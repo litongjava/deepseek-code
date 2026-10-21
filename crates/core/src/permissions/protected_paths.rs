@@ -7,8 +7,13 @@ fn sensitive(path: &Path) -> bool {
         .map(|c| c.as_os_str().to_string_lossy().to_lowercase())
         .collect();
     for (i, part) in parts.iter().enumerate() {
-        if [".git", ".vscode", ".idea", ".claude"].contains(&part.as_str()) {
+        if [".git", ".vscode", ".idea", ".claude", ".deepseek-code"].contains(&part.as_str()) {
             if part == ".claude" && parts.get(i + 1).is_some_and(|p| p == "worktrees") {
+                continue;
+            }
+            // The data directory holds hook settings and credentials, but its
+            // `workspaces` are ordinary session working directories.
+            if part == ".deepseek-code" && parts.get(i + 1).is_some_and(|p| p == "workspaces") {
                 continue;
             }
             return true;
@@ -146,6 +151,8 @@ mod tests {
             ".vscode/settings.json",
             ".idea/a",
             ".claude/settings.json",
+            ".deepseek-code/settings.json",
+            ".deepseek-code/config.json",
         ] {
             assert!(
                 requires_edit_approval(&format!("~/{name}"), &workspace, Some(&home)),
@@ -159,6 +166,11 @@ mod tests {
         ));
         assert!(requires_edit_approval(
             "~/.claude/worktrees/project/.claude/settings.json",
+            &workspace,
+            Some(&home)
+        ));
+        assert!(!requires_edit_approval(
+            "~/.deepseek-code/workspaces/session/notes.md",
             &workspace,
             Some(&home)
         ));
