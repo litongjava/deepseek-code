@@ -652,18 +652,26 @@ async fn embedded_images_reach_both_providers_and_survive_history_and_fork() {
         let requests = server.fixture.requests.lock().unwrap();
         for request in requests.iter() {
             assert!(request["messages"].to_string().contains(PNG));
-            let content = &request["messages"]
+            // Anthropic requests merge adjacent user messages (e.g. injected memories),
+            // so locate the image turn by its text instead of assuming it starts the message.
+            let (content, start) = request["messages"]
                 .as_array()
                 .unwrap()
                 .iter()
-                .find(|m| m["role"] == "user" && m["content"].is_array())
-                .unwrap()["content"];
-            assert_eq!(content[0]["text"], "Before image");
-            assert_eq!(content[2]["text"], "After image");
+                .filter(|m| m["role"] == "user" && m["content"].is_array())
+                .find_map(|m| {
+                    let blocks = m["content"].as_array().unwrap();
+                    blocks
+                        .iter()
+                        .position(|b| b["text"] == "Before image")
+                        .map(|i| (blocks, i))
+                })
+                .unwrap();
+            assert_eq!(content[start + 2]["text"], "After image");
             if anthropic {
-                assert_eq!(content[1]["source"]["data"], PNG);
+                assert_eq!(content[start + 1]["source"]["data"], PNG);
             } else {
-                assert!(content[1]["image_url"]["url"]
+                assert!(content[start + 1]["image_url"]["url"]
                     .as_str()
                     .unwrap()
                     .ends_with(PNG));
