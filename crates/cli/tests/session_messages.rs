@@ -291,9 +291,15 @@ async fn messages_cross_real_workers_at_complete_tool_boundaries_on_both_protoco
             assert_eq!(messages[incoming - 1]["role"], "tool");
             assert_eq!(messages[incoming - 2]["role"], "tool");
         } else {
-            assert!(messages[..incoming].iter().any(|m| m["content"]
-                .as_array()
-                .is_some_and(|blocks| blocks.iter().any(|b| b["type"] == "tool_result"))));
+            // Anthropic requests merge the incoming message into the user turn that
+            // carries the tool results; the results must still come before it.
+            let before_marker = messages[..=incoming].iter().flat_map(|m| {
+                m["content"].as_array().cloned().unwrap_or_default()
+            });
+            let blocks: Vec<_> = before_marker
+                .take_while(|b| !b.to_string().contains("LIVE_CONTEXT_MARKER"))
+                .collect();
+            assert!(blocks.iter().any(|b| b["type"] == "tool_result"));
         }
         drop(requests);
         assert_eq!(
