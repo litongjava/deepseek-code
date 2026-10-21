@@ -187,7 +187,10 @@ pub fn archive_segment(
     snapshots: &[serde_json::Value],
 ) -> Result<()> {
     db.with_conn(|conn| -> Result<()> {
-        let tx = conn.unchecked_transaction()?;
+        // Read-then-write: take the write lock up front. A deferred transaction
+        // fails with SQLITE_BUSY at once (no busy wait) when another connection
+        // commits between the read and the first write.
+        let tx = rusqlite::Transaction::new_unchecked(conn, rusqlite::TransactionBehavior::Immediate)?;
         let order: i64 = tx.query_row("SELECT sort_order FROM messages WHERE id=?1 AND conversation_id=?2 AND is_compact_boundary=1", rusqlite::params![boundary,session], |r|r.get(0))?;
         let id = existing.map(str::to_owned).unwrap_or_else(||uuid::Uuid::new_v4().to_string());
         if let Some(message) = crate::db::message_repo::get_message(&tx,&id)? {
