@@ -814,6 +814,8 @@ impl Session {
         progress.hook_snapshot(hook_progress.snapshot());
         let mut side_request: Option<std::pin::Pin<Box<dyn std::future::Future<Output = Result<String>> + Send + '_>>> = None;
         let mut text = String::new();
+        // Set when a tool runs, so text from the next model round starts on its own paragraph.
+        let mut separate_text = false;
         let mut thinking_text = String::new();
         let mut usage = json!({});
         let mut error = None;
@@ -878,7 +880,9 @@ impl Session {
                     if let Some(value) = event_json_with(&event, self.sdk_overrides.agent_progress_summaries) { emit_json(&value)?; }
                 }
                 match event {
-                    EngineEvent::Text(delta) => { text.push_str(&delta); if publish && cli.output_format == OutputFormat::Text { progress.before_text(&delta); if !progress.is_live() { print!("{delta}"); io::stdout().flush()?; } } },
+                    EngineEvent::Text(delta) => {
+                        let delta = if std::mem::take(&mut separate_text) && !text.is_empty() && !text.ends_with('\n') { format!("\n\n{delta}") } else { delta };
+                        text.push_str(&delta); if publish && cli.output_format == OutputFormat::Text { progress.before_text(&delta); if !progress.is_live() { print!("{delta}"); io::stdout().flush()?; } } },
                     EngineEvent::Thinking(delta) => {
                         thinking_text.push_str(&delta);
                         progress.record_thinking(&delta);
@@ -992,6 +996,7 @@ impl Session {
                         progress.set_activity("Composing");
                     },
                     EngineEvent::ToolUseStart { tool_use_id, tool_name, tool_input, .. } => {
+                        separate_text = true;
                         progress.clear();
                         if cli.verbose && !progress.is_live() { eprintln!("\n[{tool_name}]"); }
                         progress.tool_started(&tool_use_id, &tool_name, &tool_input);
