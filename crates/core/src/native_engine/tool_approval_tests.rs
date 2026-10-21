@@ -345,9 +345,11 @@ async fn permission_request_headless_validates_decisions_and_cleans_waiters() {
         .await
         .unwrap();
         assert_eq!(failed, case != "allow", "{case}: {result}");
+        // Without an approval host an undecided request is denied, not
+        // interrupted, so headless runs can finish the turn.
         assert_eq!(
             executor.ensure_permission_continuation().is_err(),
-            matches!(case, "interrupt" | "wrong-event" | "no-decision")
+            case == "interrupt"
         );
         assert!(!root.path().join("original.txt").exists());
         assert_eq!(

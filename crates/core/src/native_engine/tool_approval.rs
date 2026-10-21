@@ -247,9 +247,17 @@ impl ToolLoopExecutor {
                         if let Some(decision) = decision {
                             let _ = crate::native_engine::permission_response::respond(&self.permission_mailbox, &request_id, decision).await;
                         } else if !self.permission_host_available {
-                            let reason = "Tool approval required but no approval host or PermissionRequest hook decision is available";
-                            *self.permission_interrupted.lock().unwrap_or_else(|error| error.into_inner()) = Some(reason.into());
-                            return Err(anyhow!(reason));
+                            // Headless runs have nobody to ask. Deny the call like an unanswered
+                            // prompt so the model can continue, instead of aborting the turn.
+                            let message = format!(
+                                "Permission to use {tool} was not granted: no approval host is available in this session. Grant it with --allowed-tools or a permission mode."
+                            );
+                            let _ = crate::native_engine::permission_response::respond(
+                                &self.permission_mailbox,
+                                &request_id,
+                                PermissionResponse::Deny { message, interrupt: false },
+                            )
+                            .await;
                         }
                     },
                     answer = &mut text_rx, if !text_done => {

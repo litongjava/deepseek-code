@@ -320,19 +320,20 @@ async fn noninteractive_approval_and_api_errors_fail_without_hanging() {
         let mut cli = query(&data, temp.path(), &url);
         cli.args(["query", "-p", "perform task"]);
         let output = execute(cli).await;
-        assert!(!output.status.success());
         assert!(!temp.path().join("created.txt").exists());
         let result: Value = serde_json::from_slice(&output.stdout).unwrap_or_else(|e|panic!("{e}; stderr: {}",String::from_utf8_lossy(&output.stderr)));
-        assert_eq!(result["is_error"], true);
-        let error = result["error"].as_str().unwrap();
-        assert!(
-            error.contains(if fail {
-                "fixture failure"
-            } else {
-                "approval required"
-            }),
-            "{error}"
-        );
+        if fail {
+            assert!(!output.status.success());
+            assert_eq!(result["is_error"], true);
+            let error = result["error"].as_str().unwrap();
+            assert!(error.contains("fixture failure"), "{error}");
+        } else {
+            // With no approval host the call is denied and the model finishes the turn.
+            assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+            assert_eq!(result["is_error"], false);
+            let text = result["result"].as_str().unwrap();
+            assert!(text.contains("Permission to use Write was not granted"), "{text}");
+        }
         task.abort();
     }
 }
@@ -533,8 +534,11 @@ async fn legacy_agent_import_preserves_allowlist_in_real_shared_engine() {
         "Read fixture with explicit approval rule",
     ]);
     let output = execute(cli).await;
-    assert!(!output.status.success());
-    assert!(String::from_utf8_lossy(&output.stderr).contains("Tool approval required"));
+    assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+    let result: Value = serde_json::from_slice(&output.stdout).unwrap();
+    let text = result["result"].as_str().unwrap();
+    assert!(text.contains("Permission to use Read was not granted"), "{text}");
+    assert!(!text.contains("READ_ALLOWED_SENTINEL"), "{text}");
     let mut cli = query(&data, temp.path(), &url);
     cli.args(["--permission-mode", "accept-edits", "agent", "--agent-type", "LegacyReader", "--prompt", "Read fixture"]);
     let output = execute(cli).await;
