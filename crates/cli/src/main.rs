@@ -120,9 +120,22 @@ async fn run(cli: &Cli) -> Result<()> {
     cli.response_schema()?;
     let data_dir = match &cli.data_dir {
         Some(path) => path.clone(),
-        None => RuntimePaths::default_data_dir()?,
+        None => {
+            let resolved = claude_core::runtime::resolve_default_data_dir()?;
+            if resolved.legacy {
+                eprintln!(
+                    "Note: using the legacy data directory {}; move it to ~/{} to switch.",
+                    resolved.path.display(),
+                    claude_core::runtime::DATA_DIR_NAME
+                );
+            }
+            resolved.path
+        }
     };
     let paths = RuntimePaths::new(absolute(data_dir)?)?;
+    // Engine code that has no RuntimePaths (e.g. the task tools) and child
+    // processes resolve the data directory from the environment.
+    std::env::set_var(claude_core::runtime::DATA_DIR_ENV, &paths.data_dir);
     if let Some(path) = &cli.path {
         std::env::set_current_dir(path).context("Cannot open project directory")?;
     }
