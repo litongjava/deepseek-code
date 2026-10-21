@@ -2105,7 +2105,7 @@ impl ToolLoopExecutor {
                 return Ok((full_text, Some(response_status)));
             }
             if has_tool_use && !pending_tool_calls.is_empty() {
-                let mut tool_results: Vec<AnthropicMessage> = Vec::new();
+                let mut tool_results: Vec<ContentBlock> = Vec::new();
                 if pending_tool_calls.iter().any(|t| matches!(t.name.as_str(), "ExitPlanMode" | "plan_mode")) {
                     for call in &mut pending_tool_calls { call.requires_user_interaction = true; }
                 }
@@ -2130,13 +2130,10 @@ impl ToolLoopExecutor {
                         is_error,
                     }).await;
                     let content = mcp.map(|value|value.content).unwrap_or_else(||json!(self.retained_tool_output(&tc.name, &output_str)));
-                    tool_results.push(AnthropicMessage {
-                        role: "user".to_string(),
-                        content: AnthropicContent::Blocks(vec![ContentBlock::ToolResult {
-                            tool_use_id: tc.id.clone(),
-                            content,
-                            is_error: Some(is_error),
-                        }]),
+                    tool_results.push(ContentBlock::ToolResult {
+                        tool_use_id: tc.id.clone(),
+                        content,
+                        is_error: Some(is_error),
                     });
                 }
 
@@ -2176,13 +2173,10 @@ impl ToolLoopExecutor {
                     for (tool_use_id, tool_name, _tool_input, output_str, is_error, mcp) in results {
                         let mcp = self.finish_mcp_output(&tool_use_id, &tool_name, &output_str, is_error, mcp)?;
                         let content = mcp.map(|value|value.content).unwrap_or_else(||json!(self.retained_tool_output(&tool_name, &output_str)));
-                        tool_results.push(AnthropicMessage {
-                            role: "user".to_string(),
-                            content: AnthropicContent::Blocks(vec![ContentBlock::ToolResult {
-                                tool_use_id: tool_use_id.clone(),
-                                content,
-                                is_error: Some(is_error),
-                            }]),
+                        tool_results.push(ContentBlock::ToolResult {
+                            tool_use_id: tool_use_id.clone(),
+                            content,
+                            is_error: Some(is_error),
                         });
                     }
                 }
@@ -2192,9 +2186,11 @@ impl ToolLoopExecutor {
                     content: AnthropicContent::Blocks(assistant_blocks),
                 });
 
-                for tool_result_msg in tool_results {
-                    conversation_messages.push(tool_result_msg);
-                }
+                // All results for one assistant turn belong in a single user message.
+                conversation_messages.push(AnthropicMessage {
+                    role: "user".to_string(),
+                    content: AnthropicContent::Blocks(tool_results),
+                });
                 if let Some((boundary_id, content)) = self.pending_plan_reset.take() {
                     self.messages = vec![json!({"role":"user","content":content})];
                     conversation_messages = vec![AnthropicMessage { role: "user".into(), content: AnthropicContent::Text(content) }];

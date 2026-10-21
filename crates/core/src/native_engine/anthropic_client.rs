@@ -8,6 +8,32 @@ use serde_json::{json, Value};
 use std::pin::Pin;
 use tokio_stream::StreamExt;
 
+/// Merges adjacent messages that share a role. The Messages API requires
+/// alternating roles; Anthropic tolerates and merges repeats server side, but
+/// stricter compatible endpoints (e.g. DeepSeek) reject a `tool_use` whose
+/// results are split across several user messages.
+pub fn merge_consecutive_roles(messages: Vec<AnthropicMessage>) -> Vec<AnthropicMessage> {
+    fn into_blocks(content: AnthropicContent) -> Vec<ContentBlock> {
+        match content {
+            AnthropicContent::Text(text) => vec![ContentBlock::Text { text }],
+            AnthropicContent::Blocks(blocks) => blocks,
+        }
+    }
+    let mut merged: Vec<AnthropicMessage> = Vec::with_capacity(messages.len());
+    for message in messages {
+        match merged.last_mut() {
+            Some(last) if last.role == message.role => {
+                let previous = std::mem::replace(&mut last.content, AnthropicContent::Blocks(Vec::new()));
+                let mut blocks = into_blocks(previous);
+                blocks.extend(into_blocks(message.content));
+                last.content = AnthropicContent::Blocks(blocks);
+            }
+            _ => merged.push(message),
+        }
+    }
+    merged
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AnthropicMessage {
     pub role: String,
@@ -171,7 +197,7 @@ impl AnthropicClient {
         let mut body = json!({
             "model": provider.model.id,
             "max_tokens": max_tokens,
-            "messages": messages,
+            "messages": merge_consecutive_roles(messages),
         });
 
         if let Some(system) = system_prompt {
@@ -230,7 +256,7 @@ impl AnthropicClient {
         let mut body = json!({
             "model": provider.model.id,
             "max_tokens": max_tokens,
-            "messages": messages,
+            "messages": merge_consecutive_roles(messages),
             "stream": true,
         });
 
@@ -311,7 +337,7 @@ impl AnthropicClient {
         let mut body = json!({
             "model": provider.model.id,
             "max_tokens": max_tokens,
-            "messages": messages,
+            "messages": merge_consecutive_roles(messages),
             "stream": true,
         });
 
@@ -385,4 +411,55 @@ pub fn apply_effort(body: &mut Value, effort: &str, model: &str, max_tokens: u32
         body["thinking"] = json!({"type":"enabled", "budget_tokens": budget.min(max_tokens - 1)});
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn user(content: AnthropicContent) -> AnthropicMessage {
+        AnthropicMessage { role: "user".into(), content }
+    }
+
+    fn tool_result(id: &str) -> ContentBlock {
+        ContentBlock::ToolResult { tool_use_id: id.into(), content: json!("ok"), is_error: Some(false) }
+    }
+
+    #[test]
+    fn split_tool_results_and_follow_up_text_merge_into_one_user_message() {
+        let messages = vec![
+            user(AnthropicContent::Text("task".into())),
+            AnthropicMessage {
+                role: "assistant".into(),
+                content: AnthropicContent::Blocks(vec![
+                    ContentBlock::ToolUse { id: "a".into(), name: "Read".into(), input: json!({}) },
+                    ContentBlock::ToolUse { id: "b".into(), name: "Bash".into(), input: json!({}) },
+                ]),
+            },
+            user(AnthropicContent::Blocks(vec![tool_result("a")])),
+            user(AnthropicContent::Blocks(vec![tool_result("b")])),
+            user(AnthropicContent::Text("peer note".into())),
+        ];
+        let merged = serde_json::to_value(merge_consecutive_roles(messages)).unwrap();
+        assert_eq!(merged.as_array().unwrap().len(), 3);
+        let roles: Vec<_> = merged.as_array().unwrap().iter().map(|m| m["role"].clone()).collect();
+        assert_eq!(roles, vec![json!("user"), json!("assistant"), json!("user")]);
+        let last = &merged[2]["content"];
+        assert_eq!(last[0]["tool_use_id"], "a");
+        assert_eq!(last[1]["tool_use_id"], "b");
+        assert_eq!(last[2], json!({"type": "text", "text": "peer note"}));
+    }
+
+    #[test]
+    fn alternating_messages_are_unchanged() {
+        let messages = vec![
+            user(AnthropicContent::Text("hi".into())),
+            AnthropicMessage { role: "assistant".into(), content: AnthropicContent::Text("hello".into()) },
+        ];
+        let merged = serde_json::to_value(merge_consecutive_roles(messages)).unwrap();
+        assert_eq!(merged, json!([
+            {"role": "user", "content": "hi"},
+            {"role": "assistant", "content": "hello"}
+        ]));
+    }
 }
