@@ -1,5 +1,16 @@
 pub mod knowledge;
 pub mod peripheral;
+/// Data directory shared with the CLI (`~/.deepseek-code`, or the legacy
+/// directory while it still holds the only database). Resolved once so the
+/// whole process keeps using one directory.
+pub fn app_data_dir() -> Result<std::path::PathBuf, String> {
+    static DIR: std::sync::OnceLock<Result<std::path::PathBuf, String>> = std::sync::OnceLock::new();
+    DIR.get_or_init(|| {
+        claude_core::runtime::RuntimePaths::default_data_dir().map_err(|e| e.to_string())
+    })
+    .clone()
+}
+
 use crate::computer_use::{ComputerUseManager, ComputerAction, MouseButton};
 use crate::db::DbManager;
 use crate::db::diff_repo::CodeDiffRow;
@@ -128,8 +139,8 @@ pub async fn show_main_window(app_handle: tauri::AppHandle) -> Result<(), String
 }
 
 #[tauri::command]
-pub async fn export_workspace(app_handle: tauri::AppHandle) -> Result<String, String> {
-    let data_dir = app_handle.path().app_data_dir()
+pub async fn export_workspace() -> Result<String, String> {
+    let data_dir = app_data_dir()
         .unwrap_or_else(|_| std::path::PathBuf::from("."));
     let workspace_dir = data_dir.join("workspaces");
     Ok(workspace_dir.to_string_lossy().to_string())
@@ -175,15 +186,15 @@ pub async fn execute_tool(
 }
 
 #[tauri::command]
-pub fn get_app_path(app_handle: tauri::AppHandle) -> Result<String, String> {
-    app_handle.path().app_data_dir()
+pub fn get_app_path() -> Result<String, String> {
+    app_data_dir()
         .map(|p| p.to_string_lossy().to_string())
         .map_err(|e| e.to_string())
 }
 
 #[tauri::command]
-pub async fn check_update(app_handle: tauri::AppHandle) -> Result<Option<crate::updater::UpdateInfo>, String> {
-    let data_dir = app_handle.path().app_data_dir()
+pub async fn check_update() -> Result<Option<crate::updater::UpdateInfo>, String> {
+    let data_dir = app_data_dir()
         .unwrap_or_else(|_| std::path::PathBuf::from("."));
     let updater = crate::updater::AutoUpdater::new(
         "https://api.claude-desktop.app/updates",
@@ -225,7 +236,7 @@ pub async fn get_cost_summary(
     let tracker = match app_handle.try_state::<Arc<CostTracker>>() {
         Some(state) => state.inner().clone(),
         None => {
-            let data_dir = app_handle.path().app_data_dir()
+            let data_dir = app_data_dir()
                 .unwrap_or_else(|_| std::path::PathBuf::from("."));
             Arc::new(CostTracker::new(data_dir.join("costs")))
         }
@@ -241,7 +252,7 @@ pub async fn get_all_session_costs(
     let tracker = match app_handle.try_state::<Arc<CostTracker>>() {
         Some(state) => state.inner().clone(),
         None => {
-            let data_dir = app_handle.path().app_data_dir()
+            let data_dir = app_data_dir()
                 .unwrap_or_else(|_| std::path::PathBuf::from("."));
             Arc::new(CostTracker::new(data_dir.join("costs")))
         }
@@ -256,7 +267,7 @@ pub async fn native_engine_init(
     let engine_state = app_handle.state::<Arc<Mutex<Option<crate::native_engine::NativeEngine>>>>();
     let mut engine_guard = engine_state.lock().await;
     if engine_guard.is_none() {
-        let data_dir = app_handle.path().app_data_dir()
+        let data_dir = app_data_dir()
             .unwrap_or_else(|_| std::path::PathBuf::from("."));
         let provider_manager = Arc::new(Mutex::new(ProviderManager::new(
             data_dir.join("providers.json"),
@@ -353,10 +364,8 @@ pub async fn native_get_messages(
 }
 
 #[tauri::command]
-pub async fn native_list_providers(
-    app_handle: tauri::AppHandle,
-) -> Result<Vec<Provider>, String> {
-    let data_dir = app_handle.path().app_data_dir()
+pub async fn native_list_providers() -> Result<Vec<Provider>, String> {
+    let data_dir = app_data_dir()
         .unwrap_or_else(|_| std::path::PathBuf::from("."));
     let provider_manager = ProviderManager::new(data_dir.join("providers.json"));
     Ok(provider_manager.list_providers().to_vec())
@@ -364,10 +373,9 @@ pub async fn native_list_providers(
 
 #[tauri::command]
 pub async fn native_update_provider(
-    app_handle: tauri::AppHandle,
     provider: Provider,
 ) -> Result<(), String> {
-    let data_dir = app_handle.path().app_data_dir()
+    let data_dir = app_data_dir()
         .unwrap_or_else(|_| std::path::PathBuf::from("."));
     let mut provider_manager = ProviderManager::new(data_dir.join("providers.json"));
     provider_manager.update_provider(&provider.id.clone(), provider);
@@ -376,10 +384,9 @@ pub async fn native_update_provider(
 
 #[tauri::command]
 pub async fn native_delete_provider(
-    app_handle: tauri::AppHandle,
     provider_id: String,
 ) -> Result<(), String> {
-    let data_dir = app_handle.path().app_data_dir()
+    let data_dir = app_data_dir()
         .unwrap_or_else(|_| std::path::PathBuf::from("."));
     let mut provider_manager = ProviderManager::new(data_dir.join("providers.json"));
     provider_manager.delete_provider(&provider_id);

@@ -7,6 +7,23 @@ import react from '@vitejs/plugin-react';
 const host = process.env.TAURI_DEV_HOST;
 const packageJson = JSON.parse(fs.readFileSync('./package.json', 'utf-8'));
 
+// Mirrors claude_core::runtime::resolve_default_data_dir so the dev proxy reads
+// the Bridge key from the directory the desktop backend actually uses.
+function desktopDataDir(): string {
+  const explicit = process.env.DEEPSEEK_CODE_DATA_DIR || process.env.CLAUDE_RUST_DATA_DIR;
+  if (explicit) return explicit;
+  const preferred = path.join(os.homedir(), '.deepseek-code');
+  const platformData =
+    process.platform === 'win32'
+      ? process.env.APPDATA
+      : process.platform === 'darwin'
+        ? path.join(os.homedir(), 'Library', 'Application Support')
+        : process.env.XDG_DATA_HOME || path.join(os.homedir(), '.local', 'share');
+  const legacy = platformData && path.join(platformData, 'com.claude.desktop');
+  const hasDatabase = (dir: string) => fs.existsSync(path.join(dir, 'claude_desktop.db'));
+  return !hasDatabase(preferred) && legacy && hasDatabase(legacy) ? legacy : preferred;
+}
+
 export default defineConfig(({ mode }) => {
   const env = loadEnv(mode, '.', '');
   return {
@@ -65,8 +82,7 @@ export default defineConfig(({ mode }) => {
           target: 'http://127.0.0.1:30085',
           configure(proxy) {
             proxy.on('proxyReq', (proxyReq) => {
-              const appData = process.env.APPDATA || path.join(os.homedir(), '.config');
-              const keyPath = path.join(appData, 'com.claude.desktop', 'dev-bridge-key');
+              const keyPath = path.join(desktopDataDir(), 'dev-bridge-key');
               try { proxyReq.setHeader('Authorization', `Bearer ${fs.readFileSync(keyPath, 'utf8').trim()}`); }
               catch { /* Bridge will return 401 until the desktop backend is ready. */ }
             });

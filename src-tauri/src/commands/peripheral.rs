@@ -28,7 +28,7 @@ impl Credentials for DesktopCredentials {
 }
 fn context(app: &tauri::AppHandle) -> Result<ServiceContext> {
     Ok(ServiceContext {
-        paths: RuntimePaths::new(app.path().app_data_dir()?)?,
+        paths: RuntimePaths::new(super::app_data_dir().map_err(anyhow::Error::msg)?)?,
         db: app
             .state::<Arc<claude_core::db::DbManager>>()
             .inner()

@@ -142,7 +142,7 @@ fn main() {
         .manage(Arc::new(Mutex::new(None::<Arc<PermissionManager>>)))
         .setup(|app| {
             app.manage(commands::peripheral::PeripheralHost::default());
-            let data_dir = app.path().app_data_dir().unwrap_or_else(|_| PathBuf::from("."));
+            let data_dir = commands::app_data_dir().unwrap_or_else(|_| PathBuf::from("."));
             tracing::info!(module = "App", "Data dir: {:?}", data_dir);
 
             // Initialise global orchestration config from config/orchestration.toml
