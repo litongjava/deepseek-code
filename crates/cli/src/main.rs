@@ -317,8 +317,7 @@ async fn run(cli: &Cli) -> Result<()> {
         })
         .unwrap_or_default();
     if !sdk_stream && !io::stdin().is_terminal() {
-        let mut piped = String::new();
-        io::stdin().read_to_string(&mut piped)?;
+        let piped = read_piped_stdin(io::stdin(), STDIN_FIRST_BYTE_TIMEOUT)?;
         if !piped.trim().is_empty() {
             if !prompt.is_empty() {
                 prompt.push_str("\n\n");
@@ -753,4 +752,99 @@ async fn mcp(paths: &RuntimePaths, action: &McpCommands) -> Result<()> {
         }
     }
     manager.shutdown_all().await
+}
+
+/// How long a non-terminal stdin may stay silent before it is treated as empty.
+const STDIN_FIRST_BYTE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(3);
+
+/// Reads piped stdin without hanging when the parent keeps the pipe open but never writes.
+/// Once the first byte arrives, the rest is read to EOF without a deadline.
+fn read_piped_stdin<R: Read + Send + 'static>(
+    mut reader: R,
+    first_byte_timeout: std::time::Duration,
+) -> Result<String> {
+    let (started_tx, started_rx) = std::sync::mpsc::channel::<()>();
+    let (done_tx, done_rx) = std::sync::mpsc::channel::<io::Result<Vec<u8>>>();
+    std::thread::spawn(move || {
+        let mut data = Vec::new();
+        let mut chunk = [0u8; 8192];
+        let result = loop {
+            match reader.read(&mut chunk) {
+                Ok(0) => break Ok(data),
+                Ok(n) => {
+                    if data.is_empty() {
+                        let _ = started_tx.send(());
+                    }
+                    data.extend_from_slice(&chunk[..n]);
+                }
+                Err(e) if e.kind() == io::ErrorKind::Interrupted => {}
+                Err(e) => break Err(e),
+            }
+        };
+        let _ = done_tx.send(result);
+    });
+    match started_rx.recv_timeout(first_byte_timeout) {
+        // Data arrived, or the reader finished (EOF/error) before writing anything.
+        Ok(()) | Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {}
+        Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
+            eprintln!(
+                "Warning: no stdin data received in {}s, proceeding without it; redirect stdin from /dev/null to skip this wait",
+                first_byte_timeout.as_secs()
+            );
+            return Ok(String::new());
+        }
+    }
+    let bytes = done_rx.recv().context("stdin reader exited")??;
+    String::from_utf8(bytes).context("stdin is not valid UTF-8")
+}
+
+#[cfg(test)]
+mod piped_stdin_tests {
+    use super::*;
+    use std::time::Duration;
+
+    struct Silent;
+    impl Read for Silent {
+        fn read(&mut self, _: &mut [u8]) -> io::Result<usize> {
+            std::thread::sleep(Duration::from_secs(3600));
+            Ok(0)
+        }
+    }
+
+    struct Delayed(Option<Vec<u8>>, Duration);
+    impl Read for Delayed {
+        fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+            match self.0.take() {
+                Some(data) => {
+                    buf[..data.len()].copy_from_slice(&data);
+                    Ok(data.len())
+                }
+                None => {
+                    // EOF arrives well after the first-byte deadline.
+                    std::thread::sleep(self.1);
+                    Ok(0)
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn silent_open_pipe_times_out_as_empty() {
+        let started = std::time::Instant::now();
+        assert_eq!(read_piped_stdin(Silent, Duration::from_millis(50)).unwrap(), "");
+        assert!(started.elapsed() < Duration::from_secs(5));
+    }
+
+    #[test]
+    fn data_and_eof_are_read_fully() {
+        let input = io::Cursor::new(b"hello\nworld".to_vec());
+        assert_eq!(read_piped_stdin(input, Duration::from_secs(1)).unwrap(), "hello\nworld");
+        assert_eq!(read_piped_stdin(io::empty(), Duration::from_secs(1)).unwrap(), "");
+    }
+
+    #[test]
+    fn slow_body_after_first_byte_has_no_deadline() {
+        let input = Delayed(Some(b"late".to_vec()), Duration::from_millis(300));
+        assert_eq!(read_piped_stdin(input, Duration::from_millis(50)).unwrap(), "late");
+    }
 }
