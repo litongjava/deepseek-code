@@ -2,6 +2,7 @@
 mod lsp_commands;
 mod prompt_suggestion;
 mod shell_mode;
+mod mentions;
 mod launch_permissions;
 mod context_commands;
 mod persistent_worker;

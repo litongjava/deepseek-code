@@ -558,6 +558,13 @@ impl Session {
     ) -> Result<()> {
         use std::io::IsTerminal;
         self.apply_settings_permissions(cli)?;
+        // Attach @-mentioned files once, in the frontend; a worker receives the
+        // expanded prompt and must not attach them again.
+        let frontend = std::env::var_os(claude_core::services::background_sessions::CONTROL_ENV).is_none();
+        let mentioned = (frontend && self.sdk_content.is_none())
+            .then(|| crate::mentions::expand(&self.workspace, prompt))
+            .flatten();
+        let prompt = mentioned.as_deref().unwrap_or(prompt);
         // Frontends record original human input before skill expansion/worker handoff.
         // A worker receives synthesized context and must never re-label it as user intent.
         if std::env::var_os(claude_core::services::background_sessions::CONTROL_ENV).is_none() {
