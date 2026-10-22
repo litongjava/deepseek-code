@@ -507,6 +507,21 @@ async fn execute_tool_standalone(
     (tool_use_id, tool_name, tool_input, output_str, is_error, mcp_output)
 }
 
+/// Continuations requested in one turn after responses cut off by the output limit.
+const MAX_OUTPUT_RECOVERIES: usize = 3;
+
+fn output_limit_resume(limit: u32) -> String {
+    format!("Output token limit hit ({limit} tokens); any tool call in that response was incomplete and did not run. Resume directly \u{2014} no apology, no recap of what you were doing. Pick up mid-thought if that is where the cut happened. Break remaining work into smaller pieces, e.g. write a large file in parts: create it with Write, then append with Edit.")
+}
+
+fn output_limit_notice(limit: u32, attempt: usize) -> EngineEvent {
+    EngineEvent::BudgetWarning {
+        message: format!("Output reached the {limit}-token limit; asking the model to continue ({attempt}/{MAX_OUTPUT_RECOVERIES})."),
+        usage: limit as u64,
+        limit: limit as u64,
+    }
+}
+
 impl ToolLoopExecutor {
     pub fn with_response_schema(mut self, schema: Option<Value>) -> Result<Self> {
         if let Some(schema) = &schema { crate::structured_output::validate_schema(schema)?; }
@@ -1714,6 +1729,7 @@ impl ToolLoopExecutor {
         let api_key_len = self.provider.provider.api_key.len();
 
         let enable_thinking = matches!(self.reasoning_mode, ReasoningMode::Deep);
+        let mut output_recoveries = 0;
 
         for iteration in 0..self.max_tool_iterations {
             for context in self.drain_async_hook_messages() {
@@ -2103,9 +2119,39 @@ impl ToolLoopExecutor {
             let response_status = snapshot["status"].as_str().unwrap_or("interrupted").to_string();
             let response_error = snapshot["error"].as_str().unwrap_or("Model response ended before completion").to_string();
             let _ = self.event_tx.send(EngineEvent::RequestSnapshot(snapshot)).await;
-            if response_status != "completed" {
+            // A response cut off by the output limit is "incomplete" in the
+            // trace; continue it below instead of ending the turn.
+            let continue_cut_off = response_status == "incomplete"
+                && stop_reason.as_deref() == Some("max_tokens")
+                && output_recoveries < MAX_OUTPUT_RECOVERIES
+                && iteration + 1 < self.max_tool_iterations;
+            if response_status != "completed" && !continue_cut_off {
                 let _ = self.event_tx.send(EngineEvent::Error(response_error)).await;
                 return Ok((full_text, Some(response_status)));
+            }
+            if stop_reason.as_deref() == Some("max_tokens")
+                && output_recoveries < MAX_OUTPUT_RECOVERIES
+                && iteration + 1 < self.max_tool_iterations
+            {
+                output_recoveries += 1;
+                // Never run a call whose arguments were cut off.
+                for call in &pending_tool_calls {
+                    let _ = self.event_tx.send(EngineEvent::ToolUseDone {
+                        tool_use_id: call.id.clone(),
+                        tool_name: call.name.clone(),
+                        tool_input: call.input.clone(),
+                        output: "Not run: the response reached the output token limit before this call was complete.".into(),
+                        is_error: true,
+                    }).await;
+                }
+                assistant_blocks.retain(|block| matches!(block, ContentBlock::Text { .. }));
+                if !assistant_blocks.is_empty() {
+                    conversation_messages.push(AnthropicMessage { role: "assistant".into(), content: AnthropicContent::Blocks(assistant_blocks) });
+                }
+                conversation_messages.push(AnthropicMessage { role: "user".into(), content: AnthropicContent::Text(output_limit_resume(self.max_tokens)) });
+                let _ = self.event_tx.send(output_limit_notice(self.max_tokens, output_recoveries)).await;
+                stop_reason = None;
+                continue;
             }
             if has_tool_use && !pending_tool_calls.is_empty() {
                 let mut tool_results: Vec<ContentBlock> = Vec::new();
@@ -2254,6 +2300,7 @@ impl ToolLoopExecutor {
         let base_url = self.provider.provider.base_url.clone();
         let model_id = self.provider.model.id.clone();
         let api_key_len = self.provider.provider.api_key.len();
+        let mut output_recoveries = 0;
 
         for iteration in 0..self.max_tool_iterations {
             for context in self.drain_async_hook_messages() {
@@ -2571,9 +2618,29 @@ impl ToolLoopExecutor {
             let response_status = snapshot["status"].as_str().unwrap_or("interrupted").to_string();
             let response_error = snapshot["error"].as_str().unwrap_or("Model response ended before completion").to_string();
             let _ = self.event_tx.send(EngineEvent::RequestSnapshot(snapshot)).await;
-            if response_status != "completed" {
+            // A response cut off by the output limit is "incomplete" in the
+            // trace; continue it below instead of ending the turn.
+            let continue_cut_off = response_status == "incomplete"
+                && stop_reason.as_deref() == Some("length")
+                && output_recoveries < MAX_OUTPUT_RECOVERIES
+                && iteration + 1 < self.max_tool_iterations;
+            if response_status != "completed" && !continue_cut_off {
                 let _ = self.event_tx.send(EngineEvent::Error(response_error)).await;
                 return Ok((full_text, Some(response_status)));
+            }
+            if stop_reason.as_deref() == Some("length")
+                && output_recoveries < MAX_OUTPUT_RECOVERIES
+                && iteration + 1 < self.max_tool_iterations
+            {
+                output_recoveries += 1;
+                // Cut-off tool arguments are dropped unrun; keep the visible text.
+                if assistant_content.as_ref().is_some_and(|content| !matches!(content, OpenAIContent::Text(text) if text.is_empty())) {
+                    conversation_messages.push(OpenAIMessage { role: "assistant".into(), content: assistant_content.unwrap_or(OpenAIContent::Text(String::new())), tool_calls: None, tool_call_id: None, reasoning_content: assistant_reasoning, provider_content: assistant_provider_content });
+                }
+                conversation_messages.push(OpenAIMessage { role: "user".into(), content: OpenAIContent::Text(output_limit_resume(self.max_tokens)), tool_calls: None, tool_call_id: None, reasoning_content: None, provider_content: None });
+                let _ = self.event_tx.send(output_limit_notice(self.max_tokens, output_recoveries)).await;
+                stop_reason = None;
+                continue;
             }
             if has_tool_calls {
                 let mut indices: Vec<usize> = openai_tool_args.keys().copied().collect();

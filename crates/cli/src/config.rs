@@ -38,6 +38,9 @@ pub(crate) fn provider_template(model: &str) -> ProviderConfig {
     let model = ApiConfig::resolve_model_alias(model);
     let metadata = ApiConfig::get_provider_metadata(&model);
     let anthropic = model.starts_with("claude");
+    // DeepSeek counts thinking against the output budget, so 8K tokens cut
+    // off ordinary file writes; its API accepts far larger limits.
+    let max_tokens = if model.starts_with("deepseek") { 32_000 } else { 8192 };
     ProviderConfig {
         id: "cli".into(),
         name: "CLI".into(),
@@ -55,7 +58,7 @@ pub(crate) fn provider_template(model: &str) -> ProviderConfig {
             id: model.clone(),
             name: model,
             enabled: true,
-            max_tokens: Some(8192),
+            max_tokens: Some(max_tokens),
             supports_vision: false,
             supports_tools: true,
             supports_streaming: true,

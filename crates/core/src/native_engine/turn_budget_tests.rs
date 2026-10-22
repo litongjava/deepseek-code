@@ -193,3 +193,74 @@ async fn providers_receive_strict_schema_and_invalid_results_fail() {
         }
     }
 }
+
+async fn check_output_limit_recovery(anthropic: bool) {
+    crate::config::OrchestrationConfig::init_global().unwrap();
+    let requests = Arc::new(std::sync::Mutex::new(Vec::<Value>::new()));
+    let captured = requests.clone();
+    let app=axum::Router::new().route(if anthropic {"/v1/messages"} else {"/v1/chat/completions"},axum::routing::post(move |axum::Json(body): axum::Json<Value>| {
+        let captured=captured.clone();
+        async move {
+            let first={let mut requests=captured.lock().unwrap();requests.push(body);requests.len()==1};
+            let body=if anthropic {
+                let events=if first {
+                    vec![json!({"type":"message_start","message":{"id":"cut","type":"message","role":"assistant","content":[],"model":"fixture","usage":{"input_tokens":10,"output_tokens":0}}}),json!({"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}),json!({"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"Part one. "}}),json!({"type":"content_block_stop","index":0}),json!({"type":"content_block_start","index":1,"content_block":{"type":"tool_use","id":"write-1","name":"Write","input":{}}}),json!({"type":"content_block_delta","index":1,"delta":{"type":"input_json_delta","partial_json":"{\"file_path\":\"big.txt\",\"content\":\"aaaa"}}),json!({"type":"content_block_stop","index":1}),json!({"type":"message_delta","delta":{"stop_reason":"max_tokens"},"usage":{"output_tokens":128}}),json!({"type":"message_stop"})]
+                } else {
+                    vec![json!({"type":"message_start","message":{"id":"resume","type":"message","role":"assistant","content":[],"model":"fixture","usage":{"input_tokens":20,"output_tokens":0}}}),json!({"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}),json!({"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"done"}}),json!({"type":"content_block_stop","index":0}),json!({"type":"message_delta","delta":{"stop_reason":"end_turn"},"usage":{"output_tokens":2}}),json!({"type":"message_stop"})]
+                };
+                events.into_iter().map(|event|format!("event: {}\ndata: {event}\n\n",event["type"].as_str().unwrap())).collect::<String>()
+            } else if first {
+                format!("data: {}\n\ndata: {}\n\ndata: [DONE]\n\n",json!({"choices":[{"index":0,"delta":{"content":"Part one. ","tool_calls":[{"index":0,"id":"write-1","type":"function","function":{"name":"Write","arguments":"{\"file_path\":\"big.txt\",\"content\":\"aaaa"}}]},"finish_reason":null}]}),json!({"choices":[{"index":0,"delta":{},"finish_reason":"length"}]}))
+            } else {
+                format!("data: {}\n\ndata: {}\n\ndata: [DONE]\n\n",json!({"choices":[{"index":0,"delta":{"content":"done"},"finish_reason":null}]}),json!({"choices":[{"index":0,"delta":{},"finish_reason":"stop"}]}))
+            };
+            ([("content-type","text/event-stream")],body)
+        }
+    }));
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+    let dir = tempfile::tempdir().unwrap();
+    let provider=ResolvedProvider {
+        provider:serde_json::from_value(json!({"id":"limit-test","name":"limit-test","base_url":format!("http://{addr}"),"api_key":"unused","api_format":if anthropic {"anthropic"} else {"openai"},"models":[],"enabled":true})).unwrap(),
+        model:serde_json::from_value(json!({"id":"fixture","name":"fixture","enabled":true,"supports_vision":false,"supports_web_search":false})).unwrap(),
+    };
+    let (tx, mut rx) = mpsc::channel(128);
+    let mut executor = ToolLoopExecutor::new(
+        provider,
+        vec![json!({"role":"user","content":"Write big.txt"})],
+        None,
+        128,
+        tx,
+        dir.path().to_string_lossy().into_owned(),
+        ReasoningMode::Standard,
+    )
+    .with_max_turns(Some(5))
+    .unwrap();
+    let result = tokio::time::timeout(Duration::from_secs(10), async {
+        if anthropic { executor.execute_anthropic_loop().await } else { executor.execute_openai_loop().await }
+    })
+    .await
+    .unwrap()
+    .unwrap();
+    assert!(result.0.ends_with("done"), "{}", result.0);
+    assert!(!dir.path().join("big.txt").exists(), "a cut-off Write must not run");
+    let requests = requests.lock().unwrap();
+    assert_eq!(requests.len(), 2);
+    let resume = requests[1]["messages"].as_array().unwrap().last().unwrap().to_string();
+    assert!(resume.contains("Output token limit hit (128 tokens)"), "{resume}");
+    let mut warned = false;
+    while let Ok(event) = rx.try_recv() {
+        if let EngineEvent::BudgetWarning { message, .. } = event {
+            warned |= message.contains("asking the model to continue");
+        }
+    }
+    assert!(warned, "the user must see why the model is continuing");
+    server.abort();
+}
+
+#[tokio::test]
+async fn cut_off_responses_continue_without_running_partial_calls() {
+    check_output_limit_recovery(true).await;
+    check_output_limit_recovery(false).await;
+}

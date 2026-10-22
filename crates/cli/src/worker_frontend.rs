@@ -727,7 +727,7 @@ fn failure_message(id: &str, status: &str, diagnostic: &str) -> String {
             // Static text only: provider diagnostics can contain credentials.
             // Do not append an endpoint or truncate the task inspection command.
             return format!(
-                "Output token limit reached; send a follow-up to continue. Details: /tasks show {id}"
+                "The response was cut off at the output token limit even after automatic continuations; send a follow-up to continue or raise the limit with --max-tokens. Details: /tasks show {id}"
             );
         }
         http.map(|code| format!("HTTP {code}"))
@@ -1092,7 +1092,7 @@ mod failure_tests {
         ] {
             assert_eq!(
                 failure_message(id, "failed", diagnostic),
-                format!("Output token limit reached; send a follow-up to continue. Details: /tasks show {id}")
+                format!("The response was cut off at the output token limit even after automatic continuations; send a follow-up to continue or raise the limit with --max-tokens. Details: /tasks show {id}")
             );
         }
         for (status, diagnostic, expected) in [

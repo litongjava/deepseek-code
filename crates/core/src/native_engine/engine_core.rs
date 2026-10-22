@@ -626,11 +626,17 @@ impl QueryEngine {
         provider.model.effort = request.effort.clone();
         validate_model_input(&provider.model, &request.messages)?;
         let configured_max = provider.model.max_tokens.unwrap_or(8192);
-        let max_tokens = request.max_tokens.unwrap_or(configured_max).min(configured_max);
+        let mut max_tokens = request.max_tokens.unwrap_or(configured_max).min(configured_max);
         if max_tokens == 0 { anyhow::bail!("max_tokens must be positive"); }
         if let Some(context) = provider.model.context_window {
             let estimated = crate::native_engine::token_counter::TokenCounter::estimate(&request.messages) as u64;
-            if estimated + max_tokens as u64 > context as u64 { anyhow::bail!("Input plus output budget exceeds the configured context window; compact the conversation or lower max output tokens"); }
+            if estimated + max_tokens as u64 > context as u64 {
+                // Shrink the output budget to what the window still holds; only
+                // fail when too little is left for a useful answer.
+                let remaining = (context as u64).saturating_sub(estimated);
+                if remaining < 4096 { anyhow::bail!("Input plus output budget exceeds the configured context window; compact the conversation or lower max output tokens"); }
+                max_tokens = remaining as u32;
+            }
         }
 
         let search_config_path = self.provider_manager.lock().await.config_path()
