@@ -550,34 +550,24 @@ async fn execute_in(runtime: &Arc<Runtime>, mut input: Value, cwd: &str) -> Resu
             .extension()
             .and_then(|s| s.to_str())
             .unwrap_or("");
-        let (server, language, args) = match extension {
-            "rs" => ("rust-analyzer", "rust", vec![]),
-            "py" => ("pylsp", "python", vec![]),
-            "ts" | "mts" | "cts" => ("typescript-language-server", "typescript", vec!["--stdio"]),
-            "tsx" => (
-                "typescript-language-server",
-                "typescriptreact",
-                vec!["--stdio"],
-            ),
-            "js" | "mjs" | "cjs" => ("typescript-language-server", "javascript", vec!["--stdio"]),
-            "jsx" => (
-                "typescript-language-server",
-                "javascriptreact",
-                vec!["--stdio"],
-            ),
-            "go" => ("gopls", "go", vec![]),
-            "c" | "h" => ("clangd", "c", vec![]),
-            "cpp" | "cc" | "hpp" => ("clangd", "cpp", vec![]),
-            _ => bail!("Specify server and language_id for this file type"),
-        };
+        let (language, language_id) = super::lsp_servers::for_extension(extension)
+            .with_context(|| format!("No default language server for .{extension} files; specify server and language_id"))?;
         if input.get("server").is_none() {
-            input["server"] = json!(server);
+            let workspace = std::path::Path::new(cwd);
+            let launch = super::lsp_servers::locate(language, workspace)
+                .with_context(|| super::lsp_servers::missing_message(language))?;
+            input["server"] = json!(launch.command.to_string_lossy());
             if input.get("args").is_none() {
-                input["args"] = json!(args);
+                input["args"] = json!(launch.args);
+            }
+            if input.get("initialization_options").is_none() {
+                if let Some(options) = super::lsp_servers::initialization_options(language) {
+                    input["initialization_options"] = options;
+                }
             }
         }
         if input.get("language_id").is_none() {
-            input["language_id"] = json!(language);
+            input["language_id"] = json!(language_id);
         }
     }
     for field in ["line", "character"] {
@@ -757,8 +747,14 @@ async fn start_server(
     let workspace_uri = workspace_override.as_ref().map(|path| reqwest::Url::from_directory_path(path).map_err(|_| anyhow::anyhow!("Invalid LSP workspaceFolder URI"))).transpose()?;
     let root = workspace_override.as_deref().unwrap_or(root);
     let root_uri = workspace_uri.as_ref().unwrap_or(root_uri);
-    let executable = input["server"].as_str().context("server is required")?;
+    let requested = input["server"].as_str().context("server is required")?;
+    // A known server missing from PATH may still be a managed install.
+    let resolved = super::lsp_servers::resolve_command(requested, root);
+    let executable = resolved.as_ref().map_or(std::path::Path::new(requested), |launch| launch.command.as_path());
     let mut command = tokio::process::Command::new(executable);
+    if let Some(launch) = &resolved {
+        command.args(&launch.args);
+    }
     if let Some(env) = input.get("env") {
         for (key, value) in env.as_object().context("env must be an object")? {
             command.env(key, value.as_str().context("env values must be strings")?);
@@ -779,7 +775,19 @@ async fn start_server(
     command.creation_flags(0x08000000);
     #[cfg(unix)]
     command.process_group(0);
-    let mut child = command.spawn().context("Cannot start language server")?;
+    let mut child = match command.spawn() {
+        Ok(child) => child,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            let known = super::lsp_servers::LANGUAGES.iter().find(|language| language.command == requested);
+            bail!(
+                "{}",
+                known.map(super::lsp_servers::missing_message).unwrap_or_else(|| format!(
+                    "Cannot start language server '{requested}': it was not found. Install it, or configure the full path to its executable"
+                ))
+            );
+        }
+        Err(error) => return Err(anyhow::Error::new(error).context("Cannot start language server")),
+    };
     let process_tree = crate::services::tool_hooks::ProcessTree::new(
         child.id().context("Missing language server process ID")?,
     )?;

@@ -12,6 +12,12 @@ pub mod macros;
 mod notebook;
 pub mod tasks;
 mod lsp;
+
+/// Whether a plugin language server declaration is usable by the LSP tool.
+pub fn lsp_config_is_valid(server: &serde_json::Value) -> bool {
+    lsp::validate_configuration(server).is_ok()
+}
+pub mod lsp_servers;
 pub use lsp::{configure as configure_lsp_servers, shutdown_all as shutdown_lsp_servers, status as lsp_status};
 pub(crate) use lsp::passive_feedback as lsp_passive_feedback;
 pub(crate) use lsp::validate_configuration as validate_lsp_configuration;
