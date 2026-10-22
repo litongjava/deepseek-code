@@ -107,6 +107,7 @@ fn no_links(path: &Path) -> Result<()> {
         }
         match fs::symlink_metadata(&cursor) {
             Ok(metadata) => {
+                #[cfg_attr(not(any(windows, target_os = "macos")), allow(unused_mut))]
                 let mut link = metadata.file_type().is_symlink();
                 #[cfg(windows)]
                 {

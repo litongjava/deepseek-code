@@ -297,7 +297,7 @@ fn main() {
                                 let mut total_input_tokens: u64 = 0;
                                 let mut total_output_tokens: u64 = 0;
                                 let mut model_name = String::new();
-                                use tokio::time::{sleep, Duration};
+                                use tokio::time::Duration;
                                 let mut last_update = std::time::Instant::now();
                                 let min_update_interval = Duration::from_millis(300);
 
@@ -459,7 +459,6 @@ fn main() {
 
             let bridge_ready = Arc::new(tokio::sync::Notify::new());
             let bridge_ready_for_bridge = bridge_ready.clone();
-            let bridge_ready_for_window = bridge_ready.clone();
 
             tauri::async_runtime::spawn(async move {
                 let bridge = BridgeServer::new(data_dir, db_manager_for_bridge);

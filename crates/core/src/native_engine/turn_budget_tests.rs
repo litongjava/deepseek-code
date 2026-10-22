@@ -31,7 +31,7 @@ async fn check_budget(format: ApiFormat, budget: u32) {
     });
     let dir = tempfile::tempdir().unwrap();
     std::fs::write(dir.path().join("fixture.txt"), "actual tool fixture").unwrap();
-    let mut provider=ResolvedProvider {
+    let provider=ResolvedProvider {
         provider:serde_json::from_value(json!({"id":"budget-test","name":"budget-test","base_url":format!("http://{addr}"),"api_key":"unused","api_format":if anthropic {"anthropic"} else {"openai"},"models":[],"enabled":true})).unwrap(),
         model:serde_json::from_value(json!({"id":"fixture","name":"fixture","enabled":true,"supports_vision":false,"supports_web_search":false})).unwrap(),
     };

@@ -81,7 +81,6 @@ pub fn commands(workspace: &Path) -> BTreeMap<String, SkillCommand> {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     #[test]
     fn embedded_workflows_render_arguments_without_nonexistent_file_references() {
         let temp = tempfile::tempdir().unwrap();

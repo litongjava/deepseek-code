@@ -4,7 +4,7 @@ use crate::{
     native_engine::{engine_core::ReasoningMode, provider_manager::ResolvedProvider},
     services::teams,
 };
-use axum::{extract::State, routing::post, Json, Router};
+use axum::{extract::State, routing::post, Router};
 use std::{
     path::Path,
     sync::{Arc, Mutex, Once},
@@ -129,7 +129,7 @@ async fn spawn_runs_named_teammates_concurrently_with_distinct_sessions() {
 
     let temp = tempfile::tempdir().unwrap();
     let parent = uuid::Uuid::new_v4().to_string();
-    let (executor, context) = executor(temp.path(), &parent, endpoint).await;
+    let (executor, _context) = executor(temp.path(), &parent, endpoint).await;
     let root = temp.path().join("data");
     teams::create(
         &root,
@@ -280,7 +280,7 @@ async fn teammate_idle_hook_receives_identity_and_blocking_feedback_resumes_the_
     .unwrap_or_else(|error| panic!("settings: {error}"));
     let parent = uuid::Uuid::new_v4().to_string();
     let (executor, _context) = executor(temp.path(), &parent, endpoint).await;
-    let mut executor =
+    let executor =
         executor.with_hooks(HookRunner::load(&temp.path().join("data"), temp.path()).unwrap());
     let root = temp.path().join("data");
     teams::create(

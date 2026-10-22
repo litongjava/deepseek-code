@@ -140,7 +140,7 @@ mod tests {
     #[tokio::test]
     async fn test_load_from_file() {
         let engine = PreviewEngine::new(None);
-        let mut temp_file = NamedTempFile::new().unwrap();
+        let temp_file = NamedTempFile::new().unwrap();
         std::fs::write(temp_file.path(), "<html>Test</html>").unwrap();
         
         engine.load_from_file("file_test", &temp_file.path().to_path_buf()).await.unwrap();

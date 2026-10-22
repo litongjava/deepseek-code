@@ -70,7 +70,7 @@ async fn desktop_child_preserves_mode_and_reads_parent_private_files() {
             model:serde_json::from_value(json!({"id":"fixture","name":"fixture","enabled":true,"supports_vision":false,"supports_web_search":false})).unwrap(),
         };
         let (events, _receiver) = tokio::sync::mpsc::channel(128);
-        let mut executor = ToolLoopExecutor::new(
+        let executor = ToolLoopExecutor::new(
             provider,
             vec![],
             None,

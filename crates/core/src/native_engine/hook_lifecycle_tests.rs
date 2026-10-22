@@ -120,7 +120,7 @@ async fn child_start_context_and_stop_continuation_are_isolated_from_parent_stop
         .with_state(requests.clone());
     let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
     let (tx, _rx) = mpsc::channel(128);
-    let mut executor = ToolLoopExecutor::new(
+    let executor = ToolLoopExecutor::new(
         provider(&endpoint),
         vec![],
         None,

@@ -281,14 +281,14 @@ impl ToolLoopExecutor {
             waiters: self.answer_waiters.clone(),
             request_id: request_id.clone(),
         };
-        let question = format!("Review plan\n{}\n\n{plan}\n\nChoose 1?4, or feedback: <changes>. Clear context preserves this session and its archived transcript.", path.display());
+        let question = format!("Review plan\n{}\n\n{plan}\n\nChoose 1–4, or feedback: <changes>. Clear context preserves this session and its archived transcript.", path.display());
         let sent = self
             .event_tx
             .send(EngineEvent::AskUser {
                 request_id: request_id.clone(),
                 tool_use_id: id.into(),
-                tool_input: json!({"plan":plan,"planFilePath":path,"planApproval":true,"question":format!("Review plan\n{}\n\n{plan}\n\nChoose 1–4, or feedback: <changes>. Clear context preserves this session and its archived transcript.", path.display()),"options":crate::services::plan_approval::OPTIONS.iter().map(|label| json!({"label":label})).collect::<Vec<_>>(),"multiSelect":false}),
-                question: format!("Review plan\n{}\n\n{plan}\n\nChoose 1–4, or feedback: <changes>. Clear context preserves this session and its archived transcript.", path.display()),
+                tool_input: json!({"plan":plan,"planFilePath":path,"planApproval":true,"question":question,"options":crate::services::plan_approval::OPTIONS.iter().map(|label| json!({"label":label})).collect::<Vec<_>>(),"multiSelect":false}),
+                question,
                 options: crate::services::plan_approval::OPTIONS.iter().map(|s|s.to_string()).collect(),
             })
             .await;
