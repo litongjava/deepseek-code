@@ -50,18 +50,21 @@ pub async fn team(context: &ServiceContext, action: &TeamCommands) -> Result<()>
             } else {
                 None
             };
-            print(&team::put(
-                context,
-                id,
-                title.clone(),
-                content.clone(),
-                tags.as_deref()
-                    .unwrap_or("")
+            let tags = match (tags, &id) {
+                (Some(tags), _) => tags
                     .split(',')
                     .filter(|s| !s.trim().is_empty())
                     .map(|s| s.trim().into())
                     .collect(),
-            )?)
+                // An update without --tags keeps the current tags.
+                (None, Some(id)) => team::list(context, false)?
+                    .into_iter()
+                    .find(|memory| &memory.id == id)
+                    .map(|memory| memory.tags)
+                    .unwrap_or_default(),
+                (None, None) => Vec::new(),
+            };
+            print(&team::put(context, id, title.clone(), content.clone(), tags)?)
         }
         TeamCommands::Delete { id } => {
             team::delete(context, id)?;
