@@ -17,6 +17,18 @@ pub fn write_submitted(
         return write!(output, "{newline}");
     }
     write!(output, "{newline}")?;
+    // The submitted prompt keeps the input box's rules, so it stays easy to
+    // find in the transcript.
+    let rule = "\u{2500}".repeat(width.max(4));
+    let write_rule = |output: &mut dyn Write| -> io::Result<()> {
+        if color {
+            write!(output, "{}{rule}{}", SetForegroundColor(super::style::border()), ResetColor)?;
+        } else {
+            write!(output, "{rule}")?;
+        }
+        write!(output, "{newline}")
+    };
+    write_rule(output)?;
     for line in wrapped_lines(prompt, text, width) {
         if color {
             let cells: usize = line.chars().map(|ch| ch.width().unwrap_or(0)).sum();
@@ -34,6 +46,7 @@ pub fn write_submitted(
         }
         write!(output, "{newline}")?;
     }
+    write_rule(output)?;
     write!(output, "{newline}")
 }
 
@@ -75,11 +88,15 @@ mod tests {
     use super::*;
 
     #[test]
-    fn submitted_prompts_have_blank_lines_wrap_unicode_and_cannot_emit_controls() {
+    fn submitted_prompts_keep_rules_wrap_unicode_and_cannot_emit_controls() {
         let mut output = Vec::new();
         write_submitted(&mut output, "> ", "你好世界\nnext\x1b[2J", 8, false, true).unwrap();
         let result = String::from_utf8(output).unwrap();
-        assert_eq!(result, "\r\n> 你好世\r\n  界\r\n  next[2\r\n  J\r\n\r\n");
+        let rule = "\u{2500}".repeat(8);
+        assert_eq!(
+            result,
+            format!("\r\n{rule}\r\n> 你好世\r\n  界\r\n  next[2\r\n  J\r\n{rule}\r\n\r\n")
+        );
         assert!(!result.contains('\x1b'));
         for line in result.lines() {
             assert!(
