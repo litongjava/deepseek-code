@@ -398,7 +398,7 @@ mod tests {
         assert!(send(&context, &sender, &recipient, &"x".repeat(65537)).is_err());
         let result=crate::tools::agent_messages::execute_live(&context,&sender,serde_json::json!({"operation":"send","from":outside,"to":recipient,"content":"from actual session"})).unwrap();
         assert_eq!(result["message"]["sender"], sender);
-        assert_eq!(result["delivery"], "queued_needs_resume");
+        assert_eq!(result["delivery"], "next_recipient_turn");
         assert!(mark_read(&context, &sender, result["message"]["id"].as_str().unwrap()).is_err());
         assert_eq!(notices(&context, &recipient).unwrap().len(), 1);
         assert!(notices(&context, &recipient).unwrap().is_empty());

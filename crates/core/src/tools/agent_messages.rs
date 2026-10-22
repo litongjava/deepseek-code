@@ -61,6 +61,20 @@ fn delivered(name: Option<&str>, session: &str) -> Value {
     value
 }
 
+/// Describes when a queued message reaches its recipient. `active` means the
+/// recipient is inside a turn right now. An idle recipient may still be open in
+/// another terminal or Desktop, where the user sees a notice and the message
+/// enters context on the next turn, so it must not be resumed from here.
+fn delivery(result: &mut Value, active: bool) {
+    result["receiver_active"] = json!(active);
+    if active {
+        result["delivery"] = json!("next_safe_model_boundary");
+    } else {
+        result["delivery"] = json!("next_recipient_turn");
+        result["note"] = json!("The recipient is not running a turn. If its session is open, its user is notified and the message enters context on its next turn; a closed session reads it when resumed. Do not resume a session that may be open elsewhere.");
+    }
+}
+
 /// Live routing uses the private runtime DB; legacy cwd mail is explicitly separate.
 pub fn execute_live(
     context: &crate::services::ServiceContext,
@@ -81,11 +95,10 @@ pub fn execute_live(
                 // Without a team the recipient must already be a session UUID.
                 let message = live::send(context, session, to, &content)?;
                 let active = live::receiver_active(root, to)?;
-                return Ok(
-                    json!({"message":message,"state":"queued","receiver_active":active,
-                    "delivery":if active {"next_safe_model_boundary"} else {"queued_needs_resume"},
-                    "processed":false,"to":to,"delivered":[delivered(None,to)]}),
-                );
+                let mut result = json!({"message":message,"state":"queued","processed":false,
+                    "to":to,"delivered":[delivered(None,to)]});
+                delivery(&mut result, active);
+                return Ok(result);
             };
             if to == "*" {
                 let recipients: Vec<_> = team
@@ -133,11 +146,10 @@ pub fn execute_live(
             };
             let message = live::send(context, session, &recipient, &content)?;
             let active = live::receiver_active(root, &recipient)?;
-            Ok(
-                json!({"message":message,"state":"queued","receiver_active":active,
-                "delivery":if active {"next_safe_model_boundary"} else {"queued_needs_resume"},
-                "processed":false,"to":recipient,"delivered":[delivered(Some(to),&recipient)]}),
-            )
+            let mut result = json!({"message":message,"state":"queued","processed":false,
+                "to":recipient,"delivered":[delivered(Some(to),&recipient)]});
+            delivery(&mut result, active);
+            Ok(result)
         }
         "shutdown_request" => {
             let team = teams::team_for_session(root, session)?
