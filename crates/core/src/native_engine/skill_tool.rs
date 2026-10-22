@@ -97,13 +97,11 @@ impl ToolLoopExecutor {
             self.manual_skill_active || !skill.disable_model_invocation,
             "Skill /{name} is disabled for model invocation; it requires an explicit user command"
         );
-        if name == "code-review"
-            && skill.path.parent() == Some(Path::new("__embedded_cli_skills__"))
-        {
-            let instructions = crate::skills::code_review::prepare(
-                Path::new(&self.workspace_cwd), arguments,
-            ).await?;
-            return Ok(json!({"skill":name,"instructions":instructions,"execution":"inline","shell_context_already_collected":true}));
+        if skill.path.parent() == Some(Path::new("__embedded_cli_skills__")) {
+            if let Some(prepared) = crate::skills::code_review::prepare_named(name, Path::new(&self.workspace_cwd), arguments).await {
+                let instructions = prepared?;
+                return Ok(json!({"skill":name,"instructions":instructions,"execution":"inline","shell_context_already_collected":true}));
+            }
         }
         if name == "deep-research" && skill.path == Path::new("__embedded_cli_skills__").join("deep-research") {
             ensure!(!arguments.trim().is_empty(), "Usage: /deep-research <specific research question>");

@@ -15,6 +15,11 @@ pub fn commands(workspace: &Path) -> BTreeMap<String, SkillCommand> {
             include_str!("bundled/code-review.md"),
         ),
         (
+            "security-review",
+            "Review pending changes for exploitable security vulnerabilities",
+            include_str!("bundled/security-review.md"),
+        ),
+        (
             "dataviz",
             "Create charts and data visualizations, choose chart forms, and validate palettes, contrast and interaction using runnable reference assets.",
             include_str!("bundled/dataviz.md"),
@@ -92,6 +97,7 @@ mod tests {
             "dataviz",
             "deep-research",
             "doctor",
+            "security-review",
         ] {
             let command = &commands[name];
             let rendered = command

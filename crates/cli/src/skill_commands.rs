@@ -138,12 +138,10 @@ pub async fn prepare_invocation(
     let Some(skill) = commands.get(name) else {
         return Ok(PreparedInvocation::NotHandled);
     };
-    if name == "code-review"
-        && skill.path.parent() == Some(std::path::Path::new("__embedded_cli_skills__"))
-    {
-        return Ok(PreparedInvocation::Inline(
-            claude_core::skills::code_review::prepare(&session.workspace, arguments.trim()).await?,
-        ));
+    if skill.path.parent() == Some(std::path::Path::new("__embedded_cli_skills__")) {
+        if let Some(prepared) = claude_core::skills::code_review::prepare_named(name, &session.workspace, arguments.trim()).await {
+            return Ok(PreparedInvocation::Inline(prepared?));
+        }
     }
     if name == "doctor" && skill.path.parent() == Some(std::path::Path::new("__embedded_cli_skills__")) {
         let instructions = skill.render_template(arguments.trim(), &session.id)?;
