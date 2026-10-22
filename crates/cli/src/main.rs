@@ -3,6 +3,7 @@ mod lsp_commands;
 mod prompt_suggestion;
 mod shell_mode;
 mod mentions;
+mod memory_shortcut;
 mod launch_permissions;
 mod context_commands;
 mod persistent_worker;
@@ -623,6 +624,13 @@ async fn run(cli: &Cli) -> Result<()> {
                 },
                 terminal::prompt::Input::Command(line) => line,
             };
+            if let Some(note) = line.trim_start().strip_prefix("# ") {
+                match memory_shortcut::save(&session.workspace, note) {
+                    Ok(path) => eprintln!("Saved to {}: - {}", path.display(), note.trim()),
+                    Err(error) => eprintln!("Error: {error:#}"),
+                }
+                continue;
+            }
             if let Some(command) = line.trim_start().strip_prefix('!') {
                 if let Err(error) = shell_mode::run(&session, command).await { eprintln!("Error: {error:#}"); }
                 continue;

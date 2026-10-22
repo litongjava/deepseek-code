@@ -832,6 +832,8 @@ impl PromptEditor {
                 // As in the reference CLI: the mode label, or "? for shortcuts" in ask mode.
                 let mut parts = vec![if text.starts_with('!') {
                     "! shell mode: runs in your shell, output joins the conversation".to_owned()
+                } else if text.starts_with("# ") {
+                    "# memory: saves this line to the project's AGENTS.md or CLAUDE.md".to_owned()
                 } else {
                     crate::terminal::style::mode_indicator(&self.permission_mode)
                         .map_or_else(|| "? for shortcuts".to_owned(), |(label, _)| label)
