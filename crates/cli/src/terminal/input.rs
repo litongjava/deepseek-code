@@ -34,6 +34,7 @@ enum Message {
     Keybindings(crate::keybindings::Keybindings),
     Workspace(std::path::PathBuf),
     ContextNote(Option<String>),
+    Vim(bool),
     Read(Request),
 }
 
@@ -118,6 +119,10 @@ impl TerminalInput {
                         editor.set_context_note(note);
                         continue;
                     }
+                    Message::Vim(on) => {
+                        editor.set_vim(on);
+                        continue;
+                    }
                     Message::Read(request) => request,
                 };
                 if request.response.is_closed() {
@@ -181,6 +186,11 @@ impl TerminalInput {
     /// Set the last turn's tool titles and full display bodies before reading.
     pub fn set_panel(&self, details: Vec<(String, String)>, expanded: bool) {
         let _ = self.requests.send(Message::Panel(details, expanded));
+    }
+
+    /// Turns vim-style prompt editing on or off.
+    pub fn set_vim(&self, on: bool) {
+        let _ = self.requests.send(Message::Vim(on));
     }
 
     /// Shown in the footer while the context budget is low.

@@ -33,6 +33,8 @@ pub struct PromptEditor {
     files: Option<Vec<String>>,
     /// "12% until auto-compact" once the context budget runs low.
     context_note: Option<String>,
+    /// Vim-style editing (`/vim`).
+    vim: bool,
     keybindings: crate::keybindings::Keybindings,
 }
 impl Default for PromptEditor {
@@ -51,6 +53,7 @@ impl Default for PromptEditor {
             workspace: None,
             files: None,
             context_note: None,
+            vim: false,
             keybindings: crate::keybindings::Keybindings::default(),
             commands: crate::command_catalog::COMMANDS
                 .iter()
@@ -603,6 +606,9 @@ impl PromptEditor {
             self.files = None;
         }
     }
+    pub fn set_vim(&mut self, on: bool) {
+        self.vim = on;
+    }
     pub fn set_context_note(&mut self, note: Option<String>) {
         self.context_note = note;
     }
@@ -660,6 +666,8 @@ impl PromptEditor {
         let mut search_pos = self.history.len();
         // A second Esc on an empty prompt within a second opens /rewind.
         let mut last_esc: Option<std::time::Instant> = None;
+        // With /vim on, Some while in normal mode; each prompt starts inserting.
+        let mut vim_normal: Option<crate::terminal::vim::Normal> = None;
         // A suggestion belongs to the turn before this prompt; drop stale ones.
         self.suggestion = None;
         // Files may have changed since the last prompt; list them again on `@`.
@@ -847,6 +855,9 @@ impl PromptEditor {
                 if last_esc.is_some_and(|at| at.elapsed() < std::time::Duration::from_secs(1)) {
                     parts = vec!["esc again to rewind".into()];
                 }
+                if self.vim {
+                    parts.insert(0, if vim_normal.is_some() { "-- NORMAL --" } else { "-- INSERT --" }.into());
+                }
                 parts.join(" \u{b7} ")
             };
             let footer_style = match crate::terminal::style::mode_indicator(&self.permission_mode) {
@@ -949,6 +960,32 @@ impl PromptEditor {
                     if control && key.code == KeyCode::Char('d') && buffer.chars.is_empty() {
                         screen.finish("", &prompt)?;
                         return Ok(None);
+                    }
+                    if self.vim && !control {
+                        if vim_normal.is_none() && key.code == KeyCode::Esc && items.is_empty() && !buffer.chars.is_empty() {
+                            vim_normal = Some(crate::terminal::vim::Normal::default());
+                            crate::terminal::vim::leave_insert(&mut buffer.cursor);
+                            continue;
+                        }
+                        if let (Some(normal), KeyCode::Char(ch)) = (vim_normal.as_mut(), key.code) {
+                            use crate::terminal::vim::Outcome;
+                            match normal.key(ch, &mut buffer.chars, &mut buffer.cursor) {
+                                Outcome::Insert => vim_normal = None,
+                                Outcome::HistoryPrevious if history_pos > 0 => {
+                                    if history_pos == self.history.len() {
+                                        draft = buffer.text();
+                                    }
+                                    history_pos -= 1;
+                                    buffer.set(&self.history[history_pos]);
+                                }
+                                Outcome::HistoryNext if history_pos < self.history.len() => {
+                                    history_pos += 1;
+                                    buffer.set(if history_pos == self.history.len() { &draft } else { &self.history[history_pos] });
+                                }
+                                _ => {}
+                            }
+                            continue;
+                        }
                     }
                     if control && key.code == KeyCode::Char('v') {
                         // Ctrl+V with an image on the clipboard attaches it as

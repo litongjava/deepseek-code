@@ -49,6 +49,7 @@ pub mod change_view;
 pub mod tool_view;
 pub mod tips;
 pub mod markdown;
+pub mod vim;
 mod display_path;
 pub mod style;
 pub mod screen_mode;
