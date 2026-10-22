@@ -499,6 +499,8 @@ async fn run(cli: &Cli) -> Result<()> {
         let mut remote = remote_commands::Remote::default();
         let mut last_config_error = String::new();
         terminal::tips::start_session(&paths.data_dir);
+        // Lets other sessions see this one is open while it is idle.
+        let mut presence: Option<(String, claude_core::services::session_messages::PresenceLease)> = None;
         // History length the last suggestion was generated for.
         let mut suggested_for = session.store.history(&session.id)?.len();
         'repl: loop {
@@ -509,6 +511,12 @@ async fn run(cli: &Cli) -> Result<()> {
                 if let Err(error) = session.turn(cli, &prompt, &mut input).await { if !worker_frontend::already_presented(&error) { eprintln!("Error: {error:#}"); } }
             }
             if let Err(error) = remote.sync(&session) { eprintln!("Remote Control: {error:#}"); }
+            if presence.as_ref().is_none_or(|(id, _)| *id != session.id) {
+                drop(presence.take());
+                presence = claude_core::services::session_messages::PresenceLease::acquire(&paths.data_dir, &session.id)
+                    .ok()
+                    .map(|lease| (session.id.clone(), lease));
+            }
             if prompt_suggestion::enabled(&paths.data_dir) {
                 let history = session.store.history(&session.id)?;
                 if history.len() != suggested_for {

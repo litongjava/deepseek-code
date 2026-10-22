@@ -202,6 +202,44 @@ pub fn receiver_active(root: &Path, session: &str) -> Result<bool> {
         Err(std::fs::TryLockError::Error(e)) => Err(e.into()),
     }
 }
+/// Held by an interactive frontend for as long as a session is open, so other
+/// sessions can tell an open but idle recipient from a closed one. The lock
+/// is released by the OS when the process exits, so it never goes stale.
+pub struct PresenceLease {
+    _file: File,
+}
+impl PresenceLease {
+    pub fn acquire(root: &Path, session: &str) -> Result<Self> {
+        valid_id(session)?;
+        let directory = root.join("session-presence");
+        std::fs::create_dir_all(&directory)?;
+        let file = std::fs::OpenOptions::new()
+            .create(true)
+            .truncate(false)
+            .read(true)
+            .write(true)
+            .open(directory.join(format!("{session}.lock")))?;
+        crate::fs::try_lock_briefly(&file).context("Session is already open in another frontend")?;
+        Ok(Self { _file: file })
+    }
+}
+
+/// Whether a frontend currently holds the session open.
+pub fn session_open(root: &Path, session: &str) -> Result<bool> {
+    valid_id(session)?;
+    let path = root.join("session-presence").join(format!("{session}.lock"));
+    let file = match std::fs::OpenOptions::new().read(true).write(true).open(path) {
+        Ok(file) => file,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+        Err(e) => return Err(e.into()),
+    };
+    match file.try_lock() {
+        Ok(()) => Ok(false),
+        Err(std::fs::TryLockError::WouldBlock) => Ok(true),
+        Err(std::fs::TryLockError::Error(e)) => Err(e.into()),
+    }
+}
+
 /// Cross-engine/process execution ownership, including Desktop private sessions.
 pub struct ExecutionLease {
     _file: File,
@@ -328,6 +366,17 @@ pub fn peers(context: &ServiceContext, session: &str) -> Result<Vec<serde_json::
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn presence_marks_an_open_session_until_released() {
+        let dir = tempfile::tempdir().unwrap();
+        let id = uuid::Uuid::new_v4().to_string();
+        assert!(!session_open(dir.path(), &id).unwrap());
+        let lease = PresenceLease::acquire(dir.path(), &id).unwrap();
+        assert!(session_open(dir.path(), &id).unwrap());
+        drop(lease);
+        assert!(!session_open(dir.path(), &id).unwrap());
+    }
+
     use super::*;
     use crate::runtime::SessionStore;
     fn fixture() -> (
@@ -398,7 +447,7 @@ mod tests {
         assert!(send(&context, &sender, &recipient, &"x".repeat(65537)).is_err());
         let result=crate::tools::agent_messages::execute_live(&context,&sender,serde_json::json!({"operation":"send","from":outside,"to":recipient,"content":"from actual session"})).unwrap();
         assert_eq!(result["message"]["sender"], sender);
-        assert_eq!(result["delivery"], "next_recipient_turn");
+        assert_eq!(result["delivery"], "next_resume");
         assert!(mark_read(&context, &sender, result["message"]["id"].as_str().unwrap()).is_err());
         assert_eq!(notices(&context, &recipient).unwrap().len(), 1);
         assert!(notices(&context, &recipient).unwrap().is_empty());
