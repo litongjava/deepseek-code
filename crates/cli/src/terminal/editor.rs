@@ -148,6 +148,8 @@ pub(crate) fn clipped(text: &str, width: usize) -> String {
 }
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum TextStyle {
+    /// A permission mode label in its own colour.
+    Colored(crossterm::style::Color),
     Accent,
     Success,
     Border,
@@ -382,6 +384,7 @@ impl Screen {
             if let Some((text, style)) = next {
                 if std::env::var_os("NO_COLOR").is_none() {
                     match style {
+                        TextStyle::Colored(color) => queue!(frame, SetForegroundColor(*color))?,
                         TextStyle::Accent => queue!(
                             frame,
                             SetAttribute(Attribute::Bold),
@@ -725,18 +728,20 @@ impl PromptEditor {
                     end,
                     items.len()
                 )
-            } else if ghost.is_some() {
-                format!(
-                    "{} mode (Shift+Tab to cycle) - Tab accepts the suggestion - Enter send",
-                    self.permission_mode
-                )
             } else {
-                format!(
-                    "{} mode (Shift+Tab to cycle) - Enter send - Alt+Enter newline",
-                    self.permission_mode
-                )
+                // As in the reference CLI: the mode label, or "? for shortcuts" in ask mode.
+                let mut parts = vec![crate::terminal::style::mode_indicator(&self.permission_mode)
+                    .map_or_else(|| "? for shortcuts".to_owned(), |(label, _)| label)];
+                if ghost.is_some() {
+                    parts.push("tab to accept suggestion".into());
+                }
+                parts.join(" \u{b7} ")
             };
-            lines.push((clipped(&footer, width), TextStyle::Muted));
+            let footer_style = match crate::terminal::style::mode_indicator(&self.permission_mode) {
+                Some((_, color)) if items.is_empty() && search.is_none() => TextStyle::Colored(color),
+                _ => TextStyle::Muted,
+            };
+            lines.push((clipped(&footer, width), footer_style));
             if !self.details.entries.is_empty() {
                 lines.push((
                     clipped("Ctrl+O details \u{00b7} PgUp/PgDn scroll", width),
@@ -832,6 +837,21 @@ impl PromptEditor {
                     if control && key.code == KeyCode::Char('d') && buffer.chars.is_empty() {
                         screen.finish("", &prompt)?;
                         return Ok(None);
+                    }
+                    if key.code == KeyCode::Char('?') && !control && buffer.chars.is_empty() {
+                        // `?` on an empty prompt lists shortcuts, as in the reference CLI.
+                        screen.finish("", "")?;
+                        let width = crate::terminal::style::SHORTCUTS.iter().map(|(keys, _)| keys.chars().count()).max().unwrap_or(0) + 2;
+                        let mut text = String::from("\x1b[?2026hShortcuts\r\n");
+                        for (keys, action) in crate::terminal::style::SHORTCUTS {
+                            text.push_str(&format!("  {keys:<width$}{action}\r\n"));
+                        }
+                        text.push_str("\x1b[?2026l");
+                        let mut out = io::stderr();
+                        out.write_all(text.as_bytes())?;
+                        out.flush()?;
+                        screen = Screen::default();
+                        continue;
                     }
                     if control && key.code == KeyCode::Char('o') {
                         if self.details.entries.is_empty() && !self.transcript.is_empty() {

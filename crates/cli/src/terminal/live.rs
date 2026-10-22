@@ -583,13 +583,16 @@ impl Frame {
         let prompt_width = prompt.chars().count();
         let (draft, cursor) = state.draft.visible(width.saturating_sub(prompt_width + 1));
         let status = clip(&state.status_line(), width);
-        let mode = if state.answer.is_some() {
-            format!("{} mode (Shift+Tab to cycle) \u{b7} Enter submits your answer \u{b7} Esc interrupts", state.mode)
+        // Footer as in the reference CLI: the mode label (none for ask), then hints.
+        let indicator = crate::terminal::style::mode_indicator(&state.mode);
+        let hint = if state.answer.is_some() {
+            "enter to submit your answer \u{b7} esc to interrupt"
         } else {
-            format!(
-                "{} mode (Shift+Tab to cycle) · Enter queues · /btw question /background detach · Esc interrupts",
-                state.mode
-            )
+            "esc to interrupt"
+        };
+        let mode = match &indicator {
+            Some((label, _)) => format!("{label} \u{b7} {hint}"),
+            None => hint.to_owned(),
         };
         let rule = "─".repeat(width);
         let tip_line = state
@@ -656,6 +659,17 @@ impl Frame {
                     crate::terminal::style::muted()
                 };
                 lines[index] = format!("{}{}{}", SetForegroundColor(color), lines[index], ResetColor);
+            }
+            if let Some((label, color)) = &indicator {
+                let footer = clip(&mode, width);
+                if let Some(rest) = footer.strip_prefix(label.as_str()) {
+                    lines[6] = format!(
+                        "{}{label}{}{rest}{}",
+                        SetForegroundColor(*color),
+                        SetForegroundColor(crate::terminal::style::muted()),
+                        ResetColor
+                    );
+                }
             }
             for index in [3, 5] {
                 lines[index] = format!(
