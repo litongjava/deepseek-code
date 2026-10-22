@@ -730,8 +730,12 @@ impl PromptEditor {
                 )
             } else {
                 // As in the reference CLI: the mode label, or "? for shortcuts" in ask mode.
-                let mut parts = vec![crate::terminal::style::mode_indicator(&self.permission_mode)
-                    .map_or_else(|| "? for shortcuts".to_owned(), |(label, _)| label)];
+                let mut parts = vec![if text.starts_with('!') {
+                    "! shell mode: runs in your shell, output joins the conversation".to_owned()
+                } else {
+                    crate::terminal::style::mode_indicator(&self.permission_mode)
+                        .map_or_else(|| "? for shortcuts".to_owned(), |(label, _)| label)
+                }];
                 if ghost.is_some() {
                     parts.push("tab to accept suggestion".into());
                 }

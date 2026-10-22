@@ -1,6 +1,7 @@
 ﻿mod hook_progress;
 mod lsp_commands;
 mod prompt_suggestion;
+mod shell_mode;
 mod launch_permissions;
 mod context_commands;
 mod persistent_worker;
@@ -629,6 +630,10 @@ async fn run(cli: &Cli) -> Result<()> {
                 },
                 terminal::prompt::Input::Command(line) => line,
             };
+            if let Some(command) = line.trim_start().strip_prefix('!') {
+                if let Err(error) = shell_mode::run(&session, command).await { eprintln!("Error: {error:#}"); }
+                continue;
+            }
             if line.trim() == "/reload-skills" {
                 match skill_commands::load_for_workspace(&paths, &session.workspace).await {
                     Ok(updated) => {
