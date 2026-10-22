@@ -301,7 +301,13 @@ pub fn merge_tool_args(current: &str, incoming: &str) -> String {
     if incoming.len() >= current.len() && incoming.starts_with(current) {
         return incoming.to_string();
     }
-    if current.len() > incoming.len() && current.starts_with(incoming) {
+    // A shorter repeat of what we already have is a resent snapshot, but only
+    // when it is complete JSON: incremental deltas such as `{"` (the start of a
+    // nested object) also prefix the accumulated arguments and must be kept.
+    if current.len() > incoming.len()
+        && current.starts_with(incoming)
+        && serde_json::from_str::<Value>(incoming).is_ok()
+    {
         return current.to_string();
     }
     format!("{}{}", current, incoming)
@@ -550,8 +556,17 @@ mod tests {
     fn test_merge_tool_args() {
         assert_eq!(merge_tool_args("", "hello"), "hello");
         assert_eq!(merge_tool_args("hel", "hello"), "hello");
-        assert_eq!(merge_tool_args("hello", "hel"), "hello");
+        assert_eq!(merge_tool_args(r#"{"a":1}"#, r#"{"a":1}"#), r#"{"a":1}"#);
         assert_eq!(merge_tool_args("abc", "def"), "abcdef");
+        // Incremental deltas that open a nested object prefix the arguments.
+        let mut args = String::new();
+        for delta in [r#"{"team_name": "docs", "members": ["#, r#"{"#, r#""name": "a"}"#, r#", "#, r#"{""#, r#"name": "b"}]}"#] {
+            args = merge_tool_args(&args, delta);
+        }
+        assert_eq!(
+            serde_json::from_str::<Value>(&args).unwrap()["members"][1]["name"],
+            "b"
+        );
     }
 
     #[test]
