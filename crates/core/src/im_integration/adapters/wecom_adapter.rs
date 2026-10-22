@@ -14,7 +14,6 @@ use crate::im_integration::message_router::{
 };
 
 const WECOM_API_BASE: &str = "https://qyapi.weixin.qq.com/cgi-bin";
-const WECOM_WS_URL: &str = "wss://openws.work.weixin.qq.com";
 
 #[derive(Debug, Deserialize)]
 struct AccessTokenResponse {
@@ -22,26 +21,6 @@ struct AccessTokenResponse {
     expires_in: Option<i64>,
     errcode: Option<i32>,
     errmsg: Option<String>,
-}
-
-#[derive(Debug, Deserialize)]
-struct WeComMessage {
-    #[serde(rename = "FromUserName")]
-    from_user: Option<String>,
-    #[serde(rename = "ToUserName")]
-    to_user: Option<String>,
-    #[serde(rename = "MsgType")]
-    msg_type: Option<String>,
-    #[serde(rename = "Content")]
-    content: Option<String>,
-    #[serde(rename = "MsgId")]
-    msg_id: Option<String>,
-    #[serde(rename = "CreateTime")]
-    create_time: Option<i64>,
-    #[serde(rename = "PicUrl")]
-    pic_url: Option<String>,
-    #[serde(rename = "MediaId")]
-    media_id: Option<String>,
 }
 
 pub struct WeComAdapter {
@@ -55,7 +34,6 @@ pub struct WeComAdapter {
     access_token: Mutex<Option<String>>,
     token_expiry: Mutex<Option<chrono::DateTime<Utc>>>,
     ws_shutdown_tx: Mutex<Option<mpsc::Sender<()>>>,
-    message_count: AtomicBool,
 }
 
 impl WeComAdapter {
@@ -74,7 +52,6 @@ impl WeComAdapter {
             access_token: Mutex::new(None),
             token_expiry: Mutex::new(None),
             ws_shutdown_tx: Mutex::new(None),
-            message_count: AtomicBool::new(false),
         }
     }
 
@@ -130,55 +107,6 @@ impl WeComAdapter {
         *expiry = Some(Utc::now() + chrono::Duration::seconds(resp.expires_in.unwrap_or(7200)));
 
         Ok(token)
-    }
-
-    fn parse_message(&self, raw: serde_json::Value) -> Option<UnifiedMessage> {
-        let msg: WeComMessage = match serde_json::from_value(raw.clone()) {
-            Ok(m) => m,
-            Err(_) => {
-                let chat_id = raw
-                    .get("FromUserName")
-                    .and_then(|f| f.as_str())
-                    .unwrap_or("")
-                    .to_string();
-                let content = raw
-                    .get("Content")
-                    .and_then(|c| c.as_str())
-                    .unwrap_or("")
-                    .to_string();
-                let msg_type = raw
-                    .get("MsgType")
-                    .and_then(|m| m.as_str())
-                    .unwrap_or("text");
-
-                return Some(UnifiedMessage {
-                    platform: "wecom".to_string(),
-                    user_id: chat_id.clone(),
-                    chat_id,
-                    message_type: MessageType::from_str(msg_type).unwrap_or(MessageType::Text),
-                    content,
-                    timestamp: Utc::now(),
-                    raw_data: raw,
-                    thread_id: None,
-                });
-            }
-        };
-
-        let chat_id = msg.from_user.unwrap_or_default();
-        let user_id = chat_id.clone();
-        let content = msg.content.unwrap_or_default();
-        let msg_type = msg.msg_type.as_deref().unwrap_or("text");
-
-        Some(UnifiedMessage {
-            platform: "wecom".to_string(),
-            user_id,
-            chat_id,
-            message_type: MessageType::from_str(msg_type).unwrap_or(MessageType::Text),
-            content,
-            timestamp: Utc::now(),
-            raw_data: raw,
-            thread_id: None,
-        })
     }
 
     async fn send_text_message(&self, user_id: &str, content: &str) -> Result<()> {
@@ -464,7 +392,6 @@ impl WeComAdapter {
             access_token: Mutex::new(None),
             token_expiry: Mutex::new(None),
             ws_shutdown_tx: Mutex::new(None),
-            message_count: AtomicBool::new(false),
         }
     }
 }

@@ -218,7 +218,7 @@ app.use(express.json());
 
 // Health check
 app.get('/api/health', (_req, res) => {{
-  res.json({{ status: 'ok', project: '{}' }});
+  res.json({{ status: 'ok', project: '{name}' }});
 }});
 
 // Auth endpoints

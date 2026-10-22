@@ -202,6 +202,7 @@ fn random_secret() -> Result<String> {
     Ok(URL_SAFE_NO_PAD.encode(bytes))
 }
 
+#[cfg(test)]
 fn auth_url(base: &str, redirect: &str, state: &str, verifier: &str) -> Result<String> {
     scoped_auth_url(base, redirect, state, verifier, CLIENT_ID, SCOPES)
 }

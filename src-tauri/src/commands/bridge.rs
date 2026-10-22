@@ -154,45 +154,6 @@ pub struct AuthFlow {
 pub static AUTH_FLOW: once_cell::sync::Lazy<Arc<Mutex<Option<AuthFlow>>>> =
     once_cell::sync::Lazy::new(|| Arc::new(Mutex::new(None)));
 
-/// Launch the bridge registration wizard and capture the QR URL.
-/// Returns the verification URL that should be displayed as QR code.
-async fn run_registration_wizard() -> Result<String, String> {
-    // Run: npx -y lark-channel-bridge@latest run --wizard-only
-    // The bridge's wizard will output QR info to stderr
-    // We capture the verification_url from the output
-    let mut child = std::process::Command::new("npx")
-        .args(&["-y", "lark-channel-bridge@latest", "run", "--wizard-only"])
-        .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::piped())
-        .spawn()
-        .map_err(|e| format!("Failed to start auth wizard: {}", e))?;
-
-    let _pid = child.id();
-
-    // Wait briefly for the QR URL to appear in output
-    tokio::time::sleep(tokio::time::Duration::from_secs(5)).await;
-
-    // Check if child is still running
-    match child.try_wait() {
-        Ok(Some(status)) => {
-            return Err(format!("Auth wizard exited early with status: {}", status));
-        }
-        Ok(None) => {
-            // Still running — we can read PID and user can scan QR
-            // The wizard prints to stdout/stderr
-            // For now, just track the PID and inform the user
-            // Kill after timeout
-            tokio::time::sleep(tokio::time::Duration::from_secs(600)).await;
-            let _ = child.kill();
-            return Err("Auth timeout (10 min)".to_string());
-        }
-        Err(e) => {
-            let _ = child.kill();
-            return Err(format!("Error waiting for auth wizard: {}", e));
-        }
-    }
-}
-
 /* ── Tauri Commands ── */
 
 #[tauri::command]

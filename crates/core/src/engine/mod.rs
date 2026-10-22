@@ -9,22 +9,6 @@ use tokio::process::{Child, Command};
 use tokio::sync::mpsc;
 use uuid::Uuid;
 
-fn find_executable_in_path(name: &str) -> Option<PathBuf> {
-    if let Ok(path_env) = std::env::var("PATH") {
-        for dir in std::env::split_paths(&path_env) {
-            let candidate = if cfg!(target_os = "windows") {
-                dir.join(format!("{}.exe", name))
-            } else {
-                dir.join(name)
-            };
-            if candidate.exists() && candidate.is_file() {
-                return Some(candidate);
-            }
-        }
-    }
-    None
-}
-
 fn get_user_home() -> PathBuf {
     dirs::home_dir().unwrap_or_else(|| PathBuf::from("."))
 }

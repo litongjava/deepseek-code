@@ -40,6 +40,7 @@ pub use provider_search::search as search_provider;
 #[cfg(windows)]
 use std::os::windows::process::CommandExt;
 
+#[cfg(windows)]
 const CREATE_NO_WINDOW: u32 = 0x08000000;
 // ---- memory tool stubs (dispatched to MemEx at runtime by tool_loop) ----
 
@@ -873,80 +874,6 @@ fn tool_computer_use(input: serde_json::Value) -> Result<serde_json::Value> {
             rt.block_on(manager.execute_action(action))?
         }
     };
-
-    Ok(serde_json::json!({
-        "success": result.success,
-        "action": action_type_str,
-        "screenshot": result.screenshot,
-        "error": result.error,
-        "duration_ms": result.duration_ms,
-    }))
-}
-
-async fn tool_computer_use_async(input: serde_json::Value) -> Result<serde_json::Value> {
-    use crate::computer_use::{
-        ComputerAction, ComputerActionType, ComputerUseConfig, ComputerUseManager, MouseButton,
-        ScreenCoordinate,
-    };
-
-    let action_type_str = input["action_type"]
-        .as_str()
-        .ok_or_else(|| anyhow!("action_type required"))?;
-
-    let action_type = match action_type_str {
-        "MouseMove" => ComputerActionType::MouseMove,
-        "MouseClick" => ComputerActionType::MouseClick,
-        "MouseDown" => ComputerActionType::MouseDown,
-        "MouseUp" => ComputerActionType::MouseUp,
-        "MouseScroll" => ComputerActionType::MouseScroll,
-        "KeyPress" => ComputerActionType::KeyPress,
-        "KeyDown" => ComputerActionType::KeyDown,
-        "KeyUp" => ComputerActionType::KeyUp,
-        "TypeText" => ComputerActionType::TypeText,
-        "Screenshot" => ComputerActionType::Screenshot,
-        "Wait" => ComputerActionType::Wait,
-        _ => return Ok(serde_json::json!({ "error": format!("Unknown action_type: {}", action_type_str), "is_error": true })),
-    };
-
-    let coordinate = input
-        .get("coordinate")
-        .and_then(|c| {
-            Some(ScreenCoordinate {
-                x: c.get("x")?.as_i64()? as i32,
-                y: c.get("y")?.as_i64()? as i32,
-            })
-        });
-
-    let button = input["button"]
-        .as_str()
-        .and_then(|b| match b {
-            "Left" => Some(MouseButton::Left),
-            "Right" => Some(MouseButton::Right),
-            "Middle" => Some(MouseButton::Middle),
-            "Back" => Some(MouseButton::Back),
-            "Forward" => Some(MouseButton::Forward),
-            _ => None,
-        });
-
-    let key = input["key"].as_str().map(|s| s.to_string());
-    let text = input["text"].as_str().map(|s| s.to_string());
-    let scroll_y = input["scroll_y"].as_i64().map(|v| v as i32);
-    let scroll_x = input["scroll_x"].as_i64().map(|v| v as i32);
-    let duration_ms = input["duration_ms"].as_u64();
-
-    let action = ComputerAction {
-        action_type,
-        coordinate,
-        button,
-        key,
-        text,
-        scroll_y,
-        scroll_x,
-        duration_ms,
-    };
-
-    let manager = ComputerUseManager::new(ComputerUseConfig::default());
-    let result: crate::computer_use::ComputerActionResult = manager.execute_action(action).await?;
 
     Ok(serde_json::json!({
         "success": result.success,

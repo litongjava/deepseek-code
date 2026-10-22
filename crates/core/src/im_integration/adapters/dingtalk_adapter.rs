@@ -15,7 +15,6 @@ use crate::im_integration::message_router::{
 };
 
 const DINGTALK_API_BASE: &str = "https://api.dingtalk.com";
-const DINGTALK_WS_URL: &str = "wss://wss-open-connection.dingtalk.com";
 
 /// 钉钉 Stream 连接响应
 #[derive(Debug, Deserialize)]
@@ -39,19 +38,8 @@ struct DingTalkBotMessage {
     conversation_id_alt: Option<String>,
     #[serde(rename = "senderStaffId")]
     sender_staff_id: Option<String>,
-    #[serde(rename = "senderNick")]
-    sender_nick: Option<String>,
-    msgtype: Option<String>,
     text: Option<DingTalkTextContent>,
     markdown: Option<DingTalkMarkdownContent>,
-    #[serde(rename = "createAt")]
-    create_at: Option<String>,
-    #[serde(rename = "chatbotCorpId")]
-    chatbot_corp_id: Option<String>,
-    #[serde(rename = "chatbotUserId")]
-    chatbot_user_id: Option<String>,
-    #[serde(rename = "msgId")]
-    msg_id: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -61,7 +49,6 @@ struct DingTalkTextContent {
 
 #[derive(Debug, Deserialize)]
 struct DingTalkMarkdownContent {
-    title: Option<String>,
     text: String,
 }
 
@@ -70,7 +57,6 @@ struct DingTalkMarkdownContent {
 struct StreamFrame {
     #[serde(rename = "type")]
     frame_type: Option<String>,
-    headers: Option<serde_json::Value>,
     message: Option<serde_json::Value>,
     data: Option<serde_json::Value>,
 }
@@ -316,8 +302,8 @@ impl DingTalkAdapter {
         mut shutdown_rx: mpsc::Receiver<()>,
     ) {
         let mut heartbeat_interval = interval(Duration::from_secs(30));
-        let mut retry_delay = Duration::from_secs(1);
-        const MAX_RETRY_DELAY: Duration = Duration::from_secs(60);
+        // connection_loop owns the backoff; a closed stream reconnects after a second.
+        let retry_delay = Duration::from_secs(1);
 
         loop {
             if !self.running.load(Ordering::Relaxed) {
@@ -339,7 +325,6 @@ impl DingTalkAdapter {
                 msg = ws_stream.next() => {
                     match msg {
                         Some(Ok(tokio_tungstenite::tungstenite::protocol::Message::Text(text))) => {
-                            retry_delay = Duration::from_secs(1);
                             if let Err(e) = self.handle_ws_text(&text).await {
                                 tracing::error!("Failed to handle WebSocket text: {}", e);
                             }

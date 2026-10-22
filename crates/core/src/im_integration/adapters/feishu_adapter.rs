@@ -45,55 +45,14 @@ struct FeishuApiResponse<T> {
 #[derive(Debug, Deserialize)]
 struct WsEventEnvelope {
     #[serde(default)]
-    sid: Option<String>,
-    #[serde(default)]
     #[serde(rename = "type")]
     event_type: Option<String>,
-    #[serde(default)]
-    schema: Option<String>,
     #[serde(default)]
     header: Option<serde_json::Value>,
     #[serde(default)]
     event: Option<serde_json::Value>,
     #[serde(default)]
     challenge: Option<String>,
-}
-
-/// 飞书事件 Header
-#[derive(Debug, Deserialize)]
-struct EventHeader {
-    #[serde(default)]
-    event_id: Option<String>,
-    #[serde(default)]
-    event_type: Option<String>,
-    #[serde(default)]
-    token: Option<String>,
-    #[serde(default)]
-    create_time: Option<String>,
-}
-
-/// 飞书消息事件
-#[derive(Debug, Deserialize)]
-struct MessageEvent {
-    #[serde(default)]
-    sender: Option<serde_json::Value>,
-    #[serde(default)]
-    message: Option<serde_json::Value>,
-}
-
-/// 飞书卡片回调事件
-#[derive(Debug, Deserialize)]
-struct CardCallbackEvent {
-    #[serde(default)]
-    operator: Option<serde_json::Value>,
-    #[serde(default)]
-    token: Option<String>,
-    #[serde(default)]
-    action: Option<serde_json::Value>,
-    #[serde(default)]
-    host: Option<String>,
-    #[serde(default)]
-    context: Option<serde_json::Value>,
 }
 
 /// 发送消息请求体
@@ -124,7 +83,6 @@ pub struct FeishuAdapter {
     handler: Mutex<Option<MessageHandler>>,
     token: Mutex<Option<String>>,
     token_expiry: Mutex<Option<chrono::DateTime<Utc>>>,
-    ws_stream: Mutex<Option<WebSocketStream<MaybeTlsStream<TcpStream>>>>,
 }
 
 impl FeishuAdapter {
@@ -137,7 +95,6 @@ impl FeishuAdapter {
             handler: Mutex::new(None),
             token: Mutex::new(None),
             token_expiry: Mutex::new(None),
-            ws_stream: Mutex::new(None),
             config,
         }
     }
@@ -151,7 +108,6 @@ impl FeishuAdapter {
             handler: Mutex::new(None),
             token: Mutex::new(None),
             token_expiry: Mutex::new(None),
-            ws_stream: Mutex::new(None),
             config: self.config.clone(),
         })
     }

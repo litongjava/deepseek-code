@@ -99,7 +99,7 @@ struct CallbackQuery {
 }
 
 #[derive(Debug, Serialize, Deserialize)]
-struct TelegramUserInfo {
+pub struct TelegramUserInfo {
     id: i64,
     username: Option<String>,
     first_name: Option<String>,

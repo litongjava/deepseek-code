@@ -199,6 +199,7 @@ impl PermissionManager {
         }
     }
 
+    #[cfg(test)]
     pub(crate) fn inherit_session_rules(&self, parent: &str, child: &str) {
         let mut revision = self.policy_revision.lock().unwrap_or_else(|e| e.into_inner());
         *revision = revision.wrapping_add(1);
