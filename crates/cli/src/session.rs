@@ -912,7 +912,7 @@ impl Session {
                         let question = if tool_name == "ExitPlanMode" {
                             format!("Review plan\n{}\n\n{}\n\nApprove this plan and leave plan mode? Implementation will use ask permissions. [y/N]",
                                 tool_input["planFilePath"].as_str().unwrap_or(""), tool_input["plan"].as_str().unwrap_or(""))
-                        } else { format!("Allow {tool_name} {}? [y/N]", serde_json::to_string(&tool_input)?) };
+                        } else { crate::terminal::tool_view::approval_question(&tool_name, &tool_input, Some(&self.workspace)) };
                         let mut completion = self.engine.permission_completion(&request_id).await;
                         if *completion.borrow() { continue; }
                         if let Some(sdk) = &self.sdk_permissions {
@@ -945,7 +945,7 @@ impl Session {
                             }
                         };
                         if let Some(answer) = answer {
-                            let answer = if ["y", "yes", "\u{662f}", "\u{5141}\u{8bb8}"].contains(&answer.trim().to_lowercase().as_str()) { "yes" } else { "no" };
+                            let answer = if ["y", "yes", "1", "\u{662f}", "\u{5141}\u{8bb8}"].contains(&answer.trim().to_lowercase().as_str()) { "yes" } else { "no" };
                             let _ = self.engine.resume_with_answer(&request_id, answer.into()).await;
                             if remote_decided {
                                 if let Some(reader) = input.as_mut() { reader.dismiss_answer().await?; }

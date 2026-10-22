@@ -150,6 +150,36 @@ pub fn expanded(
     lines
 }
 
+/// The tool approval prompt: what will run, then numbered choices.
+pub fn approval_question(name: &str, input: &Value, workspace: Option<&std::path::Path>) -> String {
+    let mut question = match (name, input["command"].as_str()) {
+        ("Bash" | "PowerShell", Some(command)) => {
+            let mut text = format!("{name} command\n");
+            for line in command.lines().take(12) {
+                text.push_str(&format!("  {}\n", printable(line)));
+            }
+            if let Some(description) = input["description"].as_str() {
+                text.push_str(&format!("  {}\n", printable(description)));
+            }
+            text
+        }
+        _ => {
+            let mut text = format!("{}\n", label(name, input, workspace));
+            let pretty = serde_json::to_string_pretty(input).unwrap_or_default();
+            let lines: Vec<&str> = pretty.lines().collect();
+            for line in lines.iter().take(12) {
+                text.push_str(&format!("  {}\n", printable(line)));
+            }
+            if lines.len() > 12 {
+                text.push_str(&format!("  \u{2026} {} more lines\n", lines.len() - 12));
+            }
+            text
+        }
+    };
+    question.push_str("Allow this call?  1. Yes   2. No  (1/y or 2/n)");
+    question
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -185,5 +215,13 @@ mod tests {
         let lines = text(&expanded("Bash", &json!({"command":"cat missing"}), &output, true, None));
         assert_eq!(lines[0], "\u{25cf} Bash(cat missing) \u{b7} error");
         assert_eq!(lines[2], "     Exit code 2");
+    }
+
+    #[test]
+    fn approval_questions_show_the_command_and_numbered_choices() {
+        let question = approval_question("Bash", &json!({"command":"ls -la","description":"List files"}), None);
+        assert_eq!(question, "Bash command\n  ls -la\n  List files\nAllow this call?  1. Yes   2. No  (1/y or 2/n)");
+        let question = approval_question("Write", &json!({"file_path":"a.txt","content":"x"}), None);
+        assert!(question.starts_with("Write(a.txt)\n  {"), "{question}");
     }
 }
