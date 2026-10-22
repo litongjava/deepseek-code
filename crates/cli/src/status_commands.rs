@@ -49,50 +49,88 @@ pub async fn run(session: &Session, argument: &str) -> Result<()> {
                     .expires_at
                     .is_some_and(|expiry| expiry <= chrono::Utc::now().timestamp())
                 {
-                    "OAuth credentials stored, expired locally; refresh not checked"
+                    "OAuth, expired locally (refresh not checked)"
                 } else {
-                    "OAuth credentials stored; server authentication not checked"
+                    "OAuth (not verified with the server)"
                 }
             }
             Ok(_) => "OAuth selected but no local credentials",
-            Err(_) => "OAuth credential status unavailable",
+            Err(_) => "OAuth status unavailable",
         }
     } else if provider.provider.api_key.trim().is_empty() {
-        "No API credential configured"
+        "missing"
     } else {
-        "API credential configured locally; authentication not checked"
+        "configured (not verified)"
     };
-    let api = if let Some(check) = probe {
+    let reachability = if let Some(check) = probe {
         format!(
-            "{}{}; HTTP transport only, authentication and inference not verified",
+            "{}{} (HTTP only; no model request)",
             state_label(&check.state),
             check
                 .http_status
-                .map(|status| format!(" (HTTP {status})"))
+                .map(|status| format!(", HTTP {status}"))
                 .unwrap_or_default()
         )
     } else {
-        "Not checked; /status --check probes HTTP reachability without credentials or a model request".into()
+        "not checked \u{b7} /status --check".into()
     };
-    let mut output = format!(
-        "DeepSeek Code {version}\nSession: {id}\nProject: {workspace}\nData: {data}\nProvider: {provider} ({provider_id})\nModel: {model}\nRouting: {routing}\nPermissions (frontend): {permissions}\nAccount: {account}\nAPI origin: {origin}\nAPI: {api}\nWorker: {worker}{pid}\nTool observations: {scope}\n",
-        version = env!("CARGO_PKG_VERSION"),
-        id = runtime_status::label(&session.id),
-        workspace = runtime_status::label(&session.workspace.to_string_lossy()),
-        data = runtime_status::label(&session.paths.data_dir.to_string_lossy()),
-        provider = runtime_status::label(&provider.provider.name),
-        provider_id = runtime_status::label(&session.provider_id),
-        model = runtime_status::label(&session.model),
-        routing = if session.auto_route { "automatic" } else { "selected provider" },
-        permissions = session.permission_mode(),
-        origin = runtime_status::origin(&provider.provider.base_url),
-        worker = state_label(&worker.state),
-        pid = worker.pid.map(|pid| format!(" (PID {pid})")).unwrap_or_default(),
-    );
+    let title = session
+        .store
+        .db
+        .with_conn(|conn| claude_core::db::conversation_repo::get_conversation(conn, &session.id))
+        .ok()
+        .and_then(Result::ok)
+        .flatten()
+        .and_then(|row| row.title)
+        .filter(|title| !title.trim().is_empty())
+        .unwrap_or_else(|| "(unnamed) \u{b7} /rename".into());
+    let language_servers = claude_core::tools::lsp_servers::status(&session.workspace);
+    let installed = language_servers.iter().filter(|row| row["installed"] == true).count();
+    let mut sections = vec![
+        vec![
+            ("Version", env!("CARGO_PKG_VERSION").to_owned()),
+            ("Session name", runtime_status::label(&title)),
+            ("Session ID", runtime_status::label(&session.id)),
+            ("cwd", runtime_status::label(&session.workspace.to_string_lossy())),
+            ("Data directory", runtime_status::label(&session.paths.data_dir.to_string_lossy())),
+        ],
+        vec![
+            ("Provider", format!("{} ({})", runtime_status::label(&provider.provider.name), runtime_status::label(&session.provider_id))),
+            ("Model", format!("{} \u{b7} /model", runtime_status::label(&session.model))),
+            ("API endpoint", runtime_status::origin(&provider.provider.base_url)),
+            ("API key", account.to_owned()),
+            ("Reachability", reachability),
+            ("Permission mode", format!("{} \u{b7} Shift+Tab to cycle", session.permission_mode())),
+            ("Routing", if session.auto_route { "automatic" } else { "selected provider" }.to_owned()),
+        ],
+    ];
+    let mut tools_section = vec![(
+        "Worker",
+        format!("{}{}", state_label(&worker.state), worker.pid.map(|pid| format!(" (PID {pid})")).unwrap_or_default()),
+    )];
+    match &tools {
+        Some(tools) => {
+            let running = tools.mcp.iter().filter(|server| server.state == "manager_reports_running").count();
+            tools_section.push(("MCP servers", format!("{running} running, {} configured \u{b7} /mcp", tools.mcp.len())));
+            tools_section.push(("Built-in tools", tools.native_tools.to_string()));
+        }
+        None => tools_section.push(("Tools", "snapshot unavailable (inspection timed out)".into())),
+    }
+    tools_section.push((
+        "Language servers",
+        format!("{installed} of {} installed \u{b7} /lsp", language_servers.len()),
+    ));
+    sections.push(tools_section);
+    let width = sections.iter().flatten().map(|(label, _)| label.len()).max().unwrap_or(0) + 2;
+    let mut output = String::from("Status\n");
+    for section in &sections {
+        output.push('\n');
+        for (label, value) in section {
+            output.push_str(&format!("  {:<width$}{value}\n", format!("{label}:")));
+        }
+    }
     if let Some(tools) = tools {
-        output.push_str(&render_tools(&tools));
-    } else {
-        output.push_str("Tool snapshot unavailable (inspection timed out)\n");
+        output.push_str(&render_tools(&tools, scope));
     }
     eprint!("{output}");
     Ok(())
@@ -101,47 +139,32 @@ fn state_label(state: &str) -> String {
     runtime_status::label(state).replace('_', " ")
 }
 
-fn render_tools(tools: &RuntimeStatus) -> String {
-    let mut output = format!(
-        "Native tools: {} registered (not health-probed)\nMCP: {}\n",
-        tools.native_tools,
-        state_label(&tools.mcp_configuration)
-    );
-    if tools.mcp.is_empty() {
-        output.push_str("  No MCP entries observed\n");
+/// Per-server lines; states are manager observations, not protocol probes.
+fn render_tools(tools: &RuntimeStatus, scope: &str) -> String {
+    let mut output = String::new();
+    if !tools.mcp.is_empty() {
+        output.push_str("\n  MCP servers (as reported by the manager):\n");
     }
     for server in &tools.mcp {
         output.push_str(&format!(
-            "  {}: {}; {} tools{}\n",
+            "    {}: {}, {} tools{}\n",
             runtime_status::label(&server.name),
-            state_label(&server.state),
+            state_label(&server.state).replace("manager reports running", "running"),
             server.tools,
-            server
-                .pid
-                .map(|pid| format!("; PID {pid}"))
-                .unwrap_or_default()
+            server.pid.map(|pid| format!(", PID {pid}")).unwrap_or_default()
         ));
     }
-    output.push_str(
-        "  MCP running states are manager observations; no protocol health probe was sent.\n",
-    );
-    output.push_str(&format!(
-        "LSP: {}; {} configured, {} idle pooled servers\n",
-        state_label(&tools.lsp_state),
-        tools.lsp_configured,
-        tools.lsp_pooled.len()
-    ));
+    if !tools.lsp_pooled.is_empty() {
+        output.push_str("\n  Running language servers:\n");
+    }
     for server in &tools.lsp_pooled {
         output.push_str(&format!(
-            "  {}: {}{}\n",
+            "    {}: {}{}\n",
             server.name,
             state_label(&server.state),
-            server
-                .pid
-                .map(|pid| format!("; PID {pid}"))
-                .unwrap_or_default()
+            server.pid.map(|pid| format!(", PID {pid}")).unwrap_or_default()
         ));
     }
-    output.push_str("  LSP pool excludes in-flight requests; process presence does not verify protocol responsiveness.\n");
+    output.push_str(&format!("\n  Observed in: {scope}\n"));
     output
 }
