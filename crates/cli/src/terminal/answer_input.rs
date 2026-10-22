@@ -21,14 +21,16 @@ fn cancelled(flag: &AtomicBool) -> io::Result<()> {
     }
 }
 
+/// Reads one answer. `secret` shows typed or pasted text as dots, for API keys.
 pub(super) fn read(
     reader: &mut BufReader<io::Stdin>,
     prompt: &str,
     flag: &AtomicBool,
+    secret: bool,
 ) -> io::Result<Option<String>> {
     cancelled(flag)?;
     if io::stdin().is_terminal() {
-        return read_terminal(prompt, flag);
+        return read_terminal(prompt, flag, secret);
     }
     eprint!("{prompt}");
     io::stderr().flush()?;
@@ -61,7 +63,7 @@ impl Drop for Raw {
         let _ = terminal::disable_raw_mode();
     }
 }
-fn read_terminal(prompt: &str, flag: &AtomicBool) -> io::Result<Option<String>> {
+fn read_terminal(prompt: &str, flag: &AtomicBool, secret: bool) -> io::Result<Option<String>> {
     terminal::enable_raw_mode()?;
     let _raw = Raw;
     let mut reader = super::paste_input::Reader::new()?;
@@ -116,14 +118,19 @@ fn read_terminal(prompt: &str, flag: &AtomicBool) -> io::Result<Option<String>> 
                     KeyCode::Backspace => {
                         if let Some(ch) = value.pop() {
                             use unicode_width::UnicodeWidthChar;
-                            for _ in 0..ch.width().unwrap_or(0) {
+                            let cells = if secret { 1 } else { ch.width().unwrap_or(0) };
+                            for _ in 0..cells {
                                 eprint!("\x08 \x08");
                             }
                         }
                     }
                     KeyCode::Char(ch) => {
                         value.push(ch);
-                        eprint!("{ch}");
+                        if secret {
+                            eprint!("\u{2022}");
+                        } else {
+                            eprint!("{ch}");
+                        }
                     }
                     KeyCode::Esc => {
                         return Err(io::Error::new(
@@ -137,7 +144,11 @@ fn read_terminal(prompt: &str, flag: &AtomicBool) -> io::Result<Option<String>> 
             Event::Paste(text) => {
                 let text: String = text.chars().filter(|ch| !ch.is_control()).collect();
                 value.push_str(&text);
-                eprint!("{text}");
+                if secret {
+                    eprint!("{}", "\u{2022}".repeat(text.chars().count()));
+                } else {
+                    eprint!("{text}");
+                }
             }
             _ => {}
         }

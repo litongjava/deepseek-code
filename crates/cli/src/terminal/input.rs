@@ -42,6 +42,8 @@ struct Request {
     cancelled: Arc<AtomicBool>,
     prompt: String,
     repl: bool,
+    /// Echo typed text as dots (API keys).
+    secret: bool,
     response: oneshot::Sender<io::Result<Option<PromptEvent>>>,
 }
 
@@ -129,7 +131,7 @@ impl TerminalInput {
                     continue;
                 }
                 let result = if !request.repl {
-                    super::answer_input::read(&mut plain, &request.prompt, &request.cancelled)
+                    super::answer_input::read(&mut plain, &request.prompt, &request.cancelled, request.secret)
                         .map(|value| value.map(PromptEvent::Line))
                 } else if terminal {
                     editor.readline_until(&request.prompt, &request.cancelled)
@@ -280,6 +282,15 @@ impl TerminalInput {
         Ok(())
     }
 
+    /// Like `read_answer`, but typed text is shown as dots.
+    pub async fn read_secret(&mut self, prompt: &str) -> io::Result<Option<String>> {
+        match self.read_with(prompt, false, true).await? {
+            Some(PromptEvent::Line(line)) => Ok(Some(line)),
+            None => Ok(None),
+            Some(PromptEvent::CyclePermission) => Err(io::Error::other("Permission cycle is not a question answer")),
+        }
+    }
+
     pub async fn read_answer(&mut self, prompt: &str) -> io::Result<Option<String>> {
         match self.read(prompt, false).await? {
             Some(PromptEvent::Line(line)) => Ok(Some(line)),
@@ -296,6 +307,10 @@ impl TerminalInput {
     }
 
     async fn read(&mut self, prompt: &str, repl: bool) -> io::Result<Option<PromptEvent>> {
+        self.read_with(prompt, repl, false).await
+    }
+
+    async fn read_with(&mut self, prompt: &str, repl: bool, secret: bool) -> io::Result<Option<PromptEvent>> {
         if let Some(fixture) = self.fixture.as_mut() {
             return Ok(fixture.recv().await.map(PromptEvent::Line));
         }
@@ -307,6 +322,7 @@ impl TerminalInput {
                     cancelled: cancelled.clone(),
                     prompt: prompt.into(),
                     repl,
+                    secret,
                     response,
                 }))
                 .map_err(|_| io::Error::new(io::ErrorKind::BrokenPipe, "Terminal input closed"))?;
@@ -383,7 +399,7 @@ mod tests {
                 cancelled.store(true, Ordering::Release);
             });
             assert_eq!(
-                super::super::answer_input::read(&mut reader, "", &flag)
+                super::super::answer_input::read(&mut reader, "", &flag, false)
                     .unwrap_err()
                     .kind(),
                 io::ErrorKind::Interrupted
@@ -391,7 +407,7 @@ mod tests {
             println!("CANCEL_ACK");
             io::stdout().flush().unwrap();
             assert_eq!(
-                super::super::answer_input::read(&mut reader, "", &AtomicBool::new(false))
+                super::super::answer_input::read(&mut reader, "", &AtomicBool::new(false), false)
                     .unwrap()
                     .as_deref(),
                 Some("FRESH_RESPONSE")
