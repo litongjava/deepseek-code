@@ -1327,6 +1327,8 @@ pub struct TurnDisplay {
     fallback: super::progress::TurnProgress,
     tools: std::collections::HashMap<String, (Instant, Value)>,
     finished: std::collections::HashMap<String, (String, Value, String, bool)>,
+    /// Lines added and removed per file this turn, for the closing summary.
+    changes: std::collections::BTreeMap<String, (u64, u64)>,
 }
 impl TurnDisplay {
     pub fn new(
@@ -1354,6 +1356,7 @@ impl TurnDisplay {
             fallback,
             tools: Default::default(),
             finished: Default::default(),
+            changes: Default::default(),
         })
     }
     pub fn is_live(&self) -> bool {
@@ -1448,6 +1451,16 @@ impl TurnDisplay {
             id.to_owned(),
             (name.into(), input.clone(), output.into(), failed),
         );
+        if !failed {
+            if let Ok(value) = serde_json::from_str::<Value>(output) {
+                let change = &value["file_change"];
+                if let Some(path) = change["path"].as_str() {
+                    let entry = self.changes.entry(path.to_owned()).or_default();
+                    entry.0 += change["added"].as_u64().unwrap_or(0);
+                    entry.1 += change["removed"].as_u64().unwrap_or(0);
+                }
+            }
+        }
         if let Some(live) = &self.live {
             let previous = self.tools.remove(id);
             let elapsed = previous.as_ref().map(|(start, _)| start.elapsed());
@@ -1530,8 +1543,40 @@ impl TurnDisplay {
             None => std::future::pending().await,
         }
     }
+    /// `● Changed 2 files (+13 −3)` with one line per file.
+    fn change_summary(&self) -> Vec<change_view::Line> {
+        if self.changes.is_empty() {
+            return Vec::new();
+        }
+        let counts = |(added, removed): (u64, u64)| match (added, removed) {
+            (added, 0) => format!("+{added}"),
+            (0, removed) => format!("\u{2212}{removed}"),
+            (added, removed) => format!("+{added} \u{2212}{removed}"),
+        };
+        let total = self.changes.values().fold((0, 0), |sum, (a, r)| (sum.0 + a, sum.1 + r));
+        let files = self.changes.len();
+        let mut lines = vec![change_view::tool_call(
+            &format!("Changed {files} file{} ({})", if files == 1 { "" } else { "s" }, counts(total)),
+            "Ctrl+O shows the diffs",
+            false,
+        )];
+        let labels: Vec<String> = self
+            .changes
+            .keys()
+            .map(|path| super::display_path::label(path, self.workspace.as_deref()))
+            .collect();
+        let width = labels.iter().map(|label| label.chars().count()).max().unwrap_or(0);
+        for (label, change) in labels.iter().zip(self.changes.values()) {
+            lines.push(change_view::muted(&format!("    {label:<width$}  {}", counts(*change))));
+        }
+        lines
+    }
     pub fn finish(&mut self, error: Option<&str>) -> Vec<Action> {
         if let Some(live) = self.live.take() {
+            let summary = self.change_summary();
+            if !summary.is_empty() {
+                live.styled(summary);
+            }
             live.finish(error)
         } else {
             self.fallback.finish(error);
@@ -1544,6 +1589,22 @@ impl TurnDisplay {
 #[cfg(test)]
 mod completion_tests {
     use super::*;
+    #[test]
+    fn changed_files_are_summarised_per_turn() {
+        let temp = tempfile::tempdir().unwrap();
+        let mut display = TurnDisplay::new(false, "ask", &temp.path().join("keys.json"), vec![]).unwrap().with_workspace(temp.path());
+        let output = |path: &str, added: u64, removed: u64| {
+            serde_json::json!({"success":true,"file_change":{"path":temp.path().join(path),"added":added,"removed":removed}}).to_string()
+        };
+        display.tool_finished("1", "Edit", &serde_json::json!({}), &output("src/main.rs", 10, 3), false);
+        display.tool_finished("2", "Edit", &serde_json::json!({}), &output("src/main.rs", 2, 0), false);
+        display.tool_finished("3", "Write", &serde_json::json!({}), &output("README.md", 4, 0), false);
+        display.tool_finished("4", "Write", &serde_json::json!({}), &output("ignored.md", 9, 0), true);
+        let lines: Vec<String> = display.change_summary().iter().map(|line| change_view::render(line, usize::MAX, false)).collect();
+        assert_eq!(lines[0], "\u{25cf} Changed 2 files (+16 \u{2212}3) \u{b7} Ctrl+O shows the diffs");
+        assert_eq!(lines[1], "    README.md    +4");
+        assert_eq!(lines[2], "    src/main.rs  +12 \u{2212}3");
+    }
     #[test]
     fn hook_progress_preserves_other_running_hooks_and_underlying_activity() {
         let temp = tempfile::tempdir().unwrap();
