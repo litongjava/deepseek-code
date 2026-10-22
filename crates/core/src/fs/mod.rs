@@ -5,6 +5,24 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use walkdir::WalkDir;
 
+/// Takes an exclusive advisory lock, retrying briefly while it is held.
+///
+/// A child process forked by any thread inherits a copy of the descriptor
+/// until it execs, and that copy keeps the lock alive after we drop ours.
+/// Retrying for a short window keeps those transient holders from being
+/// reported as a concurrent owner, while a real owner still fails fast.
+pub fn try_lock_briefly(file: &fs::File) -> std::result::Result<(), fs::TryLockError> {
+    let deadline = std::time::Instant::now() + std::time::Duration::from_millis(500);
+    loop {
+        match file.try_lock() {
+            Err(fs::TryLockError::WouldBlock) if std::time::Instant::now() < deadline => {
+                std::thread::sleep(std::time::Duration::from_millis(10));
+            }
+            result => return result,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct FileEntry {
     pub path: String,

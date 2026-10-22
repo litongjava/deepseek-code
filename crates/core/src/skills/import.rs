@@ -192,7 +192,7 @@ pub fn import_legacy(source: &Path, target: &Path, preview: bool) -> Result<Repo
         .truncate(false)
         .write(true)
         .open(lock_path)?;
-    lock.try_lock()
+    crate::fs::try_lock_briefly(&lock)
         .context("Another skills import is running")?;
     if check()? {
         return Ok(report(true, None));

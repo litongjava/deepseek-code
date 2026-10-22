@@ -44,7 +44,7 @@ pub(super) fn persist(
         .read(true)
         .write(true)
         .open(path.with_extension("lock"))?;
-    lock.try_lock()
+    crate::fs::try_lock_briefly(&lock)
         .context("MCP configuration is being edited; retry")?;
     let mut revision = revision.lock().unwrap();
     let current = match std::fs::read(path) {

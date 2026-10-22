@@ -33,7 +33,7 @@ pub async fn run_with_lease(
         .create(true)
         .truncate(false)
         .open(directory.join("cron-host.lock"))?;
-    file.try_lock()
+    crate::fs::try_lock_briefly(&file)
         .context("A cron host already owns this project")?;
     let generator = Generator::saved(&context.paths, &provider, &model)?;
     crate::tools::scheduled::recover_interrupted(&cwd)?;
