@@ -1258,10 +1258,13 @@ async fn sdk_initialize_applies_runtime_overrides_and_reports_real_resources() {
             .await;
         let repeat = client.frame("control_response").await;
         assert_eq!(repeat["response"]["subtype"], "error");
-        assert!(repeat["response"]["error"]
-            .as_str()
-            .unwrap()
-            .contains("Already initialized"));
+        assert!(
+            repeat["response"]["error"]
+                .as_str()
+                .unwrap()
+                .contains("Already initialized"),
+            "{repeat}"
+        );
         for prompt in ["Return the schema answer", "Return it again"] {
             client.send(user(prompt)).await;
             let result = client.result().await;

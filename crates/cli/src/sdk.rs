@@ -726,6 +726,12 @@ async fn pump_lifecycle(
                         response(&value["request_id"],Ok(json!({})))?;
                         bail!("SDK startup interrupted");
                     }
+                    // Startup only begins after initialization (or the first user
+                    // turn), so a repeated initialize gets the same answer as mid-turn.
+                    if value["request"]["subtype"]=="initialize" {
+                        response(&value["request_id"],Err(anyhow::anyhow!("Already initialized")))?;
+                        continue;
+                    }
                     response(&value["request_id"],Err(anyhow::anyhow!("Control changes require completed session startup")))?;
                 }
             }
