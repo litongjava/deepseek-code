@@ -4,6 +4,7 @@ mod prompt_suggestion;
 mod shell_mode;
 mod mentions;
 mod memory_shortcut;
+mod images;
 mod launch_permissions;
 mod context_commands;
 mod persistent_worker;
@@ -118,6 +119,22 @@ fn absolute(path: PathBuf) -> Result<PathBuf> {
     } else {
         std::env::current_dir()?.join(path)
     })
+}
+
+/// A typed prompt's turn; image paths in it are sent as images.
+async fn prompt_turn(
+    cli: &Cli,
+    session: &mut session::Session,
+    prompt: &str,
+    input: &mut Option<terminal::input::TerminalInput>,
+) -> Result<()> {
+    let Some(content) = images::content(&session.workspace, prompt)? else {
+        return session.turn(cli, prompt, input).await;
+    };
+    session.sdk_content = Some(content);
+    let result = session.turn(cli, prompt, input).await;
+    session.sdk_content = None;
+    result
 }
 
 async fn run(cli: &Cli) -> Result<()> {
@@ -468,7 +485,7 @@ async fn run(cli: &Cli) -> Result<()> {
                     io::stderr().is_terminal() && std::env::var_os("NO_COLOR").is_none() && !terminal::screen_reader(), false,
                 )?;
             }
-            session.turn(cli, &prompt, &mut input).await?;
+            prompt_turn(cli, &mut session, &prompt, &mut input).await?;
         }
         if sdk_stream {
             Box::pin(sdk::run(cli,&mut session,(!prompt.trim().is_empty()).then_some(prompt.as_str()),if resumed.is_some() { "resume" } else { "startup" })).await?;
@@ -618,7 +635,7 @@ async fn run(cli: &Cli) -> Result<()> {
                 terminal::prompt::Input::Cancelled => { eprintln!("Prompt discarded."); continue; },
                 terminal::prompt::Input::Prompt(prompt) => {
                     if !prompt.trim().is_empty() {
-                        if let Err(error) = session.turn(cli, &prompt, &mut input).await { if !worker_frontend::already_presented(&error) { eprintln!("Error: {error:#}"); } }
+                        if let Err(error) = prompt_turn(cli, &mut session, &prompt, &mut input).await { if !worker_frontend::already_presented(&error) { eprintln!("Error: {error:#}"); } }
                     }
                     continue;
                 },
@@ -724,7 +741,7 @@ async fn run(cli: &Cli) -> Result<()> {
                     if let Err(error) = session.turn(cli, &line, &mut input).await { if !worker_frontend::already_presented(&error) { eprintln!("Error: {error:#}"); } }
                 },
                 command if command.starts_with('/') => eprintln!("Unknown command: {}. Use /help; use /multiline to send text starting with /.", command.split_whitespace().next().unwrap_or(command)),
-                _ => if let Err(error) = session.turn(cli, &line, &mut input).await { if !worker_frontend::already_presented(&error) { eprintln!("Error: {error:#}"); } },
+                _ => if let Err(error) = prompt_turn(cli, &mut session, &line, &mut input).await { if !worker_frontend::already_presented(&error) { eprintln!("Error: {error:#}"); } },
             }
         }
         if remote.is_connected() {

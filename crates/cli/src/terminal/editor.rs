@@ -950,6 +950,14 @@ impl PromptEditor {
                         screen.finish("", &prompt)?;
                         return Ok(None);
                     }
+                    if control && key.code == KeyCode::Char('v') {
+                        // Ctrl+V with an image on the clipboard attaches it as
+                        // @path; text pastes arrive as bracketed paste instead.
+                        if let Ok(Some(path)) = crate::images::paste_clipboard() {
+                            buffer.insert(&format!("@{} ", path.display()));
+                        }
+                        continue;
+                    }
                     if key.code == KeyCode::Char('?') && !control && buffer.chars.is_empty() {
                         // `?` on an empty prompt lists shortcuts, as in the reference CLI.
                         screen.finish("", "")?;

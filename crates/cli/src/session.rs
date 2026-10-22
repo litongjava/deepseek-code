@@ -748,7 +748,9 @@ impl Session {
             ) {
                 Ok(capture) => Some(capture),
                 Err(error) => {
-                    if input.is_some() {
+                    // Outside Git there are no checkpoints by design; say nothing.
+                    let not_git = format!("{error:#}").contains("requires a Git worktree");
+                    if input.is_some() && !not_git {
                         eprintln!("Code checkpoint unavailable: {error:#}");
                     }
                     None
