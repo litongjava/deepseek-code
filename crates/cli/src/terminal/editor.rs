@@ -658,6 +658,8 @@ impl PromptEditor {
         let mut menu_hidden = false;
         let mut search: Option<String> = None;
         let mut search_pos = self.history.len();
+        // A second Esc on an empty prompt within a second opens /rewind.
+        let mut last_esc: Option<std::time::Instant> = None;
         // A suggestion belongs to the turn before this prompt; drop stale ones.
         self.suggestion = None;
         // Files may have changed since the last prompt; list them again on `@`.
@@ -839,6 +841,9 @@ impl PromptEditor {
                 }
                 if let Some(note) = &self.context_note {
                     parts.push(note.clone());
+                }
+                if last_esc.is_some_and(|at| at.elapsed() < std::time::Duration::from_secs(1)) {
+                    parts = vec!["esc again to rewind".into()];
                 }
                 parts.join(" \u{b7} ")
             };
@@ -1069,6 +1074,15 @@ impl PromptEditor {
                                 self.history.push(text.clone());
                             }
                             return Ok(Some(super::PromptEvent::Line(text)));
+                        }
+                        KeyCode::Esc if items.is_empty() && buffer.chars.is_empty() => {
+                            if last_esc.is_some_and(|at| at.elapsed() < std::time::Duration::from_secs(1)) {
+                                // As in the reference CLI, Esc Esc goes back to an earlier turn.
+                                let rewind = "/rewind".to_owned();
+                                screen.finish(&rewind, &prompt)?;
+                                return Ok(Some(super::PromptEvent::Line(rewind)));
+                            }
+                            last_esc = Some(std::time::Instant::now());
                         }
                         KeyCode::Esc => menu_hidden = true,
                         KeyCode::Up if !items.is_empty() => {
