@@ -28,6 +28,7 @@ enum Message {
     PermissionMode(String),
     Commands(Vec<(String, String)>),
     Details(Vec<(String, String)>),
+    Transcript(Vec<super::change_view::Line>),
     Panel(Vec<(String, String)>, bool),
     Draft(String),
     Keybindings(crate::keybindings::Keybindings),
@@ -94,6 +95,10 @@ impl TerminalInput {
                     }
                     Message::Details(details) => {
                         editor.set_details(details);
+                        continue;
+                    }
+                    Message::Transcript(lines) => {
+                        editor.set_transcript(lines);
                         continue;
                     }
                     Message::Keybindings(bindings) => {
@@ -166,6 +171,11 @@ impl TerminalInput {
 
     pub fn set_details(&self, details: Vec<(String, String)>) {
         let _ = self.requests.send(Message::Details(details));
+    }
+
+    /// The last turn's tool calls, printed into scrollback on Ctrl+O.
+    pub fn set_transcript(&self, lines: Vec<super::change_view::Line>) {
+        let _ = self.requests.send(Message::Transcript(lines));
     }
 
     pub fn queue_permission_cycle(&mut self) {

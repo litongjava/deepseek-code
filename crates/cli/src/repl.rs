@@ -7,39 +7,35 @@ use claude_core::{
     skills::SkillsManager,
 };
 
-pub fn tool_details(session: &Session) -> Result<Vec<(String, String)>> {
+/// The last answer's thinking and tool calls for the Ctrl+O transcript.
+pub fn tool_transcript(session: &Session) -> Result<Vec<crate::terminal::change_view::Line>> {
+    use crate::terminal::{change_view, tool_view};
     session.store.db.with_conn(|conn| {
         let rows = claude_core::db::message_repo::get_messages_by_conversation(conn, &session.id)?;
         let Some(message) = rows.iter().rev().find(|row| row.role == "assistant") else {
             return Ok(Vec::new());
         };
         let tools = claude_core::db::message_repo::get_tool_calls_for_message(conn, &message.id)?;
-        let mut entries = Vec::new();
-        if let Some(thinking) = message.thinking.as_deref().filter(|text| !text.is_empty()) { entries.push(("Thinking".into(), thinking.chars().take(65536).collect())); }
-        entries.extend(tools
-            .into_iter()
-            .map(|tool| {
-                let title = format!(
-                    "{} · {}",
-                    tool.name,
-                    if tool.is_error { "error" } else { "completed" }
-                );
-                let body = format!(
-                    "Input:\n{}\n\nOutput:\n{}",
-                    tool.input.as_deref().unwrap_or("{}"),
-                    tool.output.as_deref().unwrap_or("")
-                );
-                let body=crate::terminal::change_view::details(&tool.name,tool.output.as_deref().unwrap_or(""),tool.is_error)
-                    .map(|diff|format!("{diff}\n\n{body}")).unwrap_or(body);
-                let mut shown: String = body.chars().take(65536).collect();
-                if shown.len() < body.len() {
-                    shown
-                        .push_str("\n[Display truncated; full result remains in session storage.]");
-                }
-                (title, shown)
-            })
-            );
-        Ok(entries)
+        let mut lines = Vec::new();
+        if let Some(thinking) = message.thinking.as_deref().filter(|text| !text.trim().is_empty()) {
+            lines.push(change_view::muted("\u{273b} Thinking"));
+            lines.extend(thinking.lines().take(200).map(|line| change_view::muted(&format!("  {line}"))));
+        }
+        for tool in tools {
+            let input = tool
+                .input
+                .as_deref()
+                .and_then(|input| serde_json::from_str(input).ok())
+                .unwrap_or_default();
+            lines.extend(tool_view::expanded(
+                &tool.name,
+                &input,
+                tool.output.as_deref().unwrap_or(""),
+                tool.is_error,
+                Some(&session.workspace),
+            ));
+        }
+        Ok(lines)
     })?
 }
 

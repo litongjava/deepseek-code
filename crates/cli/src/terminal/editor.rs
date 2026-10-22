@@ -1,10 +1,10 @@
-//! Inline terminal editor. The normal screen preserves transcript scrollback and
-//! native terminal text selection via Shift+drag when tool-detail mouse controls
-//! are active. No alternate screen is used; all modes are restored on exit.
+//! Inline terminal editor. The normal screen preserves transcript scrollback;
+//! the mouse is never captured, so the wheel and text selection stay with the
+//! terminal. No alternate screen is used; all modes are restored on exit.
 use crossterm::{
     cursor::{position, MoveDown, MoveToColumn, MoveUp},
     event::{
-        DisableBracketedPaste, DisableMouseCapture, EnableBracketedPaste, EnableMouseCapture,
+        DisableBracketedPaste, DisableMouseCapture, EnableBracketedPaste,
         Event, KeyCode, KeyEventKind, KeyModifiers, MouseButton, MouseEventKind,
     },
     execute, queue,
@@ -22,6 +22,9 @@ pub struct PromptEditor {
     permission_mode: String,
     commands: Vec<(String, String)>,
     details: DetailsPanel,
+    /// The last turn's tool calls, printed into scrollback by Ctrl+O.
+    transcript: Vec<crate::terminal::change_view::Line>,
+    transcript_printed: bool,
     keybindings: crate::keybindings::Keybindings,
 }
 impl Default for PromptEditor {
@@ -33,6 +36,8 @@ impl Default for PromptEditor {
             pending_cursor: None,
             permission_mode: "ask".into(),
             details: DetailsPanel::default(),
+            transcript: Vec::new(),
+            transcript_printed: false,
             keybindings: crate::keybindings::Keybindings::default(),
             commands: crate::command_catalog::COMMANDS
                 .iter()
@@ -296,7 +301,7 @@ impl DetailsPanel {
                 .map(|line| (line.clone(), TextStyle::Plain)),
         );
         let label = clipped(
-            "Show less (Ctrl+O) \u{00b7} PgUp/PgDn or wheel scroll",
+            "Show less (Ctrl+O) \u{00b7} PgUp/PgDn scroll",
             width,
         );
         frame.toggle = Some(HitTarget {
@@ -325,7 +330,13 @@ impl Screen {
         Ok(())
     }
     pub(crate) fn draw(&mut self, lines: &[DisplayLine], row: usize, col: usize) -> io::Result<()> {
-        self.draw_to(&mut io::stderr().lock(), lines, row, col)
+        let mut out = io::stderr().lock();
+        // Synchronized output keeps a large repaint from showing half drawn.
+        out.write_all(b"\x1b[?2026h")?;
+        let result = self.draw_to(&mut out, lines, row, col);
+        out.write_all(b"\x1b[?2026l")?;
+        out.flush()?;
+        result
     }
 
     fn draw_to(
@@ -423,6 +434,7 @@ impl Screen {
     fn finish(&mut self, text: &str, prompt: &str) -> io::Result<()> {
         // Clear menu and borders, retaining just submitted input in scrollback.
         let mut out = io::stderr();
+        out.write_all(b"\x1b[?2026h")?;
         queue!(out, MoveToColumn(0))?;
         if self.cursor_row > 0 {
             queue!(out, MoveUp(self.cursor_row as u16))?;
@@ -439,6 +451,7 @@ impl Screen {
             std::env::var_os("NO_COLOR").is_none(),
             true,
         )?;
+        out.write_all(b"\x1b[?2026l")?;
         out.flush()
     }
 }
@@ -516,6 +529,10 @@ impl PromptEditor {
             ..Default::default()
         };
     }
+    pub fn set_transcript(&mut self, lines: Vec<crate::terminal::change_view::Line>) {
+        self.transcript = lines;
+        self.transcript_printed = false;
+    }
     pub fn readline(&mut self, prompt: &str) -> io::Result<Option<super::PromptEvent>> {
         self.readline_until(prompt, &std::sync::atomic::AtomicBool::new(false))
     }
@@ -531,9 +548,6 @@ impl PromptEditor {
         let _raw = RawMode;
         let mut input_reader = crate::terminal::paste_input::Reader::new()?;
         execute!(io::stderr(), EnableBracketedPaste)?;
-        if !self.details.entries.is_empty() {
-            execute!(io::stderr(), EnableMouseCapture)?;
-        }
         let mut buffer = self.resume_buffer();
         let mut keybinding_pending = crate::keybindings::Pending::default();
         let mut screen = Screen::default();
@@ -630,7 +644,7 @@ impl PromptEditor {
             );
             lines.push(("\u{2500}".repeat(width), TextStyle::Border));
             let footer_rows = usize::from(show_tip)
-                + if self.details.entries.is_empty() {
+                + if self.details.entries.is_empty() && self.transcript.is_empty() {
                     1
                 } else {
                     2
@@ -688,8 +702,17 @@ impl PromptEditor {
             lines.push((clipped(&footer, width), TextStyle::Muted));
             if !self.details.entries.is_empty() {
                 lines.push((
+                    clipped("Ctrl+O details \u{00b7} PgUp/PgDn scroll", width),
+                    TextStyle::Muted,
+                ));
+            } else if !self.transcript.is_empty() {
+                lines.push((
                     clipped(
-                        "Ctrl+O details \u{00b7} Shift+drag selects terminal text",
+                        if self.transcript_printed {
+                            "Tool calls printed above \u{00b7} scroll up to read them"
+                        } else {
+                            "Ctrl+O expands the last turn's tool calls"
+                        },
                         width,
                     ),
                     TextStyle::Muted,
@@ -774,7 +797,28 @@ impl PromptEditor {
                         return Ok(None);
                     }
                     if control && key.code == KeyCode::Char('o') {
-                        self.details.toggle();
+                        if self.details.entries.is_empty() && !self.transcript.is_empty() {
+                            // Print into scrollback so the terminal's own
+                            // scrolling reads the whole output.
+                            screen.finish("", "")?;
+                            let width = terminal::size()
+                                .map(|(cols, _)| cols.saturating_sub(1) as usize)
+                                .unwrap_or(79);
+                            let color = std::env::var_os("NO_COLOR").is_none();
+                            let mut text = String::from("\x1b[?2026h");
+                            for line in &self.transcript {
+                                text.push_str(&crate::terminal::change_view::render(line, width, color));
+                                text.push_str("\r\n");
+                            }
+                            text.push_str("\x1b[?2026l");
+                            let mut out = io::stderr();
+                            out.write_all(text.as_bytes())?;
+                            out.flush()?;
+                            screen = Screen::default();
+                            self.transcript_printed = true;
+                        } else {
+                            self.details.toggle();
+                        }
                         continue;
                     }
                     if self.details.expanded

@@ -513,8 +513,9 @@ async fn run(cli: &Cli) -> Result<()> {
                     Err(error) => { eprintln!("Diff: {error:#}"); input.as_mut().unwrap().set_details(vec![]); },
                 }
             } else {
-                input.as_mut().unwrap().set_details(if display.focus { vec![] } else { repl::tool_details(&session)? });
+                input.as_mut().unwrap().set_details(vec![]);
             }
+            input.as_mut().unwrap().set_transcript(if display.focus || display.diff_panel { vec![] } else { repl::tool_transcript(&session)? });
             match display_commands::statusline(&session, &display).await {
                 Ok(Some(line)) => eprintln!("{line}"),
                 Ok(None) => {},

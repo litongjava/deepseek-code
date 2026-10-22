@@ -6,6 +6,7 @@ pub enum Style {
     Body,
     Muted,
     Success,
+    Failure,
     Removed,
     Added,
     RemovedWord,
@@ -158,6 +159,7 @@ fn codes(style: Style, theme: u8) -> &'static str {
             Style::Body => "39",
             Style::Muted => "90",
             Style::Success => "32",
+            Style::Failure => "31",
             Style::Removed | Style::RemovedGutter => "31",
             Style::Added | Style::AddedGutter => "32",
             Style::RemovedWord => "31;47",
@@ -185,6 +187,7 @@ fn codes(style: Style, theme: u8) -> &'static str {
             Style::Body => "38;2;32;32;32",
             Style::Muted => "38;2;102;102;102",
             Style::Success => "38;2;32;128;64",
+            Style::Failure => "38;2;176;32;32",
             Style::Removed => "38;2;32;32;32;48;2;255;224;224",
             Style::Added => "38;2;32;32;32;48;2;220;245;220",
             Style::RemovedWord => "38;2;32;32;32;48;2;255;180;180",
@@ -197,6 +200,7 @@ fn codes(style: Style, theme: u8) -> &'static str {
         Style::Body => "38;2;248;248;242",
         Style::Muted => "38;2;153;153;153",
         Style::Success => "38;2;78;186;101",
+        Style::Failure => "38;2;255;107;107",
         Style::Removed => "38;2;248;248;242;48;2;61;1;0",
         Style::Added => "38;2;248;248;242;48;2;2;40;0",
         Style::RemovedWord => "38;2;248;248;242;48;2;92;2;0",
@@ -267,6 +271,24 @@ pub fn success(summary: &str) -> Line {
     Line(vec![
         span("\u{25cf} ", Style::Success),
         span(summary, Style::Muted),
+    ])
+}
+/// The header of a finished tool call: `● Bash(ls -la) · 0.1s`.
+pub fn tool_call(label: &str, detail: &str, failed: bool) -> Line {
+    let mut spans = vec![
+        span("\u{25cf} ", if failed { Style::Failure } else { Style::Success }),
+        span(label, Style::Body),
+    ];
+    if !detail.is_empty() {
+        spans.push(span(format!(" \u{b7} {detail}"), Style::Muted));
+    }
+    Line(spans)
+}
+/// One line of a tool result under its header, as `  ⎿  text`.
+pub fn tool_output(text: &str, first: bool, failed: bool) -> Line {
+    Line(vec![
+        span(if first { "  \u{23bf}  " } else { "     " }, Style::Muted),
+        span(text, if failed { Style::Failure } else { Style::Muted }),
     ])
 }
 fn changed_span(text: &str, other: &str) -> (usize, usize) {

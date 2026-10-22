@@ -2,7 +2,7 @@
 use super::change_view;
 use crossterm::{
     event::{
-        DisableBracketedPaste, DisableMouseCapture, EnableBracketedPaste, EnableMouseCapture,
+        DisableBracketedPaste, DisableMouseCapture, EnableBracketedPaste,
         Event, KeyCode, KeyEventKind, KeyModifiers, MouseButton, MouseEventKind,
     },
     execute, terminal,
@@ -445,6 +445,9 @@ struct Frame {
     panel_toggle: Option<super::input::editor::HitTarget>,
     panel_height: usize,
     panel_viewport: usize,
+    /// Output not yet written. Erasing the frame, logging above it and drawing
+    /// it again go out in one write so the terminal never shows a blank frame.
+    pending: String,
 }
 impl Frame {
     fn anchor(&mut self, out: &mut String) {
@@ -454,11 +457,13 @@ impl Frame {
         out.push('\r');
         self.cursor_up = 0;
     }
-    fn clear(&mut self) -> io::Result<()> {
+    /// Queues erasing the frame, leaving the cursor on its first row.
+    fn erase(&mut self) {
         if self.lines.is_empty() {
-            return Ok(());
+            return;
         }
-        let mut out = String::from("\x1b[?25l");
+        let mut out = std::mem::take(&mut self.pending);
+        out.push_str("\x1b[?25l");
         self.anchor(&mut out);
         out.push_str("\x1b[2K");
         let rows = self.lines.len().min(
@@ -470,18 +475,41 @@ impl Frame {
         for _ in 1..rows {
             out.push_str("\x1b[1A\r\x1b[2K");
         }
-        out.push_str("\x1b[?25h");
         self.lines.clear();
+        self.pending = out;
+    }
+    /// Erases the frame now and writes anything queued.
+    fn clear(&mut self) -> io::Result<()> {
+        self.erase();
+        self.flush()
+    }
+    fn flush(&mut self) -> io::Result<()> {
+        if self.pending.is_empty() {
+            return Ok(());
+        }
+        let mut out = std::mem::take(&mut self.pending);
+        out.push_str("\x1b[?25h");
         write(&out)
     }
+    /// Queues a plain line above the frame; the next draw writes both.
     fn log(&mut self, text: &str) -> io::Result<()> {
-        self.clear()?;
-        write(&format!("{}\r\n", terminal_text(text)))
+        self.erase();
+        self.pending.push_str(&terminal_text(text));
+        self.pending.push_str("\r\n");
+        Ok(())
+    }
+    /// Like `log` for lines that already carry trusted style escapes.
+    fn log_rendered(&mut self, line: &str) {
+        self.erase();
+        self.pending.push_str(line);
+        self.pending.push_str("\r\n");
     }
     fn draw(&mut self, state: &mut State) -> io::Result<()> {
         let size = terminal::size().unwrap_or((80, 24));
         let width = (size.0 as usize).saturating_sub(1).max(4);
-        let (draft, cursor) = state.draft.visible(width.saturating_sub(3));
+        let prompt = if state.answer.is_some() { "Answer \u{203a} " } else { "\u{203a} " };
+        let prompt_width = prompt.chars().count();
+        let (draft, cursor) = state.draft.visible(width.saturating_sub(prompt_width + 1));
         let usage = state
             .usage
             .summary()
@@ -512,7 +540,7 @@ impl Frame {
             width,
         );
         let mode = if state.answer.is_some() {
-            format!("{} mode (Shift+Tab to cycle) - Answer requested - Enter submits", state.mode)
+            format!("{} mode (Shift+Tab to cycle) \u{b7} Enter submits your answer \u{b7} Esc interrupts", state.mode)
         } else {
             format!(
                 "{} mode (Shift+Tab to cycle) · Enter queues · /btw question /background detach · Esc interrupts",
@@ -552,14 +580,16 @@ impl Frame {
                 status
             ),
             clip(
-                if state.goal_proposal.is_some() {
+                if state.answer.is_some() && state.goal_proposal.is_none() {
+                    "  \u{2191} Answer the question above: type your choice or reply, then press Enter."
+                } else if state.goal_proposal.is_some() {
                     if state.answer.is_some() { "  Goal proposal pending; finish the current question first." }
                     else { "  Proposed goal: Ctrl+Y approve · Ctrl+N decline. Work continues while you decide." }
                 } else { "  Tip: /btw asks a side question while the main task continues." },
                 width,
             ),
             rule.clone(),
-            format!("{} {draft}", if state.answer.is_some() { "?" } else { "›" }),
+            format!("{prompt}{draft}"),
             rule,
             clip(&mode, width),
         ];
@@ -568,12 +598,13 @@ impl Frame {
         } else {
             use crossterm::style::{ResetColor, SetForegroundColor};
             for index in [2, 6] {
-                lines[index] = format!(
-                    "{}{}{}",
-                    SetForegroundColor(crate::terminal::style::muted()),
-                    lines[index],
-                    ResetColor
-                );
+                // A pending question is the one thing the user must act on.
+                let color = if index == 2 && state.answer.is_some() {
+                    crate::terminal::style::accent()
+                } else {
+                    crate::terminal::style::muted()
+                };
+                lines[index] = format!("{}{}{}", SetForegroundColor(color), lines[index], ResetColor);
             }
             for index in [3, 5] {
                 lines[index] = format!(
@@ -608,30 +639,30 @@ impl Frame {
             self.panel_height = self.panel_height.saturating_sub(removed);
         }
         let input_row = lines.len().saturating_sub(3);
-        let cursor_column = (cursor + 2).min(width);
-        if self.lines == lines && self.size == size && self.cursor_column == cursor_column {
+        let cursor_column = (prompt_width + cursor).min(width);
+        if self.pending.is_empty()
+            && self.lines == lines
+            && self.size == size
+            && self.cursor_column == cursor_column
+        {
             return Ok(());
         }
         if !self.lines.is_empty() && (self.size != size || self.lines.len() != lines.len()) {
-            self.clear()?;
+            self.erase();
         }
-        let mut out = String::from("\x1b[?25l");
+        let mut out = std::mem::take(&mut self.pending);
+        out.push_str("\x1b[?25l");
         self.anchor(&mut out);
         if self.lines.is_empty() {
             out.push_str(&lines.join("\r\n"));
         } else {
-            if lines.len() != self.lines.len() {
-                self.clear()?;
-                out.push_str(&lines.join("\r\n"));
-            } else {
-                out.push_str(&row_updates(&self.lines, &lines));
-            }
+            out.push_str(&row_updates(&self.lines, &lines));
         }
         self.cursor_up = lines.len() - 1 - input_row;
         if self.cursor_up > 0 {
             out.push_str(&format!("\x1b[{}A", self.cursor_up));
         }
-        out.push_str(&format!("\r\x1b[{}C\x1b[?25h", (cursor + 2).min(width)));
+        out.push_str(&format!("\r\x1b[{cursor_column}C\x1b[?25h"));
         self.lines = lines;
         self.size = size;
         self.cursor_column = cursor_column;
@@ -661,7 +692,11 @@ fn row_updates(previous: &[String], next: &[String]) -> String {
 
 fn write(text: &str) -> io::Result<()> {
     let mut output = io::stderr().lock();
+    // Synchronized output: terminals that support it present the whole update
+    // at once; others ignore the private mode.
+    output.write_all(b"\x1b[?2026h")?;
     output.write_all(text.as_bytes())?;
+    output.write_all(b"\x1b[?2026l")?;
     output.flush()
 }
 fn run(
@@ -719,11 +754,10 @@ fn run(
                     if !state.partial.is_empty() {
                         screen.log(&std::mem::take(&mut state.partial))?;
                     }
-                    screen.clear()?;
                     let width = terminal::size().unwrap_or((80, 24)).0.saturating_sub(1) as usize;
                     let color = std::env::var_os("NO_COLOR").is_none();
                     for line in lines {
-                        write(&format!("{}\r\n", change_view::render(&line, width, color)))?;
+                        screen.log_rendered(&change_view::render(&line, width, color));
                     }
                     dirty = true;
                 }
@@ -750,20 +784,20 @@ fn run(
                     dirty = true;
                 }
                 Ok(Update::Detail(id, title, body)) => {
-                    if state.detail_entries.is_empty() {
-                        execute!(io::stderr(), EnableMouseCapture)?;
-                    }
                     state.detail(id, title, body);
                     dirty = true;
                 }
                 Ok(Update::Thinking(text)) => {
-                    if state.detail_entries.is_empty() {
-                        execute!(io::stderr(), EnableMouseCapture)?;
-                    }
                     state.append_thinking(&text);
                     dirty = true;
                 }
                 Ok(Update::Question(text, reply)) => {
+                    if !state.partial.is_empty() {
+                        screen.log(&std::mem::take(&mut state.partial))?;
+                    }
+                    if state.details.expanded {
+                        state.details.toggle();
+                    }
                     screen.log(&text)?;
                     state.question(reply);
                     dirty = true;
@@ -780,7 +814,7 @@ fn run(
                     if !draft.is_empty() {
                         let _ = actions.send(Action::Draft(draft));
                     }
-                    screen.clear()?;
+                    screen.erase();
                     let footer = format!(
                         "Worked for {}s \u{b7} {} \u{b7} {}",
                         state.started.elapsed().as_secs(),
@@ -788,14 +822,15 @@ fn run(
                         chrono::Local::now().format("%-I:%M %p")
                     );
                     if std::env::var_os("NO_COLOR").is_some() {
-                        write(&format!("{}\r\n", terminal_text(&footer)))?;
+                        screen.log(&footer)?;
                     } else {
-                        write(&format!(
-                            "{}\r\n",
-                            change_view::render(&change_view::muted(&footer), usize::MAX, true)
-                        ))?;
+                        screen.log_rendered(&change_view::render(
+                            &change_view::muted(&footer),
+                            usize::MAX,
+                            true,
+                        ));
                     }
-                    return Ok(());
+                    return screen.flush();
                 }
                 Err(mpsc::TryRecvError::Empty) => break,
                 Err(mpsc::TryRecvError::Disconnected) => return Ok(()),
@@ -1238,7 +1273,7 @@ pub struct TurnDisplay {
     pub live: Option<LiveTurn>,
     hooks: std::collections::BTreeMap<String, String>,
     fallback: super::progress::TurnProgress,
-    tools: std::collections::HashMap<String, (Instant, String)>,
+    tools: std::collections::HashMap<String, (Instant, Value)>,
     finished: std::collections::HashMap<String, (String, Value, String, bool)>,
 }
 impl TurnDisplay {
@@ -1324,16 +1359,14 @@ impl TurnDisplay {
             if self.tools.contains_key(id) || self.finished.contains_key(id) {
                 return;
             }
-            self.tools.insert(
-                id.to_owned(),
-                (Instant::now(), format!("Input:\n{}", input)),
-            );
+            self.tools.insert(id.to_owned(), (Instant::now(), input.clone()));
             live.detail(id, name, &format!("Input:\n{}", input));
-            live.notice(&format!(
-                "\u{2022} {}",
-                super::progress::tool_preview_in_workspace(name, input, self.workspace.as_deref())
+            // The call is printed once, with its result, when it finishes; the
+            // status line names what is running meanwhile.
+            live.activity(&format!(
+                "Running {}",
+                super::tool_view::label(name, input, self.workspace.as_deref())
             ));
-            live.activity(&format!("Working: {name}"));
         } else {
             self.fallback.tool_started(id, name, input);
         }
@@ -1385,12 +1418,21 @@ impl TurnDisplay {
                 }
                 live.styled(preview);
             } else {
-                let summary = super::progress::tool_result_summary(name, output, failed, elapsed);
-                if failed {
-                    live.notice(&summary);
-                } else {
-                    live.styled(vec![change_view::success(summary.trim())]);
-                }
+                // A mirrored completion can arrive without the call's input;
+                // label it with the input seen when the call started.
+                let started = previous.as_ref().map(|(_, input)| input);
+                let label_input = match started {
+                    Some(started) if input.as_object().is_none_or(|fields| fields.is_empty()) => started,
+                    _ => input,
+                };
+                live.styled(super::tool_view::finished(
+                    name,
+                    label_input,
+                    output,
+                    failed,
+                    elapsed,
+                    self.workspace.as_deref(),
+                ));
             }
             live.activity("Working");
         } else {
