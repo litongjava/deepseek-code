@@ -11,7 +11,7 @@ pub fn migrate_conversation_store(store_path: &Path, conn: &Connection) -> Resul
         return Ok(());
     }
 
-    let tx = conn.unchecked_transaction()?;
+    let tx = crate::db::write_transaction(&conn)?;
 
     let entries = fs::read_dir(store_path)?;
     for entry in entries.flatten() {
@@ -123,7 +123,7 @@ pub fn migrate_session_manager(db_path: &Path, conn: &Connection) -> Result<()> 
         return Ok(());
     }
 
-    let tx = conn.unchecked_transaction()?;
+    let tx = crate::db::write_transaction(&conn)?;
 
     let content = fs::read_to_string(db_path)?;
     let data: serde_json::Value = serde_json::from_str(&content)?;

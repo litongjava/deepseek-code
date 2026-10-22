@@ -40,7 +40,7 @@ async fn create(State(state): State<AppState>, Json(input): Json<ProjectInput>) 
     let folders = input.folders.unwrap_or_default();
     let result = database(&state, move |conn| {
         let folders = projects::normalize_folders(&folders)?;
-        let tx = conn.unchecked_transaction()?;
+        let tx = claude_core::db::write_transaction(&conn)?;
         let id = uuid::Uuid::new_v4().to_string();
         let now = chrono::Utc::now().to_rfc3339();
         projects::insert_project(&tx, &id, &name, input.description.as_deref(), input.instructions.as_deref(), Some(&folders[0]), false, &now, &now)?;
@@ -68,7 +68,7 @@ async fn update(Path(id): Path<String>, State(state): State<AppState>, Json(inpu
     let name = input.name.map(|s| s.trim().to_string());
     if name.as_deref() == Some("") { return Err(invalid("Project name is required")); }
     let result = database(&state, move |conn| {
-        let tx = conn.unchecked_transaction()?;
+        let tx = claude_core::db::write_transaction(&conn)?;
         projects::update_project(&tx, &id, name.as_deref(), input.description.as_deref(), input.instructions.as_deref(), None,
             input.is_archived.map(|v| v.as_bool().unwrap_or_else(|| v.as_i64().unwrap_or(0) != 0)))?;
         if let Some(folders) = input.folders { projects::set_folders(&tx, &id, &folders)?; }
@@ -84,7 +84,7 @@ struct TrustInput { folders: Vec<String> }
 
 async fn trust(Path(id): Path<String>, State(state): State<AppState>, Json(input): Json<TrustInput>) -> ApiResult {
     let result = database(&state, move |conn| {
-        let tx = conn.unchecked_transaction()?;
+        let tx = claude_core::db::write_transaction(&conn)?;
         projects::trust_folders(&tx, &id, &input.folders)?;
         let project = projects::get_project(&tx, &id)?;
         tx.commit()?;
@@ -95,7 +95,7 @@ async fn trust(Path(id): Path<String>, State(state): State<AppState>, Json(input
 
 async fn remove(Path(id): Path<String>, State(state): State<AppState>) -> ApiResult {
     database(&state, move |conn| {
-        let tx = conn.unchecked_transaction()?;
+        let tx = claude_core::db::write_transaction(&conn)?;
         projects::delete_project(&tx, &id)?;
         tx.commit()?;
         Ok(())
@@ -134,7 +134,7 @@ async fn create_chat(Path(id): Path<String>, State(state): State<AppState>, Json
         let source = project.workspace_path.as_deref().ok_or_else(|| anyhow::anyhow!("Project has no folder"))?;
         let prepared = crate::worktree::session::prepare(std::path::Path::new(source), input.branch.as_deref(), input.use_worktree)?;
         let saved = (|| -> anyhow::Result<_> {
-            let tx = conn.unchecked_transaction()?;
+            let tx = claude_core::db::write_transaction(&conn)?;
             let conversation_id = uuid::Uuid::new_v4().to_string();
             let now = chrono::Utc::now().to_rfc3339();
             conversations::insert_conversation(&tx, &conversation_id, input.title.as_deref(), input.model.as_deref(), None, Some(&prepared.path.to_string_lossy()), Some(&id), false, false, false, &now, &now, 0)?;

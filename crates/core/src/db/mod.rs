@@ -17,6 +17,16 @@ use r2d2_sqlite::SqliteConnectionManager;
 use rusqlite::Connection;
 use std::path::PathBuf;
 
+/// Starts a transaction that takes the write lock up front.
+///
+/// A deferred transaction that reads before writing cannot upgrade its WAL
+/// snapshot once another connection commits, so SQLite fails the first write
+/// with SQLITE_BUSY at once instead of honouring busy_timeout. IMMEDIATE waits
+/// for the writer slot before reading, which keeps busy_timeout effective.
+pub fn write_transaction(conn: &Connection) -> rusqlite::Result<rusqlite::Transaction<'_>> {
+    rusqlite::Transaction::new_unchecked(conn, rusqlite::TransactionBehavior::Immediate)
+}
+
 pub struct DbManager {
     pool: Pool<SqliteConnectionManager>,
 }

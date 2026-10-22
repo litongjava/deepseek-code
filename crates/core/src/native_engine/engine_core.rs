@@ -302,7 +302,7 @@ impl QueryEngine {
 
             tokio::task::spawn_blocking(move || -> anyhow::Result<()> {
                 let result = db.with_conn(|conn| {
-                    let tx = conn.unchecked_transaction()?;
+                    let tx = crate::db::write_transaction(&conn)?;
 
                     let existing = crate::db::conversation_repo::get_conversation(&tx, &state_clone.conversation_id)?;
                     if existing.is_none() {

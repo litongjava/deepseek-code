@@ -149,7 +149,7 @@ pub async fn update(
         };
         ensure!(lease.renew()?, "Document update cancelled");
         context.db.with_conn(|c| -> Result<()> {
-            let tx = c.unchecked_transaction()?;
+            let tx = crate::db::write_transaction(&c)?;
             tx.execute("DELETE FROM magic_previews WHERE document_id=?1", [id])?;
             tx.execute("INSERT INTO magic_previews(id,document_id,original,proposed,created_at) VALUES(?1,?2,?3,?4,?5)", params![preview.id,id,preview.original,preview.proposed,chrono::Utc::now().to_rfc3339()])?;
             tx.commit()?; Ok(())
@@ -220,7 +220,7 @@ pub fn apply(
         "Document changed before apply"
     );
     context.db.with_conn(|c| -> Result<()> {
-        let tx = c.unchecked_transaction()?;
+        let tx = crate::db::write_transaction(&c)?;
         ensure!(
             tx.query_row(
                 "SELECT id FROM magic_previews WHERE id=?1",
@@ -374,7 +374,7 @@ pub fn import_legacy(
             .with_conn(|c| c.execute("VACUUM INTO ?1", [path.to_string_lossy().as_ref()]))??;
         Some(path.to_string_lossy().into_owned())
     };
-    context.db.with_conn(|c|->Result<_>{let tx=c.unchecked_transaction()?;tx.execute("UPDATE peripheral_migrations SET version=version WHERE version=9",[])?;
+    context.db.with_conn(|c|->Result<_>{let tx=crate::db::write_transaction(&c)?;tx.execute("UPDATE peripheral_migrations SET version=version WHERE version=9",[])?;
         let mut report=ImportReport{imported:0,skipped:0,preview,backup};
         for(root,path,title,entry,raw) in documents {
             let path=path.to_string_lossy();let old:Option<String>=tx.query_row("SELECT payload FROM legacy_magic_imports WHERE path=?1",[path.as_ref()],|r|r.get(0)).optional()?;

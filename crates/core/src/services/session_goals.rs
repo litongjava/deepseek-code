@@ -414,7 +414,7 @@ mod tests {
         begin_input(&db, "s").unwrap();
         db.with_conn(|conn| -> Result<()> {
             assert_eq!(revision_conn(conn, "s")?, 1);
-            let tx = conn.unchecked_transaction()?;
+            let tx = crate::db::write_transaction(&conn)?;
             set_conn(&tx, "s", "approved proposal")?;
             assert_eq!(revision_conn(&tx, "s")?, 2);
             tx.rollback()?;

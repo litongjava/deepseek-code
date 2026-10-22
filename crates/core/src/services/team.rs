@@ -91,7 +91,7 @@ pub async fn auth(context: &ServiceContext, config: TeamConfig) -> Result<()> {
     );
     // A new server has a different revision history: never silently reuse a cursor.
     context.db.with_conn(|c| -> Result<()> {
-        let tx=c.unchecked_transaction()?;
+        let tx=crate::db::write_transaction(&c)?;
         let binding:Option<String>=tx.query_row("SELECT endpoint FROM team_bindings WHERE team=?1",[&config.team],|r|r.get(0)).optional()?;
         let endpoint=config.endpoint.trim_end_matches('/');
         ensure!(binding.as_deref().is_none_or(|value|value==endpoint),
@@ -167,7 +167,7 @@ pub fn put(
         "Memory content is required"
     );
     context.db.with_conn(|c| -> Result<()> {
-        let tx = c.unchecked_transaction()?;
+        let tx = crate::db::write_transaction(&c)?;
         let revision: Option<i64> = tx.query_row("SELECT revision FROM team_memories WHERE team=?1 AND id=?2",params![team,memory.id],|r|r.get(0)).optional()?;
         ensure!(!supplied || revision.is_some(), "Team memory does not exist");
         memory.revision=revision.unwrap_or(0);
@@ -200,7 +200,7 @@ pub fn conflicts(context: &ServiceContext) -> Result<Vec<Conflict>> {
 pub fn resolve(context: &ServiceContext, id: &str, keep_local: bool) -> Result<()> {
     let team = configured(context)?.team;
     context.db.with_conn(|c| -> Result<()> {
-        let tx = c.unchecked_transaction()?;
+        let tx = crate::db::write_transaction(&c)?;
         let remote: String = tx
             .query_row(
                 "SELECT remote FROM team_conflicts WHERE team=?1 AND id=?2",
@@ -278,7 +278,7 @@ pub async fn sync(context: &ServiceContext) -> Result<SyncResponse> {
         "Server cursor moved backwards; server history was reset"
     );
     context.db.with_conn(|c| -> Result<()> {
-        let tx=c.unchecked_transaction()?;
+        let tx=crate::db::write_transaction(&c)?;
         for accepted in &response.accepted {
             validate_memory(&accepted.memory)?;
             // Preserve an edit made while the request was in flight; rebase its next push.
@@ -377,7 +377,7 @@ pub fn import_legacy(
         Some(target.to_string_lossy().into_owned())
     };
     context.db.with_conn(|c| -> Result<_> {
-        let tx=c.unchecked_transaction()?;
+        let tx=crate::db::write_transaction(&c)?;
         let mut report=ImportReport {team:config.team.clone(),imported:0,skipped:0,preview,backup};
         let mut seen=std::collections::HashSet::new();
         for (memory,path,raw) in entries {

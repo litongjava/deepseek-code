@@ -290,7 +290,7 @@ pub(super) async fn chat_handler(
                     let conversation_id = conv_id.clone();
                     let snapshots = serde_json::json!(request_snapshots);
                     let saved = tokio::task::spawn_blocking(move || db.with_conn(|conn| -> anyhow::Result<()> {
-                        let tx = conn.unchecked_transaction()?;
+                        let tx = claude_core::db::write_transaction(&conn)?;
                         let now = chrono::Utc::now().to_rfc3339();
                         tx.execute("INSERT OR IGNORE INTO messages (id, conversation_id, role, content, created_at, sort_order) VALUES (?1, ?2, 'assistant', '', ?3, (SELECT COALESCE(MAX(sort_order), -1) + 1 FROM messages WHERE conversation_id = ?2))",
                             rusqlite::params![message_id, conversation_id, now])?;

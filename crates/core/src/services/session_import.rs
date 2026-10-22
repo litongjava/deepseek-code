@@ -100,7 +100,7 @@ pub fn import_into_project(
         Some(path.to_string_lossy().into_owned())
     };
     context.db.with_conn(|c|->Result<_>{
-        let tx=c.unchecked_transaction()?;tx.execute("UPDATE peripheral_migrations SET version=version WHERE version=8",[])?;
+        let tx=crate::db::write_transaction(&c)?;tx.execute("UPDATE peripheral_migrations SET version=version WHERE version=8",[])?;
         let project=project_repo::list_projects(&tx)?.into_iter().find(|p|target_project.is_none_or(|id|p.id==id)&&!p.is_archived&&p.workspace_path.as_deref().and_then(|p|std::fs::canonicalize(p).ok()).as_ref()==Some(&root)&&!p.folders.is_empty()&&p.folders.iter().all(|f|f.trusted));
         let project_id=if let Some(project)=project {project.id}else {
             ensure!(target_project.is_none(),"Selected project is unavailable or untrusted");

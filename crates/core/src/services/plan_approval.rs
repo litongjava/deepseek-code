@@ -73,7 +73,7 @@ pub fn commit_approved_mode(
     approved_plan: &str,
 ) -> Result<()> {
     context.db.with_conn(|conn| -> Result<()> {
-        let tx=conn.unchecked_transaction()?;
+        let tx=crate::db::write_transaction(&conn)?;
         tx.execute("INSERT INTO peripheral_settings(key,value) VALUES(?1,?2) ON CONFLICT(key) DO UPDATE SET value=excluded.value",rusqlite::params![format!("cli.permission-mode.{session}"),super::session_permission_mode::name(mode)])?;
         super::permission_authority::record_conn(&tx,session,super::permission_authority::Source::ApprovedPlan,&serde_json::json!(approved_plan))?;
         manager.commit_mode_transition(expected,mode,||{tx.commit()?;Ok(())})
@@ -89,7 +89,7 @@ fn commit_boundary_inner(
     )>,
 ) -> Result<String> {
     context.db.with_conn(|conn| -> Result<String> {
-        let tx = conn.unchecked_transaction()?;
+        let tx = crate::db::write_transaction(&conn)?;
         crate::db::conversation_repo::get_conversation(&tx, session)?
             .context("Plan session not found")?;
         let order: i64 = tx.query_row(
@@ -190,7 +190,7 @@ pub fn archive_segment(
         // Read-then-write: take the write lock up front. A deferred transaction
         // fails with SQLITE_BUSY at once (no busy wait) when another connection
         // commits between the read and the first write.
-        let tx = rusqlite::Transaction::new_unchecked(conn, rusqlite::TransactionBehavior::Immediate)?;
+        let tx = crate::db::write_transaction(conn)?;
         let order: i64 = tx.query_row("SELECT sort_order FROM messages WHERE id=?1 AND conversation_id=?2 AND is_compact_boundary=1", rusqlite::params![boundary,session], |r|r.get(0))?;
         let id = existing.map(str::to_owned).unwrap_or_else(||uuid::Uuid::new_v4().to_string());
         if let Some(message) = crate::db::message_repo::get_message(&tx,&id)? {
@@ -226,10 +226,7 @@ mod tests {
             context
                 .db
                 .with_conn(|conn| -> Result<()> {
-                    let tx = rusqlite::Transaction::new_unchecked(
-                        conn,
-                        rusqlite::TransactionBehavior::Immediate,
-                    )?;
+                    let tx = crate::db::write_transaction(conn)?;
                     let (order, archive) = final_response_order(&tx, &id, None)?;
                     assert_eq!(archive, boundary_first);
                     crate::db::message_repo::insert_message(

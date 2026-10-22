@@ -41,7 +41,7 @@ async fn conversations_create(State(state): State<AppState>, Json(body): Json<Cr
     let workspace_mode = body.workspace_mode.as_str();
     let result = tokio::task::spawn_blocking(move || {
         db.with_conn(|conn| {
-            let tx = conn.unchecked_transaction()?;
+            let tx = claude_core::db::write_transaction(&conn)?;
             let now = chrono::Utc::now().to_rfc3339();
             crate::db::conversation_repo::insert_conversation(
                 &tx, &id_clone,
@@ -133,7 +133,7 @@ async fn conversation_update(Path(id): Path<String>, State(state): State<AppStat
     let id_clone = id.clone();
     let result = tokio::task::spawn_blocking(move || {
         db.with_conn(|conn: &rusqlite::Connection| {
-            let transaction = conn.unchecked_transaction()?;
+            let transaction = claude_core::db::write_transaction(&conn)?;
             let conn = &transaction;
             anyhow::ensure!(crate::db::conversation_repo::get_conversation(conn, &id_clone)?.is_some(), "Conversation not found");
             if let Some(mode) = body.get("workspace_mode") {

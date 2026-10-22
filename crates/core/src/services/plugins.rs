@@ -192,7 +192,7 @@ pub async fn install(
     }
     let payload = serde_json::to_string(&bundle)?;
     context.db.with_conn(|c| -> Result<()> {
-        let tx = c.unchecked_transaction()?;
+        let tx = crate::db::write_transaction(&c)?;
         let current: Option<(String, bool)> = tx
             .query_row(
                 "SELECT bundle,enabled FROM installed_plugins WHERE id=?1",

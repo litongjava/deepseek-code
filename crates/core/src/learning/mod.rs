@@ -70,7 +70,7 @@ pub fn record(ctx: &ServiceContext, experience: &Experience) -> Result<()> {
     let key = key(&experience.id)?;
     let json = serde_json::to_string(experience)?;
     ctx.db.with_conn(|c| -> Result<()> {
-        let tx = c.unchecked_transaction()?;
+        let tx = crate::db::write_transaction(&c)?;
         let old: Option<String> = tx
             .query_row(
                 "SELECT value FROM peripheral_settings WHERE key=?1",
@@ -103,7 +103,7 @@ pub fn feedback(ctx: &ServiceContext, id: &str, rating: f64) -> Result<()> {
     );
     let key = key(id)?;
     ctx.db.with_conn(|c| -> Result<()> {
-        let tx = c.unchecked_transaction()?;
+        let tx = crate::db::write_transaction(&c)?;
         let json: String = tx.query_row(
             "SELECT value FROM peripheral_settings WHERE key=?1",
             [&key],

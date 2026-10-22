@@ -193,7 +193,7 @@ pub fn insert_tool_call(
 
 /// Save each result as it arrives, rather than waiting for the whole assistant turn.
 pub fn save_stream_tool_result(conn: &Connection, conversation_id: &str, message_id: &str, content: &str, tool: &ToolCallRow) -> Result<()> {
-    let tx = conn.unchecked_transaction()?;
+    let tx = crate::db::write_transaction(&conn)?;
     tx.execute("INSERT INTO messages (id, conversation_id, role, content, created_at, sort_order)
         VALUES (?1, ?2, 'assistant', ?3, ?4, (SELECT COALESCE(MAX(sort_order), -1) + 1 FROM messages WHERE conversation_id = ?2))
         ON CONFLICT(id) DO UPDATE SET content = excluded.content",

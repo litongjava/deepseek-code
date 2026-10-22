@@ -36,7 +36,7 @@ pub fn set(
     mode: PermissionMode,
 ) -> Result<()> {
     db.with_conn(|conn| -> Result<()> {
-        let tx = conn.unchecked_transaction()?;
+        let tx = crate::db::write_transaction(&conn)?;
         tx.execute("INSERT INTO peripheral_settings(key,value) VALUES(?1,?2) ON CONFLICT(key) DO UPDATE SET value=excluded.value", [format!("cli.permission-mode.{session}"), name(mode).into()])?;
         manager.commit_mode_update(mode, || { tx.commit()?; Ok(()) })
     })??;

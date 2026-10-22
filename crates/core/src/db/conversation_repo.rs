@@ -5,7 +5,7 @@ use serde::{Deserialize, Serialize};
 /// Copy history through the selected response, keeping the source session intact.
 pub fn branch_conversation(conn: &Connection, source_id: &str, message_id: Option<&str>, message_index: Option<usize>) -> Result<String> {
     use super::message_repo;
-    let transaction = conn.unchecked_transaction()?;
+    let transaction = crate::db::write_transaction(&conn)?;
     let source = get_conversation(&transaction, source_id)?.ok_or_else(|| anyhow::anyhow!("Conversation not found"))?;
     let mut messages = message_repo::get_messages_by_conversation(&transaction, source_id)?;
     let index = message_id.and_then(|id| messages.iter().position(|message| message.id == id)).or(message_index);

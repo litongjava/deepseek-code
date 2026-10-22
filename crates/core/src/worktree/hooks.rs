@@ -188,7 +188,7 @@ pub async fn create(
     let metadata = json!({"canonical_path":path,"created_ns":created_ns,"newly_created":newly_created,"baseline":baseline,"provenance":provenance(&runner)?});
     // A failed DB transaction deliberately retains hook output rather than deleting unknown files.
     db.with_conn(|conn|->Result<()> {
-        let tx=conn.unchecked_transaction()?;
+        let tx=crate::db::write_transaction(&conn)?;
         tx.execute("INSERT INTO conversation_worktrees(conversation_id,project_id,source_path,repo_path,path,branch) VALUES(?1,?2,?3,?3,?4,?5)",params![session,project.id,source.to_string_lossy(),path.to_string_lossy(),name])?;
         tx.execute("INSERT INTO conversation_worktree_backends(conversation_id,backend,metadata) VALUES(?1,'hook',?2)",params![session,metadata.to_string()])?;
         tx.execute("UPDATE conversations SET workspace_path=?1 WHERE id=?2",params![path.to_string_lossy(),session])?;
@@ -336,7 +336,7 @@ pub async fn release(root: &Path, db: &DbManager, session: &str, remove: bool) -
         }
     }
     db.with_conn(|conn| -> Result<()> {
-        let tx = conn.unchecked_transaction()?;
+        let tx = crate::db::write_transaction(&conn)?;
         tx.execute(
             "DELETE FROM conversation_worktree_backends WHERE conversation_id=?1",
             [session],
