@@ -53,6 +53,7 @@ impl LiveTurn {
         mode: &str,
         bindings: crate::keybindings::Keybindings,
         history: Vec<String>,
+        tip: Option<String>,
     ) -> Option<Self> {
         if crate::terminal::screen_reader()
             || !io::stdin().is_terminal()
@@ -80,6 +81,7 @@ impl LiveTurn {
             state.bindings = bindings;
             state.history = history;
             state.history_index = state.history.len();
+            state.tip = tip;
             let mut screen = Frame::default();
             let _ = run(&mut state, &mut screen, receiver, actions);
             let _ = screen.clear();
@@ -243,7 +245,50 @@ struct State {
     history_index: usize,
     history_draft: String,
     search_query: Option<String>,
+    tip: Option<String>,
+    /// Shown while the model works, as in "Brewing… (12s)".
+    verb: &'static str,
+    frame: usize,
 }
+
+/// Spinner glyphs, played forward and back.
+const SPINNER: &[&str] = if cfg!(target_os = "macos") {
+    &["\u{b7}", "\u{2722}", "\u{2733}", "\u{2736}", "\u{273b}", "\u{273d}"]
+} else {
+    &["\u{b7}", "\u{2722}", "*", "\u{2736}", "\u{273b}", "\u{273d}"]
+};
+
+const VERBS: &[&str] = &[
+    "Brewing", "Pondering", "Composing", "Crafting", "Mulling", "Tinkering", "Cogitating", "Assembling",
+    "Percolating", "Untangling", "Sketching", "Weaving", "Noodling", "Puzzling", "Forging", "Polishing",
+    "Simmering", "Calibrating", "Distilling", "Orchestrating", "Spelunking", "Whittling", "Kneading",
+    "Marinating", "Scheming", "Synthesizing", "Wrangling", "Conjuring", "Deliberating", "Fermenting",
+];
+
+fn spinner_glyph(frame: usize) -> &'static str {
+    let cycle = SPINNER.len() * 2;
+    let position = frame % cycle;
+    SPINNER[if position < SPINNER.len() { position } else { cycle - 1 - position }]
+}
+
+/// `12s`, `4m 13s` or `1h 2m`.
+fn short_duration(seconds: u64) -> String {
+    match seconds {
+        0..=59 => format!("{seconds}s"),
+        60..=3599 => format!("{}m {}s", seconds / 60, seconds % 60),
+        _ => format!("{}h {}m", seconds / 3600, seconds % 3600 / 60),
+    }
+}
+
+/// `950` or `13.7k`.
+fn short_count(count: u64) -> String {
+    if count < 1000 {
+        count.to_string()
+    } else {
+        format!("{:.1}k", count as f64 / 1000.0)
+    }
+}
+
 impl State {
     fn new(mode: String) -> Self {
         Self {
@@ -270,7 +315,34 @@ impl State {
             history_index: 0,
             history_draft: String::new(),
             search_query: None,
+            tip: None,
+            verb: VERBS[std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map_or(0, |time| time.subsec_nanos() as usize)
+                % VERBS.len()],
+            frame: 0,
         }
+    }
+    /// The activity line: `✢ Brewing… (4m 13s · ↓ 13.7k tokens · thinking)`.
+    fn status_line(&self) -> String {
+        let label = if self.answer.is_some() {
+            "Waiting for your answer".to_owned()
+        } else if let Some(hook) = &self.hook_activity {
+            hook.clone()
+        } else if self.activity.starts_with("Running") || self.activity == "Cancelling" {
+            self.activity.clone()
+        } else {
+            self.verb.to_owned()
+        };
+        let mut details = vec![short_duration(self.started.elapsed().as_secs())];
+        let tokens = (self.generated_characters as u64).div_ceil(4).max(self.usage.output().unwrap_or(0));
+        if tokens > 0 {
+            details.push(format!("\u{2193} {} tokens", short_count(tokens)));
+        }
+        if self.activity.contains("thinking") {
+            details.push("thinking".into());
+        }
+        format!("{} {label}\u{2026} ({})", spinner_glyph(self.frame), details.join(" \u{b7} "))
     }
     fn detail(&mut self, id: String, title: String, body: String) {
         if let Some(entry) = self.detail_entries.iter_mut().find(|entry| entry.0 == id) {
@@ -510,35 +582,7 @@ impl Frame {
         let prompt = if state.answer.is_some() { "Answer \u{203a} " } else { "\u{203a} " };
         let prompt_width = prompt.chars().count();
         let (draft, cursor) = state.draft.visible(width.saturating_sub(prompt_width + 1));
-        let usage = state
-            .usage
-            .summary()
-            .map(|summary| format!(" \u{b7} {summary}"))
-            .unwrap_or_default();
-        let usage = if state.estimate_pending && state.generated_characters > 0 {
-            format!(
-                " \u{b7} ~{} generated tokens (estimate)",
-                state.generated_characters.div_ceil(4)
-            )
-        } else {
-            usage
-        };
-        let status = clip(
-            &format!(
-                "* {} ({}s){usage}",
-                if state.answer.is_some() {
-                    "Waiting for your answer"
-                } else {
-                    state.hook_activity.as_deref().unwrap_or(&state.activity)
-                },
-                if state.activity.contains("thinking") {
-                    state.activity_started.elapsed().as_secs()
-                } else {
-                    state.started.elapsed().as_secs()
-                }
-            ),
-            width,
-        );
+        let status = clip(&state.status_line(), width);
         let mode = if state.answer.is_some() {
             format!("{} mode (Shift+Tab to cycle) \u{b7} Enter submits your answer \u{b7} Esc interrupts", state.mode)
         } else {
@@ -548,6 +592,11 @@ impl Frame {
             )
         };
         let rule = "─".repeat(width);
+        let tip_line = state
+            .tip
+            .as_ref()
+            .map(|tip| format!("  \u{23bf}  Tip: {tip}"))
+            .unwrap_or_default();
         let budget = content_budget(size.1);
         let panel = state.details.render(width, budget);
         self.panel_toggle = panel.toggle;
@@ -585,7 +634,9 @@ impl Frame {
                 } else if state.goal_proposal.is_some() {
                     if state.answer.is_some() { "  Goal proposal pending; finish the current question first." }
                     else { "  Proposed goal: Ctrl+Y approve · Ctrl+N decline. Work continues while you decide." }
-                } else { "  Tip: /btw asks a side question while the main task continues." },
+                } else {
+                    &tip_line
+                },
                 width,
             ),
             rule.clone(),
@@ -1009,8 +1060,9 @@ fn run(
                 _ => {}
             }
         }
-        if last_tick.elapsed() >= Duration::from_secs(1) {
+        if last_tick.elapsed() >= Duration::from_millis(120) {
             last_tick = Instant::now();
+            state.frame = state.frame.wrapping_add(1);
             dirty = true;
         }
         if dirty {
@@ -1284,7 +1336,12 @@ impl TurnDisplay {
         history: Vec<String>,
     ) -> anyhow::Result<Self> {
         let live = if interactive {
-            LiveTurn::start(mode, crate::keybindings::load(keybindings)?, history)
+            LiveTurn::start(
+                mode,
+                crate::keybindings::load(keybindings)?,
+                history,
+                keybindings.parent().and_then(super::tips::next),
+            )
         } else {
             None
         };

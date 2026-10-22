@@ -406,6 +406,10 @@ impl ReportedUsage {
         }
     }
 
+    pub(crate) fn output(&self) -> Option<u64> {
+        self.output
+    }
+
     pub(crate) fn summary(&self) -> Option<String> {
         if self.input.is_none() && self.output.is_none() {
             return None;

@@ -487,6 +487,7 @@ async fn run(cli: &Cli) -> Result<()> {
         background_refresh.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
         let mut remote = remote_commands::Remote::default();
         let mut last_config_error = String::new();
+        terminal::tips::start_session(&paths.data_dir);
         'repl: loop {
             let idle_deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(60);
             let mut idle_notified = false;

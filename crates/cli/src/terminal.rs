@@ -47,6 +47,7 @@ pub mod live;
 pub(crate) mod paste_input;
 pub mod change_view;
 pub mod tool_view;
+pub mod tips;
 mod display_path;
 pub mod style;
 pub mod screen_mode;
