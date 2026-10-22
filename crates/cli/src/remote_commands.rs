@@ -119,6 +119,9 @@ impl Remote {
                 bridge.publish_message(role, content);
             }
         }
+        if let Some(result) = turn_result(history.get(self.published..).unwrap_or_default()) {
+            bridge.publish(result);
+        }
         self.published = history.len();
         Ok(())
     }
@@ -357,9 +360,46 @@ fn strip_credentials(url: &str) -> String {
     }
 }
 
+/// The `result` event for history rows added since the last sync. New rows
+/// mean a turn ended, so the remote client can stop waiting. A turn that failed
+/// or was interrupted before answering leaves no assistant text and is
+/// reported as an error.
+fn turn_result(new_rows: &[Value]) -> Option<Value> {
+    let last = new_rows.last()?;
+    let answered = last["role"] == "assistant"
+        && last["content"].as_str().is_some_and(|text| !text.trim().is_empty());
+    Some(json!({
+        "type": "result",
+        "subtype": if answered { "success" } else { "error_during_execution" },
+        "is_error": !answered,
+        "result": if answered { last["content"].clone() } else { json!("") },
+    }))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn turn_result_reports_answers_and_unanswered_turns() {
+        assert!(turn_result(&[]).is_none());
+        let answered = turn_result(&[
+            json!({"role":"user","content":"hi"}),
+            json!({"role":"assistant","content":"hello"}),
+        ])
+        .unwrap();
+        assert_eq!(answered["subtype"], "success");
+        assert_eq!(answered["is_error"], false);
+        assert_eq!(answered["result"], "hello");
+        for rows in [
+            vec![json!({"role":"user","content":"hi"})],
+            vec![json!({"role":"user","content":"hi"}), json!({"role":"assistant","content":""})],
+        ] {
+            let failed = turn_result(&rows).unwrap();
+            assert_eq!(failed["subtype"], "error_during_execution");
+            assert_eq!(failed["is_error"], true);
+        }
+    }
 
     #[test]
     fn remote_urls_never_carry_credentials() {
