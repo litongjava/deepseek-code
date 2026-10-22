@@ -522,13 +522,8 @@ fn parse_goal_verdict(text: &str) -> Result<GoalVerdict> {
     Ok(verdict)
 }
 
-/// Run before assembling the next request so the compact boundary is reflected
-/// in model_history. The original transcript remains available to Desktop.
-pub async fn prepare_turn(session: &Session, context_window: Option<u32>) -> Result<()> {
-    let Some(percent) = load(&session.store.db, &session.id)?.autocompact_percent else {
-        return Ok(());
-    };
-    let window = context_window.filter(|v| *v > 0).context("Autocompact is enabled but this model has no configured context window; use /autocompact off or configure the model")?;
+/// Messages and estimated tokens since the last compact boundary.
+pub fn active_history(session: &Session) -> Result<(usize, usize)> {
     let rows = session.store.db.with_conn(|conn| {
         claude_core::db::message_repo::get_messages_by_conversation(conn, &session.id)
     })??;
@@ -550,8 +545,41 @@ pub async fn prepare_turn(session: &Session, context_window: Option<u32>) -> Res
         }
         Ok(bytes)
     })??;
-    let estimated = bytes.div_ceil(3);
-    if active.len() < 2 || estimated < window as usize * percent as usize / 100 {
+    Ok((active.len(), bytes.div_ceil(3)))
+}
+
+/// The footer note the reference CLI shows once a fifth of the context budget
+/// is left: "N% until auto-compact", or "Context low" without autocompact.
+pub fn context_note(left_percent: u64, autocompact: bool) -> Option<String> {
+    if left_percent > 20 {
+        return None;
+    }
+    Some(if autocompact {
+        format!("{left_percent}% until auto-compact")
+    } else {
+        format!("Context low ({left_percent}% remaining) \u{b7} Run /compact to compact & continue")
+    })
+}
+
+/// The context note for this session, if its history nears the budget.
+pub async fn context_status(session: &Session) -> Option<String> {
+    let window = session.context_window().await.filter(|window| *window > 0)? as u64;
+    let percent = load(&session.store.db, &session.id).ok()?.autocompact_percent;
+    let budget = window * percent.unwrap_or(100) as u64 / 100;
+    let (_, used) = active_history(session).ok()?;
+    let left = budget.saturating_sub(used as u64) * 100 / budget.max(1);
+    context_note(left, percent.is_some())
+}
+
+/// Run before assembling the next request so the compact boundary is reflected
+/// in model_history. The original transcript remains available to Desktop.
+pub async fn prepare_turn(session: &Session, context_window: Option<u32>) -> Result<()> {
+    let Some(percent) = load(&session.store.db, &session.id)?.autocompact_percent else {
+        return Ok(());
+    };
+    let window = context_window.filter(|v| *v > 0).context("Autocompact is enabled but this model has no configured context window; use /autocompact off or configure the model")?;
+    let (messages, estimated) = active_history(session)?;
+    if messages < 2 || estimated < window as usize * percent as usize / 100 {
         return Ok(());
     }
     crate::compaction::notice(&format!(
@@ -571,6 +599,13 @@ pub async fn prepare_turn(session: &Session, context_window: Option<u32>) -> Res
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn context_notes_match_the_reference_wording() {
+        assert_eq!(context_note(21, true), None);
+        assert_eq!(context_note(12, true).as_deref(), Some("12% until auto-compact"));
+        assert_eq!(context_note(5, false).as_deref(), Some("Context low (5% remaining) \u{b7} Run /compact to compact & continue"));
+    }
 
     #[tokio::test]
     async fn cd_triggers_once_only_when_directory_changes() {

@@ -33,6 +33,7 @@ enum Message {
     Draft(String),
     Keybindings(crate::keybindings::Keybindings),
     Workspace(std::path::PathBuf),
+    ContextNote(Option<String>),
     Read(Request),
 }
 
@@ -113,6 +114,10 @@ impl TerminalInput {
                         editor.set_workspace(workspace);
                         continue;
                     }
+                    Message::ContextNote(note) => {
+                        editor.set_context_note(note);
+                        continue;
+                    }
                     Message::Read(request) => request,
                 };
                 if request.response.is_closed() {
@@ -176,6 +181,11 @@ impl TerminalInput {
     /// Set the last turn's tool titles and full display bodies before reading.
     pub fn set_panel(&self, details: Vec<(String, String)>, expanded: bool) {
         let _ = self.requests.send(Message::Panel(details, expanded));
+    }
+
+    /// Shown in the footer while the context budget is low.
+    pub fn set_context_note(&self, note: Option<String>) {
+        let _ = self.requests.send(Message::ContextNote(note));
     }
 
     /// The project whose files `@` completes.

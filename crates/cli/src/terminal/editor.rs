@@ -31,6 +31,8 @@ pub struct PromptEditor {
     /// Project root for `@` file completion, and its files once listed.
     workspace: Option<std::path::PathBuf>,
     files: Option<Vec<String>>,
+    /// "12% until auto-compact" once the context budget runs low.
+    context_note: Option<String>,
     keybindings: crate::keybindings::Keybindings,
 }
 impl Default for PromptEditor {
@@ -48,6 +50,7 @@ impl Default for PromptEditor {
             suggestion: None,
             workspace: None,
             files: None,
+            context_note: None,
             keybindings: crate::keybindings::Keybindings::default(),
             commands: crate::command_catalog::COMMANDS
                 .iter()
@@ -600,6 +603,9 @@ impl PromptEditor {
             self.files = None;
         }
     }
+    pub fn set_context_note(&mut self, note: Option<String>) {
+        self.context_note = note;
+    }
     pub fn set_suggestions(&mut self, suggestions: std::sync::mpsc::Receiver<String>) {
         self.suggestions = Some(suggestions);
     }
@@ -830,6 +836,9 @@ impl PromptEditor {
                 }];
                 if ghost.is_some() {
                     parts.push("tab to accept suggestion".into());
+                }
+                if let Some(note) = &self.context_note {
+                    parts.push(note.clone());
                 }
                 parts.join(" \u{b7} ")
             };

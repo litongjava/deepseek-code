@@ -56,11 +56,31 @@ pub(crate) fn default_max_tokens(model: &str) -> u32 {
     }
 }
 
+/// Context windows reported by the providers' model APIs, when known.
+pub(crate) fn default_context_window(model: &str) -> Option<u32> {
+    let model = model.to_ascii_lowercase();
+    if model.starts_with("deepseek-flash") || model.starts_with("deepseek-v4") {
+        Some(1_048_576)
+    } else if model.contains("claude") {
+        Some(200_000)
+    } else {
+        None
+    }
+}
+
+/// Models that accept image input (DeepSeek-V4.1-Flash and Claude).
+pub(crate) fn default_supports_vision(model: &str) -> bool {
+    let model = model.to_ascii_lowercase();
+    model.starts_with("deepseek-flash") || model.contains("claude")
+}
+
 pub(crate) fn provider_template(model: &str) -> ProviderConfig {
     let model = ApiConfig::resolve_model_alias(model);
     let metadata = ApiConfig::get_provider_metadata(&model);
     let anthropic = model.starts_with("claude");
     let max_tokens = default_max_tokens(&model);
+    let supports_vision = default_supports_vision(&model);
+    let context_window = default_context_window(&model);
     ProviderConfig {
         id: "cli".into(),
         name: "CLI".into(),
@@ -79,10 +99,10 @@ pub(crate) fn provider_template(model: &str) -> ProviderConfig {
             name: model,
             enabled: true,
             max_tokens: Some(max_tokens),
-            supports_vision: false,
+            supports_vision,
             supports_tools: true,
             supports_streaming: true,
-            context_window: None,
+            context_window,
             supports_text: true,
             api: None,
             cost_per_1k_input: None,
@@ -410,5 +430,8 @@ mod budget_tests {
         assert_eq!(default_max_tokens("claude-3-5-haiku-latest"), 8192);
         assert_eq!(default_max_tokens("claude-3-opus-20240229"), 4096);
         assert_eq!(default_max_tokens("gpt-4o"), 8192);
+        assert_eq!(default_context_window("deepseek-flash"), Some(1_048_576));
+        assert_eq!(default_context_window("gpt-4o"), None);
+        assert!(default_supports_vision("deepseek-flash") && !default_supports_vision("deepseek-v4-pro"));
     }
 }
