@@ -236,6 +236,8 @@ pub enum Commands {
     Cron { #[command(subcommand)] action: crate::migration::CronCommands },
     Ssh { config: PathBuf, operation: PathBuf, #[arg(long)] yes: bool },
     Remote { request: PathBuf, #[arg(long)] yes: bool },
+    /// Show language server status or install one: lsp [status] | lsp install LANGUAGE [--yes].
+    Lsp { action: Option<String>, language: Option<String>, #[arg(long)] yes: bool },
     Help { #[arg(long)] topic:Option<String>, command:Vec<String> },
     /// Install and run versioned Node.js/Python plugin bundles.
     Plugin { #[command(subcommand)] action: PluginCommands },

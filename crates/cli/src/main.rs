@@ -1,4 +1,5 @@
 ﻿mod hook_progress;
+mod lsp_commands;
 mod launch_permissions;
 mod context_commands;
 mod persistent_worker;
@@ -163,6 +164,10 @@ async fn run(cli: &Cli) -> Result<()> {
         Some(Commands::Project { action }) => return migration::project(action).await,
         Some(Commands::Cron { action }) => return migration::cron(&paths, &std::env::current_dir()?, action).await,
         Some(Commands::Ssh { config, operation, yes }) => return tokio::select! { result=migration::ssh(config,operation,*yes)=>result, _=tokio::signal::ctrl_c()=>anyhow::bail!("SSH operation cancelled") },
+        Some(Commands::Lsp { action, language, yes }) => {
+            let workspace = cli.path.clone().map_or_else(std::env::current_dir, Ok)?;
+            return lsp_commands::command(&paths, &workspace, action.as_deref(), language.as_deref(), *yes).await;
+        }
         Some(Commands::Remote { request, yes }) => return tokio::select! { result=migration::remote(request,*yes)=>result, _=tokio::signal::ctrl_c()=>anyhow::bail!("Remote operation cancelled") },
         Some(Commands::Agents { action }) => {
             let context = services::context(&paths)?;
@@ -670,6 +675,11 @@ async fn run(cli: &Cli) -> Result<()> {
                     _ => {},
                 }
                 continue;
+            }
+            match lsp_commands::handle(line.trim(), &session, input.as_mut().unwrap()).await {
+                Ok(true) => continue,
+                Err(error) => { eprintln!("Error: {error:#}"); continue; },
+                Ok(false) => {},
             }
             match interactive_config::handle(line.trim(), &paths, &mut session, input.as_mut().unwrap()).await {
                 Ok(true) => continue,

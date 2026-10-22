@@ -55,6 +55,7 @@ pub const COMMANDS: &[(&str, &str)] = &[
         "Manage tasks and sessions: list|show|attach|pending|answer|cancel|sessions|stop-session",
     ),
     ("/plan", "Enter planning mode (optionally with a task to plan), show the plan, or open it in an editor"),
+    ("/lsp", "Language server status and installs: [status] | install LANGUAGE (java, python, typescript, html, css, vue, csharp, go, rust)"),
     ("/remote-control", "Continue this session from a Remote Control client: [NAME] [--server URL [--save]]|status|disconnect|server (alias /rc)"),
     ("/rc", "Alias for /remote-control"),
     ("/reload-skills", "Reload installed skills from disk"),
