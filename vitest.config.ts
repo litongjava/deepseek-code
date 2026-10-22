@@ -11,6 +11,13 @@ export default defineConfig({
     setupFiles: ['./src/__tests__/setup.ts'],
     include: ['src/**/*.{test,spec}.{ts,tsx}'],
     exclude: ['node_modules', 'dist', 'src-tauri'],
+    // react-syntax-highlighter's CommonJS build require()s the ESM-only
+    // refractor; transform its ES module build like the app build does.
+    server: {
+      deps: {
+        inline: ['react-syntax-highlighter'],
+      },
+    },
     coverage: {
       provider: 'v8',
       reporter: ['text', 'json', 'html'],
@@ -24,8 +31,10 @@ export default defineConfig({
     },
   },
   resolve: {
-    alias: {
-      '@': path.resolve(__dirname, './src'),
-    },
+    alias: [
+      { find: '@', replacement: path.resolve(__dirname, './src') },
+      // Use the ES module build; see test.server.deps.inline above.
+      { find: /^react-syntax-highlighter$/, replacement: 'react-syntax-highlighter/dist/esm/index.js' },
+    ],
   },
 });
