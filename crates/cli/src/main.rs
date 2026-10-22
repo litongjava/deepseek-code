@@ -441,7 +441,11 @@ async fn run(cli: &Cli) -> Result<()> {
     let selection = match selection {
         Ok(selection) => selection,
         Err(error) if !single => {
-            eprintln!("Provider setup required: {error:#}");
+            // A first start has nothing configured: the onboarding explains
+            // itself. Otherwise show what is wrong with the saved setup.
+            if !paths.providers()?.is_empty() {
+                eprintln!("Provider setup required: {error:#}");
+            }
             interactive_config::setup(&paths, input.as_mut().unwrap()).await?
         }
         Err(error) if single && !sdk_stream && prompt.trim().is_empty() => {

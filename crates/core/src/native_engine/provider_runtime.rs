@@ -21,6 +21,11 @@ static CATALOG: LazyLock<Value> = LazyLock::new(|| {
     serde_json::from_str(include_str!("../../../../src/data/providerCatalog.json"))
         .expect("embedded provider catalog")
 });
+/// A provider entry of the embedded catalog shared with Desktop.
+pub fn catalog_entry(id: &str) -> Option<&'static Value> {
+    CATALOG["providers"].as_array()?.iter().find(|entry| entry["id"] == id)
+}
+
 pub type ProviderStream = Pin<Box<dyn Stream<Item = Result<String>> + Send>>;
 
 pub(super) fn metadata(provider: &ResolvedProvider) -> Result<(&'static Value, &'static Value)> {

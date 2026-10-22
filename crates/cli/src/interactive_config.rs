@@ -203,28 +203,207 @@ pub fn status(session: &Session) {
     );
 }
 
-pub async fn setup(paths: &RuntimePaths, input: &mut TerminalInput) -> Result<config::Selection> {
-    loop {
-        for p in paths.read_config()?.providers.iter().filter(|p| p.enabled) {
-            eprintln!(
-                "{}: {}",
-                p.id,
-                p.models
-                    .iter()
-                    .filter(|m| m.enabled)
-                    .map(|m| m.id.as_str())
-                    .collect::<Vec<_>>()
-                    .join(", ")
-            );
+/// A provider offered by the first-run setup.
+struct Preset {
+    id: &'static str,
+    name: &'static str,
+    /// Entry of the embedded catalog shared with Desktop; None for DeepSeek,
+    /// which uses its OpenAI-compatible endpoint directly.
+    builtin: Option<&'static str>,
+    models: &'static [&'static str],
+    key_url: &'static str,
+}
+
+const PRESETS: &[Preset] = &[
+    Preset { id: "deepseek", name: "DeepSeek (recommended)", builtin: None, models: &["deepseek-flash", "deepseek-v4-pro"], key_url: "https://platform.deepseek.com/api_keys" },
+    Preset { id: "anthropic", name: "Anthropic Claude", builtin: Some("anthropic"), models: &["claude-sonnet-4-5", "claude-opus-4-6", "claude-haiku-4-5"], key_url: "https://console.anthropic.com/settings/keys" },
+    Preset { id: "openai", name: "OpenAI", builtin: Some("openai"), models: &["gpt-5.1", "gpt-5-mini", "gpt-4.1"], key_url: "https://platform.openai.com/api-keys" },
+    Preset { id: "moonshotai-cn", name: "Moonshot Kimi (China)", builtin: Some("moonshotai-cn"), models: &["kimi-k2.7-code", "kimi-k2-thinking"], key_url: "https://platform.moonshot.cn/console/api-keys" },
+    Preset { id: "zai-coding-cn", name: "Zhipu GLM Coding Plan (China)", builtin: Some("zai-coding-cn"), models: &["glm-5.1", "glm-4.7"], key_url: "https://open.bigmodel.cn/usercenter/apikeys" },
+    Preset { id: "minimax-cn", name: "MiniMax (China)", builtin: Some("minimax-cn"), models: &["MiniMax-M3", "MiniMax-M2.7"], key_url: "https://platform.minimaxi.com/user-center/basic-information/interface-key" },
+    Preset { id: "qwen-token-plan-cn", name: "Alibaba Qwen Token Plan (China)", builtin: Some("qwen-token-plan-cn"), models: &["qwen3.6-flash", "deepseek-v4-flash", "glm-5.1"], key_url: "https://bailian.console.aliyun.com/" },
+    Preset { id: "openrouter", name: "OpenRouter", builtin: Some("openrouter"), models: &["anthropic/claude-sonnet-4.5", "anthropic/claude-opus-4.6"], key_url: "https://openrouter.ai/keys" },
+];
+
+fn preset_key_env(preset: &Preset) -> String {
+    match preset.builtin {
+        Some(id) => claude_core::native_engine::provider_runtime::credential_env(id),
+        None => "DEEPSEEK_API_KEY".into(),
+    }
+}
+
+/// The saved provider for a preset, with models taken from the catalog.
+fn preset_provider(preset: &Preset, api_key: Option<String>) -> Result<claude_core::config::ProviderConfig> {
+    let mut provider = config::provider_template(preset.models[0]);
+    provider.id = preset.id.into();
+    provider.name = preset.name.trim_end_matches(" (recommended)").into();
+    // A pasted key is stored; otherwise the key is read from the environment.
+    if api_key.is_none() {
+        provider.settings.insert("apiKeyEnv".into(), json!(preset_key_env(preset)));
+    }
+    provider.api_key = api_key;
+    provider.enabled = true;
+    provider.is_default = true;
+    match preset.builtin {
+        None => {
+            provider.provider_type = "openai".into();
+            provider.base_url = "https://api.deepseek.com".into();
+            provider.models = preset
+                .models
+                .iter()
+                .map(|id| {
+                    let mut model = config::provider_template(id).models.remove(0);
+                    model.id = (*id).into();
+                    model.name = (*id).into();
+                    model
+                })
+                .collect();
         }
-        let choice = ask(input, "Provider ID, 'add' to configure, or /cancel to exit").await?;
-        let result: Result<Option<config::Selection>> = async {
-            if choice == "add" {
-                wizard(paths, input, None).await?;
+        Some(builtin) => {
+            let entry = claude_core::native_engine::provider_runtime::catalog_entry(builtin)
+                .with_context(|| format!("The built-in catalog has no {builtin} entry"))?;
+            provider.provider_type = "openai".into();
+            provider.base_url = entry["baseUrl"].as_str().unwrap_or_default().into();
+            provider.settings.insert("builtinId".into(), json!(builtin));
+            let catalog = entry["models"].as_array().cloned().unwrap_or_default();
+            provider.models = preset
+                .models
+                .iter()
+                .filter_map(|id| catalog.iter().find(|model| model["id"] == *id))
+                .map(|model| {
+                    let id = model["id"].as_str().unwrap_or_default();
+                    let mut config = config::provider_template(id).models.remove(0);
+                    config.id = id.into();
+                    config.name = model["name"].as_str().unwrap_or(id).into();
+                    config.api = model["api"].as_str().map(String::from);
+                    config.context_window = model["contextWindow"].as_u64().map(|value| value as u32);
+                    config.max_tokens = model["maxTokens"].as_u64().map(|value| (value as u32).min(32_000));
+                    config.supports_vision = model["input"].as_array().is_some_and(|input| input.iter().any(|kind| kind == "image"));
+                    config
+                })
+                .collect();
+            ensure!(!provider.models.is_empty(), "No preset model is in the built-in catalog");
+        }
+    }
+    Ok(provider)
+}
+
+/// Sends a tiny request with the saved provider so a bad key shows up now.
+async fn verify(paths: &RuntimePaths, provider: &str, model: &str) -> Result<()> {
+    let selection = select(paths, provider, model)?;
+    let manager = claude_core::native_engine::provider_manager::ProviderManager::in_memory(
+        selection.providers,
+        paths.data_dir.join("providers.json"),
+    );
+    let resolved = manager
+        .resolve_selected(&selection.provider_id, &selection.model)
+        .context("The saved provider could not be resolved")?;
+    tokio::time::timeout(
+        std::time::Duration::from_secs(60),
+        claude_core::native_engine::generation::generate(resolved, "Reply OK.", "This is a connection test. Reply only OK."),
+    )
+    .await
+    .context("The connection test timed out")??;
+    Ok(())
+}
+
+async fn configure_preset(paths: &RuntimePaths, input: &mut TerminalInput, preset: &Preset) -> Result<Option<config::Selection>> {
+    let key_env = preset_key_env(preset);
+    loop {
+        let api_key = if std::env::var_os(&key_env).is_some_and(|value| !value.is_empty()) {
+            eprintln!("Using the API key from {key_env}.");
+            None
+        } else {
+            eprintln!("Get an API key at {}", preset.key_url);
+            let prompt = format!("Paste the API key (hidden), or press Enter to set {key_env} yourself: ");
+            let key = input.read_secret(&prompt).await?.context("Input closed")?.trim().to_owned();
+            if key.is_empty() {
+                eprintln!("Set it in your shell, then start dcl again:");
+                eprintln!("  bash/zsh:   export {key_env}=<your key>");
+                eprintln!("  PowerShell: setx {key_env} \"<your key>\"   (then open a new terminal)");
                 return Ok(None);
             }
-            let model = ask(input, "Model ID").await?;
-            Ok(Some(select(paths, &choice, &model)?))
+            anyhow::ensure!(!key.contains(char::is_whitespace), "An API key has no spaces; paste it again");
+            Some(key)
+        };
+        let provider = preset_provider(preset, api_key.clone())?;
+        let model = provider.models[0].id.clone();
+        let mut manager = ConfigManager::new(paths.data_dir.clone());
+        manager.update_config(|c| {
+            c.providers.retain(|p| p.id != provider.id);
+            for other in &mut c.providers {
+                other.is_default = false;
+            }
+            c.default_provider_id = Some(provider.id.clone());
+            c.providers.push(provider);
+        })?;
+        eprintln!("Checking the connection with {model}…");
+        match verify(paths, preset.id, &model).await {
+            Ok(()) => {
+                eprintln!(
+                    "Connected. {} is saved as the default provider{}.",
+                    preset.name.trim_end_matches(" (recommended)"),
+                    if api_key.is_some() { " (key stored in config.json, readable only by you)" } else { "" }
+                );
+                return Ok(Some(select(paths, preset.id, &model)?));
+            }
+            Err(error) => {
+                eprintln!("The connection test failed: {error:#}");
+                if api_key.is_none() {
+                    eprintln!("Check the value of {key_env}, or unset it to paste a key here.");
+                    return Ok(None);
+                }
+                let again = ask(input, "Paste a different key? [Y/n]").await?;
+                if again.eq_ignore_ascii_case("n") {
+                    return Ok(Some(select(paths, preset.id, &model)?));
+                }
+            }
+        }
+    }
+}
+
+/// First-run setup: pick a built-in provider (DeepSeek by default), a saved
+/// one, or a custom endpoint; the key is checked before the session starts.
+pub async fn setup(paths: &RuntimePaths, input: &mut TerminalInput) -> Result<config::Selection> {
+    let saved: Vec<_> = paths.read_config()?.providers.into_iter().filter(|p| p.enabled).collect();
+    if saved.is_empty() {
+        eprintln!("Welcome to DeepSeek Code! Connect a model provider to get started.");
+    }
+    loop {
+        eprintln!("\nChoose a provider:");
+        for (index, preset) in PRESETS.iter().enumerate() {
+            eprintln!("  {:>2}. {}", index + 1, preset.name);
+        }
+        let custom = PRESETS.len() + 1;
+        eprintln!("  {custom:>2}. Another OpenAI- or Anthropic-compatible endpoint");
+        for provider in &saved {
+            let models: Vec<_> = provider.models.iter().filter(|m| m.enabled).map(|m| m.id.as_str()).collect();
+            eprintln!("      saved: {} ({})", provider.id, models.join(", "));
+        }
+        let choice = ask(input, "Number or saved provider ID [1]").await?;
+        let choice = if choice.is_empty() { "1".to_owned() } else { choice };
+        let result: Result<Option<config::Selection>> = async {
+            match choice.parse::<usize>() {
+                Ok(number) if (1..=PRESETS.len()).contains(&number) => configure_preset(paths, input, &PRESETS[number - 1]).await,
+                Ok(number) if number == custom => {
+                    let id = wizard(paths, input, None).await?;
+                    let config = paths.read_config()?;
+                    let model = config
+                        .providers
+                        .iter()
+                        .find(|provider| provider.id == id)
+                        .and_then(|provider| provider.models.first())
+                        .map(|model| model.id.clone())
+                        .context("The saved provider has no models")?;
+                    Ok(Some(select(paths, &id, &model)?))
+                }
+                Ok(_) => anyhow::bail!("Choose a number from the list"),
+                Err(_) => {
+                    let provider = saved.iter().find(|provider| provider.id == choice).context("No saved provider has that ID")?;
+                    let model = provider.models.iter().find(|m| m.enabled).map(|m| m.id.clone()).context("That provider has no enabled models")?;
+                    Ok(Some(select(paths, &choice, &model)?))
+                }
+            }
         }
         .await;
         match result {
@@ -398,6 +577,23 @@ pub async fn handle(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn presets_use_catalog_models_and_their_key_variables() {
+        for preset in PRESETS {
+            let provider = preset_provider(preset, None).unwrap();
+            assert!(!provider.models.is_empty(), "{}", preset.id);
+            assert!(provider.base_url.starts_with("https://"), "{}", preset.id);
+        }
+        let deepseek = preset_provider(&PRESETS[0], Some("sk-test".into())).unwrap();
+        assert_eq!(deepseek.base_url, "https://api.deepseek.com");
+        assert_eq!(deepseek.models[0].id, "deepseek-flash");
+        assert_eq!(deepseek.api_key.as_deref(), Some("sk-test"));
+        assert_eq!(preset_key_env(&PRESETS[3]), "MOONSHOT_API_KEY");
+        let anthropic = preset_provider(&PRESETS[1], None).unwrap();
+        assert_eq!(anthropic.settings["builtinId"], "anthropic");
+        assert_eq!(anthropic.models[0].api.as_deref(), Some("anthropic-messages"));
+    }
 
     #[test]
     fn provider_answers_explain_rejections_and_fix_deepseek_urls() {

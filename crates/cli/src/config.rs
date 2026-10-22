@@ -152,7 +152,7 @@ pub fn select(
         .or(prefs["model"].as_str())
         .or(first_model)
         .unwrap_or(if std::env::var_os("DEEPSEEK_API_KEY").is_some() {
-            "deepseek-chat"
+            "deepseek-flash"
         } else {
             "sonnet"
         });

@@ -336,6 +336,12 @@ impl ConfigManager {
         let json = serde_json::to_string_pretty(&self.config)?;
         let temporary = self.config_path.with_extension(format!("{}.tmp", uuid::Uuid::new_v4()));
         std::fs::write(&temporary, json)?;
+        // The configuration may hold API keys: readable by the owner only.
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&temporary, std::fs::Permissions::from_mode(0o600))?;
+        }
         if let Err(error) = std::fs::rename(&temporary, &self.config_path) {
             let _ = std::fs::remove_file(&temporary);
             return Err(error.into());
