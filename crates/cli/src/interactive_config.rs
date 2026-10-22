@@ -16,66 +16,126 @@ async fn ask(input: &mut TerminalInput, prompt: &str) -> Result<String> {
     Ok(line.trim().into())
 }
 
+/// Asks until `check` accepts the answer, explaining each rejection.
+async fn ask_valid(
+    input: &mut TerminalInput,
+    prompt: &str,
+    default: Option<&str>,
+    check: impl Fn(&str) -> std::result::Result<String, String>,
+) -> Result<String> {
+    let label = match default {
+        Some(default) => format!("{prompt} [{default}]"),
+        None => prompt.to_owned(),
+    };
+    for _ in 0..3 {
+        let answer = ask(input, &label).await?;
+        let answer = if answer.is_empty() { default.unwrap_or_default().to_owned() } else { answer };
+        match check(&answer) {
+            Ok(value) => return Ok(value),
+            Err(reason) => eprintln!("  {reason}"),
+        }
+    }
+    bail!("Provider setup cancelled after three invalid answers; nothing was saved")
+}
+
+fn looks_like_secret(value: &str) -> bool {
+    let lower = value.to_ascii_lowercase();
+    ["sk-", "sk_", "key-", "bearer "].iter().any(|prefix| lower.starts_with(prefix))
+        || (value.len() >= 32 && value.chars().any(|c| c.is_ascii_lowercase()) && value.chars().any(|c| c.is_ascii_digit()))
+}
+
+fn check_env_name(value: &str) -> std::result::Result<String, String> {
+    if looks_like_secret(value) {
+        return Err("That looks like an API key, not a variable name, and it was not saved. Put the key in an environment variable first (bash: export DEEPSEEK_API_KEY=sk-...; Windows: setx DEEPSEEK_API_KEY sk-... and open a new terminal), then enter the variable's name, e.g. DEEPSEEK_API_KEY.".into());
+    }
+    if value.is_empty()
+        || value.as_bytes()[0].is_ascii_digit()
+        || !value.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
+    {
+        return Err("Enter an environment variable NAME: letters, digits and _, not starting with a digit (e.g. DEEPSEEK_API_KEY).".into());
+    }
+    Ok(value.to_owned())
+}
+
+/// DeepSeek serves the Anthropic protocol under `/anthropic`.
+fn deepseek_base_url(protocol: &str, url: &str) -> Option<String> {
+    let trimmed = url.trim_end_matches('/');
+    let rest = trimmed.split_once("://")?.1;
+    let host = rest.split(['/', ':']).next()?.to_ascii_lowercase();
+    (host == "api.deepseek.com" && protocol == "anthropic" && !trimmed.ends_with("/anthropic"))
+        .then(|| format!("{trimmed}/anthropic"))
+}
+
 pub async fn wizard(
     paths: &RuntimePaths,
     input: &mut TerminalInput,
     edit: Option<&str>,
-) -> Result<()> {
+) -> Result<String> {
     paths.read_config()?;
     eprintln!("Provider setup; /cancel cancels. Enter environment variable NAMES, never API keys.");
     let mut manager = ConfigManager::new(paths.data_dir.clone());
     let id = match edit {
         Some(id) => id.to_owned(),
-        None => ask(input, "Provider ID").await?,
+        None => {
+            ask_valid(input, "Provider ID", None, |id| {
+                if !id.is_empty() && id.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_') {
+                    Ok(id.to_owned())
+                } else {
+                    Err("Use letters, digits, - or _ for the ID (e.g. deepseek).".into())
+                }
+            })
+            .await?
+        }
     };
-    ensure!(
-        !id.is_empty()
-            && id
-                .chars()
-                .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_'),
-        "Use letters, digits, - or _ for the ID"
-    );
     let previous = manager.get_provider(&id).cloned();
     ensure!(
         edit.is_some() || previous.is_none(),
         "Provider exists; use /provider edit {id}"
     );
     ensure!(edit.is_none() || previous.is_some(), "Provider not found");
-    let protocol = ask(input, "Protocol (openai / anthropic / gemini)").await?;
-    ensure!(
-        ["openai", "anthropic", "claude", "gemini"].contains(&protocol.as_str()),
-        "Unsupported protocol"
-    );
-    let url = ask(input, "Base URL").await?;
-    ensure!(
-        (url.starts_with("http://") || url.starts_with("https://"))
-            && !url.contains('@')
-            && !url.contains('?')
-            && !url.contains('#'),
-        "Use an HTTP(S) URL without credentials, query or fragment"
-    );
-    let key_env = ask(input, "API key environment variable name").await?;
-    ensure!(
-        !key_env.is_empty()
-            && !key_env.as_bytes()[0].is_ascii_digit()
-            && key_env
-                .chars()
-                .all(|c| c.is_ascii_alphanumeric() || c == '_'),
-        "Invalid environment variable name"
-    );
-    let models = ask(input, "Model IDs (comma separated; first is default)").await?;
-    let models: Vec<_> = models
-        .split(',')
-        .map(str::trim)
-        .filter(|s| !s.is_empty())
-        .collect();
-    ensure!(
-        !models.is_empty()
-            && models
-                .iter()
-                .all(|m| !m.contains("::") && !m.contains(char::is_whitespace)),
-        "Provide exact model IDs without spaces or ::"
-    );
+    let protocol = ask_valid(input, "Protocol (openai / anthropic / gemini)", None, |value| {
+        let value = value.to_ascii_lowercase();
+        if ["openai", "anthropic", "claude", "gemini"].contains(&value.as_str()) {
+            Ok(value)
+        } else {
+            Err("Enter openai, anthropic or gemini.".into())
+        }
+    })
+    .await?;
+    let url = ask_valid(input, "Base URL", None, |url| {
+        if !(url.starts_with("http://") || url.starts_with("https://")) {
+            Err("The URL must start with http:// or https:// (e.g. https://api.deepseek.com).".into())
+        } else if url.contains('@') || url.contains('?') || url.contains('#') {
+            Err("Leave credentials, query strings and fragments out of the URL; keys go in an environment variable.".into())
+        } else {
+            Ok(url.to_owned())
+        }
+    })
+    .await?;
+    let url = match deepseek_base_url(&protocol, &url) {
+        Some(corrected) => {
+            eprintln!("  DeepSeek serves the Anthropic protocol at {corrected}; using that URL.");
+            corrected
+        }
+        None => url,
+    };
+    let suggested = url.contains("deepseek.com").then_some("DEEPSEEK_API_KEY");
+    let key_env = ask_valid(input, "API key environment variable name", suggested, check_env_name).await?;
+    if std::env::var_os(&key_env).is_none() {
+        eprintln!("  Note: {key_env} is not set in this terminal; set it before selecting this provider.");
+    }
+    let models = ask_valid(input, "Model IDs (comma separated; first is default)", None, |models| {
+        let models: Vec<_> = models.split(',').map(str::trim).filter(|s| !s.is_empty()).collect();
+        if models.is_empty() {
+            Err("Enter at least one model ID (e.g. deepseek-flash).".into())
+        } else if models.iter().any(|m| m.contains("::") || m.contains(char::is_whitespace)) {
+            Err("Model IDs cannot contain spaces or ::; separate several with commas.".into())
+        } else {
+            Ok(models.join(","))
+        }
+    })
+    .await?;
+    let models: Vec<_> = models.split(',').collect();
     let mut provider = previous.unwrap_or_else(|| config::provider_template(models[0]));
     provider.id = id.clone();
     provider.name = id.clone();
@@ -110,11 +170,15 @@ pub async fn wizard(
         c.providers.retain(|p| p.id != id);
         c.providers.push(provider);
     })?;
-    eprintln!(
-        "Saved {id} ({} models). Set {key_env} in the launching shell before selecting it.",
-        models.len()
-    );
-    Ok(())
+    if std::env::var_os(&key_env).is_some() {
+        eprintln!("Saved {id} ({} models); the API key is read from {key_env}.", models.len());
+    } else {
+        eprintln!(
+            "Saved {id} ({} models). Set {key_env} in the launching shell before selecting it.",
+            models.len()
+        );
+    }
+    Ok(id)
 }
 
 pub fn select(paths: &RuntimePaths, provider: &str, model: &str) -> Result<config::Selection> {
@@ -222,7 +286,20 @@ pub async fn handle(
             None
         };
         ensure!(words.next().is_none(), "Unexpected argument");
-        wizard(paths, input, edit).await?;
+        let id = wizard(paths, input, edit).await?;
+        let answer = ask(input, &format!("Switch this session to {id} now? [Y/n]")).await?;
+        if !answer.eq_ignore_ascii_case("n") && !answer.eq_ignore_ascii_case("no") {
+            let config = paths.read_config()?;
+            let model = config
+                .providers
+                .iter()
+                .find(|provider| provider.id == id)
+                .and_then(|provider| provider.models.iter().find(|model| model.enabled))
+                .map(|model| model.id.clone())
+                .context("The saved provider has no enabled models")?;
+            session.switch(paths, select(paths, &id, &model)?).await?;
+            status(session);
+        }
         return Ok(true);
     }
     ensure!(
@@ -272,7 +349,17 @@ pub async fn handle(
         let provider = providers
             .iter()
             .find(|p| p.id == session.provider_id)
-            .context("Current provider is temporary; save one with /provider add first")?;
+            .with_context(|| {
+                let saved = providers.iter().map(|p| p.id.as_str()).collect::<Vec<_>>();
+                let next = match saved.first() {
+                    Some(first) => format!("Switch to a saved provider with /provider {first} (saved: {}).", saved.join(", ")),
+                    None => "Start with -m MODEL to use another model, or save a provider with /provider add.".into(),
+                };
+                format!(
+                    "The current provider ({}) comes from command-line options or environment variables and is not saved, so it has no model list. {next}",
+                    session.provider_id
+                )
+            })?;
         let models: Vec<_> = provider.models.iter().filter(|m| m.enabled).collect();
         for (i, m) in models.iter().enumerate() {
             eprintln!("{}. {}", i + 1, m.id);
@@ -311,6 +398,20 @@ pub async fn handle(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn provider_answers_explain_rejections_and_fix_deepseek_urls() {
+        let error = check_env_name("sk-170b23aa867d47839ee0a01eddf73ff5").unwrap_err();
+        assert!(error.contains("looks like an API key") && error.contains("DEEPSEEK_API_KEY"));
+        assert!(check_env_name("1KEY").unwrap_err().contains("letters, digits"));
+        assert_eq!(check_env_name("DEEPSEEK_API_KEY").unwrap(), "DEEPSEEK_API_KEY");
+        assert_eq!(
+            deepseek_base_url("anthropic", "https://api.deepseek.com/").as_deref(),
+            Some("https://api.deepseek.com/anthropic")
+        );
+        assert_eq!(deepseek_base_url("anthropic", "https://api.deepseek.com/anthropic"), None);
+        assert_eq!(deepseek_base_url("openai", "https://api.deepseek.com"), None);
+    }
 
     fn answers(lines: &[&str]) -> TerminalInput {
         let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
