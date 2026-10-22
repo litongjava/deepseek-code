@@ -162,7 +162,7 @@ impl Session {
         if self.mcp_ready.get().is_some() { claude_core::services::plugins::sync_mcp(&context, &self.mcp).await?; }
         claude_core::tools::configure_lsp_servers(
             &self.workspace.to_string_lossy(),
-            claude_core::services::plugins::language_servers(&context)?,
+            claude_core::services::plugins::all_language_servers(&context)?,
         )?;
         Ok(())
     }

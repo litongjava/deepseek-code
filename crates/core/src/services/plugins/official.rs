@@ -23,7 +23,7 @@ fn read_json(root: &Path, relative: &str, files: &mut BTreeMap<String, String>) 
     Ok(value)
 }
 
-fn merge(
+pub(super) fn merge(
     root: &Path,
     declaration: &Value,
     files: &mut BTreeMap<String, String>,

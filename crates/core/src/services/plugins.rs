@@ -14,6 +14,7 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 mod legacy;
 mod official;
 mod materialized;
+mod claude_code;
 pub use materialized::{skill_commands, command_hooks, sync_mcp};
 pub use legacy::import_legacy;
 
@@ -122,6 +123,16 @@ impl Bundle {
         }
         Ok(())
     }
+}
+
+/// Language servers from this application's plugins, then from plugins the
+/// user installed in Claude Code (`~/.claude/plugins`). Earlier entries win.
+pub fn all_language_servers(context: &ServiceContext) -> Result<Vec<Value>> {
+    let mut servers = language_servers(context)?;
+    if let Some(home) = dirs::home_dir() {
+        servers.extend(claude_code::language_servers(&home.join(".claude")));
+    }
+    Ok(servers)
 }
 
 /// Read active plugin language servers without starting processes or exposing

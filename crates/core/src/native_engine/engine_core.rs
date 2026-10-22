@@ -468,7 +468,7 @@ impl QueryEngine {
         }
         crate::tools::configure_lsp_servers(
             &workspace_path,
-            crate::services::plugins::language_servers(&plugin_context)?,
+            crate::services::plugins::all_language_servers(&plugin_context)?,
         )?;
         let hook_provider = {
             let pm = self.provider_manager.lock().await;

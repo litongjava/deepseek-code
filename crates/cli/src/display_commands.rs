@@ -133,7 +133,7 @@ pub async fn handle(
             let root = session.workspace.to_string_lossy();
             claude_core::tools::configure_lsp_servers(
                 &root,
-                claude_core::services::plugins::language_servers(&context)?,
+                claude_core::services::plugins::all_language_servers(&context)?,
             )?;
             let words = split_arguments(argument)?;
             if words.is_empty() || words == ["status"] {
