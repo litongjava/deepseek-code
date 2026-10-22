@@ -27,8 +27,7 @@ pub struct Cli {
     /// Project directory (defaults to the current directory).
     #[arg(short = 'C', long, global = true)]
     pub path: Option<PathBuf>,
-    /// Data directory shared with Desktop; defaults to ~/.deepseek-code
-    /// (CLAUDE_RUST_DATA_DIR is still honoured).
+    /// Data directory shared with Desktop; defaults to ~/.deepseek-code.
     #[arg(long, env = "DEEPSEEK_CODE_DATA_DIR", global = true)]
     pub data_dir: Option<PathBuf>,
     /// Exact model ID, legacy alias, or provider::model.

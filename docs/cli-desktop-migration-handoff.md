@@ -30,7 +30,7 @@
 
 新 CLI 已接入 query、REPL、stdin、text/json/stream-json、provider/model 选择、权限模式、会话恢复、配置、MCP list/add/remove、skills、init。旧配置导入目前只迁移 provider、模型与 token 上限。使用说明见 [cli.md](cli.md)。
 
-默认使用 Desktop 的 `com.claude.desktop` 数据目录；支持 `--data-dir` 隔离。自定义 OpenAI/Anthropic 协议是原生 Rust；内置 provider harness 仍需要 Node.js 22+ 和 `runtime/provider-runtime.mjs`。
+默认使用与 Desktop 共用的 `~/.deepseek-code` 数据目录；支持 `--data-dir` 隔离。自定义 OpenAI/Anthropic 协议是原生 Rust；内置 provider harness 仍需要 Node.js 22+ 和 `runtime/provider-runtime.mjs`。
 
 已有取消和终端交互修复：答案等待器先注册再发事件；取消会中止并等待执行任务；Bash 子进程使用 `kill_on_drop(true)`。后续功能要复用该生命周期，不能引入取消后继续执行的后台任务。
 

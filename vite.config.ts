@@ -10,18 +10,7 @@ const packageJson = JSON.parse(fs.readFileSync('./package.json', 'utf-8'));
 // Mirrors claude_core::runtime::resolve_default_data_dir so the dev proxy reads
 // the Bridge key from the directory the desktop backend actually uses.
 function desktopDataDir(): string {
-  const explicit = process.env.DEEPSEEK_CODE_DATA_DIR || process.env.CLAUDE_RUST_DATA_DIR;
-  if (explicit) return explicit;
-  const preferred = path.join(os.homedir(), '.deepseek-code');
-  const platformData =
-    process.platform === 'win32'
-      ? process.env.APPDATA
-      : process.platform === 'darwin'
-        ? path.join(os.homedir(), 'Library', 'Application Support')
-        : process.env.XDG_DATA_HOME || path.join(os.homedir(), '.local', 'share');
-  const legacy = platformData && path.join(platformData, 'com.claude.desktop');
-  const hasDatabase = (dir: string) => fs.existsSync(path.join(dir, 'claude_desktop.db'));
-  return !hasDatabase(preferred) && legacy && hasDatabase(legacy) ? legacy : preferred;
+  return process.env.DEEPSEEK_CODE_DATA_DIR || path.join(os.homedir(), '.deepseek-code');
 }
 
 export default defineConfig(({ mode }) => {

@@ -23,43 +23,21 @@ pub use user_content::normalize_user_content;
 
 /// Default data directory under the user's home.
 pub const DATA_DIR_NAME: &str = ".deepseek-code";
+/// SQLite database shared by the CLI and Desktop inside the data directory.
+pub const DATABASE_FILE: &str = "deepseek_code.db";
 /// Explicit data directory override.
 pub const DATA_DIR_ENV: &str = "DEEPSEEK_CODE_DATA_DIR";
-/// Override honoured for compatibility with earlier releases.
-pub const LEGACY_DATA_DIR_ENV: &str = "CLAUDE_RUST_DATA_DIR";
-/// Directory name under the platform data directory used by earlier releases.
-pub const LEGACY_DATA_DIR_NAME: &str = "com.claude.desktop";
-const DATABASE_FILE: &str = "claude_desktop.db";
 
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct DataDirResolution {
-    pub path: PathBuf,
-    /// True when the legacy directory is used because it holds the only database.
-    pub legacy: bool,
+/// The data directory: `DEEPSEEK_CODE_DATA_DIR` when set, else `~/.deepseek-code`.
+pub fn resolve_default_data_dir() -> Result<PathBuf> {
+    resolve(std::env::var_os(DATA_DIR_ENV), dirs::home_dir())
 }
 
-/// Resolves the data directory: an explicit environment override wins, then
-/// `~/.deepseek-code`. Existing installs keep working: while the new directory
-/// has no database but the legacy `com.claude.desktop` directory does, the
-/// legacy directory stays in use until the user moves it.
-pub fn resolve_default_data_dir() -> Result<DataDirResolution> {
-    for name in [DATA_DIR_ENV, LEGACY_DATA_DIR_ENV] {
-        if let Some(path) = std::env::var_os(name).filter(|value| !value.is_empty()) {
-            return Ok(DataDirResolution { path: PathBuf::from(path), legacy: false });
-        }
+fn resolve(explicit: Option<std::ffi::OsString>, home: Option<PathBuf>) -> Result<PathBuf> {
+    if let Some(path) = explicit.filter(|value| !value.is_empty()) {
+        return Ok(PathBuf::from(path));
     }
-    let home = dirs::home_dir().context("Cannot locate the home directory; use --data-dir")?;
-    let legacy = dirs::data_dir().map(|dir| dir.join(LEGACY_DATA_DIR_NAME));
-    Ok(choose_data_dir(home.join(DATA_DIR_NAME), legacy))
-}
-
-fn choose_data_dir(preferred: PathBuf, legacy: Option<PathBuf>) -> DataDirResolution {
-    if !preferred.join(DATABASE_FILE).exists() {
-        if let Some(legacy) = legacy.filter(|dir| dir.join(DATABASE_FILE).exists()) {
-            return DataDirResolution { path: legacy, legacy: true };
-        }
-    }
-    DataDirResolution { path: preferred, legacy: false }
+    Ok(home.context("Cannot locate the home directory; use --data-dir")?.join(DATA_DIR_NAME))
 }
 
 #[derive(Clone, Debug)]
@@ -75,11 +53,11 @@ impl RuntimePaths {
 
     /// Data directory shared by the CLI and Desktop, see [`resolve_default_data_dir`].
     pub fn default_data_dir() -> Result<PathBuf> {
-        Ok(resolve_default_data_dir()?.path)
+        resolve_default_data_dir()
     }
 
     pub fn open_database(&self) -> Result<Arc<DbManager>> {
-        let db = Arc::new(DbManager::new(self.data_dir.join("claude_desktop.db")).context("Opening shared database pool")?);
+        let db = Arc::new(DbManager::new(self.data_dir.join(DATABASE_FILE)).context("Opening shared database pool")?);
         db.init().context("Initializing shared database schema")?;
         Ok(db)
     }
@@ -501,45 +479,12 @@ impl SessionStore {
 mod data_dir_tests {
     use super::*;
 
-    fn database(dir: &Path) {
-        std::fs::create_dir_all(dir).unwrap();
-        std::fs::write(dir.join(DATABASE_FILE), b"").unwrap();
-    }
-
     #[test]
-    fn fresh_install_uses_the_new_directory() {
-        let root = tempfile::tempdir().unwrap();
-        let preferred = root.path().join(DATA_DIR_NAME);
-        let legacy = root.path().join(LEGACY_DATA_DIR_NAME);
-        assert_eq!(
-            choose_data_dir(preferred.clone(), Some(legacy)),
-            DataDirResolution { path: preferred, legacy: false }
-        );
-    }
-
-    #[test]
-    fn legacy_database_is_kept_until_the_new_directory_has_one() {
-        let root = tempfile::tempdir().unwrap();
-        let preferred = root.path().join(DATA_DIR_NAME);
-        let legacy = root.path().join(LEGACY_DATA_DIR_NAME);
-        database(&legacy);
-        // An unrelated file in the new directory must not hide existing sessions.
-        std::fs::create_dir_all(&preferred).unwrap();
-        assert_eq!(
-            choose_data_dir(preferred.clone(), Some(legacy.clone())),
-            DataDirResolution { path: legacy.clone(), legacy: true }
-        );
-        database(&preferred);
-        assert_eq!(
-            choose_data_dir(preferred.clone(), Some(legacy)),
-            DataDirResolution { path: preferred, legacy: false }
-        );
-    }
-
-    #[test]
-    fn missing_platform_data_directory_falls_back_to_the_new_directory() {
-        let root = tempfile::tempdir().unwrap();
-        let preferred = root.path().join(DATA_DIR_NAME);
-        assert_eq!(choose_data_dir(preferred.clone(), None).path, preferred);
+    fn explicit_directory_wins_over_the_home_default() {
+        let home = PathBuf::from("/home/user");
+        assert_eq!(resolve(None, Some(home.clone())).unwrap(), home.join(DATA_DIR_NAME));
+        assert_eq!(resolve(Some("".into()), Some(home.clone())).unwrap(), home.join(DATA_DIR_NAME));
+        assert_eq!(resolve(Some("/data/dcl".into()), Some(home)).unwrap(), PathBuf::from("/data/dcl"));
+        assert!(resolve(None, None).is_err());
     }
 }

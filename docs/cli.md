@@ -63,7 +63,7 @@ dcl skills list
 dcl skills execute <skill-id> '任务说明'
 ```
 
-默认数据目录为 `~/.deepseek-code`，与 Desktop 共用，可用 `--info` 查看。`--data-dir`、`DEEPSEEK_CODE_DATA_DIR`（旧变量 `CLAUDE_RUST_DATA_DIR` 仍然有效）可选择隔离目录。兼容旧版本：`~/.deepseek-code` 中还没有数据库、而旧的平台数据目录 `com.claude.desktop` 中有时，继续使用旧目录并在 stderr 提示；把旧目录移动到 `~/.deepseek-code` 后自动切换。两端使用相同的 `config.json`、`claude_desktop.db` 和 MCP 配置。CLI 创建的会话是绑定项目的 Code 会话，沿用项目目录校验和 Code 提示词；恢复会话时使用原项目，传入冲突的 `--path` 会报错。
+默认数据目录为 `~/.deepseek-code`，与 Desktop 共用，可用 `--info` 查看。`--data-dir` 或 `DEEPSEEK_CODE_DATA_DIR` 可选择隔离目录。两端使用相同的 `config.json`、`deepseek_code.db` 和 MCP 配置。CLI 创建的会话是绑定项目的 Code 会话，沿用项目目录校验和 Code 提示词；恢复会话时使用原项目，传入冲突的 `--path` 会报错。
 
 当前项目的 `CLAUDE.md` 和 `AGENTS.md` 会加入 CLI 请求。模型参数和环境密钥仅在内存生效。`config show` 隐去凭据；`config set api_key` 与 Desktop 的 provider 配置一样会保存密钥到本地配置，优先使用环境变量。Tauri 的登录 token 和系统安全存储仍由 Desktop 管理，CLI 不尝试读取或降级存储这些 token。
 
