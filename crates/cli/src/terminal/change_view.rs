@@ -7,6 +7,10 @@ pub enum Style {
     Muted,
     Success,
     Failure,
+    /// A completed todo: muted and struck through.
+    Done,
+    /// The todo in progress: bold.
+    Current,
     Removed,
     Added,
     RemovedWord,
@@ -160,6 +164,8 @@ fn codes(style: Style, theme: u8) -> &'static str {
             Style::Muted => "90",
             Style::Success => "32",
             Style::Failure => "31",
+            Style::Done => "90;9",
+            Style::Current => "1",
             Style::Removed | Style::RemovedGutter => "31",
             Style::Added | Style::AddedGutter => "32",
             Style::RemovedWord => "31;47",
@@ -188,6 +194,8 @@ fn codes(style: Style, theme: u8) -> &'static str {
             Style::Muted => "38;2;102;102;102",
             Style::Success => "38;2;32;128;64",
             Style::Failure => "38;2;176;32;32",
+            Style::Done => "38;2;102;102;102;9",
+            Style::Current => "38;2;32;32;32;1",
             Style::Removed => "38;2;32;32;32;48;2;255;224;224",
             Style::Added => "38;2;32;32;32;48;2;220;245;220",
             Style::RemovedWord => "38;2;32;32;32;48;2;255;180;180",
@@ -201,6 +209,8 @@ fn codes(style: Style, theme: u8) -> &'static str {
         Style::Muted => "38;2;153;153;153",
         Style::Success => "38;2;78;186;101",
         Style::Failure => "38;2;255;107;107",
+        Style::Done => "38;2;153;153;153;9",
+        Style::Current => "38;2;248;248;242;1",
         Style::Removed => "38;2;248;248;242;48;2;61;1;0",
         Style::Added => "38;2;248;248;242;48;2;2;40;0",
         Style::RemovedWord => "38;2;248;248;242;48;2;92;2;0",
@@ -283,6 +293,19 @@ pub fn tool_call(label: &str, detail: &str, failed: bool) -> Line {
         spans.push(span(format!(" \u{b7} {detail}"), Style::Muted));
     }
     Line(spans)
+}
+/// One todo under `Update Todos`: done items struck through, the current one bold.
+pub fn todo_item(text: &str, status: &str, first: bool) -> Line {
+    let (mark, style) = match status {
+        "completed" => ("\u{2612} ", Style::Done),
+        "in_progress" => ("\u{2610} ", Style::Current),
+        _ => ("\u{2610} ", Style::Body),
+    };
+    Line(vec![
+        span(if first { "  \u{23bf}  " } else { "     " }, Style::Muted),
+        span(mark, style),
+        span(text, style),
+    ])
 }
 /// One line of a tool result under its header, as `  ⎿  text`.
 pub fn tool_output(text: &str, first: bool, failed: bool) -> Line {

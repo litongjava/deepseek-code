@@ -91,6 +91,19 @@ pub fn summary(name: &str, output: &str, failed: bool) -> (Vec<String>, usize) {
     )
 }
 
+/// The todo list as the reference CLI shows it: `☒` done (struck through),
+/// `☐` open, the item in progress in bold.
+fn todo_lines(input: &Value, failed: bool) -> Option<Vec<Line>> {
+    let todos = input["todos"].as_array().filter(|todos| !todos.is_empty())?;
+    let mut lines = vec![change_view::tool_call("Update Todos", "", failed)];
+    for (index, todo) in todos.iter().enumerate() {
+        let text = printable(todo["content"].as_str().unwrap_or_default());
+        let status = todo["status"].as_str().unwrap_or("pending");
+        lines.push(change_view::todo_item(&text, status, index == 0));
+    }
+    Some(lines)
+}
+
 /// `● Tool(args) · 0.4s` followed by a short result.
 pub fn finished(
     name: &str,
@@ -100,6 +113,11 @@ pub fn finished(
     elapsed: Option<Duration>,
     workspace: Option<&std::path::Path>,
 ) -> Vec<Line> {
+    if matches!(name, "TodoWrite" | "todo_write") {
+        if let Some(lines) = todo_lines(input, failed) {
+            return lines;
+        }
+    }
     let detail = elapsed
         .map(|elapsed| format!("{:.1}s", elapsed.as_secs_f64()))
         .unwrap_or_default();
@@ -223,5 +241,16 @@ mod tests {
         assert_eq!(question, "Bash command\n  ls -la\n  List files\nAllow this call?  1. Yes   2. No  (1/y or 2/n)");
         let question = approval_question("Write", &json!({"file_path":"a.txt","content":"x"}), None);
         assert!(question.starts_with("Write(a.txt)\n  {"), "{question}");
+    }
+
+    #[test]
+    fn todo_lists_render_as_checkboxes() {
+        let input = json!({"todos":[
+            {"content":"Read the code","status":"completed"},
+            {"content":"Fix the bug","status":"in_progress"},
+            {"content":"Run tests","status":"pending"}
+        ]});
+        let lines = text(&finished("TodoWrite", &input, "{}", false, None, None));
+        assert_eq!(lines, ["\u{25cf} Update Todos", "  \u{23bf}  \u{2612} Read the code", "     \u{2610} Fix the bug", "     \u{2610} Run tests"]);
     }
 }
