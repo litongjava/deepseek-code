@@ -265,6 +265,12 @@ const VERBS: &[&str] = &[
     "Marinating", "Scheming", "Synthesizing", "Wrangling", "Conjuring", "Deliberating", "Fermenting",
 ];
 
+/// Shown in the closing line, as in "✻ Churned for 7m 7s".
+const PAST_VERBS: &[&str] = &[
+    "Baked", "Brewed", "Churned", "Cogitated", "Cooked", "Crunched", "Mulled", "Pondered",
+    "Sautéed", "Simmered", "Worked", "Crafted", "Whittled", "Kneaded", "Distilled",
+];
+
 fn spinner_glyph(frame: usize) -> &'static str {
     let cycle = SPINNER.len() * 2;
     let position = frame % cycle;
@@ -880,12 +886,16 @@ fn run(
                         let _ = actions.send(Action::Draft(draft));
                     }
                     screen.erase();
+                    // As in the reference CLI, after a blank line:
+                    // "✻ Churned for 7m 7s · done 10:41 AM".
                     let footer = format!(
-                        "Worked for {}s \u{b7} {} \u{b7} {}",
-                        state.started.elapsed().as_secs(),
+                        "\u{273b} {} for {} \u{b7} {} {}",
+                        PAST_VERBS[state.frame.wrapping_add(state.started.elapsed().subsec_nanos() as usize) % PAST_VERBS.len()],
+                        short_duration(state.started.elapsed().as_secs()),
                         error.as_deref().unwrap_or("done"),
                         chrono::Local::now().format("%-I:%M %p")
                     );
+                    screen.log("")?;
                     if std::env::var_os("NO_COLOR").is_some() {
                         screen.log(&footer)?;
                     } else {
