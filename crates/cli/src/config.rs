@@ -34,13 +34,33 @@ fn save_preferences(paths: &RuntimePaths, value: &Value) -> Result<()> {
     Ok(())
 }
 
+/// Default output budget per model. Claude models follow the reference CLI's
+/// table; DeepSeek counts thinking against the budget and accepts far more
+/// than 8K. Other OpenAI-compatible endpoints often reject larger values.
+pub(crate) fn default_max_tokens(model: &str) -> u32 {
+    let model = model.to_ascii_lowercase();
+    if model.starts_with("deepseek") {
+        return 32_000;
+    }
+    if !model.contains("claude") {
+        return 8192;
+    }
+    if model.contains("opus-4-6") {
+        64_000
+    } else if model.contains("claude-3-opus") || model.contains("claude-3-haiku") {
+        4096
+    } else if model.contains("claude-3-sonnet") || model.contains("3-5-sonnet") || model.contains("3-5-haiku") {
+        8192
+    } else {
+        32_000
+    }
+}
+
 pub(crate) fn provider_template(model: &str) -> ProviderConfig {
     let model = ApiConfig::resolve_model_alias(model);
     let metadata = ApiConfig::get_provider_metadata(&model);
     let anthropic = model.starts_with("claude");
-    // DeepSeek counts thinking against the output budget, so 8K tokens cut
-    // off ordinary file writes; its API accepts far larger limits.
-    let max_tokens = if model.starts_with("deepseek") { 32_000 } else { 8192 };
+    let max_tokens = default_max_tokens(&model);
     ProviderConfig {
         id: "cli".into(),
         name: "CLI".into(),
@@ -376,4 +396,19 @@ fn import_legacy(paths: &RuntimePaths, source: &Path) -> Result<()> {
     save_preferences(paths, &prefs)?;
     eprintln!("Imported legacy provider. Source settings were not modified.");
     Ok(())
+}
+
+#[cfg(test)]
+mod budget_tests {
+    use super::*;
+
+    #[test]
+    fn output_budgets_follow_the_model_family() {
+        assert_eq!(default_max_tokens("deepseek-flash"), 32_000);
+        assert_eq!(default_max_tokens("claude-opus-4-6"), 64_000);
+        assert_eq!(default_max_tokens("claude-sonnet-4-5"), 32_000);
+        assert_eq!(default_max_tokens("claude-3-5-haiku-latest"), 8192);
+        assert_eq!(default_max_tokens("claude-3-opus-20240229"), 4096);
+        assert_eq!(default_max_tokens("gpt-4o"), 8192);
+    }
 }
