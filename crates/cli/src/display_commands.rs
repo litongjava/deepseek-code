@@ -282,9 +282,10 @@ pub async fn handle(
                 .await?;
             }
             save(session, &settings)?;
-            eprintln!("Diff panel {}. Ctrl+O expands or collapses; PgUp/PgDn or mouse wheel scrolls. /diff toggles the panel.", if settings.diff_panel { "on" } else { "off" });
+            eprintln!("Diff panel {}. Ctrl+O expands or collapses; PgUp/PgDn scrolls. /diff toggles the panel.", if settings.diff_panel { "on" } else { "off" });
         }
-        "/usage" => {
+        // /cost is the reference CLI's name for the same session cost view.
+        "/usage" | "/cost" => {
             ensure!(matches!(argument,""|"local"|"refresh"), "Usage: /usage [local|refresh]");
             let mut value=usage(session)?;
             value["billing"]=claude_core::services::usage::session_cost(&session.store.db,&session.id,&paths.read_config()?)?;

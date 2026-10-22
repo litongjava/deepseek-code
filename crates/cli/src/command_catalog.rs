@@ -31,6 +31,7 @@ pub const COMMANDS: &[(&str, &str)] = &[
     ("/statusline", "Configure status line: setup [description]|command SCRIPT|off|show"),
     ("/diff", "Toggle the scrollable Git diff panel: [on|off|staged]"),
     ("/usage", "Show request tokens, configured cost estimates and Anthropic plan usage"),
+    ("/cost", "Show this session's token usage and cost estimate (alias for /usage)"),
     ("/memory", "Show or edit project instructions: [show|edit|local]"),
     ("/plugin", "Manage installed plugins: list|install|enable|disable|remove"),
     ("/reload-plugins", "Reload the currently enabled plugin configuration"),
