@@ -1343,9 +1343,10 @@ impl ToolLoopExecutor {
             return (tool_input.clone(), output, failed);
         }
         if tool_name == "SendMessage" {
-            let permission = self.check_permission(tool_name, tool_input, _tool_use_id).await;
-            if !matches!(permission, PermissionResult::Granted) {
-                return (tool_input.clone(), "Team message access requires granted project tool permission".into(), true);
+            match self.check_permission(tool_name, tool_input, _tool_use_id).await {
+                PermissionResult::Denied(reason) => return (tool_input.clone(), format!("Team message access denied: {reason}"), true),
+                PermissionResult::RequiresConfirmation(message) => return self.execute_ask_user_confirmation(tool_name, tool_input, _tool_use_id, &message).await,
+                PermissionResult::Granted => {}
             }
             let result = match (self.search_config_path.as_deref().and_then(std::path::Path::parent), self.conv_id.as_deref()) {
                 (Some(root), Some(session)) => crate::services::session_messages::context(root).and_then(|context| crate::tools::agent_messages::execute_live(&context, session, tool_input.clone())),
