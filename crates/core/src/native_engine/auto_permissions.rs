@@ -130,7 +130,8 @@ fn schema() -> Value {
 }
 
 fn parse(text: &str) -> Result<Verdict, Failure> {
-    let verdict: Verdict = serde_json::from_str(text).map_err(|_| Failure::InvalidResponse)?;
+    let verdict: Verdict = serde_json::from_str(crate::structured_output::strip_code_fence(text))
+        .map_err(|_| Failure::InvalidResponse)?;
     if (verdict.decision == Decision::Allow) != (verdict.reason_code == Reason::Authorized) {
         return Err(Failure::InvalidResponse);
     }
@@ -484,13 +485,18 @@ impl AutoClassifier {
                     cache_read_tokens: u.cache_read_input_tokens.unwrap_or(0) as u64,
                     cache_write_tokens: u.cache_creation_input_tokens.unwrap_or(0) as u64,
                 });
-                if response.stop_reason.as_deref() != Some("end_turn")
-                    || response.content.len() != 1
-                {
+                if response.stop_reason.as_deref() != Some("end_turn") {
                     return Ok((Err(Failure::InvalidResponse), usage));
                 }
-                let verdict = match &response.content[0] {
-                    ContentBlock::Text { text } => parse(text),
+                // Reasoning models (e.g. DeepSeek) emit thinking before the answer.
+                let mut answer = response.content.iter().filter(|block| {
+                    !matches!(
+                        block,
+                        ContentBlock::Thinking { .. } | ContentBlock::RedactedThinking { .. }
+                    )
+                });
+                let verdict = match (answer.next(), answer.next()) {
+                    (Some(ContentBlock::Text { text }), None) => parse(text),
                     _ => Err(Failure::InvalidResponse),
                 };
                 Ok((verdict, usage))
@@ -525,7 +531,7 @@ mod tests {
                     json!({"id":"fixture","object":"chat.completion","created":0,"model":"classifier-fixture","choices":[{"index":0,"finish_reason":"stop","message":{"role":"assistant","content":text}}],"usage":{"prompt_tokens":12,"completion_tokens":4,"total_tokens":16}})
                 } else {
                     assert_eq!(body["output_config"]["format"]["type"], "json_schema");
-                    json!({"id":"fixture","type":"message","role":"assistant","model":"classifier-fixture","stop_reason":"end_turn","content":[{"type":"text","text":text}],"usage":{"input_tokens":12,"output_tokens":4,"cache_read_input_tokens":2}})
+                    json!({"id":"fixture","type":"message","role":"assistant","model":"classifier-fixture","stop_reason":"end_turn","content":[{"type":"thinking","thinking":"weighing scope","signature":"sig"},{"type":"text","text":text}],"usage":{"input_tokens":12,"output_tokens":4,"cache_read_input_tokens":2}})
                 })
             }));
             let server = tokio::spawn(async move {
