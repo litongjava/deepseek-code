@@ -32,6 +32,7 @@ enum Message {
     Panel(Vec<(String, String)>, bool),
     Draft(String),
     Keybindings(crate::keybindings::Keybindings),
+    Workspace(std::path::PathBuf),
     Read(Request),
 }
 
@@ -108,6 +109,10 @@ impl TerminalInput {
                         editor.set_keybindings(bindings);
                         continue;
                     }
+                    Message::Workspace(workspace) => {
+                        editor.set_workspace(workspace);
+                        continue;
+                    }
                     Message::Read(request) => request,
                 };
                 if request.response.is_closed() {
@@ -171,6 +176,11 @@ impl TerminalInput {
     /// Set the last turn's tool titles and full display bodies before reading.
     pub fn set_panel(&self, details: Vec<(String, String)>, expanded: bool) {
         let _ = self.requests.send(Message::Panel(details, expanded));
+    }
+
+    /// The project whose files `@` completes.
+    pub fn set_workspace(&self, workspace: &std::path::Path) {
+        let _ = self.requests.send(Message::Workspace(workspace.to_owned()));
     }
 
     /// Where a background task delivers the suggested next prompt.

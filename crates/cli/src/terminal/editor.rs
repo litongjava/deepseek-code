@@ -28,6 +28,9 @@ pub struct PromptEditor {
     /// Suggested next prompts, generated after a turn; Tab accepts one.
     suggestions: Option<std::sync::mpsc::Receiver<String>>,
     suggestion: Option<String>,
+    /// Project root for `@` file completion, and its files once listed.
+    workspace: Option<std::path::PathBuf>,
+    files: Option<Vec<String>>,
     keybindings: crate::keybindings::Keybindings,
 }
 impl Default for PromptEditor {
@@ -43,6 +46,8 @@ impl Default for PromptEditor {
             transcript_printed: false,
             suggestions: None,
             suggestion: None,
+            workspace: None,
+            files: None,
             keybindings: crate::keybindings::Keybindings::default(),
             commands: crate::command_catalog::COMMANDS
                 .iter()
@@ -89,6 +94,73 @@ impl Buffer {
         }
     }
 }
+/// Directories never offered by `@` file completion.
+const SKIPPED_DIRS: &[&str] = &["node_modules", "target", "dist", "build", "out", "__pycache__", "vendor"];
+
+/// Project files relative to `root`, with `/` separators, for `@` mentions.
+fn project_files(root: &std::path::Path) -> Vec<String> {
+    let mut files = Vec::new();
+    let mut pending = vec![root.to_path_buf()];
+    while let Some(dir) = pending.pop() {
+        let Ok(entries) = std::fs::read_dir(&dir) else { continue };
+        for entry in entries.flatten() {
+            let name = entry.file_name().to_string_lossy().into_owned();
+            if name.starts_with('.') {
+                continue;
+            }
+            let path = entry.path();
+            match entry.file_type() {
+                Ok(kind) if kind.is_dir() => {
+                    if !SKIPPED_DIRS.contains(&name.as_str()) {
+                        pending.push(path);
+                    }
+                }
+                Ok(kind) if kind.is_file() => {
+                    if let Ok(relative) = path.strip_prefix(root) {
+                        files.push(relative.to_string_lossy().replace('\\', "/"));
+                    }
+                }
+                _ => {}
+            }
+            if files.len() >= 20_000 {
+                return files;
+            }
+        }
+    }
+    files.sort();
+    files
+}
+
+/// The `@` word being typed at the end of the prompt, if any.
+fn mention(text: &str) -> Option<&str> {
+    let word = text.rsplit(char::is_whitespace).next()?;
+    word.strip_prefix('@')
+}
+
+/// Files for an `@` mention: path prefix, then file name prefix, then substring.
+fn mention_matches(files: &[String], query: &str) -> Vec<(String, String)> {
+    let query = query.to_lowercase();
+    let mut found: Vec<(u8, &String)> = files
+        .iter()
+        .filter_map(|file| {
+            let lower = file.to_lowercase();
+            let name = lower.rsplit('/').next().unwrap_or(&lower);
+            let rank = if lower.starts_with(&query) {
+                0
+            } else if name.starts_with(&query) {
+                1
+            } else if lower.contains(&query) {
+                2
+            } else {
+                return None;
+            };
+            Some((rank, file))
+        })
+        .collect();
+    found.sort();
+    found.into_iter().take(50).map(|(_, file)| (format!("@{file}"), String::new())).collect()
+}
+
 fn matches(commands: &[(String, String)], text: &str) -> Vec<usize> {
     if !text.starts_with('/') || text.chars().any(char::is_whitespace) {
         return Vec::new();
@@ -522,6 +594,12 @@ impl PromptEditor {
     pub fn set_notices(&mut self, notices: std::sync::mpsc::Receiver<String>) {
         self.notices = Some(notices);
     }
+    pub fn set_workspace(&mut self, workspace: std::path::PathBuf) {
+        if self.workspace.as_ref() != Some(&workspace) {
+            self.workspace = Some(workspace);
+            self.files = None;
+        }
+    }
     pub fn set_suggestions(&mut self, suggestions: std::sync::mpsc::Receiver<String>) {
         self.suggestions = Some(suggestions);
     }
@@ -576,6 +654,8 @@ impl PromptEditor {
         let mut search_pos = self.history.len();
         // A suggestion belongs to the turn before this prompt; drop stale ones.
         self.suggestion = None;
+        // Files may have changed since the last prompt; list them again on `@`.
+        self.files = None;
         if let Some(suggestions) = &self.suggestions {
             while suggestions.try_recv().is_ok() {}
         }
@@ -607,10 +687,22 @@ impl PromptEditor {
             let width = cols.saturating_sub(1).max(4) as usize;
             let text = buffer.text();
             let ghost = self.suggestion.clone().filter(|_| buffer.chars.is_empty());
+            let mention_query = mention(&text).filter(|_| buffer.cursor == buffer.chars.len()).map(str::to_owned);
+            let mentioned: Vec<(String, String)> = match (&mention_query, &self.workspace) {
+                (Some(query), Some(root)) if !menu_hidden => {
+                    let root = root.clone();
+                    let files = self.files.get_or_insert_with(|| project_files(&root));
+                    mention_matches(files, query)
+                }
+                _ => Vec::new(),
+            };
+            let entries: &[(String, String)] = if mention_query.is_some() { &mentioned } else { &self.commands };
             let items = if menu_hidden {
                 vec![]
+            } else if mention_query.is_some() {
+                (0..entries.len()).collect()
             } else {
-                matches(&self.commands, &text)
+                matches(entries, &text)
             };
             selected = selected.min(items.len().saturating_sub(1));
             // Wrap by display cells, never by UTF-8 bytes. Keep cursor in viewport.
@@ -692,7 +784,7 @@ impl PromptEditor {
                 .iter()
                 .map(|index| {
                     wrap_detail(
-                        &self.commands[*index].1,
+                        &entries[*index].1,
                         width.saturating_sub(name_width + 4).max(1),
                     )
                     .len()
@@ -701,7 +793,7 @@ impl PromptEditor {
                 .collect();
             let (start, end) = menu_page(&heights, selected, available);
             for (position, index) in items.iter().enumerate().take(end).skip(start) {
-                let (name, desc) = &self.commands[*index];
+                let (name, desc) = &entries[*index];
                 let prefix = if position == selected { "›" } else { " " };
                 let label = clipped(name, name_width);
                 let style = if position == selected {
@@ -950,9 +1042,16 @@ impl PromptEditor {
                         KeyCode::Tab | KeyCode::Enter
                             if !items.is_empty()
                                 && (key.code == KeyCode::Tab
-                                    || text != self.commands[items[selected]].0) =>
+                                    || text != entries[items[selected]].0) =>
                         {
-                            buffer.set(&format!("{} ", self.commands[items[selected]].0));
+                            let choice = &entries[items[selected]].0;
+                            if let Some(query) = &mention_query {
+                                // Replace only the `@` word; keep the rest of the prompt.
+                                let keep = text.len() - query.len() - 1;
+                                buffer.set(&format!("{}{choice} ", &text[..keep]));
+                            } else {
+                                buffer.set(&format!("{choice} "));
+                            }
                             menu_hidden = true;
                         }
                         KeyCode::Enter => {
@@ -1031,6 +1130,28 @@ impl PromptEditor {
         }
     }
 }
+#[cfg(test)]
+mod mention_tests {
+    use super::*;
+
+    #[test]
+    fn mentions_complete_project_files_and_skip_build_output() {
+        let dir = tempfile::tempdir().unwrap();
+        for file in ["src/main.rs", "src/lib.rs", "README.md", "node_modules/x/index.js", ".git/config", "target/debug/app"] {
+            let path = dir.path().join(file);
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(path, "").unwrap();
+        }
+        let files = project_files(dir.path());
+        assert_eq!(files, ["README.md", "src/lib.rs", "src/main.rs"]);
+        assert_eq!(mention("explain @src/ma"), Some("src/ma"));
+        assert_eq!(mention("no mention here"), None);
+        let found = mention_matches(&files, "ma");
+        assert_eq!(found[0].0, "@src/main.rs");
+        assert_eq!(mention_matches(&files, "src/").len(), 2);
+    }
+}
+
 #[cfg(test)]
 mod tests {
     #[test]
