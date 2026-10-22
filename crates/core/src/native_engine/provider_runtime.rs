@@ -251,7 +251,13 @@ pub async fn stream_with_schema_observed(
     };
     let vision = messages.iter().any(|m| matches!(&m.content, super::openai_client::OpenAIContent::Multi(parts) if parts.iter().any(|p| matches!(p,super::openai_client::OpenAIContentPart::Image{..}))));
     let mut body = messages::request(api, provider, model, messages, system, tools, max_tokens)?;
-    if let Some(schema) = response_schema {
+    if let Some(schema) = response_schema.filter(|_| !crate::structured_output::provider_enforces_schema(&provider.provider.base_url)) {
+        match api {
+            "openai-completions" => crate::structured_output::append_openai_instruction(&mut body, schema),
+            "anthropic-messages" => crate::structured_output::append_anthropic_instruction(&mut body, schema),
+            _ => bail!("Provider protocol '{protocol}' cannot enforce a JSON schema for this endpoint"),
+        }
+    } else if let Some(schema) = response_schema {
         match api {
             "openai-completions" => body["response_format"] = serde_json::json!({"type":"json_schema","json_schema":{"name":"structured_response","strict":true,"schema":schema}}),
             "openai-responses" => body["text"]["format"] = serde_json::json!({"type":"json_schema","name":"structured_response","strict":true,"schema":schema}),

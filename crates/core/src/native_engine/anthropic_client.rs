@@ -174,7 +174,11 @@ impl AnthropicClient {
     fn apply_options(&self, body: &mut Value, provider: &ResolvedProvider) -> Result<()> {
         crate::services::anthropic_auth::apply_fast(body, provider.model.fast, &provider.model.id, &provider.provider.base_url)?;
         if let Some(schema) = &self.response_schema {
-            body["output_config"]["format"] = json!({"type":"json_schema","schema":schema});
+            if crate::structured_output::provider_enforces_schema(&provider.provider.base_url) {
+                body["output_config"]["format"] = json!({"type":"json_schema","schema":schema});
+            } else {
+                crate::structured_output::append_anthropic_instruction(body, schema);
+            }
         }
         Ok(())
     }

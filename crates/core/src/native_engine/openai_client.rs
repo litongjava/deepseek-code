@@ -234,7 +234,11 @@ impl OpenAIClient {
 
         apply_effort(&mut body, provider.model.effort.as_deref(), &provider.provider.base_url);
         if let Some(schema) = &self.response_schema {
-            body["response_format"] = json!({"type":"json_schema","json_schema":{"name":"structured_response","strict":true,"schema":schema}});
+            if crate::structured_output::provider_enforces_schema(&provider.provider.base_url) {
+                body["response_format"] = json!({"type":"json_schema","json_schema":{"name":"structured_response","strict":true,"schema":schema}});
+            } else {
+                crate::structured_output::append_openai_instruction(&mut body, schema);
+            }
         }
         if let Some(messages) = body["messages"].as_array_mut() { for message in messages { if let Some(object) = message.as_object_mut() { object.remove("provider_content"); } } }
         let request = || async {
@@ -323,7 +327,11 @@ impl OpenAIClient {
 
         apply_effort(&mut body, provider.model.effort.as_deref(), &provider.provider.base_url);
         if let Some(schema) = &self.response_schema {
-            body["response_format"] = json!({"type":"json_schema","json_schema":{"name":"structured_response","strict":true,"schema":schema}});
+            if crate::structured_output::provider_enforces_schema(&provider.provider.base_url) {
+                body["response_format"] = json!({"type":"json_schema","json_schema":{"name":"structured_response","strict":true,"schema":schema}});
+            } else {
+                crate::structured_output::append_openai_instruction(&mut body, schema);
+            }
         }
         if let Some(messages) = body["messages"].as_array_mut() { for message in messages { if let Some(object) = message.as_object_mut() { object.remove("provider_content"); } } }
         if let Some(capture) = context_capture { capture.record("openai-completions", &body, provider.model.context_window, max_tokens).await; }

@@ -1221,10 +1221,12 @@ impl ToolLoopExecutor {
                 }
             }
         }
-        let loop_result = loop_result.and_then(|(text, stop_reason)| {
+        let loop_result = loop_result.and_then(|(mut text, stop_reason)| {
             if let Some(schema) = &self.response_schema {
                 if !matches!(stop_reason.as_deref(),Some("stream_error"|"error"|"interrupted"|"failed"|"cancelled"|"max_iterations"|"max_tokens"|"length"|"incomplete")) {
                     crate::structured_output::validate_result(schema,&text)?;
+                    // Hand back the bare JSON even when the model fenced it.
+                    text = crate::structured_output::strip_code_fence(&text).to_string();
                 }
             }
             Ok((text,stop_reason))
