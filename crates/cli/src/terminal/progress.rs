@@ -463,7 +463,7 @@ pub(crate) fn tool_preview_in_workspace(name: &str, input: &Value, workspace: Op
             }
         })
     } else {
-        ["file_path", "path", "pattern", "agent_type", "operation"]
+        ["file_path", "path", "pattern", "agent_type", "operation", "prompt"]
             .iter()
             .find_map(|key| input[*key].as_str().map(|value| {
                 if matches!(*key, "file_path" | "path") {

@@ -18,6 +18,7 @@ pub fn lsp_config_is_valid(server: &serde_json::Value) -> bool {
     lsp::validate_configuration(server).is_ok()
 }
 pub mod lsp_servers;
+pub mod external_agents;
 pub use lsp::{configure as configure_lsp_servers, shutdown_all as shutdown_lsp_servers, status as lsp_status};
 pub(crate) use lsp::passive_feedback as lsp_passive_feedback;
 pub(crate) use lsp::validate_configuration as validate_lsp_configuration;
@@ -395,6 +396,7 @@ pub fn get_tool_definitions() -> Vec<ToolDefinition> {
     defs.extend(tasks::definitions());
     defs.extend(coordination::definitions());
     defs.extend(teams::definitions());
+    defs.extend(external_agents::definitions());
     defs.extend(crate::services::plans::definitions());
     defs.extend(content_compat::definitions());
     let mut legacy_lsp=lsp::definition();
@@ -460,6 +462,7 @@ pub fn execute_tool(name: &str, input: serde_json::Value, cwd: &str) -> Result<s
 pub async fn execute_tool_async(name: &str, input: serde_json::Value, cwd: &str) -> Result<serde_json::Value> {
     if name == "LSP" || name == "lsp" { return lsp::execute(input, cwd).await; }
     if name == "worktree" { return worktrees::execute(input, cwd).await; }
+    if external_agents::is_external_agent(name) { return external_agents::execute(name, input, cwd).await; }
     tool_dispatch!(name, input, cwd,
         Bash => tool_bash_async(input, cwd).await,
         WebFetch => tool_web_fetch_async(input).await,
