@@ -363,7 +363,7 @@ async fn unmatched_hooks_and_callbacks_never_materialize_transcripts() {
         "PermissionRequest":[{"matcher":"Write","hooks":[{"type":"command","command":"must-not-run"}]}]
     }}).to_string()).unwrap();
     // Any attempt to query this database would fail. Matching only uses memory.
-    std::fs::write(root.path().join("claude_desktop.db"), "not a database").unwrap();
+    std::fs::write(root.path().join(crate::runtime::DATABASE_FILE), "not a database").unwrap();
     let session = uuid::Uuid::new_v4().to_string();
     let host: Arc<dyn Host> = Arc::new(Never);
     let callbacks = hook_callbacks::validate(&json!({"PreToolUse":[{"matcher":"Write","hookCallbackIds":["skip"]}],"PermissionRequest":[{"matcher":"Write","hookCallbackIds":["skip"]}]})).unwrap();
@@ -388,7 +388,7 @@ async fn unmatched_hooks_and_callbacks_never_materialize_transcripts() {
     }
     assert!(!root.path().join("hook-transcripts").exists());
     assert_eq!(
-        std::fs::read_to_string(root.path().join("claude_desktop.db")).unwrap(),
+        std::fs::read_to_string(root.path().join(crate::runtime::DATABASE_FILE)).unwrap(),
         "not a database"
     );
 }

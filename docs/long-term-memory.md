@@ -2,7 +2,7 @@
 
 Open **长期记忆** to browse recent memories, search, manually add an important fact, or clear the memory store. Settings control whether memory is enabled, automatic recall before a response, and automatic storage after a completed response. Settings and saved memories survive application restarts. Disabling memory preserves existing data; clearing memory does not delete conversations.
 
-The default backend is SQLite in `memory.sqlite3` inside the application's data directory, beside `claude_desktop.db`. Both the bridge and native chat engine use this file. No Python installation or background memory service is required. The panel uses the same authenticated bridge client as other application features.
+The default backend is SQLite in `memory.sqlite3` inside the application's data directory, beside `deepseek_code.db`. Both the bridge and native chat engine use this file. No Python installation or background memory service is required. The panel uses the same authenticated bridge client as other application features.
 
 Automatic storage saves up to 2,000 characters from each side of a completed turn. Turns containing recognizable credentials (API keys, password assignments, bearer tokens, or private keys) are skipped. This is a pattern-based filter, not a guarantee that all sensitive information is recognized. Disable automatic storage for conversations you do not want remembered. Manual entries and explicit `memory_ingest` tool calls are deliberate writes and are not subject to this automatic filter.
 

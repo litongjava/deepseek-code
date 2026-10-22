@@ -26,7 +26,7 @@ pub(crate) fn transcript(root: &Path, session: &str) -> Result<PathBuf> {
     let directory = root.join("hook-transcripts");
     std::fs::create_dir_all(&directory)?;
     let mut snapshot = tempfile::NamedTempFile::new_in(&directory)?;
-    let database = root.join("claude_desktop.db");
+    let database = root.join(crate::runtime::DATABASE_FILE);
     if database.exists() {
         let conn = rusqlite::Connection::open_with_flags(
             database,

@@ -1448,7 +1448,7 @@ async fn typed_sdk_approval_rewrites_both_provider_histories_and_empty_input_pre
             }
             drop(requests);
             assert!(client.finish().await.0.success());
-            let db = claude_core::db::DbManager::new(root.path().join("data/claude_desktop.db"))
+            let db = claude_core::db::DbManager::new(root.path().join("data").join(claude_core::runtime::DATABASE_FILE))
                 .unwrap();
             let persisted: String = db
                 .with_conn(|connection| {

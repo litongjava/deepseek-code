@@ -119,7 +119,7 @@ pub fn inspect_with_environment(
             "application settings",
             &paths.data_dir.join("settings.json"),
         );
-        let db = paths.data_dir.join("claude_desktop.db");
+        let db = paths.data_dir.join(crate::runtime::DATABASE_FILE);
         if !db.exists() {
             report.add(
                 "database",
@@ -202,7 +202,7 @@ mod tests {
         let rendered = report.render();
         assert!(rendered.contains("application config: error"));
         assert!(!rendered.contains("DO_NOT_ECHO_THIS_SECRET"));
-        assert!(!paths.data_dir.join("claude_desktop.db").exists());
+        assert!(!paths.data_dir.join(crate::runtime::DATABASE_FILE).exists());
         assert_eq!(std::fs::read_to_string(config).unwrap(), secret);
     }
     #[test]
@@ -287,14 +287,14 @@ mod tests {
         assert!(!report.contains("DO_NOT_ECHO_SECRET"));
         assert!(report.contains("Invalid YAML frontmatter at line"));
         assert_eq!(contents(temp.path()), before);
-        assert!(!paths.data_dir.join("claude_desktop.db").exists());
+        assert!(!paths.data_dir.join(crate::runtime::DATABASE_FILE).exists());
     }
 
     #[test]
     fn stored_agent_collisions_are_reported_without_definition_contents() {
         let temp = tempfile::tempdir().unwrap();
         let paths = RuntimePaths::new(temp.path().to_owned()).unwrap();
-        let database = temp.path().join("claude_desktop.db");
+        let database = temp.path().join(crate::runtime::DATABASE_FILE);
         let connection = rusqlite::Connection::open(&database).unwrap();
         connection
             .execute(
@@ -323,7 +323,7 @@ mod tests {
     fn actual_database_integrity_is_checked() {
         let temp = tempfile::tempdir().unwrap();
         let paths = RuntimePaths::new(temp.path().to_owned()).unwrap();
-        let connection = rusqlite::Connection::open(temp.path().join("claude_desktop.db")).unwrap();
+        let connection = rusqlite::Connection::open(temp.path().join(crate::runtime::DATABASE_FILE)).unwrap();
         connection
             .execute("CREATE TABLE fixture (id INTEGER)", [])
             .unwrap();

@@ -150,7 +150,7 @@ fn main() {
                 tracing::warn!("Failed to load orchestration.toml, using defaults: {}", e);
             }
             // Initialize SQLite database with persistent storage
-            let db_path = data_dir.join("claude_desktop.db");
+            let db_path = data_dir.join(claude_core::runtime::DATABASE_FILE);
             let db_manager = match crate::db::DbManager::new(db_path.clone()) {
                 Ok(db) => Arc::new(db),
                 Err(e) => {

@@ -92,7 +92,7 @@ pub fn inspect(
     if let Some(data) = data {
         settings(report, &data.join("settings.json"));
         keybindings(report, &data.join("keybindings.json"));
-        persisted_agents(report, &data.join("claude_desktop.db"));
+        persisted_agents(report, &data.join(crate::runtime::DATABASE_FILE));
         report.json("application MCP", &data.join("mcp-servers.json"));
     }
     installation(report, env);

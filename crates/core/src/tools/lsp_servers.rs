@@ -83,7 +83,7 @@ pub fn for_extension(extension: &str) -> Option<(&'static Language, &'static str
 
 /// `<data dir>/lsp`, where managed installs live.
 pub fn install_dir() -> Result<PathBuf> {
-    Ok(crate::runtime::resolve_default_data_dir()?.path.join("lsp"))
+    Ok(crate::runtime::resolve_default_data_dir()?.join("lsp"))
 }
 
 /// An executable on PATH, including Windows command shims.
