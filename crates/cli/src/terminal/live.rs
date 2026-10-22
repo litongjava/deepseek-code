@@ -246,6 +246,9 @@ struct State {
     history_draft: String,
     search_query: Option<String>,
     tip: Option<String>,
+    markdown: super::markdown::MarkdownStream,
+    /// The next text line starts an answer block and gets the `●` marker.
+    block_start: bool,
     /// Shown while the model works, as in "Brewing… (12s)".
     verb: &'static str,
     frame: usize,
@@ -322,6 +325,8 @@ impl State {
             history_draft: String::new(),
             search_query: None,
             tip: None,
+            markdown: super::markdown::MarkdownStream::new(std::env::var_os("NO_COLOR").is_none()),
+            block_start: true,
             verb: VERBS[std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
                 .map_or(0, |time| time.subsec_nanos() as usize)
@@ -514,6 +519,36 @@ fn flush_wrapped(state: &mut State, screen: &mut Frame) -> io::Result<()> {
     }
     Ok(())
 }
+/// Logs one finished answer line through the Markdown renderer. The first
+/// line of an answer block gets the reference CLI's `●`, later lines indent.
+fn emit_text_line(state: &mut State, screen: &mut Frame, line: &str) {
+    for rendered in state.markdown.line(line) {
+        log_answer_line(state, screen, &rendered);
+    }
+}
+
+fn log_answer_line(state: &mut State, screen: &mut Frame, rendered: &str) {
+    if rendered.is_empty() {
+        screen.log_rendered("");
+    } else if std::mem::take(&mut state.block_start) {
+        screen.log_rendered(&format!("\u{25cf} {rendered}"));
+    } else {
+        screen.log_rendered(&format!("  {rendered}"));
+    }
+}
+
+/// Ends the current answer block before tool output, notices or the footer.
+fn finish_text(state: &mut State, screen: &mut Frame) {
+    if !state.partial.is_empty() {
+        let line = std::mem::take(&mut state.partial);
+        emit_text_line(state, screen, &line);
+    }
+    for rendered in state.markdown.finish() {
+        log_answer_line(state, screen, &rendered);
+    }
+    state.block_start = true;
+}
+
 #[derive(Default)]
 struct Frame {
     lines: Vec<String>,
@@ -810,21 +845,17 @@ fn run(
                     while let Some(index) = state.partial.find('\n') {
                         let line = state.partial[..index].to_owned();
                         state.partial.drain(..index + 1);
-                        screen.log(&line)?;
+                        emit_text_line(state, screen, &line);
                     }
                     dirty = true;
                 }
                 Ok(Update::Notice(text)) => {
-                    if !state.partial.is_empty() {
-                        screen.log(&std::mem::take(&mut state.partial))?;
-                    }
+                    finish_text(state, screen);
                     screen.log(&text)?;
                     dirty = true;
                 }
                 Ok(Update::Styled(lines)) => {
-                    if !state.partial.is_empty() {
-                        screen.log(&std::mem::take(&mut state.partial))?;
-                    }
+                    finish_text(state, screen);
                     let width = terminal::size().unwrap_or((80, 24)).0.saturating_sub(1) as usize;
                     let color = std::env::var_os("NO_COLOR").is_none();
                     for line in lines {
@@ -863,9 +894,7 @@ fn run(
                     dirty = true;
                 }
                 Ok(Update::Question(text, reply)) => {
-                    if !state.partial.is_empty() {
-                        screen.log(&std::mem::take(&mut state.partial))?;
-                    }
+                    finish_text(state, screen);
                     if state.details.expanded {
                         state.details.toggle();
                     }
@@ -874,9 +903,7 @@ fn run(
                     dirty = true;
                 }
                 Ok(Update::Stop(error)) => {
-                    if !state.partial.is_empty() {
-                        screen.log(&std::mem::take(&mut state.partial))?;
-                    }
+                    finish_text(state, screen);
                     let draft = if state.answer.is_some() {
                         state.saved_draft.take().unwrap_or_default().take()
                     } else {
