@@ -561,6 +561,16 @@ impl PermissionManager {
                     context.tool_input["operation"].as_str(),
                     Some("get" | "list" | "merge" | "sources")
                 ));
+        // Plan mode may inspect the project with shell commands: read-only
+        // ones run, any other command is the user's call instead of a denial.
+        let shell = matches!(context.tool_name.as_str(), "Bash" | "PowerShell");
+        if mode == PermissionMode::PlanMode && shell && !plan_document {
+            let command = context.tool_input["command"].as_str().unwrap_or_default();
+            if super::shell_read_only::is_read_only(command) && !actions.contains(&PermissionAction::Confirm) {
+                return decision(PermissionResult::Granted, PlanBoundary);
+            }
+            return decision(self.request_confirmation(context), PlanBoundary);
+        }
         if mode == PermissionMode::PlanMode && !read_only && !plan_document && !delegation {
             return decision(
                 PermissionResult::Denied("Plan mode: write operations are not allowed".into()),
@@ -770,10 +780,14 @@ mod session_rule_tests {
             PermissionResult::RequiresConfirmation(_)
         ));
         manager.set_mode(PermissionMode::PlanMode);
+        // Plan mode asks before a command it cannot prove read-only...
         assert!(matches!(
             manager.check_permission(&context),
-            PermissionResult::Denied(_)
+            PermissionResult::RequiresConfirmation(_)
         ));
+        // ...and runs plain inspection commands.
+        context.tool_input = serde_json::json!({"command":"git status"});
+        assert_eq!(manager.check_permission(&context), PermissionResult::Granted);
         context.tool_name = "Read".into();
         manager.set_session_rules(
             "one",
@@ -865,6 +879,9 @@ mod policy_tests {
                     }
                     PermissionMode::AcceptEdits if tool == "Write" => {
                         assert_eq!(result, PermissionResult::Granted)
+                    }
+                    PermissionMode::PlanMode if tool == "Bash" => {
+                        assert!(matches!(result, PermissionResult::RequiresConfirmation(_)))
                     }
                     PermissionMode::DontAsk | PermissionMode::PlanMode => {
                         assert!(matches!(result, PermissionResult::Denied(_)))

@@ -796,7 +796,7 @@ impl ToolLoopExecutor {
 
     pub fn with_permission_manager(mut self, manager: Arc<PermissionManager>) -> Self {
         if manager.get_mode() == crate::permissions::PermissionMode::PlanMode {
-            self.system_prompt.get_or_insert_with(String::new).push_str("\nThis turn starts in read-only plan mode. Investigate without modifying project files until ExitPlanMode succeeds. Write a concrete Markdown implementation and verification plan to the dedicated session plan file using Write/Edit, then call ExitPlanMode (the legacy plan text parameter is also accepted). It requests explicit user approval before returning to normal ask permissions. Do not claim approval without a successful ExitPlanMode result.\n");
+            self.system_prompt.get_or_insert_with(String::new).push_str("\nThis turn starts in read-only plan mode. Investigate without modifying project files until ExitPlanMode succeeds. Read-only shell commands (for example ls, cat, grep, git status/log/diff, Get-ChildItem, Get-Content) run directly; any other command asks the user first. Write a concrete Markdown implementation and verification plan to the dedicated session plan file using Write/Edit, then call ExitPlanMode (the legacy plan text parameter is also accepted). It requests explicit user approval before returning to normal ask permissions. Do not claim approval without a successful ExitPlanMode result.\n");
         }
         self.permission_manager = Some(manager);
         self
