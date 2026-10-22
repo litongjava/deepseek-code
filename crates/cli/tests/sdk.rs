@@ -429,11 +429,13 @@ async fn output_limit_is_incomplete_retains_partial_and_never_replays_tools() {
             let (status, extra) = client.finish().await;
             assert!(!status.success());
             assert!(extra.is_empty());
+            // Every cut-off response is continued three times before the
+            // turn reports the output limit.
             let expected = if matches!(mode, Mode::ReadThenTruncated) {
                 2
             } else {
                 1
-            };
+            } + 3;
             assert_eq!(server.fixture.requests.lock().unwrap().len(), expected);
             let paths = claude_core::runtime::RuntimePaths::new(root.path().join("data")).unwrap();
             let store = claude_core::runtime::SessionStore::new(paths.open_database().unwrap());
@@ -463,7 +465,7 @@ async fn output_limit_is_incomplete_retains_partial_and_never_replays_tools() {
                     .unwrap();
                 assert!(retained
                     .iter()
-                    .any(|m| m.thinking.as_deref() == Some("PARTIAL_THINKING")));
+                    .any(|m| m.thinking.as_deref().is_some_and(|t| t.contains("PARTIAL_THINKING"))));
             } else if !matches!(mode, Mode::TruncatedTool) {
                 assert!(text.contains(&format!("reply-{expected}")), "{text}");
             }
