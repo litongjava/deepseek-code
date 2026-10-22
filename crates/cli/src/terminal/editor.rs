@@ -25,6 +25,9 @@ pub struct PromptEditor {
     /// The last turn's tool calls, printed into scrollback by Ctrl+O.
     transcript: Vec<crate::terminal::change_view::Line>,
     transcript_printed: bool,
+    /// Suggested next prompts, generated after a turn; Tab accepts one.
+    suggestions: Option<std::sync::mpsc::Receiver<String>>,
+    suggestion: Option<String>,
     keybindings: crate::keybindings::Keybindings,
 }
 impl Default for PromptEditor {
@@ -38,6 +41,8 @@ impl Default for PromptEditor {
             details: DetailsPanel::default(),
             transcript: Vec::new(),
             transcript_printed: false,
+            suggestions: None,
+            suggestion: None,
             keybindings: crate::keybindings::Keybindings::default(),
             commands: crate::command_catalog::COMMANDS
                 .iter()
@@ -320,6 +325,7 @@ pub(crate) struct Screen {
     height: usize,
     previous: Vec<DisplayLine>,
     invalidated: bool,
+    cursor_col: usize,
 }
 impl Screen {
     pub(crate) fn resized(&mut self, rows: u16) -> io::Result<()> {
@@ -330,6 +336,11 @@ impl Screen {
         Ok(())
     }
     pub(crate) fn draw(&mut self, lines: &[DisplayLine], row: usize, col: usize) -> io::Result<()> {
+        // The editor redraws on every poll; an unchanged frame writes nothing.
+        if !self.invalidated && self.previous == lines && self.cursor_row == row && self.cursor_col == col {
+            return Ok(());
+        }
+        self.cursor_col = col;
         let mut out = io::stderr().lock();
         // Synchronized output keeps a large repaint from showing half drawn.
         out.write_all(b"\x1b[?2026h")?;
@@ -508,6 +519,9 @@ impl PromptEditor {
     pub fn set_notices(&mut self, notices: std::sync::mpsc::Receiver<String>) {
         self.notices = Some(notices);
     }
+    pub fn set_suggestions(&mut self, suggestions: std::sync::mpsc::Receiver<String>) {
+        self.suggestions = Some(suggestions);
+    }
     pub fn set_keybindings(&mut self, bindings: crate::keybindings::Keybindings) {
         self.keybindings = bindings;
     }
@@ -557,6 +571,11 @@ impl PromptEditor {
         let mut menu_hidden = false;
         let mut search: Option<String> = None;
         let mut search_pos = self.history.len();
+        // A suggestion belongs to the turn before this prompt; drop stale ones.
+        self.suggestion = None;
+        if let Some(suggestions) = &self.suggestions {
+            while suggestions.try_recv().is_ok() {}
+        }
         loop {
             if yielded.load(std::sync::atomic::Ordering::Acquire) {
                 self.pending_draft = buffer.text();
@@ -576,9 +595,15 @@ impl PromptEditor {
                     screen = Screen::default();
                 }
             }
+            if let Some(suggestions) = &self.suggestions {
+                while let Ok(suggestion) = suggestions.try_recv() {
+                    self.suggestion = Some(suggestion);
+                }
+            }
             let (cols, rows) = terminal::size()?;
             let width = cols.saturating_sub(1).max(4) as usize;
             let text = buffer.text();
+            let ghost = self.suggestion.clone().filter(|_| buffer.chars.is_empty());
             let items = if menu_hidden {
                 vec![]
             } else {
@@ -635,13 +660,20 @@ impl PromptEditor {
             let panel_height = panel.lines.len();
             let mut lines = panel.lines;
             lines.push(("\u{2500}".repeat(width), TextStyle::Border));
-            lines.extend(
-                input_lines
-                    .iter()
-                    .skip(first)
-                    .take(max_input)
-                    .map(|s| (s.clone(), TextStyle::Plain)),
-            );
+            match &ghost {
+                // The suggestion is placeholder text: dim, with the cursor before it.
+                Some(suggestion) => lines.push((
+                    clipped(&format!("{prompt}{}", suggestion.replace('\n', " ")), width),
+                    TextStyle::Muted,
+                )),
+                None => lines.extend(
+                    input_lines
+                        .iter()
+                        .skip(first)
+                        .take(max_input)
+                        .map(|s| (s.clone(), TextStyle::Plain)),
+                ),
+            }
             lines.push(("\u{2500}".repeat(width), TextStyle::Border));
             let footer_rows = usize::from(show_tip)
                 + if self.details.entries.is_empty() && self.transcript.is_empty() {
@@ -692,6 +724,11 @@ impl PromptEditor {
                     start + 1,
                     end,
                     items.len()
+                )
+            } else if ghost.is_some() {
+                format!(
+                    "{} mode (Shift+Tab to cycle) - Tab accepts the suggestion - Enter send",
+                    self.permission_mode
                 )
             } else {
                 format!(
@@ -867,6 +904,16 @@ impl PromptEditor {
                             buffer.set(&self.history[i]);
                         }
                         continue;
+                    }
+                    if let Some(suggestion) = ghost.as_ref().filter(|_| {
+                        matches!(key.code, KeyCode::Tab | KeyCode::Right) && !control
+                    }) {
+                        buffer.insert(suggestion);
+                        self.suggestion = None;
+                        continue;
+                    }
+                    if matches!(key.code, KeyCode::Char(_) | KeyCode::Enter) {
+                        self.suggestion = None;
                     }
                     match key.code {
                         KeyCode::Enter

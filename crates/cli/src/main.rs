@@ -1,5 +1,6 @@
 ﻿mod hook_progress;
 mod lsp_commands;
+mod prompt_suggestion;
 mod launch_permissions;
 mod context_commands;
 mod persistent_worker;
@@ -488,6 +489,8 @@ async fn run(cli: &Cli) -> Result<()> {
         let mut remote = remote_commands::Remote::default();
         let mut last_config_error = String::new();
         terminal::tips::start_session(&paths.data_dir);
+        // History length the last suggestion was generated for.
+        let mut suggested_for = session.store.history(&session.id)?.len();
         'repl: loop {
             let idle_deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(60);
             let mut idle_notified = false;
@@ -496,6 +499,15 @@ async fn run(cli: &Cli) -> Result<()> {
                 if let Err(error) = session.turn(cli, &prompt, &mut input).await { if !worker_frontend::already_presented(&error) { eprintln!("Error: {error:#}"); } }
             }
             if let Err(error) = remote.sync(&session) { eprintln!("Remote Control: {error:#}"); }
+            if prompt_suggestion::enabled(&paths.data_dir) {
+                let history = session.store.history(&session.id)?;
+                if history.len() != suggested_for {
+                    suggested_for = history.len();
+                    if let (Some(text), Ok(provider)) = (prompt_suggestion::context(&history), session.selected_provider().await) {
+                        prompt_suggestion::spawn(provider, text, input.as_ref().unwrap().suggestion_sender());
+                    }
+                }
+            }
             skills = skill_commands::load_for_workspace(&paths, &session.workspace).await?;
             if let Err(error) = input.as_mut().unwrap().set_keybindings(&paths.data_dir.join("keybindings.json")) {
                 eprintln!("Keybindings: {error:#}");

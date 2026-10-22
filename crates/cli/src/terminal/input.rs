@@ -50,6 +50,7 @@ struct PendingRead {
 
 pub struct TerminalInput {
     notices: std::sync::mpsc::Sender<String>,
+    suggestions: std::sync::mpsc::Sender<String>,
     requests: std::sync::mpsc::Sender<Message>,
     pending: Option<PendingRead>,
     fixture: Option<mpsc::UnboundedReceiver<String>>,
@@ -60,6 +61,7 @@ impl TerminalInput {
     pub fn new() -> Self {
         let (requests, rx) = std::sync::mpsc::channel::<Message>();
         let (notices, notice_rx) = std::sync::mpsc::channel();
+        let (suggestions, suggestion_rx) = std::sync::mpsc::channel();
         std::thread::spawn(move || {
             let terminal = !crate::terminal::screen_reader()
                 && io::stdin().is_terminal()
@@ -68,6 +70,7 @@ impl TerminalInput {
                 && std::env::var("TERM").as_deref() != Ok("dumb");
             let mut editor = editor::PromptEditor::default();
             editor.set_notices(notice_rx);
+            editor.set_suggestions(suggestion_rx);
             let mut plain = io::BufReader::new(io::stdin());
             for message in rx {
                 let request = match message {
@@ -124,6 +127,7 @@ impl TerminalInput {
         });
         Self {
             notices,
+            suggestions,
             requests,
             pending: None,
             fixture: None,
@@ -167,6 +171,11 @@ impl TerminalInput {
     /// Set the last turn's tool titles and full display bodies before reading.
     pub fn set_panel(&self, details: Vec<(String, String)>, expanded: bool) {
         let _ = self.requests.send(Message::Panel(details, expanded));
+    }
+
+    /// Where a background task delivers the suggested next prompt.
+    pub fn suggestion_sender(&self) -> std::sync::mpsc::Sender<String> {
+        self.suggestions.clone()
     }
 
     pub fn set_details(&self, details: Vec<(String, String)>) {
@@ -296,6 +305,7 @@ impl From<mpsc::UnboundedReceiver<String>> for TerminalInput {
         let (requests, _) = std::sync::mpsc::channel();
         Self {
             notices: std::sync::mpsc::channel().0,
+            suggestions: std::sync::mpsc::channel().0,
             requests,
             pending: None,
             fixture: Some(fixture),
@@ -396,10 +406,12 @@ mod tests {
     #[tokio::test]
     async fn dismissed_answer_waits_for_reader_ack_and_cannot_answer_next_prompt() {
         let (requests, receive) = std::sync::mpsc::channel();
+        let (suggestions, _) = std::sync::mpsc::channel();
         let (notices, _) = std::sync::mpsc::channel();
         let mut input = TerminalInput {
             requests,
             notices,
+            suggestions,
             pending: None,
             fixture: None,
             queued: Default::default(),
