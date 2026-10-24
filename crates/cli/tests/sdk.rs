@@ -1015,6 +1015,10 @@ async fn dont_ask_control_denies_write_without_sdk_permission_request() {
             "dontAsk must never request SDK approval"
         );
         if frame["type"] == "result" {
+            let denials = frame["permission_denials"].as_array().unwrap();
+            assert_eq!(denials.len(), 1, "{frame}");
+            assert_eq!(denials[0]["tool_name"], "Write");
+            assert_eq!(denials[0]["tool_use_id"], "write-1");
             break;
         }
     }
@@ -1025,7 +1029,9 @@ async fn dont_ask_control_denies_write_without_sdk_permission_request() {
         "success"
     );
     client.send(user("Write with approval from mode")).await;
-    assert_eq!(client.result().await["is_error"], false);
+    let allowed = client.result().await;
+    assert_eq!(allowed["is_error"], false);
+    assert_eq!(allowed["permission_denials"], json!([]));
     assert!(root.path().join("approval.txt").exists());
     assert!(client.finish().await.0.success());
 }

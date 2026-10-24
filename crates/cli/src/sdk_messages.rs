@@ -43,6 +43,8 @@ pub struct Translator {
     index: usize,
     open_message: bool,
     pub turns: u32,
+    /// Tool calls the permission system refused, for the result's `permission_denials`.
+    pub denials: Vec<Value>,
 }
 
 impl Translator {
@@ -56,6 +58,7 @@ impl Translator {
             index: 0,
             open_message: false,
             turns: 0,
+            denials: Vec::new(),
         }
     }
 
@@ -168,16 +171,22 @@ impl Translator {
             }
             EngineEvent::ToolUseDone {
                 tool_use_id,
+                tool_name,
+                tool_input,
                 output,
                 is_error,
-                ..
             }
             | EngineEvent::PipelineToolResult {
                 tool_use_id,
+                tool_name,
+                tool_input,
                 output,
                 is_error,
                 ..
             } => {
+                if *is_error && is_permission_denial(output) {
+                    self.denials.push(json!({"tool_name":tool_name,"tool_use_id":tool_use_id,"tool_input":tool_input}));
+                }
                 // A tool result ends the model round that requested it.
                 self.close_message(Some("tool_use"))?;
                 emit_json(&self.envelope(
@@ -208,6 +217,13 @@ pub fn result_subtype(error: Option<&str>) -> &'static str {
         }
         Some(_) => "error_during_execution",
     }
+}
+
+/// Engine wording for a tool call refused by rules, modes, hooks or the host.
+fn is_permission_denial(output: &str) -> bool {
+    ["Permission denied: ", "Tool approval failed: ", "Permission to use "]
+        .iter()
+        .any(|prefix| output.starts_with(prefix))
 }
 
 /// A failed turn's result when the turn ended before producing its own result.

@@ -1160,7 +1160,7 @@ impl Session {
                     emit_json(
                         &json!({"type":"result","subtype":crate::sdk_messages::result_subtype(error.as_deref()),"session_id":self.id,"result":text,"is_error":error.is_some(),"error":error,"usage":usage,
                             "duration_ms":elapsed,"duration_api_ms":elapsed,"num_turns":sdk_messages.as_ref().map_or(0, |t| t.turns),"total_cost_usd":cost,
-                            "stop_reason":stop,"permission_denials":[],"uuid":uuid::Uuid::new_v4().to_string(),
+                            "stop_reason":stop,"permission_denials":sdk_messages.as_ref().map_or(Vec::new(), |t| t.denials.clone()),"uuid":uuid::Uuid::new_v4().to_string(),
                             "structured_output":if error.is_none() && structured_output {serde_json::from_str::<Value>(&text).ok()} else {None}}),
                     )?
                 },

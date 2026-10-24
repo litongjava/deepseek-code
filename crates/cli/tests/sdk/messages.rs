@@ -96,3 +96,19 @@ async fn reference_default_session_label_is_accepted() {
     let (status, _) = client.finish().await;
     assert!(status.success());
 }
+
+#[tokio::test]
+async fn host_denials_are_listed_in_the_result() {
+    for anthropic in [false, true] {
+        let server = Server::start(anthropic, Mode::Approval).await;
+        let root = tempfile::tempdir().unwrap();
+        let mut client = Client::start(root.path(), &server, &["--permission-mode", "ask"]);
+        client.send(user("Write the fixture file")).await;
+        let request = client.frame("control_request").await;
+        client.send(json!({"type":"control_response","response":{"subtype":"success","request_id":request["request_id"],"response":{"behavior":"deny","message":"HOST_SAYS_NO"}}})).await;
+        let result = client.result().await;
+        assert_eq!(result["is_error"], false, "{result}");
+        assert_eq!(result["permission_denials"], json!([{"tool_name":"Write","tool_use_id":"write-1","tool_input":{"file_path":"approval.txt","content":"ACTUAL_APPROVED_WRITE"}}]));
+        client.finish().await;
+    }
+}
