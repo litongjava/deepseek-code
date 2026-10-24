@@ -49,6 +49,7 @@ mod sdk_hooks;
 mod sdk_control;
 mod sdk_mcp;
 mod sdk_messages;
+mod sdk_queries;
 mod account_commands;
 mod design_commands;
 mod ide_commands;

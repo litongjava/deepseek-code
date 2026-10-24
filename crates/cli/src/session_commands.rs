@@ -63,6 +63,13 @@ pub fn effective_effort(session: &Session, fallback: Option<&str>) -> Result<Opt
         .or_else(|| fallback.map(str::to_owned)))
 }
 
+/// Session effort chosen by an SDK host; `None` restores the default.
+pub fn set_effort(session: &Session, effort: Option<&str>) -> Result<()> {
+    let mut settings = load(&session.store.db, &session.id)?;
+    settings.effort = parse_effort(effort.unwrap_or("default"))?;
+    save(&session.store.db, &session.id, &settings)
+}
+
 /// Copy only behavioral settings, retaining independent state after branching.
 pub fn copy_settings(db: &DbManager, from: &str, to: &str) -> Result<()> {
     save(db, to, &load(db, from)?)?;

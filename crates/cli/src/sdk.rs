@@ -337,6 +337,37 @@ mod question_tests {
         assert!(question_answer(&input, "Language?", &updated).is_err());
     }
 }
+/// Reference permission mode names mapped onto this CLI's mode names.
+pub(crate) fn internal_mode(mode: &str) -> &str {
+    match mode {
+        "default" => "ask",
+        "acceptEdits" => "accept-edits",
+        "bypassPermissions" => "bypass",
+        "dontAsk" => "dont-ask",
+        other => other,
+    }
+}
+
+async fn set_permission_mode(session: &Session, request: &Value) -> Result<Value> {
+    let mode = internal_mode(request["mode"].as_str().context("mode is required")?);
+    ensure!(
+        request.get("ultraplan").is_none_or(|v| v == false),
+        "ultraplan is not supported"
+    );
+    session.set_permission_mode(mode).await?;
+    Ok(json!({}))
+}
+
+/// Drops a queued user message by uuid; one already running is not affected.
+fn cancel_queued(queue: &mut VecDeque<UserMessage>, request: &Value) -> Result<Value> {
+    let uuid = request["message_uuid"]
+        .as_str()
+        .context("message_uuid is required")?;
+    let before = queue.len();
+    queue.retain(|message| message.uuid.as_deref() != Some(uuid));
+    Ok(json!({"cancelled":queue.len() != before}))
+}
+
 fn response(id: &Value, result: Result<Value>) -> Result<()> {
     crate::session::emit_json(&match result {
         Ok(value) => {
@@ -354,24 +385,22 @@ async fn idle_control(
     frame: &Value,
 ) -> Result<()> {
     let request = &frame["request"];
+    if let Some(result) = crate::sdk_queries::read_only(session, request).await {
+        return response(&frame["request_id"], result);
+    }
     let result = async {
         match request["subtype"].as_str().unwrap_or("") {
             "initialize" => initialization.initialize(cli, session, request).await,
             "interrupt" => Ok(json!({})),
-            "set_permission_mode" => {
-                let mode = match request["mode"].as_str().context("mode is required")? {
-                    "default" => "ask",
-                    "acceptEdits" => "accept-edits",
-                    "bypassPermissions" => "bypass",
-                    other => other,
-                };
-                ensure!(
-                    request.get("ultraplan").is_none_or(|v| v == false),
-                    "ultraplan is not supported"
-                );
-                session.set_permission_mode(mode).await?;
+            "set_permission_mode" => set_permission_mode(session, request).await,
+            "set_max_thinking_tokens" => {
+                let effort = crate::sdk_queries::thinking_effort(request)?;
+                crate::session_commands::set_effort(session, effort)?;
                 Ok(json!({}))
             }
+            "apply_flag_settings" => crate::sdk_queries::apply_flag_settings(session, request).await,
+            // Idle means nothing is queued, so there is nothing to drop.
+            "cancel_async_message" => cancel_queued(&mut VecDeque::new(), request),
             "set_model" => {
                 let model = request["model"]
                     .as_str()
@@ -572,7 +601,16 @@ async fn run_inner(
                                 crate::session::emit_json(&json!({"type":"result","is_error":true,"session_id":session.id,"error":"SDK turn interrupted"}))?;
                                 break;
                             }
-                            response(&value["request_id"],Err(anyhow::anyhow!("Control changes require an idle session; interrupt the active turn first")))?;
+                            let request = &value["request"];
+                            if let Some(result) = crate::sdk_queries::read_only(session, request).await {
+                                response(&value["request_id"], result)?;
+                                continue;
+                            }
+                            match request["subtype"].as_str() {
+                                Some("cancel_async_message") => response(&value["request_id"], cancel_queued(&mut queue, request))?,
+                                Some("set_permission_mode") => response(&value["request_id"], set_permission_mode(session, request).await)?,
+                                _ => response(&value["request_id"],Err(anyhow::anyhow!("Control changes require an idle session; interrupt the active turn first")))?,
+                            }
                         },
                     },
                 }

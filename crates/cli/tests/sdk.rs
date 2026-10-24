@@ -90,6 +90,7 @@ enum Mode {
     TruncatedTool,
     ReadThenTruncated,
     ReadThenText,
+    SlowText,
     Tool,
     SchemaGood,
     SchemaBad,
@@ -115,6 +116,7 @@ async fn respond(State(state): State<Fixture>, Json(body): Json<Value>) -> Respo
         return Json(json!({"id":"fixture","object":"chat.completion","created":0,"model":"fixture-model","choices":[{"index":0,"message":{"role":"assistant","content":"suggested-next"},"finish_reason":"stop"}]})).into_response();
     }
     if matches!(state.mode, Mode::DelayedApproval) && count == 1 { tokio::time::sleep(Duration::from_secs(2)).await; }
+    if matches!(state.mode, Mode::SlowText) && count == 1 { tokio::time::sleep(Duration::from_secs(2)).await; }
     if matches!(state.mode, Mode::SchemaRejected) {
         return (
             StatusCode::BAD_REQUEST,
@@ -1925,3 +1927,6 @@ mod permission_updates;
 
 #[path = "sdk/messages.rs"]
 mod messages;
+
+#[path = "sdk/controls.rs"]
+mod controls;

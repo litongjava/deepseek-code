@@ -18,6 +18,8 @@ pub struct Overrides {
     pub initial_prompt: Option<String>,
     pub prompt_suggestions: bool,
     pub agent_progress_summaries: bool,
+    /// Settings applied by `apply_flag_settings`, reported by `get_settings`.
+    pub flag_settings: serde_json::Map<String, Value>,
 }
 
 impl State {
@@ -184,6 +186,7 @@ fn validate(cli: &Cli, request: &Value) -> Result<Overrides> {
         initial_prompt: None,
         prompt_suggestions: suggestions,
         agent_progress_summaries: summaries,
+        flag_settings: Default::default(),
     })
 }
 
