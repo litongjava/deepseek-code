@@ -124,6 +124,8 @@ impl Session {
     pub(crate) async fn sdk_init_message(&self) -> Result<Value> {
         let mut tools = claude_core::tools::get_tool_definitions().into_iter().map(|tool| tool.name).collect::<Vec<_>>();
         tools.extend(self.mcp.get_all_tools().await.into_iter().map(|tool| format!("mcp__{}__{}", tool.server_name, tool.name)));
+        // SDK-hosted servers are listed through the host; their names are already qualified.
+        tools.extend(self.sdk_mcp.tools().await?.into_iter().map(|tool| tool.name));
         let skills = crate::skill_commands::load_for_workspace(&self.paths, &self.workspace).await?;
         let commands = crate::skill_commands::catalog(&skills).into_iter().map(|(name, _)| name.trim_start_matches('/').to_owned()).collect::<Vec<_>>();
         let context = crate::services::context(&self.paths)?;
