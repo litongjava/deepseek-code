@@ -7,7 +7,11 @@ use serde_json::{json, Map, Value};
 /// Requests answered without mutating the session; safe while a turn runs.
 pub async fn read_only(session: &Session, request: &Value) -> Option<Result<Value>> {
     Some(match request["subtype"].as_str()? {
-        "mcp_status" => Ok(json!({"mcpServers":session.sdk_mcp_status().await})),
+        "mcp_status" => async {
+            session.ensure_mcp().await?;
+            Ok(json!({"mcpServers":session.sdk_mcp_status().await}))
+        }
+        .await,
         "get_context_usage" => context_usage(session).await,
         "get_settings" => settings(session).await,
         _ => return None,

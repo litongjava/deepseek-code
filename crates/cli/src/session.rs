@@ -44,7 +44,7 @@ pub struct Session {
     pub(crate) paths: RuntimePaths,
     pub(crate) permissions: Arc<claude_core::permissions::PermissionManager>,
     pub(crate) ide: Arc<claude_core::services::ide::IdeClient>,
-    mcp: Arc<McpServerManager>,
+    pub(crate) mcp: Arc<McpServerManager>,
     mcp_ready: Arc<tokio::sync::OnceCell<()>>,
     pub(crate) model: String,
     pub(crate) provider_id: String,
@@ -195,7 +195,7 @@ impl Session {
         Ok(())
     }
 
-    async fn ensure_mcp(&self) -> Result<()> {
+    pub(crate) async fn ensure_mcp(&self) -> Result<()> {
         self.mcp_ready.get_or_try_init(|| async {
             self.mcp.initialize().await?;
             for server in self.mcp.list_servers().await.into_iter().filter(|server|server.enabled && !server.running) {

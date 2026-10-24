@@ -315,7 +315,7 @@ fn safe_output(text: &str) -> String {
     text.chars().filter(|ch| !ch.is_control() || matches!(ch, '\n' | '\t')).collect()
 }
 
-fn managed_shell_records(paths: &RuntimePaths, session: &str) -> Result<Vec<serde_json::Value>> {
+pub(crate) fn managed_shell_records(paths: &RuntimePaths, session: &str) -> Result<Vec<serde_json::Value>> {
     let value = claude_core::tools::tasks::execute_for_session(
         "TaskList", serde_json::json!({}), &paths.data_dir, session,
     )?;
@@ -327,7 +327,7 @@ fn managed_shell_records(paths: &RuntimePaths, session: &str) -> Result<Vec<serd
         }).collect()
 }
 
-async fn shell_control(paths: &RuntimePaths, session: &str, id: &str, stop: bool) -> Result<serde_json::Value> {
+pub(crate) async fn shell_control(paths: &RuntimePaths, session: &str, id: &str, stop: bool) -> Result<serde_json::Value> {
     claude_core::tools::tasks::execute_for_session_async(
         if stop { "TaskStop" } else { "TaskOutput" },
         if stop { serde_json::json!({"task_id":id}) } else { serde_json::json!({"task_id":id,"block":false}) },

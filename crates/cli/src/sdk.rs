@@ -388,6 +388,9 @@ async fn idle_control(
     if let Some(result) = crate::sdk_queries::read_only(session, request).await {
         return response(&frame["request_id"], result);
     }
+    if let Some(result) = crate::sdk_operations::handle(session, request).await {
+        return response(&frame["request_id"], result);
+    }
     let result = async {
         match request["subtype"].as_str().unwrap_or("") {
             "initialize" => initialization.initialize(cli, session, request).await,
@@ -497,7 +500,11 @@ async fn run_inner(
     let mut eof = false;
     let mut failed = false;
     let mut started = false;
+    let mut answered = None::<(String, String)>;
     loop {
+        if let Some((uuid, id)) = answered.take() {
+            session.sdk_overrides.message_ids.insert(uuid, id);
+        }
         if !started && (initialization.is_initialized() || !queue.is_empty()) {
             initialization.start_user_turn();
             let requires_host = session
@@ -534,9 +541,12 @@ async fn run_inner(
                     .is_none_or(|id| id.is_empty() || id == session.id),
                 "Input session_id differs from active session"
             );
+            // Every accepted message gets a UUID so hosts can address it later.
+            let message_uuid = message.uuid.clone().unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
             if cli.replay_user_messages {
                 let mut envelope = message.envelope;
                 envelope["session_id"] = json!(session.id);
+                envelope["uuid"] = json!(message_uuid);
                 crate::session::emit_json(&envelope)?;
             }
             let mut terminal = None;
@@ -617,6 +627,10 @@ async fn run_inner(
             }
             mcp.cancel_all();
             permissions.cancel().await;
+            // The pinned turn still borrows the session; record the id next iteration.
+            if let Some(id) = crate::sdk_operations::latest_user_message(session)? {
+                answered = Some((message_uuid, id));
+            }
             if !turn_failed && session.sdk_overrides.prompt_suggestions {
                 if let Err(error) = emit_prompt_suggestion(session).await {
                     if cli.verbose {

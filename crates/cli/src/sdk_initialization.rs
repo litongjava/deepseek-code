@@ -20,6 +20,8 @@ pub struct Overrides {
     pub agent_progress_summaries: bool,
     /// Settings applied by `apply_flag_settings`, reported by `get_settings`.
     pub flag_settings: serde_json::Map<String, Value>,
+    /// SDK user message UUIDs mapped to persisted message ids, for rewind_files.
+    pub message_ids: std::collections::HashMap<String, String>,
 }
 
 impl State {
@@ -187,6 +189,7 @@ fn validate(cli: &Cli, request: &Value) -> Result<Overrides> {
         prompt_suggestions: suggestions,
         agent_progress_summaries: summaries,
         flag_settings: Default::default(),
+        message_ids: Default::default(),
     })
 }
 
