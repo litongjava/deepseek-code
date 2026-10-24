@@ -825,7 +825,9 @@ async fn interrupt_cancels_pending_approval_and_session_accepts_next_message() {
         client.frame("control_response").await["response"]["request_id"],
         "stop"
     );
-    assert_eq!(client.result().await["is_error"], true);
+    let interrupted = client.result().await;
+    assert_eq!(interrupted["is_error"], true);
+    assert_eq!(interrupted["subtype"], "error_during_execution", "{interrupted}");
     assert!(!root.path().join("approval.txt").exists());
     client.send(user("Continue without tools")).await;
     assert_eq!(client.result().await["result"], "reply-2");

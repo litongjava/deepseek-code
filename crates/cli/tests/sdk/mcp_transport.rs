@@ -233,6 +233,9 @@ async fn sdk_mcp_discovery_calls_resources_hooks_permissions_and_stdio_share_rea
         for name in ["mcp__first__echo", "mcp__second__echo", "mcp__native__stdio_echo"] {
             assert!(system["tools"].as_array().unwrap().iter().any(|tool| tool == name), "{name}: {system}");
         }
+        let native = frames.iter().filter(|frame| frame["type"] == "user").map(|frame| &frame["message"]["content"][0])
+            .find(|block| block["content"].to_string().contains("STDIO_RESULT")).expect("stdio tool_result");
+        assert_eq!(native["content"][0]["type"], "text", "MCP output stays content blocks: {native}");
         let statuses = system["mcp_servers"].as_array().unwrap();
         assert!(statuses.iter().any(|s| s["name"] == "first" && s["status"] == "connected"), "{system}");
         let requests = server.fixture.requests.lock().unwrap();

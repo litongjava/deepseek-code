@@ -183,7 +183,7 @@ impl Translator {
                 emit_json(&self.envelope(
                     "user",
                     json!({"role":"user","content":[{"type":"tool_result","tool_use_id":tool_use_id,
-                        "content":output,"is_error":is_error}]}),
+                        "content":tool_result_content(output),"is_error":is_error}]}),
                 ))
             }
             EngineEvent::MessageStop { stop_reason, .. } => {
@@ -207,5 +207,36 @@ pub fn result_subtype(error: Option<&str>) -> &'static str {
             "error_max_turns"
         }
         Some(_) => "error_during_execution",
+    }
+}
+
+/// A failed turn's result when the turn ended before producing its own result.
+pub fn error_result(session_id: &str, error: &str) -> Value {
+    json!({"type":"result","subtype":"error_during_execution","is_error":true,"session_id":session_id,
+        "error":error,"result":"","num_turns":0,"duration_ms":0,"permission_denials":[],
+        "uuid":uuid::Uuid::new_v4().to_string()})
+}
+
+/// Tool output as reference content: MCP results arrive as a JSON array of
+/// content blocks and are passed through as blocks, anything else as text.
+fn tool_result_content(output: &str) -> Value {
+    if let Ok(Value::Array(blocks)) = serde_json::from_str::<Value>(output) {
+        if !blocks.is_empty() && blocks.iter().all(|block| block["type"].is_string()) {
+            return Value::Array(blocks);
+        }
+    }
+    json!(output)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn tool_output_keeps_content_blocks_and_plain_text() {
+        assert_eq!(tool_result_content(r#"[{"type":"text","text":"5"}]"#), json!([{"type":"text","text":"5"}]));
+        assert_eq!(tool_result_content("[1, 2]"), json!("[1, 2]"));
+        assert_eq!(tool_result_content("[]"), json!("[]"));
+        assert_eq!(tool_result_content("plain"), json!("plain"));
     }
 }

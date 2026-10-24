@@ -581,7 +581,7 @@ async fn run_inner(
             let mut turn_failed = false;
             loop {
                 tokio::select! {
-                    result=&mut turn=>{if let Err(error)=result {turn_failed=true;failed=true;if !error.is::<crate::output::ReportedError>() {crate::session::emit_json(&json!({"type":"result","is_error":true,"session_id":session.id,"error":format!("{error:#}")}))?;}}break;},
+                    result=&mut turn=>{if let Err(error)=result {turn_failed=true;failed=true;if !error.is::<crate::output::ReportedError>() {crate::session::emit_json(&crate::sdk_messages::error_result(&session.id,&format!("{error:#}")))?;}}break;},
                     frame=frames.recv(),if !eof=>match frame {
                         None=>{
                             eof=true;
@@ -589,7 +589,7 @@ async fn run_inner(
                                 session.engine.cancel_turn(&session.id).await;
                                 callbacks.close();mcp.close();session.sdk_mcp.clear();permissions.closed.store(true,Ordering::SeqCst);permissions.cancel().await;
                                 failed=true;turn_failed=true;queue.clear();
-                                crate::session::emit_json(&json!({"type":"result","is_error":true,"session_id":session.id,"error":"SDK input closed while a hook or MCP host was required"}))?;
+                                crate::session::emit_json(&crate::sdk_messages::error_result(&session.id,"SDK input closed while a hook or MCP host was required"))?;
                                 break;
                             }
                             callbacks.close();mcp.close();permissions.closed.store(true,Ordering::SeqCst);permissions.cancel().await;
@@ -609,7 +609,7 @@ async fn run_inner(
                                 mcp.cancel_all();
                                 permissions.cancel().await;
                                 response(&value["request_id"],Ok(json!({})))?;
-                                crate::session::emit_json(&json!({"type":"result","is_error":true,"session_id":session.id,"error":"SDK turn interrupted"}))?;
+                                crate::session::emit_json(&crate::sdk_messages::error_result(&session.id,"SDK turn interrupted"))?;
                                 break;
                             }
                             let request = &value["request"];
