@@ -89,6 +89,7 @@ enum Mode {
     TruncatedThinking,
     TruncatedTool,
     ReadThenTruncated,
+    ReadThenText,
     Tool,
     SchemaGood,
     SchemaBad,
@@ -134,6 +135,7 @@ async fn respond(State(state): State<Fixture>, Json(body): Json<Value>) -> Respo
         || matches!(state.mode, Mode::Plan) && count == 1
         || matches!(state.mode, Mode::Tool | Mode::TruncatedTool)
         || matches!(state.mode, Mode::ReadThenTruncated) && count == 1
+        || matches!(state.mode, Mode::ReadThenText) && count == 1
         || matches!(state.mode, Mode::Approval | Mode::DelayedApproval | Mode::Question) && count % 2 == 1;
     let stream = if state.anthropic {
         let mut frames = vec![
@@ -1920,3 +1922,6 @@ mod launch_permissions;
 
 #[path = "sdk/permission_updates.rs"]
 mod permission_updates;
+
+#[path = "sdk/messages.rs"]
+mod messages;

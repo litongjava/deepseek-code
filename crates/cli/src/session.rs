@@ -120,6 +120,34 @@ impl Session {
         models
     }
 
+    /// Reference `system/init` message describing this session to SDK clients.
+    pub(crate) async fn sdk_init_message(&self) -> Result<Value> {
+        let mut tools = claude_core::tools::get_tool_definitions().into_iter().map(|tool| tool.name).collect::<Vec<_>>();
+        tools.extend(self.mcp.get_all_tools().await.into_iter().map(|tool| format!("mcp__{}__{}", tool.server_name, tool.name)));
+        let skills = crate::skill_commands::load_for_workspace(&self.paths, &self.workspace).await?;
+        let commands = crate::skill_commands::catalog(&skills).into_iter().map(|(name, _)| name.trim_start_matches('/').to_owned()).collect::<Vec<_>>();
+        let context = crate::services::context(&self.paths)?;
+        let agents = claude_core::services::agents::list(&context)?.into_iter().map(|agent| agent.id).collect::<Vec<_>>();
+        Ok(json!({"type":"system","subtype":"init","cwd":self.workspace,"session_id":self.id,"tools":tools,
+            "mcp_servers":self.sdk_mcp_status().await,"model":self.model,
+            "permissionMode":crate::sdk_messages::reference_mode(self.permission_mode()),
+            "slash_commands":commands,"agents":agents,"apiKeySource":"none",
+            "version":env!("CARGO_PKG_VERSION"),"output_style":crate::display_commands::load(self)?.output_style,
+            "uuid":uuid::Uuid::new_v4().to_string()}))
+    }
+
+    /// Reference MCP server status entries: configured servers plus SDK-hosted ones.
+    pub(crate) async fn sdk_mcp_status(&self) -> Vec<Value> {
+        let mut servers = self.mcp.list_servers().await.into_iter().map(|server| {
+            let status = if !server.enabled { "disabled" } else if server.running { "connected" } else if server.error.is_some() { "failed" } else { "pending" };
+            let mut entry = json!({"name":server.name,"status":status,"config":{"type":server.transport_type,"command":server.command,"args":server.args}});
+            if let Some(error) = server.error { entry["error"] = json!(error); }
+            entry
+        }).collect::<Vec<_>>();
+        servers.extend(self.sdk_mcp.names().into_iter().map(|name| json!({"name":name,"status":"connected","config":{"type":"sdk","name":name}})));
+        servers
+    }
+
     pub(crate) async fn sdk_resolve_model(
         &self,
         name: &str,
@@ -690,6 +718,7 @@ impl Session {
             &self.id,
         )
         .await?;
+        let started = std::time::Instant::now();
         let turn_goal = claude_core::services::session_goals::active(&self.store.db, &self.id)?;
         if let Err(error) = crate::ide_commands::restore(self).await {
             eprintln!("IDE connection unavailable: {error:#}");
@@ -697,6 +726,10 @@ impl Session {
         }
         self.ensure_mcp().await?;
         self.reload_plugins().await?;
+        if cli.output_format == OutputFormat::StreamJson {
+            let init = self.sdk_init_message().await?;
+            crate::sdk_messages::emit_init_once(|| init)?;
+        }
         crate::session_commands::prepare_turn(self, self.context_window().await).await?;
         self.permissions
             .set_session_rules(&self.id, crate::permission_commands::load(self)?);
@@ -829,10 +862,13 @@ impl Session {
         let mut usage = json!({});
         let mut error = None;
         let mut completed = false;
+        let mut stop = None::<String>;
         let mut snapshots = Vec::<Value>::new();
         let mut goal_requests = crate::session_commands::GoalRequests::default();
         let mut observed_plan_boundary = claude_core::services::plan_approval::latest_boundary(&self.store.db, &self.id)?;
         let mut tools = Vec::<message_repo::ToolCallRow>::new();
+        let mut sdk_messages = (cli.output_format == OutputFormat::StreamJson)
+            .then(|| crate::sdk_messages::Translator::new(&self.id, cli.include_partial_messages));
         let mut refresh = tokio::time::interval(std::time::Duration::from_secs(1));
         refresh.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
         let mut remote_interrupts = self.remote_interrupts();
@@ -888,6 +924,7 @@ impl Session {
                 if cli.output_format == OutputFormat::StreamJson {
                     if let Some(value) = event_json_with(&event, self.sdk_overrides.agent_progress_summaries) { emit_json(&value)?; }
                 }
+                if let Some(translator) = sdk_messages.as_mut() { translator.observe(&event)?; }
                 match event {
                     EngineEvent::Text(delta) => {
                         let delta = if std::mem::take(&mut separate_text) && !text.is_empty() && !text.ends_with('\n') { format!("\n\n{delta}") } else { delta };
@@ -909,6 +946,7 @@ impl Session {
                     EngineEvent::Usage(value) => { progress.reported_usage(&value); if let Some(fields) = value.as_object() { for (key, value) in fields { usage[key] = value.clone(); } } },
                     EngineEvent::Error(message) => { progress.clear(); error = Some(message); },
                     EngineEvent::MessageStop { full_text, stop_reason } => {
+                        stop = stop_reason.clone();
                         if structured_output { text = full_text.clone(); }
                         if text.is_empty() && !full_text.is_empty() { if publish && cli.output_format == OutputFormat::Text { progress.before_text(&full_text); if !progress.is_live() { print!("{full_text}"); } } text = full_text; }
                         if stop_reason.as_deref().is_some_and(|s| ["error", "panic", "stream_error", "interrupted", "failed", "cancelled", "max_iterations", "budget_warning", "max_tokens", "length", "incomplete"].contains(&s)) {
@@ -1042,6 +1080,7 @@ impl Session {
             Ok(())
         }.await;
         progress.clear();
+        if let Some(translator) = sdk_messages.as_mut() { translator.finish()?; }
         // Join before persisting; only interruption cancels background hooks.
         if completed && turn_result.is_ok() && error.is_none() {
             self.engine.finish_turn(&self.id).await;
@@ -1112,9 +1151,17 @@ impl Session {
                         io::stdout().flush()?;
                     }
                 }
-                _ => emit_json(
-                    &json!({"type":"result","session_id":self.id,"result":text,"is_error":error.is_some(),"error":error,"usage":usage,"structured_output":if error.is_none() && structured_output {serde_json::from_str::<Value>(&text).ok()} else {None}}),
-                )?,
+                _ => {
+                    let cost = claude_core::services::usage::session_cost(&self.store.db, &self.id, &self.paths.read_config()?)
+                        .map(|cost| cost["known_subtotal_usd"].as_f64().unwrap_or(0.0)).unwrap_or(0.0);
+                    let elapsed = started.elapsed().as_millis() as u64;
+                    emit_json(
+                        &json!({"type":"result","subtype":crate::sdk_messages::result_subtype(error.as_deref()),"session_id":self.id,"result":text,"is_error":error.is_some(),"error":error,"usage":usage,
+                            "duration_ms":elapsed,"duration_api_ms":elapsed,"num_turns":sdk_messages.as_ref().map_or(0, |t| t.turns),"total_cost_usd":cost,
+                            "stop_reason":stop,"permission_denials":[],"uuid":uuid::Uuid::new_v4().to_string(),
+                            "structured_output":if error.is_none() && structured_output {serde_json::from_str::<Value>(&text).ok()} else {None}}),
+                    )?
+                },
             }
         }
         if let Some(request) = side_request.take() {

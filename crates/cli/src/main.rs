@@ -48,6 +48,7 @@ mod sdk_initialization;
 mod sdk_hooks;
 mod sdk_control;
 mod sdk_mcp;
+mod sdk_messages;
 mod account_commands;
 mod design_commands;
 mod ide_commands;
@@ -317,6 +318,14 @@ async fn run(cli: &Cli) -> Result<()> {
     ensure!(
         !cli.replay_user_messages || sdk_stream,
         "--replay-user-messages requires --input-format stream-json"
+    );
+    ensure!(
+        !cli.include_partial_messages || cli.output_format == OutputFormat::StreamJson,
+        "--include-partial-messages requires --output-format stream-json"
+    );
+    ensure!(
+        cli.permission_prompt_tool.is_none() || sdk_stream,
+        "--permission-prompt-tool stdio requires --input-format stream-json"
     );
     ensure!(
         !sdk_stream || cli.output_format == OutputFormat::StreamJson,

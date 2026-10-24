@@ -65,6 +65,12 @@ pub struct Cli {
     /// Echo accepted SDK user envelopes, including their UUIDs.
     #[arg(long, global = true)]
     pub replay_user_messages: bool,
+    /// Add reference `stream_event` partial-message frames to stream-json output.
+    #[arg(long, global = true)]
+    pub include_partial_messages: bool,
+    /// Route tool approvals to the SDK host; only `stdio` is supported.
+    #[arg(long, global = true, value_parser = ["stdio"])]
+    pub permission_prompt_tool: Option<String>,
     /// Maximum model/tool-loop iterations for each submitted user message.
     #[arg(long, value_parser = clap::value_parser!(u32).range(1..), global = true)]
     pub max_turns: Option<u32>,
