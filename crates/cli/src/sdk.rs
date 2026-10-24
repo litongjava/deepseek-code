@@ -534,11 +534,12 @@ async fn run_inner(
         }
         if let Some(message) = queue.pop_front() {
             initialization.start_user_turn();
+            // Reference SDKs label messages "default" before they learn the session id.
             ensure!(
                 message
                     .session_id
                     .as_deref()
-                    .is_none_or(|id| id.is_empty() || id == session.id),
+                    .is_none_or(|id| id.is_empty() || id == "default" || id == session.id),
                 "Input session_id differs from active session"
             );
             // Every accepted message gets a UUID so hosts can address it later.

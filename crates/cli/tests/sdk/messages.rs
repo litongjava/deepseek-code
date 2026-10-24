@@ -82,3 +82,17 @@ async fn partial_messages_require_stream_json_output() {
     assert!(!output.status.success());
     assert!(String::from_utf8_lossy(&output.stderr).contains("--include-partial-messages requires --output-format stream-json"));
 }
+
+#[tokio::test]
+async fn reference_default_session_label_is_accepted() {
+    let server = Server::start(false, Mode::Text).await;
+    let root = tempfile::tempdir().unwrap();
+    let mut client = Client::start(root.path(), &server, &[]);
+    let mut frame = user("labelled");
+    frame["session_id"] = json!("default");
+    frame["parent_tool_use_id"] = Value::Null;
+    client.send(frame).await;
+    assert_eq!(client.result().await["is_error"], false);
+    let (status, _) = client.finish().await;
+    assert!(status.success());
+}
