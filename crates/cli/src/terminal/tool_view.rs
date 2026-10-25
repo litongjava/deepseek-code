@@ -19,6 +19,65 @@ pub fn label(name: &str, input: &Value, workspace: Option<&std::path::Path>) -> 
     }
 }
 
+/// Read-only calls the reference CLI folds into one summary line.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Gathering {
+    Search,
+    Read,
+    List,
+    Shell,
+}
+
+pub fn gathering(name: &str, input: &Value) -> Option<Gathering> {
+    match name {
+        "Grep" | "Glob" => Some(Gathering::Search),
+        "Read" => Some(Gathering::Read),
+        "ListDir" => Some(Gathering::List),
+        "Bash" => {
+            let command = input["command"].as_str()?;
+            if !claude_core::permissions::shell_read_only::is_read_only(command) {
+                return None;
+            }
+            // As in the reference CLI, `ls -la src` reads as a listed directory.
+            let simple = !command.contains(['|', ';', '&', '\n']);
+            Some(match command.split_whitespace().next() {
+                Some("ls" | "tree") if simple => Gathering::List,
+                Some("cat" | "head" | "tail") if simple => Gathering::Read,
+                Some("grep" | "rg" | "find" | "fd") if simple => Gathering::Search,
+                _ => Gathering::Shell,
+            })
+        }
+        _ => None,
+    }
+}
+
+/// `Searching for 2 patterns, reading 3 files…` while calls run and
+/// `searched for 2 patterns, read 3 files` once they have finished.
+pub fn gathering_summary(kinds: &[Gathering], running: bool) -> String {
+    let forms = [
+        (Gathering::Search, "searching for", "searched for", "pattern", "patterns"),
+        (Gathering::Read, "reading", "read", "file", "files"),
+        (Gathering::List, "listing", "listed", "directory", "directories"),
+        (Gathering::Shell, "running", "ran", "shell command", "shell commands"),
+    ];
+    let parts: Vec<String> = forms
+        .iter()
+        .filter_map(|(kind, present, past, one, many)| {
+            let count = kinds.iter().filter(|other| *other == kind).count();
+            if count == 0 {
+                return None;
+            }
+            let verb = if running { present } else { past };
+            Some(format!("{verb} {count} {}", if count == 1 { one } else { many }))
+        })
+        .collect();
+    let mut text = parts.join(", ");
+    if running {
+        text.push('\u{2026}');
+    }
+    text
+}
+
 /// Human-readable text of a tool output; JSON envelopes are unwrapped.
 pub fn result_text(output: &str) -> String {
     // Failed calls wrap the tool's own JSON result as `Error: {...}`.
@@ -349,6 +408,24 @@ mod tests {
         let write = approval("Write", &json!({"file_path":"a.txt","content":"x"}), None);
         assert!(write.text().starts_with("Write(a.txt)\n  {"), "{}", write.text());
         assert_eq!(write.remember, Some(Remember::AcceptEdits));
+    }
+
+    #[test]
+    fn read_only_calls_fold_into_one_summary() {
+        let kinds: Vec<Gathering> = [
+            ("Grep", json!({"pattern":"TODO"})),
+            ("Glob", json!({"pattern":"**/*.py"})),
+            ("Read", json!({"file_path":"a.py"})),
+            ("Bash", json!({"command":"ls -la src"})),
+        ]
+        .iter()
+        .filter_map(|(name, input)| gathering(name, input))
+        .collect();
+        assert_eq!(gathering_summary(&kinds, true), "searching for 2 patterns, reading 1 file, listing 1 directory\u{2026}");
+        assert_eq!(gathering_summary(&kinds, false), "searched for 2 patterns, read 1 file, listed 1 directory");
+        assert_eq!(gathering("Bash", &json!({"command":"git log --oneline | head"})), Some(Gathering::Shell));
+        assert_eq!(gathering("Bash", &json!({"command":"touch x"})), None);
+        assert_eq!(gathering("Edit", &json!({})), None);
     }
 
     #[test]

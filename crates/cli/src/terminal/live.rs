@@ -1,5 +1,6 @@
 //! One terminal owner while a model turn runs. The idle editor is inactive.
 use super::change_view;
+use super::tool_view::Gathering;
 use crossterm::{
     event::{
         DisableBracketedPaste, DisableMouseCapture, EnableBracketedPaste,
@@ -39,7 +40,25 @@ enum Update {
     Choice(Vec<change_view::Line>, String, Vec<String>, oneshot::Sender<String>),
     Detail(String, String, String),
     Thinking(String),
+    /// A read-only call joins, finishes or leaves the folded summary line.
+    Group(String, Gathering, String, GroupStep),
+    /// Other tool output follows; the summary line is final.
+    GroupEnd,
     Stop(Option<String>),
+}
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum GroupStep {
+    Start,
+    Done,
+    Failed,
+}
+/// Consecutive read-only calls shown as one line, as in the reference CLI's
+/// "Thought for 2s, searched for 2 patterns, read 3 files".
+struct Group {
+    calls: Vec<(String, Gathering, bool)>,
+    /// The latest call, shown under the line while the group grows.
+    hint: String,
+    thought: Option<u64>,
 }
 pub struct LiveTurn {
     updates: mpsc::Sender<Update>,
@@ -103,6 +122,9 @@ impl LiveTurn {
             title.into(),
             body.chars().take(65536).collect(),
         ));
+    }
+    fn group(&self, id: &str, kind: Gathering, label: String, step: GroupStep) {
+        let _ = self.updates.send(Update::Group(id.into(), kind, label, step));
     }
     pub fn thinking(&self, text: &str) {
         let _ = self.updates.send(Update::Thinking(text.into()));
@@ -254,6 +276,9 @@ struct State {
     key_pending: crate::keybindings::Pending,
     details: super::input::editor::DetailsPanel,
     detail_entries: Vec<(String, String, String)>,
+    group: Option<Group>,
+    /// When reasoning began and last streamed, for "Thought for 2s".
+    thinking_span: Option<(Instant, Instant)>,
     thinking_characters: usize,
     thinking_entry: Option<usize>,
     history: Vec<String>,
@@ -334,6 +359,8 @@ impl State {
             key_pending: Default::default(),
             details: Default::default(),
             detail_entries: Vec::new(),
+            group: None,
+            thinking_span: None,
             thinking_characters: 0,
             thinking_entry: None,
             history: Vec::new(),
@@ -605,8 +632,65 @@ fn log_answer_line(state: &mut State, screen: &mut Frame, rendered: &str) {
     }
 }
 
+/// Writes the folded read-only calls as their final summary line.
+fn finish_group(state: &mut State, screen: &mut Frame) {
+    let Some(group) = state.group.take() else {
+        return;
+    };
+    if group.calls.is_empty() {
+        return;
+    }
+    let kinds: Vec<Gathering> = group.calls.iter().map(|call| call.1).collect();
+    let summary = super::tool_view::gathering_summary(&kinds, false);
+    let line = match group.thought {
+        Some(seconds) => format!("  Thought for {seconds}s, {summary}"),
+        None => format!("  {}", capitalized(&summary)),
+    };
+    if std::env::var_os("NO_COLOR").is_some() {
+        let _ = screen.log(&line);
+    } else {
+        screen.log_rendered(&change_view::render(&change_view::muted(&line), usize::MAX, true));
+    }
+}
+fn capitalized(text: &str) -> String {
+    let mut chars = text.chars();
+    chars.next().map_or_else(String::new, |first| first.to_uppercase().chain(chars).collect())
+}
+/// The folded calls while they run: the summary and the latest call.
+fn group_lines(group: &Group, width: usize) -> Vec<String> {
+    let kinds: Vec<Gathering> = group.calls.iter().map(|call| call.1).collect();
+    let running = group.calls.iter().any(|call| !call.2);
+    let summary = capitalized(&super::tool_view::gathering_summary(&kinds, running));
+    vec![
+        clip(&format!("  {summary}"), width),
+        clip(&format!("  \u{23bf}  {}", group.hint), width),
+    ]
+}
+fn group_call(state: &mut State, id: String, kind: Gathering, label: String, step: GroupStep) {
+    if step == GroupStep::Failed {
+        // A failed call is printed on its own with its error.
+        if let Some(group) = &mut state.group {
+            group.calls.retain(|call| call.0 != id);
+        }
+        return;
+    }
+    let thinking = state.thinking_span.take();
+    let group = state.group.get_or_insert_with(|| Group {
+        calls: Vec::new(),
+        hint: String::new(),
+        thought: thinking.map(|(first, last)| last.duration_since(first).as_secs().max(1)),
+    });
+    let done = step == GroupStep::Done;
+    match group.calls.iter_mut().find(|call| call.0 == id) {
+        Some(call) => call.2 |= done,
+        None => group.calls.push((id, kind, done)),
+    }
+    group.hint = label;
+}
+
 /// Ends the current answer block before tool output, notices or the footer.
 fn finish_text(state: &mut State, screen: &mut Frame) {
+    finish_group(state, screen);
     if !state.partial.is_empty() {
         let line = std::mem::take(&mut state.partial);
         emit_text_line(state, screen, &line);
@@ -723,11 +807,14 @@ impl Frame {
                 .map(|(text, _)| text.clone())
                 .collect::<Vec<_>>()
         } else {
-            let content = visual_lines(&state.partial, width.saturating_sub(2))
-                .into_iter()
-                .enumerate()
-                .map(|(index, (line, _))| if line.is_empty() { line } else { format!("{}{line}", answer_prefix(state, index)) })
-                .collect::<Vec<_>>();
+            let content = match &state.group {
+                Some(group) if state.partial.is_empty() && !group.calls.is_empty() => group_lines(group, width),
+                _ => visual_lines(&state.partial, width.saturating_sub(2))
+                    .into_iter()
+                    .enumerate()
+                    .map(|(index, (line, _))| if line.is_empty() { line } else { format!("{}{line}", answer_prefix(state, index)) })
+                    .collect::<Vec<_>>(),
+            };
             if !panel.lines.is_empty() {
                 // Keep the disclosure reachable without hiding the streaming text.
                 self.panel_toggle = None;
@@ -932,6 +1019,8 @@ fn run(
                 },
                 Ok(Update::PermissionMode(mode)) => { state.mode = mode; dirty = true; },
                 Ok(Update::Text(text)) => {
+                    finish_group(state, screen);
+                    state.thinking_span = None;
                     state.generated_characters = state
                         .generated_characters
                         .saturating_add(text.chars().count());
@@ -993,7 +1082,17 @@ fn run(
                     dirty = true;
                 }
                 Ok(Update::Thinking(text)) => {
+                    let now = Instant::now();
+                    state.thinking_span = Some((state.thinking_span.map_or(now, |span| span.0), now));
                     state.append_thinking(&text);
+                    dirty = true;
+                }
+                Ok(Update::Group(id, kind, label, step)) => {
+                    group_call(state, id, kind, label, step);
+                    dirty = true;
+                }
+                Ok(Update::GroupEnd) => {
+                    finish_group(state, screen);
                     dirty = true;
                 }
                 Ok(Update::Choice(lines, question, options, reply)) => {
@@ -1640,10 +1739,14 @@ impl TurnDisplay {
             live.detail(id, name, &format!("Input:\n{}", input));
             // The call is printed once, with its result, when it finishes; the
             // status line names what is running meanwhile.
-            live.activity(&format!(
-                "Running {}",
-                super::tool_view::label(name, input, self.workspace.as_deref())
-            ));
+            let label = super::tool_view::label(name, input, self.workspace.as_deref());
+            match super::tool_view::gathering(name, input) {
+                Some(kind) => live.group(id, kind, label.clone(), GroupStep::Start),
+                None => {
+                    let _ = live.updates.send(Update::GroupEnd);
+                }
+            }
+            live.activity(&format!("Running {label}"));
         } else {
             self.fallback.tool_started(id, name, input);
         }
@@ -1712,6 +1815,14 @@ impl TurnDisplay {
                     Some(started) if input.as_object().is_none_or(|fields| fields.is_empty()) => started,
                     _ => input,
                 };
+                if let Some(kind) = super::tool_view::gathering(name, label_input) {
+                    let label = super::tool_view::label(name, label_input, self.workspace.as_deref());
+                    live.group(id, kind, label, if failed { GroupStep::Failed } else { GroupStep::Done });
+                    if !failed {
+                        live.activity("Working");
+                        return;
+                    }
+                }
                 live.styled(super::tool_view::finished(
                     name,
                     label_input,
