@@ -1039,6 +1039,21 @@ fn run(
                         error.as_deref().unwrap_or("done"),
                         chrono::Local::now().format("%-I:%M %p")
                     );
+                    // An interrupted turn ends as in the reference CLI, inviting the
+                    // next instruction instead of reporting a duration.
+                    let interrupted = error.as_deref().is_some_and(|error| {
+                        let error = error.to_ascii_lowercase();
+                        error.contains("interrupt") || error.contains("cancelled")
+                    });
+                    if interrupted {
+                        let line = "  \u{23bf}  Interrupted \u{b7} What should DeepSeek Code do instead?";
+                        if std::env::var_os("NO_COLOR").is_some() {
+                            screen.log(line)?;
+                        } else {
+                            screen.log_rendered(&change_view::render(&change_view::failure(line), usize::MAX, true));
+                        }
+                        return screen.flush();
+                    }
                     screen.log("")?;
                     if std::env::var_os("NO_COLOR").is_some() {
                         screen.log(&footer)?;

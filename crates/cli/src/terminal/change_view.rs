@@ -282,6 +282,10 @@ pub fn heading(text: &str) -> Line {
 pub fn body(text: &str) -> Line {
     Line(vec![span(text, Style::Body)])
 }
+/// A line in the failure color.
+pub fn failure(text: &str) -> Line {
+    Line(vec![span(text, Style::Failure)])
+}
 pub fn muted(summary: &str) -> Line {
     Line(vec![span(summary, Style::Muted)])
 }
