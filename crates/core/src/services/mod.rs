@@ -28,6 +28,7 @@ pub mod anthropic_auth;
 pub mod design;
 pub mod ide;
 pub mod usage;
+pub mod model_pricing;
 pub mod team;
 pub mod team_server;
 pub mod voice;
