@@ -726,41 +726,8 @@ impl PromptEditor {
             selected = selected.min(items.len().saturating_sub(1));
             // Wrap by display cells, never by UTF-8 bytes. Keep cursor in viewport.
             let prompt = clipped(prompt, width.saturating_sub(2));
-            let prompt_width = prompt
-                .chars()
-                .map(|ch| ch.width().unwrap_or(0))
-                .sum::<usize>();
-            let mut input_lines = vec![prompt.clone()];
-            let mut cell = prompt_width;
-            let mut cursor_row = 0;
-            let mut cursor_col = prompt_width;
-            for (i, ch) in buffer.chars.iter().enumerate() {
-                let w = if *ch == '\t' {
-                    4
-                } else {
-                    ch.width().unwrap_or(0)
-                };
-                if *ch == '\n' || cell + w >= width {
-                    input_lines.push("  ".into());
-                    cell = 2;
-                }
-                if i == buffer.cursor {
-                    cursor_row = input_lines.len() - 1;
-                    cursor_col = cell;
-                }
-                if *ch != '\n' {
-                    input_lines.last_mut().unwrap().push_str(&if *ch == '\t' {
-                        "    ".into()
-                    } else {
-                        ch.to_string()
-                    });
-                    cell += w;
-                }
-            }
-            if buffer.cursor == buffer.chars.len() {
-                cursor_row = input_lines.len() - 1;
-                cursor_col = cell;
-            }
+            let (input_lines, positions) = crate::terminal::prompt_display::layout(&prompt, &buffer.chars, width.saturating_sub(1));
+            let (cursor_row, cursor_col) = positions[buffer.cursor.min(buffer.chars.len())];
             let max_input = (rows as usize / 3).max(1);
             let show_tip = items.is_empty() && search.is_none() && rows >= 12;
             let first = cursor_row.saturating_sub(max_input - 1);

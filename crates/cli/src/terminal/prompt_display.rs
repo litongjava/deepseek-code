@@ -51,7 +51,6 @@ pub fn write_submitted(
 }
 
 fn wrapped_lines(prompt: &str, text: &str, width: usize) -> Vec<String> {
-    let width = width.max(4);
     let clean = |value: &str| {
         value
             .replace("\r\n", "\n")
@@ -64,23 +63,67 @@ fn wrapped_lines(prompt: &str, text: &str, width: usize) -> Vec<String> {
         .filter(|ch| !ch.is_control())
         .take(2)
         .collect();
-    let mut row = prompt;
-    let mut cells: usize = row.chars().map(|ch| ch.width().unwrap_or(0)).sum();
-    let mut rows = Vec::new();
-    for ch in clean(text).replace('\t', "    ").chars() {
-        let size = ch.width().unwrap_or(0);
-        if ch == '\n' || cells + size > width {
-            rows.push(row);
-            row = "  ".into();
-            cells = 2;
+    let chars: Vec<char> = clean(text).chars().collect();
+    layout(&prompt, &chars, width.max(4)).0
+}
+
+/// Rows of a prompt followed by its text, wrapped at the last space that fits
+/// as in the reference CLI; a word longer than a row still breaks. Continuation
+/// rows indent two cells and no row exceeds `limit` cells. A space at a break
+/// is not drawn. Also returns the (row, cell) of every cursor position,
+/// `0..=chars.len()`.
+pub fn layout(prompt: &str, chars: &[char], limit: usize) -> (Vec<String>, Vec<(usize, usize)>) {
+    let cells = |ch: char| if ch == '\t' { 4 } else { ch.width().unwrap_or(0) };
+    let mut positions = Vec::with_capacity(chars.len() + 1);
+    let mut hidden = vec![false; chars.len()];
+    let mut row = 0;
+    let mut cell: usize = prompt.chars().map(cells).sum();
+    let mut space: Option<usize> = None;
+    for (index, &ch) in chars.iter().enumerate() {
+        if ch == '\n' {
+            positions.push((row, cell));
+            hidden[index] = true;
+            row += 1;
+            cell = 2;
+            space = None;
+            continue;
         }
-        if ch != '\n' {
-            row.push(ch);
-            cells += size;
+        let size = cells(ch);
+        if cell + size > limit {
+            if ch == ' ' {
+                positions.push((row, cell));
+                hidden[index] = true;
+                row += 1;
+                cell = 2;
+                space = None;
+                continue;
+            }
+            row += 1;
+            cell = 2;
+            // Carry the partial word after the row's last space down with it.
+            if let Some(last) = space.filter(|last| last + 1 < index) {
+                for moved in last + 1..index {
+                    positions[moved] = (row, cell);
+                    cell += cells(chars[moved]);
+                }
+            }
+            space = None;
+        }
+        positions.push((row, cell));
+        cell += size;
+        if ch == ' ' {
+            space = Some(index);
         }
     }
-    rows.push(row);
-    rows
+    positions.push((row, cell));
+    let mut rows = vec![prompt.to_owned()];
+    rows.resize(row + 1, "  ".to_owned());
+    for (index, &ch) in chars.iter().enumerate() {
+        if !hidden[index] {
+            rows[positions[index].0].push_str(&if ch == '\t' { "    ".to_owned() } else { ch.to_string() });
+        }
+    }
+    (rows, positions)
 }
 
 #[cfg(test)]
@@ -106,5 +149,26 @@ mod tests {
                     <= 8
             );
         }
+    }
+
+    #[test]
+    fn wraps_at_word_boundaries_and_tracks_every_cursor_position() {
+        let chars: Vec<char> = "make divide raise ValueError".chars().collect();
+        let (rows, positions) = layout("> ", &chars, 16);
+        let trimmed = |rows: &[String]| rows.iter().map(|row| row.trim_end().to_owned()).collect::<Vec<_>>();
+        assert_eq!(trimmed(&rows), ["> make divide", "  raise", "  ValueError"]);
+        assert_eq!(positions[0], (0, 2));
+        assert_eq!(positions[12], (1, 2));
+        assert_eq!(positions[chars.len()], (2, 12));
+        assert!(rows.iter().all(|row| row.chars().count() <= 16));
+        let long: Vec<char> = "abcdefghijklmnopqrstuvwxyz".chars().collect();
+        let (rows, _) = layout("> ", &long, 10);
+        assert_eq!(rows, ["> abcdefgh", "  ijklmnop", "  qrstuvwx", "  yz"]);
+        let wide: Vec<char> = "你好 世界".chars().collect();
+        let (rows, positions) = layout("> ", &wide, 7);
+        assert_eq!(trimmed(&rows), ["> 你好", "  世界"]);
+        assert_eq!(positions[2], (0, 6));
+        let lines: Vec<char> = "a\nb".chars().collect();
+        assert_eq!(layout("> ", &lines, 10).0, ["> a", "  b"]);
     }
 }
