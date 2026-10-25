@@ -729,7 +729,9 @@ impl PromptEditor {
             let (input_lines, positions) = crate::terminal::prompt_display::layout(&prompt, &buffer.chars, width.saturating_sub(1));
             let (cursor_row, cursor_col) = positions[buffer.cursor.min(buffer.chars.len())];
             let max_input = (rows as usize / 3).max(1);
-            let show_tip = items.is_empty() && search.is_none() && rows >= 12;
+            // As in the reference CLI one footer line suffices; a tip helps only
+            // before the first prompt.
+            let show_tip = items.is_empty() && search.is_none() && rows >= 12 && self.history.is_empty();
             let first = cursor_row.saturating_sub(max_input - 1);
             let input_height = input_lines.len().saturating_sub(first).min(max_input);
             let panel_budget = (rows as usize)
@@ -756,12 +758,7 @@ impl PromptEditor {
                 ),
             }
             lines.push(("\u{2500}".repeat(width), TextStyle::Border));
-            let footer_rows = usize::from(show_tip)
-                + if self.details.entries.is_empty() && self.transcript.is_empty() {
-                    1
-                } else {
-                    2
-                };
+            let footer_rows = usize::from(show_tip) + 1 + usize::from(!self.details.entries.is_empty());
             // Five one-line entries at a time, as in the reference CLI.
             let available = (rows as usize)
                 .saturating_sub(lines.len() + footer_rows + 1)
@@ -811,6 +808,9 @@ impl PromptEditor {
                 if ghost.is_some() {
                     parts.push("tab to accept suggestion".into());
                 }
+                if self.details.entries.is_empty() && !self.transcript.is_empty() && !self.transcript_printed {
+                    parts.push("ctrl+o to expand tool calls".into());
+                }
                 if let Some(note) = &self.context_note {
                     parts.push(note.clone());
                 }
@@ -830,18 +830,6 @@ impl PromptEditor {
             if !self.details.entries.is_empty() {
                 lines.push((
                     clipped("Ctrl+O details \u{00b7} PgUp/PgDn scroll", width),
-                    TextStyle::Muted,
-                ));
-            } else if !self.transcript.is_empty() {
-                lines.push((
-                    clipped(
-                        if self.transcript_printed {
-                            "Tool calls printed above \u{00b7} scroll up to read them"
-                        } else {
-                            "Ctrl+O expands the last turn's tool calls"
-                        },
-                        width,
-                    ),
                     TextStyle::Muted,
                 ));
             }
