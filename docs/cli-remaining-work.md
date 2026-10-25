@@ -109,7 +109,7 @@
 - Design 服务（授权、上传、渲染；浏览器测试按 deepseek-browser-use 流程）。
 - 真实 LSP 服务器（rust-analyzer/TypeScript/Python，九种操作、写入后诊断、重启）。
 - [x] Linux x86_64 / macOS arm64 core 与独立 CLI 构建、完整测试、真实 Anthropic 兼容接口 print / stream-json / Read 冒烟。task10 验收：Windows core 615/0/7、CLI 268/0/1；Linux core 613/0/7、CLI 267/0/1；macOS core 615/0/7、CLI 267/0/1（通过/失败/忽略）。Windows CLI/Desktop all-target check 通过；不支持的 Unix 本地截图及 macOS 按键/侧键明确报错；平台 cfg 差异、失败修复和未验证项详见开发记录 `unix-build-acceptance-20261018.md`。
-- [x] 与官方 CLI 的终端对比：Linux 下用 Claude Code 2.1.310（隔离配置目录）与 dcl 在同一 DeepSeek 接口、同模型、120x32 下逐场景对比原始 ANSI 与最终屏幕。已修复：审批菜单与编辑 diff 预览（`8ded02b`）、斜杠菜单（`7e1ec0c`）、输入按词换行（`00304bf`）、`❯` 与启动标题（`81c72dc`）、回答按词换行与悬挂缩进（`285edb9`）、工作区内只读 shell 命令免询问（`7ccf445`）、中断提示（`136b133`）、单行页脚（`8a0a446`）。启动到提示符 dcl ≤0.2 s、官方 ≈0.4 s。剩余差异（连续读取的分组摘要、菜单位置、Bash 前缀规则）见开发目录 `runs/ux/ux-parity-20261024.md`；Windows ConPTY 下未重跑。
+- [x] 与官方 CLI 的终端对比：Linux 下用 Claude Code 2.1.310（隔离配置目录）与 dcl 在同一 DeepSeek 接口、同模型、120x32 下逐场景对比原始 ANSI 与最终屏幕。已修复：审批菜单与编辑 diff 预览（`8ded02b`）、斜杠菜单（`7e1ec0c`）、输入按词换行（`00304bf`）、`❯` 与启动标题（`81c72dc`）、回答按词换行与悬挂缩进（`285edb9`）、工作区内只读 shell 命令免询问（`7ccf445`）、中断提示（`136b133`）、单行页脚（`8a0a446`）。启动到提示符 dcl ≤0.2 s、官方 ≈0.4 s。第二轮已对齐：补全菜单移到输入框上方（`366b2b7`）、连续只读调用合并为一行摘要（`93206c3`）、Bash 审批记住命令前缀（`95c5610`）。记录见开发目录 `runs/ux/ux-parity-20261024.md`；Windows ConPTY 下未重跑。
 - qwerty-learner issue #1095：先读 `issue1095-pass2-final-review.md` 等已有记录，目标仓库不提交。
 
 ### 暂时不做的任务
