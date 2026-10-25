@@ -251,6 +251,9 @@ impl Draft {
     }
 }
 struct Choice {
+    /// What is being approved, drawn in the frame and erased once answered,
+    /// as in the reference CLI.
+    preview: Vec<change_view::Line>,
     question: String,
     options: Vec<String>,
     selected: usize,
@@ -890,7 +893,13 @@ impl Frame {
                 hit
             });
         }
-        let choice_rows = state.choice.as_ref().map(|choice| choice_lines(choice, &lines[1], &mode, width));
+        let choice_rows = state.choice.as_ref().map(|choice| choice_lines(choice, &lines[1], &mode, width, size.1 as usize));
+        if choice_rows.is_some() {
+            // The approval box takes the place of the streaming area.
+            content.clear();
+            self.panel_toggle = None;
+            self.panel_height = 0;
+        }
         let choice_cursor = choice_rows.as_ref().map(|(rows, selected)| rows.len() - *selected);
         if let Some((rows, _)) = choice_rows {
             lines = rows;
@@ -941,7 +950,7 @@ impl Frame {
 /// The frame below the activity line while a menu question is pending:
 /// the question, `❯ 1. Yes` style options and a key hint. Returns the rows and
 /// the selected row counted from the end.
-fn choice_lines(choice: &Choice, status: &str, mode: &str, width: usize) -> (Vec<String>, usize) {
+fn choice_lines(choice: &Choice, status: &str, mode: &str, width: usize, height: usize) -> (Vec<String>, usize) {
     use crossterm::style::{Attribute, ResetColor, SetAttribute, SetForegroundColor};
     let color = std::env::var_os("NO_COLOR").is_none();
     let paint = |text: String, fg: crossterm::style::Color| {
@@ -953,8 +962,18 @@ fn choice_lines(choice: &Choice, status: &str, mode: &str, width: usize) -> (Vec
         String::new(),
         status.to_owned(),
         rule,
-        if color { format!("{}{question}{}", SetAttribute(Attribute::Bold), SetAttribute(Attribute::Reset)) } else { question },
     ];
+    // The preview fits above the question; an edit's full diff is printed when
+    // the call finishes.
+    let room = height.saturating_sub(rows.len() + choice.options.len() + 3).max(1);
+    let shown = if choice.preview.len() > room { room.saturating_sub(1) } else { choice.preview.len() };
+    for line in &choice.preview[..shown] {
+        rows.push(change_view::render(line, width, color));
+    }
+    if shown < choice.preview.len() {
+        rows.push(paint(clip(&format!(" \u{2026} {} more lines", choice.preview.len() - shown), width), crate::terminal::style::muted()));
+    }
+    rows.push(if color { format!("{}{question}{}", SetAttribute(Attribute::Bold), SetAttribute(Attribute::Reset)) } else { question });
     for (index, option) in choice.options.iter().enumerate() {
         let text = clip(&format!(" {} {}. {}", if index == choice.selected { "\u{276f}" } else { " " }, index + 1, terminal_text(option)), width);
         rows.push(if index == choice.selected { paint(text, crate::terminal::style::accent()) } else { text });
@@ -1100,13 +1119,8 @@ fn run(
                     if state.details.expanded {
                         state.details.toggle();
                     }
-                    let width = terminal::size().unwrap_or((80, 24)).0.saturating_sub(1) as usize;
-                    let color = std::env::var_os("NO_COLOR").is_none();
-                    for line in lines {
-                        screen.log_rendered(&change_view::render(&line, width, color));
-                    }
                     state.question(reply);
-                    state.choice = Some(Choice { question, options, selected: 0 });
+                    state.choice = Some(Choice { preview: lines, question, options, selected: 0 });
                     dirty = true;
                 }
                 Ok(Update::Question(text, reply)) => {
@@ -1536,7 +1550,7 @@ mod tests {
         state.draft.insert("queued draft");
         let (reply, mut received) = oneshot::channel();
         state.question(reply);
-        state.choice = Some(Choice { question: "Proceed?".into(), options: vec!["Yes".into(), "Always".into(), "No".into()], selected: 0 });
+        state.choice = Some(Choice { preview: Vec::new(), question: "Proceed?".into(), options: vec!["Yes".into(), "Always".into(), "No".into()], selected: 0 });
         assert!(state.choice_key(key(KeyCode::Up)));
         assert_eq!(state.choice.as_ref().unwrap().selected, 2);
         assert!(state.choice_key(key(KeyCode::Down)));
@@ -1550,13 +1564,36 @@ mod tests {
 
         let (reply, mut received) = oneshot::channel();
         state.question(reply);
-        state.choice = Some(Choice { question: "Proceed?".into(), options: vec!["Yes".into(), "No".into()], selected: 0 });
+        state.choice = Some(Choice { preview: Vec::new(), question: "Proceed?".into(), options: vec!["Yes".into(), "No".into()], selected: 0 });
         assert!(state.choice_key(key(KeyCode::Char('3'))));
         assert!(received.try_recv().is_err());
         assert!(state.choice_key(key(KeyCode::Char('2'))));
         assert_eq!(received.try_recv().unwrap(), "2");
-        let (rows, selected) = choice_lines(&Choice { question: "Proceed?".into(), options: vec!["Yes".into(), "No".into()], selected: 1 }, "status", "esc to interrupt", 40);
+        let (rows, selected) = choice_lines(&Choice { preview: Vec::new(), question: "Proceed?".into(), options: vec!["Yes".into(), "No".into()], selected: 1 }, "status", "esc to interrupt", 40, 24);
         assert_eq!(rows.len() - selected, 5);
+        // The approval preview sits between the rule and the question and is
+        // clipped to the screen; answering removes the whole box.
+        let preview = (0..30).map(|row| change_view::body(&format!("line {row}"))).collect();
+        let choice = Choice { preview, question: "Proceed?".into(), options: vec!["Yes".into(), "No".into()], selected: 0 };
+        let (rows, _) = choice_lines(&choice, "status", "esc to interrupt", 40, 20);
+        let strip = |row: &String| {
+            let mut text = String::new();
+            let mut escape = false;
+            for ch in row.chars() {
+                match (escape, ch) {
+                    (_, '\x1b') => escape = true,
+                    (true, 'm') => escape = false,
+                    (true, _) => {}
+                    (false, ch) => text.push(ch),
+                }
+            }
+            text
+        };
+        let plain: Vec<String> = rows.iter().map(strip).collect();
+        assert_eq!(rows.len(), 19);
+        assert_eq!(plain[3], "line 0");
+        assert!(plain.iter().any(|row| row.contains("more lines")), "{plain:?}");
+        assert!(plain.iter().position(|row| row.contains("Proceed?")) > plain.iter().position(|row| row.contains("more lines")));
     }
     #[test]
     fn cancelled_question_discards_answer_and_restores_original_draft() {
