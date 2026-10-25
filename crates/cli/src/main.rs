@@ -480,7 +480,7 @@ async fn run(cli: &Cli) -> Result<()> {
             }?;
             for warning in outcome { eprintln!("Setup hook: {warning}"); }
         }
-        if !single { eprintln!("DeepSeek Code {} — {}\n{}\nSession: {}\n/help for commands; Ctrl+C cancels the current task.", env!("CARGO_PKG_VERSION"), session.model, session.workspace.display(), session.id); }
+        if !single { eprintln!("{}", terminal::banner(&session.model, &session.workspace)); }
         if !sdk_stream {
             let initial = session.initial_hook_message.take();
             if single {
@@ -495,7 +495,7 @@ async fn run(cli: &Cli) -> Result<()> {
                 let display = display_commands::load(&session)?;
                 terminal::style::configure(&display.theme, &display.color);
                 terminal::prompt_display::write_submitted(
-                    &mut io::stderr(), "> ", &prompt,
+                    &mut io::stderr(), &format!("{} ", terminal::prompt_glyph()), &prompt,
                     crossterm::terminal::size().map(|(cols, _)| cols.saturating_sub(1) as usize).unwrap_or(79),
                     io::stderr().is_terminal() && std::env::var_os("NO_COLOR").is_none() && !terminal::screen_reader(), false,
                 )?;
@@ -576,7 +576,8 @@ async fn run(cli: &Cli) -> Result<()> {
                 Err(error) => eprintln!("Status line: {error:#}"),
             }
             input.as_ref().expect("interactive reader").set_permission_mode(session.permission_mode());
-            let prompt = if composer.is_pending() { "... " } else { "\n> " };
+            let idle_prompt = format!("\n{} ", terminal::prompt_glyph());
+            let prompt = if composer.is_pending() { "... " } else { idle_prompt.as_str() };
             let line = 'read: loop { tokio::select! {
                 line = input.as_mut().expect("interactive reader").read_prompt(prompt) => break 'read match line {
                     Ok(Some(terminal::input::PromptEvent::Line(line))) => line,

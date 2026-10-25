@@ -671,7 +671,7 @@ impl Frame {
     fn draw(&mut self, state: &mut State) -> io::Result<()> {
         let size = terminal::size().unwrap_or((80, 24));
         let width = (size.0 as usize).saturating_sub(1).max(4);
-        let prompt = if state.answer.is_some() { "Answer \u{203a} " } else { "\u{203a} " };
+        let prompt = if state.answer.is_some() { "Answer \u{203a} ".to_owned() } else { format!("{} ", crate::terminal::prompt_glyph()) };
         let prompt_width = prompt.chars().count();
         let (draft, cursor) = state.draft.visible(width.saturating_sub(prompt_width + 1));
         let status = clip(&state.status_line(), width);

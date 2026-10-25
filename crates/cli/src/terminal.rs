@@ -12,6 +12,39 @@ pub fn configure_accessibility(enabled: bool) {
 pub fn screen_reader() -> bool {
     SCREEN_READER.load(std::sync::atomic::Ordering::Relaxed)
 }
+/// The startup header, as in the reference CLI: product and version, the
+/// model, and the workspace with the home directory shortened to `~`.
+pub fn banner(model: &str, workspace: &std::path::Path) -> String {
+    let path = match dirs::home_dir().and_then(|home| workspace.strip_prefix(home).ok().map(std::path::Path::to_path_buf)) {
+        Some(relative) if relative.as_os_str().is_empty() => "~".to_owned(),
+        Some(relative) => format!("~{}{}", std::path::MAIN_SEPARATOR, relative.display()),
+        None => workspace.display().to_string(),
+    };
+    let model: String = model.chars().filter(|ch| !ch.is_control()).collect();
+    let path: String = path.chars().filter(|ch| !ch.is_control()).collect();
+    let title = format!("DeepSeek Code v{}", env!("CARGO_PKG_VERSION"));
+    if screen_reader() || std::env::var_os("NO_COLOR").is_some() {
+        return format!("{title}\n{model}\n{path}\n");
+    }
+    use crossterm::style::{Attribute, ResetColor, SetAttribute, SetForegroundColor};
+    let accent = SetForegroundColor(style::accent());
+    let muted = SetForegroundColor(style::muted());
+    format!(
+        " {accent}\u{273b}{ResetColor} {}{title}{}\n   {muted}{model} \u{b7} /help for commands{ResetColor}\n   {muted}{path}{ResetColor}\n",
+        SetAttribute(Attribute::Bold),
+        SetAttribute(Attribute::Reset),
+    )
+}
+
+/// The input prompt marker: the reference CLI's `❯`, or `>` for screen
+/// readers and dumb terminals.
+pub fn prompt_glyph() -> &'static str {
+    if screen_reader() || std::env::var("TERM").as_deref() == Ok("dumb") {
+        ">"
+    } else {
+        "\u{276f}"
+    }
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CliConfig {
