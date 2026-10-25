@@ -168,34 +168,135 @@ pub fn expanded(
     lines
 }
 
-/// The tool approval prompt: what will run, then numbered choices.
-pub fn approval_question(name: &str, input: &Value, workspace: Option<&std::path::Path>) -> String {
-    let mut question = match (name, input["command"].as_str()) {
-        ("Bash" | "PowerShell", Some(command)) => {
-            let mut text = format!("{name} command\n");
-            for line in command.lines().take(12) {
-                text.push_str(&format!("  {}\n", printable(line)));
+/// What the second approval choice grants for the rest of the session.
+#[derive(Clone, Debug, PartialEq)]
+pub enum Remember {
+    /// Switch the session to accept-edits mode.
+    AcceptEdits,
+    /// Add a session allow rule such as `Bash(npm test)`.
+    Rule(String),
+}
+
+/// A tool approval prompt: what will run, the question and numbered choices.
+pub struct Approval {
+    /// Heading and preview, shown above the question.
+    pub lines: Vec<Line>,
+    pub question: String,
+    pub options: Vec<String>,
+    pub remember: Option<Remember>,
+}
+
+impl Approval {
+    /// The prompt as plain text, for terminals without the live menu,
+    /// background workers and remote clients.
+    pub fn text(&self) -> String {
+        let mut text = change_view::plain(&self.lines);
+        if !text.is_empty() && !text.ends_with('\n') {
+            text.push('\n');
+        }
+        text.push_str(&self.question);
+        for (index, option) in self.options.iter().enumerate() {
+            text.push_str(&format!("\n  {}. {option}", index + 1));
+        }
+        let last = self.options.len();
+        text.push_str(&format!("\n(1/y yes{}, {last}/n no)", if self.remember.is_some() { ", 2 yes for this session" } else { "" }));
+        text
+    }
+
+    /// Whether an answer allows the call, and whether it also remembers it.
+    pub fn decide(&self, answer: &str) -> (bool, bool) {
+        let answer = answer.trim().to_lowercase();
+        if ["y", "yes", "1", "\u{662f}", "\u{5141}\u{8bb8}"].contains(&answer.as_str()) {
+            (true, false)
+        } else if answer == "2" && self.remember.is_some() {
+            (true, true)
+        } else {
+            (false, false)
+        }
+    }
+}
+
+fn file_name(path: &str) -> String {
+    std::path::Path::new(path)
+        .file_name()
+        .map_or_else(|| path.to_owned(), |name| name.to_string_lossy().into_owned())
+}
+
+/// A rule that allows exactly this call again, when one can be written safely.
+fn session_rule(name: &str, input: &Value) -> Option<String> {
+    let rule = match (name, input["command"].as_str()) {
+        ("Bash", Some(command)) => {
+            let command = command.trim();
+            if command.is_empty() || command.contains(['\n', '*', '(', ')']) {
+                return None;
             }
-            if let Some(description) = input["description"].as_str() {
-                text.push_str(&format!("  {}\n", printable(description)));
+            format!("Bash({command})")
+        }
+        ("Bash" | "PowerShell", _) => return None,
+        _ => name.to_owned(),
+    };
+    claude_core::permissions::patterns::validate(&rule).ok().map(|_| rule)
+}
+
+/// The approval prompt for one tool call. File edits preview the diff they
+/// would make; other calls show the command or their input.
+pub fn approval(name: &str, input: &Value, workspace: Option<&std::path::Path>) -> Approval {
+    let edits = matches!(name, "Write" | "Edit" | "MultiEdit" | "NotebookEdit");
+    let preview = workspace
+        .and_then(|workspace| claude_core::tools::file_change::preview(name, input, workspace));
+    let mut lines = Vec::new();
+    let question = match (&preview, input["file_path"].as_str()) {
+        (Some(change), Some(path)) => {
+            let created = change["created"] == true;
+            let shown = super::display_path::label(change["path"].as_str().unwrap_or(path), workspace);
+            lines.push(change_view::heading(match (name, created) {
+                ("Write", true) => "Create file",
+                ("Write", false) => "Overwrite file",
+                _ => "Edit file",
+            }));
+            lines.push(change_view::muted(&shown));
+            lines.extend(change_view::diff_rows(change, path).unwrap_or_default());
+            match (name, created) {
+                ("Write", true) => format!("Do you want to create {}?", file_name(path)),
+                ("Write", false) => format!("Do you want to overwrite {}?", file_name(path)),
+                _ => format!("Do you want to make this edit to {}?", file_name(path)),
             }
-            text
         }
         _ => {
-            let mut text = format!("{}\n", label(name, input, workspace));
-            let pretty = serde_json::to_string_pretty(input).unwrap_or_default();
-            let lines: Vec<&str> = pretty.lines().collect();
-            for line in lines.iter().take(12) {
-                text.push_str(&format!("  {}\n", printable(line)));
+            match (name, input["command"].as_str()) {
+                ("Bash" | "PowerShell", Some(command)) => {
+                    lines.push(change_view::heading(&format!("{name} command")));
+                    for line in command.lines().take(12) {
+                        lines.push(change_view::body(&format!("  {}", printable(line))));
+                    }
+                    if let Some(description) = input["description"].as_str() {
+                        lines.push(change_view::muted(&format!("  {}", printable(description))));
+                    }
+                }
+                _ => {
+                    lines.push(change_view::heading(&label(name, input, workspace)));
+                    let pretty = serde_json::to_string_pretty(input).unwrap_or_default();
+                    let rows: Vec<&str> = pretty.lines().collect();
+                    for row in rows.iter().take(12) {
+                        lines.push(change_view::muted(&format!("  {}", printable(row))));
+                    }
+                    if rows.len() > 12 {
+                        lines.push(change_view::muted(&format!("  \u{2026} {} more lines", rows.len() - 12)));
+                    }
+                }
             }
-            if lines.len() > 12 {
-                text.push_str(&format!("  \u{2026} {} more lines\n", lines.len() - 12));
-            }
-            text
+            "Do you want to proceed?".to_owned()
         }
     };
-    question.push_str("Allow this call?  1. Yes   2. No  (1/y or 2/n)");
-    question
+    let remember = if edits { Some(Remember::AcceptEdits) } else { session_rule(name, input).map(Remember::Rule) };
+    let mut options = vec!["Yes".to_owned()];
+    match &remember {
+        Some(Remember::AcceptEdits) => options.push("Yes, allow all edits during this session (shift+tab)".into()),
+        Some(Remember::Rule(rule)) => options.push(format!("Yes, and don't ask again for {rule} in this session")),
+        None => {}
+    }
+    options.push("No".into());
+    Approval { lines, question, options, remember }
 }
 
 #[cfg(test)]
@@ -237,10 +338,31 @@ mod tests {
 
     #[test]
     fn approval_questions_show_the_command_and_numbered_choices() {
-        let question = approval_question("Bash", &json!({"command":"ls -la","description":"List files"}), None);
-        assert_eq!(question, "Bash command\n  ls -la\n  List files\nAllow this call?  1. Yes   2. No  (1/y or 2/n)");
-        let question = approval_question("Write", &json!({"file_path":"a.txt","content":"x"}), None);
-        assert!(question.starts_with("Write(a.txt)\n  {"), "{question}");
+        let bash = approval("Bash", &json!({"command":"ls -la","description":"List files"}), None);
+        assert_eq!(bash.text(), "Bash command\n  ls -la\n  List files\nDo you want to proceed?\n  1. Yes\n  2. Yes, and don't ask again for Bash(ls -la) in this session\n  3. No\n(1/y yes, 2 yes for this session, 3/n no)");
+        assert_eq!(bash.decide("2"), (true, true));
+        assert_eq!(bash.decide("y"), (true, false));
+        assert_eq!(bash.decide("3"), (false, false));
+        let wildcard = approval("Bash", &json!({"command":"rm -rf *"}), None);
+        assert_eq!(wildcard.options, ["Yes", "No"]);
+        assert_eq!(wildcard.decide("2"), (false, false));
+        let write = approval("Write", &json!({"file_path":"a.txt","content":"x"}), None);
+        assert!(write.text().starts_with("Write(a.txt)\n  {"), "{}", write.text());
+        assert_eq!(write.remember, Some(Remember::AcceptEdits));
+    }
+
+    #[test]
+    fn edit_approvals_preview_the_diff_they_would_make() {
+        let temp = tempfile::tempdir().unwrap();
+        std::fs::write(temp.path().join("calc.py"), "def divide(a, b):\n    return a / b\n").unwrap();
+        let input = json!({"file_path":"calc.py","old_string":"    return a / b","new_string":"    if b == 0:\n        raise ValueError\n    return a / b"});
+        let edit = approval("Edit", &input, Some(temp.path()));
+        let text = edit.text();
+        assert!(text.starts_with("Edit file\ncalc.py\n"), "{text}");
+        assert!(text.contains("    2 +    if b == 0:"), "{text}");
+        assert!(text.contains("Do you want to make this edit to calc.py?\n  1. Yes\n  2. Yes, allow all edits during this session (shift+tab)\n  3. No"), "{text}");
+        let created = approval("Write", &json!({"file_path":"new.txt","content":"hi\n"}), Some(temp.path()));
+        assert_eq!(created.question, "Do you want to create new.txt?");
     }
 
     #[test]

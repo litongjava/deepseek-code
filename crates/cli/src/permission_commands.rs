@@ -1,18 +1,52 @@
 //! Explicit per-session tool rules; plan mode remains read-only and deny wins.
 use crate::session::Session;
 use anyhow::{Context, Result};
-use claude_core::permissions::rules::PermissionAction;
+use crate::terminal::tool_view::Remember;
+use claude_core::{db::DbManager, native_engine::permission_response::Commit, permissions::rules::PermissionAction};
 use std::collections::HashMap;
 
 pub fn load(session: &Session) -> Result<HashMap<String, PermissionAction>> {
-    session.store.db.with_conn(|conn| -> Result<_> {
+    load_rules(&session.store.db, &session.id)
+}
+
+fn load_rules(db: &DbManager, session: &str) -> Result<HashMap<String, PermissionAction>> {
+    db.with_conn(|conn| -> Result<_> {
         let mut statement = conn.prepare("SELECT value FROM peripheral_settings WHERE key=?1")?;
-        let mut rows = statement.query([format!("cli.permissions.{}", session.id)])?;
+        let mut rows = statement.query([format!("cli.permissions.{session}")])?;
         Ok(match rows.next()? {
             Some(row) => serde_json::from_str(&row.get::<_, String>(0)?)?,
             None => HashMap::new(),
         })
     })?
+}
+
+fn save(db: &DbManager, session: &str, rules: &HashMap<String, PermissionAction>) -> Result<()> {
+    let value = serde_json::to_string(rules)?;
+    db.with_conn(|conn| conn.execute("INSERT INTO peripheral_settings(key,value) VALUES(?1,?2) ON CONFLICT(key) DO UPDATE SET value=excluded.value", [format!("cli.permissions.{session}"), value]))??;
+    Ok(())
+}
+
+/// The approval prompt's second choice, published by the engine only after
+/// it accepts the reviewed call: an allow rule saved for this session, or
+/// accept-edits mode.
+pub fn remember_commit(session: &Session, remember: &Remember) -> Result<Commit> {
+    let (db, id, manager) = (session.store.db.clone(), session.id.clone(), session.permissions.clone());
+    Ok(match remember.clone() {
+        Remember::AcceptEdits => {
+            let mode = claude_core::services::session_permission_mode::parse("accept-edits")?;
+            Box::new(move || claude_core::services::session_permission_mode::set(&db, &id, &manager, mode))
+        }
+        Remember::Rule(rule) => {
+            claude_core::permissions::patterns::validate(&rule)?;
+            Box::new(move || {
+                let mut rules = load_rules(&db, &id)?;
+                rules.insert(rule, PermissionAction::Allow);
+                save(&db, &id, &rules)?;
+                manager.set_session_rules(&id, rules);
+                Ok(())
+            })
+        }
+    })
 }
 
 fn words(argument: &str) -> Vec<&str> {
@@ -64,8 +98,7 @@ pub async fn handle(argument: &str, session: &mut Session) -> Result<()> {
                 "ask" => { rules.insert((*tool).into(), PermissionAction::Confirm); },
                 _ => unreachable!(),
             }
-            let value = serde_json::to_string(&rules)?;
-            session.store.db.with_conn(|conn| conn.execute("INSERT INTO peripheral_settings(key,value) VALUES(?1,?2) ON CONFLICT(key) DO UPDATE SET value=excluded.value", [format!("cli.permissions.{}",session.id),value]))??;
+            save(&session.store.db, &session.id, &rules)?;
         }
         _ => anyhow::bail!("Usage: /permissions [list|ask|accept-edits|plan|bypass|dont-ask|auto|auto-config show|auto-config set JSON|auto-config off|allow RULE|deny RULE|ask RULE|remove RULE]. Examples: allow Bash(git status *), deny Read(.env), ask Edit(src/**). Enter rules without outer shell quotes."),
     }

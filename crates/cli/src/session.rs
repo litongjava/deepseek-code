@@ -958,10 +958,12 @@ impl Session {
                     },
                     EngineEvent::ToolPermission { request_id, tool_use_id, tool_name, input: tool_input } => {
                         progress.clear();
-                        let question = if tool_name == "ExitPlanMode" {
-                            format!("Review plan\n{}\n\n{}\n\nApprove this plan and leave plan mode? Implementation will use ask permissions. [y/N]",
-                                tool_input["planFilePath"].as_str().unwrap_or(""), tool_input["plan"].as_str().unwrap_or(""))
-                        } else { crate::terminal::tool_view::approval_question(&tool_name, &tool_input, Some(&self.workspace)) };
+                        let approval = (tool_name != "ExitPlanMode").then(|| crate::terminal::tool_view::approval(&tool_name, &tool_input, Some(&self.workspace)));
+                        let question = match &approval {
+                            Some(approval) => approval.text(),
+                            None => format!("Review plan\n{}\n\n{}\n\nApprove this plan and leave plan mode? Implementation will use ask permissions. [y/N]",
+                                tool_input["planFilePath"].as_str().unwrap_or(""), tool_input["plan"].as_str().unwrap_or("")),
+                        };
                         let mut completion = self.engine.permission_completion(&request_id).await;
                         if *completion.borrow() { continue; }
                         if let Some(sdk) = &self.sdk_permissions {
@@ -983,7 +985,13 @@ impl Session {
                             let answering = async {
                                 if let Some(answer) = claude_core::services::background_sessions::worker_permission(&self.paths.data_dir, &self.id, &request_id, &question, tool).await? { Ok(answer) } else {
                                     anyhow::ensure!(input.is_some(), "Tool approval required in non-interactive mode; choose --permission-mode explicitly");
-                                    turn_answer(self, &mut progress, input, question).await
+                                    match (&approval, progress.live.as_ref()) {
+                                        (Some(approval), Some(live)) => {
+                                            let reply = live.choice(approval.lines.clone(), approval.question.clone(), approval.options.clone());
+                                            wait_answer(self, &mut progress, input, reply).await
+                                        }
+                                        _ => turn_answer(self, &mut progress, input, question).await,
+                                    }
                                 }
                             };
                             tokio::select! {
@@ -994,8 +1002,25 @@ impl Session {
                             }
                         };
                         if let Some(answer) = answer {
-                            let answer = if ["y", "yes", "1", "\u{662f}", "\u{5141}\u{8bb8}"].contains(&answer.trim().to_lowercase().as_str()) { "yes" } else { "no" };
-                            let _ = self.engine.resume_with_answer(&request_id, answer.into()).await;
+                            let (allowed, remember) = match &approval {
+                                Some(approval) => approval.decide(&answer),
+                                None => (["y", "yes", "1", "\u{662f}", "\u{5141}\u{8bb8}"].contains(&answer.trim().to_lowercase().as_str()), false),
+                            };
+                            let commit = match approval.as_ref().and_then(|approval| approval.remember.as_ref()).filter(|_| remember) {
+                                Some(grant) => match crate::permission_commands::remember_commit(self, grant) {
+                                    Ok(commit) => Some((commit, grant.clone())),
+                                    Err(error) => { progress.notice(&format!("Approved once; the session grant was not saved: {error:#}")); None },
+                                },
+                                None => None,
+                            };
+                            let answer = if allowed { "yes" } else { "no" };
+                            if let Some((commit, grant)) = commit {
+                                let response = claude_core::native_engine::permission_response::PermissionResponse::Allow { updated_input: None, commit: Some(commit) };
+                                let _ = self.engine.resume_with_permission(&request_id, response).await;
+                                if grant == crate::terminal::tool_view::Remember::AcceptEdits { progress.set_permission_mode("accept-edits"); }
+                            } else {
+                                let _ = self.engine.resume_with_answer(&request_id, answer.into()).await;
+                            }
                             if remote_decided {
                                 if let Some(reader) = input.as_mut() { reader.dismiss_answer().await?; }
                                 progress.notice(&format!("Remote Control {} {tool_name}.", if answer == "yes" { "allowed" } else { "denied" }));
@@ -1212,7 +1237,19 @@ impl Session {
 
 async fn turn_answer(session: &Session, progress: &mut crate::terminal::live::TurnDisplay, input: &mut Option<TerminalInput>, question: String) -> Result<String> {
     if let Some(live)=progress.live.as_ref() {
-        let mut answer=live.question(question);
+        let answer=live.question(question);
+        return wait_answer(session, progress, input, answer).await;
+    }
+    progress.clear();
+    let reader=input.as_mut().context("User input required in non-interactive mode; resume this session interactively")?;
+    eprintln!("\n{question}");
+    read_answer(reader).await
+}
+
+/// Waits for a live question's reply while handling mode cycling, queued
+/// prompts and cancellation.
+async fn wait_answer(session: &Session, progress: &mut crate::terminal::live::TurnDisplay, input: &mut Option<TerminalInput>, mut answer: tokio::sync::oneshot::Receiver<String>) -> Result<String> {
+    {
         loop {
             tokio::select! {
                 response=&mut answer=>return response.context("Terminal answer cancelled"),
@@ -1234,10 +1271,6 @@ async fn turn_answer(session: &Session, progress: &mut crate::terminal::live::Tu
             }
         }
     }
-    progress.clear();
-    let reader=input.as_mut().context("User input required in non-interactive mode; resume this session interactively")?;
-    eprintln!("\n{question}");
-    read_answer(reader).await
 }
 
 async fn read_answer(reader: &mut TerminalInput) -> Result<String> {

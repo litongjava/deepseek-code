@@ -274,6 +274,14 @@ fn render_with_theme(line: &Line, width: usize, color: bool, theme: u8) -> Strin
     }
     result
 }
+/// A bold heading line, as `Edit file` above an approval preview.
+pub fn heading(text: &str) -> Line {
+    Line(vec![span(text, Style::Current)])
+}
+/// A plain line in the body color.
+pub fn body(text: &str) -> Line {
+    Line(vec![span(text, Style::Body)])
+}
 pub fn muted(summary: &str) -> Line {
     Line(vec![span(summary, Style::Muted)])
 }
@@ -383,7 +391,13 @@ pub fn change_in_workspace(
             result.push(muted(&format!("  {note}")));
         }
     }
+    result.extend(diff_rows(change, path)?);
+    Some(result)
+}
+/// Numbered `+`/`-` rows of a `file_change` value, with word highlights.
+pub fn diff_rows(change: &Value, path: &str) -> Option<Vec<Line>> {
     let rows = change["rows"].as_array()?;
+    let mut result = Vec::new();
     for (index, row) in rows.iter().take(120).enumerate() {
         let kind = row["kind"].as_str().unwrap_or("context");
         let text = row["text"].as_str().unwrap_or("");

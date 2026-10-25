@@ -350,7 +350,16 @@ async fn observe(
                 if pending.is_none() && plain_pending.is_none() {
                     if let Some(question) = question.filter(|question| !answered.contains(&question.request_id)) {
                         if let Some(live) = &display.live {
-                            pending = Some((question.request_id, live.question(question.question)));
+                            // Tool approvals get the same menu as a foreground turn; the
+                            // worker rebuilds the options from the same call to decide.
+                            let menu = question.tool.as_ref().filter(|tool| question.kind == "permission" && tool["tool_name"] != "ExitPlanMode").map(|tool| {
+                                crate::terminal::tool_view::approval(tool["tool_name"].as_str().unwrap_or_default(), &tool["input"], Some(&session.workspace))
+                            });
+                            let reply = match menu {
+                                Some(approval) => live.choice(approval.lines, approval.question, approval.options),
+                                None => live.question(question.question),
+                            };
+                            pending = Some((question.request_id, reply));
                         } else if input.is_some() {
                             plain_pending = Some((question.request_id, question.question));
                         }

@@ -36,6 +36,7 @@ enum Update {
     HookActivity(Option<String>),
     Usage(Value),
     Question(String, oneshot::Sender<String>),
+    Choice(Vec<change_view::Line>, String, Vec<String>, oneshot::Sender<String>),
     Detail(String, String, String),
     Thinking(String),
     Stop(Option<String>),
@@ -127,6 +128,12 @@ impl LiveTurn {
     pub fn question(&self, text: String) -> oneshot::Receiver<String> {
         let (send, receive) = oneshot::channel();
         let _ = self.updates.send(Update::Question(text, send));
+        receive
+    }
+    /// A numbered menu below a preview; the reply is the chosen number.
+    pub fn choice(&self, lines: Vec<change_view::Line>, question: String, options: Vec<String>) -> oneshot::Receiver<String> {
+        let (send, receive) = oneshot::channel();
+        let _ = self.updates.send(Update::Choice(lines, question, options, send));
         receive
     }
     pub fn finish(mut self, error: Option<&str>) -> Vec<Action> {
@@ -221,6 +228,12 @@ impl Draft {
         (clip(&text, width), cursor)
     }
 }
+struct Choice {
+    question: String,
+    options: Vec<String>,
+    selected: usize,
+}
+
 struct State {
     goal_proposal: Option<(String, String)>,
     mode: String,
@@ -229,6 +242,8 @@ struct State {
     draft: Draft,
     saved_draft: Option<Draft>,
     answer: Option<oneshot::Sender<String>>,
+    /// A pending menu question; its reply goes through `answer`.
+    choice: Option<Choice>,
     partial: String,
     usage: super::progress::ReportedUsage,
     generated_characters: usize,
@@ -308,6 +323,7 @@ impl State {
             draft: Draft::default(),
             saved_draft: None,
             answer: None,
+            choice: None,
             partial: String::new(),
             usage: Default::default(),
             generated_characters: 0,
@@ -414,10 +430,45 @@ impl State {
     fn dismiss_closed_question(&mut self) -> bool {
         if self.answer.as_ref().is_some_and(oneshot::Sender::is_closed) {
             self.answer = None;
+            self.choice = None;
             self.draft = self.saved_draft.take().unwrap_or_default();
             return true;
         }
         false
+    }
+    /// Menu keys: arrows move, a number or Enter answers. Esc and Ctrl+C
+    /// fall through and interrupt the turn as everywhere else.
+    fn choice_key(&mut self, key: crossterm::event::KeyEvent) -> bool {
+        let Some(choice) = self.choice.as_mut() else {
+            return false;
+        };
+        let control = key.modifiers.contains(KeyModifiers::CONTROL);
+        let count = choice.options.len();
+        match key.code {
+            KeyCode::Esc => return false,
+            KeyCode::Char('c' | 'o' | 'b' | 'l') if control => return false,
+            KeyCode::Up | KeyCode::Char('k') => choice.selected = (choice.selected + count - 1) % count,
+            KeyCode::Down | KeyCode::Char('j') | KeyCode::Tab => choice.selected = (choice.selected + 1) % count,
+            KeyCode::Char(ch @ '1'..='9') if !control => {
+                let index = ch as usize - '1' as usize;
+                if index < count {
+                    choice.selected = index;
+                    self.answer_choice();
+                }
+            }
+            KeyCode::Enter => self.answer_choice(),
+            _ => {}
+        }
+        true
+    }
+    fn answer_choice(&mut self) {
+        let Some(choice) = self.choice.take() else {
+            return;
+        };
+        if let Some(answer) = self.answer.take() {
+            let _ = answer.send((choice.selected + 1).to_string());
+        }
+        self.draft = self.saved_draft.take().unwrap_or_default();
     }
     fn submit(&mut self, actions: &async_mpsc::UnboundedSender<Action>) -> Option<String> {
         let text = self.draft.take();
@@ -626,7 +677,9 @@ impl Frame {
         let status = clip(&state.status_line(), width);
         // Footer as in the reference CLI: the mode label (none for ask), then hints.
         let indicator = crate::terminal::style::mode_indicator(&state.mode);
-        let hint = if state.answer.is_some() {
+        let hint = if state.choice.is_some() {
+            "esc to interrupt"
+        } else if state.answer.is_some() {
             "enter to submit your answer \u{b7} esc to interrupt"
         } else {
             "esc to interrupt"
@@ -732,6 +785,11 @@ impl Frame {
                 hit
             });
         }
+        let choice_rows = state.choice.as_ref().map(|choice| choice_lines(choice, &lines[1], &mode, width));
+        let choice_cursor = choice_rows.as_ref().map(|(rows, selected)| rows.len() - *selected);
+        if let Some((rows, _)) = choice_rows {
+            lines = rows;
+        }
         content.extend(lines);
         let mut lines = content;
         let rows = (size.1 as usize).saturating_sub(1).max(3);
@@ -744,8 +802,8 @@ impl Frame {
             });
             self.panel_height = self.panel_height.saturating_sub(removed);
         }
-        let input_row = lines.len().saturating_sub(3);
-        let cursor_column = (prompt_width + cursor).min(width);
+        let input_row = lines.len().saturating_sub(choice_cursor.unwrap_or(3));
+        let cursor_column = if choice_cursor.is_some() { 1 } else { (prompt_width + cursor).min(width) };
         if self.pending.is_empty()
             && self.lines == lines
             && self.size == size
@@ -775,6 +833,33 @@ impl Frame {
         write(&out)
     }
 }
+/// The frame below the activity line while a menu question is pending:
+/// the question, `❯ 1. Yes` style options and a key hint. Returns the rows and
+/// the selected row counted from the end.
+fn choice_lines(choice: &Choice, status: &str, mode: &str, width: usize) -> (Vec<String>, usize) {
+    use crossterm::style::{Attribute, ResetColor, SetAttribute, SetForegroundColor};
+    let color = std::env::var_os("NO_COLOR").is_none();
+    let paint = |text: String, fg: crossterm::style::Color| {
+        if color { format!("{}{text}{}", SetForegroundColor(fg), ResetColor) } else { text }
+    };
+    let rule = paint("\u{2500}".repeat(width), crate::terminal::style::border());
+    let question = clip(&format!(" {}", terminal_text(&choice.question)), width);
+    let mut rows = vec![
+        String::new(),
+        status.to_owned(),
+        rule,
+        if color { format!("{}{question}{}", SetAttribute(Attribute::Bold), SetAttribute(Attribute::Reset)) } else { question },
+    ];
+    for (index, option) in choice.options.iter().enumerate() {
+        let text = clip(&format!(" {} {}. {}", if index == choice.selected { "\u{276f}" } else { " " }, index + 1, terminal_text(option)), width);
+        rows.push(if index == choice.selected { paint(text, crate::terminal::style::accent()) } else { text });
+    }
+    let hint = mode.replace("esc to interrupt", "\u{2191}\u{2193} select \u{b7} enter confirm \u{b7} esc to interrupt");
+    rows.push(paint(clip(&format!(" {hint}"), width), crate::terminal::style::muted()));
+    let selected = 1 + choice.options.len() - choice.selected;
+    (rows, selected)
+}
+
 fn row_updates(previous: &[String], next: &[String]) -> String {
     let mut output = String::new();
     for (row, line) in next.iter().enumerate() {
@@ -893,6 +978,20 @@ fn run(
                     state.append_thinking(&text);
                     dirty = true;
                 }
+                Ok(Update::Choice(lines, question, options, reply)) => {
+                    finish_text(state, screen);
+                    if state.details.expanded {
+                        state.details.toggle();
+                    }
+                    let width = terminal::size().unwrap_or((80, 24)).0.saturating_sub(1) as usize;
+                    let color = std::env::var_os("NO_COLOR").is_none();
+                    for line in lines {
+                        screen.log_rendered(&change_view::render(&line, width, color));
+                    }
+                    state.question(reply);
+                    state.choice = Some(Choice { question, options, selected: 0 });
+                    dirty = true;
+                }
                 Ok(Update::Question(text, reply)) => {
                     finish_text(state, screen);
                     if state.details.expanded {
@@ -961,7 +1060,8 @@ fn run(
                     if !(control && key.code == KeyCode::Char('r')) {
                         state.search_query = None;
                     }
-                    if control && matches!(key.code, KeyCode::Char('y' | 'n')) && state.goal_proposal.is_some() && state.answer.is_none() {
+                    if state.choice_key(key) {
+                    } else if control && matches!(key.code, KeyCode::Char('y' | 'n')) && state.goal_proposal.is_some() && state.answer.is_none() {
                         state.decide_goal(key.code == KeyCode::Char('y'), &actions);
                     } else if control && key.code == KeyCode::Char('b') {
                         let _ = actions.send(Action::Detach);
@@ -1292,6 +1392,36 @@ mod tests {
         assert_eq!(received.try_recv().unwrap(), "yes");
         assert_eq!(state.draft.take(), "queued draft");
         assert!(events.try_recv().is_err());
+    }
+    #[test]
+    fn menu_questions_answer_with_arrows_numbers_and_leave_esc_to_interrupt() {
+        use crossterm::event::KeyEvent;
+        let key = |code| KeyEvent::new(code, KeyModifiers::NONE);
+        let mut state = State::new("ask".into());
+        state.draft.insert("queued draft");
+        let (reply, mut received) = oneshot::channel();
+        state.question(reply);
+        state.choice = Some(Choice { question: "Proceed?".into(), options: vec!["Yes".into(), "Always".into(), "No".into()], selected: 0 });
+        assert!(state.choice_key(key(KeyCode::Up)));
+        assert_eq!(state.choice.as_ref().unwrap().selected, 2);
+        assert!(state.choice_key(key(KeyCode::Down)));
+        assert!(state.choice_key(key(KeyCode::Down)));
+        assert!(state.choice_key(key(KeyCode::Char('x'))));
+        assert!(!state.choice_key(key(KeyCode::Esc)));
+        assert!(state.choice_key(key(KeyCode::Enter)));
+        assert_eq!(received.try_recv().unwrap(), "2");
+        assert!(state.choice.is_none() && state.answer.is_none());
+        assert_eq!(state.draft.take(), "queued draft");
+
+        let (reply, mut received) = oneshot::channel();
+        state.question(reply);
+        state.choice = Some(Choice { question: "Proceed?".into(), options: vec!["Yes".into(), "No".into()], selected: 0 });
+        assert!(state.choice_key(key(KeyCode::Char('3'))));
+        assert!(received.try_recv().is_err());
+        assert!(state.choice_key(key(KeyCode::Char('2'))));
+        assert_eq!(received.try_recv().unwrap(), "2");
+        let (rows, selected) = choice_lines(&Choice { question: "Proceed?".into(), options: vec!["Yes".into(), "No".into()], selected: 1 }, "status", "esc to interrupt", 40);
+        assert_eq!(rows.len() - selected, 5);
     }
     #[test]
     fn cancelled_question_discards_answer_and_restores_original_draft() {

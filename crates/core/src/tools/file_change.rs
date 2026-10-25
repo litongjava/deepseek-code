@@ -112,6 +112,47 @@ pub(crate) fn completed_text(path: &Path, before: Option<String>, after: Option<
     result
 }
 
+/// The change a pending Write, Edit or MultiEdit call would make, computed in
+/// memory for approval prompts. None when the call would fail or the file
+/// cannot be previewed; the tool itself still decides on execution.
+pub fn preview(name: &str, input: &Value, cwd: &Path) -> Option<Value> {
+    let file_path = input["file_path"].as_str()?;
+    let path = if Path::new(file_path).is_absolute() {
+        Path::new(file_path).to_path_buf()
+    } else {
+        cwd.join(file_path)
+    };
+    let before = capture(&path)?;
+    let replace = |content: &str, old: &str, new: &str, all: bool| -> Option<String> {
+        let count = content.matches(old).count();
+        if old.is_empty() || count == 0 || (!all && count > 1) {
+            return None;
+        }
+        Some(if all { content.replace(old, new) } else { content.replacen(old, new, 1) })
+    };
+    let after = match name {
+        "Write" => input["content"].as_str()?.to_owned(),
+        "Edit" => replace(
+            &before,
+            input["old_string"].as_str()?,
+            input["new_string"].as_str()?,
+            input["replace_all"].as_bool().unwrap_or(false),
+        )?,
+        "MultiEdit" => {
+            let mut content = before.clone();
+            for edit in input["edits"].as_array()? {
+                content = replace(&content, edit["old_string"].as_str()?, edit["new_string"].as_str()?, true)?;
+            }
+            content
+        }
+        _ => return None,
+    };
+    let mut change = completed_text(&path, Some(before), Some(after));
+    change["verified"] = json!(false);
+    change["created"] = json!(!path.exists());
+    Some(change)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -183,5 +224,19 @@ mod tests {
         assert_eq!(change["rows"][1]["text"], "new");
         fs::write(&file, vec![b'x'; MAX_BYTES + 1]).unwrap();
         assert!(completed(&file, Some("before".into()))["notice"].is_string());
+    }
+
+    #[test]
+    fn previews_pending_edits_without_touching_the_file() {
+        let temp = tempfile::tempdir().unwrap();
+        fs::write(temp.path().join("a.py"), "def f():\n    return 1\n").unwrap();
+        let edit = json!({"file_path":"a.py","old_string":"return 1","new_string":"return 2"});
+        let change = preview("Edit", &edit, temp.path()).unwrap();
+        assert_eq!((change["added"].clone(), change["removed"].clone(), change["created"].clone()), (json!(1), json!(1), json!(false)));
+        assert_eq!(fs::read_to_string(temp.path().join("a.py")).unwrap(), "def f():\n    return 1\n");
+        assert!(preview("Edit", &json!({"file_path":"a.py","old_string":"missing","new_string":"x"}), temp.path()).is_none());
+        let created = preview("Write", &json!({"file_path":"new.txt","content":"a\nb\n"}), temp.path()).unwrap();
+        assert_eq!((created["added"].clone(), created["created"].clone()), (json!(2), json!(true)));
+        assert!(preview("Bash", &json!({"command":"ls"}), temp.path()).is_none());
     }
 }
