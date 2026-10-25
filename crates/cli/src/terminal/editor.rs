@@ -742,6 +742,36 @@ impl PromptEditor {
             let panel = self.details.render(width, panel_budget);
             let panel_height = panel.lines.len();
             let mut lines = panel.lines;
+            let footer_rows = usize::from(show_tip) + 1 + usize::from(!self.details.entries.is_empty());
+            // Five one-line entries at a time above the input box, as in the
+            // reference CLI.
+            let available = (rows as usize)
+                .saturating_sub(panel_height + input_height + 2 + footer_rows + 1)
+                .min(MENU_ROWS);
+            let heights = vec![1; items.len()];
+            let (start, end) = menu_page(&heights, selected, available);
+            let longest = items[start..end].iter().map(|index| entries[*index].0.width()).max().unwrap_or(0);
+            let name_width = (longest + 2).clamp(12, (width / 3).max(12)).min(width / 2);
+            for (position, index) in items.iter().enumerate().take(end).skip(start) {
+                let (name, desc) = &entries[*index];
+                let prefix = if position == selected { "  \u{276f}" } else { "   " };
+                let label = clipped(name, name_width);
+                let style = if position == selected {
+                    TextStyle::Selected
+                } else {
+                    TextStyle::Muted
+                };
+                let room = width.saturating_sub(name_width + 6);
+                let first = desc.lines().next().unwrap_or_default();
+                let description = if first.width() > room || desc.lines().nth(1).is_some() {
+                    format!("{}\u{2026}", clipped(first, room.saturating_sub(1)))
+                } else {
+                    first.to_owned()
+                };
+                let pad = name_width.saturating_sub(label.width());
+                lines.push((clipped(&format!("{prefix} {label}{}  {description}", " ".repeat(pad)), width), style));
+            }
+            let menu_height = lines.len() - panel_height;
             lines.push(("\u{2500}".repeat(width), TextStyle::Border));
             match &ghost {
                 // The suggestion is placeholder text: dim, with the cursor before it.
@@ -758,43 +788,8 @@ impl PromptEditor {
                 ),
             }
             lines.push(("\u{2500}".repeat(width), TextStyle::Border));
-            let footer_rows = usize::from(show_tip) + 1 + usize::from(!self.details.entries.is_empty());
-            // Five one-line entries at a time, as in the reference CLI.
-            let available = (rows as usize)
-                .saturating_sub(lines.len() + footer_rows + 1)
-                .min(MENU_ROWS);
-            let heights = vec![1; items.len()];
-            let (start, end) = menu_page(&heights, selected, available);
-            let longest = items[start..end].iter().map(|index| entries[*index].0.width()).max().unwrap_or(0);
-            let name_width = (longest + 2).clamp(12, (width / 3).max(12)).min(width / 2);
-            for (position, index) in items.iter().enumerate().take(end).skip(start) {
-                let (name, desc) = &entries[*index];
-                let prefix = if position == selected { "\u{276f}" } else { " " };
-                let label = clipped(name, name_width);
-                let style = if position == selected {
-                    TextStyle::Selected
-                } else {
-                    TextStyle::Muted
-                };
-                let room = width.saturating_sub(name_width + 4);
-                let first = desc.lines().next().unwrap_or_default();
-                let description = if first.width() > room || desc.lines().nth(1).is_some() {
-                    format!("{}\u{2026}", clipped(first, room.saturating_sub(1)))
-                } else {
-                    first.to_owned()
-                };
-                let pad = name_width.saturating_sub(label.width());
-                lines.push((clipped(&format!("{prefix} {label}{}  {description}", " ".repeat(pad)), width), style));
-            }
             let footer = if let Some(query) = search.as_ref() {
                 format!("Search history: {query}  (Ctrl+R next · Enter accept · Esc close)")
-            } else if !items.is_empty() {
-                format!(
-                    "↑↓ select · Tab/Enter complete · Esc close   {}–{} / {}",
-                    start + 1,
-                    end,
-                    items.len()
-                )
             } else {
                 // As in the reference CLI: the mode label, or "? for shortcuts" in ask mode.
                 let mut parts = vec![if text.starts_with('!') {
@@ -823,7 +818,7 @@ impl PromptEditor {
                 parts.join(" \u{b7} ")
             };
             let footer_style = match crate::terminal::style::mode_indicator(&self.permission_mode) {
-                Some((_, color)) if items.is_empty() && search.is_none() => TextStyle::Colored(color),
+                Some((_, color)) if search.is_none() => TextStyle::Colored(color),
                 _ => TextStyle::Muted,
             };
             lines.push((clipped(&footer, width), footer_style));
@@ -844,7 +839,7 @@ impl PromptEditor {
                     TextStyle::Muted,
                 ));
             }
-            screen.draw(&lines, panel_height + cursor_row - first + 1, cursor_col)?;
+            screen.draw(&lines, panel_height + menu_height + cursor_row - first + 1, cursor_col)?;
             let Some(event) = read_editor_event(&mut input_reader)? else {
                 continue;
             };
