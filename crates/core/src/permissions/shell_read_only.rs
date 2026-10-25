@@ -1,5 +1,6 @@
 //! Conservative recognition of shell commands that only read. Plan mode runs
-//! these without asking; anything unrecognised still needs the user's approval.
+//! these without asking, and so do ask and accept-edits modes when every path
+//! stays in the workspace; anything unrecognised still needs the user's approval.
 
 /// Programs that never write files or run other commands with ordinary arguments.
 const READ_ONLY_PROGRAMS: &[&str] = &[
@@ -94,9 +95,64 @@ fn git_read_only(arguments: &[String]) -> bool {
     }
 }
 
+/// A read-only command whose path arguments all stay inside `workspace`, as
+/// the reference CLI runs without asking in its default mode. Home-relative
+/// paths and variable expansions are treated as outside.
+pub fn reads_only_inside(command: &str, workspace: &std::path::Path) -> bool {
+    if !is_read_only(command) {
+        return false;
+    }
+    command
+        .split(['\n', ';', '|', '&'])
+        .flat_map(|segment| segment.split_whitespace().skip(1))
+        .map(|word| word.trim_matches(|c| c == '\'' || c == '"'))
+        .flat_map(|word| [Some(word), word.split_once('=').map(|(_, value)| value)])
+        .flatten()
+        .all(|word| path_inside(word, workspace))
+}
+
+fn path_inside(word: &str, workspace: &std::path::Path) -> bool {
+    use std::path::{Component, Path, PathBuf};
+    if word.contains('$') || word.starts_with('~') || word.starts_with('%') {
+        return false;
+    }
+    let drive = word.len() >= 2 && word.as_bytes()[1] == b':' && word.as_bytes()[0].is_ascii_alphabetic();
+    let path = Path::new(word);
+    let absolute = path.is_absolute() || drive || word.starts_with('\\') || word.starts_with('/');
+    if !absolute && !path.components().any(|part| matches!(part, Component::ParentDir)) {
+        return true;
+    }
+    let joined = if absolute { path.to_path_buf() } else { workspace.join(path) };
+    let mut normal = PathBuf::new();
+    for part in joined.components() {
+        match part {
+            Component::ParentDir => {
+                if !normal.pop() {
+                    return false;
+                }
+            }
+            Component::CurDir => {}
+            other => normal.push(other.as_os_str()),
+        }
+    }
+    normal.starts_with(workspace)
+}
+
 #[cfg(test)]
 mod tests {
     use super::is_read_only;
+
+    #[test]
+    fn default_mode_reads_must_stay_in_the_workspace() {
+        let workspace = std::path::Path::new("/work/project");
+        for command in ["ls -la src", "cat ./README.md", "git diff --stat", "grep -rn TODO /work/project/src", "ls src/../docs"] {
+            assert!(super::reads_only_inside(command, workspace), "{command}");
+        }
+        for command in ["cat /etc/passwd", "ls ..", "cat ~/.ssh/id_rsa", "cat $HOME/.netrc", "ls ../other", "grep -r x --file=/etc/shadow", "rm -rf src"] {
+            assert!(!super::reads_only_inside(command, workspace), "{command}");
+        }
+    }
+
 
     #[test]
     fn inspection_commands_and_pipelines_are_read_only() {

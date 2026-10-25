@@ -632,6 +632,16 @@ impl PermissionManager {
         if read_only {
             return decision(PermissionResult::Granted, DefaultRead);
         }
+        // As in the reference CLI's default mode, shell commands that only read
+        // inside the workspace run without asking.
+        if shell && !auto && matches!(mode, PermissionMode::AskPermissions | PermissionMode::AcceptEdits) {
+            let command = context.tool_input["command"].as_str().unwrap_or_default();
+            if let Some(workspace) = context.workspace_path.as_deref() {
+                if super::shell_read_only::reads_only_inside(command, std::path::Path::new(workspace)) {
+                    return decision(PermissionResult::Granted, DefaultRead);
+                }
+            }
+        }
         decision(self.request_confirmation(context), DefaultPrompt)
     }
 
@@ -891,6 +901,25 @@ mod policy_tests {
                 }
             }
         }
+    }
+    #[test]
+    fn workspace_reads_in_the_shell_run_without_asking_in_default_modes() {
+        let shell = |command: &str| PermissionContext {
+            tool_name: "Bash".into(),
+            tool_input: serde_json::json!({"command": command}),
+            conversation_id: "session".into(),
+            user_id: None,
+            workspace_path: Some("/work/project".into()),
+        };
+        for mode in [PermissionMode::AskPermissions, PermissionMode::AcceptEdits] {
+            let manager = manager(mode);
+            assert_eq!(manager.check_permission(&shell("ls -la src")), PermissionResult::Granted);
+            assert!(matches!(manager.check_permission(&shell("cat /etc/passwd")), PermissionResult::RequiresConfirmation(_)));
+            assert!(matches!(manager.check_permission(&shell("npm install")), PermissionResult::RequiresConfirmation(_)));
+            manager.set_session_rules("session", HashMap::from([("Bash(ls *)".into(), PermissionAction::Confirm)]));
+            assert!(matches!(manager.check_permission(&shell("ls -la src")), PermissionResult::RequiresConfirmation(_)));
+        }
+        assert!(matches!(manager(PermissionMode::DontAsk).check_permission(&shell("ls")), PermissionResult::Denied(_)));
     }
     #[test]
     fn explicit_ask_and_deny_override_all_permissive_modes_and_saved_approvals() {
