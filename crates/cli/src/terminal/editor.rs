@@ -12,7 +12,7 @@ use crossterm::{
     terminal::{self, Clear, ClearType},
 };
 use std::io::{self, Write};
-use unicode_width::UnicodeWidthChar;
+use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 pub struct PromptEditor {
     notices: Option<std::sync::mpsc::Receiver<String>>,
@@ -188,12 +188,15 @@ fn matches(commands: &[(String, String)], text: &str) -> Vec<usize> {
             } else {
                 return None;
             };
-            Some((rank, i))
+            Some((rank, name, i))
         })
         .collect();
-    found.sort_by_key(|entry| *entry);
-    found.into_iter().map(|(_, index)| index).collect()
+    // Alphabetical within each rank, as the reference CLI lists commands.
+    found.sort();
+    found.into_iter().map(|(_, _, index)| index).collect()
 }
+/// Completion entries shown at once.
+const MENU_ROWS: usize = 5;
 fn menu_page(heights: &[usize], selected: usize, budget: usize) -> (usize, usize) {
     if budget == 0 {
         return (0, 0);
@@ -792,40 +795,32 @@ impl PromptEditor {
                 } else {
                     2
                 };
+            // Five one-line entries at a time, as in the reference CLI.
             let available = (rows as usize)
                 .saturating_sub(lines.len() + footer_rows + 1)
-                .min(18);
-            let name_width = (width / 3).clamp(20, 46).min(width / 2);
-            let heights: Vec<_> = items
-                .iter()
-                .map(|index| {
-                    wrap_detail(
-                        &entries[*index].1,
-                        width.saturating_sub(name_width + 4).max(1),
-                    )
-                    .len()
-                    .min(3)
-                })
-                .collect();
+                .min(MENU_ROWS);
+            let heights = vec![1; items.len()];
             let (start, end) = menu_page(&heights, selected, available);
+            let longest = items[start..end].iter().map(|index| entries[*index].0.width()).max().unwrap_or(0);
+            let name_width = (longest + 2).clamp(12, (width / 3).max(12)).min(width / 2);
             for (position, index) in items.iter().enumerate().take(end).skip(start) {
                 let (name, desc) = &entries[*index];
-                let prefix = if position == selected { "›" } else { " " };
+                let prefix = if position == selected { "\u{276f}" } else { " " };
                 let label = clipped(name, name_width);
                 let style = if position == selected {
                     TextStyle::Selected
                 } else {
                     TextStyle::Muted
                 };
-                let description = wrap_detail(desc, width.saturating_sub(name_width + 4).max(1));
-                for (row, part) in description.iter().take(3.min(available)).enumerate() {
-                    let heading = if row == 0 {
-                        format!("{prefix} {label:name_width$}  ")
-                    } else {
-                        " ".repeat(name_width + 4)
-                    };
-                    lines.push((clipped(&format!("{heading}{part}"), width), style));
-                }
+                let room = width.saturating_sub(name_width + 4);
+                let first = desc.lines().next().unwrap_or_default();
+                let description = if first.width() > room || desc.lines().nth(1).is_some() {
+                    format!("{}\u{2026}", clipped(first, room.saturating_sub(1)))
+                } else {
+                    first.to_owned()
+                };
+                let pad = name_width.saturating_sub(label.width());
+                lines.push((clipped(&format!("{prefix} {label}{}  {description}", " ".repeat(pad)), width), style));
             }
             let footer = if let Some(query) = search.as_ref() {
                 format!("Search history: {query}  (Ctrl+R next · Enter accept · Esc close)")
@@ -1434,6 +1429,15 @@ mod tests {
         assert_eq!(matches(&c, "/"), vec![0, 1]);
         assert_eq!(matches(&c, "/skill"), vec![1]);
         assert!(matches(&c, "/help arg").is_empty());
+        let unsorted = vec![
+            ("/worktree".into(), "Worktrees".into()),
+            ("/compact".into(), "Compact".into()),
+            ("/add-dir".into(), "Add a directory to compact".into()),
+            ("/color".into(), "Color".into()),
+        ];
+        assert_eq!(matches(&unsorted, "/"), vec![2, 3, 1, 0]);
+        // Name prefixes first, then substring and description matches, each alphabetical.
+        assert_eq!(matches(&unsorted, "/co"), vec![3, 1, 2]);
     }
     #[test]
     fn display_width_handles_wide_and_combining_characters() {
