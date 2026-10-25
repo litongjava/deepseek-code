@@ -179,6 +179,135 @@ impl MarkdownStream {
     }
 }
 
+/// Wraps one rendered line to `width` cells at spaces, as the reference CLI
+/// does. Style escapes count as zero width; styles open at a break are reset
+/// at the end of the row and reopened after `indent` on the next. Words longer
+/// than a row break at the edge, and spaces at a break are dropped.
+pub fn wrap_styled(text: &str, first: &str, indent: &str, width: usize) -> Vec<String> {
+    use unicode_width::UnicodeWidthChar;
+    let indent_cells = indent.width();
+    let width = width.max(indent_cells + 2);
+    let mut rows = Vec::new();
+    let mut row = first.to_owned();
+    let mut cells = first.width();
+    let mut start = row.len();
+    let mut open: Vec<String> = Vec::new();
+    // Byte offset in `row` after the last space, the styles open there, and the cells before it.
+    let mut space: Option<(usize, Vec<String>, usize)> = None;
+    let close = |row: &mut String, open: &[String]| {
+        let trimmed = row.trim_end_matches(' ').len();
+        row.truncate(trimmed);
+        if !open.is_empty() {
+            row.push_str("\x1b[0m");
+        }
+    };
+    let mut chars = text.chars().peekable();
+    while let Some(ch) = chars.next() {
+        if ch == '\x1b' && chars.peek() == Some(&'[') {
+            let mut sequence = String::from(ch);
+            for next in chars.by_ref() {
+                sequence.push(next);
+                if next.is_ascii_alphabetic() {
+                    break;
+                }
+            }
+            if sequence.ends_with('m') {
+                track_style(&mut open, &sequence);
+            }
+            row.push_str(&sequence);
+            continue;
+        }
+        let size = ch.width().unwrap_or(0);
+        if cells + size > width && row.len() > start {
+            // A space at the edge is the break itself; otherwise carry the
+            // partial word after the row's last space.
+            let carried = if ch == ' ' { None } else { space.take() };
+            space = None;
+            match carried.filter(|(at, _, _)| *at < row.len()) {
+                Some((at, styles, before)) => {
+                    let tail = row.split_off(at);
+                    close(&mut row, &styles);
+                    rows.push(std::mem::take(&mut row));
+                    row = format!("{indent}{}", styles.concat());
+                    start = row.len();
+                    row.push_str(&tail);
+                    cells = indent_cells + (cells - before);
+                }
+                None => {
+                    close(&mut row, &open);
+                    rows.push(std::mem::take(&mut row));
+                    row = format!("{indent}{}", open.concat());
+                    start = row.len();
+                    cells = indent_cells;
+                }
+            }
+        }
+        if ch == ' ' && row.len() == start && !rows.is_empty() {
+            continue;
+        }
+        row.push(ch);
+        cells += size;
+        if ch == ' ' {
+            space = Some((row.len(), open.clone(), cells));
+        }
+    }
+    rows.push(row);
+    rows
+}
+
+/// Keeps the list of SGR sequences still in effect after `sequence`.
+fn track_style(open: &mut Vec<String>, sequence: &str) {
+    let params = sequence.trim_start_matches("\x1b[").trim_end_matches('m');
+    let first = params.split(';').next().unwrap_or("");
+    let closes: &[&str] = match first {
+        "" | "0" => {
+            open.clear();
+            return;
+        }
+        "22" => &["1", "2"],
+        "23" => &["3"],
+        "24" => &["4"],
+        "29" => &["9"],
+        "39" => &["30", "31", "32", "33", "34", "35", "36", "37", "38", "90", "91", "92", "93", "94", "95", "96", "97"],
+        "49" => &["40", "41", "42", "43", "44", "45", "46", "47", "48", "100", "101", "102", "103", "104", "105", "106", "107"],
+        _ => {
+            open.push(sequence.to_owned());
+            return;
+        }
+    };
+    open.retain(|style| {
+        let param = style.trim_start_matches("\x1b[").split([';', 'm']).next().unwrap_or("");
+        !closes.contains(&param)
+    });
+}
+
+/// Cells to indent continuation rows of a rendered line: its own leading
+/// spaces plus a list marker such as `- ` or `12. `.
+pub fn hanging_indent(rendered: &str) -> usize {
+    let mut visible = String::new();
+    let mut chars = rendered.chars().peekable();
+    while let Some(ch) = chars.next() {
+        if ch == '\x1b' {
+            for next in chars.by_ref() {
+                if next.is_ascii_alphabetic() {
+                    break;
+                }
+            }
+        } else {
+            visible.push(ch);
+        }
+    }
+    let trimmed = visible.trim_start_matches(' ');
+    let leading = visible.len() - trimmed.len();
+    let marker = if ["- ", "* ", "+ ", "\u{2022} "].iter().any(|marker| trimmed.starts_with(marker)) {
+        2
+    } else {
+        let digits = trimmed.chars().take_while(char::is_ascii_digit).count();
+        if digits > 0 && trimmed[digits..].starts_with(". ") { digits + 2 } else { 0 }
+    };
+    leading + marker
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -211,5 +340,18 @@ mod tests {
         let mut stream = MarkdownStream::new(true);
         let line = stream.line("**bold**\x1b[2J");
         assert_eq!(line, ["\x1b[1mbold\x1b[22m[2J"]);
+    }
+
+    #[test]
+    fn wraps_rendered_lines_at_spaces_and_reopens_styles() {
+        let rows = wrap_styled("one two three four", "\u{25cf} ", "  ", 12);
+        assert_eq!(rows, ["\u{25cf} one two", "  three four"]);
+        let bold = wrap_styled("\x1b[1mbold words here\x1b[22m done", "  ", "  ", 12);
+        assert_eq!(bold, ["  \x1b[1mbold words\x1b[0m", "  \x1b[1mhere\x1b[22m done"]);
+        let long = wrap_styled("abcdefghijklmnop", "  ", "  ", 8);
+        assert_eq!(long, ["  abcdef", "  ghijkl", "  mnop"]);
+        assert_eq!(hanging_indent("- item"), 2);
+        assert_eq!(hanging_indent("  12. \x1b[1mstep\x1b[22m"), 6);
+        assert_eq!(hanging_indent("plain"), 0);
     }
 }

@@ -531,23 +531,37 @@ fn content_budget(height: u16) -> usize {
     (height as usize).saturating_sub(9).clamp(2, 8)
 }
 /// Return complete display rows with their original UTF-8 byte endpoints.
+/// Rows break after the last space that fits; a space reaching the edge
+/// starts the next row, and a word longer than a row breaks at the edge.
 fn visual_lines(text: &str, width: usize) -> Vec<(String, usize)> {
+    let width = width.max(1);
     let mut result = Vec::new();
-    let mut line = String::new();
+    let mut start = 0;
     let mut cells = 0;
-    let mut end = 0;
+    // Byte offset just after the row's last space and the cells up to it.
+    let mut space: Option<(usize, usize)> = None;
     for (index, ch) in text.char_indices() {
         let size = ch.width().unwrap_or(0);
-        if cells + size > width.max(1) && !line.is_empty() {
-            result.push((std::mem::take(&mut line), index));
-            cells = 0;
+        if cells + size > width && index > start {
+            let (at, before) = match space.take() {
+                Some(split) if ch != ' ' => split,
+                _ => (index, cells),
+            };
+            result.push((text[start..at].to_owned(), at));
+            cells -= before;
+            start = at;
         }
-        line.push(ch);
         cells += size;
-        end = index + ch.len_utf8();
+        if ch == ' ' {
+            space = Some((index + 1, cells));
+        }
     }
-    result.push((line, end));
+    result.push((text[start..].to_owned(), text.len()));
     result
+}
+/// The answer prefix of a streamed row: `● ` opens a block, later rows indent.
+fn answer_prefix(state: &State, row: usize) -> &'static str {
+    if row == 0 && state.block_start { "\u{25cf} " } else { "  " }
 }
 fn flush_wrapped(state: &mut State, screen: &mut Frame) -> io::Result<()> {
     let (width, height) = terminal::size().unwrap_or((80, 24));
@@ -555,17 +569,15 @@ fn flush_wrapped(state: &mut State, screen: &mut Frame) -> io::Result<()> {
     let budget = content_budget(height)
         .saturating_sub(usize::from(!state.detail_entries.is_empty()))
         .max(1);
-    let rows = visual_lines(&state.partial, (width as usize).saturating_sub(1));
+    let rows = visual_lines(&state.partial, (width as usize).saturating_sub(3));
     if rows.len() > budget {
         let count = rows.len() - budget;
         let end = rows[count - 1].1;
-        screen.log(
-            &rows[..count]
-                .iter()
-                .map(|(line, _)| line.as_str())
-                .collect::<Vec<_>>()
-                .join("\n"),
-        )?;
+        for (index, (line, _)) in rows[..count].iter().enumerate() {
+            let prefix = answer_prefix(state, index);
+            screen.log(&format!("{prefix}{}", line.trim_end()))?;
+        }
+        state.block_start = false;
         state.partial.drain(..end);
     }
     Ok(())
@@ -581,10 +593,15 @@ fn emit_text_line(state: &mut State, screen: &mut Frame, line: &str) {
 fn log_answer_line(state: &mut State, screen: &mut Frame, rendered: &str) {
     if rendered.is_empty() {
         screen.log_rendered("");
-    } else if std::mem::take(&mut state.block_start) {
-        screen.log_rendered(&format!("\u{25cf} {rendered}"));
-    } else {
-        screen.log_rendered(&format!("  {rendered}"));
+        return;
+    }
+    let first = if std::mem::take(&mut state.block_start) { "\u{25cf} " } else { "  " };
+    // Wrap at word boundaries with the answer's indent instead of letting the
+    // terminal break words at the edge.
+    let width = terminal::size().map_or(80, |(cols, _)| cols as usize).saturating_sub(1);
+    let indent = " ".repeat(2 + super::markdown::hanging_indent(rendered));
+    for row in super::markdown::wrap_styled(rendered, first, &indent, width) {
+        screen.log_rendered(&row);
     }
 }
 
@@ -706,9 +723,10 @@ impl Frame {
                 .map(|(text, _)| text.clone())
                 .collect::<Vec<_>>()
         } else {
-            let content = visual_lines(&state.partial, width)
+            let content = visual_lines(&state.partial, width.saturating_sub(2))
                 .into_iter()
-                .map(|(line, _)| line)
+                .enumerate()
+                .map(|(index, (line, _))| if line.is_empty() { line } else { format!("{}{line}", answer_prefix(state, index)) })
                 .collect::<Vec<_>>();
             if !panel.lines.is_empty() {
                 // Keep the disclosure reachable without hiding the streaming text.
@@ -1343,6 +1361,9 @@ mod tests {
         for (_, end) in rows {
             assert!(text.is_char_boundary(end));
         }
+        let words = visual_lines("one two three", 8);
+        assert_eq!(words.iter().map(|(row, _)| row.as_str()).collect::<Vec<_>>(), ["one two ", "three"]);
+        assert_eq!(words[0].1, 8);
     }
     #[test]
     fn detail_updates_preserve_expansion_and_input_draft() {

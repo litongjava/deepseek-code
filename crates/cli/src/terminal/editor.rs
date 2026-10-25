@@ -849,7 +849,7 @@ impl PromptEditor {
                 let tips = [
                     "Tip: Type / to browse available commands.",
                     "Tip: Use /color and /rename to tell multiple sessions apart.",
-                    "Tip: Use /btw to ask a side question while Claude works.",
+                    "Tip: Use /btw to ask a side question while the model works.",
                 ];
                 lines.push((
                     clipped(tips[self.history.len() % tips.len()], width),
