@@ -307,6 +307,9 @@ mod tests {
         assert!(shell_matches("git:*", "git status"));
         assert!(!shell_matches("git:*", "github status"));
         assert!(shell_matches("git *", "git"));
+        // Remembered approval prefixes, as `npm run *` from the approval menu.
+        assert!(shell_matches("npm run *", "npm run lint --fix"));
+        assert!(!shell_matches("npm run *", "npm runner"));
         assert!(shell_matches("git * status", "git -C repo status"));
         assert!(shell_matches(r"echo \*", "echo *"));
         assert!(!shell_matches(r"echo \*", "echo anything"));

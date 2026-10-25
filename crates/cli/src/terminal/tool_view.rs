@@ -281,20 +281,52 @@ fn file_name(path: &str) -> String {
         .map_or_else(|| path.to_owned(), |name| name.to_string_lossy().into_owned())
 }
 
-/// A rule that allows exactly this call again, when one can be written safely.
+/// The prefix the reference CLI offers to remember: the program and its
+/// subcommand, `npm run` for `npm run build --silent`. A program
+/// called only with arguments, such as `rm notes.txt`, keeps the whole command
+/// so that one answer never allows every use of it.
+fn command_prefix(command: &str) -> Option<String> {
+    let words: Vec<&str> = command.split_whitespace().collect();
+    let plain = |word: &str| {
+        word.starts_with(|c: char| c.is_ascii_lowercase())
+            && word.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | ':'))
+    };
+    if words.len() < 2 || !plain(words[0]) || !plain(words[1]) {
+        return None;
+    }
+    Some(words[..2].join(" "))
+}
+
+/// A rule that allows this call again, when one can be written safely.
 fn session_rule(name: &str, input: &Value) -> Option<String> {
     let rule = match (name, input["command"].as_str()) {
         ("Bash", Some(command)) => {
             let command = command.trim();
-            if command.is_empty() || command.contains(['\n', '*', '(', ')']) {
+            // Allow rules never match chained or substituted commands, so
+            // remembering one would not stop the next prompt.
+            if command.is_empty()
+                || command.contains(['\n', '\r', '*', '(', ')', ';', '&', '|', '`', '$', '<', '>'])
+            {
                 return None;
             }
-            format!("Bash({command})")
+            match command_prefix(command) {
+                Some(prefix) => format!("Bash({prefix} *)"),
+                None => format!("Bash({command})"),
+            }
         }
         ("Bash" | "PowerShell", _) => return None,
         _ => name.to_owned(),
     };
     claude_core::permissions::patterns::validate(&rule).ok().map(|_| rule)
+}
+
+/// `Yes, and don’t ask again for: npm run *`, as in the reference CLI.
+fn remember_option(rule: &str) -> String {
+    let subject = rule
+        .strip_prefix("Bash(")
+        .and_then(|rest| rest.strip_suffix(')'))
+        .unwrap_or(rule);
+    format!("Yes, and don\u{2019}t ask again for: {subject}")
 }
 
 /// The approval prompt for one tool call. File edits preview the diff they
@@ -324,13 +356,20 @@ pub fn approval(name: &str, input: &Value, workspace: Option<&std::path::Path>) 
         _ => {
             match (name, input["command"].as_str()) {
                 ("Bash" | "PowerShell", Some(command)) => {
+                    // As in the reference CLI: the description, then the command
+                    // between dashed rules.
+                    let width = crossterm::terminal::size().map_or(80, |(cols, _)| cols.saturating_sub(1).max(20) as usize);
+                    let rule = change_view::muted(&"\u{254c}".repeat(width));
                     lines.push(change_view::heading(&format!("{name} command")));
-                    for line in command.lines().take(12) {
-                        lines.push(change_view::body(&format!("  {}", printable(line))));
-                    }
                     if let Some(description) = input["description"].as_str() {
-                        lines.push(change_view::muted(&format!("  {}", printable(description))));
+                        lines.push(change_view::muted(&printable(description)));
                     }
+                    lines.push(rule.clone());
+                    for line in command.lines().take(12) {
+                        lines.push(change_view::body(&printable(line)));
+                    }
+                    lines.push(rule);
+                    lines.push(change_view::body("This command requires approval"));
                 }
                 _ => {
                     lines.push(change_view::heading(&label(name, input, workspace)));
@@ -351,7 +390,7 @@ pub fn approval(name: &str, input: &Value, workspace: Option<&std::path::Path>) 
     let mut options = vec!["Yes".to_owned()];
     match &remember {
         Some(Remember::AcceptEdits) => options.push("Yes, allow all edits during this session (shift+tab)".into()),
-        Some(Remember::Rule(rule)) => options.push(format!("Yes, and don't ask again for {rule} in this session")),
+        Some(Remember::Rule(rule)) => options.push(remember_option(rule)),
         None => {}
     }
     options.push("No".into());
@@ -398,10 +437,21 @@ mod tests {
     #[test]
     fn approval_questions_show_the_command_and_numbered_choices() {
         let bash = approval("Bash", &json!({"command":"ls -la","description":"List files"}), None);
-        assert_eq!(bash.text(), "Bash command\n  ls -la\n  List files\nDo you want to proceed?\n  1. Yes\n  2. Yes, and don't ask again for Bash(ls -la) in this session\n  3. No\n(1/y yes, 2 yes for this session, 3/n no)");
+        let text = bash.text();
+        assert!(text.starts_with("Bash command\nList files\n\u{254c}"), "{text}");
+        assert!(text.contains("\nls -la\n\u{254c}"), "{text}");
+        assert!(text.ends_with("This command requires approval\nDo you want to proceed?\n  1. Yes\n  2. Yes, and don\u{2019}t ask again for: ls -la\n  3. No\n(1/y yes, 2 yes for this session, 3/n no)"), "{text}");
         assert_eq!(bash.decide("2"), (true, true));
         assert_eq!(bash.decide("y"), (true, false));
         assert_eq!(bash.decide("3"), (false, false));
+        let prefix = approval("Bash", &json!({"command":"npm run build --silent"}), None);
+        assert_eq!(prefix.remember, Some(Remember::Rule("Bash(npm run *)".into())));
+        assert_eq!(prefix.options[1], "Yes, and don\u{2019}t ask again for: npm run *");
+        assert_eq!(session_rule("Bash", &json!({"command":"git status --short"})).as_deref(), Some("Bash(git status *)"));
+        // A program with only arguments is remembered exactly, never as `rm:*`.
+        assert_eq!(session_rule("Bash", &json!({"command":"rm notes.txt"})).as_deref(), Some("Bash(rm notes.txt)"));
+        // Allow rules never match chained commands, so none is offered.
+        assert_eq!(approval("Bash", &json!({"command":"npm test && npm run lint"}), None).options, ["Yes", "No"]);
         let wildcard = approval("Bash", &json!({"command":"rm -rf *"}), None);
         assert_eq!(wildcard.options, ["Yes", "No"]);
         assert_eq!(wildcard.decide("2"), (false, false));
