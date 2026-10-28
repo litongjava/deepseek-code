@@ -103,7 +103,8 @@ impl Buffer {
 /// Directories never offered by `@` file completion.
 const SKIPPED_DIRS: &[&str] = &["node_modules", "target", "dist", "build", "out", "__pycache__", "vendor"];
 
-/// Project files relative to `root`, with `/` separators, for `@` mentions.
+/// Project files and directories (with a trailing `/`) relative to `root`,
+/// with `/` separators, for `@` mentions.
 fn project_files(root: &std::path::Path) -> Vec<String> {
     let mut files = Vec::new();
     let mut pending = vec![root.to_path_buf()];
@@ -118,6 +119,10 @@ fn project_files(root: &std::path::Path) -> Vec<String> {
             match entry.file_type() {
                 Ok(kind) if kind.is_dir() => {
                     if !SKIPPED_DIRS.contains(&name.as_str()) {
+                        // Directories can be mentioned too, as in the reference CLI.
+                        if let Ok(relative) = path.strip_prefix(root) {
+                            files.push(format!("{}/", relative.to_string_lossy().replace('\\', "/")));
+                        }
                         pending.push(path);
                     }
                 }
@@ -143,14 +148,15 @@ fn mention(text: &str) -> Option<&str> {
     word.strip_prefix('@')
 }
 
-/// Files for an `@` mention: path prefix, then file name prefix, then substring.
+/// Files for an `@` mention: path prefix, then file name prefix, then
+/// substring; shallower paths first within each, so `src/` leads `src/...`.
 fn mention_matches(files: &[String], query: &str) -> Vec<(String, String)> {
     let query = query.to_lowercase();
-    let mut found: Vec<(u8, &String)> = files
+    let mut found: Vec<(u8, usize, &String)> = files
         .iter()
         .filter_map(|file| {
             let lower = file.to_lowercase();
-            let name = lower.rsplit('/').next().unwrap_or(&lower);
+            let name = lower.trim_end_matches('/').rsplit('/').next().unwrap_or(&lower);
             let rank = if lower.starts_with(&query) {
                 0
             } else if name.starts_with(&query) {
@@ -160,11 +166,11 @@ fn mention_matches(files: &[String], query: &str) -> Vec<(String, String)> {
             } else {
                 return None;
             };
-            Some((rank, file))
+            Some((rank, file.trim_end_matches('/').matches('/').count(), file))
         })
         .collect();
     found.sort();
-    found.into_iter().take(50).map(|(_, file)| (format!("@{file}"), String::new())).collect()
+    found.into_iter().take(50).map(|(_, _, file)| (format!("@{file}"), String::new())).collect()
 }
 
 fn matches(commands: &[(String, String)], text: &str) -> Vec<usize> {
@@ -1179,12 +1185,14 @@ mod mention_tests {
             std::fs::write(path, "").unwrap();
         }
         let files = project_files(dir.path());
-        assert_eq!(files, ["README.md", "src/lib.rs", "src/main.rs"]);
+        assert_eq!(files, ["README.md", "src/", "src/lib.rs", "src/main.rs"]);
         assert_eq!(mention("explain @src/ma"), Some("src/ma"));
         assert_eq!(mention("no mention here"), None);
         let found = mention_matches(&files, "ma");
         assert_eq!(found[0].0, "@src/main.rs");
-        assert_eq!(mention_matches(&files, "src/").len(), 2);
+        // The directory comes first, then what it holds.
+        let names: Vec<String> = mention_matches(&files, "src").into_iter().map(|(name, _)| name).collect();
+        assert_eq!(names, ["@src/", "@src/lib.rs", "@src/main.rs"]);
     }
 }
 
