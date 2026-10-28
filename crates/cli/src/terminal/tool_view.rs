@@ -324,20 +324,35 @@ fn file_name(path: &str) -> String {
         .map_or_else(|| path.to_owned(), |name| name.to_string_lossy().into_owned())
 }
 
+/// Programs that delete, overwrite, run code or reach the network are only
+/// ever remembered as the exact command.
+const EXACT_ONLY: &[&str] = &[
+    "rm", "rmdir", "mv", "cp", "dd", "ln", "chmod", "chown", "chgrp", "truncate", "shred", "tee",
+    "sudo", "su", "doas", "kill", "pkill", "killall", "curl", "wget", "ssh", "scp", "rsync", "nc",
+    "sh", "bash", "zsh", "fish", "env", "eval", "exec", "xargs", "find", "python", "python3",
+    "node", "deno", "perl", "ruby", "php", "osascript", "powershell", "pwsh",
+];
+
 /// The prefix the reference CLI offers to remember: the program and its
-/// subcommand, `npm run` for `npm run build --silent`. A program
-/// called only with arguments, such as `rm notes.txt`, keeps the whole command
-/// so that one answer never allows every use of it.
+/// subcommand (`npm run` for `npm run build --silent`), or the program alone
+/// when options come first (`git` for `git -C src log`). A program called
+/// only with arguments, such as `touch notes.txt`, keeps the whole command.
 fn command_prefix(command: &str) -> Option<String> {
     let words: Vec<&str> = command.split_whitespace().collect();
     let plain = |word: &str| {
         word.starts_with(|c: char| c.is_ascii_lowercase())
             && word.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | ':'))
     };
-    if words.len() < 2 || !plain(words[0]) || !plain(words[1]) {
+    if words.len() < 2 || !plain(words[0]) || EXACT_ONLY.contains(&words[0]) {
         return None;
     }
-    Some(words[..2].join(" "))
+    if plain(words[1]) {
+        Some(words[..2].join(" "))
+    } else if words[1].starts_with('-') {
+        Some(words[0].to_owned())
+    } else {
+        None
+    }
 }
 
 /// A rule that allows this call again, when one can be written safely.
@@ -495,8 +510,8 @@ mod tests {
         let text = bash.text();
         assert!(text.starts_with("Bash command\nList files\n\u{254c}"), "{text}");
         assert!(text.contains("\nls -la\n\u{254c}"), "{text}");
-        assert!(text.ends_with("This command requires approval\nDo you want to proceed?\n  1. Yes\n  2. Yes, and don\u{2019}t ask again for: ls -la\n  3. No\n(1/y yes, 2 yes for this session, 3/n no)"), "{text}");
-        let rule = Some(Remember::Rule("Bash(ls -la)".into()));
+        assert!(text.ends_with("This command requires approval\nDo you want to proceed?\n  1. Yes\n  2. Yes, and don\u{2019}t ask again for: ls *\n  3. No\n(1/y yes, 2 yes for this session, 3/n no)"), "{text}");
+        let rule = Some(Remember::Rule("Bash(ls *)".into()));
         assert_eq!(bash.decide("2"), Decision { allowed: true, grant: rule, note: None });
         assert_eq!(bash.decide("y"), Decision { allowed: true, grant: None, note: None });
         assert_eq!(bash.decide("3"), Decision { allowed: false, grant: None, note: None });
@@ -516,8 +531,13 @@ mod tests {
         assert_eq!(prefix.remember, Some(Remember::Rule("Bash(npm run *)".into())));
         assert_eq!(prefix.options[1], "Yes, and don\u{2019}t ask again for: npm run *");
         assert_eq!(session_rule("Bash", &json!({"command":"git status --short"})).as_deref(), Some("Bash(git status *)"));
-        // A program with only arguments is remembered exactly, never as `rm:*`.
-        assert_eq!(session_rule("Bash", &json!({"command":"rm notes.txt"})).as_deref(), Some("Bash(rm notes.txt)"));
+        // Options first: the program alone, as the reference CLI offers `git *`.
+        assert_eq!(session_rule("Bash", &json!({"command":"git -C src log --oneline -3"})).as_deref(), Some("Bash(git *)"));
+        // A program with only arguments, or one that can destroy data or run
+        // code, is remembered exactly.
+        assert_eq!(session_rule("Bash", &json!({"command":"touch notes.txt"})).as_deref(), Some("Bash(touch notes.txt)"));
+        assert_eq!(session_rule("Bash", &json!({"command":"rm -rf build"})).as_deref(), Some("Bash(rm -rf build)"));
+        assert_eq!(session_rule("Bash", &json!({"command":"python3 -m pytest"})).as_deref(), Some("Bash(python3 -m pytest)"));
         // Allow rules never match chained commands, so none is offered.
         assert_eq!(approval("Bash", &json!({"command":"npm test && npm run lint"}), None, false).options, ["Yes", "No"]);
         let wildcard = approval("Bash", &json!({"command":"rm -rf *"}), None, false);
