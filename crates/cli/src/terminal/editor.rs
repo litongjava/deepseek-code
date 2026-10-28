@@ -33,6 +33,8 @@ pub struct PromptEditor {
     files: Option<Vec<String>>,
     /// "12% until auto-compact" once the context budget runs low.
     context_note: Option<String>,
+    /// Background shells still running, shown as "1 shell · ↓ to manage".
+    shells: usize,
     /// Vim-style editing (`/vim`).
     vim: bool,
     keybindings: crate::keybindings::Keybindings,
@@ -53,6 +55,7 @@ impl Default for PromptEditor {
             workspace: None,
             files: None,
             context_note: None,
+            shells: 0,
             vim: false,
             keybindings: crate::keybindings::Keybindings::default(),
             commands: crate::command_catalog::COMMANDS
@@ -633,6 +636,9 @@ impl PromptEditor {
     pub fn set_context_note(&mut self, note: Option<String>) {
         self.context_note = note;
     }
+    pub fn set_shells(&mut self, count: usize) {
+        self.shells = count;
+    }
     pub fn set_suggestions(&mut self, suggestions: std::sync::mpsc::Receiver<String>) {
         self.suggestions = Some(suggestions);
     }
@@ -831,6 +837,10 @@ impl PromptEditor {
                 }
                 if let Some(note) = &self.context_note {
                     parts.push(note.clone());
+                }
+                if self.shells > 0 {
+                    // Right after the mode label, as in the reference CLI.
+                    parts.insert(1, format!("{} shell{} \u{b7} \u{2193} to manage", self.shells, if self.shells == 1 { "" } else { "s" }));
                 }
                 if last_esc.is_some_and(|at| at.elapsed() < std::time::Duration::from_secs(1)) {
                     parts = vec!["esc again to rewind".into()];
@@ -1120,6 +1130,13 @@ impl PromptEditor {
                                 history_pos -= 1;
                                 buffer.set(&self.history[history_pos]);
                             }
+                        }
+                        // As in the reference CLI, ↓ past the newest prompt manages
+                        // the running background shells.
+                        KeyCode::Down if self.shells > 0 && buffer.chars.is_empty() && history_pos == self.history.len() => {
+                            let tasks = "/tasks".to_owned();
+                            screen.finish(&tasks, &prompt)?;
+                            return Ok(Some(super::PromptEvent::Line(tasks)));
                         }
                         KeyCode::Down => {
                             if history_pos < self.history.len() {

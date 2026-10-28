@@ -155,6 +155,9 @@ pub async fn handle(
                     println!("{}", serde_json::to_string_pretty(&records)?);
                 }
 
+                "list" if command == "/tasks" && argument.trim().is_empty() && crate::terminal::picker::available() => {
+                    tasks_menu(paths, session).await?;
+                }
                 filter @ ("list" | "running" | "completed" | "failed") => {
                     ensure!(
                         parts.next().is_none(),
@@ -313,6 +316,119 @@ fn print_parked(report: &claude_core::services::session_parking::ParkedStatus) {
 
 fn safe_output(text: &str) -> String {
     text.chars().filter(|ch| !ch.is_control() || matches!(ch, '\n' | '\t')).collect()
+}
+
+/// `12s` or `3m 4s`.
+fn runtime(started_ms: u64, finished_ms: Option<u64>) -> String {
+    let end = finished_ms.unwrap_or_else(|| chrono::Utc::now().timestamp_millis().max(0) as u64);
+    let seconds = end.saturating_sub(started_ms) / 1000;
+    if seconds < 60 { format!("{seconds}s") } else { format!("{}m {}s", seconds / 60, seconds % 60) }
+}
+
+/// One background task: a managed shell or a detached worker job.
+enum Task {
+    Shell(serde_json::Value),
+    Job(background_sessions::Job),
+}
+
+/// `/tasks` as in the reference CLI: background shells and detached work;
+/// a single task opens its details directly, `x` stops it.
+async fn tasks_menu(paths: &RuntimePaths, session: &Session) -> Result<()> {
+    use crate::terminal::picker::{details, Entry, Picker};
+    let mut selected = 0;
+    loop {
+        let mut tasks: Vec<Task> = managed_shell_records(paths, &session.id)?.into_iter().map(Task::Shell).collect();
+        tasks.extend(
+            background_sessions::list(&paths.data_dir, Some(&session.id))?
+                .into_iter()
+                .filter(|job| !job.foreground && matches!(job.status.as_str(), "starting" | "running" | "unresponsive"))
+                .map(Task::Job),
+        );
+        if tasks.is_empty() {
+            eprintln!("No background tasks.");
+            return Ok(());
+        }
+        let single = tasks.len() == 1;
+        let index = if single {
+            0
+        } else {
+            let entries: Vec<Entry> = tasks
+                .iter()
+                .map(|task| match task {
+                    Task::Shell(shell) => Entry {
+                        title: safe_output(shell["metadata"]["command"].as_str().or_else(|| shell["subject"].as_str()).unwrap_or("Background shell")),
+                        detail: format!("shell \u{b7} {}", shell["status"].as_str().unwrap_or("unknown")),
+                    },
+                    Task::Job(job) => Entry {
+                        title: safe_output(&job.title),
+                        detail: format!("session \u{b7} {} \u{b7} {}", job.status, runtime(job.started_ms, job.finished_ms)),
+                    },
+                })
+                .collect();
+            let picker = Picker { heading: "Background tasks", subtitle: None, entries: &entries, search: false, hint: "Enter to view \u{b7} Esc to close", selected };
+            match picker.run()? {
+                Some(index) => index,
+                None => return Ok(()),
+            }
+        };
+        selected = index;
+        let back = if single { "" } else { "\u{2190} to go back \u{b7} " };
+        let key = match &tasks[index] {
+            Task::Shell(shell) => {
+                let id = shell["id"].as_str().unwrap_or_default().to_owned();
+                let status = shell["status"].as_str().unwrap_or("unknown").to_owned();
+                let output = shell_control(paths, &session.id, &id, false).await.unwrap_or_default();
+                let mut rows = vec![format!("Status:   {status}")];
+                if let Some(started) = shell["metadata"]["started_ms"].as_u64().filter(|_| status == "running") {
+                    rows.push(format!("Runtime:  {}", runtime(started, None)));
+                }
+                rows.push(format!("Command:  {}", safe_output(shell["metadata"]["command"].as_str().or_else(|| shell["subject"].as_str()).unwrap_or(""))));
+                rows.push(String::new());
+                rows.push("Output:".into());
+                let text: Vec<String> = ["stdout", "stderr"]
+                    .iter()
+                    .filter_map(|stream| output[*stream].as_str())
+                    .flat_map(|text| text.lines().map(safe_output).collect::<Vec<_>>())
+                    .collect();
+                if text.is_empty() {
+                    rows.push("No output available".into());
+                } else {
+                    rows.extend(text.iter().rev().take(12).rev().cloned());
+                }
+                let stop = if status == "running" { " \u{b7} x to stop" } else { "" };
+                let key = details("Shell details", &rows, &format!("{back}Esc/Enter/Space to close{stop}"), if stop.is_empty() { &[] } else { &['x'] })?;
+                if key == Some('x') {
+                    shell_control(paths, &session.id, &id, true).await?;
+                    eprintln!("Stopped shell {id}.");
+                }
+                key
+            }
+            Task::Job(job) => {
+                let rows = vec![
+                    format!("Status:   {}", job.status),
+                    format!("Runtime:  {}", runtime(job.started_ms, job.finished_ms)),
+                    format!("Task:     {}", safe_output(&job.title)),
+                    format!("Session:  {}", job.session_id),
+                ];
+                let key = details("Task details", &rows, &format!("{back}Esc/Enter/Space to close \u{b7} x to stop"), &['x'])?;
+                if key == Some('x') {
+                    background_sessions::cancel(&paths.data_dir, &job.id)?;
+                    eprintln!("Stopping task {}.", job.id);
+                }
+                key
+            }
+        };
+        if single || key != Some('<') {
+            return Ok(());
+        }
+    }
+}
+
+/// Background shells of this session that are still running.
+pub(crate) fn running_shells(paths: &RuntimePaths, session: &str) -> usize {
+    managed_shell_records(paths, session)
+        .map(|shells| shells.iter().filter(|shell| shell["status"] == "running").count())
+        .unwrap_or(0)
 }
 
 pub(crate) fn managed_shell_records(paths: &RuntimePaths, session: &str) -> Result<Vec<serde_json::Value>> {

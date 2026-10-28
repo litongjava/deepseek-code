@@ -134,6 +134,57 @@ impl Picker<'_> {
     }
 }
 
+/// A details view such as the reference CLI's "Shell details": plain lines
+/// and a hint. Esc, Enter or Space close it (None); `←` returns `'<'` and
+/// any of `keys` returns that key.
+pub fn details(heading: &str, rows: &[String], hint: &str, keys: &[char]) -> io::Result<Option<char>> {
+    let raw = terminal::is_raw_mode_enabled()?;
+    if !raw {
+        terminal::enable_raw_mode()?;
+    }
+    let mut reader = super::paste_input::Reader::new()?;
+    let result = show_details(heading, rows, hint, keys, &mut || reader.next(std::time::Duration::from_millis(100)));
+    if !raw {
+        terminal::disable_raw_mode()?;
+    }
+    result
+}
+
+fn show_details(
+    heading: &str,
+    rows: &[String],
+    hint: &str,
+    keys: &[char],
+    next_event: &mut dyn FnMut() -> io::Result<Option<Event>>,
+) -> io::Result<Option<char>> {
+    let mut screen = Screen::default();
+    let (cols, height) = terminal::size().unwrap_or((80, 24));
+    let width = (cols as usize).saturating_sub(1).max(20);
+    let mut lines = vec![(clipped(&format!(" {heading}"), width), TextStyle::Accent)];
+    let room = (height as usize).saturating_sub(4).max(1);
+    let skip = rows.len().saturating_sub(room);
+    lines.extend(rows.iter().skip(skip).map(|row| (clipped(&format!(" {row}"), width), TextStyle::Plain)));
+    lines.push((clipped(&format!(" {hint}"), width), TextStyle::Muted));
+    let result = loop {
+        screen.draw(&lines, lines.len() - 1, 1)?;
+        let Some(Event::Key(key)) = next_event()? else {
+            continue;
+        };
+        if key.kind == KeyEventKind::Release {
+            continue;
+        }
+        match key.code {
+            KeyCode::Esc | KeyCode::Enter | KeyCode::Char(' ') => break None,
+            KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => break None,
+            KeyCode::Left => break Some('<'),
+            KeyCode::Char(ch) if keys.contains(&ch) => break Some(ch),
+            _ => {}
+        }
+    };
+    screen.suspend()?;
+    Ok(result)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -158,6 +209,15 @@ mod tests {
         let (lines, cursor) = picker.lines(&picker.matching("parser"), 1, "parser", 80, 24);
         assert_eq!(lines[1].0, " \u{2315} parser");
         assert!(lines[cursor].0.starts_with(" \u{276f} refactor parser"));
+    }
+
+    #[test]
+    fn details_close_or_return_their_keys() {
+        let rows = vec!["Status:   running".to_owned()];
+        let mut keys = vec![Event::Key(KeyEvent::new(KeyCode::Char('x'), KeyModifiers::NONE)), Event::Key(KeyEvent::new(KeyCode::Char('q'), KeyModifiers::NONE))];
+        assert_eq!(show_details("Shell details", &rows, "", &['x'], &mut || Ok(keys.pop())).unwrap(), Some('x'));
+        let mut keys = vec![Event::Key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE))];
+        assert_eq!(show_details("Shell details", &rows, "", &['x'], &mut || Ok(keys.pop())).unwrap(), None);
     }
 
     #[test]

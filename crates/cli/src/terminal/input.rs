@@ -34,6 +34,7 @@ enum Message {
     Keybindings(crate::keybindings::Keybindings),
     Workspace(std::path::PathBuf),
     ContextNote(Option<String>),
+    Shells(usize),
     Vim(bool),
     Read(Request),
 }
@@ -121,6 +122,10 @@ impl TerminalInput {
                         editor.set_context_note(note);
                         continue;
                     }
+                    Message::Shells(count) => {
+                        editor.set_shells(count);
+                        continue;
+                    }
                     Message::Vim(on) => {
                         editor.set_vim(on);
                         continue;
@@ -198,6 +203,11 @@ impl TerminalInput {
     /// Shown in the footer while the context budget is low.
     pub fn set_context_note(&self, note: Option<String>) {
         let _ = self.requests.send(Message::ContextNote(note));
+    }
+
+    /// Background shells still running, for "1 shell · ↓ to manage".
+    pub fn set_shells(&self, count: usize) {
+        let _ = self.requests.send(Message::Shells(count));
     }
 
     /// The project whose files `@` completes.

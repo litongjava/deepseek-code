@@ -220,6 +220,9 @@ async fn present(
     } else {
         error_text.as_deref()
     };
+    if display.is_live() {
+        display.set_running_shells(crate::background_commands::running_shells(&session.paths, &session.id));
+    }
     for action in display.finish(footer) {
         restore(input, action);
     }

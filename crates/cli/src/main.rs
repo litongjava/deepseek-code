@@ -562,6 +562,7 @@ async fn run(cli: &Cli) -> Result<()> {
             input.as_mut().unwrap().set_commands(catalog);
             input.as_ref().unwrap().set_workspace(&session.workspace);
             input.as_ref().unwrap().set_context_note(session_commands::context_status(&session).await);
+            input.as_ref().unwrap().set_shells(background_commands::running_shells(&paths, &session.id));
             input.as_ref().unwrap().set_vim(terminal::vim::enabled(&paths.data_dir));
             if display.diff_panel && !display.focus {
                 match claude_core::services::worktree_diff::snapshot(&session.workspace, display.diff_staged).await {

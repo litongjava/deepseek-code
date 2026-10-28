@@ -79,6 +79,7 @@ pub(super) fn start(
     timeout: Option<Duration>,
     shell: &str,
     description: &str,
+    command_text: &str,
 ) -> Result<Value> {
     let (root, session) = CONTEXT
         .try_with(Clone::clone)
@@ -87,7 +88,8 @@ pub(super) fn start(
         .context("Background Bash requires an owning engine session")?;
     let task = super::tasks::execute_for_shell_owner(
         "TaskCreate",
-        json!({"subject":description,"metadata":{"managed_shell":true}}),
+        // The command and start time are kept for the task details view.
+        json!({"subject":description,"metadata":{"managed_shell":true,"command":command_text,"started_ms":chrono::Utc::now().timestamp_millis()}}),
         &root,
         &session,
     )?;
@@ -505,7 +507,7 @@ mod tests {
         let mut command = Command::new("node");
         command.arg("-e").arg("require('child_process').spawn(process.execPath,['-e',`setTimeout(()=>require('fs').writeFileSync(process.argv[1],'leaked'),1800)`,process.argv[1]],{stdio:'inherit'});console.log('ready');console.error('diagnostic');setInterval(()=>{},10000)").arg(&leaked);
         let task = scope(Some((root.path().into(), session.clone())), async {
-            start(command, None, "node", "test managed shell").unwrap()
+            start(command, None, "node", "test managed shell", "node fixture").unwrap()
         })
         .await;
         let id = task["task_id"].as_str().unwrap();
@@ -557,7 +559,7 @@ mod tests {
             let mut command = Command::new("node");
             command.args(["-e", code]);
             let task = scope(Some((root.path().into(), session.clone())), async {
-                start(command, Some(Duration::from_millis(600)), "node", "fixture").unwrap()
+                start(command, Some(Duration::from_millis(600)), "node", "fixture", "node fixture").unwrap()
             })
             .await;
             let observed = output(

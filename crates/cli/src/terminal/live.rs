@@ -48,6 +48,8 @@ enum Update {
     GroupEnd,
     /// Messages sent during the turn that the model has not read yet.
     Queued(Vec<String>),
+    /// Background shells still running when the turn ends.
+    Shells(usize),
     /// The conversation before this turn, for the Ctrl+O transcript.
     Transcript(Vec<change_view::Line>),
     /// A queued message the model has now read.
@@ -331,6 +333,7 @@ struct State {
     /// Messages typed during the turn, shown until the model reads them.
     queued: Vec<String>,
     transcript: Vec<change_view::Line>,
+    shells: usize,
     /// When reasoning began and last streamed, for "Thought for 2s".
     thinking_span: Option<(Instant, Instant)>,
     thinking_characters: usize,
@@ -416,6 +419,7 @@ impl State {
             group: None,
             queued: Vec::new(),
             transcript: Vec::new(),
+            shells: 0,
             thinking_span: None,
             thinking_characters: 0,
             thinking_entry: None,
@@ -1301,6 +1305,7 @@ fn run(
                     dirty = true;
                 }
                 Ok(Update::Transcript(lines)) => state.transcript = lines,
+                Ok(Update::Shells(count)) => state.shells = count,
                 Ok(Update::Queued(pending)) => {
                     state.queued = pending;
                     dirty = true;
@@ -1350,13 +1355,17 @@ fn run(
                     screen.erase();
                     // As in the reference CLI, after a blank line:
                     // "✻ Churned for 7m 7s · done 10:41 AM".
-                    let footer = format!(
+                    let mut footer = format!(
                         "\u{273b} {} for {} \u{b7} {} {}",
                         PAST_VERBS[state.frame.wrapping_add(state.started.elapsed().subsec_nanos() as usize) % PAST_VERBS.len()],
                         short_duration(state.started.elapsed().as_secs()),
                         error.as_deref().unwrap_or("done"),
                         chrono::Local::now().format("%-I:%M %p")
                     );
+                    // As in the reference CLI: "· 1 shell still running".
+                    if state.shells > 0 {
+                        footer.push_str(&format!(" \u{b7} {} shell{} still running", state.shells, if state.shells == 1 { "" } else { "s" }));
+                    }
                     // An interrupted turn ends as in the reference CLI, inviting the
                     // next instruction instead of reporting a duration.
                     let interrupted = error.as_deref().is_some_and(|error| {
@@ -2146,6 +2155,12 @@ impl TurnDisplay {
         match &self.live {
             Some(live) => live.styled(lines),
             None => self.notice(&change_view::plain(&lines)),
+        }
+    }
+    /// Background shells still running, named in the closing line.
+    pub fn set_running_shells(&mut self, count: usize) {
+        if let Some(live) = &self.live {
+            let _ = live.updates.send(Update::Shells(count));
         }
     }
     /// The conversation before this turn, for Ctrl+O.
