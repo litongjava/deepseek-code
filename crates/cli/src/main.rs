@@ -15,6 +15,7 @@ mod settings_dialog;
 mod stats_view;
 mod permissions_menu;
 mod startup_prompts;
+mod repl_loop;
 mod command_catalog;
 mod workflow_commands;
 mod interactive_config;
@@ -521,6 +522,8 @@ async fn run(cli: &Cli) -> Result<()> {
         input.as_mut().unwrap().set_commands(skill_commands::catalog(&skills));
         let mut composer = terminal::prompt::Composer::default();
         let mut background_refresh = tokio::time::interval(std::time::Duration::from_secs(1));
+        // /loop prompts: interval, prompt and when each runs next.
+        let mut loops: Vec<(std::time::Duration, String, std::time::Instant)> = Vec::new();
         background_refresh.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
         let mut remote = remote_commands::Remote::default();
         let mut last_config_error = String::new();
@@ -530,6 +533,9 @@ async fn run(cli: &Cli) -> Result<()> {
         // History length the last suggestion was generated for.
         let mut suggested_for = session.store.history(&session.id)?.len();
         terminal::STARTED.get_or_init(std::time::Instant::now);
+        if let Some(speed) = std::fs::read_to_string(paths.data_dir.join("scroll-speed")).ok().and_then(|text| text.trim().parse::<usize>().ok()).filter(|speed| (1..=20).contains(speed)) {
+            terminal::SCROLL_SPEED.store(speed, std::sync::atomic::Ordering::Relaxed);
+        }
         'repl: loop {
             let idle_deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(60);
             let mut idle_notified = false;
@@ -651,6 +657,16 @@ async fn run(cli: &Cli) -> Result<()> {
                         if let Err(error) = session.wake_hooks(cli, &mut input).await { eprintln!("Hook wake: {error:#}"); }
                         continue 'repl;
                     }
+                    // A due /loop prompt runs as if typed, once the input is empty.
+                    if let Some(index) = loops.iter().position(|(_, _, next)| *next <= std::time::Instant::now()) {
+                        if !composer.is_pending() && input.as_mut().expect("interactive reader").yield_prompt().await? {
+                            let (every, prompt, next) = &mut loops[index];
+                            *next = std::time::Instant::now() + *every;
+                            eprintln!("\u{21bb} Loop: {prompt}");
+                            input.as_mut().expect("interactive reader").queue_prompt(prompt.clone());
+                            continue 'repl;
+                        }
+                    }
                     // A background agent waiting for approval asks here, as in the
                     // reference CLI, once the input is empty.
                     if !composer.is_pending()
@@ -768,6 +784,29 @@ async fn run(cli: &Cli) -> Result<()> {
                 Ok(background_commands::Outcome::Exit) => break,
                 Err(error) => { if !worker_frontend::already_presented(&error) { eprintln!("Error: {error:#}"); } continue; },
                 Ok(background_commands::Outcome::NotHandled) => {},
+            }
+            if command == "/scroll-speed" {
+                // As in the reference CLI: lines per mouse wheel notch, kept.
+                let file = paths.data_dir.join("scroll-speed");
+                match argument.trim() {
+                    "" => eprintln!("Scroll speed: {} lines per wheel notch. /scroll-speed 1-20 changes it.", terminal::SCROLL_SPEED.load(std::sync::atomic::Ordering::Relaxed)),
+                    value => match value.parse::<usize>().ok().filter(|speed| (1..=20).contains(speed)) {
+                        Some(speed) => {
+                            terminal::SCROLL_SPEED.store(speed, std::sync::atomic::Ordering::Relaxed);
+                            if let Err(error) = std::fs::write(&file, speed.to_string()) { eprintln!("Scroll speed set for this session; not saved: {error}"); }
+                            else { eprintln!("Scroll speed: {speed} lines per wheel notch."); }
+                        }
+                        None => eprintln!("Usage: /scroll-speed 1-20"),
+                    },
+                }
+                continue;
+            }
+            if command == "/loop" {
+                match repl_loop::command(argument, &mut loops) {
+                    Ok(message) => eprintln!("{message}"),
+                    Err(error) => eprintln!("Error: {error:#}"),
+                }
+                continue;
             }
             if matches!(command, "/remote-control" | "/rc") {
                 if let Err(error) = remote.command(argument, &paths, &session, &mut input).await { eprintln!("Error: {error:#}"); }

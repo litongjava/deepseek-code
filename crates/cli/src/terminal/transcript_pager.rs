@@ -126,8 +126,8 @@ fn pager(
             }
             Event::Mouse(mouse) => {
                 match mouse.kind {
-                    MouseEventKind::ScrollUp => top = top.saturating_sub(3),
-                    MouseEventKind::ScrollDown => top = top.saturating_add(3),
+                    MouseEventKind::ScrollUp => top = top.saturating_sub(super::SCROLL_SPEED.load(std::sync::atomic::Ordering::Relaxed)),
+                    MouseEventKind::ScrollDown => top = top.saturating_add(super::SCROLL_SPEED.load(std::sync::atomic::Ordering::Relaxed)),
                     _ => {}
                 }
                 continue;
