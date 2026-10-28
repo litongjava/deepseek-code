@@ -135,10 +135,13 @@ async fn persistent_worker_refreshes_launch_rules_without_retaining_previous_gra
             jobs::answer_question(&paths.data_dir, &id, &session, &pending.request_id, "n")
                 .unwrap();
         }
-        assert_eq!(completed(&paths.data_dir, &id).await.status, "completed");
+        // Declining the approval stops that turn, as in the reference CLI.
+        let status = if index == 3 { "cancelled" } else { "completed" };
+        assert_eq!(completed(&paths.data_dir, &id).await.status, status);
         assert_eq!(file.exists(), expected, "turn {index}");
     }
-    assert_eq!(count.load(std::sync::atomic::Ordering::SeqCst), 8);
+    // The declined turn ends without asking the model to continue.
+    assert_eq!(count.load(std::sync::atomic::Ordering::SeqCst), 7);
     worker::shutdown(&paths.data_dir, &session).await.unwrap();
     server.abort();
 }

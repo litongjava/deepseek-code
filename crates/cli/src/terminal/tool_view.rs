@@ -131,6 +131,11 @@ fn printable(line: &str) -> String {
 
 /// Inline result lines and the number of lines left for the details view.
 pub fn summary(name: &str, output: &str, failed: bool) -> (Vec<String>, usize) {
+    // The model reads the full rejection text; the transcript shows the answer.
+    if let Some(rest) = output.split_once(REJECTED).map(|(_, rest)| rest) {
+        let note = rest.split_once("the user said:\n").map(|(_, note)| printable(note.trim()));
+        return (vec![note.map_or_else(|| "Rejected".to_owned(), |note| format!("Rejected: {note}"))], 0);
+    }
     if !failed && name == "Read" {
         if let Ok(value) = serde_json::from_str::<Value>(output) {
             if let Some(lines) = value["lines"].as_u64() {
@@ -234,6 +239,29 @@ pub enum Remember {
     AcceptEdits,
     /// Add a session allow rule such as `Bash(npm test)`.
     Rule(String),
+    /// Switch the session to auto mode.
+    Auto,
+}
+
+/// The reference CLI's text for a rejected call; a bare "No" also ends the turn.
+pub const REJECTED: &str = "The user doesn't want to proceed with this tool use. The tool use was rejected (eg. if it was a file edit, the new_string was NOT written to the file).";
+
+/// The answer to an approval prompt.
+#[derive(Debug, PartialEq)]
+pub struct Decision {
+    pub allowed: bool,
+    pub grant: Option<Remember>,
+    /// Text added with Tab: "Yes, use -5 instead" or "No, keep the readme".
+    pub note: Option<String>,
+}
+impl Decision {
+    /// What the model reads for a rejection, and whether the turn stops.
+    pub fn rejection(&self) -> (String, bool) {
+        match &self.note {
+            Some(note) => (format!("{REJECTED} To tell you how to proceed, the user said:\n{note}"), false),
+            None => (format!("{REJECTED} STOP what you are doing and wait for the user to tell you how to proceed."), true),
+        }
+    }
 }
 
 /// A tool approval prompt: what will run, the question and numbered choices.
@@ -243,6 +271,8 @@ pub struct Approval {
     pub question: String,
     pub options: Vec<String>,
     pub remember: Option<Remember>,
+    /// Whether a "switch to auto mode" choice follows the remember choice.
+    pub auto: bool,
 }
 
 impl Approval {
@@ -257,21 +287,34 @@ impl Approval {
         for (index, option) in self.options.iter().enumerate() {
             text.push_str(&format!("\n  {}. {option}", index + 1));
         }
-        let last = self.options.len();
-        text.push_str(&format!("\n(1/y yes{}, {last}/n no)", if self.remember.is_some() { ", 2 yes for this session" } else { "" }));
+        let mut hints = vec!["1/y yes".to_owned()];
+        if self.remember.is_some() {
+            hints.push("2 yes for this session".into());
+        }
+        if self.auto {
+            hints.push(format!("{} switch to auto mode", self.options.len() - 1));
+        }
+        hints.push(format!("{}/n no", self.options.len()));
+        text.push_str(&format!("\n({})", hints.join(", ")));
         text
     }
 
-    /// Whether an answer allows the call, and whether it also remembers it.
-    pub fn decide(&self, answer: &str) -> (bool, bool) {
-        let answer = answer.trim().to_lowercase();
-        if ["y", "yes", "1", "\u{662f}", "\u{5141}\u{8bb8}"].contains(&answer.as_str()) {
-            (true, false)
-        } else if answer == "2" && self.remember.is_some() {
-            (true, true)
-        } else {
-            (false, false)
-        }
+    /// The choice an answer makes. The live menu answers with the option
+    /// number, followed on the next line by any text added with Tab.
+    pub fn decide(&self, answer: &str) -> Decision {
+        let (choice, note) = answer.split_once('\n').unwrap_or((answer, ""));
+        let note = Some(note.trim().to_owned()).filter(|note| !note.is_empty());
+        let last = self.options.len();
+        let index = match choice.trim().to_lowercase().as_str() {
+            "y" | "yes" | "\u{662f}" | "\u{5141}\u{8bb8}" => 1,
+            number => number.parse().unwrap_or(last),
+        };
+        let grant = match index {
+            2 if self.remember.is_some() => self.remember.clone(),
+            index if self.auto && index == last - 1 => Some(Remember::Auto),
+            _ => None,
+        };
+        Decision { allowed: index == 1 || grant.is_some(), grant, note }
     }
 }
 
@@ -331,7 +374,7 @@ fn remember_option(rule: &str) -> String {
 
 /// The approval prompt for one tool call. File edits preview the diff they
 /// would make; other calls show the command or their input.
-pub fn approval(name: &str, input: &Value, workspace: Option<&std::path::Path>) -> Approval {
+pub fn approval(name: &str, input: &Value, workspace: Option<&std::path::Path>, auto: bool) -> Approval {
     let edits = matches!(name, "Write" | "Edit" | "MultiEdit" | "NotebookEdit");
     let preview = workspace
         .and_then(|workspace| claude_core::tools::file_change::preview(name, input, workspace));
@@ -391,10 +434,13 @@ pub fn approval(name: &str, input: &Value, workspace: Option<&std::path::Path>) 
     match &remember {
         Some(Remember::AcceptEdits) => options.push("Yes, allow all edits during this session (shift+tab)".into()),
         Some(Remember::Rule(rule)) => options.push(remember_option(rule)),
-        None => {}
+        _ => {}
+    }
+    if auto {
+        options.push("Yes, and switch to auto mode \u{b7} auto mode handles these prompts for you".into());
     }
     options.push("No".into());
-    Approval { lines, question, options, remember }
+    Approval { lines, question, options, remember, auto }
 }
 
 #[cfg(test)]
@@ -424,6 +470,15 @@ mod tests {
     }
 
     #[test]
+    fn rejected_calls_show_the_answer_not_the_model_text() {
+        let denied = Decision { allowed: false, grant: None, note: Some("keep it".into()) }.rejection().0;
+        let lines = text(&finished("Bash", &json!({"command":"rm a"}), &format!("Tool approval failed: {denied}"), true, None, None));
+        assert_eq!(lines[1], "  \u{23bf}  Rejected: keep it");
+        let stopped = Decision { allowed: false, grant: None, note: None }.rejection().0;
+        assert_eq!(summary("Bash", &stopped, true).0, ["Rejected"]);
+    }
+
+    #[test]
     fn failing_commands_report_stderr_and_exit_code() {
         let output = json!({"exit_code":2,"stdout":"","stderr":"no such file\n"}).to_string();
         assert_eq!(result_text(&output), "no such file\nExit code 2");
@@ -436,26 +491,39 @@ mod tests {
 
     #[test]
     fn approval_questions_show_the_command_and_numbered_choices() {
-        let bash = approval("Bash", &json!({"command":"ls -la","description":"List files"}), None);
+        let bash = approval("Bash", &json!({"command":"ls -la","description":"List files"}), None, false);
         let text = bash.text();
         assert!(text.starts_with("Bash command\nList files\n\u{254c}"), "{text}");
         assert!(text.contains("\nls -la\n\u{254c}"), "{text}");
         assert!(text.ends_with("This command requires approval\nDo you want to proceed?\n  1. Yes\n  2. Yes, and don\u{2019}t ask again for: ls -la\n  3. No\n(1/y yes, 2 yes for this session, 3/n no)"), "{text}");
-        assert_eq!(bash.decide("2"), (true, true));
-        assert_eq!(bash.decide("y"), (true, false));
-        assert_eq!(bash.decide("3"), (false, false));
-        let prefix = approval("Bash", &json!({"command":"npm run build --silent"}), None);
+        let rule = Some(Remember::Rule("Bash(ls -la)".into()));
+        assert_eq!(bash.decide("2"), Decision { allowed: true, grant: rule, note: None });
+        assert_eq!(bash.decide("y"), Decision { allowed: true, grant: None, note: None });
+        assert_eq!(bash.decide("3"), Decision { allowed: false, grant: None, note: None });
+        // Tab adds a note to Yes or No.
+        assert_eq!(bash.decide("1\nuse -5 instead"), Decision { allowed: true, grant: None, note: Some("use -5 instead".into()) });
+        let no = bash.decide("3\nkeep the readme");
+        assert!(!no.allowed);
+        assert_eq!(no.rejection(), (format!("{REJECTED} To tell you how to proceed, the user said:\nkeep the readme"), false));
+        assert!(bash.decide("n").rejection().1, "a bare No ends the turn");
+        // With auto mode configured, a third choice switches to it.
+        let auto = approval("Bash", &json!({"command":"touch notes.txt"}), None, true);
+        assert_eq!(auto.options[2], "Yes, and switch to auto mode \u{b7} auto mode handles these prompts for you");
+        assert_eq!(auto.decide("3").grant, Some(Remember::Auto));
+        assert!(!auto.decide("4").allowed);
+        assert!(auto.text().ends_with("(1/y yes, 2 yes for this session, 3 switch to auto mode, 4/n no)"));
+        let prefix = approval("Bash", &json!({"command":"npm run build --silent"}), None, false);
         assert_eq!(prefix.remember, Some(Remember::Rule("Bash(npm run *)".into())));
         assert_eq!(prefix.options[1], "Yes, and don\u{2019}t ask again for: npm run *");
         assert_eq!(session_rule("Bash", &json!({"command":"git status --short"})).as_deref(), Some("Bash(git status *)"));
         // A program with only arguments is remembered exactly, never as `rm:*`.
         assert_eq!(session_rule("Bash", &json!({"command":"rm notes.txt"})).as_deref(), Some("Bash(rm notes.txt)"));
         // Allow rules never match chained commands, so none is offered.
-        assert_eq!(approval("Bash", &json!({"command":"npm test && npm run lint"}), None).options, ["Yes", "No"]);
-        let wildcard = approval("Bash", &json!({"command":"rm -rf *"}), None);
+        assert_eq!(approval("Bash", &json!({"command":"npm test && npm run lint"}), None, false).options, ["Yes", "No"]);
+        let wildcard = approval("Bash", &json!({"command":"rm -rf *"}), None, false);
         assert_eq!(wildcard.options, ["Yes", "No"]);
-        assert_eq!(wildcard.decide("2"), (false, false));
-        let write = approval("Write", &json!({"file_path":"a.txt","content":"x"}), None);
+        assert!(!wildcard.decide("2").allowed);
+        let write = approval("Write", &json!({"file_path":"a.txt","content":"x"}), None, false);
         assert!(write.text().starts_with("Write(a.txt)\n  {"), "{}", write.text());
         assert_eq!(write.remember, Some(Remember::AcceptEdits));
     }
@@ -483,12 +551,12 @@ mod tests {
         let temp = tempfile::tempdir().unwrap();
         std::fs::write(temp.path().join("calc.py"), "def divide(a, b):\n    return a / b\n").unwrap();
         let input = json!({"file_path":"calc.py","old_string":"    return a / b","new_string":"    if b == 0:\n        raise ValueError\n    return a / b"});
-        let edit = approval("Edit", &input, Some(temp.path()));
+        let edit = approval("Edit", &input, Some(temp.path()), false);
         let text = edit.text();
         assert!(text.starts_with("Edit file\ncalc.py\n"), "{text}");
         assert!(text.contains("    2 +    if b == 0:"), "{text}");
         assert!(text.contains("Do you want to make this edit to calc.py?\n  1. Yes\n  2. Yes, allow all edits during this session (shift+tab)\n  3. No"), "{text}");
-        let created = approval("Write", &json!({"file_path":"new.txt","content":"hi\n"}), Some(temp.path()));
+        let created = approval("Write", &json!({"file_path":"new.txt","content":"hi\n"}), Some(temp.path()), false);
         assert_eq!(created.question, "Do you want to create new.txt?");
     }
 

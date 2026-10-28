@@ -26,14 +26,15 @@ fn save(db: &DbManager, session: &str, rules: &HashMap<String, PermissionAction>
     Ok(())
 }
 
-/// The approval prompt's second choice, published by the engine only after
-/// it accepts the reviewed call: an allow rule saved for this session, or
-/// accept-edits mode.
+/// The approval prompt's session choice, published by the engine only after
+/// it accepts the reviewed call: an allow rule saved for this session,
+/// accept-edits mode or auto mode.
 pub fn remember_commit(session: &Session, remember: &Remember) -> Result<Commit> {
     let (db, id, manager) = (session.store.db.clone(), session.id.clone(), session.permissions.clone());
     Ok(match remember.clone() {
-        Remember::AcceptEdits => {
-            let mode = claude_core::services::session_permission_mode::parse("accept-edits")?;
+        Remember::AcceptEdits | Remember::Auto => {
+            let name = if *remember == Remember::Auto { "auto" } else { "accept-edits" };
+            let mode = claude_core::services::session_permission_mode::parse(name)?;
             Box::new(move || claude_core::services::session_permission_mode::set(&db, &id, &manager, mode))
         }
         Remember::Rule(rule) => {

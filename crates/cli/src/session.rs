@@ -536,6 +536,21 @@ impl Session {
         Ok(authorization.result)
     }
 
+    /// Whether an approval can offer "switch to auto mode": only once auto
+    /// permissions are configured, never as a way to enable them.
+    pub async fn auto_mode_available(&self) -> bool {
+        if self.permissions.get_mode() == PermissionMode::Auto {
+            return false;
+        }
+        let Ok(context) = crate::services::context(&self.paths) else {
+            return false;
+        };
+        match self.selected_provider().await {
+            Ok(provider) => claude_core::native_engine::auto_permissions::configured(&context, &provider).is_ok(),
+            Err(_) => false,
+        }
+    }
+
     pub async fn set_permission_mode(&self, value: &str) -> Result<()> {
         if claude_core::services::background_sessions::worker_directory(&self.paths.data_dir, &self.id)?.is_none() {
             if let Some(job) = claude_core::services::background_sessions::list(&self.paths.data_dir, None)?.into_iter().find(|job|job.session_id == self.id && matches!(job.status.as_str(), "starting" | "running" | "unresponsive")) {
@@ -869,6 +884,9 @@ impl Session {
         let mut goal_requests = crate::session_commands::GoalRequests::default();
         let mut observed_plan_boundary = claude_core::services::plan_approval::latest_boundary(&self.store.db, &self.id)?;
         let mut tools = Vec::<message_repo::ToolCallRow>::new();
+        // Notes added to approvals reach the model after the result and are
+        // saved apart from it, as the user's words.
+        let mut approval_notes = std::collections::HashMap::<String, String>::new();
         let mut sdk_messages = (cli.output_format == OutputFormat::StreamJson)
             .then(|| crate::sdk_messages::Translator::new(&self.id, cli.include_partial_messages));
         let mut refresh = tokio::time::interval(std::time::Duration::from_secs(1));
@@ -958,7 +976,8 @@ impl Session {
                     },
                     EngineEvent::ToolPermission { request_id, tool_use_id, tool_name, input: tool_input } => {
                         progress.clear();
-                        let approval = (tool_name != "ExitPlanMode").then(|| crate::terminal::tool_view::approval(&tool_name, &tool_input, Some(&self.workspace)));
+                        let auto = tool_name != "ExitPlanMode" && self.auto_mode_available().await;
+                        let approval = (tool_name != "ExitPlanMode").then(|| crate::terminal::tool_view::approval(&tool_name, &tool_input, Some(&self.workspace), auto));
                         let question = match &approval {
                             Some(approval) => approval.text(),
                             None => format!("Review plan\n{}\n\n{}\n\nApprove this plan and leave plan mode? Implementation will use ask permissions. [y/N]",
@@ -1002,22 +1021,37 @@ impl Session {
                             }
                         };
                         if let Some(answer) = answer {
-                            let (allowed, remember) = match &approval {
+                            use claude_core::native_engine::permission_response::PermissionResponse;
+                            use crate::terminal::tool_view::{Decision, Remember};
+                            let decision = match &approval {
                                 Some(approval) => approval.decide(&answer),
-                                None => (["y", "yes", "1", "\u{662f}", "\u{5141}\u{8bb8}"].contains(&answer.trim().to_lowercase().as_str()), false),
+                                None => Decision { allowed: ["y", "yes", "1", "\u{662f}", "\u{5141}\u{8bb8}"].contains(&answer.trim().to_lowercase().as_str()), grant: None, note: None },
                             };
-                            let commit = match approval.as_ref().and_then(|approval| approval.remember.as_ref()).filter(|_| remember) {
+                            let commit = match decision.grant.as_ref() {
                                 Some(grant) => match crate::permission_commands::remember_commit(self, grant) {
                                     Ok(commit) => Some((commit, grant.clone())),
                                     Err(error) => { progress.notice(&format!("Approved once; the session grant was not saved: {error:#}")); None },
                                 },
                                 None => None,
                             };
-                            let answer = if allowed { "yes" } else { "no" };
-                            if let Some((commit, grant)) = commit {
-                                let response = claude_core::native_engine::permission_response::PermissionResponse::Allow { updated_input: None, commit: Some(commit), note: None };
+                            let answer = if decision.allowed { "yes" } else { "no" };
+                            if decision.allowed && (commit.is_some() || decision.note.is_some()) {
+                                let grant = commit.as_ref().map(|(_, grant)| grant.clone());
+                                if let Some(note) = &decision.note {
+                                    approval_notes.insert(tool_use_id.clone(), note.clone());
+                                }
+                                let response = PermissionResponse::Allow { updated_input: None, commit: commit.map(|(commit, _)| commit), note: decision.note.clone() };
                                 let _ = self.engine.resume_with_permission(&request_id, response).await;
-                                if grant == crate::terminal::tool_view::Remember::AcceptEdits { progress.set_permission_mode("accept-edits"); }
+                                match grant {
+                                    Some(Remember::AcceptEdits) => progress.set_permission_mode("accept-edits"),
+                                    Some(Remember::Auto) => progress.set_permission_mode("auto"),
+                                    _ => {}
+                                }
+                            } else if !decision.allowed && !remote_decided && approval.is_some() {
+                                // As in the reference CLI: a bare No stops the turn; No with
+                                // a note tells the model how to proceed instead.
+                                let (message, interrupt) = decision.rejection();
+                                let _ = self.engine.resume_with_permission(&request_id, PermissionResponse::Deny { message, interrupt }).await;
                             } else {
                                 let _ = self.engine.resume_with_answer(&request_id, answer.into()).await;
                             }
@@ -1144,9 +1178,10 @@ impl Session {
             self.store.db.with_conn(|conn| -> Result<()> {
                 if !thinking_text.is_empty() { conn.execute("UPDATE messages SET thinking = ?1 WHERE id = ?2", [&thinking_text, &message_id])?; }
                 for tool in &tools {
+                    let call_id = format!("{message_id}:{}", tool.id);
                     message_repo::insert_tool_call(
                         conn,
-                        &format!("{message_id}:{}", tool.id),
+                        &call_id,
                         &message_id,
                         &tool.name,
                         tool.input.as_deref(),
@@ -1154,6 +1189,9 @@ impl Session {
                         tool.is_error,
                         tool.sort_order,
                     )?;
+                    if let Some(note) = approval_notes.get(&tool.id) {
+                        message_repo::set_tool_call_note(conn, &call_id, note)?;
+                    }
                 }
                 message_repo::save_request_snapshots(conn, &message_id, &json!(snapshots))?;
                 Ok(())

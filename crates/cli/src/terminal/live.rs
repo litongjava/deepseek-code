@@ -16,7 +16,7 @@ use std::{
     time::{Duration, Instant},
 };
 use tokio::sync::{mpsc as async_mpsc, oneshot};
-use unicode_width::UnicodeWidthChar;
+use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 pub enum Action {
     GoalDecision { id: String, approved: bool },
@@ -257,6 +257,29 @@ struct Choice {
     question: String,
     options: Vec<String>,
     selected: usize,
+    /// Text typed after Tab on Yes or No, sent with the answer.
+    amend: Option<String>,
+}
+impl Choice {
+    fn amendable(&self) -> bool {
+        self.selected == 0 || self.selected + 1 == self.options.len()
+    }
+    /// An option's label; while amending, `Yes, use -5 instead` or the
+    /// reference CLI's placeholder.
+    fn label(&self, index: usize) -> String {
+        let option = terminal_text(&self.options[index]);
+        match &self.amend {
+            Some(text) if index == self.selected => {
+                let (word, placeholder) = if index == 0 {
+                    ("Yes", "and tell DeepSeek Code what to do next")
+                } else {
+                    ("No", "and tell DeepSeek Code what to do differently")
+                };
+                format!("{word}, {}", if text.is_empty() { placeholder.to_owned() } else { terminal_text(text) })
+            }
+            _ => option,
+        }
+    }
 }
 
 struct State {
@@ -474,11 +497,39 @@ impl State {
         };
         let control = key.modifiers.contains(KeyModifiers::CONTROL);
         let count = choice.options.len();
+        if let Some(text) = choice.amend.as_mut() {
+            // As in the reference CLI, Tab on Yes or No turns the option into a
+            // text field; the note goes to the model with the answer.
+            match key.code {
+                KeyCode::Char('c' | 'o' | 'b' | 'l') if control => return false,
+                KeyCode::Esc | KeyCode::Tab => choice.amend = None,
+                KeyCode::Enter => self.answer_choice(),
+                KeyCode::Backspace => {
+                    text.pop();
+                }
+                KeyCode::Char(ch) if !control => text.push(ch),
+                KeyCode::Up => {
+                    choice.amend = None;
+                    choice.selected = (choice.selected + count - 1) % count;
+                }
+                KeyCode::Down => {
+                    choice.amend = None;
+                    choice.selected = (choice.selected + 1) % count;
+                }
+                _ => {}
+            }
+            return true;
+        }
         match key.code {
             KeyCode::Esc => return false,
             KeyCode::Char('c' | 'o' | 'b' | 'l') if control => return false,
             KeyCode::Up | KeyCode::Char('k') => choice.selected = (choice.selected + count - 1) % count,
-            KeyCode::Down | KeyCode::Char('j') | KeyCode::Tab => choice.selected = (choice.selected + 1) % count,
+            KeyCode::Down | KeyCode::Char('j') => choice.selected = (choice.selected + 1) % count,
+            KeyCode::Tab => {
+                if choice.amendable() {
+                    choice.amend = Some(String::new());
+                }
+            }
             KeyCode::Char(ch @ '1'..='9') if !control => {
                 let index = ch as usize - '1' as usize;
                 if index < count {
@@ -496,7 +547,11 @@ impl State {
             return;
         };
         if let Some(answer) = self.answer.take() {
-            let _ = answer.send((choice.selected + 1).to_string());
+            let number = choice.selected + 1;
+            let _ = answer.send(match choice.amend.as_deref().map(str::trim) {
+                Some(note) if !note.is_empty() => format!("{number}\n{note}"),
+                _ => number.to_string(),
+            });
         }
         self.draft = self.saved_draft.take().unwrap_or_default();
     }
@@ -900,8 +955,8 @@ impl Frame {
             self.panel_toggle = None;
             self.panel_height = 0;
         }
-        let choice_cursor = choice_rows.as_ref().map(|(rows, selected)| rows.len() - *selected);
-        if let Some((rows, _)) = choice_rows {
+        let choice_cursor = choice_rows.as_ref().map(|(rows, selected, column)| (rows.len() - *selected, *column));
+        if let Some((rows, _, _)) = choice_rows {
             lines = rows;
         }
         content.extend(lines);
@@ -916,8 +971,11 @@ impl Frame {
             });
             self.panel_height = self.panel_height.saturating_sub(removed);
         }
-        let input_row = lines.len().saturating_sub(choice_cursor.unwrap_or(3));
-        let cursor_column = if choice_cursor.is_some() { 1 } else { (prompt_width + cursor).min(width) };
+        let input_row = lines.len().saturating_sub(choice_cursor.map_or(3, |(row, _)| row));
+        let cursor_column = match choice_cursor {
+            Some((_, column)) => column,
+            None => (prompt_width + cursor).min(width),
+        };
         if self.pending.is_empty()
             && self.lines == lines
             && self.size == size
@@ -948,9 +1006,9 @@ impl Frame {
     }
 }
 /// The frame below the activity line while a menu question is pending:
-/// the question, `❯ 1. Yes` style options and a key hint. Returns the rows and
-/// the selected row counted from the end.
-fn choice_lines(choice: &Choice, status: &str, mode: &str, width: usize, height: usize) -> (Vec<String>, usize) {
+/// the question, `❯ 1. Yes` style options and a key hint. Returns the rows,
+/// the selected row counted from the end and the cursor column.
+fn choice_lines(choice: &Choice, status: &str, mode: &str, width: usize, height: usize) -> (Vec<String>, usize, usize) {
     use crossterm::style::{Attribute, ResetColor, SetAttribute, SetForegroundColor};
     let color = std::env::var_os("NO_COLOR").is_none();
     let paint = |text: String, fg: crossterm::style::Color| {
@@ -974,14 +1032,28 @@ fn choice_lines(choice: &Choice, status: &str, mode: &str, width: usize, height:
         rows.push(paint(clip(&format!(" \u{2026} {} more lines", choice.preview.len() - shown), width), crate::terminal::style::muted()));
     }
     rows.push(if color { format!("{}{question}{}", SetAttribute(Attribute::Bold), SetAttribute(Attribute::Reset)) } else { question });
-    for (index, option) in choice.options.iter().enumerate() {
-        let text = clip(&format!(" {} {}. {}", if index == choice.selected { "\u{276f}" } else { " " }, index + 1, terminal_text(option)), width);
+    for index in 0..choice.options.len() {
+        let text = clip(&format!(" {} {}. {}", if index == choice.selected { "\u{276f}" } else { " " }, index + 1, choice.label(index)), width);
         rows.push(if index == choice.selected { paint(text, crate::terminal::style::accent()) } else { text });
     }
-    let hint = mode.replace("esc to interrupt", "\u{2191}\u{2193} select \u{b7} enter confirm \u{b7} esc to interrupt");
+    let hint = if choice.amend.is_some() {
+        "enter confirm \u{b7} esc to cancel amend".to_owned()
+    } else if choice.amendable() {
+        mode.replace("esc to interrupt", "\u{2191}\u{2193} select \u{b7} enter confirm \u{b7} tab to amend \u{b7} esc to interrupt")
+    } else {
+        mode.replace("esc to interrupt", "\u{2191}\u{2193} select \u{b7} enter confirm \u{b7} esc to interrupt")
+    };
     rows.push(paint(clip(&format!(" {hint}"), width), crate::terminal::style::muted()));
     let selected = 1 + choice.options.len() - choice.selected;
-    (rows, selected)
+    // The cursor follows typed text while amending.
+    let column = match &choice.amend {
+        Some(text) if !text.is_empty() => {
+            let label = format!(" \u{276f} {}. {}", choice.selected + 1, choice.label(choice.selected));
+            UnicodeWidthStr::width(label.as_str()).min(width)
+        }
+        _ => 1,
+    };
+    (rows, selected, column)
 }
 
 fn row_updates(previous: &[String], next: &[String]) -> String {
@@ -1120,7 +1192,7 @@ fn run(
                         state.details.toggle();
                     }
                     state.question(reply);
-                    state.choice = Some(Choice { preview: lines, question, options, selected: 0 });
+                    state.choice = Some(Choice { preview: lines, question, options, selected: 0, amend: None });
                     dirty = true;
                 }
                 Ok(Update::Question(text, reply)) => {
@@ -1543,6 +1615,38 @@ mod tests {
         assert!(events.try_recv().is_err());
     }
     #[test]
+    fn tab_adds_a_note_to_yes_or_no() {
+        use crossterm::event::KeyEvent;
+        let key = |code| KeyEvent::new(code, KeyModifiers::NONE);
+        let mut state = State::new("ask".into());
+        let (reply, mut received) = oneshot::channel();
+        state.question(reply);
+        state.choice = Some(Choice { preview: Vec::new(), question: "Proceed?".into(), options: vec!["Yes".into(), "Always".into(), "No".into()], selected: 1, amend: None });
+        // The remember choice takes no note.
+        assert!(state.choice_key(key(KeyCode::Tab)));
+        assert!(state.choice.as_ref().unwrap().amend.is_none());
+        assert!(state.choice_key(key(KeyCode::Up)));
+        assert!(state.choice_key(key(KeyCode::Tab)));
+        assert_eq!(state.choice.as_ref().unwrap().label(0), "Yes, and tell DeepSeek Code what to do next");
+        for ch in "use -5 instead".chars() {
+            assert!(state.choice_key(key(KeyCode::Char(ch))));
+        }
+        assert_eq!(state.choice.as_ref().unwrap().label(0), "Yes, use -5 instead");
+        let (_, _, column) = choice_lines(state.choice.as_ref().unwrap(), "status", "esc", 80, 24);
+        assert_eq!(column, " \u{276f} 1. Yes, use -5 instead".chars().count());
+        // Esc leaves the note without interrupting.
+        assert!(state.choice_key(key(KeyCode::Esc)));
+        assert!(state.choice.as_ref().unwrap().amend.is_none());
+        assert!(state.choice_key(key(KeyCode::Up)));
+        assert!(state.choice_key(key(KeyCode::Tab)));
+        assert_eq!(state.choice.as_ref().unwrap().label(2), "No, and tell DeepSeek Code what to do differently");
+        for ch in "keep it".chars() {
+            state.choice_key(key(KeyCode::Char(ch)));
+        }
+        assert!(state.choice_key(key(KeyCode::Enter)));
+        assert_eq!(received.try_recv().unwrap(), "3\nkeep it");
+    }
+    #[test]
     fn menu_questions_answer_with_arrows_numbers_and_leave_esc_to_interrupt() {
         use crossterm::event::KeyEvent;
         let key = |code| KeyEvent::new(code, KeyModifiers::NONE);
@@ -1550,7 +1654,7 @@ mod tests {
         state.draft.insert("queued draft");
         let (reply, mut received) = oneshot::channel();
         state.question(reply);
-        state.choice = Some(Choice { preview: Vec::new(), question: "Proceed?".into(), options: vec!["Yes".into(), "Always".into(), "No".into()], selected: 0 });
+        state.choice = Some(Choice { preview: Vec::new(), question: "Proceed?".into(), options: vec!["Yes".into(), "Always".into(), "No".into()], selected: 0, amend: None });
         assert!(state.choice_key(key(KeyCode::Up)));
         assert_eq!(state.choice.as_ref().unwrap().selected, 2);
         assert!(state.choice_key(key(KeyCode::Down)));
@@ -1564,18 +1668,18 @@ mod tests {
 
         let (reply, mut received) = oneshot::channel();
         state.question(reply);
-        state.choice = Some(Choice { preview: Vec::new(), question: "Proceed?".into(), options: vec!["Yes".into(), "No".into()], selected: 0 });
+        state.choice = Some(Choice { preview: Vec::new(), question: "Proceed?".into(), options: vec!["Yes".into(), "No".into()], selected: 0, amend: None });
         assert!(state.choice_key(key(KeyCode::Char('3'))));
         assert!(received.try_recv().is_err());
         assert!(state.choice_key(key(KeyCode::Char('2'))));
         assert_eq!(received.try_recv().unwrap(), "2");
-        let (rows, selected) = choice_lines(&Choice { preview: Vec::new(), question: "Proceed?".into(), options: vec!["Yes".into(), "No".into()], selected: 1 }, "status", "esc to interrupt", 40, 24);
+        let (rows, selected, _) = choice_lines(&Choice { preview: Vec::new(), question: "Proceed?".into(), options: vec!["Yes".into(), "No".into()], selected: 1, amend: None }, "status", "esc to interrupt", 40, 24);
         assert_eq!(rows.len() - selected, 5);
         // The approval preview sits between the rule and the question and is
         // clipped to the screen; answering removes the whole box.
         let preview = (0..30).map(|row| change_view::body(&format!("line {row}"))).collect();
-        let choice = Choice { preview, question: "Proceed?".into(), options: vec!["Yes".into(), "No".into()], selected: 0 };
-        let (rows, _) = choice_lines(&choice, "status", "esc to interrupt", 40, 20);
+        let choice = Choice { preview, question: "Proceed?".into(), options: vec!["Yes".into(), "No".into()], selected: 0, amend: None };
+        let (rows, _, _) = choice_lines(&choice, "status", "esc to interrupt", 40, 20);
         let strip = |row: &String| {
             let mut text = String::new();
             let mut escape = false;

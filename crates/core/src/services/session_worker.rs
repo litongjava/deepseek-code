@@ -710,7 +710,11 @@ fn supervise(dir: &Path, worker: &mut Worker) -> Result<()> {
                         .map(|bytes| serde_json::from_slice(&bytes))
                         .transpose()?
                         .flatten();
-                    job.status = if cancel {
+                    // A bare "No" to an approval stops the turn like Esc does.
+                    let declined = error
+                        .as_deref()
+                        .is_some_and(|error| error.contains("Tool permission interrupted the turn"));
+                    job.status = if cancel || (declined && exited.is_none()) {
                         "cancelled"
                     } else if exited.is_some() || error.is_some() {
                         "failed"
