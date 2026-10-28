@@ -158,6 +158,9 @@ pub async fn handle(line: &str, paths: &RuntimePaths, session: &mut Session) -> 
                 serde_json::to_string_pretty(&manager.load_skills().await?)?
             );
         }
+        "/mcp" if argument.trim().is_empty() && crate::terminal::picker::available() => {
+            crate::mcp_menu::run(session).await?;
+        }
         "/mcp" => {
             use clap::Parser;
             let mut words = crate::display_commands::split_arguments(argument)?;
