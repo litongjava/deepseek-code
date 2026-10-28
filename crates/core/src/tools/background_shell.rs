@@ -179,10 +179,16 @@ pub(super) async fn run_foreground(
     description: &str,
     command_text: &str,
 ) -> Result<Value> {
-    let Some((root, session)) = CONTEXT.try_with(Clone::clone).ok().flatten() else {
+    // Managed shells belong to a UUID session; anything else runs as before.
+    let Some((root, session, id)) = CONTEXT
+        .try_with(Clone::clone)
+        .ok()
+        .flatten()
+        .and_then(|(root, session)| uuid::Uuid::parse_str(&session).ok().map(|id| (root, session, id)))
+    else {
         return super::bash_process::run(&mut command, timeout, shell).await;
     };
-    let session_directory = root.join("shell-tasks").join(uuid::Uuid::parse_str(&session)?.to_string());
+    let session_directory = root.join("shell-tasks").join(id.to_string());
     let log_dir = format!("fg-{}", uuid::Uuid::new_v4());
     let directory = session_directory.join(&log_dir);
     std::fs::create_dir_all(&directory)?;
