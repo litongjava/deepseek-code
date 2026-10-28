@@ -171,8 +171,7 @@ pub async fn handle(
         }
         "/terminal-setup" => {
             ensure!(argument.is_empty(), "Usage: /terminal-setup");
-            use std::io::IsTerminal;
-            eprintln!("Interactive input: {}\nInteractive output: {}\nTab: complete commands; arrow keys: edit/history.\nMultiline: /multiline followed by /end, or a trailing backslash.\nClipboard: /copy [N]. Mouse selection and automatic copy are controlled by your terminal.", std::io::stdin().is_terminal(), std::io::stdout().is_terminal());
+            eprintln!("{}", terminal_setup());
         }
         "/agents" => {
             // As in the reference CLI, subagents are chosen by asking for one;
@@ -620,4 +619,30 @@ mod resume_tests {
         assert_eq!(ago(&(now - chrono::Duration::seconds(32)).to_rfc3339()), "32 seconds ago");
         assert_eq!(ago(&(now - chrono::Duration::hours(1)).to_rfc3339()), "1 hour ago");
     }
+}
+
+/// `/terminal-setup` as in the reference CLI: how to add newlines to a
+/// prompt in this terminal. The prompt takes Shift+Enter when the terminal
+/// reports it, Alt+Enter, and a trailing backslash.
+fn terminal_setup() -> String {
+    let program = std::env::var("TERM_PROGRAM").unwrap_or_default();
+    let native = match program.as_str() {
+        "iTerm.app" => Some("iTerm2"),
+        "WezTerm" => Some("WezTerm"),
+        "ghostty" => Some("Ghostty"),
+        "WarpTerminal" => Some("Warp"),
+        _ if std::env::var("TERM").is_ok_and(|term| term.contains("kitty")) => Some("Kitty"),
+        _ if std::env::var_os("WT_SESSION").is_some() => Some("Windows Terminal"),
+        _ => None,
+    };
+    if let Some(name) = native {
+        return format!("  \u{23bf}  {name} supports Shift+Enter for newlines natively; nothing to set up.\n     You can also use backslash (\\) + Enter or Alt+Enter.");
+    }
+    let mut text = String::from("  \u{23bf}  This command explains the Shift+Enter shortcut for multi-line prompts.\n     Note: You can already use backslash (\\) + Enter, or Alt+Enter, to add newlines.\n");
+    if matches!(program.as_str(), "vscode" | "cursor" | "zed") || std::env::var_os("VSCODE_PID").is_some() {
+        text.push_str("     To set up the shortcut in this editor's terminal, bind Shift+Enter to send the sequence \\u001b\\r\n     (Alt+Enter), e.g. in VS Code with workbench.action.terminal.sendSequence.");
+    } else {
+        text.push_str("     Shift+Enter works where the terminal reports it: iTerm2, WezTerm, Ghostty, Kitty, Warp and Windows\n     Terminal do so natively. In other terminals, bind Shift+Enter to send \\u001b\\r (Alt+Enter).");
+    }
+    text
 }
