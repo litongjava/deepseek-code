@@ -187,7 +187,10 @@ fn matches(commands: &[(String, String)], text: &str) -> Vec<usize> {
                 2
             } else if name.contains(&query) {
                 3
-            } else if query.chars().all(|wanted| letters.any(|ch| ch == wanted)) {
+            } else if name[1..].starts_with(&query[..query.len().min(1)])
+                && query.chars().all(|wanted| letters.any(|ch| ch == wanted))
+            {
+                // Letters in order from the first one: `/memory` for `mo`.
                 4
             } else if description.to_lowercase().contains(&query) {
                 5
@@ -1307,6 +1310,9 @@ mod tests {
         assert_eq!(order("/co"), ["/copy", "/color", "/config", "/compact", "/context"]);
         assert_eq!(order("/mo"), ["/model", "/mobile", "/auto-mode-setup", "/memory"]);
         assert_eq!(order("/")[..3], ["/auto-mode-setup", "/color", "/compact"]);
+        // Scattered letters elsewhere in a long name are no match.
+        let skill = vec![("/synced:54534282-ab-x9x".to_string(), String::new())];
+        assert!(matches(&skill, "/xx").is_empty());
         assert_eq!(menu_page(&[1, 3, 1, 2, 1], 1, 4), (0, 2));
         assert_eq!(menu_page(&[1, 3, 1, 2, 1], 3, 4), (2, 5));
         assert_eq!(menu_page(&[3], 0, 0), (0, 0));

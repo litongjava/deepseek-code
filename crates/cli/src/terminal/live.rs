@@ -768,6 +768,11 @@ fn group_call(state: &mut State, id: String, kind: Gathering, label: String, ste
 /// Ends the current answer block before tool output, notices or the footer.
 fn finish_text(state: &mut State, screen: &mut Frame) {
     finish_group(state, screen);
+    finish_answer(state, screen);
+}
+/// Writes the streamed answer so far; the text before folded calls keeps its
+/// own block, as in the reference CLI.
+fn finish_answer(state: &mut State, screen: &mut Frame) {
     if !state.partial.is_empty() {
         let line = std::mem::take(&mut state.partial);
         emit_text_line(state, screen, &line);
@@ -1211,6 +1216,9 @@ fn run(
                     dirty = true;
                 }
                 Ok(Update::Group(id, kind, label, step)) => {
+                    if state.group.is_none() {
+                        finish_answer(state, screen);
+                    }
                     group_call(state, id, kind, label, step);
                     dirty = true;
                 }
