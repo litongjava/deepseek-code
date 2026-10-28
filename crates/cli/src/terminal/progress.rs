@@ -491,6 +491,12 @@ pub(crate) fn tool_result_summary(
         .map(|value| format!(" · {:.1}s", value.as_secs_f64()))
         .unwrap_or_default();
     let mut result = format!("  {} · {status}{elapsed}", single_line(name));
+    // Review findings are reported only through this tool, so show them in full.
+    if name == "ReportFindings" && !failed {
+        if let Some(content) = serde_json::from_str::<Value>(output).ok().and_then(|value| value["content"].as_str().map(str::to_owned)) {
+            for line in content.lines() { result.push_str(&format!("\n    {line}")); }
+        }
+    }
     if matches!(name, "Agent" | "Delegate" | "Worker") {
         if let Ok(value) = serde_json::from_str::<Value>(output) {
             if let Some(id) = value["session_id"].as_str() {

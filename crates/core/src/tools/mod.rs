@@ -32,6 +32,7 @@ pub mod scheduled;
 pub mod cron_jobs;
 pub mod session_worktree;
 pub mod wakeup;
+mod findings;
 mod content_compat;
 mod utf8;
 mod bash_process;
@@ -383,6 +384,7 @@ pub fn get_tool_definitions() -> Vec<ToolDefinition> {
     defs.extend(cron_jobs::definitions());
     defs.extend(session_worktree::definitions());
     defs.push(wakeup::definition());
+    defs.push(findings::definition());
     for macro_def in macros::get_macro_definitions() {
         defs.push(ToolDefinition {
             name: macro_def.name,
@@ -417,6 +419,7 @@ macro_rules! tool_dispatch {
             "cron" => scheduled::execute($input, $cwd),
             "Config" | "brief" | "SyntheticOutput" => content_compat::execute($name, &$input, $cwd),
             "ToolSearch" => tool_search($input),
+            "ReportFindings" => findings::execute(&$input),
             "TaskCreate" | "TaskGet" | "TaskList" | "TaskUpdate" | "TaskOutput" | "TaskStop" | "TodoWrite" | "TodoRead" | "todo_write" => tasks::execute($name, $input, $cwd),
             "Read" => read::execute($input, $cwd),
             "Write" => tool_write($input, $cwd),
