@@ -127,6 +127,11 @@ pub async fn handle(
                 &crate::services::context(paths)?,
                 &session.workspace,
             )?;
+            if argument.is_empty() && crate::terminal::picker::available() {
+                // As in the reference CLI: a read-only menu of events and hooks.
+                crate::hooks_menu::run(runner.list())?;
+                return Ok(true);
+            }
             println!("{}", serde_json::to_string_pretty(runner.list())?);
             eprintln!("Effective command/HTTP/prompt lifecycle hooks from settings.json and .claude/settings[.local].json. PermissionDenied runs only after an auto-classifier rejection; retry:true is advice to the model, never approval.");
         }
