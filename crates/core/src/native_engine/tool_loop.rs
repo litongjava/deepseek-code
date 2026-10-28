@@ -164,6 +164,8 @@ pub struct ToolLoopExecutor {
     answer_waiters: Arc<Mutex<HashMap<String, oneshot::Sender<String>>>>,
     permission_mailbox: crate::native_engine::permission_response::Mailbox,
     permission_interrupted: std::sync::Mutex<Option<String>>,
+    /// Notes the user attached to approvals, delivered after the tool results.
+    approval_notes: std::sync::Mutex<Vec<String>>,
     approved_call: Option<tool_approval::ExactApproval>,
     runtime_agents: super::runtime_agents::Catalog,
     permission_manager: Option<Arc<PermissionManager>>,
@@ -571,6 +573,7 @@ impl ToolLoopExecutor {
             answer_waiters: Arc::new(Mutex::new(HashMap::new())),
             permission_mailbox: Default::default(),
             permission_interrupted: std::sync::Mutex::new(None),
+            approval_notes: std::sync::Mutex::new(Vec::new()),
             approved_call: None,
             runtime_agents: Default::default(),
             permission_manager: None,
@@ -943,6 +946,10 @@ impl ToolLoopExecutor {
         } else {
             false
         }
+    }
+
+    fn drain_approval_notes(&self) -> Vec<String> {
+        std::mem::take(&mut *self.approval_notes.lock().unwrap_or_else(|error| error.into_inner()))
     }
 
     fn drain_peer_messages(&mut self) -> Result<Vec<String>> {
@@ -1743,7 +1750,7 @@ impl ToolLoopExecutor {
             self.ensure_auto_not_exhausted()?;
             self.ensure_permission_continuation()?;
             self.resume_pending_owned_children().await;
-            for content in self.drain_peer_messages()? {
+            for content in self.drain_approval_notes().into_iter().chain(self.drain_peer_messages()?) {
                 conversation_messages.push(AnthropicMessage { role: "user".into(), content: AnthropicContent::Text(content) });
             }
 
@@ -2318,7 +2325,7 @@ impl ToolLoopExecutor {
             self.ensure_auto_not_exhausted()?;
             self.ensure_permission_continuation()?;
             self.resume_pending_owned_children().await;
-            for content in self.drain_peer_messages()? {
+            for content in self.drain_approval_notes().into_iter().chain(self.drain_peer_messages()?) {
                 conversation_messages.push(OpenAIMessage { role: "user".into(), content: OpenAIContent::Text(content), tool_calls: None, tool_call_id: None, reasoning_content: None, provider_content: None });
             }
 

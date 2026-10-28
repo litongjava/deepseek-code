@@ -208,6 +208,7 @@ impl Permissions {
                         Ok(Reply::Permission(PermissionResponse::Allow {
                             updated_input,
                             commit,
+                            note: None,
                         }))
                     }
                 }

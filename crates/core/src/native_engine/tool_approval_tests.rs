@@ -91,6 +91,7 @@ async fn typed_approval_validates_before_committing_and_uses_effective_input() {
                     flag.store(true, Ordering::SeqCst);
                     Ok(())
                 })),
+                note: None,
             }
         };
         crate::native_engine::permission_response::respond(&mailbox, &request_id, response)

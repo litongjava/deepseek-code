@@ -134,6 +134,22 @@ pub struct ToolCallRow {
     pub sort_order: i64,
 }
 
+/// Records the note the user added when approving a stored call.
+pub fn set_tool_call_note(conn: &Connection, tool_call_id: &str, note: &str) -> Result<()> {
+    conn.execute(
+        "INSERT INTO tool_call_notes (tool_call_id, note) VALUES (?1, ?2) ON CONFLICT(tool_call_id) DO UPDATE SET note = excluded.note",
+        rusqlite::params![tool_call_id, note],
+    )?;
+    Ok(())
+}
+
+pub fn tool_call_note(conn: &Connection, tool_call_id: &str) -> Result<Option<String>> {
+    use rusqlite::OptionalExtension;
+    Ok(conn
+        .query_row("SELECT note FROM tool_call_notes WHERE tool_call_id = ?1", [tool_call_id], |row| row.get(0))
+        .optional()?)
+}
+
 pub fn get_tool_calls_for_message(conn: &Connection, message_id: &str) -> Result<Vec<ToolCallRow>> {
     let mut stmt = conn.prepare_cached(
         "SELECT id, message_id, name, input, output, is_error, sort_order FROM tool_calls WHERE message_id = ?1 ORDER BY sort_order ASC"

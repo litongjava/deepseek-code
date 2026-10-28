@@ -390,11 +390,18 @@ impl SessionStore {
                             let tool_calls: Vec<_> = calls.iter().map(|t| json!({"id":t.id,"type":"function","function":{"name":t.name,"arguments":t.input.as_deref().unwrap_or("{}")}})).collect();
                             history.push(json!({"role":"assistant","content":"","tool_calls":tool_calls}));
                             for tool in &calls { history.push(json!({"role":"tool","tool_call_id":tool.id,"content":tool.output.as_deref().unwrap_or("")})); }
+                            for tool in &calls {
+                                if let Some(note) = message_repo::tool_call_note(conn, &tool.id)? { history.push(json!({"role":"user","content":note})); }
+                            }
                         }
                         ApiFormat::Anthropic => {
                             let blocks: Vec<_> = calls.iter().map(|t| json!({"type":"tool_use","id":t.id,"name":t.name,"input":t.input.as_deref().and_then(|s| serde_json::from_str::<Value>(s).ok()).unwrap_or(json!({}))})).collect();
                             history.push(json!({"role":"assistant","content":blocks}));
-                            let results: Vec<_> = calls.iter().map(|t| json!({"type":"tool_result","tool_use_id":t.id,"content":t.output.as_deref().unwrap_or(""),"is_error":t.is_error})).collect();
+                            let mut results: Vec<_> = calls.iter().map(|t| json!({"type":"tool_result","tool_use_id":t.id,"content":t.output.as_deref().unwrap_or(""),"is_error":t.is_error})).collect();
+                            // Approval notes follow the results as the user's own text.
+                            for tool in &calls {
+                                if let Some(note) = message_repo::tool_call_note(conn, &tool.id)? { results.push(json!({"type":"text","text":note})); }
+                            }
                             history.push(json!({"role":"user","content":results}));
                         }
                     }

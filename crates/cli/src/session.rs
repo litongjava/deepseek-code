@@ -1015,7 +1015,7 @@ impl Session {
                             };
                             let answer = if allowed { "yes" } else { "no" };
                             if let Some((commit, grant)) = commit {
-                                let response = claude_core::native_engine::permission_response::PermissionResponse::Allow { updated_input: None, commit: Some(commit) };
+                                let response = claude_core::native_engine::permission_response::PermissionResponse::Allow { updated_input: None, commit: Some(commit), note: None };
                                 let _ = self.engine.resume_with_permission(&request_id, response).await;
                                 if grant == crate::terminal::tool_view::Remember::AcceptEdits { progress.set_permission_mode("accept-edits"); }
                             } else {

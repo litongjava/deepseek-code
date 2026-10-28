@@ -13,6 +13,9 @@ pub enum PermissionResponse {
         updated_input: Option<Value>,
         /// A prevalidated host policy patch, published only after effective input validation.
         commit: Option<Commit>,
+        /// What the user added when approving ("Yes, use -5 instead"); sent
+        /// to the model as a user message after the tool result.
+        note: Option<String>,
     },
     Deny {
         message: String,
@@ -128,7 +131,8 @@ mod tests {
                 commit: Some(Box::new(move || {
                     flag.store(true, Ordering::SeqCst);
                     Ok(())
-                }))
+                })),
+                note: None,
             }
         )
         .await

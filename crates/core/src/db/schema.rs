@@ -127,6 +127,13 @@ CREATE TABLE IF NOT EXISTS tool_calls (
     FOREIGN KEY (message_id) REFERENCES messages(id) ON DELETE CASCADE
 );
 
+-- What the user added when approving a call, replayed after its result as
+-- the user's own words.
+CREATE TABLE IF NOT EXISTS tool_call_notes (
+    tool_call_id TEXT PRIMARY KEY REFERENCES tool_calls(id) ON DELETE CASCADE,
+    note TEXT NOT NULL
+);
+
 CREATE TABLE IF NOT EXISTS attachments (
     id TEXT PRIMARY KEY,
     message_id TEXT NOT NULL,

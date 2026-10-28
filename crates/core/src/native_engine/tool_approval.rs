@@ -229,6 +229,7 @@ impl ToolLoopExecutor {
                     Some(PermissionResponse::Allow {
                         updated_input,
                         commit,
+                        note: None,
                     })
                 }
             }
@@ -319,6 +320,7 @@ impl ToolLoopExecutor {
                 PermissionResponse::Allow {
                     updated_input: None,
                     commit,
+                    note: None,
                 }
             } else {
                 PermissionResponse::Deny {
@@ -343,6 +345,7 @@ impl ToolLoopExecutor {
             PermissionResponse::Allow {
                 updated_input,
                 commit,
+                note,
             } => {
                 let actual = match updated_input {
                     Some(Value::Object(fields)) if fields.is_empty() => input.clone(),
@@ -366,6 +369,9 @@ impl ToolLoopExecutor {
                 // A policy patch cannot override explicit deny or a changed plan boundary.
                 if let Some(reason) = self.permission_hard_denial(tool, &actual) {
                     anyhow::bail!("{reason}");
+                }
+                if let Some(note) = note.filter(|note| !note.trim().is_empty()) {
+                    self.approval_notes.lock().unwrap_or_else(|error| error.into_inner()).push(note);
                 }
                 Ok(actual)
             }
