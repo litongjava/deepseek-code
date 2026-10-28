@@ -196,27 +196,44 @@ pub fn get_tool_definitions() -> Vec<ToolDefinition> {
         },
         ToolDefinition {
             name: "AskUserQuestion".to_string(),
-            description: "Ask the user a question with multiple options. Returns the user's selected options and any custom input.".to_string(),
+            description: "Use this tool only when you are blocked on a decision that is genuinely the user's to make: one you cannot resolve from the request, the code, or sensible defaults.\n\nUsage notes:\n- Users will always be able to type a custom answer instead of picking an option\n- Use multiSelect: true to allow multiple answers to be selected for a question\n- If you recommend a specific option, make that the first option in the list and add \"(Recommended)\" at the end of the label\n\nReserve this for decisions where the user's answer changes what you do next — not for choices with a conventional default or facts you can verify in the codebase yourself. In those cases pick the obvious option, mention it in your response, and proceed.\n\nThe user may see only the question: make each question stand on its own. If it depends on something you found, say so briefly, and name the items you are asking about in the question itself.".to_string(),
             input_schema: serde_json::json!({
                 "type": "object",
                 "properties": {
-                    "question": { "type": "string", "description": "The question to ask the user" },
-                    "description": { "type": "string", "description": "Additional context or description for the question" },
-                    "options": {
-                        "type": "array",
+                    "questions": {
+                        "description": "Questions to ask the user (1-4 questions)",
+                        "type": "array", "minItems": 1, "maxItems": 4,
                         "items": {
                             "type": "object",
                             "properties": {
-                                "label": { "type": "string", "description": "The display label for this option" },
-                                "description": { "type": "string", "description": "Additional description for this option" }
+                                "question": { "description": "The complete question to ask the user. Should be clear, specific, and end with a question mark.", "type": "string" },
+                                "header": { "description": "Very short label displayed as a chip/tag (max 12 chars). Examples: \"Auth method\", \"Library\", \"Approach\".", "type": "string" },
+                                "options": {
+                                    "description": "The available choices for this question. Must have 2-4 options. Each option should be a distinct, mutually exclusive choice (unless multiSelect is enabled). There should be no 'Other' option, that will be provided automatically.",
+                                    "type": "array", "minItems": 2, "maxItems": 4,
+                                    "items": {
+                                        "type": "object",
+                                        "properties": {
+                                            "label": { "description": "The display text for this option that the user will see and select. Should be concise (1-5 words).", "type": "string" },
+                                            "description": { "description": "Explanation of what this option means or what will happen if chosen.", "type": "string" },
+                                            "preview": { "description": "Optional preview content rendered when this option is focused, such as a code snippet or ASCII mockup.", "type": "string" }
+                                        },
+                                        "required": ["label", "description"],
+                                        "additionalProperties": false
+                                    }
+                                },
+                                "multiSelect": { "description": "Set to true to allow the user to select multiple options instead of just one.", "default": false, "type": "boolean" }
                             },
-                            "required": ["label"]
-                        },
-                        "description": "The available options for the user to choose from"
+                            "required": ["question", "header", "options", "multiSelect"],
+                            "additionalProperties": false
+                        }
                     },
-                    "multiSelect": { "type": "boolean", "description": "Whether the user can select multiple options (default: false)" }
+                    "answers": { "description": "User answers collected by the permission component", "type": "object", "additionalProperties": { "type": "string" } },
+                    "annotations": { "description": "Optional per-question annotations from the user (e.g., notes on preview selections). Keyed by question text.", "type": "object" },
+                    "metadata": { "description": "Optional metadata for tracking and analytics purposes. Not displayed to user.", "type": "object", "properties": { "source": { "description": "Optional identifier for the source of this question.", "type": "string" } }, "additionalProperties": false }
                 },
-                "required": ["question", "options"]
+                "required": ["questions"],
+                "additionalProperties": false
             }),
         },
         ToolDefinition {

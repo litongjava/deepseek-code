@@ -290,7 +290,6 @@ async fn independent_search_provider(path: Option<&std::path::Path>) -> Result<R
     settings.resolved_provider()
 }
 
-/// Provider credentials are request-scoped, including parallel tool execution.
 /// File paths passed to Read/Edit/Write/MultiEdit in either provider's history format.
 fn collect_file_tool_paths(value: &Value, out: &mut Vec<String>) {
     match value {
@@ -322,6 +321,28 @@ async fn web_fetch_with_prompt(input: Value, cwd: &str, provider: &ResolvedProvi
     Ok(json!({"url":page["url"],"result":answer,"offset":page["offset"],"next_offset":page["next_offset"],"truncated":page["truncated"]}))
 }
 
+/// AskUserQuestion takes 1-4 questions; the older single `question` shape is
+/// still accepted. Each returned item has the single-question shape frontends render.
+fn ask_user_questions(input: &Value) -> Result<Vec<Value>> {
+    let questions = match input["questions"].as_array() {
+        Some(questions) => questions.clone(),
+        None if input["question"].is_string() => vec![json!({"question":input["question"],"header":input["header"],"options":input["options"],"multiSelect":input["multiSelect"],"description":input["description"]})],
+        None => anyhow::bail!("questions is required"),
+    };
+    anyhow::ensure!((1..=4).contains(&questions.len()), "questions must contain 1-4 questions");
+    let mut seen = std::collections::HashSet::new();
+    questions.into_iter().map(|mut question| {
+        let text = question["question"].as_str().filter(|q| !q.trim().is_empty()).ok_or_else(|| anyhow!("Each question needs question text"))?.to_owned();
+        anyhow::ensure!(seen.insert(text), "Question texts must be unique");
+        let options = question["options"].as_array().ok_or_else(|| anyhow!("Each question needs options"))?;
+        anyhow::ensure!(input["questions"].is_null() || (2..=4).contains(&options.len()), "Each question needs 2-4 options");
+        anyhow::ensure!(options.iter().all(|option| option["label"].as_str().is_some_and(|label| !label.trim().is_empty())), "Each option needs a label");
+        if question["multiSelect"].is_null() { question["multiSelect"] = json!(false); }
+        Ok(question)
+    }).collect()
+}
+
+/// Provider credentials are request-scoped, including parallel tool execution.
 async fn execute_builtin_tool(
     name: &str,
     input: Value,
@@ -1695,66 +1716,52 @@ impl ToolLoopExecutor {
         (serde_json::to_string_pretty(&value).unwrap_or_default(), false)
     }
 
+    /// Asks each question in turn with the single-question event every frontend
+    /// already renders, then reports the answers like the reference CLI.
     async fn execute_ask_user_question(&mut self, tool_input: &Value, tool_use_id: &str) -> (Value, String, bool) {
-        let request_id = uuid::Uuid::new_v4().to_string();
-        let question = tool_input["question"].as_str().unwrap_or("").to_string();
-        let options: Vec<String> = tool_input["options"]
-            .as_array()
-            .map(|arr| {
-                arr.iter()
-                    .filter_map(|opt| opt["label"].as_str().map(String::from))
-                    .collect()
-            })
-            .unwrap_or_default();
-
-        let (tx, rx) = oneshot::channel::<String>();
-        {
-            let mut waiters = self.answer_waiters.lock().await;
-            waiters.insert(request_id.clone(), tx);
+        let questions = match ask_user_questions(tool_input) {
+            Ok(questions) => questions,
+            Err(error) => return (tool_input.clone(), format!("Error: {error}"), true),
+        };
+        let mut answers = serde_json::Map::new();
+        for question in questions {
+            let text = question["question"].as_str().unwrap_or_default().to_owned();
+            if let Some(answer) = tool_input["answers"][&text].as_str() {
+                answers.insert(text, json!(answer));
+                continue;
+            }
+            match self.ask_one_question(question, tool_use_id).await {
+                Ok(answer) => { answers.insert(text, json!(answer)); }
+                Err(reason) => {
+                    let result = json!({"type":"ask_user_question","answers":answers,"content":reason,"is_error":true});
+                    return (tool_input.clone(), serde_json::to_string_pretty(&result).unwrap_or_default(), true);
+                }
+            }
         }
+        let summary = answers.iter().map(|(q, a)| format!("\"{q}\"=\"{}\"", a.as_str().unwrap_or_default())).collect::<Vec<_>>().join(", ");
+        let content = format!("User has answered your questions: {summary}. You can now continue with the user's answers in mind.");
+        let result = json!({"type":"ask_user_question","answers":answers,"content":content,"requires_user_input":false});
+        (tool_input.clone(), serde_json::to_string_pretty(&result).unwrap_or_default(), false)
+    }
 
+    async fn ask_one_question(&mut self, question: Value, tool_use_id: &str) -> Result<String, String> {
+        let request_id = uuid::Uuid::new_v4().to_string();
+        let text = question["question"].as_str().unwrap_or_default().to_owned();
+        let options: Vec<String> = question["options"].as_array().map(|arr| arr.iter().filter_map(|opt| opt["label"].as_str().map(String::from)).collect()).unwrap_or_default();
+        let (tx, rx) = oneshot::channel::<String>();
+        self.answer_waiters.lock().await.insert(request_id.clone(), tx);
         let _waiter_guard = PermissionWaiterGuard { waiters: self.answer_waiters.clone(), request_id: request_id.clone() };
         let _ = self.event_tx.send(EngineEvent::AskUser {
             request_id: request_id.clone(),
             tool_use_id: tool_use_id.to_owned(),
-            tool_input: tool_input.clone(),
-            question: question.clone(),
-            options: options.clone(),
+            tool_input: question,
+            question: text,
+            options,
         }).await;
-
         match self.wait_for_user_answer(rx).await {
-            Ok(Ok(answer)) => {
-                let result = serde_json::json!({
-                    "type": "ask_user_question",
-                    "question": question,
-                    "answer": answer,
-                    "content": answer,
-                    "requires_user_input": false
-                });
-                (tool_input.clone(), serde_json::to_string_pretty(&result).unwrap_or_default(), false)
-            }
-            Ok(Err(_)) => {
-                let mut waiters = self.answer_waiters.lock().await;
-                waiters.remove(&request_id);
-                let result = serde_json::json!({
-                    "type": "ask_user_question",
-                    "question": question,
-                    "content": "User did not respond",
-                    "is_error": true
-                });
-                (tool_input.clone(), serde_json::to_string_pretty(&result).unwrap_or_default(), true)
-            }
-            Err(_) => {
-                let mut waiters = self.answer_waiters.lock().await;
-                waiters.remove(&request_id);
-                let result = serde_json::json!({
-                    "type": "ask_user_question",
-                    "question": question,
-                    "content": "User response timed out (300s)",
-                    "is_error": true
-                });
-                (tool_input.clone(), serde_json::to_string_pretty(&result).unwrap_or_default(), true)
-            }
+            Ok(Ok(answer)) => Ok(answer),
+            Ok(Err(_)) => { self.answer_waiters.lock().await.remove(&request_id); Err("User did not respond".into()) }
+            Err(_) => { self.answer_waiters.lock().await.remove(&request_id); Err("User response timed out (300s)".into()) }
         }
     }
 
@@ -3136,5 +3143,23 @@ impl ToolLoopExecutor {
         } else {
             json!({})
         }
+    }
+}
+
+#[cfg(test)]
+#[test]
+fn ask_user_questions_accept_the_reference_and_legacy_shapes() {
+    let option = |label: &str| json!({"label":label,"description":"d"});
+    let questions = ask_user_questions(&json!({"questions":[
+        {"question":"Which DB?","header":"DB","options":[option("SQLite"),option("Postgres")],"multiSelect":false},
+        {"question":"Which features?","header":"Features","options":[option("A"),option("B")],"multiSelect":true}]})).unwrap();
+    assert_eq!(questions.len(), 2);
+    assert_eq!(questions[1]["multiSelect"], true);
+    let legacy = ask_user_questions(&json!({"question":"Proceed?","options":[option("Yes")]})).unwrap();
+    assert_eq!(legacy[0]["question"], "Proceed?");
+    assert_eq!(legacy[0]["multiSelect"], false);
+    for invalid in [json!({"questions":[]}), json!({"questions":[{"question":"Q?","options":[option("only")]}]}),
+        json!({"questions":[{"question":"Q?","options":[option("A"),option("B")]},{"question":"Q?","options":[option("A"),option("B")]}]})] {
+        assert!(ask_user_questions(&invalid).is_err(), "{invalid}");
     }
 }
