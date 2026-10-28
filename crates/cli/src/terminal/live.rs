@@ -531,7 +531,12 @@ impl State {
             return true;
         }
         match key.code {
-            KeyCode::Esc => return false,
+            // As in the reference CLI, Esc cancels the call: a bare No, which
+            // also stops the turn.
+            KeyCode::Esc => {
+                choice.selected = count - 1;
+                self.answer_choice();
+            }
             KeyCode::Char('c' | 'o' | 'b' | 'l') if control => return false,
             KeyCode::Up | KeyCode::Char('k') => choice.selected = (choice.selected + count - 1) % count,
             KeyCode::Down | KeyCode::Char('j') => choice.selected = (choice.selected + 1) % count,
@@ -1066,9 +1071,9 @@ fn choice_lines(choice: &Choice, status: &str, mode: &str, width: usize, height:
     let hint = if choice.amend.is_some() {
         "enter confirm \u{b7} esc to cancel amend".to_owned()
     } else if choice.amendable() {
-        mode.replace("esc to interrupt", "\u{2191}\u{2193} select \u{b7} enter confirm \u{b7} tab to amend \u{b7} esc to interrupt")
+        mode.replace("esc to interrupt", "\u{2191}\u{2193} select \u{b7} enter confirm \u{b7} tab to amend \u{b7} esc to cancel")
     } else {
-        mode.replace("esc to interrupt", "\u{2191}\u{2193} select \u{b7} enter confirm \u{b7} esc to interrupt")
+        mode.replace("esc to interrupt", "\u{2191}\u{2193} select \u{b7} enter confirm \u{b7} esc to cancel")
     };
     rows.push(paint(clip(&format!(" {hint}"), width), crate::terminal::style::muted()));
     let selected = 1 + choice.options.len() - choice.selected;
@@ -1698,7 +1703,7 @@ mod tests {
         assert_eq!(received.try_recv().unwrap(), "3\nkeep it");
     }
     #[test]
-    fn menu_questions_answer_with_arrows_numbers_and_leave_esc_to_interrupt() {
+    fn menu_questions_answer_with_arrows_numbers_and_esc_as_no() {
         use crossterm::event::KeyEvent;
         let key = |code| KeyEvent::new(code, KeyModifiers::NONE);
         let mut state = State::new("ask".into());
@@ -1711,7 +1716,6 @@ mod tests {
         assert!(state.choice_key(key(KeyCode::Down)));
         assert!(state.choice_key(key(KeyCode::Down)));
         assert!(state.choice_key(key(KeyCode::Char('x'))));
-        assert!(!state.choice_key(key(KeyCode::Esc)));
         assert!(state.choice_key(key(KeyCode::Enter)));
         assert_eq!(received.try_recv().unwrap(), "2");
         assert!(state.choice.is_none() && state.answer.is_none());
@@ -1724,6 +1728,12 @@ mod tests {
         assert!(received.try_recv().is_err());
         assert!(state.choice_key(key(KeyCode::Char('2'))));
         assert_eq!(received.try_recv().unwrap(), "2");
+        // Esc answers the last choice, No.
+        let (reply, mut received) = oneshot::channel();
+        state.question(reply);
+        state.choice = Some(Choice { preview: Vec::new(), question: "Proceed?".into(), options: vec!["Yes".into(), "Always".into(), "No".into()], selected: 0, amend: None });
+        assert!(state.choice_key(key(KeyCode::Esc)));
+        assert_eq!(received.try_recv().unwrap(), "3");
         let (rows, selected, _) = choice_lines(&Choice { preview: Vec::new(), question: "Proceed?".into(), options: vec!["Yes".into(), "No".into()], selected: 1, amend: None }, "status", "esc to interrupt", 40, 24);
         assert_eq!(rows.len() - selected, 5);
         // The approval preview sits between the rule and the question and is
