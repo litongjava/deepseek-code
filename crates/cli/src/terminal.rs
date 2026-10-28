@@ -12,14 +12,19 @@ pub fn configure_accessibility(enabled: bool) {
 pub fn screen_reader() -> bool {
     SCREEN_READER.load(std::sync::atomic::Ordering::Relaxed)
 }
+/// A path with the home directory shortened to `~`, for display.
+pub fn home_path(path: &std::path::Path) -> String {
+    match dirs::home_dir().and_then(|home| path.strip_prefix(home).ok().map(std::path::Path::to_path_buf)) {
+        Some(relative) if relative.as_os_str().is_empty() => "~".to_owned(),
+        Some(relative) => format!("~{}{}", std::path::MAIN_SEPARATOR, relative.display()),
+        None => path.display().to_string(),
+    }
+}
+
 /// The startup header, as in the reference CLI: product and version, the
 /// model, and the workspace with the home directory shortened to `~`.
 pub fn banner(model: &str, workspace: &std::path::Path) -> String {
-    let path = match dirs::home_dir().and_then(|home| workspace.strip_prefix(home).ok().map(std::path::Path::to_path_buf)) {
-        Some(relative) if relative.as_os_str().is_empty() => "~".to_owned(),
-        Some(relative) => format!("~{}{}", std::path::MAIN_SEPARATOR, relative.display()),
-        None => workspace.display().to_string(),
-    };
+    let path = home_path(workspace);
     let model: String = model.chars().filter(|ch| !ch.is_control()).collect();
     let path: String = path.chars().filter(|ch| !ch.is_control()).collect();
     let title = format!("DeepSeek Code v{}", env!("CARGO_PKG_VERSION"));
@@ -82,6 +87,7 @@ pub mod change_view;
 pub mod tool_view;
 pub mod transcript_pager;
 pub mod picker;
+pub mod plan_view;
 pub mod tips;
 pub mod markdown;
 pub mod vim;

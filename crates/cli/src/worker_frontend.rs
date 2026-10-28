@@ -266,6 +266,8 @@ async fn observe(
     tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     let mut answered = std::collections::HashSet::new();
     let mut pending: Option<(String, tokio::sync::oneshot::Receiver<String>)> = None;
+    // The plan and its file while a plan review is pending.
+    let mut pending_plan: Option<(String, String)> = None;
     let mut plain_pending: Option<(String, String)> = None;
     let mut side: Option<
         std::pin::Pin<Box<dyn std::future::Future<Output = Result<String>> + Send + '_>>,
@@ -348,6 +350,7 @@ async fn observe(
                     // Closing this receiver tells the live renderer to discard
                     // only its answer draft and restore the queued prompt draft.
                     pending = None;
+                    pending_plan = None;
                     display.set_activity("Working");
                 }
                 if plain_pending.as_ref().is_some_and(|(request, _)| Some(request.as_str()) != current) {
@@ -365,9 +368,19 @@ async fn observe(
                             let menu = tool.map(|tool| {
                                 crate::terminal::tool_view::approval(tool["tool_name"].as_str().unwrap_or_default(), &tool["input"], Some(&session.workspace), auto)
                             });
-                            let reply = match menu {
-                                Some(approval) => live.choice(approval.lines, approval.question, approval.options),
-                                None => live.question(question.question),
+                            let plan = question.tool.as_ref().filter(|_| question.kind == "plan");
+                            let reply = match (menu, plan) {
+                                (Some(approval), _) => live.choice(approval.lines, approval.question, approval.options),
+                                (None, Some(plan)) => {
+                                    // The worker reads `plan:` answers as menu choices.
+                                    let text = plan["plan"].as_str().unwrap_or_default().to_owned();
+                                    let path = plan["planFilePath"].as_str().unwrap_or_default().to_owned();
+                                    let width = crossterm::terminal::size().map_or(80, |(cols, _)| cols.saturating_sub(1) as usize);
+                                    let view = crate::terminal::plan_view::review(&text, &path, session.auto_mode_available().await, width);
+                                    pending_plan = Some((text, path));
+                                    live.plan_choice(view.lines, view.question, view.options, view.footer)
+                                }
+                                (None, None) => live.question(question.question),
                             };
                             pending = Some((question.request_id, reply));
                         } else if input.is_some() {
@@ -406,7 +419,7 @@ async fn observe(
                 let request = remote_request.take().unwrap().request_id.clone();
                 answer_if_current(root, id, owner, &request, if allowed { "y" } else { "n" })?;
                 answered.insert(request.clone());
-                if pending.as_ref().is_some_and(|(pending, _)| *pending == request) { pending = None; }
+                if pending.as_ref().is_some_and(|(pending, _)| *pending == request) { pending = None; pending_plan = None; }
                 if plain_pending.as_ref().is_some_and(|(pending, _)| *pending == request) {
                     plain_pending = None;
                     if let Some(reader) = input.as_mut() { reader.dismiss_answer().await?; }
@@ -419,7 +432,18 @@ async fn observe(
             },
             answer = async { match pending.as_mut() { Some((_, answer)) => answer.await, None => std::future::pending().await } } => {
                 let (request, _) = pending.take().unwrap();
-                answer_if_current(root, id, owner, &request, &answer?)?;
+                let mut answer = answer?;
+                if let Some((plan, path)) = pending_plan.take() {
+                    if answer == "edit" {
+                        crate::display_commands::edit_file(std::path::Path::new(&path), "").await?;
+                    }
+                    if crate::terminal::plan_view::decide(&answer, false).rejected {
+                        let width = crossterm::terminal::size().map_or(80, |(cols, _)| cols.saturating_sub(1) as usize);
+                        display.styled_lines(crate::terminal::plan_view::rejected(&plan, width));
+                    }
+                    answer = format!("plan:{answer}");
+                }
+                answer_if_current(root, id, owner, &request, &answer)?;
                 answered.insert(request);
                 display.set_activity("Working");
             },

@@ -39,7 +39,7 @@ enum Update {
     HookActivity(Option<String>),
     Usage(Value),
     Question(String, oneshot::Sender<String>),
-    Choice(Vec<change_view::Line>, String, Vec<String>, oneshot::Sender<String>),
+    Choice(Vec<change_view::Line>, String, Vec<String>, Option<String>, oneshot::Sender<String>),
     Detail(String, String, String),
     Thinking(String),
     /// A read-only call joins, finishes or leaves the folded summary line.
@@ -164,7 +164,14 @@ impl LiveTurn {
     /// A numbered menu below a preview; the reply is the chosen number.
     pub fn choice(&self, lines: Vec<change_view::Line>, question: String, options: Vec<String>) -> oneshot::Receiver<String> {
         let (send, receive) = oneshot::channel();
-        let _ = self.updates.send(Update::Choice(lines, question, options, send));
+        let _ = self.updates.send(Update::Choice(lines, question, options, None, send));
+        receive
+    }
+    /// A plan review menu. Answers: the option number, `N\ntext` with typed
+    /// changes, `esc` to reject, or `edit` after ctrl+g.
+    pub fn plan_choice(&self, lines: Vec<change_view::Line>, question: String, options: Vec<String>, footer: String) -> oneshot::Receiver<String> {
+        let (send, receive) = oneshot::channel();
+        let _ = self.updates.send(Update::Choice(lines, question, options, Some(footer), send));
         receive
     }
     pub fn finish(mut self, error: Option<&str>) -> Vec<Action> {
@@ -268,9 +275,15 @@ struct Choice {
     selected: usize,
     /// Text typed after Tab on Yes or No, sent with the answer.
     amend: Option<String>,
+    /// A plan review: the last choice takes typed changes, and the footer
+    /// names the plan file instead of the key hint.
+    plan_footer: Option<String>,
 }
 impl Choice {
     fn amendable(&self) -> bool {
+        if self.plan_footer.is_some() {
+            return self.selected + 1 == self.options.len();
+        }
         self.selected == 0 || self.selected + 1 == self.options.len()
     }
     /// An option's label; while amending, `Yes, use -5 instead` or the
@@ -278,6 +291,9 @@ impl Choice {
     fn label(&self, index: usize) -> String {
         let option = terminal_text(&self.options[index]);
         match &self.amend {
+            Some(text) if index == self.selected && self.plan_footer.is_some() => {
+                if text.is_empty() { option } else { terminal_text(text) }
+            }
             Some(text) if index == self.selected => {
                 let (word, placeholder) = if index == 0 {
                     ("Yes", "and tell DeepSeek Code what to do next")
@@ -505,17 +521,40 @@ impl State {
     }
     /// Menu keys: arrows move, a number or Enter answers. Esc and Ctrl+C
     /// fall through and interrupt the turn as everywhere else.
-    fn choice_key(&mut self, key: crossterm::event::KeyEvent) -> bool {
+    fn choice_key(&mut self, mut key: crossterm::event::KeyEvent) -> bool {
         let Some(choice) = self.choice.as_mut() else {
             return false;
         };
+        if crate::keybindings::is_cycle_permission(key) {
+            key.code = KeyCode::BackTab;
+        }
         let control = key.modifiers.contains(KeyModifiers::CONTROL);
         let count = choice.options.len();
+        let plan = choice.plan_footer.is_some();
+        if plan && control && key.code == KeyCode::Char('g') {
+            // ctrl+g: the caller opens the plan file in an editor.
+            if let Some(answer) = self.answer.take() {
+                let _ = answer.send("edit".into());
+            }
+            self.choice = None;
+            self.draft = self.saved_draft.take().unwrap_or_default();
+            return true;
+        }
         if let Some(text) = choice.amend.as_mut() {
             // As in the reference CLI, Tab on Yes or No turns the option into a
             // text field; the note goes to the model with the answer.
             match key.code {
                 KeyCode::Char('c' | 'o' | 'b' | 'l') if control => return false,
+                // A plan's typed changes: shift+tab approves with them as a note.
+                KeyCode::BackTab if plan && !text.trim().is_empty() => {
+                    let note = text.trim().to_owned();
+                    if let Some(answer) = self.answer.take() {
+                        let _ = answer.send(format!("2\n{note}"));
+                    }
+                    self.choice = None;
+                    self.draft = self.saved_draft.take().unwrap_or_default();
+                }
+                KeyCode::Enter if plan && text.trim().is_empty() => {}
                 KeyCode::Esc | KeyCode::Tab => choice.amend = None,
                 KeyCode::Enter => self.answer_choice(),
                 KeyCode::Backspace => {
@@ -534,7 +573,33 @@ impl State {
             }
             return true;
         }
+        if plan && choice.selected + 1 == count && !control {
+            // The plan's last choice is a text field: typing starts it.
+            if let KeyCode::Char(ch) = key.code {
+                choice.amend = Some(ch.to_string());
+                return true;
+            }
+            if key.code == KeyCode::Enter {
+                return true;
+            }
+        }
         match key.code {
+            // shift+tab picks the choice labelled with it, such as "allow all
+            // edits during this session (shift+tab)".
+            KeyCode::BackTab => {
+                if let Some(index) = choice.options.iter().position(|option| option.contains("(shift+tab)")) {
+                    choice.selected = index;
+                    self.answer_choice();
+                }
+            }
+            // A rejected plan: the turn stops, as in the reference CLI.
+            KeyCode::Esc if plan => {
+                if let Some(answer) = self.answer.take() {
+                    let _ = answer.send("esc".into());
+                }
+                self.choice = None;
+                self.draft = self.saved_draft.take().unwrap_or_default();
+            }
             // As in the reference CLI, Esc cancels the call: a bare No, which
             // also stops the turn.
             KeyCode::Esc => {
@@ -1064,7 +1129,7 @@ fn choice_lines(choice: &Choice, status: &str, mode: &str, width: usize, height:
     ];
     // The preview fits above the question; an edit's full diff is printed when
     // the call finishes.
-    let room = height.saturating_sub(rows.len() + choice.options.len() + 3).max(1);
+    let room = height.saturating_sub(rows.len() + choice.options.len() + 3 + usize::from(choice.plan_footer.is_some())).max(1);
     let shown = if choice.preview.len() > room { room.saturating_sub(1) } else { choice.preview.len() };
     for line in &choice.preview[..shown] {
         rows.push(change_view::render(line, width, color));
@@ -1077,7 +1142,12 @@ fn choice_lines(choice: &Choice, status: &str, mode: &str, width: usize, height:
         let text = clip(&format!(" {} {}. {}", if index == choice.selected { "\u{276f}" } else { " " }, index + 1, choice.label(index)), width);
         rows.push(if index == choice.selected { paint(text, crate::terminal::style::accent()) } else { text });
     }
-    let hint = if choice.amend.is_some() {
+    if choice.plan_footer.is_some() {
+        rows.push(paint(clip("      shift+tab to approve with this feedback", width), crate::terminal::style::muted()));
+    }
+    let hint = if let Some(footer) = &choice.plan_footer {
+        footer.clone()
+    } else if choice.amend.is_some() {
         "enter confirm \u{b7} esc to cancel amend".to_owned()
     } else if choice.amendable() {
         mode.replace("esc to interrupt", "\u{2191}\u{2193} select \u{b7} enter confirm \u{b7} tab to amend \u{b7} esc to cancel")
@@ -1085,7 +1155,7 @@ fn choice_lines(choice: &Choice, status: &str, mode: &str, width: usize, height:
         mode.replace("esc to interrupt", "\u{2191}\u{2193} select \u{b7} enter confirm \u{b7} esc to cancel")
     };
     rows.push(paint(clip(&format!(" {hint}"), width), crate::terminal::style::muted()));
-    let selected = 1 + choice.options.len() - choice.selected;
+    let selected = 1 + usize::from(choice.plan_footer.is_some()) + choice.options.len() - choice.selected;
     // The cursor follows typed text while amending.
     let column = match &choice.amend {
         Some(text) if !text.is_empty() => {
@@ -1249,13 +1319,13 @@ fn run(
                     state.draft.set(&text);
                     dirty = true;
                 }
-                Ok(Update::Choice(lines, question, options, reply)) => {
+                Ok(Update::Choice(lines, question, options, plan_footer, reply)) => {
                     finish_text(state, screen);
                     if state.details.expanded {
                         state.details.toggle();
                     }
                     state.question(reply);
-                    state.choice = Some(Choice { preview: lines, question, options, selected: 0, amend: None });
+                    state.choice = Some(Choice { preview: lines, question, options, selected: 0, amend: None, plan_footer });
                     dirty = true;
                 }
                 Ok(Update::Question(text, reply)) => {
@@ -1333,7 +1403,8 @@ fn run(
                         crate::keybindings::Resolution::Key(key) => key,
                         crate::keybindings::Resolution::Consumed => continue,
                     };
-                    if crate::keybindings::is_cycle_permission(key) {
+                    // With a menu open, shift+tab belongs to the menu.
+                    if crate::keybindings::is_cycle_permission(key) && state.choice.is_none() {
                         state.cycle_permission(&actions);
                         continue;
                     }
@@ -1708,7 +1779,7 @@ mod tests {
         let mut state = State::new("ask".into());
         let (reply, mut received) = oneshot::channel();
         state.question(reply);
-        state.choice = Some(Choice { preview: Vec::new(), question: "Proceed?".into(), options: vec!["Yes".into(), "Always".into(), "No".into()], selected: 1, amend: None });
+        state.choice = Some(Choice { preview: Vec::new(), question: "Proceed?".into(), options: vec!["Yes".into(), "Always".into(), "No".into()], selected: 1, amend: None, plan_footer: None });
         // The remember choice takes no note.
         assert!(state.choice_key(key(KeyCode::Tab)));
         assert!(state.choice.as_ref().unwrap().amend.is_none());
@@ -1741,7 +1812,7 @@ mod tests {
         state.draft.insert("queued draft");
         let (reply, mut received) = oneshot::channel();
         state.question(reply);
-        state.choice = Some(Choice { preview: Vec::new(), question: "Proceed?".into(), options: vec!["Yes".into(), "Always".into(), "No".into()], selected: 0, amend: None });
+        state.choice = Some(Choice { preview: Vec::new(), question: "Proceed?".into(), options: vec!["Yes".into(), "Always".into(), "No".into()], selected: 0, amend: None, plan_footer: None });
         assert!(state.choice_key(key(KeyCode::Up)));
         assert_eq!(state.choice.as_ref().unwrap().selected, 2);
         assert!(state.choice_key(key(KeyCode::Down)));
@@ -1754,7 +1825,7 @@ mod tests {
 
         let (reply, mut received) = oneshot::channel();
         state.question(reply);
-        state.choice = Some(Choice { preview: Vec::new(), question: "Proceed?".into(), options: vec!["Yes".into(), "No".into()], selected: 0, amend: None });
+        state.choice = Some(Choice { preview: Vec::new(), question: "Proceed?".into(), options: vec!["Yes".into(), "No".into()], selected: 0, amend: None, plan_footer: None });
         assert!(state.choice_key(key(KeyCode::Char('3'))));
         assert!(received.try_recv().is_err());
         assert!(state.choice_key(key(KeyCode::Char('2'))));
@@ -1762,15 +1833,15 @@ mod tests {
         // Esc answers the last choice, No.
         let (reply, mut received) = oneshot::channel();
         state.question(reply);
-        state.choice = Some(Choice { preview: Vec::new(), question: "Proceed?".into(), options: vec!["Yes".into(), "Always".into(), "No".into()], selected: 0, amend: None });
+        state.choice = Some(Choice { preview: Vec::new(), question: "Proceed?".into(), options: vec!["Yes".into(), "Always".into(), "No".into()], selected: 0, amend: None, plan_footer: None });
         assert!(state.choice_key(key(KeyCode::Esc)));
         assert_eq!(received.try_recv().unwrap(), "3");
-        let (rows, selected, _) = choice_lines(&Choice { preview: Vec::new(), question: "Proceed?".into(), options: vec!["Yes".into(), "No".into()], selected: 1, amend: None }, "status", "esc to interrupt", 40, 24);
+        let (rows, selected, _) = choice_lines(&Choice { preview: Vec::new(), question: "Proceed?".into(), options: vec!["Yes".into(), "No".into()], selected: 1, amend: None, plan_footer: None }, "status", "esc to interrupt", 40, 24);
         assert_eq!(rows.len() - selected, 5);
         // The approval preview sits between the rule and the question and is
         // clipped to the screen; answering removes the whole box.
         let preview = (0..30).map(|row| change_view::body(&format!("line {row}"))).collect();
-        let choice = Choice { preview, question: "Proceed?".into(), options: vec!["Yes".into(), "No".into()], selected: 0, amend: None };
+        let choice = Choice { preview, question: "Proceed?".into(), options: vec!["Yes".into(), "No".into()], selected: 0, amend: None, plan_footer: None };
         let (rows, _, _) = choice_lines(&choice, "status", "esc to interrupt", 40, 20);
         let strip = |row: &String| {
             let mut text = String::new();
@@ -2068,6 +2139,13 @@ impl TurnDisplay {
             live.activity("Working");
         } else {
             self.fallback.tool_finished(id, name, input, output, failed);
+        }
+    }
+    /// Lines written into the transcript as they are, such as a rejected plan.
+    pub fn styled_lines(&mut self, lines: Vec<change_view::Line>) {
+        match &self.live {
+            Some(live) => live.styled(lines),
+            None => self.notice(&change_view::plain(&lines)),
         }
     }
     /// The conversation before this turn, for Ctrl+O.

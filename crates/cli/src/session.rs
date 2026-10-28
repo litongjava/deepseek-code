@@ -892,6 +892,8 @@ impl Session {
         let mut approval_notes = std::collections::HashMap::<String, Vec<String>>::new();
         // Messages typed during this turn that the model has not read yet.
         let mut pending_inputs = Vec::<String>::new();
+        // The mode chosen with a plan, applied once the engine has approved it.
+        let mut plan_mode_after: Option<(String, &'static str)> = None;
         let mut sdk_messages = (cli.output_format == OutputFormat::StreamJson)
             .then(|| crate::sdk_messages::Translator::new(&self.id, cli.include_partial_messages));
         let mut refresh = tokio::time::interval(std::time::Duration::from_secs(1));
@@ -1114,6 +1116,55 @@ impl Session {
                             progress.set_activity("Composing");
                             continue;
                         }
+                        if tool_input["planApproval"] == true {
+                            // As in the reference CLI: a review menu, from this terminal or
+                            // an attached frontend; typed answers keep the 1–4 choices.
+                            let plan = tool_input["plan"].as_str().unwrap_or_default().to_owned();
+                            let path = tool_input["planFilePath"].as_str().unwrap_or_default().to_owned();
+                            let auto = self.auto_mode_available().await;
+                            let menu = match claude_core::services::background_sessions::worker_plan(&self.paths.data_dir, &self.id, &request_id, &question, tool_input.clone()).await? {
+                                Some(answer) => answer.strip_prefix("plan:").map(str::to_owned).ok_or(answer),
+                                None => match progress.live.as_ref() {
+                                    Some(live) if input.is_some() => {
+                                        let width = crossterm::terminal::size().map_or(80, |(cols, _)| cols.saturating_sub(1) as usize);
+                                        let view = crate::terminal::plan_view::review(&plan, &path, auto, width);
+                                        let reply = live.plan_choice(view.lines, view.question, view.options, view.footer);
+                                        let answer = wait_answer(self, &mut progress, input, reply).await?;
+                                        if answer == "edit" {
+                                            crate::display_commands::edit_file(std::path::Path::new(&path), "").await?;
+                                        }
+                                        Ok(answer)
+                                    }
+                                    _ => Err(String::new()),
+                                },
+                            };
+                            match menu {
+                                Ok(answer) => {
+                                    let decision = crate::terminal::plan_view::decide(&answer, auto);
+                                    if decision.rejected && progress.is_live() {
+                                        let width = crossterm::terminal::size().map_or(80, |(cols, _)| cols.saturating_sub(1) as usize);
+                                        progress.styled_lines(crate::terminal::plan_view::rejected(&plan, width));
+                                    }
+                                    if let Some(note) = &decision.note {
+                                        claude_core::services::input_queue::push(&self.store.db, &self.id, note)?;
+                                    }
+                                    self.engine.resume_with_answer(&request_id, decision.engine).await?;
+                                    plan_mode_after = decision.mode.map(|mode| (tool_use_id.clone(), mode));
+                                    if decision.stop {
+                                        bail!("Tool permission interrupted the turn: the user rejected the plan");
+                                    }
+                                    progress.set_activity("Working");
+                                    continue;
+                                }
+                                // A frontend without the menu answered as text.
+                                Err(answer) if !answer.is_empty() => {
+                                    self.engine.resume_with_answer(&request_id, answer).await?;
+                                    progress.set_activity("Composing");
+                                    continue;
+                                }
+                                Err(_) => {}
+                            }
+                        }
                         let mut prompt = question;
                         for (index, option) in options.iter().enumerate() { prompt.push_str(&format!("\n{}. {option}", index+1)); }
                         let answer = if let Some(answer) = claude_core::services::background_sessions::worker_answer(&self.paths.data_dir, &self.id, &request_id, "question", &prompt).await? { answer } else { turn_answer(self, &mut progress, input, prompt).await? };
@@ -1152,6 +1203,16 @@ impl Session {
                             progress.set_permission_mode(self.permission_mode());
                         }
                         progress.tool_finished(&tool_use_id, &tool_name, &tool_input, &output, is_error);
+                        if let Some((plan_tool, mode)) = plan_mode_after.take() {
+                            if plan_tool == tool_use_id && !is_error {
+                                match self.set_permission_mode(mode).await {
+                                    Ok(()) => progress.set_permission_mode(mode),
+                                    Err(error) => progress.notice(&format!("Plan approved; {mode} mode unavailable: {error:#}")),
+                                }
+                            } else if plan_tool != tool_use_id {
+                                plan_mode_after = Some((plan_tool, mode));
+                            }
+                        }
                         let position = tools.iter().position(|tool| tool.id == tool_use_id);
                         let row = message_repo::ToolCallRow { id: tool_use_id, message_id: String::new(), name: tool_name, input: Some(tool_input.to_string()), output: Some(output), is_error, sort_order: position.unwrap_or(tools.len()) as i64 };
                         if let Some(position) = position { tools[position] = row; } else { tools.push(row); }

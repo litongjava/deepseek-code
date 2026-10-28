@@ -555,6 +555,23 @@ pub async fn worker_permission(
         .map(Some)
 }
 
+/// Like [`worker_answer`] for a plan review; `plan` carries the plan and its
+/// file so an attached frontend can show the review menu.
+pub async fn worker_plan(
+    root: &Path,
+    session: &str,
+    request: &str,
+    question: &str,
+    plan: serde_json::Value,
+) -> Result<Option<String>> {
+    let Some(dir) = worker_directory(root, session)? else {
+        return Ok(None);
+    };
+    wait_for_answer(&dir, request, "plan", question, Some(plan))
+        .await
+        .map(Some)
+}
+
 struct PendingAnswerCleanup {
     dir: PathBuf,
     request: String,
