@@ -34,6 +34,42 @@ pub fn commands(workspace: &Path) -> BTreeMap<String, SkillCommand> {
             "Inspect local CLI configuration and diagnose failures",
             include_str!("bundled/doctor.md"),
         ),
+        // The reference CLI's bundled workflow commands.
+        (
+            "simplify",
+            "Clean up the changed code without changing behavior",
+            include_str!("bundled/simplify.md"),
+        ),
+        (
+            "fewer-permission-prompts",
+            "Pre-approve safe read-only commands for this project",
+            include_str!("bundled/fewer-permission-prompts.md"),
+        ),
+        (
+            "update-config",
+            "Change settings: hooks and permission rules",
+            include_str!("bundled/update-config.md"),
+        ),
+        (
+            "insights",
+            "Generate a report analyzing your DeepSeek Code sessions",
+            include_str!("bundled/insights.md"),
+        ),
+        (
+            "team-onboarding",
+            "Help teammates ramp up on DeepSeek Code with a guide for this project",
+            include_str!("bundled/team-onboarding.md"),
+        ),
+        (
+            "run-skill-generator",
+            "Create a skill that knows how to run this project's app",
+            include_str!("bundled/run-skill-generator.md"),
+        ),
+        (
+            "auto-mode-setup",
+            "Prepare auto mode for your environment, plus permission rules",
+            include_str!("bundled/auto-mode-setup.md"),
+        ),
     ];
     definitions
         .into_iter()
