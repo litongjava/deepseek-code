@@ -147,17 +147,16 @@ pub fn get_tool_definitions() -> Vec<ToolDefinition> {
         },
         ToolDefinition {
             name: "WebFetch".to_string(),
-            description: "Fetch readable text and links from a web page. Removes page scripts and navigation. Output is bounded; use next_offset to read more, or raw=true to inspect markup.".to_string(),
+            description: "Fetches a URL, converts the page to readable text, and answers `prompt` against it using the session's model.\n\n- Fails on authenticated/private URLs — use an authenticated MCP tool or `gh` for those instead.\n- For a local server, use curl via Bash.\n- Long pages are read in parts: when the result has next_offset, call again with it as offset.".to_string(),
             input_schema: serde_json::json!({
                 "type": "object",
                 "properties": {
-                    "url": { "type": "string", "description": "The URL to fetch" },
-                    "headers": { "type": "object", "description": "Optional HTTP headers" },
-                    "max_chars": { "type": "integer", "minimum": 1, "maximum": 50000, "description": "Maximum returned characters (default 12000, hard limit 50000)" },
-                    "offset": { "type": "integer", "minimum": 0, "description": "Character offset in extracted text; use next_offset to continue" },
-                    "raw": { "type": "boolean", "description": "Return raw markup instead of readable text (default false); size limits still apply" }
+                    "url": { "description": "The URL to fetch content from", "type": "string", "format": "uri" },
+                    "prompt": { "description": "The prompt to run on the fetched content", "type": "string" },
+                    "offset": { "description": "Character position in the page text to start reading from. Use it to read on through a page too long for one call, with the value the previous result gave.", "type": "integer", "minimum": 0 }
                 },
-                "required": ["url"]
+                "required": ["url", "prompt"],
+                "additionalProperties": false
             }),
         },
         ToolDefinition {
