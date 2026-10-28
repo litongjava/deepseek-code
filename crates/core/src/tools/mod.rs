@@ -394,11 +394,7 @@ pub fn get_tool_definitions() -> Vec<ToolDefinition> {
     defs.extend(external_agents::definitions());
     defs.extend(crate::services::plans::definitions());
     defs.extend(content_compat::definitions());
-    let mut legacy_lsp=lsp::definition();
-    legacy_lsp.name="lsp".into();
-    legacy_lsp.input_schema["properties"]["action"]=serde_json::json!({"type":"string","enum":["symbols","references","diagnostics","definition","hover"]});
-    legacy_lsp.input_schema["required"]=serde_json::json!(["action","path"]);
-    defs.push(legacy_lsp);
+    // The legacy `lsp` alias stays dispatchable but is no longer advertised.
     defs
 }
 
