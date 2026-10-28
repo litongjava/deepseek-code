@@ -36,6 +36,7 @@ enum Message {
     ContextNote(Option<String>),
     Shells(usize),
     ShellCounter(Box<dyn Fn() -> usize + Send>),
+    Todos(Box<dyn Fn() -> Vec<(String, String)> + Send>),
     Vim(bool),
     Read(Request),
 }
@@ -131,6 +132,10 @@ impl TerminalInput {
                         editor.set_shell_counter(counter);
                         continue;
                     }
+                    Message::Todos(todos) => {
+                        editor.set_todos(todos);
+                        continue;
+                    }
                     Message::Vim(on) => {
                         editor.set_vim(on);
                         continue;
@@ -213,6 +218,11 @@ impl TerminalInput {
     /// Background shells still running, for "1 shell · ↓ to manage".
     pub fn set_shells(&self, count: usize) {
         let _ = self.requests.send(Message::Shells(count));
+    }
+
+    /// Reads the todo list that ctrl+t shows.
+    pub fn set_todos(&self, todos: Box<dyn Fn() -> Vec<(String, String)> + Send>) {
+        let _ = self.requests.send(Message::Todos(todos));
     }
 
     /// Recounts running shells while the prompt waits, so the footer drops

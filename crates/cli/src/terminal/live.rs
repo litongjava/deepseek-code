@@ -55,6 +55,8 @@ enum Update {
     Queued(Vec<String>),
     /// Background shells still running when the turn ends.
     Shells(usize),
+    /// The todo list ctrl+t shows, as (content, status).
+    Todos(Vec<(String, String)>),
     /// The conversation before this turn, for the Ctrl+O transcript.
     Transcript(Vec<change_view::Line>),
     /// A queued message the model has now read.
@@ -341,6 +343,7 @@ struct State {
     shells: usize,
     /// When ctrl+x was pressed, for the ctrl+x ctrl+s chord.
     chord: Option<Instant>,
+    todos: Vec<(String, String)>,
     /// When reasoning began and last streamed, for "Thought for 2s".
     thinking_span: Option<(Instant, Instant)>,
     thinking_characters: usize,
@@ -428,6 +431,7 @@ impl State {
             transcript: Vec::new(),
             shells: 0,
             chord: None,
+            todos: Vec::new(),
             thinking_span: None,
             thinking_characters: 0,
             thinking_entry: None,
@@ -994,6 +998,15 @@ impl Frame {
             content.drain(..skip);
             content.extend(rows.into_iter().take(budget));
         }
+        if !state.details.expanded && crate::terminal::TODOS_VISIBLE.load(std::sync::atomic::Ordering::Relaxed) {
+            // ctrl+t: the todo list above the status line.
+            content.retain(|line| !line.is_empty());
+            content.extend(crate::terminal::todo_rows(&state.todos, width).into_iter().map(|(row, done, current)| {
+                if done { format!("\x1b[2m{row}\x1b[0m") } else if current { format!("\x1b[1m{row}\x1b[0m") } else { row }
+            }));
+            let skip = content.len().saturating_sub(budget);
+            content.drain(..skip);
+        }
         if !state.details.expanded && state.activity.starts_with("Running Bash") && state.activity_started.elapsed() >= Duration::from_secs(3) {
             // A long command can continue in the background, as in the reference CLI.
             content.retain(|line| !line.is_empty());
@@ -1322,6 +1335,10 @@ fn run(
                 }
                 Ok(Update::Transcript(lines)) => state.transcript = lines,
                 Ok(Update::Shells(count)) => state.shells = count,
+                Ok(Update::Todos(todos)) => {
+                    state.todos = todos;
+                    dirty = true;
+                }
                 Ok(Update::Queued(pending)) => {
                     state.queued = pending;
                     dirty = true;
@@ -1443,6 +1460,8 @@ fn run(
                     if state.choice_key(key) {
                     } else if control && matches!(key.code, KeyCode::Char('y' | 'n')) && state.goal_proposal.is_some() && state.answer.is_none() {
                         state.decide_goal(key.code == KeyCode::Char('y'), &actions);
+                    } else if control && key.code == KeyCode::Char('t') {
+                        crate::terminal::TODOS_VISIBLE.fetch_xor(true, std::sync::atomic::Ordering::Relaxed);
                     } else if control && key.code == KeyCode::Char('x') {
                         state.chord = Some(Instant::now());
                         continue;
@@ -2122,6 +2141,11 @@ impl TurnDisplay {
                 }
             }
         }
+        if let (Some(live), false, true) = (&self.live, failed, matches!(name, "TodoWrite" | "todo_write")) {
+            // Keep the ctrl+t list current as the model updates it.
+            let todos = input["todos"].as_array().into_iter().flatten().map(|todo| (todo["content"].as_str().unwrap_or_default().to_owned(), todo["status"].as_str().unwrap_or("pending").to_owned())).collect();
+            let _ = live.updates.send(Update::Todos(todos));
+        }
         if let Some(live) = &self.live {
             let previous = self.tools.remove(id);
             let elapsed = previous.as_ref().map(|(start, _)| start.elapsed());
@@ -2183,6 +2207,12 @@ impl TurnDisplay {
         match &self.live {
             Some(live) => live.styled(lines),
             None => self.notice(&change_view::plain(&lines)),
+        }
+    }
+    /// The todo list for ctrl+t.
+    pub fn set_todos(&mut self, todos: Vec<(String, String)>) {
+        if let Some(live) = &self.live {
+            let _ = live.updates.send(Update::Todos(todos));
         }
     }
     /// Background shells still running, named in the closing line.

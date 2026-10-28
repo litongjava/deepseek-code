@@ -64,6 +64,7 @@ async fn single_turn(
     )?.with_workspace(&session.workspace);
     if display.is_live() {
         display.set_transcript(crate::repl::transcript(session).unwrap_or_default());
+        display.set_todos(crate::background_commands::todo_items(&session.paths, &session.id));
     }
     let proposal_frontend = if display.live.is_some() {
         Some(claude_core::services::goal_proposals::Frontend::acquire(session.store.db.clone(), &session.id)?)

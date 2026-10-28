@@ -36,6 +36,8 @@ pub struct PromptEditor {
     /// Background shells still running, shown as "1 shell · ↓ to manage".
     shells: usize,
     shell_counter: Option<Box<dyn Fn() -> usize + Send>>,
+    /// The todo list that ctrl+t shows above the input.
+    todos: Option<Box<dyn Fn() -> Vec<(String, String)> + Send>>,
     /// Text removed by Ctrl+U or Ctrl+K, pasted back by Ctrl+Y.
     killed: String,
     /// A draft put aside with Ctrl+S; it returns after the next prompt.
@@ -63,6 +65,7 @@ impl Default for PromptEditor {
             context_note: None,
             shells: 0,
             shell_counter: None,
+            todos: None,
             killed: String::new(),
             stash: None,
             stash_restore: false,
@@ -652,6 +655,9 @@ impl PromptEditor {
     pub fn set_shell_counter(&mut self, counter: Box<dyn Fn() -> usize + Send>) {
         self.shell_counter = Some(counter);
     }
+    pub fn set_todos(&mut self, todos: Box<dyn Fn() -> Vec<(String, String)> + Send>) {
+        self.todos = Some(todos);
+    }
     pub fn set_suggestions(&mut self, suggestions: std::sync::mpsc::Receiver<String>) {
         self.suggestions = Some(suggestions);
     }
@@ -711,6 +717,8 @@ impl PromptEditor {
         let mut last_state = (buffer.chars.clone(), buffer.cursor);
         let mut kill_hint = false;
         let mut clear_esc: Option<std::time::Instant> = None;
+        // Read once per prompt; ctrl+t toggles whether they show.
+        let todo_list = self.todos.as_ref().map(|todos| todos()).unwrap_or_default();
         let mut keybinding_pending = crate::keybindings::Pending::default();
         let mut screen = Screen::default();
         let mut selected = 0usize;
@@ -841,6 +849,11 @@ impl PromptEditor {
             }
             if items.is_empty() && mention_query.is_none() && !menu_hidden && text.len() > 1 && text.starts_with('/') && !text.contains(char::is_whitespace) {
                 lines.push((clipped(&format!("  No commands match \"{text}\""), width), TextStyle::Muted));
+            }
+            if crate::terminal::TODOS_VISIBLE.load(std::sync::atomic::Ordering::Relaxed) {
+                for (row, done, current) in crate::terminal::todo_rows(&todo_list, width) {
+                    lines.push((row, if done { TextStyle::Muted } else if current { TextStyle::Selected } else { TextStyle::Plain }));
+                }
             }
             let menu_height = lines.len() - panel_height;
             lines.push(("\u{2500}".repeat(width), TextStyle::Border));
@@ -1009,6 +1022,11 @@ impl PromptEditor {
                             buffer.cursor = cursor.min(buffer.chars.len());
                             last_state = (buffer.chars.clone(), buffer.cursor);
                         }
+                        continue;
+                    }
+                    if control && key.code == KeyCode::Char('t') {
+                        // As in the reference CLI, ctrl+t shows or hides the tasks.
+                        crate::terminal::TODOS_VISIBLE.fetch_xor(true, std::sync::atomic::Ordering::Relaxed);
                         continue;
                     }
                     if control && key.code == KeyCode::Char('y') {

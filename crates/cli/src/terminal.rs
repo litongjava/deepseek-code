@@ -9,6 +9,27 @@ static SCREEN_READER: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicB
 pub fn configure_accessibility(enabled: bool) {
     SCREEN_READER.store(enabled, std::sync::atomic::Ordering::Relaxed);
 }
+/// Whether ctrl+t shows the todo list, at the prompt and during turns alike.
+pub static TODOS_VISIBLE: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// The todo list rows shown by ctrl+t: `☒` done, `☐` open; the item in
+/// progress is marked as selected.
+pub fn todo_rows(todos: &[(String, String)], width: usize) -> Vec<(String, bool, bool)> {
+    if todos.is_empty() {
+        return vec![("  No todos yet".to_owned(), true, false)];
+    }
+    todos
+        .iter()
+        .take(12)
+        .map(|(content, status)| {
+            let done = status == "completed";
+            let marker = if done { "\u{2612}" } else { "\u{2610}" };
+            let text: String = format!("  {marker} {content}").chars().filter(|ch| !ch.is_control()).collect();
+            (crate::terminal::input::editor::clipped(&text, width), done, status == "in_progress")
+        })
+        .collect()
+}
+
 pub fn screen_reader() -> bool {
     SCREEN_READER.load(std::sync::atomic::Ordering::Relaxed)
 }

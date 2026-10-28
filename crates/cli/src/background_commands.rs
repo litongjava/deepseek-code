@@ -424,6 +424,17 @@ async fn tasks_menu(paths: &RuntimePaths, session: &Session) -> Result<()> {
     }
 }
 
+/// The session's todo list as (content, status), for ctrl+t.
+pub(crate) fn todo_items(paths: &RuntimePaths, session: &str) -> Vec<(String, String)> {
+    claude_core::tools::tasks::execute_for_session("TodoRead", serde_json::json!({}), &paths.data_dir, session)
+        .ok()
+        .and_then(|value| value["todos"].as_array().cloned())
+        .unwrap_or_default()
+        .iter()
+        .map(|todo| (todo["content"].as_str().unwrap_or_default().to_owned(), todo["status"].as_str().unwrap_or("pending").to_owned()))
+        .collect()
+}
+
 /// Background shells of this session that are still running.
 pub(crate) fn running_shells(paths: &RuntimePaths, session: &str) -> usize {
     managed_shell_records(paths, session)

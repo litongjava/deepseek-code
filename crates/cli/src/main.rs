@@ -574,6 +574,8 @@ async fn run(cli: &Cli) -> Result<()> {
             input.as_ref().unwrap().set_shells(background_commands::running_shells(&paths, &session.id));
             let (counter_paths, counter_session) = (paths.clone(), session.id.clone());
             input.as_ref().unwrap().set_shell_counter(Box::new(move || background_commands::running_shells(&counter_paths, &counter_session)));
+            let (todo_paths, todo_session) = (paths.clone(), session.id.clone());
+            input.as_ref().unwrap().set_todos(Box::new(move || background_commands::todo_items(&todo_paths, &todo_session)));
             input.as_ref().unwrap().set_vim(terminal::vim::enabled(&paths.data_dir));
             if display.diff_panel && !display.focus {
                 match claude_core::services::worktree_diff::snapshot(&session.workspace, display.diff_staged).await {
