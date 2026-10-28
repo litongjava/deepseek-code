@@ -182,19 +182,39 @@ pub fn mode_indicator(mode: &str) -> Option<(String, Color)> {
     Some((format!("{symbol} {title} on (shift+tab to cycle)"), color))
 }
 
-/// Keyboard shortcuts listed by `?` on an empty prompt.
-pub const SHORTCUTS: &[(&str, &str)] = &[
-    ("/", "commands"),
-    ("enter", "send (queues while working)"),
-    ("alt+enter", "new line"),
-    ("shift+tab", "cycle permission modes"),
-    ("esc", "interrupt the current turn"),
-    ("ctrl+o", "expand the last turn's tool calls"),
-    ("tab", "accept the suggested prompt"),
-    ("\u{2191} \u{2193}", "prompt history"),
-    ("ctrl+r", "search prompt history"),
-    ("ctrl+u / ctrl+k", "delete before / after the cursor"),
-    ("ctrl+l", "redraw"),
-    ("ctrl+d", "exit on an empty prompt"),
-    ("/btw", "ask a side question while working"),
+/// Shortcuts shown by `?` on an empty prompt, in the reference CLI's three
+/// columns (filled top to bottom).
+pub const SHORTCUTS: &[&str] = &[
+    "! for shell mode",
+    "/ for commands",
+    "@ for file paths",
+    "# to save a memory",
+    "/btw for side question",
+    "double tap esc to rewind",
+    "shift + tab to cycle modes",
+    "ctrl + o for transcript",
+    "alt + enter for newline",
+    "tab to accept suggestion",
+    "ctrl + r to search history",
+    "ctrl + v to paste images",
+    "ctrl + u / k to delete line",
+    "ctrl + l to redraw",
+    "ctrl + d to exit",
 ];
+
+/// The `?` panel rows: SHORTCUTS in three columns at `width`.
+pub fn shortcut_rows(width: usize) -> Vec<String> {
+    let per_column = SHORTCUTS.len().div_ceil(3);
+    let column = (width.saturating_sub(2) / 3).max(12);
+    (0..per_column)
+        .map(|row| {
+            let mut line = String::from("  ");
+            for index in (0..3).map(|col| col * per_column + row) {
+                if let Some(text) = SHORTCUTS.get(index) {
+                    line.push_str(&format!("{text:<column$}"));
+                }
+            }
+            line.trim_end().to_owned()
+        })
+        .collect()
+}

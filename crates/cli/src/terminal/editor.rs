@@ -683,6 +683,8 @@ impl PromptEditor {
         let mut history_pos = self.history.len();
         let mut draft = String::new();
         let mut menu_hidden = false;
+        // `?` on an empty prompt shows shortcuts in place of the footer.
+        let mut shortcuts = false;
         let mut search: Option<String> = None;
         let mut search_pos = self.history.len();
         // A second Esc on an empty prompt within a second opens /rewind.
@@ -842,7 +844,11 @@ impl PromptEditor {
                 Some((_, color)) if search.is_none() => TextStyle::Colored(color),
                 _ => TextStyle::Muted,
             };
-            lines.push((clipped(&footer, width), footer_style));
+            if shortcuts && items.is_empty() && search.is_none() {
+                lines.extend(crate::terminal::style::shortcut_rows(width).into_iter().map(|row| (clipped(&row, width), TextStyle::Muted)));
+            } else {
+                lines.push((clipped(&footer, width), footer_style));
+            }
             if !self.details.entries.is_empty() {
                 lines.push((
                     clipped("Ctrl+O details \u{00b7} PgUp/PgDn scroll", width),
@@ -962,20 +968,12 @@ impl PromptEditor {
                         continue;
                     }
                     if key.code == KeyCode::Char('?') && !control && buffer.chars.is_empty() {
-                        // `?` on an empty prompt lists shortcuts, as in the reference CLI.
-                        screen.finish("", "")?;
-                        let width = crate::terminal::style::SHORTCUTS.iter().map(|(keys, _)| keys.chars().count()).max().unwrap_or(0) + 2;
-                        let mut text = String::from("\x1b[?2026hShortcuts\r\n");
-                        for (keys, action) in crate::terminal::style::SHORTCUTS {
-                            text.push_str(&format!("  {keys:<width$}{action}\r\n"));
-                        }
-                        text.push_str("\x1b[?2026l");
-                        let mut out = io::stderr();
-                        out.write_all(text.as_bytes())?;
-                        out.flush()?;
-                        screen = Screen::default();
+                        // As in the reference CLI, `?` toggles the shortcuts panel
+                        // below the input; any other key closes it.
+                        shortcuts = !shortcuts;
                         continue;
                     }
+                    shortcuts = false;
                     if control && key.code == KeyCode::Char('o') {
                         if self.details.entries.is_empty() && !self.transcript.is_empty() {
                             // As in the reference CLI: a full-screen pager over the
