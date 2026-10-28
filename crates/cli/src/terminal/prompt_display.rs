@@ -47,6 +47,10 @@ pub fn write_submitted(
         write!(output, "{newline}")?;
     }
     write_rule(output)?;
+    // Attached images, as in the reference CLI: `  ⎿  [Image #1]`.
+    for number in crate::images::placeholder_numbers(text) {
+        write!(output, "  \u{23bf}  [Image #{number}]{newline}")?;
+    }
     write!(output, "{newline}")
 }
 

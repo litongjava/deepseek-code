@@ -934,6 +934,7 @@ impl Session {
                                 else if queues_mid_turn(&prompt) {
                                     // As in the reference CLI the model reads it after its next
                                     // tool results, or as the next prompt.
+                                    crate::images::share(&self.id, &prompt);
                                     claude_core::services::input_queue::push(&self.store.db, &self.id, &prompt)?;
                                     pending_inputs.push(prompt);
                                     progress.queued(pending_inputs.clone());

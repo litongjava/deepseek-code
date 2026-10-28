@@ -20,7 +20,7 @@ mod plan_tool;
 
 use crate::native_engine::anthropic_client::{AnthropicClient, AnthropicContent, AnthropicMessage, ContentBlock};
 use crate::native_engine::engine_core::ReasoningMode;
-use crate::native_engine::openai_client::{OpenAIClient, OpenAIContent, OpenAIMessage};
+use crate::native_engine::openai_client::{ImageUrl, OpenAIClient, OpenAIContent, OpenAIContentPart, OpenAIMessage};
 use crate::native_engine::provider_manager::{ApiFormat, ResolvedProvider};
 use crate::native_engine::token_counter::TokenCounter;
 use crate::native_engine::context_compressor::{ContextCompressor, ContextWindow, CompressionLevel};
@@ -970,6 +970,17 @@ impl ToolLoopExecutor {
         inputs
     }
 
+    /// The blocks for a queued message whose `[Image #N]` names pasted
+    /// images, when the model accepts images.
+    fn queued_images(&self, text: &str) -> Option<Vec<Value>> {
+        if !self.provider.model.supports_vision || !text.contains("[Image #") {
+            return None;
+        }
+        let id = self.conv_id.as_deref()?;
+        let data_dir = crate::runtime::resolve_default_data_dir().ok()?;
+        crate::services::input_queue::content_with_images(&data_dir, id, text)
+    }
+
     fn drain_approval_notes(&self) -> Vec<String> {
         std::mem::take(&mut *self.approval_notes.lock().unwrap_or_else(|error| error.into_inner()))
     }
@@ -1774,7 +1785,12 @@ impl ToolLoopExecutor {
             self.resume_pending_owned_children().await;
             let queued = self.deliver_queued_inputs(iteration).await;
             for content in self.drain_approval_notes().into_iter().chain(queued).chain(self.drain_peer_messages()?) {
-                conversation_messages.push(AnthropicMessage { role: "user".into(), content: AnthropicContent::Text(content) });
+                // A queued message that names pasted images carries them.
+                let content = match self.queued_images(&content) {
+                    Some(blocks) => AnthropicContent::Blocks(blocks.into_iter().filter_map(|block| serde_json::from_value(block).ok()).collect()),
+                    None => AnthropicContent::Text(content),
+                };
+                conversation_messages.push(AnthropicMessage { role: "user".into(), content });
             }
 
             self.auto_history = conversation_messages.iter().filter_map(|message| serde_json::to_value(message).ok()).collect();
@@ -2350,7 +2366,14 @@ impl ToolLoopExecutor {
             self.resume_pending_owned_children().await;
             let queued = self.deliver_queued_inputs(iteration).await;
             for content in self.drain_approval_notes().into_iter().chain(queued).chain(self.drain_peer_messages()?) {
-                conversation_messages.push(OpenAIMessage { role: "user".into(), content: OpenAIContent::Text(content), tool_calls: None, tool_call_id: None, reasoning_content: None, provider_content: None });
+                let content = match self.queued_images(&content) {
+                    Some(blocks) => OpenAIContent::Multi(blocks.iter().map(|block| match block["type"].as_str() {
+                        Some("image") => OpenAIContentPart::Image { image_url: ImageUrl { url: format!("data:{};base64,{}", block["source"]["media_type"].as_str().unwrap_or("image/png"), block["source"]["data"].as_str().unwrap_or_default()) } },
+                        _ => OpenAIContentPart::Text { text: block["text"].as_str().unwrap_or_default().to_owned() },
+                    }).collect()),
+                    None => OpenAIContent::Text(content),
+                };
+                conversation_messages.push(OpenAIMessage { role: "user".into(), content, tool_calls: None, tool_call_id: None, reasoning_content: None, provider_content: None });
             }
 
             self.auto_history = conversation_messages.iter().filter_map(|message| serde_json::to_value(message).ok()).collect();

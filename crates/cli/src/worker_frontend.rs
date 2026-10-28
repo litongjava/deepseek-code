@@ -542,6 +542,7 @@ async fn observe(
                                 if child_target.is_none() && crate::session::queues_mid_turn(&prompt) && display.is_live() {
                                     // As in the reference CLI the running turn reads it after its
                                     // next tool results; unread messages become the next prompt.
+                                    crate::images::share(&session.id, &prompt);
                                     claude_core::services::input_queue::push(&session.store.db, &session.id, &prompt)?;
                                     queued_inputs.push(prompt);
                                     display.queued(queued_inputs.clone());

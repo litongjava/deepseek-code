@@ -40,15 +40,35 @@ pub fn pasted_path(text: &str) -> Option<PathBuf> {
     (text.lines().count() == 1 && path.is_absolute() && image_media_type(path).is_some() && path.is_file()).then(|| path.to_path_buf())
 }
 
+/// Shares this session's pasted images with the process that delivers a
+/// queued message, so its `[Image #N]` attaches the image.
+pub fn share(session: &str, text: &str) {
+    if placeholder_numbers(text).is_empty() {
+        return;
+    }
+    let pasted = PASTED.lock().unwrap_or_else(|error| error.into_inner()).clone();
+    if let Ok(data_dir) = claude_core::runtime::resolve_default_data_dir() {
+        let _ = claude_core::services::input_queue::save_pasted_images(&data_dir, session, &pasted);
+    }
+}
+
+/// The numbers of the pasted images a prompt names with `[Image #N]`.
+pub fn placeholder_numbers(prompt: &str) -> Vec<usize> {
+    let pasted = PASTED.lock().unwrap_or_else(|error| error.into_inner());
+    let mut numbers: Vec<usize> = Vec::new();
+    for number in prompt.split("[Image #").skip(1).filter_map(|rest| rest.split_once(']')?.0.parse::<usize>().ok()) {
+        if (1..=pasted.len()).contains(&number) && !numbers.contains(&number) {
+            numbers.push(number);
+        }
+    }
+    numbers
+}
+
 /// The pasted images a prompt names with `[Image #N]`, in order.
 fn placeholders(prompt: &str) -> Vec<PathBuf> {
+    let numbers = placeholder_numbers(prompt);
     let pasted = PASTED.lock().unwrap_or_else(|error| error.into_inner());
-    prompt
-        .split("[Image #")
-        .skip(1)
-        .filter_map(|rest| rest.split_once(']')?.0.parse::<usize>().ok())
-        .filter_map(|number| pasted.get(number.checked_sub(1)?).cloned())
-        .collect()
+    numbers.into_iter().map(|number| pasted[number - 1].clone()).collect()
 }
 
 /// Image paths written in the prompt: plain, quoted or after @.
