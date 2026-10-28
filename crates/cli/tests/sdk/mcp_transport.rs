@@ -524,7 +524,7 @@ async fn sdk_mcp_initialization_is_atomic_and_rejects_configured_name_conflicts(
 async fn sdk_mcp_owned_child_cannot_expand_its_agent_tool_boundary() {
     for anthropic in [false, true] {
         let root = tempfile::tempdir().unwrap();
-        let server = start_server(anthropic, vec![("Agent", json!({"agent_type":"restricted","prompt":"Complete the restricted child task"})), ("mcp__first__echo", json!({"value":"FORBIDDEN_CHILD_CALL"}))]).await;
+        let server = start_server(anthropic, vec![("Agent", json!({"agent_type":"restricted","prompt":"Complete the restricted child task","run_in_background":false})), ("mcp__first__echo", json!({"value":"FORBIDDEN_CHILD_CALL"}))]).await;
         let mut client = Client::start(root.path(), &server, &["--permission-mode", "bypass"]);
         client.send(initialize_request("child-mcp", json!({"sdkMcpServers":["first"],"agents":{"restricted":{"description":"Restricted child","prompt":"Read only","tools":["Read"]}}}))).await;
         assert_eq!(

@@ -149,7 +149,7 @@ async fn respond(State(state): State<Fixture>, Json(body): Json<Value>) -> Respo
                     (
                         "agent-1",
                         "Agent",
-                        json!({"agent_type":"sdk-child","prompt":"Complete the child task"}),
+                        json!({"agent_type":"sdk-child","prompt":"Complete the child task","run_in_background":false}),
                     )
                 } else {
                     (
@@ -201,7 +201,7 @@ async fn respond(State(state): State<Fixture>, Json(body): Json<Value>) -> Respo
                 let (name, args) = if count == 1 {
                     (
                         "Agent",
-                        json!({"agent_type":"sdk-child","prompt":"Complete the child task"}),
+                        json!({"agent_type":"sdk-child","prompt":"Complete the child task","run_in_background":false}),
                     )
                 } else {
                     (

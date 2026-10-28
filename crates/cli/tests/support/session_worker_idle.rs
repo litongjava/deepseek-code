@@ -64,7 +64,7 @@ async fn model(
         tool = Some((
             "initial-agent",
             "Agent",
-            json!({"agent_type":"general","prompt":"Complete the initial child task"}),
+            json!({"agent_type":"general","prompt":"Complete the initial child task","run_in_background":false}),
         ));
     } else if !child && state.boundary_resume && last["tool_call_id"] == "initial-agent" {
         let result: Value = serde_json::from_str(content).unwrap();

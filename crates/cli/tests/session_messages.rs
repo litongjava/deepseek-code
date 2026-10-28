@@ -90,7 +90,7 @@ async fn respond(
         vec![(
             "child",
             "Agent",
-            json!({"prompt":"sender task", "agent_type":"general"}),
+            json!({"prompt":"sender task", "agent_type":"general", "run_in_background":false}),
         )]
     } else {
         state.started.notify_one();
@@ -431,7 +431,7 @@ async fn resident_owner_resumes_same_child_with_original_provider_after_switch()
                 let child=body.to_string().contains("Child session ID:");requests.lock().unwrap().push((original,body.clone()));
                 let messages=body["messages"].as_array().unwrap();let last=messages.last().unwrap();
                 let tools=if child {assert!(original,"Child must retain its original endpoint");child_calls.fetch_add(1,Ordering::SeqCst);Vec::new()}
-                else if last["role"]=="user" && last["content"]=="create owned child" {vec![("create","Agent",json!({"prompt":"original owned child"}))]}
+                else if last["role"]=="user" && last["content"]=="create owned child" {vec![("create","Agent",json!({"prompt":"original owned child","run_in_background":false}))]}
                 else if last["role"]=="user" && last["content"]=="continue owned child" {vec![("resume","Agent",json!({"resume":child_id.lock().unwrap().clone().unwrap(),"prompt":"resumed through resident worker"}))]}
                 else {Vec::new()};
                 ([("content-type","text/event-stream")],stream("openai",tools))

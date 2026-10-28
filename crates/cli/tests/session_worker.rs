@@ -364,7 +364,7 @@ async fn added_directory_survives_worker_resume_without_granting_other_sessions(
                 {"name":"Read","input":{"file_path":allowed.join("source.txt")}},
                 {"name":"Read","input":{"file_path":denied.join("source.txt")}}
             ]);
-            let delegate = json!([{"name":"Agent","input":{"prompt":child_calls.to_string(),"agent_type":"general"}}]);
+            let delegate = json!([{"name":"Agent","input":{"prompt":child_calls.to_string(),"agent_type":"general","run_in_background":false}}]);
             let job = submit(&host, &endpoint, &delegate.to_string(), "fixture-one", 128).await;
             assert_eq!(completed(&paths.data_dir, &job).await.status, "completed");
             let requests = requests.lock().unwrap();
