@@ -28,19 +28,43 @@ pub async fn handle(
             };
             let history = session.store.history(&session.id)?;
             let text = response(&history, number)?;
-            copy_text(text)?;
-            eprintln!("Copied {} chars to clipboard.", text.chars().count());
+            eprintln!("{}", copy_with_file(text)?);
         }
         "/export" => {
-            ensure!(
-                !argument.is_empty(),
-                "Usage: /export FILE or /export clipboard"
-            );
             let history = session.store.history(&session.id)?;
             let text = transcript(&session.id, &history);
+            let argument = if argument.is_empty() {
+                // As in the reference CLI: choose how to export.
+                ensure!(crate::terminal::picker::available(), "Usage: /export FILE or /export clipboard");
+                use crate::terminal::picker::{Entry, Picker};
+                let entries = [
+                    Entry { title: "Copy to clipboard".into(), detail: "Copy the conversation to your system clipboard".into() },
+                    Entry { title: "Save to file".into(), detail: "Save the conversation to a file in the current directory".into() },
+                ];
+                let picker = Picker { heading: "Export conversation", subtitle: Some("Select export method"), entries: &entries, search: false, hint: "Enter to confirm \u{b7} Esc to cancel", selected: 0 };
+                match picker.run()? {
+                    Some(0) => "clipboard".to_owned(),
+                    Some(_) => {
+                        let default = format!("conversation-{}.txt", chrono::Local::now().format("%Y-%m-%d-%H%M%S"));
+                        match crate::terminal::picker::text_input("Save to file:", &default)?.filter(|name| !name.is_empty()) {
+                            Some(name) => name,
+                            None => {
+                                eprintln!("  \u{23bf}  Export cancelled");
+                                return Ok(true);
+                            }
+                        }
+                    }
+                    None => {
+                        eprintln!("  \u{23bf}  Export cancelled");
+                        return Ok(true);
+                    }
+                }
+            } else {
+                argument.to_owned()
+            };
+            let argument = argument.as_str();
             if argument == "clipboard" {
-                copy_text(&text)?;
-                eprintln!("Copied {} chars to clipboard.", text.chars().count());
+                eprintln!("{}", copy_with_file(&text)?);
             } else {
                 let path = Path::new(argument.trim_matches('"'));
                 export_file(path, &text)?;
@@ -317,6 +341,47 @@ fn export_file(path: &Path, text: &str) -> Result<()> {
     Ok(())
 }
 
+/// Copies like the reference CLI: the system clipboard, or the terminal's
+/// own clipboard (OSC 52) when no clipboard program is available, and always
+/// a file with the text too.
+fn copy_with_file(text: &str) -> Result<String> {
+    let copied = copy_text(text).is_ok() || copy_osc52(text);
+    let directory = std::env::temp_dir().join("deepseek-code");
+    std::fs::create_dir_all(&directory)?;
+    let file = directory.join("response.md");
+    std::fs::write(&file, text)?;
+    let lines = text.lines().count().max(1);
+    let summary = format!("({} characters, {lines} lines)", text.chars().count());
+    Ok(if copied {
+        format!("  \u{23bf}  Copied to clipboard {summary}\n     Also written to {}", file.display())
+    } else {
+        format!("  \u{23bf}  No clipboard available {summary}\n     Written to {}", file.display())
+    })
+}
+
+fn base64(bytes: &[u8]) -> String {
+    const ALPHABET: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    let mut encoded = String::with_capacity(bytes.len() * 4 / 3 + 4);
+    for chunk in bytes.chunks(3) {
+        let value = chunk.iter().enumerate().fold(0u32, |value, (index, byte)| value | (*byte as u32) << (16 - index * 8));
+        for index in 0..4 {
+            encoded.push(if index <= chunk.len() { ALPHABET[(value >> (18 - index * 6)) as usize & 63] as char } else { '=' });
+        }
+    }
+    encoded
+}
+
+/// Sends the text to the terminal's clipboard with OSC 52.
+fn copy_osc52(text: &str) -> bool {
+    use std::io::IsTerminal;
+    if !std::io::stderr().is_terminal() || text.len() > 74_994 {
+        return false;
+    }
+    let encoded = base64(text.as_bytes());
+    let mut out = std::io::stderr();
+    write!(out, "\x1b]52;c;{encoded}\x07").and_then(|()| out.flush()).is_ok()
+}
+
 fn copy_text(text: &str) -> Result<()> {
     #[cfg(windows)]
     let mut command = {
@@ -537,6 +602,13 @@ fn resumable(session: &Session, all: bool) -> Result<Vec<(String, Resumable)>> {
 #[cfg(test)]
 mod resume_tests {
     use super::*;
+
+    #[test]
+    fn osc52_payload_is_standard_base64() {
+        assert_eq!(base64(b"hello"), "aGVsbG8=");
+        assert_eq!(base64(b"hi"), "aGk=");
+        assert_eq!(base64("中".as_bytes()), "5Lit");
+    }
 
     #[test]
     fn sizes_and_times_read_like_the_reference_list() {
