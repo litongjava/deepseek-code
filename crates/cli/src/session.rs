@@ -487,6 +487,12 @@ impl Session {
         Ok(())
     }
 
+    /// A separate engine on the same providers, for side requests such as
+    /// naming the session's topic while a turn runs.
+    pub fn side_engine(&self) -> NativeEngine {
+        runtime::create_engine(&self.paths, self.store.db.clone(), self.providers.clone(), self.permissions.clone(), Arc::new(FileCache::new()))
+    }
+
     pub async fn branch_saved(&mut self, paths: &RuntimePaths, title: &str) -> Result<String> {
         anyhow::ensure!(title.chars().count() <= 200, "Session titles must be at most 200 characters");
         let id = self.store.fork(&self.id)?;

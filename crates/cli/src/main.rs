@@ -138,6 +138,7 @@ async fn prompt_turn(
     prompt: &str,
     input: &mut Option<terminal::input::TerminalInput>,
 ) -> Result<()> {
+    terminal::title::name_topic(session, prompt);
     let Some(content) = images::content(&session.workspace, prompt)? else {
         return session.turn(cli, prompt, input).await;
     };
@@ -533,10 +534,12 @@ async fn run(cli: &Cli) -> Result<()> {
         // History length the last suggestion was generated for.
         let mut suggested_for = session.store.history(&session.id)?.len();
         terminal::STARTED.get_or_init(std::time::Instant::now);
+        terminal::title::start();
         if let Some(speed) = std::fs::read_to_string(paths.data_dir.join("scroll-speed")).ok().and_then(|text| text.trim().parse::<usize>().ok()).filter(|speed| (1..=20).contains(speed)) {
             terminal::SCROLL_SPEED.store(speed, std::sync::atomic::Ordering::Relaxed);
         }
         'repl: loop {
+            terminal::title::apply(&session.id);
             let idle_deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(60);
             let mut idle_notified = false;
             for notice in background_commands::collect_completed(&session)? { eprintln!("{notice}"); }
@@ -876,6 +879,7 @@ async fn run(cli: &Cli) -> Result<()> {
         }
         Ok(())
     }.await;
+    if !single { terminal::title::clear(); }
     session.end_hooks(if result.is_ok() && !single { "prompt_input_exit" } else { "other" }).await;
     let shutdown = session.close().await;
     // A completed single turn already wrote its terminal result. Shutdown may

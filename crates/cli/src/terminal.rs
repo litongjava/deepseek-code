@@ -128,6 +128,7 @@ pub(crate) mod paste_input;
 pub mod change_view;
 pub mod tool_view;
 pub mod transcript_pager;
+pub mod title;
 pub mod picker;
 pub mod plan_view;
 pub mod tips;
