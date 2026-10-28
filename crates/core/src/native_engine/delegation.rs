@@ -43,8 +43,8 @@ impl OwnedChild {
 
 pub(super) fn definitions() -> Vec<ToolDefinition> {
     ["Agent", "Delegate", "Worker"].into_iter().map(|name| ToolDefinition {
-        name: name.into(), description: "Delegate a bounded task to a persistent child session using the same model and tool permissions. Waits for completion; cancellation stops the child. Use agent_type to select an existing agent definition.".into(),
-        input_schema: json!({"type":"object","properties":{"prompt":{"type":"string"},"agent_type":{"type":"string","default":"general"},"resume":{"type":"string","description":"Resume a completed child UUID owned by this session; original live configuration must still be retained"}},"required":["prompt"],"additionalProperties":false})
+        name: name.into(), description: "Delegate a bounded task to a persistent child session using the same model and tool permissions. Waits for completion unless run_in_background is true: then it returns at once, the child runs as a background task, and you are notified when it finishes. Cancellation stops a waited-for child. Use agent_type to select an existing agent definition.".into(),
+        input_schema: json!({"type":"object","properties":{"prompt":{"type":"string"},"description":{"type":"string","description":"A short (3-5 word) description of the task"},"agent_type":{"type":"string","default":"general"},"run_in_background":{"type":"boolean","description":"Return at once and run the agent in the background; you are notified when it finishes"},"resume":{"type":"string","description":"Resume a completed child UUID owned by this session; original live configuration must still be retained"}},"required":["prompt"],"additionalProperties":false})
     }).collect()
 }
 
@@ -521,6 +521,9 @@ impl ToolLoopExecutor {
         if let Some(id) = input["resume"].as_str() {
             return Box::pin(self.resume_owned_child(id, input["prompt"].as_str(), false)).await;
         }
+        if input["run_in_background"] == true && schema.is_none() && tools.is_none() {
+            return self.spawn_background_agent(&input);
+        }
         let prepared = Box::pin(self.prepare_delegated_child(&input, schema, tools)).await?;
         self.run_owned_child(
             prepared.context,
@@ -531,6 +534,85 @@ impl ToolLoopExecutor {
             prepared.policy,
         )
         .await
+    }
+
+    /// As the reference CLI's background agents: the child runs in its own
+    /// session as a background task with the same provider, model and
+    /// permission mode, and this call returns at once. The host announces it
+    /// and wakes this session when it finishes.
+    fn spawn_background_agent(&self, input: &Value) -> Result<Value> {
+        ensure!(self.delegation_depth == 0, "Background agents start from the main session only");
+        let prompt = input["prompt"].as_str().context("prompt is required")?;
+        ensure!(!prompt.trim().is_empty() && prompt.len() <= 64_000, "Child prompt must contain 1–64000 bytes");
+        let parent = self.conv_id.clone().context("Child owner unavailable")?;
+        let root = self
+            .search_config_path
+            .as_deref()
+            .and_then(|p| p.parent())
+            .context("Runtime directory is unavailable")?
+            .to_path_buf();
+        let context = ServiceContext::open(RuntimePaths::new(root.clone())?, Arc::new(EnvironmentCredentials))?;
+        let agent_type = input["agent_type"].as_str().unwrap_or("general");
+        let definition = agents::resolve(&context, agent_type)?;
+        let description = input["description"]
+            .as_str()
+            .filter(|text| !text.trim().is_empty())
+            .map(str::to_owned)
+            .unwrap_or_else(|| prompt.lines().next().unwrap_or_default().chars().take(60).collect());
+        let provider = &self.provider;
+        let child = SessionStore::new(context.db.clone()).create(std::path::Path::new(&self.workspace_cwd), &provider.model.id, &provider.provider.id)?;
+        crate::services::permission_authority::record_user(&context.db, &child, &json!(prompt))?;
+        let mode = self
+            .permission_manager
+            .as_ref()
+            .map(|manager| crate::services::session_permission_mode::name(manager.get_mode()))
+            .unwrap_or("ask");
+        let mut arguments = vec![
+            "--data-dir".to_owned(), root.to_string_lossy().into_owned(),
+            "--resume".into(), child.clone(),
+            "--provider".into(), provider.provider.id.clone(),
+            "--model".into(), provider.model.id.clone(),
+            "--permission-mode".into(), mode.into(),
+            "--print".into(), "--output-format".into(), "stream-json".into(),
+        ];
+        if provider.provider.builtin_id.is_none() {
+            arguments.extend(["--base-url".into(), provider.provider.base_url.clone()]);
+            arguments.extend(["--api-format".into(), match provider.provider.api_format {
+                crate::native_engine::provider_manager::ApiFormat::Anthropic => "anthropic",
+                crate::native_engine::provider_manager::ApiFormat::OpenAI => "openai",
+            }.into()]);
+        }
+        let mut environment = vec![("CLAUDE_RUST_WORKER_MODEL".to_owned(), serde_json::to_string(&provider.model)?)];
+        if !provider.provider.api_key.is_empty() {
+            arguments.extend(["--api-key-env".into(), "CLAUDE_RUST_CHILD_API_KEY".into()]);
+            environment.push(("CLAUDE_RUST_CHILD_API_KEY".into(), provider.provider.api_key.clone()));
+        }
+        if !definition.system_prompt.trim().is_empty() {
+            arguments.extend(["--append-system-prompt".into(), definition.system_prompt.clone()]);
+        }
+        arguments.extend(["--".into(), prompt.into()]);
+        let executable = std::env::current_exe()?;
+        let job = crate::services::background_sessions::spawn(
+            &root,
+            &executable,
+            crate::services::background_sessions::Launch { executable: executable.clone(), arguments, cwd: std::path::PathBuf::from(&self.workspace_cwd) },
+            &parent,
+            &child,
+            &format!("Agent: {description}"),
+            &environment,
+        )?;
+        context.save_setting(
+            &format!("background-agent.{}", job.id),
+            &json!({"agent_type":definition.id,"description":description,"parent":parent,"session_id":child,"started_at":chrono::Utc::now().to_rfc3339()}),
+        )?;
+        Ok(json!({
+            "agent_id": job.id,
+            "session_id": child,
+            "status": "running",
+            "backgrounded": true,
+            "description": description,
+            "message": "The agent is running in the background. You will be notified when it finishes; do not wait or poll for it."
+        }))
     }
 
     /// Builds an owned child session without running it so a leader can start
