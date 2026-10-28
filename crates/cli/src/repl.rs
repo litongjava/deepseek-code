@@ -37,6 +37,7 @@ pub fn transcript_of(session: &Session, id: &str) -> Result<Vec<crate::terminal:
         for message in &rows {
             if message.is_compact_boundary {
                 lines.push(change_view::muted("\u{273b} Conversation compacted"));
+                lines.extend(message.content.lines().map(|line| change_view::muted(&format!("  {line}"))));
                 continue;
             }
             if message.role == "user" {
@@ -117,8 +118,9 @@ pub async fn handle(line: &str, paths: &RuntimePaths, session: &mut Session) -> 
                 _ = tokio::signal::ctrl_c() => anyhow::bail!("Compaction interrupted; check /history for a completed summary. Original transcript retained"),
             };
             for warning in &report.warnings { eprintln!("Hook: {warning}"); }
+            // As in the reference CLI; the summary is in the Ctrl+O transcript.
             eprintln!(
-                "Summarized {} messages. Original transcript remains in /history.",
+                "  \u{23bf}  Compacted (ctrl+o to see full summary)\n     {} messages summarized; the original transcript remains in /history.",
                 report.summarized_messages
             );
         }
