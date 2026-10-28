@@ -54,25 +54,45 @@ pub async fn handle(
         "/resume" => {
             if argument.is_empty() && crate::terminal::picker::available() {
                 // As in the reference CLI: this project's other sessions in a
-                // searchable picker, newest first.
-                let here = resumable(session)?;
-                if here.is_empty() {
-                    eprintln!("No other conversations in this project.");
-                    return Ok(true);
-                }
-                let entries: Vec<_> = here.iter().map(|(_, entry)| crate::terminal::picker::Entry { title: entry.title.clone(), detail: entry.detail.clone() }).collect();
-                let project = session.workspace.file_name().map(|name| name.to_string_lossy().into_owned()).unwrap_or_default();
-                let picker = crate::terminal::picker::Picker {
-                    heading: "Resume session",
-                    subtitle: Some(&project),
-                    entries: &entries,
-                    search: true,
-                    hint: "Type to search \u{b7} Enter to resume \u{b7} Esc to cancel",
-                    selected: 0,
-                };
-                if let Some(index) = picker.run()? {
-                    session.resume_saved(paths, &here[index].0).await?;
-                    eprintln!("Resumed {} using saved provider {} and model {}.", session.id, session.provider_id, session.model);
+                // searchable picker, newest first; Ctrl+A shows every project,
+                // Space previews and Ctrl+R renames.
+                use crate::terminal::picker::{Entry, Key, Picked, Picker};
+                let mut all = false;
+                let mut selected = 0;
+                loop {
+                    let found = resumable(session, all)?;
+                    if found.is_empty() && !all {
+                        eprintln!("No other conversations in this project. Ctrl+A in /resume shows every project once there are some.");
+                        return Ok(true);
+                    }
+                    let entries: Vec<_> = found.iter().map(|(_, entry)| Entry { title: entry.title.clone(), detail: entry.detail.clone() }).collect();
+                    let project = if all { "All projects".to_owned() } else { session.workspace.file_name().map(|name| name.to_string_lossy().into_owned()).unwrap_or_default() };
+                    let hint = format!("Ctrl+A to {} \u{b7} Space to preview \u{b7} Ctrl+R to rename \u{b7} Type to search \u{b7} Esc to cancel", if all { "only show current project" } else { "show all projects" });
+                    let picker = Picker { heading: "Resume session", subtitle: Some(&project), entries: &entries, search: true, hint: &hint, selected };
+                    match picker.run_keys(&[Key::Ctrl('a'), Key::Space, Key::Ctrl('r')])? {
+                        Picked::Entry(index) => {
+                            session.resume_saved(paths, &found[index].0).await?;
+                            eprintln!("Resumed {} using saved provider {} and model {}.", session.id, session.provider_id, session.model);
+                            return Ok(true);
+                        }
+                        Picked::Key(Key::Ctrl('a'), _) => {
+                            all = !all;
+                            selected = 0;
+                        }
+                        Picked::Key(Key::Space, Some(index)) => {
+                            selected = index;
+                            crate::terminal::transcript_pager::view(&crate::repl::transcript_of(session, &found[index].0)?)?;
+                        }
+                        Picked::Key(Key::Ctrl('r'), Some(index)) => {
+                            selected = index;
+                            if let Some(title) = crate::terminal::picker::text_input("Rename session:", &found[index].1.title)?.filter(|title| !title.is_empty()) {
+                                let title: String = title.chars().take(200).collect();
+                                session.store.db.with_conn(|conn| conversation_repo::update_conversation_title(conn, &found[index].0, &title))??;
+                            }
+                        }
+                        Picked::Key(..) => {}
+                        Picked::Cancel => return Ok(true),
+                    }
                 }
             } else if argument.is_empty() {
                 let sessions = session
@@ -400,15 +420,15 @@ pub(crate) struct Resumable {
     pub detail: String,
 }
 
-/// This workspace's other unarchived sessions, newest first, titled by their
-/// name or first prompt.
-fn resumable(session: &Session) -> Result<Vec<(String, Resumable)>> {
+/// This workspace's (or with `all` every project's) other unarchived
+/// sessions, newest first, titled by their name or first prompt.
+fn resumable(session: &Session, all: bool) -> Result<Vec<(String, Resumable)>> {
     let here = session.workspace.canonicalize().unwrap_or_else(|_| session.workspace.clone());
     session.store.db.with_conn(|conn| -> Result<Vec<(String, Resumable)>> {
         let mut found = Vec::new();
         for row in conversation_repo::list_conversations(conn)? {
             let same = row.workspace_path.as_deref().map(|path| Path::new(path).canonicalize().unwrap_or_else(|_| Path::new(path).to_path_buf())) == Some(here.clone());
-            if row.id == session.id || row.archived || !same || row.message_count == 0 {
+            if row.id == session.id || row.archived || !(same || all) || row.message_count == 0 {
                 continue;
             }
             let named = row.title.clone().filter(|title| !title.trim().is_empty() && title != "CLI session");
@@ -420,7 +440,12 @@ fn resumable(session: &Session) -> Result<Vec<(String, Resumable)>> {
                     .map(|message| message.content.lines().next().unwrap_or_default().to_owned())
                     .unwrap_or_else(|| "(no prompt)".into()),
             };
-            let detail = format!("{} \u{b7} {} messages", ago(&row.updated_at), row.message_count);
+            let mut detail = format!("{} \u{b7} {} messages", ago(&row.updated_at), row.message_count);
+            if all {
+                if let Some(path) = &row.workspace_path {
+                    detail.push_str(&format!(" \u{b7} {}", crate::terminal::home_path(Path::new(path))));
+                }
+            }
             found.push((row.id, Resumable { title, detail }));
             if found.len() == 50 {
                 break;

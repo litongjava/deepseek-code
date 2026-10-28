@@ -72,6 +72,20 @@ fn rows(lines: &[Line], width: usize, color: bool) -> Vec<Row> {
     rows
 }
 
+/// The pager outside the prompt, such as the /resume preview.
+pub fn view(lines: &[Line]) -> io::Result<Outcome> {
+    let raw = terminal::is_raw_mode_enabled()?;
+    if !raw {
+        terminal::enable_raw_mode()?;
+    }
+    let mut reader = super::paste_input::Reader::new()?;
+    let result = run(lines, &mut || reader.next(std::time::Duration::from_millis(100)));
+    if !raw {
+        terminal::disable_raw_mode()?;
+    }
+    result
+}
+
 pub fn run(
     lines: &[Line],
     next_event: &mut dyn FnMut() -> io::Result<Option<Event>>,

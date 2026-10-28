@@ -24,10 +24,15 @@ pub fn tool_transcript(session: &Session) -> Result<Vec<crate::terminal::change_
 /// each prompt, each answer under its time and model, its thinking and every
 /// tool call in full.
 pub fn transcript(session: &Session) -> Result<Vec<crate::terminal::change_view::Line>> {
+    transcript_of(session, &session.id)
+}
+
+/// The transcript of any saved conversation, for the /resume preview.
+pub fn transcript_of(session: &Session, id: &str) -> Result<Vec<crate::terminal::change_view::Line>> {
     use crate::terminal::{change_view, tool_view};
     let width = crossterm::terminal::size().map_or(80, |(cols, _)| cols.saturating_sub(1) as usize);
     session.store.db.with_conn(|conn| {
-        let rows = claude_core::db::message_repo::get_messages_by_conversation(conn, &session.id)?;
+        let rows = claude_core::db::message_repo::get_messages_by_conversation(conn, id)?;
         let mut lines = Vec::new();
         for message in &rows {
             if message.is_compact_boundary {

@@ -29,22 +29,56 @@ pub fn available() -> bool {
     io::stdin().is_terminal() && io::stderr().is_terminal() && !crate::terminal::screen_reader()
 }
 
+/// An extra key a picker hands back with the entry it was pressed on.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Key {
+    /// Space, while the search box is empty.
+    Space,
+    Ctrl(char),
+}
+
+#[derive(Debug, PartialEq)]
+pub enum Picked {
+    Entry(usize),
+    Key(Key, Option<usize>),
+    Cancel,
+}
+
+fn with_raw<T>(run: impl FnOnce(&mut dyn FnMut() -> io::Result<Option<Event>>) -> io::Result<T>) -> io::Result<T> {
+    let raw = terminal::is_raw_mode_enabled()?;
+    if !raw {
+        terminal::enable_raw_mode()?;
+    }
+    let mut reader = super::paste_input::Reader::new()?;
+    let result = run(&mut || reader.next(std::time::Duration::from_millis(100)));
+    if !raw {
+        terminal::disable_raw_mode()?;
+    }
+    result
+}
+
 impl Picker<'_> {
     /// The chosen entry's index, or None after Esc or Ctrl+C.
     pub fn run(&self) -> io::Result<Option<usize>> {
-        let raw = terminal::is_raw_mode_enabled()?;
-        if !raw {
-            terminal::enable_raw_mode()?;
-        }
-        let mut reader = super::paste_input::Reader::new()?;
-        let result = self.drive(&mut || reader.next(std::time::Duration::from_millis(100)));
-        if !raw {
-            terminal::disable_raw_mode()?;
-        }
-        result
+        Ok(match with_raw(|next| self.drive_keys(&[], next))? {
+            Picked::Entry(index) => Some(index),
+            _ => None,
+        })
+    }
+
+    /// Like `run`, also returning any of `keys`.
+    pub fn run_keys(&self, keys: &[Key]) -> io::Result<Picked> {
+        with_raw(|next| self.drive_keys(keys, next))
     }
 
     fn drive(&self, next_event: &mut dyn FnMut() -> io::Result<Option<Event>>) -> io::Result<Option<usize>> {
+        Ok(match self.drive_keys(&[], next_event)? {
+            Picked::Entry(index) => Some(index),
+            _ => None,
+        })
+    }
+
+    fn drive_keys(&self, keys: &[Key], next_event: &mut dyn FnMut() -> io::Result<Option<Event>>) -> io::Result<Picked> {
         let mut screen = Screen::default();
         let mut query = String::new();
         let mut selected = self.selected;
@@ -61,13 +95,22 @@ impl Picker<'_> {
                 continue;
             }
             let control = key.modifiers.contains(KeyModifiers::CONTROL);
+            let extra = match key.code {
+                KeyCode::Char(' ') if query.is_empty() && !control => Some(Key::Space),
+                KeyCode::Char(ch) if control => Some(Key::Ctrl(ch)),
+                _ => None,
+            };
+            if let Some(extra) = extra.filter(|extra| keys.contains(extra)) {
+                screen.suspend()?;
+                return Ok(Picked::Key(extra, shown.get(selected).copied()));
+            }
             match key.code {
                 KeyCode::Esc => break,
                 KeyCode::Char('c') if control => break,
                 KeyCode::Enter => {
                     if let Some(index) = shown.get(selected) {
                         screen.suspend()?;
-                        return Ok(Some(*index));
+                        return Ok(Picked::Entry(*index));
                     }
                 }
                 KeyCode::Up => selected = selected.saturating_sub(1),
@@ -86,7 +129,7 @@ impl Picker<'_> {
             }
         }
         screen.suspend()?;
-        Ok(None)
+        Ok(Picked::Cancel)
     }
 
     fn matching(&self, query: &str) -> Vec<usize> {
@@ -132,6 +175,47 @@ impl Picker<'_> {
         lines.push((clipped(&format!(" {}", self.hint), width), TextStyle::Muted));
         (lines, cursor)
     }
+}
+
+/// One line of text input, as the reference CLI's "Rename session:".
+/// Enter returns the text, Esc returns None.
+pub fn text_input(heading: &str, initial: &str) -> io::Result<Option<String>> {
+    with_raw(|next| edit_text(heading, initial, next))
+}
+
+fn edit_text(heading: &str, initial: &str, next_event: &mut dyn FnMut() -> io::Result<Option<Event>>) -> io::Result<Option<String>> {
+    let mut screen = Screen::default();
+    let mut text = initial.to_owned();
+    let result = loop {
+        let width = terminal::size().map_or(80, |(cols, _)| cols as usize).saturating_sub(1).max(20);
+        let lines = vec![
+            (clipped(&format!(" {heading}"), width), TextStyle::Accent),
+            (clipped(&format!(" {text}"), width), TextStyle::Plain),
+            (clipped(" Enter to save \u{b7} Esc to cancel", width), TextStyle::Muted),
+        ];
+        let column = (1 + unicode_width::UnicodeWidthStr::width(text.as_str())).min(width);
+        screen.draw(&lines, 1, column)?;
+        let Some(Event::Key(key)) = next_event()? else {
+            continue;
+        };
+        if key.kind == KeyEventKind::Release {
+            continue;
+        }
+        let control = key.modifiers.contains(KeyModifiers::CONTROL);
+        match key.code {
+            KeyCode::Esc => break None,
+            KeyCode::Char('c') if control => break None,
+            KeyCode::Enter => break Some(text.trim().to_owned()),
+            KeyCode::Backspace => {
+                text.pop();
+            }
+            KeyCode::Char('u') if control => text.clear(),
+            KeyCode::Char(ch) if !control => text.push(ch),
+            _ => {}
+        }
+    };
+    screen.suspend()?;
+    Ok(result)
 }
 
 /// A details view such as the reference CLI's "Shell details": plain lines
@@ -209,6 +293,24 @@ mod tests {
         let (lines, cursor) = picker.lines(&picker.matching("parser"), 1, "parser", 80, 24);
         assert_eq!(lines[1].0, " \u{2315} parser");
         assert!(lines[cursor].0.starts_with(" \u{276f} refactor parser"));
+    }
+
+    #[test]
+    fn extra_keys_return_with_the_selected_entry_and_text_input_edits() {
+        let entries = entries();
+        let picker = Picker { heading: "Resume session", subtitle: None, entries: &entries, search: true, hint: "", selected: 1 };
+        let mut keys = vec![Event::Key(KeyEvent::new(KeyCode::Char(' '), KeyModifiers::NONE))];
+        assert_eq!(picker.drive_keys(&[Key::Space], &mut || Ok(keys.pop())).unwrap(), Picked::Key(Key::Space, Some(1)));
+        // Once searching, Space is text.
+        let mut keys = vec![
+            Event::Key(KeyEvent::new(KeyCode::Char('r'), KeyModifiers::CONTROL)),
+            Event::Key(KeyEvent::new(KeyCode::Backspace, KeyModifiers::NONE)),
+            Event::Key(KeyEvent::new(KeyCode::Char(' '), KeyModifiers::NONE)),
+            Event::Key(KeyEvent::new(KeyCode::Char('a'), KeyModifiers::NONE)),
+        ];
+        assert_eq!(picker.drive_keys(&[Key::Space, Key::Ctrl('r')], &mut || Ok(keys.pop())).unwrap(), Picked::Key(Key::Ctrl('r'), Some(0)));
+        let mut keys: Vec<Event> = [KeyCode::Enter, KeyCode::Char('x'), KeyCode::Backspace].into_iter().map(|code| Event::Key(KeyEvent::new(code, KeyModifiers::NONE))).collect();
+        assert_eq!(edit_text("Rename session:", "old", &mut || Ok(keys.pop())).unwrap().as_deref(), Some("olx"));
     }
 
     #[test]
