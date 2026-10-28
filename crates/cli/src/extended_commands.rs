@@ -52,7 +52,29 @@ pub async fn handle(
             eprintln!("Switched to branch {id}; original conversation retained.");
         }
         "/resume" => {
-            if argument.is_empty() {
+            if argument.is_empty() && crate::terminal::picker::available() {
+                // As in the reference CLI: this project's other sessions in a
+                // searchable picker, newest first.
+                let here = resumable(session)?;
+                if here.is_empty() {
+                    eprintln!("No other conversations in this project.");
+                    return Ok(true);
+                }
+                let entries: Vec<_> = here.iter().map(|(_, entry)| crate::terminal::picker::Entry { title: entry.title.clone(), detail: entry.detail.clone() }).collect();
+                let project = session.workspace.file_name().map(|name| name.to_string_lossy().into_owned()).unwrap_or_default();
+                let picker = crate::terminal::picker::Picker {
+                    heading: "Resume session",
+                    subtitle: Some(&project),
+                    entries: &entries,
+                    search: true,
+                    hint: "Type to search \u{b7} Enter to resume \u{b7} Esc to cancel",
+                    selected: 0,
+                };
+                if let Some(index) = picker.run()? {
+                    session.resume_saved(paths, &here[index].0).await?;
+                    eprintln!("Resumed {} using saved provider {} and model {}.", session.id, session.provider_id, session.model);
+                }
+            } else if argument.is_empty() {
                 let sessions = session
                     .store
                     .db
@@ -356,4 +378,54 @@ mod tests {
         assert!(export_file(&path, "replacement").is_err());
         assert_eq!(std::fs::read_to_string(path).unwrap(), text);
     }
+}
+
+/// `24 minutes ago`, as session lists in the reference CLI show it.
+pub(crate) fn ago(time: &str) -> String {
+    let Ok(time) = chrono::DateTime::parse_from_rfc3339(time) else {
+        return String::new();
+    };
+    let seconds = (chrono::Utc::now() - time.with_timezone(&chrono::Utc)).num_seconds().max(0);
+    let (count, unit) = match seconds {
+        0..=59 => return "just now".into(),
+        60..=3599 => (seconds / 60, "minute"),
+        3600..=86_399 => (seconds / 3600, "hour"),
+        _ => (seconds / 86_400, "day"),
+    };
+    format!("{count} {unit}{} ago", if count == 1 { "" } else { "s" })
+}
+
+pub(crate) struct Resumable {
+    pub title: String,
+    pub detail: String,
+}
+
+/// This workspace's other unarchived sessions, newest first, titled by their
+/// name or first prompt.
+fn resumable(session: &Session) -> Result<Vec<(String, Resumable)>> {
+    let here = session.workspace.canonicalize().unwrap_or_else(|_| session.workspace.clone());
+    session.store.db.with_conn(|conn| -> Result<Vec<(String, Resumable)>> {
+        let mut found = Vec::new();
+        for row in conversation_repo::list_conversations(conn)? {
+            let same = row.workspace_path.as_deref().map(|path| Path::new(path).canonicalize().unwrap_or_else(|_| Path::new(path).to_path_buf())) == Some(here.clone());
+            if row.id == session.id || row.archived || !same || row.message_count == 0 {
+                continue;
+            }
+            let named = row.title.clone().filter(|title| !title.trim().is_empty() && title != "CLI session");
+            let title = match named {
+                Some(title) => title,
+                None => claude_core::db::message_repo::get_messages_by_conversation(conn, &row.id)?
+                    .into_iter()
+                    .find(|message| message.role == "user")
+                    .map(|message| message.content.lines().next().unwrap_or_default().to_owned())
+                    .unwrap_or_else(|| "(no prompt)".into()),
+            };
+            let detail = format!("{} \u{b7} {} messages", ago(&row.updated_at), row.message_count);
+            found.push((row.id, Resumable { title, detail }));
+            if found.len() == 50 {
+                break;
+            }
+        }
+        Ok(found)
+    })?
 }
