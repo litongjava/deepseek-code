@@ -651,6 +651,14 @@ async fn run(cli: &Cli) -> Result<()> {
                         if let Err(error) = session.wake_hooks(cli, &mut input).await { eprintln!("Hook wake: {error:#}"); }
                         continue 'repl;
                     }
+                    // A background agent waiting for approval asks here, as in the
+                    // reference CLI, once the input is empty.
+                    if !composer.is_pending()
+                        && background_commands::agent_question(&paths, &session.id).is_some()
+                        && input.as_mut().expect("interactive reader").yield_prompt().await? {
+                        if let Err(error) = background_commands::answer_agent_question(&paths, &session) { eprintln!("Agent question: {error:#}"); }
+                        continue 'repl;
+                    }
                     let notices = background_commands::collect_completed(&session)?;
                     // A finished background command starts a turn; its line is
                     // printed first, above that turn.

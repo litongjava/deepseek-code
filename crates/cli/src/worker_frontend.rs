@@ -275,6 +275,8 @@ async fn observe(
     let mut pending: Option<(String, tokio::sync::oneshot::Receiver<String>)> = None;
     // The plan and its file while a plan review is pending.
     let mut pending_plan: Option<(String, String)> = None;
+    // A background agent's question shown in the live menu: job and request.
+    let mut agent_pending: Option<(String, String, tokio::sync::oneshot::Receiver<String>)> = None;
     let mut plain_pending: Option<(String, String)> = None;
     let mut side: Option<
         std::pin::Pin<Box<dyn std::future::Future<Output = Result<String>> + Send + '_>>,
@@ -365,6 +367,12 @@ async fn observe(
                     if let Some(reader) = input.as_mut() { reader.dismiss_answer().await?; }
                     display.set_activity("Working");
                 }
+                if pending.is_none() && plain_pending.is_none() && agent_pending.is_none() && question.is_none() {
+                    if let (Some(live), Some((job, description, agent))) = (&display.live, crate::background_commands::agent_question(&session.paths, &session.id)) {
+                        let (lines, heading, options) = crate::background_commands::agent_approval(&session.workspace, &description, &agent);
+                        agent_pending = Some((job, agent.request_id.clone(), live.choice(lines, heading, options)));
+                    }
+                }
                 if pending.is_none() && plain_pending.is_none() {
                     if let Some(question) = question.filter(|question| !answered.contains(&question.request_id)) {
                         if let Some(live) = &display.live {
@@ -436,6 +444,16 @@ async fn observe(
             },
             _ = remote_interrupts.next() => {
                 if !cancelled { cancel_job(session, id)?; cancelled = true; display.notice("Remote Control interrupted the turn."); display.set_activity("Cancelling worker"); }
+            },
+            answer = async { match agent_pending.as_mut() { Some((_, _, answer)) => answer.await, None => std::future::pending().await } } => {
+                let (job, request, _) = agent_pending.take().unwrap();
+                if let Ok(answer) = answer {
+                    let answer = answer.split('\n').next().unwrap_or("").to_owned();
+                    match jobs::answer_question(root, &job, &session.id, &request, &answer) {
+                        Ok(()) => crate::background_commands::mark_answered(&request),
+                        Err(error) => display.notice(&format!("Agent question: {error:#}")),
+                    }
+                }
             },
             answer = async { match pending.as_mut() { Some((_, answer)) => answer.await, None => std::future::pending().await } } => {
                 let (request, _) = pending.take().unwrap();

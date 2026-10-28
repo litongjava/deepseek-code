@@ -462,6 +462,68 @@ pub(crate) fn running_agents(paths: &RuntimePaths, db: &claude_core::db::DbManag
         .collect()
 }
 
+/// Agent questions already answered here; one stays pending until its
+/// worker reads the answer and must not be asked twice.
+static ANSWERED: std::sync::Mutex<Vec<String>> = std::sync::Mutex::new(Vec::new());
+
+pub(crate) fn mark_answered(request: &str) {
+    let mut answered = ANSWERED.lock().unwrap_or_else(|error| error.into_inner());
+    answered.push(request.to_owned());
+    if answered.len() > 200 {
+        answered.remove(0);
+    }
+}
+
+/// A question one of this session's background agents is waiting on:
+/// its job, description and the question.
+pub(crate) fn agent_question(paths: &RuntimePaths, session: &str) -> Option<(String, String, background_sessions::PendingQuestion)> {
+    let context = crate::services::context(paths).ok()?;
+    for job in background_sessions::list(&paths.data_dir, Some(session)).ok()? {
+        if !matches!(job.status.as_str(), "starting" | "running" | "unresponsive") {
+            continue;
+        }
+        let Some(record) = context.setting::<serde_json::Value>(&format!("background-agent.{}", job.id)).ok().flatten() else { continue };
+        if let Ok(Some(question)) = background_sessions::pending_question(&paths.data_dir, &job.id, session) {
+            if ANSWERED.lock().unwrap_or_else(|error| error.into_inner()).contains(&question.request_id) {
+                continue;
+            }
+            return Some((job.id, record["description"].as_str().unwrap_or("background agent").to_owned(), question));
+        }
+    }
+    None
+}
+
+/// The approval menu for a background agent's question, as the live menu
+/// shows it: preview lines, the question and its choices.
+pub(crate) fn agent_approval(workspace: &std::path::Path, description: &str, question: &background_sessions::PendingQuestion) -> (Vec<crate::terminal::change_view::Line>, String, Vec<String>) {
+    match question.tool.as_ref().filter(|_| question.kind == "permission") {
+        Some(tool) => {
+            let approval = crate::terminal::tool_view::approval(tool["tool_name"].as_str().unwrap_or_default(), &tool["input"], Some(workspace), false);
+            (approval.lines, format!("Agent \"{description}\": {}", approval.question), approval.options)
+        }
+        None => (
+            vec![crate::terminal::change_view::body(&question.question)],
+            format!("Agent \"{description}\" asks:"),
+            vec!["Yes".into(), "No".into()],
+        ),
+    }
+}
+
+/// Asks a background agent's question at the prompt and sends the answer.
+pub(crate) fn answer_agent_question(paths: &RuntimePaths, session: &Session) -> Result<bool> {
+    use crate::terminal::picker::{Entry, Picker};
+    let Some((job, description, question)) = agent_question(paths, &session.id) else { return Ok(false) };
+    let (lines, heading, options) = agent_approval(&session.workspace, &description, &question);
+    let body = crate::terminal::change_view::plain(&lines);
+    let entries: Vec<Entry> = options.iter().map(|option| Entry { title: option.clone(), detail: String::new() }).collect();
+    let picker = Picker { heading: &heading, subtitle: Some(body.trim_end()), entries: &entries, search: false, hint: "Enter to confirm \u{b7} Esc to cancel", selected: 0 };
+    // Esc answers No, as in an approval menu.
+    let choice = picker.run()?.unwrap_or(options.len() - 1);
+    background_sessions::answer_question(&paths.data_dir, &job, &session.id, &question.request_id, &(choice + 1).to_string())?;
+    mark_answered(&question.request_id);
+    Ok(true)
+}
+
 /// The rows under the footer while agents run, as in the reference CLI:
 /// `● main` and `◯ general  Find the logging code  13s · ↓ 6.6k tokens`.
 pub(crate) fn agent_rows(agents: &[Agent], width: usize) -> Vec<String> {
