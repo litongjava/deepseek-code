@@ -353,6 +353,8 @@ struct State {
     thinking_span: Option<(Instant, Instant)>,
     thinking_characters: usize,
     thinking_entry: Option<usize>,
+    /// The current reasoning, for the live `● Thinking for 2s…` preview.
+    thinking_preview: String,
     history: Vec<String>,
     history_index: usize,
     history_draft: String,
@@ -442,6 +444,7 @@ impl State {
             thinking_span: None,
             thinking_characters: 0,
             thinking_entry: None,
+            thinking_preview: String::new(),
             history: Vec::new(),
             history_index: 0,
             history_draft: String::new(),
@@ -897,6 +900,20 @@ fn capitalized(text: &str) -> String {
     let mut chars = text.chars();
     chars.next().map_or_else(String::new, |first| first.to_uppercase().chain(chars).collect())
 }
+/// Reasoning while it streams, as in the reference CLI: `● Thinking for 2s…`
+/// and the latest reasoning as one paragraph under `⎿`.
+fn thinking_lines(state: &State, width: usize, budget: usize) -> Vec<String> {
+    let seconds = state.thinking_span.map_or(0, |(first, _)| first.elapsed().as_secs()).max(1);
+    let mut lines = vec![format!("\u{25cf} Thinking for {seconds}s\u{2026}")];
+    let text = terminal_text(&state.thinking_preview).split_whitespace().collect::<Vec<_>>().join(" ");
+    let rows: Vec<String> = visual_lines(&text, width.saturating_sub(5).max(1)).into_iter().map(|(row, _)| row.trim().to_owned()).collect();
+    let skip = rows.len().saturating_sub(budget.saturating_sub(1).max(1));
+    for (index, row) in rows.into_iter().skip(skip).enumerate() {
+        let prefix = if index == 0 { "  \u{23bf}  " } else { "     " };
+        lines.push(format!("\x1b[2m{prefix}{row}\x1b[0m"));
+    }
+    lines
+}
 /// The folded calls while they run: the summary and the latest call.
 fn group_lines(group: &Group, width: usize) -> Vec<String> {
     let kinds: Vec<Gathering> = group.calls.iter().map(|call| call.1).collect();
@@ -933,6 +950,21 @@ fn group_call(state: &mut State, id: String, kind: Gathering, label: String, ste
 fn finish_text(state: &mut State, screen: &mut Frame) {
     finish_group(state, screen);
     finish_answer(state, screen);
+    finish_thought(state, screen);
+}
+/// Reasoning that no folded calls absorbed gets its own line, as in the
+/// reference CLI: `  Thought for 2s`.
+fn finish_thought(state: &mut State, screen: &mut Frame) {
+    let Some((first, last)) = state.thinking_span.take() else {
+        return;
+    };
+    let line = format!("  Thought for {}s", last.duration_since(first).as_secs().max(1));
+    if std::env::var_os("NO_COLOR").is_some() {
+        let _ = screen.log(&line);
+    } else {
+        screen.log_rendered(&change_view::render(&change_view::muted(&line), usize::MAX, true));
+    }
+    screen.log_rendered("");
 }
 /// Writes the streamed answer so far; the text before folded calls keeps its
 /// own block, as in the reference CLI.
@@ -1055,6 +1087,7 @@ impl Frame {
         } else {
             let content = match &state.group {
                 Some(group) if state.partial.is_empty() && !group.calls.is_empty() => group_lines(group, width),
+                _ if state.partial.is_empty() && state.thinking_span.is_some() => thinking_lines(state, width, budget),
                 _ => visual_lines(&state.partial, width.saturating_sub(2))
                     .into_iter()
                     .enumerate()
@@ -1334,7 +1367,10 @@ fn run(
                 Ok(Update::PermissionMode(mode)) => { state.mode = mode; dirty = true; },
                 Ok(Update::Text(text)) => {
                     finish_group(state, screen);
-                    state.thinking_span = None;
+                    if state.thinking_span.is_some() {
+                        finish_answer(state, screen);
+                        finish_thought(state, screen);
+                    }
                     state.generated_characters = state
                         .generated_characters
                         .saturating_add(text.chars().count());
@@ -1397,7 +1433,15 @@ fn run(
                 }
                 Ok(Update::Thinking(text)) => {
                     let now = Instant::now();
+                    if state.thinking_span.is_none() {
+                        state.thinking_preview.clear();
+                    }
                     state.thinking_span = Some((state.thinking_span.map_or(now, |span| span.0), now));
+                    state.thinking_preview.push_str(&text);
+                    if state.thinking_preview.len() > 16384 {
+                        let cut = state.thinking_preview.ceil_char_boundary(state.thinking_preview.len() - 8192);
+                        state.thinking_preview.drain(..cut);
+                    }
                     state.append_thinking(&text);
                     dirty = true;
                 }
@@ -1812,6 +1856,20 @@ mod tests {
             .iter()
             .any(|(line, _)| line.contains("中🦀e\u{301}")));
         assert_eq!(state.draft.take(), "未提交 draft");
+    }
+
+    #[test]
+    fn thinking_preview_shows_the_latest_reasoning_as_one_paragraph() {
+        let mut state = State::new("ask".into());
+        let now = Instant::now();
+        state.thinking_span = Some((now, now));
+        state.thinking_preview = "The user asked.\n\nLet me   check the files first, then answer.".into();
+        let lines = thinking_lines(&state, 30, 3);
+        assert_eq!(lines[0], "\u{25cf} Thinking for 1s\u{2026}");
+        let rows: Vec<String> = lines[1..].iter().map(|line| line.replace("\x1b[2m", "").replace("\x1b[0m", "")).collect();
+        assert_eq!(rows.len(), 2, "{rows:?}");
+        assert!(rows[0].starts_with("  \u{23bf}  "), "{rows:?}");
+        assert!(rows[1].starts_with("     ") && rows[1].ends_with("answer."), "{rows:?}");
     }
 
     #[test]
