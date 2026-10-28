@@ -177,23 +177,32 @@ fn matches(commands: &[(String, String)], text: &str) -> Vec<usize> {
         .enumerate()
         .filter_map(|(i, (name, description))| {
             let name = name.to_lowercase();
+            let mut letters = name.chars();
             let rank = if name == text.to_lowercase() {
                 0
             } else if name.starts_with(&format!("/{query}")) {
                 1
-            } else if name.contains(&query) {
+            } else if name.split(['-', '_']).skip(1).any(|word| word.starts_with(&query)) {
+                // A word inside the name: `/auto-mode-setup` for `mo`.
                 2
-            } else if description.to_lowercase().contains(&query) {
+            } else if name.contains(&query) {
                 3
+            } else if query.chars().all(|wanted| letters.any(|ch| ch == wanted)) {
+                4
+            } else if description.to_lowercase().contains(&query) {
+                5
             } else {
                 return None;
             };
-            Some((rank, name, i))
+            // As in the reference CLI: a bare `/` lists commands alphabetically;
+            // a typed prefix puts the shortest names first (`/copy` before
+            // `/config`).
+            let length = if query.is_empty() { 0 } else { name.len() };
+            Some((rank, length, name, i))
         })
         .collect();
-    // Alphabetical within each rank, as the reference CLI lists commands.
     found.sort();
-    found.into_iter().map(|(_, _, index)| index).collect()
+    found.into_iter().map(|(_, _, _, index)| index).collect()
 }
 /// Completion entries shown at once.
 const MENU_ROWS: usize = 5;
@@ -771,6 +780,9 @@ impl PromptEditor {
                 let pad = name_width.saturating_sub(label.width());
                 lines.push((clipped(&format!("{prefix} {label}{}  {description}", " ".repeat(pad)), width), style));
             }
+            if items.is_empty() && mention_query.is_none() && !menu_hidden && text.len() > 1 && text.starts_with('/') && !text.contains(char::is_whitespace) {
+                lines.push((clipped(&format!("  No commands match \"{text}\""), width), TextStyle::Muted));
+            }
             let menu_height = lines.len() - panel_height;
             lines.push(("\u{2500}".repeat(width), TextStyle::Border));
             match &ghost {
@@ -1287,6 +1299,14 @@ mod tests {
             ("/exit".into(), "Exit".into()),
         ];
         assert_eq!(matches(&commands, "/model"), vec![1, 2, 0]);
+        // The reference order for `/co` and `/mo`: shortest prefix matches
+        // first, then names containing the text, then letters in order.
+        let names = ["/compact", "/context", "/config", "/color", "/copy", "/model", "/mobile", "/memory", "/auto-mode-setup"];
+        let commands: Vec<(String, String)> = names.iter().map(|name| (name.to_string(), String::new())).collect();
+        let order = |text| matches(&commands, text).into_iter().map(|index| names[index]).collect::<Vec<_>>();
+        assert_eq!(order("/co"), ["/copy", "/color", "/config", "/compact", "/context"]);
+        assert_eq!(order("/mo"), ["/model", "/mobile", "/auto-mode-setup", "/memory"]);
+        assert_eq!(order("/")[..3], ["/auto-mode-setup", "/color", "/compact"]);
         assert_eq!(menu_page(&[1, 3, 1, 2, 1], 1, 4), (0, 2));
         assert_eq!(menu_page(&[1, 3, 1, 2, 1], 3, 4), (2, 5));
         assert_eq!(menu_page(&[3], 0, 0), (0, 0));
