@@ -102,12 +102,12 @@ impl ToolLoopExecutor {
             .map_err(|error| anyhow!("Invalid approved tool input: {error}"))?;
         let path_keys: &[&str] = match tool {
             "Write" | "Edit" | "Read" | "MultiEdit" | "smart_edit" => &["file_path"],
-            "NotebookEdit" => &["path"],
+            "NotebookEdit" => &["notebook_path", "path"],
             "ListDir" | "Grep" | "Glob" | "smart_grep" | "smart_project_scan" | "git_status"
             | "git_diff" | "git_log" | "git_commit" | "git_add" => &["path"],
             "Bash" | "Shell" => &["cwd"],
             "LSP" | "lsp" => &["filePath", "path"],
-            "worktree" => &["path", "name"],
+            "worktree" | "EnterWorktree" => &["path", "name"],
             _ => &[],
         };
         for key in path_keys {

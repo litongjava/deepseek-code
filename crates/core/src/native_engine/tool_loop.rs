@@ -344,7 +344,7 @@ fn ask_user_questions(input: &Value) -> Result<Vec<Value>> {
 
 /// Writes, scheduled jobs and worktree switches run one at a time in order.
 fn is_serial_builtin(name: &str) -> bool {
-    matches!(name, "Edit" | "Write" | "MultiEdit")
+    matches!(name, "Edit" | "Write" | "MultiEdit" | "NotebookEdit")
         || crate::tools::cron_jobs::is_cron_tool(name)
         || crate::tools::session_worktree::is_worktree_tool(name)
 }
@@ -1719,8 +1719,8 @@ impl ToolLoopExecutor {
     /// Like the reference CLI, Edit and overwriting Write require the file to
     /// have been read (or written) earlier in this conversation.
     fn unread_file_error(&mut self, tool_name: &str, tool_input: &Value) -> Option<String> {
-        if !matches!(tool_name, "Edit" | "Write" | "MultiEdit") { return None; }
-        let file_path = tool_input["file_path"].as_str()?;
+        if !matches!(tool_name, "Edit" | "Write" | "MultiEdit" | "NotebookEdit") { return None; }
+        let file_path = tool_input["file_path"].as_str().or_else(|| tool_input["notebook_path"].as_str())?;
         let key = self.file_key(file_path);
         if !key.is_file() || self.known_files.contains(&key) { return None; }
         let mut seen = Vec::new();
@@ -1740,8 +1740,8 @@ impl ToolLoopExecutor {
             Ok(value) => value,
             Err(error) => return (format!("Error: {}", error), true),
         };
-        if matches!(tool_name, "Read" | "Edit" | "Write" | "MultiEdit") {
-            if let Some(file_path) = tool_input["file_path"].as_str() { let key = self.file_key(file_path); self.known_files.insert(key); }
+        if matches!(tool_name, "Read" | "Edit" | "Write" | "MultiEdit" | "NotebookEdit") {
+            if let Some(file_path) = tool_input["file_path"].as_str().or_else(|| tool_input["notebook_path"].as_str()) { let key = self.file_key(file_path); self.known_files.insert(key); }
         }
         match take_read_image(tool_name, &mut value, self.provider.model.supports_vision) {
             Some(Ok((text, content))) => { self.mcp_outputs.insert(tool_use_id.to_owned(), content); return (text, false); }
