@@ -9,6 +9,9 @@ static SCREEN_READER: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicB
 pub fn configure_accessibility(enabled: bool) {
     SCREEN_READER.store(enabled, std::sync::atomic::Ordering::Relaxed);
 }
+/// When this process started, for the session's wall-clock time in /cost.
+pub static STARTED: std::sync::OnceLock<std::time::Instant> = std::sync::OnceLock::new();
+
 /// Whether ctrl+t shows the todo list, at the prompt and during turns alike.
 pub static TODOS_VISIBLE: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 

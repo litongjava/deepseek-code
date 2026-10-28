@@ -117,7 +117,7 @@ pub async fn handle(
         }
         "/context" => {
             ensure!(argument.is_empty(), "Usage: /context");
-            crate::context_commands::show(session)?;
+            crate::context_commands::show(session).await?;
         }
         "/keybindings" => {
             ensure!(argument.is_empty(), "Usage: /keybindings");

@@ -9,6 +9,12 @@ use claude_core::services::{
 use std::time::Duration;
 
 pub async fn run(session: &Session, argument: &str) -> Result<()> {
+    eprint!("{}", text(session, argument).await?);
+    Ok(())
+}
+
+/// The status report, for /status and the settings dialog's Status tab.
+pub async fn text(session: &Session, argument: &str) -> Result<String> {
     ensure!(
         matches!(argument.trim(), "" | "--check"),
         "Usage: /status [--check]"
@@ -132,8 +138,7 @@ pub async fn run(session: &Session, argument: &str) -> Result<()> {
     if let Some(tools) = tools {
         output.push_str(&render_tools(&tools, scope));
     }
-    eprint!("{output}");
-    Ok(())
+    Ok(output)
 }
 fn state_label(state: &str) -> String {
     runtime_status::label(state).replace('_', " ")

@@ -267,6 +267,7 @@ fn show_details(
             KeyCode::Esc | KeyCode::Enter | KeyCode::Char(' ') => break None,
             KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => break None,
             KeyCode::Left => break Some('<'),
+            KeyCode::Right => break Some('>'),
             KeyCode::Char(ch) if keys.contains(&ch) => break Some(ch),
             _ => {}
         }

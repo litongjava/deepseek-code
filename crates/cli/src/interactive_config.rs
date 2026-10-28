@@ -422,6 +422,20 @@ pub async fn handle(
 ) -> Result<bool> {
     let mut words = line.split_whitespace();
     let command = words.next().unwrap_or_default();
+    // As in the reference CLI these share one dialog with Status, Config and
+    // Usage tabs; arguments keep the text forms.
+    if words.clone().next().is_none() && crate::terminal::picker::available() {
+        let tab = match command {
+            "/status" => Some("Status"),
+            "/config" => Some("Config"),
+            "/cost" | "/usage" => Some("Usage"),
+            _ => None,
+        };
+        if let Some(tab) = tab {
+            crate::settings_dialog::run(tab, paths, session, input).await?;
+            return Ok(true);
+        }
+    }
     if command == "/statusline" {
         crate::statusline_commands::handle(line.strip_prefix("/statusline").unwrap().trim(), session, input).await?;
         return Ok(true);

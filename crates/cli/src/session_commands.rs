@@ -95,6 +95,11 @@ pub(crate) fn session_effort(session: &Session) -> Result<Option<String>> {
     Ok(load(&session.store.db, &session.id)?.effort)
 }
 
+/// The session's auto-compact threshold in percent, None when off.
+pub(crate) fn autocompact(session: &Session) -> Result<Option<u8>> {
+    Ok(load(&session.store.db, &session.id)?.autocompact_percent)
+}
+
 pub(crate) fn set_session_effort(session: &Session, effort: Option<String>) -> Result<()> {
     let mut settings = load(&session.store.db, &session.id)?;
     settings.effort = effort;

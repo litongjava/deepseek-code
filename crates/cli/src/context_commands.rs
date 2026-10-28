@@ -2,14 +2,21 @@
 use crate::session::Session;
 use anyhow::Result;
 
-pub fn show(session: &Session) -> Result<()> {
-    eprintln!(
-        "{}",
-        render(claude_core::services::context_usage::last_request(
-            &session.store.db,
-            &session.id
-        )?)
-    );
+pub async fn show(session: &Session) -> Result<()> {
+    let request = claude_core::services::context_usage::last_request(&session.store.db, &session.id)?;
+    if crate::terminal::picker::available() {
+        let window = session.context_window().await.map(u64::from);
+        let autocompact = crate::session_commands::autocompact(session)?;
+        if let Some(grid) = request.as_ref().and_then(|request| grid(request, window, autocompact, std::env::var_os("NO_COLOR").is_none())) {
+            eprintln!("{grid}");
+            return Ok(());
+        }
+        if request.is_none() {
+            eprintln!("  \u{23bf}  Context Usage\n     Nothing measured yet: usage appears after the first reply.");
+            return Ok(());
+        }
+    }
+    eprintln!("{}", render(request));
     Ok(())
 }
 fn render(request: Option<claude_core::services::context_usage::LastRequest>) -> String {
@@ -111,6 +118,85 @@ fn render(request: Option<claude_core::services::context_usage::LastRequest>) ->
     lines.push(format!("Historical request only; later responses, model/settings changes and compaction are not included."));
     lines.join("\n")
 }
+/// `950`, `1.6k` or `200k`.
+fn short(tokens: u64) -> String {
+    match tokens {
+        0..=999 => tokens.to_string(),
+        1_000_000.. => {
+            let text = format!("{:.1}", tokens as f64 / 1_048_576.0);
+            format!("{}M", text.strip_suffix(".0").unwrap_or(&text))
+        }
+        _ if tokens % 1000 == 0 || tokens >= 100_000 && tokens % 1000 < 50 => format!("{}k", tokens / 1000),
+        _ => format!("{:.1}k", tokens as f64 / 1000.0),
+    }
+}
+
+/// /context as in the reference CLI: a 10×10 grid of the context window
+/// coloured by what fills it, with the estimate per category beside it.
+/// None before the session has sent a request.
+pub fn grid(request: &claude_core::services::context_usage::LastRequest, window: Option<u64>, autocompact: Option<u8>, color: bool) -> Option<String> {
+    let usage = request.usage.as_ref()?;
+    let parts: Vec<(&str, u64, &str)> = [
+        ("System prompt", usage.instructions.estimated_tokens, "38;5;246"),
+        ("System tools", usage.tools.estimated_tokens, "38;5;37"),
+        ("Output schema", usage.output_schema.estimated_tokens, "38;5;179"),
+        ("Messages", usage.history.estimated_tokens, "38;5;141"),
+    ]
+    .into_iter()
+    .filter(|(_, tokens, _)| *tokens > 0)
+    .collect();
+    let used: u64 = parts.iter().map(|(_, tokens, _)| tokens).sum();
+    let window = window.or(usage.configured_context_window).unwrap_or(used.max(1)).max(1);
+    let buffer = autocompact.map_or(0, |percent| window * (100 - percent as u64) / 100);
+    let free = window.saturating_sub(used + buffer);
+    let paint = |code: &str, text: &str| if color { format!("\x1b[{code}m{text}\x1b[0m") } else { text.to_owned() };
+    let cell = window as f64 / 100.0;
+    let buffer_cells = (buffer as f64 / cell).round() as usize;
+    let mut cells = Vec::with_capacity(100);
+    for index in 0..100usize {
+        let start = index as f64 * cell;
+        if index >= 100 - buffer_cells {
+            cells.push(paint("38;5;240", "\u{26dd}"));
+            continue;
+        }
+        let mut offset = 0.0;
+        let mut glyph = paint("38;5;240", "\u{26f6}");
+        for (_, tokens, code) in &parts {
+            let end = offset + *tokens as f64;
+            if start < end {
+                glyph = paint(code, if end - start >= cell { "\u{26c1}" } else { "\u{26c0}" });
+                break;
+            }
+            offset = end;
+        }
+        cells.push(glyph);
+    }
+    let percent = |tokens: u64| tokens as f64 * 100.0 / window as f64;
+    let mut side = vec![
+        request.model.clone(),
+        format!("{}/{} tokens ({:.0}%)", short(used), short(window), percent(used)),
+        String::new(),
+        "Estimated usage by category".to_owned(),
+    ];
+    for (name, tokens, code) in &parts {
+        side.push(format!("{} {name}: {} tokens ({:.1}%)", paint(code, "\u{26c1}"), short(*tokens), percent(*tokens)));
+    }
+    side.push(format!("{} Free space: {} ({:.1}%)", paint("38;5;240", "\u{26f6}"), short(free), percent(free)));
+    if buffer > 0 {
+        side.push(format!("{} Autocompact buffer: {} tokens ({:.1}%)", paint("38;5;240", "\u{26dd}"), short(buffer), percent(buffer)));
+    }
+    let mut lines = vec!["  \u{23bf}  Context Usage".to_owned()];
+    for row in 0..10 {
+        let cells: Vec<&str> = cells[row * 10..row * 10 + 10].iter().map(String::as_str).collect();
+        lines.push(format!("     {}   {}", cells.join(" "), side.get(row).map(String::as_str).unwrap_or("")));
+    }
+    for extra in side.iter().skip(10) {
+        lines.push(format!("     {:19}   {extra}", ""));
+    }
+    lines.push(format!("     Measured from the last request; the next one includes this turn's messages."));
+    Some(lines.join("\n"))
+}
+
 fn count(value: Option<u64>) -> String {
     value
         .map(|n| format!("{n} tokens"))
@@ -124,6 +210,33 @@ mod tests {
         native_engine::request_context::ContextUsage, services::context_usage::LastRequest,
     };
     use serde_json::json;
+
+    #[test]
+    fn the_grid_shows_each_category_free_space_and_the_buffer() {
+        assert_eq!((short(950), short(1_600), short(200_000), short(156_600), short(1_048_576)), ("950".into(), "1.6k".into(), "200k".into(), "156.6k".into(), "1M".into()));
+        let system = "x".repeat(3000);
+        let request = LastRequest {
+            model: "deepseek-flash".into(),
+            started_at_ms: Some(0),
+            status: "completed".into(),
+            reported_input_tokens: None,
+            usage: Some(ContextUsage::from_body(
+                "openai-completions",
+                &json!({"messages":[{"role":"system","content":system},{"role":"user","content":"hello there"}],"max_tokens":200}),
+                Some(10_000),
+                200,
+            )),
+        };
+        let drawn = grid(&request, Some(10_000), Some(80), false).unwrap();
+        let rows: Vec<&str> = drawn.lines().collect();
+        assert_eq!(rows[0], "  \u{23bf}  Context Usage");
+        assert!(rows[1].starts_with("     \u{26c1} ") && rows[1].ends_with("deepseek-flash"), "{drawn}");
+        assert!(drawn.contains("System prompt:") && drawn.contains("Messages:") && drawn.contains("Free space:"));
+        assert!(drawn.contains("Autocompact buffer: 2k tokens (20.0%)"), "{drawn}");
+        // The last two rows are the 20% buffer.
+        assert_eq!(rows[10].matches('\u{26dd}').count(), 10);
+        assert!(grid(&LastRequest { usage: None, ..request }, None, None, false).is_none());
+    }
 
     #[test]
     fn context_output_distinguishes_unknown_estimates_and_last_request() {

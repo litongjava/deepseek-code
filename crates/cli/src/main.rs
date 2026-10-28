@@ -11,6 +11,7 @@ mod persistent_worker;
 mod worker_frontend;
 mod mcp_menu;
 mod hooks_menu;
+mod settings_dialog;
 mod command_catalog;
 mod workflow_commands;
 mod interactive_config;
@@ -520,6 +521,7 @@ async fn run(cli: &Cli) -> Result<()> {
         let mut presence: Option<(String, claude_core::services::session_messages::PresenceLease)> = None;
         // History length the last suggestion was generated for.
         let mut suggested_for = session.store.history(&session.id)?.len();
+        terminal::STARTED.get_or_init(std::time::Instant::now);
         'repl: loop {
             let idle_deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(60);
             let mut idle_notified = false;
