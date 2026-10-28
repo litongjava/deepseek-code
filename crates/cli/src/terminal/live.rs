@@ -48,6 +48,8 @@ enum Update {
     GroupEnd,
     /// Messages sent during the turn that the model has not read yet.
     Queued(Vec<String>),
+    /// The conversation before this turn, for the Ctrl+O transcript.
+    Transcript(Vec<change_view::Line>),
     /// A queued message the model has now read.
     QueuedDelivered(String),
     SetDraft(String),
@@ -312,6 +314,7 @@ struct State {
     group: Option<Group>,
     /// Messages typed during the turn, shown until the model reads them.
     queued: Vec<String>,
+    transcript: Vec<change_view::Line>,
     /// When reasoning began and last streamed, for "Thought for 2s".
     thinking_span: Option<(Instant, Instant)>,
     thinking_characters: usize,
@@ -396,6 +399,7 @@ impl State {
             detail_entries: Vec::new(),
             group: None,
             queued: Vec::new(),
+            transcript: Vec::new(),
             thinking_span: None,
             thinking_characters: 0,
             thinking_entry: None,
@@ -1226,6 +1230,7 @@ fn run(
                     finish_group(state, screen);
                     dirty = true;
                 }
+                Ok(Update::Transcript(lines)) => state.transcript = lines,
                 Ok(Update::Queued(pending)) => {
                     state.queued = pending;
                     dirty = true;
@@ -1342,7 +1347,25 @@ fn run(
                     } else if control && key.code == KeyCode::Char('b') {
                         let _ = actions.send(Action::Detach);
                     } else if control && key.code == KeyCode::Char('o') {
-                        state.details.toggle();
+                        // As at the prompt: the transcript so far, this turn's
+                        // calls included, in the full-screen pager.
+                        let mut lines = state.transcript.clone();
+                        for (_, title, body) in &state.detail_entries {
+                            lines.push(change_view::heading(&format!("\u{25cf} {title}")));
+                            lines.extend(body.lines().map(|line| change_view::body(&format!("  {line}"))));
+                        }
+                        if let Some(text) = Some(state.partial.trim()).filter(|text| !text.is_empty()) {
+                            lines.push(change_view::body(&format!("\u{25cf} {text}")));
+                        }
+                        let outcome = super::transcript_pager::run(&lines, &mut || input_reader.next(Duration::from_millis(100)))?;
+                        if matches!(outcome, super::transcript_pager::Outcome::PrintToScrollback) {
+                            let width = terminal::size().unwrap_or((80, 24)).0.saturating_sub(1) as usize;
+                            let color = std::env::var_os("NO_COLOR").is_none();
+                            for line in &lines {
+                                screen.log_rendered(&change_view::render(line, width, color));
+                            }
+                        }
+                        screen.size = (0, 0);
                     } else if control && key.code == KeyCode::Char('r') && state.answer.is_none() {
                         let query = state
                             .search_query
@@ -2045,6 +2068,12 @@ impl TurnDisplay {
             live.activity("Working");
         } else {
             self.fallback.tool_finished(id, name, input, output, failed);
+        }
+    }
+    /// The conversation before this turn, for Ctrl+O.
+    pub fn set_transcript(&mut self, lines: Vec<change_view::Line>) {
+        if let Some(live) = &self.live {
+            let _ = live.updates.send(Update::Transcript(lines));
         }
     }
     /// Messages sent during the turn and not yet read by the model.

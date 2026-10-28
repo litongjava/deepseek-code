@@ -869,6 +869,9 @@ impl Session {
             _ = tokio::signal::ctrl_c() => bail!("Interrupted before model request"),
         };
         let mut progress = crate::terminal::live::TurnDisplay::new(interactive_display, self.permission_mode(), &self.paths.data_dir.join("keybindings.json"), self.store.history(&self.id)?.iter().filter(|row|row["role"]=="user").filter_map(|row|row["content"].as_str().map(str::to_owned)).collect())?.with_workspace(&self.workspace);
+        if progress.is_live() {
+            progress.set_transcript(crate::repl::transcript(self).unwrap_or_default());
+        }
         let mut hook_progress = claude_core::services::hook_progress::subscribe(&self.id);
         progress.hook_snapshot(hook_progress.snapshot());
         let mut side_request: Option<std::pin::Pin<Box<dyn std::future::Future<Output = Result<String>> + Send + '_>>> = None;
