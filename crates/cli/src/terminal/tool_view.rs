@@ -187,7 +187,7 @@ pub fn finished(
     elapsed: Option<Duration>,
     workspace: Option<&std::path::Path>,
 ) -> Vec<Line> {
-    if matches!(name, "TodoWrite" | "todo_write") {
+    if name == "TodoWrite" {
         if let Some(lines) = todo_lines(input, failed) {
             return lines;
         }

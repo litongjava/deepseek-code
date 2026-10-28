@@ -420,7 +420,7 @@ macro_rules! tool_dispatch {
             "Config" | "brief" | "SyntheticOutput" => content_compat::execute($name, &$input, $cwd),
             "ToolSearch" => tool_search($input),
             "ReportFindings" => findings::execute(&$input),
-            "TaskCreate" | "TaskGet" | "TaskList" | "TaskUpdate" | "TaskOutput" | "TaskStop" | "TodoWrite" | "TodoRead" | "todo_write" => tasks::execute($name, $input, $cwd),
+            "TaskCreate" | "TaskGet" | "TaskList" | "TaskUpdate" | "TaskOutput" | "TaskStop" | "TodoWrite" | "TodoRead" => tasks::execute($name, $input, $cwd),
             "Read" => read::execute($input, $cwd),
             "Write" => tool_write($input, $cwd),
             "Edit" => tool_edit($input, $cwd),

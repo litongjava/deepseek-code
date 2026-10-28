@@ -2290,7 +2290,7 @@ impl TurnDisplay {
                 }
             }
         }
-        if let (Some(live), false, true) = (&self.live, failed, matches!(name, "TodoWrite" | "todo_write")) {
+        if let (Some(live), false, true) = (&self.live, failed, name == "TodoWrite") {
             // Keep the ctrl+t list current as the model updates it.
             let todos = input["todos"].as_array().into_iter().flatten().map(|todo| (todo["content"].as_str().unwrap_or_default().to_owned(), todo["status"].as_str().unwrap_or("pending").to_owned())).collect();
             let _ = live.updates.send(Update::Todos(todos));

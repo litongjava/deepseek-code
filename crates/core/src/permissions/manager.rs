@@ -420,6 +420,7 @@ impl PermissionManager {
             tool_name,
             "Read" | "ListDir" | "Grep" | "Glob" | "WebFetch" | "WebSearch" | "memory_search"
                 | "TodoRead" | "Skill" | "SkillRead" | "TaskGet" | "TaskList" | "TaskOutput" | "ToolSearch" | "ProposeGoal" | "plan_mode" | "EnterPlanMode" | "ExitPlanMode" | "brief" | "SyntheticOutput"
+                | "ListAgents" | "CronList" | "ReportFindings"
         )
     }
 
@@ -427,7 +428,7 @@ impl PermissionManager {
         matches!(
             tool_name,
             "Write" | "Edit" | "SearchReplace" | "GlobReplace" | "Delete"
-                | "memory_ingest" | "SkillCreate" | "SkillUpdate" | "NotebookEdit" | "TaskCreate" | "TaskUpdate" | "TaskStop" | "todo_write" | "TodoWrite" | "SendMessage" | "team" | "cron" | "Config"
+                | "memory_ingest" | "SkillCreate" | "SkillUpdate" | "NotebookEdit" | "TaskCreate" | "TaskUpdate" | "TaskStop" | "TodoWrite" | "SendMessage" | "team" | "cron" | "CronCreate" | "CronDelete" | "ScheduleWakeup" | "Config"
         )
     }
 

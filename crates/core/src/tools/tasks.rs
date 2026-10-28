@@ -14,7 +14,6 @@ pub(super) fn definitions() -> Vec<super::ToolDefinition> {
         ("TodoRead", "Read the session's durable todo list.",json!({}),vec![]),
         ("TaskOutput", "Read managed background shell logs and status. block defaults to true; timeout is milliseconds (default 30000, maximum 600000). Use block:false for an immediate snapshot. Saved non-process task records return their saved output.",json!({"id":{"type":"string"},"task_id":{"type":"string"},"block":{"type":"boolean","default":true},"timeout":{"type":"integer","minimum":0,"maximum":600000,"default":30000}}),vec![]),
         ("TaskStop", "\n- Stops a running background task by its ID\n- Takes a task_id parameter identifying the task to stop\n- Stops a background shell together with its descendant processes; for other task records it marks the record cancelled\n- Returns a success or failure status\n- Use this tool when you need to terminate a long-running task\n",json!({"task_id":{"description":"The ID of the background task to stop.","type":"string"},"shell_id":{"description":"Deprecated: use task_id instead","type":"string"}}),vec![]),
-        ("todo_write", "Manage durable todos using the legacy create/list/get/update/delete/complete/filter operations.",json!({"operation":{"type":"string","enum":["create","list","get","update","delete","complete","filter"]},"id":{"type":"string"},"content":{"type":"string"},"priority":{"type":"string","enum":["low","medium","high","urgent"]},"status":{"type":"string","enum":["pending","in_progress","completed","cancelled"]},"tags":{"type":"array","items":{"type":"string"}},"filter_status":{"type":"string"},"filter_priority":{"type":"string"},"filter_tags":{"type":"array","items":{"type":"string"}}}),vec!["operation"]),
     ].into_iter().map(|(name,description,properties,required)| super::ToolDefinition {name:name.into(),description:description.into(),input_schema:json!({"type":"object","properties":properties,"required":required})}).collect()
 }
 
@@ -29,14 +28,11 @@ pub fn is_task(name: &str) -> bool {
             | "TaskStop"
             | "TodoWrite"
             | "TodoRead"
-            | "todo_write"
     )
 }
 
 fn readonly(name: &str, input: &Value) -> bool {
     matches!(name, "TaskGet" | "TaskList" | "TodoRead" | "TaskOutput")
-        || (name == "todo_write"
-            && matches!(input["operation"].as_str(), Some("list" | "filter" | "get")))
 }
 
 pub fn execute_for_session(name: &str, input: Value, root: &Path, session: &str) -> Result<Value> {
@@ -142,7 +138,6 @@ fn execute_at_owned(name: &str, mut input: Value, path: &Path, shell_owner: bool
         return match name {
             "TaskList" => Ok(json!({"tasks":[]})),
             "TodoRead" => Ok(json!({"todos":[]})),
-            "todo_write" if input["operation"] != "get" => Ok(json!({"todos":[]})),
             _ => bail!("Task not found"),
         };
     }
@@ -363,7 +358,6 @@ fn execute_at_owned(name: &str, mut input: Value, path: &Path, shell_owner: bool
             tx.execute("INSERT INTO todo(singleton,body) VALUES(1,?1) ON CONFLICT(singleton) DO UPDATE SET body=excluded.body",[json!(todos).to_string()])?;
             json!({"todos":todos})
         }
-        "todo_write" => legacy_todos(&tx, &input)?,
         "TodoRead" => {
             let body: Option<String> = tx
                 .query_row("SELECT body FROM todo WHERE singleton=1", [], |row| {
@@ -378,85 +372,6 @@ fn execute_at_owned(name: &str, mut input: Value, path: &Path, shell_owner: bool
     Ok(result)
 }
 
-fn legacy_todos(db: &rusqlite::Connection, input: &Value) -> Result<Value> {
-    let body: Option<String> = db
-        .query_row("SELECT body FROM todo WHERE singleton=1", [], |row| {
-            row.get(0)
-        })
-        .optional()?;
-    let mut todos: Vec<Value> = serde_json::from_str(body.as_deref().unwrap_or("[]"))?;
-    let operation = input["operation"]
-        .as_str()
-        .context("operation is required")?;
-    let result = match operation {
-        "list" => json!({"todos":todos}),
-        "filter" => {
-            let filtered: Vec<_> = todos
-                .iter()
-                .filter(|todo| {
-                    input
-                        .get("filter_status")
-                        .is_none_or(|value| todo["status"] == *value)
-                        && input
-                            .get("filter_priority")
-                            .is_none_or(|value| todo["priority"] == *value)
-                        && input["filter_tags"].as_array().is_none_or(|tags| {
-                            tags.iter().all(|tag| {
-                                todo["tags"]
-                                    .as_array()
-                                    .is_some_and(|saved| saved.contains(tag))
-                            })
-                        })
-                })
-                .cloned()
-                .collect();
-            json!({"todos":filtered})
-        }
-        "create" => {
-            let mut todo = json!({"id":uuid::Uuid::new_v4().to_string(),"content":input["content"],"status":"pending","priority":input["priority"].as_str().unwrap_or("medium"),"tags":input.get("tags").cloned().unwrap_or(json!([])),"created_at":chrono::Utc::now().to_rfc3339()});
-            if let Some(status) = input.get("status") {
-                todo["status"] = status.clone();
-            }
-            validate_todo(&todo)?;
-            todos.push(todo.clone());
-            json!({"id":todo["id"],"todo":todo})
-        }
-        "get" | "update" | "delete" | "complete" => {
-            let id = input["id"].as_str().context("id is required")?;
-            let index = todos
-                .iter()
-                .position(|todo| todo["id"] == id)
-                .context("Todo not found")?;
-            match operation {
-                "delete" => {
-                    todos.remove(index);
-                    json!({"id":id,"deleted":true})
-                }
-                "get" => json!({"todo":todos[index]}),
-                _ => {
-                    let todo = &mut todos[index];
-                    if operation == "complete" {
-                        todo["status"] = json!("completed");
-                    } else {
-                        for key in ["content", "status", "priority", "tags"] {
-                            if let Some(value) = input.get(key) {
-                                todo[key] = value.clone();
-                            }
-                        }
-                    }
-                    validate_todo(todo)?;
-                    todo["updated_at"] = json!(chrono::Utc::now().to_rfc3339());
-                    json!({"todo":todo})
-                }
-            }
-        }
-        _ => bail!("Unknown todo operation"),
-    };
-    if !matches!(operation, "list" | "get" | "filter") {
-        db.execute("INSERT INTO todo(singleton,body) VALUES(1,?1) ON CONFLICT(singleton) DO UPDATE SET body=excluded.body",[serde_json::to_string(&todos)?])?;
-    }
-    Ok(result)
-}
 fn validate_todo(todo: &Value) -> Result<()> {
     if todo["content"].as_str().is_none_or(|s| s.trim().is_empty())
         || !matches!(
@@ -538,36 +453,6 @@ mod tests {
             execute("TaskStop", json!({"shell_id":task["id"]}), cwd).unwrap()["worker_process_stopped"],
             false
         );
-        let todo = execute(
-            "todo_write",
-            json!({"operation":"create","content":"old todo","priority":"urgent","tags":["rust"]}),
-            cwd,
-        )
-        .unwrap();
-        execute(
-            "todo_write",
-            json!({"operation":"complete","id":todo["id"]}),
-            cwd,
-        )
-        .unwrap();
-        assert_eq!(
-            execute(
-                "todo_write",
-                json!({"operation":"filter","filter_tags":["rust"],"filter_status":"completed"}),
-                cwd
-            )
-            .unwrap()["todos"]
-                .as_array()
-                .unwrap()
-                .len(),
-            1
-        );
-        execute(
-            "todo_write",
-            json!({"operation":"delete","id":todo["id"]}),
-            cwd,
-        )
-        .unwrap();
         assert_eq!(
             execute("TodoRead", json!({}), cwd).unwrap()["todos"],
             json!([])
