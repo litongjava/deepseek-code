@@ -945,10 +945,13 @@ impl PromptEditor {
                 if last_esc.is_some_and(|at| at.elapsed() < std::time::Duration::from_secs(1)) {
                     parts = vec!["esc again to rewind".into()];
                 }
-                if self.vim {
-                    parts.insert(0, if vim_normal.is_some() { "-- NORMAL --" } else { "-- INSERT --" }.into());
+                // As in the reference CLI: `-- INSERT -- ` leads the footer in
+                // insert mode; normal mode has no label.
+                if self.vim && vim_normal.is_none() {
+                    format!("-- INSERT -- {}", parts.join(" \u{b7} "))
+                } else {
+                    parts.join(" \u{b7} ")
                 }
-                parts.join(" \u{b7} ")
             };
             let footer_style = match crate::terminal::style::mode_indicator(&self.permission_mode) {
                 Some((_, color)) if search.is_none() => TextStyle::Colored(color),

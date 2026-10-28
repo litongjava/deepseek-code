@@ -122,6 +122,8 @@ async fn config(paths: &RuntimePaths, session: &mut Session, input: &mut Termina
         ("effort", "Effort", effort),
         ("autocompact", "Auto-compact", autocompact),
         ("theme", "Theme", display.theme.clone()),
+        // As in the reference CLI; /vim toggles the same setting.
+        ("editor", "Editor mode", if crate::terminal::vim::enabled(&paths.data_dir) { "vim" } else { "normal" }.into()),
         ("color", "Prompt color", display.color.clone()),
         ("focus", "Focus mode", display.focus.to_string()),
         ("output-style", "Output style", display.output_style.clone()),
@@ -134,9 +136,9 @@ async fn config(paths: &RuntimePaths, session: &mut Session, input: &mut Termina
         .map(|(_, label, value)| Entry { title: format!("{label:<width$}{value}"), detail: String::new() })
         .collect();
     let bar = tab_bar(1);
-    let picker = Picker { heading: &bar, subtitle: None, entries: &entries, search: true, hint: "Type to filter \u{b7} Enter to change \u{b7} \u{2190}/\u{2192} to switch tabs \u{b7} Esc to close", selected };
-    let index = match picker.run_keys(&[Key::Left, Key::Right])? {
-        Picked::Entry(index) => index,
+    let picker = Picker { heading: &bar, subtitle: None, entries: &entries, search: true, hint: "Type to filter \u{b7} Enter/Space to change \u{b7} \u{2190}/\u{2192} to switch tabs \u{b7} Esc to close", selected };
+    let index = match picker.run_keys(&[Key::Left, Key::Right, Key::Space])? {
+        Picked::Entry(index) | Picked::Key(Key::Space, Some(index)) => index,
         Picked::Key(Key::Left, _) => return Ok(ConfigOutcome::Switch(-1)),
         Picked::Key(Key::Right, _) => return Ok(ConfigOutcome::Switch(1)),
         _ => return Ok(ConfigOutcome::Close),
@@ -149,6 +151,7 @@ async fn config(paths: &RuntimePaths, session: &mut Session, input: &mut Termina
         "theme" => &["dark", "light", "dark-daltonized", "light-daltonized", "dark-ansi", "light-ansi"],
         "color" => &["default", "red", "orange", "yellow", "green", "blue", "purple", "pink", "cyan"],
         "focus" => &["on", "off"],
+        "editor" => &["normal", "vim"],
         "output-style" => &["default", "explanatory", "learning"],
         "tui" => &["default", "fullscreen"],
         _ => &[],
@@ -157,12 +160,12 @@ async fn config(paths: &RuntimePaths, session: &mut Session, input: &mut Termina
         // Model, provider and the status line keep their own pickers or prompts.
         Box::pin(crate::interactive_config::handle(&format!("/{}", if *key == "model" { "model" } else { key }), paths, session, input)).await.map(|_| ())
     } else {
-        let options: Vec<Entry> = choices.iter().map(|choice| Entry { title: if *choice == value { format!("{choice} \u{2714}") } else { choice.to_string() }, detail: String::new() }).collect();
-        let current = choices.iter().position(|choice| choice == value).unwrap_or(0);
-        let heading = format!("{label}");
-        match (Picker { heading: &heading, subtitle: None, entries: &options, search: false, hint: "Enter to choose \u{b7} Esc to go back", selected: current }).run()? {
+        // As in the reference CLI, Enter or Space moves to the next value in place.
+        let choice = choices.iter().position(|choice| choice == value).map_or(0, |current| (current + 1) % choices.len());
+        match Some(choice) {
             Some(choice) if choices[choice] != value => match *key {
                 "permissions" => session.set_permission_mode(choices[choice]).await,
+                "editor" => crate::terminal::vim::set_enabled(&paths.data_dir, choices[choice] == "vim").map(|()| input.set_vim(choices[choice] == "vim")),
                 "effort" | "autocompact" => crate::session_commands::handle(&format!("/{key}"), choices[choice], paths, session).await.map(|_| ()),
                 _ => crate::display_commands::handle(&format!("/{key}"), choices[choice], paths, session).await.map(|_| ()),
             },
