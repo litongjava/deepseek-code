@@ -7,13 +7,17 @@ pub async fn show(session: &Session) -> Result<()> {
     if crate::terminal::picker::available() {
         let window = session.context_window().await.map(u64::from);
         let autocompact = crate::session_commands::autocompact(session)?;
-        if let Some(grid) = request.as_ref().and_then(|request| grid(request, window, autocompact, std::env::var_os("NO_COLOR").is_none())) {
+        let color = std::env::var_os("NO_COLOR").is_none();
+        if let Some(grid) = request.as_ref().and_then(|request| grid(request, window, autocompact, color, "Measured from the last request; the next one includes this turn's messages.")) {
             eprintln!("{grid}");
             return Ok(());
         }
         if request.is_none() {
-            eprintln!("  \u{23bf}  Context Usage\n     Nothing measured yet: usage appears after the first reply.");
-            return Ok(());
+            // As in the reference CLI, estimate before anything was sent.
+            if let Some(grid) = grid(&estimate(session, window)?, window, autocompact, color, "Estimated before the first request, from a recent request\u{2019}s system prompt and tools and this session\u{2019}s messages.") {
+                eprintln!("{grid}");
+                return Ok(());
+            }
         }
     }
     eprintln!("{}", render(request));
@@ -118,6 +122,36 @@ fn render(request: Option<claude_core::services::context_usage::LastRequest>) ->
     lines.push(format!("Historical request only; later responses, model/settings changes and compaction are not included."));
     lines.join("\n")
 }
+/// What the first request would hold: the base system prompt with the
+/// project instructions, the built-in tool definitions and saved history.
+fn estimate(session: &Session, window: Option<u64>) -> Result<claude_core::services::context_usage::LastRequest> {
+    let mut system = claude_core::prompt::build_self_hosted_system_prompt_with_config("", &claude_core::prompt::SystemPromptConfig::default());
+    if let Ok(instructions) = claude_core::project_instructions::load(&session.workspace) {
+        system.push_str(&instructions);
+    }
+    let history = session.store.model_history(&session.id, &claude_core::native_engine::provider_manager::ApiFormat::Anthropic)?;
+    let body = serde_json::json!({"system": system, "messages": history, "tools": claude_core::tools::get_tool_definitions(), "max_tokens": 0});
+    let window = window.and_then(|window| u32::try_from(window).ok());
+    let mut usage = claude_core::native_engine::request_context::ContextUsage::from_body("anthropic-messages", &body, window, 0);
+    // The engine's full system prompt and tool list barely change between
+    // sessions; a recent measured request estimates them better.
+    let recent = session.store.db.with_conn(|conn| claude_core::db::conversation_repo::list_conversations(conn))??;
+    for row in recent.iter().filter(|row| row.id != session.id).take(20) {
+        if let Some(measured) = claude_core::services::context_usage::last_request(&session.store.db, &row.id)?.and_then(|request| request.usage) {
+            usage.instructions = measured.instructions;
+            usage.tools = measured.tools;
+            break;
+        }
+    }
+    Ok(claude_core::services::context_usage::LastRequest {
+        model: session.model.clone(),
+        started_at_ms: None,
+        status: "estimate".into(),
+        usage: Some(usage),
+        reported_input_tokens: None,
+    })
+}
+
 /// `950`, `1.6k` or `200k`.
 fn short(tokens: u64) -> String {
     match tokens {
@@ -134,7 +168,7 @@ fn short(tokens: u64) -> String {
 /// /context as in the reference CLI: a 10×10 grid of the context window
 /// coloured by what fills it, with the estimate per category beside it.
 /// None before the session has sent a request.
-pub fn grid(request: &claude_core::services::context_usage::LastRequest, window: Option<u64>, autocompact: Option<u8>, color: bool) -> Option<String> {
+pub fn grid(request: &claude_core::services::context_usage::LastRequest, window: Option<u64>, autocompact: Option<u8>, color: bool, footer: &str) -> Option<String> {
     let usage = request.usage.as_ref()?;
     let parts: Vec<(&str, u64, &str)> = [
         ("System prompt", usage.instructions.estimated_tokens, "38;5;246"),
@@ -193,7 +227,7 @@ pub fn grid(request: &claude_core::services::context_usage::LastRequest, window:
     for extra in side.iter().skip(10) {
         lines.push(format!("     {:19}   {extra}", ""));
     }
-    lines.push(format!("     Measured from the last request; the next one includes this turn's messages."));
+    lines.push(format!("     {footer}"));
     Some(lines.join("\n"))
 }
 
@@ -227,7 +261,7 @@ mod tests {
                 200,
             )),
         };
-        let drawn = grid(&request, Some(10_000), Some(80), false).unwrap();
+        let drawn = grid(&request, Some(10_000), Some(80), false, "note").unwrap();
         let rows: Vec<&str> = drawn.lines().collect();
         assert_eq!(rows[0], "  \u{23bf}  Context Usage");
         assert!(rows[1].starts_with("     \u{26c1} ") && rows[1].ends_with("deepseek-flash"), "{drawn}");
@@ -235,7 +269,7 @@ mod tests {
         assert!(drawn.contains("Autocompact buffer: 2k tokens (20.0%)"), "{drawn}");
         // The last two rows are the 20% buffer.
         assert_eq!(rows[10].matches('\u{26dd}').count(), 10);
-        assert!(grid(&LastRequest { usage: None, ..request }, None, None, false).is_none());
+        assert!(grid(&LastRequest { usage: None, ..request }, None, None, false, "note").is_none());
     }
 
     #[test]

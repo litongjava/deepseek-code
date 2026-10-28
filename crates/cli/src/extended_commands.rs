@@ -484,7 +484,8 @@ fn short_size(bytes: i64) -> String {
 
 /// This workspace's (or with `all` every project's) other unarchived
 /// sessions, newest first, titled by their name or first prompt, with the
-/// branch and saved size of each.
+/// branch and saved size of each (messages, tool calls and the request
+/// snapshots, as the reference CLI's transcript files hold them).
 fn resumable(session: &Session, all: bool) -> Result<Vec<(String, Resumable)>> {
     let here = session.workspace.canonicalize().unwrap_or_else(|_| session.workspace.clone());
     session.store.db.with_conn(|conn| -> Result<Vec<(String, Resumable)>> {
@@ -509,7 +510,8 @@ fn resumable(session: &Session, all: bool) -> Result<Vec<(String, Resumable)>> {
                 .ok();
             let size: i64 = conn.query_row(
                 "SELECT (SELECT COALESCE(SUM(length(CAST(content AS BLOB)) + COALESCE(length(CAST(thinking AS BLOB)),0)),0) FROM messages WHERE conversation_id=?1)
-                      + (SELECT COALESCE(SUM(COALESCE(length(CAST(t.input AS BLOB)),0) + COALESCE(length(CAST(t.output AS BLOB)),0)),0) FROM tool_calls t JOIN messages m ON t.message_id=m.id WHERE m.conversation_id=?1)",
+                      + (SELECT COALESCE(SUM(COALESCE(length(CAST(t.input AS BLOB)),0) + COALESCE(length(CAST(t.output AS BLOB)),0)),0) FROM tool_calls t JOIN messages m ON t.message_id=m.id WHERE m.conversation_id=?1)
+                      + (SELECT COALESCE(SUM(length(CAST(r.requests_json AS BLOB))),0) FROM message_trajectory r JOIN messages m ON r.message_id=m.id WHERE m.conversation_id=?1)",
                 [&row.id],
                 |r| r.get(0),
             )?;
