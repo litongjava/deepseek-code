@@ -150,6 +150,20 @@ pub async fn handle(
             use std::io::IsTerminal;
             eprintln!("Interactive input: {}\nInteractive output: {}\nTab: complete commands; arrow keys: edit/history.\nMultiline: /multiline followed by /end, or a trailing backslash.\nClipboard: /copy [N]. Mouse selection and automatic copy are controlled by your terminal.", std::io::stdin().is_terminal(), std::io::stdout().is_terminal());
         }
+        "/agents" => {
+            // As in the reference CLI, subagents are chosen by asking for one;
+            // this lists what is available.
+            let context = crate::services::context(paths)?;
+            let agents = claude_core::services::agents::list(&context)?;
+            let width = agents.iter().map(|agent| agent.id.chars().count()).max().unwrap_or(0) + 2;
+            let mut text = String::from("  \u{23bf}  Ask DeepSeek Code to hand work to a subagent (e.g. \"use the explore agent to find where errors are logged\").\n     Available subagents:\n");
+            for agent in agents {
+                let description = agent.description.lines().next().unwrap_or_default().chars().take(100).collect::<String>();
+                text.push_str(&format!("       \u{2022} {:<width$}{description}\n", agent.id));
+            }
+            text.push_str("     /list-agents shows the sessions running now.");
+            eprintln!("{text}");
+        }
         "/list-agents" => {
             if argument == "definitions" {
                 let context = crate::services::context(paths)?;

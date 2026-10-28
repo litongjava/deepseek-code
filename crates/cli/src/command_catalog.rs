@@ -50,6 +50,7 @@ pub const COMMANDS: &[(&str, &str)] = &[
     ("/config", "Show settings and commands to change them"),
     ("/copy", "Copy the latest assistant response: [N]"),
     ("/export", "Export transcript: FILE or clipboard"),
+    ("/agents", "Show the subagents DeepSeek Code can delegate to"),
     ("/list-agents", "List available agent definitions"),
     (
         "/tasks",

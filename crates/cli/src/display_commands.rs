@@ -300,6 +300,29 @@ pub async fn handle(
         }
         "/memory" => {
             let paths_by_scope = memory_paths(&paths.data_dir, &session.workspace);
+            if argument.trim().is_empty() && crate::terminal::picker::available() {
+                // As in the reference CLI: pick the instructions file to edit.
+                use crate::terminal::picker::{Entry, Picker};
+                let describe = |path: &std::path::Path, place: &str| match std::fs::metadata(path) {
+                    Ok(metadata) => format!("{place} {} \u{b7} {} bytes", crate::terminal::home_path(path), metadata.len()),
+                    Err(_) => format!("{place} {} \u{b7} not created yet", crate::terminal::home_path(path)),
+                };
+                let entries = vec![
+                    Entry { title: "User instructions".into(), detail: describe(&paths_by_scope[0].1, "Saved in") },
+                    Entry { title: "Project instructions".into(), detail: describe(&paths_by_scope[1].1, "Checked in at") },
+                    Entry { title: "Local instructions".into(), detail: describe(&paths_by_scope[2].1, "Not checked in:") },
+                    Entry { title: "Show loaded project instructions".into(), detail: String::new() },
+                ];
+                let picker = Picker { heading: "Memory", subtitle: Some("Instructions DeepSeek Code reads in every session"), entries: &entries, search: false, hint: "Enter to open \u{b7} Esc to cancel", selected: 0 };
+                let scope = match picker.run()? {
+                    Some(0) => "user",
+                    Some(1) => "project",
+                    Some(2) => "local",
+                    Some(3) => "show",
+                    _ => return Ok(true),
+                };
+                return Box::pin(handle("/memory", scope, paths, session)).await;
+            }
             match argument.trim() {
                 "" | "list" => {
                     for (scope, path) in &paths_by_scope {

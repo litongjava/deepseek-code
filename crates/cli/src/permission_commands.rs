@@ -5,6 +5,13 @@ use crate::terminal::tool_view::Remember;
 use claude_core::{db::DbManager, native_engine::permission_response::Commit, permissions::rules::PermissionAction};
 use std::collections::HashMap;
 
+/// Saves the session's rules and applies them at once.
+pub fn save_rules(session: &Session, rules: &HashMap<String, PermissionAction>) -> Result<()> {
+    save(&session.store.db, &session.id, rules)?;
+    session.permissions.set_session_rules(&session.id, rules.clone());
+    Ok(())
+}
+
 pub fn load(session: &Session) -> Result<HashMap<String, PermissionAction>> {
     load_rules(&session.store.db, &session.id)
 }
@@ -66,6 +73,10 @@ fn words(argument: &str) -> Vec<&str> {
 }
 
 pub async fn handle(argument: &str, session: &mut Session) -> Result<()> {
+    if argument.trim().is_empty() && crate::terminal::picker::available() {
+        // As in the reference CLI: tabs of rules instead of a printed list.
+        return crate::permissions_menu::run(session).await;
+    }
     if let Some(action) = argument.trim().strip_prefix("auto-config").filter(|rest| rest.is_empty() || rest.starts_with(char::is_whitespace)) {
         let context = crate::services::context(&session.paths)?;
         let action = action.trim();
