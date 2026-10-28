@@ -86,6 +86,9 @@ pub async fn handle(session: &Session, argument: &str) -> Result<bool> {
         return Ok(false);
     }
     let context = crate::services::context(&session.paths)?;
+    if words.is_empty() && crate::terminal::picker::available() {
+        return pick(session, &context).await.map(|()| true);
+    }
     match words.first().map(String::as_str).unwrap_or("status") {
         "status" => {
             ensure!(words.len() <= 1, "Usage: /ide status");
@@ -157,4 +160,52 @@ pub async fn handle(session: &Session, argument: &str) -> Result<bool> {
         _ => anyhow::bail!("Usage: /ide [status|list|connect [PORT]|disconnect|tools|selection|open FILE [LINE]|diagnostics [FILE]|lsp FILE OPERATION [LINE CHARACTER]]"),
     }
     Ok(true)
+}
+
+/// `/ide` as in the reference CLI: the editors running this workspace to
+/// choose from, or a short note when there are none. `/ide status` keeps
+/// the detailed report.
+async fn pick(session: &Session, context: &claude_core::services::ServiceContext) -> Result<()> {
+    use crate::terminal::picker::{Entry, Picker};
+    let editors: Vec<ide::Editor> = ide::discover(&ide::lock_directory()?, &session.workspace)?
+        .into_iter()
+        .filter(|editor| editor.matches_workspace)
+        .collect();
+    if editors.is_empty() {
+        eprintln!("  \u{23bf}  No available IDEs detected. Open this project in an editor whose extension dcl can connect to (see /ide list).");
+        return Ok(());
+    }
+    let connected = session.ide.status().await.editor.map(|editor| editor.port);
+    let mut entries: Vec<Entry> = editors
+        .iter()
+        .map(|editor| Entry {
+            title: format!("{}{}", editor.name, if connected == Some(editor.port) { " \u{2714}" } else { "" }),
+            detail: String::new(),
+        })
+        .collect();
+    entries.push(Entry { title: "None".into(), detail: String::new() });
+    let picker = Picker {
+        heading: "Select IDE",
+        subtitle: Some("Connect to an IDE for integrated development features."),
+        entries: &entries,
+        search: false,
+        hint: "Enter to confirm \u{b7} Esc to cancel",
+        selected: 0,
+    };
+    let Some(choice) = picker.run()? else {
+        return Ok(());
+    };
+    match editors.get(choice) {
+        Some(editor) => {
+            connect(session, Some(editor.port)).await?;
+            context.save_setting(&key(session), &Some(Choice { port: editor.port, workspace: session.workspace.canonicalize()? }))?;
+            eprintln!("  \u{23bf}  Connected to {}.", editor.name);
+        }
+        None => {
+            context.save_setting(&key(session), &Option::<Choice>::None)?;
+            session.ide.disconnect().await;
+            eprintln!("  \u{23bf}  Disconnected from IDE.");
+        }
+    }
+    Ok(())
 }
