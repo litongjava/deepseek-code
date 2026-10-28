@@ -1015,7 +1015,11 @@ impl PromptEditor {
                     }
                 }
                 Event::Paste(value) => {
-                    buffer.insert(&value);
+                    // A dragged or pasted image file shows as `[Image #N]`, as in the reference CLI.
+                    match crate::images::pasted_path(&value) {
+                        Some(path) => buffer.insert(&format!("{} ", crate::images::attach(path))),
+                        None => buffer.insert(&value),
+                    }
                     selected = 0;
                     menu_hidden = false;
                 }
@@ -1157,9 +1161,9 @@ impl PromptEditor {
                     }
                     if control && key.code == KeyCode::Char('v') {
                         // Ctrl+V with an image on the clipboard attaches it as
-                        // @path; text pastes arrive as bracketed paste instead.
+                        // [Image #N]; text pastes arrive as bracketed paste instead.
                         if let Ok(Some(path)) = crate::images::paste_clipboard() {
-                            buffer.insert(&format!("@{} ", path.display()));
+                            buffer.insert(&format!("{} ", crate::images::attach(path)));
                         }
                         continue;
                     }

@@ -1763,6 +1763,8 @@ fn run(
                     }
                 }
                 Event::Paste(text) => {
+                    // A dragged or pasted image file shows as `[Image #N]`, as at the prompt.
+                    let text = crate::images::pasted_path(&text).map_or(text, |path| format!("{} ", crate::images::attach(path)));
                     if !state.draft.insert_paste(&text) {
                         screen.log("Paste not inserted: the active draft limit is 32768 characters. Shorten the text and paste again.")?;
                     }
