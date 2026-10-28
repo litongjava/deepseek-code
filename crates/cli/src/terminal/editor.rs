@@ -36,6 +36,11 @@ pub struct PromptEditor {
     /// Background shells still running, shown as "1 shell · ↓ to manage".
     shells: usize,
     shell_counter: Option<Box<dyn Fn() -> usize + Send>>,
+    /// Text removed by Ctrl+U or Ctrl+K, pasted back by Ctrl+Y.
+    killed: String,
+    /// A draft put aside with Ctrl+S; it returns after the next prompt.
+    stash: Option<String>,
+    stash_restore: bool,
     /// Vim-style editing (`/vim`).
     vim: bool,
     keybindings: crate::keybindings::Keybindings,
@@ -58,6 +63,9 @@ impl Default for PromptEditor {
             context_note: None,
             shells: 0,
             shell_counter: None,
+            killed: String::new(),
+            stash: None,
+            stash_restore: false,
             vim: false,
             keybindings: crate::keybindings::Keybindings::default(),
             commands: crate::command_catalog::COMMANDS
@@ -688,6 +696,21 @@ impl PromptEditor {
         let mut input_reader = crate::terminal::paste_input::Reader::new()?;
         execute!(io::stderr(), EnableBracketedPaste)?;
         let mut buffer = self.resume_buffer();
+        // As in the reference CLI, a stashed draft returns after the prompt
+        // that was sent instead.
+        let mut restored = false;
+        if self.stash_restore {
+            self.stash_restore = false;
+            if let Some(stash) = self.stash.take().filter(|_| buffer.chars.is_empty()) {
+                buffer.set(&stash);
+                restored = true;
+            }
+        }
+        // Undo history: each change pushes the state before it.
+        let mut undo: Vec<(Vec<char>, usize)> = Vec::new();
+        let mut last_state = (buffer.chars.clone(), buffer.cursor);
+        let mut kill_hint = false;
+        let mut clear_esc: Option<std::time::Instant> = None;
         let mut keybinding_pending = crate::keybindings::Pending::default();
         let mut screen = Screen::default();
         let mut selected = 0usize;
@@ -740,6 +763,13 @@ impl PromptEditor {
                     self.shells = counter();
                 }
             }
+            if buffer.chars != last_state.0 {
+                undo.push(std::mem::replace(&mut last_state, (buffer.chars.clone(), buffer.cursor)));
+                if undo.len() > 200 {
+                    undo.remove(0);
+                }
+            }
+            last_state.1 = buffer.cursor;
             let (cols, rows) = terminal::size()?;
             let width = cols.saturating_sub(1).max(4) as usize;
             let text = buffer.text();
@@ -854,6 +884,21 @@ impl PromptEditor {
                     // Right after the mode label, as in the reference CLI.
                     parts.insert(1, format!("{} shell{} \u{b7} \u{2193} to manage", self.shells, if self.shells == 1 { "" } else { "s" }));
                 }
+                if kill_hint {
+                    parts.push("Ctrl+Y to paste deleted text".into());
+                }
+                if self.stash.is_some() {
+                    parts.push("\u{203a} stashed".into());
+                }
+                if restored {
+                    parts.push("Draft restored".into());
+                }
+                if buffer.chars.contains(&'\n') {
+                    parts.push(format!("ctrl+g to edit in {}", external_editor()));
+                }
+                if clear_esc.is_some_and(|at| at.elapsed() < std::time::Duration::from_secs(1)) {
+                    parts = vec!["Esc again to clear".into()];
+                }
                 if last_esc.is_some_and(|at| at.elapsed() < std::time::Duration::from_secs(1)) {
                     parts = vec!["esc again to rewind".into()];
                 }
@@ -942,6 +987,78 @@ impl PromptEditor {
                     let control = key.modifiers.contains(KeyModifiers::CONTROL);
                     if control && key.code == KeyCode::Char('l') {
                         screen.invalidated = true;
+                        continue;
+                    }
+                    restored = false;
+                    let killing = control && matches!(key.code, KeyCode::Char('u' | 'k'));
+                    if killing {
+                        let cut: String = if key.code == KeyCode::Char('u') {
+                            buffer.chars[..buffer.cursor].iter().collect()
+                        } else {
+                            buffer.chars[buffer.cursor..].iter().collect()
+                        };
+                        if !cut.is_empty() {
+                            self.killed = cut;
+                        }
+                    }
+                    kill_hint = killing && !self.killed.is_empty();
+                    // Shortcuts from the reference CLI's `?` panel.
+                    if control && matches!(key.code, KeyCode::Char('_' | '7' | '/' | '-')) {
+                        if let Some((chars, cursor)) = undo.pop() {
+                            buffer.chars = chars;
+                            buffer.cursor = cursor.min(buffer.chars.len());
+                            last_state = (buffer.chars.clone(), buffer.cursor);
+                        }
+                        continue;
+                    }
+                    if control && key.code == KeyCode::Char('y') {
+                        let killed = self.killed.clone();
+                        buffer.insert(&killed);
+                        continue;
+                    }
+                    if control && key.code == KeyCode::Char('s') {
+                        if buffer.chars.is_empty() {
+                            if let Some(stash) = self.stash.take() {
+                                buffer.set(&stash);
+                            }
+                        } else {
+                            self.stash = Some(buffer.text());
+                            buffer.set("");
+                        }
+                        continue;
+                    }
+                    if control && key.code == KeyCode::Char('g') {
+                        screen.suspend()?;
+                        let edited = edit_externally(&buffer.text())?;
+                        buffer.set(&edited);
+                        screen = Screen::default();
+                        continue;
+                    }
+                    if control && key.code == KeyCode::Char('z') && cfg!(unix) {
+                        screen.suspend()?;
+                        suspend_process()?;
+                        screen = Screen::default();
+                        continue;
+                    }
+                    if key.code == KeyCode::Esc && items.is_empty() && !buffer.chars.is_empty() && !self.vim {
+                        if clear_esc.is_some_and(|at| at.elapsed() < std::time::Duration::from_secs(1)) {
+                            buffer.set("");
+                            clear_esc = None;
+                        } else {
+                            clear_esc = Some(std::time::Instant::now());
+                        }
+                        continue;
+                    }
+                    if key.code == KeyCode::Enter
+                        && key.modifiers.is_empty()
+                        && items.is_empty()
+                        && buffer.cursor == buffer.chars.len()
+                        && buffer.chars.last() == Some(&'\\')
+                    {
+                        // A trailing backslash continues on a new line.
+                        buffer.chars.pop();
+                        buffer.cursor = buffer.chars.len();
+                        buffer.insert("\n");
                         continue;
                     }
                     if control && key.code == KeyCode::Char('c') {
@@ -1112,6 +1229,7 @@ impl PromptEditor {
                             if !text.trim().is_empty() && self.history.last() != Some(&text) {
                                 self.history.push(text.clone());
                             }
+                            self.stash_restore = self.stash.is_some();
                             return Ok(Some(super::PromptEvent::Line(text)));
                         }
                         KeyCode::Esc if items.is_empty() && buffer.chars.is_empty() => {
@@ -1462,4 +1580,46 @@ mod tests {
         assert_eq!(clipped("e\u{301}x", 1), "e\u{301}");
         assert_eq!(clipped("\u{1b}hi", 2), "hi");
     }
+}
+
+/// $VISUAL, $EDITOR or vi, for Ctrl+G.
+fn external_editor() -> String {
+    std::env::var("VISUAL")
+        .or_else(|_| std::env::var("EDITOR"))
+        .ok()
+        .and_then(|editor| editor.split_whitespace().next().map(|name| name.rsplit(['/', '\\']).next().unwrap_or(name).to_owned()))
+        .unwrap_or_else(|| "vi".into())
+}
+
+/// Ctrl+G: the input in an external editor, as in the reference CLI.
+fn edit_externally(text: &str) -> io::Result<String> {
+    use std::io::Write as _;
+    let mut file = tempfile::Builder::new().prefix("dcl-prompt-").suffix(".md").tempfile()?;
+    file.write_all(text.as_bytes())?;
+    file.flush()?;
+    let editor = std::env::var("VISUAL").or_else(|_| std::env::var("EDITOR")).unwrap_or_else(|_| "vi".into());
+    let mut parts = editor.split_whitespace();
+    let program = parts.next().unwrap_or("vi").to_owned();
+    terminal::disable_raw_mode()?;
+    let status = std::process::Command::new(&program).args(parts).arg(file.path()).status();
+    terminal::enable_raw_mode()?;
+    match status {
+        Ok(_) => Ok(std::fs::read_to_string(file.path())?.trim_end_matches('\n').to_owned()),
+        Err(error) => {
+            eprint!("Could not open {program}: {error}\r\n");
+            Ok(text.to_owned())
+        }
+    }
+}
+
+/// Ctrl+Z: stop like a shell job until `fg`, as in the reference CLI.
+fn suspend_process() -> io::Result<()> {
+    terminal::disable_raw_mode()?;
+    eprintln!("DeepSeek Code has been suspended. Run `fg` to bring DeepSeek Code back.");
+    #[cfg(unix)]
+    {
+        let _ = std::process::Command::new("kill").arg("-TSTP").arg(std::process::id().to_string()).status();
+    }
+    terminal::enable_raw_mode()?;
+    Ok(())
 }
