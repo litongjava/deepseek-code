@@ -101,9 +101,9 @@ impl ToolLoopExecutor {
         crate::structured_output::validate_result(&schema, &input.to_string())
             .map_err(|error| anyhow!("Invalid approved tool input: {error}"))?;
         let path_keys: &[&str] = match tool {
-            "Write" | "Edit" | "Read" | "MultiEdit" | "smart_edit" => &["file_path"],
+            "Write" | "Edit" | "Read" | "MultiEdit" => &["file_path"],
             "NotebookEdit" => &["notebook_path", "path"],
-            "ListDir" | "Grep" | "Glob" | "smart_grep" | "smart_project_scan" | "git_status"
+            "ListDir" | "Grep" | "Glob" | "smart_project_scan" | "git_status"
             | "git_diff" | "git_log" | "git_commit" | "git_add" => &["path"],
             "Bash" | "Shell" => &["cwd"],
             "LSP" | "lsp" => &["filePath", "path"],

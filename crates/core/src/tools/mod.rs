@@ -440,8 +440,6 @@ macro_rules! tool_dispatch {
             "computer_use" => tool_computer_use($input),
             "memory_search" => tool_memory_search($input),
             "memory_ingest" => tool_memory_ingest($input),
-            "smart_edit" => macros::execute_smart_edit($input, $cwd),
-            "smart_grep" => macros::execute_smart_grep($input, $cwd),
             "smart_project_scan" => macros::execute_smart_project_scan($input, $cwd),
             _ => Ok(serde_json::json!({ "error": format!("Unknown tool: {}", $name) })),
         }

@@ -249,7 +249,7 @@ fn compact_tool_output(tool_name: &str, output: &str) -> String {
     let cleaned = model_tool_output(tool_name, output);
     let output = cleaned.as_str();
     match tool_name {
-        "Edit" | "Write" | "MultiEdit" | "smart_edit" => {
+        "Edit" | "Write" | "MultiEdit" => {
             if output.len() > 500 {
                 let safe_end = output.char_indices()
                     .take(500)
