@@ -82,6 +82,7 @@ pub fn get_tool_definitions() -> Vec<ToolDefinition> {
         lsp::definition(),
         // `worktree` stays dispatchable for older transcripts; the model sees Enter/ExitWorktree.
         agent_messages::definition(),
+        agent_messages::list_agents_definition(),
         // `cron` stays dispatchable for older transcripts; the model sees the reference trio.
         crate::services::goal_proposals::definition(),
         ToolDefinition { name: "ToolSearch".into(), description: "Search the currently registered built-in tool names, descriptions and schemas. MCP tools are supplied separately by the host.".into(), input_schema: serde_json::json!({"type":"object","properties":{"query":{"type":"string"}},"required":["query"]}) },

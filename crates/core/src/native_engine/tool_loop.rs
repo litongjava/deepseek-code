@@ -1482,6 +1482,25 @@ impl ToolLoopExecutor {
             let output = match result { Ok(value) => value.to_string(), Err(error) => error.to_string() };
             return (tool_input.clone(), output, failed);
         }
+        if tool_name == "ListAgents" {
+            let result = match (self.search_config_path.as_deref().and_then(std::path::Path::parent), self.conv_id.as_deref()) {
+                (Some(root), Some(session)) => crate::services::session_messages::context(root).and_then(|context| crate::tools::agent_messages::list_agents(&context, session)),
+                _ => Err(anyhow!("ListAgents needs an interactive session")),
+            };
+            return (tool_input.clone(), match &result { Ok(value) => value.to_string(), Err(error) => format!("Error: {error:#}") }, result.is_err());
+        }
+        if tool_name == "SendMessage" && tool_input["notify_when_idle"] == true {
+            return (tool_input.clone(), "Error: notify_when_idle is not supported by this runtime yet; send without it.".into(), true);
+        }
+        // Like the reference CLI, a bare {to, message} is a send.
+        let normalized_message;
+        let tool_input = if tool_name == "SendMessage" && tool_input["operation"].is_null() {
+            let mut input = tool_input.clone();
+            input["operation"] = json!("send");
+            if let Some(object) = input.as_object_mut() { object.remove("summary"); object.remove("notify_when_idle"); }
+            normalized_message = input;
+            &normalized_message
+        } else { tool_input };
         if tool_name == "SendMessage" {
             match self.check_permission(tool_name, tool_input, _tool_use_id).await {
                 PermissionResult::Denied(reason) => return (tool_input.clone(), format!("Team message access denied: {reason}"), true),

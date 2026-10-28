@@ -4,7 +4,37 @@ use rusqlite::{params, OptionalExtension};
 use serde_json::{json, Value};
 
 pub(super) fn definition() -> super::ToolDefinition {
-    super::ToolDefinition {name:"SendMessage".into(),description:"Send durable team or same-project messages. With a team, address a teammate by name or use \"*\" to broadcast; without a team use a session UUID from /list-agents. Active recipients consume queued context at their next safe model boundary. Operations: send, shutdown_request (leader only), shutdown_response, plan_approval_response (leader only), request_status, receive, sent, pending_count, mark_read, peers. No external network transmission.".into(),input_schema:json!({"type":"object","properties":{"operation":{"type":"string","enum":["send","receive","pending_count","mark_read","sent","peers","shutdown_request","shutdown_response","plan_approval_response","request_status"]},"to":{"type":"string","description":"Teammate name, \"*\" for broadcast, or a session UUID"},"from":{"type":"string"},"content":{"type":"string"},"message":{"description":"Plain text or a structured shutdown/plan response"},"recipient":{"type":"string"},"unread_only":{"type":"boolean"},"message_id":{"type":"string"},"request_id":{"type":"string"},"approve":{"description":"true/false or yes/no"},"reason":{"type":"string"},"feedback":{"type":"string"},"timeout_ms":{"type":"integer","minimum":1}},"required":["operation"]})}
+    super::ToolDefinition {name:"SendMessage".into(),description:"Send a message to another agent or session.\n\n```json\n{\"to\": \"researcher\", \"summary\": \"assign task 1\", \"message\": \"start on task #1\"}\n```\n\n- `to`: a teammate name, \"*\" to broadcast to your team, or the `to` value a ListAgents row shows (a background agent or another session of this project).\n- Your plain text output is NOT visible to other agents — to communicate, you MUST call this tool. Messages from teammates are delivered automatically; you don't check an inbox.\n- Recipients read queued messages at their next safe model boundary; a successful send means the message was queued for that session, not that it was read.\n- When relaying, don't quote the original — it's already rendered to the user.\n\nTeam protocol (this runtime): `operation` also accepts shutdown_request (leader only), shutdown_response, plan_approval_response (leader only), request_status, receive, sent, pending_count and mark_read; it defaults to send.".into(),input_schema:json!({"type":"object","properties":{
+        "to":{"description":"Recipient: a teammate name, \"*\" for your team, or the `to` value from a ListAgents row","type":"string","maxLength":300},
+        "summary":{"description":"A 5-10 word label for your own transcript row (not transmitted — the recipient previews the first line of `message`).","type":"string","maxLength":200},
+        "message":{"default":"","description":"Plain text message content (or a structured shutdown/plan response for the team protocol). The recipient's human sees only the FIRST LINE as a one-line preview until they expand it, so make the first line a clear, self-contained sentence saying what this is about.","type":["string","object"]},
+        "notify_when_idle":{"description":"Not supported by this runtime yet; leave unset.","type":"boolean"},
+        "operation":{"description":"Team protocol operation; defaults to send.","type":"string","enum":["send","receive","pending_count","mark_read","sent","peers","shutdown_request","shutdown_response","plan_approval_response","request_status"]},
+        "request_id":{"type":"string"},"approve":{"description":"true/false or yes/no"},"reason":{"type":"string"},"feedback":{"type":"string"},"message_id":{"type":"string"},"unread_only":{"type":"boolean"},"timeout_ms":{"type":"integer","minimum":1}
+    },"required":["to","message"],"additionalProperties":false})}
+}
+
+pub(super) fn list_agents_definition() -> super::ToolDefinition {
+    super::ToolDefinition {name:"ListAgents".into(),description:"Lists agents you can SendMessage to — background agents you spawned and the other sessions of this project on this machine. Each row shows the `to` value to pass to SendMessage, the kind, and whether the recipient is running or idle.".into(),input_schema:json!({"type":"object","properties":{
+        "channel":{"description":"Not available in this build; leave unset.","type":"string","maxLength":256},
+        "q":{"description":"Not available in this build; leave unset.","type":"string","maxLength":256}
+    },"additionalProperties":false})}
+}
+
+/// Rows for ListAgents: owned background agents, then same-project sessions.
+pub fn list_agents(context: &crate::services::ServiceContext, session: &str) -> Result<Value> {
+    let mut rows = Vec::new();
+    for job in crate::services::background_sessions::list(&context.paths.data_dir, Some(session))? {
+        rows.push(json!({"to":job.session_id,"name":job.title,"kind":"background agent","status":job.status}));
+    }
+    for peer in crate::services::session_messages::peers(context, session)? {
+        if peer["current"] == true || rows.iter().any(|row| row["to"] == peer["id"]) { continue; }
+        rows.push(json!({"to":peer["id"],"name":peer["title"],"kind":"session","status":if peer["receiver_active"] == true { "running" } else { "idle" }}));
+    }
+    let content = if rows.is_empty() { "No agents or sessions to message.".to_owned() } else {
+        rows.iter().map(|row| format!("{} — to: {} ({}, {})", row["name"].as_str().filter(|n| !n.is_empty()).unwrap_or("untitled"), row["to"].as_str().unwrap_or_default(), row["kind"].as_str().unwrap_or_default(), row["status"].as_str().unwrap_or_default())).collect::<Vec<_>>().join("\n")
+    };
+    Ok(json!({"agents":rows,"content":content}))
 }
 
 fn message_content(input: &Value) -> Result<String> {
