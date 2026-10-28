@@ -210,82 +210,7 @@ impl McpServerManager {
     }
 
     async fn create_default_config(&self) -> Result<()> {
-        let default_servers = vec![
-            McpServerConfig {
-                id: "filesystem".to_string(),
-                name: "Filesystem (Anthropic)".to_string(),
-                command: "npx".to_string(),
-                args: vec![
-                    "-y".to_string(),
-                    "@anthropic/mcp-server-filesystem".to_string(),
-                    ".".to_string(),
-                ],
-                env: HashMap::new(),
-                cwd: None,
-                enabled: false,
-            },
-            McpServerConfig {
-                id: "git".to_string(),
-                name: "Git".to_string(),
-                command: "npx".to_string(),
-                args: vec![
-                    "-y".to_string(),
-                    "@anthropic/mcp-server-git".to_string(),
-                ],
-                env: HashMap::new(),
-                cwd: None,
-                enabled: false,
-            },
-            McpServerConfig {
-                id: "brave-search".to_string(),
-                name: "Brave Search".to_string(),
-                command: "npx".to_string(),
-                args: vec![
-                    "-y".to_string(),
-                    "@anthropic/mcp-server-brave-search".to_string(),
-                ],
-                env: HashMap::new(),
-                cwd: None,
-                enabled: false,
-            },
-            McpServerConfig {
-                id: "mcp-filesystem".to_string(),
-                name: "Filesystem (MCP)".to_string(),
-                command: "npx".to_string(),
-                args: vec![
-                    "-y".to_string(),
-                    "@modelcontextprotocol/server-filesystem".to_string(),
-                    ".".to_string(),
-                ],
-                env: HashMap::new(),
-                cwd: None,
-                enabled: false,
-            },
-            McpServerConfig {
-                id: "github".to_string(),
-                name: "GitHub".to_string(),
-                command: "npx".to_string(),
-                args: vec![
-                    "-y".to_string(),
-                    "@modelcontextprotocol/server-github".to_string(),
-                ],
-                env: HashMap::new(),
-                cwd: None,
-                enabled: false,
-            },
-            McpServerConfig {
-                id: "slack".to_string(),
-                name: "Slack".to_string(),
-                command: "npx".to_string(),
-                args: vec![
-                    "-y".to_string(),
-                    "@modelcontextprotocol/server-slack".to_string(),
-                ],
-                env: HashMap::new(),
-                cwd: None,
-                enabled: false,
-            },
-        ];
+        let default_servers = default_servers();
 
         let mut servers = HashMap::new();
         for server in default_servers {
@@ -1140,3 +1065,83 @@ impl McpConfigManager {
 
 #[cfg(test)]
 mod elicitation_tests;
+
+/// The MCP server presets written, disabled, into a new configuration.
+pub fn default_servers() -> Vec<McpServerConfig> {
+    vec![
+            McpServerConfig {
+                id: "filesystem".to_string(),
+                name: "Filesystem (Anthropic)".to_string(),
+                command: "npx".to_string(),
+                args: vec![
+                    "-y".to_string(),
+                    "@anthropic/mcp-server-filesystem".to_string(),
+                    ".".to_string(),
+                ],
+                env: HashMap::new(),
+                cwd: None,
+                enabled: false,
+            },
+            McpServerConfig {
+                id: "git".to_string(),
+                name: "Git".to_string(),
+                command: "npx".to_string(),
+                args: vec![
+                    "-y".to_string(),
+                    "@anthropic/mcp-server-git".to_string(),
+                ],
+                env: HashMap::new(),
+                cwd: None,
+                enabled: false,
+            },
+            McpServerConfig {
+                id: "brave-search".to_string(),
+                name: "Brave Search".to_string(),
+                command: "npx".to_string(),
+                args: vec![
+                    "-y".to_string(),
+                    "@anthropic/mcp-server-brave-search".to_string(),
+                ],
+                env: HashMap::new(),
+                cwd: None,
+                enabled: false,
+            },
+            McpServerConfig {
+                id: "mcp-filesystem".to_string(),
+                name: "Filesystem (MCP)".to_string(),
+                command: "npx".to_string(),
+                args: vec![
+                    "-y".to_string(),
+                    "@modelcontextprotocol/server-filesystem".to_string(),
+                    ".".to_string(),
+                ],
+                env: HashMap::new(),
+                cwd: None,
+                enabled: false,
+            },
+            McpServerConfig {
+                id: "github".to_string(),
+                name: "GitHub".to_string(),
+                command: "npx".to_string(),
+                args: vec![
+                    "-y".to_string(),
+                    "@modelcontextprotocol/server-github".to_string(),
+                ],
+                env: HashMap::new(),
+                cwd: None,
+                enabled: false,
+            },
+            McpServerConfig {
+                id: "slack".to_string(),
+                name: "Slack".to_string(),
+                command: "npx".to_string(),
+                args: vec![
+                    "-y".to_string(),
+                    "@modelcontextprotocol/server-slack".to_string(),
+                ],
+                env: HashMap::new(),
+                cwd: None,
+                enabled: false,
+            },
+    ]
+}

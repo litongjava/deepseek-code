@@ -18,20 +18,34 @@ fn state(server: &McpServerStatus) -> String {
     }
 }
 
+/// A bundled preset nobody has turned on or changed; the reference CLI has
+/// no presets, so these stay out of the list.
+fn untouched_preset(server: &McpServerStatus) -> bool {
+    !server.enabled
+        && claude_core::mcp::default_servers()
+            .iter()
+            .any(|preset| preset.id == server.id && preset.command == server.command && preset.args == server.args)
+}
+
 pub async fn run(session: &Session) -> Result<()> {
     session.ensure_mcp().await?;
     let mut selected = 0;
     loop {
-        let servers = session.mcp.list_servers().await;
+        let all = session.mcp.list_servers().await;
+        let hidden = all.iter().filter(|server| untouched_preset(server)).count();
+        let servers: Vec<McpServerStatus> = all.into_iter().filter(|server| !untouched_preset(server)).collect();
         if servers.is_empty() {
-            eprintln!("No MCP servers configured. Run /doctor if this is unexpected. Otherwise, run dcl mcp --help to learn how to add one.");
+            eprintln!("No MCP servers configured. Run /doctor if this is unexpected. Otherwise, run dcl mcp --help to learn how to add one{}.", if hidden > 0 { format!(", or /mcp list to see the {hidden} bundled presets") } else { String::new() });
             return Ok(());
         }
         let entries: Vec<Entry> = servers
             .iter()
             .map(|server| Entry { title: server.name.clone(), detail: state(server) })
             .collect();
-        let count = format!("{} server{}", servers.len(), if servers.len() == 1 { "" } else { "s" });
+        let mut count = format!("{} server{}", servers.len(), if servers.len() == 1 { "" } else { "s" });
+        if hidden > 0 {
+            count.push_str(&format!(" \u{b7} {hidden} disabled presets hidden (/mcp list)"));
+        }
         let picker = Picker {
             heading: "Manage MCP servers",
             subtitle: Some(&count),
