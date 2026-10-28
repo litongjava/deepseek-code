@@ -308,6 +308,9 @@ pub(super) async fn chat_handler(
                         "model": model,
                     }))
                 }
+                crate::native_engine::tool_loop::EngineEvent::QueuedInput(text) => {
+                    Some(serde_json::json!({"type": "queued_input", "text": text}))
+                }
                 crate::native_engine::tool_loop::EngineEvent::Text(text) => {
                     full_text.push_str(&text);
                     Some(serde_json::json!({
