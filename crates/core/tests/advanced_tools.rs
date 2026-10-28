@@ -24,7 +24,9 @@ fn advanced_tools_respect_read_edit_and_execution_modes() {
         "TaskUpdate",
         "TodoWrite",
         "LSP",
-        "worktree",
+        "EnterWorktree",
+        "ExitWorktree",
+        "CronCreate",
     ] {
         assert!(
             matches!(
@@ -87,7 +89,9 @@ async fn registered_tools_dispatch_and_project_reads_have_no_side_effects() {
         "TaskUpdate",
         "TodoWrite",
         "LSP",
-        "worktree",
+        "EnterWorktree",
+        "ExitWorktree",
+        "CronCreate",
     ] {
         assert_eq!(registered.iter().filter(|t| t.name == name).count(), 1);
     }

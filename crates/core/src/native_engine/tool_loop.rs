@@ -342,6 +342,25 @@ fn ask_user_questions(input: &Value) -> Result<Vec<Value>> {
     }).collect()
 }
 
+/// Writes, scheduled jobs and worktree switches run one at a time in order.
+fn is_serial_builtin(name: &str) -> bool {
+    matches!(name, "Edit" | "Write" | "MultiEdit")
+        || crate::tools::cron_jobs::is_cron_tool(name)
+        || crate::tools::session_worktree::is_worktree_tool(name)
+}
+
+/// A Read of an image becomes model image content when the model accepts images.
+fn take_read_image(tool_name: &str, value: &mut Value, supports_vision: bool) -> Option<std::result::Result<(String, McpOutput), String>> {
+    if tool_name != "Read" { return None; }
+    let image = value.as_object_mut()?.remove("image")?;
+    if !supports_vision {
+        return Some(Err("Error: The selected model does not accept images, so this image file cannot be shown to it.".to_owned()));
+    }
+    let text = value["content"].as_str().unwrap_or_default().to_owned();
+    let transport = json!({"content":[{"type":"image","mimeType":image["media_type"],"data":image["data"]},{"type":"text","text":text}]});
+    Some(McpOutput::from_transport(&transport).map(|content| (text, content)).map_err(|error| format!("Error: {error:#}")))
+}
+
 /// Provider credentials are request-scoped, including parallel tool execution.
 async fn execute_builtin_tool(
     name: &str,
@@ -529,16 +548,22 @@ async fn execute_tool_standalone(
                 Err(e) => (format!("Error: {}", e), true),
             }
         } else {
-            let result = execute_builtin_tool(&tool_name, tool_input.clone(), &workspace_cwd, &provider, &event_tx, search_config_path.as_deref(), false).await;
-            match &result {
-                Ok(val) => (serde_json::to_string_pretty(val).unwrap_or_default(), false),
+            match execute_builtin_tool(&tool_name, tool_input.clone(), &workspace_cwd, &provider, &event_tx, search_config_path.as_deref(), false).await {
+                Ok(mut val) => match take_read_image(&tool_name, &mut val, provider.model.supports_vision) {
+                    Some(Ok((text, content))) => { mcp_output = Some(content); (text, false) }
+                    Some(Err(error)) => (error, true),
+                    None => (serde_json::to_string_pretty(&val).unwrap_or_default(), false),
+                },
                 Err(e) => (format!("Error: {}", e), true),
             }
         }
     } else {
-        let result = execute_builtin_tool(&tool_name, tool_input.clone(), &workspace_cwd, &provider, &event_tx, search_config_path.as_deref(), false).await;
-        match &result {
-            Ok(val) => (serde_json::to_string_pretty(val).unwrap_or_default(), false),
+        match execute_builtin_tool(&tool_name, tool_input.clone(), &workspace_cwd, &provider, &event_tx, search_config_path.as_deref(), false).await {
+            Ok(mut val) => match take_read_image(&tool_name, &mut val, provider.model.supports_vision) {
+                Some(Ok((text, content))) => { mcp_output = Some(content); (text, false) }
+                Some(Err(error)) => (error, true),
+                None => (serde_json::to_string_pretty(&val).unwrap_or_default(), false),
+            },
             Err(e) => (format!("Error: {}", e), true),
         }
     };
@@ -1539,6 +1564,16 @@ impl ToolLoopExecutor {
             let result = Box::pin(self.execute_workflow(tool_input)).await;
             return (tool_input.clone(), match &result { Ok(value)=>value.to_string(),Err(error)=>format!("Workflow failed: {error:#}") }, result.is_err());
         }
+        if crate::tools::session_worktree::is_worktree_tool(tool_name) {
+            let result = match (self.search_config_path.as_deref().and_then(std::path::Path::parent).map(std::path::Path::to_path_buf), self.conv_id.clone()) {
+                (Some(root), Some(session)) => crate::tools::session_worktree::execute(tool_name, tool_input, &root, &session, std::path::Path::new(&self.workspace_cwd)).await,
+                _ => Err(anyhow!("Worktree tools need an interactive session")),
+            };
+            return match result {
+                Ok((value, cwd)) => { self.workspace_cwd = cwd.to_string_lossy().into_owned(); (tool_input.clone(), value.to_string(), false) }
+                Err(error) => (tool_input.clone(), format!("Error: {error:#}"), true),
+            };
+        }
         if crate::tools::cron_jobs::is_cron_tool(tool_name) {
             let result = match (self.search_config_path.as_deref().and_then(std::path::Path::parent), self.conv_id.as_deref()) {
                 (Some(root), Some(session)) => crate::tools::cron_jobs::execute(tool_name, tool_input, &crate::tools::cron_jobs::Scope { root, session, project: std::path::Path::new(&self.workspace_cwd) }),
@@ -1708,18 +1743,10 @@ impl ToolLoopExecutor {
         if matches!(tool_name, "Read" | "Edit" | "Write" | "MultiEdit") {
             if let Some(file_path) = tool_input["file_path"].as_str() { let key = self.file_key(file_path); self.known_files.insert(key); }
         }
-        if tool_name == "Read" {
-            if let Some(image) = value.as_object_mut().and_then(|object| object.remove("image")) {
-                if !self.provider.model.supports_vision {
-                    return ("Error: The selected model does not accept images, so this image file cannot be shown to it.".to_owned(), true);
-                }
-                let text = value["content"].as_str().unwrap_or_default().to_owned();
-                let transport = json!({"content":[{"type":"image","mimeType":image["media_type"],"data":image["data"]},{"type":"text","text":text}]});
-                match McpOutput::from_transport(&transport) {
-                    Ok(content) => { self.mcp_outputs.insert(tool_use_id.to_owned(), content); return (text, false); }
-                    Err(error) => return (format!("Error: {error:#}"), true),
-                }
-            }
+        match take_read_image(tool_name, &mut value, self.provider.model.supports_vision) {
+            Some(Ok((text, content))) => { self.mcp_outputs.insert(tool_use_id.to_owned(), content); return (text, false); }
+            Some(Err(error)) => return (error, true),
+            None => {}
         }
         (serde_json::to_string_pretty(&value).unwrap_or_default(), false)
     }
@@ -2216,6 +2243,7 @@ impl ToolLoopExecutor {
                                         "ListMcpResources" | "ReadMcpResource"
                                     )
                                     || crate::tools::tasks::is_task(&name)
+                                    || is_serial_builtin(&name)
                                     || is_memory_tool(&name)
                                     || self.hooks.is_some()
                                     || self.is_plan_document_tool(&name, &input)
@@ -2367,6 +2395,7 @@ impl ToolLoopExecutor {
                     let results = futures::future::join_all(futures).await;
 
                     for (tool_use_id, tool_name, _tool_input, output_str, is_error, mcp) in results {
+                        if !is_error && tool_name == "Read" { if let Some(path) = _tool_input["file_path"].as_str() { let key = self.file_key(path); self.known_files.insert(key); } }
                         let mcp = self.finish_mcp_output(&tool_use_id, &tool_name, &output_str, is_error, mcp)?;
                         let content = mcp.map(|value|value.content).unwrap_or_else(||json!(self.retained_tool_output(&tool_name, &output_str)));
                         tool_results.push(ContentBlock::ToolResult {
@@ -2377,6 +2406,9 @@ impl ToolLoopExecutor {
                     }
                 }
 
+                // Serial tools run first; results still follow the order of the calls.
+                let order: Vec<String> = assistant_blocks.iter().filter_map(|block| match block { ContentBlock::ToolUse { id, .. } => Some(id.clone()), _ => None }).collect();
+                tool_results.sort_by_key(|block| match block { ContentBlock::ToolResult { tool_use_id, .. } => order.iter().position(|id| id == tool_use_id).unwrap_or(usize::MAX), _ => usize::MAX });
                 conversation_messages.push(AnthropicMessage {
                     role: "assistant".to_string(),
                     content: AnthropicContent::Blocks(assistant_blocks),
@@ -2837,6 +2869,7 @@ impl ToolLoopExecutor {
                             || name.starts_with("mcp__")
                             || matches!(name.as_str(), "ListMcpResources" | "ReadMcpResource")
                             || crate::tools::tasks::is_task(&name)
+                            || is_serial_builtin(&name)
                             || is_memory_tool(&name)
                             || self.hooks.is_some()
                             || self.is_plan_document_tool(name, &input)
@@ -2929,6 +2962,7 @@ impl ToolLoopExecutor {
                     let results = futures::future::join_all(futures).await;
 
                     for (tool_use_id, tool_name, _tool_input, output_str, is_error, mcp) in results {
+                        if !is_error && tool_name == "Read" { if let Some(path) = _tool_input["file_path"].as_str() { let key = self.file_key(path); self.known_files.insert(key); } }
                         let mcp = self.finish_mcp_output(&tool_use_id, &tool_name, &output_str, is_error, mcp)?;
                         if let Some(content) = &mcp { tool_images.extend(content.openai_images(&tool_use_id)); }
                         let compacted = mcp.map(|value|value.openai_text()).unwrap_or_else(||self.retained_tool_output(&tool_name, &output_str));
@@ -2942,6 +2976,9 @@ impl ToolLoopExecutor {
                     }
                 }
 
+                // Serial tools run first; results still follow the order of the calls.
+                let order: Vec<String> = assistant_tool_calls.iter().map(|call| call.id.clone()).collect();
+                tool_results.sort_by_key(|message| message.tool_call_id.as_ref().and_then(|id| order.iter().position(|item| item == id)).unwrap_or(usize::MAX));
                 conversation_messages.push(OpenAIMessage {
                     role: "assistant".to_string(),
                     content: assistant_content.unwrap_or(OpenAIContent::Text(String::new())),

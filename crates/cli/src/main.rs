@@ -660,6 +660,7 @@ async fn run(cli: &Cli) -> Result<()> {
                         if let Err(error) = session.wake_hooks(cli, &mut input).await { eprintln!("Hook wake: {error:#}"); }
                         continue 'repl;
                     }
+                    if let Err(error) = session.sync_workspace() { eprintln!("Worktree: {error:#}"); }
                     // A due CronCreate job runs as if typed, once the input is empty.
                     if !composer.is_pending() {
                         let scope = claude_core::tools::cron_jobs::Scope { root: &paths.data_dir, session: &session.id, project: &session.workspace };

@@ -601,6 +601,24 @@ impl Session {
         self.mcp.shutdown_all().await
     }
 
+    /// Follows EnterWorktree/ExitWorktree from the last turn: the bound
+    /// worktree, or the recorded source folder once a worktree is left.
+    pub fn sync_workspace(&mut self) -> Result<()> {
+        let target = match claude_core::worktree::hooks::status(&self.store.db, &self.id)? {
+            Some(state) => state["path"].as_str().map(std::path::PathBuf::from),
+            // A worktree checkout has a .git file; the main checkout a directory.
+            None if self.workspace.join(".git").is_file() => self.store.db.with_conn(|conn| {
+                conn.query_row("SELECT workspace_path FROM conversations WHERE id=?1", [&self.id], |row| row.get::<_, Option<String>>(0))
+            })??.map(std::path::PathBuf::from),
+            None => None,
+        };
+        if let Some(target) = target.filter(|path| path.is_dir() && *path != self.workspace) {
+            std::env::set_current_dir(&target)?;
+            self.workspace = target;
+        }
+        Ok(())
+    }
+
     pub async fn turn(
         &self,
         cli: &Cli,

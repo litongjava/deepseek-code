@@ -23,14 +23,13 @@ fn git(root: &Path, args: &[&str]) -> String {
 }
 
 async fn response(Json(body): Json<Value>) -> impl axum::response::IntoResponse {
-    let done = body["messages"].as_array().unwrap().last().unwrap()["role"] == "tool";
-    let (delta, finish) = if done {
-        (json!({"content":"isolated edit complete"}), "stop")
-    } else {
-        (
-            json!({"tool_calls":[{"index":0,"id":"write","type":"function","function":{"name":"Write","arguments":json!({"file_path":"tracked.txt","content":"worktree edit"}).to_string()}}]}),
-            "tool_calls",
-        )
+    // Like the reference CLI, an existing file is read before it is overwritten.
+    let last = body["messages"].as_array().unwrap().last().unwrap().clone();
+    let call = |id: &str, name: &str, arguments: Value| (json!({"tool_calls":[{"index":0,"id":id,"type":"function","function":{"name":name,"arguments":arguments.to_string()}}]}), "tool_calls");
+    let (delta, finish) = match (last["role"].as_str(), last["tool_call_id"].as_str()) {
+        (Some("tool"), Some("write")) => (json!({"content":"isolated edit complete"}), "stop"),
+        (Some("tool"), _) => call("write", "Write", json!({"file_path":"tracked.txt","content":"worktree edit"})),
+        _ => call("read", "Read", json!({"file_path":"tracked.txt"})),
     };
     (
         [("content-type", "text/event-stream")],

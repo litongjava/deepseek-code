@@ -30,6 +30,7 @@ pub mod coordination;
 pub mod teams;
 pub mod scheduled;
 pub mod cron_jobs;
+pub mod session_worktree;
 mod content_compat;
 mod utf8;
 mod bash_process;
@@ -79,7 +80,7 @@ pub fn get_tool_definitions() -> Vec<ToolDefinition> {
         ToolDefinition { name: "Skill".into(), description: "Invoke a skill.\n\nA skill is a packaged set of instructions the user or project has set up for a particular kind of task (deploy steps, a review checklist, a repo-specific workflow). Available skills are listed in the system prompt with one-line descriptions. When the task at hand is one a listed skill covers, call this tool first — the skill's instructions load into the turn for you to follow in place of your default approach; skills with context:fork instead run in an isolated child conversation and return the finished result. Users may also ask for one by name (`/<name>`, or \"slash command\"); that's a request to invoke it.\n\n- `skill`: exact name from the listing, no leading slash. Plugin skills use `plugin:skill`.\n- `args`: optional arguments to pass through.\n\nOnly names from the listing (or that the user typed explicitly) are valid. Built-in CLI commands (`/help`, `/clear`, …) aren't skills. Do not read a skill file to bypass this tool: dynamic shell context and fork isolation run through it.".into(), input_schema:serde_json::json!({"type":"object","properties":{"skill":{"description":"The name of a skill from the available-skills list. Do not guess names.","type":"string"},"args":{"description":"Optional arguments for the skill","type":"string"}},"required":["skill"],"additionalProperties":false}) },
         notebook::definition(),
         lsp::definition(),
-        worktrees::definition(),
+        // `worktree` stays dispatchable for older transcripts; the model sees Enter/ExitWorktree.
         agent_messages::definition(),
         // `cron` stays dispatchable for older transcripts; the model sees the reference trio.
         crate::services::goal_proposals::definition(),
@@ -378,6 +379,7 @@ pub fn get_tool_definitions() -> Vec<ToolDefinition> {
 
     defs.extend(search::definitions());
     defs.extend(cron_jobs::definitions());
+    defs.extend(session_worktree::definitions());
     for macro_def in macros::get_macro_definitions() {
         defs.push(ToolDefinition {
             name: macro_def.name,

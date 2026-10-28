@@ -24,7 +24,7 @@ pub(super) fn command(cwd: &Path, args: &[&str]) -> Result<Output> {
         .context("Could not run Git. Check that Git is installed")
 }
 
-pub(super) fn git(cwd: &Path, args: &[&str]) -> Result<String> {
+pub(crate) fn git(cwd: &Path, args: &[&str]) -> Result<String> {
     let output = command(cwd, args)?;
     ensure!(
         output.status.success(),
