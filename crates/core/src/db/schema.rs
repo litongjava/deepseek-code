@@ -127,6 +127,15 @@ CREATE TABLE IF NOT EXISTS tool_calls (
     FOREIGN KEY (message_id) REFERENCES messages(id) ON DELETE CASCADE
 );
 
+-- Messages typed while a turn runs, read after its next tool results.
+CREATE TABLE IF NOT EXISTS session_input_queue (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    session_id TEXT NOT NULL,
+    content TEXT NOT NULL,
+    created_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_session_input_queue ON session_input_queue(session_id, id);
+
 -- What the user added when approving a call, replayed after its result as
 -- the user's own words.
 CREATE TABLE IF NOT EXISTS tool_call_notes (

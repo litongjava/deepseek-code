@@ -886,7 +886,9 @@ impl Session {
         let mut tools = Vec::<message_repo::ToolCallRow>::new();
         // Notes added to approvals reach the model after the result and are
         // saved apart from it, as the user's words.
-        let mut approval_notes = std::collections::HashMap::<String, String>::new();
+        let mut approval_notes = std::collections::HashMap::<String, Vec<String>>::new();
+        // Messages typed during this turn that the model has not read yet.
+        let mut pending_inputs = Vec::<String>::new();
         let mut sdk_messages = (cli.output_format == OutputFormat::StreamJson)
             .then(|| crate::sdk_messages::Translator::new(&self.id, cli.include_partial_messages));
         let mut refresh = tokio::time::interval(std::time::Duration::from_secs(1));
@@ -920,7 +922,20 @@ impl Session {
                             crate::terminal::live::Action::Detach => progress.notice("This turn is not owned by a background worker."),
                             crate::terminal::live::Action::Submit(prompt) => {
                                 if let Some(message) = crate::session_commands::live_goal_command(self, &prompt)? { progress.notice(&message); }
+                                else if queues_mid_turn(&prompt) {
+                                    // As in the reference CLI the model reads it after its next
+                                    // tool results, or as the next prompt.
+                                    claude_core::services::input_queue::push(&self.store.db, &self.id, &prompt)?;
+                                    pending_inputs.push(prompt);
+                                    progress.queued(pending_inputs.clone());
+                                }
                                 else if let Some(reader)=input.as_mut() { reader.queue_prompt(prompt); }
+                            },
+                            crate::terminal::live::Action::EditQueued => {
+                                let taken = claude_core::services::input_queue::take(&self.store.db, &self.id)?;
+                                pending_inputs.clear();
+                                progress.queued(Vec::new());
+                                if !taken.is_empty() { progress.set_draft(&taken.join("\n")); }
                             },
                             crate::terminal::live::Action::Draft(draft) => if let Some(reader)=input.as_ref() { reader.restore_draft(draft); },
                             crate::terminal::live::Action::SideQuestion(question) => {
@@ -1038,7 +1053,7 @@ impl Session {
                             if decision.allowed && (commit.is_some() || decision.note.is_some()) {
                                 let grant = commit.as_ref().map(|(_, grant)| grant.clone());
                                 if let Some(note) = &decision.note {
-                                    approval_notes.insert(tool_use_id.clone(), note.clone());
+                                    approval_notes.entry(tool_use_id.clone()).or_default().push(note.clone());
                                 }
                                 let response = PermissionResponse::Allow { updated_input: None, commit: commit.map(|(commit, _)| commit), note: decision.note.clone() };
                                 let _ = self.engine.resume_with_permission(&request_id, response).await;
@@ -1103,6 +1118,14 @@ impl Session {
                         self.engine.resume_with_answer(&request_id, answer).await?;
                         progress.set_activity("Composing");
                     },
+                    EngineEvent::QueuedInput(text) => {
+                        // Saved after the latest result, where the model read it.
+                        if let Some(tool) = tools.last() {
+                            approval_notes.entry(tool.id.clone()).or_default().push(text.clone());
+                        }
+                        if let Some(index) = pending_inputs.iter().position(|pending| *pending == text) { pending_inputs.remove(index); }
+                        progress.queued_delivered(&text);
+                    },
                     EngineEvent::ToolUseStart { tool_use_id, tool_name, tool_input, .. } => {
                         separate_text = true;
                         progress.clear();
@@ -1162,6 +1185,13 @@ impl Session {
                 progress.notice(&format!("Could not save permission mode: {error:#}"));
             }
         }
+        // Only a frontend with an input reader takes unread messages; a
+        // background worker leaves them for its frontend.
+        if let Some(reader) = input.as_mut() {
+            if let Err(error) = requeue_unread(self, reader) {
+                progress.notice(&format!("Could not restore queued messages: {error:#}"));
+            }
+        }
         if let Some(capture) = checkpoint {
             if let Err(error) = claude_core::services::checkpoints::finish(capture) {
                 progress.notice(&format!("Could not save code checkpoint: {error:#}"));
@@ -1189,8 +1219,8 @@ impl Session {
                         tool.is_error,
                         tool.sort_order,
                     )?;
-                    if let Some(note) = approval_notes.get(&tool.id) {
-                        message_repo::set_tool_call_note(conn, &call_id, note)?;
+                    if let Some(notes) = approval_notes.get(&tool.id) {
+                        message_repo::set_tool_call_note(conn, &call_id, &notes.join("\n\n"))?;
                     }
                 }
                 message_repo::save_request_snapshots(conn, &message_id, &json!(snapshots))?;
@@ -1259,7 +1289,8 @@ impl Session {
                     crate::terminal::live::Action::SideQuestion(question)=>reader.queue_prompt(format!("/btw {question}")),
                     crate::terminal::live::Action::Draft(draft)=>reader.restore_draft(draft),
                     crate::terminal::live::Action::CyclePermission => { self.cycle_permission_mode().await?; },
-                    crate::terminal::live::Action::Cancel|crate::terminal::live::Action::Detach|crate::terminal::live::Action::GoalDecision { .. }=>{},
+                    // Unread messages were already queued as the next prompts.
+                    crate::terminal::live::Action::Cancel|crate::terminal::live::Action::Detach|crate::terminal::live::Action::GoalDecision { .. }|crate::terminal::live::Action::EditQueued=>{},
                 }
             }
         }
@@ -1301,6 +1332,7 @@ async fn wait_answer(session: &Session, progress: &mut crate::terminal::live::Tu
                     Some(crate::terminal::live::Action::Cancel)|None=>bail!("Interrupted"),
                     Some(crate::terminal::live::Action::Detach)=>progress.notice("Answer the pending question before detaching."),
                     Some(crate::terminal::live::Action::GoalDecision { .. })=>progress.notice("Answer the pending question first."),
+                    Some(crate::terminal::live::Action::EditQueued)=>{},
                     Some(crate::terminal::live::Action::Submit(prompt))=>if let Some(reader)=input.as_mut(){reader.queue_prompt(prompt);},
                     Some(crate::terminal::live::Action::SideQuestion(question))=>if let Some(reader)=input.as_mut(){reader.queue_prompt(format!("/btw {question}"));},
                     Some(crate::terminal::live::Action::Draft(draft))=>if let Some(reader)=input.as_ref(){reader.restore_draft(draft);},
@@ -1321,6 +1353,21 @@ pub(crate) fn emit_json(value: &Value) -> Result<()> {
     serde_json::to_writer(&mut stdout, value)?;
     writeln!(stdout)?;
     stdout.flush()?;
+    Ok(())
+}
+
+/// Plain text typed during a turn goes to the model at its next tool
+/// boundary; commands, shell and memory input wait for the turn to end.
+pub(crate) fn queues_mid_turn(prompt: &str) -> bool {
+    let prompt = prompt.trim_start();
+    !prompt.is_empty() && !prompt.starts_with('/') && !prompt.starts_with('!') && !prompt.starts_with("# ")
+}
+
+/// Messages the model did not read during the turn become the next prompts.
+pub(crate) fn requeue_unread(session: &Session, reader: &mut TerminalInput) -> Result<()> {
+    for prompt in claude_core::services::input_queue::take(&session.store.db, &session.id)? {
+        reader.queue_prompt(prompt);
+    }
     Ok(())
 }
 
@@ -1363,6 +1410,7 @@ pub(crate) fn event_json_with(event: &EngineEvent, summaries: bool) -> Option<Va
     Some(match event {
         EngineEvent::ContextReset { session_id, boundary_id } => json!({"type":"context_reset","session_id":session_id,"boundary_id":boundary_id}),
         EngineEvent::Text(delta) => json!({"type":"text","delta":delta}),
+        EngineEvent::QueuedInput(text) => json!({"type":"queued_input","text":text}),
         EngineEvent::Thinking(delta) => json!({"type":"thinking","delta":delta}),
         EngineEvent::Usage(usage) => json!({"type":"usage","usage":usage}),
         EngineEvent::MessageStart { model } => json!({"type":"message_start","model":model}),
@@ -1419,6 +1467,14 @@ pub(crate) fn event_json_with(event: &EngineEvent, summaries: bool) -> Option<Va
 
 #[cfg(test)]
 mod event_tests {
+    #[test]
+    fn only_plain_text_is_read_by_the_running_turn() {
+        assert!(super::queues_mid_turn("Also end with BANANA"));
+        for waits in ["/compact", "!ls", "# note", "   "] {
+            assert!(!super::queues_mid_turn(waits), "{waits}");
+        }
+    }
+
     use super::*;
     #[test]
     fn duplicate_pipeline_completion_does_not_hide_distinct_results() {

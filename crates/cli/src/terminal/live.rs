@@ -26,6 +26,8 @@ pub enum Action {
     Cancel,
     Detach,
     Draft(String),
+    /// Up in an empty input while messages wait: take them back to edit.
+    EditQueued,
 }
 enum Update {
     GoalProposal(Option<(String, String)>),
@@ -44,6 +46,11 @@ enum Update {
     Group(String, Gathering, String, GroupStep),
     /// Other tool output follows; the summary line is final.
     GroupEnd,
+    /// Messages sent during the turn that the model has not read yet.
+    Queued(Vec<String>),
+    /// A queued message the model has now read.
+    QueuedDelivered(String),
+    SetDraft(String),
     Stop(Option<String>),
 }
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -303,6 +310,8 @@ struct State {
     details: super::input::editor::DetailsPanel,
     detail_entries: Vec<(String, String, String)>,
     group: Option<Group>,
+    /// Messages typed during the turn, shown until the model reads them.
+    queued: Vec<String>,
     /// When reasoning began and last streamed, for "Thought for 2s".
     thinking_span: Option<(Instant, Instant)>,
     thinking_characters: usize,
@@ -386,6 +395,7 @@ impl State {
             details: Default::default(),
             detail_entries: Vec::new(),
             group: None,
+            queued: Vec::new(),
             thinking_span: None,
             thinking_characters: 0,
             thinking_entry: None,
@@ -588,6 +598,10 @@ impl State {
             return Some("While working, use /btw QUESTION or type a prompt to queue; other commands are available after completion.".into());
         }
         let _ = actions.send(Action::Submit(text.clone()));
+        // Plain text waits under the work until the model reads it.
+        if crate::session::queues_mid_turn(&text) {
+            return None;
+        }
         Some(format!("\n{text}\n\nPrompt queued for after this turn."))
     }
 }
@@ -879,6 +893,15 @@ impl Frame {
             }
             content
         };
+        if !state.details.expanded && !state.queued.is_empty() {
+            // Waiting messages stay at the bottom of the work area.
+            let rows: Vec<String> = state.queued.iter().map(|text| clip(&format!("{} {}", crate::terminal::prompt_glyph(), terminal_text(text).replace('\n', " ")), width)).collect();
+            content.retain(|line| !line.is_empty());
+            let keep = budget.saturating_sub(rows.len().min(budget));
+            let skip = content.len().saturating_sub(keep);
+            content.drain(..skip);
+            content.extend(rows.into_iter().take(budget));
+        }
         content.resize(budget, String::new());
         content.truncate(budget);
         let mut lines = vec![
@@ -900,7 +923,11 @@ impl Frame {
                 width,
             ),
             rule.clone(),
-            format!("{prompt}{draft}"),
+            if draft.is_empty() && !state.queued.is_empty() && state.answer.is_none() {
+                format!("{prompt}\x1b[2mPress up to edit queued messages\x1b[0m")
+            } else {
+                format!("{prompt}{draft}")
+            },
             rule,
             clip(&mode, width),
         ];
@@ -1186,6 +1213,24 @@ fn run(
                     finish_group(state, screen);
                     dirty = true;
                 }
+                Ok(Update::Queued(pending)) => {
+                    state.queued = pending;
+                    dirty = true;
+                }
+                Ok(Update::QueuedDelivered(text)) => {
+                    finish_text(state, screen);
+                    if let Some(index) = state.queued.iter().position(|queued| *queued == text) {
+                        state.queued.remove(index);
+                    }
+                    // As in the reference CLI the message joins the transcript
+                    // where the model read it.
+                    screen.log(&format!("{} {}", crate::terminal::prompt_glyph(), terminal_text(&text)))?;
+                    dirty = true;
+                }
+                Ok(Update::SetDraft(text)) => {
+                    state.draft.set(&text);
+                    dirty = true;
+                }
                 Ok(Update::Choice(lines, question, options, reply)) => {
                     finish_text(state, screen);
                     if state.details.expanded {
@@ -1324,6 +1369,12 @@ fn run(
                             },
                             screen.panel_viewport,
                         );
+                    } else if key.code == KeyCode::Up
+                        && state.answer.is_none()
+                        && state.draft.characters.is_empty()
+                        && !state.queued.is_empty()
+                    {
+                        let _ = actions.send(Action::EditQueued);
                     } else if key.code == KeyCode::Up
                         && state.answer.is_none()
                         && state.history_index > 0
@@ -1976,6 +2027,25 @@ impl TurnDisplay {
             live.activity("Working");
         } else {
             self.fallback.tool_finished(id, name, input, output, failed);
+        }
+    }
+    /// Messages sent during the turn and not yet read by the model.
+    pub fn queued(&mut self, pending: Vec<String>) {
+        if let Some(live) = &self.live {
+            let _ = live.updates.send(Update::Queued(pending));
+        }
+    }
+    pub fn queued_delivered(&mut self, text: &str) {
+        match &self.live {
+            Some(live) => {
+                let _ = live.updates.send(Update::QueuedDelivered(text.into()));
+            }
+            None => self.notice(&format!("{} {text}", crate::terminal::prompt_glyph())),
+        }
+    }
+    pub fn set_draft(&mut self, text: &str) {
+        if let Some(live) = &self.live {
+            let _ = live.updates.send(Update::SetDraft(text.into()));
         }
     }
     pub fn agent_progress(&mut self, id: &str, kind: &str, status: &str, tool: Option<&str>) {

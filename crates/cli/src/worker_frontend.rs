@@ -268,6 +268,8 @@ async fn observe(
         std::pin::Pin<Box<dyn std::future::Future<Output = Result<String>> + Send + '_>>,
     > = None;
     let mut cancelled = false;
+    // Messages typed during this job that the model has not read yet.
+    let mut queued_inputs = Vec::<String>::new();
     let mut notified = std::time::Instant::now();
     let mut notification_error = None;
     let mut final_mode_synced = false;
@@ -319,6 +321,9 @@ async fn observe(
                 }
                 for event in events {
                     if event["type"] == "text" { streamed = true; }
+                    if let Some(text) = event["text"].as_str().filter(|_| event["type"] == "queued_input") {
+                        if let Some(index) = queued_inputs.iter().position(|queued| queued == text) { queued_inputs.remove(index); }
+                    }
                     if event["type"] == "result" {
                         if let Some(text)=result_text(&event,streamed) {display.before_text(text);}
                         streamed = false;
@@ -368,6 +373,9 @@ async fn observe(
                     }
                 }
                 if drained && !matches!(job.status.as_str(), "starting"|"running") {
+                    if let Some(reader) = input.as_mut() {
+                        if let Err(error) = crate::session::requeue_unread(session, reader) { display.notice(&format!("Could not restore queued messages: {error:#}")); }
+                    }
                     if job.session_id == owner && matches!(job.status.as_str(),"completed"|"failed"|"cancelled") {jobs::acknowledge_foreground(root,id,owner)?;}
                     ensure!(job.status == "completed", "Worker {}: {}{}", id, job.status, job.error.map(|error|format!(" - {error}")).unwrap_or_default());
                     if side.is_none() && !has_proposal { return Ok(false); }
@@ -479,10 +487,24 @@ async fn observe(
                                     jobs::cancel(root, id)?;
                                     cancelled = true;
                                 }
-                                restore(input, Action::Submit(prompt));
+                                if child_target.is_none() && crate::session::queues_mid_turn(&prompt) && display.is_live() {
+                                    // As in the reference CLI the running turn reads it after its
+                                    // next tool results; unread messages become the next prompt.
+                                    claude_core::services::input_queue::push(&session.store.db, &session.id, &prompt)?;
+                                    queued_inputs.push(prompt);
+                                    display.queued(queued_inputs.clone());
+                                } else {
+                                    restore(input, Action::Submit(prompt));
+                                }
                                 if jobs::get(root, id)?.status == "completed" { return Ok(false); }
                             }
                         } else { restore(input, Action::Submit(prompt)); }
+                    },
+                    Some(Action::EditQueued) => {
+                        let taken = claude_core::services::input_queue::take(&session.store.db, &session.id)?;
+                        queued_inputs.clear();
+                        display.queued(Vec::new());
+                        if !taken.is_empty() { display.set_draft(&taken.join("\n")); }
                     },
                     Some(action) => restore(input, action),
                 }
@@ -668,6 +690,7 @@ fn render(display: &mut TurnDisplay, event: &Value) {
         "hook_progress" => display.hook_progress(text("hook_id"), event["status_message"].as_str()),
         "notice" => display.notice(text("message")),
         "text" => display.before_text(text("delta")),
+        "queued_input" => display.queued_delivered(text("text")),
         "thinking" => {
             display.record_thinking(text("delta"));
             display.thinking();

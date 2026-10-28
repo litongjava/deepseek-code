@@ -71,6 +71,9 @@ mod goal_proposal_tests;
 
 #[derive(Debug, Clone)]
 pub enum EngineEvent {
+    /// A message the user sent while the turn ran, now given to the model
+    /// after the last tool results.
+    QueuedInput(String),
     /// A durable plan boundary; hosts must finish the old assistant segment before it.
     ContextReset { session_id: String, boundary_id: String },
     /// Delegated task state without exposing the child's private model output.
@@ -948,6 +951,25 @@ impl ToolLoopExecutor {
         }
     }
 
+    /// Messages queued during the turn; only read after tool results, so a
+    /// final answer is never interrupted.
+    async fn deliver_queued_inputs(&self, iteration: usize) -> Vec<String> {
+        let (Some(db), Some(id)) = (&self.goal_db, &self.conv_id) else {
+            return Vec::new();
+        };
+        if iteration == 0 {
+            return Vec::new();
+        }
+        let inputs = crate::services::input_queue::take(db, id).unwrap_or_else(|error| {
+            tracing::warn!("Queued input unavailable: {error:#}");
+            Vec::new()
+        });
+        for text in &inputs {
+            let _ = self.event_tx.send(EngineEvent::QueuedInput(text.clone())).await;
+        }
+        inputs
+    }
+
     fn drain_approval_notes(&self) -> Vec<String> {
         std::mem::take(&mut *self.approval_notes.lock().unwrap_or_else(|error| error.into_inner()))
     }
@@ -1750,7 +1772,8 @@ impl ToolLoopExecutor {
             self.ensure_auto_not_exhausted()?;
             self.ensure_permission_continuation()?;
             self.resume_pending_owned_children().await;
-            for content in self.drain_approval_notes().into_iter().chain(self.drain_peer_messages()?) {
+            let queued = self.deliver_queued_inputs(iteration).await;
+            for content in self.drain_approval_notes().into_iter().chain(queued).chain(self.drain_peer_messages()?) {
                 conversation_messages.push(AnthropicMessage { role: "user".into(), content: AnthropicContent::Text(content) });
             }
 
@@ -2325,7 +2348,8 @@ impl ToolLoopExecutor {
             self.ensure_auto_not_exhausted()?;
             self.ensure_permission_continuation()?;
             self.resume_pending_owned_children().await;
-            for content in self.drain_approval_notes().into_iter().chain(self.drain_peer_messages()?) {
+            let queued = self.deliver_queued_inputs(iteration).await;
+            for content in self.drain_approval_notes().into_iter().chain(queued).chain(self.drain_peer_messages()?) {
                 conversation_messages.push(OpenAIMessage { role: "user".into(), content: OpenAIContent::Text(content), tool_calls: None, tool_call_id: None, reasoning_content: None, provider_content: None });
             }
 
