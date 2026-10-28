@@ -225,6 +225,7 @@ async fn present(
     };
     if display.is_live() {
         display.set_running_shells(crate::background_commands::running_shells(&session.paths, &session.id));
+        display.set_running_agents(crate::background_commands::running_agents(&session.paths, &session.store.db, &session.id).len());
     }
     for action in display.finish(footer) {
         restore(input, action);

@@ -435,6 +435,51 @@ pub(crate) fn todo_items(paths: &RuntimePaths, session: &str) -> Vec<(String, St
         .collect()
 }
 
+/// One background agent started by this session.
+pub(crate) struct Agent {
+    pub agent_type: String,
+    pub description: String,
+    pub started_ms: u64,
+    pub output_tokens: i64,
+}
+
+/// This session's background agents that are still running.
+pub(crate) fn running_agents(paths: &RuntimePaths, db: &claude_core::db::DbManager, session: &str) -> Vec<Agent> {
+    let Ok(context) = crate::services::context(paths) else { return Vec::new() };
+    let Ok(jobs) = background_sessions::list(&paths.data_dir, Some(session)) else { return Vec::new() };
+    jobs.into_iter()
+        .filter(|job| matches!(job.status.as_str(), "starting" | "running" | "unresponsive"))
+        .filter_map(|job| {
+            let record = context.setting::<serde_json::Value>(&format!("background-agent.{}", job.id)).ok().flatten()?;
+            let output_tokens = db.with_conn(|conn| conn.query_row("SELECT COALESCE(SUM(output_tokens),0) FROM model_requests WHERE conversation_id=?1", [&job.session_id], |row| row.get::<_, i64>(0))).ok().and_then(Result::ok).unwrap_or(0);
+            Some(Agent {
+                agent_type: record["agent_type"].as_str().unwrap_or("general").to_owned(),
+                description: record["description"].as_str().unwrap_or(&job.title).to_owned(),
+                started_ms: job.started_ms,
+                output_tokens,
+            })
+        })
+        .collect()
+}
+
+/// The rows under the footer while agents run, as in the reference CLI:
+/// `● main` and `◯ general  Find the logging code  13s · ↓ 6.6k tokens`.
+pub(crate) fn agent_rows(agents: &[Agent], width: usize) -> Vec<String> {
+    if agents.is_empty() {
+        return Vec::new();
+    }
+    let now = chrono::Utc::now().timestamp_millis().max(0) as u64;
+    let mut rows = vec!["  \u{25cf} main".to_owned()];
+    for agent in agents {
+        let tokens = if agent.output_tokens >= 1000 { format!("{:.1}k", agent.output_tokens as f64 / 1000.0) } else { agent.output_tokens.to_string() };
+        let right = format!("{} \u{b7} \u{2193} {tokens} tokens", runtime(agent.started_ms, Some(now)));
+        let left = format!("  \u{25ef} {}  {}", agent.agent_type, agent.description);
+        let pad = width.saturating_sub(left.chars().count() + right.chars().count()).max(2);
+        rows.push(format!("{left}{}{right}", " ".repeat(pad)));
+    }
+    rows
+}
+
 /// Background shells of this session that are still running.
 pub(crate) fn running_shells(paths: &RuntimePaths, session: &str) -> usize {
     managed_shell_records(paths, session)
@@ -733,6 +778,32 @@ pub(crate) async fn wake_for_notifications(cli: &crate::args::Cli, session: &mut
     Ok(true)
 }
 
+/// A finished background agent's report becomes, as in the reference CLI,
+/// "● Agent "…" completed" and a task notification that wakes this
+/// session; the full report stays in its history.
+fn agent_notice(session: &Session, report: String) -> Result<String> {
+    let Some(id) = report.lines().find_map(|line| line.strip_prefix("Task: ")) else {
+        return Ok(report);
+    };
+    let context = crate::services::context(&session.paths)?;
+    let Some(record) = context.setting::<serde_json::Value>(&format!("background-agent.{id}"))? else {
+        return Ok(report);
+    };
+    let status = report.lines().find_map(|line| line.strip_prefix("Status: ")).unwrap_or("completed");
+    let description = record["description"].as_str().unwrap_or("background agent");
+    let summary = match status {
+        "completed" => format!("Agent \"{description}\" completed"),
+        "cancelled" => format!("Agent \"{description}\" was stopped"),
+        other => format!("Agent \"{description}\" {other}"),
+    };
+    claude_core::services::input_queue::push(
+        &session.store.db,
+        &session.id,
+        &format!("{}\n<task-id>{id}</task-id>\n<status>{status}</status>\n<summary>{summary}</summary>\n<result>See the background task report for this task above.</result>\n</task-notification>", claude_core::tools::background_shell::NOTIFICATION_START),
+    )?;
+    Ok(format!("\u{25cf} {summary}"))
+}
+
 pub fn collect_completed(session: &Session) -> Result<Vec<String>> {
     use std::sync::atomic::{AtomicBool, Ordering};
     static WORKER_WARNING: AtomicBool = AtomicBool::new(false);
@@ -741,7 +812,7 @@ pub fn collect_completed(session: &Session) -> Result<Vec<String>> {
     let mut notices = Vec::new();
     for (source, warning, result) in [
         ("messages", &MESSAGE_WARNING, claude_core::services::session_messages::notices(&claude_core::services::ServiceContext { paths: session.paths.clone(), db: session.store.db.clone(), credentials: std::sync::Arc::new(claude_core::services::EnvironmentCredentials) },&session.id)),
-        ("workers", &WORKER_WARNING, background_sessions::collect_completed(&session.store, &session.paths.data_dir, &session.id)),
+        ("workers", &WORKER_WARNING, background_sessions::collect_completed(&session.store, &session.paths.data_dir, &session.id).and_then(|reports| reports.into_iter().map(|report| agent_notice(session, report)).collect())),
         ("shells", &SHELL_WARNING, shell_notifications(session)),
     ] {
         match result {
@@ -847,5 +918,21 @@ mod worker_config_tests {
         assert_eq!(snapshot.context_window, Some(12345));
         assert_eq!(snapshot.max_tokens, Some(321));
         assert!(!values["CLAUDE_RUST_WORKER_MODEL"].contains("test-secret"));
+    }
+}
+
+#[cfg(test)]
+mod agent_row_tests {
+    use super::*;
+
+    #[test]
+    fn running_agents_list_under_main_with_time_and_tokens() {
+        assert!(agent_rows(&[], 80).is_empty());
+        let started = chrono::Utc::now().timestamp_millis() as u64 - 13_000;
+        let rows = agent_rows(&[Agent { agent_type: "general".into(), description: "Find the logging code".into(), started_ms: started, output_tokens: 6_600 }], 80);
+        assert_eq!(rows[0], "  \u{25cf} main");
+        assert!(rows[1].starts_with("  \u{25ef} general  Find the logging code"), "{rows:?}");
+        assert!(rows[1].ends_with("13s \u{b7} \u{2193} 6.6k tokens"), "{rows:?}");
+        assert_eq!(rows[1].chars().count(), 80);
     }
 }

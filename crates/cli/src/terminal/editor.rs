@@ -36,6 +36,8 @@ pub struct PromptEditor {
     /// Background shells still running, shown as "1 shell · ↓ to manage".
     shells: usize,
     shell_counter: Option<Box<dyn Fn() -> usize + Send>>,
+    /// Rows for running background agents at a width, shown under the footer.
+    agent_rows: Option<Box<dyn Fn(usize) -> Vec<String> + Send>>,
     /// The effort in use, shown right-aligned above the input.
     effort: Option<String>,
     /// The todo list that ctrl+t shows above the input.
@@ -67,6 +69,7 @@ impl Default for PromptEditor {
             context_note: None,
             shells: 0,
             shell_counter: None,
+            agent_rows: None,
             todos: None,
             effort: None,
             killed: String::new(),
@@ -658,6 +661,9 @@ impl PromptEditor {
     pub fn set_shell_counter(&mut self, counter: Box<dyn Fn() -> usize + Send>) {
         self.shell_counter = Some(counter);
     }
+    pub fn set_agent_rows(&mut self, rows: Box<dyn Fn(usize) -> Vec<String> + Send>) {
+        self.agent_rows = Some(rows);
+    }
     pub fn set_effort(&mut self, effort: Option<String>) {
         self.effort = effort;
     }
@@ -734,6 +740,10 @@ impl PromptEditor {
         // `?` on an empty prompt shows shortcuts in place of the footer.
         let mut shortcuts = false;
         let mut last_shell_count = std::time::Instant::now();
+        let mut agents: Vec<String> = Vec::new();
+        let mut last_agents = std::time::Instant::now() - std::time::Duration::from_secs(5);
+        // ← twice on an empty prompt opens the agents and tasks view.
+        let mut left_press: Option<std::time::Instant> = None;
         let mut search: Option<String> = None;
         let mut search_pos = self.history.len();
         // A second Esc on an empty prompt within a second opens /rewind.
@@ -786,6 +796,12 @@ impl PromptEditor {
             last_state.1 = buffer.cursor;
             let (cols, rows) = terminal::size()?;
             let width = cols.saturating_sub(1).max(4) as usize;
+            if last_agents.elapsed() >= std::time::Duration::from_secs(1) {
+                last_agents = std::time::Instant::now();
+                if let Some(rows) = &self.agent_rows {
+                    agents = rows(width);
+                }
+            }
             let text = buffer.text();
             let ghost = self.suggestion.clone().filter(|_| buffer.chars.is_empty());
             let mention_query = mention(&text).filter(|_| buffer.cursor == buffer.chars.len()).map(str::to_owned);
@@ -905,6 +921,13 @@ impl PromptEditor {
                 if let Some(note) = &self.context_note {
                     parts.push(note.clone());
                 }
+                if !agents.is_empty() && self.shells == 0 {
+                    parts.insert(1, "\u{2193} to manage".into());
+                }
+                parts.push("\u{2190} for agents".into());
+                if left_press.is_some_and(|at| at.elapsed() < std::time::Duration::from_secs(1)) {
+                    parts = vec!["Press \u{2190} again to open agents".into()];
+                }
                 if self.shells > 0 {
                     // Right after the mode label, as in the reference CLI.
                     parts.insert(1, format!("{} shell{} \u{b7} \u{2193} to manage", self.shells, if self.shells == 1 { "" } else { "s" }));
@@ -941,6 +964,8 @@ impl PromptEditor {
             } else {
                 lines.push((clipped(&footer, width), footer_style));
             }
+            // Running background agents, as in the reference CLI.
+            lines.extend(agents.iter().map(|row| (clipped(row, width), TextStyle::Muted)));
             if !self.details.entries.is_empty() {
                 lines.push((
                     clipped("Ctrl+O details \u{00b7} PgUp/PgDn scroll", width),
@@ -1299,7 +1324,15 @@ impl PromptEditor {
                         }
                         // As in the reference CLI, ↓ past the newest prompt manages
                         // the running background shells.
-                        KeyCode::Down if self.shells > 0 && buffer.chars.is_empty() && history_pos == self.history.len() => {
+                        KeyCode::Left if buffer.chars.is_empty() && items.is_empty() => {
+                            if left_press.is_some_and(|at| at.elapsed() < std::time::Duration::from_secs(1)) {
+                                let tasks = "/tasks".to_owned();
+                                screen.finish(&tasks, &prompt)?;
+                                return Ok(Some(super::PromptEvent::Line(tasks)));
+                            }
+                            left_press = Some(std::time::Instant::now());
+                        }
+                        KeyCode::Down if (self.shells > 0 || !agents.is_empty()) && buffer.chars.is_empty() && history_pos == self.history.len() => {
                             let tasks = "/tasks".to_owned();
                             screen.finish(&tasks, &prompt)?;
                             return Ok(Some(super::PromptEvent::Line(tasks)));

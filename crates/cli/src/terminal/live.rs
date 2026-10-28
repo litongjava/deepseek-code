@@ -55,6 +55,8 @@ enum Update {
     Queued(Vec<String>),
     /// Background shells still running when the turn ends.
     Shells(usize),
+    /// Background agents still running when the turn ends.
+    Agents(usize),
     /// The todo list ctrl+t shows, as (content, status).
     Todos(Vec<(String, String)>),
     /// The conversation before this turn, for the Ctrl+O transcript.
@@ -344,6 +346,7 @@ struct State {
     /// When ctrl+x was pressed, for the ctrl+x ctrl+s chord.
     chord: Option<Instant>,
     todos: Vec<(String, String)>,
+    agents: usize,
     /// When reasoning began and last streamed, for "Thought for 2s".
     thinking_span: Option<(Instant, Instant)>,
     thinking_characters: usize,
@@ -432,6 +435,7 @@ impl State {
             shells: 0,
             chord: None,
             todos: Vec::new(),
+            agents: 0,
             thinking_span: None,
             thinking_characters: 0,
             thinking_entry: None,
@@ -1335,6 +1339,7 @@ fn run(
                 }
                 Ok(Update::Transcript(lines)) => state.transcript = lines,
                 Ok(Update::Shells(count)) => state.shells = count,
+                Ok(Update::Agents(count)) => state.agents = count,
                 Ok(Update::Todos(todos)) => {
                     state.todos = todos;
                     dirty = true;
@@ -1398,6 +1403,11 @@ fn run(
                         error.as_deref().unwrap_or("done"),
                         chrono::Local::now().format("%-I:%M %p")
                     );
+                    // As in the reference CLI, a turn that leaves agents running
+                    // says so instead of its duration.
+                    if state.agents > 0 && error.is_none() {
+                        footer = format!("\u{273b} Waiting for {} background agent{} to finish", state.agents, if state.agents == 1 { "" } else { "s" });
+                    }
                     // As in the reference CLI: "· 1 shell still running".
                     if state.shells > 0 {
                         footer.push_str(&format!(" \u{b7} {} shell{} still running", state.shells, if state.shells == 1 { "" } else { "s" }));
@@ -2213,6 +2223,12 @@ impl TurnDisplay {
     pub fn set_todos(&mut self, todos: Vec<(String, String)>) {
         if let Some(live) = &self.live {
             let _ = live.updates.send(Update::Todos(todos));
+        }
+    }
+    /// Background agents still running when the turn ends.
+    pub fn set_running_agents(&mut self, count: usize) {
+        if let Some(live) = &self.live {
+            let _ = live.updates.send(Update::Agents(count));
         }
     }
     /// Background shells still running, named in the closing line.

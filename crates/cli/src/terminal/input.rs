@@ -37,6 +37,7 @@ enum Message {
     Shells(usize),
     Effort(Option<String>),
     ShellCounter(Box<dyn Fn() -> usize + Send>),
+    AgentRows(Box<dyn Fn(usize) -> Vec<String> + Send>),
     Todos(Box<dyn Fn() -> Vec<(String, String)> + Send>),
     Vim(bool),
     Read(Request),
@@ -137,6 +138,10 @@ impl TerminalInput {
                         editor.set_shell_counter(counter);
                         continue;
                     }
+                    Message::AgentRows(rows) => {
+                        editor.set_agent_rows(rows);
+                        continue;
+                    }
                     Message::Todos(todos) => {
                         editor.set_todos(todos);
                         continue;
@@ -228,6 +233,11 @@ impl TerminalInput {
     /// The reasoning effort shown above the input, as "● high · /effort".
     pub fn set_effort(&self, effort: Option<String>) {
         let _ = self.requests.send(Message::Effort(effort));
+    }
+
+    /// Rows for running background agents, shown under the footer.
+    pub fn set_agent_rows(&self, rows: Box<dyn Fn(usize) -> Vec<String> + Send>) {
+        let _ = self.requests.send(Message::AgentRows(rows));
     }
 
     /// Reads the todo list that ctrl+t shows.

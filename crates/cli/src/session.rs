@@ -1355,6 +1355,7 @@ impl Session {
         }
         if progress.is_live() {
             progress.set_running_shells(crate::background_commands::running_shells(&self.paths, &self.id));
+            progress.set_running_agents(crate::background_commands::running_agents(&self.paths, &self.store.db, &self.id).len());
         }
         for action in progress.finish(error.as_deref()) {
             if let Some(reader)=input.as_mut() {

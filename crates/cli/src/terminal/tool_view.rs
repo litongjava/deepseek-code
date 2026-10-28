@@ -11,6 +11,10 @@ const EXPANDED_LINES: usize = 400;
 
 /// `Bash(ls -la)` for previewable inputs, otherwise the tool name.
 pub fn label(name: &str, input: &Value, workspace: Option<&std::path::Path>) -> String {
+    // Agents read as their short description, as in the reference CLI.
+    if let Some(description) = input["description"].as_str().filter(|text| matches!(name, "Agent" | "Delegate" | "Worker") && !text.trim().is_empty()) {
+        return format!("{}({})", super::progress::single_line(name), printable(description));
+    }
     let preview = super::progress::tool_preview_in_workspace(name, input, workspace);
     let name = super::progress::single_line(name);
     match preview.strip_prefix(&format!("{name}: ")) {
@@ -132,6 +136,9 @@ fn printable(line: &str) -> String {
 /// Inline result lines and the number of lines left for the details view.
 pub fn summary(name: &str, output: &str, failed: bool) -> (Vec<String>, usize) {
     if !failed && serde_json::from_str::<Value>(output).is_ok_and(|value| value["backgrounded"] == true) {
+        if matches!(name, "Agent" | "Delegate" | "Worker") {
+            return (vec!["Backgrounded agent (\u{2193} to manage \u{b7} ctrl+o to expand)".into()], 0);
+        }
         return (vec!["Running in the background (\u{2193} to manage)".into()], 0);
     }
     // The model reads the full rejection text; the transcript shows the answer.
