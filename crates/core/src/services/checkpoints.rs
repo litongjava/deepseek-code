@@ -340,6 +340,23 @@ pub fn get(root: &Path, session: &str, id: &str) -> Result<Checkpoint> {
     );
     Ok(checkpoint)
 }
+/// Lines added and removed by a change, as its diff counts them.
+pub fn line_counts(change: &Change) -> Result<(usize, usize)> {
+    let text = |value: &Option<String>| -> Result<String> {
+        Ok(bytes(value)?.map(|bytes| String::from_utf8_lossy(&bytes).into_owned()).unwrap_or_default())
+    };
+    let (before, after) = (text(&change.before)?, text(&change.after)?);
+    let patch = diffy::create_patch(&before, &after);
+    let mut counts = (0, 0);
+    for line in patch.hunks().iter().flat_map(|hunk| hunk.lines()) {
+        match line {
+            diffy::Line::Insert(_) => counts.0 += 1,
+            diffy::Line::Delete(_) => counts.1 += 1,
+            diffy::Line::Context(_) => {}
+        }
+    }
+    Ok(counts)
+}
 fn bytes(value: &Option<String>) -> Result<Option<Vec<u8>>> {
     value
         .as_ref()
@@ -493,6 +510,17 @@ fn rollback(workspace: &Path, applied: &[&Change]) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn line_counts_follow_the_diff() {
+        let change = Change {
+            path: "app.py".into(),
+            before: Some(STANDARD.encode("def greet():\n    return \"hi\"\n")),
+            after: Some(STANDARD.encode("def greet():\n    return \"hello\"\n\n\ndef bye():\n    return \"bye\"\n")),
+        };
+        assert_eq!(line_counts(&change).unwrap(), (5, 1));
+        let created = Change { path: "new.txt".into(), before: None, after: Some(STANDARD.encode("a\nb\n")) };
+        assert_eq!(line_counts(&created).unwrap(), (2, 0));
+    }
     fn fixture() -> (tempfile::TempDir, tempfile::TempDir, String) {
         let work = tempfile::tempdir().unwrap();
         let data = tempfile::tempdir().unwrap();

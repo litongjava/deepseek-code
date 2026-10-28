@@ -140,8 +140,8 @@ async fn pick(paths: &RuntimePaths, session: &mut Session) -> Result<bool> {
             let detail = match (checkpoint.changes.len(), checkpoint.restored) {
                 (_, true) => "Code already restored".to_owned(),
                 (0, _) => "No code changes".to_owned(),
-                (1, _) => "1 file changed".to_owned(),
-                (count, _) => format!("{count} files changed"),
+                // As in the reference CLI: `app.py +5 -1`.
+                _ => changed_files(checkpoint, false),
             };
             Entry { title: prompt, detail }
         })
@@ -171,13 +171,22 @@ async fn pick(paths: &RuntimePaths, session: &mut Session) -> Result<bool> {
     }
     choices.push(("", "Never mind"));
     let options: Vec<Entry> = choices.iter().map(|(_, label)| Entry { title: label.to_string(), detail: String::new() }).collect();
-    let title = format!("Rewind to before: {}", entries[index].title);
+    // The confirmation as in the reference CLI: the message, its age, and
+    // what restoring removes and undoes.
+    let mut subtitle = format!(
+        "Confirm you want to restore to the point before you sent this message:\n\u{2502} {}\n\u{2502} ({})\n\nThis message and everything after it will be removed.",
+        entries[index].title,
+        ago(messages.iter().find(|message| message.id == checkpoint.message_id).map_or(&checkpoint.created_at, |message| &message.created_at))
+    );
+    if code {
+        subtitle.push_str(&format!("\nThe code will be restored {}.", changed_files(checkpoint, true)));
+    }
     let confirm = Picker {
-        heading: &title,
-        subtitle: Some(&entries[index].detail),
+        heading: "Rewind",
+        subtitle: Some(&subtitle),
         entries: &options,
         search: false,
-        hint: "Enter to confirm \u{b7} Esc to cancel",
+        hint: "\u{26a0} Restored files go back whole, losing later changes by anyone. Bash changes to other files are not undone.",
         selected: 0,
     };
     match confirm.run()?.map(|choice| choices[choice].0) {
@@ -185,5 +194,44 @@ async fn pick(paths: &RuntimePaths, session: &mut Session) -> Result<bool> {
             Box::pin(handle("/rewind", &format!("{action} {}", checkpoint.id), paths, session)).await
         }
         _ => Ok(true),
+    }
+}
+
+/// `app.py +5 -1`, or for a restore the reverse, `+1 -5 in app.py`.
+fn changed_files(checkpoint: &checkpoints::Checkpoint, restore: bool) -> String {
+    let files: Vec<(String, (usize, usize))> = checkpoint
+        .changes
+        .iter()
+        .map(|change| {
+            let (added, removed) = checkpoints::line_counts(change).unwrap_or_default();
+            (change.path.clone(), if restore { (removed, added) } else { (added, removed) })
+        })
+        .collect();
+    if restore {
+        let (added, removed) = files.iter().fold((0, 0), |sum, (_, (a, r))| (sum.0 + a, sum.1 + r));
+        let target = match files.as_slice() {
+            [(path, _)] => path.clone(),
+            _ => format!("{} files", files.len()),
+        };
+        return format!("+{added} -{removed} in {target}");
+    }
+    let mut shown: Vec<String> = files.iter().take(3).map(|(path, (added, removed))| format!("{path} +{added} -{removed}")).collect();
+    if files.len() > 3 {
+        shown.push(format!("{} more", files.len() - 3));
+    }
+    shown.join(", ")
+}
+
+/// `28s ago`, `5m ago`, `2h ago` or `3d ago`.
+fn ago(created_at: &str) -> String {
+    let Ok(time) = chrono::DateTime::parse_from_rfc3339(created_at) else {
+        return created_at.to_owned();
+    };
+    let seconds = (chrono::Utc::now() - time.with_timezone(&chrono::Utc)).num_seconds().max(0);
+    match seconds {
+        0..=59 => format!("{seconds}s ago"),
+        60..=3599 => format!("{}m ago", seconds / 60),
+        3600..=86_399 => format!("{}h ago", seconds / 3600),
+        _ => format!("{}d ago", seconds / 86_400),
     }
 }
