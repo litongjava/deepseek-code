@@ -87,6 +87,20 @@ pub fn copy_settings(db: &DbManager, from: &str, to: &str) -> Result<()> {
     Ok(())
 }
 
+/// The levels /effort and the model picker offer, in order.
+pub(crate) const EFFORTS: [&str; 6] = ["default", "low", "medium", "high", "xhigh", "max"];
+
+/// The session's effort setting, None for the model default.
+pub(crate) fn session_effort(session: &Session) -> Result<Option<String>> {
+    Ok(load(&session.store.db, &session.id)?.effort)
+}
+
+pub(crate) fn set_session_effort(session: &Session, effort: Option<String>) -> Result<()> {
+    let mut settings = load(&session.store.db, &session.id)?;
+    settings.effort = effort;
+    save(&session.store.db, &session.id, &settings)
+}
+
 fn parse_effort(argument: &str) -> Result<Option<String>> {
     ensure!(
         ["default", "off", "low", "medium", "high", "xhigh", "max"].contains(&argument),

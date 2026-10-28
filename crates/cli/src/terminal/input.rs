@@ -35,6 +35,7 @@ enum Message {
     Workspace(std::path::PathBuf),
     ContextNote(Option<String>),
     Shells(usize),
+    Effort(Option<String>),
     ShellCounter(Box<dyn Fn() -> usize + Send>),
     Todos(Box<dyn Fn() -> Vec<(String, String)> + Send>),
     Vim(bool),
@@ -128,6 +129,10 @@ impl TerminalInput {
                         editor.set_shells(count);
                         continue;
                     }
+                    Message::Effort(effort) => {
+                        editor.set_effort(effort);
+                        continue;
+                    }
                     Message::ShellCounter(counter) => {
                         editor.set_shell_counter(counter);
                         continue;
@@ -218,6 +223,11 @@ impl TerminalInput {
     /// Background shells still running, for "1 shell · ↓ to manage".
     pub fn set_shells(&self, count: usize) {
         let _ = self.requests.send(Message::Shells(count));
+    }
+
+    /// The reasoning effort shown above the input, as "● high · /effort".
+    pub fn set_effort(&self, effort: Option<String>) {
+        let _ = self.requests.send(Message::Effort(effort));
     }
 
     /// Reads the todo list that ctrl+t shows.

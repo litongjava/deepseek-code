@@ -574,6 +574,11 @@ async fn run(cli: &Cli) -> Result<()> {
             input.as_ref().unwrap().set_shells(background_commands::running_shells(&paths, &session.id));
             let (counter_paths, counter_session) = (paths.clone(), session.id.clone());
             input.as_ref().unwrap().set_shell_counter(Box::new(move || background_commands::running_shells(&counter_paths, &counter_session)));
+            let effort = match session_commands::session_effort(&session) {
+                Ok(Some(effort)) => Some(effort),
+                _ => session.selected_provider().await.ok().and_then(|provider| provider.model.effort),
+            };
+            input.as_ref().unwrap().set_effort(effort.filter(|effort| !effort.is_empty() && effort != "off"));
             let (todo_paths, todo_session) = (paths.clone(), session.id.clone());
             input.as_ref().unwrap().set_todos(Box::new(move || background_commands::todo_items(&todo_paths, &todo_session)));
             input.as_ref().unwrap().set_vim(terminal::vim::enabled(&paths.data_dir));

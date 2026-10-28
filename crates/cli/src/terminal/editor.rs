@@ -36,6 +36,8 @@ pub struct PromptEditor {
     /// Background shells still running, shown as "1 shell · ↓ to manage".
     shells: usize,
     shell_counter: Option<Box<dyn Fn() -> usize + Send>>,
+    /// The effort in use, shown right-aligned above the input.
+    effort: Option<String>,
     /// The todo list that ctrl+t shows above the input.
     todos: Option<Box<dyn Fn() -> Vec<(String, String)> + Send>>,
     /// Text removed by Ctrl+U or Ctrl+K, pasted back by Ctrl+Y.
@@ -66,6 +68,7 @@ impl Default for PromptEditor {
             shells: 0,
             shell_counter: None,
             todos: None,
+            effort: None,
             killed: String::new(),
             stash: None,
             stash_restore: false,
@@ -655,6 +658,9 @@ impl PromptEditor {
     pub fn set_shell_counter(&mut self, counter: Box<dyn Fn() -> usize + Send>) {
         self.shell_counter = Some(counter);
     }
+    pub fn set_effort(&mut self, effort: Option<String>) {
+        self.effort = effort;
+    }
     pub fn set_todos(&mut self, todos: Box<dyn Fn() -> Vec<(String, String)> + Send>) {
         self.todos = Some(todos);
     }
@@ -855,6 +861,12 @@ impl PromptEditor {
                     lines.push((row, if done { TextStyle::Muted } else if current { TextStyle::Selected } else { TextStyle::Plain }));
                 }
             }
+            if let Some(effort) = self.effort.as_ref().filter(|_| items.is_empty() && lines.len() == panel_height) {
+                // As in the reference CLI: "● high · /effort" above the input.
+                let label = format!("\u{25cf} {effort} \u{b7} /effort");
+                let pad = width.saturating_sub(label.chars().count());
+                lines.push((format!("{}{label}", " ".repeat(pad)), TextStyle::Muted));
+            }
             let menu_height = lines.len() - panel_height;
             lines.push(("\u{2500}".repeat(width), TextStyle::Border));
             match &ghost {
@@ -1023,6 +1035,12 @@ impl PromptEditor {
                             last_state = (buffer.chars.clone(), buffer.cursor);
                         }
                         continue;
+                    }
+                    if key.code == KeyCode::Char('p') && key.modifiers.contains(KeyModifiers::ALT) {
+                        // alt+p opens the model picker, as in the reference CLI.
+                        let model = "/model".to_owned();
+                        screen.finish(&model, &prompt)?;
+                        return Ok(Some(super::PromptEvent::Line(model)));
                     }
                     if control && key.code == KeyCode::Char('t') {
                         // As in the reference CLI, ctrl+t shows or hides the tasks.

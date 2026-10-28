@@ -35,6 +35,8 @@ pub enum Key {
     /// Space, while the search box is empty.
     Space,
     Ctrl(char),
+    Left,
+    Right,
 }
 
 #[derive(Debug, PartialEq)]
@@ -98,6 +100,8 @@ impl Picker<'_> {
             let extra = match key.code {
                 KeyCode::Char(' ') if query.is_empty() && !control => Some(Key::Space),
                 KeyCode::Char(ch) if control => Some(Key::Ctrl(ch)),
+                KeyCode::Left => Some(Key::Left),
+                KeyCode::Right => Some(Key::Right),
                 _ => None,
             };
             if let Some(extra) = extra.filter(|extra| keys.contains(extra)) {

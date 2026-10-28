@@ -540,6 +540,52 @@ pub async fn handle(
                 )
             })?;
         let models: Vec<_> = provider.models.iter().filter(|m| m.enabled).collect();
+        if argument.is_none() && crate::terminal::picker::available() && !models.is_empty() {
+            // As in the reference CLI: a model picker with the effort below it.
+            use crate::terminal::picker::{Entry, Key, Picked, Picker};
+            let efforts = crate::session_commands::EFFORTS;
+            let current_effort = crate::session_commands::session_effort(session)?;
+            let mut effort = efforts.iter().position(|level| Some(*level) == current_effort.as_deref()).unwrap_or(0);
+            let mut selected = models.iter().position(|m| m.id == session.model).unwrap_or(0);
+            loop {
+                let entries: Vec<Entry> = models
+                    .iter()
+                    .map(|m| Entry {
+                        title: if m.id == session.model { format!("{} \u{2714}", m.id) } else { m.id.clone() },
+                        detail: if m.name.is_empty() || m.name == m.id { String::new() } else { m.name.clone() },
+                    })
+                    .collect();
+                let level = efforts[effort];
+                let level_label = if level == "default" { "Default effort (model default)".to_owned() } else { format!("{}{} effort", level[..1].to_uppercase(), &level[1..]) };
+                let subtitle = format!("Switch between {} models. \u{25cf} {level_label} \u{2190}/\u{2192} to adjust", provider.name);
+                let picker = Picker { heading: "Select model", subtitle: Some(&subtitle), entries: &entries, search: false, hint: "Enter to switch \u{b7} Esc to cancel", selected };
+                match picker.run_keys(&[Key::Left, Key::Right])? {
+                    Picked::Key(Key::Left, index) => {
+                        selected = index.unwrap_or(selected);
+                        effort = (effort + efforts.len() - 1) % efforts.len();
+                    }
+                    Picked::Key(Key::Right, index) => {
+                        selected = index.unwrap_or(selected);
+                        effort = (effort + 1) % efforts.len();
+                    }
+                    Picked::Entry(index) => {
+                        let chosen = (efforts[effort] != "default").then(|| efforts[effort].to_owned());
+                        if chosen != current_effort {
+                            crate::session_commands::set_session_effort(session, chosen.clone())?;
+                            eprintln!("Session effort: {}", chosen.as_deref().unwrap_or("default"));
+                        }
+                        if models[index].id != session.model {
+                            let selection = select(paths, &provider.id, &models[index].id)?;
+                            session.switch(paths, selection).await?;
+                            status(session);
+                            eprintln!("Conversation history preserved. Use /test to verify connectivity.");
+                        }
+                        return Ok(true);
+                    }
+                    _ => return Ok(true),
+                }
+            }
+        }
         for (i, m) in models.iter().enumerate() {
             eprintln!("{}. {}", i + 1, m.id);
         }
