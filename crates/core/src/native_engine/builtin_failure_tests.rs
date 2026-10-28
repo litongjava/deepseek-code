@@ -48,7 +48,7 @@ async fn builtin_errors_are_failures_in_serial_and_parallel_paths() {
         std::fs::read_to_string(temp.path().join("file.txt")).unwrap(),
         "original"
     );
-    for timeout in [json!(0), json!(-1), json!(1.5), json!("120"), json!(3601)] {
+    for timeout in [json!(0), json!(-1), json!("120"), json!(600_001)] {
         assert!(crate::tools::execute_tool_async(
             "Bash",
             json!({"command":"echo must-not-run","timeout":timeout}),

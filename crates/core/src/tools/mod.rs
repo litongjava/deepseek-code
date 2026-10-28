@@ -10,6 +10,8 @@ use tokio::sync::RwLock;
 
 pub mod macros;
 mod notebook;
+mod read;
+mod search;
 pub mod tasks;
 mod lsp;
 
@@ -73,7 +75,7 @@ pub struct ToolDefinition {
 
 pub fn get_tool_definitions() -> Vec<ToolDefinition> {
     let mut defs = vec![
-        ToolDefinition { name: "Skill".into(), description: "Invoke an available skill by name with optional args. Inline skills return instructions to follow; context:fork skills execute in an isolated child conversation and return its actual result. Dynamic shell context uses normal execution permissions and can request approval. Do not read a skill file to bypass this execution path.".into(), input_schema:serde_json::json!({"type":"object","properties":{"skill":{"type":"string"},"args":{"type":"string"}},"required":["skill"],"additionalProperties":false}) },
+        ToolDefinition { name: "Skill".into(), description: "Invoke a skill.\n\nA skill is a packaged set of instructions the user or project has set up for a particular kind of task (deploy steps, a review checklist, a repo-specific workflow). Available skills are listed in the system prompt with one-line descriptions. When the task at hand is one a listed skill covers, call this tool first — the skill's instructions load into the turn for you to follow in place of your default approach; skills with context:fork instead run in an isolated child conversation and return the finished result. Users may also ask for one by name (`/<name>`, or \"slash command\"); that's a request to invoke it.\n\n- `skill`: exact name from the listing, no leading slash. Plugin skills use `plugin:skill`.\n- `args`: optional arguments to pass through.\n\nOnly names from the listing (or that the user typed explicitly) are valid. Built-in CLI commands (`/help`, `/clear`, …) aren't skills. Do not read a skill file to bypass this tool: dynamic shell context and fork isolation run through it.".into(), input_schema:serde_json::json!({"type":"object","properties":{"skill":{"description":"The name of a skill from the available-skills list. Do not guess names.","type":"string"},"args":{"description":"Optional arguments for the skill","type":"string"}},"required":["skill"],"additionalProperties":false}) },
         notebook::definition(),
         lsp::definition(),
         worktrees::definition(),
@@ -86,82 +88,50 @@ pub fn get_tool_definitions() -> Vec<ToolDefinition> {
             description: "Execute an installed, enabled plugin command with OS user permissions. Requires execution approval.".into(),
             input_schema: serde_json::json!({"type":"object","properties":{"plugin":{"type":"string"},"command":{"type":"string"},"input":{}},"required":["plugin","command"]}),
         },
-        ToolDefinition {
-            name: "Read".to_string(),
-            description: "Read a file from the local filesystem. Returns content with line numbers.".to_string(),
-            input_schema: serde_json::json!({
-                "type": "object",
-                "properties": {
-                    "file_path": { "type": "string", "description": "The absolute or relative path to the file to read" },
-                    "offset": { "type": "number", "description": "Line number to start reading from (1-based)" },
-                    "limit": { "type": "number", "description": "Max number of lines to read" }
-                },
-                "required": ["file_path"]
-            }),
-        },
+        read::definition(),
         ToolDefinition {
             name: "Write".to_string(),
-            description: "Write content to a file. Creates the file and parent directories if needed.".to_string(),
+            description: "Writes a file to the local filesystem, overwriting if one exists.\n\nWhen to use: creating a new file, or fully replacing one you've already Read. Overwriting an existing file you haven't Read will fail. For partial changes, use Edit instead.".to_string(),
             input_schema: serde_json::json!({
                 "type": "object",
                 "properties": {
-                    "file_path": { "type": "string", "description": "The path to the file" },
-                    "content": { "type": "string", "description": "The full content to write" }
+                    "file_path": { "description": "The absolute path to the file to write (must be absolute, not relative)", "type": "string" },
+                    "content": { "description": "The content to write to the file", "type": "string" }
                 },
-                "required": ["file_path", "content"]
+                "required": ["file_path", "content"],
+                "additionalProperties": false
             }),
         },
         ToolDefinition {
             name: "Edit".to_string(),
-            description: "Make an exact string replacement in a file.".to_string(),
+            description: "Performs exact string replacement in a file.\n\n- You must Read the file in this conversation before editing, or the call will fail.\n- `old_string` must match the file exactly, including indentation, and be unique — the edit fails otherwise. Strip the Read line prefix (line number + tab) before matching.\n- `replace_all: true` replaces every occurrence instead.".to_string(),
             input_schema: serde_json::json!({
                 "type": "object",
                 "properties": {
-                    "file_path": { "type": "string", "description": "The path to the file" },
-                    "old_string": { "type": "string", "description": "The exact text to find" },
-                    "new_string": { "type": "string", "description": "The replacement text" },
-                    "replace_all": { "type": "boolean", "description": "If true, replace ALL occurrences" }
+                    "file_path": { "description": "The absolute path to the file to modify", "type": "string" },
+                    "old_string": { "description": "The text to replace", "type": "string" },
+                    "new_string": { "description": "The text to replace it with (must be different from old_string)", "type": "string" },
+                    "replace_all": { "description": "Replace all occurrences of old_string (default false)", "default": false, "type": "boolean" }
                 },
-                "required": ["file_path", "old_string", "new_string"]
+                "required": ["file_path", "old_string", "new_string"],
+                "additionalProperties": false
             }),
         },
         ToolDefinition {
             name: "Bash".to_string(),
-            description: "Execute a shell command and return stdout/stderr. On Windows, use shell powershell or pwsh for PowerShell commands; UTF-8 input/output and file cmdlet encoding are configured automatically. Windows PowerShell -File requires UTF-8 with BOM; Write/Edit add it to .ps1 files.".to_string(),
+            description: "Executes a shell command and returns its output.\n\nThe default shell is bash (Git Bash on Windows): use Unix shell syntax there — `/dev/null` not `NUL`, forward slashes, `$VAR` not `%VAR%` or `$env:VAR`. Pass `shell` (powershell, pwsh, cmd, sh, zsh, fish) to use another shell's syntax; PowerShell input/output is UTF-8.\n\n- Each call starts in the project working directory; `cd` and shell state (env vars, functions) do not persist between calls, so prefer absolute paths.\n- Command output is displayed to you, not reliably to the user.\n- `timeout` is in milliseconds: default 120000, max 600000 for a foreground command.\n- `run_in_background` runs the command detached as a managed task: it keeps running across turns and returns a task_id. No `&` or Start-Process needed. Use TaskOutput to read its output and TaskStop to stop it.\n\n# Git\n- Interactive flags (`-i`, e.g. `git rebase -i`, `git add -i`) are not supported in this environment.\n- Use the `gh` CLI for GitHub operations (PRs, issues, API).\n- Commit or push only when the user asks. If on the default branch, branch first.".to_string(),
             input_schema: serde_json::json!({
                 "type": "object",
                 "properties": {
-                    "command": { "type": "string", "description": "The shell command to execute" },
-                    "run_in_background": { "type": "boolean", "description": "Run the command itself in a managed background task; returns task_id. Use TaskOutput for logs and TaskStop to terminate the process tree. Do not use Start-Process or shell & to detach." },
-                    "timeout": { "type": "integer", "minimum": 1, "maximum": 3600, "description": "Timeout in seconds (foreground default: 120; background has no deadline unless specified); use 900-1800 for dependency installation or initial builds" },
-                    "shell": { "type": "string", "description": "Shell to use: bash, zsh, fish, sh, cmd, powershell, pwsh (default: bash)" }
+                    "command": { "description": "The command to execute", "type": "string" },
+                    "timeout": { "description": "Optional timeout in milliseconds (max 600000 for a foreground command)", "type": "number" },
+                    "description": { "description": "Clear, concise description of what this command does in active voice. Never use words like \"complex\" or \"risk\" in the description - just describe what it does.\n\nSay what the command does in plain words: do not echo the command's text, its flags, or file paths - the user reads this description, often without seeing the command.\n\nFor simple commands (git, npm, standard CLI tools), keep it brief (5-10 words):\n- ls → \"List files in current directory\"\n- git status → \"Show working tree status\"\n- npm install → \"Install package dependencies\"\n\nFor commands that are harder to parse at a glance (piped commands, obscure flags, etc.), add enough context to clarify what it does:\n- find . -name \"*.tmp\" -exec rm {} \\; → \"Find and delete all .tmp files recursively\"\n- git reset --hard origin/main → \"Discard all local changes and match remote main\"\n- curl -s url | jq '.data[]' → \"Fetch JSON from URL and extract data array elements\"", "type": "string" },
+                    "run_in_background": { "description": "Set to true to run this command in the background.", "type": "boolean" },
+                    "dangerouslyDisableSandbox": { "description": "Set this to true to dangerously override sandbox mode and run commands without sandboxing. This runtime does not sandbox commands, so it currently has no effect.", "type": "boolean" },
+                    "shell": { "description": "Shell to use: bash, zsh, fish, sh, cmd, powershell, pwsh (default: bash)", "type": "string" }
                 },
-                "required": ["command"]
-            }),
-        },
-        ToolDefinition {
-            name: "Glob".to_string(),
-            description: "Find files matching a glob pattern.".to_string(),
-            input_schema: serde_json::json!({
-                "type": "object",
-                "properties": {
-                    "pattern": { "type": "string", "description": "Glob pattern" },
-                    "path": { "type": "string", "description": "Base directory to search in" }
-                },
-                "required": ["pattern"]
-            }),
-        },
-        ToolDefinition {
-            name: "Grep".to_string(),
-            description: "Search file contents using regex.".to_string(),
-            input_schema: serde_json::json!({
-                "type": "object",
-                "properties": {
-                    "pattern": { "type": "string", "description": "Regex pattern to search for" },
-                    "path": { "type": "string", "description": "File or directory to search in" },
-                    "include": { "type": "string", "description": "Glob to filter files" }
-                },
-                "required": ["pattern"]
+                "required": ["command"],
+                "additionalProperties": false
             }),
         },
         ToolDefinition {
@@ -386,6 +356,7 @@ pub fn get_tool_definitions() -> Vec<ToolDefinition> {
         },
     ];
 
+    defs.extend(search::definitions());
     for macro_def in macros::get_macro_definitions() {
         defs.push(ToolDefinition {
             name: macro_def.name,
@@ -425,12 +396,12 @@ macro_rules! tool_dispatch {
             "Config" | "brief" | "SyntheticOutput" => content_compat::execute($name, &$input, $cwd),
             "ToolSearch" => tool_search($input),
             "TaskCreate" | "TaskGet" | "TaskList" | "TaskUpdate" | "TaskOutput" | "TaskStop" | "TodoWrite" | "TodoRead" | "todo_write" => tasks::execute($name, $input, $cwd),
-            "Read" => tool_read($input, $cwd),
+            "Read" => read::execute($input, $cwd),
             "Write" => tool_write($input, $cwd),
             "Edit" => tool_edit($input, $cwd),
             "Bash" => $bash,
-            "Glob" => tool_glob($input, $cwd),
-            "Grep" => tool_grep($input, $cwd),
+            "Glob" => search::glob($input, $cwd),
+            "Grep" => search::grep($input, $cwd),
             "ListDir" => tool_list_dir($input, $cwd),
             "WebFetch" => $webfetch,
             "WebSearch" => $websearch,
@@ -629,39 +600,6 @@ pub fn resolve_path(file_path: &str, cwd: &str) -> Result<String> {
         return Err(anyhow!("Path is outside allowed directories: {}", resolved.display()));
     }
     Ok(resolved.to_string_lossy().to_string())
-}
-
-fn tool_read(input: serde_json::Value, cwd: &str) -> Result<serde_json::Value> {
-    let file_path = input["file_path"].as_str().ok_or_else(|| anyhow!("file_path required"))?;
-    let resource = crate::skills::bundled_resources::read(Path::new(file_path));
-    let content = if let Some(bytes) = resource {
-        std::str::from_utf8(bytes)?.to_owned()
-    } else {
-        let path = resolve_path(file_path, cwd)?;
-        if !Path::new(&path).exists() {
-            return Ok(serde_json::json!({ "content": format!("File not found: {}", path), "is_error": true }));
-        }
-        fs::read_to_string(&path)?
-    };
-    let content = content.strip_prefix('\u{feff}').unwrap_or(&content);
-    let offset = input["offset"].as_u64().unwrap_or(1) as usize;
-    let limit = input["limit"].as_u64().unwrap_or(2000) as usize;
-
-    let lines: Vec<&str> = content.lines().collect();
-    let total_lines = lines.len();
-    let selected: Vec<String> = lines
-        .iter()
-        .skip(offset.saturating_sub(1))
-        .take(limit)
-        .enumerate()
-        .map(|(i, line)| format!("{:>6}\t{}", i + offset, line))
-        .collect();
-
-    Ok(serde_json::json!({
-        "content": selected.join("\n"),
-        "lines": total_lines,
-        "truncated": total_lines > limit
-    }))
 }
 
 fn tool_write(input: serde_json::Value, cwd: &str) -> Result<serde_json::Value> {
@@ -886,11 +824,15 @@ fn tool_computer_use(input: serde_json::Value) -> Result<serde_json::Value> {
 
 async fn tool_bash_async(input: serde_json::Value, cwd: &str) -> Result<serde_json::Value> {
     let command = input["command"].as_str().ok_or_else(|| anyhow!("command required"))?;
-    let timeout_secs = match input.get("timeout") {
-        Some(value) => value.as_u64().ok_or_else(|| anyhow!("Bash timeout must be an integer number of seconds"))?,
-        None => default_bash_timeout_secs(),
+    // Milliseconds, like the reference CLI. Background tasks may run longer.
+    let background = input["run_in_background"].as_bool().unwrap_or(false);
+    let timeout_ms = match input.get("timeout").filter(|value| !value.is_null()) {
+        Some(value) => value.as_f64().filter(|ms| ms.is_finite() && *ms >= 1.0).ok_or_else(|| anyhow!("Bash timeout must be a positive number of milliseconds"))? as u64,
+        None => default_bash_timeout_secs() * 1000,
     };
-    anyhow::ensure!((1..=3600).contains(&timeout_secs), "Bash timeout must be 1-3600 seconds");
+    let max_ms = if background { 86_400_000 } else { 600_000 };
+    anyhow::ensure!(timeout_ms <= max_ms, "Bash timeout must be at most {max_ms} milliseconds");
+    let timeout = std::time::Duration::from_millis(timeout_ms);
     let shell_type = input["shell"].as_str().unwrap_or("bash");
 
     if is_dangerous_command(command) {
@@ -1028,11 +970,11 @@ async fn tool_bash_async(input: serde_json::Value, cwd: &str) -> Result<serde_js
 
     // Background commands are named by their description, or the command.
     let description = input["description"].as_str().filter(|text| !text.trim().is_empty()).unwrap_or(&command).to_owned();
-    if input["run_in_background"].as_bool().unwrap_or(false) {
-        background_shell::start(cmd, input.get("timeout").map(|_| std::time::Duration::from_secs(timeout_secs)), shell_type, &description, &command)
+    if background {
+        background_shell::start(cmd, input.get("timeout").filter(|value| !value.is_null()).map(|_| timeout), shell_type, &description, &command)
     } else {
         // Ctrl+B can move it to the background while it runs.
-        background_shell::run_foreground(cmd, std::time::Duration::from_secs(timeout_secs), shell_type, &description, &command).await
+        background_shell::run_foreground(cmd, timeout, shell_type, &description, &command).await
     }
 }
 
@@ -1118,72 +1060,6 @@ pub fn find_shell(shell_name: &str) -> Option<String> {
     }
 
     None
-}
-
-fn tool_glob(input: serde_json::Value, cwd: &str) -> Result<serde_json::Value> {
-    let pattern = input["pattern"].as_str().ok_or_else(|| anyhow!("pattern required"))?;
-    let base_path = input["path"].as_str().unwrap_or(cwd);
-    let base_path = resolve_path(base_path, cwd)?;
-    let glob_pattern = glob::Pattern::new(&pattern.replace('\\', "/"))?;
-
-    let mut matches: Vec<String> = Vec::new();
-    for entry in walkdir::WalkDir::new(&base_path).into_iter().filter_map(|e| e.ok()) {
-        let path = entry.path();
-        if !path.is_file() { continue; }
-        let relative = path.strip_prefix(&base_path).unwrap_or(path).to_string_lossy().replace('\\', "/");
-        let absolute = path.to_string_lossy().replace('\\', "/");
-        if glob_pattern.matches(&relative) || glob_pattern.matches(&absolute) {
-            matches.push(path.to_string_lossy().into_owned());
-        }
-    }
-    matches.sort();
-
-    Ok(serde_json::json!({
-        "files": matches,
-        "count": matches.len()
-    }))
-}
-
-fn tool_grep(input: serde_json::Value, cwd: &str) -> Result<serde_json::Value> {
-    let pattern = input["pattern"].as_str().ok_or_else(|| anyhow!("pattern required"))?;
-    let search_path = input["path"].as_str().unwrap_or(cwd);
-    let search_path = resolve_path(search_path, cwd)?;
-    let include = input["include"].as_str().map(glob::Pattern::new).transpose()?;
-
-    let re = regex::Regex::new(pattern)?;
-    let mut results: Vec<serde_json::Value> = Vec::new();
-
-    for entry in walkdir::WalkDir::new(&search_path).into_iter().filter_map(|e| e.ok()) {
-        let path = entry.path();
-        if !path.is_file() {
-            continue;
-        }
-        if let Some(include) = &include {
-            let relative = path.strip_prefix(&search_path).unwrap_or(path);
-            let relative = relative.to_string_lossy().replace('\\', "/");
-            let name = path.file_name().unwrap_or_default().to_string_lossy();
-            if !include.matches(&relative) && !include.matches(&name) {
-                continue;
-            }
-        }
-
-        if let Ok(content) = fs::read_to_string(path) {
-            for (line_num, line) in content.lines().enumerate() {
-                if re.is_match(line) {
-                    results.push(serde_json::json!({
-                        "file": path.to_string_lossy(),
-                        "line": line_num + 1,
-                        "content": line
-                    }));
-                }
-            }
-        }
-    }
-
-    Ok(serde_json::json!({
-        "matches": results,
-        "count": results.len()
-    }))
 }
 
 fn tool_list_dir(input: serde_json::Value, _cwd: &str) -> Result<serde_json::Value> {

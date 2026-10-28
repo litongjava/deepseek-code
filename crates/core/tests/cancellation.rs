@@ -14,7 +14,7 @@ async fn cancelling_a_tool_stops_its_shell_before_later_writes() {
     let task = tokio::spawn(async move {
         claude_core::tools::execute_tool_async(
             "Bash",
-            serde_json::json!({"shell":shell,"command":command,"timeout":10}),
+            serde_json::json!({"shell":shell,"command":command,"timeout":10_000}),
             &cwd,
         )
         .await

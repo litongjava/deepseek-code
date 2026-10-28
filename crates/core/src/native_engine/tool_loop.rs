@@ -161,6 +161,8 @@ pub struct ToolLoopExecutor {
     workspace_cwd: String,
     mcp_registry: Option<Arc<McpToolRegistry>>,
     mcp_outputs: HashMap<String, McpOutput>,
+    /// Files read or written in this conversation; Edit and Write require one.
+    known_files: std::collections::HashSet<std::path::PathBuf>,
     mcp_tools: Vec<crate::tools::ToolDefinition>,
     streaming_tool_args: HashMap<String, StreamingToolCall>,
     conv_id: Option<String>,
@@ -289,6 +291,25 @@ async fn independent_search_provider(path: Option<&std::path::Path>) -> Result<R
 }
 
 /// Provider credentials are request-scoped, including parallel tool execution.
+/// File paths passed to Read/Edit/Write/MultiEdit in either provider's history format.
+fn collect_file_tool_paths(value: &Value, out: &mut Vec<String>) {
+    match value {
+        Value::Array(items) => items.iter().for_each(|item| collect_file_tool_paths(item, out)),
+        Value::Object(map) => {
+            let file_tool = |name: &Value| matches!(name.as_str(), Some("Read" | "Edit" | "Write" | "MultiEdit"));
+            if map.get("type").and_then(Value::as_str) == Some("tool_use") && map.get("name").is_some_and(file_tool) {
+                if let Some(path) = map.get("input").and_then(|input| input["file_path"].as_str()) { out.push(path.to_owned()); }
+            }
+            if let Some(function) = map.get("function").filter(|function| file_tool(&function["name"])) {
+                let arguments = function["arguments"].as_str().and_then(|text| serde_json::from_str::<Value>(text).ok()).unwrap_or_else(|| function["arguments"].clone());
+                if let Some(path) = arguments["file_path"].as_str() { out.push(path.to_owned()); }
+            }
+            map.values().for_each(|item| collect_file_tool_paths(item, out));
+        }
+        _ => {}
+    }
+}
+
 async fn execute_builtin_tool(
     name: &str,
     input: Value,
@@ -570,6 +591,7 @@ impl ToolLoopExecutor {
             workspace_cwd,
             mcp_registry: None,
             mcp_outputs: HashMap::new(),
+            known_files: Default::default(),
             mcp_tools: Vec::new(),
             streaming_tool_args: HashMap::new(),
             conv_id: None,
@@ -1589,24 +1611,71 @@ impl ToolLoopExecutor {
                 };
             } else {
                 let cwd = self.get_workspace_cwd().to_string();
-                let result = execute_builtin_tool(tool_name, tool_input.clone(), &cwd, &self.provider, &self.event_tx, self.search_config_path.as_deref(), self.skill_shell_active).await;
-                output_str = match &result {
-                    Ok(val) => serde_json::to_string_pretty(val).unwrap_or_default(),
-                    Err(e) => format!("Error: {}", e),
+                let result = match self.unread_file_error(tool_name, tool_input) {
+                    Some(error) => Err(anyhow!(error)),
+                    None => execute_builtin_tool(tool_name, tool_input.clone(), &cwd, &self.provider, &self.event_tx, self.search_config_path.as_deref(), self.skill_shell_active).await,
                 };
-                is_error = result.is_err();
+                (output_str, is_error) = self.finish_builtin(tool_name, tool_input, _tool_use_id, result);
             }
         } else {
             let cwd = self.get_workspace_cwd().to_string();
-            let result = execute_builtin_tool(tool_name, tool_input.clone(), &cwd, &self.provider, &self.event_tx, self.search_config_path.as_deref(), self.skill_shell_active).await;
-            output_str = match &result {
-                Ok(val) => serde_json::to_string_pretty(val).unwrap_or_default(),
-                Err(e) => format!("Error: {}", e),
+            let result = match self.unread_file_error(tool_name, tool_input) {
+                Some(error) => Err(anyhow!(error)),
+                None => execute_builtin_tool(tool_name, tool_input.clone(), &cwd, &self.provider, &self.event_tx, self.search_config_path.as_deref(), self.skill_shell_active).await,
             };
-            is_error = result.is_err();
+            (output_str, is_error) = self.finish_builtin(tool_name, tool_input, _tool_use_id, result);
         }
 
         (tool_input.clone(), output_str, is_error)
+    }
+
+    fn file_key(&self, file_path: &str) -> std::path::PathBuf {
+        let path = std::path::Path::new(file_path);
+        let path = if path.is_absolute() { path.to_path_buf() } else { std::path::Path::new(&self.workspace_cwd).join(path) };
+        path.canonicalize().unwrap_or(path)
+    }
+
+    /// Like the reference CLI, Edit and overwriting Write require the file to
+    /// have been read (or written) earlier in this conversation.
+    fn unread_file_error(&mut self, tool_name: &str, tool_input: &Value) -> Option<String> {
+        if !matches!(tool_name, "Edit" | "Write" | "MultiEdit") { return None; }
+        let file_path = tool_input["file_path"].as_str()?;
+        let key = self.file_key(file_path);
+        if !key.is_file() || self.known_files.contains(&key) { return None; }
+        let mut seen = Vec::new();
+        collect_file_tool_paths(&Value::Array(self.messages.clone()), &mut seen);
+        for path in seen { let key = self.file_key(&path); self.known_files.insert(key); }
+        if self.known_files.contains(&key) { return None; }
+        Some(if tool_name == "Write" {
+            "File has not been read yet. Read it first before writing to it.".to_owned()
+        } else {
+            "File has not been read yet. Read it first before editing it.".to_owned()
+        })
+    }
+
+    /// Records files the model has seen and turns Read images into model image content.
+    fn finish_builtin(&mut self, tool_name: &str, tool_input: &Value, tool_use_id: &str, result: Result<Value>) -> (String, bool) {
+        let mut value = match result {
+            Ok(value) => value,
+            Err(error) => return (format!("Error: {}", error), true),
+        };
+        if matches!(tool_name, "Read" | "Edit" | "Write" | "MultiEdit") {
+            if let Some(file_path) = tool_input["file_path"].as_str() { let key = self.file_key(file_path); self.known_files.insert(key); }
+        }
+        if tool_name == "Read" {
+            if let Some(image) = value.as_object_mut().and_then(|object| object.remove("image")) {
+                if !self.provider.model.supports_vision {
+                    return ("Error: The selected model does not accept images, so this image file cannot be shown to it.".to_owned(), true);
+                }
+                let text = value["content"].as_str().unwrap_or_default().to_owned();
+                let transport = json!({"content":[{"type":"image","mimeType":image["media_type"],"data":image["data"]},{"type":"text","text":text}]});
+                match McpOutput::from_transport(&transport) {
+                    Ok(content) => { self.mcp_outputs.insert(tool_use_id.to_owned(), content); return (text, false); }
+                    Err(error) => return (format!("Error: {error:#}"), true),
+                }
+            }
+        }
+        (serde_json::to_string_pretty(&value).unwrap_or_default(), false)
     }
 
     async fn execute_ask_user_question(&mut self, tool_input: &Value, tool_use_id: &str) -> (Value, String, bool) {

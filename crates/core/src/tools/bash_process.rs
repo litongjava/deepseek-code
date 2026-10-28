@@ -87,7 +87,7 @@ pub(super) async fn run_logged(
             let _ = child.kill().await;
             let _ = child.wait().await;
             Ok(
-                json!({"error":format!("Command timed out after {} seconds; descendants were terminated. For long installations/builds, set timeout explicitly (seconds, maximum 3600).",timeout.unwrap().as_secs_f64()),"is_error":true,"timed_out":true,"shell":shell,"stdout":super::limit_output(&String::from_utf8_lossy(&stdout_bytes)),"stderr":super::limit_output(&String::from_utf8_lossy(&stderr_bytes)),"stdout_truncated":out_cut,"stderr_truncated":err_cut}),
+                json!({"error":format!("Command timed out after {} ms; descendants were terminated. For long installations or builds, set timeout explicitly (milliseconds, at most 600000), or use run_in_background.",timeout.unwrap().as_millis()),"is_error":true,"timed_out":true,"shell":shell,"stdout":super::limit_output(&String::from_utf8_lossy(&stdout_bytes)),"stderr":super::limit_output(&String::from_utf8_lossy(&stderr_bytes)),"stdout_truncated":out_cut,"stderr_truncated":err_cut}),
             )
         }
     }

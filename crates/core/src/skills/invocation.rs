@@ -50,7 +50,7 @@ pub fn shell_input(command: &str, shell: Option<&str>) -> Result<Value> {
         ["bash", "sh", "powershell", "pwsh"].contains(&shell),
         "Unsupported skill shell: {shell}"
     );
-    Ok(json!({"command":command,"shell":shell,"timeout":30}))
+    Ok(json!({"command":command,"shell":shell,"timeout":30_000}))
 }
 
 /// A permit binds the exact checked input to one process launch. Explicit deny
