@@ -410,10 +410,16 @@ async fn tasks_menu(paths: &RuntimePaths, session: &Session) -> Result<()> {
                     format!("Task:     {}", safe_output(&job.title)),
                     format!("Session:  {}", job.session_id),
                 ];
-                let key = details("Task details", &rows, &format!("{back}Esc/Enter/Space to close \u{b7} x to stop"), &['x'])?;
+                // An agent's conversation can be followed, as in the reference
+                // CLI's agent view.
+                let key = details("Task details", &rows, &format!("{back}t to view transcript \u{b7} Esc/Enter/Space to close \u{b7} x to stop"), &['x', 't'])?;
                 if key == Some('x') {
                     background_sessions::cancel(&paths.data_dir, &job.id)?;
                     eprintln!("Stopping task {}.", job.id);
+                }
+                if key == Some('t') {
+                    crate::terminal::transcript_pager::view(&crate::repl::transcript_of(session, &job.session_id)?)?;
+                    continue;
                 }
                 key
             }
