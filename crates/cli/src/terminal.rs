@@ -80,6 +80,7 @@ pub mod live;
 pub(crate) mod paste_input;
 pub mod change_view;
 pub mod tool_view;
+pub mod transcript_pager;
 pub mod tips;
 pub mod markdown;
 pub mod vim;

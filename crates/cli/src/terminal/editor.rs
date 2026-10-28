@@ -972,8 +972,14 @@ impl PromptEditor {
                     }
                     if control && key.code == KeyCode::Char('o') {
                         if self.details.entries.is_empty() && !self.transcript.is_empty() {
-                            // Print into scrollback so the terminal's own
-                            // scrolling reads the whole output.
+                            // As in the reference CLI: a full-screen pager over the
+                            // whole conversation; `[` prints it into scrollback.
+                            let outcome = crate::terminal::transcript_pager::run(&self.transcript, &mut || read_editor_event(&mut input_reader))?;
+                            screen.invalidated = true;
+                            self.transcript_printed = true;
+                            if matches!(outcome, crate::terminal::transcript_pager::Outcome::Closed) {
+                                continue;
+                            }
                             screen.finish("", "")?;
                             let width = terminal::size()
                                 .map(|(cols, _)| cols.saturating_sub(1) as usize)

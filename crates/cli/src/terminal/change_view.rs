@@ -278,6 +278,10 @@ fn render_with_theme(line: &Line, width: usize, color: bool, theme: u8) -> Strin
 pub fn heading(text: &str) -> Line {
     Line(vec![span(text, Style::Current)])
 }
+/// One line in a single style.
+pub fn styled(text: &str, style: Style) -> Line {
+    Line(vec![span(text, style)])
+}
 /// A plain line in the body color.
 pub fn body(text: &str) -> Line {
     Line(vec![span(text, Style::Body)])

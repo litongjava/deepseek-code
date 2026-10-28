@@ -7,21 +7,44 @@ use claude_core::{
     skills::SkillsManager,
 };
 
-/// The last answer's thinking and tool calls for the Ctrl+O transcript.
+/// The whole conversation for the Ctrl+O transcript, as in the reference CLI:
+/// each prompt, each answer under its time and model, its thinking and every
+/// tool call in full. Empty until a turn has used a tool.
 pub fn tool_transcript(session: &Session) -> Result<Vec<crate::terminal::change_view::Line>> {
     use crate::terminal::{change_view, tool_view};
+    let width = crossterm::terminal::size().map_or(80, |(cols, _)| cols.saturating_sub(1) as usize);
     session.store.db.with_conn(|conn| {
         let rows = claude_core::db::message_repo::get_messages_by_conversation(conn, &session.id)?;
-        let Some(message) = rows.iter().rev().find(|row| row.role == "assistant") else {
-            return Ok(Vec::new());
+        let last_tools = match rows.iter().rev().find(|row| row.role == "assistant") {
+            Some(message) => !claude_core::db::message_repo::get_tool_calls_for_message(conn, &message.id)?.is_empty(),
+            None => false,
         };
-        let tools = claude_core::db::message_repo::get_tool_calls_for_message(conn, &message.id)?;
-        let mut lines = Vec::new();
-        if let Some(thinking) = message.thinking.as_deref().filter(|text| !text.trim().is_empty()) {
-            lines.push(change_view::muted("\u{273b} Thinking"));
-            lines.extend(thinking.lines().take(200).map(|line| change_view::muted(&format!("  {line}"))));
+        if !last_tools {
+            return Ok(Vec::new());
         }
-        for tool in tools {
+        let mut lines = Vec::new();
+        for message in &rows {
+            if message.is_compact_boundary {
+                lines.push(change_view::muted("\u{273b} Conversation compacted"));
+                continue;
+            }
+            if message.role == "user" {
+                let mut text = message.content.lines();
+                lines.push(change_view::body(&format!("{} {}", crate::terminal::prompt_glyph(), text.next().unwrap_or_default())));
+                lines.extend(text.map(|line| change_view::body(&format!("  {line}"))));
+                continue;
+            }
+            let time = chrono::DateTime::parse_from_rfc3339(&message.created_at)
+                .map(|time| time.with_timezone(&chrono::Local).format("%I:%M %p").to_string())
+                .unwrap_or_default();
+            let header = format!("{time} {}", session.model);
+            lines.push(change_view::muted(&format!("{header:>width$}")));
+            if let Some(thinking) = message.thinking.as_deref().filter(|text| !text.trim().is_empty()) {
+                let mut text = thinking.lines();
+                lines.push(change_view::muted(&format!("\u{2234} {}", text.next().unwrap_or_default())));
+                lines.extend(text.take(400).map(|line| change_view::muted(&format!("  {line}"))));
+            }
+            for tool in claude_core::db::message_repo::get_tool_calls_for_message(conn, &message.id)? {
             let input = tool
                 .input
                 .as_deref()
@@ -34,6 +57,12 @@ pub fn tool_transcript(session: &Session) -> Result<Vec<crate::terminal::change_
                 tool.is_error,
                 Some(&session.workspace),
             ));
+            }
+            let mut text = message.content.lines();
+            if let Some(first) = text.next() {
+                lines.push(change_view::body(&format!("\u{25cf} {first}")));
+                lines.extend(text.map(|line| change_view::body(&format!("  {line}"))));
+            }
         }
         Ok(lines)
     })?
