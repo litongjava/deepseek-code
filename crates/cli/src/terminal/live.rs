@@ -347,6 +347,8 @@ struct State {
     chord: Option<Instant>,
     todos: Vec<(String, String)>,
     agents: usize,
+    /// Draft states before each edit, for ctrl+_.
+    undo: Vec<(Vec<char>, usize)>,
     /// When reasoning began and last streamed, for "Thought for 2s".
     thinking_span: Option<(Instant, Instant)>,
     thinking_characters: usize,
@@ -436,6 +438,7 @@ impl State {
             chord: None,
             todos: Vec::new(),
             agents: 0,
+            undo: Vec::new(),
             thinking_span: None,
             thinking_characters: 0,
             thinking_entry: None,
@@ -661,6 +664,12 @@ impl State {
     }
     fn submit(&mut self, actions: &async_mpsc::UnboundedSender<Action>) -> Option<String> {
         let text = self.draft.take();
+        self.undo.clear();
+        if self.answer.is_none() {
+            // A stashed draft comes back at the next prompt.
+            let mut stash = crate::terminal::stash();
+            stash.1 = stash.0.is_some();
+        }
         if let Some(answer) = self.answer.take() {
             let _ = answer.send(text);
             self.draft = self.saved_draft.take().unwrap_or_default();
@@ -699,6 +708,72 @@ impl State {
         Some(format!("\n{text}\n\nPrompt queued for after this turn."))
     }
 }
+/// The prompt's editing shortcuts in the input during a turn, as in the
+/// reference CLI: Ctrl+A/E, Ctrl+U/K and Ctrl+Y, ctrl+_ undo, `\` + Enter,
+/// ctrl+g and ctrl+s. True when the key was one of them.
+fn edit_draft(state: &mut State, screen: &mut Frame, key: crossterm::event::KeyEvent) -> io::Result<bool> {
+    let control = key.modifiers.contains(KeyModifiers::CONTROL);
+    let before = (state.draft.characters.clone(), state.draft.cursor);
+    match key.code {
+        KeyCode::Char('a') if control => state.draft.cursor = 0,
+        KeyCode::Char('e') if control => state.draft.cursor = state.draft.characters.len(),
+        KeyCode::Char('u') if control => {
+            let cut: String = state.draft.characters.drain(..state.draft.cursor).collect();
+            state.draft.cursor = 0;
+            if !cut.is_empty() {
+                *crate::terminal::killed() = cut;
+            }
+        }
+        KeyCode::Char('k') if control => {
+            let cut: String = state.draft.characters.drain(state.draft.cursor..).collect();
+            if !cut.is_empty() {
+                *crate::terminal::killed() = cut;
+            }
+        }
+        KeyCode::Char('y') if control => {
+            let killed = crate::terminal::killed().clone();
+            state.draft.insert(&killed);
+        }
+        KeyCode::Char('\x1f') | KeyCode::Char('_' | '7' | '/' | '-') if control || key.code == KeyCode::Char('\x1f') => {
+            if let Some((characters, cursor)) = state.undo.pop() {
+                state.draft.characters = characters;
+                state.draft.cursor = cursor.min(state.draft.characters.len());
+            }
+            return Ok(true);
+        }
+        KeyCode::Char('s') if control => {
+            let mut stash = crate::terminal::stash();
+            if state.draft.characters.is_empty() {
+                if let Some(text) = stash.0.take() {
+                    state.draft.set(&text);
+                }
+            } else {
+                *stash = (Some(state.draft.take()), false);
+            }
+        }
+        KeyCode::Char('g') if control => {
+            screen.clear()?;
+            let edited = super::input::editor::edit_externally(&state.draft.characters.iter().collect::<String>())?;
+            state.draft.set(&edited);
+            screen.size = (0, 0);
+        }
+        KeyCode::Enter
+            if key.modifiers.is_empty()
+                && state.draft.cursor == state.draft.characters.len()
+                && state.draft.characters.last() == Some(&'\\') =>
+        {
+            state.draft.characters.pop();
+            state.draft.cursor = state.draft.characters.len();
+            state.draft.insert("\n");
+        }
+        _ => return Ok(false),
+    }
+    if state.draft.characters != before.0 {
+        state.undo.push(before);
+    }
+    Ok(true)
+}
+
 fn clip(text: &str, width: usize) -> String {
     let mut result = String::new();
     let mut used = 0;
@@ -1520,11 +1595,6 @@ fn run(
                         }
                     } else if control && key.code == KeyCode::Char('l') {
                         screen.clear()?;
-                    } else if control && key.code == KeyCode::Char('u') {
-                        state.draft.characters.drain(..state.draft.cursor);
-                        state.draft.cursor = 0;
-                    } else if control && key.code == KeyCode::Char('k') {
-                        state.draft.characters.truncate(state.draft.cursor);
                     } else if control
                         && key.code == KeyCode::Char('d')
                         && state.draft.characters.is_empty()
@@ -1573,6 +1643,8 @@ fn run(
                     {
                         let _ = actions.send(Action::Cancel);
                         state.activity = "Cancelling".into();
+                    } else if state.answer.is_none() && edit_draft(state, screen, key)? {
+                        // The prompt's editing shortcuts, during the turn too.
                     } else {
                         match key.code {
                             KeyCode::Enter
@@ -1587,12 +1659,14 @@ fn run(
                                 }
                             }
                             KeyCode::Backspace if state.draft.cursor > 0 => {
+                                state.undo.push((state.draft.characters.clone(), state.draft.cursor));
                                 state.draft.cursor -= 1;
                                 state.draft.characters.remove(state.draft.cursor);
                             }
                             KeyCode::Delete
                                 if state.draft.cursor < state.draft.characters.len() =>
                             {
+                                state.undo.push((state.draft.characters.clone(), state.draft.cursor));
                                 state.draft.characters.remove(state.draft.cursor);
                             }
                             KeyCode::Left => {
@@ -1609,6 +1683,7 @@ fn run(
                                     .modifiers
                                     .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT) =>
                             {
+                                state.undo.push((state.draft.characters.clone(), state.draft.cursor));
                                 state.draft.insert(&ch.to_string())
                             }
                             _ => {}

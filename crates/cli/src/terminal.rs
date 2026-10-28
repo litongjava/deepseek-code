@@ -9,6 +9,19 @@ static SCREEN_READER: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicB
 pub fn configure_accessibility(enabled: bool) {
     SCREEN_READER.store(enabled, std::sync::atomic::Ordering::Relaxed);
 }
+/// A draft put aside with ctrl+s, shared by the prompt and the input during
+/// a turn; `true` once a prompt was sent and it should come back.
+pub static STASH: std::sync::Mutex<(Option<String>, bool)> = std::sync::Mutex::new((None, false));
+/// Text removed by Ctrl+U or Ctrl+K, pasted back by Ctrl+Y anywhere.
+pub static KILLED: std::sync::Mutex<String> = std::sync::Mutex::new(String::new());
+
+pub fn stash() -> std::sync::MutexGuard<'static, (Option<String>, bool)> {
+    STASH.lock().unwrap_or_else(|error| error.into_inner())
+}
+pub fn killed() -> std::sync::MutexGuard<'static, String> {
+    KILLED.lock().unwrap_or_else(|error| error.into_inner())
+}
+
 /// When this process started, for the session's wall-clock time in /cost.
 pub static STARTED: std::sync::OnceLock<std::time::Instant> = std::sync::OnceLock::new();
 

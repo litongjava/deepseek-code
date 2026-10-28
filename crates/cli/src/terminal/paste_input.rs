@@ -85,6 +85,11 @@ impl PasteDecoder {
                         modifiers = KeyModifiers::CONTROL;
                         KeyCode::Char((b'a' + ch as u8 - 1) as char)
                     }
+                    // Ctrl+\, Ctrl+], Ctrl+^ and Ctrl+_ (undo).
+                    '\x1c'..='\x1f' => {
+                        modifiers = KeyModifiers::CONTROL;
+                        KeyCode::Char(['\\', ']', '^', '_'][ch as usize - 0x1c])
+                    }
                     ch => KeyCode::Char(ch),
                 };
                 self.ready

@@ -42,11 +42,6 @@ pub struct PromptEditor {
     effort: Option<String>,
     /// The todo list that ctrl+t shows above the input.
     todos: Option<Box<dyn Fn() -> Vec<(String, String)> + Send>>,
-    /// Text removed by Ctrl+U or Ctrl+K, pasted back by Ctrl+Y.
-    killed: String,
-    /// A draft put aside with Ctrl+S; it returns after the next prompt.
-    stash: Option<String>,
-    stash_restore: bool,
     /// Vim-style editing (`/vim`).
     vim: bool,
     keybindings: crate::keybindings::Keybindings,
@@ -72,9 +67,6 @@ impl Default for PromptEditor {
             agent_rows: None,
             todos: None,
             effort: None,
-            killed: String::new(),
-            stash: None,
-            stash_restore: false,
             vim: false,
             keybindings: crate::keybindings::Keybindings::default(),
             commands: crate::command_catalog::COMMANDS
@@ -717,11 +709,14 @@ impl PromptEditor {
         // As in the reference CLI, a stashed draft returns after the prompt
         // that was sent instead.
         let mut restored = false;
-        if self.stash_restore {
-            self.stash_restore = false;
-            if let Some(stash) = self.stash.take().filter(|_| buffer.chars.is_empty()) {
-                buffer.set(&stash);
-                restored = true;
+        {
+            let mut stash = crate::terminal::stash();
+            if stash.1 && buffer.chars.is_empty() {
+                if let Some(text) = stash.0.take() {
+                    buffer.set(&text);
+                    restored = true;
+                }
+                stash.1 = false;
             }
         }
         // Undo history: each change pushes the state before it.
@@ -935,7 +930,7 @@ impl PromptEditor {
                 if kill_hint {
                     parts.push("Ctrl+Y to paste deleted text".into());
                 }
-                if self.stash.is_some() {
+                if crate::terminal::stash().0.is_some() {
                     parts.push("\u{203a} stashed".into());
                 }
                 if restored {
@@ -1048,12 +1043,12 @@ impl PromptEditor {
                             buffer.chars[buffer.cursor..].iter().collect()
                         };
                         if !cut.is_empty() {
-                            self.killed = cut;
+                            *crate::terminal::killed() = cut;
                         }
                     }
-                    kill_hint = killing && !self.killed.is_empty();
+                    kill_hint = killing && !crate::terminal::killed().is_empty();
                     // Shortcuts from the reference CLI's `?` panel.
-                    if control && matches!(key.code, KeyCode::Char('_' | '7' | '/' | '-')) {
+                    if (control && matches!(key.code, KeyCode::Char('_' | '7' | '/' | '-'))) || key.code == KeyCode::Char('\x1f') {
                         if let Some((chars, cursor)) = undo.pop() {
                             buffer.chars = chars;
                             buffer.cursor = cursor.min(buffer.chars.len());
@@ -1073,17 +1068,18 @@ impl PromptEditor {
                         continue;
                     }
                     if control && key.code == KeyCode::Char('y') {
-                        let killed = self.killed.clone();
+                        let killed = crate::terminal::killed().clone();
                         buffer.insert(&killed);
                         continue;
                     }
                     if control && key.code == KeyCode::Char('s') {
+                        let mut stash = crate::terminal::stash();
                         if buffer.chars.is_empty() {
-                            if let Some(stash) = self.stash.take() {
-                                buffer.set(&stash);
+                            if let Some(text) = stash.0.take() {
+                                buffer.set(&text);
                             }
                         } else {
-                            self.stash = Some(buffer.text());
+                            *stash = (Some(buffer.text()), false);
                             buffer.set("");
                         }
                         continue;
@@ -1290,7 +1286,10 @@ impl PromptEditor {
                             if !text.trim().is_empty() && self.history.last() != Some(&text) {
                                 self.history.push(text.clone());
                             }
-                            self.stash_restore = self.stash.is_some();
+                            {
+                                let mut stash = crate::terminal::stash();
+                                stash.1 = stash.0.is_some();
+                            }
                             return Ok(Some(super::PromptEvent::Line(text)));
                         }
                         KeyCode::Esc if items.is_empty() && buffer.chars.is_empty() => {
@@ -1661,7 +1660,7 @@ fn external_editor() -> String {
 }
 
 /// Ctrl+G: the input in an external editor, as in the reference CLI.
-fn edit_externally(text: &str) -> io::Result<String> {
+pub(crate) fn edit_externally(text: &str) -> io::Result<String> {
     use std::io::Write as _;
     let mut file = tempfile::Builder::new().prefix("dcl-prompt-").suffix(".md").tempfile()?;
     file.write_all(text.as_bytes())?;
