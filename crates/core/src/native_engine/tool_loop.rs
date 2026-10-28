@@ -1488,7 +1488,8 @@ impl ToolLoopExecutor {
             return (tool_input.clone(), output, failed);
         }
         if matches!(tool_name, "Agent" | "Delegate" | "Worker") {
-            let result = Box::pin(self.execute_delegated_authorized(tool_input, None, None, true)).await;
+            let normalized = if tool_name == "Agent" { delegation::normalize_agent_input(tool_input, self.delegation_depth == 0 && self.conv_id.is_some()) } else { tool_input.clone() };
+            let result = Box::pin(self.execute_delegated_authorized(&normalized, None, None, true)).await;
             let failed = result.is_err();
             let output = match result { Ok(value) => value.to_string(), Err(error) => format!("Delegation failed: {error}") };
             return (tool_input.clone(), output, failed);

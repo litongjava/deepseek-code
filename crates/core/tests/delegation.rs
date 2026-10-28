@@ -69,7 +69,7 @@ async fn run_case(cancel: bool, team: bool) {
             let has_tools = messages.iter().any(|m| m["role"] == "tool");
             let response = if !child && !has_tools {
                 if team { stream(json!({"tool_calls":[call("team-1","team",json!({"operation":"run","team_id":team_id}),0)]}), "tool_calls") }
-                else { stream(json!({"tool_calls":[call("delegate-1","Agent",json!({"prompt":"inspect child","agent_type":"general"}),0)]}), "tool_calls") }
+                else { stream(json!({"tool_calls":[call("delegate-1","Agent",json!({"prompt":"inspect child","agent_type":"general","run_in_background":false}),0)]}), "tool_calls") }
             } else if child && !has_tools && cancel {
                 let (shell, command) = if cfg!(windows) { ("powershell", "Set-Content child-started.txt ready; Start-Sleep -Milliseconds 1500; Set-Content child-finished.txt unexpected") } else { ("sh", "echo ready > child-started.txt; sleep 1.5; echo unexpected > child-finished.txt") };
                 stream(json!({"tool_calls":[call("shell-1","Bash",json!({"shell":shell,"command":command,"timeout":10_000}),0)]}), "tool_calls")

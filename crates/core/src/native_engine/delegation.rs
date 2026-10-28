@@ -42,10 +42,39 @@ impl OwnedChild {
 }
 
 pub(super) fn definitions() -> Vec<ToolDefinition> {
-    ["Agent", "Delegate", "Worker"].into_iter().map(|name| ToolDefinition {
+    let mut definitions = vec![ToolDefinition {
+        name: "Agent".into(),
+        description: "Launch a new agent to handle complex, multi-step tasks. Each agent type has specific capabilities and tools available to it.\n\nSpecify a subagent_type to select an agent definition; omitting it starts a general-purpose agent.\n\n## When to use\n\nReach for this when the task matches an available agent type, when you have independent work to run in parallel, or when answering would mean reading across several files — delegate it and you keep the conclusion, not the file dumps. For a single-fact lookup where you already know the file, symbol, or value, search directly. Once you've delegated a search, don't also run it yourself — wait for the result.\n\nSubagents run in the background; you'll be notified when one completes. Never fabricate or predict a pending agent's results — the notification is never something you write yourself; if the user asks before it arrives, say it's still running. Pass run_in_background: false when you need the result before continuing.\n\n- The agent's final report is not shown to the user — relay what matters.\n- Use SendMessage with the agent's ID or name to continue a previously spawned agent with its context intact; a new Agent call starts fresh.\n- Each agent type's prompt and tools come from its definition (`.claude/agents/*.md` or SDK `agents`).\n- `isolation: \"worktree\"` gives the agent its own git worktree.".into(),
+        input_schema: json!({"type":"object","properties":{
+            "description":{"description":"A short (3-5 word) description of the task","type":"string"},
+            "prompt":{"description":"The task for the agent to perform","type":"string"},
+            "subagent_type":{"description":"The type of specialized agent to use for this task","type":"string"},
+            "model":{"description":"Optional model override for this agent: a model ID configured for the current provider. If omitted, the agent uses the parent's model.","type":"string"},
+            "effort":{"description":"Reasoning effort for this agent. Set this ONLY when the user, or instructions such as AGENTS.md or a skill, explicitly ask that this agent or delegated work run at a specific effort level, never on your own judgment; otherwise omit it and the agent runs at its usual effort.","type":"string","enum":["low","medium","high","xhigh","max"]},
+            "isolation":{"description":"Isolation mode. \"worktree\" creates a git worktree so the agent works on an isolated copy of the repo.","type":"string","enum":["worktree"]},
+            "run_in_background":{"description":"Defaults to true. Set to false to wait for the agent's result in this turn.","type":"boolean"}
+        },"required":["description","prompt"],"additionalProperties":false})
+    }];
+    definitions.extend(["Delegate", "Worker"].into_iter().map(|name| ToolDefinition {
         name: name.into(), description: "Delegate a bounded task to a persistent child session using the same model and tool permissions. Waits for completion unless run_in_background is true: then it returns at once, the child runs as a background task, and you are notified when it finishes. Cancellation stops a waited-for child. Use agent_type to select an existing agent definition.".into(),
         input_schema: json!({"type":"object","properties":{"prompt":{"type":"string"},"description":{"type":"string","description":"A short (3-5 word) description of the task"},"agent_type":{"type":"string","default":"general"},"run_in_background":{"type":"boolean","description":"Return at once and run the agent in the background; you are notified when it finishes"},"resume":{"type":"string","description":"Resume a completed child UUID owned by this session; original live configuration must still be retained"}},"required":["prompt"],"additionalProperties":false})
-    }).collect()
+    }));
+    definitions
+}
+
+/// Maps the reference Agent input onto the delegation fields: subagent_type
+/// names the definition and, from the main session, agents run in the background.
+pub(super) fn normalize_agent_input(input: &Value, main_session: bool) -> Value {
+    let mut input = input.clone();
+    if input["agent_type"].is_null() {
+        if let Some(kind) = input["subagent_type"].as_str().filter(|kind| !kind.is_empty()) {
+            input["agent_type"] = json!(if kind == "general-purpose" { "general" } else { kind });
+        }
+    }
+    if input["run_in_background"].is_null() && main_session {
+        input["run_in_background"] = json!(true);
+    }
+    input
 }
 
 struct ChildState {
@@ -524,6 +553,10 @@ impl ToolLoopExecutor {
         if input["run_in_background"] == true && schema.is_none() && tools.is_none() {
             return self.spawn_background_agent(&input);
         }
+        ensure!(
+            ["model", "effort", "isolation"].iter().all(|key| input[*key].is_null()),
+            "model, effort and isolation apply to background agents; omit run_in_background or set it to true"
+        );
         let prepared = Box::pin(self.prepare_delegated_child(&input, schema, tools)).await?;
         self.run_owned_child(
             prepared.context,
@@ -589,6 +622,20 @@ impl ToolLoopExecutor {
         }
         if !definition.system_prompt.trim().is_empty() {
             arguments.extend(["--append-system-prompt".into(), definition.system_prompt.clone()]);
+        }
+        if let Some(model) = input["model"].as_str().filter(|model| !model.trim().is_empty()) {
+            let at = arguments.iter().position(|arg| arg == "--model").context("child model argument")? + 1;
+            arguments[at] = model.to_owned();
+            environment.retain(|(key, _)| key != "CLAUDE_RUST_WORKER_MODEL");
+        }
+        if let Some(effort) = input["effort"].as_str() {
+            ensure!(["low", "medium", "high", "xhigh", "max"].contains(&effort), "Invalid effort");
+            arguments.extend(["--effort".into(), effort.into()]);
+        }
+        match input["isolation"].as_str() {
+            None => {}
+            Some("worktree") => arguments.extend(["--worktree".into(), format!("agent-{}", &child[..8.min(child.len())])]),
+            Some(other) => anyhow::bail!("Unsupported isolation mode: {other}"),
         }
         arguments.extend(["--".into(), prompt.into()]);
         let executable = std::env::current_exe()?;
@@ -1260,3 +1307,14 @@ mod team_spawn_tests;
 #[cfg(test)]
 #[path = "sdk_agent_fields_tests.rs"]
 mod sdk_agent_fields_tests;
+
+#[cfg(test)]
+#[test]
+fn agent_input_maps_subagent_type_and_defaults_to_background_in_the_main_session() {
+    let input = normalize_agent_input(&json!({"prompt":"p","description":"d","subagent_type":"general-purpose"}), true);
+    assert_eq!(input["agent_type"], "general");
+    assert_eq!(input["run_in_background"], true);
+    let child = normalize_agent_input(&json!({"prompt":"p","subagent_type":"reviewer","run_in_background":false}), true);
+    assert_eq!((child["agent_type"].as_str(), child["run_in_background"].as_bool()), (Some("reviewer"), Some(false)));
+    assert!(normalize_agent_input(&json!({"prompt":"p"}), false)["run_in_background"].is_null());
+}
