@@ -6,7 +6,7 @@ use crate::terminal::picker::{details, Entry, Key, Picked, Picker};
 use anyhow::Result;
 use claude_core::runtime::RuntimePaths;
 
-const TABS: [&str; 3] = ["Status", "Config", "Usage"];
+const TABS: [&str; 4] = ["Status", "Config", "Usage", "Stats"];
 
 /// `Settings   Status   [Config]   Usage`.
 fn tab_bar(current: usize) -> String {
@@ -21,8 +21,21 @@ fn tab_bar(current: usize) -> String {
 pub async fn run(start: &str, paths: &RuntimePaths, session: &mut Session, input: &mut TerminalInput) -> Result<()> {
     let mut tab = TABS.iter().position(|tab| tab.eq_ignore_ascii_case(start)).unwrap_or(0);
     let mut selected = 0;
+    let mut range = 0;
     loop {
         let step = match tab {
+            3 => {
+                let rows = crate::stats_view::rows(&crate::stats_view::load(session)?, range, chrono::Local::now().date_naive());
+                match details(&tab_bar(tab), &rows, "r to change range \u{b7} \u{2190}/\u{2192} to switch tabs \u{b7} Esc to close", &['r'])? {
+                    Some('r') => {
+                        range = (range + 1) % crate::stats_view::RANGES.len();
+                        continue;
+                    }
+                    Some('<') => -1,
+                    Some('>') => 1,
+                    _ => return Ok(()),
+                }
+            }
             1 => match config(paths, session, input, selected).await? {
                 ConfigOutcome::Switch(step) => step,
                 ConfigOutcome::Stay(index) => {

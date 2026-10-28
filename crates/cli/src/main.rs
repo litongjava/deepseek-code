@@ -12,6 +12,7 @@ mod worker_frontend;
 mod mcp_menu;
 mod hooks_menu;
 mod settings_dialog;
+mod stats_view;
 mod permissions_menu;
 mod startup_prompts;
 mod command_catalog;
