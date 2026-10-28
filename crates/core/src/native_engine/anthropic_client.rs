@@ -367,7 +367,7 @@ impl AnthropicClient {
         }
 
         self.apply_options(&mut body, provider)?;
-        crate::performance::apply_prompt_cache(&mut body);
+        crate::performance::apply_conversation_cache(&mut body);
         let response = retry_with_backoff(|| async {
             let request = self.client
                 .post(&url)

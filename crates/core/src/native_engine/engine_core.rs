@@ -431,8 +431,8 @@ impl QueryEngine {
             &conv_id,
         )
         .await?;
-        request.system_prompt = Some(crate::prompt::compose_system_prompt(
-            request.system_prompt.as_deref(), &request.model, prompt_profile,
+        request.system_prompt = Some(crate::prompt::compose_system_prompt_in(
+            request.system_prompt.as_deref(), &request.model, prompt_profile, Some(&workspace),
         ));
         let workspace_path = workspace.to_string_lossy().into_owned();
         let mut discovered_skills = crate::services::plugins::skill_commands(&plugin_context)?;
@@ -516,10 +516,6 @@ impl QueryEngine {
             }
         }
         request.workspace_path = Some(workspace_path.clone());
-        request
-            .system_prompt
-            .get_or_insert_with(String::new)
-            .push_str(&format!("\nWorking directory: {workspace_path}\n"));
         let instructions_workspace = workspace.clone();
         let (instructions, instruction_files) = tokio::task::spawn_blocking(move || {
             crate::project_instructions::load_with_files(&instructions_workspace)
@@ -532,10 +528,11 @@ impl QueryEngine {
             &instruction_files,
         )
         .await?;
-        request
-            .system_prompt
-            .get_or_insert_with(String::new)
-            .push_str(&instructions);
+        if !instructions.is_empty() {
+            request.system_prompt.get_or_insert_with(String::new).push_str(&format!(
+                "\nCodebase and user instructions are shown below. Be sure to adhere to these instructions. IMPORTANT: These instructions OVERRIDE any default behavior and you MUST follow them exactly as written.\n{instructions}"
+            ));
+        }
         let allowed_directories = project
             .as_ref()
             .map(|project| {

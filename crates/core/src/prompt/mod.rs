@@ -7,16 +7,19 @@ use std::path::{Path, PathBuf};
 use std::sync::LazyLock;
 
 const SELF_HOSTED_IDENTITY_BLOCK: &str = r#"<identity>
-You are an AI assistant running in a desktop application called Claude Desktop, powered by a native Rust tool engine and the user's selected model provider. You help with everyday questions, research, writing, files, and software projects. Only use capabilities present in the tools supplied with the current request.
+You are an AI assistant running in the deepseek-code desktop app, powered by a native Rust tool engine and the user's selected model provider. You help with everyday questions, research, writing, files, and software projects. Only use capabilities present in the tools supplied with the current request.
 
-Treat the user the way claude.ai would: with warmth, curiosity, presence, and depth. At the same time, when the user actually wants something built, read, run, or changed on disk — including handing you an entire code project to read or modify — do that work decisively and competently. Conversation-first does NOT mean code-shy.
+Treat the user with warmth, curiosity, presence, and depth. At the same time, when the user actually wants something built, read, run, or changed on disk — including handing you an entire code project to read or modify — do that work decisively and competently. Conversation-first does NOT mean code-shy.
 
 You are NOT Kiro. You are NOT made by Amazon, AWS, or any Amazon product. You have no connection to Kiro. Do not create .kiro directories, do not produce Kiro-style configs, do not refer to yourself as Kiro under any circumstances.
 
 Default to 简体中文 when the user writes in Chinese. Match the user's language otherwise.
 
-Do not claim to be Claude or created by Anthropic unless the active model actually is a Claude-family model. If the active model is something else, describe yourself generically as the assistant in Claude Desktop.
+Describe yourself as the assistant in deepseek-code. Name the model or the company behind it only as the selected model reports it; do not guess.
 </identity>"#;
+
+/// First system block of Code sessions, cached on its own like the reference CLI.
+const CODE_IDENTITY: &str = "You are deepseek-code, an agentic coding tool for DeepSeek models.";
 
 const DESKTOP_BEHAVIOR: &str = include_str!("desktop.md");
 const MEMORY_GUIDANCE: &str = include_str!("memory.md");
@@ -44,19 +47,73 @@ pub fn compose_desktop_system_prompt(custom_prompt: Option<&str>, model: &str) -
 }
 
 pub fn compose_system_prompt(custom_prompt: Option<&str>, model: &str, profile: PromptProfile) -> String {
-    let identity = build_self_hosted_system_prompt("");
-    let mut sections = vec![identity, DESKTOP_BEHAVIOR.trim().to_string()];
-    if profile == PromptProfile::Code {
-        sections.push(CODE_BEHAVIOR.trim().to_string());
-    }
-    sections.push(MEMORY_GUIDANCE.trim().to_string());
-    sections.push(format!("<runtime>\nSelected model: {}\nCurrent date: {}\nHost operating system: {}\n</runtime>",
-        serde_json::to_string(model).unwrap_or_default(), chrono::Local::now().format("%Y-%m-%d"), std::env::consts::OS));
+    compose_system_prompt_in(custom_prompt, model, profile, None)
+}
+
+/// Static sections come first and never vary within a profile, so providers can
+/// cache them; everything per-request (environment, custom instructions, and what
+/// the engine appends later) follows them.
+pub fn compose_system_prompt_in(custom_prompt: Option<&str>, model: &str, profile: PromptProfile, workspace: Option<&Path>) -> String {
+    let mut sections = static_sections(profile);
+    sections.push(environment_section(model, workspace));
     if let Some(custom) = custom_prompt.map(str::trim).filter(|s| !s.is_empty()) {
         // Preserve request-specific instructions verbatim; identity rewriting only applies to the base.
         sections.push(format!("<additional_instructions>\n{}\n</additional_instructions>", custom));
     }
     sections.join("\n\n")
+}
+
+fn static_sections(profile: PromptProfile) -> Vec<String> {
+    match profile {
+        PromptProfile::Code => vec![
+            CODE_IDENTITY.to_string(),
+            format!("{}\n\n{}", CODE_BEHAVIOR.trim(), MEMORY_GUIDANCE.trim()),
+        ],
+        PromptProfile::Desktop => vec![
+            build_self_hosted_system_prompt(""),
+            format!("{}\n\n{}", DESKTOP_BEHAVIOR.trim(), MEMORY_GUIDANCE.trim()),
+        ],
+    }
+}
+
+fn environment_section(model: &str, workspace: Option<&Path>) -> String {
+    let mut lines = vec!["# Environment".to_string(), "You have been invoked in the following environment:".to_string()];
+    if let Some(workspace) = workspace {
+        lines.push(format!(" - Primary working directory: {}", workspace.display()));
+        lines.push(format!(" - Is a git repository: {}", workspace.ancestors().any(|dir| dir.join(".git").exists())));
+    }
+    lines.push(format!(" - Platform: {}", std::env::consts::OS));
+    if let Some(shell) = std::env::var_os("SHELL").map(PathBuf::from).and_then(|path| path.file_name().map(|name| name.to_string_lossy().into_owned())) {
+        lines.push(format!(" - Shell: {shell}"));
+    }
+    lines.push(String::new());
+    lines.push(format!("You are powered by the model {}.", serde_json::to_string(model).unwrap_or_default()));
+    lines.push(String::new());
+    lines.push(format!("Today's date is {}.", chrono::Local::now().format("%Y-%m-%d")));
+    lines.join("\n")
+}
+
+/// Split a composed system prompt into Anthropic text blocks: each static section
+/// carries its own cache breakpoint and the per-request tail is left unmarked.
+/// Returns None for prompts this module did not compose.
+pub fn cache_blocks(system: &str) -> Option<Vec<(String, bool)>> {
+    [PromptProfile::Code, PromptProfile::Desktop].into_iter().find_map(|profile| {
+        let sections = static_sections(profile);
+        let mut rest = system;
+        let mut blocks = Vec::new();
+        for (index, section) in sections.iter().enumerate() {
+            rest = rest.strip_prefix(section.as_str())?;
+            if index + 1 < sections.len() {
+                rest = rest.strip_prefix("\n\n")?;
+            }
+            blocks.push((section.clone(), true));
+        }
+        let rest = rest.trim_start_matches('\n');
+        if !rest.is_empty() {
+            blocks.push((rest.to_string(), false));
+        }
+        Some(blocks)
+    })
 }
 
 static RE_OVERRIDE: LazyLock<Regex> =
@@ -313,7 +370,8 @@ mod tests {
         let custom = "请保留这段项目指令。\n<identity>My project</identity>";
         let prompt = super::compose_system_prompt(Some(custom), "deepseek-flash", super::PromptProfile::Code);
         assert!(prompt.contains(custom));
-        assert!(prompt.contains("Selected model: \"deepseek-flash\""));
+        assert!(prompt.contains("You are powered by the model \"deepseek-flash\"."));
+        assert!(prompt.starts_with(super::CODE_IDENTITY));
         assert_eq!(prompt.matches("<code_behavior>").count(), 1);
         assert_eq!(prompt.matches("<memory_guidance>").count(), 1);
         assert!(!prompt.contains("Reply with OK only"));
@@ -333,7 +391,7 @@ mod tests {
         assert!(prompt.contains("native Rust tool engine"));
         assert!(prompt.contains("<desktop_behavior>"));
         assert!(prompt.contains("<memory_guidance>"));
-        assert!(prompt.contains("Selected model: \"deepseek-flash\""));
+        assert!(prompt.contains("You are powered by the model \"deepseek-flash\"."));
         assert!(prompt.contains("Respond in Spanish.\n<identity>Project persona</identity>"));
         assert_eq!(prompt.matches("<desktop_behavior>").count(), 1);
     }
@@ -348,6 +406,34 @@ mod tests {
     }
 
     use super::*;
+
+    #[test]
+    fn prompts_name_deepseek_instead_of_claude() {
+        for profile in [PromptProfile::Code, PromptProfile::Desktop] {
+            let prompt = compose_system_prompt(None, "deepseek-flash", profile);
+            assert!(!prompt.contains("Claude") && !prompt.contains("claude.ai") && !prompt.contains("Anthropic"), "{profile:?}");
+        }
+    }
+
+    #[test]
+    fn static_sections_become_cached_blocks_before_the_dynamic_tail() {
+        let workspace = tempfile::tempdir().unwrap();
+        let mut system = compose_system_prompt_in(Some("custom rule"), "deepseek-flash", PromptProfile::Code, Some(workspace.path()));
+        system.push_str("\nProject instructions follow\n");
+        let blocks = cache_blocks(&system).unwrap();
+        assert_eq!(blocks.len(), 3);
+        assert_eq!(blocks[0], (CODE_IDENTITY.to_string(), true));
+        assert!(blocks[1].1 && blocks[1].0.contains("# Harness") && blocks[1].0.contains("<memory_guidance>"));
+        assert!(!blocks[2].1 && blocks[2].0.starts_with("# Environment"));
+        assert!(blocks[2].0.contains(&format!("Primary working directory: {}", workspace.path().display())));
+        assert!(blocks[2].0.contains("custom rule") && blocks[2].0.ends_with("Project instructions follow\n"));
+        // Every request in a session shares the identical cached prefix.
+        let other = compose_system_prompt_in(None, "other-model", PromptProfile::Code, None);
+        assert_eq!(cache_blocks(&other).unwrap()[..2], blocks[..2]);
+        let desktop = cache_blocks(&compose_desktop_system_prompt(None, "m")).unwrap();
+        assert!(desktop[0].0.starts_with("<identity>") && desktop[1].0.contains("<desktop_behavior>"));
+        assert!(cache_blocks("Respond in French.").is_none());
+    }
 
     #[test]
     fn test_is_claude_family_model() {
@@ -394,7 +480,7 @@ mod tests {
     fn test_build_self_hosted_prompt_with_identity() {
         let input = "<identity>Old identity</identity>\nHello world";
         let result = build_self_hosted_system_prompt(input);
-        assert!(result.contains("Claude Desktop"));
+        assert!(result.contains("deepseek-code desktop app"));
         assert!(!result.contains("Old identity"));
         assert!(result.contains("Hello world"));
     }

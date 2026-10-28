@@ -236,7 +236,7 @@ pub(super) fn request(
         }
     };
     if api == "anthropic-messages" && metadata["compat"]["supportsCacheControlOnTools"] != false {
-        crate::performance::apply_prompt_cache(&mut body);
+        crate::performance::apply_conversation_cache(&mut body);
     }
     Ok(body)
 }

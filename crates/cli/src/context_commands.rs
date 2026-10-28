@@ -125,7 +125,7 @@ fn render(request: Option<claude_core::services::context_usage::LastRequest>) ->
 /// What the first request would hold: the base system prompt with the
 /// project instructions, the built-in tool definitions and saved history.
 fn estimate(session: &Session, window: Option<u64>) -> Result<claude_core::services::context_usage::LastRequest> {
-    let mut system = claude_core::prompt::build_self_hosted_system_prompt_with_config("", &claude_core::prompt::SystemPromptConfig::default());
+    let mut system = claude_core::prompt::compose_system_prompt_in(None, &session.model, claude_core::prompt::PromptProfile::Code, Some(&session.workspace));
     if let Ok(instructions) = claude_core::project_instructions::load(&session.workspace) {
         system.push_str(&instructions);
     }

@@ -169,12 +169,41 @@ where
     unreachable!()
 }
 
-/// Mark a stable system prefix only. No cache of generated answers is created.
+/// Mark stable prefixes only; no cache of generated answers is created. Composed
+/// system prompts get one breakpoint per static section, like the reference CLI.
 pub fn apply_prompt_cache(body: &mut serde_json::Value) {
+    let ephemeral = || serde_json::json!({"type":"ephemeral"});
     if let Some(system) = body.get("system").and_then(|s| s.as_str()) {
-        if system.len() >= 4096 {
-            body["system"] = serde_json::json!([{"type":"text","text":system,"cache_control":{"type":"ephemeral"}}]);
+        if let Some(blocks) = crate::prompt::cache_blocks(system) {
+            body["system"] = blocks.into_iter().map(|(text, cached)| {
+                let mut block = serde_json::json!({"type":"text","text":text});
+                if cached { block["cache_control"] = ephemeral(); }
+                block
+            }).collect();
+        } else if system.len() >= 4096 {
+            body["system"] = serde_json::json!([{"type":"text","text":system,"cache_control":ephemeral()}]);
         }
+    }
+}
+
+/// For agent conversations: the system breakpoints plus a rolling breakpoint on
+/// the last user block, so the next turn reuses the conversation so far. One-shot
+/// requests skip it because a cache write nobody reads only costs more. At most
+/// three of the four allowed breakpoints are used.
+pub fn apply_conversation_cache(body: &mut serde_json::Value) {
+    apply_prompt_cache(body);
+    let ephemeral = || serde_json::json!({"type":"ephemeral"});
+    let Some(last) = body.get_mut("messages").and_then(|m| m.as_array_mut()).and_then(|m| m.last_mut()) else { return };
+    if last["role"] != "user" { return; }
+    if let Some(text) = last["content"].as_str().filter(|text| !text.is_empty()).map(str::to_owned) {
+        last["content"] = serde_json::json!([{"type":"text","text":text,"cache_control":ephemeral()}]);
+    } else if let Some(block) = last["content"].as_array_mut().and_then(|blocks| blocks.iter_mut().rev().find(|block| match block["type"].as_str() {
+        // Empty text blocks and thinking blocks reject cache_control.
+        Some("text") => block["text"].as_str().is_some_and(|text| !text.is_empty()),
+        Some("tool_result" | "image" | "document") => true,
+        _ => false,
+    })) {
+        block["cache_control"] = ephemeral();
     }
 }
 
@@ -330,5 +359,27 @@ mod tests {
         apply_prompt_cache(&mut body);
         assert_eq!(body["system"][0]["text"], text);
         assert_eq!(body["system"][0]["cache_control"]["type"], "ephemeral");
+    }
+    #[test]
+    fn cache_marks_static_system_blocks_and_the_last_user_block() {
+        let system = crate::prompt::compose_system_prompt(Some("rule"), "m", crate::prompt::PromptProfile::Code);
+        let mut body = serde_json::json!({"system":system,"messages":[
+            {"role":"user","content":"first"},
+            {"role":"assistant","content":[{"type":"text","text":"ok"}]},
+            {"role":"user","content":[{"type":"tool_result","tool_use_id":"t","content":"out"},{"type":"text","text":""}]}]});
+        apply_conversation_cache(&mut body);
+        let blocks = body["system"].as_array().unwrap();
+        assert_eq!(blocks.iter().map(|b| b["text"].as_str().unwrap()).collect::<String>().len() + 4, system.len());
+        assert_eq!(blocks.iter().map(|b| !b["cache_control"].is_null()).collect::<Vec<_>>(), [true, true, false]);
+        assert_eq!(body["messages"][0]["content"], "first");
+        assert_eq!(body["messages"][2]["content"][0]["cache_control"]["type"], "ephemeral");
+        assert!(body["messages"][2]["content"][1].get("cache_control").is_none());
+
+        let mut body = serde_json::json!({"system":"short","messages":[{"role":"user","content":"hi"}]});
+        apply_prompt_cache(&mut body);
+        assert_eq!(body["messages"][0]["content"], "hi");
+        apply_conversation_cache(&mut body);
+        assert_eq!(body["system"], "short");
+        assert_eq!(body["messages"][0]["content"], serde_json::json!([{"type":"text","text":"hi","cache_control":{"type":"ephemeral"}}]));
     }
 }

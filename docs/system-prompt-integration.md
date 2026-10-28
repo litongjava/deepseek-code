@@ -2,14 +2,15 @@
 
 The common `QueryEngine::send_message_with_history` entry point now composes the desktop system prompt for every conversation request, including HTTP chat, native commands, H5, and scheduled requests using that engine. Previously the prompt module existed but was never called by this path, so requests with no explicit `system_prompt` had no desktop instructions.
 
-Composition order:
+Composition order (static sections first, so they form a stable cacheable prefix):
 
-1. Project identity (provider-neutral; does not impersonate Anthropic for non-Claude models).
-2. `src-tauri/src/prompt/desktop.md`: conversation, execution, permissions, files, skills, and truthful usage reporting.
-3. For saved Code conversations, `src-tauri/src/prompt/code.md`: reviewed coding/tool guidance adapted from the user's tool-prompt sample. All modes include `memory.md` for native memory guidance.
-4. Actual selected model, current local date, and host OS.
-5. The request's optional custom `system_prompt`, preserved verbatim.
-6. Existing trusted-project instructions and folders, followed by retrieved memory context according to the existing memory configuration. All modes support automatic recall, ingestion, and memory tools; no mode-specific memory restrictions apply.
+1. Identity. Code sessions (the CLI and Desktop Code mode) open with the one-line `CODE_IDENTITY`; other modes use the provider-neutral desktop `<identity>` block. Neither claims to be Claude or made by Anthropic.
+2. Behavior. Code: `prompt/code.md`, adapted from the reference CLI 2.1.302 system prompt (harness, session guidance, confirmation and reporting rules, context management) plus notes for this runtime's native tools. Other modes: `prompt/desktop.md`. Both are followed by `memory.md`.
+3. `# Environment`: working directory, whether it is a Git repository, platform, shell, the selected model and today's date.
+4. The request's optional custom `system_prompt`, preserved verbatim in `<additional_instructions>`.
+5. Skills, then project instructions under the reference CLI's "Codebase and user instructions are shown below" header, then project folders, team context and retrieved memory.
+
+For Anthropic Messages requests, `performance::apply_prompt_cache` uses `prompt::cache_blocks` to send sections 1 and 2 as separate text blocks, each with `cache_control: {"type":"ephemeral"}`, and everything after them as one unmarked block. Agent conversations (`apply_conversation_cache`) also mark the last user block, a rolling breakpoint so the next turn reuses the conversation so far. One-shot utility requests, such as hook judges, mark only the system. OpenAI-format providers such as DeepSeek cache by prefix automatically, so they get the same stable ordering with no extra fields.
 
 The common entry point resolves the persisted conversation `workspace_mode` before composing the prompt. The same `PromptProfile` controls the prompt and both protocol tool loops. Code tool descriptions are adapted to actual native schemas in `prompt/code.rs`; no tools or captured probe messages are imported from the sample. `ScheduleWakeup.reason` telemetry and host session/account/settings collection conventions are excluded. The full Chinese explanation is in the documentation workspace at `development/code-prompt.md`.
 

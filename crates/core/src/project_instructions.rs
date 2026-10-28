@@ -121,7 +121,7 @@ fn load_directories_with_files(
                         .collect(),
                 ));
                 prompt.push_str(&format!(
-                    "\nProject instructions ({}):\n{content}\n",
+                    "\nContents of {} (project instructions):\n{content}\n",
                     path.display()
                 ));
             }
