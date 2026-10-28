@@ -1078,6 +1078,10 @@ impl Frame {
         self.panel_toggle = panel.toggle;
         self.panel_height = panel.lines.len();
         self.panel_viewport = panel.viewport;
+        // The reference CLI shows reasoning on its own, without the disclosure row.
+        let thinking = state.partial.is_empty()
+            && state.thinking_span.is_some()
+            && state.group.as_ref().is_none_or(|group| group.calls.is_empty());
         let mut content = if state.details.expanded {
             panel
                 .lines
@@ -1087,7 +1091,7 @@ impl Frame {
         } else {
             let content = match &state.group {
                 Some(group) if state.partial.is_empty() && !group.calls.is_empty() => group_lines(group, width),
-                _ if state.partial.is_empty() && state.thinking_span.is_some() => thinking_lines(state, width, budget),
+                _ if thinking => thinking_lines(state, width, budget),
                 _ => visual_lines(&state.partial, width.saturating_sub(2))
                     .into_iter()
                     .enumerate()
@@ -1190,7 +1194,7 @@ impl Frame {
         }
         // The content viewport has a fixed height throughout the turn, so a long
         // stream grows into scrollback without making the composer jump.
-        if !state.details.expanded && !panel.lines.is_empty() {
+        if !state.details.expanded && !panel.lines.is_empty() && !thinking {
             let label = panel.lines[0].0.clone();
             content[budget - 1] = label;
             self.panel_height = budget;
