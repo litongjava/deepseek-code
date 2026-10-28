@@ -345,8 +345,10 @@ async fn execute_builtin_tool(
         }
         return Ok(result);
     }
+    let domains = input.clone();
+    let filter = |result: Result<Value>| result.map(|mut value| { crate::tools::filter_search_domains(&mut value, &domains); value });
     if crate::tools::provider_search::uses_public_search(provider) {
-        return crate::tools::execute_public_web_search(input).await;
+        return filter(crate::tools::execute_public_web_search(input).await);
     }
 
     let independent;
@@ -391,7 +393,7 @@ async fn execute_builtin_tool(
         }
     };
     let _ = event_tx.send(EngineEvent::RequestSnapshot(snapshot)).await;
-    result
+    filter(result)
 }
 
 async fn execute_tool_standalone(

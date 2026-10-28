@@ -162,13 +162,16 @@ pub fn get_tool_definitions() -> Vec<ToolDefinition> {
         },
         ToolDefinition {
             name: "WebSearch".to_string(),
-            description: "Search the web using the configured search service. Cite returned source URLs. DeepSeek models use separate search credentials configured in System settings > Web search. If configuration or native search support is missing, relay the tool's setup instructions to the user; do not claim a search succeeded or retry unchanged requests.".to_string(),
+            description: "Search the web. Returns result blocks with titles and URLs.\n\n- The current date is given in the system prompt — use it when searching for recent information.\n- `allowed_domains` / `blocked_domains` filter results.\n- After answering from results, end with a \"Sources:\" list of the URLs you used as markdown links.\n- DeepSeek models use separate search credentials configured in System settings > Web search. If configuration or native search support is missing, relay the tool's setup instructions to the user; do not claim a search succeeded or retry unchanged requests.".to_string(),
             input_schema: serde_json::json!({
                 "type": "object",
                 "properties": {
-                    "query": { "type": "string", "description": "The search query" }
+                    "query": { "description": "The search query to use", "type": "string", "minLength": 2 },
+                    "allowed_domains": { "description": "Only include search results from these domains", "type": "array", "items": { "type": "string" } },
+                    "blocked_domains": { "description": "Never include search results from these domains", "type": "array", "items": { "type": "string" } }
                 },
-                "required": ["query"]
+                "required": ["query"],
+                "additionalProperties": false
             }),
         },
         ToolDefinition {
@@ -592,6 +595,16 @@ fn is_path_allowed(resolved_path: &Path, cwd: &str) -> bool {
         if canonical.starts_with(&local_appdata) { return true; }
     }
     false
+}
+
+#[cfg(test)]
+#[test]
+fn search_results_follow_domain_filters() {
+    let results = serde_json::json!({"results":[{"url":"https://docs.rs/a"},{"url":"https://www.docs.rs/b"},{"url":"https://example.com/c"},{"url":"not a url"}]});
+    let urls = |input: serde_json::Value| { let mut value = results.clone(); filter_search_domains(&mut value, &input); value["results"].as_array().unwrap().iter().map(|r| r["url"].as_str().unwrap().to_owned()).collect::<Vec<_>>() };
+    assert_eq!(urls(serde_json::json!({"allowed_domains":["docs.rs"]})), ["https://docs.rs/a", "https://www.docs.rs/b"]);
+    assert_eq!(urls(serde_json::json!({"blocked_domains":["www.docs.rs","example.com"]})), ["https://docs.rs/a", "not a url"]);
+    assert_eq!(urls(serde_json::json!({})).len(), 4);
 }
 
 pub fn resolve_path(file_path: &str, cwd: &str) -> Result<String> {
@@ -1077,6 +1090,21 @@ fn tool_list_dir(input: serde_json::Value, _cwd: &str) -> Result<serde_json::Val
     }
 
     Ok(serde_json::json!({ "entries": entries }))
+}
+
+/// Applies WebSearch allowed_domains/blocked_domains to `results`; a domain
+/// also matches its subdomains.
+pub fn filter_search_domains(result: &mut serde_json::Value, input: &serde_json::Value) {
+    let list = |key: &str| -> Vec<String> { input[key].as_array().into_iter().flatten().filter_map(|d| d.as_str()).map(|d| d.trim().trim_start_matches("*.").trim_start_matches('.').to_ascii_lowercase()).filter(|d| !d.is_empty()).collect() };
+    let (allowed, blocked) = (list("allowed_domains"), list("blocked_domains"));
+    if allowed.is_empty() && blocked.is_empty() { return; }
+    let matches = |host: &str, domain: &str| host == domain || host.ends_with(&format!(".{domain}"));
+    if let Some(results) = result.get_mut("results").and_then(|r| r.as_array_mut()) {
+        results.retain(|item| {
+            let Some(host) = item["url"].as_str().and_then(|url| reqwest::Url::parse(url).ok()).and_then(|url| url.host_str().map(str::to_ascii_lowercase)) else { return allowed.is_empty() };
+            (allowed.is_empty() || allowed.iter().any(|d| matches(&host, d))) && !blocked.iter().any(|d| matches(&host, d))
+        });
+    }
 }
 
 fn tool_web_fetch_blocking(input: serde_json::Value) -> Result<serde_json::Value> { web::fetch_blocking(input) }
