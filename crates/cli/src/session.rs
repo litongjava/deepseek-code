@@ -610,6 +610,9 @@ impl Session {
             .then(|| crate::mentions::expand(&self.workspace, prompt))
             .flatten();
         let prompt = mentioned.as_deref().unwrap_or(prompt);
+        if frontend {
+            crate::extended_commands::record_branch(self);
+        }
         // Frontends record original human input before skill expansion/worker handoff.
         // A worker receives synthesized context and must never re-label it as user intent.
         if std::env::var_os(claude_core::services::background_sessions::CONTROL_ENV).is_none() {

@@ -58,18 +58,27 @@ pub async fn handle(
                 // Space previews and Ctrl+R renames.
                 use crate::terminal::picker::{Entry, Key, Picked, Picker};
                 let mut all = false;
+                let mut this_branch = false;
+                let current_branch = git_branch(&session.workspace);
                 let mut selected = 0;
                 loop {
-                    let found = resumable(session, all)?;
-                    if found.is_empty() && !all {
+                    let mut found = resumable(session, all)?;
+                    if this_branch {
+                        found.retain(|(_, entry)| entry.branch.is_some() && entry.branch == current_branch);
+                    }
+                    if found.is_empty() && !all && !this_branch {
                         eprintln!("No other conversations in this project. Ctrl+A in /resume shows every project once there are some.");
                         return Ok(true);
                     }
                     let entries: Vec<_> = found.iter().map(|(_, entry)| Entry { title: entry.title.clone(), detail: entry.detail.clone() }).collect();
                     let project = if all { "All projects".to_owned() } else { session.workspace.file_name().map(|name| name.to_string_lossy().into_owned()).unwrap_or_default() };
-                    let hint = format!("Ctrl+A to {} \u{b7} Space to preview \u{b7} Ctrl+R to rename \u{b7} Type to search \u{b7} Esc to cancel", if all { "only show current project" } else { "show all projects" });
+                    let hint = format!(
+                        "Ctrl+A to {} \u{b7} Ctrl+B to {} \u{b7} Space to preview \u{b7} Ctrl+R to rename \u{b7} Type to search \u{b7} Esc to cancel",
+                        if all { "only show current project" } else { "show all projects" },
+                        if this_branch { "show all branches" } else { "only show current branch" },
+                    );
                     let picker = Picker { heading: "Resume session", subtitle: Some(&project), entries: &entries, search: true, hint: &hint, selected };
-                    match picker.run_keys(&[Key::Ctrl('a'), Key::Space, Key::Ctrl('r')])? {
+                    match picker.run_keys(&[Key::Ctrl('a'), Key::Ctrl('b'), Key::Space, Key::Ctrl('r')])? {
                         Picked::Entry(index) => {
                             session.resume_saved(paths, &found[index].0).await?;
                             eprintln!("Resumed {} using saved provider {} and model {}.", session.id, session.provider_id, session.model);
@@ -77,6 +86,10 @@ pub async fn handle(
                         }
                         Picked::Key(Key::Ctrl('a'), _) => {
                             all = !all;
+                            selected = 0;
+                        }
+                        Picked::Key(Key::Ctrl('b'), _) => {
+                            this_branch = !this_branch;
                             selected = 0;
                         }
                         Picked::Key(Key::Space, Some(index)) => {
@@ -407,7 +420,7 @@ pub(crate) fn ago(time: &str) -> String {
     };
     let seconds = (chrono::Utc::now() - time.with_timezone(&chrono::Utc)).num_seconds().max(0);
     let (count, unit) = match seconds {
-        0..=59 => return "just now".into(),
+        0..=59 => (seconds, "second"),
         60..=3599 => (seconds / 60, "minute"),
         3600..=86_399 => (seconds / 3600, "hour"),
         _ => (seconds / 86_400, "day"),
@@ -418,10 +431,46 @@ pub(crate) fn ago(time: &str) -> String {
 pub(crate) struct Resumable {
     pub title: String,
     pub detail: String,
+    pub branch: Option<String>,
+}
+
+/// The workspace's git branch, as the reference CLI lists sessions by it.
+fn git_branch(workspace: &Path) -> Option<String> {
+    claude_core::git::GitIntegration::new(workspace.to_path_buf())
+        .get_current_branch()
+        .ok()
+        .filter(|branch| !branch.is_empty())
+}
+
+/// Remembers the branch a session is working on, at each turn.
+pub(crate) fn record_branch(session: &Session) {
+    let Some(branch) = git_branch(&session.workspace) else {
+        return;
+    };
+    let _ = session.store.db.with_conn(|conn| {
+        conn.execute(
+            "INSERT INTO peripheral_settings(key,value) VALUES(?1,?2) ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+            [format!("cli.git-branch.{}", session.id), branch],
+        )
+    });
+}
+
+/// `168KB` or `167.2KB`, as the reference CLI shows a session's size.
+fn short_size(bytes: i64) -> String {
+    let format = |value: f64, unit: &str| {
+        let text = format!("{value:.1}");
+        format!("{}{unit}", text.strip_suffix(".0").unwrap_or(&text))
+    };
+    match bytes {
+        ..=1023 => format!("{}B", bytes.max(0)),
+        1024..=1_048_575 => format(bytes as f64 / 1024.0, "KB"),
+        _ => format(bytes as f64 / 1_048_576.0, "MB"),
+    }
 }
 
 /// This workspace's (or with `all` every project's) other unarchived
-/// sessions, newest first, titled by their name or first prompt.
+/// sessions, newest first, titled by their name or first prompt, with the
+/// branch and saved size of each.
 fn resumable(session: &Session, all: bool) -> Result<Vec<(String, Resumable)>> {
     let here = session.workspace.canonicalize().unwrap_or_else(|_| session.workspace.clone());
     session.store.db.with_conn(|conn| -> Result<Vec<(String, Resumable)>> {
@@ -440,17 +489,47 @@ fn resumable(session: &Session, all: bool) -> Result<Vec<(String, Resumable)>> {
                     .map(|message| message.content.lines().next().unwrap_or_default().to_owned())
                     .unwrap_or_else(|| "(no prompt)".into()),
             };
-            let mut detail = format!("{} \u{b7} {} messages", ago(&row.updated_at), row.message_count);
+            // No row: the session was never used in a git repository.
+            let branch: Option<String> = conn
+                .query_row("SELECT value FROM peripheral_settings WHERE key=?1", [format!("cli.git-branch.{}", row.id)], |r| r.get(0))
+                .ok();
+            let size: i64 = conn.query_row(
+                "SELECT (SELECT COALESCE(SUM(length(CAST(content AS BLOB)) + COALESCE(length(CAST(thinking AS BLOB)),0)),0) FROM messages WHERE conversation_id=?1)
+                      + (SELECT COALESCE(SUM(COALESCE(length(CAST(t.input AS BLOB)),0) + COALESCE(length(CAST(t.output AS BLOB)),0)),0) FROM tool_calls t JOIN messages m ON t.message_id=m.id WHERE m.conversation_id=?1)",
+                [&row.id],
+                |r| r.get(0),
+            )?;
+            let mut detail = ago(&row.updated_at);
+            if let Some(branch) = &branch {
+                detail.push_str(&format!(" \u{b7} {branch}"));
+            }
+            detail.push_str(&format!(" \u{b7} {}", short_size(size)));
             if all {
                 if let Some(path) = &row.workspace_path {
                     detail.push_str(&format!(" \u{b7} {}", crate::terminal::home_path(Path::new(path))));
                 }
             }
-            found.push((row.id, Resumable { title, detail }));
+            found.push((row.id, Resumable { title, detail, branch }));
             if found.len() == 50 {
                 break;
             }
         }
         Ok(found)
     })?
+}
+
+#[cfg(test)]
+mod resume_tests {
+    use super::*;
+
+    #[test]
+    fn sizes_and_times_read_like_the_reference_list() {
+        assert_eq!(short_size(512), "512B");
+        assert_eq!(short_size(168 * 1024), "168KB");
+        assert_eq!(short_size(171_213), "167.2KB");
+        assert_eq!(short_size(3 * 1_048_576 / 2), "1.5MB");
+        let now = chrono::Utc::now();
+        assert_eq!(ago(&(now - chrono::Duration::seconds(32)).to_rfc3339()), "32 seconds ago");
+        assert_eq!(ago(&(now - chrono::Duration::hours(1)).to_rfc3339()), "1 hour ago");
+    }
 }

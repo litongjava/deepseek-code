@@ -172,7 +172,9 @@ impl Picker<'_> {
                 lines.push((clipped(&format!("   {}", entry.detail), width), TextStyle::Muted));
             }
         }
-        lines.push((clipped(&format!(" {}", self.hint), width), TextStyle::Muted));
+        for row in wrap_hint(self.hint, width) {
+            lines.push((row, TextStyle::Muted));
+        }
         (lines, cursor)
     }
 }
@@ -269,6 +271,21 @@ fn show_details(
     Ok(result)
 }
 
+/// A key hint over as many rows as it needs, broken between its `·` parts.
+fn wrap_hint(hint: &str, width: usize) -> Vec<String> {
+    let mut rows = vec![String::new()];
+    for part in hint.split(" \u{b7} ") {
+        let row = rows.last_mut().unwrap();
+        let joined = if row.is_empty() { format!(" {part}") } else { format!("{row} \u{b7} {part}") };
+        if row.is_empty() || unicode_width::UnicodeWidthStr::width(joined.as_str()) <= width {
+            *row = joined;
+        } else {
+            rows.push(format!(" {part}"));
+        }
+    }
+    rows.into_iter().map(|row| clipped(&row, width)).collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -311,6 +328,11 @@ mod tests {
         assert_eq!(picker.drive_keys(&[Key::Space, Key::Ctrl('r')], &mut || Ok(keys.pop())).unwrap(), Picked::Key(Key::Ctrl('r'), Some(0)));
         let mut keys: Vec<Event> = [KeyCode::Enter, KeyCode::Char('x'), KeyCode::Backspace].into_iter().map(|code| Event::Key(KeyEvent::new(code, KeyModifiers::NONE))).collect();
         assert_eq!(edit_text("Rename session:", "old", &mut || Ok(keys.pop())).unwrap().as_deref(), Some("olx"));
+    }
+
+    #[test]
+    fn long_hints_wrap_between_parts() {
+        assert_eq!(wrap_hint("Ctrl+A to show all projects \u{b7} Space to preview \u{b7} Esc to cancel", 50), [" Ctrl+A to show all projects \u{b7} Space to preview", " Esc to cancel"]);
     }
 
     #[test]
