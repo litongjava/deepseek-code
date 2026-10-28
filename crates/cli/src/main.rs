@@ -13,6 +13,7 @@ mod mcp_menu;
 mod hooks_menu;
 mod settings_dialog;
 mod permissions_menu;
+mod startup_prompts;
 mod command_catalog;
 mod workflow_commands;
 mod interactive_config;
@@ -469,6 +470,11 @@ async fn run(cli: &Cli) -> Result<()> {
         Err(error) => return Err(error),
     };
     startup_options::validate(cli, &std::env::current_dir()?)?;
+    if !single && !sdk_stream {
+        // As in the reference CLI, before project settings and hooks load.
+        let folder = cli.path.clone().unwrap_or(std::env::current_dir()?);
+        startup_prompts::confirm(&paths.data_dir, &folder, matches!(cli.permission_mode, args::PermissionModeArg::Bypass))?;
+    }
     let mut session = session::Session::open(cli, &paths, selection, resumed.as_ref().map(|s| s.id.as_str())).await?;
     startup_options::apply(cli, &mut session).await?;
     let mut screen_mode = terminal::screen_mode::ScreenMode::default();

@@ -151,7 +151,12 @@ impl Picker<'_> {
         let width = width.saturating_sub(1).max(20);
         let mut lines = vec![(clipped(&format!(" {}", self.heading), width), TextStyle::Accent)];
         if let Some(subtitle) = self.subtitle {
-            lines.push((clipped(&format!(" {subtitle}"), width), TextStyle::Muted));
+            // Several paragraphs wrap at word boundaries.
+            for paragraph in subtitle.split('\n') {
+                for row in wrap_words(paragraph, width.saturating_sub(1)) {
+                    lines.push((clipped(&format!(" {row}"), width), TextStyle::Muted));
+                }
+            }
         }
         if self.search {
             let text = if query.is_empty() { "\u{2315} Search\u{2026}".to_owned() } else { format!("\u{2315} {query}") };
@@ -274,6 +279,23 @@ fn show_details(
     };
     screen.suspend()?;
     Ok(result)
+}
+
+/// A paragraph over as many rows as it needs, broken between words.
+fn wrap_words(text: &str, width: usize) -> Vec<String> {
+    let mut rows = vec![String::new()];
+    for word in text.split(' ') {
+        let row = rows.last_mut().unwrap();
+        if !row.is_empty() && unicode_width::UnicodeWidthStr::width(row.as_str()) + 1 + unicode_width::UnicodeWidthStr::width(word) > width {
+            rows.push(word.to_owned());
+        } else {
+            if !row.is_empty() {
+                row.push(' ');
+            }
+            row.push_str(word);
+        }
+    }
+    rows
 }
 
 /// A key hint over as many rows as it needs, broken between its `·` parts.
