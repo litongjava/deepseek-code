@@ -13,7 +13,7 @@ pub(super) fn definitions() -> Vec<super::ToolDefinition> {
         ("TodoWrite", "Replace the session's durable todo list.", json!({"todos":{"type":"array","items":{"type":"object","properties":{"content":{"type":"string"},"activeForm":{"type":"string"},"status":{"type":"string","enum":["pending","in_progress","completed"]}},"required":["content","status"]}}}),vec!["todos"]),
         ("TodoRead", "Read the session's durable todo list.",json!({}),vec![]),
         ("TaskOutput", "Read managed background shell logs and status. block defaults to true; timeout is milliseconds (default 30000, maximum 600000). Use block:false for an immediate snapshot. Saved non-process task records return their saved output.",json!({"id":{"type":"string"},"task_id":{"type":"string"},"block":{"type":"boolean","default":true},"timeout":{"type":"integer","minimum":0,"maximum":600000,"default":30000}}),vec![]),
-        ("TaskStop", "Request cancellation of a managed background shell and its descendants. For other task records, changes metadata only; use host cancellation for running agents.",json!({"id":{"type":"string"},"task_id":{"type":"string"}}),vec![]),
+        ("TaskStop", "\n- Stops a running background task by its ID\n- Takes a task_id parameter identifying the task to stop\n- Stops a background shell together with its descendant processes; for other task records it marks the record cancelled\n- Returns a success or failure status\n- Use this tool when you need to terminate a long-running task\n",json!({"task_id":{"description":"The ID of the background task to stop.","type":"string"},"shell_id":{"description":"Deprecated: use task_id instead","type":"string"}}),vec![]),
         ("todo_write", "Manage durable todos using the legacy create/list/get/update/delete/complete/filter operations.",json!({"operation":{"type":"string","enum":["create","list","get","update","delete","complete","filter"]},"id":{"type":"string"},"content":{"type":"string"},"priority":{"type":"string","enum":["low","medium","high","urgent"]},"status":{"type":"string","enum":["pending","in_progress","completed","cancelled"]},"tags":{"type":"array","items":{"type":"string"}},"filter_status":{"type":"string"},"filter_priority":{"type":"string"},"filter_tags":{"type":"array","items":{"type":"string"}}}),vec!["operation"]),
     ].into_iter().map(|(name,description,properties,required)| super::ToolDefinition {name:name.into(),description:description.into(),input_schema:json!({"type":"object","properties":properties,"required":required})}).collect()
 }
@@ -119,7 +119,8 @@ fn execute_at_owned(name: &str, mut input: Value, path: &Path, shell_owner: bool
             "managed_shell provenance is reserved for the shell process owner"
         );
     }
-    if input.get("id").is_none() { if let Some(id) = input.get("task_id").cloned() { input["id"] = id; } }
+    // shell_id is the reference CLI's deprecated TaskStop alias.
+    if input.get("id").is_none() { if let Some(id) = input.get("task_id").or_else(|| input.get("shell_id")).cloned() { input["id"] = id; } }
     if input.get("taskId").is_none() {
         if let Some(id) = input.get("id").cloned() {
             input["taskId"] = id;
@@ -534,7 +535,7 @@ mod tests {
             "actual output"
         );
         assert_eq!(
-            execute("TaskStop", json!({"id":task["id"]}), cwd).unwrap()["worker_process_stopped"],
+            execute("TaskStop", json!({"shell_id":task["id"]}), cwd).unwrap()["worker_process_stopped"],
             false
         );
         let todo = execute(

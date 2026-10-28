@@ -275,6 +275,7 @@ pub(super) fn control(
         .as_str()
         .or_else(|| input["taskId"].as_str())
         .or_else(|| input["id"].as_str())
+        .or_else(|| input["shell_id"].as_str())
         .context("task_id is required")?;
     let task = super::tasks::execute_for_session("TaskGet", json!({"id":id}), root, session)?;
     if task["metadata"]["managed_shell"] != true {
