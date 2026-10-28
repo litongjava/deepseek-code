@@ -35,6 +35,7 @@ enum Message {
     Workspace(std::path::PathBuf),
     ContextNote(Option<String>),
     Shells(usize),
+    ShellCounter(Box<dyn Fn() -> usize + Send>),
     Vim(bool),
     Read(Request),
 }
@@ -126,6 +127,10 @@ impl TerminalInput {
                         editor.set_shells(count);
                         continue;
                     }
+                    Message::ShellCounter(counter) => {
+                        editor.set_shell_counter(counter);
+                        continue;
+                    }
                     Message::Vim(on) => {
                         editor.set_vim(on);
                         continue;
@@ -208,6 +213,12 @@ impl TerminalInput {
     /// Background shells still running, for "1 shell · ↓ to manage".
     pub fn set_shells(&self, count: usize) {
         let _ = self.requests.send(Message::Shells(count));
+    }
+
+    /// Recounts running shells while the prompt waits, so the footer drops
+    /// a shell once it finishes.
+    pub fn set_shell_counter(&self, counter: Box<dyn Fn() -> usize + Send>) {
+        let _ = self.requests.send(Message::ShellCounter(counter));
     }
 
     /// The project whose files `@` completes.

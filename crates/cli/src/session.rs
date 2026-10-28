@@ -936,6 +936,9 @@ impl Session {
                                 }
                                 else if let Some(reader)=input.as_mut() { reader.queue_prompt(prompt); }
                             },
+                            crate::terminal::live::Action::BackgroundShell | crate::terminal::live::Action::SendNow => {
+                                claude_core::tools::background_shell::request_background(&self.paths.data_dir, &self.id)?;
+                            },
                             crate::terminal::live::Action::EditQueued => {
                                 let taken = claude_core::services::input_queue::take(&self.store.db, &self.id)?;
                                 pending_inputs.clear();
@@ -1357,7 +1360,7 @@ impl Session {
                     crate::terminal::live::Action::Draft(draft)=>reader.restore_draft(draft),
                     crate::terminal::live::Action::CyclePermission => { self.cycle_permission_mode().await?; },
                     // Unread messages were already queued as the next prompts.
-                    crate::terminal::live::Action::Cancel|crate::terminal::live::Action::Detach|crate::terminal::live::Action::GoalDecision { .. }|crate::terminal::live::Action::EditQueued=>{},
+                    crate::terminal::live::Action::Cancel|crate::terminal::live::Action::Detach|crate::terminal::live::Action::GoalDecision { .. }|crate::terminal::live::Action::EditQueued|crate::terminal::live::Action::BackgroundShell|crate::terminal::live::Action::SendNow=>{},
                 }
             }
         }
@@ -1399,7 +1402,7 @@ async fn wait_answer(session: &Session, progress: &mut crate::terminal::live::Tu
                     Some(crate::terminal::live::Action::Cancel)|None=>bail!("Interrupted"),
                     Some(crate::terminal::live::Action::Detach)=>progress.notice("Answer the pending question before detaching."),
                     Some(crate::terminal::live::Action::GoalDecision { .. })=>progress.notice("Answer the pending question first."),
-                    Some(crate::terminal::live::Action::EditQueued)=>{},
+                    Some(crate::terminal::live::Action::EditQueued|crate::terminal::live::Action::BackgroundShell|crate::terminal::live::Action::SendNow)=>{},
                     Some(crate::terminal::live::Action::Submit(prompt))=>if let Some(reader)=input.as_mut(){reader.queue_prompt(prompt);},
                     Some(crate::terminal::live::Action::SideQuestion(question))=>if let Some(reader)=input.as_mut(){reader.queue_prompt(format!("/btw {question}"));},
                     Some(crate::terminal::live::Action::Draft(draft))=>if let Some(reader)=input.as_ref(){reader.restore_draft(draft);},

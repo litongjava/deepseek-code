@@ -530,6 +530,11 @@ async fn observe(
                             }
                         } else { restore(input, Action::Submit(prompt)); }
                     },
+                    Some(Action::BackgroundShell | Action::SendNow) => {
+                        if child_target.is_none() {
+                            claude_core::tools::background_shell::request_background(root, &session.id)?;
+                        }
+                    },
                     Some(Action::EditQueued) => {
                         let taken = claude_core::services::input_queue::take(&session.store.db, &session.id)?;
                         queued_inputs.clear();

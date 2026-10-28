@@ -35,6 +35,7 @@ pub struct PromptEditor {
     context_note: Option<String>,
     /// Background shells still running, shown as "1 shell · ↓ to manage".
     shells: usize,
+    shell_counter: Option<Box<dyn Fn() -> usize + Send>>,
     /// Vim-style editing (`/vim`).
     vim: bool,
     keybindings: crate::keybindings::Keybindings,
@@ -56,6 +57,7 @@ impl Default for PromptEditor {
             files: None,
             context_note: None,
             shells: 0,
+            shell_counter: None,
             vim: false,
             keybindings: crate::keybindings::Keybindings::default(),
             commands: crate::command_catalog::COMMANDS
@@ -639,6 +641,9 @@ impl PromptEditor {
     pub fn set_shells(&mut self, count: usize) {
         self.shells = count;
     }
+    pub fn set_shell_counter(&mut self, counter: Box<dyn Fn() -> usize + Send>) {
+        self.shell_counter = Some(counter);
+    }
     pub fn set_suggestions(&mut self, suggestions: std::sync::mpsc::Receiver<String>) {
         self.suggestions = Some(suggestions);
     }
@@ -691,6 +696,7 @@ impl PromptEditor {
         let mut menu_hidden = false;
         // `?` on an empty prompt shows shortcuts in place of the footer.
         let mut shortcuts = false;
+        let mut last_shell_count = std::time::Instant::now();
         let mut search: Option<String> = None;
         let mut search_pos = self.history.len();
         // A second Esc on an empty prompt within a second opens /rewind.
@@ -726,6 +732,12 @@ impl PromptEditor {
             if let Some(suggestions) = &self.suggestions {
                 while let Ok(suggestion) = suggestions.try_recv() {
                     self.suggestion = Some(suggestion);
+                }
+            }
+            if self.shells > 0 && last_shell_count.elapsed() >= std::time::Duration::from_secs(1) {
+                last_shell_count = std::time::Instant::now();
+                if let Some(counter) = &self.shell_counter {
+                    self.shells = counter();
                 }
             }
             let (cols, rows) = terminal::size()?;

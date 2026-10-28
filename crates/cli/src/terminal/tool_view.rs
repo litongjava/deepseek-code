@@ -131,6 +131,9 @@ fn printable(line: &str) -> String {
 
 /// Inline result lines and the number of lines left for the details view.
 pub fn summary(name: &str, output: &str, failed: bool) -> (Vec<String>, usize) {
+    if !failed && serde_json::from_str::<Value>(output).is_ok_and(|value| value["backgrounded"] == true) {
+        return (vec!["Running in the background (\u{2193} to manage)".into()], 0);
+    }
     // The model reads the full rejection text; the transcript shows the answer.
     if let Some(rest) = output.split_once(REJECTED).map(|(_, rest)| rest) {
         let note = rest.split_once("the user said:\n").map(|(_, note)| printable(note.trim()));

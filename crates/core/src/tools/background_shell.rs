@@ -12,11 +12,25 @@ mod notifications;
 pub use notifications::collect_completed;
 tokio::task_local! { static CONTEXT: Option<(PathBuf, String)>; }
 
+/// A shell task's log directory: its task ID, or the directory of a
+/// foreground call that was moved to the background.
+fn directory(root: &Path, session: &str, task: &Value) -> Result<PathBuf> {
+    let session = uuid::Uuid::parse_str(session)?.to_string();
+    let base = root.join("shell-tasks").join(session);
+    if let Some(name) = task["metadata"]["log_dir"].as_str() {
+        anyhow::ensure!(
+            name.starts_with("fg-") && uuid::Uuid::parse_str(&name[3..]).is_ok(),
+            "Invalid shell log directory"
+        );
+        return Ok(base.join(name));
+    }
+    let id = uuid::Uuid::parse_str(task["id"].as_str().context("Task ID missing")?)?.to_string();
+    Ok(base.join(id))
+}
+
 /// Shared status presentation without loading process logs.
 pub fn task_status(root: &Path, session: &str, task: &Value) -> Result<String> {
-    let session = uuid::Uuid::parse_str(session)?.to_string();
-    let id = uuid::Uuid::parse_str(task["id"].as_str().context("Task ID missing")?)?.to_string();
-    let fresh = std::fs::metadata(root.join("shell-tasks").join(session).join(id).join("heartbeat"))
+    let fresh = std::fs::metadata(directory(root, session, task)?.join("heartbeat"))
         .and_then(|metadata| metadata.modified())
         .ok()
         .and_then(|time| time.elapsed().ok())
@@ -136,6 +150,103 @@ pub(super) fn start(
     )
 }
 
+/// Asks this session's running foreground Bash calls to continue in the
+/// background, as Ctrl+B does in the reference CLI. Calls started later
+/// ignore the request.
+pub fn request_background(root: &Path, session: &str) -> Result<()> {
+    let directory = root.join("shell-tasks").join(uuid::Uuid::parse_str(session)?.to_string());
+    std::fs::create_dir_all(&directory)?;
+    std::fs::write(directory.join("background-now"), b"1")?;
+    Ok(())
+}
+
+/// Aborts a foreground call's process when the turn drops it.
+struct AbortOnDrop(Option<tokio::task::JoinHandle<Result<Value>>>);
+impl Drop for AbortOnDrop {
+    fn drop(&mut self) {
+        if let Some(handle) = self.0.take() {
+            handle.abort();
+        }
+    }
+}
+
+/// A foreground Bash call that the user can move to the background while it
+/// runs; it then continues as a managed shell task with the same logs.
+pub(super) async fn run_foreground(
+    mut command: Command,
+    timeout: Duration,
+    shell: &str,
+    description: &str,
+    command_text: &str,
+) -> Result<Value> {
+    let Some((root, session)) = CONTEXT.try_with(Clone::clone).ok().flatten() else {
+        return super::bash_process::run(&mut command, timeout, shell).await;
+    };
+    let session_directory = root.join("shell-tasks").join(uuid::Uuid::parse_str(&session)?.to_string());
+    let log_dir = format!("fg-{}", uuid::Uuid::new_v4());
+    let directory = session_directory.join(&log_dir);
+    std::fs::create_dir_all(&directory)?;
+    let signal = session_directory.join("background-now");
+    let started = std::time::SystemTime::now();
+    let started_ms = chrono::Utc::now().timestamp_millis();
+    let logs = (directory.join("stdout.log"), directory.join("stderr.log"));
+    let shell_name = shell.to_owned();
+    let mut running = AbortOnDrop(Some(tokio::spawn(async move {
+        super::bash_process::run_logged(&mut command, Some(timeout), &shell_name, Some(logs)).await
+    })));
+    loop {
+        let handle = running.0.as_mut().context("Shell task missing")?;
+        tokio::select! {
+            result = handle => {
+                running.0 = None;
+                let _ = std::fs::remove_dir_all(&directory);
+                return result.context("Shell task stopped")?;
+            }
+            _ = tokio::time::sleep(Duration::from_millis(100)) => {
+                let requested = std::fs::metadata(&signal)
+                    .and_then(|metadata| metadata.modified())
+                    .is_ok_and(|time| time >= started);
+                if requested {
+                    break;
+                }
+            }
+        }
+    }
+    let task = super::tasks::execute_for_shell_owner(
+        "TaskCreate",
+        json!({"subject":description,"metadata":{"managed_shell":true,"command":command_text,"started_ms":started_ms,"log_dir":log_dir}}),
+        &root,
+        &session,
+    )?;
+    let id = task["id"].as_str().context("Task ID missing")?.to_string();
+    // The task ID directory marks a managed shell for blocking TaskOutput
+    // waits; the logs stay where the call started.
+    std::fs::create_dir_all(session_directory.join(&id))?;
+    super::tasks::execute_for_shell_owner("TaskUpdate", json!({"id":id,"status":"running"}), &root, &session)?;
+    std::fs::write(directory.join("heartbeat"), b"running")?;
+    ACTIVE.fetch_add(1, std::sync::atomic::Ordering::AcqRel);
+    let mut completion = Completion { root, session, id: id.clone(), done: false };
+    let mut handle = running.0.take().context("Shell task missing")?;
+    tokio::spawn(async move {
+        let result = tokio::select! {
+            result = &mut handle => result,
+            _ = async { let mut heartbeat = std::time::Instant::now(); loop { if directory.join("cancel").exists() { break; } if heartbeat.elapsed() >= Duration::from_secs(1) { let _ = std::fs::write(directory.join("heartbeat"), b"running"); heartbeat = std::time::Instant::now(); } tokio::time::sleep(Duration::from_millis(50)).await; } } => {
+                handle.abort();
+                completion.finish("cancelled", json!({"is_error":true,"cancelled":true}));
+                return;
+            }
+        };
+        let output = match result {
+            Ok(Ok(output)) => output,
+            Ok(Err(error)) => json!({"is_error":true,"error":format!("{error:#}")}),
+            Err(error) => json!({"is_error":true,"error":format!("{error}")}),
+        };
+        let status = if output["success"] == true { "completed" } else { "failed" };
+        completion.finish(status, output);
+    });
+    Ok(json!({"task_id":id,"status":"running","backgrounded":true,"message":"The user moved this command to the background; it keeps running. Use TaskOutput with task_id for its output and TaskStop to stop it."}))
+}
+
 pub(super) fn control(
     name: &str,
     input: &Value,
@@ -166,10 +277,7 @@ pub(super) fn control(
     anyhow::ensure!(policy.is_none_or(|(block, _)| !block), "Blocking TaskOutput requires the asynchronous task entry point; synchronous callers must set block:false");
     let id = uuid::Uuid::parse_str(id)?.to_string();
     let session = uuid::Uuid::parse_str(session)?;
-    let directory = root
-        .join("shell-tasks")
-        .join(session.to_string())
-        .join(id.to_string());
+    let directory = directory(root, &session.to_string(), &task)?;
     let status = json!(task_status(root, &session.to_string(), &task)?);
     if name == "TaskStop" {
         let active = task["status"] == "running";
@@ -242,6 +350,7 @@ pub(super) async fn control_async(
         .context("task_id is required")?;
     let id = uuid::Uuid::parse_str(id)?.to_string();
     let session_id = uuid::Uuid::parse_str(session)?.to_string();
+    // Moved foreground calls also get this directory, as a marker.
     let managed_directory = root
         .join("shell-tasks")
         .join(&session_id)
@@ -498,6 +607,43 @@ mod tests {
         .await
         .unwrap()
     }
+    #[tokio::test]
+    async fn a_running_foreground_call_moves_to_the_background_on_request() {
+        crate::config::OrchestrationConfig::init_global().unwrap();
+        let root = tempfile::tempdir().unwrap();
+        let session = uuid::Uuid::new_v4().to_string();
+        let script = "console.log('early');setTimeout(()=>console.log('late'),900)";
+        // Without a request the call finishes in the foreground as before.
+        let mut quick = Command::new("node");
+        quick.arg("-e").arg("console.log('quick')");
+        let done = scope(Some((root.path().into(), session.clone())), run_foreground(quick, Duration::from_secs(30), "node", "quick", "node quick")).await.unwrap();
+        assert!(done["stdout"].as_str().unwrap().contains("quick"));
+        let mut command = Command::new("node");
+        command.arg("-e").arg(script);
+        let (root_path, id) = (root.path().to_owned(), session.clone());
+        let moved = scope(Some((root.path().into(), session.clone())), async move {
+            let request = async {
+                tokio::time::sleep(Duration::from_millis(400)).await;
+                request_background(&root_path, &id).unwrap();
+            };
+            let (result, ()) = tokio::join!(run_foreground(command, Duration::from_secs(30), "node", "slow", "node slow"), request);
+            result
+        })
+        .await
+        .unwrap();
+        assert_eq!(moved["backgrounded"], true);
+        let id = moved["task_id"].as_str().unwrap();
+        let finished = output(root.path(), &session, id, true).await;
+        assert_eq!(finished["status"], "completed");
+        let stdout = finished["stdout"].as_str().unwrap();
+        assert!(stdout.contains("early") && stdout.contains("late"), "{stdout}");
+        // A request made before a call starts does not move it.
+        let mut later = Command::new("node");
+        later.arg("-e").arg("setTimeout(()=>console.log('kept'),300)");
+        let kept = scope(Some((root.path().into(), session.clone())), run_foreground(later, Duration::from_secs(30), "node", "later", "node later")).await.unwrap();
+        assert!(kept["stdout"].as_str().unwrap().contains("kept"));
+    }
+
     #[tokio::test]
     async fn managed_shell_survives_turn_returns_live_logs_and_cancels_descendants() {
         crate::config::OrchestrationConfig::init_global().unwrap();

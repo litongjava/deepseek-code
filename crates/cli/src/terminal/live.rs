@@ -28,6 +28,11 @@ pub enum Action {
     Draft(String),
     /// Up in an empty input while messages wait: take them back to edit.
     EditQueued,
+    /// Ctrl+B during a Bash call: it continues in the background.
+    BackgroundShell,
+    /// ctrl+x ctrl+s: deliver waiting messages now, moving a running Bash
+    /// call to the background so the turn reaches its next boundary.
+    SendNow,
 }
 enum Update {
     GoalProposal(Option<(String, String)>),
@@ -334,6 +339,8 @@ struct State {
     queued: Vec<String>,
     transcript: Vec<change_view::Line>,
     shells: usize,
+    /// When ctrl+x was pressed, for the ctrl+x ctrl+s chord.
+    chord: Option<Instant>,
     /// When reasoning began and last streamed, for "Thought for 2s".
     thinking_span: Option<(Instant, Instant)>,
     thinking_characters: usize,
@@ -420,6 +427,7 @@ impl State {
             queued: Vec::new(),
             transcript: Vec::new(),
             shells: 0,
+            chord: None,
             thinking_span: None,
             thinking_characters: 0,
             thinking_entry: None,
@@ -978,12 +986,20 @@ impl Frame {
         };
         if !state.details.expanded && !state.queued.is_empty() {
             // Waiting messages stay at the bottom of the work area.
-            let rows: Vec<String> = state.queued.iter().map(|text| clip(&format!("{} {}", crate::terminal::prompt_glyph(), terminal_text(text).replace('\n', " ")), width)).collect();
+            let mut rows: Vec<String> = state.queued.iter().map(|text| clip(&format!("{} {}", crate::terminal::prompt_glyph(), terminal_text(text).replace('\n', " ")), width)).collect();
+            rows.push("  ctrl+x ctrl+s to send now".into());
             content.retain(|line| !line.is_empty());
             let keep = budget.saturating_sub(rows.len().min(budget));
             let skip = content.len().saturating_sub(keep);
             content.drain(..skip);
             content.extend(rows.into_iter().take(budget));
+        }
+        if !state.details.expanded && state.activity.starts_with("Running Bash") && state.activity_started.elapsed() >= Duration::from_secs(3) {
+            // A long command can continue in the background, as in the reference CLI.
+            content.retain(|line| !line.is_empty());
+            content.push("  \u{23bf}  (ctrl+b to run in background)".into());
+            let skip = content.len().saturating_sub(budget);
+            content.drain(..skip);
         }
         content.resize(budget, String::new());
         content.truncate(budget);
@@ -1424,6 +1440,15 @@ fn run(
                     if state.choice_key(key) {
                     } else if control && matches!(key.code, KeyCode::Char('y' | 'n')) && state.goal_proposal.is_some() && state.answer.is_none() {
                         state.decide_goal(key.code == KeyCode::Char('y'), &actions);
+                    } else if control && key.code == KeyCode::Char('x') {
+                        state.chord = Some(Instant::now());
+                        continue;
+                    } else if control && key.code == KeyCode::Char('s') && state.chord.take().is_some_and(|at| at.elapsed() < Duration::from_secs(2)) {
+                        let _ = actions.send(Action::SendNow);
+                    } else if control && key.code == KeyCode::Char('b') && state.activity.starts_with("Running Bash") {
+                        // As in the reference CLI, a running command can continue
+                        // in the background; otherwise Ctrl+B detaches the session.
+                        let _ = actions.send(Action::BackgroundShell);
                     } else if control && key.code == KeyCode::Char('b') {
                         let _ = actions.send(Action::Detach);
                     } else if control && key.code == KeyCode::Char('o') {
