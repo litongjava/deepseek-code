@@ -14,6 +14,8 @@ pub fn configure_accessibility(enabled: bool) {
 pub static STASH: std::sync::Mutex<(Option<String>, bool)> = std::sync::Mutex::new((None, false));
 /// Text removed by Ctrl+U or Ctrl+K, pasted back by Ctrl+Y anywhere.
 pub static KILLED: std::sync::Mutex<String> = std::sync::Mutex::new(String::new());
+/// A draft for the next prompt, such as the message a rewind went back before.
+pub static NEXT_DRAFT: std::sync::Mutex<Option<String>> = std::sync::Mutex::new(None);
 
 pub fn stash() -> std::sync::MutexGuard<'static, (Option<String>, bool)> {
     STASH.lock().unwrap_or_else(|error| error.into_inner())

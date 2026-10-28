@@ -56,7 +56,26 @@ pub async fn handle(
         args.next().is_none(),
         "Unexpected argument after checkpoint ID"
     );
-    let checkpoint = checkpoints::get(&paths.data_dir, &session.id, id)?;
+    if action == "preview" {
+        let checkpoint = checkpoints::get(&paths.data_dir, &session.id, id)?;
+        ensure_workspace(paths, session, &checkpoint)?;
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&checkpoints::preview(&paths.data_dir, &session.id, id)?)?
+        );
+        return Ok(true);
+    }
+    let (restored, rewound) = apply(action, id, paths, session).await?;
+    if let Some(count) = restored {
+        eprintln!("Restored {count} file changes from checkpoint {id}.");
+    }
+    if let Some((message, previous)) = rewound {
+        eprintln!("Conversation rewound to before message {message} in session {}. Original transcript retained as {previous}.", session.id);
+    }
+    Ok(true)
+}
+
+fn ensure_workspace(paths: &RuntimePaths, session: &Session, checkpoint: &checkpoints::Checkpoint) -> Result<()> {
     let workspace = session
         .store
         .workspace(&session.id, &paths.data_dir.join("workspaces"))?
@@ -65,13 +84,15 @@ pub async fn handle(
         workspace == checkpoint.workspace,
         "Checkpoint belongs to a different working directory"
     );
-    if action == "preview" {
-        println!(
-            "{}",
-            serde_json::to_string_pretty(&checkpoints::preview(&paths.data_dir, &session.id, id)?)?
-        );
-        return Ok(true);
-    }
+    Ok(())
+}
+
+/// Restores a checkpoint's code, conversation or both. Returns how many
+/// files were restored, and for a conversation the message it went back
+/// before and the session it left.
+async fn apply(action: &str, id: &str, paths: &RuntimePaths, session: &mut Session) -> Result<(Option<usize>, Option<(String, String)>)> {
+    let checkpoint = checkpoints::get(&paths.data_dir, &session.id, id)?;
+    ensure_workspace(paths, session, &checkpoint)?;
     if action == "code" || action == "both" {
         let report = checkpoints::preview(&paths.data_dir, &session.id, id)?;
         ensure!(!report.restored, "Checkpoint code was already restored");
@@ -100,20 +121,19 @@ pub async fn handle(
     } else {
         None
     };
-    if action == "code" || action == "both" {
-        let report = checkpoints::restore(&paths.data_dir, &session.id, id)?;
-        eprintln!(
-            "Restored {} file changes from checkpoint {id}.",
-            report.paths.len()
-        );
-    }
+    let restored = if action == "code" || action == "both" {
+        Some(checkpoints::restore(&paths.data_dir, &session.id, id)?.paths.len())
+    } else {
+        None
+    };
+    let mut rewound = None;
     if let Some(target) = target {
         crate::background_commands::copy_settings(session, &target)?;
         let previous = session.id.clone();
         session.resume_saved(paths, &target).await?;
-        eprintln!("Conversation rewound to before message {} in session {target}. Original transcript retained as {previous}.", checkpoint.message_id);
+        rewound = Some((checkpoint.message_id.clone(), previous));
     }
-    Ok(true)
+    Ok((restored, rewound))
 }
 
 /// As in the reference CLI: choose the prompt to go back before, then what
@@ -189,12 +209,26 @@ async fn pick(paths: &RuntimePaths, session: &mut Session) -> Result<bool> {
         hint: "\u{26a0} Restored files go back whole, losing later changes by anyone. Bash changes to other files are not undone.",
         selected: 0,
     };
-    match confirm.run()?.map(|choice| choices[choice].0) {
-        Some(action) if !action.is_empty() => {
-            Box::pin(handle("/rewind", &format!("{action} {}", checkpoint.id), paths, session)).await
+    let Some(action) = confirm.run()?.map(|choice| choices[choice].0).filter(|action| !action.is_empty()) else {
+        return Ok(true);
+    };
+    let prompt = messages.iter().find(|message| message.id == checkpoint.message_id).map(|message| message.content.clone()).unwrap_or_default();
+    let (restored, rewound) = apply(action, &checkpoint.id, paths, session).await?;
+    if rewound.is_some() {
+        // As in the reference CLI: the screen shows the conversation as it
+        // now is, and the message is back in the input box to edit or resend.
+        eprint!("\x1b[2J\x1b[3J\x1b[H");
+        eprintln!("{}", crate::terminal::banner(&session.model, &session.workspace));
+        let color = std::env::var_os("NO_COLOR").is_none();
+        let width = crossterm::terminal::size().map_or(80, |(columns, _)| columns as usize).saturating_sub(1);
+        for line in crate::repl::transcript_of(session, &session.id.clone())? {
+            eprintln!("{}", crate::terminal::change_view::render(&line, width, color));
         }
-        _ => Ok(true),
+        *crate::terminal::NEXT_DRAFT.lock().unwrap_or_else(|error| error.into_inner()) = Some(prompt);
+    } else if let Some(count) = restored {
+        eprintln!("  \u{23bf}  Restored {count} file{} to before: {}", if count == 1 { "" } else { "s" }, entries[index].title);
     }
+    Ok(true)
 }
 
 /// `app.py +5 -1`, or for a restore the reverse, `+1 -5 in app.py`.

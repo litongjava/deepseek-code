@@ -845,7 +845,12 @@ async fn run(cli: &Cli) -> Result<()> {
                 Ok(false) => {},
             }
             match repl::handle(&line, &paths, &mut session).await {
-                Ok(true) => continue,
+                Ok(true) => {
+                    if let Some(draft) = terminal::NEXT_DRAFT.lock().unwrap_or_else(|error| error.into_inner()).take() {
+                        if let Some(input) = &input { input.restore_draft(draft); }
+                    }
+                    continue;
+                },
                 Err(error) => { eprintln!("Error: {error:#}"); continue; },
                 Ok(false) => {},
             }
