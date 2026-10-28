@@ -152,6 +152,91 @@ pub async fn compact(
     commit(db, prepared, &summary)
 }
 
+/// Which part of a conversation a rewind summarizes, as in the reference
+/// CLI: `UpTo` summarizes what came before a message and keeps the message
+/// and everything after it; `From` keeps what came before and summarizes the
+/// message and everything after it.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum Part {
+    UpTo,
+    From,
+}
+
+pub struct PreparedPart {
+    transcript: String,
+    count: usize,
+}
+
+/// The messages `part` summarizes, as the transcript the summary is made from.
+pub fn prepare_part(db: &DbManager, id: &str, message_id: &str, part: Part) -> Result<PreparedPart> {
+    db.with_conn(|conn| {
+        let rows = message_repo::get_messages_by_conversation(conn, id)?;
+        let index = rows.iter().position(|m| m.id == message_id).context("Message not found in this conversation")?;
+        let range = match part {
+            Part::UpTo => rows[..index].iter().rposition(|m| m.is_compact_boundary).unwrap_or(0)..index,
+            Part::From => index..rows.len(),
+        };
+        ensure!(!range.is_empty(), "Nothing to summarize there");
+        let mut all = Vec::new();
+        for row in &rows[range.clone()] {
+            let calls = message_repo::get_tool_calls_for_message(conn, &row.id)?;
+            all.push(json!({"message": row, "tools": calls}));
+        }
+        Ok(PreparedPart { transcript: serde_json::to_string(&all)?, count: range.len() })
+    })?
+}
+
+/// Writes the summary into a new branch of the conversation and returns the
+/// branch's id and how many messages the summary replaced. The original
+/// conversation is left as it was.
+pub fn commit_part(db: &DbManager, id: &str, message_id: &str, part: Part, prepared: PreparedPart, summary: &str) -> Result<(String, usize)> {
+    ensure!(
+        !summary.trim().is_empty() && summary.chars().count() <= 32_000,
+        "Empty or oversized summary"
+    );
+    let branch = db.with_conn(|conn| -> Result<String> {
+        let rows = message_repo::get_messages_by_conversation(conn, id)?;
+        let index = rows.iter().position(|m| m.id == message_id).context("Message not found in this conversation")?;
+        let now = chrono::Utc::now().to_rfc3339();
+        let summary_id = uuid::Uuid::new_v4().to_string();
+        match part {
+            Part::UpTo => {
+                // The summary becomes a boundary right before the message.
+                let branch = conversation_repo::branch_conversation(conn, id, None, None)?;
+                let order = rows[index].sort_order;
+                conn.execute("UPDATE messages SET sort_order = sort_order + 1 WHERE conversation_id = ?1 AND sort_order >= ?2", rusqlite::params![branch, order])?;
+                let content = format!("[Conversation summary — earlier transcript retained in session history]\n{}", summary.trim());
+                message_repo::insert_message(conn, &summary_id, &branch, "user", &content, None, &now, true, order)?;
+                Ok(branch)
+            }
+            Part::From if index == 0 => {
+                // Nothing comes before: the whole conversation is summarized.
+                let branch = conversation_repo::branch_conversation(conn, id, None, None)?;
+                let order = rows.last().map_or(0, |m| m.sort_order + 1);
+                let content = format!("[Conversation summary — earlier transcript retained in session history]\n{}", summary.trim());
+                message_repo::insert_message(conn, &summary_id, &branch, "user", &content, None, &now, true, order)?;
+                Ok(branch)
+            }
+            Part::From => {
+                // Earlier messages stay; the rest becomes one summary message.
+                let branch = conversation_repo::branch_conversation(conn, id, None, Some(index - 1))?;
+                let content = format!("[Summary of the later conversation — full transcript retained in session history]\n{}", summary.trim());
+                message_repo::insert_message(conn, &summary_id, &branch, "user", &content, None, &now, false, rows[index].sort_order)?;
+                Ok(branch)
+            }
+        }
+    })??;
+    Ok((branch, prepared.count))
+}
+
+/// Summarizes part of a conversation into a new branch; see [`Part`].
+pub async fn summarize_part(engine: &NativeEngine, db: &DbManager, id: &str, message_id: &str, part: Part, provider_id: &str, model: &str) -> Result<(String, usize)> {
+    let prepared = prepare_part(db, id, message_id, part)?;
+    let input = format!("Conversation JSON:\n{}", prepared.transcript);
+    let summary = engine.generate_text(provider_id, model, PROMPT, &input).await?;
+    commit_part(db, id, message_id, part, prepared, &summary)
+}
+
 /// Run compact lifecycle hooks in the trusted workspace. The boundary and fresh
 /// SessionStart context commit together; cancellation before that point preserves both.
 /// Cancellation during PostCompact can leave a successfully committed boundary.
@@ -436,5 +521,55 @@ mod hook_tests {
                 }
             );
         }
+    }
+}
+
+#[cfg(test)]
+mod part_tests {
+    use super::*;
+    use crate::runtime::{RuntimePaths, SessionStore};
+    use crate::services::{EnvironmentCredentials, ServiceContext};
+
+    #[test]
+    fn partial_summaries_branch_around_the_chosen_message() {
+        let dir = tempfile::tempdir().unwrap();
+        let service = ServiceContext::open(RuntimePaths::new(dir.path().join("data")).unwrap(), std::sync::Arc::new(EnvironmentCredentials)).unwrap();
+        let store = SessionStore::new(service.db.clone());
+        let id = store.create(dir.path(), "model", "provider").unwrap();
+        let mut ids = Vec::new();
+        for (role, text) in [("user", "one"), ("assistant", "reply-one"), ("user", "two"), ("assistant", "reply-two")] {
+            ids.push(store.append(&id, role, text).unwrap());
+        }
+        let contents = |branch: &str| -> Vec<(String, bool)> {
+            service.db.with_conn(|conn| message_repo::get_messages_by_conversation(conn, branch)).unwrap().unwrap()
+                .into_iter().map(|m| (m.content, m.is_compact_boundary)).collect()
+        };
+
+        let prepared = prepare_part(&service.db, &id, &ids[2], Part::UpTo).unwrap();
+        assert!(prepared.transcript.contains("reply-one") && !prepared.transcript.contains("reply-two"));
+        let (branch, count) = commit_part(&service.db, &id, &ids[2], Part::UpTo, prepared, "S").unwrap();
+        assert_eq!(count, 2);
+        let rows = contents(&branch);
+        assert_eq!(rows.len(), 5);
+        assert!(rows[2].1 && rows[2].0.ends_with("\nS"), "{rows:?}");
+        assert_eq!(rows[3].0, "two");
+        // The history the model sees starts at the summary.
+        let anthropic = crate::native_engine::provider_manager::ApiFormat::Anthropic;
+        assert_eq!(store.model_history(&branch, &anthropic).unwrap().len(), 3);
+
+        let prepared = prepare_part(&service.db, &id, &ids[2], Part::From).unwrap();
+        assert!(prepared.transcript.contains("reply-two") && !prepared.transcript.contains("reply-one"));
+        let (branch, count) = commit_part(&service.db, &id, &ids[2], Part::From, prepared, "T").unwrap();
+        assert_eq!(count, 2);
+        let rows = contents(&branch);
+        assert_eq!(rows.iter().map(|row| row.0.as_str()).take(2).collect::<Vec<_>>(), ["one", "reply-one"]);
+        assert!(rows.len() == 3 && !rows[2].1 && rows[2].0.ends_with("\nT"));
+
+        assert!(prepare_part(&service.db, &id, &ids[0], Part::UpTo).is_err());
+        let prepared = prepare_part(&service.db, &id, &ids[0], Part::From).unwrap();
+        let (branch, _) = commit_part(&service.db, &id, &ids[0], Part::From, prepared, "U").unwrap();
+        assert_eq!(store.model_history(&branch, &anthropic).unwrap().len(), 1);
+        // The original conversation is unchanged.
+        assert_eq!(contents(&id).len(), 4);
     }
 }

@@ -4,7 +4,7 @@ use anyhow::{ensure, Context, Result};
 use claude_core::{
     db::{conversation_repo, message_repo},
     runtime::RuntimePaths,
-    services::checkpoints,
+    services::{checkpoints, compaction},
 };
 
 pub async fn handle(
@@ -189,8 +189,13 @@ async fn pick(paths: &RuntimePaths, session: &mut Session) -> Result<bool> {
     if code {
         choices.push(("code", "Restore code"));
     }
+    choices.push(("from", "Summarize from here"));
+    if messages.iter().position(|message| message.id == checkpoint.message_id).is_some_and(|position| position > 0) {
+        choices.push(("up-to", "Summarize up to here"));
+    }
     choices.push(("", "Never mind"));
-    let options: Vec<Entry> = choices.iter().map(|(_, label)| Entry { title: label.to_string(), detail: String::new() }).collect();
+    // Numbered as in the reference CLI; the digit picks the option.
+    let options: Vec<Entry> = choices.iter().enumerate().map(|(number, (_, label))| Entry { title: format!("{}. {label}", number + 1), detail: String::new() }).collect();
     // The confirmation as in the reference CLI: the message, its age, and
     // what restoring removes and undoes.
     let mut subtitle = format!(
@@ -213,17 +218,27 @@ async fn pick(paths: &RuntimePaths, session: &mut Session) -> Result<bool> {
         return Ok(true);
     };
     let prompt = messages.iter().find(|message| message.id == checkpoint.message_id).map(|message| message.content.clone()).unwrap_or_default();
+    if action == "from" || action == "up-to" {
+        let part = if action == "from" { compaction::Part::From } else { compaction::Part::UpTo };
+        let (branch, count) = tokio::select! {
+            result = compaction::summarize_part(&session.engine, &session.store.db, &session.id, &checkpoint.message_id, part, &session.provider_id, &session.model) => result?,
+            _ = tokio::signal::ctrl_c() => anyhow::bail!("Summary interrupted; the conversation is unchanged"),
+        };
+        crate::background_commands::copy_settings(session, &branch)?;
+        session.resume_saved(paths, &branch).await?;
+        redraw(session)?;
+        eprintln!(
+            "  \u{23bf}  Summarized {count} message{} {} (ctrl+o to see full summary)",
+            if count == 1 { "" } else { "s" },
+            if part == compaction::Part::From { "from here" } else { "up to here" }
+        );
+        return Ok(true);
+    }
     let (restored, rewound) = apply(action, &checkpoint.id, paths, session).await?;
     if rewound.is_some() {
         // As in the reference CLI: the screen shows the conversation as it
         // now is, and the message is back in the input box to edit or resend.
-        eprint!("\x1b[2J\x1b[3J\x1b[H");
-        eprintln!("{}", crate::terminal::banner(&session.model, &session.workspace));
-        let color = std::env::var_os("NO_COLOR").is_none();
-        let width = crossterm::terminal::size().map_or(80, |(columns, _)| columns as usize).saturating_sub(1);
-        for line in crate::repl::transcript_of(session, &session.id.clone())? {
-            eprintln!("{}", crate::terminal::change_view::render(&line, width, color));
-        }
+        redraw(session)?;
         *crate::terminal::NEXT_DRAFT.lock().unwrap_or_else(|error| error.into_inner()) = Some(prompt);
     } else if let Some(count) = restored {
         eprintln!("  \u{23bf}  Restored {count} file{} to before: {}", if count == 1 { "" } else { "s" }, entries[index].title);
@@ -268,4 +283,16 @@ fn ago(created_at: &str) -> String {
         3600..=86_399 => format!("{}h ago", seconds / 3600),
         _ => format!("{}d ago", seconds / 86_400),
     }
+}
+
+/// Clears the screen and shows the conversation as it now is.
+fn redraw(session: &Session) -> Result<()> {
+    eprint!("\x1b[2J\x1b[3J\x1b[H");
+    eprintln!("{}", crate::terminal::banner(&session.model, &session.workspace));
+    let color = std::env::var_os("NO_COLOR").is_none();
+    let width = crossterm::terminal::size().map_or(80, |(columns, _)| columns as usize).saturating_sub(1);
+    for line in crate::repl::transcript_of(session, &session.id)? {
+        eprintln!("{}", crate::terminal::change_view::render(&line, width, color));
+    }
+    Ok(())
 }

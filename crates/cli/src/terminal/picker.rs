@@ -121,6 +121,13 @@ impl Picker<'_> {
                 KeyCode::Down => selected = (selected + 1).min(shown.len().saturating_sub(1)),
                 KeyCode::Char('k') if !self.search => selected = selected.saturating_sub(1),
                 KeyCode::Char('j') if !self.search => selected = (selected + 1).min(shown.len().saturating_sub(1)),
+                // In a numbered list, as in the reference CLI, a digit picks its option.
+                KeyCode::Char(ch) if !self.search && !control && ch.is_ascii_digit() => {
+                    if let Some(index) = shown.iter().find(|index| self.entries[**index].title.starts_with(&format!("{ch}. "))) {
+                        screen.suspend()?;
+                        return Ok(Picked::Entry(*index));
+                    }
+                }
                 KeyCode::Backspace if self.search => {
                     query.pop();
                     selected = 0;
