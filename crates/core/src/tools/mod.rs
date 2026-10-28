@@ -31,6 +31,7 @@ pub mod teams;
 pub mod scheduled;
 pub mod cron_jobs;
 pub mod session_worktree;
+pub mod wakeup;
 mod content_compat;
 mod utf8;
 mod bash_process;
@@ -381,6 +382,7 @@ pub fn get_tool_definitions() -> Vec<ToolDefinition> {
     defs.extend(search::definitions());
     defs.extend(cron_jobs::definitions());
     defs.extend(session_worktree::definitions());
+    defs.push(wakeup::definition());
     for macro_def in macros::get_macro_definitions() {
         defs.push(ToolDefinition {
             name: macro_def.name,

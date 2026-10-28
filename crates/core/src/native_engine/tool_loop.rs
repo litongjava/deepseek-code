@@ -344,7 +344,7 @@ fn ask_user_questions(input: &Value) -> Result<Vec<Value>> {
 
 /// Writes, scheduled jobs and worktree switches run one at a time in order.
 fn is_serial_builtin(name: &str) -> bool {
-    matches!(name, "Edit" | "Write" | "MultiEdit" | "NotebookEdit")
+    matches!(name, "Edit" | "Write" | "MultiEdit" | "NotebookEdit" | "ScheduleWakeup")
         || crate::tools::cron_jobs::is_cron_tool(name)
         || crate::tools::session_worktree::is_worktree_tool(name)
 }
@@ -1592,6 +1592,13 @@ impl ToolLoopExecutor {
                 Ok((value, cwd)) => { self.workspace_cwd = cwd.to_string_lossy().into_owned(); (tool_input.clone(), value.to_string(), false) }
                 Err(error) => (tool_input.clone(), format!("Error: {error:#}"), true),
             };
+        }
+        if tool_name == "ScheduleWakeup" {
+            let result = match (self.search_config_path.as_deref().and_then(std::path::Path::parent), self.conv_id.as_deref()) {
+                (Some(root), Some(session)) => crate::tools::wakeup::execute(tool_input, root, session, chrono::Utc::now().timestamp()),
+                _ => Err(anyhow!("ScheduleWakeup needs an interactive session")),
+            };
+            return (tool_input.clone(), match &result { Ok(value) => value.to_string(), Err(error) => format!("Error: {error:#}") }, result.is_err());
         }
         if crate::tools::cron_jobs::is_cron_tool(tool_name) {
             let result = match (self.search_config_path.as_deref().and_then(std::path::Path::parent), self.conv_id.as_deref()) {

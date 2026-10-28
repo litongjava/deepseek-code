@@ -679,6 +679,15 @@ async fn run(cli: &Cli) -> Result<()> {
                             Err(error) => eprintln!("Scheduled jobs: {error:#}"),
                         }
                     }
+                    // A self-paced /loop wakes as if its input were typed again.
+                    if !composer.is_pending() && claude_core::tools::wakeup::is_due(&paths.data_dir, &session.id, chrono::Utc::now().timestamp())
+                        && input.as_mut().expect("interactive reader").yield_prompt().await? {
+                        if let Some((prompt, reason)) = claude_core::tools::wakeup::take_due(&paths.data_dir, &session.id, chrono::Utc::now().timestamp()).unwrap_or(None) {
+                            eprintln!("\u{21bb} Loop wakeup: {reason}");
+                            input.as_mut().expect("interactive reader").queue_prompt(prompt);
+                            continue 'repl;
+                        }
+                    }
                     // A due /loop prompt runs as if typed, once the input is empty.
                     if let Some(index) = loops.iter().position(|(_, _, next)| *next <= std::time::Instant::now()) {
                         if !composer.is_pending() && input.as_mut().expect("interactive reader").yield_prompt().await? {
@@ -824,8 +833,11 @@ async fn run(cli: &Cli) -> Result<()> {
                 continue;
             }
             if command == "/loop" {
-                match repl_loop::command(argument, &mut loops) {
-                    Ok(message) => eprintln!("{message}"),
+                match repl_loop::run(argument, &mut loops) {
+                    Ok(repl_loop::Outcome::Message(message)) => eprintln!("{message}"),
+                    Ok(repl_loop::Outcome::Run(prompt)) => if let Err(error) = session.turn(cli, &prompt, &mut input).await {
+                        if !worker_frontend::already_presented(&error) { eprintln!("Error: {error:#}"); }
+                    },
                     Err(error) => eprintln!("Error: {error:#}"),
                 }
                 continue;

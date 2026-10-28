@@ -1,5 +1,6 @@
 //! /loop as in the reference CLI: repeat a prompt or command on an interval
-//! while the session is open.
+//! while the session is open, or, without an interval, let the model pace
+//! itself with ScheduleWakeup.
 use anyhow::{bail, ensure, Result};
 use std::time::{Duration, Instant};
 
@@ -29,7 +30,32 @@ fn describe(every: Duration) -> String {
     }
 }
 
-/// Handles `/loop [INTERVAL] PROMPT`, `/loop` (list) and `/loop stop`.
+/// What /loop asks the REPL to do.
+#[derive(Debug, PartialEq)]
+pub enum Outcome {
+    Message(String),
+    /// A self-paced iteration to run now.
+    Run(String),
+}
+
+/// The turn a self-paced /loop runs; the model schedules the next one.
+fn dynamic_prompt(prompt: &str) -> String {
+    format!("{prompt}\n\n<system-reminder>This is a self-paced /loop. When this iteration is done, call ScheduleWakeup with prompt \"/loop {prompt}\" and a delay that fits what you are waiting for, or with stop: true when the task is finished.</system-reminder>")
+}
+
+/// Handles `/loop [INTERVAL] PROMPT`, `/loop PROMPT` (self-paced), `/loop`
+/// (list) and `/loop stop`.
+pub fn run(argument: &str, loops: &mut Vec<Loop>) -> Result<Outcome> {
+    let argument = argument.trim();
+    let (first, _) = argument.split_once(char::is_whitespace).unwrap_or((argument, ""));
+    if !argument.is_empty() && argument != "list" && !argument.starts_with("stop") && interval(first).is_none() {
+        ensure!(!argument.starts_with("/loop"), "A loop cannot start another loop");
+        return Ok(Outcome::Run(dynamic_prompt(argument)));
+    }
+    command(argument, loops).map(Outcome::Message)
+}
+
+/// Handles `/loop INTERVAL PROMPT`, `/loop` (list) and `/loop stop`.
 pub fn command(argument: &str, loops: &mut Vec<Loop>) -> Result<String> {
     let argument = argument.trim();
     if argument.is_empty() || argument == "list" {
@@ -77,8 +103,14 @@ mod tests {
         let mut loops = Vec::new();
         assert!(command("5m check the build", &mut loops).unwrap().contains("every 5m"));
         assert_eq!(loops[0].0, Duration::from_secs(300));
-        assert!(command("summarize new issues", &mut loops).unwrap().contains("every 10m"));
+        assert!(command("10m summarize new issues", &mut loops).unwrap().contains("every 10m"));
         assert!(command("", &mut loops).unwrap().contains("2. every 10m"));
+        match run("watch the deploy", &mut loops).unwrap() {
+            Outcome::Run(prompt) => assert!(prompt.starts_with("watch the deploy") && prompt.contains("ScheduleWakeup with prompt \"/loop watch the deploy\"")),
+            other => panic!("{other:?}"),
+        }
+        assert!(matches!(run("5m x", &mut loops).unwrap(), Outcome::Message(_)));
+        loops.pop();
         assert!(command("10s too fast", &mut loops).is_err());
         assert!(command("stop 1", &mut loops).unwrap().contains("check the build"));
         assert!(command("stop", &mut loops).unwrap().contains("Stopped 1 loop."));
