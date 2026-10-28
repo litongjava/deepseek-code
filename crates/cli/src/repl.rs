@@ -40,6 +40,10 @@ pub fn transcript_of(session: &Session, id: &str) -> Result<Vec<crate::terminal:
                 continue;
             }
             if message.role == "user" {
+                if let Some(summary) = claude_core::tools::background_shell::notification_summary(&message.content) {
+                    lines.push(change_view::body(&format!("\u{25cf} {summary}")));
+                    continue;
+                }
                 let mut text = message.content.lines();
                 lines.push(change_view::body(&format!("{} {}", crate::terminal::prompt_glyph(), text.next().unwrap_or_default())));
                 lines.extend(text.map(|line| change_view::body(&format!("  {line}"))));

@@ -9,7 +9,7 @@ use std::{
 use tokio::process::Command;
 #[path = "shell_notifications.rs"]
 mod notifications;
-pub use notifications::collect_completed;
+pub use notifications::{collect_completed, collect_finished, notification_summary, Finished, NOTIFICATION_START};
 tokio::task_local! { static CONTEXT: Option<(PathBuf, String)>; }
 
 /// A shell task's log directory: its task ID, or the directory of a

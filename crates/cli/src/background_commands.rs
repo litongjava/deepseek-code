@@ -694,6 +694,34 @@ mod tests {
     }
 }
 
+/// Whether a queued message is a background task notification rather than
+/// text the user typed.
+pub(crate) fn is_notification(text: &str) -> bool {
+    text.starts_with(claude_core::tools::background_shell::NOTIFICATION_START)
+}
+
+/// Finished background shells: each is queued for the model as a task
+/// notification, as in the reference CLI, and announced once.
+fn shell_notifications(session: &Session) -> Result<Vec<String>> {
+    let mut notices = Vec::new();
+    for task in claude_core::tools::background_shell::collect_finished(&session.paths.data_dir, &session.id)? {
+        claude_core::services::input_queue::push(&session.store.db, &session.id, &task.notification())?;
+        notices.push(format!("\u{25cf} {}", task.summary()));
+    }
+    Ok(notices)
+}
+
+/// Starts a turn for task notifications waiting at an idle prompt; the
+/// model reads them as the reference CLI's background command updates.
+pub(crate) async fn wake_for_notifications(cli: &crate::args::Cli, session: &mut Session, input: &mut Option<crate::terminal::input::TerminalInput>) -> Result<bool> {
+    let prompts = claude_core::services::input_queue::take_where(&session.store.db, &session.id, is_notification)?;
+    if prompts.is_empty() {
+        return Ok(false);
+    }
+    session.turn(cli, &prompts.join("\n\n"), input).await?;
+    Ok(true)
+}
+
 pub fn collect_completed(session: &Session) -> Result<Vec<String>> {
     use std::sync::atomic::{AtomicBool, Ordering};
     static WORKER_WARNING: AtomicBool = AtomicBool::new(false);
@@ -703,7 +731,7 @@ pub fn collect_completed(session: &Session) -> Result<Vec<String>> {
     for (source, warning, result) in [
         ("messages", &MESSAGE_WARNING, claude_core::services::session_messages::notices(&claude_core::services::ServiceContext { paths: session.paths.clone(), db: session.store.db.clone(), credentials: std::sync::Arc::new(claude_core::services::EnvironmentCredentials) },&session.id)),
         ("workers", &WORKER_WARNING, background_sessions::collect_completed(&session.store, &session.paths.data_dir, &session.id)),
-        ("shells", &SHELL_WARNING, claude_core::tools::background_shell::collect_completed(&session.paths.data_dir, &session.id)),
+        ("shells", &SHELL_WARNING, shell_notifications(session)),
     ] {
         match result {
             Ok(mut messages) => notices.append(&mut messages),

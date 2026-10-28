@@ -524,6 +524,15 @@ async fn run(cli: &Cli) -> Result<()> {
             let idle_deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(60);
             let mut idle_notified = false;
             for notice in background_commands::collect_completed(&session)? { eprintln!("{notice}"); }
+            // A background command that finished meanwhile starts a turn, as in
+            // the reference CLI.
+            if !composer.is_pending() {
+                match background_commands::wake_for_notifications(cli, &mut session, &mut input).await {
+                    Ok(true) => continue 'repl,
+                    Ok(false) => {},
+                    Err(error) => if !worker_frontend::already_presented(&error) { eprintln!("Error: {error:#}"); },
+                }
+            }
             if let Some(prompt) = remote.take_deferred() {
                 if let Err(error) = session.turn(cli, &prompt, &mut input).await { if !worker_frontend::already_presented(&error) { eprintln!("Error: {error:#}"); } }
             }
@@ -623,7 +632,16 @@ async fn run(cli: &Cli) -> Result<()> {
                         if let Err(error) = session.wake_hooks(cli, &mut input).await { eprintln!("Hook wake: {error:#}"); }
                         continue 'repl;
                     }
-                    for notice in background_commands::collect_completed(&session)? {
+                    let notices = background_commands::collect_completed(&session)?;
+                    // A finished background command starts a turn; its line is
+                    // printed first, above that turn.
+                    if !composer.is_pending()
+                        && claude_core::services::input_queue::any(&session.store.db, &session.id, background_commands::is_notification).unwrap_or(false)
+                        && input.as_mut().expect("interactive reader").yield_prompt().await? {
+                        for notice in notices { eprintln!("{notice}"); }
+                        continue 'repl;
+                    }
+                    for notice in notices {
                         input.as_ref().expect("interactive reader").notice(notice);
                     }
                 },

@@ -436,7 +436,7 @@ fn resumable(session: &Session, all: bool) -> Result<Vec<(String, Resumable)>> {
                 Some(title) => title,
                 None => claude_core::db::message_repo::get_messages_by_conversation(conn, &row.id)?
                     .into_iter()
-                    .find(|message| message.role == "user")
+                    .find(|message| message.role == "user" && !crate::background_commands::is_notification(&message.content))
                     .map(|message| message.content.lines().next().unwrap_or_default().to_owned())
                     .unwrap_or_else(|| "(no prompt)".into()),
             };

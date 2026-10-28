@@ -53,6 +53,8 @@ async fn single_turn(
         .iter()
         .filter(|row| row["role"] == "user")
         .filter_map(|row| row["content"].as_str().map(str::to_owned))
+        // Task notifications are not prompts to recall.
+        .filter(|text| !crate::background_commands::is_notification(text))
         .collect();
     let mut display = TurnDisplay::new(
         true,

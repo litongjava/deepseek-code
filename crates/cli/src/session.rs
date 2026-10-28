@@ -868,7 +868,7 @@ impl Session {
             result = crate::hook_progress::during(&self.id, interactive_display, request) => result?,
             _ = tokio::signal::ctrl_c() => bail!("Interrupted before model request"),
         };
-        let mut progress = crate::terminal::live::TurnDisplay::new(interactive_display, self.permission_mode(), &self.paths.data_dir.join("keybindings.json"), self.store.history(&self.id)?.iter().filter(|row|row["role"]=="user").filter_map(|row|row["content"].as_str().map(str::to_owned)).collect())?.with_workspace(&self.workspace);
+        let mut progress = crate::terminal::live::TurnDisplay::new(interactive_display, self.permission_mode(), &self.paths.data_dir.join("keybindings.json"), self.store.history(&self.id)?.iter().filter(|row|row["role"]=="user").filter_map(|row|row["content"].as_str().map(str::to_owned)).filter(|text| !crate::background_commands::is_notification(text)).collect())?.with_workspace(&self.workspace);
         if progress.is_live() {
             progress.set_transcript(crate::repl::transcript(self).unwrap_or_default());
         }
@@ -1435,7 +1435,8 @@ pub(crate) fn queues_mid_turn(prompt: &str) -> bool {
 
 /// Messages the model did not read during the turn become the next prompts.
 pub(crate) fn requeue_unread(session: &Session, reader: &mut TerminalInput) -> Result<()> {
-    for prompt in claude_core::services::input_queue::take(&session.store.db, &session.id)? {
+    // Task notifications stay queued for the next turn the prompt starts.
+    for prompt in claude_core::services::input_queue::take_where(&session.store.db, &session.id, |text| !crate::background_commands::is_notification(text))? {
         reader.queue_prompt(prompt);
     }
     Ok(())

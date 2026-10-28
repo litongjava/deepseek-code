@@ -1026,11 +1026,13 @@ async fn tool_bash_async(input: serde_json::Value, cwd: &str) -> Result<serde_js
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
 
+    // Background commands are named by their description, or the command.
+    let description = input["description"].as_str().filter(|text| !text.trim().is_empty()).unwrap_or(&command).to_owned();
     if input["run_in_background"].as_bool().unwrap_or(false) {
-        background_shell::start(cmd, input.get("timeout").map(|_| std::time::Duration::from_secs(timeout_secs)), shell_type, input["description"].as_str().unwrap_or("Background shell"), &command)
+        background_shell::start(cmd, input.get("timeout").map(|_| std::time::Duration::from_secs(timeout_secs)), shell_type, &description, &command)
     } else {
         // Ctrl+B can move it to the background while it runs.
-        background_shell::run_foreground(cmd, std::time::Duration::from_secs(timeout_secs), shell_type, input["description"].as_str().unwrap_or("Background shell"), &command).await
+        background_shell::run_foreground(cmd, std::time::Duration::from_secs(timeout_secs), shell_type, &description, &command).await
     }
 }
 
