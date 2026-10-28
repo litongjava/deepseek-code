@@ -1539,6 +1539,13 @@ impl ToolLoopExecutor {
             let result = Box::pin(self.execute_workflow(tool_input)).await;
             return (tool_input.clone(), match &result { Ok(value)=>value.to_string(),Err(error)=>format!("Workflow failed: {error:#}") }, result.is_err());
         }
+        if crate::tools::cron_jobs::is_cron_tool(tool_name) {
+            let result = match (self.search_config_path.as_deref().and_then(std::path::Path::parent), self.conv_id.as_deref()) {
+                (Some(root), Some(session)) => crate::tools::cron_jobs::execute(tool_name, tool_input, &crate::tools::cron_jobs::Scope { root, session, project: std::path::Path::new(&self.workspace_cwd) }),
+                _ => Err(anyhow!("Scheduled jobs need an interactive session")),
+            };
+            return (tool_input.clone(), match &result { Ok(value) => value.to_string(), Err(error) => format!("Error: {error:#}") }, result.is_err());
+        }
         if crate::tools::tasks::is_task(tool_name) {
             let result = async {
                 let root = self.search_config_path.as_deref().and_then(std::path::Path::parent).ok_or_else(|| anyhow!("Task runtime directory unavailable"))?;

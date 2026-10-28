@@ -660,6 +660,24 @@ async fn run(cli: &Cli) -> Result<()> {
                         if let Err(error) = session.wake_hooks(cli, &mut input).await { eprintln!("Hook wake: {error:#}"); }
                         continue 'repl;
                     }
+                    // A due CronCreate job runs as if typed, once the input is empty.
+                    if !composer.is_pending() {
+                        let scope = claude_core::tools::cron_jobs::Scope { root: &paths.data_dir, session: &session.id, project: &session.workspace };
+                        match claude_core::tools::cron_jobs::take_due(&scope, chrono::Local::now()) {
+                            Ok(due) if !due.is_empty() => {
+                                if input.as_mut().expect("interactive reader").yield_prompt().await? {
+                                    for prompt in due {
+                                        eprintln!("\u{23f0} Scheduled: {}", prompt.lines().next().unwrap_or_default());
+                                        input.as_mut().expect("interactive reader").queue_prompt(prompt);
+                                    }
+                                    continue 'repl;
+                                }
+                                for prompt in due { claude_core::services::input_queue::push(&session.store.db, &session.id, &prompt)?; }
+                            }
+                            Ok(_) => {}
+                            Err(error) => eprintln!("Scheduled jobs: {error:#}"),
+                        }
+                    }
                     // A due /loop prompt runs as if typed, once the input is empty.
                     if let Some(index) = loops.iter().position(|(_, _, next)| *next <= std::time::Instant::now()) {
                         if !composer.is_pending() && input.as_mut().expect("interactive reader").yield_prompt().await? {

@@ -29,6 +29,7 @@ pub mod agent_messages;
 pub mod coordination;
 pub mod teams;
 pub mod scheduled;
+pub mod cron_jobs;
 mod content_compat;
 mod utf8;
 mod bash_process;
@@ -80,7 +81,7 @@ pub fn get_tool_definitions() -> Vec<ToolDefinition> {
         lsp::definition(),
         worktrees::definition(),
         agent_messages::definition(),
-        scheduled::definition(),
+        // `cron` stays dispatchable for older transcripts; the model sees the reference trio.
         crate::services::goal_proposals::definition(),
         ToolDefinition { name: "ToolSearch".into(), description: "Search the currently registered built-in tool names, descriptions and schemas. MCP tools are supplied separately by the host.".into(), input_schema: serde_json::json!({"type":"object","properties":{"query":{"type":"string"}},"required":["query"]}) },
         ToolDefinition {
@@ -376,6 +377,7 @@ pub fn get_tool_definitions() -> Vec<ToolDefinition> {
     ];
 
     defs.extend(search::definitions());
+    defs.extend(cron_jobs::definitions());
     for macro_def in macros::get_macro_definitions() {
         defs.push(ToolDefinition {
             name: macro_def.name,
