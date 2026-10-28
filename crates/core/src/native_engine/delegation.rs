@@ -42,7 +42,7 @@ impl OwnedChild {
 }
 
 pub(super) fn definitions() -> Vec<ToolDefinition> {
-    let mut definitions = vec![ToolDefinition {
+    vec![ToolDefinition {
         name: "Agent".into(),
         description: "Launch a new agent to handle complex, multi-step tasks. Each agent type has specific capabilities and tools available to it.\n\nSpecify a subagent_type to select an agent definition; omitting it starts a general-purpose agent.\n\n## When to use\n\nReach for this when the task matches an available agent type, when you have independent work to run in parallel, or when answering would mean reading across several files — delegate it and you keep the conclusion, not the file dumps. For a single-fact lookup where you already know the file, symbol, or value, search directly. Once you've delegated a search, don't also run it yourself — wait for the result.\n\nSubagents run in the background; you'll be notified when one completes. Never fabricate or predict a pending agent's results — the notification is never something you write yourself; if the user asks before it arrives, say it's still running. Pass run_in_background: false when you need the result before continuing.\n\n- The agent's final report is not shown to the user — relay what matters.\n- Use SendMessage with the agent's ID or name to continue a previously spawned agent with its context intact; a new Agent call starts fresh.\n- Each agent type's prompt and tools come from its definition (`.claude/agents/*.md` or SDK `agents`).\n- `isolation: \"worktree\"` gives the agent its own git worktree.".into(),
         input_schema: json!({"type":"object","properties":{
@@ -54,12 +54,7 @@ pub(super) fn definitions() -> Vec<ToolDefinition> {
             "isolation":{"description":"Isolation mode. \"worktree\" creates a git worktree so the agent works on an isolated copy of the repo.","type":"string","enum":["worktree"]},
             "run_in_background":{"description":"Defaults to true. Set to false to wait for the agent's result in this turn.","type":"boolean"}
         },"required":["description","prompt"],"additionalProperties":false})
-    }];
-    definitions.extend(["Delegate", "Worker"].into_iter().map(|name| ToolDefinition {
-        name: name.into(), description: "Delegate a bounded task to a persistent child session using the same model and tool permissions. Waits for completion unless run_in_background is true: then it returns at once, the child runs as a background task, and you are notified when it finishes. Cancellation stops a waited-for child. Use agent_type to select an existing agent definition.".into(),
-        input_schema: json!({"type":"object","properties":{"prompt":{"type":"string"},"description":{"type":"string","description":"A short (3-5 word) description of the task"},"agent_type":{"type":"string","default":"general"},"run_in_background":{"type":"boolean","description":"Return at once and run the agent in the background; you are notified when it finishes"},"resume":{"type":"string","description":"Resume a completed child UUID owned by this session; original live configuration must still be retained"}},"required":["prompt"],"additionalProperties":false})
-    }));
-    definitions
+    }]
 }
 
 /// Maps the reference Agent input onto the delegation fields: subagent_type

@@ -110,7 +110,7 @@ impl TurnProgress {
         }
         self.tools.insert(id.into(), Instant::now());
         self.notice(&format!("• {}", tool_preview_in_workspace(name, input, self.workspace.as_deref())));
-        let label = if matches!(name, "Agent" | "Delegate" | "Worker") {
+        let label = if name == "Agent" {
             format!("Running subagent: {name}")
         } else {
             format!("Working: {name}")
@@ -497,7 +497,7 @@ pub(crate) fn tool_result_summary(
             for line in content.lines() { result.push_str(&format!("\n    {line}")); }
         }
     }
-    if matches!(name, "Agent" | "Delegate" | "Worker") {
+    if name == "Agent" {
         if let Ok(value) = serde_json::from_str::<Value>(output) {
             if let Some(id) = value["session_id"].as_str() {
                 result.push_str(&format!(" · session {}", clipped(&single_line(id), 50)));

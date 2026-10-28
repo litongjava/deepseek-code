@@ -412,7 +412,7 @@ impl PermissionManager {
 
     fn broad_auto_grant(pattern: &str) -> bool {
         let name = pattern.split('(').next().unwrap_or(pattern);
-        matches!(name, "Bash" | "PowerShell" | "Agent" | "Delegate" | "Worker" | "Task" | "team") && (!pattern.contains('(') || pattern.contains('*'))
+        matches!(name, "Bash" | "PowerShell" | "Agent" | "Task" | "team") && (!pattern.contains('(') || pattern.contains('*'))
     }
 
     fn is_read_only_tool(tool_name: &str) -> bool {
@@ -554,7 +554,7 @@ impl PermissionManager {
         }
         // Delegation inherits the parent authority; children check their own tools.
         // Auto still classifies the spawn itself, matching the native Agent tool.
-        let delegation = matches!(context.tool_name.as_str(), "Agent" | "Delegate" | "Worker")
+        let delegation = context.tool_name == "Agent"
             || (context.tool_name == "team" && context.tool_input["operation"] == "run");
         let read_only = Self::is_read_only_tool(&context.tool_name)
             || (context.tool_name == "Config"
@@ -1068,7 +1068,7 @@ mod policy_tests {
     fn delegation_defaults_preserve_inherited_authority_but_auto_classifies() {
         for mode in [PermissionMode::AskPermissions, PermissionMode::PlanMode, PermissionMode::DontAsk, PermissionMode::Auto] {
             let manager = manager(mode);
-            for name in ["Agent", "Delegate", "Worker"] {
+            for name in ["Agent"] {
                 let decision = manager.evaluate_permission(&context(name));
                 if mode == PermissionMode::Auto { assert!(decision.classifier_eligible); }
                 else { assert_eq!(decision.result, PermissionResult::Granted); }
