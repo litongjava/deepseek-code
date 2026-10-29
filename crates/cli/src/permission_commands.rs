@@ -57,6 +57,22 @@ pub fn remember_commit(session: &Session, remember: &Remember) -> Result<Commit>
     })
 }
 
+/// Saves a remembered allow rule to the project's `.claude/settings.local.json`,
+/// as the reference CLI does, so later sessions keep it.
+pub fn save_local(session: &Session, rule: &str) -> Result<()> {
+    claude_core::services::permission_updates::add_local_allow_rule(&session.workspace, &settings_rule(rule))?;
+    Ok(())
+}
+
+/// The rule as the reference CLI saves it: a sandbox host becomes a
+/// `WebFetch(domain:)` rule, which the sandbox allowlist also reads.
+fn settings_rule(rule: &str) -> String {
+    match rule.strip_prefix("SandboxNetwork(") {
+        Some(rest) => format!("WebFetch({rest}"),
+        None => rule.to_owned(),
+    }
+}
+
 fn words(argument: &str) -> Vec<&str> {
     let argument = argument.trim();
     let (first, rest) = argument
@@ -195,6 +211,12 @@ fn active_launch_snapshot(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn sandbox_hosts_are_saved_as_web_fetch_domains() {
+        assert_eq!(settings_rule("SandboxNetwork(domain:pypi.org)"), "WebFetch(domain:pypi.org)");
+        assert_eq!(settings_rule("Bash(npm run *)"), "Bash(npm run *)");
+    }
 
     #[test]
     fn active_worker_display_requires_authoritative_launch_rules_and_job_identity() {

@@ -626,6 +626,20 @@ impl Drop for Cleanup {
     }
 }
 
+/// Saves an allow rule to `.claude/settings.local.json`, where the reference
+/// CLI keeps "Yes, and don't ask again" answers. Returns the file written.
+pub fn add_local_allow_rule(workspace: &Path, rule: &str) -> Result<PathBuf> {
+    crate::permissions::patterns::validate(rule)?;
+    let path = workspace.join(".claude").join("settings.local.json");
+    let _lock = lock_settings(&path)?;
+    let mut edit = read_settings(&path)?;
+    apply_rules_edit(&mut edit, 0, "addRules", &[rule.to_owned()]);
+    if edit.changed {
+        write_settings(&edit)?;
+    }
+    Ok(path)
+}
+
 #[derive(Default)]
 pub struct LoadedPermissions {
     pub rules: HashMap<String, PermissionAction>,
@@ -940,6 +954,23 @@ mod tests {
         assert_eq!(loaded.rules.get("Edit"), Some(&PermissionAction::Allow));
         assert_eq!(loaded.rules.get("Bash(rm *)"), Some(&PermissionAction::Deny));
         assert_eq!(loaded.directories.len(), 1);
+    }
+
+    #[test]
+    fn local_allow_rules_are_added_once_and_keep_other_settings() {
+        let temp = tempfile::tempdir().unwrap();
+        let workspace = temp.path();
+        std::fs::create_dir_all(workspace.join(".claude")).unwrap();
+        let path = workspace.join(".claude").join("settings.local.json");
+        std::fs::write(&path, json!({"env":{"A":"1"},"permissions":{"allow":["Read"]}}).to_string()).unwrap();
+        assert_eq!(add_local_allow_rule(workspace, "WebFetch(domain:example.com)").unwrap(), path);
+        add_local_allow_rule(workspace, "WebFetch(domain:example.com)").unwrap();
+        assert!(add_local_allow_rule(workspace, "Bash(").is_err());
+        let saved: Value = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+        assert_eq!(saved["env"]["A"], "1");
+        assert_eq!(saved["permissions"]["allow"], json!(["Read", "WebFetch(domain:example.com)"]));
+        let loaded = load_settings(&temp.path().join("data"), workspace, true).unwrap();
+        assert_eq!(loaded.rules.get("WebFetch(domain:example.com)"), Some(&PermissionAction::Allow));
     }
 }
 

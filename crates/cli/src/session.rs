@@ -1118,7 +1118,12 @@ impl Session {
                                 match grant {
                                     Some(Remember::AcceptEdits) => progress.set_permission_mode("accept-edits"),
                                     Some(Remember::Auto) => progress.set_permission_mode("auto"),
-                                    _ => {}
+                                    Some(Remember::Rule(rule)) => {
+                                        if let Err(error) = crate::permission_commands::save_local(self, &rule) {
+                                            progress.notice(&format!("Allowed for this session; saving the rule to .claude/settings.local.json failed: {error:#}"));
+                                        }
+                                    }
+                                    None => {}
                                 }
                             } else if !decision.allowed && !remote_decided && approval.is_some() {
                                 // As in the reference CLI: a bare No stops the turn; No with
