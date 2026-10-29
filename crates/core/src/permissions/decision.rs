@@ -9,6 +9,8 @@ pub enum DecisionOrigin {
     SavedApproval,
     Mode,
     DefaultRead,
+    /// A tool that only changes this app's own session state.
+    DefaultOwnState,
     DefaultDelegation,
     DefaultPrompt,
 }

@@ -424,6 +424,14 @@ impl PermissionManager {
         )
     }
 
+    /// Tools that write only this app's own data (memory store, todo list,
+    /// task list), never project files. Like the reference CLI, which does not
+    /// prompt for its todo and task tools or for writes to its memory
+    /// directory, they run without asking.
+    fn is_own_state_tool(tool_name: &str) -> bool {
+        matches!(tool_name, "memory_ingest" | "TodoWrite" | "TaskCreate" | "TaskUpdate")
+    }
+
     fn is_edit_tool(tool_name: &str) -> bool {
         matches!(
             tool_name,
@@ -621,6 +629,9 @@ impl PermissionManager {
                     return decision(self.request_confirmation(context), DefaultPrompt);
                 }
             }
+        }
+        if Self::is_own_state_tool(&context.tool_name) {
+            return decision(PermissionResult::Granted, DefaultOwnState);
         }
         if mode == PermissionMode::BypassPermissions
             || (mode == PermissionMode::AcceptEdits && Self::is_edit_tool(&context.tool_name))
@@ -921,6 +932,23 @@ mod policy_tests {
             assert!(matches!(manager.check_permission(&shell("ls -la src")), PermissionResult::RequiresConfirmation(_)));
         }
         assert!(matches!(manager(PermissionMode::DontAsk).check_permission(&shell("ls")), PermissionResult::Denied(_)));
+    }
+    #[test]
+    fn own_state_tools_run_without_asking_unless_a_rule_or_plan_mode_says_otherwise() {
+        for mode in [PermissionMode::AskPermissions, PermissionMode::AcceptEdits, PermissionMode::DontAsk] {
+            let manager = manager(mode);
+            for tool in ["memory_ingest", "TodoWrite", "TaskCreate", "TaskUpdate"] {
+                let decision = manager.evaluate_permission(&context(tool));
+                assert_eq!(decision.result, PermissionResult::Granted, "{tool} {mode:?}");
+                assert_eq!(decision.origin, DecisionOrigin::DefaultOwnState);
+            }
+            manager.set_session_rules("session", HashMap::from([("memory_ingest".into(), PermissionAction::Confirm), ("TodoWrite".into(), PermissionAction::Deny)]));
+            assert!(!matches!(manager.check_permission(&context("memory_ingest")), PermissionResult::Granted), "{mode:?}");
+            assert!(matches!(manager.check_permission(&context("TodoWrite")), PermissionResult::Denied(_)), "{mode:?}");
+        }
+        // Other writes still ask, and plan mode still blocks these tools.
+        assert!(matches!(manager(PermissionMode::AskPermissions).check_permission(&context("CronCreate")), PermissionResult::RequiresConfirmation(_)));
+        assert!(matches!(manager(PermissionMode::PlanMode).check_permission(&context("memory_ingest")), PermissionResult::Denied(_)));
     }
     #[test]
     fn explicit_ask_and_deny_override_all_permissive_modes_and_saved_approvals() {
