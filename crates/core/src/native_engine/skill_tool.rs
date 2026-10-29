@@ -48,12 +48,7 @@ impl ToolLoopExecutor {
                 .context("Skill instructions missing")?;
             // Kept after the user's message for the rest of the session, as
             // the reference CLI keeps an invoked skill's content.
-            if let Some(entry) = crate::services::turn_context::for_last(&self.messages, vec![instructions.to_owned()]) {
-                if let (Some(root), Some(session)) = (self.search_config_path.as_deref().and_then(|path| path.parent()), self.conv_id.as_deref()) {
-                    crate::services::turn_context::save(root, session, &entry)?;
-                }
-                self.turn_context.push(entry);
-            }
+            self.attach_turn_context(vec![instructions.to_owned()])?;
             Ok(None)
         } else {
             ensure!(

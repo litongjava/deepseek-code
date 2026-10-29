@@ -13,6 +13,17 @@ struct Model {
     boundary_resume: bool,
 }
 
+/// The user's own text: context reminders (instructions, recalled memories)
+/// may come before or after it in the same message.
+fn prompt_text(content: &str) -> String {
+    let mut text = content.to_owned();
+    while let (Some(start), Some(end)) = (text.find("<system-reminder>"), text.find("</system-reminder>")) {
+        if end < start { break; }
+        text.replace_range(start..end + "</system-reminder>".len(), "");
+    }
+    text.trim().to_owned()
+}
+
 fn child_request(body: &Value) -> bool {
     body["messages"].as_array().unwrap().iter().any(|message| {
         message["role"] == "system" && message["content"].to_string().contains("Child session ID:")
@@ -32,7 +43,7 @@ async fn model(
     let last = body["messages"].as_array().unwrap().last().unwrap();
     let mut tool = None;
     let child = child_request(&body);
-    let content = last["content"].as_str().unwrap_or_default();
+    let content = &prompt_text(last["content"].as_str().unwrap_or_default());
     if child && last["role"] == "user" {
         if content.contains("IDLE_MODE") {
             state.slow_started.notify_one();

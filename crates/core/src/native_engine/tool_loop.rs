@@ -184,8 +184,6 @@ pub struct ToolLoopExecutor {
     context_reminders: Vec<String>,
     /// Hook context and skill content recorded for earlier user messages.
     turn_context: Vec<crate::services::turn_context::Entry>,
-    /// Memory recall inserted its own user message at index 0 this turn.
-    memory_message_injected: bool,
     reasoning_mode: ReasoningMode,
     prefetch_engine: Option<Arc<PrefetchEngine>>,
     bundled_resources: Arc<crate::skills::bundled_resources::Resources>,
@@ -697,7 +695,6 @@ impl ToolLoopExecutor {
             prompt_profile: PromptProfile::Desktop,
             context_reminders: Vec::new(),
             turn_context: Vec::new(),
-            memory_message_injected: false,
             reasoning_mode,
             prefetch_engine: None,
             bundled_resources: Arc::default(),
@@ -960,14 +957,24 @@ impl ToolLoopExecutor {
         self
     }
 
+    /// Record blocks after the last user message, for this request and, when
+    /// the session is known, for every later one.
+    pub(super) fn attach_turn_context(&mut self, blocks: Vec<String>) -> Result<()> {
+        let Some(entry) = crate::services::turn_context::for_last(&self.messages, blocks) else { return Ok(()) };
+        let saved = match (self.search_config_path.as_deref().and_then(|path| path.parent()), self.conv_id.as_deref()) {
+            (Some(root), Some(session)) => crate::services::turn_context::save(root, session, &entry),
+            _ => Ok(()),
+        };
+        self.turn_context.push(entry);
+        saved
+    }
+
     /// Text blocks to place before and after each message's own content: the
-    /// context reminders open the first user message (not a recalled-memory
-    /// message, which changes from turn to turn), and recorded turn context
-    /// follows the message it was recorded for.
+    /// context reminders open the first user message, and recorded turn
+    /// context follows the message it was recorded for.
     fn message_additions(&self) -> Vec<(Vec<String>, Vec<String>)> {
-        let skip = usize::from(self.memory_message_injected);
         let target = (!self.context_reminders.is_empty()).then(|| {
-            self.messages.iter().enumerate().skip(skip).find(|(_, msg)| msg.get("role").and_then(Value::as_str) == Some("user")).map(|(index, _)| index)
+            self.messages.iter().position(|msg| msg.get("role").and_then(Value::as_str) == Some("user"))
         }).flatten();
         crate::services::turn_context::resolve(&self.turn_context, &self.messages)
             .into_iter()
@@ -1324,14 +1331,19 @@ impl ToolLoopExecutor {
             });
         }
 
-        if let Some(ctx_mgr) = &self.context_manager {
+        // Like the reference CLI, recalled memories follow the user message
+        // they were recalled for and stay there on later turns; a hook wake or
+        // a second run for the same message recalls nothing new.
+        let recall_target = crate::services::turn_context::for_last(&self.messages, Vec::new());
+        let recalled_before = recall_target.as_ref().is_some_and(|target| self.turn_context.iter().any(|entry| {
+            entry.key == target.key && entry.occurrence == target.occurrence && entry.blocks.iter().any(|block| block.contains(crate::memory::RECALL_LEAD_IN))
+        }));
+        if let (Some(ctx_mgr), false, false) = (&self.context_manager, self.require_hook_wake, recalled_before) {
             tracing::info!(module = "ToolLoop", "[E4] Injecting memory context...");
             if let Some(memory_context) = ctx_mgr.before_api_call(&conv_id, &last_user_msg).await {
-                self.messages.insert(0, json!({
-                    "role": "user",
-                    "content": memory_context
-                }));
-                self.memory_message_injected = true;
+                if let Err(error) = self.attach_turn_context(vec![memory_context]) {
+                    tracing::warn!(module = "ToolLoop", "Recalled memories were not saved for later turns: {error:#}");
+                }
             }
         }
         tracing::info!(module = "ToolLoop", "[E4] Memory injection COMPLETED");

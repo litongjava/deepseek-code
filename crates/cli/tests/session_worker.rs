@@ -83,18 +83,29 @@ impl Drop for Cleanup {
     }
 }
 
+/// The user's own text: context reminders (instructions, recalled memories)
+/// may come before or after it in the same message.
+fn prompt_text(content: &str) -> String {
+    let mut text = content.to_owned();
+    while let (Some(start), Some(end)) = (text.find("<system-reminder>"), text.find("</system-reminder>")) {
+        if end < start { break; }
+        text.replace_range(start..end + "</system-reminder>".len(), "");
+    }
+    text.trim().to_owned()
+}
+
 async fn respond(
     State((requests, lsp)): State<(Arc<Mutex<Vec<Value>>>, std::path::PathBuf)>,
     Json(body): Json<Value>,
 ) -> impl axum::response::IntoResponse {
     let slow = body["messages"].as_array().unwrap().last().unwrap()["content"]
         .as_str()
-        .is_some_and(|s| s.contains("slow"));
+        .is_some_and(|s| prompt_text(s).contains("slow"));
     let last = body["messages"].as_array().unwrap().last().unwrap();
     let lsp_turn = last["role"] == "user"
         && last["content"]
             .as_str()
-            .is_some_and(|s| s == "first turn" || s == "second turn");
+            .is_some_and(|s| matches!(prompt_text(s).as_str(), "first turn" | "second turn"));
     requests.lock().unwrap().push(body);
     if lsp_turn {
         let arguments=json!({"server":"node","args":[lsp],"filePath":"fixture.rs","operation":"hover","line":1,"character":1}).to_string();
@@ -210,11 +221,9 @@ async fn scope_respond(
 ) -> impl axum::response::IntoResponse {
     let last = body["messages"].as_array().unwrap().last().unwrap();
     let calls = if last["role"] == "user" {
-        // Context reminders may precede the calls in the first user message.
         last["content"]
             .as_str()
-            .and_then(|s| s.rsplit("</system-reminder>\n\n").next())
-            .and_then(|s| serde_json::from_str::<Value>(s).ok())
+            .and_then(|s| serde_json::from_str::<Value>(&prompt_text(s)).ok())
     } else {
         None
     };

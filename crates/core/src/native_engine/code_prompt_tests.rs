@@ -198,6 +198,12 @@ async fn all_modes_recall_ingest_and_run_memory_tools_on_both_protocols() {
         assert!(first["tools"].to_string().contains("memory_ingest"));
         assert!(first["tools"].to_string().contains("memory_search"));
         assert!(first["messages"].to_string().contains("recallmarker existing architecture"));
+        // Recall follows the prompt in the same user message, on every request of the turn.
+        for request in requests.iter() {
+            let user = request["messages"].as_array().unwrap().iter().find(|m| m["role"] == "user").unwrap().to_string();
+            let (prompt, recall) = (user.find("recallmarker\"").or_else(|| user.find("recallmarker\\n")).unwrap(), user.find(crate::memory::RECALL_LEAD_IN).unwrap());
+            assert!(prompt < recall, "{format} {mode}: {user}");
+        }
         assert!(requests[1]["messages"].to_string().contains("ingested"));
         assert!(requests[2]["messages"].to_string().contains("search_completed"));
         assert!(requests[2]["messages"].to_string().contains("remember toolmemory"));
@@ -290,4 +296,58 @@ async fn context_reminders_open_the_first_user_message() {
         }
         assert_eq!(executor.messages[0], history[0], "{format}: the transcript keeps the user's own text");
     }
+}
+
+/// Recalled memories are saved with the message they were recalled for: a
+/// later turn shows them in the same place once, beside its own recall.
+#[tokio::test]
+async fn recalled_memories_stay_with_their_message_on_later_turns() {
+    use axum::{http::header, routing::post, Json, Router};
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let base = format!("http://{}", listener.local_addr().unwrap());
+    let captured = Arc::new(Mutex::new(Vec::<Value>::new()));
+    let requests = captured.clone();
+    let app = Router::new().route("/v1/messages", post(move |Json(body): Json<Value>| {
+        let requests = requests.clone();
+        async move {
+            requests.lock().await.push(body);
+            let events = [json!({"type":"message_start","message":{"id":"a","model":"code-test","usage":{"input_tokens":1}}}),
+                json!({"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}),
+                json!({"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"done"}}),
+                json!({"type":"content_block_stop","index":0}),
+                json!({"type":"message_delta","delta":{"stop_reason":"end_turn"},"usage":{"output_tokens":1}}),
+                json!({"type":"message_stop"})];
+            ([(header::CONTENT_TYPE, "text/event-stream")], events.iter().map(|event| format!("data: {event}\n\n")).collect::<String>())
+        }
+    }));
+    let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap(); });
+    let temp = tempfile::tempdir().unwrap();
+    let client = MemExClient::with_path(temp.path().join("memory.sqlite3"), None);
+    let mut config = client.get_config().await;
+    config.auto_ingest = false;
+    client.update_config(config).await.unwrap();
+    client.ingest("alphamark uses port 7001", Some(0.9), None).await.unwrap();
+    client.ingest("betamark uses port 7002", Some(0.9), None).await.unwrap();
+    let mut history = vec![json!({"role":"user","content":"alphamark"})];
+    for turn in 0..2 {
+        if turn == 1 {
+            history.extend([json!({"role":"assistant","content":"done"}), json!({"role":"user","content":"betamark"})]);
+        }
+        let (tx, _rx) = mpsc::channel(64);
+        let saved = crate::services::turn_context::load(temp.path(), "recall-session").unwrap();
+        let mut executor = ToolLoopExecutor::new(provider(&base, "anthropic"), history.clone(), None, 128, tx, temp.path().to_string_lossy().into(), ReasoningMode::Standard)
+            .with_memex(client.clone()).with_conv_id("recall-session".into()).with_turn_context(saved)
+            .with_search_config_path(temp.path().join("config.json"));
+        tokio::time::timeout(Duration::from_secs(15), executor.execute()).await.unwrap().unwrap();
+    }
+    server.abort();
+    let requests = captured.lock().await;
+    let last = &requests.last().unwrap()["messages"];
+    let first_message = last[0].to_string();
+    assert_eq!(first_message.matches(crate::memory::RECALL_LEAD_IN).count(), 1, "{first_message}");
+    assert!(first_message.contains("alphamark uses port 7001"));
+    assert!(last[2].to_string().contains("betamark uses port 7002"));
+    // Turn 1's message is sent exactly as it was on turn 1, so the prefix stays cacheable.
+    let strip = |message: &Value| { let mut message = message.clone(); for block in message["content"].as_array_mut().unwrap() { block.as_object_mut().unwrap().remove("cache_control"); } message };
+    assert_eq!(strip(&requests[0]["messages"][0]), strip(&last[0]));
 }

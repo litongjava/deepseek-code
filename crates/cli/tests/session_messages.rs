@@ -59,6 +59,17 @@ fn stream(format: &str, tools: Vec<(&str, &str, Value)>) -> String {
         .map(|v| format!("event: {}\ndata: {v}\n\n", v["type"].as_str().unwrap()))
         .collect()
 }
+/// The user's own text: context reminders (instructions, recalled memories)
+/// may come before or after it in the same message.
+fn prompt_text(content: &str) -> String {
+    let mut text = content.to_owned();
+    while let (Some(start), Some(end)) = (text.find("<system-reminder>"), text.find("</system-reminder>")) {
+        if end < start { break; }
+        text.replace_range(start..end + "</system-reminder>".len(), "");
+    }
+    text.trim().to_owned()
+}
+
 async fn respond(
     State(state): State<Arc<Fixture>>,
     Json(body): Json<Value>,
@@ -66,8 +77,7 @@ async fn respond(
     let sender = body["messages"].as_array().is_some_and(|messages| {
         messages.iter().any(|message| {
             message["role"] == "user"
-                // Context reminders may precede the text in a string body.
-                && (message["content"].as_str().is_some_and(|text| text.ends_with("sender task"))
+                && (message["content"].as_str().is_some_and(|text| prompt_text(text) == "sender task")
                     || message["content"].as_array().is_some_and(|blocks| {
                         blocks.iter().any(|block| block["text"] == "sender task")
                     }))
@@ -432,8 +442,8 @@ async fn resident_owner_resumes_same_child_with_original_provider_after_switch()
                 let child=body.to_string().contains("Child session ID:");requests.lock().unwrap().push((original,body.clone()));
                 let messages=body["messages"].as_array().unwrap();let last=messages.last().unwrap();
                 let tools=if child {assert!(original,"Child must retain its original endpoint");child_calls.fetch_add(1,Ordering::SeqCst);Vec::new()}
-                else if last["role"]=="user" && last["content"]=="create owned child" {vec![("create","Agent",json!({"prompt":"original owned child","run_in_background":false}))]}
-                else if last["role"]=="user" && last["content"]=="continue owned child" {vec![("resume","Agent",json!({"resume":child_id.lock().unwrap().clone().unwrap(),"prompt":"resumed through resident worker"}))]}
+                else if last["role"]=="user" && last["content"].as_str().is_some_and(|text| prompt_text(text)=="create owned child") {vec![("create","Agent",json!({"prompt":"original owned child","run_in_background":false}))]}
+                else if last["role"]=="user" && last["content"].as_str().is_some_and(|text| prompt_text(text)=="continue owned child") {vec![("resume","Agent",json!({"resume":child_id.lock().unwrap().clone().unwrap(),"prompt":"resumed through resident worker"}))]}
                 else {Vec::new()};
                 ([("content-type","text/event-stream")],stream("openai",tools))
             }
