@@ -12,6 +12,8 @@ fn answer(message: &Value) -> Option<Value> {
         "initialize" => json!({"protocolVersion":"2025-06-18","capabilities":{"tools":{}},"serverInfo":{"name":"fixture","version":"1"}}),
         "tools/list" => json!({"tools":[{"name":"echo","description":"Echo text","inputSchema":{"type":"object","properties":{"text":{"type":"string"}}}}]}),
         "tools/call" => json!({"content":[{"type":"text","text":format!("echo: {}", message["params"]["arguments"]["text"].as_str().unwrap_or_default())}]}),
+        "prompts/list" => json!({"prompts":[{"name":"review","description":"Review a PR","arguments":[{"name":"pr","required":true}]}]}),
+        "prompts/get" => json!({"messages":[{"role":"user","content":{"type":"text","text":format!("Review PR {}", message["params"]["arguments"]["pr"].as_str().unwrap_or_default())}}]}),
         _ => return Some(json!({"jsonrpc":"2.0","id":id,"error":{"code":-32601,"message":"unknown"}})),
     };
     Some(json!({"jsonrpc":"2.0","id":id,"result":result}))
@@ -25,6 +27,9 @@ async fn exercise(config: McpServerConfig) {
     assert_eq!(tools[0].name, "echo");
     let result = connector.call_tool("echo", json!({"text":"hi"})).await.unwrap();
     assert!(result.to_string().contains("echo: hi"), "{result}");
+    let prompts = connector.list_prompts().await.unwrap();
+    assert_eq!((prompts[0].name.as_str(), prompts[0].arguments[0].required), ("review", true));
+    assert_eq!(connector.get_prompt("review", json!({"pr":"42"})).await.unwrap(), "Review PR 42");
     connector.stop().await.unwrap();
 }
 

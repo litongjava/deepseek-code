@@ -62,6 +62,25 @@ pub struct McpResource {
     pub mime_type: Option<String>,
 }
 
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct McpPromptArgument {
+    pub name: String,
+    #[serde(default)]
+    pub description: Option<String>,
+    #[serde(default)]
+    pub required: bool,
+}
+
+/// A prompt a server offers; the reference CLI shows it as /mcp__server__name.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct McpPrompt {
+    pub name: String,
+    #[serde(default)]
+    pub description: Option<String>,
+    #[serde(default)]
+    pub arguments: Vec<McpPromptArgument>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct McpResourceContent {
     pub uri: String,
@@ -585,6 +604,29 @@ impl McpServerManager {
         }
     }
 
+    fn running_connector(servers: &HashMap<String, McpServerState>, server_id: &str) -> Result<Arc<Mutex<McpConnector>>> {
+        servers.get(server_id).ok_or_else(|| anyhow!("Server not found: {server_id}"))?
+            .connector.clone().ok_or_else(|| anyhow!("Server not running: {server_id}"))
+    }
+
+    /// Prompts of every running server, as (server id, prompt).
+    pub async fn get_all_prompts(&self) -> Vec<(String, McpPrompt)> {
+        let connectors: Vec<_> = self.servers.read().await.iter().filter_map(|(id, state)| state.connector.clone().map(|c| (id.clone(), c))).collect();
+        let mut prompts = Vec::new();
+        for (id, connector) in connectors {
+            if let Ok(list) = connector.lock().await.list_prompts().await {
+                prompts.extend(list.into_iter().map(|prompt| (id.clone(), prompt)));
+            }
+        }
+        prompts
+    }
+
+    pub async fn get_prompt(&self, server_id: &str, name: &str, arguments: serde_json::Value) -> Result<String> {
+        let connector = Self::running_connector(&*self.servers.read().await, server_id)?;
+        let connector = connector.lock().await;
+        connector.get_prompt(name, arguments).await
+    }
+
     pub async fn toggle_server(&self, id: &str) -> Result<()> {
         self.change_server_enabled(id, None).await
     }
@@ -789,6 +831,30 @@ impl McpConnector {
         let response = self.send_json_rpc(request).await?;
 
         response.result.ok_or_else(|| anyhow!("No result in tool call response"))
+    }
+
+    /// The server's prompts, or none when it does not offer the capability.
+    pub async fn list_prompts(&self) -> Result<Vec<McpPrompt>> {
+        let request = McpJsonRpcRequest { jsonrpc: "2.0".into(), id: self.next_id().await, method: "prompts/list".into(), params: None };
+        let result = match self.send_json_rpc(request).await {
+            Ok(response) => response.result.unwrap_or_default(),
+            // -32601: the server has no prompts.
+            Err(error) if error.to_string().contains("[-32601]") => return Ok(Vec::new()),
+            Err(error) => return Err(error),
+        };
+        Ok(serde_json::from_value(result["prompts"].clone()).unwrap_or_default())
+    }
+
+    /// The prompt's messages as one text, ready to send as the user's turn.
+    pub async fn get_prompt(&self, name: &str, arguments: serde_json::Value) -> Result<String> {
+        let request = McpJsonRpcRequest { jsonrpc: "2.0".into(), id: self.next_id().await, method: "prompts/get".into(), params: Some(serde_json::json!({"name": name, "arguments": arguments})) };
+        let result = self.send_json_rpc(request).await?.result.ok_or_else(|| anyhow!("No result in prompt response"))?;
+        let text = result["messages"].as_array().into_iter().flatten().filter_map(|message| {
+            let content = &message["content"];
+            content["text"].as_str().map(str::to_owned).or_else(|| content["resource"]["text"].as_str().map(str::to_owned))
+        }).collect::<Vec<_>>().join("\n\n");
+        anyhow::ensure!(!text.trim().is_empty(), "MCP prompt {name} returned no text");
+        Ok(text)
     }
 
     pub async fn list_resources(&self) -> Result<Vec<McpResource>> {

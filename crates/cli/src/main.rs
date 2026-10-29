@@ -17,6 +17,7 @@ mod permissions_menu;
 mod startup_prompts;
 mod repl_loop;
 mod command_catalog;
+mod mcp_prompts;
 mod workflow_commands;
 mod interactive_config;
 mod args;
@@ -830,6 +831,16 @@ async fn run(cli: &Cli) -> Result<()> {
                         }
                         None => eprintln!("Usage: /scroll-speed 1-20"),
                     },
+                }
+                continue;
+            }
+            if command.starts_with("/mcp__") {
+                match mcp_prompts::expand(&session, command, argument).await {
+                    Ok(Some(prompt)) => if let Err(error) = session.turn(cli, &prompt, &mut input).await {
+                        if !worker_frontend::already_presented(&error) { eprintln!("Error: {error:#}"); }
+                    },
+                    Ok(None) => {}
+                    Err(error) => eprintln!("Error: {error:#}"),
                 }
                 continue;
             }
