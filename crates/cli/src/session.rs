@@ -1205,10 +1205,9 @@ impl Session {
                                 Err(_) => {}
                             }
                         }
-                        let mut prompt = question;
-                        for (index, option) in options.iter().enumerate() { prompt.push_str(&format!("\n{}. {option}", index+1)); }
+                        let prompt = question_prompt(&question, &options, &tool_input);
                         let answer = if let Some(answer) = claude_core::services::background_sessions::worker_answer(&self.paths.data_dir, &self.id, &request_id, "question", &prompt).await? { answer } else { turn_answer(self, &mut progress, input, prompt).await? };
-                        let answer = answer.trim().parse::<usize>().ok().and_then(|i| i.checked_sub(1)).and_then(|i| options.get(i)).cloned().unwrap_or(answer);
+                        let answer = chosen_options(&answer, &options, tool_input["multiSelect"] == true);
                         self.engine.resume_with_answer(&request_id, answer).await?;
                         progress.set_activity("Composing");
                     },
@@ -1412,6 +1411,41 @@ impl Session {
     }
 }
 
+/// An AskUserQuestion question as terminal text: the header, then numbered
+/// options with their descriptions and previews shown in full, since the
+/// terminal prompt has no per-option focus to reveal them on.
+fn question_prompt(question: &str, options: &[String], input: &Value) -> String {
+    let mut prompt = match input["header"].as_str().filter(|header| !header.trim().is_empty()) {
+        Some(header) => format!("[{header}] {question}"),
+        None => question.to_owned(),
+    };
+    let details = input["options"].as_array();
+    for (index, option) in options.iter().enumerate() {
+        prompt.push_str(&format!("\n{}. {option}", index + 1));
+        let detail = details.and_then(|details| details.get(index));
+        if let Some(description) = detail.and_then(|d| d["description"].as_str()).filter(|d| !d.trim().is_empty()) {
+            prompt.push_str(&format!(" \u{2014} {description}"));
+        }
+        if let Some(preview) = detail.and_then(|d| d["preview"].as_str()).filter(|p| !p.trim().is_empty()) {
+            for line in preview.lines() { prompt.push_str(&format!("\n     \u{2502} {line}")); }
+        }
+    }
+    if input["multiSelect"] == true {
+        prompt.push_str("\n(Choose one or more: numbers separated by commas, or type your own answer.)");
+    }
+    prompt
+}
+
+/// Numbers become option labels; several are allowed for multiSelect.
+/// Anything else is the user's own answer.
+fn chosen_options(answer: &str, options: &[String], multi: bool) -> String {
+    let picks: Option<Vec<&String>> = answer.split(',').map(|part| part.trim().parse::<usize>().ok().and_then(|i| i.checked_sub(1)).and_then(|i| options.get(i))).collect();
+    match picks {
+        Some(picks) if !picks.is_empty() && (multi || picks.len() == 1) => picks.iter().map(|pick| pick.as_str()).collect::<Vec<_>>().join(", "),
+        _ => answer.to_owned(),
+    }
+}
+
 async fn turn_answer(session: &Session, progress: &mut crate::terminal::live::TurnDisplay, input: &mut Option<TerminalInput>, question: String) -> Result<String> {
     if let Some(live)=progress.live.as_ref() {
         let answer=live.question(question);
@@ -1576,6 +1610,20 @@ pub(crate) fn event_json_with(event: &EngineEvent, summaries: bool) -> Option<Va
 
 #[cfg(test)]
 mod event_tests {
+    #[test]
+    fn questions_show_headers_descriptions_previews_and_take_several_numbers() {
+        let options = vec!["Tabs".to_owned(), "Spaces".to_owned(), "Mixed".to_owned()];
+        let input = serde_json::json!({"header":"Indent","multiSelect":true,"options":[{"label":"Tabs","description":"One tab per level","preview":"fn a() {\n\tb();\n}"},{"label":"Spaces","description":"Four spaces"},{"label":"Mixed"}]});
+        let prompt = super::question_prompt("Which indentation?", &options, &input);
+        assert!(prompt.starts_with("[Indent] Which indentation?\n1. Tabs \u{2014} One tab per level\n     \u{2502} fn a() {\n"));
+        assert!(prompt.contains("2. Spaces \u{2014} Four spaces\n3. Mixed\n(Choose one or more"));
+        assert_eq!(super::chosen_options("1, 3", &options, true), "Tabs, Mixed");
+        assert_eq!(super::chosen_options("1, 3", &options, false), "1, 3");
+        assert_eq!(super::chosen_options("2", &options, false), "Spaces");
+        assert_eq!(super::chosen_options("my own", &options, true), "my own");
+        assert_eq!(super::chosen_options("9", &options, false), "9");
+    }
+
     #[test]
     fn only_plain_text_is_read_by_the_running_turn() {
         assert!(super::queues_mid_turn("Also end with BANANA"));
