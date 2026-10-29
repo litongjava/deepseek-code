@@ -1,6 +1,7 @@
-//! Delegate a task to another coding agent installed on this machine: Claude
-//! Code (`claude`) or OpenAI Codex (`codex`). A tool is offered only when its
-//! executable is on PATH; signing in to either agent is left to the user.
+//! Delegate a task to another coding agent installed on this machine:
+//! deepseek-code (`dcl`), Claude Code (`claude`) or OpenAI Codex (`codex`). A
+//! tool is offered only when its executable is on PATH; signing in to an agent
+//! or configuring its provider is left to the user.
 use anyhow::{bail, Context, Result};
 use serde_json::{json, Value};
 use std::time::Duration;
@@ -17,10 +18,21 @@ struct Agent {
     login: &'static str,
 }
 
+/// Set for a `dcl` started by this tool, so it does not offer the tool again.
+const NESTED_ENV: &str = "DCL_EXTERNAL_AGENT";
+
 const AGENTS: &[Agent] = &[
+    Agent { tool: "DeepSeekCode", command: "dcl", name: "deepseek-code", login: "run `dcl` once in a terminal and configure a model provider, or pass its API key settings" },
     Agent { tool: "ClaudeCode", command: "claude", name: "Claude Code", login: "run `claude` once in a terminal and sign in, or set ANTHROPIC_API_KEY" },
     Agent { tool: "Codex", command: "codex", name: "OpenAI Codex", login: "run `codex login`, or configure a model provider in ~/.codex/config.toml" },
 ];
+
+impl Agent {
+    /// `dcl` and `claude` share the headless JSON interface and resumable sessions.
+    fn resumable(&self) -> bool {
+        matches!(self.command, "dcl" | "claude")
+    }
+}
 
 fn agent(tool: &str) -> Option<&'static Agent> {
     AGENTS.iter().find(|agent| agent.tool == tool)
@@ -30,8 +42,9 @@ pub fn is_external_agent(tool: &str) -> bool {
     agent(tool).is_some()
 }
 
-fn schema(name: &str) -> Value {
-    json!({
+fn schema(agent: &Agent) -> Value {
+    let name = agent.name;
+    let mut schema = json!({
         "type": "object",
         "properties": {
             "prompt": {"type": "string", "description": format!("The complete task for {name}. It does not see this conversation, so include every file, constraint and expected result it needs.")},
@@ -41,21 +54,27 @@ fn schema(name: &str) -> Value {
         },
         "required": ["prompt"],
         "additionalProperties": false
-    })
+    });
+    if agent.resumable() {
+        schema["properties"]["session_id"] = json!({"type": "string", "description": format!("Continue the {name} session with this session_id from an earlier result, keeping its context. Omit to start a new session.")});
+    }
+    schema
 }
 
 /// Definitions for the agents installed on this machine.
 pub(super) fn definitions() -> Vec<super::ToolDefinition> {
     AGENTS
         .iter()
+        .filter(|agent| !(agent.command == "dcl" && std::env::var_os(NESTED_ENV).is_some()))
         .filter(|agent| super::lsp_servers::find_on_path(agent.command).is_some())
         .map(|agent| super::ToolDefinition {
             name: agent.tool.into(),
             description: format!(
-                "Delegate a self-contained task to {} (the `{}` CLI installed on this machine) and return its final answer. Use it for a second opinion, a review, or work the user explicitly wants {} to do. It runs non-interactively in the project directory: read-only by default, mode=edit lets it change files. It cannot ask questions, so give it the full context. Requires approval.",
-                agent.name, agent.command, agent.name
+                "Delegate a self-contained task to {} (the `{}` CLI installed on this machine) and return its final answer. Use it for a second opinion, a review, or work the user explicitly wants {} to do. It runs non-interactively in the project directory: read-only by default, mode=edit lets it change files. It cannot ask questions, so give it the full context.{} Requires approval.",
+                agent.name, agent.command, agent.name,
+                if agent.resumable() { format!(" Each call starts a new {} session unless session_id continues an earlier one from a previous result.", agent.name) } else { String::new() }
             ),
-            input_schema: schema(agent.name),
+            input_schema: schema(agent),
         })
         .collect()
 }
@@ -68,13 +87,19 @@ fn arguments(agent: &Agent, input: &Value, prompt: &str, cwd: &str, answer_file:
     };
     let mut args: Vec<String> = Vec::new();
     match agent.command {
-        "claude" => {
-            // Headless Claude Code denies anything that would need approval;
+        "claude" | "dcl" => {
+            // A headless agent denies anything that would need approval;
             // edit mode lets it change files but still not run commands.
             args.extend(["-p", "--output-format", "json", "--permission-mode"].map(String::from));
             args.push(if edit { "acceptEdits" } else { "default" }.into());
+            if let Some(session) = input["session_id"].as_str().filter(|id| !id.trim().is_empty()) {
+                // Session IDs are UUIDs; anything else could be read as an option.
+                uuid::Uuid::parse_str(session.trim()).with_context(|| format!("session_id must be a {} session UUID, not {session}", agent.name))?;
+                args.extend(["--resume".into(), session.trim().into()]);
+            }
         }
         _ => {
+            anyhow::ensure!(input["session_id"].is_null(), "{} sessions cannot be continued from here; start a new one", agent.name);
             args.extend(["exec", "--skip-git-repo-check", "--sandbox"].map(String::from));
             args.push(if edit { "workspace-write" } else { "read-only" }.into());
             args.extend(["--cd".into(), cwd.into(), "--output-last-message".into(), answer_file.to_string_lossy().into_owned()]);
@@ -120,6 +145,9 @@ pub(super) async fn execute(tool: &str, input: Value, cwd: &str) -> Result<Value
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped())
         .kill_on_drop(true);
+    if agent.command == "dcl" {
+        command.env(NESTED_ENV, "1");
+    }
     #[cfg(unix)]
     command.process_group(0);
     #[cfg(windows)]
@@ -136,7 +164,7 @@ pub(super) async fn execute(tool: &str, input: Value, cwd: &str) -> Result<Value
     let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
     let mut cost = None;
     let mut session = None;
-    let (answer, failed) = if agent.command == "claude" {
+    let (answer, failed) = if agent.resumable() {
         match serde_json::from_str::<Value>(stdout.trim()) {
             Ok(result) => {
                 cost = result["total_cost_usd"].as_f64();
@@ -179,11 +207,20 @@ mod tests {
     #[test]
     fn arguments_map_modes_and_keep_the_prompt_after_double_dash() {
         let file = std::path::Path::new("/tmp/answer.txt");
-        let claude = arguments(&AGENTS[0], &json!({"mode":"edit","model":"sonnet"}), "--help me", "/p", file).unwrap();
+        let claude = arguments(&AGENTS[1], &json!({"mode":"edit","model":"sonnet"}), "--help me", "/p", file).unwrap();
         assert_eq!(claude, ["-p", "--output-format", "json", "--permission-mode", "acceptEdits", "--model", "sonnet", "--", "--help me"]);
-        let codex = arguments(&AGENTS[1], &json!({}), "review", "/p", file).unwrap();
+        let codex = arguments(&AGENTS[2], &json!({}), "review", "/p", file).unwrap();
         assert_eq!(codex, ["exec", "--skip-git-repo-check", "--sandbox", "read-only", "--cd", "/p", "--output-last-message", "/tmp/answer.txt", "--", "review"]);
-        assert!(arguments(&AGENTS[1], &json!({"mode":"anything"}), "x", "/p", file).is_err());
+        assert!(arguments(&AGENTS[2], &json!({"mode":"anything"}), "x", "/p", file).is_err());
+        let id = "0cc3f1f4-67cc-4d6d-aa91-953fcc8eb695";
+        for agent in [&AGENTS[0], &AGENTS[1]] {
+            let resumed = arguments(agent, &json!({"session_id":id}), "continue", "/p", file).unwrap();
+            assert_eq!(resumed, ["-p", "--output-format", "json", "--permission-mode", "default", "--resume", id, "--", "continue"]);
+            assert!(arguments(agent, &json!({"session_id":"--dangerously-skip-permissions"}), "x", "/p", file).is_err());
+            assert!(schema(agent)["properties"]["session_id"].is_object());
+        }
+        assert!(arguments(&AGENTS[2], &json!({"session_id":id}), "x", "/p", file).is_err());
+        assert!(schema(&AGENTS[2])["properties"]["session_id"].is_null());
     }
 
     #[tokio::test]
