@@ -61,8 +61,19 @@ pub(super) fn execute(input: Value, cwd: &str) -> Result<Value> {
             .create(true)
             .truncate(false)
             .open(path.with_extension("ipynb.claude-lock"))?;
-        file.try_lock()
-            .context("Notebook is being edited by another process")?;
+        // A child process forked elsewhere briefly holds a copy of the lock
+        // until it execs, so a just-released lock can still look taken.
+        let mut attempts = 0;
+        loop {
+            match file.try_lock() {
+                Ok(()) => break,
+                Err(std::fs::TryLockError::WouldBlock) if attempts < 100 => {
+                    attempts += 1;
+                    std::thread::sleep(std::time::Duration::from_millis(20));
+                }
+                Err(error) => return Err(anyhow::Error::from(error).context("Notebook is being edited by another process")),
+            }
+        }
         Some(file)
     } else {
         None
