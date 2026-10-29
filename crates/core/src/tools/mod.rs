@@ -643,6 +643,21 @@ async fn bash_keeps_its_directory_and_resets_outside_the_project() {
     assert_eq!(tool_bash_async(serde_json::json!({"command":"pwd -P"}), cwd).await.unwrap()["stdout"].as_str().unwrap().trim(), cwd);
 }
 
+/// cmd: appends the directory bookkeeping with `&`, the weakest operator, so
+/// the command parses as before. `%^errorlevel%` survives the command line's
+/// first expansion and `call` expands it after the command ran, which keeps
+/// the command's exit code.
+fn cmd_cwd_footer(command: &str, state: &str) -> String {
+    format!("{command} & call set \"__dcl_rc=%^errorlevel%\" & cd > \"{state}\" & call exit /b %^__dcl_rc%")
+}
+
+#[cfg(test)]
+#[test]
+fn cmd_footer_appends_without_regrouping_the_command() {
+    let footer = cmd_cwd_footer("chcp 65001 >nul & cd sub && dir || echo no", r"C:\data\shell-cwd\s");
+    assert_eq!(footer, r#"chcp 65001 >nul & cd sub && dir || echo no & call set "__dcl_rc=%^errorlevel%" & cd > "C:\data\shell-cwd\s" & call exit /b %^__dcl_rc%"#);
+}
+
 /// PowerShell keeps its directory too; runs where pwsh is installed.
 #[cfg(all(test, unix))]
 #[tokio::test]
@@ -1016,13 +1031,12 @@ async fn tool_bash_async(input: serde_json::Value, cwd: &str) -> Result<serde_js
         cwd.to_string()
     };
     // Like the reference CLI, a foreground shell keeps its working directory
-    // between calls; the engine passes a per-session state file. cmd is left
-    // out: it cannot report the directory without changing how the command
-    // itself is parsed.
+    // between calls; the engine passes a per-session state file.
     let shell_name = shell_type.to_lowercase();
     let powershell = flag == "-Command";
+    let cmd_shell = flag == "/C" && cfg!(windows);
     let cwd_state = input["__cwd_state"].as_str().map(PathBuf::from)
-        .filter(|_| !background && (powershell || (flag == "-c" && matches!(shell_name.as_str(), "bash" | "sh" | "zsh"))));
+        .filter(|_| !background && (powershell || cmd_shell || (flag == "-c" && matches!(shell_name.as_str(), "bash" | "sh" | "zsh"))));
     let saved_cwd = |state: &PathBuf| fs::read_to_string(state).ok().map(|text| text.trim_start_matches('\u{feff}').trim().to_owned());
     let safe_cwd = match cwd_state.as_ref().and_then(saved_cwd) {
         Some(saved) if Path::new(&saved).is_dir() && is_path_allowed(Path::new(&saved), cwd) => saved,
@@ -1067,6 +1081,7 @@ async fn tool_bash_async(input: serde_json::Value, cwd: &str) -> Result<serde_js
             "{command}\n$__dcl_ok = $?; $__dcl_code = $global:LASTEXITCODE\ntry {{ [System.IO.File]::WriteAllText('{}', (Get-Location).ProviderPath) }} catch {{}}\nif (-not $__dcl_ok) {{ if ($__dcl_code) {{ exit $__dcl_code }} else {{ exit 1 }} }}",
             state.to_string_lossy().replace('\'', "''")
         ),
+        Some(state) if cmd_shell => cmd_cwd_footer(&command, &state.to_string_lossy()),
         // Git Bash on Windows prints C:/... with -W; elsewhere -P is the path.
         Some(state) => format!(
             "{command}\n__dcl_status=$?\n{} > '{}' 2>/dev/null\nexit $__dcl_status",
