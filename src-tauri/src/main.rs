@@ -85,6 +85,10 @@ async fn cleanup_all_processes(app_handle: &tauri::AppHandle) {
 }
 
 fn main() {
+    // Inside a sandbox with a domain allowlist: carry the proxy, then run the command.
+    if let Some(code) = claude_core::tools::sandbox::run_bridge_from_args() {
+        std::process::exit(code);
+    }
     init_tracing();
 
     std::panic::set_hook(Box::new(|info| {

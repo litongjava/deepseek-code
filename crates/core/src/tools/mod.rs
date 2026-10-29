@@ -1058,7 +1058,16 @@ async fn tool_bash_async(input: serde_json::Value, cwd: &str) -> Result<serde_js
         background_shell::start(cmd, input.get("timeout").filter(|value| !value.is_null()).map(|_| timeout), shell_type, &description, &command)
     } else {
         // Ctrl+B can move it to the background while it runs.
+        let filtered = input.get("__sandbox").filter(|policy| policy["network_rules"].is_object() && input["dangerouslyDisableSandbox"] != true);
+        let mark = filtered.map(sandbox::blocked_mark);
         let mut result = background_shell::run_foreground(cmd, timeout, shell_type, &description, &command).await?;
+        // Name refused hosts: an HTTPS client often reports only a reset.
+        if let (Some(policy), Some(mark)) = (filtered, mark) {
+            let hosts = sandbox::blocked_since(policy, mark);
+            if let (false, Some(object)) = (hosts.is_empty(), result.as_object_mut()) {
+                object.insert("sandbox_network".into(), serde_json::json!(format!("The sandbox blocked network access to {}: not in sandbox.network.allowedDomains (or listed in deniedDomains) in settings.json. Ask the user to allow the domain; do not retry with other hosts.", hosts.join(", "))));
+            }
+        }
         if let Some(state) = &cwd_state {
             let moved = fs::read_to_string(state).ok().map(|dir| dir.trim().to_owned());
             if moved.as_deref().is_some_and(|dir| !is_path_allowed(Path::new(dir), cwd)) {

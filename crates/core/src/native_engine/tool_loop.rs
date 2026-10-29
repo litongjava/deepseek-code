@@ -359,7 +359,7 @@ fn shell_state_input(name: &str, input: &Value, cwd: &str, search_config_path: O
             input["__cwd_state"] = json!(root.join("shell-cwd").join(session).to_string_lossy());
             let _ = std::fs::create_dir_all(root.join("shell-cwd"));
             let settings = crate::tools::sandbox::settings(root, std::path::Path::new(cwd));
-            if let Some(policy) = crate::tools::sandbox::policy(&settings, std::path::Path::new(cwd), &[root.join("shell-cwd")]) {
+            if let Some(policy) = crate::tools::sandbox::policy(&settings, std::path::Path::new(cwd), root, &[root.join("shell-cwd")]) {
                 input["__sandbox"] = policy;
             }
         }

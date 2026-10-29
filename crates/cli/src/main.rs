@@ -85,6 +85,10 @@ use std::{
 
 #[tokio::main]
 async fn main() -> std::process::ExitCode {
+    // Inside a sandbox with a domain allowlist: carry the proxy, then run the command.
+    if let Some(code) = claude_core::tools::sandbox::run_bridge_from_args() {
+        return std::process::ExitCode::from(code.clamp(0, 255) as u8);
+    }
     match claude_core::services::batch::run_worker_from_env() {
         Ok(true) => return std::process::ExitCode::SUCCESS,
         Ok(false) => {},
