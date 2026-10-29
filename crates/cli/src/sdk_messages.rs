@@ -220,7 +220,7 @@ pub fn result_subtype(error: Option<&str>) -> &'static str {
 }
 
 /// Engine wording for a tool call refused by rules, modes, hooks or the host.
-fn is_permission_denial(output: &str) -> bool {
+pub(crate) fn is_permission_denial(output: &str) -> bool {
     ["Permission denied: ", "Tool approval failed: ", "Permission to use "]
         .iter()
         .any(|prefix| output.starts_with(prefix))

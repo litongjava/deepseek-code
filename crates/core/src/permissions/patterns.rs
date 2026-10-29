@@ -38,9 +38,20 @@ impl Rule {
                 !content.trim().is_empty(),
                 "Permission pattern cannot be empty"
             );
+            // As in the reference CLI: WebFetch(domain:example.com), with
+            // *.example.com for its subdomains.
+            if tool == "WebFetch" {
+                let domain = content.strip_prefix("domain:").ok_or_else(|| anyhow::anyhow!("WebFetch rules take the form WebFetch(domain:example.com)"))?;
+                let host = domain.strip_prefix("*.").unwrap_or(domain);
+                ensure!(
+                    !host.is_empty() && host.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '.')),
+                    "Invalid domain in WebFetch rule: {domain}"
+                );
+                return Ok(Self { tool: tool.into(), content: Some(content.to_ascii_lowercase()) });
+            }
             ensure!(
                 matches!(tool, "Bash" | "Read" | "Edit" | "Write" | "MultiEdit"),
-                "Patterns are supported for Bash, Read, Edit, Write and MultiEdit only"
+                "Patterns are supported for Bash, Read, Edit, Write, MultiEdit and WebFetch(domain:...) only"
             );
             let mut decoded = String::new();
             let mut chars = content.chars().peekable();
@@ -97,6 +108,17 @@ impl Rule {
         let Some(pattern) = &self.content else {
             return true;
         };
+        if self.tool == "WebFetch" {
+            let domain = pattern.strip_prefix("domain:").unwrap_or(pattern);
+            let Some(host) = context.tool_input["url"].as_str().and_then(|url| reqwest::Url::parse(url).ok()).and_then(|url| url.host_str().map(|host| host.trim_end_matches('.').to_ascii_lowercase())) else {
+                // An unparsable URL never matches a grant, but does match a deny or ask.
+                return *action != PermissionAction::Allow;
+            };
+            return match domain.strip_prefix("*.") {
+                Some(suffix) => host.ends_with(&format!(".{suffix}")),
+                None => host == domain,
+            };
+        }
         if self.tool == "Bash" {
             let Some(command) = context.tool_input["command"].as_str() else {
                 return false;
@@ -339,10 +361,27 @@ mod tests {
             "Unknown(*)",
             "Bash(echo (x))",
             "Bash\n",
+            "WebFetch(example.com)",
+            "WebFetch(domain:)",
+            "WebFetch(domain:exa mple.com)",
         ] {
             assert!(Rule::parse(text).is_err(), "{text}");
         }
         assert!(Rule::parse(r"Bash(echo \(x\))").is_ok());
+    }
+
+    #[test]
+    fn web_fetch_rules_match_domains() {
+        let fetch = |url: &str| context("WebFetch", json!({"url": url, "prompt": "p"}), Path::new("."));
+        let exact = Rule::parse("WebFetch(domain:Docs.rs)").unwrap();
+        assert!(exact.matches(&fetch("https://docs.rs/serde"), &PermissionAction::Allow));
+        assert!(!exact.matches(&fetch("https://evil-docs.rs/"), &PermissionAction::Allow));
+        assert!(!exact.matches(&fetch("https://api.docs.rs/"), &PermissionAction::Allow));
+        let wildcard = Rule::parse("WebFetch(domain:*.github.com)").unwrap();
+        assert!(wildcard.matches(&fetch("https://api.github.com/x"), &PermissionAction::Deny));
+        assert!(!wildcard.matches(&fetch("https://github.com/"), &PermissionAction::Deny));
+        assert!(!exact.matches(&fetch("not a url"), &PermissionAction::Allow));
+        assert!(exact.matches(&fetch("not a url"), &PermissionAction::Deny));
     }
 
     #[test]

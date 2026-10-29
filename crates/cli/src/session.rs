@@ -932,6 +932,8 @@ impl Session {
         let mut plan_mode_after: Option<(String, &'static str)> = None;
         let mut sdk_messages = (cli.output_format == OutputFormat::StreamJson)
             .then(|| crate::sdk_messages::Translator::new(&self.id, cli.include_partial_messages));
+        // num_turns and permission_denials for the json result, as stream-json reports them.
+        let (mut model_rounds, mut round_open, mut denials) = (0u32, false, Vec::<Value>::new());
         let mut refresh = tokio::time::interval(std::time::Duration::from_secs(1));
         refresh.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
         let mut remote_interrupts = self.remote_interrupts();
@@ -1005,6 +1007,17 @@ impl Session {
                     if let Some(value) = event_json_with(&event, self.sdk_overrides.agent_progress_summaries) { emit_json(&value)?; }
                 }
                 if let Some(translator) = sdk_messages.as_mut() { translator.observe(&event)?; }
+                match &event {
+                    // A provider may announce one round twice; count it once.
+                    EngineEvent::MessageStart { .. } if !round_open => { model_rounds += 1; round_open = true; }
+                    EngineEvent::MessageStart { .. } => {}
+                    EngineEvent::ToolUseDone { tool_use_id, tool_name, tool_input, output, is_error: true } if crate::sdk_messages::is_permission_denial(output) => {
+                        round_open = false;
+                        denials.push(json!({"tool_name":tool_name,"tool_use_id":tool_use_id,"tool_input":tool_input}));
+                    }
+                    EngineEvent::Text(_) | EngineEvent::ToolUseStart { .. } | EngineEvent::ToolUseDone { .. } | EngineEvent::MessageStop { .. } => round_open = false,
+                    _ => {}
+                }
                 match event {
                     EngineEvent::Text(delta) => {
                         let delta = if std::mem::take(&mut separate_text) && !text.is_empty() && !text.ends_with('\n') { format!("\n\n{delta}") } else { delta };
@@ -1363,8 +1376,8 @@ impl Session {
                     let elapsed = started.elapsed().as_millis() as u64;
                     emit_json(
                         &json!({"type":"result","subtype":crate::sdk_messages::result_subtype(error.as_deref()),"session_id":self.id,"result":text,"is_error":error.is_some(),"error":error,"usage":usage,
-                            "duration_ms":elapsed,"duration_api_ms":elapsed,"num_turns":sdk_messages.as_ref().map_or(0, |t| t.turns),"total_cost_usd":cost,
-                            "stop_reason":stop,"permission_denials":sdk_messages.as_ref().map_or(Vec::new(), |t| t.denials.clone()),"uuid":uuid::Uuid::new_v4().to_string(),
+                            "duration_ms":elapsed,"duration_api_ms":elapsed,"num_turns":sdk_messages.as_ref().map_or(model_rounds, |t| t.turns),"total_cost_usd":cost,
+                            "stop_reason":stop,"permission_denials":sdk_messages.as_ref().map_or_else(|| denials.clone(), |t| t.denials.clone()),"uuid":uuid::Uuid::new_v4().to_string(),
                             "structured_output":if error.is_none() && structured_output {serde_json::from_str::<Value>(&text).ok()} else {None}}),
                     )?
                 },
