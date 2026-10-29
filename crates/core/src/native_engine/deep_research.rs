@@ -851,7 +851,9 @@ mod tests {
         assert_eq!(state.dropped_sources, 0);
         assert_eq!(run.fixture.requests.lock().unwrap().len(), 22);
         assert_eq!(run.fixture.searches.load(Ordering::SeqCst), 6);
-        assert_eq!(run.fixture.fetches.load(Ordering::SeqCst), 4);
+        // Every fetch task reads the same fixture URL; WebFetch's 15-minute
+        // cache serves the repeats without another download.
+        assert_eq!(run.fixture.fetches.load(Ordering::SeqCst), 1);
         assert!(state
             .tasks
             .iter()

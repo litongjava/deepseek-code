@@ -3,7 +3,7 @@ use anyhow::{anyhow, bail, Result};
 use futures::{stream::FuturesUnordered, StreamExt};
 use scraper::{ElementRef, Html, Selector};
 use serde_json::{json, Value};
-use std::{collections::HashSet, io::Read, time::Duration};
+use std::{collections::{HashMap, HashSet}, io::Read, sync::{LazyLock, Mutex}, time::{Duration, Instant}};
 
 const MAX_RESPONSE_BYTES: usize = 2 * 1024 * 1024;
 const DEFAULT_CHARS: usize = 12_000;
@@ -18,6 +18,68 @@ fn http_url(url: &str) -> Result<reqwest::Url> {
         bail!("Only HTTP(S) URLs are supported");
     }
     Ok(parsed)
+}
+
+/// URLs the model fetches, as in the reference CLI: HTTP is upgraded to
+/// HTTPS, and localhost, private addresses and hostnames without a dot are
+/// refused (use curl via Bash for a local server).
+/// `allow_loopback` is only for this crate's tests, whose fixture servers
+/// listen on 127.0.0.1.
+pub(super) fn model_url(url: &str, allow_loopback: bool) -> Result<String> {
+    let mut parsed = http_url(url)?;
+    let test_fixture = allow_loopback && parsed.host_str().and_then(|host| host.parse::<std::net::Ipv4Addr>().ok()).is_some_and(|ip| ip.is_loopback());
+    if parsed.scheme() == "http" && !test_fixture {
+        parsed.set_scheme("https").map_err(|_| anyhow!("Cannot upgrade {url} to HTTPS"))?;
+    }
+    let host = parsed.host_str().unwrap_or_default().trim_end_matches('.').to_ascii_lowercase();
+    let private = match host.trim_matches(|c| c == '[' || c == ']').parse::<std::net::IpAddr>() {
+        Ok(std::net::IpAddr::V4(ip)) => (ip.is_loopback() && !allow_loopback) || ip.is_private() || ip.is_link_local() || ip.is_unspecified(),
+        Ok(std::net::IpAddr::V6(ip)) => ip.is_loopback() || ip.is_unspecified() || (ip.segments()[0] & 0xfe00) == 0xfc00 || (ip.segments()[0] & 0xffc0) == 0xfe80,
+        Err(_) => host == "localhost" || host.ends_with(".localhost") || !host.contains('.'),
+    };
+    if private {
+        bail!("WebFetch cannot open localhost, private addresses or hostnames without a dot ({host}); for a local server, use curl via Bash");
+    }
+    Ok(parsed.to_string())
+}
+
+const CACHE_TTL: Duration = Duration::from_secs(15 * 60);
+const CACHE_ENTRIES: usize = 32;
+
+/// Final URL, content type, body and whether the body was cut at the limit.
+type Page = (String, String, Vec<u8>, bool);
+
+/// Downloads are reused for 15 minutes per URL, as in the reference CLI.
+static CACHE: LazyLock<Mutex<HashMap<String, (Instant, Page)>>> = LazyLock::new(Default::default);
+
+fn cached(url: &str) -> Option<Page> {
+    let cache = CACHE.lock().unwrap_or_else(|e| e.into_inner());
+    cache.get(url).filter(|(at, _)| at.elapsed() < CACHE_TTL).map(|(_, page)| page.clone())
+}
+
+fn remember(url: &str, page: &Page) {
+    let mut cache = CACHE.lock().unwrap_or_else(|e| e.into_inner());
+    cache.retain(|_, (at, _)| at.elapsed() < CACHE_TTL);
+    if cache.len() >= CACHE_ENTRIES {
+        if let Some(oldest) = cache.iter().min_by_key(|(_, (at, _))| *at).map(|(key, _)| key.clone()) { cache.remove(&oldest); }
+    }
+    cache.insert(url.to_owned(), (Instant::now(), page.clone()));
+}
+
+/// Same-host redirects are followed; a redirect to another host is returned
+/// to the model instead, which can fetch it explicitly.
+fn redirect_policy() -> reqwest::redirect::Policy {
+    reqwest::redirect::Policy::custom(|attempt| {
+        let same_host = attempt.previous().first().and_then(|first| first.host_str()) == attempt.url().host_str();
+        if attempt.previous().len() >= 10 { attempt.error("too many redirects") } else if same_host { attempt.follow() } else { attempt.stop() }
+    })
+}
+
+fn cross_host_redirect(from: &str, status: reqwest::StatusCode, location: Option<&str>) -> Option<Value> {
+    if !status.is_redirection() { return None; }
+    let target = location.and_then(|location| reqwest::Url::parse(from).ok()?.join(location).ok()).map(|url| url.to_string())?;
+    Some(json!({"url":from,"redirect_url":target,"status":status.as_u16(),
+        "content":format!("The page redirects to a different host: {target}. Call WebFetch again with that URL to follow it.")}))
 }
 
 fn selector(value: &str) -> Selector {
@@ -190,30 +252,45 @@ pub(super) async fn fetch(input: Value) -> Result<Value> {
             .as_str()
             .ok_or_else(|| anyhow!("url required"))?,
     )?;
-    let client = reqwest::Client::builder()
-        .timeout(FETCH_TIMEOUT)
-        .connect_timeout(Duration::from_secs(4))
-        .user_agent(USER_AGENT)
-        .build()?;
-    let mut request = client.get(url);
-    if let Some(headers) = input["headers"].as_object() {
-        for (key, value) in headers {
-            if let Some(value) = value.as_str() {
-                request = request.header(key, value);
+    let cacheable = input["headers"].as_object().map_or(true, |headers| headers.is_empty());
+    let page = match cacheable.then(|| cached(url.as_str())).flatten() {
+        Some(page) => page,
+        None => {
+            let client = reqwest::Client::builder()
+                .timeout(FETCH_TIMEOUT)
+                .connect_timeout(Duration::from_secs(4))
+                .user_agent(USER_AGENT)
+                .redirect(redirect_policy())
+                .build()?;
+            let mut request = client.get(url.clone());
+            if let Some(headers) = input["headers"].as_object() {
+                for (key, value) in headers {
+                    if let Some(value) = value.as_str() {
+                        request = request.header(key, value);
+                    }
+                }
             }
+            let response = request.send().await?;
+            let location = response.headers().get("location").and_then(|v| v.to_str().ok()).map(str::to_owned);
+            if let Some(redirect) = cross_host_redirect(response.url().as_str(), response.status(), location.as_deref()) {
+                return Ok(redirect);
+            }
+            let response = response.error_for_status()?;
+            let final_url = response.url().to_string();
+            let content_type = response
+                .headers()
+                .get("content-type")
+                .and_then(|v| v.to_str().ok())
+                .unwrap_or("text/plain")
+                .to_string();
+            let (bytes, truncated) = read_bounded(response).await?;
+            let page = (final_url, content_type, bytes, truncated);
+            if cacheable { remember(url.as_str(), &page); }
+            page
         }
-    }
-    let response = request.send().await?.error_for_status()?;
-    let url = response.url().to_string();
-    let content_type = response
-        .headers()
-        .get("content-type")
-        .and_then(|v| v.to_str().ok())
-        .unwrap_or("text/plain")
-        .to_string();
-    let (bytes, truncated) = read_bounded(response).await?;
+    };
     // Parsing a large document is CPU work; keep it off the async executor.
-    tokio::task::spawn_blocking(move || page_result(&input, &url, &content_type, &bytes, truncated))
+    tokio::task::spawn_blocking(move || page_result(&input, &page.0, &page.1, &page.2, page.3))
         .await?
 }
 
@@ -223,12 +300,17 @@ pub(super) fn fetch_blocking(input: Value) -> Result<Value> {
             .as_str()
             .ok_or_else(|| anyhow!("url required"))?,
     )?;
+    let cacheable = input["headers"].as_object().map_or(true, |headers| headers.is_empty());
+    if let Some(page) = cacheable.then(|| cached(url.as_str())).flatten() {
+        return page_result(&input, &page.0, &page.1, &page.2, page.3);
+    }
     let client = reqwest::blocking::Client::builder()
         .timeout(FETCH_TIMEOUT)
         .connect_timeout(Duration::from_secs(4))
         .user_agent(USER_AGENT)
+        .redirect(redirect_policy())
         .build()?;
-    let mut request = client.get(url);
+    let mut request = client.get(url.clone());
     if let Some(headers) = input["headers"].as_object() {
         for (key, value) in headers {
             if let Some(value) = value.as_str() {
@@ -236,8 +318,13 @@ pub(super) fn fetch_blocking(input: Value) -> Result<Value> {
             }
         }
     }
-    let response = request.send()?.error_for_status()?;
-    let url = response.url().to_string();
+    let response = request.send()?;
+    let location = response.headers().get("location").and_then(|v| v.to_str().ok()).map(str::to_owned);
+    if let Some(redirect) = cross_host_redirect(response.url().as_str(), response.status(), location.as_deref()) {
+        return Ok(redirect);
+    }
+    let response = response.error_for_status()?;
+    let final_url = response.url().to_string();
     let content_type = response
         .headers()
         .get("content-type")
@@ -250,7 +337,9 @@ pub(super) fn fetch_blocking(input: Value) -> Result<Value> {
         .read_to_end(&mut bytes)?;
     let truncated = bytes.len() > MAX_RESPONSE_BYTES;
     bytes.truncate(MAX_RESPONSE_BYTES);
-    page_result(&input, &url, &content_type, &bytes, truncated)
+    let page = (final_url, content_type, bytes, truncated);
+    if cacheable { remember(url.as_str(), &page); }
+    page_result(&input, &page.0, &page.1, &page.2, page.3)
 }
 
 fn clipped(value: &str, limit: usize) -> String {
@@ -521,6 +610,40 @@ mod tests {
                 .await
                 .is_err()
         );
+        server.abort();
+    }
+
+    #[test]
+    fn model_urls_upgrade_to_https_and_refuse_local_hosts() {
+        assert_eq!(model_url("http://example.com/a?b=1", false).unwrap(), "https://example.com/a?b=1");
+        assert_eq!(model_url("https://docs.rs/", false).unwrap(), "https://docs.rs/");
+        assert_eq!(model_url("http://127.0.0.1:8080/", true).unwrap(), "http://127.0.0.1:8080/");
+        assert!(model_url("http://localhost/", true).is_err());
+        for url in ["http://localhost:3000/", "https://intranet/", "http://127.0.0.1/", "http://192.168.1.2/", "http://[::1]/", "http://app.localhost/", "ftp://example.com/"] {
+            assert!(model_url(url, false).is_err(), "{url}");
+        }
+    }
+
+    #[tokio::test]
+    async fn fetch_caches_pages_and_returns_cross_host_redirects() {
+        let hits = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let counter = hits.clone();
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let app = axum::Router::new()
+            .route("/page", axum::routing::get(move || { counter.fetch_add(1, std::sync::atomic::Ordering::SeqCst); async { "cached body" } }))
+            .route("/same", axum::routing::get(|| async { axum::response::Redirect::temporary("/page") }))
+            .route("/away", axum::routing::get(move || async move { axum::response::Redirect::temporary(&format!("http://localhost:{port}/page")) }));
+        let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap(); });
+        let base = format!("http://127.0.0.1:{port}");
+        for _ in 0..2 {
+            assert_eq!(fetch(json!({"url":format!("{base}/page")})).await.unwrap()["content"], "cached body");
+        }
+        assert_eq!(hits.load(std::sync::atomic::Ordering::SeqCst), 1);
+        assert_eq!(fetch(json!({"url":format!("{base}/same")})).await.unwrap()["content"], "cached body");
+        let away = fetch(json!({"url":format!("{base}/away")})).await.unwrap();
+        assert_eq!(away["redirect_url"], format!("http://localhost:{port}/page"));
+        assert!(away["content"].as_str().unwrap().contains("different host"));
         server.abort();
     }
 

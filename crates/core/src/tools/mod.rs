@@ -152,7 +152,7 @@ pub fn get_tool_definitions() -> Vec<ToolDefinition> {
         },
         ToolDefinition {
             name: "WebFetch".to_string(),
-            description: "Fetches a URL, converts the page to readable text, and answers `prompt` against it using the session's model.\n\n- Fails on authenticated/private URLs — use an authenticated MCP tool or `gh` for those instead.\n- For a local server, use curl via Bash.\n- Long pages are read in parts: when the result has next_offset, call again with it as offset.".to_string(),
+            description: "Fetches a URL, converts the page to readable text, and answers `prompt` against it using the session's model.\n\n- Fails on authenticated/private URLs — use an authenticated MCP tool or `gh` for those instead.\n- Fails on localhost, private addresses and other hostnames without a dot; for a local server, use curl via Bash.\n- HTTP is upgraded to HTTPS. Cross-host redirects are returned to you rather than followed; call again with the redirect URL.\n- Responses are cached for 15 minutes per URL.\n- Long pages are read in parts: when the result has next_offset, call again with it as offset.".to_string(),
             input_schema: serde_json::json!({
                 "type": "object",
                 "properties": {
@@ -1175,8 +1175,14 @@ pub fn filter_search_domains(result: &mut serde_json::Value, input: &serde_json:
     }
 }
 
-fn tool_web_fetch_blocking(input: serde_json::Value) -> Result<serde_json::Value> { web::fetch_blocking(input) }
-async fn tool_web_fetch_async(input: serde_json::Value) -> Result<serde_json::Value> { web::fetch(input).await }
+/// The model's WebFetch: the URL policy applies before any request is made.
+fn model_fetch_input(mut input: serde_json::Value) -> Result<serde_json::Value> {
+    let url = input["url"].as_str().ok_or_else(|| anyhow!("url required"))?;
+    input["url"] = serde_json::json!(web::model_url(url, cfg!(test))?);
+    Ok(input)
+}
+fn tool_web_fetch_blocking(input: serde_json::Value) -> Result<serde_json::Value> { web::fetch_blocking(model_fetch_input(input)?) }
+async fn tool_web_fetch_async(input: serde_json::Value) -> Result<serde_json::Value> { web::fetch(model_fetch_input(input)?).await }
 fn tool_web_search_blocking(_input: serde_json::Value) -> Result<serde_json::Value> {
     Err(anyhow!("WebSearch requires a conversation provider and its search settings. Start search from a conversation."))
 }
