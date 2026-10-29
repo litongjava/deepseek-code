@@ -560,6 +560,10 @@ async fn run(cli: &Cli) -> Result<()> {
         let mut loops: Vec<(std::time::Duration, String, std::time::Instant)> = Vec::new();
         background_refresh.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
         let mut remote = remote_commands::Remote::default();
+        // As in the reference CLI, remoteControlAtStartup connects every session.
+        if remote_commands::at_startup(&paths.data_dir) {
+            if let Err(error) = remote.command("", &paths, &session, &mut input).await { eprintln!("Remote Control: {error:#}"); }
+        }
         let mut last_config_error = String::new();
         terminal::tips::start_session(&paths.data_dir);
         // Lets other sessions see this one is open while it is idle.

@@ -12,6 +12,14 @@ use serde_json::{json, Value};
 
 const USAGE: &str = "Usage: /remote-control [NAME] [--server URL [--save]] | status | disconnect | server [URL|clear]";
 
+/// The reference CLI's remoteControlAtStartup, read from user settings
+/// only: a project file must not connect a session to a remote server.
+pub fn at_startup(data_dir: &std::path::Path) -> bool {
+    std::fs::read(data_dir.join("settings.json")).ok()
+        .and_then(|bytes| serde_json::from_slice::<serde_json::Value>(&bytes).ok())
+        .is_some_and(|settings| settings["remoteControlAtStartup"] == true)
+}
+
 #[derive(Default)]
 pub struct Remote {
     bridge: Option<Bridge>,
@@ -378,6 +386,16 @@ fn turn_result(new_rows: &[Value]) -> Option<Value> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn startup_connection_follows_user_settings_only() {
+        let data = tempfile::tempdir().unwrap();
+        assert!(!super::at_startup(data.path()));
+        std::fs::write(data.path().join("settings.json"), r#"{"remoteControlAtStartup":true}"#).unwrap();
+        assert!(super::at_startup(data.path()));
+        std::fs::write(data.path().join("settings.json"), r#"{"remoteControlAtStartup":"yes"}"#).unwrap();
+        assert!(!super::at_startup(data.path()));
+    }
+
     use super::*;
 
     #[test]
