@@ -602,6 +602,36 @@ pub async fn context_status(session: &Session) -> Option<String> {
     context_note(left, percent.is_some())
 }
 
+/// Whether a turn failed because the request no longer fits the model's
+/// context window, as reported by the engine or the provider.
+pub fn is_context_overflow(error: &anyhow::Error) -> bool {
+    let text = format!("{error:#}").to_ascii_lowercase();
+    ["exceeds the configured context window", "prompt is too long", "context_length_exceeded", "maximum context length", "input is too long"]
+        .iter()
+        .any(|needle| text.contains(needle))
+}
+
+/// As the reference CLI's reactive compact: when a request overflows the
+/// context window, drop the failed attempt, compact the earlier conversation
+/// the way autocompact does, and let the caller send the prompt again. False
+/// (with nothing changed) when there is no earlier conversation to compact.
+pub async fn reactive_compact(session: &Session, prompt: &str) -> Result<bool> {
+    use claude_core::db::message_repo;
+    let rows = session.store.db.with_conn(|conn| message_repo::get_messages_by_conversation(conn, &session.id))??;
+    let start = rows.iter().rposition(|row| row.is_compact_boundary).unwrap_or(0);
+    let Some(index) = rows.iter().rposition(|row| row.role == "user") else { return Ok(false) };
+    if rows[index].content != prompt || index <= start + 1 {
+        return Ok(false);
+    }
+    crate::compaction::notice("Context limit reached; compacting the conversation and retrying…");
+    let failed_attempt = rows[index].sort_order;
+    session.store.db.with_conn(|conn| message_repo::delete_messages_from(conn, &session.id, failed_attempt))??;
+    let context = crate::services::context(&session.paths)?;
+    let report = crate::hook_progress::during(&session.id, true, claude_core::services::compaction::compact_with_hooks(&session.engine, &context, &session.workspace, &session.id, &session.provider_id, &session.model, "", "auto")).await?;
+    for warning in report.warnings { crate::compaction::notice(&format!("Hook: {warning}")); }
+    Ok(true)
+}
+
 /// Run before assembling the next request so the compact boundary is reflected
 /// in model_history. The original transcript remains available to Desktop.
 pub async fn prepare_turn(session: &Session, context_window: Option<u32>) -> Result<()> {
@@ -635,6 +665,10 @@ mod tests {
     fn context_notes_match_the_reference_wording() {
         assert_eq!(context_note(21, true), None);
         assert_eq!(context_note(12, true).as_deref(), Some("12% until auto-compact"));
+        for overflow in ["Input plus output budget exceeds the configured context window; compact the conversation", "Model API error 400: prompt is too long: 210000 tokens > 200000 maximum", "This model's maximum context length is 65536 tokens"] {
+            assert!(is_context_overflow(&anyhow::anyhow!(overflow.to_owned())), "{overflow}");
+        }
+        assert!(!is_context_overflow(&anyhow::anyhow!("Model API error 429: rate limited")));
         assert_eq!(context_note(5, false).as_deref(), Some("Context low (5% remaining) \u{b7} Run /compact to compact & continue"));
     }
 

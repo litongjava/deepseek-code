@@ -731,8 +731,15 @@ impl Session {
         prompt: &str,
         input: &mut Option<TerminalInput>,
     ) -> Result<()> {
-        self.run_turn_origin(cli, prompt, input, false, false, true)
-            .await
+        match self.run_turn_origin(cli, prompt, input, false, false, true).await {
+            Err(error) if crate::session_commands::is_context_overflow(&error) => {
+                if !crate::session_commands::reactive_compact(self, prompt).await? {
+                    return Err(error);
+                }
+                self.run_turn_origin(cli, prompt, input, false, false, true).await
+            }
+            result => result,
+        }
     }
 
     pub(crate) async fn turn_initial_hook(
