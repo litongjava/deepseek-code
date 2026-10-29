@@ -342,6 +342,19 @@ fn ask_user_questions(input: &Value) -> Result<Vec<Value>> {
     }).collect()
 }
 
+/// Bash keeps its working directory per session; the tool reads and updates
+/// this file. Added only at execution, so the model never sees the field.
+fn shell_state_input(name: &str, input: &Value, search_config_path: Option<&std::path::Path>, conv_id: Option<&str>) -> Value {
+    let mut input = input.clone();
+    if name == "Bash" {
+        if let (Some(root), Some(session)) = (search_config_path.and_then(std::path::Path::parent), conv_id) {
+            input["__cwd_state"] = json!(root.join("shell-cwd").join(session).to_string_lossy());
+            let _ = std::fs::create_dir_all(root.join("shell-cwd"));
+        }
+    }
+    input
+}
+
 /// Writes, scheduled jobs and worktree switches run one at a time in order.
 fn is_serial_builtin(name: &str) -> bool {
     matches!(name, "Edit" | "Write" | "MultiEdit" | "NotebookEdit" | "ScheduleWakeup")
@@ -548,7 +561,7 @@ async fn execute_tool_standalone(
                 Err(e) => (format!("Error: {}", e), true),
             }
         } else {
-            match execute_builtin_tool(&tool_name, tool_input.clone(), &workspace_cwd, &provider, &event_tx, search_config_path.as_deref(), false).await {
+            match execute_builtin_tool(&tool_name, shell_state_input(&tool_name, &tool_input, search_config_path.as_deref(), conv_id.as_deref()), &workspace_cwd, &provider, &event_tx, search_config_path.as_deref(), false).await {
                 Ok(mut val) => match take_read_image(&tool_name, &mut val, provider.model.supports_vision) {
                     Some(Ok((text, content))) => { mcp_output = Some(content); (text, false) }
                     Some(Err(error)) => (error, true),
@@ -558,7 +571,7 @@ async fn execute_tool_standalone(
             }
         }
     } else {
-        match execute_builtin_tool(&tool_name, tool_input.clone(), &workspace_cwd, &provider, &event_tx, search_config_path.as_deref(), false).await {
+        match execute_builtin_tool(&tool_name, shell_state_input(&tool_name, &tool_input, search_config_path.as_deref(), conv_id.as_deref()), &workspace_cwd, &provider, &event_tx, search_config_path.as_deref(), false).await {
             Ok(mut val) => match take_read_image(&tool_name, &mut val, provider.model.supports_vision) {
                 Some(Ok((text, content))) => { mcp_output = Some(content); (text, false) }
                 Some(Err(error)) => (error, true),
@@ -1720,7 +1733,7 @@ impl ToolLoopExecutor {
                 let cwd = self.get_workspace_cwd().to_string();
                 let result = match self.unread_file_error(tool_name, tool_input) {
                     Some(error) => Err(anyhow!(error)),
-                    None => execute_builtin_tool(tool_name, tool_input.clone(), &cwd, &self.provider, &self.event_tx, self.search_config_path.as_deref(), self.skill_shell_active).await,
+                    None => execute_builtin_tool(tool_name, shell_state_input(tool_name, tool_input, self.search_config_path.as_deref(), self.conv_id.as_deref()), &cwd, &self.provider, &self.event_tx, self.search_config_path.as_deref(), self.skill_shell_active).await,
                 };
                 (output_str, is_error) = self.finish_builtin(tool_name, tool_input, _tool_use_id, result);
             }
@@ -1728,7 +1741,7 @@ impl ToolLoopExecutor {
             let cwd = self.get_workspace_cwd().to_string();
             let result = match self.unread_file_error(tool_name, tool_input) {
                 Some(error) => Err(anyhow!(error)),
-                None => execute_builtin_tool(tool_name, tool_input.clone(), &cwd, &self.provider, &self.event_tx, self.search_config_path.as_deref(), self.skill_shell_active).await,
+                None => execute_builtin_tool(tool_name, shell_state_input(tool_name, tool_input, self.search_config_path.as_deref(), self.conv_id.as_deref()), &cwd, &self.provider, &self.event_tx, self.search_config_path.as_deref(), self.skill_shell_active).await,
             };
             (output_str, is_error) = self.finish_builtin(tool_name, tool_input, _tool_use_id, result);
         }

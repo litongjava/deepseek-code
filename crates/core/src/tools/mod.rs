@@ -124,7 +124,7 @@ pub fn get_tool_definitions() -> Vec<ToolDefinition> {
         },
         ToolDefinition {
             name: "Bash".to_string(),
-            description: "Executes a shell command and returns its output.\n\nThe default shell is bash (Git Bash on Windows): use Unix shell syntax there — `/dev/null` not `NUL`, forward slashes, `$VAR` not `%VAR%` or `$env:VAR`. Pass `shell` (powershell, pwsh, cmd, sh, zsh, fish) to use another shell's syntax; PowerShell input/output is UTF-8.\n\n- Each call starts in the project working directory; `cd` and shell state (env vars, functions) do not persist between calls, so prefer absolute paths.\n- Command output is displayed to you, not reliably to the user.\n- `timeout` is in milliseconds: default 120000, max 600000 for a foreground command.\n- `run_in_background` runs the command detached as a managed task: it keeps running across turns and returns a task_id. No `&` or Start-Process needed. Use TaskOutput to read its output and TaskStop to stop it.\n\n# Git\n- Interactive flags (`-i`, e.g. `git rebase -i`, `git add -i`) are not supported in this environment.\n- Use the `gh` CLI for GitHub operations (PRs, issues, API).\n- Commit or push only when the user asks. If on the default branch, branch first.".to_string(),
+            description: "Executes a shell command and returns its output.\n\nThe default shell is bash (Git Bash on Windows): use Unix shell syntax there — `/dev/null` not `NUL`, forward slashes, `$VAR` not `%VAR%` or `$env:VAR`. Pass `shell` (powershell, pwsh, cmd, sh, zsh, fish) to use another shell's syntax; PowerShell input/output is UTF-8.\n\n- With bash, sh or zsh the working directory persists between calls, but prefer absolute paths; leaving the project resets it to the project directory. Shell state (env vars, functions) does not persist. Other shells start in the project directory each call.\n- Command output is displayed to you, not reliably to the user.\n- `timeout` is in milliseconds: default 120000, max 600000 for a foreground command.\n- `run_in_background` runs the command detached as a managed task: it keeps running across turns and returns a task_id. No `&` or Start-Process needed. Use TaskOutput to read its output and TaskStop to stop it.\n\n# Git\n- Interactive flags (`-i`, e.g. `git rebase -i`, `git add -i`) are not supported in this environment.\n- Use the `gh` CLI for GitHub operations (PRs, issues, API).\n- Commit or push only when the user asks. If on the default branch, branch first.".to_string(),
             input_schema: serde_json::json!({
                 "type": "object",
                 "properties": {
@@ -617,6 +617,31 @@ fn is_path_allowed(resolved_path: &Path, cwd: &str) -> bool {
     false
 }
 
+#[cfg(all(test, unix))]
+#[tokio::test]
+async fn bash_keeps_its_directory_and_resets_outside_the_project() {
+    crate::config::OrchestrationConfig::init_global().unwrap();
+    let dir = tempfile::tempdir().unwrap();
+    let project = dir.path().canonicalize().unwrap();
+    std::fs::create_dir(project.join("sub")).unwrap();
+    let cwd = project.to_str().unwrap();
+    let state = project.join("cwd-state");
+    let run = |command: &str| serde_json::json!({"command":command,"__cwd_state":state.to_string_lossy()});
+    tool_bash_async(run("cd sub"), cwd).await.unwrap();
+    let out = tool_bash_async(run("pwd -P"), cwd).await.unwrap();
+    assert_eq!(out["stdout"].as_str().unwrap().trim(), project.join("sub").to_str().unwrap());
+    // Exiting early keeps the previous directory.
+    let _ = tool_bash_async(run("cd /; exit 3"), cwd).await;
+    assert!(tool_bash_async(run("pwd -P"), cwd).await.unwrap()["stdout"].as_str().unwrap().contains("sub"));
+    let reset = tool_bash_async(run("cd /"), cwd).await.unwrap();
+    assert_eq!(reset["note"], format!("Shell cwd was reset to {cwd}"));
+    assert_eq!(tool_bash_async(run("pwd -P"), cwd).await.unwrap()["stdout"].as_str().unwrap().trim(), cwd);
+    // Without the engine's state file every call starts in the project.
+    let plain = tool_bash_async(serde_json::json!({"command":"cd sub && pwd"}), cwd).await.unwrap();
+    assert!(plain["stdout"].as_str().unwrap().contains("sub"));
+    assert_eq!(tool_bash_async(serde_json::json!({"command":"pwd -P"}), cwd).await.unwrap()["stdout"].as_str().unwrap().trim(), cwd);
+}
+
 #[cfg(test)]
 #[test]
 fn search_results_follow_domain_filters() {
@@ -954,6 +979,14 @@ async fn tool_bash_async(input: serde_json::Value, cwd: &str) -> Result<serde_js
     } else {
         cwd.to_string()
     };
+    // Like the reference CLI, a foreground POSIX shell keeps its working
+    // directory between calls; the engine passes a per-session state file.
+    let cwd_state = input["__cwd_state"].as_str().map(PathBuf::from)
+        .filter(|_| !cfg!(windows) && !background && matches!(shell_type.to_lowercase().as_str(), "bash" | "sh" | "zsh"));
+    let safe_cwd = match cwd_state.as_ref().and_then(|state| fs::read_to_string(state).ok()) {
+        Some(saved) if Path::new(saved.trim()).is_dir() && is_path_allowed(Path::new(saved.trim()), cwd) => saved.trim().to_owned(),
+        _ => safe_cwd,
+    };
 
     let command = if flag == "-Command" {
         cmd.args(["-NoProfile", "-NonInteractive"]);
@@ -987,6 +1020,11 @@ async fn tool_bash_async(input: serde_json::Value, cwd: &str) -> Result<serde_js
     } else {
         command
     };
+    let command = match &cwd_state {
+        // A command that exits early keeps the previous directory.
+        Some(state) => format!("{command}\n__dcl_status=$?\npwd -P > '{}' 2>/dev/null\nexit $__dcl_status", state.to_string_lossy().replace('\'', "'\"'\"'")),
+        None => command,
+    };
     #[cfg(windows)]
     if flag == "/C" {
         // cmd uses its own quoting rules; normal Windows argument escaping adds
@@ -1007,7 +1045,17 @@ async fn tool_bash_async(input: serde_json::Value, cwd: &str) -> Result<serde_js
         background_shell::start(cmd, input.get("timeout").filter(|value| !value.is_null()).map(|_| timeout), shell_type, &description, &command)
     } else {
         // Ctrl+B can move it to the background while it runs.
-        background_shell::run_foreground(cmd, timeout, shell_type, &description, &command).await
+        let mut result = background_shell::run_foreground(cmd, timeout, shell_type, &description, &command).await?;
+        if let Some(state) = &cwd_state {
+            let moved = fs::read_to_string(state).ok().map(|dir| dir.trim().to_owned());
+            if moved.as_deref().is_some_and(|dir| !is_path_allowed(Path::new(dir), cwd)) {
+                let _ = fs::remove_file(state);
+                if let Some(object) = result.as_object_mut() {
+                    object.insert("note".into(), serde_json::json!(format!("Shell cwd was reset to {cwd}")));
+                }
+            }
+        }
+        Ok(result)
     }
 }
 
