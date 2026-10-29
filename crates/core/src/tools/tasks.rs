@@ -31,7 +31,7 @@ pub fn is_task(name: &str) -> bool {
     )
 }
 
-fn readonly(name: &str, input: &Value) -> bool {
+fn readonly(name: &str) -> bool {
     matches!(name, "TaskGet" | "TaskList" | "TodoRead" | "TaskOutput")
 }
 
@@ -60,7 +60,7 @@ pub async fn execute_for_session_async(
 }
 
 pub fn read_legacy(name: &str, input: Value, cwd: &str) -> Result<Value> {
-    ensure!(readonly(name, &input), "Legacy project tasks are read-only");
+    ensure!(readonly(name), "Legacy project tasks are read-only");
     let path = Path::new(cwd).canonicalize()?.join(".claude/tasks.sqlite3");
     super::resolve_path(&path.to_string_lossy(), cwd)?;
     execute_at(name, input, &path)
@@ -133,7 +133,7 @@ fn execute_at_owned(name: &str, mut input: Value, path: &Path, shell_owner: bool
         return Ok(json!({"task":task,"record_cancelled":true,"worker_process_stopped":false}));
     }
     let directory = path.parent().context("Task storage parent missing")?;
-    let readonly = readonly(name, &input);
+    let readonly = readonly(name);
     if readonly && !path.exists() {
         return match name {
             "TaskList" => Ok(json!({"tasks":[]})),

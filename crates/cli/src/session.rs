@@ -785,6 +785,7 @@ impl Session {
         self.permissions
             .set_session_rules(&self.id, crate::permission_commands::load(self)?);
         let mut history = self.store.model_history(&self.id, &self.api_format)?;
+        crate::session_commands::microcompact(self, &mut history, self.context_window().await)?;
         if !hook_wake {
             history.push(json!({"role":"user","content":self.sdk_content.as_ref().cloned().unwrap_or(json!(prompt))}));
         }

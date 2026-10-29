@@ -3,6 +3,7 @@ use crate::session::Session;
 use anyhow::{ensure, Context, Result};
 use claude_core::{db::DbManager, runtime::RuntimePaths};
 use serde::{Deserialize, Serialize};
+use serde_json::{json, Value};
 
 #[derive(Debug, Default, Serialize, Deserialize)]
 struct Settings {
@@ -602,6 +603,68 @@ pub async fn context_status(session: &Session) -> Option<String> {
     context_note(left, percent.is_some())
 }
 
+const MICROCOMPACT_KEEP_RECENT: usize = 10;
+const MICROCOMPACT_MIN_CHARS: usize = 1000;
+const CLEARED_TOOL_RESULT: &str = "[Old tool result content cleared to save context]";
+
+/// Where microcompact's clearing stops, and the compaction it applies to.
+#[derive(serde::Serialize, serde::Deserialize, Default, PartialEq, Debug)]
+struct Microcompact {
+    through: usize,
+    boundary: String,
+}
+
+/// Microcompact moves its line forward only once the request passes half the
+/// window, so between moves every request shares the same prefix and cache.
+fn microcompact_through(current: usize, len: usize, estimated_tokens: usize, window: Option<u32>) -> usize {
+    match window.filter(|window| *window > 0) {
+        Some(window) if estimated_tokens > window as usize / 2 => current.max(len.saturating_sub(MICROCOMPACT_KEEP_RECENT)),
+        _ => current,
+    }
+}
+
+/// Replaces large tool results in `messages` with a short placeholder, in
+/// either provider's history format.
+fn clear_tool_results(messages: &mut [Value]) {
+    let large = |content: &Value| match content {
+        Value::String(text) => text.len() > MICROCOMPACT_MIN_CHARS,
+        Value::Array(blocks) => blocks.iter().filter_map(|block| block["text"].as_str()).map(str::len).sum::<usize>() > MICROCOMPACT_MIN_CHARS || blocks.iter().any(|block| block["type"] == "image"),
+        _ => false,
+    };
+    for message in messages {
+        if message["role"] == "tool" && large(&message["content"]) {
+            message["content"] = json!(CLEARED_TOOL_RESULT);
+        }
+        if let Some(blocks) = message["content"].as_array_mut() {
+            for block in blocks.iter_mut().filter(|block| block["type"] == "tool_result") {
+                if large(&block["content"]) { block["content"] = json!(CLEARED_TOOL_RESULT); }
+            }
+        }
+    }
+}
+
+/// As the reference CLI's microcompact: once the conversation passes half the
+/// context window, large tool results older than the last few messages are
+/// replaced with a placeholder. The saved transcript is unchanged.
+pub fn microcompact(session: &Session, history: &mut [Value], window: Option<u32>) -> Result<()> {
+    let rows = session.store.db.with_conn(|conn| claude_core::db::message_repo::get_messages_by_conversation(conn, &session.id))??;
+    let boundary = rows.iter().rev().find(|row| row.is_compact_boundary).map(|row| row.id.clone()).unwrap_or_default();
+    let context = crate::services::context(&session.paths)?;
+    let key = format!("microcompact.{}", session.id);
+    let mut state = context.setting::<Microcompact>(&key)?.filter(|state| state.boundary == boundary).unwrap_or(Microcompact { through: 0, boundary });
+    let len = history.len();
+    clear_tool_results(&mut history[..state.through.min(len)]);
+    let estimated = serde_json::to_string(&history)?.len().div_ceil(3);
+    let through = microcompact_through(state.through, len, estimated, window);
+    if through != state.through {
+        state.through = through;
+        context.save_setting(&key, &state)?;
+        clear_tool_results(&mut history[..through.min(len)]);
+        crate::compaction::notice("Cleared older tool results to save context.");
+    }
+    Ok(())
+}
+
 /// Whether a turn failed because the request no longer fits the model's
 /// context window, as reported by the engine or the provider.
 pub fn is_context_overflow(error: &anyhow::Error) -> bool {
@@ -669,6 +732,21 @@ mod tests {
             assert!(is_context_overflow(&anyhow::anyhow!(overflow.to_owned())), "{overflow}");
         }
         assert!(!is_context_overflow(&anyhow::anyhow!("Model API error 429: rate limited")));
+        assert_eq!(microcompact_through(0, 30, 400, Some(1000)), 0);
+        assert_eq!(microcompact_through(0, 30, 600, Some(1000)), 20);
+        assert_eq!(microcompact_through(25, 30, 600, Some(1000)), 25);
+        assert_eq!(microcompact_through(4, 30, 600, None), 4);
+        let big = "x".repeat(MICROCOMPACT_MIN_CHARS + 1);
+        let mut history = vec![
+            json!({"role":"tool","content":big}),
+            json!({"role":"tool","content":"small"}),
+            json!({"role":"user","content":[{"type":"tool_result","tool_use_id":"a","content":[{"type":"text","text":big}]},{"type":"text","text":big}]}),
+        ];
+        clear_tool_results(&mut history);
+        assert_eq!(history[0]["content"], CLEARED_TOOL_RESULT);
+        assert_eq!(history[1]["content"], "small");
+        assert_eq!(history[2]["content"][0]["content"], CLEARED_TOOL_RESULT);
+        assert_eq!(history[2]["content"][1]["text"], big);
         assert_eq!(context_note(5, false).as_deref(), Some("Context low (5% remaining) \u{b7} Run /compact to compact & continue"));
     }
 
