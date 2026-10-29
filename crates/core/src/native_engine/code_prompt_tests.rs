@@ -259,9 +259,14 @@ async fn context_reminders_open_the_first_user_message() {
         let temp = tempfile::tempdir().unwrap();
         let reminders = vec!["<system-reminder>\nreminder-marker-rules\n</system-reminder>".to_string(), "<system-reminder>\n# gitStatus\n</system-reminder>".to_string()];
         let prompt = crate::prompt::compose_system_prompt(None, "code-test", PromptProfile::Code);
-        let history = vec![json!({"role":"user","content":"hello"})];
+        let history = vec![json!({"role":"user","content":"hello"}), json!({"role":"assistant","content":"hi"}), json!({"role":"user","content":"again"})];
+        // Recorded on an earlier turn for "hello", and on this turn for "again".
+        let turn_context = vec![
+            crate::services::turn_context::for_last(&history[..1], vec!["hook-for-hello".into()]).unwrap(),
+            crate::services::turn_context::for_last(&history, vec!["skill-for-again".into()]).unwrap(),
+        ];
         let mut executor = ToolLoopExecutor::new(provider(&base, format), history.clone(), Some(prompt), 128, tx, temp.path().to_string_lossy().into(), ReasoningMode::Standard)
-            .with_prompt_profile(PromptProfile::Code).with_context_reminders(reminders.clone()).with_conv_id(format!("reminders-{format}"));
+            .with_prompt_profile(PromptProfile::Code).with_context_reminders(reminders.clone()).with_turn_context(turn_context).with_conv_id(format!("reminders-{format}"));
         let (text, _) = tokio::time::timeout(Duration::from_secs(15), executor.execute()).await.unwrap().unwrap();
         server.abort();
         assert_eq!(text, "done", "{format}");
@@ -273,10 +278,14 @@ async fn context_reminders_open_the_first_user_message() {
                 assert_eq!(content[0]["text"], reminders[0].as_str());
                 assert_eq!(content[1]["text"], reminders[1].as_str());
                 assert_eq!(content[2]["text"], "hello");
+                assert_eq!(content[3]["text"], "hook-for-hello");
+                let texts: Vec<_> = request["messages"][2]["content"].as_array().unwrap().iter().map(|block| block["text"].clone()).collect();
+                assert_eq!(texts, [json!("again"), json!("skill-for-again")]);
                 assert!(!request["system"].to_string().contains("reminder-marker"));
             } else {
-                let user = request["messages"].as_array().unwrap().iter().find(|m| m["role"] == "user").unwrap();
-                assert_eq!(user["content"], format!("{}\n\n{}\n\nhello", reminders[0], reminders[1]).as_str());
+                let users: Vec<_> = request["messages"].as_array().unwrap().iter().filter(|m| m["role"] == "user").collect();
+                assert_eq!(users[0]["content"], format!("{}\n\n{}\n\nhello\n\nhook-for-hello", reminders[0], reminders[1]).as_str());
+                assert_eq!(users[1]["content"], "again\n\nskill-for-again");
             }
         }
         assert_eq!(executor.messages[0], history[0], "{format}: the transcript keeps the user's own text");

@@ -236,10 +236,18 @@ async fn shared_engine_routes_opt_in_and_preserves_explicit_provider() {
             .collect::<Vec<_>>(),
         ["cheap", "primary", "primary"]
     );
-    assert!(requests[2]["messages"][0]["content"]
-        .as_str()
-        .unwrap()
-        .contains("Unique skill marker 7931"));
+    // Skill content follows the user's message instead of joining the system prompt.
+    let messages = requests[2]["messages"].as_array().unwrap();
+    let user = messages
+        .iter()
+        .find(|m| m["role"] == "user" && m["content"].to_string().contains("/test-skill inspect this"))
+        .unwrap();
+    assert!(user["content"].to_string().contains("Unique skill marker 7931"));
+    assert!(!messages
+        .iter()
+        .chain(std::iter::once(&requests[2]))
+        .filter_map(|m| m.get("system").or_else(|| (m["role"] == "system").then(|| &m["content"])))
+        .any(|system| system.to_string().contains("Unique skill marker 7931")));
     let observations = claude_core::learning::status(&ctx).unwrap();
     assert_eq!(observations.experiences.len(), 3);
     assert!(observations

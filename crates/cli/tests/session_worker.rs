@@ -210,8 +210,10 @@ async fn scope_respond(
 ) -> impl axum::response::IntoResponse {
     let last = body["messages"].as_array().unwrap().last().unwrap();
     let calls = if last["role"] == "user" {
+        // Context reminders may precede the calls in the first user message.
         last["content"]
             .as_str()
+            .and_then(|s| s.rsplit("</system-reminder>\n\n").next())
             .and_then(|s| serde_json::from_str::<Value>(s).ok())
     } else {
         None

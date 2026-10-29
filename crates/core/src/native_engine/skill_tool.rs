@@ -46,7 +46,14 @@ impl ToolLoopExecutor {
             let instructions = result["instructions"]
                 .as_str()
                 .context("Skill instructions missing")?;
-            self.system_prompt.get_or_insert_with(String::new).push_str(&format!("\nSelected skill instructions (shell context already collected):\n{instructions}\n"));
+            // Kept after the user's message for the rest of the session, as
+            // the reference CLI keeps an invoked skill's content.
+            if let Some(entry) = crate::services::turn_context::for_last(&self.messages, vec![instructions.to_owned()]) {
+                if let (Some(root), Some(session)) = (self.search_config_path.as_deref().and_then(|path| path.parent()), self.conv_id.as_deref()) {
+                    crate::services::turn_context::save(root, session, &entry)?;
+                }
+                self.turn_context.push(entry);
+            }
             Ok(None)
         } else {
             ensure!(

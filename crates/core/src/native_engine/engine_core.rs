@@ -219,7 +219,10 @@ impl QueryEngine {
             let skill = manager.get_skill_by_id(skill_id).await?.filter(|s| s.enabled).context("Skill not found or disabled")?;
             skill.content.context("Skill has no content")?
         };
-        request.system_prompt.get_or_insert_with(String::new).push_str(&format!("\nSelected skill instructions:\n{content}\n"));
+        // Kept after the user's message for the rest of the session.
+        let root = self.provider_manager.lock().await.config_path().parent().context("Missing runtime directory")?.to_path_buf();
+        let (session, messages) = (request.conversation_id.clone(), request.messages.clone());
+        tokio::task::spawn_blocking(move || crate::services::turn_context::attach_to_last(&root, &session, &messages, vec![content])).await??;
         self.send_message(request).await
     }
 
@@ -442,6 +445,8 @@ impl QueryEngine {
         let mut discovered_skills = crate::services::plugins::skill_commands(&plugin_context)?;
         discovered_skills.extend(crate::skills::discovery::discover(&workspace)?);
         let mut pending_user_skill = None;
+        // Blocks kept after this turn's user message for the rest of the session.
+        let mut turn_blocks = Vec::new();
         if let Some((command, arguments)) = skill_invocation.filter(|_| !hook_wake) {
             let content = if let Some(skill) = discovered_skills.get(&command) {
                 let embedded =
@@ -464,7 +469,7 @@ impl QueryEngine {
             } else { None };
             // Hosts reject unknown slash commands; ordinary Desktop or multiline
             // messages may legitimately begin with a literal filesystem path.
-            if let Some(content) = content { request.system_prompt.get_or_insert_with(String::new).push_str(&format!("\nSelected skill instructions:\n{content}\n")); }
+            if let Some(content) = content { turn_blocks.push(content); }
         }
         let available_skills = discovered_skills.values().filter(|skill| skill.model_invocable()).map(|skill| serde_json::json!({"name":skill.name,"description":skill.description,"context":skill.context})).collect::<Vec<_>>();
         if !available_skills.is_empty() {
@@ -509,11 +514,11 @@ impl QueryEngine {
                 "UserPromptSubmit hook blocked request: {}",
                 hook_result.reason
             );
-            for context in hook_result.additional_context {
-                request
-                    .system_prompt
-                    .get_or_insert_with(String::new)
-                    .push_str(&format!("\nUserPromptSubmit hook context: {context}\n"));
+            if !hook_result.additional_context.is_empty() {
+                turn_blocks.push(format!(
+                    "<system-reminder>\nUserPromptSubmit hook additional context: {}\n</system-reminder>",
+                    hook_result.additional_context.join("\n")
+                ));
             }
             for warning in hook_result.warnings {
                 tracing::warn!("UserPromptSubmit hook: {warning}");
@@ -537,6 +542,16 @@ impl QueryEngine {
         // Like the reference CLI, instructions and the Git snapshot open the first
         // user message instead of the system prompt, which stays the same across
         // projects and so shares one cache entry.
+        let turn_root = plugin_context.paths.data_dir.clone();
+        let turn_session = conv_id.clone();
+        let turn_messages = request.messages.clone();
+        let turn_context = tokio::task::spawn_blocking(move || {
+            if !turn_blocks.is_empty() {
+                crate::services::turn_context::attach_to_last(&turn_root, &turn_session, &turn_messages, turn_blocks)?;
+            }
+            crate::services::turn_context::load(&turn_root, &turn_session)
+        })
+        .await??;
         let context_reminders: Vec<String> = crate::project_instructions::reminder(&instructions)
             .into_iter()
             .chain(git_snapshot.as_deref().map(crate::services::git_snapshot::reminder))
@@ -681,6 +696,7 @@ impl QueryEngine {
         .with_allowed_tools(agent.and_then(|d|d.tools))
         .with_prompt_profile(prompt_profile)
         .with_context_reminders(context_reminders)
+        .with_turn_context(turn_context)
         .with_memex(crate::memory::MemExClient::with_path(
             self.workspaces_dir.parent().unwrap_or(&self.workspaces_dir).join("memory.sqlite3"), None,
         ))

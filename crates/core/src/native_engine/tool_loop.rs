@@ -182,6 +182,10 @@ pub struct ToolLoopExecutor {
     /// `<system-reminder>` blocks placed before the first user message's text
     /// in every request; never saved to the transcript.
     context_reminders: Vec<String>,
+    /// Hook context and skill content recorded for earlier user messages.
+    turn_context: Vec<crate::services::turn_context::Entry>,
+    /// Memory recall inserted its own user message at index 0 this turn.
+    memory_message_injected: bool,
     reasoning_mode: ReasoningMode,
     prefetch_engine: Option<Arc<PrefetchEngine>>,
     bundled_resources: Arc<crate::skills::bundled_resources::Resources>,
@@ -692,6 +696,8 @@ impl ToolLoopExecutor {
             context_manager: None,
             prompt_profile: PromptProfile::Desktop,
             context_reminders: Vec::new(),
+            turn_context: Vec::new(),
+            memory_message_injected: false,
             reasoning_mode,
             prefetch_engine: None,
             bundled_resources: Arc::default(),
@@ -949,10 +955,25 @@ impl ToolLoopExecutor {
         self
     }
 
-    /// Index of the message that carries the context reminders.
-    fn reminder_target(&self) -> Option<usize> {
-        if self.context_reminders.is_empty() { return None; }
-        self.messages.iter().position(|msg| msg.get("role").and_then(Value::as_str) == Some("user"))
+    pub fn with_turn_context(mut self, entries: Vec<crate::services::turn_context::Entry>) -> Self {
+        self.turn_context = entries;
+        self
+    }
+
+    /// Text blocks to place before and after each message's own content: the
+    /// context reminders open the first user message (not a recalled-memory
+    /// message, which changes from turn to turn), and recorded turn context
+    /// follows the message it was recorded for.
+    fn message_additions(&self) -> Vec<(Vec<String>, Vec<String>)> {
+        let skip = usize::from(self.memory_message_injected);
+        let target = (!self.context_reminders.is_empty()).then(|| {
+            self.messages.iter().enumerate().skip(skip).find(|(_, msg)| msg.get("role").and_then(Value::as_str) == Some("user")).map(|(index, _)| index)
+        }).flatten();
+        crate::services::turn_context::resolve(&self.turn_context, &self.messages)
+            .into_iter()
+            .enumerate()
+            .map(|(index, after)| (if Some(index) == target { self.context_reminders.clone() } else { Vec::new() }, after))
+            .collect()
     }
 
     pub fn with_allowed_tools(mut self, tools: Option<Vec<String>>) -> Self { self.allowed_tools = tools; self }
@@ -1310,6 +1331,7 @@ impl ToolLoopExecutor {
                     "role": "user",
                     "content": memory_context
                 }));
+                self.memory_message_injected = true;
             }
         }
         tracing::info!(module = "ToolLoop", "[E4] Memory injection COMPLETED");
@@ -3102,7 +3124,7 @@ impl ToolLoopExecutor {
     }
 
     fn build_anthropic_messages(&self) -> Vec<AnthropicMessage> {
-        let target = self.reminder_target();
+        let additions = self.message_additions();
         self.messages.iter().enumerate().filter_map(|(index, msg)| {
             let role = msg.get("role")?.as_str()?;
             let content = msg.get("content")?;
@@ -3155,15 +3177,17 @@ impl ToolLoopExecutor {
             } else {
                 return None;
             };
-            let anthropic_content = if Some(index) == target {
-                // One text block per reminder, ahead of the user's own content.
-                let mut blocks: Vec<ContentBlock> = self.context_reminders.iter().map(|text| ContentBlock::Text { text: text.clone() }).collect();
+            let (before, after) = &additions[index];
+            let anthropic_content = if before.is_empty() && after.is_empty() { anthropic_content } else {
+                // One text block per addition, around the message's own content.
+                let mut blocks: Vec<ContentBlock> = before.iter().map(|text| ContentBlock::Text { text: text.clone() }).collect();
                 match anthropic_content {
                     AnthropicContent::Text(text) => blocks.push(ContentBlock::Text { text }),
                     AnthropicContent::Blocks(rest) => blocks.extend(rest),
                 }
+                blocks.extend(after.iter().map(|text| ContentBlock::Text { text: text.clone() }));
                 AnthropicContent::Blocks(blocks)
-            } else { anthropic_content };
+            };
 
             Some(AnthropicMessage {
                 role: role.to_string(),
@@ -3173,7 +3197,7 @@ impl ToolLoopExecutor {
     }
 
     fn build_openai_messages(&self) -> Vec<OpenAIMessage> {
-        let target = self.reminder_target();
+        let additions = self.message_additions();
         self.messages.iter().enumerate().filter_map(|(index, msg)| {
             let role = msg.get("role")?.as_str()?;
             let content = msg.get("content")?;
@@ -3204,14 +3228,18 @@ impl ToolLoopExecutor {
             } else {
                 return None;
             };
-            let openai_content = if Some(index) == target {
+            let (before, after) = &additions[index];
+            let openai_content = if before.is_empty() && after.is_empty() { openai_content } else {
                 // Plain-string content stays a string: some compatible servers
                 // accept only strings for user messages.
                 match openai_content {
-                    OpenAIContent::Text(text) => OpenAIContent::Text(self.context_reminders.iter().cloned().chain([text]).collect::<Vec<_>>().join("\n\n")),
-                    OpenAIContent::Multi(rest) => OpenAIContent::Multi(self.context_reminders.iter().map(|text| crate::native_engine::openai_client::OpenAIContentPart::Text { text: text.clone() }).chain(rest).collect()),
+                    OpenAIContent::Text(text) => OpenAIContent::Text(before.iter().cloned().chain([text]).chain(after.iter().cloned()).collect::<Vec<_>>().join("\n\n")),
+                    OpenAIContent::Multi(rest) => {
+                        let part = |text: &String| crate::native_engine::openai_client::OpenAIContentPart::Text { text: text.clone() };
+                        OpenAIContent::Multi(before.iter().map(part).chain(rest).chain(after.iter().map(part)).collect())
+                    }
                 }
-            } else { openai_content };
+            };
 
             let tool_calls = msg.get("tool_calls").and_then(|tc| {
                 serde_json::from_value(tc.clone()).ok()
