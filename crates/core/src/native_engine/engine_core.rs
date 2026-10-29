@@ -437,9 +437,7 @@ impl QueryEngine {
         let snapshot_root = plugin_context.paths.data_dir.clone();
         let snapshot_session = conv_id.clone();
         let snapshot_workspace = workspace.clone();
-        if let Some(snapshot) = tokio::task::spawn_blocking(move || crate::services::git_snapshot::for_session(&snapshot_root, &snapshot_session, &snapshot_workspace)).await? {
-            request.system_prompt.get_or_insert_with(String::new).push_str(&format!("\n\n{snapshot}"));
-        }
+        let git_snapshot = tokio::task::spawn_blocking(move || crate::services::git_snapshot::for_session(&snapshot_root, &snapshot_session, &snapshot_workspace)).await?;
         let workspace_path = workspace.to_string_lossy().into_owned();
         let mut discovered_skills = crate::services::plugins::skill_commands(&plugin_context)?;
         discovered_skills.extend(crate::skills::discovery::discover(&workspace)?);
@@ -523,10 +521,12 @@ impl QueryEngine {
         }
         request.workspace_path = Some(workspace_path.clone());
         let instructions_workspace = workspace.clone();
-        let (instructions, instruction_files) = tokio::task::spawn_blocking(move || {
-            crate::project_instructions::load_with_files(&instructions_workspace)
+        let instructions_user_dir = plugin_context.paths.data_dir.clone();
+        let instructions = tokio::task::spawn_blocking(move || {
+            crate::project_instructions::load_all(Some(&instructions_user_dir), &instructions_workspace)
         })
         .await??;
+        let instruction_files: Vec<_> = instructions.iter().map(|item| (item.path.clone(), item.sha256.clone())).collect();
         crate::services::lifecycle_events::instructions(
             &plugin_context,
             &hooks,
@@ -534,11 +534,13 @@ impl QueryEngine {
             &instruction_files,
         )
         .await?;
-        if !instructions.is_empty() {
-            request.system_prompt.get_or_insert_with(String::new).push_str(&format!(
-                "\nCodebase and user instructions are shown below. Be sure to adhere to these instructions. IMPORTANT: These instructions OVERRIDE any default behavior and you MUST follow them exactly as written.\n{instructions}"
-            ));
-        }
+        // Like the reference CLI, instructions and the Git snapshot open the first
+        // user message instead of the system prompt, which stays the same across
+        // projects and so shares one cache entry.
+        let context_reminders: Vec<String> = crate::project_instructions::reminder(&instructions)
+            .into_iter()
+            .chain(git_snapshot.as_deref().map(crate::services::git_snapshot::reminder))
+            .collect();
         let allowed_directories = project
             .as_ref()
             .map(|project| {
@@ -551,7 +553,10 @@ impl QueryEngine {
             .unwrap_or_default();
         if let Some(project) = project {
             let folders = project.folders.iter().map(|f| f.path.as_str()).collect::<Vec<_>>();
-            let context = format!("\nProject: {}\nProject source folders (the first is the working directory):\n{}\nProject instructions:\n{}", project.name, serde_json::to_string(&folders)?, project.instructions.unwrap_or_default());
+            let mut context = format!("\nProject: {}\nProject source folders (the first is the working directory):\n{}", project.name, serde_json::to_string(&folders)?);
+            if let Some(instructions) = project.instructions.as_deref().map(str::trim).filter(|text| !text.is_empty()) {
+                context.push_str(&format!("\nProject instructions:\n{instructions}"));
+            }
             request.system_prompt.get_or_insert_with(String::new).push_str(&context);
         }
         let team_context=crate::services::team::model_context(&plugin_context,&workspace)?;
@@ -675,6 +680,7 @@ impl QueryEngine {
         .with_goal_state(self.db_manager.clone())
         .with_allowed_tools(agent.and_then(|d|d.tools))
         .with_prompt_profile(prompt_profile)
+        .with_context_reminders(context_reminders)
         .with_memex(crate::memory::MemExClient::with_path(
             self.workspaces_dir.parent().unwrap_or(&self.workspaces_dir).join("memory.sqlite3"), None,
         ))

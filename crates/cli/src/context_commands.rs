@@ -122,14 +122,15 @@ fn render(request: Option<claude_core::services::context_usage::LastRequest>) ->
     lines.push(format!("Historical request only; later responses, model/settings changes and compaction are not included."));
     lines.join("\n")
 }
-/// What the first request would hold: the base system prompt with the
-/// project instructions, the built-in tool definitions and saved history.
+/// What the first request would hold: the base system prompt, the project
+/// instructions, the built-in tool definitions and saved history.
 fn estimate(session: &Session, window: Option<u64>) -> Result<claude_core::services::context_usage::LastRequest> {
-    let mut system = claude_core::prompt::compose_system_prompt_in(None, &session.model, claude_core::prompt::PromptProfile::Code, Some(&session.workspace));
-    if let Ok(instructions) = claude_core::project_instructions::load(&session.workspace) {
-        system.push_str(&instructions);
+    let system = claude_core::prompt::compose_system_prompt_in(None, &session.model, claude_core::prompt::PromptProfile::Code, Some(&session.workspace));
+    let mut history = session.store.model_history(&session.id, &claude_core::native_engine::provider_manager::ApiFormat::Anthropic)?;
+    // The engine puts instructions at the start of the first user message.
+    if let Some(reminder) = claude_core::project_instructions::load_all(Some(&session.paths.data_dir), &session.workspace).ok().and_then(|all| claude_core::project_instructions::reminder(&all)) {
+        history.insert(0, serde_json::json!({"role": "user", "content": reminder}));
     }
-    let history = session.store.model_history(&session.id, &claude_core::native_engine::provider_manager::ApiFormat::Anthropic)?;
     let body = serde_json::json!({"system": system, "messages": history, "tools": claude_core::tools::get_tool_definitions(), "max_tokens": 0});
     let window = window.and_then(|window| u32::try_from(window).ok());
     let mut usage = claude_core::native_engine::request_context::ContextUsage::from_body("anthropic-messages", &body, window, 0);

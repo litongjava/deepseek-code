@@ -890,6 +890,7 @@ impl ToolLoopExecutor {
         .with_runtime_agents(self.runtime_agents.clone())
         .with_allowed_tools(definition.tools)
         .with_prompt_profile(self.prompt_profile)
+        .with_context_reminders(self.context_reminders.clone())
         .with_conv_id(id.clone())
         .with_answer_waiters(self.answer_waiters.clone())
         .with_permission_mailbox(self.permission_mailbox.clone())

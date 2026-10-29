@@ -335,8 +335,9 @@ pub async fn handle(
                     eprintln!("Use /memory user|project|local to open a file (created if missing); /memory show prints loaded project instructions.");
                 }
                 "show" => {
-                    let instructions =
-                        claude_core::project_instructions::load(&session.workspace)?;
+                    let instructions = claude_core::project_instructions::render(
+                        &claude_core::project_instructions::load_all(Some(&paths.data_dir), &session.workspace)?,
+                    );
                     if instructions.is_empty() {
                         eprintln!("No project instructions found. /memory project opens the file.");
                     } else {

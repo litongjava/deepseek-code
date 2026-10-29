@@ -13,19 +13,66 @@ const FILE_NAMES: [&str; 4] = [
     ".claude/CLAUDE.md",
     "CLAUDE.local.md",
 ];
+/// Files in the user's data directory that apply to every project.
+const USER_FILE_NAMES: [&str; 2] = ["AGENTS.md", "CLAUDE.md"];
 const MAX_FILE_BYTES: usize = 256 * 1024;
 const MAX_TOTAL_BYTES: usize = 1024 * 1024;
 const MAX_FILES: usize = 128;
 
-/// Load instructions from filesystem root to workspace, preserving file order
-/// within each directory. Local instructions follow checked-in instructions.
-/// Missing files are normal; unreadable, oversized or invalid UTF-8 files fail
-/// explicitly rather than silently dropping user instructions.
-pub fn load(workspace: &Path) -> Result<String> {
-    Ok(load_with_files(workspace)?.0)
+/// The reference CLI's lead-in for the instructions reminder.
+pub const PREAMBLE: &str = "Codebase and user instructions are shown below. Be sure to adhere to these instructions. IMPORTANT: These instructions OVERRIDE any default behavior and you MUST follow them exactly as written.";
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Scope {
+    User,
+    Project,
+    Local,
 }
 
-pub fn load_with_files(workspace: &Path) -> Result<(String, Vec<(PathBuf, String)>)> {
+impl Scope {
+    fn label(self) -> &'static str {
+        match self {
+            Scope::User => "user's private global instructions for all projects",
+            Scope::Project => "project instructions, checked into the codebase",
+            Scope::Local => "user's private project instructions, not checked in",
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct Instruction {
+    pub path: PathBuf,
+    pub scope: Scope,
+    pub content: String,
+    pub sha256: String,
+}
+
+/// Every instruction as the reference CLI lists it, or "" when none exist.
+pub fn render(instructions: &[Instruction]) -> String {
+    instructions
+        .iter()
+        .map(|item| format!("Contents of {} ({}):\n\n{}", item.path.display(), item.scope.label(), item.content.trim()))
+        .collect::<Vec<_>>()
+        .join("\n\n")
+}
+
+/// The `<system-reminder>` the reference CLI puts at the start of the first
+/// user message, or None when there are no instructions.
+pub fn reminder(instructions: &[Instruction]) -> Option<String> {
+    (!instructions.is_empty()).then(|| format!("<system-reminder>\n{PREAMBLE}\n\n{}\n</system-reminder>", render(instructions)))
+}
+
+/// Project instructions only, rendered; see [`load_all`] for user instructions too.
+pub fn load(workspace: &Path) -> Result<String> {
+    Ok(render(&load_all(None, workspace)?))
+}
+
+/// User instructions from `user_dir` first, then the workspace's ancestor chain
+/// from the filesystem root down, preserving file order within each directory.
+/// Local instructions follow checked-in instructions. Missing files are normal;
+/// unreadable, oversized or invalid UTF-8 files fail explicitly rather than
+/// silently dropping user instructions.
+pub fn load_all(user_dir: Option<&Path>, workspace: &Path) -> Result<Vec<Instruction>> {
     let workspace = workspace.canonicalize().with_context(|| {
         format!(
             "Resolving project instructions workspace {}",
@@ -39,95 +86,106 @@ pub fn load_with_files(workspace: &Path) -> Result<(String, Vec<(PathBuf, String
     );
     let mut directories: Vec<_> = workspace.ancestors().map(Path::to_path_buf).collect();
     directories.reverse();
-    load_directories_with_files(&directories)
+    let mut reader = Reader::default();
+    if let Some(user_dir) = user_dir {
+        for name in USER_FILE_NAMES {
+            reader.read(&user_dir.join(name), Scope::User)?;
+        }
+    }
+    reader.read_directories(&directories)?;
+    Ok(reader.files)
 }
 
 #[cfg(test)]
 fn load_directories(directories: &[PathBuf]) -> Result<String> {
-    Ok(load_directories_with_files(directories)?.0)
+    let mut reader = Reader::default();
+    reader.read_directories(directories)?;
+    Ok(render(&reader.files))
 }
 
-fn load_directories_with_files(
-    directories: &[PathBuf],
-) -> Result<(String, Vec<(PathBuf, String)>)> {
-    let mut files = Vec::new();
-    let mut seen = HashSet::new();
-    let mut total_bytes = 0;
-    let mut prompt = String::new();
-    for directory in directories {
-        for name in FILE_NAMES {
-            let path = directory.join(name);
-            let canonical = match path.canonicalize() {
-                Ok(path) => path,
-                Err(error) if error.kind() == ErrorKind::NotFound => continue,
-                Err(error) => {
-                    return Err(error).with_context(|| {
-                        format!("Resolving project instructions {}", path.display())
-                    })
-                }
-            };
-            if !seen.insert(canonical.clone()) {
-                continue;
-            }
-            anyhow::ensure!(
-                seen.len() <= MAX_FILES,
-                "Project instructions exceed {MAX_FILES} files at {}",
-                path.display()
-            );
-            let metadata = canonical
-                .metadata()
-                .with_context(|| format!("Inspecting project instructions {}", path.display()))?;
-            anyhow::ensure!(
-                metadata.is_file(),
-                "Project instructions must be a regular file: {}",
-                path.display()
-            );
-            anyhow::ensure!(
-                metadata.len() <= MAX_FILE_BYTES as u64,
-                "Project instructions exceed {MAX_FILE_BYTES} bytes: {}",
-                path.display()
-            );
-            // Bound the read too, in case the file grows after metadata inspection.
-            let mut bytes = Vec::new();
-            File::open(&canonical)
-                .and_then(|file| {
-                    file.take((MAX_FILE_BYTES + 1) as u64)
-                        .read_to_end(&mut bytes)
-                })
-                .with_context(|| format!("Reading project instructions {}", path.display()))?;
-            anyhow::ensure!(
-                bytes.len() <= MAX_FILE_BYTES,
-                "Project instructions exceed {MAX_FILE_BYTES} bytes: {}",
-                path.display()
-            );
-            total_bytes += bytes.len();
-            anyhow::ensure!(
-                total_bytes <= MAX_TOTAL_BYTES,
-                "Project instructions exceed {MAX_TOTAL_BYTES} total bytes at {}",
-                path.display()
-            );
-            let content = String::from_utf8(bytes).with_context(|| {
-                format!("Project instructions must be UTF-8: {}", path.display())
-            })?;
-            let content = content.trim_start_matches('\u{feff}');
-            if !content.trim().is_empty() {
-                let digest = ring::digest::digest(&ring::digest::SHA256, content.as_bytes());
-                files.push((
-                    path.clone(),
-                    digest
-                        .as_ref()
-                        .iter()
-                        .map(|byte| format!("{byte:02x}"))
-                        .collect(),
-                ));
-                prompt.push_str(&format!(
-                    "\nContents of {} (project instructions):\n{content}\n",
-                    path.display()
-                ));
+#[derive(Default)]
+struct Reader {
+    files: Vec<Instruction>,
+    seen: HashSet<PathBuf>,
+    total_bytes: usize,
+}
+
+impl Reader {
+    fn read_directories(&mut self, directories: &[PathBuf]) -> Result<()> {
+        for directory in directories {
+            for name in FILE_NAMES {
+                let scope = if name == "CLAUDE.local.md" { Scope::Local } else { Scope::Project };
+                self.read(&directory.join(name), scope)?;
             }
         }
+        Ok(())
     }
-    Ok((prompt, files))
+
+    fn read(&mut self, path: &Path, scope: Scope) -> Result<()> {
+        let canonical = match path.canonicalize() {
+            Ok(path) => path,
+            Err(error) if error.kind() == ErrorKind::NotFound => return Ok(()),
+            Err(error) => {
+                return Err(error).with_context(|| {
+                    format!("Resolving project instructions {}", path.display())
+                })
+            }
+        };
+        if !self.seen.insert(canonical.clone()) {
+            return Ok(());
+        }
+        anyhow::ensure!(
+            self.seen.len() <= MAX_FILES,
+            "Project instructions exceed {MAX_FILES} files at {}",
+            path.display()
+        );
+        let metadata = canonical
+            .metadata()
+            .with_context(|| format!("Inspecting project instructions {}", path.display()))?;
+        anyhow::ensure!(
+            metadata.is_file(),
+            "Project instructions must be a regular file: {}",
+            path.display()
+        );
+        anyhow::ensure!(
+            metadata.len() <= MAX_FILE_BYTES as u64,
+            "Project instructions exceed {MAX_FILE_BYTES} bytes: {}",
+            path.display()
+        );
+        // Bound the read too, in case the file grows after metadata inspection.
+        let mut bytes = Vec::new();
+        File::open(&canonical)
+            .and_then(|file| {
+                file.take((MAX_FILE_BYTES + 1) as u64)
+                    .read_to_end(&mut bytes)
+            })
+            .with_context(|| format!("Reading project instructions {}", path.display()))?;
+        anyhow::ensure!(
+            bytes.len() <= MAX_FILE_BYTES,
+            "Project instructions exceed {MAX_FILE_BYTES} bytes: {}",
+            path.display()
+        );
+        self.total_bytes += bytes.len();
+        anyhow::ensure!(
+            self.total_bytes <= MAX_TOTAL_BYTES,
+            "Project instructions exceed {MAX_TOTAL_BYTES} total bytes at {}",
+            path.display()
+        );
+        let content = String::from_utf8(bytes).with_context(|| {
+            format!("Project instructions must be UTF-8: {}", path.display())
+        })?;
+        let content = content.trim_start_matches('\u{feff}');
+        if !content.trim().is_empty() {
+            let digest = ring::digest::digest(&ring::digest::SHA256, content.as_bytes());
+            self.files.push(Instruction {
+                path: path.to_path_buf(),
+                scope,
+                content: content.to_owned(),
+                sha256: digest.as_ref().iter().map(|byte| format!("{byte:02x}")).collect(),
+            });
+        }
+        Ok(())
+    }
 }
 
 #[cfg(test)]
@@ -217,5 +275,23 @@ mod tests {
         fs::write(root.path().join("CLAUDE.md"), "\u{feff}hello").unwrap();
         let result = load_directories(&[root.path().into()]).unwrap();
         assert!(result.contains("hello") && !result.contains('\u{feff}'));
+    }
+
+    #[test]
+    fn user_instructions_come_first_with_reference_labels() {
+        let user = tempfile::tempdir().unwrap();
+        let project = tempfile::tempdir().unwrap();
+        fs::write(user.path().join("CLAUDE.md"), "user marker").unwrap();
+        fs::write(project.path().join("AGENTS.md"), "project marker\n").unwrap();
+        fs::write(project.path().join("CLAUDE.local.md"), "local marker").unwrap();
+        let all = load_all(Some(user.path()), project.path()).unwrap();
+        let scopes: Vec<_> = all.iter().map(|item| item.scope).collect();
+        assert_eq!(scopes, [Scope::User, Scope::Project, Scope::Local]);
+        let reminder = reminder(&all).unwrap();
+        assert!(reminder.starts_with(&format!("<system-reminder>\n{PREAMBLE}\n\nContents of ")));
+        assert!(reminder.contains("CLAUDE.md (user's private global instructions for all projects):\n\nuser marker\n\nContents of "));
+        assert!(reminder.contains("AGENTS.md (project instructions, checked into the codebase):\n\nproject marker\n\n"));
+        assert!(reminder.ends_with("CLAUDE.local.md (user's private project instructions, not checked in):\n\nlocal marker\n</system-reminder>"));
+        assert!(super::reminder(&[]).is_none());
     }
 }

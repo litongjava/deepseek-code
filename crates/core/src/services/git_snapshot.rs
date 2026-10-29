@@ -39,6 +39,11 @@ pub fn take(cwd: &Path) -> Option<String> {
     Some(text)
 }
 
+/// The snapshot as the reference CLI attaches it to the first user message.
+pub fn reminder(snapshot: &str) -> String {
+    format!("<system-reminder>\nAs you answer the user's questions, you can use the following context:\n{}\n\ndeepseek-code attached this context automatically; it isn't part of the user's message. It describes the user's own account and workspace, so they don't need it reported back.\n</system-reminder>", snapshot.trim_end())
+}
+
 /// The session's snapshot: taken on its first request, then reused.
 pub fn for_session(root: &Path, session: &str, cwd: &Path) -> Option<String> {
     let path = root.join("git-status").join(format!("{session}.txt"));

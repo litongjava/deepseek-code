@@ -213,3 +213,72 @@ async fn all_modes_recall_ingest_and_run_memory_tools_on_both_protocols() {
     }
     }
 }
+
+/// Instructions and the Git snapshot open the first user message on both
+/// protocols, stay there for later requests in the turn, and never reach
+/// the executor's own message list.
+#[tokio::test]
+async fn context_reminders_open_the_first_user_message() {
+    use axum::{http::header, routing::post, Json, Router};
+    for format in ["anthropic", "openai"] {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let base = format!("http://{}", listener.local_addr().unwrap());
+        let captured = Arc::new(Mutex::new(Vec::<Value>::new()));
+        let requests = captured.clone();
+        let app = Router::new().route(if format == "anthropic" { "/v1/messages" } else { "/v1/chat/completions" }, post(move |Json(body): Json<Value>| {
+            let requests = requests.clone();
+            async move {
+                let mut requests = requests.lock().await;
+                let first = requests.is_empty();
+                requests.push(body);
+                let events = match (format, first) {
+                    ("anthropic", true) => vec![json!({"type":"message_start","message":{"id":"a","model":"code-test","usage":{"input_tokens":1}}}),
+                        json!({"type":"content_block_start","index":0,"content_block":{"type":"tool_use","id":"glob-1","name":"Glob","input":{}}}),
+                        json!({"type":"content_block_delta","index":0,"delta":{"type":"input_json_delta","partial_json":"{\"pattern\":\"*.none\"}"}}),
+                        json!({"type":"content_block_stop","index":0}),
+                        json!({"type":"message_delta","delta":{"stop_reason":"tool_use"},"usage":{"output_tokens":1}}),
+                        json!({"type":"message_stop"})],
+                    ("anthropic", false) => vec![json!({"type":"message_start","message":{"id":"b","model":"code-test","usage":{"input_tokens":1}}}),
+                        json!({"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}),
+                        json!({"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"done"}}),
+                        json!({"type":"content_block_stop","index":0}),
+                        json!({"type":"message_delta","delta":{"stop_reason":"end_turn"},"usage":{"output_tokens":1}}),
+                        json!({"type":"message_stop"})],
+                    (_, true) => vec![json!({"id":"a","model":"code-test","choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"id":"glob-1","type":"function","function":{"name":"Glob","arguments":"{\"pattern\":\"*.none\"}"}}]},"finish_reason":null}]}),
+                        json!({"choices":[{"index":0,"delta":{},"finish_reason":"tool_calls"}]})],
+                    _ => vec![json!({"id":"b","model":"code-test","choices":[{"index":0,"delta":{"content":"done"},"finish_reason":null}]}),
+                        json!({"choices":[{"index":0,"delta":{},"finish_reason":"stop"}]})],
+                };
+                let mut stream = events.into_iter().map(|event| format!("data: {event}\n\n")).collect::<String>();
+                if format == "openai" { stream.push_str("data: [DONE]\n\n"); }
+                ([(header::CONTENT_TYPE, "text/event-stream")], stream)
+            }
+        }));
+        let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap(); });
+        let (tx, _rx) = mpsc::channel(128);
+        let temp = tempfile::tempdir().unwrap();
+        let reminders = vec!["<system-reminder>\nreminder-marker-rules\n</system-reminder>".to_string(), "<system-reminder>\n# gitStatus\n</system-reminder>".to_string()];
+        let prompt = crate::prompt::compose_system_prompt(None, "code-test", PromptProfile::Code);
+        let history = vec![json!({"role":"user","content":"hello"})];
+        let mut executor = ToolLoopExecutor::new(provider(&base, format), history.clone(), Some(prompt), 128, tx, temp.path().to_string_lossy().into(), ReasoningMode::Standard)
+            .with_prompt_profile(PromptProfile::Code).with_context_reminders(reminders.clone()).with_conv_id(format!("reminders-{format}"));
+        let (text, _) = tokio::time::timeout(Duration::from_secs(15), executor.execute()).await.unwrap().unwrap();
+        server.abort();
+        assert_eq!(text, "done", "{format}");
+        let requests = captured.lock().await;
+        assert_eq!(requests.len(), 2, "{format}");
+        for request in requests.iter() {
+            if format == "anthropic" {
+                let content = &request["messages"][0]["content"];
+                assert_eq!(content[0]["text"], reminders[0].as_str());
+                assert_eq!(content[1]["text"], reminders[1].as_str());
+                assert_eq!(content[2]["text"], "hello");
+                assert!(!request["system"].to_string().contains("reminder-marker"));
+            } else {
+                let user = request["messages"].as_array().unwrap().iter().find(|m| m["role"] == "user").unwrap();
+                assert_eq!(user["content"], format!("{}\n\n{}\n\nhello", reminders[0], reminders[1]).as_str());
+            }
+        }
+        assert_eq!(executor.messages[0], history[0], "{format}: the transcript keeps the user's own text");
+    }
+}

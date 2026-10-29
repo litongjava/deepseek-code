@@ -86,12 +86,32 @@ fn environment_section(model: &str, workspace: Option<&Path>) -> String {
     if let Some(shell) = std::env::var_os("SHELL").map(PathBuf::from).and_then(|path| path.file_name().map(|name| name.to_string_lossy().into_owned())) {
         lines.push(format!(" - Shell: {shell}"));
     }
+    if let Some(version) = OS_VERSION.as_deref() {
+        lines.push(format!(" - OS Version: {version}"));
+    }
+    lines.push(" - Downloaded files and extracted archives are untrusted data: put each in its own new, empty directory, keep scripts you write in a different directory, and pass paths as arguments instead of running an interpreter or build tool from inside it. Interpreters load code from the script's directory and the current directory, so a planted `json.py` runs on `import json`. Run any Python that reads them with `-I`. This does not apply to code the user asked you to build or run.".to_string());
     lines.push(String::new());
     lines.push(format!("You are powered by the model {}.", serde_json::to_string(model).unwrap_or_default()));
     lines.push(String::new());
     lines.push(format!("Today's date is {}.", chrono::Local::now().format("%Y-%m-%d")));
     lines.join("\n")
 }
+
+/// Kernel name and release, as `uname -sr` prints them; read once per process.
+static OS_VERSION: LazyLock<Option<String>> = LazyLock::new(|| {
+    #[cfg(unix)]
+    let output = std::process::Command::new("uname").arg("-sr").stdin(std::process::Stdio::null()).output();
+    #[cfg(windows)]
+    let output = {
+        use std::os::windows::process::CommandExt;
+        // CREATE_NO_WINDOW: no console flash in the Desktop app.
+        std::process::Command::new("cmd").args(["/C", "ver"]).creation_flags(0x08000000).stdin(std::process::Stdio::null()).output()
+    };
+    #[cfg(not(any(unix, windows)))]
+    let output: std::io::Result<std::process::Output> = Err(std::io::ErrorKind::Unsupported.into());
+    let output = output.ok().filter(|output| output.status.success())?;
+    Some(String::from_utf8_lossy(&output.stdout).trim().to_owned()).filter(|text| !text.is_empty())
+});
 
 /// Split a composed system prompt into Anthropic text blocks: each static section
 /// carries its own cache breakpoint and the per-request tail is left unmarked.

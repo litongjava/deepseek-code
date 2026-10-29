@@ -179,6 +179,9 @@ pub struct ToolLoopExecutor {
     memex_client: Option<MemExClient>,
     context_manager: Option<ContextManager>,
     prompt_profile: PromptProfile,
+    /// `<system-reminder>` blocks placed before the first user message's text
+    /// in every request; never saved to the transcript.
+    context_reminders: Vec<String>,
     reasoning_mode: ReasoningMode,
     prefetch_engine: Option<Arc<PrefetchEngine>>,
     bundled_resources: Arc<crate::skills::bundled_resources::Resources>,
@@ -688,6 +691,7 @@ impl ToolLoopExecutor {
             memex_client: None,
             context_manager: None,
             prompt_profile: PromptProfile::Desktop,
+            context_reminders: Vec::new(),
             reasoning_mode,
             prefetch_engine: None,
             bundled_resources: Arc::default(),
@@ -938,6 +942,17 @@ impl ToolLoopExecutor {
     pub fn with_prompt_profile(mut self, profile: PromptProfile) -> Self {
         self.prompt_profile = profile;
         self
+    }
+
+    pub fn with_context_reminders(mut self, reminders: Vec<String>) -> Self {
+        self.context_reminders = reminders;
+        self
+    }
+
+    /// Index of the message that carries the context reminders.
+    fn reminder_target(&self) -> Option<usize> {
+        if self.context_reminders.is_empty() { return None; }
+        self.messages.iter().position(|msg| msg.get("role").and_then(Value::as_str) == Some("user"))
     }
 
     pub fn with_allowed_tools(mut self, tools: Option<Vec<String>>) -> Self { self.allowed_tools = tools; self }
@@ -3087,7 +3102,8 @@ impl ToolLoopExecutor {
     }
 
     fn build_anthropic_messages(&self) -> Vec<AnthropicMessage> {
-        self.messages.iter().filter_map(|msg| {
+        let target = self.reminder_target();
+        self.messages.iter().enumerate().filter_map(|(index, msg)| {
             let role = msg.get("role")?.as_str()?;
             let content = msg.get("content")?;
 
@@ -3139,6 +3155,15 @@ impl ToolLoopExecutor {
             } else {
                 return None;
             };
+            let anthropic_content = if Some(index) == target {
+                // One text block per reminder, ahead of the user's own content.
+                let mut blocks: Vec<ContentBlock> = self.context_reminders.iter().map(|text| ContentBlock::Text { text: text.clone() }).collect();
+                match anthropic_content {
+                    AnthropicContent::Text(text) => blocks.push(ContentBlock::Text { text }),
+                    AnthropicContent::Blocks(rest) => blocks.extend(rest),
+                }
+                AnthropicContent::Blocks(blocks)
+            } else { anthropic_content };
 
             Some(AnthropicMessage {
                 role: role.to_string(),
@@ -3148,7 +3173,8 @@ impl ToolLoopExecutor {
     }
 
     fn build_openai_messages(&self) -> Vec<OpenAIMessage> {
-        self.messages.iter().filter_map(|msg| {
+        let target = self.reminder_target();
+        self.messages.iter().enumerate().filter_map(|(index, msg)| {
             let role = msg.get("role")?.as_str()?;
             let content = msg.get("content")?;
 
@@ -3178,6 +3204,14 @@ impl ToolLoopExecutor {
             } else {
                 return None;
             };
+            let openai_content = if Some(index) == target {
+                // Plain-string content stays a string: some compatible servers
+                // accept only strings for user messages.
+                match openai_content {
+                    OpenAIContent::Text(text) => OpenAIContent::Text(self.context_reminders.iter().cloned().chain([text]).collect::<Vec<_>>().join("\n\n")),
+                    OpenAIContent::Multi(rest) => OpenAIContent::Multi(self.context_reminders.iter().map(|text| crate::native_engine::openai_client::OpenAIContentPart::Text { text: text.clone() }).chain(rest).collect()),
+                }
+            } else { openai_content };
 
             let tool_calls = msg.get("tool_calls").and_then(|tc| {
                 serde_json::from_value(tc.clone()).ok()

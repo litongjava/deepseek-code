@@ -66,7 +66,8 @@ async fn respond(
     let sender = body["messages"].as_array().is_some_and(|messages| {
         messages.iter().any(|message| {
             message["role"] == "user"
-                && (message["content"] == "sender task"
+                // Context reminders may precede the text in a string body.
+                && (message["content"].as_str().is_some_and(|text| text.ends_with("sender task"))
                     || message["content"].as_array().is_some_and(|blocks| {
                         blocks.iter().any(|block| block["text"] == "sender task")
                     }))
