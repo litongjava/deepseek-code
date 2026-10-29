@@ -27,7 +27,9 @@ impl ToolLoopExecutor {
         input: &Value,
         pre_tool_hook: bool,
     ) -> Option<String> {
-        if self
+        // A sandboxed command's host question belongs to its Bash call, which
+        // already passed this check.
+        if tool != "SandboxNetwork" && self
             .allowed_tools
             .as_ref()
             .is_some_and(|tools| !tools.iter().any(|name| name == tool))
@@ -86,6 +88,10 @@ impl ToolLoopExecutor {
             .into_iter()
             .find(|definition| definition.name == tool)
             .map(|definition| definition.input_schema);
+        // Not a model tool: the host a sandboxed command wants to reach.
+        if tool == "SandboxNetwork" {
+            schema = Some(json!({"type":"object","properties":{"host":{"type":"string"},"url":{"type":"string"}},"required":["host","url"],"additionalProperties":false}));
+        }
         if schema.is_none() {
             if let Some(registry) = &self.mcp_registry {
                 schema = registry

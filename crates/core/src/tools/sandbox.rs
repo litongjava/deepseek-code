@@ -134,7 +134,9 @@ async fn serve<S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin>(mut clie
         let head = head.replacen(first, &format!("{method} {path} {version}"), 1);
         (host, url.port_or_known_default().unwrap_or(80), Some(head))
     };
-    if !rules.allows(&host) {
+    // A host outside allowedDomains (and not denied) is the user's call.
+    let denied = rules.denied.iter().any(|pattern| domain_matches(pattern, &host));
+    if !rules.allows(&host) && (denied || !ask_about(&rules, &host).await) {
         blocked.lock().unwrap_or_else(|e| e.into_inner()).push(host.clone());
         let body = format!("Connection to {host} blocked by the sandbox network allowlist (sandbox.network.allowedDomains / deniedDomains in settings.json).\n");
         client.write_all(format!("HTTP/1.1 403 Forbidden\r\nContent-Type: text/plain\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len()).as_bytes()).await?;
@@ -154,6 +156,49 @@ struct Proxy {
     endpoint: String,
     /// Hosts refused so far, in order, so a command's result can name them.
     blocked: Arc<Mutex<Vec<String>>>,
+}
+
+/// A question for the user: may a sandboxed command reach this host?
+pub type HostQuestion = (String, tokio::sync::oneshot::Sender<bool>);
+
+/// Who answers host questions for a rule set: the turn running a sandboxed
+/// command, while it runs. Without one, unlisted hosts are refused.
+static ASKERS: std::sync::LazyLock<Mutex<HashMap<NetworkRules, tokio::sync::mpsc::Sender<HostQuestion>>>> = std::sync::LazyLock::new(Default::default);
+
+/// Removes its asker when the command finishes.
+pub struct AskerGuard {
+    rules: NetworkRules,
+    sender: tokio::sync::mpsc::Sender<HostQuestion>,
+}
+
+impl Drop for AskerGuard {
+    fn drop(&mut self) {
+        let mut askers = ASKERS.lock().unwrap_or_else(|e| e.into_inner());
+        if askers.get(&self.rules).is_some_and(|current| current.same_channel(&self.sender)) {
+            askers.remove(&self.rules);
+        }
+    }
+}
+
+/// Lets the caller answer host questions while a command with this policy
+/// runs, as the reference CLI asks about hosts outside allowedDomains.
+pub fn register_asker(policy: &Value) -> Option<(AskerGuard, tokio::sync::mpsc::Receiver<HostQuestion>)> {
+    if policy["network"] == false || !policy["network_rules"].is_object() || policy["network_rules"]["restricted"] != true {
+        return None;
+    }
+    let rules = NetworkRules::from_policy(&policy["network_rules"]);
+    let (sender, receiver) = tokio::sync::mpsc::channel(8);
+    ASKERS.lock().unwrap_or_else(|e| e.into_inner()).insert(rules.clone(), sender.clone());
+    Some((AskerGuard { rules, sender }, receiver))
+}
+
+/// Asks the registered caller about `host`; false when nobody can answer.
+async fn ask_about(rules: &NetworkRules, host: &str) -> bool {
+    let sender = ASKERS.lock().unwrap_or_else(|e| e.into_inner()).get(rules).cloned();
+    let Some(sender) = sender else { return false };
+    let (reply, answer) = tokio::sync::oneshot::channel();
+    if sender.send((host.to_owned(), reply)).await.is_err() { return false }
+    tokio::time::timeout(std::time::Duration::from_secs(600), answer).await.ok().and_then(Result::ok).unwrap_or(false)
 }
 
 /// Running proxies, one per distinct rule set.
@@ -341,6 +386,38 @@ mod network_tests {
         assert_eq!(policy["network"], true);
         // Without either list, the network stays open as before.
         assert!(super::policy(&json!({"enabled":true}), workspace.path(), data.path(), &[]).unwrap()["network_rules"].is_null());
+    }
+
+    #[tokio::test]
+    async fn unlisted_hosts_are_put_to_the_registered_asker() {
+        let server = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = server.local_addr().unwrap().port();
+        tokio::spawn(async move { while let Ok((mut stream, _)) = server.accept().await { let _ = stream.write_all(b"pong").await; } });
+        // A rule set of its own, so other tests' askers never interfere.
+        let policy = json!({"network": true, "network_rules": {"allowed": ["only.example.test"], "denied": ["blocked.example.test"], "restricted": true}});
+        let rules = Arc::new(NetworkRules::from_policy(&policy["network_rules"]));
+        let (_guard, mut questions) = register_asker(&policy).unwrap();
+        let connect = |host: &'static str, rules: Arc<NetworkRules>| async move {
+            let (mut client, proxy_side) = tokio::io::duplex(8192);
+            tokio::spawn(serve(proxy_side, rules, Default::default()));
+            client.write_all(format!("CONNECT {host}:{port} HTTP/1.1\r\n\r\n").as_bytes()).await.unwrap();
+            let mut reply = vec![0u8; 256];
+            let read = client.read(&mut reply).await.unwrap();
+            String::from_utf8_lossy(&reply[..read]).into_owned()
+        };
+        // Approved: the tunnel opens.
+        let pending = tokio::spawn(connect("localhost", rules.clone()));
+        let (host, reply) = questions.recv().await.unwrap();
+        assert_eq!(host, "localhost");
+        reply.send(true).unwrap();
+        assert!(pending.await.unwrap().starts_with("HTTP/1.1 200"));
+        // Refused: a 403.
+        let pending = tokio::spawn(connect("localhost", rules.clone()));
+        questions.recv().await.unwrap().1.send(false).unwrap();
+        assert!(pending.await.unwrap().starts_with("HTTP/1.1 403"));
+        // A denied host is refused without asking.
+        assert!(connect("blocked.example.test", rules.clone()).await.starts_with("HTTP/1.1 403"));
+        assert!(questions.try_recv().is_err());
     }
 
     #[tokio::test]

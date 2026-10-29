@@ -383,13 +383,24 @@ fn session_rule(name: &str, input: &Value) -> Option<String> {
             }
         }
         ("Bash" | "PowerShell", _) => return None,
+        // As in the reference CLI: don't ask again for this host.
+        ("WebFetch", _) => format!("WebFetch(domain:{})", fetch_host(input)?),
+        ("SandboxNetwork", _) => format!("SandboxNetwork(domain:{})", fetch_host(input)?),
         _ => name.to_owned(),
     };
     claude_core::permissions::patterns::validate(&rule).ok().map(|_| rule)
 }
 
+/// The host a WebFetch call would contact.
+fn fetch_host(input: &Value) -> Option<String> {
+    claude_core::permissions::web_fetch::host(input["url"].as_str()?).filter(|host| claude_core::permissions::patterns::validate(&format!("WebFetch(domain:{host})")).is_ok())
+}
+
 /// `Yes, and don’t ask again for: npm run *`, as in the reference CLI.
 fn remember_option(rule: &str) -> String {
+    if let Some(host) = rule.strip_prefix("WebFetch(domain:").or_else(|| rule.strip_prefix("SandboxNetwork(domain:")).and_then(|rest| rest.strip_suffix(')')) {
+        return format!("Yes, and don\u{2019}t ask again for {host}");
+    }
     let subject = rule
         .strip_prefix("Bash(")
         .and_then(|rest| rest.strip_suffix(')'))
@@ -423,6 +434,18 @@ pub fn approval(name: &str, input: &Value, workspace: Option<&std::path::Path>, 
         }
         _ => {
             match (name, input["command"].as_str()) {
+                // A sandboxed command reaching a host outside allowedDomains.
+                ("SandboxNetwork", _) => {
+                    lines.push(change_view::heading("Network request outside of sandbox"));
+                    lines.push(change_view::body(&format!("  Host: {}", printable(input["host"].as_str().unwrap_or_default()))));
+                }
+                // The reference CLI's fetch approval: the URL and its host.
+                ("WebFetch", _) if fetch_host(input).is_some() => {
+                    let host = fetch_host(input).unwrap_or_default();
+                    lines.push(change_view::heading("Fetch"));
+                    lines.push(change_view::body(&format!("  {}", printable(input["url"].as_str().unwrap_or_default()))));
+                    lines.push(change_view::muted(&format!("  DeepSeek Code wants to fetch content from {host}")));
+                }
                 ("Bash" | "PowerShell", Some(command)) => {
                     // As in the reference CLI: the description, then the command
                     // between dashed rules.
@@ -451,7 +474,13 @@ pub fn approval(name: &str, input: &Value, workspace: Option<&std::path::Path>, 
                     }
                 }
             }
-            "Do you want to proceed?".to_owned()
+            if name == "WebFetch" && fetch_host(input).is_some() {
+                "Do you want to allow DeepSeek Code to fetch this content?".to_owned()
+            } else if name == "SandboxNetwork" {
+                "Do you want to allow this connection?".to_owned()
+            } else {
+                "Do you want to proceed?".to_owned()
+            }
         }
     };
     let remember = if edits { Some(Remember::AcceptEdits) } else { session_rule(name, input).map(Remember::Rule) };
@@ -475,6 +504,24 @@ mod tests {
 
     fn text(lines: &[Line]) -> Vec<String> {
         lines.iter().map(|line| change_view::render(line, usize::MAX, false)).collect()
+    }
+
+    #[test]
+    fn web_fetch_approval_names_the_host_and_remembers_it() {
+        let approval = approval("WebFetch", &json!({"url":"https://Example.com/a?b=1","prompt":"p"}), None, false);
+        assert_eq!(approval.question, "Do you want to allow DeepSeek Code to fetch this content?");
+        assert!(text(&approval.lines).iter().any(|line| line.contains("wants to fetch content from example.com")));
+        assert_eq!(approval.options, ["Yes", "Yes, and don\u{2019}t ask again for example.com", "No"]);
+        assert!(matches!(&approval.remember, Some(Remember::Rule(rule)) if rule == "WebFetch(domain:example.com)"));
+    }
+
+    #[test]
+    fn sandbox_host_approval_matches_the_reference() {
+        let approval = approval("SandboxNetwork", &json!({"host":"pypi.org","url":"https://pypi.org/"}), None, false);
+        assert_eq!(approval.question, "Do you want to allow this connection?");
+        assert_eq!(text(&approval.lines), ["Network request outside of sandbox", "  Host: pypi.org"]);
+        assert_eq!(approval.options, ["Yes", "Yes, and don\u{2019}t ask again for pypi.org", "No"]);
+        assert!(matches!(&approval.remember, Some(Remember::Rule(rule)) if rule == "SandboxNetwork(domain:pypi.org)"));
     }
 
     #[test]

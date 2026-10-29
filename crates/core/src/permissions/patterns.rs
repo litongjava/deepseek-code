@@ -40,8 +40,9 @@ impl Rule {
             );
             // As in the reference CLI: WebFetch(domain:example.com), with
             // *.example.com for its subdomains.
-            if tool == "WebFetch" {
-                let domain = content.strip_prefix("domain:").ok_or_else(|| anyhow::anyhow!("WebFetch rules take the form WebFetch(domain:example.com)"))?;
+            // SandboxNetwork(domain:...) remembers a sandboxed command's host.
+            if matches!(tool, "WebFetch" | "SandboxNetwork") {
+                let domain = content.strip_prefix("domain:").ok_or_else(|| anyhow::anyhow!("{tool} rules take the form {tool}(domain:example.com)"))?;
                 let host = domain.strip_prefix("*.").unwrap_or(domain);
                 ensure!(
                     !host.is_empty() && host.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '.')),
@@ -108,7 +109,7 @@ impl Rule {
         let Some(pattern) = &self.content else {
             return true;
         };
-        if self.tool == "WebFetch" {
+        if matches!(self.tool.as_str(), "WebFetch" | "SandboxNetwork") {
             let domain = pattern.strip_prefix("domain:").unwrap_or(pattern);
             let Some(host) = context.tool_input["url"].as_str().and_then(|url| reqwest::Url::parse(url).ok()).and_then(|url| url.host_str().map(|host| host.trim_end_matches('.').to_ascii_lowercase())) else {
                 // An unparsable URL never matches a grant, but does match a deny or ask.
@@ -382,6 +383,9 @@ mod tests {
         assert!(!wildcard.matches(&fetch("https://github.com/"), &PermissionAction::Deny));
         assert!(!exact.matches(&fetch("not a url"), &PermissionAction::Allow));
         assert!(exact.matches(&fetch("not a url"), &PermissionAction::Deny));
+        let sandbox = Rule::parse("SandboxNetwork(domain:registry.npmjs.org)").unwrap();
+        let host = context("SandboxNetwork", json!({"host":"registry.npmjs.org","url":"https://registry.npmjs.org/"}), Path::new("."));
+        assert!(sandbox.matches(&host, &PermissionAction::Allow));
     }
 
     #[test]

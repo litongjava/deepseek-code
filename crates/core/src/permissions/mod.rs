@@ -6,6 +6,7 @@ pub mod rules;
 pub mod patterns;
 mod protected_paths;
 pub mod shell_read_only;
+pub mod web_fetch;
 pub mod audit;
 
 pub use manager::{PermissionManager, PermissionMode};

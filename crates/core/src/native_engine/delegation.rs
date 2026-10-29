@@ -519,12 +519,31 @@ impl ToolLoopExecutor {
             .await
     }
 
+    /// A deep-research child: a typed delegation that may fetch any page
+    /// without asking, since the user explicitly started web research with
+    /// /deep-research. Deny and ask rules for WebFetch still apply.
+    pub(super) async fn execute_research_child(&self, input: &Value, schema: Value, tools: Vec<String>) -> Result<Value> {
+        Box::pin(self.execute_delegated_with(input, Some(schema), Some(tools), false, true)).await
+    }
+
     pub(super) async fn execute_delegated_authorized(
         &self,
         input: &Value,
         schema: Option<Value>,
         tools: Option<Vec<String>>,
         preapproved: bool,
+    ) -> Result<Value> {
+        // Boxed: the delegation future is large and nests inside tool calls.
+        Box::pin(self.execute_delegated_with(input, schema, tools, preapproved, false)).await
+    }
+
+    async fn execute_delegated_with(
+        &self,
+        input: &Value,
+        schema: Option<Value>,
+        tools: Option<Vec<String>>,
+        preapproved: bool,
+        web_research: bool,
     ) -> Result<Value> {
         let input = if preapproved {
             input.clone()
@@ -553,6 +572,11 @@ impl ToolLoopExecutor {
             "model, effort and isolation apply to background agents; omit run_in_background or set it to true"
         );
         let prepared = Box::pin(self.prepare_delegated_child(&input, schema, tools)).await?;
+        if web_research {
+            if let Some(manager) = &prepared.child.permission_manager {
+                manager.allow_in_session(&prepared.id, "WebFetch");
+            }
+        }
         self.run_owned_child(
             prepared.context,
             prepared.id,

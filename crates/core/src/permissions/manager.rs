@@ -178,6 +178,12 @@ impl PermissionManager {
         *revision = revision.wrapping_add(1);
         self.session_rules.lock().unwrap_or_else(|e| e.into_inner()).insert(conversation.to_owned(), rules);
     }
+    /// Adds one allow rule to a session's rules; deny and ask rules still win.
+    pub(crate) fn allow_in_session(&self, conversation: &str, rule: &str) {
+        let mut revision = self.policy_revision.lock().unwrap_or_else(|e| e.into_inner());
+        *revision = revision.wrapping_add(1);
+        self.session_rules.lock().unwrap_or_else(|e| e.into_inner()).entry(conversation.to_owned()).or_default().insert(rule.to_owned(), PermissionAction::Allow);
+    }
     pub fn session_directories(&self, conversation: &str) -> Vec<PathBuf> {
         self.session_directories
             .lock()
@@ -596,6 +602,15 @@ impl PermissionManager {
         if actions.contains(&PermissionAction::Allow) {
             return decision(PermissionResult::Granted, ExplicitRule);
         }
+        // As in the reference CLI, WebFetch asks once per host outside its
+        // documentation list; "don't ask again" saves a WebFetch(domain:) rule.
+        if context.tool_name == "WebFetch"
+            && mode != PermissionMode::BypassPermissions
+            && !setting.as_ref().is_some_and(|p| p.allowed)
+            && !super::web_fetch::preapproved(context.tool_input["url"].as_str().unwrap_or_default())
+        {
+            return decision(self.request_confirmation(context), DefaultPrompt);
+        }
         if mode == PermissionMode::PlanMode {
             return decision(PermissionResult::Granted, PlanBoundary);
         }
@@ -932,6 +947,29 @@ mod policy_tests {
             assert!(matches!(manager.check_permission(&shell("ls -la src")), PermissionResult::RequiresConfirmation(_)));
         }
         assert!(matches!(manager(PermissionMode::DontAsk).check_permission(&shell("ls")), PermissionResult::Denied(_)));
+    }
+    #[test]
+    fn web_fetch_asks_for_new_hosts_unless_preapproved_or_allowed() {
+        let fetch = |url: &str| PermissionContext { tool_input: serde_json::json!({"url": url, "prompt": "p"}), ..context("WebFetch") };
+        for mode in [PermissionMode::AskPermissions, PermissionMode::AcceptEdits, PermissionMode::PlanMode] {
+            let manager = manager(mode);
+            assert_eq!(manager.check_permission(&fetch("https://docs.python.org/3/")), PermissionResult::Granted, "{mode:?}");
+            assert!(matches!(manager.check_permission(&fetch("https://example.com/")), PermissionResult::RequiresConfirmation(_)), "{mode:?}");
+            manager.set_session_rules("session", HashMap::from([("WebFetch(domain:example.com)".into(), PermissionAction::Allow)]));
+            assert_eq!(manager.check_permission(&fetch("https://example.com/")), PermissionResult::Granted, "{mode:?}");
+            assert!(matches!(manager.check_permission(&fetch("https://example.org/")), PermissionResult::RequiresConfirmation(_)));
+        }
+        // A research child may fetch anything; its parent still asks, and deny wins.
+        let parent = manager(PermissionMode::AskPermissions);
+        parent.set_session_rules("session", HashMap::from([("WebFetch(domain:evil.test)".into(), PermissionAction::Deny)]));
+        let child = parent.fork_session("session", "child");
+        child.allow_in_session("child", "WebFetch");
+        let in_child = |url: &str| PermissionContext { conversation_id: "child".into(), ..fetch(url) };
+        assert_eq!(child.check_permission(&in_child("https://example.com/")), PermissionResult::Granted);
+        assert!(matches!(child.check_permission(&in_child("https://evil.test/")), PermissionResult::Denied(_)));
+        assert!(matches!(parent.check_permission(&fetch("https://example.com/")), PermissionResult::RequiresConfirmation(_)));
+        assert_eq!(manager(PermissionMode::BypassPermissions).check_permission(&fetch("https://example.com/")), PermissionResult::Granted);
+        assert!(matches!(manager(PermissionMode::DontAsk).check_permission(&fetch("https://example.com/")), PermissionResult::Denied(_)));
     }
     #[test]
     fn own_state_tools_run_without_asking_unless_a_rule_or_plan_mode_says_otherwise() {

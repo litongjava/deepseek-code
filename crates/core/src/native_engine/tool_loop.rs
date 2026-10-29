@@ -952,6 +952,45 @@ impl ToolLoopExecutor {
         self
     }
 
+    /// Runs a built-in tool. While a sandboxed command with a domain
+    /// allowlist runs, hosts outside the list are put to the user, as in the
+    /// reference CLI; "don't ask again" saves a SandboxNetwork(domain:) rule.
+    async fn run_builtin(&self, tool_name: &str, tool_input: &Value, cwd: &str) -> Result<Value> {
+        let input = shell_state_input(tool_name, tool_input, cwd, self.search_config_path.as_deref(), self.conv_id.as_deref());
+        let asker = input.get("__sandbox").filter(|_| tool_input["dangerouslyDisableSandbox"] != true).and_then(crate::tools::sandbox::register_asker);
+        let run = execute_builtin_tool(tool_name, input.clone(), cwd, &self.provider, &self.event_tx, self.search_config_path.as_deref(), self.skill_shell_active);
+        let Some((_guard, mut questions)) = asker else { return run.await };
+        tokio::pin!(run);
+        loop {
+            tokio::select! {
+                result = &mut run => return result,
+                Some((host, reply)) = questions.recv() => {
+                    let allowed = self.approve_sandbox_host(&host).await;
+                    let _ = reply.send(allowed);
+                }
+            }
+        }
+    }
+
+    /// Whether a sandboxed Bash command may need to ask about a host; such
+    /// calls run in order through this executor, which can ask.
+    fn sandbox_may_ask(&self) -> bool {
+        let Some(root) = self.search_config_path.as_deref().and_then(std::path::Path::parent) else { return false };
+        let workspace = std::path::Path::new(&self.workspace_cwd);
+        crate::tools::sandbox::policy(&crate::tools::sandbox::settings(root, workspace), workspace, root, &[])
+            .is_some_and(|policy| policy["network_rules"]["restricted"] == true && policy["network"] != false)
+    }
+
+    async fn approve_sandbox_host(&self, host: &str) -> bool {
+        let input = json!({"host": host, "url": format!("https://{host}/")});
+        let id = uuid::Uuid::new_v4().to_string();
+        match self.check_permission("SandboxNetwork", &input, &id).await {
+            PermissionResult::Granted => true,
+            PermissionResult::Denied(_) => false,
+            PermissionResult::RequiresConfirmation(_) => self.request_tool_approval("SandboxNetwork", &input, &id).await.is_ok(),
+        }
+    }
+
     pub fn with_turn_context(mut self, entries: Vec<crate::services::turn_context::Entry>) -> Self {
         self.turn_context = entries;
         self
@@ -1806,7 +1845,7 @@ impl ToolLoopExecutor {
                 let cwd = self.get_workspace_cwd().to_string();
                 let result = match self.unread_file_error(tool_name, tool_input) {
                     Some(error) => Err(anyhow!(error)),
-                    None => execute_builtin_tool(tool_name, shell_state_input(tool_name, tool_input, &cwd, self.search_config_path.as_deref(), self.conv_id.as_deref()), &cwd, &self.provider, &self.event_tx, self.search_config_path.as_deref(), self.skill_shell_active).await,
+                    None => self.run_builtin(tool_name, tool_input, &cwd).await,
                 };
                 (output_str, is_error) = self.finish_builtin(tool_name, tool_input, _tool_use_id, result);
             }
@@ -1814,7 +1853,7 @@ impl ToolLoopExecutor {
             let cwd = self.get_workspace_cwd().to_string();
             let result = match self.unread_file_error(tool_name, tool_input) {
                 Some(error) => Err(anyhow!(error)),
-                None => execute_builtin_tool(tool_name, shell_state_input(tool_name, tool_input, &cwd, self.search_config_path.as_deref(), self.conv_id.as_deref()), &cwd, &self.provider, &self.event_tx, self.search_config_path.as_deref(), self.skill_shell_active).await,
+                None => self.run_builtin(tool_name, tool_input, &cwd).await,
             };
             (output_str, is_error) = self.finish_builtin(tool_name, tool_input, _tool_use_id, result);
         }
@@ -2363,6 +2402,7 @@ impl ToolLoopExecutor {
                                     )
                                     || crate::tools::tasks::is_task(&name)
                                     || is_serial_builtin(&name)
+                                    || (name == "Bash" && self.sandbox_may_ask())
                                     || is_memory_tool(&name)
                                     || self.hooks.is_some()
                                     || self.is_plan_document_tool(&name, &input)
@@ -2987,6 +3027,7 @@ impl ToolLoopExecutor {
                             || matches!(name.as_str(), "ListMcpResources" | "ReadMcpResource")
                             || crate::tools::tasks::is_task(&name)
                             || is_serial_builtin(&name)
+                            || (name == "Bash" && self.sandbox_may_ask())
                             || is_memory_tool(&name)
                             || self.hooks.is_some()
                             || self.is_plan_document_tool(name, &input)

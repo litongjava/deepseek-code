@@ -299,7 +299,7 @@ impl ToolLoopExecutor {
                 let input = json!({"prompt":task.prompt,"agent_type":"general"});
                 let result = tokio::time::timeout(
                     Duration::from_secs(180),
-                    self.execute_delegated_typed(&input, Some(task.schema), Some(task.tools)),
+                    self.execute_research_child(&input, task.schema, task.tools),
                 )
                 .await;
                 let result = match result {
