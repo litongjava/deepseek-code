@@ -1206,7 +1206,15 @@ impl Session {
                             }
                         }
                         let prompt = question_prompt(&question, &options, &tool_input);
-                        let answer = if let Some(answer) = claude_core::services::background_sessions::worker_answer(&self.paths.data_dir, &self.id, &request_id, "question", &prompt).await? { answer } else { turn_answer(self, &mut progress, input, prompt).await? };
+                        // A worker's frontend gets the options too, to show the menu.
+                        let answer = if let Some(answer) = claude_core::services::background_sessions::worker_question(&self.paths.data_dir, &self.id, &request_id, &prompt, tool_input.clone()).await? {
+                            answer
+                        } else if let (Some(menu), Some(live), true) = (crate::terminal::question_menu::menu(&question, &tool_input), progress.live.as_ref(), input.is_some()) {
+                            let reply = live.question_choice(menu.question.clone(), menu.options.clone(), menu.previews.clone());
+                            menu.answer(&wait_answer(self, &mut progress, input, reply).await?)
+                        } else {
+                            turn_answer(self, &mut progress, input, prompt).await?
+                        };
                         let answer = chosen_options(&answer, &options, tool_input["multiSelect"] == true);
                         self.engine.resume_with_answer(&request_id, answer).await?;
                         progress.set_activity("Composing");

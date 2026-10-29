@@ -275,6 +275,8 @@ async fn observe(
     let mut pending: Option<(String, tokio::sync::oneshot::Receiver<String>)> = None;
     // The plan and its file while a plan review is pending.
     let mut pending_plan: Option<(String, String)> = None;
+    // An AskUserQuestion menu waiting for its reply.
+    let mut pending_menu: Option<crate::terminal::question_menu::Menu> = None;
     // A background agent's question shown in the live menu: job and request.
     let mut agent_pending: Option<(String, String, tokio::sync::oneshot::Receiver<String>)> = None;
     let mut plain_pending: Option<(String, String)> = None;
@@ -395,7 +397,15 @@ async fn observe(
                                     pending_plan = Some((text, path));
                                     live.plan_choice(view.lines, view.question, view.options, view.footer)
                                 }
-                                (None, None) => live.question(question.question),
+                                (None, None) => match question.tool.as_ref().filter(|_| question.kind == "question").and_then(|input| crate::terminal::question_menu::menu(&question.question, input)) {
+                                    // As in the reference CLI: a menu whose focused option shows its preview.
+                                    Some(menu) => {
+                                        let reply = live.question_choice(menu.question.clone(), menu.options.clone(), menu.previews.clone());
+                                        pending_menu = Some(menu);
+                                        reply
+                                    }
+                                    None => live.question(question.question),
+                                },
                             };
                             pending = Some((question.request_id, reply));
                         } else if input.is_some() {
@@ -434,7 +444,7 @@ async fn observe(
                 let request = remote_request.take().unwrap().request_id.clone();
                 answer_if_current(root, id, owner, &request, if allowed { "y" } else { "n" })?;
                 answered.insert(request.clone());
-                if pending.as_ref().is_some_and(|(pending, _)| *pending == request) { pending = None; pending_plan = None; }
+                if pending.as_ref().is_some_and(|(pending, _)| *pending == request) { pending = None; pending_plan = None; pending_menu = None; }
                 if plain_pending.as_ref().is_some_and(|(pending, _)| *pending == request) {
                     plain_pending = None;
                     if let Some(reader) = input.as_mut() { reader.dismiss_answer().await?; }
@@ -467,6 +477,9 @@ async fn observe(
                         display.styled_lines(crate::terminal::plan_view::rejected(&plan, width));
                     }
                     answer = format!("plan:{answer}");
+                }
+                if let Some(menu) = pending_menu.take() {
+                    answer = menu.answer(&answer);
                 }
                 answer_if_current(root, id, owner, &request, &answer)?;
                 answered.insert(request);

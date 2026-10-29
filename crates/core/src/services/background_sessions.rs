@@ -539,6 +539,23 @@ pub async fn worker_answer(
         .map(Some)
 }
 
+/// Like [`worker_answer`] for an AskUserQuestion question; `input` carries its
+/// options, descriptions and previews so an attached frontend can show a menu.
+pub async fn worker_question(
+    root: &Path,
+    session: &str,
+    request: &str,
+    question: &str,
+    input: serde_json::Value,
+) -> Result<Option<String>> {
+    let Some(dir) = worker_directory(root, session)? else {
+        return Ok(None);
+    };
+    wait_for_answer(&dir, request, "question", question, Some(input))
+        .await
+        .map(Some)
+}
+
 /// Like [`worker_answer`] for a tool approval with structured details.
 pub async fn worker_permission(
     root: &Path,
