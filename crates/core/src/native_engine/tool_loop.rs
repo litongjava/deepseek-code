@@ -161,8 +161,8 @@ pub struct ToolLoopExecutor {
     workspace_cwd: String,
     mcp_registry: Option<Arc<McpToolRegistry>>,
     mcp_outputs: HashMap<String, McpOutput>,
-    /// Files read or written in this conversation; Edit and Write require one.
-    known_files: std::collections::HashSet<std::path::PathBuf>,
+    /// Files read or written in this conversation and the state seen then.
+    file_state: super::file_state::FileState,
     mcp_tools: Vec<crate::tools::ToolDefinition>,
     streaming_tool_args: HashMap<String, StreamingToolCall>,
     conv_id: Option<String>,
@@ -654,7 +654,7 @@ impl ToolLoopExecutor {
             workspace_cwd,
             mcp_registry: None,
             mcp_outputs: HashMap::new(),
-            known_files: Default::default(),
+            file_state: Default::default(),
             mcp_tools: Vec::new(),
             streaming_tool_args: HashMap::new(),
             conv_id: None,
@@ -1742,22 +1742,31 @@ impl ToolLoopExecutor {
         path.canonicalize().unwrap_or(path)
     }
 
+    fn file_state_store(&self) -> Option<std::path::PathBuf> {
+        let root = self.search_config_path.as_deref()?.parent()?;
+        Some(super::file_state::store(root, self.conv_id.as_deref()?))
+    }
+
+    fn record_seen_file(&mut self, file_path: &str) {
+        let key = self.file_key(file_path);
+        let store = self.file_state_store();
+        self.file_state.record(&key, store.as_deref());
+    }
+
     /// Like the reference CLI, Edit and overwriting Write require the file to
-    /// have been read (or written) earlier in this conversation.
+    /// have been read in this conversation and to be unchanged since.
     fn unread_file_error(&mut self, tool_name: &str, tool_input: &Value) -> Option<String> {
         if !matches!(tool_name, "Edit" | "Write" | "MultiEdit" | "NotebookEdit") { return None; }
         let file_path = tool_input["file_path"].as_str().or_else(|| tool_input["notebook_path"].as_str())?;
         let key = self.file_key(file_path);
-        if !key.is_file() || self.known_files.contains(&key) { return None; }
-        let mut seen = Vec::new();
-        collect_file_tool_paths(&Value::Array(self.messages.clone()), &mut seen);
-        for path in seen { let key = self.file_key(&path); self.known_files.insert(key); }
-        if self.known_files.contains(&key) { return None; }
-        Some(if tool_name == "Write" {
-            "File has not been read yet. Read it first before writing to it.".to_owned()
-        } else {
-            "File has not been read yet. Read it first before editing it.".to_owned()
-        })
+        let store = self.file_state_store();
+        let history = || {
+            let mut seen = Vec::new();
+            collect_file_tool_paths(&Value::Array(self.messages.clone()), &mut seen);
+            seen.iter().map(|path| self.file_key(path)).collect()
+        };
+        let history = history();
+        self.file_state.check(tool_name, &key, store.as_deref(), || history)
     }
 
     /// Records files the model has seen and turns Read images into model image content.
@@ -1767,7 +1776,7 @@ impl ToolLoopExecutor {
             Err(error) => return (format!("Error: {}", error), true),
         };
         if matches!(tool_name, "Read" | "Edit" | "Write" | "MultiEdit" | "NotebookEdit") {
-            if let Some(file_path) = tool_input["file_path"].as_str().or_else(|| tool_input["notebook_path"].as_str()) { let key = self.file_key(file_path); self.known_files.insert(key); }
+            if let Some(file_path) = tool_input["file_path"].as_str().or_else(|| tool_input["notebook_path"].as_str()) { self.record_seen_file(file_path); }
         }
         match take_read_image(tool_name, &mut value, self.provider.model.supports_vision) {
             Some(Ok((text, content))) => { self.mcp_outputs.insert(tool_use_id.to_owned(), content); return (text, false); }
@@ -2419,7 +2428,7 @@ impl ToolLoopExecutor {
                     let results = futures::future::join_all(futures).await;
 
                     for (tool_use_id, tool_name, _tool_input, output_str, is_error, mcp) in results {
-                        if !is_error && tool_name == "Read" { if let Some(path) = _tool_input["file_path"].as_str() { let key = self.file_key(path); self.known_files.insert(key); } }
+                        if !is_error && tool_name == "Read" { if let Some(path) = _tool_input["file_path"].as_str() { self.record_seen_file(path); } }
                         let mcp = self.finish_mcp_output(&tool_use_id, &tool_name, &output_str, is_error, mcp)?;
                         let content = mcp.map(|value|value.content).unwrap_or_else(||json!(self.retained_tool_output(&tool_name, &output_str)));
                         tool_results.push(ContentBlock::ToolResult {
@@ -2984,7 +2993,7 @@ impl ToolLoopExecutor {
                     let results = futures::future::join_all(futures).await;
 
                     for (tool_use_id, tool_name, _tool_input, output_str, is_error, mcp) in results {
-                        if !is_error && tool_name == "Read" { if let Some(path) = _tool_input["file_path"].as_str() { let key = self.file_key(path); self.known_files.insert(key); } }
+                        if !is_error && tool_name == "Read" { if let Some(path) = _tool_input["file_path"].as_str() { self.record_seen_file(path); } }
                         let mcp = self.finish_mcp_output(&tool_use_id, &tool_name, &output_str, is_error, mcp)?;
                         if let Some(content) = &mcp { tool_images.extend(content.openai_images(&tool_use_id)); }
                         let compacted = mcp.map(|value|value.openai_text()).unwrap_or_else(||self.retained_tool_output(&tool_name, &output_str));
