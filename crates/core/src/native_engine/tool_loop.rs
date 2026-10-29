@@ -199,6 +199,9 @@ pub struct ToolLoopExecutor {
     stop_hook_blocks: u64,
     goal_db: Option<Arc<crate::db::DbManager>>,
     skill_shell_active: bool,
+    /// Deep-research children read pages as text: their quotes are checked
+    /// against the fetched source, not against a model's answer about it.
+    pub(super) raw_web_fetch: bool,
     pending_user_skill: Option<Value>,
     manual_skill_active: bool,
     durable_user_input: bool,
@@ -409,7 +412,7 @@ async fn execute_builtin_tool(
         return crate::services::plugins::run(&context,id,command,input["input"].clone(),std::path::Path::new(cwd)).await;
     }
     if name == "WebFetch" && input["prompt"].as_str().is_some_and(|prompt| !prompt.trim().is_empty()) {
-        return web_fetch_with_prompt(input, cwd, provider).await;
+        return Box::pin(web_fetch_with_prompt(input, cwd, provider)).await;
     }
     if name != "WebSearch" {
         let file = if matches!(name, "Read" | "Edit" | "Write" | "MultiEdit") { input["file_path"].as_str().map(str::to_owned) } else { None };
@@ -710,6 +713,7 @@ impl ToolLoopExecutor {
             stop_hook_blocks: 0,
             goal_db: None,
             skill_shell_active: false,
+            raw_web_fetch: false,
             pending_user_skill: None,
             manual_skill_active: false,
             durable_user_input: false,
@@ -956,20 +960,29 @@ impl ToolLoopExecutor {
     /// allowlist runs, hosts outside the list are put to the user, as in the
     /// reference CLI; "don't ask again" saves a SandboxNetwork(domain:) rule.
     async fn run_builtin(&self, tool_name: &str, tool_input: &Value, cwd: &str) -> Result<Value> {
-        let input = shell_state_input(tool_name, tool_input, cwd, self.search_config_path.as_deref(), self.conv_id.as_deref());
+        let input = shell_state_input(tool_name, &self.tool_run_input(tool_name, tool_input), cwd, self.search_config_path.as_deref(), self.conv_id.as_deref());
         let asker = input.get("__sandbox").filter(|_| tool_input["dangerouslyDisableSandbox"] != true).and_then(crate::tools::sandbox::register_asker);
-        let run = execute_builtin_tool(tool_name, input.clone(), cwd, &self.provider, &self.event_tx, self.search_config_path.as_deref(), self.skill_shell_active);
+        // Boxed: tool futures are large and this runs nested inside delegated children.
+        let mut run = Box::pin(execute_builtin_tool(tool_name, input.clone(), cwd, &self.provider, &self.event_tx, self.search_config_path.as_deref(), self.skill_shell_active));
         let Some((_guard, mut questions)) = asker else { return run.await };
-        tokio::pin!(run);
         loop {
             tokio::select! {
                 result = &mut run => return result,
                 Some((host, reply)) = questions.recv() => {
-                    let allowed = self.approve_sandbox_host(&host).await;
+                    let allowed = Box::pin(self.approve_sandbox_host(&host)).await;
                     let _ = reply.send(allowed);
                 }
             }
         }
+    }
+
+    /// The input a tool runs with: research children fetch pages as text.
+    fn tool_run_input(&self, tool_name: &str, tool_input: &Value) -> Value {
+        let mut input = tool_input.clone();
+        if self.raw_web_fetch && tool_name == "WebFetch" {
+            if let Some(fields) = input.as_object_mut() { fields.remove("prompt"); }
+        }
+        input
     }
 
     /// Whether a sandboxed Bash command may need to ask about a host; such
@@ -2532,9 +2545,10 @@ impl ToolLoopExecutor {
 
                     let mut futures = Vec::new();
                     for tc in parallel_calls {
+                        let input = self.tool_run_input(&tc.name, &tc.input);
                         let fut = execute_tool_standalone(
                             tc.name,
-                            tc.input.clone(),
+                            input,
                             tc.id.clone(),
                             event_tx_clone.clone(),
                             mcp_registry_clone.clone(),
@@ -3098,9 +3112,10 @@ impl ToolLoopExecutor {
 
                     let mut futures = Vec::new();
                     for tc in parallel_calls {
+                        let input = self.tool_run_input(&tc.name, &tc.input);
                         let fut = execute_tool_standalone(
                             tc.name,
-                            tc.input.clone(),
+                            input,
                             tc.id.clone(),
                             event_tx_clone.clone(),
                             mcp_registry_clone.clone(),

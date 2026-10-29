@@ -571,8 +571,9 @@ impl ToolLoopExecutor {
             ["model", "effort", "isolation"].iter().all(|key| input[*key].is_null()),
             "model, effort and isolation apply to background agents; omit run_in_background or set it to true"
         );
-        let prepared = Box::pin(self.prepare_delegated_child(&input, schema, tools)).await?;
+        let mut prepared = Box::pin(self.prepare_delegated_child(&input, schema, tools)).await?;
         if web_research {
+            prepared.child.raw_web_fetch = true;
             if let Some(manager) = &prepared.child.permission_manager {
                 manager.allow_in_session(&prepared.id, "WebFetch");
             }

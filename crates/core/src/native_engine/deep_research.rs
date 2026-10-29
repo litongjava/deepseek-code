@@ -106,7 +106,7 @@ fn task(
 fn validate_web_evidence(
     phase: &str,
     url: Option<&str>,
-    output: &Value,
+    output: &mut Value,
     evidence: &[Value],
 ) -> Result<()> {
     let successful: Vec<_> = evidence.iter().filter(|e| e["is_error"] == false).collect();
@@ -125,13 +125,15 @@ fn validate_web_evidence(
                 .flat_map(|e| e["output"]["results"].as_array().into_iter().flatten())
                 .filter_map(|hit| hit["url"].as_str().and_then(|url| canonical_url(url).ok()))
                 .collect();
-            for hit in output["results"].as_array().into_iter().flatten() {
-                let key = canonical_url(hit["url"].as_str().context("Search URL missing")?)?;
-                ensure!(
-                    urls.contains(&key),
-                    "Search proposed a URL absent from actual WebSearch results"
-                );
+            // Drop URLs the child added from memory; keep the ones it found.
+            let proposed = output["results"].as_array().map_or(0, Vec::len);
+            if let Some(hits) = output["results"].as_array_mut() {
+                hits.retain(|hit| hit["url"].as_str().and_then(|url| canonical_url(url).ok()).is_some_and(|key| urls.contains(&key)));
             }
+            ensure!(
+                proposed == 0 || output["results"].as_array().is_some_and(|hits| !hits.is_empty()),
+                "Search proposed only URLs absent from actual WebSearch results"
+            );
         }
         "Fetch" => {
             let requested = canonical_url(url.context("Fetch target missing")?)?;
@@ -328,12 +330,12 @@ impl ToolLoopExecutor {
                         .cloned()
                         .unwrap_or_default();
                     match serde_json::from_str::<Value>(value["result"].as_str().unwrap_or("")) {
-                        Ok(value) => {
+                        Ok(mut value) => {
                             item.output = Some(value.clone());
                             match validate_web_evidence(
                                 phase,
                                 expected_url.as_deref(),
-                                &value,
+                                &mut value,
                                 &item.web_evidence,
                             ) {
                                 Ok(()) => outputs[index] = Some(value),
@@ -657,7 +659,13 @@ mod tests {
                 json!({"angles":(0..6).map(|i|json!({"label":format!("angle{i}"),"query":format!("query{i}"),"rationale":"fixture"})).collect::<Vec<_>>()})
             }
             "Search" => {
-                json!({"results":[{"url":url,"title":"fixture source","snippet":"fixture","relevance":"high"},{"url":format!("{url}?utm_source=test#fragment"),"title":"duplicate","snippet":"fixture","relevance":"low"}]})
+                // A URL from memory, absent from the search results, is dropped.
+                let remembered = json!({"url":"https://remembered.invalid/","title":"from memory","snippet":"fixture","relevance":"high"});
+                if fixture.mode == "search_only_remembered" {
+                    json!({"results":[remembered]})
+                } else {
+                    json!({"results":[{"url":url,"title":"fixture source","snippet":"fixture","relevance":"high"},{"url":format!("{url}?utm_source=test#fragment"),"title":"duplicate","snippet":"fixture","relevance":"low"},remembered]})
+                }
             }
             "Fetch" => {
                 json!({"sourceQuality":"primary","publishDate":"2026-10-16","claims":[{"claim":"Fixture claim","quote":if fixture.mode=="bad_quote"{"Invented quote"}else{"Exact fixture quote"},"importance":"central"}]})
@@ -696,7 +704,8 @@ mod tests {
         let input = if phase == "Search" {
             json!({"query":"fixture"})
         } else {
-            json!({"url":if fixture.mode=="wrong_fetch_url" && phase=="Fetch" {format!("{}/wrong",fixture.base_url)}else{url}})
+            // Models pass a prompt; research children still read the page text.
+            json!({"url":if fixture.mode=="wrong_fetch_url" && phase=="Fetch" {format!("{}/wrong",fixture.base_url)}else{url},"prompt":"Extract the claims"})
         };
         let delta = if call_tool {
             json!({"tool_calls":[{"index":0,"id":"web_fixture","type":"function","function":{"name":name,"arguments":input.to_string()}}]})
@@ -915,6 +924,7 @@ mod tests {
             "fetch_failure",
             "wrong_fetch_url",
             "bad_quote",
+            "search_only_remembered",
         ] {
             let mut run = setup(mode).await;
             let result = tokio::time::timeout(Duration::from_secs(30), run.executor.execute())
