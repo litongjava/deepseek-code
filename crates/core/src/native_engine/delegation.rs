@@ -564,6 +564,36 @@ impl ToolLoopExecutor {
         .await
     }
 
+    /// Arguments and environment that start a `dcl` child with this session's
+    /// provider, model and permission mode.
+    pub(super) fn child_cli_launch(&self, root: &std::path::Path) -> Result<(Vec<String>, Vec<(String, String)>)> {
+        let provider = &self.provider;
+        let mode = self
+            .permission_manager
+            .as_ref()
+            .map(|manager| crate::services::session_permission_mode::name(manager.get_mode()))
+            .unwrap_or("ask");
+        let mut arguments = vec![
+            "--data-dir".to_owned(), root.to_string_lossy().into_owned(),
+            "--provider".into(), provider.provider.id.clone(),
+            "--model".into(), provider.model.id.clone(),
+            "--permission-mode".into(), mode.into(),
+        ];
+        if provider.provider.builtin_id.is_none() {
+            arguments.extend(["--base-url".into(), provider.provider.base_url.clone()]);
+            arguments.extend(["--api-format".into(), match provider.provider.api_format {
+                crate::native_engine::provider_manager::ApiFormat::Anthropic => "anthropic",
+                crate::native_engine::provider_manager::ApiFormat::OpenAI => "openai",
+            }.into()]);
+        }
+        let mut environment = vec![("CLAUDE_RUST_WORKER_MODEL".to_owned(), serde_json::to_string(&provider.model)?)];
+        if !provider.provider.api_key.is_empty() {
+            arguments.extend(["--api-key-env".into(), "CLAUDE_RUST_CHILD_API_KEY".into()]);
+            environment.push(("CLAUDE_RUST_CHILD_API_KEY".into(), provider.provider.api_key.clone()));
+        }
+        Ok((arguments, environment))
+    }
+
     /// As the reference CLI's background agents: the child runs in its own
     /// session as a background task with the same provider, model and
     /// permission mode, and this call returns at once. The host announces it
@@ -590,31 +620,8 @@ impl ToolLoopExecutor {
         let provider = &self.provider;
         let child = SessionStore::new(context.db.clone()).create(std::path::Path::new(&self.workspace_cwd), &provider.model.id, &provider.provider.id)?;
         crate::services::permission_authority::record_user(&context.db, &child, &json!(prompt))?;
-        let mode = self
-            .permission_manager
-            .as_ref()
-            .map(|manager| crate::services::session_permission_mode::name(manager.get_mode()))
-            .unwrap_or("ask");
-        let mut arguments = vec![
-            "--data-dir".to_owned(), root.to_string_lossy().into_owned(),
-            "--resume".into(), child.clone(),
-            "--provider".into(), provider.provider.id.clone(),
-            "--model".into(), provider.model.id.clone(),
-            "--permission-mode".into(), mode.into(),
-            "--print".into(), "--output-format".into(), "stream-json".into(),
-        ];
-        if provider.provider.builtin_id.is_none() {
-            arguments.extend(["--base-url".into(), provider.provider.base_url.clone()]);
-            arguments.extend(["--api-format".into(), match provider.provider.api_format {
-                crate::native_engine::provider_manager::ApiFormat::Anthropic => "anthropic",
-                crate::native_engine::provider_manager::ApiFormat::OpenAI => "openai",
-            }.into()]);
-        }
-        let mut environment = vec![("CLAUDE_RUST_WORKER_MODEL".to_owned(), serde_json::to_string(&provider.model)?)];
-        if !provider.provider.api_key.is_empty() {
-            arguments.extend(["--api-key-env".into(), "CLAUDE_RUST_CHILD_API_KEY".into()]);
-            environment.push(("CLAUDE_RUST_CHILD_API_KEY".into(), provider.provider.api_key.clone()));
-        }
+        let (mut arguments, mut environment) = self.child_cli_launch(&root)?;
+        arguments.extend(["--resume".into(), child.clone(), "--print".into(), "--output-format".into(), "stream-json".into()]);
         if !definition.system_prompt.trim().is_empty() {
             arguments.extend(["--append-system-prompt".into(), definition.system_prompt.clone()]);
         }

@@ -18,6 +18,7 @@ mod startup_prompts;
 mod repl_loop;
 mod command_catalog;
 mod mcp_prompts;
+mod workflow_runner;
 mod workflow_commands;
 mod interactive_config;
 mod args;
@@ -186,6 +187,26 @@ async fn run(cli: &Cli) -> Result<()> {
         Some(Commands::Performance { action }) => return migration::performance(&paths, action).await,
         Some(Commands::Project { action }) => return migration::project(action).await,
         Some(Commands::Cron { action }) => return migration::cron(&paths, &std::env::current_dir()?, action).await,
+        Some(Commands::WorkflowRun { script, run_dir, args_json, resume_dir, agent_args, concurrency }) => {
+            let source = std::fs::read_to_string(script).with_context(|| format!("Reading workflow script {}", script.display()))?;
+            let result = workflow_runner::run(workflow_runner::Run {
+                script: &source,
+                args: args_json.as_deref().map(serde_json::from_str).transpose()?.unwrap_or(serde_json::Value::Null),
+                run_dir,
+                resume_dir: resume_dir.as_deref(),
+                cwd: &std::env::current_dir()?,
+                agent_args: serde_json::from_str(agent_args).context("--agent-args must be a JSON array")?,
+                concurrency: *concurrency,
+            }).await;
+            return match result {
+                Ok(value) => {
+                    std::fs::write(run_dir.join("result.json"), serde_json::to_vec_pretty(&value)?)?;
+                    println!("Workflow result:\n{}", serde_json::to_string_pretty(&value)?);
+                    Ok(())
+                }
+                Err(error) => Err(error),
+            };
+        }
         Some(Commands::Ssh { config, operation, yes }) => return tokio::select! { result=migration::ssh(config,operation,*yes)=>result, _=tokio::signal::ctrl_c()=>anyhow::bail!("SSH operation cancelled") },
         Some(Commands::Lsp { action, language, yes }) => {
             let workspace = cli.path.clone().map_or_else(std::env::current_dir, Ok)?;

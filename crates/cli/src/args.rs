@@ -239,6 +239,17 @@ pub enum Commands {
     Performance { #[command(subcommand)] action: crate::migration::PerformanceCommands },
     Project { #[command(subcommand)] action: crate::migration::ProjectCommands },
     Cron { #[command(subcommand)] action: crate::migration::CronCommands },
+    /// Internal: run a Workflow script started by the Workflow tool.
+    #[command(hide = true)]
+    WorkflowRun {
+        #[arg(long)] script: PathBuf,
+        #[arg(long)] run_dir: PathBuf,
+        #[arg(long)] args_json: Option<String>,
+        #[arg(long)] resume_dir: Option<PathBuf>,
+        /// JSON array of arguments that start each agent's `dcl -p`.
+        #[arg(long)] agent_args: String,
+        #[arg(long, default_value_t = 4)] concurrency: usize,
+    },
     Ssh { config: PathBuf, operation: PathBuf, #[arg(long)] yes: bool },
     Remote { request: PathBuf, #[arg(long)] yes: bool },
     /// Show language server status or install one: lsp [status] | lsp install LANGUAGE [--yes].

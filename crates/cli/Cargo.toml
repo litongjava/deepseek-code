@@ -26,6 +26,8 @@ unicode-width = "0.2"
 cpal = "0.15"
 axum = "0.8"
 tempfile = "3"
+rquickjs = { version = "0.14.0", features = ["futures", "macro"] }
+ring = "0.17"
 
 [dev-dependencies]
 axum = "0.8"

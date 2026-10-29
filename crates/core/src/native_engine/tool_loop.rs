@@ -10,6 +10,8 @@ mod permission_denied_tests;
 pub(crate) mod delegation;
 #[path = "deep_research.rs"]
 mod deep_research;
+#[path = "script_workflow.rs"]
+mod script_workflow;
 #[cfg(test)]
 #[path = "hook_lifecycle_tests.rs"]
 mod hook_lifecycle_tests;
@@ -964,7 +966,7 @@ impl ToolLoopExecutor {
             }
             tools.extend(definitions);
         }
-        if self.search_config_path.is_some() && self.delegation_depth == 0 { tools.push(deep_research::definition()); }
+        if self.search_config_path.is_some() && self.delegation_depth == 0 { tools.push(script_workflow::definition()); }
         adapt_tools(tools, self.prompt_profile).into_iter().filter(|tool| self.allowed_tools.as_ref().is_none_or(|names| names.contains(&tool.name))).collect()
     }
 
@@ -1236,7 +1238,7 @@ impl ToolLoopExecutor {
         if let Some(registry) = &self.mcp_registry {
             let mut builtin = get_tool_definitions();
             builtin.extend(delegation::definitions());
-            builtin.push(deep_research::definition());
+            builtin.push(script_workflow::definition());
             let builtin = builtin.into_iter().map(|tool| tool.name).collect::<std::collections::HashSet<_>>();
             self.mcp_tools = registry.get_all_tools().await?.into_iter().map(|tool| {
                 anyhow::ensure!(!builtin.contains(&tool.name), "MCP tool conflicts with native tool: {}", tool.name);
@@ -1598,7 +1600,7 @@ impl ToolLoopExecutor {
         let mut is_error;
 
         if tool_name == "Workflow" {
-            let result = Box::pin(self.execute_workflow(tool_input)).await;
+            let result = if script_workflow::is_script(tool_input) { self.execute_script_workflow(tool_input).await } else { Box::pin(self.execute_workflow(tool_input)).await };
             return (tool_input.clone(), match &result { Ok(value)=>value.to_string(),Err(error)=>format!("Workflow failed: {error:#}") }, result.is_err());
         }
         if crate::tools::session_worktree::is_worktree_tool(tool_name) {

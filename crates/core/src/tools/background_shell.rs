@@ -88,7 +88,7 @@ impl Drop for Completion {
     }
 }
 
-pub(super) fn start(
+pub(crate) fn start(
     mut command: Command,
     timeout: Option<Duration>,
     shell: &str,

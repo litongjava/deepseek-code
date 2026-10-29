@@ -1,9 +1,9 @@
-//! Fixed Rust deep-research orchestration. No JavaScript evaluation or arbitrary workflows.
+//! Fixed Rust deep-research orchestration, the built-in `deep-research`
+//! workflow. Script workflows run in script_workflow.rs.
 use super::{EngineEvent, ToolLoopExecutor};
 use crate::{
     runtime::RuntimePaths,
     services::{deep_research::*, EnvironmentCredentials, ServiceContext},
-    tools::ToolDefinition,
 };
 use anyhow::{ensure, Context, Result};
 use futures::{stream, StreamExt};
@@ -36,9 +36,6 @@ impl Drop for ProgressGuard {
     }
 }
 
-pub(super) fn definition() -> ToolDefinition {
-    ToolDefinition { name: "Workflow".into(), description: "Run the implemented deep-research workflow only after an explicit /deep-research command. Fixed Rust scope, search, fetch, three-vote verification and synthesis. Arbitrary scripts and other names are not supported.".into(), input_schema: json!({"type":"object","properties":{"name":{"type":"string","enum":["deep-research"]},"args":{"type":"string","minLength":1,"maxLength":8000}},"required":["name","args"],"additionalProperties":false}) }
-}
 fn object(properties: Value, required: &[&str]) -> Value {
     json!({"type":"object","properties":properties,"required":required,"additionalProperties":false})
 }
