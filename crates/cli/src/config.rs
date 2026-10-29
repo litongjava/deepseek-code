@@ -315,6 +315,21 @@ pub fn run(paths: &RuntimePaths, action: &ConfigCommands) -> Result<()> {
                 claude_core::permissions::auto_config::save(&crate::services::context(paths)?, &config)?;
                 return crate::services::print(&config);
             }
+            if let Some(field) = key.strip_prefix("search.") {
+                // The independent DeepSeek search service, as in Desktop's web search settings.
+                let mut manager = ConfigManager::new(paths.data_dir.clone());
+                let mut search = manager.get_config().deepseek_search.clone();
+                match field {
+                    "api_key" => search.api_key = value.trim().into(),
+                    "base_url" => search.base_url = value.trim().into(),
+                    "model" => search.model = value.trim().into(),
+                    _ => bail!("Unsupported setting: {key}"),
+                }
+                search.validate()?;
+                manager.update_config(|c| c.deepseek_search = search)?;
+                eprintln!("Updated {key}");
+                return Ok(());
+            }
             ensure!(
                 ["model", "base_url", "api_format", "api_key", "max_tokens"]
                     .contains(&key.as_str()),
@@ -433,5 +448,29 @@ mod budget_tests {
         assert_eq!(default_context_window("deepseek-flash"), Some(1_048_576));
         assert_eq!(default_context_window("gpt-4o"), None);
         assert!(default_supports_vision("deepseek-flash") && !default_supports_vision("deepseek-v4-pro"));
+    }
+}
+
+#[cfg(test)]
+mod search_tests {
+    use super::*;
+
+    #[test]
+    fn search_settings_are_saved_where_web_search_reads_them() {
+        let root = tempfile::tempdir().unwrap();
+        let paths = RuntimePaths::new(root.path().join("data")).unwrap();
+        let set = |key: &str, value: &str| run(&paths, &ConfigCommands::Set { key: key.into(), value: value.into() });
+        set("search.api_key", " search-key ").unwrap();
+        set("search.model", "deepseek-pro").unwrap();
+        assert!(set("search.base_url", "ftp://example.com").is_err());
+        assert!(set("search.other", "x").is_err());
+        let saved: claude_core::config::AppConfig =
+            serde_json::from_slice(&std::fs::read(paths.data_dir.join("config.json")).unwrap()).unwrap();
+        assert_eq!(saved.deepseek_search.api_key, "search-key");
+        assert_eq!(saved.deepseek_search.model, "deepseek-pro");
+        assert_eq!(saved.deepseek_search.base_url, "https://api.deepseek.com/anthropic/v1");
+        let mut shown = json!({"config": saved});
+        redact(&mut shown);
+        assert!(!shown.to_string().contains("search-key"));
     }
 }

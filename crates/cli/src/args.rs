@@ -486,7 +486,8 @@ pub enum ServiceCommands {
 pub enum ConfigCommands {
     /// Show effective saved configuration with credentials redacted.
     Show,
-    /// Set model, base_url, api_format, api_key, max_tokens, or permissions.auto for the CLI provider.
+    /// Set model, base_url, api_format, api_key, max_tokens, or permissions.auto for the CLI provider;
+    /// search.api_key, search.base_url and search.model configure DeepSeek web search.
     Set { key: String, value: String },
     /// Remove only the CLI-managed provider and CLI preferences.
     Reset,

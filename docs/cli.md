@@ -56,6 +56,8 @@ dcl config show
 dcl config set model deepseek-chat
 dcl config set base_url https://api.deepseek.com
 dcl config set api_format openai
+# DeepSeek 联网搜索（WebSearch、/deep-research）使用独立的密钥，与 Desktop 的“系统设置 → 联网搜索”相同
+dcl config set search.api_key sk-...
 dcl config import-legacy C:\Users\you\.claude-code\settings.json
 dcl mcp list
 dcl mcp add my-server node -- server.mjs
