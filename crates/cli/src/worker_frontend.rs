@@ -400,7 +400,7 @@ async fn observe(
                                 (None, None) => match question.tool.as_ref().filter(|_| question.kind == "question").and_then(|input| crate::terminal::question_menu::menu(&question.question, input)) {
                                     // As in the reference CLI: a menu whose focused option shows its preview.
                                     Some(menu) => {
-                                        let reply = live.question_choice(menu.question.clone(), menu.options.clone(), menu.previews.clone());
+                                        let reply = live.question_choice(menu.question.clone(), menu.options.clone(), menu.previews.clone(), menu.multi);
                                         pending_menu = Some(menu);
                                         reply
                                     }

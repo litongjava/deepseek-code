@@ -45,7 +45,7 @@ enum Update {
     Usage(Value),
     Question(String, oneshot::Sender<String>),
     Choice(Vec<change_view::Line>, String, Vec<String>, Option<String>, oneshot::Sender<String>),
-    QuestionChoice(String, Vec<String>, Vec<Vec<change_view::Line>>, oneshot::Sender<String>),
+    QuestionChoice(String, Vec<String>, Vec<Vec<change_view::Line>>, bool, oneshot::Sender<String>),
     Detail(String, String, String),
     Thinking(String),
     /// A read-only call joins, finishes or leaves the folded summary line.
@@ -181,9 +181,9 @@ impl LiveTurn {
     }
     /// An AskUserQuestion menu; the reply is the option number, or `N\ntext`
     /// for a typed answer on the last option.
-    pub fn question_choice(&self, question: String, options: Vec<String>, previews: Vec<Vec<change_view::Line>>) -> oneshot::Receiver<String> {
+    pub fn question_choice(&self, question: String, options: Vec<String>, previews: Vec<Vec<change_view::Line>>, multi: bool) -> oneshot::Receiver<String> {
         let (send, receive) = oneshot::channel();
-        let _ = self.updates.send(Update::QuestionChoice(question, options, previews, send));
+        let _ = self.updates.send(Update::QuestionChoice(question, options, previews, multi, send));
         receive
     }
     /// A plan review menu. Answers: the option number, `N\ntext` with typed
@@ -300,6 +300,8 @@ struct Choice {
     /// An AskUserQuestion menu: each option's preview, shown while it is
     /// selected; the last option takes a typed answer.
     option_previews: Option<Vec<Vec<change_view::Line>>>,
+    /// A multiSelect question: which options are checked.
+    checked: Option<Vec<bool>>,
 }
 impl Choice {
     fn amendable(&self) -> bool {
@@ -324,7 +326,11 @@ impl Choice {
                 };
                 format!("{word}, {}", if text.is_empty() { placeholder.to_owned() } else { terminal_text(text) })
             }
-            _ => option,
+            _ => match &self.checked {
+                // The typed-answer entry has no box.
+                Some(checked) if index + 1 < self.options.len() => format!("[{}] {option}", if checked[index] { "x" } else { " " }),
+                _ => option,
+            },
         }
     }
 }
@@ -611,6 +617,26 @@ impl State {
             return true;
         }
         let question = choice.option_previews.is_some();
+        // multiSelect: space or a number toggles an option, enter submits.
+        if let (Some(checked), None, false) = (choice.checked.as_mut(), choice.amend.as_ref(), control) {
+            match key.code {
+                KeyCode::Char(' ') if choice.selected + 1 < count => {
+                    checked[choice.selected] = !checked[choice.selected];
+                    return true;
+                }
+                KeyCode::Char(ch @ '1'..='9') if (ch as usize - '1' as usize) + 1 < count => {
+                    let index = ch as usize - '1' as usize;
+                    checked[index] = !checked[index];
+                    choice.selected = index;
+                    return true;
+                }
+                KeyCode::Enter if choice.selected + 1 < count => {
+                    self.answer_choice();
+                    return true;
+                }
+                _ => {}
+            }
+        }
         if (plan || question) && choice.selected + 1 == count && !control {
             // The last choice of a plan or question is a text field: typing starts it.
             if let KeyCode::Char(ch) = key.code {
@@ -670,10 +696,14 @@ impl State {
             return;
         };
         if let Some(answer) = self.answer.take() {
-            let number = choice.selected + 1;
+            // multiSelect: `m:` and the checked numbers, then any typed answer.
+            let number = match &choice.checked {
+                Some(checked) => format!("m:{}", checked.iter().enumerate().filter(|(_, on)| **on).map(|(index, _)| (index + 1).to_string()).collect::<Vec<_>>().join(",")),
+                None => (choice.selected + 1).to_string(),
+            };
             let _ = answer.send(match choice.amend.as_deref().map(str::trim) {
                 Some(note) if !note.is_empty() => format!("{number}\n{note}"),
-                _ => number.to_string(),
+                _ => number,
             });
         }
         self.draft = self.saved_draft.take().unwrap_or_default();
@@ -1316,6 +1346,8 @@ fn choice_lines(choice: &Choice, status: &str, mode: &str, width: usize, height:
         footer.clone()
     } else if choice.amend.is_some() {
         "enter confirm \u{b7} esc to cancel amend".to_owned()
+    } else if choice.checked.is_some() {
+        mode.replace("esc to interrupt", "\u{2191}\u{2193} select \u{b7} space to toggle \u{b7} enter to submit \u{b7} esc to cancel")
     } else if choice.option_previews.is_some() {
         let last = if choice.amendable() { " \u{b7} tab to type" } else { "" };
         mode.replace("esc to interrupt", &format!("\u{2191}\u{2193} select \u{b7} enter confirm{last} \u{b7} esc to cancel"))
@@ -1515,16 +1547,17 @@ fn run(
                         state.details.toggle();
                     }
                     state.question(reply);
-                    state.choice = Some(Choice { preview: lines, question, options, selected: 0, amend: None, plan_footer, option_previews: None });
+                    state.choice = Some(Choice { preview: lines, question, options, selected: 0, amend: None, plan_footer, option_previews: None, checked: None });
                     dirty = true;
                 }
-                Ok(Update::QuestionChoice(question, options, previews, reply)) => {
+                Ok(Update::QuestionChoice(question, options, previews, multi, reply)) => {
                     finish_text(state, screen);
                     if state.details.expanded {
                         state.details.toggle();
                     }
                     state.question(reply);
-                    state.choice = Some(Choice { preview: Vec::new(), question, options, selected: 0, amend: None, plan_footer: None, option_previews: Some(previews) });
+                    let checked = multi.then(|| vec![false; options.len()]);
+                    state.choice = Some(Choice { preview: Vec::new(), question, options, selected: 0, amend: None, plan_footer: None, option_previews: Some(previews), checked });
                     dirty = true;
                 }
                 Ok(Update::Question(text, reply)) => {
@@ -2014,7 +2047,7 @@ mod tests {
         let mut state = State::new("ask".into());
         let (reply, mut received) = oneshot::channel();
         state.question(reply);
-        state.choice = Some(Choice { preview: Vec::new(), question: "Proceed?".into(), options: vec!["Yes".into(), "Always".into(), "No".into()], selected: 1, amend: None, plan_footer: None, option_previews: None });
+        state.choice = Some(Choice { preview: Vec::new(), question: "Proceed?".into(), options: vec!["Yes".into(), "Always".into(), "No".into()], selected: 1, amend: None, plan_footer: None, option_previews: None, checked: None });
         // The remember choice takes no note.
         assert!(state.choice_key(key(KeyCode::Tab)));
         assert!(state.choice.as_ref().unwrap().amend.is_none());
@@ -2047,7 +2080,7 @@ mod tests {
         state.draft.insert("queued draft");
         let (reply, mut received) = oneshot::channel();
         state.question(reply);
-        state.choice = Some(Choice { preview: Vec::new(), question: "Proceed?".into(), options: vec!["Yes".into(), "Always".into(), "No".into()], selected: 0, amend: None, plan_footer: None, option_previews: None });
+        state.choice = Some(Choice { preview: Vec::new(), question: "Proceed?".into(), options: vec!["Yes".into(), "Always".into(), "No".into()], selected: 0, amend: None, plan_footer: None, option_previews: None, checked: None });
         assert!(state.choice_key(key(KeyCode::Up)));
         assert_eq!(state.choice.as_ref().unwrap().selected, 2);
         assert!(state.choice_key(key(KeyCode::Down)));
@@ -2060,7 +2093,7 @@ mod tests {
 
         let (reply, mut received) = oneshot::channel();
         state.question(reply);
-        state.choice = Some(Choice { preview: Vec::new(), question: "Proceed?".into(), options: vec!["Yes".into(), "No".into()], selected: 0, amend: None, plan_footer: None, option_previews: None });
+        state.choice = Some(Choice { preview: Vec::new(), question: "Proceed?".into(), options: vec!["Yes".into(), "No".into()], selected: 0, amend: None, plan_footer: None, option_previews: None, checked: None });
         assert!(state.choice_key(key(KeyCode::Char('3'))));
         assert!(received.try_recv().is_err());
         assert!(state.choice_key(key(KeyCode::Char('2'))));
@@ -2068,14 +2101,14 @@ mod tests {
         // Esc answers the last choice, No.
         let (reply, mut received) = oneshot::channel();
         state.question(reply);
-        state.choice = Some(Choice { preview: Vec::new(), question: "Proceed?".into(), options: vec!["Yes".into(), "Always".into(), "No".into()], selected: 0, amend: None, plan_footer: None, option_previews: None });
+        state.choice = Some(Choice { preview: Vec::new(), question: "Proceed?".into(), options: vec!["Yes".into(), "Always".into(), "No".into()], selected: 0, amend: None, plan_footer: None, option_previews: None, checked: None });
         assert!(state.choice_key(key(KeyCode::Esc)));
         assert_eq!(received.try_recv().unwrap(), "3");
         // A question shows the focused option's preview and takes typed text last.
         let previews = vec![vec![change_view::body("tabs preview")], vec![change_view::body("spaces preview")], Vec::new()];
         let (reply, mut received) = oneshot::channel();
         state.question(reply);
-        state.choice = Some(Choice { preview: Vec::new(), question: "Indent?".into(), options: vec!["Tabs".into(), "Spaces".into(), "Type something else".into()], selected: 0, amend: None, plan_footer: None, option_previews: Some(previews) });
+        state.choice = Some(Choice { preview: Vec::new(), question: "Indent?".into(), options: vec!["Tabs".into(), "Spaces".into(), "Type something else".into()], selected: 0, amend: None, plan_footer: None, option_previews: Some(previews), checked: None });
         let shown = |state: &State| choice_lines(state.choice.as_ref().unwrap(), "status", "esc to interrupt", 60, 24).0.join("\n");
         assert!(shown(&state).contains("tabs preview") && !shown(&state).contains("spaces preview"));
         assert!(state.choice_key(key(KeyCode::Down)));
@@ -2087,15 +2120,26 @@ mod tests {
         assert_eq!(received.try_recv().unwrap(), "3\nown");
         let (reply, mut received) = oneshot::channel();
         state.question(reply);
-        state.choice = Some(Choice { preview: Vec::new(), question: "Indent?".into(), options: vec!["Tabs".into(), "Type something else".into()], selected: 0, amend: None, plan_footer: None, option_previews: Some(vec![Vec::new(), Vec::new()]) });
+        state.choice = Some(Choice { preview: Vec::new(), question: "Indent?".into(), options: vec!["Tabs".into(), "Type something else".into()], selected: 0, amend: None, plan_footer: None, option_previews: Some(vec![Vec::new(), Vec::new()]), checked: None });
         assert!(state.choice_key(key(KeyCode::Esc)));
         assert_eq!(received.try_recv().unwrap(), "esc");
-        let (rows, selected, _) = choice_lines(&Choice { preview: Vec::new(), question: "Proceed?".into(), options: vec!["Yes".into(), "No".into()], selected: 1, amend: None, plan_footer: None, option_previews: None }, "status", "esc to interrupt", 40, 24);
+        // multiSelect: space and numbers toggle, enter submits the checked set.
+        let (reply, mut received) = oneshot::channel();
+        state.question(reply);
+        state.choice = Some(Choice { preview: Vec::new(), question: "Features?".into(), options: vec!["A".into(), "B".into(), "C".into(), "Type something else".into()], selected: 0, amend: None, plan_footer: None, option_previews: Some(vec![Vec::new(); 4]), checked: Some(vec![false; 4]) });
+        assert!(state.choice_key(key(KeyCode::Char(' '))));
+        assert!(state.choice_key(key(KeyCode::Char('3'))));
+        assert!(shown(&state).contains("[x] A") && shown(&state).contains("[ ] B") && shown(&state).contains("[x] C"));
+        assert!(shown(&state).contains("space to toggle"));
+        assert!(received.try_recv().is_err());
+        assert!(state.choice_key(key(KeyCode::Enter)));
+        assert_eq!(received.try_recv().unwrap(), "m:1,3");
+        let (rows, selected, _) = choice_lines(&Choice { preview: Vec::new(), question: "Proceed?".into(), options: vec!["Yes".into(), "No".into()], selected: 1, amend: None, plan_footer: None, option_previews: None, checked: None }, "status", "esc to interrupt", 40, 24);
         assert_eq!(rows.len() - selected, 5);
         // The approval preview sits between the rule and the question and is
         // clipped to the screen; answering removes the whole box.
         let preview = (0..30).map(|row| change_view::body(&format!("line {row}"))).collect();
-        let choice = Choice { preview, question: "Proceed?".into(), options: vec!["Yes".into(), "No".into()], selected: 0, amend: None, plan_footer: None, option_previews: None };
+        let choice = Choice { preview, question: "Proceed?".into(), options: vec!["Yes".into(), "No".into()], selected: 0, amend: None, plan_footer: None, option_previews: None, checked: None };
         let (rows, _, _) = choice_lines(&choice, "status", "esc to interrupt", 40, 20);
         let strip = |row: &String| {
             let mut text = String::new();

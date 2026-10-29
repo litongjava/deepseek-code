@@ -13,15 +13,13 @@ pub struct Menu {
     pub options: Vec<String>,
     /// Preview lines per entry; empty where an option has none.
     pub previews: Vec<Vec<Line>>,
+    /// multiSelect: options are checked with space and sent together.
+    pub multi: bool,
     labels: Vec<String>,
 }
 
-/// A menu for a single-select question with options; multiSelect questions
-/// keep the numbered text prompt, which accepts several numbers.
+/// A menu for a question with options; multiSelect questions get checkboxes.
 pub fn menu(question: &str, input: &Value) -> Option<Menu> {
-    if input["multiSelect"] == true {
-        return None;
-    }
     let options = input["options"].as_array().filter(|options| !options.is_empty())?;
     let labels: Vec<String> = options.iter().map(|option| option["label"].as_str().or_else(|| option.as_str()).unwrap_or_default().to_owned()).collect();
     let mut entries: Vec<String> = options.iter().zip(&labels).map(|(option, label)| match option["description"].as_str().filter(|text| !text.trim().is_empty()) {
@@ -40,7 +38,7 @@ pub fn menu(question: &str, input: &Value) -> Option<Menu> {
         Some(header) => format!("[{header}] {question}"),
         None => question.to_owned(),
     };
-    Some(Menu { question, options: entries, previews, labels })
+    Some(Menu { question, options: entries, previews, multi: input["multiSelect"] == true, labels })
 }
 
 /// Tabs as a terminal shows them, to the next multiple of eight columns, so
@@ -66,6 +64,12 @@ impl Menu {
             return "The user dismissed the question without answering.".into();
         }
         let (number, typed) = reply.split_once('\n').unwrap_or((reply, ""));
+        if let Some(numbers) = number.strip_prefix("m:") {
+            // The checked labels, then any typed answer.
+            let mut picks: Vec<String> = numbers.split(',').filter_map(|n| n.trim().parse::<usize>().ok()).filter_map(|n| n.checked_sub(1)).filter_map(|i| self.labels.get(i).cloned()).collect();
+            if !typed.trim().is_empty() { picks.push(typed.trim().to_owned()); }
+            return if picks.is_empty() { "The user submitted no choices.".into() } else { picks.join(", ") };
+        }
         match number.trim().parse::<usize>().ok().and_then(|n| n.checked_sub(1)) {
             Some(index) if index < self.labels.len() => self.labels[index].clone(),
             Some(_) if !typed.trim().is_empty() => typed.trim().to_owned(),
@@ -92,6 +96,10 @@ mod tests {
         assert_eq!(menu.answer("2"), "Spaces");
         assert_eq!(menu.answer("3\nUse whatever the file uses"), "Use whatever the file uses");
         assert!(menu.answer("esc").contains("dismissed"));
-        assert!(super::menu("Q?", &serde_json::json!({"multiSelect":true,"options":[{"label":"A"}]})).is_none());
+        let multi = super::menu("Q?", &serde_json::json!({"multiSelect":true,"options":[{"label":"A"},{"label":"B"},{"label":"C"}]})).unwrap();
+        assert!(multi.multi && multi.options.len() == 4);
+        assert_eq!(multi.answer("m:1,3"), "A, C");
+        assert_eq!(multi.answer("m:2\nalso D"), "B, also D");
+        assert!(multi.answer("m:").contains("no choices"));
     }
 }
