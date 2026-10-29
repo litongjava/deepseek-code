@@ -97,10 +97,15 @@ impl ToolLoopExecutor {
         }
         let mut command = tokio::process::Command::new(std::env::current_exe()?);
         command.args(&arguments).envs(environment).current_dir(&self.workspace_cwd).stdout(std::process::Stdio::piped()).stderr(std::process::Stdio::piped());
+        // A REPL turn runs in a session worker whose control channel would make
+        // every child agent refuse to start ("does not own this session").
+        command.env_remove(crate::services::background_sessions::CONTROL_ENV).env_remove(crate::services::background_sessions::WORKER_ENV);
         let label = format!("Workflow {name}");
         let started = crate::tools::background_shell::start(command, None, "workflow", &label, &label)?;
         let task_id = started["task_id"].clone();
         if task_id.is_null() { bail!("The workflow did not start: {started}"); }
+        // What /workflows lists for this run.
+        std::fs::write(run_dir.join("run.json"), json!({"run_id": run_id, "task_id": task_id, "name": name, "description": description, "started_ms": chrono::Utc::now().timestamp_millis()}).to_string())?;
         Ok(json!({
             "task_id": task_id,
             "run_id": run_id,

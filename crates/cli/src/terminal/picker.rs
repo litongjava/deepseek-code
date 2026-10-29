@@ -252,6 +252,50 @@ pub fn details(heading: &str, rows: &[String], hint: &str, keys: &[char]) -> io:
     result
 }
 
+/// Like [`details`], redrawn from `rows` about twice a second, for views of
+/// work that is still running.
+pub fn details_live(heading: &str, rows: &mut dyn FnMut() -> Vec<String>, hint: &str, keys: &[char]) -> io::Result<Option<char>> {
+    let raw = terminal::is_raw_mode_enabled()?;
+    if !raw {
+        terminal::enable_raw_mode()?;
+    }
+    let mut reader = super::paste_input::Reader::new()?;
+    let mut screen = Screen::default();
+    let mut ticks = 0;
+    let mut current = rows();
+    let result = loop {
+        let (cols, height) = terminal::size().unwrap_or((80, 24));
+        let width = (cols as usize).saturating_sub(1).max(20);
+        let mut lines = vec![(clipped(&format!(" {heading}"), width), TextStyle::Accent)];
+        let room = (height as usize).saturating_sub(4).max(1);
+        let skip = current.len().saturating_sub(room);
+        lines.extend(current.iter().skip(skip).map(|row| (clipped(&format!(" {row}"), width), TextStyle::Plain)));
+        lines.push((clipped(&format!(" {hint}"), width), TextStyle::Muted));
+        screen.draw(&lines, lines.len() - 1, 1)?;
+        let event = reader.next(std::time::Duration::from_millis(100))?;
+        let Some(Event::Key(key)) = event else {
+            ticks += 1;
+            if ticks % 5 == 0 { current = rows(); }
+            continue;
+        };
+        if key.kind == KeyEventKind::Release {
+            continue;
+        }
+        match key.code {
+            KeyCode::Esc | KeyCode::Enter | KeyCode::Char(' ') => break None,
+            KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => break None,
+            KeyCode::Left => break Some('<'),
+            KeyCode::Char(ch) if keys.contains(&ch) => break Some(ch),
+            _ => {}
+        }
+    };
+    screen.suspend()?;
+    if !raw {
+        terminal::disable_raw_mode()?;
+    }
+    Ok(result)
+}
+
 fn show_details(
     heading: &str,
     rows: &[String],

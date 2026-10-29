@@ -26,7 +26,7 @@ function pipeline(items, ...stages) {
     return value;
   }));
 }
-function phase(title) { __progress('Phase: ' + String(title)); }
+function phase(title) { __phase(String(title)); }
 function log(...parts) { __progress(parts.map(String).join(' ')); }
 "#;
 
@@ -65,6 +65,16 @@ struct Runner {
     slots: tokio::sync::Semaphore,
 }
 
+/// Append one progress event to the run's progress.jsonl, read by /workflows.
+pub fn record(run_dir: &Path, event: Value) {
+    use std::io::Write;
+    let mut event = event;
+    event["at_ms"] = json!(chrono::Utc::now().timestamp_millis());
+    if let Ok(mut file) = std::fs::OpenOptions::new().create(true).append(true).open(run_dir.join("progress.jsonl")) {
+        let _ = writeln!(file, "{event}");
+    }
+}
+
 fn cache_key(prompt: &str, opts: &Value) -> String {
     let digest = ring::digest::digest(&ring::digest::SHA256, format!("{prompt}\u{0}{opts}").as_bytes());
     digest.as_ref().iter().map(|byte| format!("{byte:02x}")).collect()
@@ -78,16 +88,32 @@ impl Runner {
         let opts = &spec["opts"];
         let label = opts["label"].as_str().unwrap_or_else(|| prompt.lines().next().unwrap_or_default());
         let key = cache_key(prompt, opts);
+        let phase = opts["phase"].as_str().unwrap_or_default();
         let cached = self.run_dir.join("agents").join(format!("{key}.json"));
         for dir in self.resume_dir.iter().map(|dir| dir.join("agents")).chain(std::iter::once(self.run_dir.join("agents"))) {
             if let Ok(saved) = std::fs::read_to_string(dir.join(format!("{key}.json"))) {
                 println!("\u{21bb} {label} (cached)");
+                record(&self.run_dir, json!({"kind":"agent_cached","label":label,"phase":phase,"key":key}));
                 if !cached.exists() { let _ = std::fs::write(&cached, &saved); }
                 return Ok(saved);
             }
         }
         let _slot = self.slots.acquire().await?;
         println!("\u{25cf} {label}");
+        record(&self.run_dir, json!({"kind":"agent_start","label":label,"phase":phase,"key":key}));
+        let result = self.run_agent(prompt, opts, label).await;
+        match &result {
+            Ok(text) => {
+                std::fs::write(&cached, text)?;
+                println!("\u{2713} {label}");
+                record(&self.run_dir, json!({"kind":"agent_done","label":label,"phase":phase,"key":key}));
+            }
+            Err(error) => record(&self.run_dir, json!({"kind":"agent_failed","label":label,"phase":phase,"key":key,"error":format!("{error:#}")})),
+        }
+        result
+    }
+
+    async fn run_agent(&self, prompt: &str, opts: &Value, label: &str) -> Result<String> {
         let mut args = self.agent_args.clone();
         if let Some(model) = opts["model"].as_str().filter(|m| !m.is_empty()) {
             match args.iter().position(|arg| arg == "--model") {
@@ -101,18 +127,23 @@ impl Runner {
         }
         args.extend(["--".into(), prompt.into()]);
         let output = tokio::process::Command::new(&self.exe).args(&args).current_dir(&self.cwd)
+            .env_remove(claude_core::services::background_sessions::CONTROL_ENV).env_remove(claude_core::services::background_sessions::WORKER_ENV)
             .stdin(std::process::Stdio::null()).kill_on_drop(true).output().await
             .with_context(|| format!("Cannot start agent {label}"))?;
         let stdout = String::from_utf8_lossy(&output.stdout);
-        let result: Value = serde_json::from_str(stdout.trim()).with_context(|| format!("Agent {label} failed: {}", String::from_utf8_lossy(&output.stderr).trim()))?;
+        let result: Value = serde_json::from_str(stdout.trim()).with_context(|| {
+            // Show whatever the child printed: stderr, else the start of stdout.
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            let detail = if stderr.trim().is_empty() { stdout.chars().take(500).collect::<String>() } else { stderr.into_owned() };
+            format!("Agent {label} failed ({}): {}", output.status, detail.trim())
+        })?;
         if result["is_error"] == true || !output.status.success() {
-            bail!("Agent {label} failed: {}", result["result"].as_str().or_else(|| result["error"].as_str()).unwrap_or("unknown error"));
+            let reason = [&result["result"], &result["error"], &result["subtype"]].into_iter().filter_map(Value::as_str).find(|text| !text.trim().is_empty()).map(str::to_owned)
+                .unwrap_or_else(|| result.to_string().chars().take(500).collect());
+            bail!("Agent {label} failed ({}): {reason}", output.status);
         }
         let value = if opts["schema"].is_null() { result["result"].clone() } else { result["structured_output"].clone() };
-        let text = value.to_string();
-        std::fs::write(&cached, &text)?;
-        println!("\u{2713} {label}");
-        Ok(text)
+        Ok(value.to_string())
     }
 }
 
@@ -156,7 +187,9 @@ pub async fn run(run: Run<'_>) -> Result<Value> {
                 })
             }
         })))?;
-        globals.set("__progress", Func::from(|text: String| println!("{text}")))?;
+        let (log_dir, phase_dir) = (runner.run_dir.clone(), runner.run_dir.clone());
+        globals.set("__progress", Func::from(move |text: String| { println!("{text}"); record(&log_dir, json!({"kind":"log","text":text})); }))?;
+        globals.set("__phase", Func::from(move |title: String| { println!("Phase: {title}"); record(&phase_dir, json!({"kind":"phase","title":title})); }))?;
         let promise: Promise = ctx.eval(source).catch(&ctx).map_err(|error| anyhow::anyhow!("Workflow script error: {error}"))?;
         promise.into_future::<String>().await.catch(&ctx).map_err(|error| anyhow::anyhow!("Workflow failed: {error}"))
     }).await;

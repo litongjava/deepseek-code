@@ -1,4 +1,5 @@
 ﻿mod hook_progress;
+mod workflows_view;
 mod lsp_commands;
 mod prompt_suggestion;
 mod shell_mode;
@@ -202,13 +203,19 @@ async fn run(cli: &Cli) -> Result<()> {
                 agent_args: serde_json::from_str(agent_args).context("--agent-args must be a JSON array")?,
                 concurrency: *concurrency,
             }).await;
+            // status.json tells /workflows how the run ended.
+            let finished = chrono::Utc::now().timestamp_millis();
             return match result {
                 Ok(value) => {
                     std::fs::write(run_dir.join("result.json"), serde_json::to_vec_pretty(&value)?)?;
+                    std::fs::write(run_dir.join("status.json"), serde_json::json!({"status":"completed","finished_ms":finished}).to_string())?;
                     println!("Workflow result:\n{}", serde_json::to_string_pretty(&value)?);
                     Ok(())
                 }
-                Err(error) => Err(error),
+                Err(error) => {
+                    let _ = std::fs::write(run_dir.join("status.json"), serde_json::json!({"status":"failed","error":format!("{error:#}"),"finished_ms":finished}).to_string());
+                    Err(error)
+                }
             };
         }
         Some(Commands::Ssh { config, operation, yes }) => return tokio::select! { result=migration::ssh(config,operation,*yes)=>result, _=tokio::signal::ctrl_c()=>anyhow::bail!("SSH operation cancelled") },

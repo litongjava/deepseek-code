@@ -22,7 +22,7 @@ pub const COMMANDS: &[(&str, &str)] = &[
     ("/subtask", "Run a background subtask with a copy of this context: PROMPT"),
     ("/background", "Background this session and free the terminal; optional task prompt"),
     ("/btw", "Ask a side question without adding to conversation history: QUESTION"),
-    ("/workflows", "Browse background task history: list|running|completed|failed"),
+    ("/workflows", "Browse running and completed workflows; list|run NAME|show NAME for saved ones"),
     ("/theme", "Choose a dark, light, accessible, or ANSI color theme"),
     ("/tui", "Switch terminal screen mode: default|fullscreen"),
     ("/color", "Set this session's prompt border color"),

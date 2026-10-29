@@ -113,6 +113,12 @@ pub async fn handle(
                         }
                     }
                     "" | "list" => {
+                        // As in the reference CLI: browse this session's runs.
+                        if argument.trim().is_empty() && crate::terminal::picker::available() {
+                            crate::workflows_view::browse(paths, &session.id)?;
+                            return Ok(Outcome::Handled);
+                        }
+                        crate::workflows_view::print(paths, &session.id);
                         let workflows = crate::workflow_commands::discover(
                             &paths.data_dir,
                             &session.workspace,
