@@ -76,6 +76,7 @@ pub(super) fn request(
             input.push(item);
         }
         let mut body = json!({"model":provider.model.id,"messages":input,"stream":true,"stream_options":{"include_usage":true}});
+        if crate::performance::accepts_mid_system(&provider.provider.base_url) { crate::performance::move_system_tail_chat(&mut body); }
         let field = metadata["compat"]["maxTokensField"]
             .as_str()
             .unwrap_or("max_tokens");
@@ -216,6 +217,7 @@ pub(super) fn request(
             let mut body = json!({"model":provider.model.id,"messages":input,"stream":true,"max_tokens":max_tokens});
             if !system.is_empty() {
                 body["system"] = json!(system);
+                if crate::performance::accepts_mid_system(&provider.provider.base_url) { crate::performance::move_system_tail(&mut body); }
             }
             if !tools.is_empty() {
                 body["tools"] = tools.iter().map(|t| json!({"name":t.name,"description":t.description,"input_schema":t.input_schema})).collect();

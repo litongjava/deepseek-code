@@ -206,6 +206,7 @@ impl AnthropicClient {
 
         if let Some(system) = system_prompt {
             body["system"] = json!(system);
+            if crate::performance::accepts_mid_system(base_url) { crate::performance::move_system_tail(&mut body); }
         }
 
         if !tools.is_empty() {
@@ -266,6 +267,7 @@ impl AnthropicClient {
 
         if let Some(system) = system_prompt {
             body["system"] = json!(system);
+            if crate::performance::accepts_mid_system(base_url) { crate::performance::move_system_tail(&mut body); }
         }
 
         if !tools.is_empty() {
@@ -347,6 +349,7 @@ impl AnthropicClient {
 
         if let Some(system) = system_prompt {
             body["system"] = json!(system);
+            if crate::performance::accepts_mid_system(base_url) { crate::performance::move_system_tail(&mut body); }
         }
 
         if !tools.is_empty() {

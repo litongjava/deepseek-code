@@ -169,6 +169,42 @@ where
     unreachable!()
 }
 
+/// Endpoints known to take a system-role message after the first user
+/// message, as the reference CLI sends: DeepSeek (both protocols, verified)
+/// and Anthropic. Other servers keep the whole prompt in the system field.
+pub fn accepts_mid_system(base_url: &str) -> bool {
+    reqwest::Url::parse(base_url).ok().and_then(|url| url.host_str().map(str::to_ascii_lowercase)).is_some_and(|host| {
+        host == "deepseek.com" || host.ends_with(".deepseek.com") || host == "api.anthropic.com"
+    })
+}
+
+/// Index after the first user message, where the reference CLI places its
+/// environment message.
+fn after_first_user(messages: &[serde_json::Value]) -> Option<usize> {
+    messages.iter().position(|message| message["role"] == "user").map(|index| index + 1)
+}
+
+/// Anthropic body: keep only a composed prompt's static sections in `system`
+/// and send its per-session tail (environment, skills, project) as a system
+/// message after the first user message, so `system` is the same for every
+/// session and project and shares one cache entry.
+pub fn move_system_tail(body: &mut serde_json::Value) {
+    let Some((fixed, tail)) = body["system"].as_str().and_then(crate::prompt::split_tail) else { return };
+    let Some(at) = body["messages"].as_array().and_then(|messages| after_first_user(messages)) else { return };
+    body["system"] = serde_json::json!(fixed);
+    body["messages"].as_array_mut().unwrap().insert(at, serde_json::json!({"role":"system","content":tail}));
+}
+
+/// Chat Completions body: the same move for a leading system message.
+pub fn move_system_tail_chat(body: &mut serde_json::Value) {
+    let Some(messages) = body["messages"].as_array_mut() else { return };
+    if messages.first().is_none_or(|first| first["role"] != "system") { return }
+    let Some((fixed, tail)) = messages[0]["content"].as_str().and_then(crate::prompt::split_tail) else { return };
+    let Some(at) = after_first_user(messages) else { return };
+    messages[0]["content"] = serde_json::json!(fixed);
+    messages.insert(at, serde_json::json!({"role":"system","content":tail}));
+}
+
 /// Mark stable prefixes only; no cache of generated answers is created. Composed
 /// system prompts get one breakpoint per static section, like the reference CLI.
 pub fn apply_prompt_cache(body: &mut serde_json::Value) {
@@ -375,6 +411,22 @@ mod tests {
         assert_eq!(body["messages"][2]["content"][0]["cache_control"]["type"], "ephemeral");
         assert!(body["messages"][2]["content"][1].get("cache_control").is_none());
 
+        // The per-session tail moves after the first user message where accepted.
+        let composed = crate::prompt::compose_system_prompt_in(None, "m", crate::prompt::PromptProfile::Code, Some(std::path::Path::new("/w")));
+        let (fixed, tail) = crate::prompt::split_tail(&composed).unwrap();
+        assert!(tail.starts_with("# Environment") && tail.contains("Primary working directory: /w") && !fixed.contains("Primary working directory"));
+        let mut moved = serde_json::json!({"system":composed,"messages":[{"role":"user","content":"hi"},{"role":"assistant","content":"ok"}]});
+        move_system_tail(&mut moved);
+        assert_eq!(moved["system"], fixed.as_str());
+        assert_eq!(moved["messages"][1], serde_json::json!({"role":"system","content":tail}));
+        apply_conversation_cache(&mut moved);
+        assert!(moved["system"].as_array().unwrap().iter().all(|block| block["cache_control"]["type"] == "ephemeral"));
+        let mut chat = serde_json::json!({"messages":[{"role":"system","content":composed},{"role":"user","content":"hi"}]});
+        move_system_tail_chat(&mut chat);
+        assert_eq!(chat["messages"][0]["content"], fixed.as_str());
+        assert_eq!(chat["messages"][2]["role"], "system");
+        assert!(accepts_mid_system("https://api.deepseek.com/anthropic") && accepts_mid_system("https://api.anthropic.com"));
+        assert!(!accepts_mid_system("https://openrouter.ai/api") && !accepts_mid_system("not a url"));
         let mut body = serde_json::json!({"system":"short","messages":[{"role":"user","content":"hi"}]});
         apply_prompt_cache(&mut body);
         assert_eq!(body["messages"][0]["content"], "hi");

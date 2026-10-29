@@ -136,6 +136,16 @@ pub fn cache_blocks(system: &str) -> Option<Vec<(String, bool)>> {
     })
 }
 
+/// A composed prompt's static sections, joined as composed, and its
+/// per-session tail; None for prompts this module did not compose or without
+/// a tail.
+pub fn split_tail(system: &str) -> Option<(String, String)> {
+    let blocks = cache_blocks(system)?;
+    let (fixed, tail): (Vec<_>, Vec<_>) = blocks.into_iter().partition(|(_, cached)| *cached);
+    let tail = tail.into_iter().map(|(text, _)| text).collect::<Vec<_>>().join("\n\n");
+    (!tail.trim().is_empty()).then(|| (fixed.into_iter().map(|(text, _)| text).collect::<Vec<_>>().join("\n\n"), tail))
+}
+
 static RE_OVERRIDE: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"<override_instructions>[\s\S]*?</override_instructions>\s*").unwrap());
 static RE_IDENTITY: LazyLock<Regex> =
