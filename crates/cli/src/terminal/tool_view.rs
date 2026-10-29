@@ -16,7 +16,7 @@ pub fn label(name: &str, input: &Value, workspace: Option<&std::path::Path>) -> 
         return format!("{}({})", super::progress::single_line(name), printable(description));
     }
     let preview = super::progress::tool_preview_in_workspace(name, input, workspace);
-    let name = super::progress::single_line(name);
+    let name = super::progress::single_line(super::progress::display_name(name));
     match preview.strip_prefix(&format!("{name}: ")) {
         Some(argument) => format!("{name}({argument})"),
         None => preview,
@@ -504,6 +504,12 @@ mod tests {
 
     fn text(lines: &[Line]) -> Vec<String> {
         lines.iter().map(|line| change_view::render(line, usize::MAX, false)).collect()
+    }
+
+    #[test]
+    fn web_tools_use_the_reference_names() {
+        assert_eq!(label("WebFetch", &json!({"url":"https://example.com/","prompt":"title?"}), None), "Fetch(https://example.com/)");
+        assert_eq!(label("WebSearch", &json!({"query":"rust 1.85"}), None), "Web Search(\"rust 1.85\")");
     }
 
     #[test]

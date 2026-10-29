@@ -440,9 +440,22 @@ pub(crate) fn tool_preview(name: &str, input: &Value) -> String {
     tool_preview_in_workspace(name, input, None)
 }
 
+/// The name the reference CLI shows for a tool.
+pub(crate) fn display_name(name: &str) -> &str {
+    match name {
+        "WebFetch" => "Fetch",
+        "WebSearch" => "Web Search",
+        _ => name,
+    }
+}
+
 pub(crate) fn tool_preview_in_workspace(name: &str, input: &Value, workspace: Option<&std::path::Path>) -> String {
     let name = single_line(name);
-    let preview = if name == "Bash" {
+    let preview = if name == "WebFetch" {
+        input["url"].as_str().map(single_line)
+    } else if name == "WebSearch" {
+        input["query"].as_str().map(|query| format!("\"{}\"", single_line(query)))
+    } else if name == "Bash" {
         input["command"].as_str().map(|command| {
             let lower = command.to_ascii_lowercase();
             if [
@@ -474,9 +487,10 @@ pub(crate) fn tool_preview_in_workspace(name: &str, input: &Value, workspace: Op
             }))
             .map(|value| single_line(&value))
     };
+    let name = display_name(&name);
     match preview {
         Some(preview) if !preview.is_empty() => format!("{name}: {}", clipped(&preview, 100)),
-        _ => name,
+        _ => name.to_owned(),
     }
 }
 
