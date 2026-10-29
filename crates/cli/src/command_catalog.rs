@@ -95,10 +95,24 @@ pub const COMMANDS: &[(&str, &str)] = &[
         "/permissions",
         "Inspect/change mode: ask|accept-edits|plan|dont-ask|bypass|auto; auto-config show|set JSON|off",
     ),
+    ("/new", "Alias for /clear"),
+    ("/reset", "Alias for /clear"),
+    ("/settings", "Alias for /config"),
+    ("/checkpoint", "Alias for /rewind"),
     ("/multiline", "Compose multiple lines; /end sends"),
     ("/end", "Send a multiline prompt"),
     ("/cancel", "Discard an unfinished prompt"),
 ];
+
+/// The command an alias stands for, as in the reference CLI.
+pub fn canonical(command: &str) -> &str {
+    match command {
+        "/new" | "/reset" => "/clear",
+        "/settings" => "/config",
+        "/checkpoint" => "/rewind",
+        other => other,
+    }
+}
 
 pub fn help() -> String {
     let mut text = String::from("Commands (type / to discover, Tab to complete):\n");
@@ -107,4 +121,13 @@ pub fn help() -> String {
     }
     text.push_str("End a line with a single backslash to continue onto the next line.\nArrow keys edit/navigate session-only history; Ctrl+R searches history.\nCtrl+C discards unfinished composition; at the main prompt it exits.\nDuring a task, Ctrl+C cancels the task. Multiline content is sent literally.");
     text
+}
+
+#[cfg(test)]
+#[test]
+fn aliases_resolve_to_listed_commands() {
+    for (alias, command) in [("/new", "/clear"), ("/reset", "/clear"), ("/settings", "/config"), ("/checkpoint", "/rewind"), ("/help", "/help")] {
+        assert_eq!(canonical(alias), command);
+        assert!(COMMANDS.iter().any(|(name, _)| *name == command) || command == "/help");
+    }
 }

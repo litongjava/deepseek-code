@@ -87,6 +87,7 @@ pub fn transcript_of(session: &Session, id: &str) -> Result<Vec<crate::terminal:
 pub async fn handle(line: &str, paths: &RuntimePaths, session: &mut Session) -> Result<bool> {
     let line = line.trim();
     let (command, argument) = line.split_once(char::is_whitespace).unwrap_or((line, ""));
+    let command = crate::command_catalog::canonical(command);
     if command == "/worktree" { crate::startup_options::worktree_startup::handle(argument,session).await?;return Ok(true); }
     if crate::feedback_commands::handle(command, argument, session).await? {
         return Ok(true);

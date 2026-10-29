@@ -794,6 +794,7 @@ async fn run(cli: &Cli) -> Result<()> {
                 continue;
             }
             let (command, argument) = line.trim().split_once(char::is_whitespace).unwrap_or((line.trim(), ""));
+            let command = command_catalog::canonical(command);
             if command == "/powerup" && powerup::interactive_topic(argument).is_some() && powerup::available() {
                 if let Err(error) = input.as_mut().unwrap().powerup(paths.clone(), argument.to_owned()).await {
                     eprintln!("Power-ups: {error:#}");
