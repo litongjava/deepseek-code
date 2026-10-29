@@ -48,7 +48,7 @@ impl ToolLoopExecutor {
                 .context("Skill instructions missing")?;
             // Kept after the user's message for the rest of the session, as
             // the reference CLI keeps an invoked skill's content.
-            self.attach_turn_context(vec![instructions.to_owned()])?;
+            self.attach_turn_entry(vec![instructions.to_owned()], invoked(&result))?;
             Ok(None)
         } else {
             ensure!(
@@ -102,7 +102,7 @@ impl ToolLoopExecutor {
         if skill.path.parent() == Some(Path::new("__embedded_cli_skills__")) {
             if let Some(prepared) = crate::skills::code_review::prepare_named(name, Path::new(&self.workspace_cwd), arguments).await {
                 let instructions = prepared?;
-                return Ok(json!({"skill":name,"instructions":instructions,"execution":"inline","shell_context_already_collected":true}));
+                return Ok(json!({"skill":name,"path":skill.path,"instructions":instructions,"execution":"inline","shell_context_already_collected":true}));
             }
         }
         if name == "deep-research" && skill.path == Path::new("__embedded_cli_skills__").join("deep-research") {
@@ -119,7 +119,7 @@ impl ToolLoopExecutor {
             let snapshot = crate::services::doctor::inspect(
                 Path::new(&self.workspace_cwd), Some(&context.paths),
             ).render();
-            return Ok(json!({"skill":name,"instructions":crate::services::doctor::attach_snapshot(&instructions, &snapshot),"execution":"inline","shell_context_already_collected":true}));
+            return Ok(json!({"skill":name,"path":skill.path,"instructions":crate::services::doctor::attach_snapshot(&instructions, &snapshot),"execution":"inline","shell_context_already_collected":true}));
         }
         if crate::skills::bundled_resources::supports(name)
             && skill.path.parent() == Some(Path::new("__embedded_cli_skills__"))
@@ -127,7 +127,7 @@ impl ToolLoopExecutor {
             let instructions = self.bundled_resources.prepare(
                 name, arguments, Path::new(&self.workspace_cwd),
             )?;
-            return Ok(json!({"skill":name,"instructions":instructions,"execution":"inline","shell_context_already_collected":true}));
+            return Ok(json!({"skill":name,"path":skill.path,"instructions":instructions,"execution":"inline","shell_context_already_collected":true}));
         }
         // user-invocable controls slash commands, not model-only skills.
         let mut selected = skill.clone();
@@ -185,9 +185,18 @@ impl ToolLoopExecutor {
             "Unsupported skill execution context"
         );
         Ok(
-            json!({"skill":name,"instructions":expanded,"execution":"inline","shell_context_already_collected":true}),
+            json!({"skill":name,"path":skill.path,"instructions":expanded,"execution":"inline","shell_context_already_collected":true}),
         )
     }
+}
+
+/// The skill an inline Skill result records, for showing after a compaction.
+pub(super) fn invoked(result: &Value) -> Option<crate::services::turn_context::InvokedSkill> {
+    Some(crate::services::turn_context::InvokedSkill {
+        name: result["skill"].as_str()?.to_owned(),
+        path: result["path"].as_str().unwrap_or_default().to_owned(),
+        content: result["instructions"].as_str()?.to_owned(),
+    })
 }
 
 #[cfg(test)]

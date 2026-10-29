@@ -960,7 +960,12 @@ impl ToolLoopExecutor {
     /// Record blocks after the last user message, for this request and, when
     /// the session is known, for every later one.
     pub(super) fn attach_turn_context(&mut self, blocks: Vec<String>) -> Result<()> {
+        self.attach_turn_entry(blocks, None)
+    }
+
+    pub(super) fn attach_turn_entry(&mut self, blocks: Vec<String>, skill: Option<crate::services::turn_context::InvokedSkill>) -> Result<()> {
         let Some(entry) = crate::services::turn_context::for_last(&self.messages, blocks) else { return Ok(()) };
+        let entry = crate::services::turn_context::Entry { skill, ..entry };
         let saved = match (self.search_config_path.as_deref().and_then(|path| path.parent()), self.conv_id.as_deref()) {
             (Some(root), Some(session)) => crate::services::turn_context::save(root, session, &entry),
             _ => Ok(()),
@@ -1718,6 +1723,18 @@ impl ToolLoopExecutor {
 
         if tool_name == "Skill" {
             let result = Box::pin(self.execute_skill_tool(tool_input)).await;
+            // A skill the model ran inline is recorded for after a compaction; its
+            // content is already in this tool result. Slash commands record theirs
+            // in prepare_user_skill.
+            if let Ok(value) = &result {
+                if value["execution"] == "inline" && !self.manual_skill_active {
+                    if let Some(skill) = skill_tool::invoked(value) {
+                        if let Err(error) = self.attach_turn_entry(Vec::new(), Some(skill)) {
+                            tracing::warn!(module = "ToolLoop", "Invoked skill was not recorded: {error:#}");
+                        }
+                    }
+                }
+            }
             return (tool_input.clone(), match &result { Ok(value)=>value.to_string(),Err(error)=>format!("Skill failed: {error:#}") }, result.is_err());
         }
 

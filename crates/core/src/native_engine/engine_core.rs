@@ -212,7 +212,7 @@ impl QueryEngine {
     }
 
     /// Apply an enabled skill to the normal conversation executor and stream real results.
-    pub async fn execute_skill(&self, skill_id: &str, mut request: ChatRequest) -> Result<mpsc::Receiver<EngineEvent>> {
+    pub async fn execute_skill(&self, skill_id: &str, request: ChatRequest) -> Result<mpsc::Receiver<EngineEvent>> {
         let manager = self.skills_manager.as_ref().context("Skills manager not configured")?;
         let content = {
             let manager = manager.lock().await;
@@ -445,8 +445,9 @@ impl QueryEngine {
         let mut discovered_skills = crate::services::plugins::skill_commands(&plugin_context)?;
         discovered_skills.extend(crate::skills::discovery::discover(&workspace)?);
         let mut pending_user_skill = None;
-        // Blocks kept after this turn's user message for the rest of the session.
-        let mut turn_blocks = Vec::new();
+        // Blocks kept after this turn's user message for the rest of the session;
+        // a skill's block also records the skill for after a compaction.
+        let mut turn_blocks: Vec<(String, Option<crate::services::turn_context::InvokedSkill>)> = Vec::new();
         if let Some((command, arguments)) = skill_invocation.filter(|_| !hook_wake) {
             let content = if let Some(skill) = discovered_skills.get(&command) {
                 let embedded =
@@ -460,16 +461,22 @@ impl QueryEngine {
                 if requires_execution {
                     pending_user_skill = Some(serde_json::json!({"skill":command,"args":arguments}));
                     None
-                } else { Some(skill.render(&arguments, &conv_id)?) }
+                } else {
+                    let content = skill.render(&arguments, &conv_id)?;
+                    Some((content.clone(), crate::services::turn_context::InvokedSkill { name: command.clone(), path: skill.path.display().to_string(), content }))
+                }
             } else if let Some(manager) = &self.skills_manager {
                 let skills = manager.lock().await.list_enabled_skills().await?;
                 let matches: Vec<_> = skills.into_iter().filter(|skill| skill.id == command || skill.name.to_lowercase().split_whitespace().collect::<Vec<_>>().join("-") == command).collect();
                 anyhow::ensure!(matches.len() <= 1, "Ambiguous skill command; use its full skill ID");
-                matches.into_iter().next().and_then(|skill| skill.content).map(|content| format!("{content}\n\nUser arguments: {arguments}"))
+                matches.into_iter().next().and_then(|skill| {
+                    let content = format!("{}\n\nUser arguments: {arguments}", skill.content?);
+                    Some((content.clone(), crate::services::turn_context::InvokedSkill { name: command.clone(), path: format!("skill:{}", skill.id), content }))
+                })
             } else { None };
             // Hosts reject unknown slash commands; ordinary Desktop or multiline
             // messages may legitimately begin with a literal filesystem path.
-            if let Some(content) = content { turn_blocks.push(content); }
+            if let Some((content, skill)) = content { turn_blocks.push((content, Some(skill))); }
         }
         let available_skills = discovered_skills.values().filter(|skill| skill.model_invocable()).map(|skill| serde_json::json!({"name":skill.name,"description":skill.description,"context":skill.context})).collect::<Vec<_>>();
         if !available_skills.is_empty() {
@@ -515,10 +522,10 @@ impl QueryEngine {
                 hook_result.reason
             );
             if !hook_result.additional_context.is_empty() {
-                turn_blocks.push(format!(
+                turn_blocks.push((format!(
                     "<system-reminder>\nUserPromptSubmit hook additional context: {}\n</system-reminder>",
                     hook_result.additional_context.join("\n")
-                ));
+                ), None));
             }
             for warning in hook_result.warnings {
                 tracing::warn!("UserPromptSubmit hook: {warning}");
@@ -546,15 +553,19 @@ impl QueryEngine {
         let turn_session = conv_id.clone();
         let turn_messages = request.messages.clone();
         let turn_context = tokio::task::spawn_blocking(move || {
-            if !turn_blocks.is_empty() {
-                crate::services::turn_context::attach_to_last(&turn_root, &turn_session, &turn_messages, turn_blocks)?;
+            for (block, skill) in turn_blocks {
+                if let Some(entry) = crate::services::turn_context::for_last(&turn_messages, vec![block]) {
+                    crate::services::turn_context::save(&turn_root, &turn_session, &crate::services::turn_context::Entry { skill, ..entry })?;
+                }
             }
             crate::services::turn_context::load(&turn_root, &turn_session)
         })
         .await??;
+        // Skills whose message a compaction removed follow, as in the reference CLI.
         let context_reminders: Vec<String> = crate::project_instructions::reminder(&instructions)
             .into_iter()
             .chain(git_snapshot.as_deref().map(crate::services::git_snapshot::reminder))
+            .chain(crate::services::turn_context::invoked_skills_reminder(&turn_context, &request.messages))
             .collect();
         let allowed_directories = project
             .as_ref()
