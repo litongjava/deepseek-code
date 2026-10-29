@@ -84,6 +84,21 @@ pub fn transcript_of(session: &Session, id: &str) -> Result<Vec<crate::terminal:
     })?
 }
 
+/// `/compact [instructions]`: summarize the session; returns how many
+/// messages were summarized. Shared by the REPL and print mode.
+pub async fn compact(paths: &RuntimePaths, session: &mut Session, instructions: &str) -> Result<usize> {
+    let context = crate::services::context(paths)?;
+    let report = tokio::select! {
+        report = claude_core::services::compaction::compact_with_hooks(
+            &session.engine, &context, &session.workspace, &session.id,
+            &session.provider_id, &session.model, instructions.trim(), "manual",
+        ) => report?,
+        _ = tokio::signal::ctrl_c() => anyhow::bail!("Compaction interrupted; check /history for a completed summary. Original transcript retained"),
+    };
+    for warning in &report.warnings { eprintln!("Hook: {warning}"); }
+    Ok(report.summarized_messages)
+}
+
 pub async fn handle(line: &str, paths: &RuntimePaths, session: &mut Session) -> Result<bool> {
     let line = line.trim();
     let (command, argument) = line.split_once(char::is_whitespace).unwrap_or((line, ""));
@@ -110,19 +125,10 @@ pub async fn handle(line: &str, paths: &RuntimePaths, session: &mut Session) -> 
     match command {
         "/status" => crate::status_commands::run(session, argument).await?,
         "/compact" => {
-            let context = crate::services::context(paths)?;
-            let report = tokio::select! {
-                report = claude_core::services::compaction::compact_with_hooks(
-                    &session.engine, &context, &session.workspace, &session.id,
-                    &session.provider_id, &session.model, argument.trim(), "manual",
-                ) => report?,
-                _ = tokio::signal::ctrl_c() => anyhow::bail!("Compaction interrupted; check /history for a completed summary. Original transcript retained"),
-            };
-            for warning in &report.warnings { eprintln!("Hook: {warning}"); }
+            let summarized = compact(paths, session, argument).await?;
             // As in the reference CLI; the summary is in the Ctrl+O transcript.
             eprintln!(
-                "  \u{23bf}  Compacted (ctrl+o to see full summary)\n     {} messages summarized; the original transcript remains in /history.",
-                report.summarized_messages
+                "  \u{23bf}  Compacted (ctrl+o to see full summary)\n     {summarized} messages summarized; the original transcript remains in /history."
             );
         }
         "/clear" => {

@@ -546,7 +546,20 @@ async fn run(cli: &Cli) -> Result<()> {
                     io::stderr().is_terminal() && std::env::var_os("NO_COLOR").is_none() && !terminal::screen_reader(), false,
                 )?;
             }
-            prompt_turn(cli, &mut session, &prompt, &mut input).await?;
+            // As in the reference CLI, /compact also works without a terminal.
+            let compact = prompt.trim().strip_prefix("/compact").filter(|rest| rest.is_empty() || rest.starts_with(char::is_whitespace));
+            match compact {
+                Some(instructions) if single => {
+                    let summarized = repl::compact(&paths, &mut session, instructions).await?;
+                    let message = format!("Compacted: {summarized} messages summarized; the original transcript remains in the session history.");
+                    if cli.output_format == OutputFormat::Text {
+                        println!("{message}");
+                    } else {
+                        session::emit_json(&serde_json::json!({"type":"result","subtype":"success","is_error":false,"session_id":session.id,"result":message,"num_turns":0,"permission_denials":[],"uuid":uuid::Uuid::new_v4().to_string()}))?;
+                    }
+                }
+                _ => prompt_turn(cli, &mut session, &prompt, &mut input).await?,
+            }
         }
         if sdk_stream {
             Box::pin(sdk::run(cli,&mut session,(!prompt.trim().is_empty()).then_some(prompt.as_str()),if resumed.is_some() { "resume" } else { "startup" })).await?;
