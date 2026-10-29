@@ -32,6 +32,7 @@ pub mod scheduled;
 pub mod cron_jobs;
 pub mod session_worktree;
 pub mod wakeup;
+pub mod sandbox;
 mod findings;
 mod content_compat;
 mod utf8;
@@ -132,7 +133,7 @@ pub fn get_tool_definitions() -> Vec<ToolDefinition> {
                     "timeout": { "description": "Optional timeout in milliseconds (max 600000 for a foreground command)", "type": "number" },
                     "description": { "description": "Clear, concise description of what this command does in active voice. Never use words like \"complex\" or \"risk\" in the description - just describe what it does.\n\nSay what the command does in plain words: do not echo the command's text, its flags, or file paths - the user reads this description, often without seeing the command.\n\nFor simple commands (git, npm, standard CLI tools), keep it brief (5-10 words):\n- ls → \"List files in current directory\"\n- git status → \"Show working tree status\"\n- npm install → \"Install package dependencies\"\n\nFor commands that are harder to parse at a glance (piped commands, obscure flags, etc.), add enough context to clarify what it does:\n- find . -name \"*.tmp\" -exec rm {} \\; → \"Find and delete all .tmp files recursively\"\n- git reset --hard origin/main → \"Discard all local changes and match remote main\"\n- curl -s url | jq '.data[]' → \"Fetch JSON from URL and extract data array elements\"", "type": "string" },
                     "run_in_background": { "description": "Set to true to run this command in the background.", "type": "boolean" },
-                    "dangerouslyDisableSandbox": { "description": "Set this to true to dangerously override sandbox mode and run commands without sandboxing. This runtime does not sandbox commands, so it currently has no effect.", "type": "boolean" },
+                    "dangerouslyDisableSandbox": { "description": "Set this to true to dangerously override sandbox mode and run commands without sandboxing.", "type": "boolean" },
                     "shell": { "description": "Shell to use: bash, zsh, fish, sh, cmd, powershell, pwsh (default: bash)", "type": "string" }
                 },
                 "required": ["command"],
@@ -963,7 +964,19 @@ async fn tool_bash_async(input: serde_json::Value, cwd: &str) -> Result<serde_js
         }
     };
 
-    let mut cmd = Command::new(&shell);
+    let mut cmd = match input.get("__sandbox").filter(|policy| policy.is_object()) {
+        Some(policy) if input["dangerouslyDisableSandbox"] == true => {
+            anyhow::ensure!(policy["allow_unsandboxed"] != false, "Running commands outside the sandbox is disabled by sandbox.allowUnsandboxedCommands");
+            Command::new(&shell)
+        }
+        Some(policy) => {
+            let (program, args) = sandbox::wrap(policy, &shell)?;
+            let mut cmd = Command::new(program);
+            cmd.args(args);
+            cmd
+        }
+        None => Command::new(&shell),
+    };
     // Dropping a cancelled/expired turn must also stop its shell command.
     cmd.kill_on_drop(true);
 
