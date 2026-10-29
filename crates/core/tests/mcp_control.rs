@@ -45,6 +45,7 @@ async fn restart_reaches_existing_process_and_acknowledges_real_restart() {
             env: Default::default(),
             cwd: None,
             enabled: true,
+            ..Default::default()
         })
         .await
         .unwrap();

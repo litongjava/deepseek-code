@@ -3,7 +3,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
-use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+use tokio::io::BufReader;
 use tokio::process::{Child, Command};
 use tokio::sync::{Mutex, RwLock};
 
@@ -13,9 +13,10 @@ pub mod elicitation;
 pub mod tool_executor;
 pub mod transfer;
 pub mod sdk;
+mod transport;
 pub use tool_executor::McpToolRegistry;
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct McpServerConfig {
     pub id: String,
     pub name: String,
@@ -25,6 +26,25 @@ pub struct McpServerConfig {
     #[serde(default)]
     pub cwd: Option<PathBuf>,
     pub enabled: bool,
+    /// stdio (default), http, sse or ws, as in the reference CLI's `type`.
+    #[serde(default, rename = "type", alias = "transport", skip_serializing_if = "Option::is_none")]
+    pub transport: Option<String>,
+    /// Server URL for the http, sse and ws transports.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub url: Option<String>,
+    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
+    pub headers: HashMap<String, String>,
+}
+
+impl McpServerConfig {
+    pub fn transport_name(&self) -> &str {
+        match self.transport.as_deref() {
+            Some("streamable-http") => "http",
+            Some("websocket") => "ws",
+            Some(other) if !other.is_empty() => other,
+            _ => "stdio",
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -174,6 +194,11 @@ impl McpServerManager {
                         .get("enabled")
                         .and_then(|e| e.as_bool())
                         .unwrap_or(true),
+                    transport: value.get("type").or_else(|| value.get("transport")).and_then(|t| t.as_str()).map(str::to_owned),
+                    url: value.get("url").and_then(|u| u.as_str()).map(str::to_owned),
+                    headers: value.get("headers").and_then(|h| h.as_object())
+                        .map(|obj| obj.iter().filter_map(|(k, v)| v.as_str().map(|s| (k.clone(), s.to_string()))).collect())
+                        .unwrap_or_default(),
                 };
 
                 let status = McpServerStatus {
@@ -193,7 +218,7 @@ impl McpServerManager {
                     tools_count: 0,
                     resources_count: 0,
                     error: None,
-                    transport_type: "stdio".to_string(),
+                    transport_type: server_config.transport_name().to_string(),
                 };
 
                 let state = McpServerState {
@@ -231,7 +256,7 @@ impl McpServerManager {
                 tools_count: 0,
                 resources_count: 0,
                 error: None,
-                transport_type: "stdio".to_string(),
+                transport_type: server.transport_name().to_string(),
             };
 
             servers.insert(server.id.clone(), McpServerState {
@@ -275,7 +300,7 @@ impl McpServerManager {
             tools_count: 0,
             resources_count: 0,
             error: None,
-            transport_type: "stdio".to_string(),
+            transport_type: config.transport_name().to_string(),
         };
 
         let state = McpServerState {
@@ -638,8 +663,7 @@ pub struct McpConnector {
     config: McpServerConfig,
     process: Option<Child>,
     request_id: Mutex<u64>,
-    stdin: Mutex<Option<tokio::process::ChildStdin>>,
-    stdout: Mutex<Option<BufReader<tokio::process::ChildStdout>>>,
+    channel: Mutex<Option<transport::Channel>>,
     retry_config: RetryConfig,
     last_heartbeat: Mutex<std::time::Instant>,
     is_healthy: Mutex<bool>,
@@ -651,8 +675,7 @@ impl McpConnector {
             config,
             process: None,
             request_id: Mutex::new(0),
-            stdin: Mutex::new(None),
-            stdout: Mutex::new(None),
+            channel: Mutex::new(None),
             retry_config: RetryConfig::default(),
             last_heartbeat: Mutex::new(std::time::Instant::now()),
             is_healthy: Mutex::new(false),
@@ -665,28 +688,32 @@ impl McpConnector {
     }
 
     pub async fn start(&mut self) -> Result<()> {
-        let mut cmd = Command::new(&self.config.command);
-        cmd.args(&self.config.args)
-            .envs(&self.config.env)
-            .stdin(std::process::Stdio::piped())
-            .stdout(std::process::Stdio::piped())
-            .stderr(std::process::Stdio::piped())
-            .kill_on_drop(true);
-
-        if let Some(cwd) = &self.config.cwd {
-            cmd.current_dir(cwd);
-        }
-        let mut child = cmd.spawn()?;
-
-        let stdin = child.stdin.take().ok_or_else(|| anyhow!("Failed to take stdin"))?;
-        let stdout = child.stdout.take().ok_or_else(|| anyhow!("Failed to take stdout"))?;
-
-        self.stdin = Mutex::new(Some(stdin));
-        self.stdout = Mutex::new(Some(BufReader::new(stdout)));
-        self.process = Some(child);
-
+        let url = || self.config.url.as_deref().filter(|url| !url.is_empty()).ok_or_else(|| anyhow!("MCP server {} needs a url for the {} transport", self.config.name, self.config.transport_name()));
+        let channel = match self.config.transport_name() {
+            "stdio" => {
+                let mut cmd = Command::new(&self.config.command);
+                cmd.args(&self.config.args)
+                    .envs(&self.config.env)
+                    .stdin(std::process::Stdio::piped())
+                    .stdout(std::process::Stdio::piped())
+                    .stderr(std::process::Stdio::piped())
+                    .kill_on_drop(true);
+                if let Some(cwd) = &self.config.cwd {
+                    cmd.current_dir(cwd);
+                }
+                let mut child = cmd.spawn()?;
+                let stdin = child.stdin.take().ok_or_else(|| anyhow!("Failed to take stdin"))?;
+                let stdout = child.stdout.take().ok_or_else(|| anyhow!("Failed to take stdout"))?;
+                self.process = Some(child);
+                transport::Channel::Stdio { stdin, stdout: BufReader::new(stdout) }
+            }
+            "http" => transport::Channel::http(url()?, &self.config.headers).await?,
+            "sse" => transport::Channel::sse(url()?, &self.config.headers).await?,
+            "ws" => transport::Channel::websocket(url()?, &self.config.headers).await?,
+            other => return Err(anyhow!("Unsupported MCP transport: {other}")),
+        };
+        self.channel = Mutex::new(Some(channel));
         self.initialize().await?;
-
         Ok(())
     }
 
@@ -696,7 +723,7 @@ impl McpConnector {
             id: self.next_id().await,
             method: "initialize".to_string(),
             params: Some(serde_json::json!({
-                "protocolVersion": "2025-06-18",
+                "protocolVersion": transport::PROTOCOL_VERSION,
                 "capabilities": {
                     "roots": {"listChanged": true},
                     "elicitation": {}
@@ -709,14 +736,9 @@ impl McpConnector {
         };
 
         self.send_json_rpc(request).await?;
-        let mut guard = self.stdin.lock().await;
-        let stdin = guard
-            .as_mut()
-            .ok_or_else(|| anyhow!("MCP stdin unavailable"))?;
-        stdin
-            .write_all(b"{\"jsonrpc\":\"2.0\",\"method\":\"notifications/initialized\"}\n")
-            .await?;
-        stdin.flush().await?;
+        let mut guard = self.channel.lock().await;
+        let channel = guard.as_mut().ok_or_else(|| anyhow!("MCP connection unavailable"))?;
+        channel.send(&serde_json::json!({"jsonrpc":"2.0","method":"notifications/initialized"})).await?;
         Ok(())
     }
 
@@ -924,34 +946,17 @@ impl McpConnector {
     }
 
     async fn try_send_json_rpc(&self, request: &McpJsonRpcRequest) -> Result<McpJsonRpcResponse> {
-        let json = serde_json::to_string(request)?;
-        {
-            let mut stdin_guard = self.stdin.lock().await;
-            let stdin = stdin_guard.as_mut().ok_or_else(|| anyhow!("MCP stdin not available"))?;
-            stdin.write_all(format!("{}\n", json).as_bytes()).await?;
-        }
-
-        let mut stdout_guard = self.stdout.lock().await;
-        let stdout = stdout_guard.as_mut().ok_or_else(|| anyhow!("MCP stdout not available"))?;
+        // One request at a time keeps replies matched to their requests.
+        let mut guard = self.channel.lock().await;
+        let channel = guard.as_mut().ok_or_else(|| anyhow!("MCP connection unavailable"))?;
+        channel.send(&serde_json::to_value(request)?).await?;
 
         let response = loop {
-            let mut line = String::new();
-            let bytes = tokio::time::timeout(
-                tokio::time::Duration::from_secs(30),
-                stdout.read_line(&mut line),
-            )
-            .await??;
-            anyhow::ensure!(bytes != 0, "MCP stdout closed");
-            let value: serde_json::Value = serde_json::from_str(line.trim())?;
+            let value = tokio::time::timeout(tokio::time::Duration::from_secs(30), channel.recv()).await??;
             if value.get("method").is_some() {
                 if value.get("id").is_some() {
                     let reply = elicitation::reply(&self.config.id, &value).await;
-                    let mut guard = self.stdin.lock().await;
-                    let stdin = guard
-                        .as_mut()
-                        .ok_or_else(|| anyhow!("MCP stdin unavailable"))?;
-                    stdin.write_all(format!("{reply}\n").as_bytes()).await?;
-                    stdin.flush().await?;
+                    channel.send(&reply).await?;
                 }
                 continue;
             }
@@ -1003,6 +1008,9 @@ impl McpConnector {
     }
 
     pub async fn stop(&mut self) -> Result<()> {
+        if let Some(mut channel) = self.channel.lock().await.take() {
+            channel.close().await;
+        }
         if let Some(mut child) = self.process.take() {
             child.kill().await?;
         }
@@ -1081,6 +1089,7 @@ pub fn default_servers() -> Vec<McpServerConfig> {
                 env: HashMap::new(),
                 cwd: None,
                 enabled: false,
+                ..Default::default()
             },
             McpServerConfig {
                 id: "git".to_string(),
@@ -1093,6 +1102,7 @@ pub fn default_servers() -> Vec<McpServerConfig> {
                 env: HashMap::new(),
                 cwd: None,
                 enabled: false,
+                ..Default::default()
             },
             McpServerConfig {
                 id: "brave-search".to_string(),
@@ -1105,6 +1115,7 @@ pub fn default_servers() -> Vec<McpServerConfig> {
                 env: HashMap::new(),
                 cwd: None,
                 enabled: false,
+                ..Default::default()
             },
             McpServerConfig {
                 id: "mcp-filesystem".to_string(),
@@ -1118,6 +1129,7 @@ pub fn default_servers() -> Vec<McpServerConfig> {
                 env: HashMap::new(),
                 cwd: None,
                 enabled: false,
+                ..Default::default()
             },
             McpServerConfig {
                 id: "github".to_string(),
@@ -1130,6 +1142,7 @@ pub fn default_servers() -> Vec<McpServerConfig> {
                 env: HashMap::new(),
                 cwd: None,
                 enabled: false,
+                ..Default::default()
             },
             McpServerConfig {
                 id: "slack".to_string(),
@@ -1142,6 +1155,7 @@ pub fn default_servers() -> Vec<McpServerConfig> {
                 env: HashMap::new(),
                 cwd: None,
                 enabled: false,
+                ..Default::default()
             },
     ]
 }

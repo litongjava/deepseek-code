@@ -24,6 +24,7 @@ async fn resource_tools_read_protocol_contents_and_reject_stopped_servers() {
             env: Default::default(),
             cwd: None,
             enabled: true,
+            ..Default::default()
         })
         .await
         .unwrap();
@@ -85,6 +86,7 @@ async fn configured_server_tools_are_namespaced_for_dispatch_and_server_rules() 
                 env: Default::default(),
                 cwd: None,
                 enabled: true,
+                ..Default::default()
             })
             .await
             .unwrap();

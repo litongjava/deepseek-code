@@ -174,6 +174,7 @@ pub async fn sync_mcp(
                 )?,
                 cwd: Some(root.clone()),
                 enabled: true,
+                ..Default::default()
             };
             config
                 .env

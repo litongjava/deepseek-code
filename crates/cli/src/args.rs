@@ -494,8 +494,17 @@ pub enum McpCommands {
     Hosts,
     Restart { name:String, #[arg(long)] host:Option<String> },
     List,
+    /// Add a server: `NAME COMMAND [ARGS...]` for stdio, or
+    /// `--transport http|sse|ws NAME URL` for a remote server.
     Add {
+        /// stdio (default), http, sse or ws.
+        #[arg(long, short = 't')]
+        transport: Option<String>,
+        /// Request header for remote transports, "Name: value"; repeatable.
+        #[arg(long = "header", short = 'H')]
+        headers: Vec<String>,
         name: String,
+        /// The command for stdio, or the server URL for remote transports.
         command: String,
         #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
         args: Vec<String>,

@@ -135,6 +135,7 @@ impl McpServerManager {
                 env: entry.env,
                 cwd: entry.cwd,
                 enabled: entry.auto_start,
+                ..Default::default()
             };
             if let Some(prior) = configs.get(&config.id) {
                 ensure!(

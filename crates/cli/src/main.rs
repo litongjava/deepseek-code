@@ -945,10 +945,18 @@ async fn mcp(paths: &RuntimePaths, action: &McpCommands) -> Result<()> {
             println!("{}", serde_json::to_string_pretty(&value)?);
         }
         McpCommands::Add {
+            transport,
+            headers,
             name,
             command,
             args,
         } => {
+            let transport = transport.as_deref().map(|t| match t { "streamable-http" => "http", "websocket" => "ws", other => other });
+            ensure!(matches!(transport, None | Some("stdio" | "http" | "sse" | "ws")), "--transport must be stdio, http, sse or ws");
+            let remote = matches!(transport, Some("http" | "sse" | "ws"));
+            ensure!(!remote || args.is_empty(), "Remote MCP servers take a URL, not command arguments");
+            ensure!(remote || headers.is_empty(), "--header applies to http, sse and ws servers");
+            let headers = headers.iter().map(|header| header.split_once(':').map(|(key, value)| (key.trim().to_owned(), value.trim().to_owned())).filter(|(key, _)| !key.is_empty()).with_context(|| format!("Header must look like \"Name: value\", not {header}"))).collect::<Result<HashMap<_, _>>>()?;
             ensure!(
                 manager.get_server(name).await.is_none(),
                 "MCP server already exists"
@@ -957,11 +965,14 @@ async fn mcp(paths: &RuntimePaths, action: &McpCommands) -> Result<()> {
                 .add_server(McpServerConfig {
                     id: name.clone(),
                     name: name.clone(),
-                    command: command.clone(),
+                    command: if remote { String::new() } else { command.clone() },
                     args: args.clone(),
                     env: HashMap::new(),
                     cwd: None,
                     enabled: true,
+                    transport: transport.filter(|_| remote).map(str::to_owned),
+                    url: remote.then(|| command.clone()),
+                    headers,
                 })
                 .await?;
             eprintln!("Added {name}");
