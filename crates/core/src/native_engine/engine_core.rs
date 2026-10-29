@@ -434,6 +434,12 @@ impl QueryEngine {
         request.system_prompt = Some(crate::prompt::compose_system_prompt_in(
             request.system_prompt.as_deref(), &request.model, prompt_profile, Some(&workspace),
         ));
+        let snapshot_root = plugin_context.paths.data_dir.clone();
+        let snapshot_session = conv_id.clone();
+        let snapshot_workspace = workspace.clone();
+        if let Some(snapshot) = tokio::task::spawn_blocking(move || crate::services::git_snapshot::for_session(&snapshot_root, &snapshot_session, &snapshot_workspace)).await? {
+            request.system_prompt.get_or_insert_with(String::new).push_str(&format!("\n\n{snapshot}"));
+        }
         let workspace_path = workspace.to_string_lossy().into_owned();
         let mut discovered_skills = crate::services::plugins::skill_commands(&plugin_context)?;
         discovered_skills.extend(crate::skills::discovery::discover(&workspace)?);

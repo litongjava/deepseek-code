@@ -1,4 +1,5 @@
 //! Peripheral services shared by CLI and Desktop. Hosts supply credentials/devices.
+pub mod git_snapshot;
 pub mod lifecycle;
 pub mod deep_research;
 pub mod compaction;
