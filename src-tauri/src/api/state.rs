@@ -60,6 +60,7 @@ pub struct AppState {
     pub context_manager: Arc<Mutex<ContextManager>>,
     pub git_integration: Arc<GitIntegration>,
     pub permission_manager: Arc<PermissionManager>,
+    pub generation_runs: Arc<crate::bridge::routes::generation_runs::GenerationRuns>,
 }
 
 impl AppState {
@@ -98,6 +99,7 @@ impl AppState {
             permission_manager: Arc::new(PermissionManager::new(
                 Arc::new(crate::permissions::AuditLogger::new(1000)),
             )),
+            generation_runs: Arc::default(),
         }
     }
 }

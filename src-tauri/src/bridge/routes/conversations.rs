@@ -442,6 +442,57 @@ async fn conversation_permission_handler(
     }
 }
 
+/// Estimated context occupancy of a persisted conversation and its model window.
+async fn conversation_context_size(
+    Path(id): Path<String>,
+    State(state): State<AppState>,
+) -> Result<Json<serde_json::Value>, (StatusCode, Json<serde_json::Value>)> {
+    let db = state.db_manager.clone();
+    let id_clone = id.clone();
+    let measured = tokio::task::spawn_blocking(move || {
+        let conversation = db.with_conn(|conn| crate::db::conversation_repo::get_conversation(conn, &id_clone))??;
+        let store = crate::runtime::SessionStore::new(db);
+        let tokens = crate::services::context_usage::estimated_tokens(&store, &id_clone)?;
+        Ok::<_, anyhow::Error>(conversation.zip(tokens))
+    }).await;
+    let (conversation, tokens) = match measured {
+        Ok(Ok(Some(found))) => found,
+        Ok(Ok(None)) => return Err((StatusCode::NOT_FOUND, Json(serde_json::json!({ "error": "Conversation not found" })))),
+        Ok(Err(e)) => {
+            tracing::error!(module = "ContextSize", "Failed for {}: {}", id, e);
+            return Err((StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({ "error": e.to_string() }))));
+        }
+        Err(e) => return Err((StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({ "error": e.to_string() })))),
+    };
+    // Resolve against the configured providers, as each chat request does.
+    let providers = match state.config_manager.lock().await.as_ref() {
+        Some(cm) => cm.get_config().providers.iter().map(crate::runtime::provider_from_config).collect(),
+        None => Vec::new(),
+    };
+    let providers = crate::native_engine::provider_manager::ProviderManager::in_memory(providers, std::path::PathBuf::new());
+    let model = conversation.model.unwrap_or_default();
+    let limit = crate::services::context_usage::context_limit(&providers, conversation.provider.as_deref(), &model).await;
+    Ok(Json(serde_json::json!({ "tokens": tokens, "limit": limit })))
+}
+
+async fn conversation_generation_status(Path(id): Path<String>, State(state): State<AppState>) -> Json<serde_json::Value> {
+    Json(state.generation_runs.generation_status(&id))
+}
+
+async fn conversation_stream_status(Path(id): Path<String>, State(state): State<AppState>) -> Json<serde_json::Value> {
+    Json(state.generation_runs.stream_status(&id))
+}
+
+/// Cancels the running turn like a transport disconnect; a no-op when idle.
+async fn conversation_stop_generation(Path(id): Path<String>, State(state): State<AppState>) -> Json<serde_json::Value> {
+    let outcome = state.generation_runs.stop(&id, std::time::Duration::from_secs(5)).await;
+    Json(serde_json::json!({
+        "ok": true,
+        "stopped": outcome.requested > 0,
+        "settled": outcome.settled,
+    }))
+}
+
 pub fn routes() -> Router<AppState> {
     Router::new()
         .route("/api/conversations", get(conversations_list))
@@ -456,4 +507,8 @@ pub fn routes() -> Router<AppState> {
         .route("/api/conversations/{id}/answer", post(conversation_answer_handler))
         .route("/api/conversations/{id}/permission", post(conversation_permission_handler))
         .route("/api/conversations/{id}/warm", post(conversation_warm_handler))
+        .route("/api/conversations/{id}/context-size", get(conversation_context_size))
+        .route("/api/conversations/{id}/generation-status", get(conversation_generation_status))
+        .route("/api/conversations/{id}/stream-status", get(conversation_stream_status))
+        .route("/api/conversations/{id}/stop-generation", post(conversation_stop_generation))
 }

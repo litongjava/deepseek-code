@@ -200,6 +200,8 @@ pub(super) async fn chat_handler(
         }
     };
     tracing::info!(module = "Chat", "[7/7] Engine guard released, building SSE stream...");
+    // Registered while this collector owns the receiver; stop-generation signals it.
+    let started = rx_opt.map(|rx| (rx, state.generation_runs.start(&conv_id)));
 
     let (sse_tx, sse_rx) = tokio::sync::mpsc::channel(64);
     let transport = sse_tx.clone();
@@ -207,8 +209,8 @@ pub(super) async fn chat_handler(
     crate::metrics::ACTIVE_SSE_CONNECTIONS.inc();
     let stream = async_stream::stream! {
         let db_clone = db_for_stream;
-        let mut rx = match rx_opt {
-            Some(rx) => rx,
+        let (mut rx, run) = match started {
+            Some(started) => started,
             None => {
                 tracing::error!(module = "Chat", "rx_opt is None - engine failed to start");
                 yield Ok::<Event, Infallible>(Event::default().data(serde_json::json!({"type": "error", "error": start_error}).to_string()));
@@ -234,6 +236,11 @@ pub(super) async fn chat_handler(
                 biased;
                 _ = transport.closed() => {
                     terminal_event = Some(serde_json::json!({"type":"message_stop","stop_reason":"cancelled","full_text":full_text,"error":"Response transport disconnected"}));
+                    break;
+                }
+                _ = run.stop_requested() => {
+                    // Same path as a disconnect: dropping rx below cancels this turn's executor.
+                    terminal_event = Some(serde_json::json!({"type":"message_stop","stop_reason":"cancelled","full_text":full_text}));
                     break;
                 }
                 resolved = permission_watches.next(&conv_id), if !permission_watches.is_empty() => {
@@ -271,6 +278,7 @@ pub(super) async fn chat_handler(
                         }
                         assistant_id = uuid::Uuid::new_v4().to_string();
                         full_text.clear(); collected_tool_calls.clear(); request_snapshots.clear();
+                        run.reset_progress();
                         observed_plan_boundary = Some(boundary_id.clone());
                     }
                     let content = db_clone.with_conn(|conn| crate::db::message_repo::get_message(conn, &boundary_id)).ok().and_then(Result::ok).flatten().map(|m|m.content).unwrap_or_default();
@@ -313,12 +321,14 @@ pub(super) async fn chat_handler(
                 }
                 crate::native_engine::tool_loop::EngineEvent::Text(text) => {
                     full_text.push_str(&text);
+                    run.push_text(&text);
                     Some(serde_json::json!({
                         "type": "content_block_delta",
                         "delta": {"type": "text_delta", "text": text},
                     }))
                 }
                 crate::native_engine::tool_loop::EngineEvent::Thinking(thinking) => {
+                    run.push_thinking(&thinking);
                     Some(serde_json::json!({
                         "type": "thinking",
                         "thinking": thinking,
@@ -459,6 +469,7 @@ pub(super) async fn chat_handler(
                 let is_stop = data.get("type").and_then(|t| t.as_str()) == Some("message_stop")
                     || data.get("type").and_then(|t| t.as_str()) == Some("error");
                 if is_stop { terminal_event = Some(data); break; }
+                run.record_event();
                 yield Ok::<Event, Infallible>(Event::default().data(data.to_string()));
             }
         }
@@ -550,6 +561,8 @@ pub(super) async fn chat_handler(
                 yield Ok::<Event, Infallible>(Event::default().data(serde_json::json!({"type":"request_snapshot", "snapshot":snapshot, "persisted":persisted}).to_string()));
             }
         }
+        // Report idle only once the trajectory above is persisted.
+        drop(run);
         if let Some(event) = terminal_event {
             yield Ok::<Event, Infallible>(Event::default().data(event.to_string()));
         }

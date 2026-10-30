@@ -1447,9 +1447,14 @@ pub async fn app_studio_generate_project(
 
 #[tauri::command]
 pub async fn get_context_size(conversation_id: String) -> Result<serde_json::Value, String> {
+    let (port, api_key) = crate::bridge::local_endpoint().ok_or_else(|| "Bridge error: server is not running".to_string())?;
     let client = reqwest::Client::new();
-    let url = format!("http://127.0.0.1:30085/api/conversations/{}/context-size", conversation_id);
-    let resp = client.get(&url).send().await.map_err(|e| format!("Bridge error: {}", e))?;
+    let url = format!("http://127.0.0.1:{}/api/conversations/{}/context-size", port, urlencoding::encode(&conversation_id));
+    let resp = client.get(&url).header("x-api-key", api_key).send().await.map_err(|e| format!("Bridge error: {}", e))?;
+    let status = resp.status();
     let data: serde_json::Value = resp.json().await.map_err(|e| format!("Parse error: {}", e))?;
+    if !status.is_success() {
+        return Err(data["error"].as_str().map(String::from).unwrap_or_else(|| format!("Bridge error: {}", status)));
+    }
     Ok(data)
 }

@@ -54,6 +54,14 @@ use crate::cache::FileCache;
 
 const SSE_CONTENT_TYPE: &str = "text/event-stream; charset=utf-8";
 
+/// Port and key of the Bridge started in this process, for in-process callers
+/// such as Tauri commands that must authenticate like the frontend does.
+static LOCAL_ENDPOINT: std::sync::RwLock<Option<(u16, String)>> = std::sync::RwLock::new(None);
+
+pub fn local_endpoint() -> Option<(u16, String)> {
+    LOCAL_ENDPOINT.read().unwrap_or_else(|e| e.into_inner()).clone()
+}
+
 pub fn set_sse_content_type(response: &mut axum::response::Response) {
     if let Ok(header_value) = SSE_CONTENT_TYPE.parse::<axum::http::HeaderValue>() {
         response.headers_mut().insert(CONTENT_TYPE, header_value);
@@ -367,6 +375,7 @@ impl BridgeServer {
                 std::env::current_dir().unwrap_or_default(),
             )),
             permission_manager: self.permission_manager.clone(),
+            generation_runs: Arc::default(),
         };
         tracing::info!(module = "Bridge", "Database manager ready");
 
@@ -473,6 +482,7 @@ impl BridgeServer {
             tracing::warn!(module = "Bridge", "Original port {} unavailable, using port {} instead", port, actual_port);
         }
         tracing::info!(module = "Bridge", "Server running on http://127.0.0.1:{}", actual_port);
+        *LOCAL_ENDPOINT.write().unwrap_or_else(|e| e.into_inner()) = Some((actual_port, self.api_key.clone()));
         axum::serve(listener, app).await?;
         Ok(())
     }
