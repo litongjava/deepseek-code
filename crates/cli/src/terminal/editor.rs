@@ -820,9 +820,9 @@ impl PromptEditor {
     ) -> io::Result<Option<super::PromptEvent>> {
         terminal::enable_raw_mode()?;
         let _raw = RawMode;
-        let mut input_reader = crate::terminal::paste_input::Reader::new()?;
         // Capture both tool disclosure clicks and drag selection.
         execute!(io::stderr(), EnableBracketedPaste, EnableMouseCapture)?;
+        let mut input_reader = crate::terminal::paste_input::Reader::new()?;
         let mut above = crate::terminal::scrollback::Scrollback::take();
         let mut buffer = self.resume_buffer();
         // As in the reference CLI, a stashed draft returns after the prompt
@@ -1021,7 +1021,7 @@ impl PromptEditor {
                 // As in the reference CLI: the mode label, or "? for shortcuts" in ask mode.
                 let mut parts = vec![if text.starts_with('!') {
                     "! shell mode: runs in your shell, output joins the conversation".to_owned()
-                } else if text.starts_with("# ") {
+                } else if text.starts_with("# ") && !text.contains('\n') {
                     "# memory: saves this line to the project's AGENTS.md or CLAUDE.md".to_owned()
                 } else {
                     crate::terminal::style::mode_indicator(&self.permission_mode)

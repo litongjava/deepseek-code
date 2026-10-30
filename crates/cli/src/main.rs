@@ -828,7 +828,7 @@ async fn run(cli: &Cli) -> Result<()> {
                 }
                 continue;
             }
-            if let Some(note) = line.trim_start().strip_prefix("# ") {
+            if let Some(note) = line.trim_start().strip_prefix("# ").filter(|_| !line.contains(['\n', '\r'])) {
                 match memory_shortcut::save(&session.workspace, note) {
                     Ok(path) => eprintln!("Saved to {}: - {}", path.display(), note.trim()),
                     Err(error) => eprintln!("Error: {error:#}"),

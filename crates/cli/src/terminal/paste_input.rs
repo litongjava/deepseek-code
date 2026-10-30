@@ -301,6 +301,14 @@ mod windows {
             }
         }
         pub fn next(&mut self, timeout: Duration) -> io::Result<Option<Event>> {
+            // Crossterm mouse capture replaces the Windows input flags. Restore VT
+            // before reading so ConPTY preserves bracketed-paste delimiters.
+            unsafe {
+                let mut mode = 0;
+                if GetConsoleMode(self.handle, &mut mode) == 0 || SetConsoleMode(self.handle, mode | 0x200) == 0 {
+                    return Err(io::Error::last_os_error());
+                }
+            }
             let deadline = Instant::now() + timeout;
             let mut shared = STATE.lock().unwrap_or_else(|e| e.into_inner());
             let state = shared.get_or_insert_with(State::default);
