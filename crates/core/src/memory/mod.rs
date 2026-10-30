@@ -102,7 +102,9 @@ pub struct MemExClient {
 
 impl MemExClient {
     pub fn new(base_url: Option<String>) -> Self {
-        let directory = dirs::data_local_dir().unwrap_or_else(std::env::temp_dir).join("claude-desktop");
+        // The shared data directory, where the CLI and Desktop keep memory.
+        let directory = crate::runtime::resolve_default_data_dir()
+            .unwrap_or_else(|_| std::env::temp_dir().join("deepseek-code"));
         Self::with_path(directory.join("memory.sqlite3"), base_url)
     }
 

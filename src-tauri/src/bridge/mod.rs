@@ -808,9 +808,9 @@ fn get_upload_dir() -> PathBuf {
         return dir.clone();
     }
     drop(guard);
-    let default_dir = dirs::data_local_dir()
-        .unwrap_or_else(|| std::env::current_dir().unwrap_or_default())
-        .join("claude-desktop")
+    let default_dir = crate::commands::app_data_dir()
+        .map(PathBuf::from)
+        .unwrap_or_else(|_| std::env::temp_dir().join("deepseek-code"))
         .join("uploads");
     let mut guard = UPLOAD_DIR.lock().unwrap_or_else(|e| e.into_inner());
     *guard = Some(default_dir.clone());
@@ -1795,7 +1795,8 @@ async fn watcher_unwatch(State(state): State<AppState>, Json(req): Json<WatcherW
 }
 
 async fn update_check() -> Json<serde_json::Value> {
-    let updater = match AutoUpdater::configured(std::env::temp_dir().join("deepseek-code-updates")) {
+    let updater = match AutoUpdater::configured(std::env::temp_dir().join("deepseek-code-updates"))
+    {
         Ok(updater) => updater,
         Err(e) => return Json(serde_json::json!({ "error": format!("{}", e) })),
     };
@@ -1812,17 +1813,28 @@ pub struct UpdateDownloadRequest {
 }
 
 async fn update_download(Json(req): Json<UpdateDownloadRequest>) -> Json<serde_json::Value> {
-    let updater = match AutoUpdater::configured(std::env::temp_dir().join("deepseek-code-updates")) {
+    let updater = match AutoUpdater::configured(std::env::temp_dir().join("deepseek-code-updates"))
+    {
         Ok(updater) => updater,
         Err(e) => return Json(serde_json::json!({ "error": format!("{}", e) })),
     };
     // Only the installer the update manifest names, and only with its signature.
     let signature = match updater.check_for_updates().await {
-        Ok(Some(info)) if info.download_url.as_deref() == Some(req.url.as_str()) => match info.signature {
-            Some(signature) => signature,
-            None => return Json(serde_json::json!({ "error": "The update manifest has no signature for this download" })),
-        },
-        Ok(_) => return Json(serde_json::json!({ "error": "The URL is not the download the update manifest offers" })),
+        Ok(Some(info)) if info.download_url.as_deref() == Some(req.url.as_str()) => {
+            match info.signature {
+                Some(signature) => signature,
+                None => {
+                    return Json(
+                        serde_json::json!({ "error": "The update manifest has no signature for this download" }),
+                    )
+                }
+            }
+        }
+        Ok(_) => {
+            return Json(
+                serde_json::json!({ "error": "The URL is not the download the update manifest offers" }),
+            )
+        }
         Err(e) => return Json(serde_json::json!({ "error": format!("{}", e) })),
     };
     match updater.download_update(&req.url, Some(&signature)).await {
