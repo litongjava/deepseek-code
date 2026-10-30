@@ -4,6 +4,8 @@ import { useStreamingStore } from '../stores/useStreamingStore';
 import { useWorkspaceModeStore } from '../stores/useWorkspaceModeStore';
 import { useGeneralSettingsStore } from '../stores/useGeneralSettingsStore';
 import { useI18n } from '../hooks/useI18n';
+import { isRightSidebarRoute } from '../stores/useRightSidebarStore';
+import { OPEN_PANEL_EVENT } from '../features/rightSidebar/useRightSidebarController';
 import { IconCode } from './Icons';
 import { ChevronUp, Settings, HelpCircle, LogOut, Shield, Pin, PinOff, X, Home } from 'lucide-react';
 import { getConversations, getUser, getUserUsage, logout, getUserProfile } from '../api';
@@ -11,7 +13,6 @@ import { getConversations, getUser, getUserUsage, logout, getUserProfile } from 
 import SearchModal from './SearchModal';
 import SidebarNavigation from './SidebarNavigation';
 import SidebarProjects from '../features/project/SidebarProjects';
-import EmbeddedBrowser from './EmbeddedBrowser';
 import SwarmCollaboration from './SwarmCollaboration';
 import H5AccessPanel from './H5AccessPanel';
 import TerminalPanel from './TerminalPanel';
@@ -78,9 +79,7 @@ const Sidebar = ({ isCollapsed, toggleSidebar, refreshTrigger, onNewChatClick, o
     });
   }, []);
 
-  // New states for tabs and browser
-  const [showBrowser, setShowBrowser] = useState(false);
-  const [browserUrl, setBrowserUrl] = useState('https://example.com');
+  // New states for tool panels; the browser lives in the right sidebar's Browser tab.
   const [showH5Panel, setShowH5Panel] = useState(false);
   const [showComputerUse, setShowComputerUse] = useState(false);
   const [showIMPanel, setShowIMPanel] = useState(false);
@@ -92,7 +91,6 @@ const Sidebar = ({ isCollapsed, toggleSidebar, refreshTrigger, onNewChatClick, o
   const [showAppStudio, setShowAppStudio] = useState(false);
 
   const openPanel = (panel: 'browser' | 'h5' | 'computerUse' | 'im' | 'terminal' | 'agent' | 'preview' | 'knowledge' | 'github' | 'appstudio') => {
-    setShowBrowser(panel === 'browser' ? !showBrowser : false);
     setShowH5Panel(panel === 'h5' ? !showH5Panel : false);
     setShowComputerUse(panel === 'computerUse' ? !showComputerUse : false);
     setShowIMPanel(panel === 'im' ? !showIMPanel : false);
@@ -102,6 +100,11 @@ const Sidebar = ({ isCollapsed, toggleSidebar, refreshTrigger, onNewChatClick, o
     setShowKnowledgePanel(panel === 'knowledge' ? !showKnowledgePanel : false);
     setShowGitHubHub(panel === 'github' ? !showGitHubHub : false);
     setShowAppStudio(panel === 'appstudio' ? !showAppStudio : false);
+    if (panel === 'browser') {
+      // The right sidebar only exists on chat views; go Home from full-page routes.
+      if (!isRightSidebarRoute(location.pathname)) navigate('/');
+      window.dispatchEvent(new CustomEvent(OPEN_PANEL_EVENT, { detail: { panel: 'browser' } }));
+    }
   };
 
   useEffect(() => {
@@ -128,23 +131,18 @@ const Sidebar = ({ isCollapsed, toggleSidebar, refreshTrigger, onNewChatClick, o
   useEffect(() => {
     const handler = (e: Event) => {
       const detail = (e as CustomEvent).detail;
+      // Browser requests are handled by the right sidebar (useRightSidebarController).
       if (detail?.panel === 'preview') { setShowLivePreview(true); }
-      if (detail?.panel === 'browser' && /^https?:\/\//i.test(detail.url || '')) {
-        setBrowserUrl(detail.url);
-        setShowBrowser(true);
-        if (isCollapsed) toggleSidebar();
-      }
     };
-    window.addEventListener('request-open-panel', handler as EventListener);
-    return () => window.removeEventListener('request-open-panel', handler as EventListener);
-  }, [isCollapsed, toggleSidebar]);
+    window.addEventListener(OPEN_PANEL_EVENT, handler as EventListener);
+    return () => window.removeEventListener(OPEN_PANEL_EVENT, handler as EventListener);
+  }, []);
 
   // Escape key closes any open panel
   useEffect(() => {
     const handleKeyDown = (e: KeyboardEvent) => {
       if (e.key === 'Escape') {
         if (showComputerUse) setShowComputerUse(false);
-        if (showBrowser) setShowBrowser(false);
         if (showH5Panel) setShowH5Panel(false);
         if (showIMPanel) setShowIMPanel(false);
         if (showTerminalPanel) setShowTerminalPanel(false);
@@ -157,7 +155,7 @@ const Sidebar = ({ isCollapsed, toggleSidebar, refreshTrigger, onNewChatClick, o
     };
     window.addEventListener('keydown', handleKeyDown);
     return () => window.removeEventListener('keydown', handleKeyDown);
-  }, [showComputerUse, showBrowser, showH5Panel, showIMPanel, showTerminalPanel, showAgentView, showLivePreview, showKnowledgePanel, showGitHubHub, showAppStudio]);
+  }, [showComputerUse, showH5Panel, showIMPanel, showTerminalPanel, showAgentView, showLivePreview, showKnowledgePanel, showGitHubHub, showAppStudio]);
 
   const scrollRef = useRef<HTMLDivElement>(null);
   const userMenuRef = useRef<HTMLDivElement>(null);
@@ -315,7 +313,7 @@ const Sidebar = ({ isCollapsed, toggleSidebar, refreshTrigger, onNewChatClick, o
         `}
         style={{
           paddingTop: `${titleBarHeight || 44}px`,
-          width: isCollapsed ? '46px' : (showBrowser ? `${tunerConfig?.sidebarWidth || 280}px` : `${tunerConfig?.sidebarWidth || 280}px`)
+          width: isCollapsed ? '46px' : `${tunerConfig?.sidebarWidth || 280}px`
         }}
       >
         {!isCollapsed && (
@@ -506,27 +504,6 @@ const Sidebar = ({ isCollapsed, toggleSidebar, refreshTrigger, onNewChatClick, o
         onClose={() => setShowSearch(false)}
         chats={chats}
       />
-
-      {/* Embedded Browser Panel - Slides in from the right */}
-      {showBrowser && !isCollapsed && (
-        <div
-          className="fixed z-40 border-l border-claude-border bg-claude-sidebar flex flex-col shadow-2xl transition-all duration-300 ease-in-out"
-          style={{
-            top: `${titleBarHeight || 44}px`,
-            left: `${tunerConfig?.sidebarWidth || 280}px`,
-            width: 'min(700px, 60vw)',
-            height: `calc(100vh - ${titleBarHeight || 44}px)`,
-            borderRadius: '0 12px 12px 0'
-          }}
-        >
-          <EmbeddedBrowser
-            key={browserUrl}
-            initialUrl={browserUrl}
-            onClose={() => setShowBrowser(false)}
-            className="flex-1"
-          />
-        </div>
-      )}
 
       {/* H5 Access Panel */}
       {showH5Panel && !isCollapsed && (

@@ -4,6 +4,8 @@ import { MemoryRouter } from 'react-router-dom';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import type { DocumentInfo } from '../../components/DocumentCard';
 import { useUIStore } from '../../stores/useUIStore';
+import { useGeneralSettingsStore } from '../../stores/useGeneralSettingsStore';
+import { openChatLink } from '../../utils/chatLinks';
 import {
   RIGHT_SIDEBAR_DEFAULT_WIDTH, clampRightSidebarWidth, isRightSidebarRoute, useRightSidebarStore,
 } from '../../stores/useRightSidebarStore';
@@ -64,7 +66,7 @@ const sidebar = () => screen.queryByRole('complementary', { name: 'Right sidebar
 beforeEach(() => {
   localStorage.clear();
   useUIStore.setState({ language: 'en' });
-  useRightSidebarStore.setState({ open: false, tab: 'files', width: RIGHT_SIDEBAR_DEFAULT_WIDTH });
+  useRightSidebarStore.setState({ open: false, tab: 'files', width: RIGHT_SIDEBAR_DEFAULT_WIDTH, browserUrl: '', browserRequest: 0 });
 });
 
 describe('right sidebar', () => {
@@ -164,6 +166,38 @@ describe('right sidebar', () => {
     expect(screen.queryByText('Preview Report')).toBeNull();
     expect(sidebar()).toBeInTheDocument();
     expect(useRightSidebarStore.getState().open).toBe(true);
+  });
+
+  it('opens chat links in the Browser tab, dismissing a document preview', async () => {
+    useGeneralSettingsStore.setState({ chatLinks: 'sidebar' });
+    render(<Harness />);
+    fireEvent.click(screen.getByRole('button', { name: 'Open preview' }));
+    expect(sidebar()).toBeNull();
+
+    await act(async () => { await openChatLink('https://example.com/docs'); });
+    expect(screen.queryByText('Preview Report')).toBeNull();
+    expect(sidebar()).toBeInTheDocument();
+    expect(screen.getByRole('tab', { name: 'Browser' })).toHaveAttribute('aria-selected', 'true');
+    expect(screen.getByTitle('Web page: https://example.com/docs')).toHaveAttribute('src', 'https://example.com/docs');
+    expect(persisted()).toMatchObject({ open: true, tab: 'browser', browserUrl: 'https://example.com/docs' });
+
+    // A later link navigates the open browser; its history keeps the previous page.
+    await act(async () => { await openChatLink('http://localhost:5173/'); });
+    expect(screen.getByTitle('Web page: http://localhost:5173/')).toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: 'Back' }));
+    expect(screen.getByTitle('Web page: https://example.com/docs')).toBeInTheDocument();
+
+    // A request for the app's own origin or a non-web scheme is ignored.
+    act(() => { window.dispatchEvent(new CustomEvent('request-open-panel', { detail: { panel: 'browser', url: 'javascript:alert(1)' } })); });
+    expect(useRightSidebarStore.getState().browserUrl).toBe('https://example.com/docs');
+  });
+
+  it('opens the Browser tab without a URL from the Tools menu event', () => {
+    useRightSidebarStore.setState({ browserUrl: '' });
+    render(<Harness />);
+    act(() => { window.dispatchEvent(new CustomEvent('request-open-panel', { detail: { panel: 'browser' } })); });
+    expect(screen.getByRole('tab', { name: 'Browser' })).toHaveAttribute('aria-selected', 'true');
+    expect(screen.getByRole('textbox', { name: 'Address' })).toBeInTheDocument();
   });
 
   it('exposes English accessible names for every control', () => {

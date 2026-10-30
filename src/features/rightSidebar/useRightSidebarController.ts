@@ -1,5 +1,9 @@
 import { useCallback, useEffect, useRef } from 'react';
 import { useRightSidebarStore } from '../../stores/useRightSidebarStore';
+import { normalizeBrowserUrl } from './browser/browserUrl';
+
+/** Window event that asks for a panel; chat links send `{ panel: 'browser', url }`. */
+export const OPEN_PANEL_EVENT = 'request-open-panel';
 
 /** Ctrl+Alt+B (Cmd+Option+B on macOS). Matching `key` leaves AltGr layouts that type a character alone. */
 export function isRightSidebarShortcut(event: KeyboardEvent): boolean {
@@ -41,6 +45,28 @@ export function useRightSidebarController({ allowed, otherPanelOpen, closeOtherP
     window.addEventListener('keydown', handler);
     return () => window.removeEventListener('keydown', handler);
   }, [allowed]);
+
+  // Chat links ("Open chat links in: In-App Sidebar") and the left Tools > Browser
+  // entry open the Browser tab. The request is honoured on any route; the sidebar
+  // shows once a chat view is active.
+  const otherPanelRef = useRef({ otherPanelOpen, closeOtherPanels });
+  otherPanelRef.current = { otherPanelOpen, closeOtherPanels };
+  useEffect(() => {
+    const handler = (event: Event) => {
+      const detail = (event as CustomEvent<{ panel?: string; url?: unknown } | undefined>).detail;
+      if (detail?.panel !== 'browser') return;
+      let url: string | undefined;
+      if (typeof detail.url === 'string') {
+        const result = normalizeBrowserUrl(detail.url);
+        if (!result.ok) return;
+        url = result.url;
+      }
+      if (otherPanelRef.current.otherPanelOpen) otherPanelRef.current.closeOtherPanels();
+      useRightSidebarStore.getState().openBrowser(url);
+    };
+    window.addEventListener(OPEN_PANEL_EVENT, handler);
+    return () => window.removeEventListener(OPEN_PANEL_EVENT, handler);
+  }, []);
 
   const close = useCallback(() => setOpen(false), [setOpen]);
   return { visible, toggle, close };
