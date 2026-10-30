@@ -4,7 +4,7 @@
 use crossterm::{
     cursor::{position, MoveDown, MoveToColumn, MoveUp},
     event::{
-        DisableBracketedPaste, DisableMouseCapture, EnableBracketedPaste,
+        DisableBracketedPaste, DisableMouseCapture, EnableBracketedPaste, EnableMouseCapture,
         Event, KeyCode, KeyEventKind, KeyModifiers, MouseButton, MouseEventKind,
     },
     execute, queue,
@@ -38,7 +38,7 @@ pub struct PromptEditor {
     shell_counter: Option<Box<dyn Fn() -> usize + Send>>,
     /// Rows for running background agents at a width, shown under the footer.
     agent_rows: Option<Box<dyn Fn(usize) -> Vec<String> + Send>>,
-    /// The effort in use, shown right-aligned above the input.
+    /// The model and reasoning effort, at the right of the footer.
     effort: Option<String>,
     /// The todo list that ctrl+t shows above the input.
     todos: Option<Box<dyn Fn() -> Vec<(String, String)> + Send>>,
@@ -187,7 +187,7 @@ fn mention_matches(files: &[String], query: &str) -> Vec<(String, String)> {
     found.into_iter().take(50).map(|(_, _, file)| (format!("@{file}"), String::new())).collect()
 }
 
-fn matches(commands: &[(String, String)], text: &str) -> Vec<usize> {
+pub(crate) fn matches(commands: &[(String, String)], text: &str) -> Vec<usize> {
     if !text.starts_with('/') || text.chars().any(char::is_whitespace) {
         return Vec::new();
     }
@@ -704,7 +704,9 @@ impl PromptEditor {
         terminal::enable_raw_mode()?;
         let _raw = RawMode;
         let mut input_reader = crate::terminal::paste_input::Reader::new()?;
-        execute!(io::stderr(), EnableBracketedPaste)?;
+        // Clicks expand and collapse the last turn's tool results above.
+        execute!(io::stderr(), EnableBracketedPaste, EnableMouseCapture)?;
+        let mut above = crate::terminal::scrollback::Scrollback::take();
         let mut buffer = self.resume_buffer();
         // As in the reference CLI, a stashed draft returns after the prompt
         // that was sent instead.
@@ -872,12 +874,6 @@ impl PromptEditor {
                     lines.push((row, if done { TextStyle::Muted } else if current { TextStyle::Selected } else { TextStyle::Plain }));
                 }
             }
-            if let Some(effort) = self.effort.as_ref().filter(|_| items.is_empty() && lines.len() == panel_height) {
-                // As in the reference CLI: "● high · /effort" above the input.
-                let label = format!("\u{25cf} {effort} \u{b7} /effort");
-                let pad = width.saturating_sub(label.chars().count());
-                lines.push((format!("{}{label}", " ".repeat(pad)), TextStyle::Muted));
-            }
             let menu_height = lines.len() - panel_height;
             lines.push(("\u{2500}".repeat(width), TextStyle::Border));
             match &ghost {
@@ -947,10 +943,14 @@ impl PromptEditor {
                 }
                 // As in the reference CLI: `-- INSERT -- ` leads the footer in
                 // insert mode; normal mode has no label.
-                if self.vim && vim_normal.is_none() {
+                let left = if self.vim && vim_normal.is_none() {
                     format!("-- INSERT -- {}", parts.join(" \u{b7} "))
                 } else {
                     parts.join(" \u{b7} ")
+                };
+                match self.effort.as_ref().filter(|label| left.width() + 2 + label.width() <= width) {
+                    Some(label) => format!("{left}{}{label}", " ".repeat(width - left.width() - label.width())),
+                    None => left,
                 }
             };
             let footer_style = match crate::terminal::style::mode_indicator(&self.permission_mode) {
@@ -997,7 +997,22 @@ impl PromptEditor {
                 Event::Mouse(mouse) => {
                     let (_, cursor_y) = position()?;
                     let origin = cursor_y.saturating_sub(screen.cursor_row as u16);
-                    if let Some(row) = mouse.row.checked_sub(origin) {
+                    let toggled = (mouse.kind == MouseEventKind::Down(MouseButton::Left))
+                        .then(|| above.toggle(origin, mouse.row))
+                        .flatten();
+                    if let Some((start, lines)) = toggled {
+                        // Redraw from the clicked tool result down, then the prompt.
+                        let mut out = format!("\x1b[?25l\x1b[{};1H\x1b[J", start + 1);
+                        for (line, block) in lines {
+                            out.push_str(&line);
+                            out.push_str("\r\n");
+                            above.push(line, block);
+                        }
+                        let mut stderr = io::stderr().lock();
+                        stderr.write_all(out.as_bytes())?;
+                        stderr.flush()?;
+                        screen = Screen::default();
+                    } else if let Some(row) = mouse.row.checked_sub(origin) {
                         if mouse.kind == MouseEventKind::Down(MouseButton::Left)
                             && panel.toggle.is_some_and(|hit| {
                                 hit.contains(row as usize, mouse.column as usize)

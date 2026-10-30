@@ -25,6 +25,13 @@ fn preferences(paths: &RuntimePaths) -> Result<Value> {
     Ok(serde_json::from_str(&std::fs::read_to_string(path)?)?)
 }
 
+/// The model new sessions start with, until `--model` or `/model` says otherwise.
+pub fn save_default_model(paths: &RuntimePaths, provider: &str, model: &str) -> Result<()> {
+    let mut prefs = preferences(paths)?;
+    prefs["model"] = json!(format!("{provider}::{model}"));
+    save_preferences(paths, &prefs)
+}
+
 fn save_preferences(paths: &RuntimePaths, value: &Value) -> Result<()> {
     std::fs::create_dir_all(&paths.data_dir)?;
     std::fs::write(

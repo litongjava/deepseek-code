@@ -230,7 +230,8 @@ impl TerminalInput {
         let _ = self.requests.send(Message::Shells(count));
     }
 
-    /// The reasoning effort shown above the input, as "● high · /effort".
+    /// The model and reasoning effort at the right of the footer, as
+    /// "deepseek-flash · ● high".
     pub fn set_effort(&self, effort: Option<String>) {
         let _ = self.requests.send(Message::Effort(effort));
     }

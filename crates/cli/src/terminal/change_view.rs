@@ -208,7 +208,7 @@ fn codes(style: Style, theme: u8) -> &'static str {
         Style::Body => "38;2;248;248;242",
         Style::Muted => "38;2;153;153;153",
         Style::Success => "38;2;78;186;101",
-        Style::Failure => "38;2;255;107;107",
+        Style::Failure => "38;2;255;107;128",
         Style::Done => "38;2;153;153;153;9",
         Style::Current => "38;2;248;248;242;1",
         Style::Removed => "38;2;248;248;242;48;2;61;1;0",
@@ -368,32 +368,22 @@ pub fn change_in_workspace(
     let change = &output["file_change"];
     let path = change["path"].as_str()?;
     let display_path = super::display_path::label(path, workspace);
+    // As in the reference CLI: `● Updated src/a.rs (+7 -0)`, the diff below.
     let mut result = vec![Line(vec![
         span("\u{25cf} ", Style::Success),
-        span(format!("Update({display_path})"), Style::Body),
+        span(
+            format!(
+                "Updated {display_path} (+{} -{})",
+                change["added"].as_u64().unwrap_or(0),
+                change["removed"].as_u64().unwrap_or(0)
+            ),
+            Style::Body,
+        ),
     ])];
     if let Some(notice) = change["notice"].as_str() {
         result.push(Line(vec![span(format!("  {notice}"), Style::Muted)]));
         return Some(result);
     }
-    result.push(Line(vec![span(
-        format!(
-            "  Added {} {}, removed {} {}",
-            change["added"].as_u64().unwrap_or(0),
-            if change["added"].as_u64() == Some(1) {
-                "line"
-            } else {
-                "lines"
-            },
-            change["removed"].as_u64().unwrap_or(0),
-            if change["removed"].as_u64() == Some(1) {
-                "line"
-            } else {
-                "lines"
-            }
-        ),
-        Style::Muted,
-    )]));
     if let Some(notes) = change["format_notes"].as_array() {
         for note in notes.iter().filter_map(Value::as_str) {
             result.push(muted(&format!("  {note}")));
@@ -519,16 +509,16 @@ mod tests {
     fn verified_replacement_uses_line_and_changed_character_backgrounds() {
         let output = serde_json::json!({"success":true,"file_change":{"version":1,"verified":true,"path":"a.ts","added":1,"removed":1,"rows":[{"kind":"removed","old_line":1,"text":"return 41;"},{"kind":"added","new_line":1,"text":"return 42;"}]}});
         let lines = change(&output.to_string(), false).unwrap();
-        assert_eq!(plain(&lines),"\u{25cf} Update(a.ts)\n  Added 1 line, removed 1 line\n      1 -return 41;\n      1 +return 42;");
-        let removed = render(&lines[2], 80, true);
-        let added = render(&lines[3], 80, true);
+        assert_eq!(plain(&lines),"\u{25cf} Updated a.ts (+1 -1)\n      1 -return 41;\n      1 +return 42;");
+        let removed = render(&lines[1], 80, true);
+        let added = render(&lines[2], 80, true);
         assert!(removed.contains("48;2;61;1;0"));
         assert!(removed.contains("48;2;92;2;0"));
         assert!(added.contains("48;2;2;40;0"));
         assert!(added.contains("48;2;4;71;0"));
         assert!(change(&output.to_string(), true).is_none());
         for width in [0, 1, 8, 12] {
-            let plain = render(&lines[2], width, false);
+            let plain = render(&lines[1], width, false);
             assert!(unicode_width::UnicodeWidthStr::width(plain.as_str()) <= width);
             assert!(!plain.contains('\x1b'));
         }
@@ -541,7 +531,7 @@ mod tests {
         let full = change(&output, false).unwrap();
         let preview = change_in_workspace(&output, false, Some(&workspace)).unwrap();
         assert!(plain(&full).contains(&path.to_string_lossy().to_string()));
-        assert!(plain(&preview).starts_with("● Update(中文 file.ts)\n"));
+        assert!(plain(&preview).starts_with("● Updated 中文 file.ts (+1 -0)\n"));
         for (original, shown) in full.iter().skip(1).zip(preview.iter().skip(1)) {
             assert_eq!(render(original, 100, true), render(shown, 100, true));
         }
@@ -586,7 +576,7 @@ mod tests {
         }
         let value = serde_json::json!({"success":true,"file_change":{"version":1,"verified":true,"path":"x","added":2,"removed":0,"rows":[]}});
         assert!(plain(&change(&value.to_string(), false).unwrap())
-            .contains("Added 2 lines, removed 0 lines"));
+            .starts_with("\u{25cf} Updated x (+2 -0)"));
     }
     #[test]
     fn failed_output_has_no_success_diff() {

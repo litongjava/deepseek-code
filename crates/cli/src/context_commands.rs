@@ -6,7 +6,7 @@ pub async fn show(session: &Session) -> Result<()> {
     let request = claude_core::services::context_usage::last_request(&session.store.db, &session.id)?;
     if crate::terminal::picker::available() {
         let window = session.context_window().await.map(u64::from);
-        let autocompact = crate::session_commands::autocompact(session)?;
+        let autocompact = match window { Some(window) => crate::session_commands::autocompact(session, window)?, None => None };
         let color = std::env::var_os("NO_COLOR").is_none();
         if let Some(grid) = request.as_ref().and_then(|request| grid(request, window, autocompact, color, "Measured from the last request; the next one includes this turn's messages.")) {
             eprintln!("{grid}");

@@ -345,6 +345,8 @@ async fn configure_preset(paths: &RuntimePaths, input: &mut TerminalInput, prese
                     preset.name.trim_end_matches(" (recommended)"),
                     if api_key.is_some() { " (key stored in config.json, readable only by you)" } else { "" }
                 );
+                let model = choose_default_model(input, preset).await?;
+                crate::config::save_default_model(paths, preset.id, &model)?;
                 return Ok(Some(select(paths, preset.id, &model)?));
             }
             Err(error) => {
@@ -360,6 +362,26 @@ async fn configure_preset(paths: &RuntimePaths, input: &mut TerminalInput, prese
             }
         }
     }
+}
+
+/// After the key works: which of the provider's models runs by default.
+async fn choose_default_model(input: &mut TerminalInput, preset: &Preset) -> Result<String> {
+    if preset.models.len() < 2 {
+        return Ok(preset.models[0].to_owned());
+    }
+    if crate::terminal::picker::available() {
+        use crate::terminal::picker::{Entry, Picker};
+        let entries: Vec<Entry> = preset.models.iter().map(|model| Entry { title: (*model).into(), detail: String::new() }).collect();
+        let picker = Picker { heading: "Choose the default model", subtitle: Some("Change it later with /model"), entries: &entries, search: false, hint: "Enter to confirm \u{b7} Esc for the first", selected: 0 };
+        return Ok(preset.models[picker.run()?.unwrap_or(0)].to_owned());
+    }
+    eprintln!("\nChoose the default model:");
+    for (index, model) in preset.models.iter().enumerate() {
+        eprintln!("  {}. {model}", index + 1);
+    }
+    let choice = ask(input, "Number [1]").await?;
+    let index = choice.parse::<usize>().ok().filter(|n| (1..=preset.models.len()).contains(n)).unwrap_or(1);
+    Ok(preset.models[index - 1].to_owned())
 }
 
 /// First-run setup: pick a built-in provider (DeepSeek by default), a saved

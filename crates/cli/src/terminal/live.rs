@@ -4,7 +4,7 @@ use super::tool_view::Gathering;
 use crossterm::{
     event::{
         DisableBracketedPaste, DisableMouseCapture, EnableBracketedPaste,
-        Event, KeyCode, KeyEventKind, KeyModifiers, MouseButton, MouseEventKind,
+        EnableMouseCapture, Event, KeyCode, KeyEventKind, KeyModifiers, MouseButton, MouseEventKind,
     },
     execute, terminal,
 };
@@ -40,6 +40,13 @@ enum Update {
     Text(String),
     Notice(String),
     Styled(Vec<change_view::Line>),
+    /// A tool result with hidden lines: the short form and the full one a
+    /// click switches between.
+    Expandable(Vec<change_view::Line>, Vec<change_view::Line>),
+    /// The session's working directory, shown in the footer.
+    Workspace(String),
+    /// The model and reasoning effort, shown in the footer.
+    ModelLabel(String),
     Activity(String),
     HookActivity(Option<String>),
     Usage(Value),
@@ -110,7 +117,8 @@ impl LiveTurn {
         let mode = mode.to_owned();
         let worker = thread::spawn(move || {
             let result = terminal::enable_raw_mode()
-                .and_then(|_| execute!(io::stderr(), EnableBracketedPaste));
+                // Clicks expand and collapse tool results in place.
+                .and_then(|_| execute!(io::stderr(), EnableBracketedPaste, EnableMouseCapture));
             if result.is_err() {
                 let _ = terminal::disable_raw_mode();
                 let _ = ready.send(false);
@@ -126,6 +134,8 @@ impl LiveTurn {
             let mut screen = Frame::default();
             let _ = run(&mut state, &mut screen, receiver, actions);
             let _ = screen.clear();
+            // The prompt that follows starts right below these lines.
+            std::mem::take(&mut screen.scrollback).save();
         });
         if initialized.recv().ok() != Some(true) {
             let _ = worker.join();
@@ -338,6 +348,13 @@ impl Choice {
 struct State {
     goal_proposal: Option<(String, String)>,
     mode: String,
+    /// The model and effort, then the session's working directory, at the
+    /// right of the footer.
+    model_label: String,
+    workspace: String,
+    /// The highlighted `/` command, and whether Esc closed the menu.
+    menu_selected: usize,
+    menu_hidden: bool,
     activity: String,
     hook_activity: Option<String>,
     draft: Draft,
@@ -384,6 +401,9 @@ struct State {
     verb: &'static str,
     frame: usize,
 }
+
+/// Commands `submit` accepts while the model works.
+const LIVE_COMMANDS: &[&str] = &["/btw", "/background", "/goal"];
 
 /// Spinner glyphs, played forward and back.
 const SPINNER: &[&str] = if cfg!(target_os = "macos") {
@@ -434,6 +454,10 @@ impl State {
         Self {
             goal_proposal: None,
             mode,
+            model_label: String::new(),
+            workspace: String::new(),
+            menu_selected: 0,
+            menu_hidden: false,
             activity: "Waiting for response".into(),
             hook_activity: None,
             draft: Draft::default(),
@@ -475,6 +499,39 @@ impl State {
                 % VERBS.len()],
             frame: 0,
         }
+    }
+    /// The `/` menu while the model works: only the commands that run
+    /// during a turn, as (name, description).
+    fn menu(&self) -> Vec<(String, String)> {
+        if self.menu_hidden || self.answer.is_some() || self.choice.is_some() {
+            return Vec::new();
+        }
+        let commands: Vec<(String, String)> = crate::command_catalog::COMMANDS
+            .iter()
+            .filter(|(name, _)| LIVE_COMMANDS.contains(name))
+            .map(|(name, description)| (name.to_string(), description.to_string()))
+            .collect();
+        let text: String = self.draft.characters.iter().collect();
+        super::input::editor::matches(&commands, &text).into_iter().map(|index| commands[index].clone()).collect()
+    }
+    /// Menu keys: arrows move, Tab or Enter fills in the command. True when
+    /// the key was one of them.
+    fn menu_key(&mut self, key: crossterm::event::KeyEvent) -> bool {
+        let items = self.menu();
+        if items.is_empty() || key.modifiers.intersects(KeyModifiers::CONTROL | KeyModifiers::ALT) {
+            return false;
+        }
+        let selected = self.menu_selected.min(items.len() - 1);
+        let text: String = self.draft.characters.iter().collect();
+        match key.code {
+            KeyCode::Up => self.menu_selected = (selected + items.len() - 1) % items.len(),
+            KeyCode::Down => self.menu_selected = (selected + 1) % items.len(),
+            KeyCode::Esc => self.menu_hidden = true,
+            KeyCode::Tab => self.draft.set(&format!("{} ", items[selected].0)),
+            KeyCode::Enter if text != items[selected].0 => self.draft.set(&format!("{} ", items[selected].0)),
+            _ => return false,
+        }
+        true
     }
     /// The activity line: `✢ Brewing… (4m 13s · ↓ 13.7k tokens · thinking)`.
     fn status_line(&self) -> String {
@@ -1034,6 +1091,14 @@ struct Frame {
     /// Output not yet written. Erasing the frame, logging above it and drawing
     /// it again go out in one write so the terminal never shows a blank frame.
     pending: String,
+    /// Screen row of the frame's first line. Blank rows above the content keep
+    /// the input box and footer on the last screen rows.
+    top: Option<u16>,
+    padding: usize,
+    /// Screen rows logged since the frame was last drawn.
+    logged_rows: usize,
+    /// Lines logged above the frame, for clicks on tool results.
+    scrollback: super::scrollback::Scrollback,
 }
 impl Frame {
     fn anchor(&mut self, out: &mut String) {
@@ -1079,16 +1144,41 @@ impl Frame {
     }
     /// Queues a plain line above the frame; the next draw writes both.
     fn log(&mut self, text: &str) -> io::Result<()> {
-        self.erase();
-        self.pending.push_str(&terminal_text(text));
-        self.pending.push_str("\r\n");
+        self.log_line(terminal_text(text), None);
         Ok(())
     }
     /// Like `log` for lines that already carry trusted style escapes.
     fn log_rendered(&mut self, line: &str) {
+        self.log_line(line.to_owned(), None);
+    }
+    fn log_line(&mut self, text: String, block: Option<usize>) {
         self.erase();
-        self.pending.push_str(line);
+        self.pending.push_str(&text);
         self.pending.push_str("\r\n");
+        self.logged_rows += self.scrollback.push(text, block);
+    }
+    /// Logs a tool result that a click expands and collapses.
+    fn log_block(&mut self, short: Vec<change_view::Line>, full: Vec<change_view::Line>) {
+        let (block, lines) = self.scrollback.block(short, full);
+        for line in lines {
+            self.log_line(line, Some(block));
+        }
+    }
+    /// Switches a clicked tool result between its short and full form and
+    /// redraws everything below it, the frame included.
+    fn toggle_block(&mut self, row: u16) -> bool {
+        let Some((start, lines)) = self.top.and_then(|top| self.scrollback.toggle(top, row)) else {
+            return false;
+        };
+        self.pending = format!("\x1b[?25l\x1b[{};1H\x1b[J", start + 1);
+        self.lines.clear();
+        self.cursor_up = 0;
+        self.top = Some(start);
+        self.logged_rows = 0;
+        for (line, block) in lines {
+            self.log_line(line, block);
+        }
+        true
     }
     fn draw(&mut self, state: &mut State) -> io::Result<()> {
         let size = terminal::size().unwrap_or((80, 24));
@@ -1109,6 +1199,17 @@ impl Frame {
         let mode = match &indicator {
             Some((label, _)) => format!("{label} \u{b7} {hint}"),
             None => hint.to_owned(),
+        };
+        // The model, effort and session directory at the right; a short line
+        // keeps only the directory's name, then only the model.
+        let used = mode.width();
+        let folder = state.workspace.rsplit(['/', '\\']).next().unwrap_or_default();
+        let join = |path: &str| [state.model_label.as_str(), path].into_iter().filter(|part| !part.is_empty()).collect::<Vec<_>>().join(" \u{b7} ");
+        let candidates = [join(&state.workspace), join(folder), state.model_label.clone()];
+        let right = candidates.iter().find(|right| !right.is_empty() && used + 2 + right.width() <= width);
+        let mode = match right {
+            Some(right) => format!("{mode}{}{right}", " ".repeat(width - used - right.width())),
+            None => mode,
         };
         let rule = "─".repeat(width);
         let tip_line = state
@@ -1246,6 +1347,25 @@ impl Frame {
                 hit
             });
         }
+        let menu = state.menu();
+        if !menu.is_empty() && !state.details.expanded {
+            // The `/` menu takes the bottom of the work area, above the input.
+            let selected = state.menu_selected.min(menu.len() - 1);
+            let shown = menu.len().min(budget).min(5);
+            let name_width = menu.iter().map(|(name, _)| name.width()).max().unwrap_or(0) + 2;
+            let color = std::env::var_os("NO_COLOR").is_none();
+            let rows = menu.iter().take(shown).enumerate().map(|(index, (name, description))| {
+                let prefix = if index == selected { "  \u{276f} " } else { "    " };
+                let row = clip(&format!("{prefix}{name:<name_width$}{description}"), width);
+                match (color, index == selected) {
+                    (false, _) => row,
+                    (true, true) => format!("{}{row}\x1b[0m", crossterm::style::SetForegroundColor(crate::terminal::style::selected())),
+                    (true, false) => format!("{}{row}\x1b[0m", crossterm::style::SetForegroundColor(crate::terminal::style::muted())),
+                }
+            });
+            content.splice(budget - shown.., rows);
+            self.panel_toggle = None;
+        }
         let choice_rows = state.choice.as_ref().map(|choice| choice_lines(choice, &lines[1], &mode, width, size.1 as usize));
         if choice_rows.is_some() {
             // The approval box takes the place of the streaming area.
@@ -1269,6 +1389,26 @@ impl Frame {
             });
             self.panel_height = self.panel_height.saturating_sub(removed);
         }
+        // Blank rows above the content keep the input box and footer on the
+        // bottom screen rows, however little output there is yet.
+        let resized = self.size != size;
+        if resized && !self.lines.is_empty() {
+            self.erase();
+        }
+        let start = match self.top {
+            Some(top) if !resized => (top as usize + self.logged_rows).min(size.1.saturating_sub(1) as usize),
+            _ => {
+                // The terminal reflowed what was logged; only new lines are clickable.
+                self.scrollback.clear();
+                write(&std::mem::take(&mut self.pending))?;
+                crossterm::cursor::position().map_or(0, |(_, row)| row as usize)
+            }
+        };
+        let padding = (size.1 as usize).saturating_sub(start).saturating_sub(lines.len());
+        lines.splice(0..0, std::iter::repeat_n(String::new(), padding));
+        self.padding = padding;
+        self.top = Some((size.1 as usize).saturating_sub(lines.len()) as u16);
+        self.logged_rows = 0;
         let input_row = lines.len().saturating_sub(choice_cursor.map_or(3, |(row, _)| row));
         let cursor_column = match choice_cursor {
             Some((_, column)) => column,
@@ -1281,7 +1421,7 @@ impl Frame {
         {
             return Ok(());
         }
-        if !self.lines.is_empty() && (self.size != size || self.lines.len() != lines.len()) {
+        if !self.lines.is_empty() && self.lines.len() != lines.len() {
             self.erase();
         }
         let mut out = std::mem::take(&mut self.pending);
@@ -1460,6 +1600,19 @@ fn run(
                     for line in lines {
                         screen.log_rendered(&change_view::render(&line, width, color));
                     }
+                    dirty = true;
+                }
+                Ok(Update::Expandable(short, full)) => {
+                    finish_text(state, screen);
+                    screen.log_block(short, full);
+                    dirty = true;
+                }
+                Ok(Update::Workspace(path)) => {
+                    state.workspace = path;
+                    dirty = true;
+                }
+                Ok(Update::ModelLabel(label)) => {
+                    state.model_label = label;
                     dirty = true;
                 }
                 Ok(Update::HookActivity(activity)) => {
@@ -1653,7 +1806,8 @@ fn run(
                     if !(control && key.code == KeyCode::Char('r')) {
                         state.search_query = None;
                     }
-                    if state.choice_key(key) {
+                    let before: String = state.draft.characters.iter().collect();
+                    if state.choice_key(key) || state.menu_key(key) {
                     } else if control && matches!(key.code, KeyCode::Char('y' | 'n')) && state.goal_proposal.is_some() && state.answer.is_none() {
                         state.decide_goal(key.code == KeyCode::Char('y'), &actions);
                     } else if control && key.code == KeyCode::Char('t') {
@@ -1800,13 +1954,22 @@ fn run(
                             _ => {}
                         }
                     }
+                    if state.draft.characters.iter().collect::<String>() != before {
+                        // A changed draft opens the menu again at its first match.
+                        state.menu_hidden = false;
+                        state.menu_selected = 0;
+                    }
                     dirty = true;
                 }
                 Event::Mouse(mouse) => {
-                    let (_, cursor_y) = crossterm::cursor::position()?;
-                    let input_row = screen.lines.len().saturating_sub(1 + screen.cursor_up);
-                    let origin = cursor_y.saturating_sub(input_row as u16);
-                    if let Some(row) = mouse.row.checked_sub(origin) {
+                    let origin = screen.top.unwrap_or(0) + screen.padding as u16;
+                    if mouse.kind == MouseEventKind::Down(MouseButton::Left)
+                        && screen.top.is_some_and(|top| mouse.row < top)
+                    {
+                        // A click on a tool result above the frame shows it in
+                        // full; another click shows the short form again.
+                        dirty |= screen.toggle_block(mouse.row);
+                    } else if let Some(row) = mouse.row.checked_sub(origin) {
                         if mouse.kind == MouseEventKind::Down(MouseButton::Left)
                             && screen.panel_toggle.is_some_and(|hit| {
                                 hit.contains(row as usize, mouse.column as usize)
@@ -2223,6 +2386,20 @@ mod tests {
     }
 
     #[test]
+    fn slash_menu_lists_only_commands_that_run_during_a_turn() {
+        let mut state = State::new("ask".into());
+        state.draft.set("/");
+        let names: Vec<_> = state.menu().into_iter().map(|(name, _)| name).collect();
+        assert_eq!(names, vec!["/background", "/btw", "/goal"]);
+        state.draft.set("/bt");
+        assert!(state.menu_key(crossterm::event::KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE)));
+        assert_eq!(state.draft.characters.iter().collect::<String>(), "/btw ");
+        assert!(state.menu().is_empty());
+        state.draft.set("/zz");
+        assert!(state.menu().is_empty());
+    }
+
+    #[test]
     fn unanswered_goal_does_not_block_commands_after_the_model_finishes() {
         let mut state = State::new("ask".into());
         let (send, mut receive) = async_mpsc::unbounded_channel();
@@ -2281,9 +2458,18 @@ impl TurnDisplay {
         self.live.is_some()
     }
     pub fn with_workspace(mut self, workspace: &std::path::Path) -> Self {
+        if let Some(live) = &self.live {
+            let _ = live.updates.send(Update::Workspace(crate::terminal::home_path(workspace)));
+        }
         self.workspace = Some(workspace.to_owned());
         self.fallback.set_workspace(workspace);
         self
+    }
+    /// The footer's `deepseek-flash · ● high`.
+    pub fn set_model_label(&self, label: &str) {
+        if let Some(live) = &self.live {
+            let _ = live.updates.send(Update::ModelLabel(label.to_owned()));
+        }
     }
     pub fn set_permission_mode(&mut self, mode: &str) {
         if let Some(live) = &self.live { live.permission_mode(mode); }
@@ -2409,11 +2595,12 @@ impl TurnDisplay {
                 let display_lines =
                     change_view::change_in_workspace(output, failed, self.workspace.as_deref())
                         .unwrap_or_else(|| lines.clone());
-                let mut preview = display_lines.iter().take(14).cloned().collect::<Vec<_>>();
-                if lines.len() > 14 {
-                    preview.push(change_view::success("More changes in details (Ctrl+O)"));
+                // One summary line; a click shows the diff.
+                if display_lines.len() > 1 {
+                    let _ = live.updates.send(Update::Expandable(display_lines[..1].to_vec(), display_lines));
+                } else {
+                    live.styled(display_lines);
                 }
-                live.styled(preview);
             } else {
                 // A mirrored completion can arrive without the call's input;
                 // label it with the input seen when the call started.
@@ -2430,14 +2617,20 @@ impl TurnDisplay {
                         return;
                     }
                 }
-                live.styled(super::tool_view::finished(
+                let short = super::tool_view::finished(
                     name,
                     label_input,
                     output,
                     failed,
                     elapsed,
                     self.workspace.as_deref(),
-                ));
+                );
+                if name != "TodoWrite" && super::tool_view::summary(name, output, failed).1 > 0 {
+                    let full = super::tool_view::expanded(name, label_input, output, failed, self.workspace.as_deref());
+                    let _ = live.updates.send(Update::Expandable(short, full));
+                } else {
+                    live.styled(short);
+                }
             }
             live.activity("Working");
         } else {

@@ -504,6 +504,10 @@ impl PermissionManager {
     ) -> PermissionDecision {
         use DecisionOrigin::*;
         let decision = PermissionDecision::new;
+        // Full Access grants everything bypass mode would, deny rules included.
+        if mode == PermissionMode::BypassPermissions && super::full_access() {
+            return decision(PermissionResult::Granted, Mode);
+        }
         let auto = mode == PermissionMode::Auto;
         let action = |rules: &HashMap<String, PermissionAction>| {
             if !auto { return super::patterns::matching_action(rules, context); }

@@ -10,6 +10,19 @@ pub mod web_fetch;
 pub mod audit;
 
 pub use manager::{PermissionManager, PermissionMode};
+
+/// Full Access: bypass mode that also ignores deny rules and runs commands
+/// outside the sandbox. On only while a `--full-access` launch is in bypass
+/// mode; the CLI updates it as the mode changes.
+static FULL_ACCESS: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+pub fn set_full_access(on: bool) {
+    FULL_ACCESS.store(on, std::sync::atomic::Ordering::Relaxed);
+}
+
+pub fn full_access() -> bool {
+    FULL_ACCESS.load(std::sync::atomic::Ordering::Relaxed)
+}
 pub use rules::{PermissionScope, PermissionLevel};
 pub use audit::AuditLogger;
 

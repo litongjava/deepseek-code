@@ -13,10 +13,24 @@ impl Reader {
     }
     pub fn next(&mut self, timeout: Duration) -> io::Result<Option<Event>> {
         if crossterm::event::poll(timeout)? {
-            crossterm::event::read().map(Some)
+            crossterm::event::read().map(|event| Some(backspace_from_ctrl_h(event)))
         } else {
             Ok(None)
         }
+    }
+}
+
+/// Many terminals (Xshell, PuTTY variants, some tmux setups) send `^H` for
+/// Backspace and `^?` for Ctrl+Backspace; crossterm reads `^H` as Ctrl+H.
+/// As on Windows, both bytes delete backwards.
+#[cfg(not(windows))]
+fn backspace_from_ctrl_h(event: Event) -> Event {
+    use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+    match event {
+        Event::Key(key) if key.code == KeyCode::Char('h') && key.modifiers == KeyModifiers::CONTROL => {
+            Event::Key(KeyEvent::new_with_kind(KeyCode::Backspace, KeyModifiers::NONE, key.kind))
+        }
+        event => event,
     }
 }
 
@@ -460,5 +474,15 @@ mod tests {
             parser.ready.pop_front(),
             Some(Event::Paste("hello\n/exit\n".into()))
         );
+    }
+
+    #[cfg(not(windows))]
+    #[test]
+    fn ctrl_h_from_a_terminal_backspace_deletes() {
+        use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+        let ctrl_h = Event::Key(KeyEvent::new(KeyCode::Char('h'), KeyModifiers::CONTROL));
+        assert!(matches!(super::backspace_from_ctrl_h(ctrl_h), Event::Key(key) if key.code == KeyCode::Backspace && key.modifiers.is_empty()));
+        let alt_h = Event::Key(KeyEvent::new(KeyCode::Char('h'), KeyModifiers::ALT));
+        assert!(matches!(super::backspace_from_ctrl_h(alt_h), Event::Key(key) if key.code == KeyCode::Char('h')));
     }
 }

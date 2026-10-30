@@ -49,6 +49,10 @@ pub struct Session {
     pub(crate) model: String,
     pub(crate) provider_id: String,
     pub(crate) auto_route: bool,
+    /// Bypass is in the Shift+Tab cycle (`--allow-dangerously-skip-permissions`).
+    pub(crate) bypass_available: bool,
+    /// Launched with `--full-access`: bypass mode is Full Access.
+    pub(crate) full_access: bool,
     providers: Arc<Mutex<ProviderManager>>,
     pub(crate) workspace: std::path::PathBuf,
     lifecycle_owned: bool,
@@ -352,6 +356,8 @@ impl Session {
             providers,
             workspace,
             auto_route,
+            bypass_available: cli.allow_dangerously_skip_permissions,
+            full_access: cli.full_access,
             sdk_permissions: None,
             sdk_content: None,
             sdk_overrides: Default::default(),
@@ -474,7 +480,8 @@ impl Session {
         let resolved = self.providers.lock().await.resolve_selected(&provider_id, &model)
             .context("Saved provider/model is unavailable; current session retained")?;
         let lifecycle_owned = self.lifecycle_owned;
-        let saved_mode = claude_core::services::session_permission_mode::load(&self.store.db, id)?.filter(|mode| *mode != PermissionMode::BypassPermissions).unwrap_or(PermissionMode::AskPermissions);
+        // As in the reference CLI, the resumed conversation keeps the mode in use.
+        let mode = self.permissions.get_mode();
         self.end_hooks("other").await;
         self.workspace = workspace;
         self.api_format = resolved.provider.api_format;
@@ -482,7 +489,7 @@ impl Session {
         self.provider_id = provider_id;
         self.auto_route = false;
         self.id = id.to_owned();
-        claude_core::services::session_permission_mode::set(&self.store.db, &self.id, &self.permissions, saved_mode)?;
+        claude_core::services::session_permission_mode::set(&self.store.db, &self.id, &self.permissions, mode)?;
         if lifecycle_owned { self.start_hooks("resume").await?; }
         Ok(())
     }
@@ -517,17 +524,17 @@ impl Session {
         }
     }
 
+    /// As in the reference CLI: ask, accept edits, plan, bypass (when the
+    /// launch allows it), auto, then ask again.
     pub fn next_permission_mode(&self) -> &'static str {
-        match self.permission_mode() {
-            "ask" => "accept-edits",
-            "accept-edits" => "plan",
-            _ => "ask", // Bypass is explicit opt-in and can only be exited here.
-        }
+        next_mode(self.permission_mode(), self.bypass_available)
     }
 
     pub async fn cycle_permission_mode(&self) -> Result<&'static str> {
-        self.set_permission_mode(self.next_permission_mode())
-            .await?;
+        // Auto mode needs its classifier; without one the cycle goes on to ask.
+        if self.set_permission_mode(self.next_permission_mode()).await.is_err() {
+            self.set_permission_mode("ask").await?;
+        }
         Ok(self.permission_mode())
     }
 
@@ -567,7 +574,9 @@ impl Session {
         if mode == PermissionMode::Auto {
             claude_core::native_engine::auto_permissions::configured(&crate::services::context(&self.paths)?, &self.selected_provider().await?)?;
         }
+        anyhow::ensure!(mode != PermissionMode::BypassPermissions || self.bypass_available, "Bypass permissions mode needs a launch with --dangerously-skip-permissions or --allow-dangerously-skip-permissions");
         claude_core::services::session_permission_mode::set(&self.store.db, &self.id, &self.permissions, mode)?;
+        claude_core::permissions::set_full_access(self.full_access && mode == PermissionMode::BypassPermissions);
         Ok(())
     }
 
@@ -905,6 +914,7 @@ impl Session {
         };
         let mut progress = crate::terminal::live::TurnDisplay::new(interactive_display, self.permission_mode(), &self.paths.data_dir.join("keybindings.json"), self.store.history(&self.id)?.iter().filter(|row|row["role"]=="user").filter_map(|row|row["content"].as_str().map(str::to_owned)).filter(|text| !crate::background_commands::is_notification(text)).collect())?.with_workspace(&self.workspace);
         if progress.is_live() {
+            progress.set_model_label(&crate::session_commands::model_label(self).await);
             progress.set_transcript(crate::repl::transcript(self).unwrap_or_default());
             progress.set_todos(crate::background_commands::todo_items(&self.paths, &self.id));
         }
@@ -1634,6 +1644,16 @@ pub(crate) fn event_json_with(event: &EngineEvent, summaries: bool) -> Option<Va
     })
 }
 
+fn next_mode(mode: &str, bypass_available: bool) -> &'static str {
+    match mode {
+        "ask" => "accept-edits",
+        "accept-edits" => "plan",
+        "plan" if bypass_available => "bypass",
+        "plan" | "bypass" => "auto",
+        _ => "ask",
+    }
+}
+
 #[cfg(test)]
 mod event_tests {
     #[test]
@@ -1659,6 +1679,29 @@ mod event_tests {
     }
 
     use super::*;
+
+    #[test]
+    fn shift_tab_cycles_like_the_reference_cli() {
+        let cycle = |bypass| {
+            let mut mode = "ask";
+            (0..5).map(|_| { mode = super::next_mode(mode, bypass); mode }).collect::<Vec<_>>()
+        };
+        assert_eq!(cycle(false), ["accept-edits", "plan", "auto", "ask", "accept-edits"]);
+        assert_eq!(cycle(true), ["accept-edits", "plan", "bypass", "auto", "ask"]);
+    }
+
+    #[test]
+    fn launch_flags_choose_bypass_and_keep_it_in_the_cycle() {
+        let parse = |args: &[&str]| { let mut cli = Cli::try_parse_with_mode_source(std::iter::once("dcl").chain(args.iter().copied())).unwrap(); cli.normalize(); cli };
+        let full = parse(&["--full-access"]);
+        assert!(matches!(full.permission_mode, crate::args::PermissionModeArg::Bypass) && full.allow_dangerously_skip_permissions);
+        let skip = parse(&["--dangerously-skip-permissions"]);
+        assert!(skip.allow_dangerously_skip_permissions && !skip.full_access);
+        // A worker job keeps the mode in use alongside --full-access.
+        let worker = parse(&["--permission-mode", "plan", "--full-access", "--allow-dangerously-skip-permissions"]);
+        assert!(matches!(worker.permission_mode, crate::args::PermissionModeArg::Plan) && worker.full_access);
+        assert!(!parse(&[]).allow_dangerously_skip_permissions);
+    }
     #[test]
     fn duplicate_pipeline_completion_does_not_hide_distinct_results() {
         let saved = vec![message_repo::ToolCallRow {
@@ -1733,6 +1776,11 @@ mod event_tests {
         let explicit = Cli::try_parse_with_mode_source(["dcl", "--permission-mode", "ask"]).unwrap();
         let overridden = Session::open(&explicit, &paths, selection(), Some(&saved)).await.unwrap();
         assert_eq!(overridden.permission_mode(), "ask");
+        // Bypass needs a launch that allows it.
+        assert!(overridden.set_permission_mode("bypass").await.is_err());
+        overridden.close().await.unwrap();
+        let explicit = Cli::try_parse_with_mode_source(["dcl", "--permission-mode", "ask", "--allow-dangerously-skip-permissions"]).unwrap();
+        let overridden = Session::open(&explicit, &paths, selection(), Some(&saved)).await.unwrap();
         overridden.set_permission_mode("bypass").await.unwrap();
         overridden.close().await.unwrap();
         let safe_resume = Session::open(&cli, &paths, selection(), Some(&saved)).await.unwrap();

@@ -51,6 +51,10 @@ pub fn settings(data_dir: &Path, workspace: &Path) -> Value {
 
 /// What the tool receives when the sandbox is on: writable paths and network.
 pub fn policy(settings: &Value, workspace: &Path, data_dir: &Path, extra_writable: &[PathBuf]) -> Option<Value> {
+    // Full Access runs commands without the sandbox.
+    if crate::permissions::full_access() {
+        return None;
+    }
     if settings["enabled"] != true { return None; }
     let mut writable: Vec<String> = vec![workspace.to_string_lossy().into_owned(), std::env::temp_dir().to_string_lossy().into_owned()];
     writable.extend(extra_writable.iter().map(|path| path.to_string_lossy().into_owned()));

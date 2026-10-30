@@ -84,6 +84,13 @@ pub struct Cli {
     /// Bypass interactive permission prompts; explicit deny rules still apply.
     #[arg(long, global = true, conflicts_with = "permission_mode")]
     pub dangerously_skip_permissions: bool,
+    /// Offer bypass mode in the Shift+Tab cycle without starting in it.
+    #[arg(long, global = true)]
+    pub allow_dangerously_skip_permissions: bool,
+    /// Full Access: bypass mode that also ignores deny rules and runs commands
+    /// outside the sandbox. Only for disposable machines.
+    #[arg(long, global = true)]
+    pub full_access: bool,
     /// Allow matching tools without confirmation for this launch; deny and Plan still apply.
     #[arg(long, visible_alias = "allowedTools", num_args = 1.., global = true)]
     pub allowed_tools: Vec<String>,
@@ -163,8 +170,13 @@ impl Cli {
         Self::try_parse_with_mode_source(std::env::args_os()).unwrap_or_else(|error|error.exit())
     }
     pub fn normalize(&mut self) {
-        if self.dangerously_skip_permissions {
+        // Workers get --full-access with the mode in use, which may be another.
+        if self.dangerously_skip_permissions || (self.full_access && !self.permission_mode_explicit) {
             self.permission_mode = PermissionModeArg::Bypass;
+        }
+        // Starting in bypass keeps it in the Shift+Tab cycle, as in the reference CLI.
+        if matches!(self.permission_mode, PermissionModeArg::Bypass) {
+            self.allow_dangerously_skip_permissions = true;
         }
     }
     pub fn response_schema(&self) -> anyhow::Result<Option<serde_json::Value>> {

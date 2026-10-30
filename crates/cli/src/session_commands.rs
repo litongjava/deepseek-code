@@ -9,8 +9,29 @@ use serde_json::{json, Value};
 struct Settings {
     effort: Option<String>,
     autocompact_percent: Option<u8>,
+    /// `/autocompact off`; without it and without a percent the reference
+    /// CLI's default threshold applies.
+    #[serde(default)]
+    autocompact_off: bool,
     #[serde(default)]
     goal: Option<Goal>,
+}
+
+impl Settings {
+    /// Estimated history tokens at which the conversation is compacted.
+    fn autocompact_tokens(&self, window: u64) -> Option<u64> {
+        match self.autocompact_percent {
+            Some(percent) => Some(window * percent as u64 / 100),
+            None if self.autocompact_off => None,
+            None => default_autocompact_tokens(window),
+        }
+    }
+}
+
+/// As in the reference CLI: the window less the reserved output (at most
+/// 20k tokens) and a 13k buffer, e.g. 167k of a 200k window.
+fn default_autocompact_tokens(window: u64) -> Option<u64> {
+    window.checked_sub(20_000 + 13_000).filter(|tokens| *tokens > 0)
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -96,9 +117,32 @@ pub(crate) fn session_effort(session: &Session) -> Result<Option<String>> {
     Ok(load(&session.store.db, &session.id)?.effort)
 }
 
+/// The status line's model and reasoning effort: `deepseek-flash · ● high`.
+pub(crate) async fn model_label(session: &Session) -> String {
+    let effort = match session_effort(session) {
+        Ok(Some(effort)) => Some(effort),
+        _ => session.selected_provider().await.ok().and_then(|provider| provider.model.effort),
+    };
+    match effort.filter(|effort| !effort.is_empty() && effort != "off") {
+        Some(effort) => format!("{} \u{b7} \u{25cf} {effort}", session.model),
+        None => session.model.clone(),
+    }
+}
+
 /// The session's auto-compact threshold in percent, None when off.
-pub(crate) fn autocompact(session: &Session) -> Result<Option<u8>> {
-    Ok(load(&session.store.db, &session.id)?.autocompact_percent)
+pub(crate) fn autocompact(session: &Session, window: u64) -> Result<Option<u8>> {
+    let tokens = load(&session.store.db, &session.id)?.autocompact_tokens(window);
+    Ok(tokens.map(|tokens| (tokens * 100 / window.max(1)) as u8))
+}
+
+/// The Config tab's value: `80%`, `off` or `default`.
+pub(crate) fn autocompact_label(session: &Session) -> Result<String> {
+    let settings = load(&session.store.db, &session.id)?;
+    Ok(match (settings.autocompact_percent, settings.autocompact_off) {
+        (Some(percent), _) => format!("{percent}%"),
+        (None, true) => "off".into(),
+        (None, false) => "default".into(),
+    })
 }
 
 pub(crate) fn set_session_effort(session: &Session, effort: Option<String>) -> Result<()> {
@@ -122,7 +166,7 @@ fn parse_threshold(argument: &str) -> Result<Option<u8>> {
     let percent = argument
         .trim_end_matches('%')
         .parse::<u8>()
-        .context("Usage: /autocompact off|10..95[%]")?;
+        .context("Usage: /autocompact default|off|10..95[%]")?;
     ensure!(
         (10..=95).contains(&percent),
         "Autocompact threshold must be between 10 and 95 percent"
@@ -226,15 +270,28 @@ pub async fn handle(
         }
         "/autocompact" => {
             let mut settings = load(&session.store.db, &session.id)?;
-            if !argument.is_empty() {
+            if argument == "default" {
+                settings.autocompact_percent = None;
+                settings.autocompact_off = false;
+                save(&session.store.db, &session.id, &settings)?;
+            } else if !argument.is_empty() {
                 let threshold = parse_threshold(argument)?;
                 if threshold.is_some() {
                     ensure!(session.context_window().await.is_some(), "The selected model has no configured context window; configure it before enabling autocompact");
                 }
                 settings.autocompact_percent = threshold;
+                settings.autocompact_off = threshold.is_none();
                 save(&session.store.db, &session.id, &settings)?;
             }
-            eprintln!("Autocompact: {}", settings.autocompact_percent.map(|v| format!("{v}% of configured context window (estimated history size, checked before each turn)")).unwrap_or_else(|| "off".into()));
+            let status = match (settings.autocompact_percent, settings.autocompact_off) {
+                (Some(percent), _) => format!("{percent}% of configured context window (estimated history size, checked before each turn)"),
+                (None, true) => "off".into(),
+                (None, false) => match session.context_window().await.and_then(|window| default_autocompact_tokens(window as u64)) {
+                    Some(tokens) => format!("on at {tokens} tokens (default: the context window less 33k, as in Claude Code)"),
+                    None => "on by default once the model has a configured context window".into(),
+                },
+            };
+            eprintln!("Autocompact: {status}");
         }
         "/recap" => {
             ensure!(argument.is_empty(), "Usage: /recap");
@@ -596,11 +653,11 @@ pub fn context_note(left_percent: u64, autocompact: bool) -> Option<String> {
 /// The context note for this session, if its history nears the budget.
 pub async fn context_status(session: &Session) -> Option<String> {
     let window = session.context_window().await.filter(|window| *window > 0)? as u64;
-    let percent = load(&session.store.db, &session.id).ok()?.autocompact_percent;
-    let budget = window * percent.unwrap_or(100) as u64 / 100;
+    let threshold = load(&session.store.db, &session.id).ok()?.autocompact_tokens(window);
+    let budget = threshold.unwrap_or(window);
     let (_, used) = active_history(session).ok()?;
     let left = budget.saturating_sub(used as u64) * 100 / budget.max(1);
-    context_note(left, percent.is_some())
+    context_note(left, threshold.is_some())
 }
 
 const MICROCOMPACT_KEEP_RECENT: usize = 10;
@@ -698,16 +755,22 @@ pub async fn reactive_compact(session: &Session, prompt: &str) -> Result<bool> {
 /// Run before assembling the next request so the compact boundary is reflected
 /// in model_history. The original transcript remains available to Desktop.
 pub async fn prepare_turn(session: &Session, context_window: Option<u32>) -> Result<()> {
-    let Some(percent) = load(&session.store.db, &session.id)?.autocompact_percent else {
+    let settings = load(&session.store.db, &session.id)?;
+    let window = match context_window.filter(|v| *v > 0) {
+        Some(window) => window,
+        // The default needs a window; an explicit percent asks for one.
+        None if settings.autocompact_percent.is_none() => return Ok(()),
+        None => anyhow::bail!("Autocompact is enabled but this model has no configured context window; use /autocompact off or configure the model"),
+    };
+    let Some(threshold) = settings.autocompact_tokens(window as u64) else {
         return Ok(());
     };
-    let window = context_window.filter(|v| *v > 0).context("Autocompact is enabled but this model has no configured context window; use /autocompact off or configure the model")?;
     let (messages, estimated) = active_history(session)?;
-    if messages < 2 || estimated < window as usize * percent as usize / 100 {
+    if messages < 2 || (estimated as u64) < threshold {
         return Ok(());
     }
     crate::compaction::notice(&format!(
-        "Auto-compacting conversation (estimated {estimated} tokens, threshold {percent}%)…"
+        "Auto-compacting conversation (estimated {estimated} tokens, threshold {threshold})…"
     ));
     let context = crate::services::context(&session.paths)?;
     tokio::select! {
@@ -723,6 +786,18 @@ pub async fn prepare_turn(session: &Session, context_window: Option<u32>) -> Res
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn autocompact_defaults_to_the_reference_threshold_until_turned_off() {
+        let mut settings = Settings::default();
+        assert_eq!(settings.autocompact_tokens(200_000), Some(167_000));
+        assert_eq!(settings.autocompact_tokens(20_000), None);
+        settings.autocompact_percent = Some(50);
+        assert_eq!(settings.autocompact_tokens(200_000), Some(100_000));
+        settings.autocompact_percent = None;
+        settings.autocompact_off = true;
+        assert_eq!(settings.autocompact_tokens(200_000), None);
+    }
 
     #[test]
     fn context_notes_match_the_reference_wording() {
@@ -922,6 +997,7 @@ mod tests {
                 &Settings {
                     effort: Some("high".into()),
                     autocompact_percent: Some(80),
+                    autocompact_off: false,
                     goal: None,
                 },
             )

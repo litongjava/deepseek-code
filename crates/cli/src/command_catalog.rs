@@ -15,7 +15,7 @@ pub const COMMANDS: &[(&str, &str)] = &[
     ("/add-dir", "Add an additional working directory: PATH"),
     ("/cd", "Change this session's working directory: PATH"),
     ("/effort", "Set thinking effort: default|off|low|medium|high|xhigh|max"),
-    ("/autocompact", "Set automatic context compaction: off|10..95%"),
+    ("/autocompact", "Set automatic context compaction: default|off|10..95%"),
     ("/recap", "Generate a one-sentence summary of this session"),
     ("/goal", "Set, inspect, or clear a goal checked after each turn"),
     ("/fork", "Copy to a background session; optionally run a prompt"),

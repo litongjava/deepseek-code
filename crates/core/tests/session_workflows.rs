@@ -19,9 +19,16 @@ fn continue_is_scoped_to_directory_and_skips_unavailable_sessions() {
     let archived = store.create(&a, "model", "provider").unwrap();
     let chat = store.create(&a, "model", "provider").unwrap();
     let other = store.create(&b, "model", "provider").unwrap();
+    for id in [&first, &older, &archived, &chat, &other] {
+        store.append(id, "user", "hello").unwrap();
+    }
+    // A newer session with no messages is not one to continue.
+    let empty = store.create(&a, "model", "provider").unwrap();
     store
         .db
         .with_conn(|conn| {
+            conversation_repo::update_conversation_timestamp(conn, &empty, "2999-01-01T00:00:00Z")
+                .unwrap();
             conversation_repo::update_conversation_timestamp(conn, &older, "2000-01-01T00:00:00Z")
                 .unwrap();
             conversation_repo::archive_conversation(conn, &archived, true).unwrap();

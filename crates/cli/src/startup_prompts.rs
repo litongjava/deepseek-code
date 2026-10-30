@@ -1,5 +1,6 @@
 //! The reference CLI's startup safety prompts: trust a new folder before
-//! its project settings and hooks load, and accept bypass mode once.
+//! its project settings and hooks load, and accept bypass mode once (which
+//! trusts the folder as well).
 use crate::terminal::picker::{Entry, Picker};
 use anyhow::{bail, Result};
 use std::path::{Path, PathBuf};
@@ -10,6 +11,8 @@ struct Answers {
     trusted_folders: Vec<PathBuf>,
     #[serde(default)]
     bypass_accepted: bool,
+    #[serde(default)]
+    full_access_accepted: bool,
 }
 
 fn file(data_dir: &Path) -> PathBuf {
@@ -42,13 +45,14 @@ fn choose(heading: &str, body: &str, yes: &str) -> Result<bool> {
 
 /// Asks before an interactive session starts in a folder not trusted yet,
 /// and before the first start in bypass mode. Declining exits.
-pub fn confirm(data_dir: &Path, folder: &Path, bypass: bool) -> Result<()> {
+pub fn confirm(data_dir: &Path, folder: &Path, bypass: bool, full_access: bool) -> Result<()> {
     if !crate::terminal::picker::available() {
         return Ok(());
     }
     let folder = folder.canonicalize().unwrap_or_else(|_| folder.to_path_buf());
     let mut answers = load(data_dir);
-    if !trusted(&answers, &folder) {
+    // Accepting bypass mode covers the folder too: one prompt, not two.
+    if !trusted(&answers, &folder) && !bypass {
         let body = format!(
             "{}\n\nQuick safety check: Is this a project you created or one you trust? (Like your own code, a well-known open source project, or work from your team). If not, take a moment to review what's in this folder first.\n\nDeepSeek Code will be able to read, edit, and execute files here.",
             folder.display()
@@ -56,7 +60,16 @@ pub fn confirm(data_dir: &Path, folder: &Path, bypass: bool) -> Result<()> {
         if !choose("Accessing workspace:", &body, "Yes, I trust this folder")? {
             bail!("Folder not trusted; nothing was changed.");
         }
-        answers.trusted_folders.push(folder);
+        answers.trusted_folders.push(folder.clone());
+        save(data_dir, &answers)?;
+    }
+    if full_access && !answers.full_access_accepted {
+        let body = "In Full Access mode, DeepSeek Code runs every command without asking, ignores your deny rules and runs commands outside the sandbox, with full network and file access.\n\nUse it only on a disposable machine or container that you can restore.\n\nBy proceeding, you accept all responsibility for actions taken while running in Full Access mode.";
+        if !choose("WARNING: DeepSeek Code running in Full Access mode", body, "Yes, I accept")? {
+            bail!("Full Access mode not accepted.");
+        }
+        answers.full_access_accepted = true;
+        answers.bypass_accepted = true;
         save(data_dir, &answers)?;
     }
     if bypass && !answers.bypass_accepted {
@@ -65,6 +78,10 @@ pub fn confirm(data_dir: &Path, folder: &Path, bypass: bool) -> Result<()> {
             bail!("Bypass Permissions mode not accepted.");
         }
         answers.bypass_accepted = true;
+        save(data_dir, &answers)?;
+    }
+    if bypass && !trusted(&answers, &folder) {
+        answers.trusted_folders.push(folder);
         save(data_dir, &answers)?;
     }
     Ok(())

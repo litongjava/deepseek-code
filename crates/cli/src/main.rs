@@ -509,8 +509,9 @@ async fn run(cli: &Cli) -> Result<()> {
     if !single && !sdk_stream {
         // As in the reference CLI, before project settings and hooks load.
         let folder = cli.path.clone().unwrap_or(std::env::current_dir()?);
-        startup_prompts::confirm(&paths.data_dir, &folder, matches!(cli.permission_mode, args::PermissionModeArg::Bypass))?;
+        startup_prompts::confirm(&paths.data_dir, &folder, matches!(cli.permission_mode, args::PermissionModeArg::Bypass), cli.full_access)?;
     }
+    claude_core::permissions::set_full_access(cli.full_access && matches!(cli.permission_mode, args::PermissionModeArg::Bypass));
     let mut session = session::Session::open(cli, &paths, selection, resumed.as_ref().map(|s| s.id.as_str())).await?;
     startup_options::apply(cli, &mut session).await?;
     let mut screen_mode = terminal::screen_mode::ScreenMode::default();
@@ -526,7 +527,11 @@ async fn run(cli: &Cli) -> Result<()> {
             }?;
             for warning in outcome { eprintln!("Setup hook: {warning}"); }
         }
-        if !single { eprintln!("{}", terminal::banner(&session.model, &session.workspace)); }
+        if !single {
+            eprintln!("{}", terminal::banner(&session.model, &session.workspace));
+            // --resume and --continue show the conversation so far, as in the reference CLI.
+            if resumed.is_some() { repl::show_resumed(&session, false)?; }
+        }
         if !sdk_stream {
             let initial = session.initial_hook_message.take();
             if single {
@@ -643,11 +648,7 @@ async fn run(cli: &Cli) -> Result<()> {
             input.as_ref().unwrap().set_shells(background_commands::running_shells(&paths, &session.id));
             let (counter_paths, counter_session) = (paths.clone(), session.id.clone());
             input.as_ref().unwrap().set_shell_counter(Box::new(move || background_commands::running_shells(&counter_paths, &counter_session)));
-            let effort = match session_commands::session_effort(&session) {
-                Ok(Some(effort)) => Some(effort),
-                _ => session.selected_provider().await.ok().and_then(|provider| provider.model.effort),
-            };
-            input.as_ref().unwrap().set_effort(effort.filter(|effort| !effort.is_empty() && effort != "off"));
+            input.as_ref().unwrap().set_effort(Some(session_commands::model_label(&session).await));
             let (agent_paths, agent_db, agent_session) = (paths.clone(), session.store.db.clone(), session.id.clone());
             input.as_ref().unwrap().set_agent_rows(Box::new(move |width| background_commands::agent_rows(&background_commands::running_agents(&agent_paths, &agent_db, &agent_session), width)));
             let (todo_paths, todo_session) = (paths.clone(), session.id.clone());
@@ -968,6 +969,10 @@ async fn run(cli: &Cli) -> Result<()> {
         }
         if remote.is_connected() {
             if let Err(error) = remote.disconnect().await { eprintln!("Remote Control: {error:#}"); }
+        }
+        // As in the reference CLI, a conversation worth returning to ends with how to.
+        if session.store.history(&session.id).is_ok_and(|rows| !rows.is_empty()) {
+            eprintln!("\nResume this session with:\ndcl --resume {}", session.id);
         }
         Ok(())
     }.await;

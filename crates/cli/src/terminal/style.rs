@@ -84,6 +84,8 @@ pub fn border() -> Color {
             b: 180,
         },
         8 => Color::Cyan,
+        // The reference CLI's dark prompt border.
+        _ if THEME.load(Ordering::Relaxed) == 0 => Color::Rgb { r: 136, g: 136, b: 136 },
         _ => muted(),
     }
 }
@@ -170,10 +172,11 @@ pub fn theme_variant() -> u8 {
 /// The footer's permission mode label, as in the reference CLI, e.g.
 /// `⏵⏵ accept edits on (shift+tab to cycle)`; none for the default ask mode.
 pub fn mode_indicator(mode: &str) -> Option<(String, Color)> {
-    let red = Color::Rgb { r: 255, g: 107, b: 107 };
+    let red = Color::Rgb { r: 255, g: 107, b: 128 };
     let (symbol, title, color) = match mode {
         "accept-edits" => ("\u{23f5}\u{23f5}", "accept edits", Color::Rgb { r: 175, g: 135, b: 255 }),
-        "plan" => ("\u{23f8}", "plan mode", Color::Rgb { r: 72, g: 160, b: 150 }),
+        "plan" => ("\u{23f8}", "plan mode", Color::Rgb { r: 72, g: 150, b: 140 }),
+        "bypass" if claude_core::permissions::full_access() => ("\u{23f5}\u{23f5}", "full access", red),
         "bypass" => ("\u{23f5}\u{23f5}", "bypass permissions", red),
         "dont-ask" => ("\u{23f5}\u{23f5}", "don't ask", red),
         "auto" => ("\u{23f5}\u{23f5}", "auto mode", Color::Yellow),

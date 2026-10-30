@@ -3,10 +3,10 @@
 //! between prompts, printing to scrollback and opening in an editor.
 use super::change_view::{self, Line};
 use crossterm::{
-    cursor::{Hide, MoveTo, Show},
+    cursor::{Hide, Show},
     event::{Event, KeyCode, KeyEventKind, KeyModifiers, MouseEventKind},
-    execute, queue,
-    terminal::{self, Clear, ClearType, EnterAlternateScreen, LeaveAlternateScreen},
+    execute,
+    terminal::{self, EnterAlternateScreen, LeaveAlternateScreen},
 };
 use std::io::{self, Write};
 use unicode_width::UnicodeWidthChar;
@@ -110,14 +110,20 @@ fn pager(
     let mut help = false;
     let mut search: Option<String> = None;
     let mut query = String::new();
+    let mut redraw = true;
     loop {
         let footer_rows = if help { HELP.len() + 1 } else { 2 };
         let page = (size.1 as usize).saturating_sub(footer_rows).max(1);
         top = top.min(all.len().saturating_sub(page));
-        draw(out, &all, top, page, size, help, search.as_deref(), color)?;
+        if redraw {
+            draw(out, &all, top, page, size, help, search.as_deref(), color)?;
+        }
+        // Only an event changes the page; idle polls draw nothing.
         let Some(event) = next_event()? else {
+            redraw = false;
             continue;
         };
+        redraw = true;
         let key = match event {
             Event::Resize(cols, rows_count) => {
                 size = (cols, rows_count);
@@ -222,8 +228,9 @@ fn draw(
 ) -> io::Result<()> {
     let width = (size.0 as usize).saturating_sub(1);
     let muted = |text: &str| if color { format!("\x1b[2m{text}\x1b[0m") } else { text.to_owned() };
-    queue!(out, MoveTo(0, 0), Clear(ClearType::All))?;
-    let mut frame = String::from("\x1b[?2026h");
+    // Rows overwrite in place inside one synchronized frame: clearing the
+    // screen first would show it blank between frames.
+    let mut frame = String::from("\x1b[?2026h\x1b[H");
     for row in rows.iter().skip(top).take(page) {
         frame.push_str(&row.styled);
         frame.push_str("\x1b[K\r\n");
@@ -240,7 +247,7 @@ fn draw(
     } else {
         frame.push_str(&muted(&clip(FOOTER, width)));
     }
-    frame.push_str("\x1b[?2026l");
+    frame.push_str("\x1b[J\x1b[?2026l");
     out.write_all(frame.as_bytes())?;
     out.flush()
 }

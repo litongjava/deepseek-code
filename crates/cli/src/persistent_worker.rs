@@ -27,6 +27,9 @@ struct ModeControl {
     db: Arc<claude_core::db::DbManager>,
     provider: claude_core::native_engine::provider_manager::ResolvedProvider,
     owner_manager: Option<Arc<claude_core::permissions::PermissionManager>>,
+    /// The job's launch allows bypass, and Full Access when `full_access`.
+    bypass_available: bool,
+    full_access: bool,
 }
 type ModeTarget = Arc<std::sync::Mutex<Option<ModeControl>>>;
 
@@ -209,6 +212,9 @@ async fn execute(
     let mut current = sessions.lock().await;
     if let Some(session) = current.as_mut() {
         session.switch(&paths, selection).await?;
+        // Each job carries its own launch permissions.
+        session.bypass_available = cli.allow_dangerously_skip_permissions;
+        session.full_access = cli.full_access;
         session.auto_route =
             std::env::var("CLAUDE_RUST_WORKER_AUTO_ROUTE").as_deref() == Ok("true");
         session
@@ -229,7 +235,8 @@ async fn execute(
     session.engine.set_owned_child_idle_ready(&session.id, false);
     *status_target.lock().unwrap_or_else(|error|error.into_inner()) = Some(session.runtime_status_source());
     let current_provider = session.selected_provider().await?;
-    *mode_target.lock().unwrap_or_else(|e|e.into_inner()) = Some(ModeControl { job_id:id.into(), session_id:session.id.clone(), manager:session.permissions.clone(), db:session.store.db.clone(), provider:current_provider, owner_manager:None });
+    *mode_target.lock().unwrap_or_else(|e|e.into_inner()) = Some(ModeControl { job_id:id.into(), session_id:session.id.clone(), manager:session.permissions.clone(), db:session.store.db.clone(), provider:current_provider, owner_manager:None, bypass_available:session.bypass_available, full_access:session.full_access });
+    claude_core::permissions::set_full_access(session.full_access && session.permissions.get_mode() == claude_core::permissions::PermissionMode::BypassPermissions);
     let result = current
         .as_ref()
         .unwrap()
@@ -246,9 +253,10 @@ async fn execute(
 }
 
 fn update_live_mode(worker: &Worker, target: &ModeTarget, job_id: &str, mode: &str) -> Result<String> {
-    ensure!(matches!(claude_core::services::session_permission_mode::parse(mode)?, claude_core::permissions::PermissionMode::AskPermissions | claude_core::permissions::PermissionMode::AcceptEdits | claude_core::permissions::PermissionMode::PlanMode | claude_core::permissions::PermissionMode::DontAsk | claude_core::permissions::PermissionMode::Auto), "Live switching cannot enable bypass permissions");
     let target = target.lock().unwrap_or_else(|e|e.into_inner());
     let control = target.as_ref().context("Session worker has no active initialized turn")?;
+    let bypass = claude_core::services::session_permission_mode::parse(mode)? == claude_core::permissions::PermissionMode::BypassPermissions;
+    ensure!(!bypass || control.bypass_available, "Live switching cannot enable bypass permissions unless the launch allows it");
     ensure!(control.job_id == job_id, "Permission change targets a different job");
     if control.owner_manager.as_ref().is_some_and(|manager| manager.get_mode() == claude_core::permissions::PermissionMode::PlanMode) {
         ensure!(claude_core::services::session_permission_mode::parse(mode)? == claude_core::permissions::PermissionMode::PlanMode, "Owner remains in plan mode; child mode cannot expand its authority");
@@ -259,6 +267,7 @@ fn update_live_mode(worker: &Worker, target: &ModeTarget, job_id: &str, mode: &s
         claude_core::native_engine::auto_permissions::configured(&crate::services::context(&RuntimePaths::new(worker.root.clone())?)?, &control.provider)?;
     }
     claude_core::services::session_permission_mode::set(&control.db, &control.session_id, &control.manager, claude_core::services::session_permission_mode::parse(mode)?)?;
+    claude_core::permissions::set_full_access(control.full_access && bypass);
     let _ = service::emit_event(&serde_json::json!({"type":"permission_mode","mode":mode,"session_id":control.session_id}));
     Ok(control.session_id.clone())
 }

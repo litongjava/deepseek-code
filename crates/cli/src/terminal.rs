@@ -136,6 +136,7 @@ pub mod tips;
 pub mod markdown;
 pub mod vim;
 mod display_path;
+mod scrollback;
 pub mod style;
 pub mod screen_mode;
 

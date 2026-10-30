@@ -157,6 +157,8 @@ async fn execute(
             db: session.store.db.clone(),
             provider: session.selected_provider().await?,
             owner_manager: None,
+            bypass_available: session.bypass_available,
+            full_access: session.full_access,
         });
         return session.wake_hooks(&cli, &mut None).await;
     }
@@ -170,6 +172,9 @@ async fn execute(
         db: session.store.db.clone(),
         provider,
         owner_manager: Some(session.permissions.clone()),
+        // A child never gains bypass of its own.
+        bypass_available: false,
+        full_access: false,
     });
     service::emit_event(
         &json!({"type":"owned_child_wake","session_id":session.id,"child_session_id":child}),

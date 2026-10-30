@@ -29,6 +29,33 @@ pub fn transcript(session: &Session) -> Result<Vec<crate::terminal::change_view:
 
 /// The transcript of any saved conversation, for the /resume preview.
 pub fn transcript_of(session: &Session, id: &str) -> Result<Vec<crate::terminal::change_view::Line>> {
+    conversation(session, id, true)
+}
+
+/// After a resume, as in the reference CLI: the screen starts over with the
+/// banner and the conversation so far, one short line per tool call.
+pub fn show_resumed(session: &Session, clear: bool) -> Result<()> {
+    use std::io::IsTerminal;
+    if !std::io::stderr().is_terminal() {
+        return Ok(());
+    }
+    let color = std::env::var_os("NO_COLOR").is_none();
+    let mut out = String::new();
+    if clear {
+        out.push_str("\x1b[2J\x1b[H");
+        out.push_str(&crate::terminal::banner(&session.model, &session.workspace));
+        out.push('\n');
+    }
+    for line in conversation(session, &session.id, false)? {
+        // Unclipped: long prompts wrap in the terminal as they did when typed.
+        out.push_str(&crate::terminal::change_view::render(&line, usize::MAX, color));
+        out.push('\n');
+    }
+    eprint!("{out}");
+    Ok(())
+}
+
+fn conversation(session: &Session, id: &str, detailed: bool) -> Result<Vec<crate::terminal::change_view::Line>> {
     use crate::terminal::{change_view, tool_view};
     let width = crossterm::terminal::size().map_or(80, |(cols, _)| cols.saturating_sub(1) as usize);
     session.store.db.with_conn(|conn| {
@@ -50,12 +77,14 @@ pub fn transcript_of(session: &Session, id: &str) -> Result<Vec<crate::terminal:
                 lines.extend(text.map(|line| change_view::body(&format!("  {line}"))));
                 continue;
             }
-            let time = chrono::DateTime::parse_from_rfc3339(&message.created_at)
-                .map(|time| time.with_timezone(&chrono::Local).format("%I:%M %p").to_string())
-                .unwrap_or_default();
-            let header = format!("{time} {}", session.model);
-            lines.push(change_view::muted(&format!("{header:>width$}")));
-            if let Some(thinking) = message.thinking.as_deref().filter(|text| !text.trim().is_empty()) {
+            if detailed {
+                let time = chrono::DateTime::parse_from_rfc3339(&message.created_at)
+                    .map(|time| time.with_timezone(&chrono::Local).format("%I:%M %p").to_string())
+                    .unwrap_or_default();
+                let header = format!("{time} {}", session.model);
+                lines.push(change_view::muted(&format!("{header:>width$}")));
+            }
+            if let Some(thinking) = message.thinking.as_deref().filter(|text| detailed && !text.trim().is_empty()) {
                 let mut text = thinking.lines();
                 lines.push(change_view::muted(&format!("\u{2234} {}", text.next().unwrap_or_default())));
                 lines.extend(text.take(400).map(|line| change_view::muted(&format!("  {line}"))));
@@ -66,13 +95,12 @@ pub fn transcript_of(session: &Session, id: &str) -> Result<Vec<crate::terminal:
                 .as_deref()
                 .and_then(|input| serde_json::from_str(input).ok())
                 .unwrap_or_default();
-            lines.extend(tool_view::expanded(
-                &tool.name,
-                &input,
-                tool.output.as_deref().unwrap_or(""),
-                tool.is_error,
-                Some(&session.workspace),
-            ));
+            let output = tool.output.as_deref().unwrap_or("");
+            lines.extend(if detailed {
+                tool_view::expanded(&tool.name, &input, output, tool.is_error, Some(&session.workspace))
+            } else {
+                tool_view::finished(&tool.name, &input, output, tool.is_error, None, Some(&session.workspace))
+            });
             }
             let mut text = message.content.lines();
             if let Some(first) = text.next() {

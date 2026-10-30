@@ -105,7 +105,7 @@ pub async fn handle(
                     match picker.run_keys(&[Key::Ctrl('a'), Key::Ctrl('b'), Key::Space, Key::Ctrl('r')])? {
                         Picked::Entry(index) => {
                             session.resume_saved(paths, &found[index].0).await?;
-                            eprintln!("Resumed {} using saved provider {} and model {}.", session.id, session.provider_id, session.model);
+                            crate::repl::show_resumed(session, true)?;
                             return Ok(true);
                         }
                         Picked::Key(Key::Ctrl('a'), _) => {
@@ -128,7 +128,10 @@ pub async fn handle(
                             }
                         }
                         Picked::Key(..) => {}
-                        Picked::Cancel => return Ok(true),
+                        Picked::Cancel => {
+                            eprintln!("  \u{23bf}  Resume cancelled");
+                            return Ok(true);
+                        }
                     }
                 }
             } else if argument.is_empty() {
@@ -140,10 +143,7 @@ pub async fn handle(
                 eprintln!("Use /resume ID to switch conversations.");
             } else {
                 session.resume_saved(paths, argument).await?;
-                eprintln!(
-                    "Resumed {} using saved provider {} and model {}.",
-                    session.id, session.provider_id, session.model
-                );
+                crate::repl::show_resumed(session, true)?;
             }
         }
         "/plan" => {

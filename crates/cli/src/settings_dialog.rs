@@ -114,7 +114,7 @@ enum ConfigOutcome {
 async fn config(paths: &RuntimePaths, session: &mut Session, input: &mut TerminalInput, selected: usize) -> Result<ConfigOutcome> {
     let display = crate::display_commands::load(session)?;
     let effort = crate::session_commands::session_effort(session)?.unwrap_or_else(|| "default".into());
-    let autocompact = crate::session_commands::autocompact(session)?.map_or_else(|| "off".to_owned(), |percent| format!("{percent}%"));
+    let autocompact = crate::session_commands::autocompact_label(session)?;
     let settings: Vec<(&str, &str, String)> = vec![
         ("model", "Model", session.model.clone()),
         ("provider", "Provider", session.provider_id.clone()),
@@ -147,7 +147,7 @@ async fn config(paths: &RuntimePaths, session: &mut Session, input: &mut Termina
     let choices: &[&str] = match *key {
         "permissions" => &["ask", "accept-edits", "plan", "auto", "dont-ask"],
         "effort" => &crate::session_commands::EFFORTS,
-        "autocompact" => &["off", "70%", "80%", "90%"],
+        "autocompact" => &["default", "off", "70%", "80%", "90%"],
         "theme" => &["dark", "light", "dark-daltonized", "light-daltonized", "dark-ansi", "light-ansi"],
         "color" => &["default", "red", "orange", "yellow", "green", "blue", "purple", "pink", "cyan"],
         "focus" => &["on", "off"],

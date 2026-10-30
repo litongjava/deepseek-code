@@ -283,7 +283,8 @@ impl SessionStore {
                     .then_with(|| b.id.cmp(&a.id))
             });
             for session in sessions {
-                if session.archived || session.workspace_mode != "code" {
+                // Empty sessions are not conversations to continue, as in the /resume list.
+                if session.archived || session.workspace_mode != "code" || session.message_count == 0 {
                     continue;
                 }
                 // Resolve the same project/worktree as the engine, rather than a

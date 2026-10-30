@@ -627,6 +627,12 @@ pub(crate) fn arguments(
         "--output-format".into(),
         "stream-json".into(),
     ];
+    if session.bypass_available {
+        args.push("--allow-dangerously-skip-permissions".into());
+    }
+    if session.full_access {
+        args.push("--full-access".into());
+    }
     if provider.provider.builtin_id.is_none() {
         args.extend(["--base-url".into(), provider.provider.base_url.clone()]);
         args.extend([
