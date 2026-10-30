@@ -528,7 +528,7 @@
     "skills": "기술",
     "connectors": "커넥터",
     "filterSkills": "필터 스킬...",
-    "createWithClaude": "Claude로 생성",
+    "createWithDeepSeek": "DeepSeek Code로 생성",
     "writeSkillInstructions": "기술 지침 작성",
     "uploadSkill": "스킬 업로드",
     "examples": "예시",

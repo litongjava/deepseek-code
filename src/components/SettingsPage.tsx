@@ -25,7 +25,7 @@ const WORK_OPTIONS = [
 
 type Tab = 'about' | 'general' | 'account' | 'usage' | 'models' | 'search' | 'customize' | 'tasks';
 
-const SettingsPage = ({ onCreateWithClaude }: { onCreateWithClaude?: () => void }) => {
+const SettingsPage = ({ onCreateWithDeepSeek }: { onCreateWithDeepSeek?: () => void }) => {
   const { t, locale } = useI18n();
   const navigate = useNavigate();
   const [tab, setTab] = useState<Tab>('general');
@@ -377,7 +377,7 @@ const SettingsPage = ({ onCreateWithClaude }: { onCreateWithClaude?: () => void 
 
         {/* Right Content Area */}
         <div className={`flex-1 min-w-0 ${tab === 'customize' ? 'overflow-hidden' : 'overflow-y-auto'}`}>
-          {tab === 'customize' ? <CustomizePage onBack={() => setTab('general')} onCreateWithClaude={onCreateWithClaude} /> : <div className="max-w-6xl px-6 lg:px-12 pb-32">
+          {tab === 'customize' ? <CustomizePage onBack={() => setTab('general')} onCreateWithDeepSeek={onCreateWithDeepSeek} /> : <div className="max-w-6xl px-6 lg:px-12 pb-32">
             {tab === 'general' && renderGeneral()}
             {tab === 'about' && renderAbout()}
             {tab === 'models' && <ProviderSettings />}

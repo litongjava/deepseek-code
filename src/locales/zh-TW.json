@@ -567,7 +567,7 @@
     "skills": "技能",
     "connectors": "連接器",
     "filterSkills": "篩選技能...",
-    "createWithClaude": "使用 Claude 創建",
+    "createWithDeepSeek": "使用 DeepSeek Code 創建",
     "writeSkillInstructions": "撰寫技能說明",
     "uploadSkill": "上傳技能",
     "examples": "範例",

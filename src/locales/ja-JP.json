@@ -528,7 +528,7 @@
     "skills": "スキル",
     "connectors": "コネクタ",
     "filterSkills": "フィルタースキル...",
-    "createWithClaude": "Claudeで作成",
+    "createWithDeepSeek": "DeepSeek Codeで作成",
     "writeSkillInstructions": "スキルの指示を書く",
     "uploadSkill": "スキルをアップロードする",
     "examples": "例",

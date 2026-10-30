@@ -528,7 +528,7 @@
     "skills": "कौशल",
     "connectors": "कनेक्टर्स",
     "filterSkills": "फ़िल्टर कौशल...",
-    "createWithClaude": "Claude के साथ बनाएं",
+    "createWithDeepSeek": "DeepSeek Code के साथ बनाएं",
     "writeSkillInstructions": "कौशल निर्देश लिखें",
     "uploadSkill": "एक कौशल अपलोड करें",
     "examples": "उदाहरण",

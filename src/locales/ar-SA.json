@@ -528,7 +528,7 @@
     "skills": "المهارات",
     "connectors": "الموصلات",
     "filterSkills": "مهارات التصفية...",
-    "createWithClaude": "إنشاء بـ Claude",
+    "createWithDeepSeek": "إنشاء بـ DeepSeek Code",
     "writeSkillInstructions": "كتابة تعليمات المهارة",
     "uploadSkill": "رفع مهارة",
     "examples": "أمثلة",

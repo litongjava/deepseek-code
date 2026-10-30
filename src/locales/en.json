@@ -585,7 +585,7 @@
     "skills": "Skills",
     "connectors": "Connectors",
     "filterSkills": "Filter skills...",
-    "createWithClaude": "Create with Claude",
+    "createWithDeepSeek": "Create with DeepSeek Code",
     "writeSkillInstructions": "Write skill instructions",
     "uploadSkill": "Upload a skill",
     "examples": "Examples",

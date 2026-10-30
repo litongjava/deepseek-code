@@ -528,7 +528,7 @@
     "skills": "Umiejętności",
     "connectors": "[0358] Złącza",
     "filterSkills": "Umiejętności filtrowania...",
-    "createWithClaude": "Utwórz za pomocą Claude",
+    "createWithDeepSeek": "Utwórz za pomocą DeepSeek Code",
     "writeSkillInstructions": "[0361] Napisz instrukcje dotyczące umiejętności",
     "uploadSkill": "Prześlij umiejętność",
     "examples": "[0363] Przykłady",

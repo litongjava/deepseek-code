@@ -528,7 +528,7 @@
     "skills": "Beceriler",
     "connectors": "Konektörler",
     "filterSkills": "Filtre becerileri...",
-    "createWithClaude": "Claude ile oluştur",
+    "createWithDeepSeek": "DeepSeek Code ile oluştur",
     "writeSkillInstructions": "Beceri talimatlarını yazın",
     "uploadSkill": "Bir beceri yükleyin",
     "examples": "Örnekler",

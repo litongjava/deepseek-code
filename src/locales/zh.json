@@ -585,7 +585,7 @@
     "skills": "技能",
     "connectors": "连接器",
     "filterSkills": "筛选技能...",
-    "createWithClaude": "使用 Claude 创建",
+    "createWithDeepSeek": "使用 DeepSeek Code 创建",
     "writeSkillInstructions": "编写技能说明",
     "uploadSkill": "上传技能",
     "examples": "示例",

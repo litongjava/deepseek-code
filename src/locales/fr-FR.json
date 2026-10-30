@@ -528,7 +528,7 @@
     "skills": "Compétences",
     "connectors": "Connecteurs",
     "filterSkills": "Filtrer les compétences...",
-    "createWithClaude": "Créer avec Claude",
+    "createWithDeepSeek": "Créer avec DeepSeek Code",
     "writeSkillInstructions": "Rédiger des instructions de compétences",
     "uploadSkill": "Télécharger une compétence",
     "examples": "Exemples",

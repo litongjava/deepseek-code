@@ -334,7 +334,7 @@ const RemotionMotionPanel: React.FC<RemotionMotionPanelProps> = ({ onRenderCompl
               </div>
               <h3 className="text-[15px] font-semibold text-claude-text">AI 视频生成</h3>
               <p className="text-[12px] text-claude-textSecondary mt-1">
-                用自然语言描述你想要的动画，Claude 会生成完整的 Remotion 代码并渲染成视频
+                用自然语言描述你想要的动画，模型会生成完整的 Remotion 代码并渲染成视频
               </p>
             </div>
 
@@ -411,7 +411,7 @@ const RemotionMotionPanel: React.FC<RemotionMotionPanelProps> = ({ onRenderCompl
                 className={`${btnPink} px-4 py-2 text-[13px]`}
               >
                 {aiGenerating ? (
-                  <><Loader2 size={14} className="animate-spin" /> Claude 正在生成代码...</>
+                  <><Loader2 size={14} className="animate-spin" /> 模型正在生成代码...</>
                 ) : (
                   <><Sparkles size={14} /> 生成视频</>
                 )}
@@ -429,7 +429,7 @@ const RemotionMotionPanel: React.FC<RemotionMotionPanelProps> = ({ onRenderCompl
                 <div className="flex items-center gap-2 mb-2">
                   <span className="w-2 h-2 rounded-full bg-green-400 animate-pulse" />
                   <span className="text-[11px] text-claude-textSecondary">
-                    {aiGenerating ? 'Claude 正在生成...' : '生成完成'}
+                    {aiGenerating ? '模型正在生成...' : '生成完成'}
                   </span>
                 </div>
                 <pre className="text-[11px] text-claude-text font-mono whitespace-pre-wrap">

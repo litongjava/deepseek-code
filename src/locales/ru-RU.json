@@ -528,7 +528,7 @@
     "skills": "Навыки",
     "connectors": "Соединители",
     "filterSkills": "Фильтровать навыки...",
-    "createWithClaude": "Создать с помощью Claude",
+    "createWithDeepSeek": "Создать с помощью DeepSeek Code",
     "writeSkillInstructions": "Напишите инструкции по навыкам",
     "uploadSkill": "Загрузить навык",
     "examples": "Примеры",

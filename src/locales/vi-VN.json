@@ -528,7 +528,7 @@
     "skills": "Kỹ năng",
     "connectors": "Đầu nối",
     "filterSkills": "Kỹ năng lọc...",
-    "createWithClaude": "Tạo bằng Claude",
+    "createWithDeepSeek": "Tạo bằng DeepSeek Code",
     "writeSkillInstructions": "Viết hướng dẫn kỹ năng",
     "uploadSkill": "Tải lên một kỹ năng",
     "examples": "Ví dụ",

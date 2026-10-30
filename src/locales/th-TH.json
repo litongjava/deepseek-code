@@ -528,7 +528,7 @@
     "skills": "ทักษะ",
     "connectors": "ขั้วต่อ",
     "filterSkills": "ทักษะการกรอง...",
-    "createWithClaude": "สร้างด้วย Claude",
+    "createWithDeepSeek": "สร้างด้วย DeepSeek Code",
     "writeSkillInstructions": "เขียนคำสั่งทักษะ",
     "uploadSkill": "อัปโหลดทักษะ",
     "examples": "ตัวอย่าง",

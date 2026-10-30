@@ -223,7 +223,7 @@ const Auth = () => {
       )}
       <div className="w-full max-w-md p-8 bg-white rounded-2xl shadow-sm border border-[#E5E5E5]">
         <div className="text-center mb-8">
-          <h1 className="text-3xl font-serif-claude text-[#222] mb-2">Claude</h1>
+          <h1 className="text-3xl font-serif-claude text-[#222] mb-2">DeepSeek Code</h1>
           <p className="text-[#747474]">欢迎回来</p>
         </div>
 

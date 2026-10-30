@@ -533,7 +533,7 @@ const MainContent = ({ onNewChat, resetKey, tunerConfig, onOpenDocument, onArtif
       setTimeout(() => setShowEntranceAnimation(false), 800);
       isAtBottomRef.current = true;
 
-      // Check for prefill input (from Create with Claude)
+      // Check for prefill input (from Create with DeepSeek Code)
       const prefillInput = sessionStorage.getItem('prefill_input');
       if (prefillInput) {
         sessionStorage.removeItem('prefill_input');

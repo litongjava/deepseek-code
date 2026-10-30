@@ -257,7 +257,7 @@ const Layout = () => {
     }
   };
 
-  const handleCreateSkillWithClaude = () => {
+  const handleCreateSkillWithDeepSeek = () => {
     sessionStorage.setItem('prefill_input', '让我们一起使用你的 skill-creator skill 来创建一个 skill 吧。请先问我这个 skill 应该做什么。');
     handleNewChat();
     navigate('/');
@@ -406,11 +406,11 @@ const Layout = () => {
               {showUpgrade ? (
                 <UpgradePlan onClose={() => setShowUpgrade(false)} />
               ) : location.pathname === '/settings' ? (
-                <SettingsPage onCreateWithClaude={handleCreateSkillWithClaude} />
+                <SettingsPage onCreateWithDeepSeek={handleCreateSkillWithDeepSeek} />
               ) : location.pathname === '/chats' ? (
                 <ChatsPage />
               ) : location.pathname === '/customize' ? (
-                <CustomizePage onCreateWithClaude={handleCreateSkillWithClaude} />
+                <CustomizePage onCreateWithDeepSeek={handleCreateSkillWithDeepSeek} />
               ) : location.pathname === '/projects' ? (
                 <ProjectsPage />
               ) : location.pathname === '/artifacts' ? (
