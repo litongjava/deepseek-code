@@ -196,11 +196,7 @@ pub fn get_app_path() -> Result<String, String> {
 pub async fn check_update() -> Result<Option<crate::updater::UpdateInfo>, String> {
     let data_dir = app_data_dir()
         .unwrap_or_else(|_| std::path::PathBuf::from("."));
-    let updater = crate::updater::AutoUpdater::new(
-        "https://api.claude-desktop.app/updates",
-        env!("CARGO_PKG_VERSION"),
-        data_dir.join("updates"),
-    );
+    let updater = crate::updater::AutoUpdater::configured(data_dir.join("updates")).map_err(|e| e.to_string())?;
     updater.check_for_updates().await.map_err(|e| e.to_string())
 }
 
