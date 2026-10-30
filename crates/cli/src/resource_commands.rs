@@ -12,7 +12,7 @@ pub(crate) const LESSONS: &[(&str, &str, &str)] = &[
     ("mcp", "Connect external tools", "Use /mcp to inspect configured tool servers. The dcl mcp add command registers a stdio server; plugin-provided servers follow the plugin enabled state."),
     ("skills", "Create a reusable skill", "Create .claude/skills/NAME/SKILL.md with YAML name and description, followed by instructions. /reload-skills refreshes the menu; /NAME invokes the skill."),
     ("sessions", "Continue a conversation", "Use /rename TITLE to label this session, /resume to browse saved sessions, and /branch TITLE to continue a copy."),
-    ("details", "Inspect work in progress", "Press Ctrl+O to expand tool details. The terminal also supports clicking detail headers and show less. Esc interrupts the active turn."),
+    ("details", "Inspect work in progress", "Press Ctrl+O to expand tool details; PgUp/PgDn scrolls and Ctrl+O closes. Esc interrupts the active turn."),
     ("language", "Navigate code with LSP", "Install a language-service plugin, then inspect /ide status. /ide lsp FILE documentSymbol lists symbols. Position-based operations use 1-based line and character values."),
 ];
 

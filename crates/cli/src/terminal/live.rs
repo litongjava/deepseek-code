@@ -3,8 +3,8 @@ use super::change_view;
 use super::tool_view::Gathering;
 use crossterm::{
     event::{
-        DisableBracketedPaste, DisableMouseCapture, EnableBracketedPaste,
-        EnableMouseCapture, Event, KeyCode, KeyEventKind, KeyModifiers, MouseButton, MouseEventKind,
+        DisableBracketedPaste, EnableBracketedPaste, Event, KeyCode, KeyEventKind, KeyModifiers, MouseButton,
+        MouseEventKind,
     },
     execute, terminal,
 };
@@ -40,8 +40,10 @@ enum Update {
     Text(String),
     Notice(String),
     Styled(Vec<change_view::Line>),
-    /// A tool result with hidden lines: the short form and the full one a
-    /// click switches between.
+    /// A tool result with hidden lines: the short form to show, and the full
+    /// one if the terminal reports a click (the mouse is not captured, so the
+    /// wheel and text selection stay with the terminal). Ctrl+O lists the full
+    /// text without a click.
     Expandable(Vec<change_view::Line>, Vec<change_view::Line>),
     /// The session's working directory, shown in the footer.
     Workspace(String),
@@ -117,8 +119,9 @@ impl LiveTurn {
         let mode = mode.to_owned();
         let worker = thread::spawn(move || {
             let result = terminal::enable_raw_mode()
-                // Clicks expand and collapse tool results in place.
-                .and_then(|_| execute!(io::stderr(), EnableBracketedPaste, EnableMouseCapture));
+                // The mouse stays with the terminal during a turn too: the
+                // wheel reaches scrollback and a drag selects text.
+                .and_then(|_| execute!(io::stderr(), EnableBracketedPaste));
             if result.is_err() {
                 let _ = terminal::disable_raw_mode();
                 let _ = ready.send(false);
@@ -226,7 +229,7 @@ impl Drop for LiveTurn {
 struct RawGuard;
 impl Drop for RawGuard {
     fn drop(&mut self) {
-        let _ = execute!(io::stderr(), DisableBracketedPaste, DisableMouseCapture);
+        let _ = execute!(io::stderr(), DisableBracketedPaste);
         let _ = terminal::disable_raw_mode();
     }
 }
@@ -2595,7 +2598,8 @@ impl TurnDisplay {
                 let display_lines =
                     change_view::change_in_workspace(output, failed, self.workspace.as_deref())
                         .unwrap_or_else(|| lines.clone());
-                // One summary line; a click shows the diff.
+                // One summary line; a click, where the terminal reports one,
+                // shows the diff. Ctrl+O has the full text regardless.
                 if display_lines.len() > 1 {
                     let _ = live.updates.send(Update::Expandable(display_lines[..1].to_vec(), display_lines));
                 } else {

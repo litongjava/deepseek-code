@@ -176,7 +176,7 @@ fn example(id: &str) -> &'static str {
         "mcp" => "Inspect: /mcp\nConfigure from your shell: dcl mcp add --help",
         "skills" => "Example: .claude/skills/review/SKILL.md\n---\nname: review\ndescription: Review local changes\n---\nCheck the diff for correctness.\nThen run /reload-skills and /review.",
         "sessions" => "Try: /rename investigate-tests\nUse /branch alternative to try another approach.",
-        "details" => "After a tool finishes, click its detail header or press Ctrl+O.\nScroll to Show less to collapse the output.",
+        "details" => "After a tool finishes, press Ctrl+O for its details.\nPgUp/PgDn scrolls; Ctrl+O closes.",
         "language" => "Try: /ide status\nThen: /ide lsp src/main.rs documentSymbol",
         _ => "",
     }

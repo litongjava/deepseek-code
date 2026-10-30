@@ -2,10 +2,10 @@
 //! the mouse is never captured, so the wheel and text selection stay with the
 //! terminal. No alternate screen is used; all modes are restored on exit.
 use crossterm::{
-    cursor::{position, MoveDown, MoveToColumn, MoveUp},
+    cursor::{position, MoveDown, MoveTo, MoveToColumn, MoveUp},
     event::{
-        DisableBracketedPaste, DisableMouseCapture, EnableBracketedPaste, EnableMouseCapture,
-        Event, KeyCode, KeyEventKind, KeyModifiers, MouseButton, MouseEventKind,
+        DisableBracketedPaste, EnableBracketedPaste, Event, KeyCode, KeyEventKind, KeyModifiers,
+        MouseButton, MouseEventKind,
     },
     execute, queue,
     style::{Attribute, ResetColor, SetAttribute, SetForegroundColor},
@@ -79,12 +79,7 @@ impl Default for PromptEditor {
 struct RawMode;
 impl Drop for RawMode {
     fn drop(&mut self) {
-        let _ = execute!(
-            io::stderr(),
-            DisableBracketedPaste,
-            DisableMouseCapture,
-            ResetColor
-        );
+        let _ = execute!(io::stderr(), DisableBracketedPaste, ResetColor);
         let _ = terminal::disable_raw_mode();
     }
 }
@@ -441,8 +436,20 @@ pub(crate) struct Screen {
     previous: Vec<DisplayLine>,
     invalidated: bool,
     cursor_col: usize,
+    /// The prompt keeps its last line on the screen's last row instead of
+    /// following the cursor. Modals that follow output stay unpinned.
+    pinned: bool,
+    /// Screen row of the frame's first line while pinned.
+    top: Option<u16>,
 }
 impl Screen {
+    /// A frame pinned to the bottom rows, as the prompt is.
+    pub(crate) fn pinned() -> Self {
+        Self {
+            pinned: true,
+            ..Self::default()
+        }
+    }
     pub(crate) fn resized(&mut self, rows: u16) -> io::Result<()> {
         let (_, cursor_y) = position()?;
         self.cursor_row = self.cursor_row.min(cursor_y as usize);
@@ -450,10 +457,20 @@ impl Screen {
         self.invalidated = true;
         Ok(())
     }
+    /// The terminal reflowed the frame; its screen row is unknown until the
+    /// next draw places it again.
+    pub(crate) fn reflow(&mut self) {
+        self.invalidated = true;
+        self.previous.clear();
+        self.top = None;
+    }
     pub(crate) fn draw(&mut self, lines: &[DisplayLine], row: usize, col: usize) -> io::Result<()> {
         // The editor redraws on every poll; an unchanged frame writes nothing.
         if !self.invalidated && self.previous == lines && self.cursor_row == row && self.cursor_col == col {
             return Ok(());
+        }
+        if self.pinned {
+            return self.draw_pinned(lines, row, col);
         }
         self.cursor_col = col;
         let mut out = io::stderr().lock();
@@ -463,6 +480,99 @@ impl Screen {
         out.write_all(b"\x1b[?2026l")?;
         out.flush()?;
         result
+    }
+
+    fn draw_pinned(&mut self, lines: &[DisplayLine], row: usize, col: usize) -> io::Result<()> {
+        let rows = terminal::size().map(|(_, rows)| rows).unwrap_or(24).max(1);
+        let (_, cursor_y) = position()?;
+        self.cursor_col = col;
+        let mut out = io::stderr().lock();
+        out.write_all(b"\x1b[?2026h")?;
+        let result = self.draw_pinned_to(&mut out, lines, row, col, rows as usize, cursor_y as usize);
+        out.write_all(b"\x1b[?2026l")?;
+        out.flush()?;
+        result
+    }
+
+    /// Draws `lines` ending on the last of `rows` rows. Content above the
+    /// frame is scrolled up rather than overwritten, so the transcript (and
+    /// the terminal's scrollback) keeps everything said.
+    fn draw_pinned_to(
+        &mut self,
+        out: &mut impl Write,
+        lines: &[DisplayLine],
+        row: usize,
+        col: usize,
+        rows: usize,
+        cursor_y: usize,
+    ) -> io::Result<()> {
+        // A frame taller than the screen keeps its bottom rows.
+        let dropped = lines.len().saturating_sub(rows);
+        let lines = &lines[dropped..];
+        let row = row.saturating_sub(dropped).min(lines.len().saturating_sub(1));
+        let height = lines.len().max(1);
+        let top = rows - height;
+        // Rows below the old frame's top belong to the frame. Before the first
+        // draw, and after a resize moved it, the cursor shows where it starts.
+        let first = self.height == 0;
+        let anchor = self
+            .top
+            .map(|old| old as usize)
+            .unwrap_or_else(|| if first { cursor_y } else { cursor_y.saturating_sub(row) })
+            .min(rows - 1);
+        let repaint = self.invalidated || anchor != top || self.height != height;
+        let mut frame = Vec::new();
+        if anchor > top {
+            // The frame grew: scroll the rows above it into scrollback so the
+            // whole frame fits on screen.
+            queue!(frame, MoveTo(0, (rows - 1) as u16))?;
+            for _ in top..anchor {
+                frame.extend_from_slice(b"\r\n");
+            }
+        } else if anchor < top {
+            // The frame shrank: erase the rows it no longer covers.
+            queue!(frame, MoveTo(0, anchor as u16), Clear(ClearType::FromCursorDown))?;
+        }
+        for (offset, (text, style)) in lines.iter().enumerate() {
+            if !repaint && self.previous.get(offset) == Some(&(text.clone(), *style)) {
+                continue;
+            }
+            queue!(frame, MoveTo(0, (top + offset) as u16))?;
+            if std::env::var_os("NO_COLOR").is_none() {
+                match style {
+                    TextStyle::Colored(color) => queue!(frame, SetForegroundColor(*color))?,
+                    TextStyle::Accent => queue!(
+                        frame,
+                        SetAttribute(Attribute::Bold),
+                        SetForegroundColor(crate::terminal::style::accent())
+                    )?,
+                    TextStyle::Success => {
+                        queue!(frame, SetForegroundColor(crate::terminal::style::success()))?
+                    }
+                    TextStyle::Border => {
+                        queue!(frame, SetForegroundColor(crate::terminal::style::border()))?
+                    }
+                    TextStyle::Plain => queue!(frame, ResetColor)?,
+                    TextStyle::Muted => queue!(frame, SetForegroundColor(crate::terminal::style::muted()))?,
+                    TextStyle::Selected => queue!(frame, SetForegroundColor(crate::terminal::style::selected()))?,
+                }
+            }
+            write!(frame, "{text}")?;
+            // Overwrite first, then erase only the old trailing cells.
+            if matches!(style, TextStyle::Accent) {
+                queue!(frame, SetAttribute(Attribute::Reset))?;
+            }
+            queue!(frame, ResetColor, Clear(ClearType::UntilNewLine))?;
+        }
+        queue!(frame, MoveTo(col as u16, (top + row) as u16))?;
+        out.write_all(&frame)?;
+        out.flush()?;
+        self.cursor_row = row;
+        self.height = height;
+        self.previous = lines.to_vec();
+        self.top = Some(top as u16);
+        self.invalidated = false;
+        Ok(())
     }
 
     fn draw_to(
@@ -540,34 +650,38 @@ impl Screen {
     }
     pub(crate) fn suspend(&mut self) -> io::Result<()> {
         let mut out = io::stderr();
-        queue!(out, MoveToColumn(0))?;
-        if self.cursor_row > 0 {
-            queue!(out, MoveUp(self.cursor_row as u16))?;
-        }
-        queue!(out, Clear(ClearType::FromCursorDown), ResetColor)?;
+        self.erase(&mut out)?;
         out.flush()
     }
 
     /// Remove the editor from the screen without echoing a submitted line.
     fn clear(&mut self) -> io::Result<()> {
         let mut out = io::stderr();
+        self.erase(&mut out)?;
+        out.flush()
+    }
+    /// Erases the frame, leaving the cursor on its first row.
+    fn erase(&mut self, out: &mut impl Write) -> io::Result<()> {
+        if self.pinned {
+            if let Some(top) = self.top.take() {
+                queue!(out, MoveTo(0, top), Clear(ClearType::FromCursorDown))?;
+            }
+            queue!(out, ResetColor)?;
+            self.previous.clear();
+            return Ok(());
+        }
         queue!(out, MoveToColumn(0))?;
         if self.cursor_row > 0 {
             queue!(out, MoveUp(self.cursor_row as u16))?;
         }
         queue!(out, Clear(ClearType::FromCursorDown), ResetColor)?;
-        out.flush()
+        Ok(())
     }
     fn finish(&mut self, text: &str, prompt: &str) -> io::Result<()> {
         // Clear menu and borders, retaining just submitted input in scrollback.
         let mut out = io::stderr();
         out.write_all(b"\x1b[?2026h")?;
-        queue!(out, MoveToColumn(0))?;
-        if self.cursor_row > 0 {
-            queue!(out, MoveUp(self.cursor_row as u16))?;
-        }
-        queue!(out, Clear(ClearType::FromCursorDown))?;
-        queue!(out, ResetColor)?;
+        self.erase(&mut out)?;
         crate::terminal::prompt_display::write_submitted(
             &mut out,
             prompt,
@@ -704,8 +818,9 @@ impl PromptEditor {
         terminal::enable_raw_mode()?;
         let _raw = RawMode;
         let mut input_reader = crate::terminal::paste_input::Reader::new()?;
-        // Clicks expand and collapse the last turn's tool results above.
-        execute!(io::stderr(), EnableBracketedPaste, EnableMouseCapture)?;
+        // The mouse stays with the terminal: the wheel scrolls scrollback and a
+        // drag selects text, as in the reference CLI.
+        execute!(io::stderr(), EnableBracketedPaste)?;
         let mut above = crate::terminal::scrollback::Scrollback::take();
         let mut buffer = self.resume_buffer();
         // As in the reference CLI, a stashed draft returns after the prompt
@@ -729,7 +844,7 @@ impl PromptEditor {
         // Read once per prompt; ctrl+t toggles whether they show.
         let todo_list = self.todos.as_ref().map(|todos| todos()).unwrap_or_default();
         let mut keybinding_pending = crate::keybindings::Pending::default();
-        let mut screen = Screen::default();
+        let mut screen = Screen::pinned();
         let mut selected = 0usize;
         let mut history_pos = self.history.len();
         let mut draft = String::new();
@@ -770,7 +885,7 @@ impl PromptEditor {
                         .collect();
                     write!(io::stderr(), "{}\r\n", safe.replace('\n', "\r\n"))?;
                     io::stderr().flush()?;
-                    screen = Screen::default();
+                    screen = Screen::pinned();
                 }
             }
             if let Some(suggestions) = &self.suggestions {
@@ -986,13 +1101,10 @@ impl PromptEditor {
                 continue;
             };
             match event {
-                Event::Resize(_, new_rows) => {
-                    // Dimensions changed: every row needs repainting. Clamp the
-                    // anchor to the cursor's actual visible row after a resize.
-                    let (_, cursor_y) = position()?;
-                    screen.cursor_row = screen.cursor_row.min(cursor_y as usize);
-                    screen.height = screen.height.min(new_rows.max(1) as usize);
-                    screen.invalidated = true;
+                Event::Resize(_, _) => {
+                    // The terminal reflowed the prompt; the next draw places it
+                    // on the last rows again.
+                    screen.reflow();
                 }
                 Event::Mouse(mouse) => {
                     let (_, cursor_y) = position()?;
@@ -1011,7 +1123,7 @@ impl PromptEditor {
                         let mut stderr = io::stderr().lock();
                         stderr.write_all(out.as_bytes())?;
                         stderr.flush()?;
-                        screen = Screen::default();
+                        screen = Screen::pinned();
                     } else if let Some(row) = mouse.row.checked_sub(origin) {
                         if mouse.kind == MouseEventKind::Down(MouseButton::Left)
                             && panel.toggle.is_some_and(|hit| {
@@ -1110,13 +1222,13 @@ impl PromptEditor {
                         screen.suspend()?;
                         let edited = edit_externally(&buffer.text())?;
                         buffer.set(&edited);
-                        screen = Screen::default();
+                        screen = Screen::pinned();
                         continue;
                     }
                     if control && key.code == KeyCode::Char('z') && cfg!(unix) {
                         screen.suspend()?;
                         suspend_process()?;
-                        screen = Screen::default();
+                        screen = Screen::pinned();
                         continue;
                     }
                     if key.code == KeyCode::Esc && items.is_empty() && !buffer.chars.is_empty() && !self.vim {
@@ -1216,7 +1328,7 @@ impl PromptEditor {
                             let mut out = io::stderr();
                             out.write_all(text.as_bytes())?;
                             out.flush()?;
-                            screen = Screen::default();
+                            screen = Screen::pinned();
                             self.transcript_printed = true;
                         } else {
                             self.details.toggle();
@@ -1540,6 +1652,66 @@ mod tests {
         let output = String::from_utf8(output).unwrap();
         assert_eq!(output.matches("\x1b[K").count(), 4);
         assert!(!output.contains('\n'));
+    }
+
+    #[test]
+    fn pinned_prompt_draws_on_the_last_rows_without_overwriting_transcript() {
+        let mut screen = Screen::pinned();
+        let lines = frame_lines();
+        let mut output = Vec::new();
+        // Four rows on a ten-row screen start at row 6 (0-based); the cursor
+        // is still at row 2 and the rows below it are ours to erase.
+        screen.draw_pinned_to(&mut output, &lines, 1, 3, 10, 2).unwrap();
+        let output = String::from_utf8(output).unwrap();
+        assert!(output.starts_with("\x1b[3;1H\x1b[J"), "clears from the cursor");
+        assert!(output.contains("\x1b[7;1H"), "first line on row 7");
+        assert!(output.contains("\x1b[10;1H"), "last line on row 10");
+        assert!(output.ends_with("\x1b[8;4H"), "cursor on the input row");
+        assert!(!output.contains("\r\n"), "nothing scrolls when it already fits");
+        assert_eq!(screen.top, Some(6));
+    }
+
+    #[test]
+    fn growing_pinned_prompt_scrolls_only_the_rows_it_overshoots() {
+        let mut screen = Screen::pinned();
+        let mut lines = frame_lines();
+        screen.draw_pinned_to(&mut Vec::new(), &lines, 1, 3, 10, 9).unwrap();
+        lines.push(("/status".into(), TextStyle::Muted));
+        let mut output = Vec::new();
+        screen.draw_pinned_to(&mut output, &lines, 1, 3, 10, 9).unwrap();
+        let output = String::from_utf8(output).unwrap();
+        assert_eq!(output.matches("\r\n").count(), 1);
+        assert!(output.starts_with("\x1b[10;1H\r\n"));
+        assert!(output.contains("\x1b[6;1H"), "the taller frame starts a row up");
+        assert_eq!(screen.top, Some(5));
+    }
+
+    #[test]
+    fn shrinking_pinned_prompt_erases_the_rows_it_leaves() {
+        let mut screen = Screen::pinned();
+        let mut lines = frame_lines();
+        screen.draw_pinned_to(&mut Vec::new(), &lines, 1, 3, 10, 9).unwrap();
+        lines.pop();
+        let mut output = Vec::new();
+        screen.draw_pinned_to(&mut output, &lines, 1, 3, 10, 9).unwrap();
+        let output = String::from_utf8(output).unwrap();
+        assert!(output.starts_with("\x1b[7;1H\x1b[J"), "the old top row is erased");
+        assert_eq!(output.matches("\x1b[K").count(), 3);
+        assert!(!output.contains("\r\n"));
+        assert_eq!(screen.top, Some(7));
+    }
+
+    #[test]
+    fn pinned_prompt_taller_than_the_screen_keeps_its_bottom_rows() {
+        let mut screen = Screen::pinned();
+        let lines = vec![("row".into(), TextStyle::Plain); 12];
+        let mut output = Vec::new();
+        screen.draw_pinned_to(&mut output, &lines, 11, 0, 10, 9).unwrap();
+        let output = String::from_utf8(output).unwrap();
+        assert!(output.contains("\x1b[1;1H"), "the frame fills the screen");
+        assert!(!output.contains("\x1b[11;1H"), "rows past the screen are dropped");
+        assert!(output.ends_with("\x1b[10;1H"));
+        assert_eq!(screen.top, Some(0));
     }
 
     #[test]

@@ -4,7 +4,7 @@
 use super::change_view::{self, Line};
 use crossterm::{
     cursor::{Hide, Show},
-    event::{Event, KeyCode, KeyEventKind, KeyModifiers, MouseEventKind},
+    event::{DisableMouseCapture, EnableMouseCapture, Event, KeyCode, KeyEventKind, KeyModifiers, MouseEventKind},
     execute,
     terminal::{self, EnterAlternateScreen, LeaveAlternateScreen},
 };
@@ -91,9 +91,11 @@ pub fn run(
     next_event: &mut dyn FnMut() -> io::Result<Option<Event>>,
 ) -> io::Result<Outcome> {
     let mut out = io::stderr();
-    execute!(out, EnterAlternateScreen, Hide)?;
+    // This full-screen pager is the one place the wheel belongs to the app:
+    // it scrolls the page. The prompt itself never captures the mouse.
+    execute!(out, EnterAlternateScreen, Hide, EnableMouseCapture)?;
     let result = pager(lines, next_event, &mut out);
-    execute!(out, Show, LeaveAlternateScreen)?;
+    execute!(out, Show, DisableMouseCapture, LeaveAlternateScreen)?;
     result
 }
 
@@ -274,11 +276,11 @@ fn open_in_editor(rows: &[Row], out: &mut impl Write) -> io::Result<()> {
         .unwrap_or_else(|_| "vi".into());
     let mut parts = editor.split_whitespace();
     let program = parts.next().unwrap_or("vi").to_owned();
-    execute!(out, Show, LeaveAlternateScreen)?;
+    execute!(out, Show, DisableMouseCapture, LeaveAlternateScreen)?;
     terminal::disable_raw_mode()?;
     let status = std::process::Command::new(&program).args(parts).arg(file.path()).status();
     terminal::enable_raw_mode()?;
-    execute!(out, EnterAlternateScreen, Hide)?;
+    execute!(out, EnableMouseCapture, EnterAlternateScreen, Hide)?;
     if let Err(error) = status {
         eprint!("Could not open {program}: {error}\r\n");
     }
