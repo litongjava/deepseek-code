@@ -5,9 +5,9 @@ use crossterm::event::Event;
 use std::{io, time::Duration};
 
 #[cfg(not(windows))]
-pub struct Reader;
+pub struct RawReader;
 #[cfg(not(windows))]
-impl Reader {
+impl RawReader {
     pub fn new() -> io::Result<Self> {
         Ok(Self)
     }
@@ -280,11 +280,11 @@ mod windows {
     }
     // Shared across idle/live ownership transfers; no second OS reader/thread.
     static STATE: Mutex<Option<State>> = Mutex::new(None);
-    pub struct Reader {
+    pub struct RawReader {
         handle: Handle,
         previous_vt: bool,
     }
-    impl Reader {
+    impl RawReader {
         pub fn new() -> io::Result<Self> {
             unsafe {
                 let handle = GetStdHandle(-10i32 as u32);
@@ -402,7 +402,7 @@ mod windows {
             }
         }
     }
-    impl Drop for Reader {
+    impl Drop for RawReader {
         fn drop(&mut self) {
             unsafe {
                 let mut mode = 0;
@@ -419,7 +419,7 @@ mod windows {
     }
 }
 #[cfg(windows)]
-pub use windows::Reader;
+use windows::RawReader;
 
 #[cfg(test)]
 mod tests {
@@ -484,5 +484,61 @@ mod tests {
         assert!(matches!(super::backspace_from_ctrl_h(ctrl_h), Event::Key(key) if key.code == KeyCode::Backspace && key.modifiers.is_empty()));
         let alt_h = Event::Key(KeyEvent::new(KeyCode::Char('h'), KeyModifiers::ALT));
         assert!(matches!(super::backspace_from_ctrl_h(alt_h), Event::Key(key) if key.code == KeyCode::Char('h')));
+    }
+}
+
+
+/// Coalesce unbracketed terminal paste bursts before any embedded Enter can submit.
+pub struct Reader {
+    raw: RawReader,
+    pending: std::collections::VecDeque<Event>,
+}
+impl Reader {
+    pub fn new() -> io::Result<Self> { Ok(Self { raw: RawReader::new()?, pending: Default::default() }) }
+    pub fn next(&mut self, timeout: Duration) -> io::Result<Option<Event>> {
+        if let Some(event) = self.pending.pop_front() { return Ok(Some(event)); }
+        let Some(first) = self.raw.next(timeout)? else { return Ok(None); };
+        if paste_character(&first).is_none() { return Ok(Some(first)); }
+        let mut events = vec![first];
+        while let Some(event) = self.raw.next(Duration::from_millis(8))? {
+            if matches!(&event, Event::Key(key) if key.kind == crossterm::event::KeyEventKind::Release) { continue; }
+            if paste_character(&event).is_none() { self.pending.push_back(event); break; }
+            events.push(event);
+            if events.len() >= 1_000_000 { break; }
+        }
+        let multiline = events.iter().any(|event| paste_character(event) == Some('\n'));
+        if events.len() >= 8 || (events.len() >= 2 && multiline) {
+            Ok(Some(Event::Paste(events.iter().filter_map(paste_character).collect())))
+        } else {
+            let first = events.remove(0);
+            for event in events.into_iter().rev() { self.pending.push_front(event); }
+            Ok(Some(first))
+        }
+    }
+}
+fn paste_character(event: &Event) -> Option<char> {
+    use crossterm::event::{KeyCode, KeyEventKind, KeyModifiers};
+    let Event::Key(key) = event else { return None; };
+    if key.kind == KeyEventKind::Release || key.modifiers.intersects(KeyModifiers::CONTROL | KeyModifiers::ALT) { return None; }
+    match key.code { KeyCode::Char(ch) => Some(ch), KeyCode::Enter => Some('\n'), KeyCode::Tab => Some('\t'), _ => None }
+}
+
+pub fn paste_label(text: &str) -> Option<String> {
+    let count = text.chars().count();
+    (count >= 200 || text.lines().count() >= 3).then(|| format!("[Pasted Content {count} chars]"))
+}
+
+
+#[cfg(test)]
+mod burst_tests {
+    use super::*;
+    use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+    #[test]
+    fn burst_enter_remains_text_and_unicode_count_is_not_bytes() {
+        let events = [Event::Key(KeyEvent::new(KeyCode::Char('中'), KeyModifiers::NONE)), Event::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))];
+        assert_eq!(events.iter().filter_map(paste_character).collect::<String>(), "中\n");
+        assert_eq!(paste_label(&"中".repeat(200)).as_deref(), Some("[Pasted Content 200 chars]"));
+        assert!(paste_label("hello").is_none());
+        assert_eq!(paste_label("a\nb\nc").as_deref(), Some("[Pasted Content 5 chars]"));
     }
 }

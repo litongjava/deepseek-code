@@ -233,6 +233,7 @@ impl Drop for RawGuard {
 }
 #[derive(Default, Clone)]
 struct Draft {
+    pasted: bool,
     characters: Vec<char>,
     cursor: usize,
 }
@@ -242,6 +243,7 @@ impl Draft {
         let count = normalized.chars().filter(|ch| !ch.is_control() || matches!(ch, '\n' | '\t')).count();
         if self.characters.len().saturating_add(count) > 32_768 { return false; }
         self.insert(&normalized);
+        self.pasted = true;
         true
     }
     fn insert(&mut self, text: &str) {
@@ -259,6 +261,7 @@ impl Draft {
         }
     }
     fn take(&mut self) -> String {
+        self.pasted = false;
         self.cursor = 0;
         std::mem::take(&mut self.characters).into_iter().collect()
     }
@@ -268,6 +271,12 @@ impl Draft {
         self.insert(text);
     }
     fn visible(&self, width: usize) -> (String, usize) {
+        if self.pasted {
+            if let Some(label) = super::paste_input::paste_label(&self.characters.iter().collect::<String>()) {
+                let text = clip(&label, width);
+                return (text.clone(), text.chars().count());
+            }
+        }
         let mut start = 0;
         while self.characters[start..self.cursor]
             .iter()
@@ -1817,6 +1826,7 @@ fn run(
             match event {
                 Event::Key(key) if key.kind != KeyEventKind::Release => {
                     selection.clear()?;
+                    if !matches!(key.code, KeyCode::Enter) { state.draft.pasted = false; }
                     let key = match state.bindings.resolve(key, &mut state.key_pending) {
                         crate::keybindings::Resolution::Key(key) => key,
                         crate::keybindings::Resolution::Consumed => continue,
@@ -2111,6 +2121,15 @@ mod tests {
         }
         assert!(logged.find("ANSWER_SENTINEL") < logged.find("NOTICE_SENTINEL"));
         assert!(logged.find("NOTICE_SENTINEL") < logged.find("PARTIAL_SENTINEL"));
+    }
+
+    #[test]
+    fn large_paste_displays_label_but_submits_original_text() {
+        let mut draft = Draft::default();
+        let text = "中文\n".repeat(100);
+        assert!(draft.insert_paste(&text));
+        assert!(draft.visible(80).0.starts_with("[Pasted Content 300 chars]"));
+        assert_eq!(draft.take(), text);
     }
 
     #[test]

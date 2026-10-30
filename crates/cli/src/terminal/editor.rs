@@ -86,12 +86,14 @@ impl Drop for RawMode {
 struct Buffer {
     chars: Vec<char>,
     cursor: usize,
+    pasted: bool,
 }
 impl Buffer {
     fn text(&self) -> String {
         self.chars.iter().collect()
     }
     fn set(&mut self, text: &str) {
+        self.pasted = false;
         self.chars = text.chars().collect();
         self.cursor = self.chars.len();
     }
@@ -940,8 +942,11 @@ impl PromptEditor {
             selected = selected.min(items.len().saturating_sub(1));
             // Wrap by display cells, never by UTF-8 bytes. Keep cursor in viewport.
             let prompt = clipped(prompt, width.saturating_sub(2));
-            let (input_lines, positions) = crate::terminal::prompt_display::layout(&prompt, &buffer.chars, width.saturating_sub(1));
-            let (cursor_row, cursor_col) = positions[buffer.cursor.min(buffer.chars.len())];
+            let label = buffer.pasted.then(|| crate::terminal::paste_input::paste_label(&text)).flatten();
+            let shown = label.as_ref().map(|label| label.chars().collect::<Vec<_>>());
+            let chars = shown.as_ref().unwrap_or(&buffer.chars);
+            let (input_lines, positions) = crate::terminal::prompt_display::layout(&prompt, chars, width.saturating_sub(1));
+            let (cursor_row, cursor_col) = positions[if shown.is_some() { chars.len() } else { buffer.cursor.min(chars.len()) }];
             let max_input = (rows as usize / 3).max(1);
             // As in the reference CLI one footer line suffices; a tip helps only
             // before the first prompt.
@@ -1200,6 +1205,8 @@ impl PromptEditor {
                     }
                 }
                 Event::Paste(value) => {
+                    selection.clear()?;
+                    buffer.pasted = true;
                     history_view.close()?;
                     screen.invalidated = true;
                     // A dragged or pasted image file shows as `[Image #N]`, as in the reference CLI.
@@ -1212,6 +1219,7 @@ impl PromptEditor {
                 }
                 Event::Key(key) if key.kind != KeyEventKind::Release => {
                     selection.clear()?;
+                    if !matches!(key.code, KeyCode::Enter) { buffer.pasted = false; }
                     let key = match self.keybindings.resolve(key, &mut keybinding_pending) {
                         crate::keybindings::Resolution::Key(key) => key,
                         crate::keybindings::Resolution::Consumed => continue,
