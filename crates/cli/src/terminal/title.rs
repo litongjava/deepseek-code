@@ -10,12 +10,59 @@ static NAMED: Mutex<Vec<String>> = Mutex::new(Vec::new());
 
 const PROMPT: &str = "Name the topic of the user's request in 2 to 5 words, in the request's language. Reply with only the title: no quotes, no punctuation at the end.";
 
-pub fn set(text: &str) {
+#[derive(Default)]
+struct TitleState {
+    text: String,
+    running: usize,
+}
+
+impl TitleState {
+    fn rendered(&self) -> String {
+        if self.running > 0 && !self.text.is_empty() {
+            format!("⏳ {}", self.text.trim_start_matches("✳ "))
+        } else {
+            self.text.clone()
+        }
+    }
+}
+
+static CURRENT: Mutex<TitleState> = Mutex::new(TitleState {
+    text: String::new(),
+    running: 0,
+});
+
+fn emit(text: &str) {
     let mut out = std::io::stdout();
     if out.is_terminal() && !crate::terminal::screen_reader() {
         let clean: String = text.chars().filter(|ch| !ch.is_control()).collect();
         let _ = write!(out, "\x1b]0;{clean}\x07");
         let _ = out.flush();
+    }
+}
+
+pub fn set(text: &str) {
+    let mut state = CURRENT.lock().unwrap_or_else(|error| error.into_inner());
+    state.text = text.to_owned();
+    emit(&state.rendered());
+}
+
+/// Keeps the busy marker scoped to the foreground running view, including errors.
+pub struct RunningTitle;
+
+impl RunningTitle {
+    pub fn new() -> Self {
+        let mut state = CURRENT.lock().unwrap_or_else(|error| error.into_inner());
+        state.running += 1;
+        emit(&state.rendered());
+        Self
+    }
+}
+
+impl Drop for RunningTitle {
+    fn drop(&mut self) {
+        let mut state = CURRENT.lock().unwrap_or_else(|error| error.into_inner());
+        state.running = state.running.saturating_sub(1);
+        emit(&state.rendered());
     }
 }
 
@@ -29,7 +76,10 @@ pub fn clear() {
 
 /// Shows the session's topic once it has been named.
 pub fn apply(session: &str) {
-    let topic = TOPIC.lock().unwrap_or_else(|error| error.into_inner()).take();
+    let topic = TOPIC
+        .lock()
+        .unwrap_or_else(|error| error.into_inner())
+        .take();
     if let Some((owner, title)) = topic {
         if owner == session {
             set(&format!("\u{2733} {title}"));
@@ -41,13 +91,18 @@ pub fn apply(session: &str) {
 fn tidy(reply: &str) -> Option<String> {
     let line = reply.lines().map(str::trim).find(|line| !line.is_empty())?;
     let decoration = |ch: char| matches!(ch, '"' | '\'' | '`' | '*' | '#') || ch.is_whitespace();
-    let line = line.trim_start_matches(decoration).trim_end_matches(|ch: char| decoration(ch) || matches!(ch, '.' | '。' | '!' | '！'));
+    let line = line
+        .trim_start_matches(decoration)
+        .trim_end_matches(|ch: char| decoration(ch) || matches!(ch, '.' | '。' | '!' | '！'));
     (!line.is_empty()).then(|| line.chars().take(50).collect())
 }
 
 /// Names the session's topic from its first prompt, in the background.
 pub fn name_topic(session: &crate::session::Session, prompt: &str) {
-    if !std::io::stdout().is_terminal() || prompt.trim().is_empty() || prompt.trim_start().starts_with('/') {
+    if !std::io::stdout().is_terminal()
+        || prompt.trim().is_empty()
+        || prompt.trim_start().starts_with('/')
+    {
         return;
     }
     {
@@ -58,10 +113,18 @@ pub fn name_topic(session: &crate::session::Session, prompt: &str) {
         named.push(session.id.clone());
     }
     let engine = session.side_engine();
-    let (id, provider, model) = (session.id.clone(), session.provider_id.clone(), session.model.clone());
+    let (id, provider, model) = (
+        session.id.clone(),
+        session.provider_id.clone(),
+        session.model.clone(),
+    );
     let prompt: String = prompt.chars().take(2000).collect();
     tokio::spawn(async move {
-        if let Ok(Some(title)) = engine.generate_text(&provider, &model, PROMPT, &prompt).await.map(|reply| tidy(&reply)) {
+        if let Ok(Some(title)) = engine
+            .generate_text(&provider, &model, PROMPT, &prompt)
+            .await
+            .map(|reply| tidy(&reply))
+        {
             *TOPIC.lock().unwrap_or_else(|error| error.into_inner()) = Some((id, title));
         }
     });
@@ -72,8 +135,30 @@ mod tests {
     use super::*;
 
     #[test]
+    fn running_marker_preserves_title_updates_and_restores_idle_title() {
+        let mut state = TitleState {
+            text: "✳ 修复工具详情".into(),
+            running: 0,
+        };
+        assert_eq!(state.rendered(), "✳ 修复工具详情");
+        state.running = 1;
+        assert_eq!(state.rendered(), "⏳ 修复工具详情");
+        state.text = "✳ 新会话标题".into();
+        state.running = 2;
+        assert_eq!(state.rendered(), "⏳ 新会话标题");
+        state.running = 0;
+        assert_eq!(state.rendered(), "✳ 新会话标题");
+        state.text.clear();
+        state.running = 1;
+        assert_eq!(state.rendered(), "");
+    }
+
+    #[test]
     fn titles_are_one_short_line_without_decoration() {
-        assert_eq!(tidy("\n\"Attached image color.\"\nmore").as_deref(), Some("Attached image color"));
+        assert_eq!(
+            tidy("\n\"Attached image color.\"\nmore").as_deref(),
+            Some("Attached image color")
+        );
         assert_eq!(tidy("**修复登录问题**。").as_deref(), Some("修复登录问题"));
         assert_eq!(tidy("   ").as_deref(), None);
         assert_eq!(tidy(&"x".repeat(80)).map(|title| title.len()), Some(50));

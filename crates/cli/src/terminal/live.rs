@@ -2540,6 +2540,7 @@ mod tests {
 
 /// Unified API: exactly one of the live actor and legacy progress writes output.
 pub struct TurnDisplay {
+    running_title: Option<super::title::RunningTitle>,
     workspace: Option<std::path::PathBuf>,
     pub live: Option<LiveTurn>,
     hooks: std::collections::BTreeMap<String, String>,
@@ -2569,6 +2570,7 @@ impl TurnDisplay {
         let mut fallback = super::progress::TurnProgress::new(interactive && live.is_none());
         fallback.set_permission_mode(mode);
         Ok(Self {
+            running_title: interactive.then(super::title::RunningTitle::new),
             workspace: None,
             live,
             hooks: Default::default(),
@@ -2879,6 +2881,7 @@ impl TurnDisplay {
         lines
     }
     pub fn finish(&mut self, error: Option<&str>) -> Vec<Action> {
+        self.running_title.take();
         if let Some(live) = self.live.take() {
             let summary = self.change_summary();
             if !summary.is_empty() {
