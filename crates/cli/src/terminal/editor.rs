@@ -496,7 +496,7 @@ impl Screen {
         result
     }
 
-    /// Draws `lines` ending on the last of `rows` rows. Content above the
+    /// Draws `lines` immediately after the transcript. Content above the
     /// frame is scrolled up rather than overwritten, so the transcript (and
     /// the terminal's scrollback) keeps everything said.
     fn draw_pinned_to(
@@ -513,7 +513,7 @@ impl Screen {
         let lines = &lines[viewport];
         let row = row.saturating_sub(dropped).min(lines.len().saturating_sub(1));
         let height = lines.len().max(1);
-        let top = rows - height;
+        let bottom_limit = rows - height;
         // Rows below the old frame's top belong to the frame. Before the first
         // draw, and after a resize moved it, the cursor shows where it starts.
         let first = self.height == 0;
@@ -522,6 +522,7 @@ impl Screen {
             .map(|old| old as usize)
             .unwrap_or_else(|| if first { cursor_y } else { cursor_y.saturating_sub(row) })
             .min(rows - 1);
+        let top = anchor.min(bottom_limit);
         let repaint = self.invalidated || anchor != top || self.height != height;
         let mut frame = Vec::new();
         if anchor > top {
@@ -531,7 +532,7 @@ impl Screen {
             for _ in top..anchor {
                 frame.extend_from_slice(b"\r\n");
             }
-        } else if anchor < top {
+        } else if self.height > height || first || self.invalidated {
             // The frame shrank: erase the rows it no longer covers.
             queue!(frame, MoveTo(0, anchor as u16), Clear(ClearType::FromCursorDown))?;
         }
@@ -1129,12 +1130,10 @@ impl PromptEditor {
                 }).collect();
                 if !selection.retained() { history_view.draw(&composer, input_row, cursor_col, (cols, rows))?; }
             } else if !selection.retained() {
-                if screen.height == 0 {
-                    let (_, cursor_y) = position()?;
-                    let top = (rows as usize).saturating_sub(lines.len().min(rows as usize));
-                    // Pinning a short resumed history leaves a gap above the composer.
-                    // Record that gap so selection coordinates still match the screen.
-                    for _ in cursor_y as usize..top { above.push(String::new(), None); }
+                if screen.height == 0 && above.needs_separator() {
+                    write!(io::stderr(), "\r\n")?;
+                    io::stderr().flush()?;
+                    above.push(String::new(), None);
                 }
                 screen.draw(&lines, input_row, cursor_col)?;
             }
@@ -1743,20 +1742,19 @@ mod tests {
     }
 
     #[test]
-    fn pinned_prompt_draws_on_the_last_rows_without_overwriting_transcript() {
+    fn composer_follows_short_transcript_without_filling_the_screen() {
         let mut screen = Screen::pinned();
         let lines = frame_lines();
         let mut output = Vec::new();
-        // Four rows on a ten-row screen start at row 6 (0-based); the cursor
-        // is still at row 2 and the rows below it are ours to erase.
+        // A short transcript ends at row 2; keep the composer there.
         screen.draw_pinned_to(&mut output, &lines, 1, 3, 10, 2).unwrap();
         let output = String::from_utf8(output).unwrap();
         assert!(output.starts_with("\x1b[3;1H\x1b[J"), "clears from the cursor");
-        assert!(output.contains("\x1b[7;1H"), "first line on row 7");
-        assert!(output.contains("\x1b[10;1H"), "last line on row 10");
-        assert!(output.ends_with("\x1b[8;4H"), "cursor on the input row");
+        assert!(output.contains("\x1b[3;1H"), "first line follows transcript");
+        assert!(output.contains("\x1b[6;1H"), "last line on row 6");
+        assert!(output.ends_with("\x1b[4;4H"), "cursor on the input row");
         assert!(!output.contains("\r\n"), "nothing scrolls when it already fits");
-        assert_eq!(screen.top, Some(6));
+        assert_eq!(screen.top, Some(2));
     }
 
     #[test]
@@ -1786,7 +1784,7 @@ mod tests {
         assert!(output.starts_with("\x1b[7;1H\x1b[J"), "the old top row is erased");
         assert_eq!(output.matches("\x1b[K").count(), 3);
         assert!(!output.contains("\r\n"));
-        assert_eq!(screen.top, Some(7));
+        assert_eq!(screen.top, Some(6));
     }
 
     #[test]

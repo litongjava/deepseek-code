@@ -961,6 +961,7 @@ fn stream_text(state: &mut State, screen: &mut Frame, text: &str) {
         finish_answer(state, screen);
         finish_thought(state, screen);
     }
+    if state.block_start && state.partial.is_empty() && !text.is_empty() { screen.separate_block(); }
     state.generated_characters = state.generated_characters.saturating_add(text.chars().count());
     state.estimate_pending = true;
     if state.activity.contains("thinking") || state.activity == "Waiting for response" {
@@ -1007,6 +1008,7 @@ fn finish_group(state: &mut State, screen: &mut Frame) {
     if group.calls.is_empty() {
         return;
     }
+    screen.separate_block();
     let kinds: Vec<Gathering> = group.calls.iter().map(|call| call.1).collect();
     let summary = super::tool_view::gathering_summary(&kinds, false);
     let line = format!("  {}", capitalized(&summary));
@@ -1212,9 +1214,12 @@ impl Frame {
         self.pending.push_str("\r\n");
         self.logged_rows += self.scrollback.push(text, block);
     }
+    fn separate_block(&mut self) {
+        if self.scrollback.needs_separator() { self.log_rendered(""); }
+    }
     /// Logs a tool result that a click expands and collapses.
     fn log_block(&mut self, short: Vec<change_view::Line>, full: Vec<change_view::Line>) {
-        if self.scrollback.needs_separator() { self.log_rendered(""); }
+        self.separate_block();
         let (block, lines) = self.scrollback.block(short, full);
         for line in lines {
             self.log_line(line, Some(block));
@@ -1633,11 +1638,13 @@ fn run(
                 }
                 Ok(Update::Notice(text)) => {
                     finish_text(state, screen);
+                    screen.separate_block();
                     screen.log(&text)?;
                     dirty = true;
                 }
                 Ok(Update::Styled(lines)) => {
                     finish_text(state, screen);
+                    if !lines.is_empty() { screen.separate_block(); }
                     let width = terminal::size().unwrap_or((80, 24)).0.saturating_sub(1) as usize;
                     let color = std::env::var_os("NO_COLOR").is_none();
                     for line in lines {
@@ -1687,6 +1694,9 @@ fn run(
                 Ok(Update::Thinking(text)) => {
                     let now = Instant::now();
                     if state.thinking_span.is_none() {
+                        finish_group(state, screen);
+                        finish_answer(state, screen);
+                        screen.separate_block();
                         state.thinking_preview.clear();
                     }
                     state.thinking_span = Some((state.thinking_span.map_or(now, |span| span.0), now));
@@ -1698,6 +1708,7 @@ fn run(
                     finish_thought(state, screen);
                     if state.group.is_none() {
                         finish_answer(state, screen);
+                        screen.separate_block();
                     }
                     group_call(state, id, kind, label, step);
                     dirty = true;
@@ -2928,6 +2939,22 @@ mod completion_tests {
         assert_eq!(display.hooks.values().collect::<Vec<_>>(), vec!["Check B"]);
         display.hook_progress("two", None);
         assert!(display.hooks.is_empty());
+    }
+
+    #[test]
+    fn streaming_answer_has_separator_before_its_first_newline() {
+        let mut state = State::new("ask".into());
+        let mut screen = Frame::default();
+        screen.log_block(vec![change_view::body("tool")], vec![change_view::body("tool")]);
+        state.block_start = true;
+        stream_text(&mut state, &mut screen, "partial");
+        assert_eq!(screen.logged.len(), 2);
+        assert_eq!(screen.logged[1], "");
+        stream_text(&mut state, &mut screen, " answer");
+        assert_eq!(screen.logged.len(), 2);
+        finish_answer(&mut state, &mut screen);
+        assert_eq!(screen.logged.len(), 3);
+        assert!(screen.logged[2].contains("partial answer"));
     }
 
     #[test]
