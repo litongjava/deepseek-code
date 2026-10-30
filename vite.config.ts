@@ -61,6 +61,9 @@ export default defineConfig(({ mode }) => {
       },
     },
     clearScreen: false,
+    // Scan only the app's entry for dependencies; other HTML files under the
+    // repository (src-tauri/writing-studio, legacy/) are not part of this build.
+    optimizeDeps: { entries: ['index.html'] },
     server: {
       fs: { deny: ['**/dev-bridge-key', '**/.env', '**/.env.*', '**/*.{crt,pem}'] },
       port: 5200,
@@ -79,7 +82,9 @@ export default defineConfig(({ mode }) => {
         },
       },
       hmr: { protocol: 'ws', host: '127.0.0.1', port: 5201 },
-      watch: { ignored: ['**/src-tauri/**'] },
+      // Cargo output, build artifacts and the legacy snapshot hold far more
+      // files than the watcher limit allows and never feed the dev server.
+      watch: { ignored: ['**/src-tauri/**', '**/target/**', '**/artifacts/**', '**/legacy/**'] },
     },
     envPrefix: ['VITE_', 'TAURI_ENV_*'],
     build: {
