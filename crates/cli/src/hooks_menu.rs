@@ -2,7 +2,7 @@
 //! with its description and the hooks configured for it.
 use crate::terminal::picker::{Entry, Picker};
 use anyhow::Result;
-use claude_core::services::tool_hooks::ActiveHook;
+use deepseek_code_core::services::tool_hooks::ActiveHook;
 
 /// Every event dcl runs hooks for, in the reference CLI's wording.
 const EVENTS: &[(&str, &str)] = &[

@@ -23,7 +23,7 @@
 ## 3. 验证工具
 
 - 测试（最近结果）：
-  - `cargo test --locked -p claude-core --lib --tests`：543 通过 / 0 失败 / 4 忽略
+  - `cargo test --locked -p deepseek-code-core --lib --tests`：543 通过 / 0 失败 / 4 忽略
   - `cargo test --locked -p deepseek-code-cli`：251 / 0 / 1
   - `cargo check --locked -p deepseek-code-desktop --all-targets`
   - `cargo build --locked -p deepseek-code-cli`
@@ -31,7 +31,7 @@
   - `node terminal-harness.mjs <spec.json>`：启动 CLI；运行中向 `<evidence>/input.jsonl` 追加 `{"write": "..."}` 或 `{"snapshot": "name"}` 行进行交互。
   - `node logs/fmt-backup/screen.js <abs path .screen.json> N`：读屏幕快照。
   - `integration-acceptance-fixture.mjs <prefix>`：本地模型 fixture（STEP_EDIT / STEP_WRITE2 / STEP_SLOW / STEP_TOOLS 等脚本化步骤）。
-  - `crates/core/examples/remote_control_mock.rs`：Remote Control 模拟服务（`cargo build --locked -p claude-core --example remote_control_mock` 后运行 `remote_control_mock.exe 5516 rc-mock-token`）；`node logs/fmt-backup/rc_answer.mjs allow|deny|interrupt|state` 扮演远程客户端。
+  - `crates/core/examples/remote_control_mock.rs`：Remote Control 模拟服务（`cargo build --locked -p deepseek-code-core --example remote_control_mock` 后运行 `remote_control_mock.exe 5516 rc-mock-token`）；`node logs/fmt-backup/rc_answer.mjs allow|deny|interrupt|state` 扮演远程客户端。
 - 测试用临时目录与本地 mock 端点，不用真实凭据。
 
 ## 4. 已完成（不要重做）

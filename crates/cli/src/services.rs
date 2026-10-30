@@ -1,11 +1,11 @@
 use crate::args::{ServiceCommands, TeamCommands};
 use anyhow::Result;
-use claude_core::services::{lifecycle, team, team_server::TeamServer, ServiceContext};
+use deepseek_code_core::services::{lifecycle, team, team_server::TeamServer, ServiceContext};
 use serde::Serialize;
-pub fn context(paths: &claude_core::runtime::RuntimePaths) -> Result<ServiceContext> {
+pub fn context(paths: &deepseek_code_core::runtime::RuntimePaths) -> Result<ServiceContext> {
     ServiceContext::open(
         paths.clone(),
-        std::sync::Arc::new(claude_core::services::EnvironmentCredentials),
+        std::sync::Arc::new(deepseek_code_core::services::EnvironmentCredentials),
     )
 }
 pub fn print(value: &impl Serialize) -> Result<()> {
@@ -103,12 +103,12 @@ pub async fn services(context: &ServiceContext, action: &ServiceCommands) -> Res
         ServiceCommands::Start { name, interval } => {
             eprintln!("Hosting {name}; Ctrl+C or services stop {name} stops this instance.");
             if name == "auto-dream" {
-                let config: claude_core::services::dream::DreamConfig = context.setting("auto-dream")?.unwrap_or_default();
+                let config: deepseek_code_core::services::dream::DreamConfig = context.setting("auto-dream")?.unwrap_or_default();
                 config.validate()?;
                 anyhow::ensure!(config.enabled, "Enable AutoDream with memory dream-config first");
-                claude_core::services::generation::Generator::saved(&context.paths, &config.provider, &config.model)?;
+                deepseek_code_core::services::generation::Generator::saved(&context.paths, &config.provider, &config.model)?;
                 let lease = lifecycle::Lease::acquire(context, name)?;
-                return tokio::select! { result=claude_core::services::dream::host(context.clone(),*interval,lease)=>result, _=tokio::signal::ctrl_c()=>Ok(()) };
+                return tokio::select! { result=deepseek_code_core::services::dream::host(context.clone(),*interval,lease)=>result, _=tokio::signal::ctrl_c()=>Ok(()) };
             }
             tokio::select! {result=lifecycle::run_team_sync(context.clone(),*interval)=>result,_=tokio::signal::ctrl_c()=>Ok(())}
         }
@@ -119,7 +119,7 @@ pub async fn services(context: &ServiceContext, action: &ServiceCommands) -> Res
         }
         ServiceCommands::TeamSync => print(&context.setting::<team::TeamConfig>("team-sync")?),
         ServiceCommands::Voice => {
-            print(&context.setting::<claude_core::services::voice::VoiceConfig>("voice")?)
+            print(&context.setting::<deepseek_code_core::services::voice::VoiceConfig>("voice")?)
         }
     }
 }

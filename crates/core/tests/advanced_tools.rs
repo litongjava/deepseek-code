@@ -1,4 +1,4 @@
-use claude_core::{
+use deepseek_code_core::{
     permissions::{
         AuditLogger, PermissionContext, PermissionManager, PermissionMode, PermissionResult,
     },

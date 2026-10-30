@@ -1,7 +1,7 @@
 //! Local workflow files. Hosted workflows need a vendor account and are not faked.
 use crate::{args::Cli, session::Session};
 use anyhow::{ensure, Context, Result};
-use claude_core::{
+use deepseek_code_core::{
     runtime::RuntimePaths,
     services::{background_sessions, permission_authority},
 };

@@ -1,7 +1,7 @@
 //! Explicit, previewable code/conversation rewind without destroying the source transcript.
 use crate::session::Session;
 use anyhow::{ensure, Context, Result};
-use claude_core::{
+use deepseek_code_core::{
     db::{conversation_repo, message_repo},
     runtime::RuntimePaths,
     services::{checkpoints, compaction},

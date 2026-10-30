@@ -1,7 +1,7 @@
 //! CLI rendering of read-only shared runtime observations.
 use crate::session::Session;
 use anyhow::{ensure, Result};
-use claude_core::services::{
+use deepseek_code_core::services::{
     anthropic_auth,
     runtime_status::{self, RuntimeStatus},
     session_worker,
@@ -83,14 +83,14 @@ pub async fn text(session: &Session, argument: &str) -> Result<String> {
     let title = session
         .store
         .db
-        .with_conn(|conn| claude_core::db::conversation_repo::get_conversation(conn, &session.id))
+        .with_conn(|conn| deepseek_code_core::db::conversation_repo::get_conversation(conn, &session.id))
         .ok()
         .and_then(Result::ok)
         .flatten()
         .and_then(|row| row.title)
         .filter(|title| !title.trim().is_empty())
         .unwrap_or_else(|| "(unnamed) \u{b7} /rename".into());
-    let language_servers = claude_core::tools::lsp_servers::status(&session.workspace);
+    let language_servers = deepseek_code_core::tools::lsp_servers::status(&session.workspace);
     let installed = language_servers.iter().filter(|row| row["installed"] == true).count();
     let mut sections = vec![
         vec![

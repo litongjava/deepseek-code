@@ -4,7 +4,7 @@ use crate::{
     session::Session,
 };
 use anyhow::{ensure, Result};
-use claude_core::{config::ConfigManager, runtime::RuntimePaths, services::anthropic_auth};
+use deepseek_code_core::{config::ConfigManager, runtime::RuntimePaths, services::anthropic_auth};
 
 const PROVIDER_ID: &str = "anthropic-oauth";
 
@@ -130,7 +130,7 @@ pub async fn handle(
                 ensure!(
                     matches!(
                         selected.provider.api_format,
-                        claude_core::native_engine::provider_manager::ApiFormat::Anthropic
+                        deepseek_code_core::native_engine::provider_manager::ApiFormat::Anthropic
                     ),
                     "Fast mode requires an Anthropic messages provider"
                 );

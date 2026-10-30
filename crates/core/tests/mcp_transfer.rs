@@ -1,4 +1,4 @@
-use claude_core::mcp::McpServerManager;
+use deepseek_code_core::mcp::McpServerManager;
 use serde_json::json;
 
 fn entry(name: &str) -> serde_json::Value {
@@ -163,7 +163,7 @@ async fn remote_server_status_reports_its_url_and_headers() {
     std::fs::write(&path, br#"{"mcpServers":{}}"#).unwrap();
     let manager = McpServerManager::new(path.clone());
     manager.initialize().await.unwrap();
-    let mut config: claude_core::mcp::McpServerConfig = serde_json::from_value(json!({
+    let mut config: deepseek_code_core::mcp::McpServerConfig = serde_json::from_value(json!({
         "id":"docs","name":"docs","command":"","args":[],"env":{},"enabled":false,
         "type":"http","url":"https://mcp.example.com/mcp","headers":{"Authorization":"Bearer t"}
     }))

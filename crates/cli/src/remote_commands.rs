@@ -2,7 +2,7 @@
 //! Control server. Remote prompts run only while the prompt is idle.
 use crate::{session::Session, terminal::input::TerminalInput};
 use anyhow::{Context, Result};
-use claude_core::{
+use deepseek_code_core::{
     runtime::RuntimePaths,
     services::remote_control::{
         self, Bridge, Endpoint, Inbound, Registration, Status, Timing, Update,
@@ -311,7 +311,7 @@ fn registration(session: &Session, name: &str) -> Result<Registration> {
             .store
             .db
             .with_conn(|conn| {
-                claude_core::db::conversation_repo::get_conversation(conn, &session.id)
+                deepseek_code_core::db::conversation_repo::get_conversation(conn, &session.id)
             })??
             .and_then(|row| row.title)
             .filter(|title| !title.trim().is_empty())

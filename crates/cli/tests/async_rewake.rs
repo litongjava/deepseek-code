@@ -1,6 +1,6 @@
 //! Live standalone worker: idle completion starts a fresh request without user authority.
 use axum::{extract::State, routing::post, Json, Router};
-use claude_core::{
+use deepseek_code_core::{
     runtime::{RuntimePaths, SessionStore},
     services::{background_sessions as jobs, permission_authority, session_worker as worker},
 };
@@ -193,7 +193,7 @@ async fn submit(
         "fixture-secret-only-in-memory".into(),
     )];
     if let Some(base) =
-        claude_core::native_engine::provider_manager::one_million_context_base(model)
+        deepseek_code_core::native_engine::provider_manager::one_million_context_base(model)
     {
         environment.push(("CLAUDE_RUST_WORKER_MODEL".into(),json!({"id":base,"name":base,"enabled":true,"supports_vision":false,"supports_web_search":false,"context_window":1_000_000,"max_tokens":max_tokens}).to_string()));
     }

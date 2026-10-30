@@ -1,6 +1,6 @@
 //! Two real workers exchange durable context while a model request is in flight.
 use axum::{extract::State, routing::post, Json, Router};
-use claude_core::{
+use deepseek_code_core::{
     runtime::{RuntimePaths, SessionStore},
     services::{background_sessions as jobs, session_messages as mail, session_worker as worker},
 };
@@ -354,7 +354,7 @@ async fn managed_worktree_owned_child_can_message_parent_without_new_source_trus
     let paths = RuntimePaths::new(temp.path().join("data")).unwrap();
     let store = SessionStore::new(paths.open_database().unwrap());
     let parent = store.create(&source, "fixture", "cli-runtime").unwrap();
-    let prepared = claude_core::worktree::session::prepare(&source, None, true).unwrap();
+    let prepared = deepseek_code_core::worktree::session::prepare(&source, None, true).unwrap();
     let project = store.resume(&parent).unwrap().project_id.unwrap();
     store
         .db

@@ -3,7 +3,7 @@
 use crate::session::Session;
 use crate::terminal::picker::{text_input, Entry, Key, Picked, Picker};
 use anyhow::Result;
-use claude_core::permissions::rules::PermissionAction;
+use deepseek_code_core::permissions::rules::PermissionAction;
 
 const TABS: [&str; 6] = ["Recently denied", "Allow", "Ask", "Deny", "Auto mode", "Workspace"];
 
@@ -90,7 +90,7 @@ pub async fn run(session: &mut Session) -> Result<()> {
             }
             4 => {
                 let context = crate::services::context(&session.paths)?;
-                let config = claude_core::permissions::auto_config::load(&context)?;
+                let config = deepseek_code_core::permissions::auto_config::load(&context)?;
                 let value = serde_json::to_value(&config)?;
                 let mut entries = vec![Entry { title: format!("Enabled: {}", value["enabled"].as_bool().unwrap_or(false)), detail: String::new() }];
                 entries.push(Entry { title: format!("Classifier: {}", value["classifier"]["kind"].as_str().unwrap_or("not set")), detail: String::new() });
@@ -101,7 +101,7 @@ pub async fn run(session: &mut Session) -> Result<()> {
             _ => {
                 let mut entries = vec![Entry { title: "Add directory\u{2026}".into(), detail: String::new() }];
                 entries.push(Entry { title: session.workspace.display().to_string(), detail: "working directory".into() });
-                let folders = session.store.db.with_conn(|conn| claude_core::native_engine::workspace::conversation_project(conn, &session.id))??;
+                let folders = session.store.db.with_conn(|conn| deepseek_code_core::native_engine::workspace::conversation_project(conn, &session.id))??;
                 for folder in folders.map(|project| project.folders).unwrap_or_default() {
                     if std::path::Path::new(&folder.path) != session.workspace {
                         entries.push(Entry { title: folder.path, detail: "added directory".into() });
@@ -128,7 +128,7 @@ pub async fn run(session: &mut Session) -> Result<()> {
                     let Some(rule) = text_input(&format!("Add {} rule (for example Bash(npm test *) or Read(.env)):", TABS[tab].to_lowercase()), "")?.filter(|rule| !rule.is_empty()) else {
                         continue;
                     };
-                    match claude_core::permissions::patterns::validate(&rule) {
+                    match deepseek_code_core::permissions::patterns::validate(&rule) {
                         Ok(_) => {
                             rules.insert(rule, wanted);
                             crate::permission_commands::save_rules(session, &rules)?;

@@ -22,9 +22,9 @@ fn windows() -> bool {
 
 fn missing_language_server() -> bool {
     let workspace = std::env::current_dir().unwrap_or_default();
-    claude_core::tools::lsp_servers::LANGUAGES
+    deepseek_code_core::tools::lsp_servers::LANGUAGES
         .iter()
-        .any(|language| claude_core::tools::lsp_servers::locate(language, &workspace).is_none())
+        .any(|language| deepseek_code_core::tools::lsp_servers::locate(language, &workspace).is_none())
 }
 
 const TIPS: &[Tip] = &[

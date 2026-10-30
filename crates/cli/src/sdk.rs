@@ -5,7 +5,7 @@ use crate::{
     session::Session,
 };
 use anyhow::{bail, ensure, Context, Result};
-use claude_core::native_engine::permission_response::PermissionResponse;
+use deepseek_code_core::native_engine::permission_response::PermissionResponse;
 use serde_json::{json, Value};
 enum Reply {
     Question(String),
@@ -277,7 +277,7 @@ mod question_tests {
     use super::*;
     #[tokio::test]
     async fn approval_patch_is_deferred_until_effective_input_is_validated() {
-        use claude_core::permissions::{
+        use deepseek_code_core::permissions::{
             AuditLogger, PermissionContext, PermissionManager, PermissionMode, PermissionResult,
         };
         let manager = Arc::new(PermissionManager::new(Arc::new(AuditLogger::new(16))));

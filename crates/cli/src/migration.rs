@@ -1,6 +1,6 @@
 use anyhow::{ensure, Context, Result};
 use clap::{Args, Subcommand};
-use claude_core::{
+use deepseek_code_core::{
     runtime::RuntimePaths,
     services::{project_templates as projects, remote_access},
 };
@@ -36,7 +36,7 @@ pub async fn cron(
     cwd: &std::path::Path,
     action: &CronCommands,
 ) -> Result<()> {
-    use claude_core::services::{lifecycle, scheduled_prompts};
+    use deepseek_code_core::services::{lifecycle, scheduled_prompts};
     let context = crate::services::context(paths)?;
     let cwd = cwd.canonicalize()?.to_string_lossy().into_owned();
     let input = match action {
@@ -62,7 +62,7 @@ pub async fn cron(
             }
         }
     };
-    crate::services::print(&claude_core::tools::scheduled::execute(input, &cwd)?)
+    crate::services::print(&deepseek_code_core::tools::scheduled::execute(input, &cwd)?)
 }
 
 #[derive(Debug, Subcommand)]
@@ -124,7 +124,7 @@ pub async fn learning(paths: &RuntimePaths, action: &LearningCommands) -> Result
     let ctx = crate::services::context(paths)?;
     match action {
         LearningCommands::Status => {
-            let mut value = serde_json::to_value(claude_core::learning::status(&ctx)?)?;
+            let mut value = serde_json::to_value(deepseek_code_core::learning::status(&ctx)?)?;
             value["enabled"] =
                 serde_json::json!(ctx.setting::<bool>("learning.enabled")?.unwrap_or(false));
             crate::services::print(&value)
@@ -134,11 +134,11 @@ pub async fn learning(paths: &RuntimePaths, action: &LearningCommands) -> Result
             crate::services::print(&serde_json::json!({"enabled":enabled}))
         }
         LearningCommands::Feedback { id, rating } => {
-            claude_core::learning::feedback(&ctx, id, *rating)?;
+            deepseek_code_core::learning::feedback(&ctx, id, *rating)?;
             crate::services::print(&serde_json::json!({"updated":id}))
         }
         LearningCommands::Accept { id } => {
-            crate::services::print(&claude_core::learning::accept(&ctx, id)?)
+            crate::services::print(&deepseek_code_core::learning::accept(&ctx, id)?)
         }
     }
 }
@@ -146,7 +146,7 @@ pub async fn performance(paths: &RuntimePaths, action: &PerformanceCommands) -> 
     let ctx = crate::services::context(paths)?;
     match action {
         PerformanceCommands::Status => crate::services::print(
-            &ctx.setting::<claude_core::performance::RouterConfig>("performance.router")?
+            &ctx.setting::<deepseek_code_core::performance::RouterConfig>("performance.router")?
                 .unwrap_or_default(),
         ),
         PerformanceCommands::Configure {
@@ -154,12 +154,12 @@ pub async fn performance(paths: &RuntimePaths, action: &PerformanceCommands) -> 
             provider,
             model,
         } => {
-            let config = claude_core::performance::RouterConfig {
+            let config = deepseek_code_core::performance::RouterConfig {
                 enabled: *enabled,
                 provider_id: provider.clone(),
                 model_id: model.clone(),
             };
-            claude_core::performance::configure_router(&ctx, &config)?;
+            deepseek_code_core::performance::configure_router(&ctx, &config)?;
             crate::services::print(&config)
         }
     }

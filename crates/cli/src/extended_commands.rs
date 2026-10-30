@@ -1,7 +1,7 @@
 ﻿//! Local commands backed by the shared conversation store and OS clipboard.
 use crate::session::Session;
 use anyhow::{ensure, Context, Result};
-use claude_core::{db::conversation_repo, runtime::RuntimePaths};
+use deepseek_code_core::{db::conversation_repo, runtime::RuntimePaths};
 use serde_json::Value;
 use std::{
     fs::OpenOptions,
@@ -153,11 +153,11 @@ pub async fn handle(
             );
             if argument.is_empty() && session.permission_mode() != "plan" {
                 session.set_permission_mode("plan").await?;
-                let path = claude_core::services::plans::path(&paths.data_dir, &session.id)?;
+                let path = deepseek_code_core::services::plans::path(&paths.data_dir, &session.id)?;
                 eprintln!("Plan mode enabled. Plan file: {}. Claude will submit it for approval before implementation.", path.display());
             } else {
-                let path = claude_core::services::plans::path(&paths.data_dir, &session.id)?;
-                let plan = claude_core::services::plans::read(&paths.data_dir, &session.id)?;
+                let path = deepseek_code_core::services::plans::path(&paths.data_dir, &session.id)?;
+                let plan = deepseek_code_core::services::plans::read(&paths.data_dir, &session.id)?;
                 if argument == "open" {
                     ensure!(plan.is_some(), "No plan written yet. Describe the task in plan mode first.");
                     crate::display_commands::edit_file(&path, "").await?;
@@ -177,7 +177,7 @@ pub async fn handle(
             // As in the reference CLI, subagents are chosen by asking for one;
             // this lists what is available.
             let context = crate::services::context(paths)?;
-            let agents = claude_core::services::agents::list(&context)?;
+            let agents = deepseek_code_core::services::agents::list(&context)?;
             let width = agents.iter().map(|agent| agent.id.chars().count()).max().unwrap_or(0) + 2;
             let mut text = String::from("  \u{23bf}  Ask DeepSeek Code to hand work to a subagent (e.g. \"use the explore agent to find where errors are logged\").\n     Available subagents:\n");
             for agent in agents {
@@ -190,7 +190,7 @@ pub async fn handle(
         "/list-agents" => {
             if argument == "definitions" {
                 let context = crate::services::context(paths)?;
-                for agent in claude_core::services::agents::list(&context)? {
+                for agent in deepseek_code_core::services::agents::list(&context)? {
                     println!("{}: {}", agent.id, agent.description);
                 }
             } else {
@@ -209,7 +209,7 @@ pub async fn handle(
                         let mut observed=peers.clone();
                         for peer in &mut observed {
                             let id=peer["id"].as_str().unwrap_or_default();
-                            let runtime=claude_core::services::session_worker::runtime_status(&paths.data_dir,id).await;
+                            let runtime=deepseek_code_core::services::session_worker::runtime_status(&paths.data_dir,id).await;
                             peer["worker"]=serde_json::to_value(runtime)?;
                         }
                         println!("{}", serde_json::to_string_pretty(&observed)?);
@@ -223,7 +223,7 @@ pub async fn handle(
                         Some(serde_json::json!({"operation":"send","to":to,"content":content.trim()}))
                     }
                     "inbox" if rest.trim()=="legacy" => {
-                        let result=claude_core::tools::agent_messages::execute_for_session(serde_json::json!({"operation":"receive"}),&session.workspace.to_string_lossy(),&session.id)?;
+                        let result=deepseek_code_core::tools::agent_messages::execute_for_session(serde_json::json!({"operation":"receive"}),&session.workspace.to_string_lossy(),&session.id)?;
                         println!("{}",serde_json::to_string_pretty(&result)?);
                         eprintln!("Legacy repository mailbox; these rows are not automatically injected into live context.");
                         None
@@ -239,7 +239,7 @@ pub async fn handle(
                     "read" if rest.trim().starts_with("legacy ") => {
                         let id=rest.trim().strip_prefix("legacy ").unwrap().trim();
                         ensure!(!id.is_empty() && !id.contains(char::is_whitespace), "Usage: /list-agents read legacy MESSAGE_ID");
-                        let result=claude_core::tools::agent_messages::execute_for_session(serde_json::json!({"operation":"mark_read","message_id":id}),&session.workspace.to_string_lossy(),&session.id)?;
+                        let result=deepseek_code_core::tools::agent_messages::execute_for_session(serde_json::json!({"operation":"mark_read","message_id":id}),&session.workspace.to_string_lossy(),&session.id)?;
                         println!("{}",serde_json::to_string_pretty(&result)?);
                         None
                     }
@@ -250,7 +250,7 @@ pub async fn handle(
                     _ => anyhow::bail!("Usage: /list-agents [list|definitions|message SESSION_ID TEXT|inbox [legacy]|sent|read MESSAGE_ID]"),
                 };
                 if let Some(request) = request {
-                    let result = claude_core::tools::agent_messages::execute_live(
+                    let result = deepseek_code_core::tools::agent_messages::execute_live(
                         &crate::services::context(paths)?, &session.id, request,
                     )?;
                     println!("{}", serde_json::to_string_pretty(&result)?);
@@ -266,19 +266,19 @@ pub async fn handle(
 }
 
 fn peer_sessions(
-    _store: &claude_core::runtime::SessionStore,
+    _store: &deepseek_code_core::runtime::SessionStore,
     root: &Path,
     _workspace: &Path,
     current: &str,
 ) -> Result<Vec<Value>> {
-    let context=claude_core::services::session_messages::context(root)?;
-    let mut peers=claude_core::services::session_messages::peers(&context,current)?;
+    let context=deepseek_code_core::services::session_messages::context(root)?;
+    let mut peers=deepseek_code_core::services::session_messages::peers(&context,current)?;
     for peer in &mut peers {
         let id=peer["id"].as_str().unwrap_or_default().to_owned();
         peer["status"]=serde_json::json!(if id==current {"attached"} else if peer["receiver_active"]==true {"active_receiver"} else {"saved"});
         peer["kind"]=serde_json::json!("session");
     }
-    claude_core::services::teams::classify_peers(root,&context,&mut peers)?;
+    deepseek_code_core::services::teams::classify_peers(root,&context,&mut peers)?;
     Ok(peers)
 }
 
@@ -432,7 +432,7 @@ mod tests {
     fn peer_list_scopes_projects_and_mailboxes_do_not_spoof_identity() {
         let dir = tempfile::tempdir().unwrap();
         let paths = RuntimePaths::new(dir.path().join("data")).unwrap();
-        let store = claude_core::runtime::SessionStore::new(paths.open_database().unwrap());
+        let store = deepseek_code_core::runtime::SessionStore::new(paths.open_database().unwrap());
         let project = dir.path().join("project");
         let other = dir.path().join("other");
         std::fs::create_dir_all(&project).unwrap();
@@ -450,14 +450,14 @@ mod tests {
             peers.iter().find(|p| p["id"] == child).unwrap()["status"],
             "saved"
         );
-        let sent = claude_core::tools::agent_messages::execute_for_session(
+        let sent = deepseek_code_core::tools::agent_messages::execute_for_session(
             json!({"operation":"send","to":child,"from":"spoof","content":"check"}),
             project.to_str().unwrap(),
             &parent,
         )
         .unwrap();
         assert_eq!(sent["from"], parent);
-        let inbox = claude_core::tools::agent_messages::execute_for_session(
+        let inbox = deepseek_code_core::tools::agent_messages::execute_for_session(
             json!({"operation":"receive"}),
             project.to_str().unwrap(),
             &child,
@@ -514,7 +514,7 @@ pub(crate) struct Resumable {
 
 /// The workspace's git branch, as the reference CLI lists sessions by it.
 fn git_branch(workspace: &Path) -> Option<String> {
-    claude_core::git::GitIntegration::new(workspace.to_path_buf())
+    deepseek_code_core::git::GitIntegration::new(workspace.to_path_buf())
         .get_current_branch()
         .ok()
         .filter(|branch| !branch.is_empty())
@@ -562,7 +562,7 @@ fn resumable(session: &Session, all: bool) -> Result<Vec<(String, Resumable)>> {
             let named = row.title.clone().filter(|title| !title.trim().is_empty() && title != "CLI session");
             let title = match named {
                 Some(title) => title,
-                None => claude_core::db::message_repo::get_messages_by_conversation(conn, &row.id)?
+                None => deepseek_code_core::db::message_repo::get_messages_by_conversation(conn, &row.id)?
                     .into_iter()
                     .find(|message| message.role == "user" && !crate::background_commands::is_notification(&message.content))
                     .map(|message| message.content.lines().next().unwrap_or_default().to_owned())

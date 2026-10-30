@@ -9,12 +9,12 @@ const MAX_STREAM: usize = 30_000;
 
 fn shell() -> (std::path::PathBuf, Vec<&'static str>) {
     if cfg!(windows) {
-        let program = claude_core::tools::lsp_servers::find_on_path("pwsh")
-            .or_else(|| claude_core::tools::lsp_servers::find_on_path("powershell"))
+        let program = deepseek_code_core::tools::lsp_servers::find_on_path("pwsh")
+            .or_else(|| deepseek_code_core::tools::lsp_servers::find_on_path("powershell"))
             .unwrap_or_else(|| "powershell".into());
         (program, vec!["-NoProfile", "-Command"])
     } else {
-        let program = claude_core::tools::lsp_servers::find_on_path("bash").unwrap_or_else(|| "sh".into());
+        let program = deepseek_code_core::tools::lsp_servers::find_on_path("bash").unwrap_or_else(|| "sh".into());
         (program, vec!["-c"])
     }
 }

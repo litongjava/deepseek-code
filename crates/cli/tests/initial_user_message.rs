@@ -105,9 +105,9 @@ async fn print_initial_turn_once_before_caller_and_resume_only_uses_fresh_output
                 requests.len()
             );
             assert_eq!(submits.matches("HOOK_startup").count(), 1);
-            let context = claude_core::services::session_messages::context(&data).unwrap();
+            let context = deepseek_code_core::services::session_messages::context(&data).unwrap();
             let authority =
-                claude_core::services::permission_authority::history(&context.db, &id, 8192)
+                deepseek_code_core::services::permission_authority::history(&context.db, &id, 8192)
                     .unwrap();
             assert_eq!(authority.len(), if caller { 2 } else { 1 });
             assert!(!serde_json::to_string(&authority).unwrap().contains("HOOK_"));

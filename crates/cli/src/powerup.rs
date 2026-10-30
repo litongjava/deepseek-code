@@ -4,7 +4,7 @@ use crate::{
     terminal::input::editor::{clipped, DisplayLine, Screen, TextStyle},
 };
 use anyhow::Result;
-use claude_core::runtime::RuntimePaths;
+use deepseek_code_core::runtime::RuntimePaths;
 use crossterm::{
     cursor::{Hide, Show},
     event::{Event, KeyCode, KeyEventKind, KeyModifiers},

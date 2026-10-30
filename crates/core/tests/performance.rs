@@ -1,4 +1,4 @@
-use claude_core::performance;
+use deepseek_code_core::performance;
 
 #[test]
 fn persisted_tool_output_is_complete_and_unicode_preview_is_bounded() {
@@ -136,7 +136,7 @@ async fn cancelling_retry_delay_prevents_another_request() {
 
 #[tokio::test]
 async fn shared_engine_routes_opt_in_and_preserves_explicit_provider() {
-    use claude_core::{
+    use deepseek_code_core::{
         native_engine::{
             engine_core::ChatRequest,
             provider_manager::{Provider, ProviderManager},
@@ -146,7 +146,7 @@ async fn shared_engine_routes_opt_in_and_preserves_explicit_provider() {
     };
     use serde_json::json;
     use std::sync::Arc;
-    claude_core::config::OrchestrationConfig::init_global().unwrap();
+    deepseek_code_core::config::OrchestrationConfig::init_global().unwrap();
     let seen = Arc::new(std::sync::Mutex::new(Vec::<serde_json::Value>::new()));
     let captured = seen.clone();
     let app = axum::Router::new().route("/v1/chat/completions", axum::routing::post(move |axum::Json(body): axum::Json<serde_json::Value>| { let captured = captured.clone(); async move {
@@ -181,7 +181,7 @@ async fn shared_engine_routes_opt_in_and_preserves_explicit_provider() {
         vec![provider],
         dir.path().join("providers.json"),
     )));
-    let skills = claude_core::skills::SkillsManager::with_path(dir.path().join("skills"));
+    let skills = deepseek_code_core::skills::SkillsManager::with_path(dir.path().join("skills"));
     skills
         .create_skill(
             "Test Skill",
@@ -194,7 +194,7 @@ async fn shared_engine_routes_opt_in_and_preserves_explicit_provider() {
         ctx.db.clone(),
         manager,
         runtime::default_permissions(),
-        Arc::new(claude_core::cache::FileCache::new()),
+        Arc::new(deepseek_code_core::cache::FileCache::new()),
     )
     .with_skills_manager(Arc::new(tokio::sync::Mutex::new(skills)));
     let sessions = SessionStore::new(ctx.db.clone());
@@ -248,7 +248,7 @@ async fn shared_engine_routes_opt_in_and_preserves_explicit_provider() {
         .chain(std::iter::once(&requests[2]))
         .filter_map(|m| m.get("system").or_else(|| (m["role"] == "system").then(|| &m["content"])))
         .any(|system| system.to_string().contains("Unique skill marker 7931")));
-    let observations = claude_core::learning::status(&ctx).unwrap();
+    let observations = deepseek_code_core::learning::status(&ctx).unwrap();
     assert_eq!(observations.experiences.len(), 3);
     assert!(observations
         .experiences

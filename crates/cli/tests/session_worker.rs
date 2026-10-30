@@ -1,6 +1,6 @@
 //! Real supervisor/host IPC with a local model endpoint and an actual MCP child.
 use axum::{extract::State, routing::post, Json, Router};
-use claude_core::{
+use deepseek_code_core::{
     runtime::{RuntimePaths, SessionStore},
     services::{background_sessions as jobs, session_worker as worker},
 };
@@ -181,7 +181,7 @@ async fn submit(
         "fixture-secret-only-in-memory".into(),
     )];
     if let Some(base) =
-        claude_core::native_engine::provider_manager::one_million_context_base(model)
+        deepseek_code_core::native_engine::provider_manager::one_million_context_base(model)
     {
         environment.push(("CLAUDE_RUST_WORKER_MODEL".into(),json!({"id":base,"name":base,"enabled":true,"supports_vision":false,"supports_web_search":false,"context_window":1_000_000,"max_tokens":max_tokens}).to_string()));
     }
@@ -424,12 +424,12 @@ async fn persistent_engine_reuses_mcp_refreshes_settings_and_recovers_after_cras
     let session = store
         .create(&workspace, "fixture-one", "cli-runtime")
         .unwrap();
-    let hook_service = claude_core::services::ServiceContext {
-        paths: paths.clone(), db: store.db.clone(), credentials: Arc::new(claude_core::services::EnvironmentCredentials),
+    let hook_service = deepseek_code_core::services::ServiceContext {
+        paths: paths.clone(), db: store.db.clone(), credentials: Arc::new(deepseek_code_core::services::EnvironmentCredentials),
     };
     std::fs::write(workspace.join("lifecycle.cjs"), "require('fs').appendFileSync('lifecycle-count','start\\n'); console.log('WORKER_HOOK_CONTEXT');").unwrap();
     std::fs::write(paths.data_dir.join("settings.json"), json!({"hooks":{"SessionStart":[{"hooks":[{"type":"command","command":"node lifecycle.cjs"}]}]}}).to_string()).unwrap();
-    claude_core::services::session_hooks::start(&hook_service, &workspace, &session, "startup", "fixture-one").await.unwrap();
+    deepseek_code_core::services::session_hooks::start(&hook_service, &workspace, &session, "startup", "fixture-one").await.unwrap();
     let marker = temp.path().join("starts.txt");
     let script = temp.path().join("mcp.cjs");
     std::fs::write(&script,r#"require('fs').appendFileSync(process.env.START_MARKER,'start\n');require('readline').createInterface({input:process.stdin}).on('line',line=>{const r=JSON.parse(line);if(r.id!==undefined)process.stdout.write(JSON.stringify({jsonrpc:'2.0',id:r.id,result:{protocolVersion:'2024-11-05',capabilities:{},serverInfo:{name:'fixture',version:'1'},tools:[],resources:[]}})+'\n');});"#).unwrap();
@@ -511,14 +511,14 @@ async fn persistent_engine_reuses_mcp_refreshes_settings_and_recovers_after_cras
     assert_eq!(active_status.state,"reachable", "runtime status must not wait for the active turn's Session mutex");
     assert!(active_status.tools.unwrap().mcp_initialized);
     tokio::time::timeout(Duration::from_secs(2), worker::set_permission_mode(&paths.data_dir, &session, &slow, "plan")).await.unwrap().unwrap();
-    assert_eq!(claude_core::services::session_permission_mode::load(&store.db, &session).unwrap(), Some(claude_core::permissions::PermissionMode::PlanMode));
+    assert_eq!(deepseek_code_core::services::session_permission_mode::load(&store.db, &session).unwrap(), Some(deepseek_code_core::permissions::PermissionMode::PlanMode));
     assert_eq!(worker::permission_mode(&paths.data_dir, &session, &slow).await.unwrap(), "plan");
     worker::set_permission_mode(&paths.data_dir, &session, &slow, "accept-edits").await.unwrap();
     // Query after an older mode event has been queued must return live authority.
     assert_eq!(worker::permission_mode(&paths.data_dir, &session, &slow).await.unwrap(), "accept-edits");
     worker::set_permission_mode(&paths.data_dir, &session, &slow, "dontAsk").await.unwrap();
     assert_eq!(worker::permission_mode(&paths.data_dir, &session, &slow).await.unwrap(), "dont-ask");
-    assert_eq!(claude_core::services::session_permission_mode::load(&store.db, &session).unwrap(), Some(claude_core::permissions::PermissionMode::DontAsk));
+    assert_eq!(deepseek_code_core::services::session_permission_mode::load(&store.db, &session).unwrap(), Some(deepseek_code_core::permissions::PermissionMode::DontAsk));
     assert!(worker::set_permission_mode(&paths.data_dir, &session, &slow, "auto").await.is_err());
     assert_eq!(worker::permission_mode(&paths.data_dir, &session, &slow).await.unwrap(), "dont-ask");
     assert!(worker::set_permission_mode(&paths.data_dir, &session, &slow, "bypass").await.is_err());

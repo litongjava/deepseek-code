@@ -41,13 +41,13 @@ impl State {
     ) -> Result<Value> {
         ensure!(!self.initialized, "Already initialized");
         let mut overrides = validate(cli, request)?;
-        let servers = request.get("sdkMcpServers").map(claude_core::mcp::sdk::validate_names).transpose()?.unwrap_or_default();
+        let servers = request.get("sdkMcpServers").map(deepseek_code_core::mcp::sdk::validate_names).transpose()?.unwrap_or_default();
         session.validate_sdk_mcp_servers(&servers).await?;
         let mcp_host = session.sdk_mcp_transport.clone().context("SDK MCP transport unavailable")?;
         ensure!(session.sdk_hooks.is_some(), "SDK hook transport unavailable");
         let callbacks = request
             .get("hooks")
-            .map(claude_core::services::hook_callbacks::validate)
+            .map(deepseek_code_core::services::hook_callbacks::validate)
             .transpose()?
             .unwrap_or_default();
         let catalog = agents::prepare(session, request.get("agents")).await?;
@@ -76,7 +76,7 @@ impl State {
             if let Some(mode) = &agent.permission_mode {
                 session
                     .permissions
-                    .set_mode(claude_core::permissions::PermissionMode::parse(mode)?);
+                    .set_mode(deepseek_code_core::permissions::PermissionMode::parse(mode)?);
             }
         }
         let mut response = metadata(session).await?;
@@ -130,15 +130,15 @@ fn validate(cli: &Cli, request: &Value) -> Result<Overrides> {
                 }
             }
             "jsonSchema" => {
-                claude_core::structured_output::validate_schema(value)
+                deepseek_code_core::structured_output::validate_schema(value)
                     .context("Invalid initialize.jsonSchema")?;
                 schema = Some(value.clone());
             }
             "agents" => ensure!(value.is_object(), "initialize.agents must be an object"),
             "hooks" => {
-                claude_core::services::hook_callbacks::validate(value)?;
+                deepseek_code_core::services::hook_callbacks::validate(value)?;
             }
-            "sdkMcpServers" => { claude_core::mcp::sdk::validate_names(value)?; },
+            "sdkMcpServers" => { deepseek_code_core::mcp::sdk::validate_names(value)?; },
             "promptSuggestions" => {
                 suggestions = value
                     .as_bool()
@@ -200,7 +200,7 @@ async fn metadata(session: &Session) -> Result<Value> {
     let commands = crate::skill_commands::catalog(&skills).into_iter().map(|(name, description)| {
         json!({"name":name.trim_start_matches('/'),"description":description,"argumentHint":""})
     }).collect::<Vec<_>>();
-    let agents = claude_core::services::agents::list(&context)?
+    let agents = deepseek_code_core::services::agents::list(&context)?
         .into_iter()
         .map(|agent| {
             // Agent model overrides are not applied by the current execution engine.

@@ -6,7 +6,7 @@ pub mod peripheral;
 pub fn app_data_dir() -> Result<std::path::PathBuf, String> {
     static DIR: std::sync::OnceLock<Result<std::path::PathBuf, String>> = std::sync::OnceLock::new();
     DIR.get_or_init(|| {
-        claude_core::runtime::RuntimePaths::default_data_dir().map_err(|e| e.to_string())
+        deepseek_code_core::runtime::RuntimePaths::default_data_dir().map_err(|e| e.to_string())
     })
     .clone()
 }
@@ -453,7 +453,7 @@ pub async fn mcp_import_legacy(
     app_handle: tauri::AppHandle,
     source: String,
     preview: bool,
-) -> Result<claude_core::mcp::transfer::Report, String> {
+) -> Result<deepseek_code_core::mcp::transfer::Report, String> {
     let mcp_state =
         app_handle.state::<Arc<Mutex<Option<Arc<Mutex<crate::mcp::McpServerManager>>>>>>();
     let guard = mcp_state.lock().await;

@@ -28,7 +28,7 @@ impl Write for RedactingWriter {
 impl Drop for RedactingWriter {
     fn drop(&mut self) {
         let text =
-            claude_core::services::feedback::redact(&String::from_utf8_lossy(&self.bytes), &[]);
+            deepseek_code_core::services::feedback::redact(&String::from_utf8_lossy(&self.bytes), &[]);
         let _ = self.output.write_all(text.as_bytes());
         let _ = self.output.flush();
     }
@@ -96,7 +96,7 @@ pub fn configure(path: Option<PathBuf>) -> anyhow::Result<()> {
     *DESTINATION.write().unwrap_or_else(|e| e.into_inner()) = path;
     *FILE.write().unwrap_or_else(|e| e.into_inner()) = file;
     handle.reload(EnvFilter::new(if enabled {
-        "error,claude_core=debug,claude_code=debug"
+        "error,deepseek_code_core=debug,claude_code=debug"
     } else {
         "error"
     }))?;
@@ -113,14 +113,14 @@ pub fn destination() -> Option<PathBuf> {
 fn category_filter(categories: &str) -> anyhow::Result<EnvFilter> {
     use anyhow::{bail, ensure};
     if categories.trim().is_empty() {
-        return Ok(EnvFilter::new("error,claude_core=debug,claude_code=debug"));
+        return Ok(EnvFilter::new("error,deepseek_code_core=debug,claude_code=debug"));
     }
     let parts: Vec<_> = categories.split(',').map(str::trim).collect();
     let has_inclusions = parts.iter().any(|part| !part.starts_with('!'));
     let mut filter = if has_inclusions {
         "error".to_owned()
     } else {
-        "error,claude_core=debug,claude_code=debug".to_owned()
+        "error,deepseek_code_core=debug,claude_code=debug".to_owned()
     };
     for part in parts {
         let (enabled, name) = part
@@ -129,16 +129,16 @@ fn category_filter(categories: &str) -> anyhow::Result<EnvFilter> {
             .unwrap_or((true, part));
         ensure!(!name.is_empty(), "Empty debug category");
         let target = match name {
-            "api" => "claude_core::native_engine",
-            "hooks" => "claude_core::services::tool_hooks",
-            "mcp" => "claude_core::mcp",
-            "lsp" => "claude_core::tools::lsp",
-            "ide" => "claude_core::services::ide",
-            "skills" => "claude_core::skills",
-            "permissions" => "claude_core::permissions",
+            "api" => "deepseek_code_core::native_engine",
+            "hooks" => "deepseek_code_core::services::tool_hooks",
+            "mcp" => "deepseek_code_core::mcp",
+            "lsp" => "deepseek_code_core::tools::lsp",
+            "ide" => "deepseek_code_core::services::ide",
+            "skills" => "deepseek_code_core::skills",
+            "permissions" => "deepseek_code_core::permissions",
             "cli" => "claude_code",
-            "1p" => "claude_core::native_engine::anthropic_client",
-            "file" => "claude_core::tools",
+            "1p" => "deepseek_code_core::native_engine::anthropic_client",
+            "file" => "deepseek_code_core::tools",
             _ => bail!("Unknown debug category '{name}'; use api,hooks,mcp,lsp,ide,skills,permissions,cli,1p,file (prefix ! to exclude)"),
         };
         filter.push_str(&format!(
@@ -166,12 +166,12 @@ mod tests {
     #[test]
     fn debug_categories_preserve_exclusions_and_reject_misspellings() {
         let filter = category_filter("api,hooks,!1p").unwrap().to_string();
-        assert!(filter.contains("claude_core::native_engine=debug"));
-        assert!(filter.contains("claude_core::native_engine::anthropic_client=off"));
+        assert!(filter.contains("deepseek_code_core::native_engine=debug"));
+        assert!(filter.contains("deepseek_code_core::native_engine::anthropic_client=off"));
         assert!(category_filter("!file")
             .unwrap()
             .to_string()
-            .contains("claude_core=debug"));
+            .contains("deepseek_code_core=debug"));
         assert!(category_filter("mistyped").is_err());
         assert!(category_filter("api,,hooks").is_err());
     }

@@ -1,5 +1,5 @@
 use axum::{extract::State, routing::post, Json, Router};
-use claude_core::{
+use deepseek_code_core::{
     memory::ContextManager,
     native_engine::provider_manager::Provider,
     runtime::RuntimePaths,

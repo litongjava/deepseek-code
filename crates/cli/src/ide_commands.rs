@@ -1,7 +1,7 @@
 //! Explicit editor attachment, independent of Desktop and the LSP registry.
 use crate::session::Session;
 use anyhow::{ensure, Context, Result};
-use claude_core::{
+use deepseek_code_core::{
     permissions::{PermissionLevel, PermissionScope, ToolPermission},
     services::ide,
 };
@@ -93,7 +93,7 @@ pub async fn handle(session: &Session, argument: &str) -> Result<bool> {
         "status" => {
             ensure!(words.len() <= 1, "Usage: /ide status");
             println!("{}", serde_json::to_string_pretty(&session.ide.status().await)?);
-            println!("Language servers: {}", serde_json::to_string_pretty(&claude_core::tools::lsp_status(&session.workspace.to_string_lossy()).await?)?);
+            println!("Language servers: {}", serde_json::to_string_pretty(&deepseek_code_core::tools::lsp_status(&session.workspace.to_string_lossy()).await?)?);
             eprintln!("/ide list | connect [PORT] | disconnect | tools | selection | open FILE [LINE] | diagnostics [FILE]\n/ide lsp FILE OPERATION [LINE CHARACTER] (1-based)");
         },
         "list" => {
@@ -165,7 +165,7 @@ pub async fn handle(session: &Session, argument: &str) -> Result<bool> {
 /// `/ide` as in the reference CLI: the editors running this workspace to
 /// choose from, or a short note when there are none. `/ide status` keeps
 /// the detailed report.
-async fn pick(session: &Session, context: &claude_core::services::ServiceContext) -> Result<()> {
+async fn pick(session: &Session, context: &deepseek_code_core::services::ServiceContext) -> Result<()> {
     use crate::terminal::picker::{Entry, Picker};
     let editors: Vec<ide::Editor> = ide::discover(&ide::lock_directory()?, &session.workspace)?
         .into_iter()

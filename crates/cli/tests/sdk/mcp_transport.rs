@@ -434,9 +434,9 @@ async fn sdk_mcp_plan_and_explicit_deny_override_host_hook_allow() {
         let server = start_server(false, vec![("mcp__first__echo", json!({"value":"ONE"}))]).await;
         let denied_session = if mode == "deny" {
             let context =
-                claude_core::services::session_messages::context(&root.path().join("data"))
+                deepseek_code_core::services::session_messages::context(&root.path().join("data"))
                     .unwrap();
-            let store = claude_core::runtime::SessionStore::new(context.db.clone());
+            let store = deepseek_code_core::runtime::SessionStore::new(context.db.clone());
             let id = store
                 .create(root.path(), "fixture-model", "cli-runtime")
                 .unwrap();

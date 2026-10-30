@@ -3,7 +3,7 @@ use axum::{
     http::{HeaderMap, StatusCode},
     response::{IntoResponse, Response},
 };
-use claude_core::services::{permission_authority, session_messages, ServiceContext};
+use deepseek_code_core::services::{permission_authority, session_messages, ServiceContext};
 
 #[derive(Clone)]
 struct Model {
@@ -452,15 +452,15 @@ async fn idle_child_live_mode_is_scoped_to_child_and_respects_owner_plan() {
         );
         assert!(!fixture.workspace.join("idle.txt").exists());
         assert_eq!(
-            claude_core::services::session_permission_mode::load(&fixture.store.db, &fixture.owner)
+            deepseek_code_core::services::session_permission_mode::load(&fixture.store.db, &fixture.owner)
                 .unwrap()
-                .map(claude_core::services::session_permission_mode::name),
+                .map(deepseek_code_core::services::session_permission_mode::name),
             Some(mode)
         );
         assert_eq!(
-            claude_core::services::session_permission_mode::load(&fixture.store.db, &fixture.child)
+            deepseek_code_core::services::session_permission_mode::load(&fixture.store.db, &fixture.child)
                 .unwrap()
-                .map(claude_core::services::session_permission_mode::name),
+                .map(deepseek_code_core::services::session_permission_mode::name),
             Some("plan")
         );
         let reply = worker::call(

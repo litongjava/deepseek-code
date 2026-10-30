@@ -1,5 +1,5 @@
 use anyhow::{ensure, Context, Result};
-use claude_core::{
+use deepseek_code_core::{
     runtime::RuntimePaths,
     services::{dream, generation::Generator, lifecycle, team, voice, Credentials, ServiceContext},
 };
@@ -30,7 +30,7 @@ fn context(app: &tauri::AppHandle) -> Result<ServiceContext> {
     Ok(ServiceContext {
         paths: RuntimePaths::new(super::app_data_dir().map_err(anyhow::Error::msg)?)?,
         db: app
-            .state::<Arc<claude_core::db::DbManager>>()
+            .state::<Arc<deepseek_code_core::db::DbManager>>()
             .inner()
             .clone(),
         credentials: Arc::new(DesktopCredentials(app.clone())),
@@ -84,12 +84,12 @@ pub enum Request {
     LearningFeedback { id: String, rating: f64 },
     LearningAccept { id: String },
     PerformanceStatus,
-    PerformanceConfigure { config: claude_core::performance::RouterConfig },
+    PerformanceConfigure { config: deepseek_code_core::performance::RouterConfig },
     ProjectTemplates,
     ProjectScaffold { parent: std::path::PathBuf, name: String, template: String, template_file: Option<std::path::PathBuf>, #[serde(default)] variables: std::collections::HashMap<String,String>, #[serde(default)] git: bool, #[serde(default)] vscode: bool, preview: bool, #[serde(default)] allow_commands: bool },
     NetworkCancel { id: String },
-    RemoteRequest { id: String, request: claude_core::services::remote_access::RemoteRequest, confirmed: bool },
-    SshOperation { id: String, config: claude_core::services::remote_access::SshConfig, operation: claude_core::services::remote_access::SshOperation, confirmed: bool },
+    RemoteRequest { id: String, request: deepseek_code_core::services::remote_access::RemoteRequest, confirmed: bool },
+    SshOperation { id: String, config: deepseek_code_core::services::remote_access::SshConfig, operation: deepseek_code_core::services::remote_access::SshOperation, confirmed: bool },
     SessionImport {source:std::path::PathBuf,project_id:String,preview:bool},
     McpHosts,
     McpRestart {server:String,host:String},
@@ -104,7 +104,7 @@ pub enum Request {
     UpdateCheck { url:String },
     AgentImportLegacy { source: std::path::PathBuf, id: String, preview: bool },
     Agents,
-    AgentImport { definition: claude_core::services::agents::Definition },
+    AgentImport { definition: deepseek_code_core::services::agents::Definition },
     AgentCreate { project_id:String, agent_type:String, provider:String, model:String },
     Magic { project_id: String, operation: MagicRequest },
     DreamStatus,
@@ -166,22 +166,22 @@ pub async fn peripheral_command(
     async {
         let context=context(&app)?;
         match request {
-            Request::SkillImportLegacy {source,preview} => Ok(json!(claude_core::skills::import::import_legacy(&source,&context.paths.data_dir.join("skills"),preview)?)),
+            Request::SkillImportLegacy {source,preview} => Ok(json!(deepseek_code_core::skills::import::import_legacy(&source,&context.paths.data_dir.join("skills"),preview)?)),
             Request::Cron {project_id,operation} => {
-                let project=context.db.with_conn(|c|claude_core::db::project_repo::require_trusted(c,&project_id))??;
+                let project=context.db.with_conn(|c|deepseek_code_core::db::project_repo::require_trusted(c,&project_id))??;
                 ensure!(!project.is_archived,"Select an active project");
                 let root=project.workspace_path.context("Project has no workspace")?;
-                claude_core::tools::scheduled::execute(operation,&root)
+                deepseek_code_core::tools::scheduled::execute(operation,&root)
             }
             Request::CronStart {project_id,provider,model} => {
-                let project=context.db.with_conn(|c|claude_core::db::project_repo::require_trusted(c,&project_id))??;
+                let project=context.db.with_conn(|c|deepseek_code_core::db::project_repo::require_trusted(c,&project_id))??;
                 ensure!(!project.is_archived,"Select an active project");
                 let root=project.workspace_path.context("Project has no workspace")?;
                 Generator::saved(&context.paths,&provider,&model)?;
                 let mut tasks=host.memory_tasks.lock().unwrap();
                 ensure!(tasks.get("cron").is_none_or(|t|t.is_finished()),"Cron host is still running");
                 let lease=lifecycle::Lease::acquire(&context,"cron")?;
-                tasks.insert("cron".into(),tokio::spawn(claude_core::services::scheduled_prompts::run_with_lease(context,root,provider,model,lease)));
+                tasks.insert("cron".into(),tokio::spawn(deepseek_code_core::services::scheduled_prompts::run_with_lease(context,root,provider,model,lease)));
                 Ok(json!({"started":true}))
             }
             Request::CronStop => {
@@ -190,15 +190,15 @@ pub async fn peripheral_command(
                 if let Some(task)=task {let _=task.await;}
                 Ok(json!({"stopped":true}))
             }
-            Request::LearningStatus => {let mut value=json!(claude_core::learning::status(&context)?);value["enabled"]=json!(context.setting::<bool>("learning.enabled")?.unwrap_or(false));Ok(value)},
+            Request::LearningStatus => {let mut value=json!(deepseek_code_core::learning::status(&context)?);value["enabled"]=json!(context.setting::<bool>("learning.enabled")?.unwrap_or(false));Ok(value)},
             Request::LearningConfigure { enabled } => {context.save_setting("learning.enabled",&enabled)?;Ok(json!({"enabled":enabled}))},
-            Request::LearningFeedback { id, rating } => {claude_core::learning::feedback(&context,&id,rating)?;Ok(json!({"updated":id}))},
-            Request::LearningAccept { id } => Ok(json!(claude_core::learning::accept(&context,&id)?)),
-            Request::PerformanceStatus => Ok(json!(context.setting::<claude_core::performance::RouterConfig>("performance.router")?.unwrap_or_default())),
-            Request::PerformanceConfigure { config } => {claude_core::performance::configure_router(&context,&config)?;Ok(json!(config))},
-            Request::ProjectTemplates => Ok(json!(claude_core::services::project_templates::builtin_templates())),
+            Request::LearningFeedback { id, rating } => {deepseek_code_core::learning::feedback(&context,&id,rating)?;Ok(json!({"updated":id}))},
+            Request::LearningAccept { id } => Ok(json!(deepseek_code_core::learning::accept(&context,&id)?)),
+            Request::PerformanceStatus => Ok(json!(context.setting::<deepseek_code_core::performance::RouterConfig>("performance.router")?.unwrap_or_default())),
+            Request::PerformanceConfigure { config } => {deepseek_code_core::performance::configure_router(&context,&config)?;Ok(json!(config))},
+            Request::ProjectTemplates => Ok(json!(deepseek_code_core::services::project_templates::builtin_templates())),
             Request::ProjectScaffold { parent,name,template,template_file,variables,git,vscode,preview,allow_commands } => {
-                use claude_core::services::project_templates as projects;
+                use deepseek_code_core::services::project_templates as projects;
                 let template=if let Some(file)=template_file { projects::load_template(&file)? } else { projects::builtin_templates().into_iter().find(|t|t.name==template).context("Unknown project template")? };
                 let plan=projects::preview(&parent,&name,&template,&variables,git,vscode)?;
                 if preview {Ok(json!(plan))} else {Ok(json!({"created":projects::create(plan,allow_commands).await?}))}
@@ -206,68 +206,68 @@ pub async fn peripheral_command(
             Request::NetworkCancel { id } => { if let Some(sender)=host.voice_jobs.lock().unwrap().remove(&id) { let _=sender.send(true); } Ok(json!({"cancelled":id})) },
             Request::RemoteRequest { id,request,confirmed } => {
                 ensure!(confirmed || matches!(request.method.to_ascii_uppercase().as_str(),"GET"|"HEAD"),"Confirm the mutating HTTP request first");
-                run_network(&host,id,async {Ok(json!(claude_core::services::remote_access::request(request).await?))}).await
+                run_network(&host,id,async {Ok(json!(deepseek_code_core::services::remote_access::request(request).await?))}).await
             }
             Request::SshOperation { id,config,operation,confirmed } => {
-                ensure!(confirmed || matches!(operation,claude_core::services::remote_access::SshOperation::Check),"Confirm the SSH operation first");
-                run_network(&host,id,async {Ok(json!(claude_core::services::remote_access::ssh(&config,operation).await?))}).await
+                ensure!(confirmed || matches!(operation,deepseek_code_core::services::remote_access::SshOperation::Check),"Confirm the SSH operation first");
+                run_network(&host,id,async {Ok(json!(deepseek_code_core::services::remote_access::ssh(&config,operation).await?))}).await
             }
             Request::SessionImport {source,project_id,preview} => {
-                let project=context.db.with_conn(|c|claude_core::db::project_repo::require_trusted(c,&project_id))??;
+                let project=context.db.with_conn(|c|deepseek_code_core::db::project_repo::require_trusted(c,&project_id))??;
                 ensure!(!project.is_archived,"Select an active project");let root=project.workspace_path.context("Project has no workspace")?;
-                Ok(json!(claude_core::services::session_import::import_into_project(&context,&source,std::path::Path::new(&root),preview,Some(&project_id))?))
+                Ok(json!(deepseek_code_core::services::session_import::import_into_project(&context,&source,std::path::Path::new(&root),preview,Some(&project_id))?))
             }
 
-            Request::McpHosts => Ok(json!(claude_core::mcp::control::hosts(&context)?)),
-            Request::McpRestart {server,host} => Ok(json!({"host":claude_core::mcp::control::restart(&context,&server,Some(&host)).await?})),
-            Request::PluginSearch {registry,query} => Ok(json!(claude_core::services::plugins::search(&registry,&query).await?)),
-            Request::PluginImportLegacy {source,preview} => Ok(json!(claude_core::services::plugins::import_legacy(&context,std::path::Path::new(&source),preview)?)),
-            Request::Plugins => Ok(json!(claude_core::services::plugins::list(&context)?)),
-            Request::PluginInstall {source,update} => Ok(json!(claude_core::services::plugins::install(&context,&source,update.as_deref()).await?)),
-            Request::PluginEnable {id,enabled} => {claude_core::services::plugins::enable(&context,&id,enabled)?;Ok(json!({"enabled":enabled}))},
-            Request::PluginRemove {id} => {claude_core::services::plugins::remove(&context,&id)?;Ok(json!({"removed":id}))},
+            Request::McpHosts => Ok(json!(deepseek_code_core::mcp::control::hosts(&context)?)),
+            Request::McpRestart {server,host} => Ok(json!({"host":deepseek_code_core::mcp::control::restart(&context,&server,Some(&host)).await?})),
+            Request::PluginSearch {registry,query} => Ok(json!(deepseek_code_core::services::plugins::search(&registry,&query).await?)),
+            Request::PluginImportLegacy {source,preview} => Ok(json!(deepseek_code_core::services::plugins::import_legacy(&context,std::path::Path::new(&source),preview)?)),
+            Request::Plugins => Ok(json!(deepseek_code_core::services::plugins::list(&context)?)),
+            Request::PluginInstall {source,update} => Ok(json!(deepseek_code_core::services::plugins::install(&context,&source,update.as_deref()).await?)),
+            Request::PluginEnable {id,enabled} => {deepseek_code_core::services::plugins::enable(&context,&id,enabled)?;Ok(json!({"enabled":enabled}))},
+            Request::PluginRemove {id} => {deepseek_code_core::services::plugins::remove(&context,&id)?;Ok(json!({"removed":id}))},
             Request::PluginRun {id,command,input,project_id,confirmed} => {
                 ensure!(confirmed,"Confirm plugin execution first");
-                let project=context.db.with_conn(|c|claude_core::db::project_repo::require_trusted(c,&project_id))??;
+                let project=context.db.with_conn(|c|deepseek_code_core::db::project_repo::require_trusted(c,&project_id))??;
                 ensure!(!project.is_archived,"Select an active project");
                 let root=project.workspace_path.context("Project has no workspace")?;
-                claude_core::services::plugins::run(&context,&id,&command,input,std::path::Path::new(&root)).await
+                deepseek_code_core::services::plugins::run(&context,&id,&command,input,std::path::Path::new(&root)).await
             },
-            Request::Diagnostics {concurrency,iterations} => Ok(json!(claude_core::services::diagnostics::stress(concurrency,iterations,None,false).await?)),
-            Request::UpdateCheck {url} => {let update=claude_core::services::updates::check(&url,env!("CARGO_PKG_VERSION")).await?;Ok(json!({"up_to_date":update.is_none(),"update":update}))}
-            Request::AgentImportLegacy { source, id, preview } => Ok(json!(claude_core::services::agent_import::import(&context, &source, &id, preview)?)),
-            Request::Agents => Ok(json!(claude_core::services::agents::list(&context)?)),
-            Request::AgentImport { definition } => {claude_core::services::agents::install(&context,definition)?;Ok(json!({"imported":true}))}
+            Request::Diagnostics {concurrency,iterations} => Ok(json!(deepseek_code_core::services::diagnostics::stress(concurrency,iterations,None,false).await?)),
+            Request::UpdateCheck {url} => {let update=deepseek_code_core::services::updates::check(&url,env!("CARGO_PKG_VERSION")).await?;Ok(json!({"up_to_date":update.is_none(),"update":update}))}
+            Request::AgentImportLegacy { source, id, preview } => Ok(json!(deepseek_code_core::services::agent_import::import(&context, &source, &id, preview)?)),
+            Request::Agents => Ok(json!(deepseek_code_core::services::agents::list(&context)?)),
+            Request::AgentImport { definition } => {deepseek_code_core::services::agents::install(&context,definition)?;Ok(json!({"imported":true}))}
             Request::AgentCreate { project_id,agent_type,provider,model } => {
-                let project = context.db.with_conn(|c|claude_core::db::project_repo::require_trusted(c,&project_id))??;
+                let project = context.db.with_conn(|c|deepseek_code_core::db::project_repo::require_trusted(c,&project_id))??;
                 ensure!(!project.is_archived,"Select an active project");
                 let root = project.workspace_path.context("Project has no workspace")?;
-                let definition = claude_core::services::agents::resolve(&context,&agent_type)?;
+                let definition = deepseek_code_core::services::agents::resolve(&context,&agent_type)?;
                 Generator::saved(&context.paths,&provider,&model)?;
-                let store = claude_core::runtime::SessionStore::new(context.db.clone());
+                let store = deepseek_code_core::runtime::SessionStore::new(context.db.clone());
                 let id = store.create(std::path::Path::new(&root),&model,&provider)?;
                 // Preserve the exact project selected by the user, even if roots overlap.
                 context.db.with_conn(|c|c.execute("UPDATE conversations SET project_id=?1,title=?2 WHERE id=?3",rusqlite::params![project_id,format!("{} agent",definition.id),id]))??;
-                claude_core::services::agents::bind(&context.db,&id,&definition)?;
+                deepseek_code_core::services::agents::bind(&context.db,&id,&definition)?;
                 Ok(json!({"id":id,"agent":definition.id}))
             }
             Request::Magic { project_id, operation } => {
-                use claude_core::services::magic_docs as docs;
-                let project = context.db.with_conn(|c| claude_core::db::project_repo::require_trusted(c, &project_id))??;
+                use deepseek_code_core::services::magic_docs as docs;
+                let project = context.db.with_conn(|c| deepseek_code_core::db::project_repo::require_trusted(c, &project_id))??;
                 ensure!(!project.is_archived, "Select an active project");
                 let root = std::path::PathBuf::from(project.workspace_path.context("Project has no workspace")?);
                 match operation {
-                    MagicRequest::ContextConfig { enabled } => {claude_core::services::magic_context::configure(&context,&root,&project_id,enabled)?;Ok(json!({"include_conversations":enabled}))},
+                    MagicRequest::ContextConfig { enabled } => {deepseek_code_core::services::magic_context::configure(&context,&root,&project_id,enabled)?;Ok(json!({"include_conversations":enabled}))},
                     MagicRequest::ImportLegacy {source,preview}=>Ok(json!(docs::import_legacy(&context,&root,&source,preview)?)),
-                    MagicRequest::List => Ok(json!({"include_conversations":claude_core::services::magic_context::enabled(&context,&project_id)?,"documents":docs::list(&context,&root)?, "previews":docs::previews(&context,&root)?, "services":lifecycle::status(&context)?})),
+                    MagicRequest::List => Ok(json!({"include_conversations":deepseek_code_core::services::magic_context::enabled(&context,&project_id)?,"documents":docs::list(&context,&root)?, "previews":docs::previews(&context,&root)?, "services":lifecycle::status(&context)?})),
                     MagicRequest::Check { file } => Ok(json!(docs::check(&context,&root,&file)?)),
                     MagicRequest::Update { id,new_context,provider,model } => {
                         let generator = Generator::saved(&context.paths,&provider,&model)?;
                         Ok(json!(docs::update(&context,&root,&id,&new_context,&generator).await?))
                     }
                     MagicRequest::Apply { id } => {
-                        let permissions = claude_core::runtime::default_permissions();
-                        permissions.set_mode(claude_core::permissions::PermissionMode::AcceptEdits);
+                        let permissions = deepseek_code_core::runtime::default_permissions();
+                        permissions.set_mode(deepseek_code_core::permissions::PermissionMode::AcceptEdits);
                         docs::apply(&context,&root,&id,&permissions)?; Ok(json!({"applied":id}))
                     }
                     MagicRequest::Clear => Ok(json!({"untracked":docs::clear(&context,&root)?})),
@@ -329,7 +329,7 @@ pub async fn peripheral_command(
             Request::VoiceConfig {config}=> {config.validate()?;context.save_setting("voice",&config)?;Ok(json!(config))}
             Request::TeamAuth {config}=> {team::auth(&context,config).await?;Ok(json!({"authenticated":true}))}
             Request::TeamContext {project_id,enabled} => {
-                let project=context.db.with_conn(|c|claude_core::db::project_repo::require_trusted(c,&project_id))??;
+                let project=context.db.with_conn(|c|deepseek_code_core::db::project_repo::require_trusted(c,&project_id))??;
                 ensure!(!project.is_archived,"Select an active project");
                 let root=project.workspace_path.context("Project has no workspace")?;
                 if let Some(enabled)=enabled {Ok(json!(team::configure_model_context(&context,std::path::Path::new(&root),enabled)?))}

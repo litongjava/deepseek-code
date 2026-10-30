@@ -1,4 +1,4 @@
-use claude_core::{
+use deepseek_code_core::{
     native_engine::{
         engine_core::ChatRequest,
         provider_manager::{Provider, ProviderManager},
@@ -40,12 +40,12 @@ async fn cancelling_team_run_fails_claim_and_stops_child() {
 }
 
 async fn run_case(cancel: bool, team: bool) {
-    claude_core::config::OrchestrationConfig::init_global().unwrap();
+    deepseek_code_core::config::OrchestrationConfig::init_global().unwrap();
     let dir = tempfile::tempdir().unwrap();
     std::fs::write(dir.path().join("evidence.txt"), "verified child read").unwrap();
     let workspace = dir.path().to_string_lossy().into_owned();
     let team_id = if team {
-        claude_core::tools::coordination::execute(
+        deepseek_code_core::tools::coordination::execute(
             "team",
             json!({"operation":"create","name":"test team","tasks":[{"prompt":"inspect child"}]}),
             &workspace,
@@ -92,13 +92,13 @@ async fn run_case(cancel: bool, team: bool) {
         dir.path().join("providers.json"),
     )));
     let permissions = runtime::default_permissions();
-    permissions.set_mode(claude_core::permissions::PermissionMode::BypassPermissions);
+    permissions.set_mode(deepseek_code_core::permissions::PermissionMode::BypassPermissions);
     let engine = runtime::create_engine(
         &paths,
         context.db.clone(),
         manager,
         permissions,
-        Arc::new(claude_core::cache::FileCache::new()),
+        Arc::new(deepseek_code_core::cache::FileCache::new()),
     );
     let sessions = SessionStore::new(context.db.clone());
     let id = sessions.create(dir.path(), "fixture", "local").unwrap();
@@ -169,7 +169,7 @@ async fn run_case(cancel: bool, team: bool) {
             "cancelled"
         );
         if team {
-            let record = claude_core::tools::coordination::execute(
+            let record = deepseek_code_core::tools::coordination::execute(
                 "team",
                 json!({"operation":"get","team_id":team_id}),
                 dir.path().to_str().unwrap(),
@@ -188,7 +188,7 @@ async fn run_case(cancel: bool, team: bool) {
     let mut progress = Vec::new();
     tokio::time::timeout(std::time::Duration::from_secs(15), async {
         while let Some(event) = events.recv().await {
-            if let claude_core::native_engine::tool_loop::EngineEvent::AgentProgress {
+            if let deepseek_code_core::native_engine::tool_loop::EngineEvent::AgentProgress {
                 session_id,
                 agent_type,
                 status,
@@ -202,7 +202,7 @@ async fn run_case(cancel: bool, team: bool) {
                     tool_name.clone(),
                 ));
             }
-            if let claude_core::native_engine::tool_loop::EngineEvent::ToolUseDone {
+            if let deepseek_code_core::native_engine::tool_loop::EngineEvent::ToolUseDone {
                 tool_name,
                 output,
                 is_error,
@@ -252,7 +252,7 @@ async fn run_case(cancel: bool, team: bool) {
     let rows = context
         .db
         .with_conn(|conn| {
-            claude_core::db::message_repo::get_messages_by_conversation(conn, &child_id)
+            deepseek_code_core::db::message_repo::get_messages_by_conversation(conn, &child_id)
         })
         .unwrap()
         .unwrap();
@@ -262,7 +262,7 @@ async fn run_case(cancel: bool, team: bool) {
             context
                 .db
                 .with_conn(|conn| {
-                    claude_core::db::message_repo::get_tool_calls_for_message(conn, &row.id)
+                    deepseek_code_core::db::message_repo::get_tool_calls_for_message(conn, &row.id)
                 })
                 .unwrap()
                 .unwrap(),
@@ -280,7 +280,7 @@ async fn run_case(cancel: bool, team: bool) {
         "completed"
     );
     if team {
-        let record = claude_core::tools::coordination::execute(
+        let record = deepseek_code_core::tools::coordination::execute(
             "team",
             json!({"operation":"get","team_id":team_id}),
             dir.path().to_str().unwrap(),

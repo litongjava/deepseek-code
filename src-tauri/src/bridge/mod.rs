@@ -213,7 +213,7 @@ impl BridgeServer {
             tracing::error!(module = "Bridge", error = %e);
         }
 
-        tracing::info!(module = "Bridge", "Database initialized at {:?}", data_dir.join(claude_core::runtime::DATABASE_FILE));
+        tracing::info!(module = "Bridge", "Database initialized at {:?}", data_dir.join(deepseek_code_core::runtime::DATABASE_FILE));
         tracing::info!(module = "Bridge", "Running migration check...");
         {
             let data_dir_ref = &data_dir;

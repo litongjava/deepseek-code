@@ -19,7 +19,7 @@ Use Node.js 22+, Rust, and the platform's Tauri prerequisites.
 - `cargo build --locked -p deepseek-code-cli`: build only the standalone CLI.
 - `npx tsc --noEmit`: check TypeScript types.
 - `npm run test:run`: execute frontend tests once.
-- `cargo test --locked -p claude-core --lib --tests`: run core tests; use `-p deepseek-code-cli` or `-p deepseek-code-desktop` for those packages.
+- `cargo test --locked -p deepseek-code-core --lib --tests`: run core tests; use `-p deepseek-code-cli` or `-p deepseek-code-desktop` for those packages.
 - `cargo check --locked -p deepseek-code-desktop --all-targets`: check Desktop targets.
 
 Cargo output is configured under the workspace root `target/`.

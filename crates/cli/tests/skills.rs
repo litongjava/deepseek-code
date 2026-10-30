@@ -1,6 +1,6 @@
 //! Actual CLI, detached skill worker and local-only model fixture.
 use axum::{extract::State, routing::post, Json, Router};
-use claude_core::runtime::{RuntimePaths, SessionStore};
+use deepseek_code_core::runtime::{RuntimePaths, SessionStore};
 use serde_json::{json, Value};
 use std::{
     sync::{Arc, Mutex},

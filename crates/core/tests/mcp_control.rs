@@ -1,4 +1,4 @@
-use claude_core::{
+use deepseek_code_core::{
     mcp::{control, McpServerConfig, McpServerManager},
     runtime::RuntimePaths,
     services::{EnvironmentCredentials, ServiceContext},

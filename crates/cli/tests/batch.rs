@@ -1,6 +1,6 @@
 //! Real detached CLI supervisors and workers against a local model fixture.
 use axum::{extract::State, routing::post, Router};
-use claude_core::{
+use deepseek_code_core::{
     runtime::{RuntimePaths, SessionStore},
     services::batch::{self, Proposal, Unit, WorkerLaunch},
 };
@@ -154,7 +154,7 @@ async fn exercise(cancel: bool) {
             if let Some(id) = &worker.job_id {
                 eprintln!(
                     "WORKER LOG: {:?}",
-                    claude_core::services::background_sessions::output(&root, id)
+                    deepseek_code_core::services::background_sessions::output(&root, id)
                 );
             }
         }
@@ -310,7 +310,7 @@ async fn worker_failures_are_reported_and_the_batch_fails() {
         .any(|worker| worker.status == "failed"));
     for worker in &result.workers {
         if let Some(job) = &worker.job_id {
-            let job = claude_core::services::background_sessions::get(&root, job).unwrap();
+            let job = deepseek_code_core::services::background_sessions::get(&root, job).unwrap();
             assert_ne!(job.status, "running");
         }
     }

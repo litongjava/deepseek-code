@@ -1,5 +1,5 @@
 //! Trust recovery must work without a provider, Desktop, or a usable session.
-use claude_core::{
+use deepseek_code_core::{
     db::project_repo,
     runtime::{RuntimePaths, SessionStore},
 };
@@ -25,7 +25,7 @@ fn startup_explains_and_explicit_command_repairs_without_model_credentials() {
     let paths = RuntimePaths::new(root.path().join("data")).unwrap();
     let store = SessionStore::new(paths.open_database().unwrap());
     let id = store.create(&source, "fixture", "fixture").unwrap();
-    let original = claude_core::services::session_trust::inspect(&store.db, &id).unwrap();
+    let original = deepseek_code_core::services::session_trust::inspect(&store.db, &id).unwrap();
     store
         .db
         .with_conn(|conn| {
@@ -89,7 +89,7 @@ fn repeated_folder_arguments_and_worker_rejection_preserve_scope() {
     let paths = RuntimePaths::new(root.path().join("data")).unwrap();
     let store = SessionStore::new(paths.open_database().unwrap());
     let id = store.create(&source, "fixture", "fixture").unwrap();
-    let original = claude_core::services::session_trust::inspect(&store.db, &id).unwrap();
+    let original = deepseek_code_core::services::session_trust::inspect(&store.db, &id).unwrap();
     store
         .db
         .with_conn(|conn| {
@@ -134,7 +134,7 @@ fn repeated_folder_arguments_and_worker_rejection_preserve_scope() {
         String::from_utf8_lossy(&result.stderr)
     );
     assert_eq!(
-        claude_core::services::session_trust::inspect(&store.db, &id)
+        deepseek_code_core::services::session_trust::inspect(&store.db, &id)
             .unwrap()
             .folders
             .len(),
@@ -148,7 +148,7 @@ fn standalone_shutdown_refuses_owned_shells_and_explicit_stop_is_scoped() {
     let paths = RuntimePaths::new(root.path().join("data")).unwrap();
     let id = uuid::Uuid::new_v4().to_string();
     let other = uuid::Uuid::new_v4().to_string();
-    let task = claude_core::tools::tasks::execute_for_session(
+    let task = deepseek_code_core::tools::tasks::execute_for_session(
         "TaskCreate",
         serde_json::json!({"subject":"managed fixture"}),
         &paths.data_dir,
@@ -161,7 +161,7 @@ fn standalone_shutdown_refuses_owned_shells_and_explicit_stop_is_scoped() {
     task["metadata"] = serde_json::json!({"managed_shell":true});
     task["status"] = serde_json::json!("running");
     let conn =
-        claude_core::db::DbManager::new(paths.data_dir.join("tasks").join(format!("{id}.sqlite3")))
+        deepseek_code_core::db::DbManager::new(paths.data_dir.join("tasks").join(format!("{id}.sqlite3")))
             .unwrap();
     conn.with_conn(|c| {
         c.execute(

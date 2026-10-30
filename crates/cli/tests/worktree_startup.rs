@@ -1,6 +1,6 @@
 //! Actual Git + CLI processes exercise source isolation and durable resume.
 use axum::{routing::post, Json, Router};
-use claude_core::runtime::{RuntimePaths, SessionStore};
+use deepseek_code_core::runtime::{RuntimePaths, SessionStore};
 use serde_json::{json, Value};
 use std::{
     path::Path,
@@ -144,7 +144,7 @@ async fn named_and_generated_worktrees_isolate_dirty_sources_and_resume_after_pr
     store
         .db
         .with_conn(|conn| {
-            let project = claude_core::native_engine::workspace::conversation_project(conn, &id)
+            let project = deepseek_code_core::native_engine::workspace::conversation_project(conn, &id)
                 .unwrap()
                 .unwrap();
             assert_eq!(project.folders.len(), 2);
@@ -185,7 +185,7 @@ async fn named_and_generated_worktrees_isolate_dirty_sources_and_resume_after_pr
         .db
         .with_conn(|conn| {
             assert_eq!(
-                claude_core::native_engine::workspace::conversation_project(conn, &id)
+                deepseek_code_core::native_engine::workspace::conversation_project(conn, &id)
                     .unwrap()
                     .unwrap()
                     .folders
@@ -309,7 +309,7 @@ async fn non_git_hook_worktree_uses_real_cli_tools_and_resumes_without_recreatin
         );
     }
     assert_eq!(
-        claude_core::worktree::hooks::status(&store.db, &session)
+        deepseek_code_core::worktree::hooks::status(&store.db, &session)
             .unwrap()
             .unwrap()["backend"],
         "hook"

@@ -8,7 +8,7 @@ pub fn during<'a, F: std::future::Future + Send + 'a>(
     // startup and compaction futures can otherwise overflow the main stack.
     let mut future = Box::pin(future);
     Box::pin(async move {
-        let mut subscription = claude_core::services::hook_progress::subscribe(session);
+        let mut subscription = deepseek_code_core::services::hook_progress::subscribe(session);
         let mut progress = crate::terminal::progress::TurnProgress::new(false);
         let mut refresh = tokio::time::interval(std::time::Duration::from_secs(1));
         refresh.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);

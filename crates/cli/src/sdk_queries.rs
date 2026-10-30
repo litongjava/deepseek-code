@@ -20,7 +20,7 @@ pub async fn read_only(session: &Session, request: &Value) -> Option<Result<Valu
 
 async fn context_usage(session: &Session) -> Result<Value> {
     let window = session.context_window().await.map(u64::from);
-    let last = claude_core::services::context_usage::last_request(&session.store.db, &session.id)?;
+    let last = deepseek_code_core::services::context_usage::last_request(&session.store.db, &session.id)?;
     let mut categories = Vec::new();
     let mut total = 0;
     if let Some(usage) = last.as_ref().and_then(|request| request.usage.as_ref()) {

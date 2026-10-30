@@ -217,7 +217,7 @@ pub(super) async fn chat_handler(
         };
 
         let mut assistant_id = uuid::Uuid::new_v4().to_string();
-        let mut observed_plan_boundary = claude_core::services::plan_approval::latest_boundary(&db_clone, &conv_id).unwrap_or(None);
+        let mut observed_plan_boundary = deepseek_code_core::services::plan_approval::latest_boundary(&db_clone, &conv_id).unwrap_or(None);
         let mut request_snapshots = Vec::<serde_json::Value>::new();
         let db_number = db_clone.clone();
         let conv_number = conv_id.clone();
@@ -265,7 +265,7 @@ pub(super) async fn chat_handler(
                 crate::native_engine::tool_loop::EngineEvent::ContextReset { session_id, boundary_id } => {
                     if session_id == conv_id {
                         let rows = collected_tool_calls.iter().enumerate().map(|(i,(id,name,input,output,is_error))| crate::db::message_repo::ToolCallRow { id:id.clone(),message_id:assistant_id.clone(),name:name.clone(),input:Some(input.clone()),output:output.clone(),is_error:*is_error,sort_order:i as i64 }).collect::<Vec<_>>();
-                        if let Err(error) = claude_core::services::plan_approval::archive_segment(&db_clone, &conv_id, &boundary_id, Some(&assistant_id), &full_text, "", &rows, &request_snapshots) {
+                        if let Err(error) = deepseek_code_core::services::plan_approval::archive_segment(&db_clone, &conv_id, &boundary_id, Some(&assistant_id), &full_text, "", &rows, &request_snapshots) {
                             terminal_event = Some(serde_json::json!({"type":"error","error":format!("Cannot archive planning context: {error:#}")}));
                             break;
                         }
@@ -290,7 +290,7 @@ pub(super) async fn chat_handler(
                     let conversation_id = conv_id.clone();
                     let snapshots = serde_json::json!(request_snapshots);
                     let saved = tokio::task::spawn_blocking(move || db.with_conn(|conn| -> anyhow::Result<()> {
-                        let tx = claude_core::db::write_transaction(&conn)?;
+                        let tx = deepseek_code_core::db::write_transaction(&conn)?;
                         let now = chrono::Utc::now().to_rfc3339();
                         tx.execute("INSERT OR IGNORE INTO messages (id, conversation_id, role, content, created_at, sort_order) VALUES (?1, ?2, 'assistant', '', ?3, (SELECT COALESCE(MAX(sort_order), -1) + 1 FROM messages WHERE conversation_id = ?2))",
                             rusqlite::params![message_id, conversation_id, now])?;
@@ -499,7 +499,7 @@ pub(super) async fn chat_handler(
                     tracing::info!(module = "BridgeDB", "Saving assistant message for conv_id={}", conv_id_save);
                     let msg_id = assistant_id;
                     let now = chrono::Utc::now().to_rfc3339();
-                    let (sort_order, archive) = claude_core::services::plan_approval::final_response_order(conn, &conv_id_save, observed_plan_boundary.as_deref())?;
+                    let (sort_order, archive) = deepseek_code_core::services::plan_approval::final_response_order(conn, &conv_id_save, observed_plan_boundary.as_deref())?;
                     tracing::info!(module = "BridgeDB", "Inserting assistant message: id={}, content_len={}, sort_order={}", msg_id, assistant_text.len(), sort_order);
                     let insert_result = if let Some(message) = crate::db::message_repo::get_message(conn, &msg_id)? {
                         anyhow::ensure!(message.conversation_id == conv_id_save && message.role == "assistant", "Response session identity changed");

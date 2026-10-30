@@ -1,6 +1,6 @@
 //! MCP over Streamable HTTP, HTTP+SSE and WebSocket against local fixtures.
 use axum::{extract::State, http::HeaderMap, response::IntoResponse, routing::{get, post}, Json, Router};
-use claude_core::mcp::{McpConnector, McpServerConfig};
+use deepseek_code_core::mcp::{McpConnector, McpServerConfig};
 use futures::{SinkExt, StreamExt};
 use serde_json::{json, Value};
 use std::sync::{Arc, Mutex};

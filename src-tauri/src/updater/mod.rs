@@ -6,7 +6,7 @@ use std::path::PathBuf;
 
 const EMBEDDED_PUBLIC_KEY: &[u8; 32] = include_bytes!("../../update_pubkey.bin");
 
-pub use claude_core::services::updates::UpdateInfo;
+pub use deepseek_code_core::services::updates::UpdateInfo;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct UpdateProgress {
@@ -56,7 +56,7 @@ impl AutoUpdater {
     }
 
     pub async fn check_for_updates(&self) -> Result<Option<UpdateInfo>> {
-        claude_core::services::updates::check(
+        deepseek_code_core::services::updates::check(
             &format!("{}/manifest.json", self.update_url.trim_end_matches('/')),
             &self.current_version,
         )

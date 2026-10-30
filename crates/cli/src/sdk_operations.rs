@@ -2,7 +2,7 @@
 //! background tasks and recorded file checkpoints.
 use crate::session::Session;
 use anyhow::{bail, ensure, Context, Result};
-use claude_core::{db::message_repo, services::checkpoints};
+use deepseek_code_core::{db::message_repo, services::checkpoints};
 use serde_json::{json, Value};
 
 pub async fn handle(session: &mut Session, request: &Value) -> Option<Result<Value>> {
@@ -61,7 +61,7 @@ async fn mcp_reconnect(session: &Session, request: &Value) -> Result<Value> {
 async fn reload_plugins(session: &Session) -> Result<Value> {
     session.reload_plugins().await?;
     let context = crate::services::context(&session.paths)?;
-    let plugins = claude_core::services::plugins::list(&context)?
+    let plugins = deepseek_code_core::services::plugins::list(&context)?
         .into_iter()
         .filter(|plugin| plugin.enabled)
         .map(|plugin| json!({"name":plugin.id,"path":"","source":plugin.source}))
@@ -71,7 +71,7 @@ async fn reload_plugins(session: &Session) -> Result<Value> {
         .into_iter()
         .map(|(name, description)| json!({"name":name.trim_start_matches('/'),"description":description,"argumentHint":""}))
         .collect::<Vec<_>>();
-    let agents = claude_core::services::agents::list(&context)?
+    let agents = deepseek_code_core::services::agents::list(&context)?
         .into_iter()
         .map(|agent| json!({"name":agent.id,"description":agent.description}))
         .collect::<Vec<_>>();
@@ -89,7 +89,7 @@ async fn stop_task(session: &Session, request: &Value) -> Result<Value> {
         crate::background_commands::shell_control(paths, &session.id, id, true).await?;
         return Ok(json!({}));
     }
-    let job = claude_core::services::background_sessions::get(&paths.data_dir, id)
+    let job = deepseek_code_core::services::background_sessions::get(&paths.data_dir, id)
         .with_context(|| format!("Task not found: {id}"))?;
     ensure!(job.parent_session_id == session.id, "Task belongs to another session");
     crate::worker_frontend::cancel_job(session, id)?;

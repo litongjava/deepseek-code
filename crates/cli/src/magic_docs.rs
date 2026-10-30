@@ -3,7 +3,7 @@ use crate::{
     services::print,
 };
 use anyhow::{ensure, Result};
-use claude_core::{
+use deepseek_code_core::{
     runtime::RuntimePaths,
     services::{generation::Generator, lifecycle::Lease, magic_docs as docs},
 };
@@ -13,7 +13,7 @@ pub async fn run(cli: &Cli, paths: &RuntimePaths, action: &MagicCommands) -> Res
     let root = std::env::current_dir()?;
     match action {
         MagicCommands::ContextConfig { project_id, enabled } => {
-            claude_core::services::magic_context::configure(&context, &root, project_id, *enabled)?;
+            deepseek_code_core::services::magic_context::configure(&context, &root, project_id, *enabled)?;
             print(&serde_json::json!({"include_conversations":enabled}))
         }
         MagicCommands::ImportLegacy { source, preview } => {
@@ -31,15 +31,15 @@ pub async fn run(cli: &Cli, paths: &RuntimePaths, action: &MagicCommands) -> Res
         }
         MagicCommands::Apply { id, yes } => {
             ensure!(*yes, "Inspect magic-docs previews then pass --yes to apply");
-            let permissions = claude_core::runtime::default_permissions();
+            let permissions = deepseek_code_core::runtime::default_permissions();
             permissions.set_mode(if matches!(cli.permission_mode, PermissionModeArg::Auto) {
                 anyhow::bail!("Automatic permission classification is available in conversation tools; magic-docs apply requires an explicit non-auto mode")
             } else if matches!(cli.permission_mode, PermissionModeArg::DontAsk) {
-                claude_core::permissions::PermissionMode::DontAsk
+                deepseek_code_core::permissions::PermissionMode::DontAsk
             } else if matches!(cli.permission_mode, PermissionModeArg::Plan) {
-                claude_core::permissions::PermissionMode::PlanMode
+                deepseek_code_core::permissions::PermissionMode::PlanMode
             } else {
-                claude_core::permissions::PermissionMode::AcceptEdits
+                deepseek_code_core::permissions::PermissionMode::AcceptEdits
             });
             docs::apply(&context, &root, id, &permissions)?;
             print(&serde_json::json!({"applied":id}))

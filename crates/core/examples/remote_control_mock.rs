@@ -1,9 +1,9 @@
 //! Development Remote Control server with simulated data.
-//! Usage: cargo run -p claude-core --example remote_control_mock -- [PORT] [TOKEN] [PORT_FILE]
+//! Usage: cargo run -p deepseek-code-core --example remote_control_mock -- [PORT] [TOKEN] [PORT_FILE]
 //! Then `/remote-control --server http://127.0.0.1:PORT` in the CLI. Play the
 //! remote client with POST /mock/send (frame JSON), /mock/drop, /mock/fail
 //! ({"status":503,"count":2}) and inspect GET /mock/state.
-use claude_core::services::remote_control::mock::MockServer;
+use deepseek_code_core::services::remote_control::mock::MockServer;
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {

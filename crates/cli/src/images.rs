@@ -3,7 +3,7 @@
 //! Ctrl+V (saved under the data directory). Pasted images, and pasted or
 //! dragged image paths, show in the prompt as `[Image #N]`.
 use anyhow::Result;
-use claude_core::runtime::{image_block_from_file, image_media_type};
+use deepseek_code_core::runtime::{image_block_from_file, image_media_type};
 use serde_json::{json, Value};
 use std::path::{Path, PathBuf};
 
@@ -47,8 +47,8 @@ pub fn share(session: &str, text: &str) {
         return;
     }
     let pasted = PASTED.lock().unwrap_or_else(|error| error.into_inner()).clone();
-    if let Ok(data_dir) = claude_core::runtime::resolve_default_data_dir() {
-        let _ = claude_core::services::input_queue::save_pasted_images(&data_dir, session, &pasted);
+    if let Ok(data_dir) = deepseek_code_core::runtime::resolve_default_data_dir() {
+        let _ = deepseek_code_core::services::input_queue::save_pasted_images(&data_dir, session, &pasted);
     }
 }
 
@@ -122,7 +122,7 @@ fn run(program: &str, args: &[&str]) -> Option<Vec<u8>> {
 
 /// Saves a clipboard image as PNG under `<data dir>/pasted-images`.
 pub fn paste_clipboard() -> Result<Option<PathBuf>> {
-    let dir = claude_core::runtime::resolve_default_data_dir()?.join("pasted-images");
+    let dir = deepseek_code_core::runtime::resolve_default_data_dir()?.join("pasted-images");
     std::fs::create_dir_all(&dir)?;
     let path = dir.join(format!("{}.png", uuid::Uuid::new_v4()));
     let path_text = path.to_string_lossy().into_owned();

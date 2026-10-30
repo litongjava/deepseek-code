@@ -4,7 +4,7 @@ use crate::session::Session;
 use crate::terminal::input::TerminalInput;
 use crate::terminal::picker::{details, Entry, Key, Picked, Picker};
 use anyhow::Result;
-use claude_core::runtime::RuntimePaths;
+use deepseek_code_core::runtime::RuntimePaths;
 
 const TABS: [&str; 4] = ["Status", "Config", "Usage", "Stats"];
 
@@ -69,7 +69,7 @@ async fn status_rows(session: &Session) -> Result<Vec<String>> {
 /// The reference CLI's Usage tab: cost, time, code changes and tokens.
 fn usage_rows(session: &Session, paths: &RuntimePaths) -> Result<Vec<String>> {
     let usage = crate::display_commands::usage(session)?;
-    let billing = claude_core::services::usage::session_cost(&session.store.db, &session.id, &paths.read_config()?)?;
+    let billing = deepseek_code_core::services::usage::session_cost(&session.store.db, &session.id, &paths.read_config()?)?;
     let count = |key: &str| usage[key].as_i64().unwrap_or(0);
     let seconds = |ms: i64| {
         let seconds = ms / 1000;

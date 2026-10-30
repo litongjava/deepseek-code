@@ -1,4 +1,4 @@
-use claude_core::{
+use deepseek_code_core::{
     runtime::{RuntimePaths, SessionStore},
     services::agents,
 };
@@ -57,7 +57,7 @@ fn clear_rejects_missing_and_archived_sessions_without_creating_rows() {
     store
         .db
         .with_conn(|conn| {
-            claude_core::db::conversation_repo::archive_conversation(conn, &source, true).unwrap();
+            deepseek_code_core::db::conversation_repo::archive_conversation(conn, &source, true).unwrap();
         })
         .unwrap();
     assert!(store.clear("missing").is_err());

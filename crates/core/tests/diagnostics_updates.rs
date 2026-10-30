@@ -1,5 +1,5 @@
 use axum::{routing::get, Json, Router};
-use claude_core::services::{diagnostics, updates};
+use deepseek_code_core::services::{diagnostics, updates};
 use serde_json::json;
 #[tokio::test]
 async fn diagnostics_use_real_requests_and_validate_limits() {

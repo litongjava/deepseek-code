@@ -1,4 +1,4 @@
-use claude_core::mcp::{McpServerConfig, McpServerManager, McpToolRegistry};
+use deepseek_code_core::mcp::{McpServerConfig, McpServerManager, McpToolRegistry};
 use serde_json::json;
 use std::sync::Arc;
 
@@ -60,7 +60,7 @@ async fn resource_tools_read_protocol_contents_and_reject_stopped_servers() {
 
 #[tokio::test]
 async fn configured_server_tools_are_namespaced_for_dispatch_and_server_rules() {
-    use claude_core::permissions::{
+    use deepseek_code_core::permissions::{
         rules::PermissionAction, AuditLogger, PermissionContext, PermissionManager,
         PermissionMode, PermissionResult,
     };

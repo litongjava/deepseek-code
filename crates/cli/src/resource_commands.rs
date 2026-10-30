@@ -1,6 +1,6 @@
 //! Terminal adapters for public resources and persistent feature lessons.
 use anyhow::{ensure, Context, Result};
-use claude_core::{runtime::RuntimePaths, services::cli_resources};
+use deepseek_code_core::{runtime::RuntimePaths, services::cli_resources};
 use std::collections::BTreeSet;
 
 pub(crate) const LESSONS: &[(&str, &str, &str)] = &[

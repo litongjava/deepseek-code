@@ -31,7 +31,7 @@ pub fn validate(cli: &Cli, workspace: &std::path::Path) -> Result<()> {
 pub async fn apply(cli: &Cli, session: &mut Session) -> Result<()> {
     validate(cli, &session.workspace)?;
     for directory in &cli.add_dir {
-        claude_core::services::session_workspace::change(
+        deepseek_code_core::services::session_workspace::change(
             &session.store.db,
             &session.id,
             &session.workspace,
@@ -42,12 +42,12 @@ pub async fn apply(cli: &Cli, session: &mut Session) -> Result<()> {
     worktree_startup::apply(cli, session).await?;
     if let Some(name) = &cli.name {
         session.store.db.with_conn(|conn| {
-            claude_core::db::conversation_repo::update_conversation_title(conn, &session.id, name)
+            deepseek_code_core::db::conversation_repo::update_conversation_title(conn, &session.id, name)
         })??;
     }
     if cli.ide {
-        let editors = claude_core::services::ide::discover(
-            &claude_core::services::ide::lock_directory()?,
+        let editors = deepseek_code_core::services::ide::discover(
+            &deepseek_code_core::services::ide::lock_directory()?,
             &session.workspace,
         )?;
         let matches: Vec<_> = editors

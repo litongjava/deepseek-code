@@ -4,7 +4,7 @@
 //! `run.json` from the Workflow tool, `progress.jsonl` from the runner and
 //! `status.json` once it ends.
 use anyhow::Result;
-use claude_core::runtime::RuntimePaths;
+use deepseek_code_core::runtime::RuntimePaths;
 use serde_json::{json, Value};
 use std::path::{Path, PathBuf};
 
@@ -112,8 +112,8 @@ fn progress(dir: &Path) -> (Option<String>, Vec<Agent>, Vec<String>) {
 }
 
 fn task_status(paths: &RuntimePaths, session: &str, task_id: &str) -> String {
-    let Ok(task) = claude_core::tools::tasks::execute_for_session("TaskGet", json!({"taskId": task_id}), &paths.data_dir, session) else { return "stopped".into() };
-    match claude_core::tools::background_shell::task_status(&paths.data_dir, session, &task).unwrap_or_default().as_str() {
+    let Ok(task) = deepseek_code_core::tools::tasks::execute_for_session("TaskGet", json!({"taskId": task_id}), &paths.data_dir, session) else { return "stopped".into() };
+    match deepseek_code_core::tools::background_shell::task_status(&paths.data_dir, session, &task).unwrap_or_default().as_str() {
         "running" => "running".into(),
         "unresponsive" => "unresponsive".into(),
         "" | "unknown" => "stopped".into(),
@@ -153,7 +153,7 @@ pub fn runs(paths: &RuntimePaths, session: &str) -> Vec<Run> {
 }
 
 fn stop(paths: &RuntimePaths, session: &str, run: &Run) -> Result<()> {
-    claude_core::tools::tasks::execute_for_session("TaskStop", json!({"task_id": run.task_id}), &paths.data_dir, session)?;
+    deepseek_code_core::tools::tasks::execute_for_session("TaskStop", json!({"task_id": run.task_id}), &paths.data_dir, session)?;
     // Recorded at once, so the list does not show it running meanwhile.
     std::fs::write(run.dir.join("status.json"), json!({"status":"stopped","finished_ms":chrono::Utc::now().timestamp_millis()}).to_string())?;
     Ok(())

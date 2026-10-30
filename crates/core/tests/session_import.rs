@@ -1,4 +1,4 @@
-use claude_core::{
+use deepseek_code_core::{
     runtime::RuntimePaths,
     services::{session_import, team, EnvironmentCredentials, ServiceContext},
 };
@@ -27,19 +27,19 @@ fn session_import_previews_backs_up_preserves_and_rolls_back_conflicts() {
     );
     assert!(context
         .db
-        .with_conn(claude_core::db::conversation_repo::list_conversations)
+        .with_conn(deepseek_code_core::db::conversation_repo::list_conversations)
         .unwrap()
         .unwrap()
         .is_empty());
     assert!(context
         .db
-        .with_conn(claude_core::db::project_repo::list_projects)
+        .with_conn(deepseek_code_core::db::project_repo::list_projects)
         .unwrap()
         .unwrap()
         .is_empty());
     let report = session_import::import(&context, &source, &root, false).unwrap();
     assert!(std::path::Path::new(&report.backup.unwrap()).exists());
-    let store = claude_core::runtime::SessionStore::new(context.db.clone());
+    let store = deepseek_code_core::runtime::SessionStore::new(context.db.clone());
     assert_eq!(
         store.history("old-session").unwrap()[1]["content"],
         "answer"
@@ -126,7 +126,7 @@ fn concurrent_hosts_initialize_and_write_shared_schema() {
 
 #[test]
 fn desktop_import_preserves_exact_selected_project() {
-    use claude_core::db::project_repo;
+    use deepseek_code_core::db::project_repo;
     let dir = tempfile::tempdir().unwrap();
     let root = dir.path().join("project");
     std::fs::create_dir(&root).unwrap();
@@ -169,7 +169,7 @@ fn desktop_import_preserves_exact_selected_project() {
             .unwrap();
     assert_eq!(result.project_id, "selected");
     assert_eq!(
-        claude_core::runtime::SessionStore::new(context.db.clone())
+        deepseek_code_core::runtime::SessionStore::new(context.db.clone())
             .resume("exact")
             .unwrap()
             .project_id

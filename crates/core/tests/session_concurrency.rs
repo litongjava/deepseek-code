@@ -1,4 +1,4 @@
-use claude_core::runtime::{RuntimePaths, SessionStore};
+use deepseek_code_core::runtime::{RuntimePaths, SessionStore};
 use std::sync::{Arc, Barrier};
 
 #[test]

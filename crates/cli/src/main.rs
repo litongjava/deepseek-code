@@ -73,7 +73,7 @@ mod remote_commands;
 
 use anyhow::{bail, ensure, Context, Result};
 use args::{Cli, Commands, McpCommands, OutputFormat, SessionCommands, SkillsCommands};
-use claude_core::{
+use deepseek_code_core::{
     mcp::{McpServerConfig, McpServerManager},
     runtime::{RuntimePaths, SessionStore},
     skills::SkillsManager,
@@ -87,20 +87,20 @@ use std::{
 #[tokio::main]
 async fn main() -> std::process::ExitCode {
     // Inside a sandbox with a domain allowlist: carry the proxy, then run the command.
-    if let Some(code) = claude_core::tools::sandbox::run_bridge_from_args() {
+    if let Some(code) = deepseek_code_core::tools::sandbox::run_bridge_from_args() {
         return std::process::ExitCode::from(code.clamp(0, 255) as u8);
     }
-    match claude_core::services::batch::run_worker_from_env() {
+    match deepseek_code_core::services::batch::run_worker_from_env() {
         Ok(true) => return std::process::ExitCode::SUCCESS,
         Ok(false) => {},
         Err(error) => { eprintln!("Batch worker failed: {error:#}"); return std::process::ExitCode::FAILURE; },
     }
-    match claude_core::services::background_sessions::run_worker_from_env() {
+    match deepseek_code_core::services::background_sessions::run_worker_from_env() {
         Ok(true) => return std::process::ExitCode::SUCCESS,
         Ok(false) => {},
         Err(error) => { eprintln!("Background worker failed: {error:#}"); return std::process::ExitCode::FAILURE; },
     }
-    match claude_core::services::session_worker::run_supervisor_from_env() {
+    match deepseek_code_core::services::session_worker::run_supervisor_from_env() {
         Ok(true) => return std::process::ExitCode::SUCCESS,
         Ok(false) => {},
         Err(error) => { eprintln!("Session supervisor failed: {error:#}"); return std::process::ExitCode::FAILURE; },
@@ -160,12 +160,12 @@ async fn run(cli: &Cli) -> Result<()> {
     cli.response_schema()?;
     let data_dir = match &cli.data_dir {
         Some(path) => path.clone(),
-        None => claude_core::runtime::resolve_default_data_dir()?,
+        None => deepseek_code_core::runtime::resolve_default_data_dir()?,
     };
     let paths = RuntimePaths::new(absolute(data_dir)?)?;
     // Engine code that has no RuntimePaths (e.g. the task tools) and child
     // processes resolve the data directory from the environment.
-    std::env::set_var(claude_core::runtime::DATA_DIR_ENV, &paths.data_dir);
+    std::env::set_var(deepseek_code_core::runtime::DATA_DIR_ENV, &paths.data_dir);
     if let Some(path) = &cli.path {
         std::env::set_current_dir(path).context("Cannot open project directory")?;
     }
@@ -174,7 +174,7 @@ async fn run(cli: &Cli) -> Result<()> {
         debug_logging::configure_filtered(log, cli.debug.as_deref().unwrap_or(""))?;
     }
     if cli.info {
-        println!("dcl {}\nOS: {}\nProject: {}\nData: {}\nEngine: claude-core (direct; no Bridge)", env!("CARGO_PKG_VERSION"), std::env::consts::OS, std::env::current_dir()?.display(), paths.data_dir.display());
+        println!("dcl {}\nOS: {}\nProject: {}\nData: {}\nEngine: deepseek-code-core (direct; no Bridge)", env!("CARGO_PKG_VERSION"), std::env::consts::OS, std::env::current_dir()?.display(), paths.data_dir.display());
         return Ok(());
     }
     let mut skill_prompt = None;
@@ -182,11 +182,11 @@ async fn run(cli: &Cli) -> Result<()> {
         Some(Commands::Auth { action }) => return account_commands::run(&paths, action).await,
         Some(Commands::Plugin { action }) => return plugins::run(&paths,action).await,
         Some(Commands::Update { url }) => {
-            let update = claude_core::services::updates::check(url,env!("CARGO_PKG_VERSION")).await?;
+            let update = deepseek_code_core::services::updates::check(url,env!("CARGO_PKG_VERSION")).await?;
             return services::print(&serde_json::json!({"up_to_date":update.is_none(),"update":update}));
         }
         Some(Commands::StressTest { concurrency, iterations, endpoint, allow_remote }) => {
-            return tokio::select! {result=claude_core::services::diagnostics::stress(*concurrency,*iterations,endpoint.clone(),*allow_remote)=>services::print(&result?), _=tokio::signal::ctrl_c()=>anyhow::bail!("Diagnostics cancelled")};
+            return tokio::select! {result=deepseek_code_core::services::diagnostics::stress(*concurrency,*iterations,endpoint.clone(),*allow_remote)=>services::print(&result?), _=tokio::signal::ctrl_c()=>anyhow::bail!("Diagnostics cancelled")};
         }
         Some(Commands::Learning { action }) => return migration::learning(&paths, action).await,
         Some(Commands::Performance { action }) => return migration::performance(&paths, action).await,
@@ -227,24 +227,24 @@ async fn run(cli: &Cli) -> Result<()> {
         Some(Commands::Agents { action }) => {
             let context = services::context(&paths)?;
             match action {
-                args::AgentCommands::ImportLegacy { source, id, preview } => return services::print(&claude_core::services::agent_import::import(&context, source, id, *preview)?),
-                args::AgentCommands::List => return services::print(&claude_core::services::agents::list(&context)?),
+                args::AgentCommands::ImportLegacy { source, id, preview } => return services::print(&deepseek_code_core::services::agent_import::import(&context, source, id, *preview)?),
+                args::AgentCommands::List => return services::print(&deepseek_code_core::services::agents::list(&context)?),
                 args::AgentCommands::Import { source } => {
                     let definition = serde_json::from_slice(&std::fs::read(source)?)?;
-                    claude_core::services::agents::install(&context, definition)?;
+                    deepseek_code_core::services::agents::install(&context, definition)?;
                     return services::print(&serde_json::json!({"imported":true}));
                 }
             }
         }
         Some(Commands::Agent { agent_type, prompt }) => {
-            claude_core::services::agents::resolve(&services::context(&paths)?, agent_type)?;
+            deepseek_code_core::services::agents::resolve(&services::context(&paths)?, agent_type)?;
             skill_prompt = Some(prompt.clone());
         }
         Some(Commands::MagicDocs { action }) => return magic_docs::run(cli, &paths, action).await,
         Some(Commands::Memory { action }) => return memory::run(cli, &paths, action).await,
         Some(Commands::VoiceConfig { endpoint, model, credential, language }) => {
             let context = services::context(&paths)?;
-            let config = claude_core::services::voice::VoiceConfig {
+            let config = deepseek_code_core::services::voice::VoiceConfig {
                 endpoint: endpoint.clone(), model: model.clone(),
                 credential: credential.clone(), language: language.clone(),
             };
@@ -277,11 +277,11 @@ async fn run(cli: &Cli) -> Result<()> {
             let db = paths.open_database()?;
             let value = match action {
                 SessionCommands::ShutdownWorker { .. } | SessionCommands::StopTask { .. } => unreachable!(),
-                SessionCommands::Trust { id, folders } => serde_json::to_value(claude_core::services::session_trust::repair(&db, &paths.data_dir, id, folders).map_err(|error| session_trust::repair_error(&paths, id, error))?)?,
+                SessionCommands::Trust { id, folders } => serde_json::to_value(deepseek_code_core::services::session_trust::repair(&db, &paths.data_dir, id, folders).map_err(|error| session_trust::repair_error(&paths, id, error))?)?,
                 SessionCommands::Compact { .. } => unreachable!(),
-                SessionCommands::ImportLegacy {source,preview} => serde_json::to_value(claude_core::services::session_import::import(&services::context(&paths)?,source,&std::env::current_dir()?,*preview)?)?,
+                SessionCommands::ImportLegacy {source,preview} => serde_json::to_value(deepseek_code_core::services::session_import::import(&services::context(&paths)?,source,&std::env::current_dir()?,*preview)?)?,
                 SessionCommands::List => serde_json::to_value(
-                    db.with_conn(claude_core::db::conversation_repo::list_conversations)??,
+                    db.with_conn(deepseek_code_core::db::conversation_repo::list_conversations)??,
                 )?,
                 SessionCommands::Show { id } => {
                     let store = SessionStore::new(db);
@@ -312,7 +312,7 @@ async fn run(cli: &Cli) -> Result<()> {
         }
         Some(Commands::Skills { action }) => {
             if let SkillsCommands::ImportLegacy {source,preview} = action {
-                return services::print(&claude_core::skills::import::import_legacy(source,&paths.data_dir.join("skills"),*preview)?);
+                return services::print(&deepseek_code_core::skills::import::import_legacy(source,&paths.data_dir.join("skills"),*preview)?);
             }
             let manager = SkillsManager::with_path(paths.data_dir.join("skills"));
             let skills = manager.load_skills().await?;
@@ -419,7 +419,7 @@ async fn run(cli: &Cli) -> Result<()> {
     if let Some(resumed) = &resumed {
         let db = paths.open_database()?;
         let (workspace, _) = db.with_conn(|conn| {
-            claude_core::native_engine::workspace::resolve_workspace(
+            deepseek_code_core::native_engine::workspace::resolve_workspace(
                 conn,
                 &paths.data_dir.join("workspaces"),
                 &resumed.id,
@@ -456,22 +456,22 @@ async fn run(cli: &Cli) -> Result<()> {
             )?
         };
         let work = async {
-            claude_core::services::lifecycle_events::check_configuration(&context, &workspace, &id)
+            deepseek_code_core::services::lifecycle_events::check_configuration(&context, &workspace, &id)
                 .await?;
-            for warning in claude_core::services::lifecycle_events::setup(
+            for warning in deepseek_code_core::services::lifecycle_events::setup(
                 &context, &workspace, &id, "init", true,
             )
             .await?
             {
                 eprintln!("Setup hook: {warning}");
             }
-            let mut hooks = claude_core::services::tool_hooks::HookRunner::load_with_plugins(
+            let mut hooks = deepseek_code_core::services::tool_hooks::HookRunner::load_with_plugins(
                 &context, &workspace,
             )?;
             hooks.force_synchronous();
             let result = hooks
                 .run(
-                    claude_core::services::tool_hooks::HookEvent::SessionStart,
+                    deepseek_code_core::services::tool_hooks::HookEvent::SessionStart,
                     &id,
                     serde_json::json!({"source":"startup"}),
                 )
@@ -511,7 +511,7 @@ async fn run(cli: &Cli) -> Result<()> {
         let folder = cli.path.clone().unwrap_or(std::env::current_dir()?);
         startup_prompts::confirm(&paths.data_dir, &folder, matches!(cli.permission_mode, args::PermissionModeArg::Bypass), cli.full_access)?;
     }
-    claude_core::permissions::set_full_access(cli.full_access && matches!(cli.permission_mode, args::PermissionModeArg::Bypass));
+    deepseek_code_core::permissions::set_full_access(cli.full_access && matches!(cli.permission_mode, args::PermissionModeArg::Bypass));
     let mut session = session::Session::open(cli, &paths, selection, resumed.as_ref().map(|s| s.id.as_str())).await?;
     startup_options::apply(cli, &mut session).await?;
     let mut screen_mode = terminal::screen_mode::ScreenMode::default();
@@ -522,7 +522,7 @@ async fn run(cli: &Cli) -> Result<()> {
             let trigger = if cli.maintenance { "maintenance" } else { "init" };
             let context = session.hook_service_context();
             let outcome = tokio::select! {
-                result = hook_progress::during(&session.id, true, claude_core::services::lifecycle_events::setup(&context, &session.workspace, &session.id, trigger, false)) => result,
+                result = hook_progress::during(&session.id, true, deepseek_code_core::services::lifecycle_events::setup(&context, &session.workspace, &session.id, trigger, false)) => result,
                 _ = tokio::signal::ctrl_c() => anyhow::bail!("Setup hooks interrupted"),
             }?;
             for warning in outcome { eprintln!("Setup hook: {warning}"); }
@@ -585,7 +585,7 @@ async fn run(cli: &Cli) -> Result<()> {
         let mut last_config_error = String::new();
         terminal::tips::start_session(&paths.data_dir);
         // Lets other sessions see this one is open while it is idle.
-        let mut presence: Option<(String, claude_core::services::session_messages::PresenceLease)> = None;
+        let mut presence: Option<(String, deepseek_code_core::services::session_messages::PresenceLease)> = None;
         // History length the last suggestion was generated for.
         let mut suggested_for = session.store.history(&session.id)?.len();
         terminal::STARTED.get_or_init(std::time::Instant::now);
@@ -613,7 +613,7 @@ async fn run(cli: &Cli) -> Result<()> {
             if let Err(error) = remote.sync(&session) { eprintln!("Remote Control: {error:#}"); }
             if presence.as_ref().is_none_or(|(id, _)| *id != session.id) {
                 drop(presence.take());
-                presence = claude_core::services::session_messages::PresenceLease::acquire(&paths.data_dir, &session.id)
+                presence = deepseek_code_core::services::session_messages::PresenceLease::acquire(&paths.data_dir, &session.id)
                     .ok()
                     .map(|lease| (session.id.clone(), lease));
             }
@@ -655,7 +655,7 @@ async fn run(cli: &Cli) -> Result<()> {
             input.as_ref().unwrap().set_todos(Box::new(move || background_commands::todo_items(&todo_paths, &todo_session)));
             input.as_ref().unwrap().set_vim(terminal::vim::enabled(&paths.data_dir));
             if display.diff_panel && !display.focus {
-                match claude_core::services::worktree_diff::snapshot(&session.workspace, display.diff_staged).await {
+                match deepseek_code_core::services::worktree_diff::snapshot(&session.workspace, display.diff_staged).await {
                     Ok(diff) => input.as_mut().unwrap().set_panel(vec![(if display.diff_staged { "Staged diff" } else { "Uncommitted changes (untracked files listed by name)" }.into(), diff)], true),
                     Err(error) => { eprintln!("Diff: {error:#}"); input.as_mut().unwrap().set_details(vec![]); },
                 }
@@ -693,20 +693,20 @@ async fn run(cli: &Cli) -> Result<()> {
                     }
                 },
                 _ = background_refresh.tick() => {
-                    match claude_core::services::lifecycle_events::check_configuration(&session.hook_service_context(), &session.workspace, &session.id).await {
+                    match deepseek_code_core::services::lifecycle_events::check_configuration(&session.hook_service_context(), &session.workspace, &session.id).await {
                         Ok(()) => last_config_error.clear(),
                         Err(error) => { let text = format!("{error:#}"); if last_config_error != text { input.as_ref().expect("interactive reader").notice(text.clone()); last_config_error = text; } }
                     }
                     if last_config_error.is_empty() && !idle_notified && tokio::time::Instant::now() >= idle_deadline {
                         idle_notified = true;
-                        if let Err(error) = claude_core::services::lifecycle_events::run(&session.hook_service_context(), &session.workspace, &session.id,
-                            claude_core::services::tool_hooks::HookEvent::Notification,
+                        if let Err(error) = deepseek_code_core::services::lifecycle_events::run(&session.hook_service_context(), &session.workspace, &session.id,
+                            deepseek_code_core::services::tool_hooks::HookEvent::Notification,
                             serde_json::json!({"message":"Claude is waiting for your input","notification_type":"idle_prompt"})).await {
                             input.as_ref().expect("interactive reader").notice(format!("Notification hook: {error:#}"));
                         }
                     }
                     if !composer.is_pending()
-                        && claude_core::services::async_hooks::has_pending_wake(&paths.data_dir, &session.id)
+                        && deepseek_code_core::services::async_hooks::has_pending_wake(&paths.data_dir, &session.id)
                         && input.as_mut().expect("interactive reader").yield_prompt().await? {
                         if let Err(error) = session.wake_hooks(cli, &mut input).await { eprintln!("Hook wake: {error:#}"); }
                         continue 'repl;
@@ -714,8 +714,8 @@ async fn run(cli: &Cli) -> Result<()> {
                     if let Err(error) = session.sync_workspace() { eprintln!("Worktree: {error:#}"); }
                     // A due CronCreate job runs as if typed, once the input is empty.
                     if !composer.is_pending() {
-                        let scope = claude_core::tools::cron_jobs::Scope { root: &paths.data_dir, session: &session.id, project: &session.workspace };
-                        match claude_core::tools::cron_jobs::take_due(&scope, chrono::Local::now()) {
+                        let scope = deepseek_code_core::tools::cron_jobs::Scope { root: &paths.data_dir, session: &session.id, project: &session.workspace };
+                        match deepseek_code_core::tools::cron_jobs::take_due(&scope, chrono::Local::now()) {
                             Ok(due) if !due.is_empty() => {
                                 if input.as_mut().expect("interactive reader").yield_prompt().await? {
                                     for prompt in due {
@@ -724,16 +724,16 @@ async fn run(cli: &Cli) -> Result<()> {
                                     }
                                     continue 'repl;
                                 }
-                                for prompt in due { claude_core::services::input_queue::push(&session.store.db, &session.id, &prompt)?; }
+                                for prompt in due { deepseek_code_core::services::input_queue::push(&session.store.db, &session.id, &prompt)?; }
                             }
                             Ok(_) => {}
                             Err(error) => eprintln!("Scheduled jobs: {error:#}"),
                         }
                     }
                     // A self-paced /loop wakes as if its input were typed again.
-                    if !composer.is_pending() && claude_core::tools::wakeup::is_due(&paths.data_dir, &session.id, chrono::Utc::now().timestamp())
+                    if !composer.is_pending() && deepseek_code_core::tools::wakeup::is_due(&paths.data_dir, &session.id, chrono::Utc::now().timestamp())
                         && input.as_mut().expect("interactive reader").yield_prompt().await? {
-                        if let Some((prompt, reason)) = claude_core::tools::wakeup::take_due(&paths.data_dir, &session.id, chrono::Utc::now().timestamp()).unwrap_or(None) {
+                        if let Some((prompt, reason)) = deepseek_code_core::tools::wakeup::take_due(&paths.data_dir, &session.id, chrono::Utc::now().timestamp()).unwrap_or(None) {
                             eprintln!("\u{21bb} Loop wakeup: {reason}");
                             input.as_mut().expect("interactive reader").queue_prompt(prompt);
                             continue 'repl;
@@ -761,7 +761,7 @@ async fn run(cli: &Cli) -> Result<()> {
                     // A finished background command starts a turn; its line is
                     // printed first, above that turn.
                     if !composer.is_pending()
-                        && claude_core::services::input_queue::any(&session.store.db, &session.id, background_commands::is_notification).unwrap_or(false)
+                        && deepseek_code_core::services::input_queue::any(&session.store.db, &session.id, background_commands::is_notification).unwrap_or(false)
                         && input.as_mut().expect("interactive reader").yield_prompt().await? {
                         for notice in notices { eprintln!("{notice}"); }
                         continue 'repl;
@@ -959,7 +959,7 @@ async fn run(cli: &Cli) -> Result<()> {
                 },
                 "status" | ".status" => { if let Err(error) = status_commands::run(&session, "").await { eprintln!("Status: {error:#}"); } },
                 "/history" | "history" | ".history" => println!("{}", serde_json::to_string_pretty(&session.store.history(&session.id)?)?),
-                "/tools" | "tools" | ".tools" => for tool in claude_core::tools::get_tool_definitions() { eprintln!("{}: {}", tool.name, tool.description); },
+                "/tools" | "tools" | ".tools" => for tool in deepseek_code_core::tools::get_tool_definitions() { eprintln!("{}: {}", tool.name, tool.description); },
                 command if skills.contains_key(command.split_whitespace().next().unwrap_or(command)) => {
                     if let Err(error) = session.turn(cli, &line, &mut input).await { if !worker_frontend::already_presented(&error) { eprintln!("Error: {error:#}"); } }
                 },
@@ -999,9 +999,9 @@ async fn mcp(paths: &RuntimePaths, action: &McpCommands) -> Result<()> {
     manager.initialize().await?;
     match action {
         McpCommands::ImportLegacy { .. } => unreachable!(),
-        McpCommands::Hosts => services::print(&claude_core::mcp::control::hosts(&services::context(paths)?)?)?,
+        McpCommands::Hosts => services::print(&deepseek_code_core::mcp::control::hosts(&services::context(paths)?)?)?,
         McpCommands::Restart {name,host} => {
-            let owner=claude_core::mcp::control::restart(&services::context(paths)?,name,host.as_deref()).await?;
+            let owner=deepseek_code_core::mcp::control::restart(&services::context(paths)?,name,host.as_deref()).await?;
             services::print(&serde_json::json!({"restarted":name,"host":owner}))?;
         }
         McpCommands::List => {

@@ -35,7 +35,7 @@ impl Recording {
                 let on_error = move |e: cpal::StreamError| {
                     *failure.lock().unwrap() = Some(e.to_string());
                 };
-                let max = claude_core::services::voice::MAX_AUDIO_BYTES / 2 - 22;
+                let max = deepseek_code_core::services::voice::MAX_AUDIO_BYTES / 2 - 22;
                 macro_rules! stream {
                     ($t:ty,$convert:expr) => {{
                         let samples = buffer.clone();
@@ -139,8 +139,8 @@ fn wav(samples: &[i16], rate: u32, channels: u16) -> Vec<u8> {
 
 pub async fn run(
     cli: &crate::args::Cli,
-    paths: &claude_core::runtime::RuntimePaths,
-    context: &claude_core::services::ServiceContext,
+    paths: &deepseek_code_core::runtime::RuntimePaths,
+    context: &deepseek_code_core::services::ServiceContext,
     file: &Option<std::path::PathBuf>,
     push_to_talk: bool,
     continuous: bool,
@@ -155,7 +155,7 @@ pub async fn run(
         file.is_some() || std::io::stdin().is_terminal(),
         "Microphone mode requires interactive stdin; use --file for scripts"
     );
-    let config: claude_core::services::voice::VoiceConfig = context
+    let config: deepseek_code_core::services::voice::VoiceConfig = context
         .setting("voice")?
         .context("Voice backend is not configured; use voice-config")?;
     config.validate()?;
@@ -163,7 +163,7 @@ pub async fn run(
     let resumed = if send {
         let resume_id = if cli.continue_session {
             Some(
-                claude_core::runtime::SessionStore::new(paths.open_database()?)
+                deepseek_code_core::runtime::SessionStore::new(paths.open_database()?)
                     .latest(&std::env::current_dir()?)?
                     .context("No resumable Code session in this directory")?
                     .id,
@@ -173,9 +173,9 @@ pub async fn run(
         };
         if let Some(id) = &resume_id {
             let db = paths.open_database()?;
-            let resumed = claude_core::runtime::SessionStore::new(db.clone()).resume(id)?;
+            let resumed = deepseek_code_core::runtime::SessionStore::new(db.clone()).resume(id)?;
             let (workspace, _) = db.with_conn(|c| {
-                claude_core::native_engine::workspace::resolve_workspace(
+                deepseek_code_core::native_engine::workspace::resolve_workspace(
                     c,
                     &paths.data_dir.join("workspaces"),
                     id,
@@ -225,7 +225,7 @@ pub async fn run(
             let (bytes, mime) = if let Some(file) = file {
                 let size = std::fs::metadata(file)?.len();
                 ensure!(
-                    size <= claude_core::services::voice::MAX_AUDIO_BYTES as u64,
+                    size <= deepseek_code_core::services::voice::MAX_AUDIO_BYTES as u64,
                     "Audio exceeds 25 MiB"
                 );
                 let mime = match file.extension().and_then(|s| s.to_str()) {
@@ -261,7 +261,7 @@ pub async fn run(
                 (bytes, "audio/wav")
             };
             eprintln!("Transcribing…");
-            let text = claude_core::services::voice::transcribe(context, bytes, mime).await?;
+            let text = deepseek_code_core::services::voice::transcribe(context, bytes, mime).await?;
             if let Some(session) = &session {
                 session.turn(cli, &text, &mut input).await?;
             } else {

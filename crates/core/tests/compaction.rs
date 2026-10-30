@@ -1,4 +1,4 @@
-use claude_core::{
+use deepseek_code_core::{
     native_engine::provider_manager::ApiFormat,
     runtime::{RuntimePaths, SessionStore},
     services::compaction::{apply_boundary, commit, prepare},

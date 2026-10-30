@@ -1,6 +1,6 @@
 //! SDK MCP uses its own control mailbox; replies cannot authorize tools or hooks.
 use anyhow::{ensure, Context, Result};
-use claude_core::mcp::sdk::{Host, Runtime};
+use deepseek_code_core::mcp::sdk::{Host, Runtime};
 use serde_json::{json, Value};
 use std::{future::Future, pin::Pin, sync::Arc};
 

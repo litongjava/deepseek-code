@@ -1,4 +1,4 @@
-use claude_core::knowledge::*;
+use deepseek_code_core::knowledge::*;
 use std::sync::Arc;
 use tauri::State;
 
@@ -125,7 +125,7 @@ pub async fn gh_trending(
     hub: State<'_, Arc<GitHubHub>>,
     since: String,
     language: Option<String>,
-) -> Result<Vec<claude_core::knowledge::github_hub::GitHubRepo>, String> {
+) -> Result<Vec<deepseek_code_core::knowledge::github_hub::GitHubRepo>, String> {
     hub.fetch_trending(&since, language.as_deref()).await
 }
 
@@ -133,14 +133,14 @@ pub async fn gh_trending(
 pub async fn gh_search(
     hub: State<'_, Arc<GitHubHub>>,
     query: String,
-) -> Result<Vec<claude_core::knowledge::github_hub::GitHubRepo>, String> {
+) -> Result<Vec<deepseek_code_core::knowledge::github_hub::GitHubRepo>, String> {
     hub.search_repos(&query).await
 }
 
 #[tauri::command]
 pub async fn gh_user_repos(
     hub: State<'_, Arc<GitHubHub>>,
-) -> Result<Vec<claude_core::knowledge::github_hub::GitHubRepo>, String> {
+) -> Result<Vec<deepseek_code_core::knowledge::github_hub::GitHubRepo>, String> {
     hub.get_user_repos().await
 }
 
@@ -162,11 +162,11 @@ pub async fn gh_watch(hub: State<'_, Arc<GitHubHub>>, full_name: String) -> Resu
 #[tauri::command]
 pub async fn gh_get_watched(
     hub: State<'_, Arc<GitHubHub>>,
-) -> Result<Vec<claude_core::knowledge::github_hub::WatchedRepo>, String> {
+) -> Result<Vec<deepseek_code_core::knowledge::github_hub::WatchedRepo>, String> {
     Ok(hub.get_watched().await)
 }
 
 #[tauri::command]
 pub async fn gh_oauth_url(state_param: String) -> Result<String, String> {
-    Ok(claude_core::knowledge::github_hub::GitHubHub::get_oauth_url(&state_param))
+    Ok(deepseek_code_core::knowledge::github_hub::GitHubHub::get_oauth_url(&state_param))
 }
