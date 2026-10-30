@@ -62,6 +62,7 @@ async fn single_turn(
         &root.join("keybindings.json"),
         history,
     )?.with_workspace(&session.workspace);
+    display.set_pinned_prompt(prompt);
     display.set_model_label(&crate::session_commands::model_label(session).await);
     if display.is_live() {
         display.set_transcript(crate::repl::transcript(session).unwrap_or_default());

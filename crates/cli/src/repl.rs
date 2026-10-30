@@ -114,7 +114,10 @@ fn conversation(session: &Session, id: &str, detailed: bool, mut recorded: Optio
                 lines.push(change_view::body(&format!("\u{25cf} {first}")));
                 lines.extend(text.map(|line| change_view::body(&format!("  {line}"))));
             }
-            if let Some(recorded) = recorded.as_deref_mut() { record_lines(recorded, &lines[answer_start..], width); }
+            if let Some(recorded) = recorded.as_deref_mut() {
+                if lines.len() > answer_start && recorded.needs_separator() { recorded.push(String::new(), None); }
+                record_lines(recorded, &lines[answer_start..], width);
+            }
         }
         Ok(lines)
     })?

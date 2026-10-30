@@ -3,6 +3,7 @@ use serde_json::Value;
 use unicode_width::UnicodeWidthChar;
 #[derive(Clone, Copy, Debug)]
 pub enum Style {
+    TerminalDefault,
     Body,
     Muted,
     Success,
@@ -160,6 +161,7 @@ fn painted(
 fn codes(style: Style, theme: u8) -> &'static str {
     if theme >= 4 {
         return match style {
+            Style::TerminalDefault => "0;39;49",
             Style::Body => "39",
             Style::Muted => "90",
             Style::Success => "32",
@@ -190,6 +192,7 @@ fn codes(style: Style, theme: u8) -> &'static str {
     }
     if theme % 2 == 1 {
         return match style {
+            Style::TerminalDefault => "0;39;49",
             Style::Body => "38;2;32;32;32",
             Style::Muted => "38;2;102;102;102",
             Style::Success => "38;2;32;128;64",
@@ -205,6 +208,7 @@ fn codes(style: Style, theme: u8) -> &'static str {
         };
     }
     match style {
+        Style::TerminalDefault => "0;39;49",
         Style::Body => "38;2;248;248;242",
         Style::Muted => "38;2;153;153;153",
         Style::Success => "38;2;78;186;101",
@@ -300,13 +304,13 @@ pub fn success(summary: &str) -> Line {
     ])
 }
 /// The header of a finished tool call: `● Bash(ls -la) · 0.1s`.
-pub fn tool_call(label: &str, detail: &str, failed: bool) -> Line {
+pub fn tool_call(label: &str, detail: &str, _failed: bool) -> Line {
     let mut spans = vec![
-        span("\u{25cf} ", if failed { Style::Failure } else { Style::Success }),
-        span(label, Style::Body),
+        span("\u{25cf} ", Style::TerminalDefault),
+        span(label, Style::TerminalDefault),
     ];
     if !detail.is_empty() {
-        spans.push(span(format!(" \u{b7} {detail}"), Style::Muted));
+        spans.push(span(format!(" \u{b7} {detail}"), Style::TerminalDefault));
     }
     Line(spans)
 }
@@ -324,10 +328,10 @@ pub fn todo_item(text: &str, status: &str, first: bool) -> Line {
     ])
 }
 /// One line of a tool result under its header, as `  ⎿  text`.
-pub fn tool_output(text: &str, first: bool, failed: bool) -> Line {
+pub fn tool_output(text: &str, first: bool, _failed: bool) -> Line {
     Line(vec![
-        span(if first { "  \u{23bf}  " } else { "     " }, Style::Muted),
-        span(text, if failed { Style::Failure } else { Style::Muted }),
+        span(if first { "  \u{23bf}  " } else { "     " }, Style::TerminalDefault),
+        span(text, Style::TerminalDefault),
     ])
 }
 fn changed_span(text: &str, other: &str) -> (usize, usize) {

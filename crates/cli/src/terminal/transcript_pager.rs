@@ -115,6 +115,11 @@ impl HistoryView {
         let end = self.all.len().saturating_sub(page);
         let top = self.top.unwrap_or(end);
         let next = if up { top.saturating_sub(3) } else { top.saturating_add(3).min(end) };
+        if !up && next >= end {
+            self.close()?;
+            self.previous.clear();
+            return Ok(());
+        }
         self.top = Some(next);
         if !was_active { self.previous.clear(); execute!(io::stderr(), EnterAlternateScreen)?; }
         Ok(())

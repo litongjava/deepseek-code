@@ -87,6 +87,7 @@ struct Buffer {
     chars: Vec<char>,
     cursor: usize,
     pasted: bool,
+    paste_end: usize,
 }
 impl Buffer {
     fn text(&self) -> String {
@@ -848,6 +849,7 @@ impl PromptEditor {
         let mut keybinding_pending = crate::keybindings::Pending::default();
         let mut screen = Screen::pinned();
         let mut selection = crate::terminal::mouse_selection::Selection::default();
+        let mut pinned = crate::terminal::pinned_prompt::PinnedPrompt { text: { let latest = crate::terminal::pinned_prompt::latest(); if latest.is_empty() { self.history.last().cloned().unwrap_or_default() } else { latest } }, ..Default::default() };
         let mut history_view = crate::terminal::transcript_pager::HistoryView::default();
         let mut selected = 0usize;
         let mut history_pos = self.history.len();
@@ -942,7 +944,8 @@ impl PromptEditor {
             selected = selected.min(items.len().saturating_sub(1));
             // Wrap by display cells, never by UTF-8 bytes. Keep cursor in viewport.
             let prompt = clipped(prompt, width.saturating_sub(2));
-            let label = buffer.pasted.then(|| crate::terminal::paste_input::paste_label(&text)).flatten();
+            let prefix: String = buffer.chars.iter().take(buffer.paste_end).collect();
+            let label = buffer.pasted.then(|| crate::terminal::paste_input::paste_label(&prefix)).flatten().map(|label| format!("{}{}", label, buffer.chars.iter().skip(buffer.paste_end).collect::<String>()));
             let shown = label.as_ref().map(|label| label.chars().collect::<Vec<_>>());
             let chars = shown.as_ref().unwrap_or(&buffer.chars);
             let (input_lines, positions) = crate::terminal::prompt_display::layout(&prompt, chars, width.saturating_sub(1));
@@ -1135,6 +1138,7 @@ impl PromptEditor {
                 }
                 screen.draw(&lines, input_row, cursor_col)?;
             }
+            if !selection.retained() { pinned.draw(width, rows as usize)?; }
             above.clone().save();
             let Some(event) = read_editor_event(&mut input_reader)? else {
                 continue;
@@ -1156,6 +1160,7 @@ impl PromptEditor {
                         let composer = lines.iter().map(|(text, _)| text.clone()).collect::<Vec<_>>();
                         let snapshot = history_view.screen_rows(rows as usize, &composer);
                         if let Some(click) = selection.event(mouse, snapshot)? {
+                            if click.kind == MouseEventKind::Down(MouseButton::Left) && pinned.click(click.row) { continue; }
                             if click.kind == MouseEventKind::Down(MouseButton::Left) {
                                 if let Some(index) = history_view.row_index(click.row as usize, (rows as usize).saturating_sub(lines.len())) { above.toggle_history(index); }
                             }
@@ -1169,6 +1174,7 @@ impl PromptEditor {
                         if let Some(row) = snapshot.get_mut(origin as usize + index) { *row = text.clone(); }
                     }
                     let Some(mouse) = selection.event(mouse, snapshot)? else { continue; };
+                    if mouse.kind == MouseEventKind::Down(MouseButton::Left) && pinned.click(mouse.row) { screen.invalidated = true; continue; }
                     let toggled = (mouse.kind == MouseEventKind::Down(MouseButton::Left))
                         .then(|| above.toggle(origin, mouse.row))
                         .flatten();
@@ -1214,12 +1220,13 @@ impl PromptEditor {
                         Some(path) => buffer.insert(&format!("{} ", crate::images::attach(path))),
                         None => buffer.insert(&value),
                     }
+                    buffer.paste_end = buffer.chars.len();
                     selected = 0;
                     menu_hidden = false;
                 }
                 Event::Key(key) if key.kind != KeyEventKind::Release => {
                     selection.clear()?;
-                    if !matches!(key.code, KeyCode::Enter) { buffer.pasted = false; }
+                    if buffer.cursor < buffer.paste_end || matches!(key.code, KeyCode::Up | KeyCode::Down | KeyCode::Home) { buffer.pasted = false; }
                     let key = match self.keybindings.resolve(key, &mut keybinding_pending) {
                         crate::keybindings::Resolution::Key(key) => key,
                         crate::keybindings::Resolution::Consumed => continue,

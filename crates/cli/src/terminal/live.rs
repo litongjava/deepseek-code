@@ -71,6 +71,7 @@ enum Update {
     Todos(Vec<(String, String)>),
     /// The conversation before this turn, for the Ctrl+O transcript.
     Transcript(Vec<change_view::Line>),
+    PinnedPrompt(String),
     /// A queued message the model has now read.
     QueuedDelivered(String),
     SetDraft(String),
@@ -234,6 +235,7 @@ impl Drop for RawGuard {
 #[derive(Default, Clone)]
 struct Draft {
     pasted: bool,
+    paste_end: usize,
     characters: Vec<char>,
     cursor: usize,
 }
@@ -244,6 +246,7 @@ impl Draft {
         if self.characters.len().saturating_add(count) > 32_768 { return false; }
         self.insert(&normalized);
         self.pasted = true;
+        self.paste_end = self.characters.len();
         true
     }
     fn insert(&mut self, text: &str) {
@@ -272,8 +275,8 @@ impl Draft {
     }
     fn visible(&self, width: usize) -> (String, usize) {
         if self.pasted {
-            if let Some(label) = super::paste_input::paste_label(&self.characters.iter().collect::<String>()) {
-                let text = clip(&label, width);
+            if let Some(label) = super::paste_input::paste_label(&self.characters.iter().take(self.paste_end).collect::<String>()) {
+                let text = clip(&format!("{}{}", label, self.characters.iter().skip(self.paste_end).collect::<String>()), width);
                 return (text.clone(), text.chars().count());
             }
         }
@@ -985,6 +988,7 @@ fn log_answer_line(state: &mut State, screen: &mut Frame, rendered: &str) {
         screen.log_rendered("");
         return;
     }
+    if state.block_start && screen.scrollback.needs_separator() { screen.log_rendered(""); }
     let first = if std::mem::take(&mut state.block_start) { "\u{25cf} " } else { "  " };
     // Wrap at word boundaries with the answer's indent instead of letting the
     // terminal break words at the edge.
@@ -1089,6 +1093,7 @@ fn finish_answer(state: &mut State, screen: &mut Frame) {
 
 #[derive(Default)]
 struct Frame {
+    pinned: super::pinned_prompt::PinnedPrompt,
     lines: Vec<String>,
     cursor_up: usize,
     cursor_column: usize,
@@ -1427,7 +1432,8 @@ impl Frame {
             self.refresh_history(state, width);
             let input_row = lines.len().saturating_sub(choice_cursor.map_or(3, |(row, _)| row));
             let cursor_column = choice_cursor.map_or((prompt_width + cursor).min(width), |(_, column)| column);
-            return self.history_view.draw(&lines, input_row, cursor_column, size);
+            self.history_view.draw(&lines, input_row, cursor_column, size)?;
+            return self.pinned.draw(width, size.1 as usize);
         }
         content.extend(lines);
         let mut lines = content;
@@ -1495,7 +1501,8 @@ impl Frame {
         self.lines = lines;
         self.size = size;
         self.cursor_column = cursor_column;
-        write(&out)
+        write(&out)?;
+        self.pinned.draw(width, size.1 as usize)
     }
 }
 /// The frame below the activity line while a menu question is pending:
@@ -1699,6 +1706,7 @@ fn run(
                     dirty = true;
                 }
                 Ok(Update::Transcript(lines)) => state.transcript = lines,
+                Ok(Update::PinnedPrompt(text)) => { screen.pinned.text = text; dirty = true; },
                 Ok(Update::Shells(count)) => state.shells = count,
                 Ok(Update::Agents(count)) => state.agents = count,
                 Ok(Update::Todos(todos)) => {
@@ -1714,6 +1722,8 @@ fn run(
                     if let Some(index) = state.queued.iter().position(|queued| *queued == text) {
                         state.queued.remove(index);
                     }
+                    screen.pinned.text = text.clone();
+                    super::pinned_prompt::remember(&text);
                     // As in the reference CLI the message joins the transcript
                     // where the model read it; a task notification was already
                     // announced when the command finished.
@@ -1826,7 +1836,7 @@ fn run(
             match event {
                 Event::Key(key) if key.kind != KeyEventKind::Release => {
                     selection.clear()?;
-                    if !matches!(key.code, KeyCode::Enter) { state.draft.pasted = false; }
+                    if state.draft.cursor < state.draft.paste_end || matches!(key.code, KeyCode::Up | KeyCode::Down | KeyCode::Home) { state.draft.pasted = false; }
                     let key = match state.bindings.resolve(key, &mut state.key_pending) {
                         crate::keybindings::Resolution::Key(key) => key,
                         crate::keybindings::Resolution::Consumed => continue,
@@ -2014,6 +2024,7 @@ fn run(
                         let composer = screen.lines.iter().rev().take(screen.composer_height).cloned().collect::<Vec<_>>().into_iter().rev().collect::<Vec<_>>();
                         let snapshot = screen.history_view.screen_rows(screen.size.1 as usize, &composer);
                         if let Some(click) = selection.event(mouse, snapshot)? {
+                            if click.kind == MouseEventKind::Down(MouseButton::Left) && screen.pinned.click(click.row) { screen.draw(state)?; continue; }
                             if click.kind == MouseEventKind::Down(MouseButton::Left) {
                                 if let Some(index) = screen.history_view.row_index(click.row as usize, (screen.size.1 as usize).saturating_sub(composer.len())) { screen.scrollback.toggle_history(index); }
                             }
@@ -2026,6 +2037,7 @@ fn run(
                         if let Some(row) = snapshot.get_mut(screen.top.unwrap_or(0) as usize + index) { *row = text.clone(); }
                     }
                     let Some(mouse) = selection.event(mouse, snapshot)? else { continue; };
+                    if mouse.kind == MouseEventKind::Down(MouseButton::Left) && screen.pinned.click(mouse.row) { screen.lines.clear(); screen.draw(state)?; continue; }
                     let origin = screen.top.unwrap_or(0) + screen.padding as u16;
                     if mouse.kind == MouseEventKind::Down(MouseButton::Left)
                         && screen.top.is_some_and(|top| mouse.row < top)
@@ -2129,7 +2141,9 @@ mod tests {
         let text = "中文\n".repeat(100);
         assert!(draft.insert_paste(&text));
         assert!(draft.visible(80).0.starts_with("[Pasted Content 300 chars]"));
-        assert_eq!(draft.take(), text);
+        draft.insert(" more");
+        assert!(draft.visible(80).0.contains("chars] more"));
+        assert_eq!(draft.take(), format!("{text} more"));
     }
 
     #[test]
@@ -2777,6 +2791,10 @@ impl TurnDisplay {
         }
     }
     /// The conversation before this turn, for Ctrl+O.
+    pub fn set_pinned_prompt(&self, text: &str) {
+        super::pinned_prompt::remember(text);
+        if let Some(live) = &self.live { let _ = live.updates.send(Update::PinnedPrompt(text.into())); }
+    }
     pub fn set_transcript(&mut self, lines: Vec<change_view::Line>) {
         if let Some(live) = &self.live {
             let _ = live.updates.send(Update::Transcript(lines));
@@ -2908,6 +2926,21 @@ mod completion_tests {
         assert_eq!(display.hooks.values().collect::<Vec<_>>(), vec!["Check B"]);
         display.hook_progress("two", None);
         assert!(display.hooks.is_empty());
+    }
+
+    #[test]
+    fn thought_and_answer_have_exactly_one_separator() {
+        let mut state = State::new("ask".into());
+        let now = Instant::now();
+        state.thinking_span = Some((now, now));
+        state.thinking_preview = "reasoning".into();
+        let mut screen = Frame::default();
+        finish_thought(&mut state, &mut screen);
+        state.block_start = true;
+        log_answer_line(&mut state, &mut screen, "answer");
+        assert_eq!(screen.logged.len(), 3);
+        assert_eq!(screen.logged[1], "");
+        assert!(screen.logged[2].contains("answer"));
     }
 
     #[test]

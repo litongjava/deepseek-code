@@ -915,6 +915,7 @@ impl Session {
         let mut progress = crate::terminal::live::TurnDisplay::new(interactive_display, self.permission_mode(), &self.paths.data_dir.join("keybindings.json"), self.store.history(&self.id)?.iter().filter(|row|row["role"]=="user").filter_map(|row|row["content"].as_str().map(str::to_owned)).filter(|text| !crate::background_commands::is_notification(text)).collect())?.with_workspace(&self.workspace);
         if progress.is_live() {
             progress.set_model_label(&crate::session_commands::model_label(self).await);
+            progress.set_pinned_prompt(prompt);
             progress.set_transcript(crate::repl::transcript(self).unwrap_or_default());
             progress.set_todos(crate::background_commands::todo_items(&self.paths, &self.id));
         }

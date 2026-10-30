@@ -138,6 +138,7 @@ pub mod vim;
 mod display_path;
 pub(crate) mod scrollback;
 mod mouse_selection;
+mod pinned_prompt;
 pub mod style;
 pub mod screen_mode;
 
