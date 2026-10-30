@@ -126,7 +126,31 @@ pub(crate) async fn model_label(session: &Session) -> String {
     let effort = effort.filter(|value| !value.is_empty()).unwrap_or_else(|| "default".into());
     let title = session.store.resume(&session.id).ok().and_then(|conversation| conversation.title)
         .filter(|title| !title.trim().is_empty()).unwrap_or_else(|| "Untitled".into());
-    format!("{} {} · {} · {}", session.model, effort, session.workspace.display(), title.replace(['\r', '\n'], " "))
+    let branch = status_branch(&session.workspace).await;
+    format!("{} {} · {} · {} · {}", session.model, effort, session.workspace.display(), title.replace(['\r', '\n'], " "), branch)
+}
+
+/// Read the live branch without allowing Git to stall the input prompt.
+async fn status_branch(workspace: &std::path::Path) -> String {
+    let mut command = tokio::process::Command::new("git");
+    command
+        .args(["symbolic-ref", "--quiet", "--short", "HEAD"])
+        .current_dir(workspace)
+        .stdin(std::process::Stdio::null())
+        .kill_on_drop(true);
+    #[cfg(windows)]
+    command.creation_flags(0x08000000); // CREATE_NO_WINDOW
+    let output =
+        tokio::time::timeout(std::time::Duration::from_millis(500), command.output()).await;
+    if let Ok(Ok(output)) = output {
+        if output.status.success() {
+            let branch = String::from_utf8_lossy(&output.stdout).trim().to_owned();
+            if !branch.is_empty() {
+                return branch;
+            }
+        }
+    }
+    "default".into()
 }
 
 /// The session's auto-compact threshold in percent, None when off.
@@ -1035,5 +1059,46 @@ mod tests {
         ] {
             assert!(parse_goal_verdict(text).is_err(), "{text}");
         }
+    }
+}
+
+#[cfg(test)]
+mod status_branch_tests {
+    use super::status_branch;
+
+    #[tokio::test]
+    async fn branch_tracks_workspace_and_falls_back_without_a_branch() {
+        let directory = tempfile::tempdir().unwrap();
+        assert_eq!(status_branch(directory.path()).await, "default");
+        let git = |args: &[&str]| {
+            let output = std::process::Command::new("git")
+                .args(args)
+                .current_dir(directory.path())
+                .output()
+                .unwrap();
+            assert!(
+                output.status.success(),
+                "{}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+        };
+        git(&["init", "-b", "status-test"]);
+        assert_eq!(status_branch(directory.path()).await, "status-test");
+        git(&[
+            "-c",
+            "user.name=Test",
+            "-c",
+            "user.email=test@example.com",
+            "-c",
+            "commit.gpgsign=false",
+            "commit",
+            "--allow-empty",
+            "-m",
+            "test",
+        ]);
+        git(&["switch", "-c", "next-branch"]);
+        assert_eq!(status_branch(directory.path()).await, "next-branch");
+        git(&["checkout", "--detach"]);
+        assert_eq!(status_branch(directory.path()).await, "default");
     }
 }
