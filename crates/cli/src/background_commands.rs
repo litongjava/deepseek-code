@@ -257,13 +257,18 @@ pub async fn handle(
                         job.parent_session_id == session.id,
                         "Task belongs to another session"
                     );
-                    eprintln!("{}", serde_json::to_string_pretty(&job)?);
                     let (output, errors) = background_sessions::output(&paths.data_dir, id)?;
-                    if !output.is_empty() {
-                        println!("{output}");
-                    }
-                    if !errors.is_empty() {
-                        eprintln!("{errors}");
+                    let output = output.lines().map(|line| {
+                        serde_json::from_str::<serde_json::Value>(line).ok()
+                            .and_then(|value| serde_json::to_string_pretty(&value).ok())
+                            .unwrap_or_else(|| line.to_owned())
+                    }).collect::<Vec<_>>().join("\n\n");
+                    let text = format!("Task {id}\n\n{}\n\n{}\n\n{}", serde_json::to_string_pretty(&job)?, output.trim(), errors.trim());
+                    if crate::terminal::picker::available() {
+                        let lines: Vec<_> = text.lines().map(crate::terminal::change_view::body).collect();
+                        crate::terminal::transcript_pager::view(&lines)?;
+                    } else {
+                        println!("{}", safe_output(&text));
                     }
                 }
                 "cancel" | "stop" => {

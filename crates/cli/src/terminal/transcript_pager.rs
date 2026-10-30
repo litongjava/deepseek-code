@@ -274,8 +274,8 @@ pub(super) fn run_with_logged(
     next_event: &mut dyn FnMut() -> io::Result<Option<Event>>,
 ) -> io::Result<Outcome> {
     let mut out = io::stderr();
-    // Release mouse capture so the detailed transcript supports native drag selection.
-    execute!(out, EnterAlternateScreen, Hide, DisableMouseCapture)?;
+    // Capture scrolling and use the shared retained drag selection.
+    execute!(out, EnterAlternateScreen, Hide, EnableMouseCapture)?;
     let result = pager(lines, logged, next_event, &mut out);
     execute!(out, Show, LeaveAlternateScreen, EnableMouseCapture)?;
     result
@@ -296,6 +296,7 @@ fn pager(
     let mut search: Option<String> = None;
     let mut query = String::new();
     let mut redraw = true;
+    let mut selection = super::mouse_selection::Selection::default();
     loop {
         let footer_rows = if help { HELP.len() + 1 } else { 2 };
         let page = (size.1 as usize).saturating_sub(footer_rows).max(1);
@@ -316,6 +317,14 @@ fn pager(
                 continue;
             }
             Event::Mouse(mouse) => {
+                if !matches!(mouse.kind, MouseEventKind::ScrollUp | MouseEventKind::ScrollDown) {
+                    let mut snapshot = vec![String::new(); size.1 as usize];
+                    for (index, row) in all.iter().skip(top).take(page).enumerate() { snapshot[index] = row.styled.clone(); }
+                    selection.event(mouse, snapshot)?;
+                    redraw = false;
+                    continue;
+                }
+                selection.clear()?;
                 match mouse.kind {
                     MouseEventKind::ScrollUp => top = top.saturating_sub(super::SCROLL_SPEED.load(std::sync::atomic::Ordering::Relaxed)),
                     MouseEventKind::ScrollDown => top = top.saturating_add(super::SCROLL_SPEED.load(std::sync::atomic::Ordering::Relaxed)),
@@ -326,6 +335,7 @@ fn pager(
             Event::Key(key) if key.kind != KeyEventKind::Release => key,
             _ => continue,
         };
+        selection.clear()?;
         if let Some(text) = search.as_mut() {
             match key.code {
                 KeyCode::Esc => search = None,
