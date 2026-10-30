@@ -1248,30 +1248,8 @@ impl Frame {
         let prompt_width = prompt.chars().count();
         let (draft, cursor) = state.draft.visible(width.saturating_sub(prompt_width + 1));
         let status = clip(&state.status_line(), width);
-        // Footer as in the reference CLI: the mode label (none for ask), then hints.
         let indicator = crate::terminal::style::mode_indicator(&state.mode);
-        let hint = if state.choice.is_some() {
-            "esc to interrupt"
-        } else if state.answer.is_some() {
-            "enter to submit your answer \u{b7} esc to interrupt"
-        } else {
-            "esc to interrupt"
-        };
-        let mode = match &indicator {
-            Some((label, _)) => format!("{label} \u{b7} {hint}"),
-            None => hint.to_owned(),
-        };
-        // The model, effort and session directory at the right; a short line
-        // keeps only the directory's name, then only the model.
-        let used = mode.width();
-        let folder = state.workspace.rsplit(['/', '\\']).next().unwrap_or_default();
-        let join = |path: &str| [state.model_label.as_str(), path].into_iter().filter(|part| !part.is_empty()).collect::<Vec<_>>().join(" \u{b7} ");
-        let candidates = [join(&state.workspace), join(folder), state.model_label.clone()];
-        let right = candidates.iter().find(|right| !right.is_empty() && used + 2 + right.width() <= width);
-        let mode = match right {
-            Some(right) => format!("{mode}{}{right}", " ".repeat(width - used - right.width())),
-            None => mode,
-        };
+        let mode = format!("{} {}", crate::terminal::style::status_mode(&state.mode), state.model_label);
         let rule = "─".repeat(width);
         let tip_line = state
             .tip

@@ -117,16 +117,16 @@ pub(crate) fn session_effort(session: &Session) -> Result<Option<String>> {
     Ok(load(&session.store.db, &session.id)?.effort)
 }
 
-/// The status line's model and reasoning effort: `deepseek-flash · ● high`.
+/// The shared status fields following the permission mode.
 pub(crate) async fn model_label(session: &Session) -> String {
     let effort = match session_effort(session) {
         Ok(Some(effort)) => Some(effort),
         _ => session.selected_provider().await.ok().and_then(|provider| provider.model.effort),
     };
-    match effort.filter(|effort| !effort.is_empty() && effort != "off") {
-        Some(effort) => format!("{} \u{b7} \u{25cf} {effort}", session.model),
-        None => session.model.clone(),
-    }
+    let effort = effort.filter(|value| !value.is_empty()).unwrap_or_else(|| "default".into());
+    let title = session.store.resume(&session.id).ok().and_then(|conversation| conversation.title)
+        .filter(|title| !title.trim().is_empty()).unwrap_or_else(|| "Untitled".into());
+    format!("{} {} · {} · {}", session.model, effort, session.workspace.display(), title.replace(['\r', '\n'], " "))
 }
 
 /// The session's auto-compact threshold in percent, None when off.

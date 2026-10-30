@@ -224,3 +224,15 @@ pub fn shortcut_rows(width: usize) -> Vec<String> {
         })
         .collect()
 }
+
+/// Compact permission label used by both idle and streaming status lines.
+pub fn status_mode(mode: &str) -> &str {
+    match mode {
+        "accept-edits" => "accept edits on",
+        "bypass" => "bypass permissions on",
+        "plan" => "plan mode on",
+        "dont-ask" => "don't ask on",
+        "auto" => "auto mode on",
+        _ => "ask permissions on",
+    }
+}

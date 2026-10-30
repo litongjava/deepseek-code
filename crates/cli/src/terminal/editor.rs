@@ -1081,6 +1081,11 @@ impl PromptEditor {
                     None => left,
                 }
             };
+            let footer = if search.is_none() && !text.starts_with('!') && !text.starts_with("# ") {
+                format!("{} {}", crate::terminal::style::status_mode(&self.permission_mode), self.effort.as_deref().unwrap_or_default())
+            } else {
+                footer
+            };
             let footer_style = match crate::terminal::style::mode_indicator(&self.permission_mode) {
                 Some((_, color)) if search.is_none() => TextStyle::Colored(color),
                 _ => TextStyle::Muted,
