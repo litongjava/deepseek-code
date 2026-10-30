@@ -11,7 +11,11 @@ pub(super) struct PinnedPrompt {
     pub height: usize,
 }
 impl PinnedPrompt {
-    pub fn draw(&mut self, width: usize, height: usize) -> io::Result<()> {
+    pub fn draw(&mut self, width: usize, height: usize, background: &[String]) -> io::Result<()> {
+        let mut out = io::stderr().lock();
+        self.draw_to(&mut out, width, height, background)
+    }
+    fn draw_to(&mut self, out: &mut impl Write, width: usize, height: usize, background: &[String]) -> io::Result<()> {
         if self.text.is_empty() {
             return Ok(());
         }
@@ -32,9 +36,15 @@ impl PinnedPrompt {
             }
             vec![first]
         };
+        let previous_height = self.height;
         self.height = rows.len();
-        let mut out = io::stderr().lock();
         queue!(out, SavePosition)?;
+        // Restore every row covered by the previous overlay before repainting.
+        // The underlying renderer may have skipped these unchanged rows.
+        for row in 0..previous_height.min(height) {
+            queue!(out, MoveTo(0, row as u16), Print("\x1b[0m\x1b[2K"),
+                Print(background.get(row).map(String::as_str).unwrap_or_default()))?;
+        }
         for (row, text) in rows.iter().enumerate() {
             queue!(
                 out,
@@ -59,3 +69,21 @@ impl PinnedPrompt {
 static LAST: std::sync::Mutex<String> = std::sync::Mutex::new(String::new());
 pub(super) fn remember(text: &str) { *LAST.lock().unwrap_or_else(|e| e.into_inner()) = text.to_owned(); }
 pub(super) fn latest() -> String { LAST.lock().unwrap_or_else(|e| e.into_inner()).clone() }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn collapsing_restores_messages_under_expanded_prompt() {
+        let mut prompt = PinnedPrompt { text: "first\nsecond\nthird".into(), expanded: true, height: 0 };
+        let background = vec!["header".into(), "MESSAGE_ONE".into(), "MESSAGE_TWO".into(), "MESSAGE_THREE".into()];
+        prompt.draw_to(&mut Vec::new(), 80, 24, &background).unwrap();
+        assert!(prompt.click(1));
+        let mut output = Vec::new();
+        prompt.draw_to(&mut output, 80, 24, &background).unwrap();
+        let output = String::from_utf8(output).unwrap();
+        assert_eq!(prompt.height, 1);
+        for message in &background[1..] { assert!(output.contains(message)); }
+    }
+}

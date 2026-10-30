@@ -1418,7 +1418,7 @@ impl Frame {
             let input_row = lines.len().saturating_sub(choice_cursor.map_or(3, |(row, _)| row));
             let cursor_column = choice_cursor.map_or((prompt_width + cursor).min(width), |(_, column)| column);
             self.history_view.draw(&lines, input_row, cursor_column, size)?;
-            return self.pinned.draw(width, size.1 as usize);
+            return self.pinned.draw(width, size.1 as usize, &self.history_view.screen_rows(size.1 as usize, &lines));
         }
         content.extend(lines);
         let mut lines = content;
@@ -1487,7 +1487,12 @@ impl Frame {
         self.size = size;
         self.cursor_column = cursor_column;
         write(&out)?;
-        self.pinned.draw(width, size.1 as usize)
+        let origin = self.top.unwrap_or(0);
+        let mut background = self.scrollback.screen(origin, size.1);
+        for (index, text) in self.lines.iter().enumerate() {
+            if let Some(row) = background.get_mut(origin as usize + index) { *row = text.clone(); }
+        }
+        self.pinned.draw(width, size.1 as usize, &background)
     }
 }
 /// The frame below the activity line while a menu question is pending:
@@ -2006,6 +2011,7 @@ fn run(
                 Event::Mouse(mouse) => {
                     if matches!(mouse.kind, MouseEventKind::ScrollUp | MouseEventKind::ScrollDown) {
                         selection.clear()?;
+                        screen.pinned.expanded = false;
                         screen.refresh_history(state, screen.size.0.saturating_sub(1) as usize);
                         screen.history_view.wheel(mouse.kind == MouseEventKind::ScrollUp, (screen.size.1 as usize).saturating_sub(screen.composer_height))?;
                         screen.draw(state)?;

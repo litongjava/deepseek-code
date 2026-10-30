@@ -1142,7 +1142,20 @@ impl PromptEditor {
                 }
                 screen.draw(&lines, input_row, cursor_col)?;
             }
-            if !selection.retained() { pinned.draw(width, rows as usize)?; }
+            if !selection.retained() {
+                let composer: Vec<String> = lines.iter().map(|(text, _)| text.clone()).collect();
+                let background = if history_view.active() {
+                    history_view.screen_rows(rows as usize, &composer)
+                } else {
+                    let origin = screen.top.unwrap_or(0);
+                    let mut background = above.screen(origin, rows);
+                    for (index, text) in composer.iter().enumerate() {
+                        if let Some(row) = background.get_mut(origin as usize + index) { *row = text.clone(); }
+                    }
+                    background
+                };
+                pinned.draw(width, rows as usize, &background)?;
+            }
             above.clone().save();
             let Some(event) = read_editor_event(&mut input_reader)? else {
                 continue;
@@ -1156,6 +1169,8 @@ impl PromptEditor {
                 Event::Mouse(mouse) => {
                     if matches!(mouse.kind, MouseEventKind::ScrollUp | MouseEventKind::ScrollDown) {
                         selection.clear()?;
+                        pinned.expanded = false;
+                        screen.invalidated = true;
                         history_view.refresh(&[], &above.all(), width);
                         history_view.wheel(mouse.kind == MouseEventKind::ScrollUp, (rows as usize).saturating_sub(lines.len()))?;
                         continue;
