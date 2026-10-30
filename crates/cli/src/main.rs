@@ -976,15 +976,20 @@ async fn run(cli: &Cli) -> Result<()> {
         if remote.is_connected() {
             if let Err(error) = remote.disconnect().await { eprintln!("Remote Control: {error:#}"); }
         }
-        // As in the reference CLI, a conversation worth returning to ends with how to.
-        if session.store.history(&session.id).is_ok_and(|rows| !rows.is_empty()) {
-            eprintln!("\nResume this session with:\ndcl --resume {}", session.id);
-        }
         Ok(())
     }.await;
     if !single { terminal::title::clear(); }
     session.end_hooks(if result.is_ok() && !single { "prompt_input_exit" } else { "other" }).await;
+    let resume_hint = !single && !sdk_stream
+        && session.store.history(&session.id).is_ok_and(|rows| !rows.is_empty());
     let shutdown = session.close().await;
+    // Restore the shell before printing the one message that must survive cleanup.
+    drop(input);
+    drop(screen_mode);
+    drop(_exit_cleanup);
+    if resume_hint {
+        eprintln!("\nResume this session with:\ndcl --resume {}", session.id);
+    }
     // A completed single turn already wrote its terminal result. Shutdown may
     // still fail, but stdout must not acquire a second result record.
     if single && cli.output_format != OutputFormat::Text && result.is_ok() {
