@@ -2892,52 +2892,67 @@ export interface FsReadResponse {
   success: boolean;
   path: string;
   content: string;
+  /** Preview reads (`maxBytes`) only: file size on disk in bytes. */
+  size?: number;
+  /** Preview reads only: only the first `maxBytes` bytes were read. */
+  truncated?: boolean;
+  /** Preview reads only: NUL bytes or invalid UTF-8; `content` is empty. */
+  binary?: boolean;
 }
 
-export async function getFileSystemTree(dirPath?: string): Promise<FsTreeResponse> {
-  await waitForApiReady();
-  const params = dirPath ? `?path=${encodeURIComponent(dirPath)}` : '';
-  const res = await fetch(`${API_BASE}/filesystem/tree${params}`);
-  if (!res.ok) throw new Error(`Failed to get file tree: ${res.status}`);
+// Filesystem routes go through the Bridge, which requires the API key that
+// `request` attaches. Failures keep the historical "<action>: <status>" message.
+async function fsRequest<T>(path: string, init: RequestInit, action: string): Promise<T> {
+  let res: Response;
+  try {
+    res = await request(path, init);
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    const status = /^Request failed: (\d+)$/.exec(message)?.[1];
+    throw new Error(`${action}: ${status ?? message}`);
+  }
   return res.json();
 }
 
-export async function readFileContent(filePath: string): Promise<FsReadResponse> {
-  await waitForApiReady();
-  const res = await fetch(`${API_BASE}/filesystem/read?path=${encodeURIComponent(filePath)}`);
-  if (!res.ok) throw new Error(`Failed to read file: ${res.status}`);
-  return res.json();
+/**
+ * List a directory. `depth` (Bridge default 10, clamped to 1..10) is the number of
+ * levels returned; directories at the last level have no `children` (not loaded).
+ */
+export async function getFileSystemTree(dirPath?: string, depth?: number): Promise<FsTreeResponse> {
+  const params = new URLSearchParams();
+  if (dirPath) params.set('path', dirPath);
+  if (depth !== undefined) params.set('depth', String(depth));
+  const query = params.toString();
+  return fsRequest(`/filesystem/tree${query ? `?${query}` : ''}`, {}, 'Failed to get file tree');
+}
+
+/**
+ * Read a file. With `maxBytes` the Bridge returns at most that many raw bytes plus
+ * `size`, `truncated` and `binary`; without it the whole file is read as text.
+ */
+export async function readFileContent(filePath: string, options: { maxBytes?: number } = {}): Promise<FsReadResponse> {
+  const params = new URLSearchParams({ path: filePath });
+  if (options.maxBytes !== undefined) params.set('max_bytes', String(options.maxBytes));
+  return fsRequest(`/filesystem/read?${params}`, {}, 'Failed to read file');
 }
 
 export async function writeFileContent(filePath: string, content: string): Promise<{ success: boolean; path: string }> {
-  await waitForApiReady();
-  const res = await fetch(`${API_BASE}/filesystem/write`, {
+  return fsRequest('/filesystem/write', {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ path: filePath, content }),
-  });
-  if (!res.ok) throw new Error(`Failed to write file: ${res.status}`);
-  return res.json();
+  }, 'Failed to write file');
 }
 
 export async function createFileOrDir(filePath: string, isDir = false): Promise<{ success: boolean; path: string }> {
-  await waitForApiReady();
-  const res = await fetch(`${API_BASE}/filesystem/create`, {
+  return fsRequest('/filesystem/create', {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ path: filePath, is_dir: isDir }),
-  });
-  if (!res.ok) throw new Error(`Failed to create: ${res.status}`);
-  return res.json();
+  }, 'Failed to create');
 }
 
 export async function deleteFileOrDir(filePath: string): Promise<{ success: boolean; path: string }> {
-  await waitForApiReady();
-  const res = await fetch(`${API_BASE}/filesystem/delete`, {
+  return fsRequest('/filesystem/delete', {
     method: 'DELETE',
-    headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ path: filePath }),
-  });
-  if (!res.ok) throw new Error(`Failed to delete: ${res.status}`);
-  return res.json();
+  }, 'Failed to delete');
 }

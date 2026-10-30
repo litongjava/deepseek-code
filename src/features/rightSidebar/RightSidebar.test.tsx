@@ -1,5 +1,6 @@
 import React, { useRef, useState } from 'react';
 import { act, fireEvent, render, screen } from '@testing-library/react';
+import { MemoryRouter } from 'react-router-dom';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import type { DocumentInfo } from '../../components/DocumentCard';
 import { useUIStore } from '../../stores/useUIStore';
@@ -33,24 +34,26 @@ function Harness({ pathname = '/' }: { pathname?: string }) {
     closeOtherPanels: () => { setDocumentPanelDoc(null); setShowArtifacts(false); },
   });
   return (
-    <div ref={containerRef}>
-      {allowed && <RightSidebarToggle expanded={sidebar.visible} onToggle={sidebar.toggle} />}
-      <button type="button" onClick={() => setDocumentPanelDoc(doc)}>Open preview</button>
-      <button type="button" onClick={() => setShowArtifacts(true)}>Open artifacts</button>
-      <RightPanelSlot
-        containerRef={containerRef}
-        documentPanelDoc={documentPanelDoc}
-        documentPanelWidth={50}
-        onDocumentPanelResize={() => {}}
-        onCloseDocument={() => setDocumentPanelDoc(null)}
-        showArtifacts={showArtifacts}
-        artifacts={[]}
-        onCloseArtifacts={() => setShowArtifacts(false)}
-        onOpenDocument={setDocumentPanelDoc}
-        sidebarVisible={sidebar.visible}
-        onCloseSidebar={sidebar.close}
-      />
-    </div>
+    <MemoryRouter>
+      <div ref={containerRef}>
+        {allowed && <RightSidebarToggle expanded={sidebar.visible} onToggle={sidebar.toggle} />}
+        <button type="button" onClick={() => setDocumentPanelDoc(doc)}>Open preview</button>
+        <button type="button" onClick={() => setShowArtifacts(true)}>Open artifacts</button>
+        <RightPanelSlot
+          containerRef={containerRef}
+          documentPanelDoc={documentPanelDoc}
+          documentPanelWidth={50}
+          onDocumentPanelResize={() => {}}
+          onCloseDocument={() => setDocumentPanelDoc(null)}
+          showArtifacts={showArtifacts}
+          artifacts={[]}
+          onCloseArtifacts={() => setShowArtifacts(false)}
+          onOpenDocument={setDocumentPanelDoc}
+          sidebarVisible={sidebar.visible}
+          onCloseSidebar={sidebar.close}
+        />
+      </div>
+    </MemoryRouter>
   );
 }
 
@@ -105,7 +108,7 @@ describe('right sidebar', () => {
     expect(files).toHaveAttribute('aria-selected', 'true');
     expect(files).toHaveAttribute('tabindex', '0');
     expect(browser).toHaveAttribute('tabindex', '-1');
-    expect(screen.getByRole('tabpanel', { name: 'Files' })).toHaveTextContent('No files yet');
+    expect(screen.getByRole('tabpanel', { name: 'Files' })).toHaveTextContent('This chat has no workspace folder');
 
     fireEvent.click(browser);
     expect(browser).toHaveAttribute('aria-selected', 'true');

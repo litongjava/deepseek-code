@@ -2396,7 +2396,18 @@ async fn memory_clear_handler(
 #[derive(Deserialize)]
 struct FsPathQuery {
     path: Option<String>,
+    /// `fs_tree`: number of directory levels to list (1..=10, default 10).
+    depth: Option<u32>,
+    /// `fs_read`: read at most this many bytes as a raw preview (see `read_file_preview`).
+    max_bytes: Option<u64>,
 }
+
+/// Default and maximum `depth` for `GET /api/filesystem/tree`.
+const FS_TREE_MAX_DEPTH: u32 = 10;
+/// Upper bound for `max_bytes` on `GET /api/filesystem/read`.
+const FS_READ_PREVIEW_LIMIT: u64 = 16 * 1024 * 1024;
+/// Bytes inspected for NUL when classifying a preview as binary.
+const FS_BINARY_SNIFF_BYTES: usize = 8192;
 
 #[derive(Deserialize)]
 struct FsWriteRequest {
@@ -2411,11 +2422,15 @@ struct FsCreateRequest {
     is_dir: bool,
 }
 
+/// Lists `dir_path` as JSON nodes `{name, path, is_dir, size, children?}`, sorted
+/// directories first and then by case-insensitive name (`list_directory` order).
+///
+/// `max_depth` is the number of directory levels listed. A directory at the last
+/// listed level has no `children` key: it has not been loaded, which is different
+/// from `children: []` (loaded and empty). Clients load it with another request for
+/// that directory. A directory already visited in this walk (a symlink cycle) gets a
+/// single placeholder child instead of being listed again.
 fn build_tree(dir_path: &str, max_depth: u32, visited: &mut Vec<String>) -> Result<serde_json::Value, StatusCode> {
-    if max_depth == 0 {
-        return Ok(serde_json::json!([{"name": "... (max depth reached)", "path": "", "is_dir": false, "size": 0}]));
-    }
-
     let canonical = std::path::Path::new(dir_path)
         .canonicalize()
         .map_err(|_| StatusCode::BAD_REQUEST)?;
@@ -2439,7 +2454,7 @@ fn build_tree(dir_path: &str, max_depth: u32, visited: &mut Vec<String>) -> Resu
             "size": entry.size,
         });
 
-        if entry.is_dir {
+        if entry.is_dir && max_depth > 1 {
             node["children"] = build_tree(&entry.path, max_depth - 1, visited).unwrap_or(serde_json::json!([]));
         }
 
@@ -2449,6 +2464,8 @@ fn build_tree(dir_path: &str, max_depth: u32, visited: &mut Vec<String>) -> Resu
     Ok(serde_json::json!(children))
 }
 
+/// `GET /api/filesystem/tree?path=…&depth=…`. `depth` defaults to 10 and is clamped
+/// to 1..=10; `depth=1` lists only the direct entries of `path` (lazy loading).
 async fn fs_tree(Query(query): Query<FsPathQuery>) -> Result<Json<serde_json::Value>, StatusCode> {
     let path = query.path.unwrap_or_else(|| {
         dirs::home_dir()
@@ -2460,12 +2477,69 @@ async fn fs_tree(Query(query): Query<FsPathQuery>) -> Result<Json<serde_json::Va
         return Err(StatusCode::NOT_FOUND);
     }
 
-    let tree = build_tree(&path, 10, &mut Vec::new()).map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    let depth = query.depth.unwrap_or(FS_TREE_MAX_DEPTH).clamp(1, FS_TREE_MAX_DEPTH);
+    let tree = build_tree(&path, depth, &mut Vec::new()).map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
     Ok(Json(serde_json::json!({ "success": true, "path": path, "tree": tree })))
 }
 
+/// Reads at most `max_bytes` raw bytes of a regular file for previewing.
+///
+/// Returns `{success, path, content, size, truncated, binary}`. `size` is the file
+/// size on disk and `truncated` is true when only the first `max_bytes` were read.
+/// A file whose first bytes contain NUL, or that is not valid UTF-8 (ignoring a
+/// character split by truncation), is `binary` and its `content` is empty. Unlike
+/// the full read, line endings and the trailing newline are kept as they are.
+fn read_file_preview(path: &str, max_bytes: u64) -> Result<serde_json::Value, StatusCode> {
+    use std::io::Read;
+
+    let validated = crate::fs::validate_path(path).map_err(|_| StatusCode::FORBIDDEN)?;
+    let metadata = std::fs::metadata(&validated).map_err(|error| match error.kind() {
+        std::io::ErrorKind::NotFound => StatusCode::NOT_FOUND,
+        _ => StatusCode::INTERNAL_SERVER_ERROR,
+    })?;
+    if !metadata.is_file() {
+        return Err(StatusCode::BAD_REQUEST);
+    }
+
+    let limit = max_bytes.min(FS_READ_PREVIEW_LIMIT);
+    let mut bytes = Vec::new();
+    std::fs::File::open(&validated)
+        .and_then(|file| file.take(limit).read_to_end(&mut bytes))
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    let truncated = (bytes.len() as u64) < metadata.len();
+
+    let sniff = &bytes[..bytes.len().min(FS_BINARY_SNIFF_BYTES)];
+    let text = if sniff.contains(&0) {
+        None
+    } else {
+        match std::str::from_utf8(&bytes) {
+            Ok(text) => Some(text),
+            // A multi-byte character cut off at the read limit is not binary.
+            Err(error) if truncated && error.error_len().is_none() => {
+                std::str::from_utf8(&bytes[..error.valid_up_to()]).ok()
+            }
+            Err(_) => None,
+        }
+    };
+
+    Ok(serde_json::json!({
+        "success": true,
+        "path": path,
+        "content": text.unwrap_or(""),
+        "size": metadata.len(),
+        "truncated": truncated,
+        "binary": text.is_none(),
+    }))
+}
+
+/// `GET /api/filesystem/read?path=…[&max_bytes=…]`. Without `max_bytes` the whole
+/// file is read as text (unchanged behaviour); with it see `read_file_preview`.
 async fn fs_read(Query(query): Query<FsPathQuery>) -> Result<Json<serde_json::Value>, StatusCode> {
     let path = query.path.ok_or(StatusCode::BAD_REQUEST)?;
+
+    if let Some(max_bytes) = query.max_bytes {
+        return read_file_preview(&path, max_bytes).map(Json);
+    }
 
     let content = FileOperations::read_file(&path, None, None)
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
