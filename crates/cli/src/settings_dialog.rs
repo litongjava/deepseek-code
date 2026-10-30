@@ -6,6 +6,24 @@ use crate::terminal::picker::{details, Entry, Key, Picked, Picker};
 use anyhow::Result;
 use deepseek_code_core::runtime::RuntimePaths;
 
+/// Restore the conversation screen on every exit, including errors.
+struct SettingsScreen;
+
+impl SettingsScreen {
+    fn enter() -> std::io::Result<Self> {
+        crossterm::execute!(std::io::stderr(), crossterm::terminal::EnterAlternateScreen,
+            crossterm::terminal::Clear(crossterm::terminal::ClearType::All),
+            crossterm::cursor::MoveTo(0, 0))?;
+        Ok(Self)
+    }
+}
+
+impl Drop for SettingsScreen {
+    fn drop(&mut self) {
+        let _ = crossterm::execute!(std::io::stderr(), crossterm::terminal::LeaveAlternateScreen);
+    }
+}
+
 const TABS: [&str; 4] = ["Status", "Config", "Usage", "Stats"];
 
 /// `Settings   Status   [Config]   Usage`.
@@ -19,6 +37,7 @@ fn tab_bar(current: usize) -> String {
 }
 
 pub async fn run(start: &str, paths: &RuntimePaths, session: &mut Session, input: &mut TerminalInput) -> Result<()> {
+    let _screen = SettingsScreen::enter()?;
     let mut tab = TABS.iter().position(|tab| tab.eq_ignore_ascii_case(start)).unwrap_or(0);
     let mut selected = 0;
     let mut range = 0;

@@ -1523,6 +1523,9 @@ impl PromptEditor {
                             menu_hidden = true;
                         }
                         KeyCode::Enter => {
+                            // Restore the main screen before clearing its composer.
+                            // Otherwise dropping HistoryView restores a stale input frame.
+                            history_view.close()?;
                             screen.finish(&text, &prompt)?;
                             if !text.trim().is_empty() && self.history.last() != Some(&text) {
                                 self.history.push(text.clone());
