@@ -249,7 +249,7 @@ const McpSettingsPage = () => {
             setEditingServer(null);
             setShowAddForm(true);
           }}
-          className="flex items-center gap-1.5 px-3 py-1.5 bg-claude-btn-hover text-white rounded-lg text-[14px] hover:opacity-90 transition-opacity"
+          className="flex items-center gap-1.5 px-3 py-1.5 bg-claude-accent text-white rounded-lg text-[14px] hover:opacity-90 transition-opacity"
         >
           <Plus size={16} />
           Add Server
@@ -364,7 +364,7 @@ const McpSettingsPage = () => {
           <div className="flex gap-2">
             <button
               onClick={handleSubmit}
-              className="px-4 py-2 bg-claude-btn-hover text-white rounded-lg text-[14px] hover:opacity-90 transition-opacity"
+              className="px-4 py-2 bg-claude-accent text-white rounded-lg text-[14px] hover:opacity-90 transition-opacity"
             >
               {editingServer ? 'Update' : 'Add'}
             </button>

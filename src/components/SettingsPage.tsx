@@ -521,7 +521,7 @@ const SettingsPage = ({ onCreateWithDeepSeek }: { onCreateWithDeepSeek?: () => v
                     {t('settings.cancel')}
                   </button>
                   <button onClick={(e) => { e.preventDefault(); handleChangePassword(); }} disabled={pwdSaving}
-                    className="px-4 py-2 bg-claude-btn-hover text-white text-[14px] font-medium rounded-lg transition-colors disabled:opacity-60">
+                    className="px-4 py-2 bg-claude-accent text-white text-[14px] font-medium rounded-lg transition-colors disabled:opacity-60">
                     {pwdSaving ? t('settings.updating') : t('settings.updatePassword')}
                   </button>
                 </div>
