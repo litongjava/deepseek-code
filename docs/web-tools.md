@@ -1,13 +1,12 @@
 # Bounded web tools
 
-`WebFetch` returns readable text and HTTP(S) links from the page's main content. Scripts, styles, navigation, forms, hidden elements, and other page chrome are omitted. This avoids feeding hundreds of thousands of HTML tokens back into the next model request.
+`WebFetch` takes `url`, `prompt` and an optional `offset`, as in the reference CLI. It converts the page's main content to text (scripts, styles, navigation, forms and hidden elements are dropped) and answers `prompt` against that text with the session's model, so the next request carries the answer rather than the page.
 
-- Default output: 12,000 Unicode characters; `max_chars` may request up to 50,000.
-- `offset` and the returned `next_offset` allow subsequent pages of extracted text.
-- `raw: true` requests original markup while preserving output limits.
-- Downloads stop at 2 MiB and have a 12-second request deadline (4-second connection timeout).
-- Results report the final URL, format, downloaded bytes, extracted and returned character counts, truncation, and continuation offset. A truncated source cannot be completely paged; use a more specific endpoint.
-- Text, HTML, JSON, and XML are supported. HTTP failures and unsupported binary formats fail the tool instead of appearing as successful content.
+- Pages are cached for 15 minutes per URL.
+- HTTP is upgraded to HTTPS; localhost, private addresses and dotless hostnames are refused; cross-host redirects are returned to the model instead of followed, same-host redirects are followed.
+- Long pages are read in parts: a result with `next_offset` is continued by calling again with it as `offset`.
+- A new host asks for approval unless it is on the reference CLI's list of documentation sites; `WebFetch(domain:...)` rules allow or deny hosts. `/deep-research` children may fetch any page, subject to deny rules.
+- Downloads stop at 2 MiB and have a 12-second request deadline (4-second connection timeout). Text, HTML, JSON and XML are supported; HTTP failures and unsupported binary formats fail the tool.
 
 `WebSearch` defaults to provider-hosted search. OpenAI uses the Responses API `web_search` tool; Anthropic uses the Messages API `web_search_20250305` tool. The adapter returns up to eight structured source URLs, titles and available citation snippets. It does not extract invented links from generated prose. The selected model/endpoint must support native search; failures are reported without silently switching to public search engines. Requests have a 45-second deadline and a 2 MiB response limit.
 
