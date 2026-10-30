@@ -8,20 +8,24 @@ use unicode_width::UnicodeWidthChar;
 
 /// One logged line as written, the screen rows it takes and the tool result
 /// it belongs to.
+#[derive(Clone)]
 struct Logged {
     text: String,
     rows: usize,
     block: Option<usize>,
 }
 /// A tool result with hidden lines, shown short or in full.
+#[derive(Clone)]
 struct Block {
     short: Vec<Line>,
     full: Vec<Line>,
-    open: bool,
+    header_open: bool,
+    body_open: bool,
+    whole: bool,
 }
 
-#[derive(Default)]
-pub(super) struct Scrollback {
+#[derive(Default, Clone)]
+pub(crate) struct Scrollback {
     logged: VecDeque<Logged>,
     blocks: Vec<Block>,
 }
@@ -30,31 +34,63 @@ pub(super) struct Scrollback {
 static LAST: std::sync::Mutex<Option<Scrollback>> = std::sync::Mutex::new(None);
 
 impl Scrollback {
-    pub(super) fn save(self) {
+    pub(crate) fn save(self) {
         *LAST.lock().unwrap_or_else(|poison| poison.into_inner()) = Some(self);
     }
     pub(super) fn take() -> Self {
-        LAST.lock().unwrap_or_else(|poison| poison.into_inner()).take().unwrap_or_default()
+        LAST.lock()
+            .unwrap_or_else(|poison| poison.into_inner())
+            .take()
+            .unwrap_or_default()
     }
     pub(super) fn clear(&mut self) {
         self.logged.clear();
     }
     /// Records a written line; returns the screen rows it takes.
-    pub(super) fn push(&mut self, text: String, block: Option<usize>) -> usize {
-        let (columns, height) = terminal::size().unwrap_or((80, 24));
+    pub(crate) fn push(&mut self, text: String, block: Option<usize>) -> usize {
+        let (columns, _height) = terminal::size().unwrap_or((80, 24));
         let rows = screen_rows(&text, columns as usize);
         self.logged.push_back(Logged { text, rows, block });
-        // Only lines still on screen can be clicked.
-        while self.logged.iter().map(|line| line.rows).sum::<usize>() > height as usize * 2 {
-            self.logged.pop_front();
-        }
         rows
     }
     /// A tool result's short lines, to be written and recorded with `push`.
-    pub(super) fn block(&mut self, short: Vec<Line>, full: Vec<Line>) -> (usize, Vec<String>) {
-        let lines = rendered(&short);
-        self.blocks.push(Block { short, full, open: false });
+    pub(crate) fn block(&mut self, short: Vec<Line>, full: Vec<Line>) -> (usize, Vec<String>) {
+        let lines = collapsed(&short);
+        let whole = change_view::plain(&short).trim_start().starts_with("Thought");
+        self.blocks.push(Block {
+            short,
+            full,
+            header_open: false,
+            body_open: false,
+            whole,
+        });
         (self.blocks.len() - 1, lines)
+    }
+    pub(crate) fn needs_separator(&self) -> bool {
+        self.logged.back().is_some_and(|line| !super::markdown::plain_rendered(&line.text).trim().is_empty())
+    }
+    pub(crate) fn all(&self) -> Vec<String> {
+        self.logged.iter().map(|line| line.text.clone()).collect()
+    }
+    pub(super) fn toggle_history(&mut self, row: usize) -> bool {
+        // Each logged entry is a physical row in the normal view.
+        let Some(line) = self.logged.get(row) else {
+            return false;
+        };
+        if line.block.is_none() {
+            return false;
+        }
+        let bottom = self.logged.len();
+        if bottom > u16::MAX as usize {
+            return false;
+        }
+        let Some((_, rows)) = self.toggle(bottom as u16, row as u16) else {
+            return false;
+        };
+        for (text, block) in rows {
+            self.push(text, block);
+        }
+        true
     }
     /// The logged line on screen row `row`, given the row below the last one.
     fn line_at(&self, bottom: u16, row: u16) -> Option<usize> {
@@ -68,28 +104,107 @@ impl Scrollback {
         }
         None
     }
+    pub(super) fn screen(&self, bottom: u16, height: u16) -> Vec<String> {
+        let mut rows = vec![String::new(); height as usize];
+        let mut end = bottom as usize;
+        for line in self.logged.iter().rev() {
+            let width = terminal::size().unwrap_or((80, 24)).0 as usize;
+            let wrapped = super::markdown::wrap_styled(&line.text, "", "", width);
+            for text in wrapped.iter().rev() {
+                if end == 0 {
+                    return rows;
+                }
+                end -= 1;
+                if end < rows.len() {
+                    rows[end] = text.clone();
+                }
+            }
+        }
+        rows
+    }
     /// Switches the tool result on `row` between its short and full form.
     /// Returns the screen row to redraw from and the lines to write there.
-    pub(super) fn toggle(&mut self, bottom: u16, row: u16) -> Option<(u16, Vec<(String, Option<usize>)>)> {
+    pub(super) fn toggle(
+        &mut self,
+        bottom: u16,
+        row: u16,
+    ) -> Option<(u16, Vec<(String, Option<usize>)>)> {
         let index = self.line_at(bottom, row)?;
         let block = self.logged[index].block?;
-        let first = self.logged.iter().position(|line| line.block == Some(block))?;
+        let first = self
+            .logged
+            .iter()
+            .position(|line| line.block == Some(block))?;
         let above: usize = self.logged.iter().skip(first).map(|line| line.rows).sum();
         let start = (bottom as usize).saturating_sub(above) as u16;
         let entry = &mut self.blocks[block];
-        entry.open = !entry.open;
-        let lines = rendered(if entry.open { &entry.full } else { &entry.short });
-        let after = self.logged.drain(first..).filter(|line| line.block != Some(block)).map(|line| (line.text, line.block));
-        let rows = lines.into_iter().map(|line| (line, Some(block))).chain(after).collect();
+        let header_rows = if entry.header_open {
+            rendered(&entry.full[..1]).len()
+        } else {
+            1
+        };
+        if entry.whole {
+            entry.header_open = !entry.header_open;
+            entry.body_open = entry.header_open;
+        } else if index - first < header_rows {
+            entry.header_open = !entry.header_open;
+        } else {
+            entry.body_open = !entry.body_open;
+        }
+        let mut lines = if entry.header_open {
+            rendered(&entry.full[..1])
+        } else {
+            collapsed(&entry.short[..1])
+        };
+        lines.extend(if entry.body_open {
+            rendered(&entry.full[1..])
+        } else {
+            collapsed(&entry.short[1..])
+        });
+        let after = self
+            .logged
+            .drain(first..)
+            .filter(|line| line.block != Some(block))
+            .map(|line| (line.text, line.block));
+        let rows = lines
+            .into_iter()
+            .map(|line| (line, Some(block)))
+            .chain(after)
+            .collect();
         Some((start, rows))
     }
 }
 
 /// A tool result's lines as written above the input box.
+fn collapsed(lines: &[Line]) -> Vec<String> {
+    let width = terminal::size().unwrap_or((80, 24)).0.saturating_sub(1) as usize;
+    lines
+        .iter()
+        .map(|line| {
+            let color = std::env::var_os("NO_COLOR").is_none();
+            let plain = change_view::plain(std::slice::from_ref(line));
+            if unicode_width::UnicodeWidthStr::width(plain.trim_end()) > width {
+                format!(
+                    "{}…",
+                    change_view::render(line, width.saturating_sub(1), color)
+                )
+            } else {
+                change_view::render(line, width, color)
+            }
+        })
+        .collect()
+}
+
 fn rendered(lines: &[Line]) -> Vec<String> {
     let width = terminal::size().unwrap_or((80, 24)).0.saturating_sub(1) as usize;
     let color = std::env::var_os("NO_COLOR").is_none();
-    lines.iter().map(|line| change_view::render(line, width, color)).collect()
+    lines
+        .iter()
+        .flat_map(|line| {
+            let text = change_view::render(line, usize::MAX, color);
+            super::markdown::wrap_styled(&text, "", "", width)
+        })
+        .collect()
 }
 
 /// Screen rows a written line takes at `columns`, style escapes excluded.
@@ -142,23 +257,47 @@ mod tests {
     }
 
     #[test]
-    fn clicks_switch_the_tool_result_on_that_row() {
+    fn thought_header_content_and_footer_toggle_the_entire_block() {
+        let mut history = Scrollback::default();
+        let (short, full) = super::super::tool_view::thought("one\ntwo\nthree\nfour\nfive", Some(12));
+        let (id, rows) = history.block(short, full);
+        for row in rows { history.push(row, Some(id)); }
+        assert!(history.all()[0].contains("Thought for 12s 5 lines (click to expand)"));
+        assert!(history.toggle_history(0));
+        assert_eq!(history.all().len(), 7);
+        assert!(history.all()[6].contains("(click to collapse)"));
+        assert!(history.toggle_history(2));
+        assert_eq!(history.all().len(), 1);
+        assert!(history.toggle_history(0));
+        assert!(history.toggle_history(6));
+        assert_eq!(history.all().len(), 1);
+    }
+
+    #[test]
+    fn header_and_body_toggle_independently_and_collapse_again() {
         let mut lines = Scrollback::default();
-        lines.push("answer".into(), None);
-        let (block, short) = lines.block(vec![change_view::body("short 1"), change_view::body("short 2")], vec![change_view::body("full")]);
-        for line in short {
-            lines.push(line, Some(block));
+        let short = vec![
+            change_view::body("short header"),
+            change_view::body("short body"),
+        ];
+        let full = vec![
+            change_view::body("full header"),
+            change_view::body("full body 1"),
+            change_view::body("full body 2"),
+        ];
+        let (block, rows) = lines.block(short, full);
+        for row in rows {
+            lines.push(row, Some(block));
         }
-        lines.push("after".into(), None);
-        // With the input box on row 10, rows 6..10 hold answer, short 1, short 2, after.
-        assert_eq!(lines.line_at(10, 6), Some(0));
-        assert_eq!(lines.line_at(10, 8), Some(2));
-        assert_eq!(lines.line_at(10, 10), None);
-        assert!(lines.toggle(10, 6).is_none());
-        let (start, rows) = lines.toggle(10, 8).unwrap();
-        assert_eq!(start, 7);
-        let shown: Vec<_> = rows.iter().map(|(text, block)| (text.contains("full"), *block)).collect();
-        assert_eq!(shown, vec![(true, Some(0)), (false, None)]);
-        assert_eq!(lines.logged.len(), 1);
+        assert!(lines.toggle_history(1));
+        assert!(lines.all()[0].contains("short header"));
+        assert_eq!(lines.all().len(), 3);
+        assert!(lines.toggle_history(0));
+        assert!(lines.all()[0].contains("full header"));
+        assert!(lines.toggle_history(1));
+        assert_eq!(lines.all().len(), 2);
+        assert!(lines.all()[0].contains("full header"));
+        assert!(lines.toggle_history(0));
+        assert!(lines.all()[0].contains("short header"));
     }
 }

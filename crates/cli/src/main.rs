@@ -86,6 +86,8 @@ use std::{
 
 #[tokio::main]
 async fn main() -> std::process::ExitCode {
+    #[cfg(windows)]
+    let _console_modes = terminal::screen_mode::ConsoleModes::capture();
     // Inside a sandbox with a domain allowlist: carry the proxy, then run the command.
     if let Some(code) = deepseek_code_core::tools::sandbox::run_bridge_from_args() {
         return std::process::ExitCode::from(code.clamp(0, 255) as u8);
@@ -483,6 +485,10 @@ async fn run(cli: &Cli) -> Result<()> {
         };
         return tokio::select! { result = hook_progress::during(&id, true, work) => result, _ = tokio::signal::ctrl_c() => anyhow::bail!("Setup hooks interrupted") };
     }
+    let _exit_cleanup = terminal::screen_mode::ExitCleanup(
+        !single && !sdk_stream && io::stdin().is_terminal() && io::stderr().is_terminal()
+            && !terminal::screen_reader(),
+    );
     let mut input = if single { None } else { Some(session::terminal_input()) };
     let selection = config::select(
         cli,

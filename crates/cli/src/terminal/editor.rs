@@ -1,10 +1,9 @@
 //! Inline terminal editor. The normal screen preserves transcript scrollback;
-//! the mouse is never captured, so the wheel and text selection stay with the
-//! terminal. No alternate screen is used; all modes are restored on exit.
+//! clicks toggle tool results; dragging selects and copies visible text. No alternate screen is used; all modes are restored on exit.
 use crossterm::{
     cursor::{position, MoveDown, MoveTo, MoveToColumn, MoveUp},
     event::{
-        DisableBracketedPaste, EnableBracketedPaste, Event, KeyCode, KeyEventKind, KeyModifiers,
+        DisableBracketedPaste, DisableMouseCapture, EnableBracketedPaste, EnableMouseCapture, Event, KeyCode, KeyEventKind, KeyModifiers,
         MouseButton, MouseEventKind,
     },
     execute, queue,
@@ -79,7 +78,7 @@ impl Default for PromptEditor {
 struct RawMode;
 impl Drop for RawMode {
     fn drop(&mut self) {
-        let _ = execute!(io::stderr(), DisableBracketedPaste, ResetColor);
+        let _ = execute!(io::stderr(), DisableBracketedPaste, DisableMouseCapture, ResetColor);
         let _ = terminal::disable_raw_mode();
     }
 }
@@ -717,6 +716,8 @@ fn read_editor_event(
             if !matches!(
                 mouse.kind,
                 MouseEventKind::Down(MouseButton::Left)
+                    | MouseEventKind::Up(MouseButton::Left)
+                    | MouseEventKind::Drag(MouseButton::Left)
                     | MouseEventKind::ScrollUp
                     | MouseEventKind::ScrollDown
             ) {
@@ -818,9 +819,8 @@ impl PromptEditor {
         terminal::enable_raw_mode()?;
         let _raw = RawMode;
         let mut input_reader = crate::terminal::paste_input::Reader::new()?;
-        // The mouse stays with the terminal: the wheel scrolls scrollback and a
-        // drag selects text, as in the reference CLI.
-        execute!(io::stderr(), EnableBracketedPaste)?;
+        // Capture both tool disclosure clicks and drag selection.
+        execute!(io::stderr(), EnableBracketedPaste, EnableMouseCapture)?;
         let mut above = crate::terminal::scrollback::Scrollback::take();
         let mut buffer = self.resume_buffer();
         // As in the reference CLI, a stashed draft returns after the prompt
@@ -845,6 +845,7 @@ impl PromptEditor {
         let todo_list = self.todos.as_ref().map(|todos| todos()).unwrap_or_default();
         let mut keybinding_pending = crate::keybindings::Pending::default();
         let mut screen = Screen::pinned();
+        let mut selection = crate::terminal::mouse_selection::Selection::default();
         let mut history_view = crate::terminal::transcript_pager::HistoryView::default();
         let mut selected = 0usize;
         let mut history_pos = self.history.len();
@@ -1101,7 +1102,7 @@ impl PromptEditor {
             }
             let input_row = panel_height + menu_height + cursor_row - first + 1;
             if history_view.active() {
-                history_view.refresh(&self.transcript, &[], width);
+                history_view.refresh(&[], &above.all(), width);
                 let color = std::env::var_os("NO_COLOR").is_none();
                 let composer: Vec<String> = lines.iter().map(|(text, style)| {
                     let foreground = match style {
@@ -1118,10 +1119,18 @@ impl PromptEditor {
                         None => text.clone(),
                     }
                 }).collect();
-                history_view.draw(&composer, input_row, cursor_col, (cols, rows))?;
-            } else {
+                if !selection.retained() { history_view.draw(&composer, input_row, cursor_col, (cols, rows))?; }
+            } else if !selection.retained() {
+                if screen.height == 0 {
+                    let (_, cursor_y) = position()?;
+                    let top = (rows as usize).saturating_sub(lines.len().min(rows as usize));
+                    // Pinning a short resumed history leaves a gap above the composer.
+                    // Record that gap so selection coordinates still match the screen.
+                    for _ in cursor_y as usize..top { above.push(String::new(), None); }
+                }
                 screen.draw(&lines, input_row, cursor_col)?;
             }
+            above.clone().save();
             let Some(event) = read_editor_event(&mut input_reader)? else {
                 continue;
             };
@@ -1132,8 +1141,29 @@ impl PromptEditor {
                     screen.reflow();
                 }
                 Event::Mouse(mouse) => {
+                    if matches!(mouse.kind, MouseEventKind::ScrollUp | MouseEventKind::ScrollDown) {
+                        selection.clear()?;
+                        history_view.refresh(&[], &above.all(), width);
+                        history_view.wheel(mouse.kind == MouseEventKind::ScrollUp, (rows as usize).saturating_sub(lines.len()))?;
+                        continue;
+                    }
+                    if history_view.active() {
+                        let composer = lines.iter().map(|(text, _)| text.clone()).collect::<Vec<_>>();
+                        let snapshot = history_view.screen_rows(rows as usize, &composer);
+                        if let Some(click) = selection.event(mouse, snapshot)? {
+                            if click.kind == MouseEventKind::Down(MouseButton::Left) {
+                                if let Some(index) = history_view.row_index(click.row as usize, (rows as usize).saturating_sub(lines.len())) { above.toggle_history(index); }
+                            }
+                        }
+                        continue;
+                    }
                     let (_, cursor_y) = position()?;
                     let origin = cursor_y.saturating_sub(screen.cursor_row as u16);
+                    let mut snapshot = above.screen(origin, rows);
+                    for (index, (text, _)) in screen.previous.iter().enumerate() {
+                        if let Some(row) = snapshot.get_mut(origin as usize + index) { *row = text.clone(); }
+                    }
+                    let Some(mouse) = selection.event(mouse, snapshot)? else { continue; };
                     let toggled = (mouse.kind == MouseEventKind::Down(MouseButton::Left))
                         .then(|| above.toggle(origin, mouse.row))
                         .flatten();
@@ -1181,6 +1211,7 @@ impl PromptEditor {
                     menu_hidden = false;
                 }
                 Event::Key(key) if key.kind != KeyEventKind::Release => {
+                    selection.clear()?;
                     let key = match self.keybindings.resolve(key, &mut keybinding_pending) {
                         crate::keybindings::Resolution::Key(key) => key,
                         crate::keybindings::Resolution::Consumed => continue,
@@ -1188,7 +1219,7 @@ impl PromptEditor {
                     let panel_scroll = self.details.expanded
                         && matches!(key.code, KeyCode::PageUp | KeyCode::PageDown);
                     if !panel_scroll && crate::terminal::transcript_pager::HistoryView::is_navigation(key) {
-                        history_view.refresh(&self.transcript, &[], width);
+                        history_view.refresh(&[], &above.all(), width);
                         history_view.navigate(key, (rows as usize).saturating_sub(lines.len()))?;
                         screen.invalidated = true;
                         continue;

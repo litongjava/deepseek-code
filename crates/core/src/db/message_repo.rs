@@ -269,3 +269,28 @@ mod stream_tool_tests {
         assert_eq!(get_message(&conn, "assistant").unwrap().unwrap().content, "Checking again");
     }
 }
+
+/// Persist observed execution time independently of provider result payloads.
+pub fn set_tool_duration(conn: &Connection, id: &str, duration_ms: u64) -> Result<()> {
+    conn.execute("INSERT INTO tool_call_timings(tool_call_id,duration_ms) VALUES (?1,?2) ON CONFLICT(tool_call_id) DO UPDATE SET duration_ms=excluded.duration_ms", params![id, duration_ms.min(i64::MAX as u64) as i64])?;
+    Ok(())
+}
+pub fn tool_duration(conn: &Connection, id: &str) -> Result<Option<u64>> {
+    use rusqlite::OptionalExtension;
+    Ok(conn.query_row("SELECT duration_ms FROM tool_call_timings WHERE tool_call_id=?1", params![id], |row| row.get::<_, u64>(0)).optional()?)
+}
+
+#[cfg(test)]
+mod duration_tests {
+    use super::*;
+    #[test]
+    fn duration_roundtrips_and_legacy_rows_stay_unknown() {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch("CREATE TABLE tool_call_timings(tool_call_id TEXT PRIMARY KEY, duration_ms INTEGER NOT NULL)").unwrap();
+        assert_eq!(tool_duration(&conn, "legacy").unwrap(), None);
+        set_tool_duration(&conn, "call", 2050).unwrap();
+        assert_eq!(tool_duration(&conn, "call").unwrap(), Some(2050));
+        set_tool_duration(&conn, "zero", 0).unwrap();
+        assert_eq!(tool_duration(&conn, "zero").unwrap(), Some(0));
+    }
+}

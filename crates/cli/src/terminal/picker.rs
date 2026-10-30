@@ -53,6 +53,7 @@ fn with_raw<T>(run: impl FnOnce(&mut dyn FnMut() -> io::Result<Option<Event>>) -
     }
     let mut reader = super::paste_input::Reader::new()?;
     let result = run(&mut || reader.next(std::time::Duration::from_millis(100)));
+    drop(reader);
     if !raw {
         terminal::disable_raw_mode()?;
     }
@@ -246,6 +247,7 @@ pub fn details(heading: &str, rows: &[String], hint: &str, keys: &[char]) -> io:
     }
     let mut reader = super::paste_input::Reader::new()?;
     let result = show_details(heading, rows, hint, keys, &mut || reader.next(std::time::Duration::from_millis(100)));
+    drop(reader);
     if !raw {
         terminal::disable_raw_mode()?;
     }
@@ -290,6 +292,7 @@ pub fn details_live(heading: &str, rows: &mut dyn FnMut() -> Vec<String>, hint: 
         }
     };
     screen.suspend()?;
+    drop(reader);
     if !raw {
         terminal::disable_raw_mode()?;
     }

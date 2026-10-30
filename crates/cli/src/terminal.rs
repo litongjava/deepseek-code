@@ -136,7 +136,8 @@ pub mod tips;
 pub mod markdown;
 pub mod vim;
 mod display_path;
-mod scrollback;
+pub(crate) mod scrollback;
+mod mouse_selection;
 pub mod style;
 pub mod screen_mode;
 

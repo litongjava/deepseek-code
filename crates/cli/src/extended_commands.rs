@@ -381,7 +381,7 @@ fn copy_osc52(text: &str) -> bool {
     write!(out, "\x1b]52;c;{encoded}\x07").and_then(|()| out.flush()).is_ok()
 }
 
-fn copy_text(text: &str) -> Result<()> {
+pub(crate) fn copy_text(text: &str) -> Result<()> {
     #[cfg(windows)]
     let mut command = {
         use std::os::windows::process::CommandExt;

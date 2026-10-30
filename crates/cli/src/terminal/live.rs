@@ -3,7 +3,7 @@ use super::change_view;
 use super::tool_view::Gathering;
 use crossterm::{
     event::{
-        DisableBracketedPaste, EnableBracketedPaste, Event, KeyCode, KeyEventKind, KeyModifiers, MouseButton,
+        DisableBracketedPaste, DisableMouseCapture, EnableBracketedPaste, EnableMouseCapture, Event, KeyCode, KeyEventKind, KeyModifiers, MouseButton,
         MouseEventKind,
     },
     execute, terminal,
@@ -41,8 +41,8 @@ enum Update {
     Notice(String),
     Styled(Vec<change_view::Line>),
     /// A tool result with hidden lines: the short form to show, and the full
-    /// one if the terminal reports a click (the mouse is not captured, so the
-    /// wheel and text selection stay with the terminal). Ctrl+O lists the full
+    /// one when the terminal reports a click (Shift-drag still lets the
+    /// terminal select text). Ctrl+O lists the full
     /// text without a click.
     Expandable(Vec<change_view::Line>, Vec<change_view::Line>),
     /// The session's working directory, shown in the footer.
@@ -83,12 +83,11 @@ enum GroupStep {
     Failed,
 }
 /// Consecutive read-only calls shown as one line, as in the reference CLI's
-/// "Thought for 2s, searched for 2 patterns, read 3 files".
+/// "Searched for 2 patterns". File reads keep their own named tool blocks.
 struct Group {
     calls: Vec<(String, Gathering, bool)>,
     /// The latest call, shown under the line while the group grows.
     hint: String,
-    thought: Option<u64>,
 }
 pub struct LiveTurn {
     updates: mpsc::Sender<Update>,
@@ -119,9 +118,8 @@ impl LiveTurn {
         let mode = mode.to_owned();
         let worker = thread::spawn(move || {
             let result = terminal::enable_raw_mode()
-                // The mouse stays with the terminal during a turn too: the
-                // wheel reaches scrollback and a drag selects text.
-                .and_then(|_| execute!(io::stderr(), EnableBracketedPaste));
+                // Capture tool disclosure clicks and drag selection.
+                .and_then(|_| execute!(io::stderr(), EnableBracketedPaste, EnableMouseCapture));
             if result.is_err() {
                 let _ = terminal::disable_raw_mode();
                 let _ = ready.send(false);
@@ -134,7 +132,7 @@ impl LiveTurn {
             state.history = history;
             state.history_index = state.history.len();
             state.tip = tip;
-            let mut screen = Frame::default();
+            let mut screen = Frame { scrollback: super::scrollback::Scrollback::take(), ..Frame::default() };
             let _ = run(&mut state, &mut screen, receiver, actions);
             let _ = screen.clear();
             // The prompt that follows starts right below these lines.
@@ -229,7 +227,7 @@ impl Drop for LiveTurn {
 struct RawGuard;
 impl Drop for RawGuard {
     fn drop(&mut self) {
-        let _ = execute!(io::stderr(), DisableBracketedPaste);
+        let _ = execute!(io::stderr(), DisableBracketedPaste, DisableMouseCapture);
         let _ = terminal::disable_raw_mode();
     }
 }
@@ -998,10 +996,7 @@ fn finish_group(state: &mut State, screen: &mut Frame) {
     }
     let kinds: Vec<Gathering> = group.calls.iter().map(|call| call.1).collect();
     let summary = super::tool_view::gathering_summary(&kinds, false);
-    let line = match group.thought {
-        Some(seconds) => format!("  Thought for {seconds}s, {summary}"),
-        None => format!("  {}", capitalized(&summary)),
-    };
+    let line = format!("  {}", capitalized(&summary));
     if std::env::var_os("NO_COLOR").is_some() {
         let _ = screen.log(&line);
     } else {
@@ -1044,11 +1039,9 @@ fn group_call(state: &mut State, id: String, kind: Gathering, label: String, ste
         }
         return;
     }
-    let thinking = state.thinking_span.take();
     let group = state.group.get_or_insert_with(|| Group {
         calls: Vec::new(),
         hint: String::new(),
-        thought: thinking.map(|(first, last)| last.duration_since(first).as_secs().max(1)),
     });
     let done = step == GroupStep::Done;
     match group.calls.iter_mut().find(|call| call.0 == id) {
@@ -1064,19 +1057,13 @@ fn finish_text(state: &mut State, screen: &mut Frame) {
     finish_answer(state, screen);
     finish_thought(state, screen);
 }
-/// Reasoning that no folded calls absorbed gets its own line, as in the
-/// reference CLI: `  Thought for 2s`.
+/// Clear reasoning timing without adding a completed-thought transcript row.
 fn finish_thought(state: &mut State, screen: &mut Frame) {
-    let Some((first, last)) = state.thinking_span.take() else {
-        return;
-    };
-    let line = format!("  Thought for {}s", last.duration_since(first).as_secs().max(1));
-    if std::env::var_os("NO_COLOR").is_some() {
-        let _ = screen.log(&line);
-    } else {
-        screen.log_rendered(&change_view::render(&change_view::muted(&line), usize::MAX, true));
-    }
-    screen.log_rendered("");
+    let Some((first, last)) = state.thinking_span.take() else { return; };
+    let text = std::mem::take(&mut state.thinking_preview);
+    if text.trim().is_empty() { return; }
+    let (short, full) = super::tool_view::thought(&text, Some(last.duration_since(first).as_secs().max(1)));
+    screen.log_block(short, full);
 }
 /// Writes the streamed answer so far; the text before folded calls keeps its
 /// own block, as in the reference CLI.
@@ -1129,7 +1116,7 @@ impl Frame {
     }
 
     fn refresh_history(&mut self, state: &State, width: usize) {
-        self.history_view.refresh(&state.transcript, &self.logged, width);
+        self.history_view.refresh(&[], &self.scrollback.all(), width);
         if !state.partial.is_empty() {
             self.history_view.append(&format!("{}{}", answer_prefix(state, 0), terminal_text(&state.partial)), width);
         } else if let Some(group) = &state.group {
@@ -1211,6 +1198,7 @@ impl Frame {
     }
     /// Logs a tool result that a click expands and collapses.
     fn log_block(&mut self, short: Vec<change_view::Line>, full: Vec<change_view::Line>) {
+        if self.scrollback.needs_separator() { self.log_rendered(""); }
         let (block, lines) = self.scrollback.block(short, full);
         for line in lines {
             self.log_line(line, Some(block));
@@ -1457,7 +1445,7 @@ impl Frame {
             Some(top) if !resized => (top as usize + self.logged_rows).min(size.1.saturating_sub(1) as usize),
             _ => {
                 // The terminal reflowed what was logged; only new lines are clickable.
-                self.scrollback.clear();
+                if self.size != (0, 0) { self.scrollback.clear(); }
                 write(&std::mem::take(&mut self.pending))?;
                 crossterm::cursor::position().map_or(0, |(_, row)| row as usize)
             }
@@ -1603,12 +1591,13 @@ fn run(
     updates: mpsc::Receiver<Update>,
     actions: async_mpsc::UnboundedSender<Action>,
 ) -> io::Result<()> {
+    let mut selection = super::mouse_selection::Selection::default();
     let mut last_tick = Instant::now();
     let mut input_reader = super::paste_input::Reader::new()?;
     screen.draw(state)?;
     loop {
         let mut dirty = false;
-        loop {
+        while !selection.retained() {
             match updates.try_recv() {
                 Ok(Update::GoalProposal(proposal)) => {
                     if let Some((id, condition)) = &proposal {
@@ -1684,14 +1673,11 @@ fn run(
                     }
                     state.thinking_span = Some((state.thinking_span.map_or(now, |span| span.0), now));
                     state.thinking_preview.push_str(&text);
-                    if state.thinking_preview.len() > 16384 {
-                        let cut = state.thinking_preview.ceil_char_boundary(state.thinking_preview.len() - 8192);
-                        state.thinking_preview.drain(..cut);
-                    }
                     state.append_thinking(&text);
                     dirty = true;
                 }
                 Ok(Update::Group(id, kind, label, step)) => {
+                    finish_thought(state, screen);
                     if state.group.is_none() {
                         finish_answer(state, screen);
                     }
@@ -1699,6 +1685,7 @@ fn run(
                     dirty = true;
                 }
                 Ok(Update::GroupEnd) => {
+                    finish_thought(state, screen);
                     finish_group(state, screen);
                     dirty = true;
                 }
@@ -1829,6 +1816,7 @@ fn run(
             }
             match event {
                 Event::Key(key) if key.kind != KeyEventKind::Release => {
+                    selection.clear()?;
                     let key = match state.bindings.resolve(key, &mut state.key_pending) {
                         crate::keybindings::Resolution::Key(key) => key,
                         crate::keybindings::Resolution::Consumed => continue,
@@ -2005,6 +1993,29 @@ fn run(
                     dirty = true;
                 }
                 Event::Mouse(mouse) => {
+                    if matches!(mouse.kind, MouseEventKind::ScrollUp | MouseEventKind::ScrollDown) {
+                        selection.clear()?;
+                        screen.refresh_history(state, screen.size.0.saturating_sub(1) as usize);
+                        screen.history_view.wheel(mouse.kind == MouseEventKind::ScrollUp, (screen.size.1 as usize).saturating_sub(screen.composer_height))?;
+                        screen.draw(state)?;
+                        continue;
+                    }
+                    if screen.history_view.active() {
+                        let composer = screen.lines.iter().rev().take(screen.composer_height).cloned().collect::<Vec<_>>().into_iter().rev().collect::<Vec<_>>();
+                        let snapshot = screen.history_view.screen_rows(screen.size.1 as usize, &composer);
+                        if let Some(click) = selection.event(mouse, snapshot)? {
+                            if click.kind == MouseEventKind::Down(MouseButton::Left) {
+                                if let Some(index) = screen.history_view.row_index(click.row as usize, (screen.size.1 as usize).saturating_sub(composer.len())) { screen.scrollback.toggle_history(index); }
+                            }
+                            screen.draw(state)?;
+                        }
+                        continue;
+                    }
+                    let mut snapshot = screen.scrollback.screen(screen.top.unwrap_or(0), screen.size.1);
+                    for (index, text) in screen.lines.iter().enumerate() {
+                        if let Some(row) = snapshot.get_mut(screen.top.unwrap_or(0) as usize + index) { *row = text.clone(); }
+                    }
+                    let Some(mouse) = selection.event(mouse, snapshot)? else { continue; };
                     let origin = screen.top.unwrap_or(0) + screen.padding as u16;
                     if mouse.kind == MouseEventKind::Down(MouseButton::Left)
                         && screen.top.is_some_and(|top| mouse.row < top)
@@ -2053,7 +2064,7 @@ fn run(
             state.frame = state.frame.wrapping_add(1);
             dirty = true;
         }
-        if dirty {
+        if dirty && !selection.retained() {
             screen.draw(state)?;
         }
     }
@@ -2611,7 +2622,7 @@ impl TurnDisplay {
             // The call is printed once, with its result, when it finishes; the
             // status line names what is running meanwhile.
             let label = super::tool_view::label(name, input, self.workspace.as_deref());
-            match super::tool_view::gathering(name, input) {
+            match super::tool_view::gathering(name, input).filter(|_| !matches!(name, "Read" | "Bash")) {
                 Some(kind) => live.group(id, kind, label.clone(), GroupStep::Start),
                 None => {
                     let _ = live.updates.send(Update::GroupEnd);
@@ -2693,7 +2704,7 @@ impl TurnDisplay {
                     Some(started) if input.as_object().is_none_or(|fields| fields.is_empty()) => started,
                     _ => input,
                 };
-                if let Some(kind) = super::tool_view::gathering(name, label_input) {
+                if let Some(kind) = super::tool_view::gathering(name, label_input).filter(|_| !matches!(name, "Read" | "Bash")) {
                     let label = super::tool_view::label(name, label_input, self.workspace.as_deref());
                     live.group(id, kind, label, if failed { GroupStep::Failed } else { GroupStep::Done });
                     if !failed {
@@ -2709,8 +2720,8 @@ impl TurnDisplay {
                     elapsed,
                     self.workspace.as_deref(),
                 );
-                if name != "TodoWrite" && super::tool_view::summary(name, output, failed).1 > 0 {
-                    let full = super::tool_view::expanded(name, label_input, output, failed, self.workspace.as_deref());
+                if name != "TodoWrite" {
+                    let full = super::tool_view::expanded_block(name, label_input, output, failed, elapsed, self.workspace.as_deref());
                     let _ = live.updates.send(Update::Expandable(short, full));
                 } else {
                     live.styled(short);
@@ -2878,6 +2889,18 @@ mod completion_tests {
         assert_eq!(display.hooks.values().collect::<Vec<_>>(), vec!["Check B"]);
         display.hook_progress("two", None);
         assert!(display.hooks.is_empty());
+    }
+
+    #[test]
+    fn completed_thinking_is_a_collapsed_block() {
+        let mut state = State::new("ask".into());
+        let now = Instant::now();
+        state.thinking_span = Some((now, now));
+        state.thinking_preview = "first\nsecond".into();
+        let mut screen = Frame::default();
+        finish_thought(&mut state, &mut screen);
+        assert!(state.thinking_span.is_none());
+        assert!(screen.logged[0].contains("Thought for 1s 2 lines (click to expand)"));
     }
 
     #[test]

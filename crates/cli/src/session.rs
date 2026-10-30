@@ -932,6 +932,8 @@ impl Session {
         let mut snapshots = Vec::<Value>::new();
         let mut goal_requests = crate::session_commands::GoalRequests::default();
         let mut observed_plan_boundary = deepseek_code_core::services::plan_approval::latest_boundary(&self.store.db, &self.id)?;
+        let mut tool_started = std::collections::HashMap::<String, std::time::Instant>::new();
+        let mut tool_durations = std::collections::HashMap::<String, u64>::new();
         let mut tools = Vec::<message_repo::ToolCallRow>::new();
         // Notes added to approvals reach the model after the result and are
         // saved apart from it, as the user's words.
@@ -1256,6 +1258,7 @@ impl Session {
                         progress.queued_delivered(&text);
                     },
                     EngineEvent::ToolUseStart { tool_use_id, tool_name, tool_input, .. } => {
+                        tool_started.entry(tool_use_id.clone()).or_insert_with(std::time::Instant::now);
                         separate_text = true;
                         progress.clear();
                         if cli.verbose && !progress.is_live() { eprintln!("\n[{tool_name}]"); }
@@ -1277,6 +1280,7 @@ impl Session {
                         if matches!(tool_name.as_str(), "EnterPlanMode" | "ExitPlanMode" | "plan_mode") {
                             progress.set_permission_mode(self.permission_mode());
                         }
+                        if let Some(start) = tool_started.remove(&tool_use_id) { tool_durations.entry(tool_use_id.clone()).or_insert(start.elapsed().as_millis().min(u64::MAX as u128) as u64); }
                         progress.tool_finished(&tool_use_id, &tool_name, &tool_input, &output, is_error);
                         if let Some((plan_tool, mode)) = plan_mode_after.take() {
                             if plan_tool == tool_use_id && !is_error {
@@ -1358,6 +1362,7 @@ impl Session {
                         tool.is_error,
                         tool.sort_order,
                     )?;
+                    if let Some(duration) = tool_durations.get(&tool.id) { message_repo::set_tool_duration(conn, &call_id, *duration)?; }
                     if let Some(notes) = approval_notes.get(&tool.id) {
                         message_repo::set_tool_call_note(conn, &call_id, &notes.join("\n\n"))?;
                     }

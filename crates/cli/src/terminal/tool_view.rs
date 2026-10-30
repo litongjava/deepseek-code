@@ -5,12 +5,16 @@ use serde_json::Value;
 use std::time::Duration;
 
 /// Lines of a successful result shown inline before "+N lines".
-const SUMMARY_LINES: usize = 3;
+const SUMMARY_LINES: usize = 4;
 /// Lines of one result printed by the details view before truncation.
 const EXPANDED_LINES: usize = 400;
 
 /// `Bash(ls -la)` for previewable inputs, otherwise the tool name.
 pub fn label(name: &str, input: &Value, workspace: Option<&std::path::Path>) -> String {
+    // Preserve the file name even when its directory is longer than the preview limit.
+    if let Some(path) = input["file_path"].as_str().or_else(|| input["path"].as_str()) {
+        return format!("{}({})", printable(name), printable(&super::display_path::label(path, workspace)));
+    }
     // Agents read as their short description, as in the reference CLI.
     if let Some(description) = input["description"].as_str().filter(|text| name == "Agent" && !text.trim().is_empty()) {
         return format!("{}({})", super::progress::single_line(name), printable(description));
@@ -146,15 +150,8 @@ pub fn summary(name: &str, output: &str, failed: bool) -> (Vec<String>, usize) {
         let note = rest.split_once("the user said:\n").map(|(_, note)| printable(note.trim()));
         return (vec![note.map_or_else(|| "Rejected".to_owned(), |note| format!("Rejected: {note}"))], 0);
     }
-    if !failed && name == "Read" {
-        if let Ok(value) = serde_json::from_str::<Value>(output) {
-            if let Some(lines) = value["lines"].as_u64() {
-                return (vec![format!("Read {lines} lines")], 0);
-            }
-        }
-    }
     let text = result_text(output);
-    let lines: Vec<&str> = text.lines().filter(|line| !line.trim().is_empty()).collect();
+    let lines: Vec<&str> = text.lines().collect();
     if lines.is_empty() {
         return (vec![if failed { "Failed without output" } else { "(No output)" }.into()], 0);
     }
@@ -192,20 +189,14 @@ pub fn finished(
             return lines;
         }
     }
-    let detail = elapsed
-        .map(|elapsed| format!("{:.1}s", elapsed.as_secs_f64()))
-        .unwrap_or_default();
-    let mut lines = vec![change_view::tool_call(&label(name, input, workspace), &detail, failed)];
+    let _ = elapsed;
     let (shown, hidden) = summary(name, output, failed);
+    let mut lines = vec![change_view::tool_call(&label(name, input, workspace), "", failed)];
     for (index, line) in shown.iter().enumerate() {
         lines.push(change_view::tool_output(line, index == 0, failed));
     }
     if hidden > 0 {
-        lines.push(change_view::tool_output(
-            &format!("\u{2026} +{hidden} lines (Ctrl+O to expand)"),
-            false,
-            false,
-        ));
+        lines.push(change_view::muted(&format!("     +{hidden} lines (click to expand)")));
     }
     lines
 }
@@ -239,6 +230,19 @@ pub fn expanded(
             false,
         ));
     }
+    lines
+}
+
+/// Expanded inline block, with timing and a clickable collapse footer.
+pub fn expanded_block(
+    name: &str, input: &Value, output: &str, failed: bool,
+    elapsed: Option<Duration>, workspace: Option<&std::path::Path>,
+) -> Vec<Line> {
+    let mut lines = expanded(name, input, output, failed, workspace);
+    if let Some(elapsed) = elapsed {
+        lines.push(change_view::muted(&format!("  • {:.2}s", elapsed.as_secs_f64())));
+    }
+    lines.push(change_view::muted("     − Collapse"));
     lines
 }
 
@@ -534,14 +538,18 @@ mod tests {
     fn finished_calls_show_one_header_and_a_short_result() {
         let bash = json!({"exit_code":0,"stdout":"a\nb\nc\nd\ne\n","stderr":""}).to_string();
         let lines = text(&finished("Bash", &json!({"command":"ls -la"}), &bash, false, Some(Duration::from_millis(120)), None));
-        assert_eq!(lines[0], "\u{25cf} Bash(ls -la) \u{b7} 0.1s");
+        assert_eq!(lines[0], "\u{25cf} Bash(ls -la)");
         assert_eq!(lines[1], "  \u{23bf}  a");
         assert_eq!(lines[3], "     c");
-        assert_eq!(lines[4], "     \u{2026} +2 lines (Ctrl+O to expand)");
+        assert_eq!(lines[4], "     d");
+        assert_eq!(lines.len(), 6);
+        assert_eq!(lines[5], "     +1 lines (click to expand)");
+        let full = text(&expanded_block("Bash", &json!({"command":"ls"}), &bash, false, Some(Duration::from_millis(2050)), None));
+        assert_eq!(&full[full.len()-2..], &["  • 2.05s", "     − Collapse"]);
 
         let read = json!({"content":"1\tx","lines":2,"truncated":false}).to_string();
         let lines = text(&finished("Read", &json!({"file_path":"README.md"}), &read, false, None, None));
-        assert_eq!(lines, vec!["\u{25cf} Read(README.md)", "  \u{23bf}  Read 2 lines"]);
+        assert_eq!(lines, vec!["\u{25cf} Read(README.md)", "  \u{23bf}  1 x"]);
 
         let lines = text(&finished("Bash", &json!({"command":"cargo x"}), "Bash is not available in plan mode", true, None, None));
         assert_eq!(lines[1], "  \u{23bf}  Bash is not available in plan mode");
@@ -612,6 +620,17 @@ mod tests {
     }
 
     #[test]
+    fn long_read_paths_keep_the_file_name_in_both_views() {
+        let path = format!("{}Config.java", "directory/".repeat(20));
+        let input = json!({"file_path":path});
+        assert!(label("Read", &input, None).contains(&path));
+        let full = change_view::plain(&expanded("Read", &input, "content", false, None));
+        assert!(full.contains(&path));
+        let short = change_view::plain(&finished("Read", &input, "content", false, None, None));
+        assert!(short.contains(&path));
+    }
+
+    #[test]
     fn read_only_calls_fold_into_one_summary() {
         let kinds: Vec<Gathering> = [
             ("Grep", json!({"pattern":"TODO"})),
@@ -653,4 +672,19 @@ mod tests {
         let lines = text(&finished("TodoWrite", &input, "{}", false, None, None));
         assert_eq!(lines, ["\u{25cf} Update Todos", "  \u{23bf}  \u{2612} Read the code", "     \u{2610} Fix the bug", "     \u{2610} Run tests"]);
     }
+}
+
+/// One disclosure for a completed reasoning segment. Missing historical timing stays unknown.
+pub fn thought(text: &str, seconds: Option<u64>) -> (Vec<Line>, Vec<Line>) {
+    let text = text.trim_end();
+    let count = text.lines().count();
+    let title = match seconds {
+        Some(seconds) => format!("Thought for {seconds}s {count} lines"),
+        None => format!("Thought {count} lines"),
+    };
+    let short = vec![change_view::muted(&format!("{title} (click to expand)"))];
+    let mut full = vec![change_view::muted(&title)];
+    full.extend(text.lines().map(|row| change_view::body(&printable(row))));
+    full.push(change_view::muted("(click to collapse)"));
+    (short, full)
 }

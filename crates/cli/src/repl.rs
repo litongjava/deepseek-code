@@ -16,7 +16,7 @@ pub fn transcript(session: &Session) -> Result<Vec<crate::terminal::change_view:
 
 /// The transcript of any saved conversation, for the /resume preview.
 pub fn transcript_of(session: &Session, id: &str) -> Result<Vec<crate::terminal::change_view::Line>> {
-    conversation(session, id, true)
+    conversation(session, id, true, None)
 }
 
 /// After a resume, as in the reference CLI: the screen starts over with the
@@ -26,42 +26,44 @@ pub fn show_resumed(session: &Session, clear: bool) -> Result<()> {
     if !std::io::stderr().is_terminal() {
         return Ok(());
     }
-    let color = std::env::var_os("NO_COLOR").is_none();
     let mut out = String::new();
     if clear {
         out.push_str("\x1b[2J\x1b[H");
         out.push_str(&crate::terminal::banner(&session.model, &session.workspace));
         out.push('\n');
     }
-    for line in conversation(session, &session.id, false)? {
-        // Unclipped: long prompts wrap in the terminal as they did when typed.
-        out.push_str(&crate::terminal::change_view::render(&line, usize::MAX, color));
-        out.push('\n');
-    }
+    let mut recorded = crate::terminal::scrollback::Scrollback::default();
+    conversation(session, &session.id, false, Some(&mut recorded))?;
+    for row in recorded.all() { out.push_str(&row); out.push('\n'); }
     eprint!("{out}");
+    recorded.save();
     Ok(())
 }
 
-fn conversation(session: &Session, id: &str, detailed: bool) -> Result<Vec<crate::terminal::change_view::Line>> {
+fn conversation(session: &Session, id: &str, detailed: bool, mut recorded: Option<&mut crate::terminal::scrollback::Scrollback>) -> Result<Vec<crate::terminal::change_view::Line>> {
     use crate::terminal::{change_view, tool_view};
     let width = crossterm::terminal::size().map_or(80, |(cols, _)| cols.saturating_sub(1) as usize);
     session.store.db.with_conn(|conn| {
         let rows = deepseek_code_core::db::message_repo::get_messages_by_conversation(conn, id)?;
         let mut lines = Vec::new();
         for message in &rows {
+            let message_start = lines.len();
             if message.is_compact_boundary {
                 lines.push(change_view::muted("\u{273b} Conversation compacted"));
                 lines.extend(message.content.lines().map(|line| change_view::muted(&format!("  {line}"))));
+                if let Some(recorded) = recorded.as_deref_mut() { record_lines(recorded, &lines[message_start..], width); }
                 continue;
             }
             if message.role == "user" {
                 if let Some(summary) = deepseek_code_core::tools::background_shell::notification_summary(&message.content) {
                     lines.push(change_view::body(&format!("\u{25cf} {summary}")));
-                    continue;
+                    if let Some(recorded) = recorded.as_deref_mut() { record_lines(recorded, &lines[message_start..], width); }
+                continue;
                 }
                 let mut text = message.content.lines();
                 lines.push(change_view::body(&format!("{} {}", crate::terminal::prompt_glyph(), text.next().unwrap_or_default())));
                 lines.extend(text.map(|line| change_view::body(&format!("  {line}"))));
+                if let Some(recorded) = recorded.as_deref_mut() { record_lines(recorded, &lines[message_start..], width); }
                 continue;
             }
             if detailed {
@@ -71,10 +73,19 @@ fn conversation(session: &Session, id: &str, detailed: bool) -> Result<Vec<crate
                 let header = format!("{time} {}", session.model);
                 lines.push(change_view::muted(&format!("{header:>width$}")));
             }
+            if let (Some(recorded), Some(thinking)) = (recorded.as_deref_mut(), message.thinking.as_deref().filter(|text| !text.trim().is_empty())) {
+                if recorded.needs_separator() { recorded.push(String::new(), None); }
+                let (short, full) = tool_view::thought(thinking, None);
+                let (id, rows) = recorded.block(short, full);
+                for row in rows { recorded.push(row, Some(id)); }
+            }
             if let Some(thinking) = message.thinking.as_deref().filter(|text| detailed && !text.trim().is_empty()) {
                 let mut text = thinking.lines();
                 lines.push(change_view::muted(&format!("\u{2234} {}", text.next().unwrap_or_default())));
                 lines.extend(text.take(400).map(|line| change_view::muted(&format!("  {line}"))));
+            }
+            if let Some(recorded) = recorded.as_deref_mut() {
+                record_lines(recorded, &lines[message_start..], width);
             }
             for tool in deepseek_code_core::db::message_repo::get_tool_calls_for_message(conn, &message.id)? {
             let input = tool
@@ -83,17 +94,27 @@ fn conversation(session: &Session, id: &str, detailed: bool) -> Result<Vec<crate
                 .and_then(|input| serde_json::from_str(input).ok())
                 .unwrap_or_default();
             let output = tool.output.as_deref().unwrap_or("");
+            if let Some(recorded) = recorded.as_deref_mut() {
+                let short = tool_view::finished(&tool.name, &input, output, tool.is_error, None, Some(&session.workspace));
+                let elapsed = deepseek_code_core::db::message_repo::tool_duration(conn, &tool.id)?.map(std::time::Duration::from_millis);
+                let full = tool_view::expanded_block(&tool.name, &input, output, tool.is_error, elapsed, Some(&session.workspace));
+                if recorded.needs_separator() { recorded.push(String::new(), None); }
+                let (id, rows) = recorded.block(short, full);
+                for row in rows { recorded.push(row, Some(id)); }
+            }
             lines.extend(if detailed {
                 tool_view::expanded(&tool.name, &input, output, tool.is_error, Some(&session.workspace))
             } else {
                 tool_view::finished(&tool.name, &input, output, tool.is_error, None, Some(&session.workspace))
             });
             }
+            let answer_start = lines.len();
             let mut text = message.content.lines();
             if let Some(first) = text.next() {
                 lines.push(change_view::body(&format!("\u{25cf} {first}")));
                 lines.extend(text.map(|line| change_view::body(&format!("  {line}"))));
             }
+            if let Some(recorded) = recorded.as_deref_mut() { record_lines(recorded, &lines[answer_start..], width); }
         }
         Ok(lines)
     })?
@@ -240,5 +261,12 @@ mod tests {
             Some("新的会话")
         );
         assert_eq!(reopened.history(&id).unwrap(), before);
+    }
+}
+
+fn record_lines(recorded: &mut crate::terminal::scrollback::Scrollback, lines: &[crate::terminal::change_view::Line], width: usize) {
+    for line in lines {
+        let text = crate::terminal::change_view::render(line, usize::MAX, std::env::var_os("NO_COLOR").is_none());
+        for row in crate::terminal::markdown::wrap_styled(&text, "", "", width) { recorded.push(row, None); }
     }
 }

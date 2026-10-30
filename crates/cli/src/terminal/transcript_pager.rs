@@ -100,6 +100,25 @@ pub(super) struct HistoryView {
 }
 
 impl HistoryView {
+    pub(super) fn screen_rows(&self, height: usize, composer: &[String]) -> Vec<String> {
+        let page = height.saturating_sub(composer.len());
+        let mut result = vec![String::new(); height];
+        for (index, row) in self.all.iter().skip(self.top.unwrap_or(0)).take(page).enumerate() { result[index] = row.styled.clone(); }
+        for (index, row) in composer.iter().take(height).enumerate() { result[page + index] = row.clone(); }
+        result
+    }
+    pub(super) fn row_index(&self, row: usize, page: usize) -> Option<usize> {
+        (row < page).then(|| self.top.unwrap_or(0) + row)
+    }
+    pub(super) fn wheel(&mut self, up: bool, page: usize) -> io::Result<()> {
+        let was_active = self.active();
+        let end = self.all.len().saturating_sub(page);
+        let top = self.top.unwrap_or(end);
+        let next = if up { top.saturating_sub(3) } else { top.saturating_add(3).min(end) };
+        self.top = Some(next);
+        if !was_active { self.previous.clear(); execute!(io::stderr(), EnterAlternateScreen)?; }
+        Ok(())
+    }
     pub(super) fn active(&self) -> bool {
         self.top.is_some()
     }
@@ -226,7 +245,9 @@ pub fn view(lines: &[Line]) -> io::Result<Outcome> {
     }
     let mut reader = super::paste_input::Reader::new()?;
     let result = run(lines, &mut || reader.next(std::time::Duration::from_millis(100)));
+    drop(reader);
     if !raw {
+        execute!(io::stderr(), DisableMouseCapture)?;
         terminal::disable_raw_mode()?;
     }
     result
@@ -245,11 +266,10 @@ pub(super) fn run_with_logged(
     next_event: &mut dyn FnMut() -> io::Result<Option<Event>>,
 ) -> io::Result<Outcome> {
     let mut out = io::stderr();
-    // This full-screen pager is the one place the wheel belongs to the app:
-    // it scrolls the page. The prompt itself never captures the mouse.
-    execute!(out, EnterAlternateScreen, Hide, EnableMouseCapture)?;
+    // Release mouse capture so the detailed transcript supports native drag selection.
+    execute!(out, EnterAlternateScreen, Hide, DisableMouseCapture)?;
     let result = pager(lines, logged, next_event, &mut out);
-    execute!(out, Show, DisableMouseCapture, LeaveAlternateScreen)?;
+    execute!(out, Show, LeaveAlternateScreen, EnableMouseCapture)?;
     result
 }
 
@@ -435,7 +455,7 @@ fn open_in_editor(rows: &[Row], out: &mut impl Write) -> io::Result<()> {
     terminal::disable_raw_mode()?;
     let status = std::process::Command::new(&program).args(parts).arg(file.path()).status();
     terminal::enable_raw_mode()?;
-    execute!(out, EnableMouseCapture, EnterAlternateScreen, Hide)?;
+    execute!(out, DisableMouseCapture, EnterAlternateScreen, Hide)?;
     if let Err(error) = status {
         eprint!("Could not open {program}: {error}\r\n");
     }
@@ -446,6 +466,19 @@ fn open_in_editor(rows: &[Row], out: &mut impl Write) -> io::Result<()> {
 mod tests {
     use super::*;
     use crossterm::event::KeyEvent;
+
+    #[test]
+    fn selection_snapshot_uses_scrolled_rows_without_changing_position() {
+        let mut view = HistoryView::default();
+        view.refresh(&[], &(0..30).map(|n| format!("row {n}")).collect::<Vec<_>>(), 80);
+        view.move_page(KeyCode::PageUp, 5);
+        let top = view.top;
+        let snapshot = view.screen_rows(6, &["prompt".into()]);
+        assert_eq!(snapshot[0], "row 20");
+        assert_eq!(snapshot[5], "prompt");
+        assert_eq!(view.top, top);
+        assert_eq!(view.row_index(2, 5), Some(22));
+    }
 
     #[test]
     fn logged_transcript_rows_keep_styles_and_are_searchable() {

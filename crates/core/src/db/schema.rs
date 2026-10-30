@@ -138,6 +138,11 @@ CREATE INDEX IF NOT EXISTS idx_session_input_queue ON session_input_queue(sessio
 
 -- What the user added when approving a call, replayed after its result as
 -- the user's own words.
+CREATE TABLE IF NOT EXISTS tool_call_timings (
+    tool_call_id TEXT PRIMARY KEY REFERENCES tool_calls(id) ON DELETE CASCADE,
+    duration_ms INTEGER NOT NULL CHECK(duration_ms >= 0)
+);
+
 CREATE TABLE IF NOT EXISTS tool_call_notes (
     tool_call_id TEXT PRIMARY KEY REFERENCES tool_calls(id) ON DELETE CASCADE,
     note TEXT NOT NULL
