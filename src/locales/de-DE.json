@@ -762,5 +762,21 @@
     "unavailable": "Hier kann eine Sitzung gestartet werden. Branches und Worktrees erfordern ein Git-Repository.",
     "branchHint": "Gilt für den ersten Projektordner. Beim Senden wird dieser Ordner auf den gewählten lokalen Branch umgestellt.",
     "worktreeHint": "Erstellt einen isolierten Sitzungsbranch aus dem gewählten Commit. Nicht eingecheckte Änderungen werden nicht kopiert; andere Projektordner bleiben gemeinsam genutzt."
+  },
+  "rightSidebar": {
+    "toggle": "Rechte Seitenleiste umschalten",
+    "show": "Rechte Seitenleiste anzeigen",
+    "hide": "Rechte Seitenleiste ausblenden",
+    "panel": "Rechte Seitenleiste",
+    "tabs": "Tabs der rechten Seitenleiste",
+    "close": "Rechte Seitenleiste schließen",
+    "resize": "Größe der rechten Seitenleiste ändern",
+    "files": "Dateien",
+    "browser": "Browser",
+    "filesEmptyTitle": "Noch keine Dateien",
+    "filesEmptyDescription": "Dateien aus dem Arbeitsbereich dieser Unterhaltung werden hier angezeigt.",
+    "browserEmptyTitle": "Keine Seite geöffnet",
+    "browserEmptyDescription": "Aus dem Chat geöffnete Webseiten werden hier angezeigt.",
+    "shortcut": "Strg+Alt+B (⌘⌥B unter macOS): rechte Seitenleiste ein- oder ausblenden"
   }
 }

@@ -7,8 +7,10 @@ export const hasCustomTitleBar = () =>
   typeof window !== 'undefined' && !!(window as any).__TAURI_INTERNALS__ &&
   /Windows/i.test(navigator.userAgent);
 
-export default function AppTitleBar({ children, height = 44 }: {
+export default function AppTitleBar({ children, trailing, height = 44 }: {
   children?: React.ReactNode;
+  /** Controls placed at the right edge, before the window controls and outside the drag region. */
+  trailing?: React.ReactNode;
   height?: number;
 }) {
   const custom = hasCustomTitleBar();
@@ -46,6 +48,7 @@ export default function AppTitleBar({ children, height = 44 }: {
       {children}
       {/* Tauri handles native dragging and double-click maximize on this region. */}
       <div data-tauri-drag-region={custom ? true : undefined} className="h-full flex-1 min-w-4" />
+      {trailing}
       {custom && (
         <div className="flex h-full shrink-0 text-claude-text" role="group" aria-label="窗口控制">
           <button type="button" aria-label="最小化" title="最小化" onClick={() => run('minimize')} className="w-[46px] flex items-center justify-center hover:bg-black/5 dark:hover:bg-white/10"><Minus size={15} strokeWidth={1.5} /></button>

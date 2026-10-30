@@ -781,5 +781,21 @@
     "title": "Upgrade Plan",
     "currentPlan": "Current Plan",
     "availablePlans": "Available Plans"
+  },
+  "rightSidebar": {
+    "toggle": "Toggle right sidebar",
+    "show": "Show right sidebar",
+    "hide": "Hide right sidebar",
+    "panel": "Right sidebar",
+    "tabs": "Right sidebar tabs",
+    "close": "Close right sidebar",
+    "resize": "Resize right sidebar",
+    "files": "Files",
+    "browser": "Browser",
+    "filesEmptyTitle": "No files yet",
+    "filesEmptyDescription": "Files from this conversation's workspace will appear here.",
+    "browserEmptyTitle": "No page open",
+    "browserEmptyDescription": "Web pages opened from the chat will appear here.",
+    "shortcut": "Ctrl+Alt+B (⌘⌥B on macOS): show or hide the right sidebar"
   }
 }

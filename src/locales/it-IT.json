@@ -762,5 +762,21 @@
     "unavailable": "Puoi avviare una sessione qui. Branch e worktree richiedono un repository Git.",
     "branchHint": "Si applica alla prima cartella del progetto. L’invio passa questa cartella al branch locale selezionato.",
     "worktreeHint": "Crea un branch di sessione isolato dal commit selezionato. Le modifiche non confermate non vengono copiate; le altre cartelle del progetto restano condivise."
+  },
+  "rightSidebar": {
+    "toggle": "Attiva/disattiva barra laterale destra",
+    "show": "Mostra barra laterale destra",
+    "hide": "Nascondi barra laterale destra",
+    "panel": "Barra laterale destra",
+    "tabs": "Schede della barra laterale destra",
+    "close": "Chiudi barra laterale destra",
+    "resize": "Ridimensiona barra laterale destra",
+    "files": "File",
+    "browser": "Browser",
+    "filesEmptyTitle": "Ancora nessun file",
+    "filesEmptyDescription": "I file dell’area di lavoro di questa conversazione appariranno qui.",
+    "browserEmptyTitle": "Nessuna pagina aperta",
+    "browserEmptyDescription": "Le pagine web aperte dalla chat appariranno qui.",
+    "shortcut": "Ctrl+Alt+B (⌘⌥B su macOS): mostra o nascondi la barra laterale destra"
   }
 }

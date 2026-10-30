@@ -762,5 +762,21 @@
     "unavailable": "Anda dapat memulai sesi di sini. Cabang dan worktree memerlukan repositori Git.",
     "branchHint": "Berlaku untuk folder pertama proyek. Saat mengirim, folder ini beralih ke cabang lokal yang dipilih.",
     "worktreeHint": "Membuat cabang sesi terisolasi dari commit yang dipilih. Perubahan yang belum di-commit tidak disalin; folder proyek lainnya tetap dibagikan."
+  },
+  "rightSidebar": {
+    "toggle": "Alihkan bilah sisi kanan",
+    "show": "Tampilkan bilah sisi kanan",
+    "hide": "Sembunyikan bilah sisi kanan",
+    "panel": "Bilah sisi kanan",
+    "tabs": "Tab bilah sisi kanan",
+    "close": "Tutup bilah sisi kanan",
+    "resize": "Ubah ukuran bilah sisi kanan",
+    "files": "File",
+    "browser": "Browser",
+    "filesEmptyTitle": "Belum ada file",
+    "filesEmptyDescription": "File dari ruang kerja percakapan ini akan muncul di sini.",
+    "browserEmptyTitle": "Tidak ada halaman yang terbuka",
+    "browserEmptyDescription": "Halaman web yang dibuka dari chat akan muncul di sini.",
+    "shortcut": "Ctrl+Alt+B (⌘⌥B di macOS): tampilkan atau sembunyikan bilah sisi kanan"
   }
 }

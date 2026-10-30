@@ -70,6 +70,16 @@ describe('AppTitleBar', () => {
     expect(native.onResized).not.toHaveBeenCalled();
   });
 
+  it('places trailing actions after the drag region and before window controls', async () => {
+    const { container } = render(<AppTitleBar trailing={<button>Panel</button>}><button>Menu</button></AppTitleBar>);
+    const panel = screen.getByRole('button', { name: 'Panel' });
+    const dragRegion = container.querySelector('[data-tauri-drag-region]')!;
+    expect(panel.closest('[data-tauri-drag-region]')).toBeNull();
+    expect(dragRegion.compareDocumentPosition(panel) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    expect(panel.compareDocumentPosition(screen.getByRole('group', { name: '窗口控制' })) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    await waitFor(() => expect(native.onResized).toHaveBeenCalledOnce());
+  });
+
   it('provides controls on screens without a toolbar', async () => {
     render(<WindowFrame><div>Login</div></WindowFrame>);
     expect(screen.getByText('Login')).toBeInTheDocument();

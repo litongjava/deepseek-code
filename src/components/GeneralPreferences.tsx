@@ -116,6 +116,7 @@ export default function GeneralPreferences({ chatFont }: { chatFont?: React.Reac
             </select>
           </label>)}
           <p className="mt-4 text-[13px] text-claude-textSecondary">{t('general.fixedShortcuts')}</p>
+          <p className="mt-1 text-[13px] text-claude-textSecondary">{t('rightSidebar.shortcut')}</p>
         </div>
       </div>}
     </section>

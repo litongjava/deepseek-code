@@ -14,11 +14,8 @@ import { useGeneralSettingsStore } from './stores/useGeneralSettingsStore';
 import AnalyticsPanel from './components/AnalyticsPanel';
 import TerminalPanel from './components/TerminalPanel';
 import UpgradePlan from './components/UpgradePlan';
-import CodePanel from './components/CodePanel';
 import CodeWorkspace from './components/CodeWorkspace';
-import ArtifactsPanel from './components/ArtifactsPanel';
 import ArtifactsPage from './components/ArtifactsPage';
-import DraggableDivider from './components/DraggableDivider';
 import { DocumentInfo } from './components/DocumentCard';
 import AdminLayout from './components/admin/AdminLayout';
 import AdminDashboard from './components/admin/AdminDashboard';
@@ -39,6 +36,10 @@ import ChatHeader from './components/ChatHeader';
 import Tooltip from './components/ui/Tooltip';
 import { useUIStore } from './stores';
 import { useI18n } from './hooks/useI18n';
+import RightPanelSlot from './features/rightSidebar/RightPanelSlot';
+import RightSidebarToggle from './features/rightSidebar/RightSidebarToggle';
+import { useRightSidebarController } from './features/rightSidebar/useRightSidebarController';
+import { isRightSidebarRoute } from './stores/useRightSidebarStore';
 
 const isTauri = typeof window !== 'undefined' && !!(window as any).__TAURI_INTERNALS__;
 
@@ -304,6 +305,19 @@ const Layout = () => {
     setIsSidebarCollapsed(sidebarWasCollapsedRef.current);
   }, []);
 
+  const closeDocumentAndArtifacts = useCallback(() => {
+    setDocumentPanelDoc(null);
+    setShowArtifacts(false);
+    setIsSidebarCollapsed(sidebarWasCollapsedRef.current);
+  }, [setIsSidebarCollapsed]);
+
+  const rightSidebarAllowed = !showUpgrade && isRightSidebarRoute(location.pathname);
+  const rightSidebar = useRightSidebarController({
+    allowed: rightSidebarAllowed,
+    otherPanelOpen: !!documentPanelDoc || showArtifacts,
+    closeOtherPanels: closeDocumentAndArtifacts,
+  });
+
   const handleChatModeChange = useCallback((isChat: boolean) => { setIsChatMode(isChat); }, []);
   const handleTitleChange = useCallback((title: string) => { setCurrentChatTitle(title); }, []);
 
@@ -382,7 +396,11 @@ const Layout = () => {
             <button onClick={() => { setZoomLevel(1); localStorage.setItem('app_zoom', '1'); }} className="ml-1 px-1.5 py-0.5 text-[11px] rounded bg-white/20 dark:bg-black/10 hover:bg-white/30 dark:hover:bg-black/20 transition-colors">Reset</button>
           </div>
         )}
-        <AppTitleBar height={titleBarHeight}>
+        <AppTitleBar height={titleBarHeight} trailing={rightSidebarAllowed && (
+          <div className="h-full flex items-center pr-2" style={{ pointerEvents: 'auto', WebkitAppRegion: 'no-drag' } as React.CSSProperties}>
+            <RightSidebarToggle expanded={rightSidebar.visible} onToggle={rightSidebar.toggle} shortcutLabel={isMac ? '⌘⌥B' : 'Ctrl+Alt+B'} />
+          </div>
+        )}>
           <div className="h-full flex items-center pr-2 gap-0.5" style={{ pointerEvents: 'auto', WebkitAppRegion: 'no-drag', paddingLeft: isMac ? '78px' : '4px' } as React.CSSProperties}>
             <Tooltip content="Menu"><button onClick={() => { }} className="p-2 hover:bg-black/5 dark:hover:bg-white/5 rounded-md text-claude-textSecondary hover:text-claude-text transition-colors"><Menu size={18} className="opacity-80" /></button></Tooltip>
             <Tooltip content={isSidebarCollapsed ? "Expand sidebar" : "Collapse sidebar"}><button onClick={() => setIsSidebarCollapsed(!isSidebarCollapsed)} className="p-1.5 hover:bg-black/5 dark:hover:bg-white/5 rounded-md text-claude-textSecondary hover:text-claude-text transition-colors"><IconSidebarToggle size={26} className="dark:invert transition-[filter] duration-200" /></button></Tooltip>
@@ -432,24 +450,19 @@ const Layout = () => {
                 <MainContent onNewChat={refreshSidebar} resetKey={newChatKey} tunerConfig={tunerConfig} onOpenDocument={handleOpenDocument} onArtifactsUpdate={handleArtifactsUpdate} onOpenArtifacts={handleOpenArtifacts} onTitleChange={handleTitleChange} onChatModeChange={handleChatModeChange} />
               )}
             </div>
-            <div className={`h-full bg-claude-bg transition-all duration-300 ease-out flex z-20 relative ${(documentPanelDoc || showArtifacts) ? 'border-l border-claude-border' : ''} ${!(documentPanelDoc || showArtifacts) ? 'pointer-events-none' : ''}`} style={{ width: documentPanelDoc ? `${documentPanelWidth}%` : showArtifacts ? '360px' : '0px', opacity: (documentPanelDoc || showArtifacts) ? 1 : 0, overflow: 'hidden' }}>
-              {documentPanelDoc && (
-                <div className="absolute left-0 top-0 bottom-0 h-full z-50">
-                  <DraggableDivider onResize={setDocumentPanelWidth} containerRef={contentContainerRef} />
-                </div>
-              )}
-              <div className={`w-full h-full flex relative min-w-0 overflow-hidden`}>
-                {(documentPanelDoc || showArtifacts) && (
-                  <>
-                    {documentPanelDoc ? (
-                      <CodePanel document={documentPanelDoc} onClose={handleCloseDocument} />
-                    ) : (
-                      <ArtifactsPanel documents={artifacts} onClose={handleCloseArtifacts} onOpenDocument={handleOpenDocument} />
-                    )}
-                  </>
-                )}
-              </div>
-            </div>
+            <RightPanelSlot
+              containerRef={contentContainerRef}
+              documentPanelDoc={documentPanelDoc}
+              documentPanelWidth={documentPanelWidth}
+              onDocumentPanelResize={setDocumentPanelWidth}
+              onCloseDocument={handleCloseDocument}
+              showArtifacts={showArtifacts}
+              artifacts={artifacts}
+              onCloseArtifacts={handleCloseArtifacts}
+              onOpenDocument={handleOpenDocument}
+              sidebarVisible={rightSidebar.visible}
+              onCloseSidebar={rightSidebar.close}
+            />
           </div>
         </div>
       </div>

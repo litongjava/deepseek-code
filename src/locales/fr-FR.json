@@ -762,5 +762,21 @@
     "unavailable": "Vous pouvez démarrer une session ici. Les branches et worktrees nécessitent un dépôt Git.",
     "branchHint": "S’applique au premier dossier du projet. L’envoi bascule ce dossier vers la branche locale sélectionnée.",
     "worktreeHint": "Crée une branche de session isolée à partir du commit sélectionné. Les modifications non validées ne sont pas copiées ; les autres dossiers du projet restent partagés."
+  },
+  "rightSidebar": {
+    "toggle": "Afficher/masquer la barre latérale droite",
+    "show": "Afficher la barre latérale droite",
+    "hide": "Masquer la barre latérale droite",
+    "panel": "Barre latérale droite",
+    "tabs": "Onglets de la barre latérale droite",
+    "close": "Fermer la barre latérale droite",
+    "resize": "Redimensionner la barre latérale droite",
+    "files": "Fichiers",
+    "browser": "Navigateur",
+    "filesEmptyTitle": "Aucun fichier pour l’instant",
+    "filesEmptyDescription": "Les fichiers de l’espace de travail de cette conversation apparaîtront ici.",
+    "browserEmptyTitle": "Aucune page ouverte",
+    "browserEmptyDescription": "Les pages web ouvertes depuis le chat apparaîtront ici.",
+    "shortcut": "Ctrl+Alt+B (⌘⌥B sur macOS) : afficher ou masquer la barre latérale droite"
   }
 }

@@ -762,5 +762,21 @@
     "unavailable": "Je kunt hier een sessie starten. Branches en worktrees vereisen een Git-repository.",
     "branchHint": "Geldt voor de eerste projectmap. Bij verzenden wordt deze map naar de geselecteerde lokale branch omgeschakeld.",
     "worktreeHint": "Maakt een geïsoleerde sessiebranch vanuit de geselecteerde commit. Niet vastgelegde wijzigingen worden niet gekopieerd; andere projectmappen blijven gedeeld."
+  },
+  "rightSidebar": {
+    "toggle": "Rechterzijbalk in-/uitschakelen",
+    "show": "Rechterzijbalk tonen",
+    "hide": "Rechterzijbalk verbergen",
+    "panel": "Rechterzijbalk",
+    "tabs": "Tabbladen van rechterzijbalk",
+    "close": "Rechterzijbalk sluiten",
+    "resize": "Grootte van rechterzijbalk wijzigen",
+    "files": "Bestanden",
+    "browser": "Browser",
+    "filesEmptyTitle": "Nog geen bestanden",
+    "filesEmptyDescription": "Bestanden uit de werkruimte van dit gesprek verschijnen hier.",
+    "browserEmptyTitle": "Geen pagina geopend",
+    "browserEmptyDescription": "Webpagina’s die vanuit de chat worden geopend, verschijnen hier.",
+    "shortcut": "Ctrl+Alt+B (⌘⌥B op macOS): rechterzijbalk tonen of verbergen"
   }
 }

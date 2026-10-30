@@ -762,5 +762,21 @@
     "unavailable": "Bạn có thể bắt đầu phiên tại đây. Nhánh và worktree cần có kho Git.",
     "branchHint": "Áp dụng cho thư mục đầu tiên của dự án. Khi gửi, thư mục này chuyển sang nhánh cục bộ đã chọn.",
     "worktreeHint": "Tạo nhánh phiên riêng biệt từ commit đã chọn. Không sao chép thay đổi chưa commit; các thư mục khác trong dự án vẫn dùng chung."
+  },
+  "rightSidebar": {
+    "toggle": "Bật/tắt thanh bên phải",
+    "show": "Hiện thanh bên phải",
+    "hide": "Ẩn thanh bên phải",
+    "panel": "Thanh bên phải",
+    "tabs": "Các thẻ của thanh bên phải",
+    "close": "Đóng thanh bên phải",
+    "resize": "Đổi kích thước thanh bên phải",
+    "files": "Tệp",
+    "browser": "Trình duyệt",
+    "filesEmptyTitle": "Chưa có tệp",
+    "filesEmptyDescription": "Các tệp trong không gian làm việc của cuộc trò chuyện này sẽ xuất hiện ở đây.",
+    "browserEmptyTitle": "Chưa mở trang nào",
+    "browserEmptyDescription": "Các trang web được mở từ cuộc trò chuyện sẽ xuất hiện ở đây.",
+    "shortcut": "Ctrl+Alt+B (⌘⌥B trên macOS): hiện hoặc ẩn thanh bên phải"
   }
 }

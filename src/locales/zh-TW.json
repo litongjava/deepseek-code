@@ -762,5 +762,21 @@
     "title": "升級計劃",
     "currentPlan": "目前計劃",
     "availablePlans": "可選計劃"
+  },
+  "rightSidebar": {
+    "toggle": "切換右側邊欄",
+    "show": "顯示右側邊欄",
+    "hide": "隱藏右側邊欄",
+    "panel": "右側邊欄",
+    "tabs": "右側邊欄分頁",
+    "close": "關閉右側邊欄",
+    "resize": "調整右側邊欄寬度",
+    "files": "檔案",
+    "browser": "瀏覽器",
+    "filesEmptyTitle": "尚無檔案",
+    "filesEmptyDescription": "此對話工作區中的檔案將顯示在這裡。",
+    "browserEmptyTitle": "未開啟頁面",
+    "browserEmptyDescription": "從對話中開啟的網頁將顯示在這裡。",
+    "shortcut": "Ctrl+Alt+B（macOS 上為 ⌘⌥B）：顯示或隱藏右側邊欄"
   }
 }

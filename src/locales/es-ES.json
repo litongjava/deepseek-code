@@ -762,5 +762,21 @@
     "unavailable": "Puedes iniciar una sesión aquí. Las ramas y los worktrees requieren un repositorio Git.",
     "branchHint": "Se aplica a la primera carpeta del proyecto. Al enviar, esta carpeta cambia a la rama local seleccionada.",
     "worktreeHint": "Crea una rama de sesión aislada desde el commit seleccionado. No se copian los cambios sin confirmar; las demás carpetas del proyecto siguen compartidas."
+  },
+  "rightSidebar": {
+    "toggle": "Alternar barra lateral derecha",
+    "show": "Mostrar barra lateral derecha",
+    "hide": "Ocultar barra lateral derecha",
+    "panel": "Barra lateral derecha",
+    "tabs": "Pestañas de la barra lateral derecha",
+    "close": "Cerrar barra lateral derecha",
+    "resize": "Cambiar tamaño de la barra lateral derecha",
+    "files": "Archivos",
+    "browser": "Navegador",
+    "filesEmptyTitle": "Aún no hay archivos",
+    "filesEmptyDescription": "Los archivos del espacio de trabajo de esta conversación aparecerán aquí.",
+    "browserEmptyTitle": "No hay ninguna página abierta",
+    "browserEmptyDescription": "Las páginas web abiertas desde el chat aparecerán aquí.",
+    "shortcut": "Ctrl+Alt+B (⌘⌥B en macOS): mostrar u ocultar la barra lateral derecha"
   }
 }

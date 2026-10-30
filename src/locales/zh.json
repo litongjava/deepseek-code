@@ -781,5 +781,21 @@
     "title": "升级计划",
     "currentPlan": "当前计划",
     "availablePlans": "可选计划"
+  },
+  "rightSidebar": {
+    "toggle": "切换右侧边栏",
+    "show": "显示右侧边栏",
+    "hide": "隐藏右侧边栏",
+    "panel": "右侧边栏",
+    "tabs": "右侧边栏标签页",
+    "close": "关闭右侧边栏",
+    "resize": "调整右侧边栏宽度",
+    "files": "文件",
+    "browser": "浏览器",
+    "filesEmptyTitle": "暂无文件",
+    "filesEmptyDescription": "此对话工作区中的文件将显示在这里。",
+    "browserEmptyTitle": "未打开页面",
+    "browserEmptyDescription": "从对话中打开的网页将显示在这里。",
+    "shortcut": "Ctrl+Alt+B（macOS 上为 ⌘⌥B）：显示或隐藏右侧边栏"
   }
 }

@@ -762,5 +762,21 @@
     "unavailable": "Możesz tutaj rozpocząć sesję. Gałęzie i worktree wymagają repozytorium Git.",
     "branchHint": "Dotyczy pierwszego folderu projektu. Wysłanie przełącza ten folder na wybraną lokalną gałąź.",
     "worktreeHint": "Tworzy odizolowaną gałąź sesji z wybranego commitu. Niezatwierdzone zmiany nie są kopiowane; pozostałe foldery projektu pozostają współdzielone."
+  },
+  "rightSidebar": {
+    "toggle": "Przełącz prawy panel boczny",
+    "show": "Pokaż prawy panel boczny",
+    "hide": "Ukryj prawy panel boczny",
+    "panel": "Prawy panel boczny",
+    "tabs": "Karty prawego panelu bocznego",
+    "close": "Zamknij prawy panel boczny",
+    "resize": "Zmień rozmiar prawego panelu bocznego",
+    "files": "Pliki",
+    "browser": "Przeglądarka",
+    "filesEmptyTitle": "Brak plików",
+    "filesEmptyDescription": "Pliki z obszaru roboczego tej rozmowy pojawią się tutaj.",
+    "browserEmptyTitle": "Brak otwartej strony",
+    "browserEmptyDescription": "Strony internetowe otwarte z czatu pojawią się tutaj.",
+    "shortcut": "Ctrl+Alt+B (⌘⌥B w macOS): pokaż lub ukryj prawy panel boczny"
   }
 }
