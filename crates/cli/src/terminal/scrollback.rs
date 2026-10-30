@@ -37,6 +37,9 @@ impl Scrollback {
     pub(crate) fn save(self) {
         *LAST.lock().unwrap_or_else(|poison| poison.into_inner()) = Some(self);
     }
+    pub(super) fn snapshot() -> Self {
+        LAST.lock().unwrap_or_else(|poison| poison.into_inner()).clone().unwrap_or_default()
+    }
     pub(super) fn take() -> Self {
         LAST.lock()
             .unwrap_or_else(|poison| poison.into_inner())

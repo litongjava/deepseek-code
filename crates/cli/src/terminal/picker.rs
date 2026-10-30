@@ -94,6 +94,10 @@ impl Picker<'_> {
             let Some(Event::Key(key)) = next_event()? else {
                 continue;
             };
+            if super::shortcuts::requested(&Event::Key(key)) {
+                screen.shortcut_popup(super::shortcuts::Context::Picker, next_event)?;
+                continue;
+            }
             if key.kind == KeyEventKind::Release {
                 continue;
             }
@@ -217,6 +221,10 @@ fn edit_text(heading: &str, initial: &str, next_event: &mut dyn FnMut() -> io::R
         let Some(Event::Key(key)) = next_event()? else {
             continue;
         };
+        if super::shortcuts::requested(&Event::Key(key)) {
+            screen.shortcut_popup(super::shortcuts::Context::Text, next_event)?;
+            continue;
+        }
         if key.kind == KeyEventKind::Release {
             continue;
         }
@@ -280,6 +288,10 @@ pub fn details_live(heading: &str, rows: &mut dyn FnMut() -> Vec<String>, hint: 
             if ticks % 5 == 0 { current = rows(); }
             continue;
         };
+        if super::shortcuts::requested(&Event::Key(key)) {
+            screen.shortcut_popup(super::shortcuts::Context::Details, &mut || reader.next(std::time::Duration::from_millis(100)))?;
+            continue;
+        }
         if key.kind == KeyEventKind::Release {
             continue;
         }
@@ -319,6 +331,10 @@ fn show_details(
         let Some(Event::Key(key)) = next_event()? else {
             continue;
         };
+        if super::shortcuts::requested(&Event::Key(key)) {
+            screen.shortcut_popup(super::shortcuts::Context::Details, next_event)?;
+            continue;
+        }
         if key.kind == KeyEventKind::Release {
             continue;
         }
@@ -377,6 +393,16 @@ mod tests {
             .iter()
             .map(|title| Entry { title: title.to_string(), detail: "1 minute ago".into() })
             .collect()
+    }
+
+    #[test]
+    fn shortcuts_preserve_text_draft_and_do_not_submit_it() {
+        let mut events = vec![
+            Event::Key(KeyEvent::new(KeyCode::Char('?'), KeyModifiers::SHIFT)),
+            Event::Key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE)),
+            Event::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)),
+        ].into_iter();
+        assert_eq!(edit_text("Rename", "original", &mut || Ok(events.next())).unwrap(), Some("original".into()));
     }
 
     #[test]

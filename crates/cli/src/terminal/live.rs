@@ -1823,6 +1823,23 @@ fn run(
         }
         dirty |= state.dismiss_closed_question();
         if let Some(event) = input_reader.next(Duration::from_millis(25))? {
+            if super::shortcuts::requested(&event) {
+                selection.clear()?;
+                let background = if screen.history_view.active() {
+                    let composer = screen.lines.iter().rev().take(screen.composer_height).cloned().collect::<Vec<_>>().into_iter().rev().collect::<Vec<_>>();
+                    screen.history_view.screen_rows(screen.size.1 as usize, &composer)
+                } else {
+                    let origin = screen.top.unwrap_or(0);
+                    let mut background = screen.scrollback.screen(origin, screen.size.1);
+                    for (index, text) in screen.lines.iter().enumerate() {
+                        if let Some(row) = background.get_mut(origin as usize + index) { *row = text.clone(); }
+                    }
+                    background
+                };
+                super::shortcuts::show(super::shortcuts::Context::Running, &background, &mut || input_reader.next(Duration::from_millis(25)))?;
+                screen.draw(state)?;
+                continue;
+            }
             // Cancellation may arrive while waiting for a key. Never submit a
             // dismissed approval draft as a newly queued user prompt.
             if state.dismiss_closed_question() {

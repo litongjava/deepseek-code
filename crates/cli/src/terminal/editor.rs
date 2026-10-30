@@ -651,6 +651,19 @@ impl Screen {
         self.invalidated = false;
         Ok(())
     }
+    pub(crate) fn shortcut_popup(&mut self, context: crate::terminal::shortcuts::Context, next: &mut dyn FnMut() -> io::Result<Option<Event>>) -> io::Result<()> {
+        let (cols, rows) = terminal::size().unwrap_or((80, 24));
+        let (_, cursor_y) = position()?;
+        let top = self.top.unwrap_or(cursor_y.saturating_sub(self.cursor_row as u16));
+        let mut background = crate::terminal::scrollback::Scrollback::snapshot().screen(top, rows);
+        for (index, (text, _)) in self.previous.iter().enumerate() {
+            if let Some(row) = background.get_mut(top as usize + index) { *row = clipped(text, cols as usize); }
+        }
+        crate::terminal::shortcuts::show(context, &background, next)?;
+        self.invalidated = true;
+        Ok(())
+    }
+
     pub(crate) fn suspend(&mut self) -> io::Result<()> {
         let mut out = io::stderr();
         self.erase(&mut out)?;
@@ -1160,6 +1173,23 @@ impl PromptEditor {
             let Some(event) = read_editor_event(&mut input_reader)? else {
                 continue;
             };
+            if crate::terminal::shortcuts::requested(&event) {
+                selection.clear()?;
+                let composer: Vec<String> = lines.iter().map(|(text, _)| text.clone()).collect();
+                let background = if history_view.active() {
+                    history_view.screen_rows(rows as usize, &composer)
+                } else {
+                    let origin = screen.top.unwrap_or(0);
+                    let mut background = above.screen(origin, rows);
+                    for (index, text) in composer.iter().enumerate() {
+                        if let Some(row) = background.get_mut(origin as usize + index) { *row = text.clone(); }
+                    }
+                    background
+                };
+                crate::terminal::shortcuts::show(crate::terminal::shortcuts::Context::Input, &background, &mut || read_editor_event(&mut input_reader))?;
+                screen.invalidated = true;
+                continue;
+            }
             match event {
                 Event::Resize(_, _) => {
                     // The terminal reflowed the prompt; the next draw places it

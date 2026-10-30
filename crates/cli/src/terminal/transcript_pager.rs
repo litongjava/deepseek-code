@@ -330,6 +330,14 @@ fn pager(
             redraw = false;
             continue;
         };
+        if super::shortcuts::requested(&event) {
+            selection.clear()?;
+            let mut background = vec![String::new(); size.1 as usize];
+            for (index, row) in all.iter().skip(top).take(page).enumerate() { background[index] = row.styled.clone(); }
+            super::shortcuts::show(super::shortcuts::Context::Pager, &background, next_event)?;
+            redraw = true;
+            continue;
+        }
         redraw = true;
         let key = match event {
             Event::Resize(cols, rows_count) => {

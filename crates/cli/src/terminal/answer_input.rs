@@ -94,6 +94,20 @@ fn read_terminal(prompt: &str, flag: &AtomicBool, secret: bool) -> io::Result<Op
             continue;
         };
         cancelled(flag)?;
+        if super::shortcuts::requested(&event) {
+            let (cols, rows) = terminal::size().unwrap_or((80, 24));
+            let (_, y) = cursor::position()?;
+            let mut background = super::scrollback::Scrollback::snapshot().screen(y, rows);
+            let shown = if secret { "*".repeat(value.chars().count()) } else { value.clone() };
+            if let Some(row) = background.get_mut(y as usize) {
+                *row = super::input::editor::clipped(&format!("{safe_prompt}{shown}"), cols as usize);
+            }
+            super::shortcuts::show(super::shortcuts::Context::Answer, &background, &mut || {
+                cancelled(flag)?;
+                reader.next(Duration::from_millis(25))
+            })?;
+            continue;
+        }
         match event {
             Event::Key(key) if key.kind != KeyEventKind::Release => {
                 if key.modifiers.contains(KeyModifiers::CONTROL) {

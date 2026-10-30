@@ -140,6 +140,7 @@ pub(crate) mod scrollback;
 mod mouse_selection;
 mod pinned_prompt;
 pub mod style;
+pub(crate) mod shortcuts;
 pub mod screen_mode;
 
 /// Assemble prompts without creating another stdin reader. Explicit multiline
