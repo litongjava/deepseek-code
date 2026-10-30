@@ -71,7 +71,7 @@ pub struct Cli {
     /// Route tool approvals to the SDK host; only `stdio` is supported.
     #[arg(long, global = true, value_parser = ["stdio"])]
     pub permission_prompt_tool: Option<String>,
-    /// Maximum model/tool-loop iterations for each submitted user message.
+    /// Maximum model/tool-loop iterations for each submitted user message (default: unlimited).
     #[arg(long, value_parser = clap::value_parser!(u32).range(1..), global = true)]
     pub max_turns: Option<u32>,
     /// Require a provider-enforced JSON result matching this JSON Schema string.

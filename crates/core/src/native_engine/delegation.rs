@@ -977,7 +977,7 @@ impl ToolLoopExecutor {
             .as_ref()
             .and_then(|agent| agent.max_turns)
             .map_or(self.max_tool_iterations, |limit| {
-                self.max_tool_iterations.min(limit as usize)
+                Some(self.max_tool_iterations.map_or(limit as usize, |parent| parent.min(limit as usize)))
             });
         child.mcp_registry = self.mcp_registry.clone();
         if let Some(memory) = &self.memex_client {

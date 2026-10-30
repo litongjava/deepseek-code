@@ -158,7 +158,7 @@ pub struct ToolLoopExecutor {
     messages: Vec<Value>,
     system_prompt: Option<String>,
     max_tokens: u32,
-    max_tool_iterations: usize,
+    max_tool_iterations: Option<usize>,
     response_schema: Option<Value>,
     event_tx: mpsc::Sender<EngineEvent>,
     anthropic_client: AnthropicClient,
@@ -540,7 +540,7 @@ impl ToolLoopExecutor {
     pub fn with_max_turns(mut self, max_turns: Option<u32>) -> Result<Self> {
         if let Some(max_turns) = max_turns {
             anyhow::ensure!(max_turns > 0, "max_turns must be greater than zero");
-            self.max_tool_iterations = max_turns as usize;
+            self.max_tool_iterations = Some(max_turns as usize);
         }
         Ok(self)
     }
@@ -2010,7 +2010,7 @@ impl ToolLoopExecutor {
         let enable_thinking = matches!(self.reasoning_mode, ReasoningMode::Deep);
         let mut output_recoveries = 0;
 
-        for iteration in 0..self.max_tool_iterations {
+        for iteration in 0usize.. {
             for context in self.drain_async_hook_messages() {
                 conversation_messages.push(AnthropicMessage {
                     role: "user".into(),
@@ -2035,7 +2035,7 @@ impl ToolLoopExecutor {
             self.auto_history = conversation_messages.iter().filter_map(|message| serde_json::to_value(message).ok()).collect();
             if self.response_schema.is_some() { full_text.clear(); }
             let round_text_start = full_text.len();
-            tracing::info!(module = "AnthropicLoop", "Iteration {}/{} starting, base_url={}, model={}", iteration+1, self.max_tool_iterations, base_url, model_id);
+            tracing::info!(module = "AnthropicLoop", "Iteration {}/{:?} starting, base_url={}, model={}", iteration+1, self.max_tool_iterations, base_url, model_id);
             tracing::info!(module = "AnthropicLoop", "API key length={}", api_key_len);
 
             // Context compression check before each API call
@@ -2381,14 +2381,14 @@ impl ToolLoopExecutor {
             let continue_cut_off = response_status == "incomplete"
                 && stop_reason.as_deref() == Some("max_tokens")
                 && output_recoveries < MAX_OUTPUT_RECOVERIES
-                && iteration + 1 < self.max_tool_iterations;
+                && self.max_tool_iterations.is_none_or(|limit| iteration + 1 < limit);
             if response_status != "completed" && !continue_cut_off {
                 let _ = self.event_tx.send(EngineEvent::Error(response_error)).await;
                 return Ok((full_text, Some(response_status)));
             }
             if stop_reason.as_deref() == Some("max_tokens")
                 && output_recoveries < MAX_OUTPUT_RECOVERIES
-                && iteration + 1 < self.max_tool_iterations
+                && self.max_tool_iterations.is_none_or(|limit| iteration + 1 < limit)
             {
                 output_recoveries += 1;
                 // Never run a call whose arguments were cut off.
@@ -2461,14 +2461,14 @@ impl ToolLoopExecutor {
                     let _ = self.event_tx.send(EngineEvent::ContextReset { session_id: self.conv_id.clone().unwrap_or_default(), boundary_id }).await;
                 }
             } else {
-                let incoming = if iteration + 1 < self.max_tool_iterations { self.drain_peer_messages()? } else { Vec::new() };
+                let incoming = if self.max_tool_iterations.is_none_or(|limit| iteration + 1 < limit) { self.drain_peer_messages()? } else { Vec::new() };
                 if !incoming.is_empty() {
                     conversation_messages.push(AnthropicMessage { role: "assistant".into(), content: AnthropicContent::Blocks(assistant_blocks) });
                     for content in incoming { conversation_messages.push(AnthropicMessage { role: "user".into(), content: AnthropicContent::Text(content) }); }
                     continue;
                 }
                 if let Some(follow_up) = self.stop_hook(&full_text[round_text_start..]).await? {
-                    anyhow::ensure!(iteration + 1 < self.max_tool_iterations, "Stop hook requested continuation after the tool iteration limit");
+                    anyhow::ensure!(self.max_tool_iterations.is_none_or(|limit| iteration + 1 < limit), "Stop hook requested continuation after the tool iteration limit");
                     conversation_messages.push(AnthropicMessage { role: "assistant".into(), content: AnthropicContent::Blocks(assistant_blocks) });
                     conversation_messages.push(AnthropicMessage { role: "user".into(), content: AnthropicContent::Text(follow_up) });
                     continue;
@@ -2476,7 +2476,7 @@ impl ToolLoopExecutor {
                 break;
             }
 
-            if iteration == self.max_tool_iterations - 1 {
+            if self.max_tool_iterations.is_some_and(|limit| iteration + 1 >= limit) {
                 stop_reason = Some("max_iterations".to_string());
                 let _ = self.event_tx.send(EngineEvent::Error("Max tool iterations reached".to_string())).await;
                 let _ = self.event_tx.send(EngineEvent::MessageStop {
@@ -2514,7 +2514,7 @@ impl ToolLoopExecutor {
         let api_key_len = self.provider.provider.api_key.len();
         let mut output_recoveries = 0;
 
-        for iteration in 0..self.max_tool_iterations {
+        for iteration in 0usize.. {
             for context in self.drain_async_hook_messages() {
                 conversation_messages.push(OpenAIMessage {
                     role: "user".into(),
@@ -2545,7 +2545,7 @@ impl ToolLoopExecutor {
             self.auto_history = conversation_messages.iter().filter_map(|message| serde_json::to_value(message).ok()).collect();
             if self.response_schema.is_some() { full_text.clear(); }
             let round_text_start = full_text.len();
-            tracing::info!(module = "OpenAILoop", "Iteration {}/{} starting, base_url={}, model={}", iteration+1, self.max_tool_iterations, base_url, model_id);
+            tracing::info!(module = "OpenAILoop", "Iteration {}/{:?} starting, base_url={}, model={}", iteration+1, self.max_tool_iterations, base_url, model_id);
             tracing::info!(module = "OpenAILoop", "API key length={}", api_key_len);
 
             // Context compression check before each API call
@@ -2843,14 +2843,14 @@ impl ToolLoopExecutor {
             let continue_cut_off = response_status == "incomplete"
                 && stop_reason.as_deref() == Some("length")
                 && output_recoveries < MAX_OUTPUT_RECOVERIES
-                && iteration + 1 < self.max_tool_iterations;
+                && self.max_tool_iterations.is_none_or(|limit| iteration + 1 < limit);
             if response_status != "completed" && !continue_cut_off {
                 let _ = self.event_tx.send(EngineEvent::Error(response_error)).await;
                 return Ok((full_text, Some(response_status)));
             }
             if stop_reason.as_deref() == Some("length")
                 && output_recoveries < MAX_OUTPUT_RECOVERIES
-                && iteration + 1 < self.max_tool_iterations
+                && self.max_tool_iterations.is_none_or(|limit| iteration + 1 < limit)
             {
                 output_recoveries += 1;
                 // Cut-off tool arguments are dropped unrun; keep the visible text.
@@ -2961,14 +2961,14 @@ impl ToolLoopExecutor {
                     let _ = self.event_tx.send(EngineEvent::ContextReset { session_id: self.conv_id.clone().unwrap_or_default(), boundary_id }).await;
                 }
             } else {
-                let incoming = if iteration + 1 < self.max_tool_iterations { self.drain_peer_messages()? } else { Vec::new() };
+                let incoming = if self.max_tool_iterations.is_none_or(|limit| iteration + 1 < limit) { self.drain_peer_messages()? } else { Vec::new() };
                 if !incoming.is_empty() {
                     conversation_messages.push(OpenAIMessage { role: "assistant".into(), content: assistant_content.unwrap_or(OpenAIContent::Text(String::new())), tool_calls: None, tool_call_id: None, reasoning_content: assistant_reasoning, provider_content: assistant_provider_content });
                     for content in incoming { conversation_messages.push(OpenAIMessage { role: "user".into(), content: OpenAIContent::Text(content), tool_calls: None, tool_call_id: None, reasoning_content: None, provider_content: None }); }
                     continue;
                 }
                 if let Some(follow_up) = self.stop_hook(&full_text[round_text_start..]).await? {
-                    anyhow::ensure!(iteration + 1 < self.max_tool_iterations, "Stop hook requested continuation after the tool iteration limit");
+                    anyhow::ensure!(self.max_tool_iterations.is_none_or(|limit| iteration + 1 < limit), "Stop hook requested continuation after the tool iteration limit");
                     conversation_messages.push(OpenAIMessage { role: "assistant".into(), content: assistant_content.unwrap_or(OpenAIContent::Text(String::new())), tool_calls: None, tool_call_id: None, reasoning_content: assistant_reasoning, provider_content: assistant_provider_content });
                     conversation_messages.push(OpenAIMessage { role: "user".into(), content: OpenAIContent::Text(follow_up), tool_calls: None, tool_call_id: None, reasoning_content: None, provider_content: None });
                     continue;
@@ -2976,7 +2976,7 @@ impl ToolLoopExecutor {
                 break;
             }
 
-            if iteration == self.max_tool_iterations - 1 {
+            if self.max_tool_iterations.is_some_and(|limit| iteration + 1 >= limit) {
                 stop_reason = Some("max_iterations".to_string());
                 let _ = self.event_tx.send(EngineEvent::Error("Max tool iterations reached".to_string())).await;
                 let _ = self.event_tx.send(EngineEvent::MessageStop {

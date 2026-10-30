@@ -28,7 +28,7 @@ pub struct OrchestrationConfig {
 #[derive(Debug, Clone, Deserialize)]
 pub struct ToolLoopConfig {
     #[serde(default = "default_max_tool_iterations")]
-    pub max_tool_iterations: usize,
+    pub max_tool_iterations: Option<usize>,
     #[serde(default = "default_token_threshold")]
     pub token_threshold: usize,
     #[serde(default = "default_recent_messages_to_keep")]
@@ -101,7 +101,7 @@ pub struct TelemetryConfig {
 
 // ---- Default value factories ----
 
-fn default_max_tool_iterations() -> usize { 50 }
+fn default_max_tool_iterations() -> Option<usize> { None }
 fn default_token_threshold() -> usize { 600_000 }
 fn default_recent_messages_to_keep() -> usize { 10 }
 fn default_max_tokens() -> u32 { 1000000 }
@@ -199,7 +199,7 @@ impl OrchestrationConfig {
 
     // ---- Convenience accessors (avoids deep .tool_loop.xxx chains everywhere) ----
 
-    pub fn max_tool_iterations() -> usize { Self::get().tool_loop.max_tool_iterations }
+    pub fn max_tool_iterations() -> Option<usize> { Self::get().tool_loop.max_tool_iterations }
     pub fn token_threshold() -> usize { Self::get().tool_loop.token_threshold }
     pub fn recent_messages_to_keep() -> usize { Self::get().tool_loop.recent_messages_to_keep }
     pub fn default_max_tokens() -> u32 { Self::get().tool_loop.default_max_tokens }
@@ -359,7 +359,7 @@ mod tests {
         let config = OrchestrationConfig::default();
 
         // ToolLoopConfig
-        assert_eq!(config.tool_loop.max_tool_iterations, 50);
+        assert_eq!(config.tool_loop.max_tool_iterations, None);
         assert_eq!(config.tool_loop.token_threshold, 600_000);
         assert_eq!(config.tool_loop.recent_messages_to_keep, 10);
         assert_eq!(config.tool_loop.default_max_tokens, 1000000);
@@ -421,7 +421,7 @@ mod tests {
             Ok(()) => {
                 // First call — verify get() works and values match defaults
                 let config = OrchestrationConfig::get();
-                assert_eq!(config.tool_loop.max_tool_iterations, 50);
+                assert_eq!(config.tool_loop.max_tool_iterations, None);
                 assert_eq!(config.tools.max_output_bytes, 102_400);
                 assert_eq!(config.bridge.port, 30085);
                 assert_eq!(config.memory.memex_backend_url, "http://127.0.0.1:8765");
