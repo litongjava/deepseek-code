@@ -59,7 +59,8 @@ impl AutoUpdater {
         claude_core::services::updates::check(
             &format!("{}/manifest.json", self.update_url.trim_end_matches('/')),
             &self.current_version,
-        ).await
+        )
+        .await
     }
 
     pub async fn download_update(&self, url: &str, signature: Option<&str>) -> Result<PathBuf> {
@@ -105,7 +106,10 @@ impl AutoUpdater {
             .collect();
 
         if signature_bytes.len() != 64 {
-            tracing::warn!(signature_len = signature_bytes.len(), "Invalid signature length");
+            tracing::warn!(
+                signature_len = signature_bytes.len(),
+                "Invalid signature length"
+            );
             return Ok(false);
         }
 
@@ -135,9 +139,7 @@ impl AutoUpdater {
         #[cfg(not(windows))]
         {
             use std::process::Command;
-            Command::new("open")
-                .arg(file_path)
-                .spawn()?;
+            Command::new("open").arg(file_path).spawn()?;
         }
 
         Ok(())
@@ -151,10 +153,16 @@ mod configuration_tests {
     #[test]
     fn no_update_server_is_contacted_unless_one_is_configured() {
         for missing in [None, Some(String::new()), Some("  ".into())] {
-            let error = AutoUpdater::from_setting(missing, PathBuf::from("updates")).err().unwrap();
+            let error = AutoUpdater::from_setting(missing, PathBuf::from("updates"))
+                .err()
+                .unwrap();
             assert!(error.to_string().contains(UPDATE_URL_ENV));
         }
-        let updater = AutoUpdater::from_setting(Some(" https://updates.example.com/dcd ".into()), PathBuf::from("updates")).unwrap();
+        let updater = AutoUpdater::from_setting(
+            Some(" https://updates.example.com/dcd ".into()),
+            PathBuf::from("updates"),
+        )
+        .unwrap();
         assert_eq!(updater.update_url, "https://updates.example.com/dcd");
     }
 }

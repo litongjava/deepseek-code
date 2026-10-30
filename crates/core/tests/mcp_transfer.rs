@@ -166,18 +166,28 @@ async fn remote_server_status_reports_its_url_and_headers() {
     let mut config: claude_core::mcp::McpServerConfig = serde_json::from_value(json!({
         "id":"docs","name":"docs","command":"","args":[],"env":{},"enabled":false,
         "type":"http","url":"https://mcp.example.com/mcp","headers":{"Authorization":"Bearer t"}
-    })).unwrap();
+    }))
+    .unwrap();
     manager.add_server(config.clone()).await.unwrap();
     let status = manager.get_server("docs").await.unwrap();
-    assert_eq!((status.transport_type.as_str(), status.url.as_deref()), ("http", Some("https://mcp.example.com/mcp")));
+    assert_eq!(
+        (status.transport_type.as_str(), status.url.as_deref()),
+        ("http", Some("https://mcp.example.com/mcp"))
+    );
     assert_eq!(status.headers["Authorization"], "Bearer t");
 
     config.transport = Some("ws".into());
     config.url = Some("wss://mcp.example.com/ws".into());
     manager.update_server("docs", config).await.unwrap();
     let status = manager.get_server("docs").await.unwrap();
-    assert_eq!((status.transport_type.as_str(), status.url.as_deref()), ("ws", Some("wss://mcp.example.com/ws")));
+    assert_eq!(
+        (status.transport_type.as_str(), status.url.as_deref()),
+        ("ws", Some("wss://mcp.example.com/ws"))
+    );
     let saved: serde_json::Value = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
     assert_eq!(saved["mcpServers"]["docs"]["type"], "ws");
-    assert_eq!(saved["mcpServers"]["docs"]["headers"]["Authorization"], "Bearer t");
+    assert_eq!(
+        saved["mcpServers"]["docs"]["headers"]["Authorization"],
+        "Bearer t"
+    );
 }
