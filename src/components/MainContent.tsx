@@ -2017,7 +2017,7 @@ const MainContent = ({ onNewChat, resetKey, tunerConfig, onOpenDocument, onArtif
               </div>
             )}
             {modeError && <p role="alert" className="text-xs text-red-500">{modeError}</p>}
-            {!isCodeMode && showAiDisclaimer && <p className="pt-2 pb-2 text-center text-[12px] text-claude-textSecondary font-sans">Claude is AI and can make mistakes. Please double-check responses.</p>}
+            {!isCodeMode && showAiDisclaimer && <p className="pt-2 pb-2 text-center text-[12px] text-claude-textSecondary font-sans">DeepSeek Code is AI and can make mistakes. Please double-check responses.</p>}
           </div>
           <div className="w-full shrink-0 mb-auto pb-4">
             <PromptSuggestionsPanel key={isCodeMode ? 'code' : 'home'} mode={isCodeMode ? 'code' : 'home'} onSelectPrompt={(prompt) => {
@@ -2253,7 +2253,7 @@ const MainContent = ({ onNewChat, resetKey, tunerConfig, onOpenDocument, onArtif
               </div>
               {modeError && <p role="alert" className="text-xs text-red-500">{modeError}</p>}
               {showUsage && messages.some(message => message.role === 'user') && <SessionUsageBar key={`usage:${activeId || 'new'}`} messages={messages} contextLimit={selectorModels.find(model => model.id === currentModelString)?.contextWindow} />}
-              {!isCodeMode && showAiDisclaimer && <p className="pt-2 pb-2 text-center text-[12px] text-claude-textSecondary font-sans">Claude is AI and can make mistakes. Please double-check responses.</p>}
+              {!isCodeMode && showAiDisclaimer && <p className="pt-2 pb-2 text-center text-[12px] text-claude-textSecondary font-sans">DeepSeek Code is AI and can make mistakes. Please double-check responses.</p>}
               {false && (
                 <div className="mx-4 flex items-center justify-between px-4 py-1.5 bg-claude-bgSecondary border-x border-b border-claude-border rounded-b-xl text-claude-textSecondary text-xs pointer-events-auto">
                   <span>您当前没有可用套餐，无法发送消息</span>

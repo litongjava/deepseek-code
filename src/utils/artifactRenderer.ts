@@ -81,7 +81,7 @@ window.Tooltip = function(){return null}; window.Legend = function(){return null
 // Mock window.claude API (many artifacts use this)
 window.claude = {
   complete: async function(opts) {
-    return { content: [{ text: "This artifact requires the Claude API to function. Click 'Customize' to try it in a new conversation." }] };
+    return { content: [{ text: "This artifact needs a model API, which is not available in the preview. Click 'Customize' to try it in a new conversation." }] };
   }
 };
 

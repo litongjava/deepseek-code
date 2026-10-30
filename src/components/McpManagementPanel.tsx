@@ -194,7 +194,7 @@ export default function McpManagementPanel({ onClose }: { onClose: () => void })
             <div className="text-center py-12">
               <Server size={40} className="mx-auto text-claude-textSecondary/30 mb-3" />
               <p className="text-claude-textSecondary text-[14px]">No MCP servers configured</p>
-              <p className="text-claude-textSecondary/60 text-[12px] mt-1">Add a server to extend Claude's capabilities</p>
+              <p className="text-claude-textSecondary/60 text-[12px] mt-1">Add a server to extend DeepSeek Code's capabilities</p>
             </div>
           ) : (
             <div className="space-y-3">

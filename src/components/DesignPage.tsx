@@ -405,7 +405,7 @@ const DesignPage = () => {
 
         <div className="flex items-center justify-between mb-8">
           <div>
-            <h1 className="font-[Spectral] text-[32px] text-claude-text" style={{ fontWeight: 500, WebkitTextStroke: '0.5px currentColor' }}>Claude Design</h1>
+            <h1 className="font-[Spectral] text-[32px] text-claude-text" style={{ fontWeight: 500, WebkitTextStroke: '0.5px currentColor' }}>Design</h1>
             <p className="text-[14px] text-claude-textSecondary mt-1">用 HTML 做高保真原型、幻灯片、动画与设计评审</p>
           </div>
           <div className="flex items-center gap-2">
