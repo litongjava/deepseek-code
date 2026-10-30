@@ -268,12 +268,8 @@ impl BridgeServer {
          .with_mcp_registry(Arc::new(crate::mcp::McpToolRegistry::new(mcp_server_manager.clone()))))));
         tracing::info!(module = "Bridge", "NativeEngine initialized");
 
-        let config_path = std::path::Path::new("config/orchestration.toml");
-        let orchestrator_config = if config_path.exists() {
-            OrchestratorConfigFile::load_or_default(config_path)
-        } else {
-            OrchestratorConfigFile::default()
-        };
+        let orchestrator_config =
+            OrchestratorConfigFile::load_or_default(OrchestratorConfigFile::path_in(&data_dir));
         let orchestrator = MultiAgentOrchestrator::new(
             (&orchestrator_config).into(),
             &data_dir,
@@ -2303,20 +2299,24 @@ async fn workflow_stats(
     }
 }
 
+/// The orchestrator settings file in the data directory.
+fn orchestrator_config_path() -> Result<PathBuf, StatusCode> {
+    crate::commands::app_data_dir()
+        .map(|data_dir| OrchestratorConfigFile::path_in(&data_dir))
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)
+}
+
 async fn workflow_config_get() -> Result<Json<serde_json::Value>, StatusCode> {
-    let config_path = std::path::Path::new("config/orchestration.toml");
-    let config = OrchestratorConfigFile::load_or_default(config_path);
+    let config = OrchestratorConfigFile::load_or_default(orchestrator_config_path()?);
     Ok(Json(serde_json::json!({ "success": true, "config": config })))
 }
 
 async fn workflow_config_set(
     Json(config): Json<OrchestratorConfigFile>,
 ) -> Result<Json<serde_json::Value>, StatusCode> {
-    let config_path = std::path::Path::new("config/orchestration.toml");
-    let config_dir = config_path.parent().unwrap_or(std::path::Path::new("."));
-    std::fs::create_dir_all(config_dir).map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
-
-    config.save_to_file(config_path).map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    config
+        .save_to_file(orchestrator_config_path()?)
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
     Ok(Json(serde_json::json!({ "success": true })))
 }
