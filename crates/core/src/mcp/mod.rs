@@ -113,6 +113,12 @@ pub struct McpServerStatus {
     pub resources_count: usize,
     pub error: Option<String>,
     pub transport_type: String,
+    /// Server URL and request headers of a remote server, so an editor can
+    /// show and keep them.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub url: Option<String>,
+    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
+    pub headers: HashMap<String, String>,
 }
 
 #[derive(Clone, Serialize, Deserialize)]
@@ -238,6 +244,8 @@ impl McpServerManager {
                     resources_count: 0,
                     error: None,
                     transport_type: server_config.transport_name().to_string(),
+                    url: server_config.url.clone(),
+                    headers: server_config.headers.clone(),
                 };
 
                 let state = McpServerState {
@@ -276,6 +284,8 @@ impl McpServerManager {
                 resources_count: 0,
                 error: None,
                 transport_type: server.transport_name().to_string(),
+                url: server.url.clone(),
+                headers: server.headers.clone(),
             };
 
             servers.insert(server.id.clone(), McpServerState {
@@ -320,6 +330,8 @@ impl McpServerManager {
             resources_count: 0,
             error: None,
             transport_type: config.transport_name().to_string(),
+            url: config.url.clone(),
+            headers: config.headers.clone(),
         };
 
         let state = McpServerState {
@@ -369,6 +381,9 @@ impl McpServerManager {
             };
             state.status.cwd = state.config.cwd.clone();
             state.status.enabled = state.config.enabled;
+            state.status.transport_type = state.config.transport_name().to_string();
+            state.status.url = state.config.url.clone();
+            state.status.headers = state.config.headers.clone();
 
             if was_running {
                 if let Some(connector) = state.connector.take() {

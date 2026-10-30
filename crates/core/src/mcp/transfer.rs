@@ -166,7 +166,9 @@ impl McpServerManager {
                     tools_count: 0,
                     resources_count: 0,
                     error: None,
-                    transport_type: "stdio".into(),
+                    transport_type: config.transport_name().to_string(),
+                    url: config.url.clone(),
+                    headers: config.headers.clone(),
                 };
                 servers.insert(
                     id.clone(),
