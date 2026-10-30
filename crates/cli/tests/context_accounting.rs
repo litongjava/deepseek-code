@@ -1,6 +1,6 @@
 //! Actual CLI + local provider: persisted accounting corresponds to transmitted input.
 use axum::{extract::State, routing::post, Json, Router};
-use claude_core::{
+use deepseek_code_core::{
     runtime::{RuntimePaths, SessionStore},
     services::context_usage,
 };

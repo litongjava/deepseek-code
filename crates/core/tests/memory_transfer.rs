@@ -1,4 +1,4 @@
-use claude_core::memory::{ContextManager, MemExClient};
+use deepseek_code_core::memory::{ContextManager, MemExClient};
 use serde_json::json;
 use std::sync::Arc;
 

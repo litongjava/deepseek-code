@@ -23,7 +23,7 @@
 ## 3. 验证工具
 
 - 测试（最近结果）：
-  - `cargo test --locked -p claude-core --lib --tests`：543 通过 / 0 失败 / 4 忽略
+  - `cargo test --locked -p deepseek-code-core --lib --tests`：543 通过 / 0 失败 / 4 忽略
   - `cargo test --locked -p deepseek-code-cli`：251 / 0 / 1
   - `cargo check --locked -p deepseek-code-desktop --all-targets`
   - `cargo build --locked -p deepseek-code-cli`
@@ -31,7 +31,7 @@
   - `node terminal-harness.mjs <spec.json>`：启动 CLI；运行中向 `<evidence>/input.jsonl` 追加 `{"write": "..."}` 或 `{"snapshot": "name"}` 行进行交互。
   - `node logs/fmt-backup/screen.js <abs path .screen.json> N`：读屏幕快照。
   - `integration-acceptance-fixture.mjs <prefix>`：本地模型 fixture（STEP_EDIT / STEP_WRITE2 / STEP_SLOW / STEP_TOOLS 等脚本化步骤）。
-  - `crates/core/examples/remote_control_mock.rs`：Remote Control 模拟服务（`cargo build --locked -p claude-core --example remote_control_mock` 后运行 `remote_control_mock.exe 5516 rc-mock-token`）；`node logs/fmt-backup/rc_answer.mjs allow|deny|interrupt|state` 扮演远程客户端。
+  - `crates/core/examples/remote_control_mock.rs`：Remote Control 模拟服务（`cargo build --locked -p deepseek-code-core --example remote_control_mock` 后运行 `remote_control_mock.exe 5516 rc-mock-token`）；`node logs/fmt-backup/rc_answer.mjs allow|deny|interrupt|state` 扮演远程客户端。
 - 测试用临时目录与本地 mock 端点，不用真实凭据。
 
 ## 4. 已完成（不要重做）
@@ -95,7 +95,7 @@
 ### P6 命令内部差异（清单 C1、C2）
 
 - [x] `/plan` allowedPrompts：输入 schema 与校验（Bash、非空、≤500 字符、≤32 条）；批准结果与 teammate 审批请求携带语义提示，但不转成规则、不放宽 Bash（批准后仍需确认）；非法工具在弹审批前拒绝。clear-context 归档/保留 UUID 由既有双协议测试覆盖。详见 `p6-plan-memory-config-acceptance-20261020.md`。
-- [x] `/workflows`：本地范围定义为 `<data-dir>/workflows/*.md` 与 `<workspace>/.claude/workflows/*.md`（project 覆盖 user）；支持 list/show/run，run 以文件内容+参数启动后台任务，状态/取消用 `/tasks`；`hosted:` 明确报错。托管 workflow 未实现。详见 `p6-workflows-batch-acceptance-20261020.md`。
+- [x] `/workflows`：本地范围定义为 `<data-dir>/workflows/*.md` 与 `<workspace>/.claude/workflows/*.md`（project 覆盖 user）；支持 list/show/run，run 以文件内容+参数启动后台任务，状态/取消用 `/tasks`；`hosted:` 明确报错。托管 workflow 未实现。详见 `p6-workflows-batch-acceptance-20261020.md`。之后新增脚本工作流：`Workflow` 工具执行 `.claude/workflows/*.js`（QuickJS，`agent()`/`parallel()`/`pipeline()`/`phase()`），无参数的 `/workflows` 浏览、查看和停止本会话的运行（`69ca0e9`、`1fb6f2b`）。
 - [x] `/batch`：保留显式 plan→run→publish UX（与上游自动编排的差异已说明）；成功、并发上限、权限继承、取消、路径重叠、worker 失败与 supervisor 心跳过期标记均有测试；`--publish` 之外不推送；真实 PR/远端发布未验证。
 - [x] `/memory`：`/memory`/`list` 列出 user/project/local 文件与状态；`user|project|local` 用 `$VISUAL`/`$EDITOR` 打开并在缺失时创建；`edit` 兼容 project，`show` 保持打印项目指令。
 - [x] 交互式配置/powerup：既有文本向导覆盖选择/编辑/保存/取消；`/cancel` 与不完整输入路径测试断言配置字节不变；本次无新增交互布局，外观差异属既有实现差异。
@@ -111,6 +111,14 @@
 - [x] Linux x86_64 / macOS arm64 core 与独立 CLI 构建、完整测试、真实 Anthropic 兼容接口 print / stream-json / Read 冒烟。task10 验收：Windows core 615/0/7、CLI 268/0/1；Linux core 613/0/7、CLI 267/0/1；macOS core 615/0/7、CLI 267/0/1（通过/失败/忽略）。Windows CLI/Desktop all-target check 通过；不支持的 Unix 本地截图及 macOS 按键/侧键明确报错；平台 cfg 差异、失败修复和未验证项详见开发记录 `unix-build-acceptance-20261018.md`。
 - [x] 与官方 CLI 的终端对比：Linux 下用 Claude Code 2.1.310（隔离配置目录）与 dcl 在同一 DeepSeek 接口、同模型、120x32 下逐场景对比原始 ANSI 与最终屏幕。已修复：审批菜单与编辑 diff 预览（`8ded02b`）、斜杠菜单（`7e1ec0c`）、输入按词换行（`00304bf`）、`❯` 与启动标题（`81c72dc`）、回答按词换行与悬挂缩进（`285edb9`）、工作区内只读 shell 命令免询问（`7ccf445`）、中断提示（`136b133`）、单行页脚（`8a0a446`）。启动到提示符 dcl ≤0.2 s、官方 ≈0.4 s。第二轮已对齐：补全菜单移到输入框上方（`366b2b7`）、连续只读调用合并为一行摘要（`93206c3`）、Bash 审批记住命令前缀（`95c5610`）。第三轮（功能）：回答后清除审批框（`8e8a707`）、审批可附带说明并作为用户原话保存（`c3118d9`）、Tab 补充说明 / 直接 No 停止本轮 / 切换自动模式（`a876fe2`）、先跟选项的命令按程序记住（`ecb1606`）。路径类命令（`touch`、`rm`）的"允许访问目录"未照搬。第四轮：斜杠命令排序（`0f57015`）、运行中输入的消息在下一个工具结果后交给模型（`05a7f8a`）、审批菜单 Esc 等同 No（`1b5c291`）、Ctrl+O 全屏详细记录（`f6548c9`、`9700f69`）、`/resume`、`/rewind` 选择列表（`fa6aa1d`、`d121eab`）、`@` 目录（`774ec8d`）、`?` 三列面板（`7d0988d`）。第五轮：计划审批菜单（`3c3d107`）、`/mcp`（`5cc8155`）、`/hooks`（`b98fc22`）、`/tasks` 与后台命令提示（`21191dd`）、Ctrl+B 与 ctrl+x ctrl+s 把运行中的命令转到后台（`ce886a2`、`a976075`）、`/resume` 预览/重命名/全部项目（`3ba0c52`）。后台命令结束自动开始新一轮（`ae1122a`）。`/resume` 分支与大小（见 git log）。第六轮：输入框快捷键 ctrl+g/s/_/y/z、`\`+Enter、Esc Esc 清空（`36ad04b`），ctrl+t 待办（`297badf`），alt+p 模型与 effort（`a3c6f5c`），设置对话框与 `/context` 方格（`960ea10`），`/permissions`、`/memory`、`/agents`（`5be7fca`），目录信任与 bypass 确认（`da9b700`），`/mcp` 隐藏预设（`fb41a4c`）。第七轮：设置对话框 Stats 页（`c7c87ea`）、`/context` 首次请求前估算与 `/resume` 大小（`bfbd15b`）、后台子代理与 `← for agents`（`6f29c18`、`c319c5b`）。第八轮：运行中输入框快捷键（`253438b`）、后台子代理审批在主界面询问（`d46fa8d`）、`/tasks` 查看子代理记录（`b8f55d1`）、工作流技能（`8bdc9ab`）、`/loop` 与 `/scroll-speed`（`278db2e`）、`/copy` 与 `/export`（`3bbe77d`）、`/compact` 输出（`ec4d004`）、思考预览与 `Thought for`（`b9d2631`）、`[Image #N]` 图片占位符（`ea5200e`）、`/rewind` 行数与确认页（`d2b6643`）；第九轮：图片回显与运行中消息附图（`383cfd8`）、回退后重绘并放回输入框（`84cc16f`）、思考时不显示详情行（`4183dcf`）、回退选项编号与 Summarize（`634e514`）、`/ide` 选择（`c17991f`）、`/terminal-setup`（`8fc90e0`）、Config 的 Editor mode 与原地切换（`54c75d9`）、窗口标题（`aeaece7`）；`/login` 按要求不改。剩余：Windows/macOS 终端未在本机验证（本机只有 Linux 目标）。记录见开发目录 `runs/ux/ux-parity-20261024.md`；Windows ConPTY 下未重跑。
 - qwerty-learner issue #1095：先读 `issue1095-pass2-final-review.md` 等已有记录，目标仓库不提交。
+
+### P8 提示词与工具对齐 Claude Code 2.1.302
+
+- [x] 系统提示词改为参考布局：一行身份 + `code.md`/`memory.md` 各带缓存断点，环境与自定义提示词在后（`7afa5a6`）；第一条用户消息附项目说明与会话级 Git 快照（`29d5bf8`、`e72a2d4`）；钩子附加内容、技能正文、记忆召回附在当轮用户消息（`0342909`、`8ab6c96`）；压缩后重新附上已调用技能（`8d5022f`）；首条消息后发送会话级提示（`8b59c78`）。
+- [x] 工具名称、参数与行为对齐：Read/Glob/Grep/Bash/Edit/Write（`9b6e248`）、AskUserQuestion 1–4 题与预览/多选菜单（`1c32aed`、`a88f1bc`、`e36bf98`）、Agent 默认后台（`3dff045`）、CronCreate/Delete/List、Enter/ExitWorktree、NotebookEdit、LSP、ListAgents、ScheduleWakeup、ReportFindings（`1fea3c1` 至 `d874159`）；删除重复的 Delegate/Worker/smart_grep/smart_edit/todo_write（`844d317`、`c9d0153`、`52c1595`）；新增 DeepSeekCode 工具（`064dffe`）。
+- [x] 行为：读后改、文件变更后拒绝（`1ef1f26`）；Bash 工作目录跨调用保留，含 PowerShell、Git Bash、cmd（`f477eaa`、`999e6eb`、`1eb27d8`）；超窗口压缩重试与清理旧工具结果（`97df22e`、`ca56527`）；WebFetch 按 prompt 回答、缓存与 URL 规则、新主机询问（`243f7e1`、`e43a786`、`679446b`）；WebSearch 域名过滤（`acbb68a`）；沙箱与域名白名单（`5103267`、`1125aaa`）；MCP HTTP/SSE/WebSocket 与 prompt 命令（`cef6714`、`8b34216`）；`-p` 下 `/compact`（`b2adfe4`）；Remote Control 启动连接（`4ed975e`）；CLI 配置联网搜索与 `/deep-research` 跑通（`4a280f9`、`804d8a3`）；不再询问的规则写入 `.claude/settings.local.json`（`8dbb4b8`）；终端界面、恢复、Shift+Tab 循环与 `--full-access`（`cb13b43`）。
+- [x] Desktop 修复：MCP 表单支持远程服务并保留 URL/请求头（`f3eef3b`）；界面不再写 Claude（`4094863`）；更新检查不再访问第三方地址，改由 `DEEPSEEK_CODE_UPDATE_URL` 配置，下载只接受清单给出的带签名安装包（`d4ca5c7`）。
+- 未验证：macOS 沙箱（sandbox-exec）；Windows 上 PowerShell 5.1、Git Bash、cmd 的工作目录保留；rustfmt 在本机不可用，新代码未经 rustfmt 检查。用户文档已同步到 `deepseek-code-docs`。
 
 ### 暂时不做的任务
 - 真实账号 OAuth、用量、fast 模式权限、反馈投递。

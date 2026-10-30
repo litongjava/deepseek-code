@@ -366,9 +366,9 @@ async fn initial_message_precedes_queued_user_and_is_not_authority() {
         assert!(requests[0].to_string().contains("HOOK_INITIAL"));
         assert!(!requests[0].to_string().contains("HUMAN_INPUT"));
         let context =
-            claude_core::services::session_messages::context(&root.path().join("data")).unwrap();
+            deepseek_code_core::services::session_messages::context(&root.path().join("data")).unwrap();
         let authority =
-            claude_core::services::permission_authority::history(&context.db, id, 8192).unwrap();
+            deepseek_code_core::services::permission_authority::history(&context.db, id, 8192).unwrap();
         assert!(!serde_json::to_string(&authority)
             .unwrap()
             .contains("HOOK_INITIAL"));

@@ -14,6 +14,8 @@ export default {
           accent: 'var(--bg-claude-accent)',
           hover: 'var(--bg-claude-hover)',
           btnHover: 'var(--bg-claude-btn-hover)',
+          // Components write the kebab-case class (bg-claude-btn-hover).
+          'btn-hover': 'var(--bg-claude-btn-hover)',
           input: 'var(--bg-claude-input)',
           avatar: 'var(--bg-claude-avatar)',
           avatarText: 'var(--text-claude-avatar)',

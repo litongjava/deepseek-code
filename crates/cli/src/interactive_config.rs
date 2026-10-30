@@ -3,7 +3,7 @@ use crate::terminal::input::TerminalInput;
 use crate::{args::Cli, config, session::Session};
 use anyhow::{bail, ensure, Context, Result};
 use clap::Parser;
-use claude_core::{config::ConfigManager, runtime::RuntimePaths};
+use deepseek_code_core::{config::ConfigManager, runtime::RuntimePaths};
 use serde_json::json;
 
 async fn ask(input: &mut TerminalInput, prompt: &str) -> Result<String> {
@@ -227,13 +227,13 @@ const PRESETS: &[Preset] = &[
 
 fn preset_key_env(preset: &Preset) -> String {
     match preset.builtin {
-        Some(id) => claude_core::native_engine::provider_runtime::credential_env(id),
+        Some(id) => deepseek_code_core::native_engine::provider_runtime::credential_env(id),
         None => "DEEPSEEK_API_KEY".into(),
     }
 }
 
 /// The saved provider for a preset, with models taken from the catalog.
-fn preset_provider(preset: &Preset, api_key: Option<String>) -> Result<claude_core::config::ProviderConfig> {
+fn preset_provider(preset: &Preset, api_key: Option<String>) -> Result<deepseek_code_core::config::ProviderConfig> {
     let mut provider = config::provider_template(preset.models[0]);
     provider.id = preset.id.into();
     provider.name = preset.name.trim_end_matches(" (recommended)").into();
@@ -260,7 +260,7 @@ fn preset_provider(preset: &Preset, api_key: Option<String>) -> Result<claude_co
                 .collect();
         }
         Some(builtin) => {
-            let entry = claude_core::native_engine::provider_runtime::catalog_entry(builtin)
+            let entry = deepseek_code_core::native_engine::provider_runtime::catalog_entry(builtin)
                 .with_context(|| format!("The built-in catalog has no {builtin} entry"))?;
             provider.provider_type = "openai".into();
             provider.base_url = entry["baseUrl"].as_str().unwrap_or_default().into();
@@ -291,7 +291,7 @@ fn preset_provider(preset: &Preset, api_key: Option<String>) -> Result<claude_co
 /// Sends a tiny request with the saved provider so a bad key shows up now.
 async fn verify(paths: &RuntimePaths, provider: &str, model: &str) -> Result<()> {
     let selection = select(paths, provider, model)?;
-    let manager = claude_core::native_engine::provider_manager::ProviderManager::in_memory(
+    let manager = deepseek_code_core::native_engine::provider_manager::ProviderManager::in_memory(
         selection.providers,
         paths.data_dir.join("providers.json"),
     );
@@ -300,7 +300,7 @@ async fn verify(paths: &RuntimePaths, provider: &str, model: &str) -> Result<()>
         .context("The saved provider could not be resolved")?;
     tokio::time::timeout(
         std::time::Duration::from_secs(60),
-        claude_core::native_engine::generation::generate(resolved, "Reply OK.", "This is a connection test. Reply only OK."),
+        deepseek_code_core::native_engine::generation::generate(resolved, "Reply OK.", "This is a connection test. Reply only OK."),
     )
     .await
     .context("The connection test timed out")??;

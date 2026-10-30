@@ -1,5 +1,5 @@
 //! CLI-only recovery guidance; shared Desktop errors remain unchanged.
-use claude_core::{db::DbManager, runtime::RuntimePaths};
+use deepseek_code_core::{db::DbManager, runtime::RuntimePaths};
 
 pub fn repair_error(paths: &RuntimePaths, id: &str, error: anyhow::Error) -> anyhow::Error {
     if !error.to_string().contains("Cannot repair trust while") {
@@ -9,7 +9,7 @@ pub fn repair_error(paths: &RuntimePaths, id: &str, error: anyhow::Error) -> any
 }
 
 fn shell_tasks(paths: &RuntimePaths, id: &str) -> anyhow::Result<Vec<serde_json::Value>> {
-    let value = claude_core::tools::tasks::execute_for_session(
+    let value = deepseek_code_core::tools::tasks::execute_for_session(
         "TaskList",
         serde_json::json!({}),
         &paths.data_dir,
@@ -37,7 +37,7 @@ pub async fn shutdown_worker(paths: &RuntimePaths, id: &str) -> anyhow::Result<(
         .filter_map(|task| task["id"].as_str().map(str::to_owned))
         .collect::<Vec<_>>();
     active.extend(
-        claude_core::services::background_sessions::list(&paths.data_dir, None)?
+        deepseek_code_core::services::background_sessions::list(&paths.data_dir, None)?
             .into_iter()
             .filter(|job| {
                 job.session_id == id
@@ -46,7 +46,7 @@ pub async fn shutdown_worker(paths: &RuntimePaths, id: &str) -> anyhow::Result<(
             .map(|job| job.id),
     );
     anyhow::ensure!(active.is_empty(), "Session has active tasks: {}. Wait for completion or explicitly cancel each with: dcl --data-dir {} sessions stop-task {} TASK_ID", active.join(", "), quote(&paths.data_dir.to_string_lossy()), quote(id));
-    claude_core::services::session_worker::shutdown(&paths.data_dir, id).await?;
+    deepseek_code_core::services::session_worker::shutdown(&paths.data_dir, id).await?;
     println!(
         "{}",
         serde_json::json!({"session_id":id,"worker":"stopped"})
@@ -61,7 +61,7 @@ pub async fn stop_task(paths: &RuntimePaths, id: &str, task_id: &str) -> anyhow:
         .iter()
         .any(|task| task["id"] == task_id)
     {
-        claude_core::tools::tasks::execute_for_session_async(
+        deepseek_code_core::tools::tasks::execute_for_session_async(
             "TaskStop",
             serde_json::json!({"task_id":task_id}),
             &paths.data_dir,
@@ -69,12 +69,12 @@ pub async fn stop_task(paths: &RuntimePaths, id: &str, task_id: &str) -> anyhow:
         )
         .await?
     } else {
-        let job = claude_core::services::background_sessions::get(&paths.data_dir, task_id)?;
+        let job = deepseek_code_core::services::background_sessions::get(&paths.data_dir, task_id)?;
         anyhow::ensure!(
             job.session_id == id || job.parent_session_id == id,
             "Task belongs to another session"
         );
-        serde_json::to_value(claude_core::services::background_sessions::cancel(
+        serde_json::to_value(deepseek_code_core::services::background_sessions::cancel(
             &paths.data_dir,
             task_id,
         )?)?
@@ -95,7 +95,7 @@ pub fn diagnose(
     {
         return error;
     }
-    let Ok(project) = claude_core::services::session_trust::inspect(db, id) else {
+    let Ok(project) = deepseek_code_core::services::session_trust::inspect(db, id) else {
         return error;
     };
     let mut message = format!("Session {id} needs explicit project-folder trust.\n");
@@ -105,7 +105,7 @@ pub fn diagnose(
         quote(id)
     );
     for folder in project.folders {
-        let selected = claude_core::db::project_repo::normalize_folders(&[folder.path.clone()]);
+        let selected = deepseek_code_core::db::project_repo::normalize_folders(&[folder.path.clone()]);
         let (label, path) = match selected {
             Ok(current) if current[0] != folder.path => ("changed", current[0].clone()),
             Ok(_) => (

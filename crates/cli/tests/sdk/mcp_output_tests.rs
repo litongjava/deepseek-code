@@ -8,7 +8,7 @@ fn replacement() -> Value {
 }
 
 fn vision_fixture(root: &Path, server: &Server) {
-    let mut config = claude_core::config::ConfigManager::new(root.join("data"));
+    let mut config = deepseek_code_core::config::ConfigManager::new(root.join("data"));
     config.add_provider(serde_json::from_value(json!({"id":"vision-fixture","name":"Vision fixture","provider_type":if server.fixture.anthropic {"anthropic"}else{"openai"},"base_url":server.url,"enabled":true,"is_default":false,"settings":{},"supports_web_search":false,"models":[{"id":"fixture-model","name":"fixture-model","enabled":true,"supports_vision":true,"supports_tools":true,"supports_text":true,"supports_streaming":true}]})).unwrap()).unwrap();
 }
 
@@ -167,8 +167,8 @@ async fn post_mcp_output_reaches_both_providers_display_storage_and_resume() {
                         .is_some_and(|c| c.iter().any(|p| p["type"] == "image_url"))));
         }
         assert!(client.finish().await.0.success());
-        let paths = claude_core::runtime::RuntimePaths::new(root.path().join("data")).unwrap();
-        let store = claude_core::runtime::SessionStore::new(paths.open_database().unwrap());
+        let paths = deepseek_code_core::runtime::RuntimePaths::new(root.path().join("data")).unwrap();
+        let store = deepseek_code_core::runtime::SessionStore::new(paths.open_database().unwrap());
         let (saved_id, saved) = store
             .db
             .with_conn(|conn| {
@@ -188,9 +188,9 @@ async fn post_mcp_output_reaches_both_providers_display_storage_and_resume() {
         );
         let fork = store.fork(&session).unwrap();
         let format = if anthropic {
-            claude_core::native_engine::provider_manager::ApiFormat::Anthropic
+            deepseek_code_core::native_engine::provider_manager::ApiFormat::Anthropic
         } else {
-            claude_core::native_engine::provider_manager::ApiFormat::OpenAI
+            deepseek_code_core::native_engine::provider_manager::ApiFormat::OpenAI
         };
         let fork_history = store.model_history(&fork, &format).unwrap();
         assert!(serde_json::to_string(&fork_history).unwrap().contains(PNG));

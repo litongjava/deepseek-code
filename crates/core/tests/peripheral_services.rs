@@ -5,7 +5,7 @@ use axum::{
     routing::post,
     Json, Router,
 };
-use claude_core::{
+use deepseek_code_core::{
     runtime::RuntimePaths,
     services::{
         self,

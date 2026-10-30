@@ -1,7 +1,7 @@
 ﻿//! Background CLI sessions run in an independent supervisor process.
 use crate::{args::Cli, session::Session};
 use anyhow::{ensure, Context, Result};
-use claude_core::{
+use deepseek_code_core::{
     runtime::RuntimePaths,
     services::background_sessions::{self, Launch},
 };
@@ -36,14 +36,14 @@ pub async fn handle(
             if prompt.is_empty() {
                 ensure!(command != "/subtask", "Usage: /subtask PROMPT");
                 let context = crate::services::context(paths)?;
-                claude_core::services::session_parking::validate_idle(&context, &session.id, &session.id)?;
+                deepseek_code_core::services::session_parking::validate_idle(&context, &session.id, &session.id)?;
                 let target = if command == "/fork" {
                     let child = session.store.fork(&session.id)?;
                     copy_settings(session, &child).with_context(||format!("Copied session {child}, but settings could not be copied"))?;
                     child
                 } else {session.id.clone()};
                 let executable = std::env::current_exe()?;
-                claude_core::services::session_parking::park(&context, &session.id, &target, &executable).await
+                deepseek_code_core::services::session_parking::park(&context, &session.id, &target, &executable).await
                     .with_context(||format!("Session {target} remains saved; idle worker preparation failed"))?;
                 eprintln!("Session {target}: idle worker waiting for input. No model request or task was started. Worker exits after 5 idle minutes; the saved session remains resumable.");
                 eprintln!("Resume: dcl --data-dir \"{}\" --resume {target}", paths.data_dir.display());
@@ -57,7 +57,7 @@ pub async fn handle(
             }
             let child_id = session.store.fork(&session.id)?;
             copy_settings(session, &child_id)?;
-            claude_core::services::permission_authority::record_user(&session.store.db, &child_id, &serde_json::json!(prompt))?;
+            deepseek_code_core::services::permission_authority::record_user(&session.store.db, &child_id, &serde_json::json!(prompt))?;
             let workspace = session
                 .store
                 .workspace(&child_id, &paths.data_dir.join("workspaces"))?;
@@ -139,23 +139,23 @@ pub async fn handle(
             match parts.next().unwrap_or("list") {
                 "sessions" => {
                     ensure!(parts.next().is_none(), "Usage: /tasks sessions");
-                    let reports = claude_core::services::session_parking::list(&crate::services::context(paths)?, &session.id).await?;
+                    let reports = deepseek_code_core::services::session_parking::list(&crate::services::context(paths)?, &session.id).await?;
                     if reports.is_empty() { eprintln!("No saved background sessions registered by this session."); }
                     for report in reports { print_parked(&report); }
                 }
                 "stop-session" => {
                     let id = parts.next().context("Usage: /tasks stop-session SESSION_ID")?;
                     ensure!(parts.next().is_none(), "Usage: /tasks stop-session SESSION_ID");
-                    claude_core::services::session_parking::stop(&crate::services::context(paths)?, &session.id, id).await?;
+                    deepseek_code_core::services::session_parking::stop(&crate::services::context(paths)?, &session.id, id).await?;
                     eprintln!("Worker stopped for session {id}; conversation remains saved. Resume with /resume {id}.");
                 }
                 "records" => {
                     let legacy = parts.next();
                     ensure!((legacy.is_none() || legacy == Some("legacy")) && parts.next().is_none(), "Usage: /tasks records [legacy]");
                     let read = |name| if legacy.is_some() {
-                        claude_core::tools::tasks::read_legacy(name, serde_json::json!({}), &session.workspace.to_string_lossy())
+                        deepseek_code_core::tools::tasks::read_legacy(name, serde_json::json!({}), &session.workspace.to_string_lossy())
                     } else {
-                        claude_core::tools::tasks::execute_for_session(name, serde_json::json!({}), &paths.data_dir, &session.id)
+                        deepseek_code_core::tools::tasks::execute_for_session(name, serde_json::json!({}), &paths.data_dir, &session.id)
                     };
                     let records = serde_json::json!({"tasks":read("TaskList")?["tasks"],"todos":read("TodoRead")?["todos"],"legacy_read_only":legacy.is_some()});
                     println!("{}", serde_json::to_string_pretty(&records)?);
@@ -187,7 +187,7 @@ pub async fn handle(
                         );
                     }
                     let parked = if filter == "list" && command == "/tasks" {
-                        claude_core::services::session_parking::list(&crate::services::context(paths)?, &session.id).await?
+                        deepseek_code_core::services::session_parking::list(&crate::services::context(paths)?, &session.id).await?
                     } else { Vec::new() };
                     if jobs.is_empty() && shells.is_empty() && parked.is_empty() {
                         eprintln!("No background processes started by this session.");
@@ -213,7 +213,7 @@ pub async fn handle(
                 }
                 "shutdown-worker" => {
                     ensure!(parts.next().is_none(), "Usage: /tasks shutdown-worker");
-                    claude_core::services::session_worker::shutdown(&paths.data_dir,&session.id).await?;
+                    deepseek_code_core::services::session_worker::shutdown(&paths.data_dir,&session.id).await?;
                     eprintln!("Idle session worker shutdown requested; the next prompt starts a fresh worker.");
                 }
                 "pending" => {
@@ -295,7 +295,7 @@ pub async fn handle(
     Ok(Outcome::Handled)
 }
 
-fn print_parked(report: &claude_core::services::session_parking::ParkedStatus) {
+fn print_parked(report: &deepseek_code_core::services::session_parking::ParkedStatus) {
     eprintln!(
         "Session {} | {} | worker {}{}",
         report.session.session_id,
@@ -438,7 +438,7 @@ async fn tasks_menu(paths: &RuntimePaths, session: &Session) -> Result<()> {
 
 /// The session's todo list as (content, status), for ctrl+t.
 pub(crate) fn todo_items(paths: &RuntimePaths, session: &str) -> Vec<(String, String)> {
-    claude_core::tools::tasks::execute_for_session("TodoRead", serde_json::json!({}), &paths.data_dir, session)
+    deepseek_code_core::tools::tasks::execute_for_session("TodoRead", serde_json::json!({}), &paths.data_dir, session)
         .ok()
         .and_then(|value| value["todos"].as_array().cloned())
         .unwrap_or_default()
@@ -456,7 +456,7 @@ pub(crate) struct Agent {
 }
 
 /// This session's background agents that are still running.
-pub(crate) fn running_agents(paths: &RuntimePaths, db: &claude_core::db::DbManager, session: &str) -> Vec<Agent> {
+pub(crate) fn running_agents(paths: &RuntimePaths, db: &deepseek_code_core::db::DbManager, session: &str) -> Vec<Agent> {
     let Ok(context) = crate::services::context(paths) else { return Vec::new() };
     let Ok(jobs) = background_sessions::list(&paths.data_dir, Some(session)) else { return Vec::new() };
     jobs.into_iter()
@@ -562,19 +562,19 @@ pub(crate) fn running_shells(paths: &RuntimePaths, session: &str) -> usize {
 }
 
 pub(crate) fn managed_shell_records(paths: &RuntimePaths, session: &str) -> Result<Vec<serde_json::Value>> {
-    let value = claude_core::tools::tasks::execute_for_session(
+    let value = deepseek_code_core::tools::tasks::execute_for_session(
         "TaskList", serde_json::json!({}), &paths.data_dir, session,
     )?;
     value["tasks"].as_array().into_iter().flatten()
         .filter(|task| task["metadata"]["managed_shell"] == true)
         .cloned().map(|mut task| {
-            task["status"] = serde_json::json!(claude_core::tools::background_shell::task_status(&paths.data_dir, session, &task)?);
+            task["status"] = serde_json::json!(deepseek_code_core::tools::background_shell::task_status(&paths.data_dir, session, &task)?);
             Ok(task)
         }).collect()
 }
 
 pub(crate) async fn shell_control(paths: &RuntimePaths, session: &str, id: &str, stop: bool) -> Result<serde_json::Value> {
-    claude_core::tools::tasks::execute_for_session_async(
+    deepseek_code_core::tools::tasks::execute_for_session_async(
         if stop { "TaskStop" } else { "TaskOutput" },
         if stop { serde_json::json!({"task_id":id}) } else { serde_json::json!({"task_id":id,"block":false}) },
         &paths.data_dir, session,
@@ -583,7 +583,7 @@ pub(crate) async fn shell_control(paths: &RuntimePaths, session: &str, id: &str,
 
 pub(crate) fn worker_environment(
     auto_route: bool,
-    provider: &claude_core::native_engine::provider_manager::ResolvedProvider,
+    provider: &deepseek_code_core::native_engine::provider_manager::ResolvedProvider,
 ) -> Result<Vec<(String, String)>> {
     let mut environment = vec![
         (
@@ -610,7 +610,7 @@ pub(crate) fn arguments(
     session: &Session,
     child_id: &str,
     prompt: &str,
-    provider: &claude_core::native_engine::provider_manager::ResolvedProvider,
+    provider: &deepseek_code_core::native_engine::provider_manager::ResolvedProvider,
 ) -> Result<Vec<String>> {
     let mut args = vec![
         "--data-dir".into(),
@@ -638,8 +638,8 @@ pub(crate) fn arguments(
         args.extend([
             "--api-format".into(),
             match provider.provider.api_format {
-                claude_core::native_engine::provider_manager::ApiFormat::Anthropic => "anthropic",
-                claude_core::native_engine::provider_manager::ApiFormat::OpenAI => "openai",
+                deepseek_code_core::native_engine::provider_manager::ApiFormat::Anthropic => "anthropic",
+                deepseek_code_core::native_engine::provider_manager::ApiFormat::OpenAI => "openai",
             }
             .into(),
         ]);
@@ -679,10 +679,10 @@ pub(crate) fn arguments(
 /// Preserve behavioral and display settings without sharing mutable state.
 pub fn copy_settings(session: &Session, child: &str) -> Result<()> {
     crate::session_commands::copy_settings(&session.store.db, &session.id, child)?;
-    if let Some(plan) = claude_core::services::plans::read(&session.paths.data_dir, &session.id)?
+    if let Some(plan) = deepseek_code_core::services::plans::read(&session.paths.data_dir, &session.id)?
         .filter(|plan| !plan.trim().is_empty())
     {
-        claude_core::services::plans::save(&session.paths.data_dir, child, &plan)?;
+        deepseek_code_core::services::plans::save(&session.paths.data_dir, child, &plan)?;
     }
     Ok(())
 }
@@ -786,14 +786,14 @@ mod tests {
         let directory = tempfile::tempdir().unwrap();
         let paths = RuntimePaths::new(directory.path().join("data")).unwrap();
         std::fs::create_dir_all(&paths.data_dir).unwrap();
-        let mut provider = claude_core::runtime::provider_from_config(
+        let mut provider = deepseek_code_core::runtime::provider_from_config(
             &crate::config::provider_template("side-model"),
         );
         provider.id = "side-provider".into();
         provider.api_key = "fixture-key".into();
         provider.base_url = format!("http://{address}/v1");
-        provider.api_format = claude_core::native_engine::provider_manager::ApiFormat::OpenAI;
-        let store = claude_core::runtime::SessionStore::new(paths.open_database().unwrap());
+        provider.api_format = deepseek_code_core::native_engine::provider_manager::ApiFormat::OpenAI;
+        let store = deepseek_code_core::runtime::SessionStore::new(paths.open_database().unwrap());
         let id = store
             .create(directory.path(), "side-model", "side-provider")
             .unwrap();
@@ -833,15 +833,15 @@ mod tests {
 /// Whether a queued message is a background task notification rather than
 /// text the user typed.
 pub(crate) fn is_notification(text: &str) -> bool {
-    text.starts_with(claude_core::tools::background_shell::NOTIFICATION_START)
+    text.starts_with(deepseek_code_core::tools::background_shell::NOTIFICATION_START)
 }
 
 /// Finished background shells: each is queued for the model as a task
 /// notification, as in the reference CLI, and announced once.
 fn shell_notifications(session: &Session) -> Result<Vec<String>> {
     let mut notices = Vec::new();
-    for task in claude_core::tools::background_shell::collect_finished(&session.paths.data_dir, &session.id)? {
-        claude_core::services::input_queue::push(&session.store.db, &session.id, &task.notification())?;
+    for task in deepseek_code_core::tools::background_shell::collect_finished(&session.paths.data_dir, &session.id)? {
+        deepseek_code_core::services::input_queue::push(&session.store.db, &session.id, &task.notification())?;
         notices.push(format!("\u{25cf} {}", task.summary()));
     }
     Ok(notices)
@@ -850,7 +850,7 @@ fn shell_notifications(session: &Session) -> Result<Vec<String>> {
 /// Starts a turn for task notifications waiting at an idle prompt; the
 /// model reads them as the reference CLI's background command updates.
 pub(crate) async fn wake_for_notifications(cli: &crate::args::Cli, session: &mut Session, input: &mut Option<crate::terminal::input::TerminalInput>) -> Result<bool> {
-    let prompts = claude_core::services::input_queue::take_where(&session.store.db, &session.id, is_notification)?;
+    let prompts = deepseek_code_core::services::input_queue::take_where(&session.store.db, &session.id, is_notification)?;
     if prompts.is_empty() {
         return Ok(false);
     }
@@ -876,10 +876,10 @@ fn agent_notice(session: &Session, report: String) -> Result<String> {
         "cancelled" => format!("Agent \"{description}\" was stopped"),
         other => format!("Agent \"{description}\" {other}"),
     };
-    claude_core::services::input_queue::push(
+    deepseek_code_core::services::input_queue::push(
         &session.store.db,
         &session.id,
-        &format!("{}\n<task-id>{id}</task-id>\n<status>{status}</status>\n<summary>{summary}</summary>\n<result>See the background task report for this task above.</result>\n</task-notification>", claude_core::tools::background_shell::NOTIFICATION_START),
+        &format!("{}\n<task-id>{id}</task-id>\n<status>{status}</status>\n<summary>{summary}</summary>\n<result>See the background task report for this task above.</result>\n</task-notification>", deepseek_code_core::tools::background_shell::NOTIFICATION_START),
     )?;
     Ok(format!("\u{25cf} {summary}"))
 }
@@ -891,7 +891,7 @@ pub fn collect_completed(session: &Session) -> Result<Vec<String>> {
     static MESSAGE_WARNING: AtomicBool = AtomicBool::new(false);
     let mut notices = Vec::new();
     for (source, warning, result) in [
-        ("messages", &MESSAGE_WARNING, claude_core::services::session_messages::notices(&claude_core::services::ServiceContext { paths: session.paths.clone(), db: session.store.db.clone(), credentials: std::sync::Arc::new(claude_core::services::EnvironmentCredentials) },&session.id)),
+        ("messages", &MESSAGE_WARNING, deepseek_code_core::services::session_messages::notices(&deepseek_code_core::services::ServiceContext { paths: session.paths.clone(), db: session.store.db.clone(), credentials: std::sync::Arc::new(deepseek_code_core::services::EnvironmentCredentials) },&session.id)),
         ("workers", &WORKER_WARNING, background_sessions::collect_completed(&session.store, &session.paths.data_dir, &session.id).and_then(|reports| reports.into_iter().map(|report| agent_notice(session, report)).collect())),
         ("shells", &SHELL_WARNING, shell_notifications(session)),
     ] {
@@ -922,7 +922,7 @@ mod worker_config_tests {
         let session = Session::open(&cli, &paths, selection, None).await.unwrap();
         std::fs::create_dir_all(paths.data_dir.join("tasks")).unwrap();
         std::fs::write(paths.data_dir.join("tasks").join(format!("{}.sqlite3", session.id)), b"not a SQLite database").unwrap();
-        assert!(claude_core::tools::background_shell::collect_completed(&paths.data_dir, &session.id).is_err());
+        assert!(deepseek_code_core::tools::background_shell::collect_completed(&paths.data_dir, &session.id).is_err());
         assert!(collect_completed(&session).is_ok());
         session.close().await.unwrap();
     }
@@ -980,7 +980,7 @@ mod worker_config_tests {
 
     #[test]
     fn worker_snapshot_preserves_temporary_model_options_and_separates_credentials() {
-        use claude_core::native_engine::provider_manager::{
+        use deepseek_code_core::native_engine::provider_manager::{
             ModelConfig, Provider, ResolvedProvider,
         };
         let model: ModelConfig = serde_json::from_value(serde_json::json!({"id":"fixture","name":"Fixture","enabled":true,"max_tokens":321,"supports_vision":true,"supports_web_search":false,"context_window":12345,"fast":true})).unwrap();

@@ -369,7 +369,7 @@ const ChatsPage = () => {
           </div>
         ) : (
           <div className="flex items-center gap-2 mb-4 text-[13px] text-claude-textSecondary h-8">
-            <span>{modeChats.length} chats with Claude</span>
+            <span>{modeChats.length} chats with DeepSeek Code</span>
             <button onClick={toggleSelectionMode} className="text-blue-600 hover:underline">Select</button>
           </div>
         )}

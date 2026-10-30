@@ -3,7 +3,7 @@
 //! them, so existing stream-json consumers keep working unchanged.
 use crate::session::emit_json;
 use anyhow::Result;
-use claude_core::native_engine::tool_loop::EngineEvent;
+use deepseek_code_core::native_engine::tool_loop::EngineEvent;
 use serde_json::{json, Value};
 use std::sync::atomic::{AtomicBool, Ordering};
 

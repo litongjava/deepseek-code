@@ -1,5 +1,5 @@
 [package]
-name = "claude-core"
+name = "deepseek-code-core"
 version.workspace = true
 edition.workspace = true
 description = "Shared model, tool, session and persistence engine for CLI and Desktop"

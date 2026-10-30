@@ -39,7 +39,7 @@ pub fn gathering(name: &str, input: &Value) -> Option<Gathering> {
         "ListDir" => Some(Gathering::List),
         "Bash" => {
             let command = input["command"].as_str()?;
-            if !claude_core::permissions::shell_read_only::is_read_only(command) {
+            if !deepseek_code_core::permissions::shell_read_only::is_read_only(command) {
                 return None;
             }
             // As in the reference CLI, `ls -la src` reads as a listed directory.
@@ -388,12 +388,12 @@ fn session_rule(name: &str, input: &Value) -> Option<String> {
         ("SandboxNetwork", _) => format!("SandboxNetwork(domain:{})", fetch_host(input)?),
         _ => name.to_owned(),
     };
-    claude_core::permissions::patterns::validate(&rule).ok().map(|_| rule)
+    deepseek_code_core::permissions::patterns::validate(&rule).ok().map(|_| rule)
 }
 
 /// The host a WebFetch call would contact.
 fn fetch_host(input: &Value) -> Option<String> {
-    claude_core::permissions::web_fetch::host(input["url"].as_str()?).filter(|host| claude_core::permissions::patterns::validate(&format!("WebFetch(domain:{host})")).is_ok())
+    deepseek_code_core::permissions::web_fetch::host(input["url"].as_str()?).filter(|host| deepseek_code_core::permissions::patterns::validate(&format!("WebFetch(domain:{host})")).is_ok())
 }
 
 /// `Yes, and don’t ask again for: npm run *`, as in the reference CLI.
@@ -413,7 +413,7 @@ fn remember_option(rule: &str) -> String {
 pub fn approval(name: &str, input: &Value, workspace: Option<&std::path::Path>, auto: bool) -> Approval {
     let edits = matches!(name, "Write" | "Edit" | "MultiEdit" | "NotebookEdit");
     let preview = workspace
-        .and_then(|workspace| claude_core::tools::file_change::preview(name, input, workspace));
+        .and_then(|workspace| deepseek_code_core::tools::file_change::preview(name, input, workspace));
     let mut lines = Vec::new();
     let question = match (&preview, input["file_path"].as_str()) {
         (Some(change), Some(path)) => {

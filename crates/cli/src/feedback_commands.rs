@@ -1,6 +1,6 @@
 use crate::session::Session;
 use anyhow::{ensure, Result};
-use claude_core::services::{anthropic_auth, feedback};
+use deepseek_code_core::services::{anthropic_auth, feedback};
 
 pub async fn handle(command: &str, argument: &str, session: &Session) -> Result<bool> {
     if !matches!(command, "/feedback" | "/bug") {

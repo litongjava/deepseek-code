@@ -3,7 +3,7 @@
 use crate::session::Session;
 use crate::terminal::picker::{Entry, Picker};
 use anyhow::Result;
-use claude_core::mcp::McpServerStatus;
+use deepseek_code_core::mcp::McpServerStatus;
 
 fn state(server: &McpServerStatus) -> String {
     match (server.enabled, server.running, &server.error) {
@@ -22,7 +22,7 @@ fn state(server: &McpServerStatus) -> String {
 /// no presets, so these stay out of the list.
 fn untouched_preset(server: &McpServerStatus) -> bool {
     !server.enabled
-        && claude_core::mcp::default_servers()
+        && deepseek_code_core::mcp::default_servers()
             .iter()
             .any(|preset| preset.id == server.id && preset.command == server.command && preset.args == server.args)
 }

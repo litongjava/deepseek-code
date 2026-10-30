@@ -1,6 +1,6 @@
 #[tokio::test]
 async fn cancelling_a_tool_stops_its_shell_before_later_writes() {
-    claude_core::config::OrchestrationConfig::init_global().unwrap();
+    deepseek_code_core::config::OrchestrationConfig::init_global().unwrap();
     let dir = tempfile::tempdir().unwrap();
     let cwd = dir.path().to_string_lossy().into_owned();
     let (shell, command) = if cfg!(windows) {
@@ -12,7 +12,7 @@ async fn cancelling_a_tool_stops_its_shell_before_later_writes() {
         )
     };
     let task = tokio::spawn(async move {
-        claude_core::tools::execute_tool_async(
+        deepseek_code_core::tools::execute_tool_async(
             "Bash",
             serde_json::json!({"shell":shell,"command":command,"timeout":10_000}),
             &cwd,

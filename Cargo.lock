@@ -1043,59 +1043,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "1c133bc6a41be0d194c306b5506d15e6feeea7b1d6604bd3f8310dfb2ca96486"
 
 [[package]]
-name = "claude-core"
-version = "3.1.0"
-dependencies = [
- "anyhow",
- "async-stream",
- "async-trait",
- "axum 0.8.9",
- "base64 0.22.1",
- "bytes",
- "chrono",
- "cron",
- "diffy",
- "dirs 5.0.1",
- "enigo",
- "futures",
- "glob",
- "globset",
- "ignore",
- "jsonschema",
- "notify",
- "once_cell",
- "open",
- "pdf-extract",
- "prometheus",
- "qrcode",
- "r2d2",
- "r2d2_sqlite",
- "regex",
- "reqwest 0.12.28",
- "ring",
- "rusqlite",
- "rustix 1.1.4",
- "scraper",
- "semver",
- "serde",
- "serde_json",
- "serde_yaml",
- "tempfile",
- "thiserror 1.0.69",
- "tokio",
- "tokio-stream",
- "tokio-tungstenite",
- "tokio-util",
- "toml 0.8.2",
- "tower-http",
- "tracing",
- "urlencoding",
- "uuid",
- "walkdir",
- "windows 0.58.0",
-]
-
-[[package]]
 name = "clipboard-win"
 version = "5.4.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1563,9 +1510,9 @@ dependencies = [
  "axum 0.8.9",
  "chrono",
  "clap",
- "claude-core",
  "cpal",
  "crossterm",
+ "deepseek-code-core",
  "dirs 5.0.1",
  "ring",
  "rquickjs",
@@ -1580,6 +1527,59 @@ dependencies = [
 ]
 
 [[package]]
+name = "deepseek-code-core"
+version = "3.1.0"
+dependencies = [
+ "anyhow",
+ "async-stream",
+ "async-trait",
+ "axum 0.8.9",
+ "base64 0.22.1",
+ "bytes",
+ "chrono",
+ "cron",
+ "diffy",
+ "dirs 5.0.1",
+ "enigo",
+ "futures",
+ "glob",
+ "globset",
+ "ignore",
+ "jsonschema",
+ "notify",
+ "once_cell",
+ "open",
+ "pdf-extract",
+ "prometheus",
+ "qrcode",
+ "r2d2",
+ "r2d2_sqlite",
+ "regex",
+ "reqwest 0.12.28",
+ "ring",
+ "rusqlite",
+ "rustix 1.1.4",
+ "scraper",
+ "semver",
+ "serde",
+ "serde_json",
+ "serde_yaml",
+ "tempfile",
+ "thiserror 1.0.69",
+ "tokio",
+ "tokio-stream",
+ "tokio-tungstenite",
+ "tokio-util",
+ "toml 0.8.2",
+ "tower-http",
+ "tracing",
+ "urlencoding",
+ "uuid",
+ "walkdir",
+ "windows 0.58.0",
+]
+
+[[package]]
 name = "deepseek-code-desktop"
 version = "3.1.0"
 dependencies = [
@@ -1591,8 +1591,8 @@ dependencies = [
  "base64 0.22.1",
  "bytes",
  "chrono",
- "claude-core",
  "cron",
+ "deepseek-code-core",
  "diffy",
  "dirs 5.0.1",
  "ed25519-dalek",

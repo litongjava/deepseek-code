@@ -1,7 +1,7 @@
 //! Command-line tool grants are scoped to the launch, separate from SDK updates.
 use crate::args::Cli;
 use anyhow::{ensure, Result};
-use claude_core::permissions::{patterns, rules::PermissionAction};
+use deepseek_code_core::permissions::{patterns, rules::PermissionAction};
 use std::collections::HashMap;
 
 fn split(value: &str) -> Result<Vec<String>> {

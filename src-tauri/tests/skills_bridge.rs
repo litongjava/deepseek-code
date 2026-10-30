@@ -19,14 +19,15 @@ async fn skills_bridge_streams_with_permissions_rejects_disabled_and_cancels_dis
         calls.fetch_add(1, Ordering::SeqCst);
         let messages = body["messages"].as_array().unwrap();
         assert!(messages[0]["content"].as_str().unwrap().contains("bridge skill marker"));
-        let cancel = messages.iter().any(|m| m["role"] == "user" && m["content"] == "cancel this");
+        // The prompt may follow attached context, in a string or in text blocks.
+        let cancel = messages.iter().any(|m| m["role"] == "user" && m["content"].to_string().contains("cancel this"));
         let (delta, finish) = if messages.iter().any(|m| m["role"] == "tool") {
             (json!({"content":"skill execution completed"}), "stop")
         } else {
             let (shell, command) = if cfg!(windows) {
                 ("powershell", if cancel { "Set-Content started.txt ready; Start-Sleep -Milliseconds 2000; Set-Content late.txt unexpected" } else { "Set-Content approved.txt done" })
             } else { ("sh", if cancel { "echo ready > started.txt; sleep 2; echo unexpected > late.txt" } else { "echo done > approved.txt" }) };
-            (json!({"content":"partial skill evidence", "tool_calls":[{"index":0,"id":"bash-call","type":"function","function":{"name":"Bash","arguments":json!({"shell":shell,"command":command,"timeout":10}).to_string()}}]}), "tool_calls")
+            (json!({"content":"partial skill evidence", "tool_calls":[{"index":0,"id":"bash-call","type":"function","function":{"name":"Bash","arguments":json!({"shell":shell,"command":command,"timeout":10000}).to_string()}}]}), "tool_calls")
         };
         let stream = format!("data: {}\n\ndata: {}\n\ndata: [DONE]\n\n",json!({"choices":[{"index":0,"delta":delta,"finish_reason":null}]}),json!({"choices":[{"index":0,"delta":{},"finish_reason":finish}]}));
         ([("content-type","text/event-stream")],stream)

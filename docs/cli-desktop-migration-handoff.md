@@ -21,7 +21,7 @@
 | 位置 | 已有职责 |
 |---|---|
 | `Cargo.toml`、`Cargo.lock`、`.cargo/config.toml` | Workspace；构建缓存在 `src-tauri/target` |
-| `crates/core` (`claude-core`) | 共享模型、工具、权限、配置、SQLite、会话、MCP、技能等 |
+| `crates/core` (`deepseek-code-core`) | 共享模型、工具、权限、配置、SQLite、会话、MCP、技能等 |
 | `crates/core/src/runtime.rs` | 两端共用引擎创建、provider 转换、数据路径、会话与工具历史恢复 |
 | `crates/cli` (`deepseek-code-cli`) | 独立 `dcl` 可执行文件 |
 | `src-tauri` | Tauri、React 的后端适配、Bridge、凭据等；库重导出共享核心 |
@@ -125,7 +125,7 @@ git status --short
 git branch --show-current
 git -C D:\code\project\project-harven\claude-code-cli status --short
 
-cargo test --locked -p claude-core --lib --tests
+cargo test --locked -p deepseek-code-core --lib --tests
 cargo test --locked -p deepseek-code-cli
 cargo check --locked -p deepseek-code-desktop --all-targets
 cargo test --locked -p deepseek-code-desktop --lib --tests

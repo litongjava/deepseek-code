@@ -4,7 +4,7 @@ import { memoryApi, type MemoryConfig, type MemoryItem, type MemoryStats } from 
 import DreamControls from './DreamControls';
 
 const inputClass = 'w-full rounded-lg border border-claude-border bg-claude-bg px-3 py-2 text-sm text-claude-text';
-const buttonClass = 'rounded-lg bg-claude-primary px-4 py-2 text-sm text-white disabled:opacity-50';
+const buttonClass = 'rounded-lg bg-claude-accent px-4 py-2 text-sm text-white disabled:opacity-50';
 
 export function MemoryPanel() {
   const [query, setQuery] = useState('');

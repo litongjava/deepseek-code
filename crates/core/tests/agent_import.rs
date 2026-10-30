@@ -1,4 +1,4 @@
-use claude_core::{
+use deepseek_code_core::{
     runtime::RuntimePaths,
     services::{agent_import, agents, EnvironmentCredentials, ServiceContext},
 };

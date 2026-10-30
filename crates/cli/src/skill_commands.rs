@@ -1,5 +1,5 @@
 //! Discover only enabled, unambiguous skills that the shared engine can execute.
-use claude_core::{
+use deepseek_code_core::{
     runtime::RuntimePaths,
     skills::{Skill, SkillsManager},
 };
@@ -8,7 +8,7 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 pub enum PreparedInvocation {
     NotHandled,
     Inline(String),
-    Background(claude_core::services::background_sessions::Job),
+    Background(deepseek_code_core::services::background_sessions::Job),
 }
 
 /// Interactive invocation returns a manageable task. Print/SDK invocation waits
@@ -16,11 +16,11 @@ pub enum PreparedInvocation {
 pub async fn finish_background(
     cli: &crate::args::Cli,
     session: &crate::session::Session,
-    job: claude_core::services::background_sessions::Job,
+    job: deepseek_code_core::services::background_sessions::Job,
     terminal: &mut Option<crate::terminal::input::TerminalInput>,
 ) -> anyhow::Result<()> {
     use crate::args::OutputFormat;
-    use claude_core::services::background_sessions;
+    use deepseek_code_core::services::background_sessions;
     use std::io::Write;
     if terminal.is_some()
         && !cli.print
@@ -118,7 +118,7 @@ pub async fn prepare_invocation(
     terminal: &mut Option<crate::terminal::input::TerminalInput>,
 ) -> anyhow::Result<PreparedInvocation> {
     use anyhow::{ensure, Context};
-    use claude_core::{
+    use deepseek_code_core::{
         permissions::PermissionResult,
         services::{
             background_sessions,
@@ -131,15 +131,15 @@ pub async fn prepare_invocation(
     };
     let (name, arguments) = line.split_once(char::is_whitespace).unwrap_or((line, ""));
     let context = crate::services::context(&session.paths)?;
-    let mut commands = claude_core::services::plugins::skill_commands(&context)?;
-    commands.extend(claude_core::skills::discovery::discover(
+    let mut commands = deepseek_code_core::services::plugins::skill_commands(&context)?;
+    commands.extend(deepseek_code_core::skills::discovery::discover(
         &session.workspace,
     )?);
     let Some(skill) = commands.get(name) else {
         return Ok(PreparedInvocation::NotHandled);
     };
     if skill.path.parent() == Some(std::path::Path::new("__embedded_cli_skills__")) {
-        if let Some(prepared) = claude_core::skills::code_review::prepare_named(name, &session.workspace, arguments.trim()).await {
+        if let Some(prepared) = deepseek_code_core::skills::code_review::prepare_named(name, &session.workspace, arguments.trim()).await {
             return Ok(PreparedInvocation::Inline(prepared?));
         }
     }
@@ -147,10 +147,10 @@ pub async fn prepare_invocation(
         let instructions = skill.render_template(arguments.trim(), &session.id)?;
         let snapshot = crate::doctor_commands::snapshot(&session.workspace, &session.paths);
         return Ok(PreparedInvocation::Inline(
-            claude_core::services::doctor::attach_snapshot(&instructions, &snapshot),
+            deepseek_code_core::services::doctor::attach_snapshot(&instructions, &snapshot),
         ));
     }
-    if claude_core::skills::bundled_resources::supports(name)
+    if deepseek_code_core::skills::bundled_resources::supports(name)
         && skill.path.parent() == Some(std::path::Path::new("__embedded_cli_skills__"))
     {
         // The engine owns resources so they live in the worker that reads them.
@@ -181,7 +181,7 @@ pub async fn prepare_invocation(
             Segment::Text(text) => expanded.push_str(&text),
             Segment::Shell(command) => {
                 if let Some(agent) =
-                    claude_core::services::agents::for_session(&session.store.db, &session.id)?
+                    deepseek_code_core::services::agents::for_session(&session.store.db, &session.id)?
                 {
                     ensure!(
                         agent.tools.as_ref().is_none_or(|tools| tools
@@ -201,13 +201,13 @@ pub async fn prepare_invocation(
                 if let Some(updated) = pre.updated_input {
                     input = updated;
                 }
-                let mut decision = if session.permissions.get_mode() == claude_core::permissions::PermissionMode::Auto && !pre.ask_permission {
+                let mut decision = if session.permissions.get_mode() == deepseek_code_core::permissions::PermissionMode::Auto && !pre.ask_permission {
                     session.check_host_shell_permission(&input, line, terminal.is_some(), &hooks, &request_id).await?
                 } else {
                     session.engine.check_tool_permission("Bash", input.clone(), &session.id, Some(session.workspace.to_string_lossy().into_owned())).await
                 };
                 if pre.ask_permission && decision == PermissionResult::Granted {
-                    decision = if session.permissions.get_mode() == claude_core::permissions::PermissionMode::DontAsk {
+                    decision = if session.permissions.get_mode() == deepseek_code_core::permissions::PermissionMode::DontAsk {
                         PermissionResult::Denied("dontAsk mode: hook requested shell approval".into())
                     } else {
                         PermissionResult::RequiresConfirmation("Hook requests shell approval".into())
@@ -274,9 +274,9 @@ pub async fn prepare_invocation(
     }
     let child_id = isolated_child(&session.store, &session.id, &context)?;
     if let Some(agent) = &skill.agent {
-        let mut definition = claude_core::services::agents::resolve(&context, agent)?;
+        let mut definition = deepseek_code_core::services::agents::resolve(&context, agent)?;
         if let Some(parent) =
-            claude_core::services::agents::for_session(&session.store.db, &session.id)?
+            deepseek_code_core::services::agents::for_session(&session.store.db, &session.id)?
         {
             if let Some(parent_tools) = parent.tools {
                 definition.tools = Some(match definition.tools.take() {
@@ -288,7 +288,7 @@ pub async fn prepare_invocation(
                 });
             }
         }
-        claude_core::services::agents::bind(&session.store.db, &child_id, &definition)?;
+        deepseek_code_core::services::agents::bind(&session.store.db, &child_id, &definition)?;
     }
     let directory = session.paths.data_dir.join("skill-runs");
     std::fs::create_dir_all(&directory)?;
@@ -329,12 +329,12 @@ pub async fn prepare_invocation(
 }
 
 fn isolated_child(
-    store: &claude_core::runtime::SessionStore,
+    store: &deepseek_code_core::runtime::SessionStore,
     parent: &str,
-    context: &claude_core::services::ServiceContext,
+    context: &deepseek_code_core::services::ServiceContext,
 ) -> anyhow::Result<String> {
     let child = store.clear(parent)?;
-    claude_core::services::permission_authority::inherit(&store.db, parent, &child)?;
+    deepseek_code_core::services::permission_authority::inherit(&store.db, parent, &child)?;
     crate::session_commands::copy_settings(&store.db, parent, &child)?;
     // A parent autonomous goal must not turn a bounded skill into unrelated work.
     let setting = format!("cli.session.{child}");
@@ -356,8 +356,8 @@ pub async fn load_for_workspace(
         .await?;
     let mut commands = from_skills(&skills);
     let context = crate::services::context(paths)?;
-    let mut discovered = claude_core::services::plugins::skill_commands(&context)?;
-    discovered.extend(claude_core::skills::discovery::discover(workspace)?);
+    let mut discovered = deepseek_code_core::services::plugins::skill_commands(&context)?;
+    discovered.extend(deepseek_code_core::skills::discovery::discover(workspace)?);
     for (name, skill) in discovered {
         let command = format!("/{name}");
         if crate::command_catalog::COMMANDS
@@ -451,7 +451,7 @@ mod tests {
             "dontAsk",
         ])
         .unwrap();
-        let store = claude_core::runtime::SessionStore::new(paths.open_database().unwrap());
+        let store = deepseek_code_core::runtime::SessionStore::new(paths.open_database().unwrap());
         let session_id = store.create(temp.path(), "fixture", "fixture").unwrap();
         let session = Session::open(&cli, &paths, selection, Some(&session_id)).await.unwrap();
         let skill_dir = temp.path().join(".claude/skills/permission-fixture");
@@ -484,7 +484,7 @@ mod tests {
         let temp = tempfile::tempdir().unwrap();
         let paths = RuntimePaths::new(temp.path().join("data")).unwrap();
         let context = crate::services::context(&paths).unwrap();
-        claude_core::permissions::auto_config::save(&context, &claude_core::permissions::auto_config::AutoConfig { enabled:true, classifier:Some(claude_core::permissions::auto_config::ClassifierSelection::Current), ..Default::default() }).unwrap();
+        deepseek_code_core::permissions::auto_config::save(&context, &deepseek_code_core::permissions::auto_config::AutoConfig { enabled:true, classifier:Some(deepseek_code_core::permissions::auto_config::ClassifierSelection::Current), ..Default::default() }).unwrap();
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let endpoint = format!("http://{}", listener.local_addr().unwrap());
         let app = Router::new().route("/v1/chat/completions",post(|Json(body):Json<serde_json::Value>| async move {
@@ -495,7 +495,7 @@ mod tests {
         let server = tokio::spawn(async move{axum::serve(listener,app).await.unwrap();});
         let selection=Selection{providers:vec![serde_json::from_value(serde_json::json!({"id":"fixture","name":"Fixture","base_url":endpoint,"api_key":"unused","api_format":"openai","enabled":true,"models":[{"id":"fixture","name":"Fixture","enabled":true,"supports_vision":false,"supports_web_search":false}]})).unwrap()],provider_id:"fixture".into(),model:"fixture".into()};
         let cli = Cli::try_parse_with_mode_source(["dcl","--path",temp.path().to_str().unwrap(),"--permission-mode","auto"]).unwrap();
-        let store = claude_core::runtime::SessionStore::new(paths.open_database().unwrap());
+        let store = deepseek_code_core::runtime::SessionStore::new(paths.open_database().unwrap());
         let session_id = store.create(temp.path(), "fixture", "fixture").unwrap();
         let session = Session::open(&cli, &paths, selection, Some(&session_id)).await.unwrap();
         let skill_dir = temp.path().join(".claude/skills/permission-fixture");
@@ -509,7 +509,7 @@ mod tests {
             "PermissionDenied":[{"matcher":"^Bash$","hooks":[{"type":"command","shell":if cfg!(windows){"powershell"}else{"sh"},"command":command("denied.json",&denied_output)}]}]
         }}).to_string()).unwrap();
         let result=session.turn(&cli,"/permission-fixture",&mut None).await;
-        let authority=claude_core::services::permission_authority::history(&session.store.db,&session.id,8192).unwrap();
+        let authority=deepseek_code_core::services::permission_authority::history(&session.store.db,&session.id,8192).unwrap();
         assert_eq!(authority,vec![serde_json::json!({"role":"user","content":"/permission-fixture"})]);
         let error=match result {Err(error)=>error.to_string(),Ok(_)=>panic!("classifier denied shell must not run")};
         assert!(error.contains("PermissionDenied hook suggests"),"{error}");
@@ -526,7 +526,7 @@ mod tests {
         let temp = tempfile::tempdir().unwrap();
         let paths = RuntimePaths::new(temp.path().join("data")).unwrap();
         let context = crate::services::context(&paths).unwrap();
-        let store = claude_core::runtime::SessionStore::new(context.db.clone());
+        let store = deepseek_code_core::runtime::SessionStore::new(context.db.clone());
         let parent = store
             .create(temp.path(), "test-model", "test-provider")
             .unwrap();
@@ -562,7 +562,7 @@ mod tests {
             .unwrap();
         assert_eq!(store.history(&parent).unwrap().len(), 1);
     }
-    use claude_core::skills::SkillSource;
+    use deepseek_code_core::skills::SkillSource;
 
     fn skill(id: &str, name: &str, enabled: bool) -> Skill {
         Skill {

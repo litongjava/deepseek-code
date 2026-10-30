@@ -1,7 +1,7 @@
 //! SDK agent descriptions are validated as one run-local transaction.
 use crate::session::Session;
 use anyhow::{bail, ensure, Context, Result};
-use claude_core::{
+use deepseek_code_core::{
     native_engine::runtime_agents::{Catalog, RuntimeAgent},
     services::agents,
 };
@@ -65,7 +65,7 @@ async fn skill_context(session: &Session, names: &[String]) -> Result<Option<Str
         return Ok(None);
     }
     ensure!(names.len() <= 100, "Too many SDK agent skills");
-    let manager = claude_core::skills::SkillsManager::with_path(
+    let manager = deepseek_code_core::skills::SkillsManager::with_path(
         session.paths.data_dir.join("skills"),
     );
     let skills = manager.load_skills().await?;
@@ -140,21 +140,21 @@ pub async fn prepare(session: &Session, value: Option<&Value>) -> Result<Catalog
             .permission_mode
             .as_deref()
             .map(|mode| {
-                claude_core::permissions::PermissionMode::parse(mode)
+                deepseek_code_core::permissions::PermissionMode::parse(mode)
                     .map(|mode| mode.as_str().to_owned())
             })
             .transpose()
             .with_context(|| format!("Invalid SDK agent permissionMode for {id}"))?;
         if let Some(mode) = permission_mode.as_deref() {
-            let mode = claude_core::permissions::PermissionMode::parse(mode)?;
+            let mode = deepseek_code_core::permissions::PermissionMode::parse(mode)?;
             ensure!(
-                mode != claude_core::permissions::PermissionMode::Auto,
+                mode != deepseek_code_core::permissions::PermissionMode::Auto,
                 "SDK agent {id}: auto mode is not supported"
             );
             ensure!(
-                mode != claude_core::permissions::PermissionMode::BypassPermissions
+                mode != deepseek_code_core::permissions::PermissionMode::BypassPermissions
                     || session.permissions.get_mode()
-                        == claude_core::permissions::PermissionMode::BypassPermissions,
+                        == deepseek_code_core::permissions::PermissionMode::BypassPermissions,
                 "SDK agent {id}: permissionMode may not exceed the session mode"
             );
         }

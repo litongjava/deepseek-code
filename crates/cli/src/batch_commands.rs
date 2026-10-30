@@ -1,7 +1,7 @@
 //! Explicit plan/run orchestration for independent worktree tasks.
 use crate::{args::Cli, session::Session};
 use anyhow::{ensure, Context, Result};
-use claude_core::{
+use deepseek_code_core::{
     runtime::RuntimePaths,
     services::{
         background_sessions,
@@ -78,8 +78,8 @@ async fn launch(
             provider.provider.base_url.clone(),
             "--api-format".into(),
             match provider.provider.api_format {
-                claude_core::native_engine::provider_manager::ApiFormat::Anthropic => "anthropic",
-                claude_core::native_engine::provider_manager::ApiFormat::OpenAI => "openai",
+                deepseek_code_core::native_engine::provider_manager::ApiFormat::Anthropic => "anthropic",
+                deepseek_code_core::native_engine::provider_manager::ApiFormat::OpenAI => "openai",
             }
             .into(),
         ]);
@@ -226,9 +226,9 @@ pub async fn handle(
                     .create(&workspace, &session.model, &session.provider_id)?;
             crate::session_commands::copy_settings(&session.store.db, &session.id, &planner_id)?;
             if let Some(agent) =
-                claude_core::services::agents::for_session(&session.store.db, &session.id)?
+                deepseek_code_core::services::agents::for_session(&session.store.db, &session.id)?
             {
-                claude_core::services::agents::bind(&session.store.db, &planner_id, &agent)?;
+                deepseek_code_core::services::agents::bind(&session.store.db, &planner_id, &agent)?;
             }
             let prompt=format!("Research this repository using read-only tools and plan the user's batch change: {instruction}\nReturn 5–30 roughly equal independent units, each mergeable without other units. Give each unit non-overlapping repository-relative file/directory paths (no traversal), a precise title and self-contained implementation instructions. Include observed code conventions in summary, and a concrete shared unit/e2e verification recipe. Do not fabricate repository findings. Do not modify files or run workers. Return only the requested structured plan.");
             let mut process = tokio::process::Command::new(&launch.executable);

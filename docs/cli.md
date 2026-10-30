@@ -2,13 +2,13 @@
 
 ```text
 Cargo workspace
-├── crates/core       claude-core：模型、工具、权限、会话、配置、SQLite
+├── crates/core       deepseek-code-core：模型、工具、权限、会话、配置、SQLite
 ├── crates/cli        deepseek-code-cli：命令解析、REPL、流式输出
 ├── src-tauri         deepseek-code-desktop：Tauri、React Bridge、系统凭据适配
 └── src-tauri/worker  agent-worker：计算机操作辅助进程
 ```
 
-`dcl` 直接调用 `claude-core::NativeEngine`，无需启动 Desktop、WebView 或 30085 服务。核心不依赖 Tauri。桌面库重新导出共享模块，保持原有 Rust 调用路径兼容。
+`dcl` 直接调用 `deepseek-code-core::NativeEngine`，无需启动 Desktop、WebView 或 30085 服务。核心不依赖 Tauri。桌面库重新导出共享模块，保持原有 Rust 调用路径兼容。
 
 ## 构建
 
@@ -145,7 +145,7 @@ dcl --data-dir D:\team-client-a team-sync import-legacy C:\Users\you\.claude-cod
 ## 验证
 
 ```powershell
-cargo test -p claude-core --lib --tests
+cargo test -p deepseek-code-core --lib --tests
 cargo test -p deepseek-code-cli
 cargo check -p deepseek-code-desktop --all-targets
 cargo test -p deepseek-code-desktop --lib --tests

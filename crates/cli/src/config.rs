@@ -3,7 +3,7 @@ use crate::{
     legacy_api_config::ApiConfig,
 };
 use anyhow::{bail, ensure, Context, Result};
-use claude_core::{
+use deepseek_code_core::{
     config::{ConfigManager, ModelConfig, ProviderConfig},
     native_engine::provider_manager::{ApiFormat, Provider},
     runtime::{provider_from_config, RuntimePaths},
@@ -180,7 +180,7 @@ pub fn select(
     {
         raw_model.to_owned()
     } else {
-        if let Some(base)=claude_core::native_engine::provider_manager::one_million_context_base(raw_model){
+        if let Some(base)=deepseek_code_core::native_engine::provider_manager::one_million_context_base(raw_model){
             let known=providers.iter().any(|p|p.enabled&&selected_provider.is_none_or(|id|id==p.id)&&p.models.iter().any(|m|m.enabled&&m.id==base));
             format!("{}[1m]",if known {base.to_owned()}else{ApiConfig::resolve_model_alias(base)})
         }else{ApiConfig::resolve_model_alias(raw_model)}
@@ -192,7 +192,7 @@ pub fn select(
         .filter(|(_, p)| {
             p.enabled
                 && selected_provider.map_or(true, |id| p.id == id)
-                && if exact {p.models.iter().any(|m|m.enabled&&m.id==model)}else{claude_core::native_engine::provider_manager::resolve_model_selection(&p.models,&model).is_some()}
+                && if exact {p.models.iter().any(|m|m.enabled&&m.id==model)}else{deepseek_code_core::native_engine::provider_manager::resolve_model_selection(&p.models,&model).is_some()}
         })
         .map(|(i, _)| i)
         .collect();
@@ -204,7 +204,7 @@ pub fn select(
     let builtin_key_env = matching
         .first()
         .and_then(|index| providers[*index].builtin_id.as_deref())
-        .map(claude_core::native_engine::provider_runtime::credential_env);
+        .map(deepseek_code_core::native_engine::provider_runtime::credential_env);
     let configured_key_env = matching
         .first()
         .and_then(|index| {
@@ -247,7 +247,7 @@ pub fn select(
             selected_provider.is_none() || selected_provider == Some("cli-runtime"),
             "Selected provider does not contain enabled model {model}"
         );
-        let base=claude_core::native_engine::provider_manager::one_million_context_base(&model).unwrap_or(&model);
+        let base=deepseek_code_core::native_engine::provider_manager::one_million_context_base(&model).unwrap_or(&model);
         let mut p = provider_from_config(&provider_template(base));
         p.id = "cli-runtime".into();
         providers.push(p);
@@ -272,7 +272,7 @@ pub fn select(
     if let Some(limit) = cli.max_tokens {
         p.models
             .iter_mut()
-            .filter(|m| m.id == model || (!exact && Some(m.id.as_str())==claude_core::native_engine::provider_manager::one_million_context_base(&model)))
+            .filter(|m| m.id == model || (!exact && Some(m.id.as_str())==deepseek_code_core::native_engine::provider_manager::one_million_context_base(&model)))
             .for_each(|m| m.max_tokens = Some(limit));
     }
     let provider_id = p.id.clone();
@@ -312,14 +312,14 @@ pub fn run(paths: &RuntimePaths, action: &ConfigCommands) -> Result<()> {
     paths.read_config()?; // Never overwrite a malformed Desktop config with defaults.
     match action {
         ConfigCommands::Show => {
-            let mut value = json!({"data_dir":paths.data_dir,"preferences":preferences(paths)?,"config":paths.read_config()?,"permissions.auto":claude_core::permissions::auto_config::load(&crate::services::context(paths)?)?});
+            let mut value = json!({"data_dir":paths.data_dir,"preferences":preferences(paths)?,"config":paths.read_config()?,"permissions.auto":deepseek_code_core::permissions::auto_config::load(&crate::services::context(paths)?)?});
             redact(&mut value);
             println!("{}", serde_json::to_string_pretty(&value)?);
         }
         ConfigCommands::Set { key, value } => {
-            if key == claude_core::permissions::auto_config::KEY {
-                let config: claude_core::permissions::auto_config::AutoConfig = serde_json::from_str(value)?;
-                claude_core::permissions::auto_config::save(&crate::services::context(paths)?, &config)?;
+            if key == deepseek_code_core::permissions::auto_config::KEY {
+                let config: deepseek_code_core::permissions::auto_config::AutoConfig = serde_json::from_str(value)?;
+                deepseek_code_core::permissions::auto_config::save(&crate::services::context(paths)?, &config)?;
                 return crate::services::print(&config);
             }
             if let Some(field) = key.strip_prefix("search.") {
@@ -471,7 +471,7 @@ mod search_tests {
         set("search.model", "deepseek-pro").unwrap();
         assert!(set("search.base_url", "ftp://example.com").is_err());
         assert!(set("search.other", "x").is_err());
-        let saved: claude_core::config::AppConfig =
+        let saved: deepseek_code_core::config::AppConfig =
             serde_json::from_slice(&std::fs::read(paths.data_dir.join("config.json")).unwrap()).unwrap();
         assert_eq!(saved.deepseek_search.api_key, "search-key");
         assert_eq!(saved.deepseek_search.model, "deepseek-pro");

@@ -94,7 +94,7 @@ pub fn inspect_with_environment(
         "runtime",
         "ok",
         &format!(
-            "claude-core {} on {} / {}",
+            "deepseek-code-core {} on {} / {}",
             env!("CARGO_PKG_VERSION"),
             std::env::consts::OS,
             std::env::consts::ARCH

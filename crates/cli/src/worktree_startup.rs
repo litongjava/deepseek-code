@@ -1,7 +1,7 @@
 //! CLI worktrees use the shared Desktop conversation binding and resolver.
 use crate::{args::Cli, session::Session};
 use anyhow::{Context, Result};
-use claude_core::worktree::session as worktrees;
+use deepseek_code_core::worktree::session as worktrees;
 
 pub fn validate(cli: &Cli, source: &std::path::Path) -> Result<()> {
     if let Some(name) = &cli.worktree {
@@ -9,8 +9,8 @@ pub fn validate(cli: &Cli, source: &std::path::Path) -> Result<()> {
             .data_dir
             .clone()
             .map(Ok)
-            .unwrap_or_else(claude_core::runtime::RuntimePaths::default_data_dir)?;
-        if claude_core::worktree::hooks::configured(&root, source)? {
+            .unwrap_or_else(deepseek_code_core::runtime::RuntimePaths::default_data_dir)?;
+        if deepseek_code_core::worktree::hooks::configured(&root, source)? {
             if !name.is_empty() {
                 worktrees::validate_name(name)?;
             }
@@ -26,7 +26,7 @@ pub async fn apply(cli: &Cli, session: &mut Session) -> Result<()> {
         return Ok(());
     };
     let source = session.workspace.clone();
-    if let Some(path) = crate::hook_progress::during(&session.id, true, claude_core::worktree::hooks::create(
+    if let Some(path) = crate::hook_progress::during(&session.id, true, deepseek_code_core::worktree::hooks::create(
         &session.paths.data_dir,
         &session.store.db,
         &session.id,
@@ -45,7 +45,7 @@ pub async fn apply(cli: &Cli, session: &mut Session) -> Result<()> {
         .store
         .db
         .with_conn(|conn| -> Result<()> {
-            let transaction = claude_core::db::write_transaction(&conn)?;
+            let transaction = deepseek_code_core::db::write_transaction(&conn)?;
             let project: String = transaction.query_row(
                 "SELECT project_id FROM conversations WHERE id=?1",
                 [&session.id],
@@ -78,7 +78,7 @@ pub async fn apply(cli: &Cli, session: &mut Session) -> Result<()> {
 }
 
 pub async fn handle(argument: &str, session: &mut Session) -> Result<()> {
-    use claude_core::worktree::hooks;
+    use deepseek_code_core::worktree::hooks;
     match argument.trim() {
         "" | "status" => println!(
             "{}",
@@ -91,7 +91,7 @@ pub async fn handle(argument: &str, session: &mut Session) -> Result<()> {
                 .context("Source missing")?
                 .to_owned();
             hooks::ensure_idle(&session.paths.data_dir, &session.id)?;
-            claude_core::services::session_worker::shutdown(&session.paths.data_dir, &session.id)
+            deepseek_code_core::services::session_worker::shutdown(&session.paths.data_dir, &session.id)
                 .await?;
             let previous = std::env::current_dir()?;
             std::env::set_current_dir(&source)?;

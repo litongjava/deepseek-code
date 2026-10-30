@@ -71,7 +71,7 @@ pub fn parse_line(line: &str) -> Result<UserMessage> {
         .get("message")
         .context("SDK user frame needs message")?;
     ensure!(message["role"] == "user", "SDK message.role must be user");
-    let content = claude_core::runtime::normalize_user_content(&message["content"])?;
+    let content = deepseek_code_core::runtime::normalize_user_content(&message["content"])?;
     let text = match &content {
         Value::String(text) => text.clone(),
         Value::Array(blocks) => {

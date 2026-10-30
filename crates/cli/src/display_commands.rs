@@ -1,7 +1,7 @@
 ﻿//! Persisted CLI presentation and inspection commands.
 use crate::session::Session;
 use anyhow::{ensure, Context, Result};
-use claude_core::runtime::RuntimePaths;
+use deepseek_code_core::runtime::RuntimePaths;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::path::Path;
@@ -43,7 +43,7 @@ pub fn load(session: &Session) -> Result<Settings> {
             None => Settings::default(),
         })
     })??;
-    if let Some(global) = claude_core::services::statusline_setup::load(&session.paths.data_dir)? { settings.statusline = global.command; }
+    if let Some(global) = deepseek_code_core::services::statusline_setup::load(&session.paths.data_dir)? { settings.statusline = global.command; }
     Ok(settings)
 }
 
@@ -131,15 +131,15 @@ pub async fn handle(
             if crate::ide_commands::handle(session, argument).await? { return Ok(true); }
             let context = crate::services::context(paths)?;
             let root = session.workspace.to_string_lossy();
-            claude_core::tools::configure_lsp_servers(
+            deepseek_code_core::tools::configure_lsp_servers(
                 &root,
-                claude_core::services::plugins::all_language_servers(&context)?,
+                deepseek_code_core::services::plugins::all_language_servers(&context)?,
             )?;
             let words = split_arguments(argument)?;
             if words.is_empty() || words == ["status"] {
                 println!(
                     "{}",
-                    serde_json::to_string_pretty(&claude_core::tools::lsp_status(&root).await?)?
+                    serde_json::to_string_pretty(&deepseek_code_core::tools::lsp_status(&root).await?)?
                 );
                 eprintln!("LSP language services. Use /ide lsp FILE OPERATION [LINE CHARACTER] (1-based).");
             } else {
@@ -157,7 +157,7 @@ pub async fn handle(
                         .context("Invalid character number")?);
                 }
                 let result = tokio::select! {
-                    result = claude_core::tools::execute_tool_async("LSP", params, &root) => result?,
+                    result = deepseek_code_core::tools::execute_tool_async("LSP", params, &root) => result?,
                     _ = tokio::signal::ctrl_c() => anyhow::bail!("LSP query cancelled"),
                 };
                 println!("{}", serde_json::to_string_pretty(&result)?);
@@ -275,7 +275,7 @@ pub async fn handle(
                 _ => anyhow::bail!("Usage: /diff [on|off|staged]"),
             }
             if settings.diff_panel {
-                claude_core::services::worktree_diff::snapshot(
+                deepseek_code_core::services::worktree_diff::snapshot(
                     &session.workspace,
                     settings.diff_staged,
                 )
@@ -288,9 +288,9 @@ pub async fn handle(
         "/usage" | "/cost" => {
             ensure!(matches!(argument,""|"local"|"refresh"), "Usage: /usage [local|refresh]");
             let mut value=usage(session)?;
-            value["billing"]=claude_core::services::usage::session_cost(&session.store.db,&session.id,&paths.read_config()?)?;
+            value["billing"]=deepseek_code_core::services::usage::session_cost(&session.store.db,&session.id,&paths.read_config()?)?;
             if argument!="local" {
-                match claude_core::services::usage::plan(&paths.data_dir).await {
+                match deepseek_code_core::services::usage::plan(&paths.data_dir).await {
                     Ok(Some(plan))=>value["account_plan"]=serde_json::to_value(plan)?,
                     Ok(None)=>value["account_plan_status"]=json!("Requires this application's Anthropic login with profile scope; third-party provider quotas are not available."),
                     Err(error)=>value["account_plan_error"]=json!(error.to_string()),
@@ -335,8 +335,8 @@ pub async fn handle(
                     eprintln!("Use /memory user|project|local to open a file (created if missing); /memory show prints loaded project instructions.");
                 }
                 "show" => {
-                    let instructions = claude_core::project_instructions::render(
-                        &claude_core::project_instructions::load_all(Some(&paths.data_dir), &session.workspace)?,
+                    let instructions = deepseek_code_core::project_instructions::render(
+                        &deepseek_code_core::project_instructions::load_all(Some(&paths.data_dir), &session.workspace)?,
                     );
                     if instructions.is_empty() {
                         eprintln!("No project instructions found. /memory project opens the file.");
@@ -384,7 +384,7 @@ pub async fn handle(
             ensure!(argument.is_empty(), "Usage: /reload-plugins");
             session.reload_plugins().await?;
             let context = crate::services::context(paths)?;
-            let plugins = claude_core::services::plugins::list(&context)?;
+            let plugins = deepseek_code_core::services::plugins::list(&context)?;
             eprintln!("Reloaded {} enabled plugins, including commands, hooks, MCP servers and language services.", plugins.iter().filter(|plugin| plugin.enabled).count());
         }
         _ => return Ok(false),
@@ -478,7 +478,7 @@ pub async fn statusline(session: &Session, settings: &Settings) -> Result<Option
     };
     let payload = crate::statusline_commands::payload(session).await?;
     let result =
-        claude_core::services::statusline::run(script, &session.workspace, &payload).await?;
+        deepseek_code_core::services::statusline::run(script, &session.workspace, &payload).await?;
     Ok(Some(result))
 }
 

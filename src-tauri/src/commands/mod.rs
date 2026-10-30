@@ -6,7 +6,7 @@ pub mod peripheral;
 pub fn app_data_dir() -> Result<std::path::PathBuf, String> {
     static DIR: std::sync::OnceLock<Result<std::path::PathBuf, String>> = std::sync::OnceLock::new();
     DIR.get_or_init(|| {
-        claude_core::runtime::RuntimePaths::default_data_dir().map_err(|e| e.to_string())
+        deepseek_code_core::runtime::RuntimePaths::default_data_dir().map_err(|e| e.to_string())
     })
     .clone()
 }
@@ -194,13 +194,9 @@ pub fn get_app_path() -> Result<String, String> {
 
 #[tauri::command]
 pub async fn check_update() -> Result<Option<crate::updater::UpdateInfo>, String> {
-    let data_dir = app_data_dir()
-        .unwrap_or_else(|_| std::path::PathBuf::from("."));
-    let updater = crate::updater::AutoUpdater::new(
-        "https://api.claude-desktop.app/updates",
-        env!("CARGO_PKG_VERSION"),
-        data_dir.join("updates"),
-    );
+    let data_dir = app_data_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
+    let updater = crate::updater::AutoUpdater::configured(data_dir.join("updates"))
+        .map_err(|e| e.to_string())?;
     updater.check_for_updates().await.map_err(|e| e.to_string())
 }
 
@@ -457,7 +453,7 @@ pub async fn mcp_import_legacy(
     app_handle: tauri::AppHandle,
     source: String,
     preview: bool,
-) -> Result<claude_core::mcp::transfer::Report, String> {
+) -> Result<deepseek_code_core::mcp::transfer::Report, String> {
     let mcp_state =
         app_handle.state::<Arc<Mutex<Option<Arc<Mutex<crate::mcp::McpServerManager>>>>>>();
     let guard = mcp_state.lock().await;
@@ -1442,9 +1438,8 @@ pub async fn computer_use_get_screen_info() -> Result<serde_json::Value, String>
 pub async fn app_studio_generate_project(
     spec: crate::app_studio::AppProjectSpec,
 ) -> Result<crate::app_studio::ProjectStructure, String> {
-    let data_dir = dirs::data_local_dir()
-        .unwrap_or_else(|| std::path::PathBuf::from("."))
-        .join("claude-desktop")
+    let data_dir = app_data_dir()
+        .unwrap_or_else(|_| std::env::temp_dir().join("deepseek-code"))
         .join("app-studio");
     let studio = crate::app_studio::AppStudio::new(data_dir);
     studio.generate_project(&spec)

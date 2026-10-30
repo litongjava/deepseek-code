@@ -103,11 +103,11 @@ async fn persistent_worker_refreshes_launch_rules_without_retaining_previous_gra
         match rule {
             Some("--disallowedTools") => assert_eq!(
                 launch.get("Write"),
-                Some(&claude_core::permissions::rules::PermissionAction::Deny)
+                Some(&deepseek_code_core::permissions::rules::PermissionAction::Deny)
             ),
             Some("--allowed-tools") => assert_eq!(
                 launch.get("Write"),
-                Some(&claude_core::permissions::rules::PermissionAction::Allow)
+                Some(&deepseek_code_core::permissions::rules::PermissionAction::Allow)
             ),
             None => assert!(launch.is_empty()),
             _ => unreachable!(),

@@ -1,4 +1,4 @@
-use claude_core::{
+use deepseek_code_core::{
     learning::{self, Experience},
     runtime::RuntimePaths,
     services::{EnvironmentCredentials, ServiceContext},
@@ -47,7 +47,7 @@ async fn learning_persists_deduplicates_and_feedback_changes_ranking() {
     learning::accept(&ctx, &before.suggestions[0].id).unwrap();
     let after = learning::status(&open()).unwrap();
     learning::accept(&ctx, &before.suggestions[0].id).unwrap();
-    let manager = claude_core::skills::SkillsManager::with_path(dir.path().join("skills"));
+    let manager = deepseek_code_core::skills::SkillsManager::with_path(dir.path().join("skills"));
     let installed = manager.list_enabled_skills().await.unwrap();
     let skill = installed
         .iter()

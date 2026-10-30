@@ -3,7 +3,7 @@ use crate::session::Session;
 use anyhow::Result;
 
 pub async fn show(session: &Session) -> Result<()> {
-    let request = claude_core::services::context_usage::last_request(&session.store.db, &session.id)?;
+    let request = deepseek_code_core::services::context_usage::last_request(&session.store.db, &session.id)?;
     if crate::terminal::picker::available() {
         let window = session.context_window().await.map(u64::from);
         let autocompact = match window { Some(window) => crate::session_commands::autocompact(session, window)?, None => None };
@@ -23,7 +23,7 @@ pub async fn show(session: &Session) -> Result<()> {
     eprintln!("{}", render(request));
     Ok(())
 }
-fn render(request: Option<claude_core::services::context_usage::LastRequest>) -> String {
+fn render(request: Option<deepseek_code_core::services::context_usage::LastRequest>) -> String {
     let mut lines = Vec::new();
     let Some(request) = request else {
         lines.push(format!(
@@ -124,27 +124,27 @@ fn render(request: Option<claude_core::services::context_usage::LastRequest>) ->
 }
 /// What the first request would hold: the base system prompt, the project
 /// instructions, the built-in tool definitions and saved history.
-fn estimate(session: &Session, window: Option<u64>) -> Result<claude_core::services::context_usage::LastRequest> {
-    let system = claude_core::prompt::compose_system_prompt_in(None, &session.model, claude_core::prompt::PromptProfile::Code, Some(&session.workspace));
-    let mut history = session.store.model_history(&session.id, &claude_core::native_engine::provider_manager::ApiFormat::Anthropic)?;
+fn estimate(session: &Session, window: Option<u64>) -> Result<deepseek_code_core::services::context_usage::LastRequest> {
+    let system = deepseek_code_core::prompt::compose_system_prompt_in(None, &session.model, deepseek_code_core::prompt::PromptProfile::Code, Some(&session.workspace));
+    let mut history = session.store.model_history(&session.id, &deepseek_code_core::native_engine::provider_manager::ApiFormat::Anthropic)?;
     // The engine puts instructions at the start of the first user message.
-    if let Some(reminder) = claude_core::project_instructions::load_all(Some(&session.paths.data_dir), &session.workspace).ok().and_then(|all| claude_core::project_instructions::reminder(&all)) {
+    if let Some(reminder) = deepseek_code_core::project_instructions::load_all(Some(&session.paths.data_dir), &session.workspace).ok().and_then(|all| deepseek_code_core::project_instructions::reminder(&all)) {
         history.insert(0, serde_json::json!({"role": "user", "content": reminder}));
     }
-    let body = serde_json::json!({"system": system, "messages": history, "tools": claude_core::tools::get_tool_definitions(), "max_tokens": 0});
+    let body = serde_json::json!({"system": system, "messages": history, "tools": deepseek_code_core::tools::get_tool_definitions(), "max_tokens": 0});
     let window = window.and_then(|window| u32::try_from(window).ok());
-    let mut usage = claude_core::native_engine::request_context::ContextUsage::from_body("anthropic-messages", &body, window, 0);
+    let mut usage = deepseek_code_core::native_engine::request_context::ContextUsage::from_body("anthropic-messages", &body, window, 0);
     // The engine's full system prompt and tool list barely change between
     // sessions; a recent measured request estimates them better.
-    let recent = session.store.db.with_conn(|conn| claude_core::db::conversation_repo::list_conversations(conn))??;
+    let recent = session.store.db.with_conn(|conn| deepseek_code_core::db::conversation_repo::list_conversations(conn))??;
     for row in recent.iter().filter(|row| row.id != session.id).take(20) {
-        if let Some(measured) = claude_core::services::context_usage::last_request(&session.store.db, &row.id)?.and_then(|request| request.usage) {
+        if let Some(measured) = deepseek_code_core::services::context_usage::last_request(&session.store.db, &row.id)?.and_then(|request| request.usage) {
             usage.instructions = measured.instructions;
             usage.tools = measured.tools;
             break;
         }
     }
-    Ok(claude_core::services::context_usage::LastRequest {
+    Ok(deepseek_code_core::services::context_usage::LastRequest {
         model: session.model.clone(),
         started_at_ms: None,
         status: "estimate".into(),
@@ -169,7 +169,7 @@ fn short(tokens: u64) -> String {
 /// /context as in the reference CLI: a 10×10 grid of the context window
 /// coloured by what fills it, with the estimate per category beside it.
 /// None before the session has sent a request.
-pub fn grid(request: &claude_core::services::context_usage::LastRequest, window: Option<u64>, autocompact: Option<u8>, color: bool, footer: &str) -> Option<String> {
+pub fn grid(request: &deepseek_code_core::services::context_usage::LastRequest, window: Option<u64>, autocompact: Option<u8>, color: bool, footer: &str) -> Option<String> {
     let usage = request.usage.as_ref()?;
     let parts: Vec<(&str, u64, &str)> = [
         ("System prompt", usage.instructions.estimated_tokens, "38;5;246"),
@@ -241,7 +241,7 @@ fn count(value: Option<u64>) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use claude_core::{
+    use deepseek_code_core::{
         native_engine::request_context::ContextUsage, services::context_usage::LastRequest,
     };
     use serde_json::json;

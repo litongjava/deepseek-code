@@ -1721,7 +1721,7 @@ fn run(
                     // As in the reference CLI the message joins the transcript
                     // where the model read it; a task notification was already
                     // announced when the command finished.
-                    if claude_core::tools::background_shell::notification_summary(&text).is_none() {
+                    if deepseek_code_core::tools::background_shell::notification_summary(&text).is_none() {
                         screen.log(&format!("{} {}", crate::terminal::prompt_glyph(), terminal_text(&text)))?;
                     }
                     dirty = true;

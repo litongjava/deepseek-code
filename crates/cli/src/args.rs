@@ -1,4 +1,4 @@
-﻿//! Terminal commands migrated from the former CLI, now backed by claude-core.
+﻿//! Terminal commands migrated from the former CLI, now backed by deepseek-code-core.
 use clap::{Parser, Subcommand, ValueEnum};
 use std::path::PathBuf;
 
@@ -183,7 +183,7 @@ impl Cli {
         use anyhow::Context;
         self.json_schema.as_ref().map(|text| {
             let schema = serde_json::from_str(text).context("--json-schema must be a valid JSON Schema string")?;
-            claude_core::structured_output::validate_schema(&schema)?;
+            deepseek_code_core::structured_output::validate_schema(&schema)?;
             Ok(schema)
         }).transpose()
     }

@@ -1,7 +1,7 @@
 //! Local REPL commands use the same stores as Desktop and never call a model.
 use crate::session::Session;
 use anyhow::{ensure, Result};
-use claude_core::{
+use deepseek_code_core::{
     db::conversation_repo,
     runtime::{RuntimePaths, SessionStore},
     skills::SkillsManager,
@@ -46,7 +46,7 @@ fn conversation(session: &Session, id: &str, detailed: bool) -> Result<Vec<crate
     use crate::terminal::{change_view, tool_view};
     let width = crossterm::terminal::size().map_or(80, |(cols, _)| cols.saturating_sub(1) as usize);
     session.store.db.with_conn(|conn| {
-        let rows = claude_core::db::message_repo::get_messages_by_conversation(conn, id)?;
+        let rows = deepseek_code_core::db::message_repo::get_messages_by_conversation(conn, id)?;
         let mut lines = Vec::new();
         for message in &rows {
             if message.is_compact_boundary {
@@ -55,7 +55,7 @@ fn conversation(session: &Session, id: &str, detailed: bool) -> Result<Vec<crate
                 continue;
             }
             if message.role == "user" {
-                if let Some(summary) = claude_core::tools::background_shell::notification_summary(&message.content) {
+                if let Some(summary) = deepseek_code_core::tools::background_shell::notification_summary(&message.content) {
                     lines.push(change_view::body(&format!("\u{25cf} {summary}")));
                     continue;
                 }
@@ -76,7 +76,7 @@ fn conversation(session: &Session, id: &str, detailed: bool) -> Result<Vec<crate
                 lines.push(change_view::muted(&format!("\u{2234} {}", text.next().unwrap_or_default())));
                 lines.extend(text.take(400).map(|line| change_view::muted(&format!("  {line}"))));
             }
-            for tool in claude_core::db::message_repo::get_tool_calls_for_message(conn, &message.id)? {
+            for tool in deepseek_code_core::db::message_repo::get_tool_calls_for_message(conn, &message.id)? {
             let input = tool
                 .input
                 .as_deref()
@@ -104,7 +104,7 @@ fn conversation(session: &Session, id: &str, detailed: bool) -> Result<Vec<crate
 pub async fn compact(paths: &RuntimePaths, session: &mut Session, instructions: &str) -> Result<usize> {
     let context = crate::services::context(paths)?;
     let report = tokio::select! {
-        report = claude_core::services::compaction::compact_with_hooks(
+        report = deepseek_code_core::services::compaction::compact_with_hooks(
             &session.engine, &context, &session.workspace, &session.id,
             &session.provider_id, &session.model, instructions.trim(), "manual",
         ) => report?,
@@ -158,7 +158,7 @@ pub async fn handle(line: &str, paths: &RuntimePaths, session: &mut Session) -> 
         "/context" => {
             ensure!(argument.trim().is_empty(), "Usage: /context");
             let rows = session.store.db.with_conn(|conn| {
-                claude_core::db::message_repo::get_messages_by_conversation(conn, &session.id)
+                deepseek_code_core::db::message_repo::get_messages_by_conversation(conn, &session.id)
             })??;
             let start = rows
                 .iter()

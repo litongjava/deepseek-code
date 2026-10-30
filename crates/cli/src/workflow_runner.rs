@@ -127,7 +127,7 @@ impl Runner {
         }
         args.extend(["--".into(), prompt.into()]);
         let output = tokio::process::Command::new(&self.exe).args(&args).current_dir(&self.cwd)
-            .env_remove(claude_core::services::background_sessions::CONTROL_ENV).env_remove(claude_core::services::background_sessions::WORKER_ENV)
+            .env_remove(deepseek_code_core::services::background_sessions::CONTROL_ENV).env_remove(deepseek_code_core::services::background_sessions::WORKER_ENV)
             .stdin(std::process::Stdio::null()).kill_on_drop(true).output().await
             .with_context(|| format!("Cannot start agent {label}"))?;
         let stdout = String::from_utf8_lossy(&output.stdout);

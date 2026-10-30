@@ -197,7 +197,7 @@ const FileTreeNode: React.FC<FileTreeNodeProps> = ({
   );
 };
 
-const CustomizePage = ({ onCreateWithClaude, onBack }: { onCreateWithClaude?: () => void; onBack?: () => void }) => {
+const CustomizePage = ({ onCreateWithDeepSeek, onBack }: { onCreateWithDeepSeek?: () => void; onBack?: () => void }) => {
   const { t } = useI18n();
   const navigate = useNavigate();
   const [tab, setTab] = useState<'overview' | 'skills' | 'mcp' | 'connectors' | 'plugins'>('overview');
@@ -476,9 +476,9 @@ const CustomizePage = ({ onCreateWithClaude, onBack }: { onCreateWithClaude?: ()
                   <>
                     <div className="fixed inset-0 z-40" onClick={() => setShowPlusMenu(false)} />
                     <div className="absolute top-full right-0 mt-2 w-64 bg-white dark:bg-[#202020] rounded-[16px] shadow-[0_4px_24px_rgba(0,0,0,0.15)] border border-claude-border py-2 z-50">
-                      <button className="w-full flex items-center gap-3.5 px-4 py-3 text-[14.5px] font-medium text-claude-text hover:bg-black/5 dark:hover:bg-white/5 transition-colors text-left" onClick={() => { setShowPlusMenu(false); onCreateWithClaude?.(); }}>
+                      <button className="w-full flex items-center gap-3.5 px-4 py-3 text-[14.5px] font-medium text-claude-text hover:bg-black/5 dark:hover:bg-white/5 transition-colors text-left" onClick={() => { setShowPlusMenu(false); onCreateWithDeepSeek?.(); }}>
                         <MessageSquare size={18} className="text-claude-textSecondary" />
-                        {t('customize.createWithClaude')}
+                        {t('customize.createWithDeepSeek')}
                       </button>
                       <button className="w-full flex items-center gap-3.5 px-4 py-3 text-[14.5px] font-medium text-claude-text hover:bg-black/5 dark:hover:bg-white/5 transition-colors text-left" onClick={() => { setShowPlusMenu(false); startCreate(); }}>
                         <ClipboardList size={18} className="text-claude-textSecondary" />

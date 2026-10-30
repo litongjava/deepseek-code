@@ -1,7 +1,7 @@
 //! Host-owned status line setup: model output is data, never a tool invocation.
 use crate::{session::Session, terminal::input::TerminalInput};
 use anyhow::{bail, ensure, Context, Result};
-use claude_core::{
+use deepseek_code_core::{
     permissions::{PermissionContext, PermissionResult},
     services::statusline_setup as setup,
 };
@@ -136,7 +136,7 @@ pub async fn handle(argument: &str, session: &Session, input: &mut TerminalInput
         let provider = session.selected_provider().await?;
         let request = request.to_string();
         let result = tokio::select! {
-            result = claude_core::native_engine::generation::generate(provider, setup::SYSTEM, &request) => result?,
+            result = deepseek_code_core::native_engine::generation::generate(provider, setup::SYSTEM, &request) => result?,
             _ = tokio::signal::ctrl_c() => bail!("Status line setup cancelled; settings unchanged"),
         };
         let proposal = setup::parse_proposal(&result)?;
@@ -170,7 +170,7 @@ pub async fn payload(session: &Session) -> Result<Value> {
     let (current, added, project_dir) = session.store.db.with_conn(|conn| -> Result<_> {
         let current = setup::current_usage(conn, &session.id)?;
         let project =
-            claude_core::native_engine::workspace::conversation_project(conn, &session.id)?;
+            deepseek_code_core::native_engine::workspace::conversation_project(conn, &session.id)?;
         let project_dir = project
             .as_ref()
             .and_then(|p| p.workspace_path.clone())
@@ -206,7 +206,7 @@ pub async fn payload(session: &Session) -> Result<Value> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use claude_core::{
+    use deepseek_code_core::{
         permissions::{rules::PermissionAction, PermissionMode},
         runtime::{RuntimePaths, SessionStore},
     };

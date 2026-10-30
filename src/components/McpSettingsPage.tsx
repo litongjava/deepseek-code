@@ -17,7 +17,12 @@ interface McpServer {
   resources_count: number;
   error?: string;
   transport_type: string;
+  url?: string | null;
+  headers?: Record<string, string>;
 }
+
+/** Transports that connect to a URL instead of starting a command. */
+const REMOTE_TRANSPORTS = ['http', 'sse', 'ws'];
 
 interface McpTool {
   name: string;
@@ -40,6 +45,8 @@ const McpSettingsPage = () => {
     args: '',
     env: '',
     transport_type: 'stdio',
+    url: '',
+    headers: '',
   });
   const [msg, setMsg] = useState('');
   const [msgType, setMsgType] = useState<'success' | 'error'>('success');
@@ -141,23 +148,34 @@ const McpSettingsPage = () => {
       args: JSON.stringify(server.args),
       env: server.env ? JSON.stringify(server.env, null, 2) : '',
       transport_type: server.transport_type,
+      url: server.url || '',
+      headers: server.headers && Object.keys(server.headers).length ? JSON.stringify(server.headers, null, 2) : '',
     });
     setShowAddForm(true);
   };
 
   const handleSubmit = async () => {
-    if (!formData.name || !formData.command) {
-      showMessage('Name and command are required', 'error');
+    const remote = REMOTE_TRANSPORTS.includes(formData.transport_type);
+    if (!formData.name || (remote ? !formData.url.trim() : !formData.command)) {
+      showMessage(remote ? 'Name and URL are required' : 'Name and command are required', 'error');
       return;
     }
 
     try {
       const argumentText = formData.args.trim();
-      const args = argumentText.startsWith('[') ? JSON.parse(argumentText) : argumentText ? argumentText.split(/\s+/) : [];
+      const args = remote ? [] : argumentText.startsWith('[') ? JSON.parse(argumentText) : argumentText ? argumentText.split(/\s+/) : [];
       if (!Array.isArray(args) || !args.every(arg => typeof arg === 'string')) {
         throw new Error('Arguments must be a JSON array of strings');
       }
       const env = formData.env ? JSON.parse(formData.env) : {};
+      const headers = remote && formData.headers.trim() ? JSON.parse(formData.headers) : {};
+      if (typeof headers !== 'object' || Array.isArray(headers) || !Object.values(headers).every(value => typeof value === 'string')) {
+        throw new Error('Headers must be a JSON object of strings');
+      }
+      // The engine reads the reference CLI's `type`, `url` and `headers` keys.
+      const connection = remote
+        ? { command: '', cwd: null, args, type: formData.transport_type, url: formData.url.trim(), headers }
+        : { command: formData.command, cwd: formData.cwd || null, args, type: 'stdio' };
 
       if (editingServer) {
         await invoke('mcp_update_server', {
@@ -165,11 +183,8 @@ const McpSettingsPage = () => {
           config: {
             id: editingServer,
             name: formData.name,
-            command: formData.command,
-            cwd: formData.cwd || null,
-            args,
+            ...connection,
             env,
-            transport_type: formData.transport_type,
             enabled: servers.find(server => server.id === editingServer)?.enabled ?? true,
           },
         });
@@ -179,11 +194,8 @@ const McpSettingsPage = () => {
           config: {
             id: formData.name.toLowerCase().replace(/[^a-z0-9-]/g, '-'),
             name: formData.name,
-            command: formData.command,
-            cwd: formData.cwd || null,
-            args,
+            ...connection,
             env,
-            transport_type: formData.transport_type,
             enabled: true,
           },
         });
@@ -201,7 +213,7 @@ const McpSettingsPage = () => {
   };
 
   const resetForm = () => {
-    setFormData({ name: '', command: '', cwd: '', args: '', env: '', transport_type: 'stdio' });
+    setFormData({ name: '', command: '', cwd: '', args: '', env: '', transport_type: 'stdio', url: '', headers: '' });
   };
 
   const toggleToolExpansion = (serverName: string) => {
@@ -237,7 +249,7 @@ const McpSettingsPage = () => {
             setEditingServer(null);
             setShowAddForm(true);
           }}
-          className="flex items-center gap-1.5 px-3 py-1.5 bg-claude-btn-hover text-white rounded-lg text-[14px] hover:opacity-90 transition-opacity"
+          className="flex items-center gap-1.5 px-3 py-1.5 bg-claude-accent text-white rounded-lg text-[14px] hover:opacity-90 transition-opacity"
         >
           <Plus size={16} />
           Add Server
@@ -271,6 +283,46 @@ const McpSettingsPage = () => {
           </div>
 
           <div>
+            <label htmlFor="mcp-transport" className="block text-[13px] text-[#666] mb-1">Transport Type</label>
+            <select
+              id="mcp-transport"
+              value={formData.transport_type}
+              onChange={(e) => setFormData({ ...formData, transport_type: e.target.value })}
+              className="w-full px-3 py-2 border border-[#e0e0e0] rounded-lg text-[14px] focus:outline-none focus:ring-2 focus:ring-[#D97757]/30"
+            >
+              <option value="stdio">stdio</option>
+              <option value="http">HTTP (Streamable HTTP)</option>
+              <option value="sse">SSE</option>
+              <option value="ws">WebSocket</option>
+            </select>
+          </div>
+
+          {REMOTE_TRANSPORTS.includes(formData.transport_type) ? (<>
+          <div>
+            <label htmlFor="mcp-url" className="block text-[13px] text-[#666] mb-1">URL</label>
+            <input
+              id="mcp-url"
+              type="text"
+              value={formData.url}
+              onChange={(e) => setFormData({ ...formData, url: e.target.value })}
+              className="w-full px-3 py-2 border border-[#e0e0e0] rounded-lg text-[14px] focus:outline-none focus:ring-2 focus:ring-[#D97757]/30"
+              placeholder={formData.transport_type === 'ws' ? 'wss://mcp.example.com/ws' : 'https://mcp.example.com/mcp'}
+            />
+          </div>
+
+          <div>
+            <label htmlFor="mcp-headers" className="block text-[13px] text-[#666] mb-1">Headers (JSON)</label>
+            <textarea
+              id="mcp-headers"
+              value={formData.headers}
+              onChange={(e) => setFormData({ ...formData, headers: e.target.value })}
+              className="w-full px-3 py-2 border border-[#e0e0e0] rounded-lg text-[14px] font-mono focus:outline-none focus:ring-2 focus:ring-[#D97757]/30"
+              rows={3}
+              placeholder='{"Authorization": "Bearer your-token"}'
+            />
+          </div>
+          </>) : (<>
+          <div>
             <label className="block text-[13px] text-[#666] mb-1">Command</label>
             <input
               type="text"
@@ -298,19 +350,6 @@ const McpSettingsPage = () => {
           </div>
 
           <div>
-            <label className="block text-[13px] text-[#666] mb-1">Transport Type</label>
-            <select
-              value={formData.transport_type}
-              onChange={(e) => setFormData({ ...formData, transport_type: e.target.value })}
-              className="w-full px-3 py-2 border border-[#e0e0e0] rounded-lg text-[14px] focus:outline-none focus:ring-2 focus:ring-[#D97757]/30"
-            >
-              <option value="stdio">stdio</option>
-              <option value="sse">SSE</option>
-              <option value="http">HTTP</option>
-            </select>
-          </div>
-
-          <div>
             <label className="block text-[13px] text-[#666] mb-1">Environment Variables (JSON)</label>
             <textarea
               value={formData.env}
@@ -320,11 +359,12 @@ const McpSettingsPage = () => {
               placeholder='{"API_KEY": "your-key"}'
             />
           </div>
+          </>)}
 
           <div className="flex gap-2">
             <button
               onClick={handleSubmit}
-              className="px-4 py-2 bg-claude-btn-hover text-white rounded-lg text-[14px] hover:opacity-90 transition-opacity"
+              className="px-4 py-2 bg-claude-accent text-white rounded-lg text-[14px] hover:opacity-90 transition-opacity"
             >
               {editingServer ? 'Update' : 'Add'}
             </button>
@@ -348,7 +388,7 @@ const McpSettingsPage = () => {
           <div className="text-center py-12 text-[#999] text-[14px]">
             <Server size={48} className="mx-auto mb-3 opacity-40" />
             <p>No MCP servers configured</p>
-            <p className="text-[12px] mt-1">Add a server to extend Claude with external tools</p>
+            <p className="text-[12px] mt-1">Add a server to extend DeepSeek Code with external tools</p>
           </div>
         ) : (
           servers.map((server) => (
@@ -366,7 +406,7 @@ const McpSettingsPage = () => {
                   <div>
                     <h4 className="text-[15px] font-medium text-claude-text">{server.name}</h4>
                     <p className="text-[12px] text-[#999] font-mono mt-0.5">
-                      {server.command} {(server.args || []).join(' ')}
+                      {server.url ? `${server.transport_type} ${server.url}` : `${server.command} ${(server.args || []).join(' ')}`}
                     </p>
                   </div>
                 </div>
@@ -505,6 +545,8 @@ const McpSettingsPage = () => {
                     args: template.args,
                     env: '',
                     transport_type: 'stdio',
+                    url: '',
+                    headers: '',
                   });
                   setShowAddForm(true);
                 }}

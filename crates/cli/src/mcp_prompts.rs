@@ -5,7 +5,7 @@ use anyhow::{Context, Result};
 
 /// Positional words fill the prompt's arguments in order; the last argument
 /// takes the rest of the line.
-fn arguments(prompt: &claude_core::mcp::McpPrompt, line: &str) -> Result<serde_json::Value> {
+fn arguments(prompt: &deepseek_code_core::mcp::McpPrompt, line: &str) -> Result<serde_json::Value> {
     let mut values = serde_json::Map::new();
     let mut rest = line.trim();
     for (index, argument) in prompt.arguments.iter().enumerate() {
@@ -42,7 +42,7 @@ mod tests {
 
     #[test]
     fn positional_words_fill_arguments_and_the_last_takes_the_rest() {
-        let prompt: claude_core::mcp::McpPrompt = serde_json::from_value(serde_json::json!({"name":"review","arguments":[{"name":"pr","required":true},{"name":"focus"}]})).unwrap();
+        let prompt: deepseek_code_core::mcp::McpPrompt = serde_json::from_value(serde_json::json!({"name":"review","arguments":[{"name":"pr","required":true},{"name":"focus"}]})).unwrap();
         assert_eq!(arguments(&prompt, "42 error handling paths").unwrap(), serde_json::json!({"pr":"42","focus":"error handling paths"}));
         assert_eq!(arguments(&prompt, "7").unwrap(), serde_json::json!({"pr":"7"}));
         assert!(arguments(&prompt, "").unwrap_err().to_string().contains("pr"));

@@ -1,4 +1,4 @@
-use claude_core::{
+use deepseek_code_core::{
     runtime::RuntimePaths,
     services::{plugins, EnvironmentCredentials, ServiceContext},
 };
@@ -70,22 +70,22 @@ async fn installation_execution_upgrade_and_revocation() {
 fn bundle_paths_and_permissions_are_validated() {
     let bundle:plugins::Bundle=serde_json::from_value(json!({"id":"x","version":"1.0.0","description":"","commands":{},"files":{"../escape":"bad"}})).unwrap();
     assert!(bundle.validate().is_err());
-    let permissions = claude_core::runtime::default_permissions();
-    let context = claude_core::permissions::PermissionContext {
+    let permissions = deepseek_code_core::runtime::default_permissions();
+    let context = deepseek_code_core::permissions::PermissionContext {
         tool_name: "PluginRun".into(),
         tool_input: json!({"plugin":"x","command":"run"}),
         conversation_id: "test".into(),
         user_id: None,
         workspace_path: None,
     };
-    permissions.set_mode(claude_core::permissions::PermissionMode::PlanMode);
+    permissions.set_mode(deepseek_code_core::permissions::PermissionMode::PlanMode);
     assert!(matches!(
         permissions.check_permission(&context),
-        claude_core::permissions::PermissionResult::Denied(_)
+        deepseek_code_core::permissions::PermissionResult::Denied(_)
     ));
-    permissions.set_mode(claude_core::permissions::PermissionMode::AcceptEdits);
+    permissions.set_mode(deepseek_code_core::permissions::PermissionMode::AcceptEdits);
     assert!(matches!(
         permissions.check_permission(&context),
-        claude_core::permissions::PermissionResult::RequiresConfirmation(_)
+        deepseek_code_core::permissions::PermissionResult::RequiresConfirmation(_)
     ));
 }

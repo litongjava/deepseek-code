@@ -1,9 +1,12 @@
 # =============================================================================
 # DeepSeek Code Desktop Tauri — Orchestration Configuration
 # =============================================================================
-# All magic numbers / tunables previously hard-coded across the codebase are
-# centralised here.  The application reads this file at startup and caches the
-# values in a global OrchestrationConfig struct (see src/config/mod.rs).
+# Engine tunables previously hard-coded across the codebase are centralised
+# here.  The application reads this file at startup and caches the values in
+# the global OrchestrationConfig (crates/core/src/config/mod.rs).
+# The multi-agent orchestrator's own settings (concurrency, scheduling,
+# workflow switches) are not kept here: they live in orchestrator.toml in the
+# data directory and are edited through /api/workflow/config.
 # =============================================================================
 
 [tool_loop]

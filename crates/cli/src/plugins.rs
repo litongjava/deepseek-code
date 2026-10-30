@@ -1,6 +1,6 @@
 use crate::{args::PluginCommands, services};
 use anyhow::{ensure, Result};
-use claude_core::{runtime::RuntimePaths, services::plugins};
+use deepseek_code_core::{runtime::RuntimePaths, services::plugins};
 pub async fn run(paths: &RuntimePaths, action: &PluginCommands) -> Result<()> {
     let context = services::context(paths)?;
     match action {

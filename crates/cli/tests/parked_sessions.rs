@@ -1,5 +1,5 @@
 //! Idle parking uses real worker IPC without ever submitting a model turn.
-use claude_core::{
+use deepseek_code_core::{
     runtime::{RuntimePaths, SessionStore},
     services::{
         background_sessions, session_parking, session_worker, EnvironmentCredentials,
@@ -40,7 +40,7 @@ async fn idle_park_preserves_history_and_reports_worker_shutdown_honestly() {
     }
     // Stop before assertions so a failed assertion cannot leave live workers behind.
     let live = session_parking::list(&context, &parent).await.unwrap();
-    let project = claude_core::services::session_trust::inspect(&context.db, &parent).unwrap();
+    let project = deepseek_code_core::services::session_trust::inspect(&context.db, &parent).unwrap();
     context
         .db
         .with_conn(|conn| {

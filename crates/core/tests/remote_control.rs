@@ -1,4 +1,4 @@
-use claude_core::services::remote_control::{
+use deepseek_code_core::services::remote_control::{
     mock::MockServer, Bridge, Endpoint, Inbound, Registration, Status, Timing,
 };
 use serde_json::{json, Value};

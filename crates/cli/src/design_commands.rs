@@ -1,7 +1,7 @@
 //! Explicit Design account/project commands; sync plans never upload implicitly.
 use crate::{args::Cli, session::Session};
 use anyhow::{ensure, Context, Result};
-use claude_core::{
+use deepseek_code_core::{
     runtime::RuntimePaths,
     services::{anthropic_auth, design},
 };

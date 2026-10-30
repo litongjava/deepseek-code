@@ -1,6 +1,6 @@
 use crate::{args::Cli, config};
 use anyhow::Result;
-use claude_core::{
+use deepseek_code_core::{
     cache::FileCache,
     native_engine::provider_manager::ProviderManager,
     runtime::{self, RuntimePaths, SessionStore},
@@ -20,7 +20,7 @@ pub async fn run(cli: &Cli, paths: &RuntimePaths, id: &str, instructions: &str) 
         session.model.as_deref(),
         session.provider.as_deref(),
     )?;
-    claude_core::config::OrchestrationConfig::init_global()?;
+    deepseek_code_core::config::OrchestrationConfig::init_global()?;
     let manager =
         ProviderManager::in_memory(selected.providers, paths.data_dir.join("providers.json"));
     let engine = runtime::create_engine(
@@ -31,7 +31,7 @@ pub async fn run(cli: &Cli, paths: &RuntimePaths, id: &str, instructions: &str) 
         Arc::new(FileCache::new()),
     );
     tokio::select! {
-        result = crate::hook_progress::during(id, true, claude_core::services::compaction::compact_with_hooks(&engine, &context, &workspace, id, &selected.provider_id, &selected.model, instructions, "manual")) => crate::services::print(&result?),
+        result = crate::hook_progress::during(id, true, deepseek_code_core::services::compaction::compact_with_hooks(&engine, &context, &workspace, id, &selected.provider_id, &selected.model, instructions, "manual")) => crate::services::print(&result?),
         _ = tokio::signal::ctrl_c() => anyhow::bail!("Compaction interrupted; check /history for a completed summary. Original transcript retained"),
     }
 }
@@ -40,7 +40,7 @@ pub async fn run(cli: &Cli, paths: &RuntimePaths, id: &str, instructions: &str) 
 pub(crate) fn notice(message: &str) {
     let event = serde_json::json!({"type":"notice", "message":message});
     if !matches!(
-        claude_core::services::session_worker::emit_event(&event),
+        deepseek_code_core::services::session_worker::emit_event(&event),
         Ok(true)
     ) {
         eprintln!("{message}");
@@ -51,7 +51,7 @@ pub(crate) fn notice(message: &str) {
 mod tests {
     #[test]
     fn compaction_notices_are_retained_in_the_worker_event_log() {
-        use claude_core::services::session_worker::set_event_sink;
+        use deepseek_code_core::services::session_worker::set_event_sink;
         let temp = tempfile::tempdir().unwrap();
         let path = temp.path().join("events.jsonl");
         std::fs::write(&path, "").unwrap();

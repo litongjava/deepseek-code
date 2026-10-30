@@ -7,7 +7,7 @@ async fn allowlisted_domains_pass_and_others_are_refused() {
     if !std::path::Path::new("/usr/bin/bwrap").exists() || !std::path::Path::new("/usr/bin/curl").exists() {
         return;
     }
-    claude_core::config::OrchestrationConfig::init_global().unwrap();
+    deepseek_code_core::config::OrchestrationConfig::init_global().unwrap();
     std::env::set_var("DCL_SANDBOX_BRIDGE", env!("CARGO_BIN_EXE_dcl"));
     let server = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let port = server.local_addr().unwrap().port();
@@ -24,8 +24,8 @@ async fn allowlisted_domains_pass_and_others_are_refused() {
     let data = tempfile::tempdir().unwrap();
     let workspace = tempfile::tempdir().unwrap();
     let settings = json!({"enabled": true, "network": {"allowedDomains": ["localhost"]}});
-    let policy = claude_core::tools::sandbox::policy(&settings, workspace.path(), data.path(), &[]).unwrap();
-    let run = |command: String| claude_core::tools::execute_tool_async("Bash", json!({"command": command, "__sandbox": policy.clone()}), workspace.path().to_str().unwrap());
+    let policy = deepseek_code_core::tools::sandbox::policy(&settings, workspace.path(), data.path(), &[]).unwrap();
+    let run = |command: String| deepseek_code_core::tools::execute_tool_async("Bash", json!({"command": command, "__sandbox": policy.clone()}), workspace.path().to_str().unwrap());
     // NO_PROXY covers localhost inside the sandbox; force the proxy for the fixture host.
     let allowed = run(format!("curl -s --noproxy '' --max-time 10 http://localhost:{port}/")).await.unwrap();
     assert_eq!(allowed["stdout"].as_str().unwrap().trim(), "hello-sandbox", "{allowed}");

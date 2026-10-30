@@ -1,5 +1,5 @@
 //! Invoked explicitly; never called during discovery or startup.
-use claude_core::{runtime::RuntimePaths, services::doctor};
+use deepseek_code_core::{runtime::RuntimePaths, services::doctor};
 use std::path::Path;
 
 pub fn snapshot(workspace: &Path, paths: &RuntimePaths) -> String {

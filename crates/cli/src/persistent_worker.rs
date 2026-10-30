@@ -4,7 +4,7 @@ use crate::{
     session::Session,
 };
 use anyhow::{ensure, Context, Result};
-use claude_core::{
+use deepseek_code_core::{
     runtime::RuntimePaths,
     services::{
         background_sessions as jobs,
@@ -19,14 +19,14 @@ use std::{
     },
     time::{Duration, Instant},
 };
-type StatusTarget = Arc<std::sync::Mutex<Option<claude_core::services::runtime_status::RuntimeSource>>>;
+type StatusTarget = Arc<std::sync::Mutex<Option<deepseek_code_core::services::runtime_status::RuntimeSource>>>;
 struct ModeControl {
     job_id: String,
     session_id: String,
-    manager: Arc<claude_core::permissions::PermissionManager>,
-    db: Arc<claude_core::db::DbManager>,
-    provider: claude_core::native_engine::provider_manager::ResolvedProvider,
-    owner_manager: Option<Arc<claude_core::permissions::PermissionManager>>,
+    manager: Arc<deepseek_code_core::permissions::PermissionManager>,
+    db: Arc<deepseek_code_core::db::DbManager>,
+    provider: deepseek_code_core::native_engine::provider_manager::ResolvedProvider,
+    owner_manager: Option<Arc<deepseek_code_core::permissions::PermissionManager>>,
     /// The job's launch allows bypass, and Full Access when `full_access`.
     bypass_available: bool,
     full_access: bool,
@@ -64,7 +64,7 @@ pub async fn run_from_env() -> Result<bool> {
                     if let Ok(owner)=service::read_worker(&dir) { if let Some(id)=owner.active_job { let _=jobs::cancel(&worker.root,&id); } }
                 }
                 let turn_active = active.load(Ordering::Acquire);
-                let shell_active = claude_core::tools::background_shell::has_active();
+                let shell_active = deepseek_code_core::tools::background_shell::has_active();
                 if should_expire(turn_active, shell_active, fatal.load(Ordering::Acquire), idle.elapsed()) {break;}
                 if (turn_active && !idle_child_active.load(Ordering::Acquire)) || shell_active {idle=Instant::now();}
                 if !turn_active && !fatal.load(Ordering::Acquire) {
@@ -91,8 +91,8 @@ pub async fn run_from_env() -> Result<bool> {
                 }
                 match request {
                     Request::RuntimeStatus => {
-                        let source = status_target.lock().unwrap_or_else(|error|error.into_inner()).clone().unwrap_or_else(||claude_core::services::runtime_status::RuntimeSource {
-                            mcp: Arc::new(claude_core::mcp::McpServerManager::new(worker.root.join("mcp-servers.json"))),
+                        let source = status_target.lock().unwrap_or_else(|error|error.into_inner()).clone().unwrap_or_else(||deepseek_code_core::services::runtime_status::RuntimeSource {
+                            mcp: Arc::new(deepseek_code_core::mcp::McpServerManager::new(worker.root.join("mcp-servers.json"))),
                             mcp_ready: Arc::new(tokio::sync::OnceCell::new()), workspace: worker.workspace.clone(), data_dir:worker.root.clone(),
                         });
                         let response = match tokio::time::timeout(Duration::from_secs(1), source.snapshot()).await {
@@ -114,7 +114,7 @@ pub async fn run_from_env() -> Result<bool> {
                     },
                     Request::Shutdown=>{
                         if active.load(Ordering::Acquire) {let _=service::reply(stream,&Reply::error("Session worker has an active turn; cancel or detach it explicitly")).await;}
-                        else if claude_core::tools::background_shell::has_active() {let _=service::reply(stream,&Reply::error("Session worker owns running background shell tasks; stop them explicitly before shutdown")).await;}
+                        else if deepseek_code_core::tools::background_shell::has_active() {let _=service::reply(stream,&Reply::error("Session worker owns running background shell tasks; stop them explicitly before shutdown")).await;}
                         else {let _=service::reply(stream,&Reply::ok(None)).await;break;}
                     },
                     Request::Submit{id,prompt,arguments,environment}=>{
@@ -193,14 +193,14 @@ async fn execute(
     let mut selection =
         crate::config::select(&cli, &paths, cli.model.as_deref(), cli.provider.as_deref())?;
     if let Ok(value) = std::env::var("CLAUDE_RUST_WORKER_MODEL") {
-        let model: claude_core::native_engine::provider_manager::ModelConfig =
+        let model: deepseek_code_core::native_engine::provider_manager::ModelConfig =
             serde_json::from_str(&value)?;
         let provider = selection
             .providers
             .iter_mut()
             .find(|provider| provider.id == selection.provider_id)
             .context("Worker provider missing")?;
-        let expected=claude_core::native_engine::provider_manager::resolve_model_selection(&provider.models,&selection.model).context("Worker selected model missing")?;
+        let expected=deepseek_code_core::native_engine::provider_manager::resolve_model_selection(&provider.models,&selection.model).context("Worker selected model missing")?;
         ensure!(model.id==expected.id,"Worker model snapshot mismatch");
         let target = provider
             .models
@@ -236,7 +236,7 @@ async fn execute(
     *status_target.lock().unwrap_or_else(|error|error.into_inner()) = Some(session.runtime_status_source());
     let current_provider = session.selected_provider().await?;
     *mode_target.lock().unwrap_or_else(|e|e.into_inner()) = Some(ModeControl { job_id:id.into(), session_id:session.id.clone(), manager:session.permissions.clone(), db:session.store.db.clone(), provider:current_provider, owner_manager:None, bypass_available:session.bypass_available, full_access:session.full_access });
-    claude_core::permissions::set_full_access(session.full_access && session.permissions.get_mode() == claude_core::permissions::PermissionMode::BypassPermissions);
+    deepseek_code_core::permissions::set_full_access(session.full_access && session.permissions.get_mode() == deepseek_code_core::permissions::PermissionMode::BypassPermissions);
     let result = current
         .as_ref()
         .unwrap()
@@ -248,26 +248,26 @@ async fn execute(
         .unwrap_or_else(|e| e.into_inner()) = Some(Arc::new(cli));
     session.engine.set_owned_child_idle_ready(&session.id, result.is_ok());
     let _mode_guard = mode_target.lock().unwrap_or_else(|e|e.into_inner());
-    claude_core::services::session_permission_mode::set(&session.store.db, &session.id, &session.permissions, session.permissions.get_mode())?;
+    deepseek_code_core::services::session_permission_mode::set(&session.store.db, &session.id, &session.permissions, session.permissions.get_mode())?;
     result
 }
 
 fn update_live_mode(worker: &Worker, target: &ModeTarget, job_id: &str, mode: &str) -> Result<String> {
     let target = target.lock().unwrap_or_else(|e|e.into_inner());
     let control = target.as_ref().context("Session worker has no active initialized turn")?;
-    let bypass = claude_core::services::session_permission_mode::parse(mode)? == claude_core::permissions::PermissionMode::BypassPermissions;
+    let bypass = deepseek_code_core::services::session_permission_mode::parse(mode)? == deepseek_code_core::permissions::PermissionMode::BypassPermissions;
     ensure!(!bypass || control.bypass_available, "Live switching cannot enable bypass permissions unless the launch allows it");
     ensure!(control.job_id == job_id, "Permission change targets a different job");
-    if control.owner_manager.as_ref().is_some_and(|manager| manager.get_mode() == claude_core::permissions::PermissionMode::PlanMode) {
-        ensure!(claude_core::services::session_permission_mode::parse(mode)? == claude_core::permissions::PermissionMode::PlanMode, "Owner remains in plan mode; child mode cannot expand its authority");
+    if control.owner_manager.as_ref().is_some_and(|manager| manager.get_mode() == deepseek_code_core::permissions::PermissionMode::PlanMode) {
+        ensure!(deepseek_code_core::services::session_permission_mode::parse(mode)? == deepseek_code_core::permissions::PermissionMode::PlanMode, "Owner remains in plan mode; child mode cannot expand its authority");
     }
     let job = jobs::get(&worker.root, job_id)?;
     ensure!(job.session_id == worker.session_id && job.finished_ms.is_none(), "Permission change targets an inactive session job");
-    if claude_core::services::session_permission_mode::parse(mode)? == claude_core::permissions::PermissionMode::Auto {
-        claude_core::native_engine::auto_permissions::configured(&crate::services::context(&RuntimePaths::new(worker.root.clone())?)?, &control.provider)?;
+    if deepseek_code_core::services::session_permission_mode::parse(mode)? == deepseek_code_core::permissions::PermissionMode::Auto {
+        deepseek_code_core::native_engine::auto_permissions::configured(&crate::services::context(&RuntimePaths::new(worker.root.clone())?)?, &control.provider)?;
     }
-    claude_core::services::session_permission_mode::set(&control.db, &control.session_id, &control.manager, claude_core::services::session_permission_mode::parse(mode)?)?;
-    claude_core::permissions::set_full_access(control.full_access && bypass);
+    deepseek_code_core::services::session_permission_mode::set(&control.db, &control.session_id, &control.manager, deepseek_code_core::services::session_permission_mode::parse(mode)?)?;
+    deepseek_code_core::permissions::set_full_access(control.full_access && bypass);
     let _ = service::emit_event(&serde_json::json!({"type":"permission_mode","mode":mode,"session_id":control.session_id}));
     Ok(control.session_id.clone())
 }
@@ -288,7 +288,7 @@ fn current_live_mode(worker: &Worker, target: &ModeTarget, job_id: &str) -> Resu
     );
     let mut reply = Reply::ok(Some(job_id.into()));
     reply.permission_mode = Some(
-        claude_core::services::session_permission_mode::name(control.manager.get_mode()).into(),
+        deepseek_code_core::services::session_permission_mode::name(control.manager.get_mode()).into(),
     );
     reply.permission_session_id = Some(control.session_id.clone());
     reply.launch_rules = Some(control.manager.launch_rules(&control.session_id));

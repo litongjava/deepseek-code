@@ -176,7 +176,7 @@ pub fn mode_indicator(mode: &str) -> Option<(String, Color)> {
     let (symbol, title, color) = match mode {
         "accept-edits" => ("\u{23f5}\u{23f5}", "accept edits", Color::Rgb { r: 175, g: 135, b: 255 }),
         "plan" => ("\u{23f8}", "plan mode", Color::Rgb { r: 72, g: 150, b: 140 }),
-        "bypass" if claude_core::permissions::full_access() => ("\u{23f5}\u{23f5}", "full access", red),
+        "bypass" if deepseek_code_core::permissions::full_access() => ("\u{23f5}\u{23f5}", "full access", red),
         "bypass" => ("\u{23f5}\u{23f5}", "bypass permissions", red),
         "dont-ask" => ("\u{23f5}\u{23f5}", "don't ask", red),
         "auto" => ("\u{23f5}\u{23f5}", "auto mode", Color::Yellow),

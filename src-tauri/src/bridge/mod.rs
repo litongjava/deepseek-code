@@ -213,7 +213,7 @@ impl BridgeServer {
             tracing::error!(module = "Bridge", error = %e);
         }
 
-        tracing::info!(module = "Bridge", "Database initialized at {:?}", data_dir.join(claude_core::runtime::DATABASE_FILE));
+        tracing::info!(module = "Bridge", "Database initialized at {:?}", data_dir.join(deepseek_code_core::runtime::DATABASE_FILE));
         tracing::info!(module = "Bridge", "Running migration check...");
         {
             let data_dir_ref = &data_dir;
@@ -268,12 +268,8 @@ impl BridgeServer {
          .with_mcp_registry(Arc::new(crate::mcp::McpToolRegistry::new(mcp_server_manager.clone()))))));
         tracing::info!(module = "Bridge", "NativeEngine initialized");
 
-        let config_path = std::path::Path::new("config/orchestration.toml");
-        let orchestrator_config = if config_path.exists() {
-            OrchestratorConfigFile::load_or_default(config_path)
-        } else {
-            OrchestratorConfigFile::default()
-        };
+        let orchestrator_config =
+            OrchestratorConfigFile::load_or_default(OrchestratorConfigFile::path_in(&data_dir));
         let orchestrator = MultiAgentOrchestrator::new(
             (&orchestrator_config).into(),
             &data_dir,
@@ -808,9 +804,9 @@ fn get_upload_dir() -> PathBuf {
         return dir.clone();
     }
     drop(guard);
-    let default_dir = dirs::data_local_dir()
-        .unwrap_or_else(|| std::env::current_dir().unwrap_or_default())
-        .join("claude-desktop")
+    let default_dir = crate::commands::app_data_dir()
+        .map(PathBuf::from)
+        .unwrap_or_else(|_| std::env::temp_dir().join("deepseek-code"))
         .join("uploads");
     let mut guard = UPLOAD_DIR.lock().unwrap_or_else(|e| e.into_inner());
     *guard = Some(default_dir.clone());
@@ -1795,12 +1791,11 @@ async fn watcher_unwatch(State(state): State<AppState>, Json(req): Json<WatcherW
 }
 
 async fn update_check() -> Json<serde_json::Value> {
-    let updates_url = crate::config::api_endpoints::resolve_api_url(Some("clawparrot"), "updates");
-    let updater = AutoUpdater::new(
-        if updates_url.is_empty() { "https://clawparrot.com/updates" } else { &updates_url },
-        env!("CARGO_PKG_VERSION"),
-        std::path::PathBuf::from(std::env::temp_dir()).join("claude-desktop-updates"),
-    );
+    let updater = match AutoUpdater::configured(std::env::temp_dir().join("deepseek-code-updates"))
+    {
+        Ok(updater) => updater,
+        Err(e) => return Json(serde_json::json!({ "error": format!("{}", e) })),
+    };
     match updater.check_for_updates().await {
         Ok(Some(info)) => Json(serde_json::to_value(info).unwrap_or_default()),
         Ok(None) => Json(serde_json::json!({ "up_to_date": true })),
@@ -1814,13 +1809,31 @@ pub struct UpdateDownloadRequest {
 }
 
 async fn update_download(Json(req): Json<UpdateDownloadRequest>) -> Json<serde_json::Value> {
-    let updates_url = crate::config::api_endpoints::resolve_api_url(Some("clawparrot"), "updates");
-    let updater = AutoUpdater::new(
-        if updates_url.is_empty() { "https://clawparrot.com/updates" } else { &updates_url },
-        env!("CARGO_PKG_VERSION"),
-        std::path::PathBuf::from(std::env::temp_dir()).join("claude-desktop-updates"),
-    );
-    match updater.download_update(&req.url, None).await {
+    let updater = match AutoUpdater::configured(std::env::temp_dir().join("deepseek-code-updates"))
+    {
+        Ok(updater) => updater,
+        Err(e) => return Json(serde_json::json!({ "error": format!("{}", e) })),
+    };
+    // Only the installer the update manifest names, and only with its signature.
+    let signature = match updater.check_for_updates().await {
+        Ok(Some(info)) if info.download_url.as_deref() == Some(req.url.as_str()) => {
+            match info.signature {
+                Some(signature) => signature,
+                None => {
+                    return Json(
+                        serde_json::json!({ "error": "The update manifest has no signature for this download" }),
+                    )
+                }
+            }
+        }
+        Ok(_) => {
+            return Json(
+                serde_json::json!({ "error": "The URL is not the download the update manifest offers" }),
+            )
+        }
+        Err(e) => return Json(serde_json::json!({ "error": format!("{}", e) })),
+    };
+    match updater.download_update(&req.url, Some(&signature)).await {
         Ok(path) => Json(serde_json::json!({ "path": path.to_string_lossy() })),
         Err(e) => Json(serde_json::json!({ "error": format!("{}", e) })),
     }
@@ -2286,20 +2299,24 @@ async fn workflow_stats(
     }
 }
 
+/// The orchestrator settings file in the data directory.
+fn orchestrator_config_path() -> Result<PathBuf, StatusCode> {
+    crate::commands::app_data_dir()
+        .map(|data_dir| OrchestratorConfigFile::path_in(&data_dir))
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)
+}
+
 async fn workflow_config_get() -> Result<Json<serde_json::Value>, StatusCode> {
-    let config_path = std::path::Path::new("config/orchestration.toml");
-    let config = OrchestratorConfigFile::load_or_default(config_path);
+    let config = OrchestratorConfigFile::load_or_default(orchestrator_config_path()?);
     Ok(Json(serde_json::json!({ "success": true, "config": config })))
 }
 
 async fn workflow_config_set(
     Json(config): Json<OrchestratorConfigFile>,
 ) -> Result<Json<serde_json::Value>, StatusCode> {
-    let config_path = std::path::Path::new("config/orchestration.toml");
-    let config_dir = config_path.parent().unwrap_or(std::path::Path::new("."));
-    std::fs::create_dir_all(config_dir).map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
-
-    config.save_to_file(config_path).map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    config
+        .save_to_file(orchestrator_config_path()?)
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
     Ok(Json(serde_json::json!({ "success": true })))
 }

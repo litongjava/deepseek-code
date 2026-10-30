@@ -21,7 +21,7 @@ pub enum PromptEvent {
 
 enum Message {
     Powerup(
-        claude_core::runtime::RuntimePaths,
+        deepseek_code_core::runtime::RuntimePaths,
         String,
         oneshot::Sender<anyhow::Result<()>>,
     ),
@@ -184,7 +184,7 @@ impl TerminalInput {
     /// The existing input thread owns modal keys as well as ordinary prompts.
     pub async fn powerup(
         &mut self,
-        paths: claude_core::runtime::RuntimePaths,
+        paths: deepseek_code_core::runtime::RuntimePaths,
         argument: String,
     ) -> anyhow::Result<()> {
         anyhow::ensure!(self.pending.is_none(), "A prompt is still reading input");

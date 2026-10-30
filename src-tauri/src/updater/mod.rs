@@ -6,7 +6,7 @@ use std::path::PathBuf;
 
 const EMBEDDED_PUBLIC_KEY: &[u8; 32] = include_bytes!("../../update_pubkey.bin");
 
-pub use claude_core::services::updates::UpdateInfo;
+pub use deepseek_code_core::services::updates::UpdateInfo;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct UpdateProgress {
@@ -30,7 +30,23 @@ pub struct AutoUpdater {
     cache_dir: PathBuf,
 }
 
+/// Names the update server. The project publishes no update manifest, so
+/// nothing is contacted unless a deployment sets this.
+pub const UPDATE_URL_ENV: &str = "DEEPSEEK_CODE_UPDATE_URL";
+
 impl AutoUpdater {
+    /// The updater for the server in `DEEPSEEK_CODE_UPDATE_URL`, or an error
+    /// saying none is configured.
+    pub fn configured(cache_dir: PathBuf) -> Result<Self> {
+        Self::from_setting(std::env::var(UPDATE_URL_ENV).ok(), cache_dir)
+    }
+
+    fn from_setting(url: Option<String>, cache_dir: PathBuf) -> Result<Self> {
+        let url = url.filter(|url| !url.trim().is_empty())
+            .ok_or_else(|| anyhow::anyhow!("No update server is configured; set {UPDATE_URL_ENV} to the URL that serves manifest.json"))?;
+        Ok(Self::new(url.trim(), env!("CARGO_PKG_VERSION"), cache_dir))
+    }
+
     pub fn new(update_url: &str, current_version: &str, cache_dir: PathBuf) -> Self {
         Self {
             update_url: update_url.to_string(),
@@ -40,10 +56,11 @@ impl AutoUpdater {
     }
 
     pub async fn check_for_updates(&self) -> Result<Option<UpdateInfo>> {
-        claude_core::services::updates::check(
+        deepseek_code_core::services::updates::check(
             &format!("{}/manifest.json", self.update_url.trim_end_matches('/')),
             &self.current_version,
-        ).await
+        )
+        .await
     }
 
     pub async fn download_update(&self, url: &str, signature: Option<&str>) -> Result<PathBuf> {
@@ -89,7 +106,10 @@ impl AutoUpdater {
             .collect();
 
         if signature_bytes.len() != 64 {
-            tracing::warn!(signature_len = signature_bytes.len(), "Invalid signature length");
+            tracing::warn!(
+                signature_len = signature_bytes.len(),
+                "Invalid signature length"
+            );
             return Ok(false);
         }
 
@@ -119,11 +139,30 @@ impl AutoUpdater {
         #[cfg(not(windows))]
         {
             use std::process::Command;
-            Command::new("open")
-                .arg(file_path)
-                .spawn()?;
+            Command::new("open").arg(file_path).spawn()?;
         }
 
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod configuration_tests {
+    use super::*;
+
+    #[test]
+    fn no_update_server_is_contacted_unless_one_is_configured() {
+        for missing in [None, Some(String::new()), Some("  ".into())] {
+            let error = AutoUpdater::from_setting(missing, PathBuf::from("updates"))
+                .err()
+                .unwrap();
+            assert!(error.to_string().contains(UPDATE_URL_ENV));
+        }
+        let updater = AutoUpdater::from_setting(
+            Some(" https://updates.example.com/dcd ".into()),
+            PathBuf::from("updates"),
+        )
+        .unwrap();
+        assert_eq!(updater.update_url, "https://updates.example.com/dcd");
     }
 }

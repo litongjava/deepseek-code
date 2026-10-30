@@ -322,7 +322,7 @@ const cmdExport: SlashCommand = async (activeId) => {
     const msgs = data?.messages || [];
     let md = `# ${data?.title || '对话导出'}\n\n*导出时间: ${new Date().toLocaleString()}*\n\n`;
     for (const m of msgs) {
-      const role = m.role === 'user' ? '👤 用户' : '🤖 Claude';
+      const role = m.role === 'user' ? '👤 用户' : '🤖 DeepSeek Code';
       const time = m.created_at ? new Date(m.created_at).toLocaleString() : '';
       md += `## ${role} ${time ? `(${time})` : ''}\n\n${m.content || ''}\n\n`;
       if (m.toolCalls?.length) {

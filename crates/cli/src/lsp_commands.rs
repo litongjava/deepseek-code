@@ -1,6 +1,6 @@
 //! `/lsp` and `dcl lsp`: language server status and opt-in managed installs.
 use anyhow::{bail, Context, Result};
-use claude_core::tools::lsp_servers;
+use deepseek_code_core::tools::lsp_servers;
 use serde_json::Value;
 use std::path::Path;
 
@@ -94,7 +94,7 @@ pub async fn handle(
     match (words.next(), words.next()) {
         (None | Some("status" | "list"), None) => {
             let context = crate::services::context(&session.paths)?;
-            let plugins = claude_core::services::plugins::all_language_servers(&context)?;
+            let plugins = deepseek_code_core::services::plugins::all_language_servers(&context)?;
             eprintln!("{}", status_text(&session.workspace, &plugins));
         }
         (Some("install"), Some(id)) => {
@@ -113,11 +113,11 @@ pub async fn handle(
 }
 
 /// `dcl lsp [status] | dcl lsp install LANGUAGE [--yes]`.
-pub async fn command(paths: &claude_core::runtime::RuntimePaths, workspace: &Path, action: Option<&str>, id: Option<&str>, yes: bool) -> Result<()> {
+pub async fn command(paths: &deepseek_code_core::runtime::RuntimePaths, workspace: &Path, action: Option<&str>, id: Option<&str>, yes: bool) -> Result<()> {
     match (action, id) {
         (None | Some("status" | "list"), None) => {
             let context = crate::services::context(paths)?;
-            let plugins = claude_core::services::plugins::all_language_servers(&context)?;
+            let plugins = deepseek_code_core::services::plugins::all_language_servers(&context)?;
             println!("{}", status_text(workspace, &plugins));
             Ok(())
         }

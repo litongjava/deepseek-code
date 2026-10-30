@@ -1,7 +1,7 @@
 //! Supervised idle jobs for owned children and internal command-hook feedback.
 use super::{jobs, service, ModeControl, ModeTarget, Session, Worker};
 use anyhow::{bail, Context, Result};
-use claude_core::native_engine::tool_loop::EngineEvent;
+use deepseek_code_core::native_engine::tool_loop::EngineEvent;
 use serde_json::json;
 use std::sync::{
     atomic::{AtomicBool, Ordering},
@@ -23,7 +23,7 @@ pub(super) async fn start_pending(
         return Ok(());
     };
     let child =
-        if claude_core::services::async_hooks::has_pending_wake(&worker.root, &worker.session_id) {
+        if deepseek_code_core::services::async_hooks::has_pending_wake(&worker.root, &worker.session_id) {
             String::new()
         } else if let Some(child) = session
             .engine
@@ -137,7 +137,7 @@ async fn execute(
         .permissions
         .set_session_rules(&session.id, crate::permission_commands::load(session)?);
     if let Some(mode) =
-        claude_core::services::session_permission_mode::load(&session.store.db, &session.id)?
+        deepseek_code_core::services::session_permission_mode::load(&session.store.db, &session.id)?
     {
         if mode != session.permissions.get_mode() {
             session.permissions.set_mode(mode);
@@ -223,7 +223,7 @@ async fn execute(
                             let answer = jobs::worker_answer(&worker.root, &session.id, &request_id, "question", &question).await?.context("Worker answer channel missing")?;
                             let answer = answer.trim().parse::<usize>().ok().and_then(|i| i.checked_sub(1)).and_then(|i| options.get(i)).cloned().unwrap_or(answer);
                             let answer = if tool_input["subtype"] == "elicitation" {
-                                claude_core::mcp::elicitation::user_response(&answer)
+                                deepseek_code_core::mcp::elicitation::user_response(&answer)
                                     .unwrap_or_else(|_| json!({"action":"cancel"})).to_string()
                             } else { answer };
                             Ok(Some((request_id, answer, false)))

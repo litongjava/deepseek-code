@@ -1,4 +1,4 @@
-use claude_core::{
+use deepseek_code_core::{
     db::{conversation_repo, message_repo},
     native_engine::provider_manager::ApiFormat,
     runtime::{RuntimePaths, SessionStore},
@@ -57,14 +57,14 @@ fn fork_preserves_tool_history_and_leaves_source_unchanged_after_reopen() {
     {
         let store = SessionStore::new(paths.open_database().unwrap());
         source = store.create(temp.path(), "model", "provider").unwrap();
-        let restricted = claude_core::services::agents::Definition {
+        let restricted = deepseek_code_core::services::agents::Definition {
             id: "read-only".into(),
             description: "Read-only investigation".into(),
             system_prompt: "Inspect files without making changes".into(),
             tools: Some(vec!["Read".into()]),
             legacy: None,
         };
-        claude_core::services::agents::bind(&store.db, &source, &restricted).unwrap();
+        deepseek_code_core::services::agents::bind(&store.db, &source, &restricted).unwrap();
         store.append(&source, "user", "Read file").unwrap();
         let answer = store.append(&source, "assistant", "File contents").unwrap();
         store
@@ -88,10 +88,10 @@ fn fork_preserves_tool_history_and_leaves_source_unchanged_after_reopen() {
         store.append(&fork, "user", "Next step").unwrap();
     }
     let store = SessionStore::new(paths.open_database().unwrap());
-    let source_agent = claude_core::services::agents::for_session(&store.db, &source)
+    let source_agent = deepseek_code_core::services::agents::for_session(&store.db, &source)
         .unwrap()
         .unwrap();
-    let fork_agent = claude_core::services::agents::for_session(&store.db, &fork)
+    let fork_agent = deepseek_code_core::services::agents::for_session(&store.db, &fork)
         .unwrap()
         .unwrap();
     assert_eq!(source_agent, fork_agent);

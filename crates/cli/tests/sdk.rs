@@ -441,13 +441,13 @@ async fn output_limit_is_incomplete_retains_partial_and_never_replays_tools() {
                 1
             } + 3;
             assert_eq!(server.fixture.requests.lock().unwrap().len(), expected);
-            let paths = claude_core::runtime::RuntimePaths::new(root.path().join("data")).unwrap();
-            let store = claude_core::runtime::SessionStore::new(paths.open_database().unwrap());
+            let paths = deepseek_code_core::runtime::RuntimePaths::new(root.path().join("data")).unwrap();
+            let store = deepseek_code_core::runtime::SessionStore::new(paths.open_database().unwrap());
             let id = result["session_id"].as_str().unwrap();
             let history = store
                 .model_history(
                     id,
-                    &claude_core::native_engine::provider_manager::ApiFormat::OpenAI,
+                    &deepseek_code_core::native_engine::provider_manager::ApiFormat::OpenAI,
                 )
                 .unwrap();
             let text = serde_json::to_string(&history).unwrap();
@@ -463,7 +463,7 @@ async fn output_limit_is_incomplete_retains_partial_and_never_replays_tools() {
                 let retained = store
                     .db
                     .with_conn(|conn| {
-                        claude_core::db::message_repo::get_messages_by_conversation(conn, id)
+                        deepseek_code_core::db::message_repo::get_messages_by_conversation(conn, id)
                     })
                     .unwrap()
                     .unwrap();
@@ -477,12 +477,12 @@ async fn output_limit_is_incomplete_retains_partial_and_never_replays_tools() {
                 .db
                 .with_conn(|conn| -> anyhow::Result<Vec<Value>> {
                     let messages =
-                        claude_core::db::message_repo::get_messages_by_conversation(conn, id)?;
+                        deepseek_code_core::db::message_repo::get_messages_by_conversation(conn, id)?;
                     Ok(messages
                         .iter()
                         .filter(|m| m.role == "assistant")
                         .map(|m| {
-                            claude_core::db::message_repo::get_request_snapshots(conn, &m.id)
+                            deepseek_code_core::db::message_repo::get_request_snapshots(conn, &m.id)
                                 .unwrap()
                         })
                         .collect())
@@ -529,8 +529,8 @@ async fn one_million_suffix_is_selection_metadata_not_api_model() {
             .unwrap()
             .iter()
             .all(|request| request["model"] == "deepseek-v4.1-flash"));
-        let paths = claude_core::runtime::RuntimePaths::new(root.path().join("data")).unwrap();
-        let store = claude_core::runtime::SessionStore::new(paths.open_database().unwrap());
+        let paths = deepseek_code_core::runtime::RuntimePaths::new(root.path().join("data")).unwrap();
+        let store = deepseek_code_core::runtime::SessionStore::new(paths.open_database().unwrap());
         assert_eq!(
             store
                 .resume(result["session_id"].as_str().unwrap())
@@ -542,13 +542,13 @@ async fn one_million_suffix_is_selection_metadata_not_api_model() {
         store
             .db
             .with_conn(|conn| -> anyhow::Result<()> {
-                let messages = claude_core::db::message_repo::get_messages_by_conversation(
+                let messages = deepseek_code_core::db::message_repo::get_messages_by_conversation(
                     conn,
                     result["session_id"].as_str().unwrap(),
                 )?;
                 for message in messages.iter().filter(|m| m.role == "assistant") {
                     let snapshots =
-                        claude_core::db::message_repo::get_request_snapshots(conn, &message.id)?;
+                        deepseek_code_core::db::message_repo::get_request_snapshots(conn, &message.id)?;
                     assert!(!snapshots.as_array().unwrap().is_empty());
                     for snapshot in snapshots.as_array().unwrap() {
                         assert_eq!(snapshot["contextWindow"], 1_000_000, "{snapshot}");
@@ -618,12 +618,12 @@ async fn sdk_question_answers_reach_model_and_history_without_rewriting_question
             assert!(requests[1]["messages"]
                 .to_string()
                 .contains("Rust 中文😀 and custom free text"));
-            let paths = claude_core::runtime::RuntimePaths::new(root.path().join("data")).unwrap();
-            let store = claude_core::runtime::SessionStore::new(paths.open_database().unwrap());
+            let paths = deepseek_code_core::runtime::RuntimePaths::new(root.path().join("data")).unwrap();
+            let store = deepseek_code_core::runtime::SessionStore::new(paths.open_database().unwrap());
             let history = store
                 .model_history(
                     result["session_id"].as_str().unwrap(),
-                    &claude_core::native_engine::provider_manager::ApiFormat::OpenAI,
+                    &deepseek_code_core::native_engine::provider_manager::ApiFormat::OpenAI,
                 )
                 .unwrap();
             assert!(serde_json::to_string(&history)
@@ -639,8 +639,8 @@ async fn embedded_images_reach_both_providers_and_survive_history_and_fork() {
     for anthropic in [false, true] {
         let server = Server::start(anthropic, Mode::Text).await;
         let root = tempfile::tempdir().unwrap();
-        let paths = claude_core::runtime::RuntimePaths::new(root.path().join("data")).unwrap();
-        let mut config = claude_core::config::AppConfig::default();
+        let paths = deepseek_code_core::runtime::RuntimePaths::new(root.path().join("data")).unwrap();
+        let mut config = deepseek_code_core::config::AppConfig::default();
         std::fs::create_dir_all(&paths.data_dir).unwrap();
         config.providers.push(serde_json::from_value(json!({"id":"vision-fixture","name":"Vision fixture","provider_type":"openai","base_url":server.url,"enabled":true,"is_default":false,"settings":{},"supports_web_search":false,"models":[{"id":"fixture-model","name":"fixture-model","enabled":true,"supports_vision":true,"supports_tools":true,"supports_text":true,"supports_streaming":true}]})).unwrap());
         std::fs::write(
@@ -684,13 +684,13 @@ async fn embedded_images_reach_both_providers_and_survive_history_and_fork() {
             }
         }
         drop(requests);
-        let store = claude_core::runtime::SessionStore::new(paths.open_database().unwrap());
+        let store = deepseek_code_core::runtime::SessionStore::new(paths.open_database().unwrap());
         let id = result["session_id"].as_str().unwrap();
         let fork = store.fork(id).unwrap();
         let history = store
             .model_history(
                 &fork,
-                &claude_core::native_engine::provider_manager::ApiFormat::OpenAI,
+                &deepseek_code_core::native_engine::provider_manager::ApiFormat::OpenAI,
             )
             .unwrap();
         assert!(history[0].to_string().contains(PNG));
@@ -1053,7 +1053,7 @@ async fn sdk_plan_clear_boundary_survives_actual_cli_process() {
             .as_str()
             .unwrap()
             .to_owned();
-        assert_eq!(choice, claude_core::services::plan_approval::OPTIONS[0]);
+        assert_eq!(choice, deepseek_code_core::services::plan_approval::OPTIONS[0]);
         updated["answers"] = json!({question: choice});
         client.send(json!({"type":"control_response","response":{"subtype":"success","request_id":request["request_id"],"response":{"behavior":"allow","updatedInput":updated}}})).await;
         let result = client.result().await;
@@ -1064,18 +1064,18 @@ async fn sdk_plan_clear_boundary_survives_actual_cli_process() {
         let resumed = requests[1]["messages"].to_string();
         assert!(resumed.contains("APPROVED_PLAN_SENTINEL"));
         assert!(!resumed.contains("OLD_HISTORY_SENTINEL"));
-        let paths = claude_core::runtime::RuntimePaths::new(root.path().join("data")).unwrap();
-        let store = claude_core::runtime::SessionStore::new(paths.open_database().unwrap());
+        let paths = deepseek_code_core::runtime::RuntimePaths::new(root.path().join("data")).unwrap();
+        let store = deepseek_code_core::runtime::SessionStore::new(paths.open_database().unwrap());
         let session = result["session_id"].as_str().unwrap();
         assert!(
-            claude_core::services::plan_approval::latest_boundary(&store.db, session)
+            deepseek_code_core::services::plan_approval::latest_boundary(&store.db, session)
                 .unwrap()
                 .is_some()
         );
         let history = store
             .model_history(
                 session,
-                &claude_core::native_engine::provider_manager::ApiFormat::OpenAI,
+                &deepseek_code_core::native_engine::provider_manager::ApiFormat::OpenAI,
             )
             .unwrap();
         let history = serde_json::to_string(&history).unwrap();
@@ -1111,14 +1111,14 @@ async fn auto_extension_uses_only_explicit_classifier_and_never_executes_on_fail
             axum::serve(listener, app).await.unwrap();
         });
         let context =
-            claude_core::services::session_messages::context(&root.path().join("data")).unwrap();
+            deepseek_code_core::services::session_messages::context(&root.path().join("data")).unwrap();
         std::fs::write(root.path().join("data/providers.json"), json!([{"id":"classifier-only","name":"Fixture","base_url":endpoint,"api_key":"isolated-classifier-fixture","api_format":"openai","enabled":true,"models":[{"id":"explicit-classifier","name":"Fixture","enabled":true,"supports_vision":false,"supports_web_search":false}]}]).to_string()).unwrap();
-        claude_core::permissions::auto_config::save(
+        deepseek_code_core::permissions::auto_config::save(
             &context,
-            &claude_core::permissions::auto_config::AutoConfig {
+            &deepseek_code_core::permissions::auto_config::AutoConfig {
                 enabled: true,
                 classifier: Some(
-                    claude_core::permissions::auto_config::ClassifierSelection::Named {
+                    deepseek_code_core::permissions::auto_config::ClassifierSelection::Named {
                         provider_id: "classifier-only".into(),
                         model_id: "explicit-classifier".into(),
                     },
@@ -1170,13 +1170,13 @@ async fn sdk_initialize_applies_runtime_overrides_and_reports_real_resources() {
     for anthropic in [false, true] {
         let server = Server::start(anthropic, Mode::SchemaGood).await;
         let root = tempfile::tempdir().unwrap();
-        let paths = claude_core::runtime::RuntimePaths::new(root.path().join("data")).unwrap();
-        let context = claude_core::services::ServiceContext::open(
+        let paths = deepseek_code_core::runtime::RuntimePaths::new(root.path().join("data")).unwrap();
+        let context = deepseek_code_core::services::ServiceContext::open(
             paths.clone(),
-            Arc::new(claude_core::services::EnvironmentCredentials),
+            Arc::new(deepseek_code_core::services::EnvironmentCredentials),
         )
         .unwrap();
-        claude_core::services::agents::install(&context,serde_json::from_value(json!({"id":"sdk-fixture-agent","description":"Actual configured agent","system_prompt":"Use local fixtures","tools":["Read"]})).unwrap()).unwrap();
+        deepseek_code_core::services::agents::install(&context,serde_json::from_value(json!({"id":"sdk-fixture-agent","description":"Actual configured agent","system_prompt":"Use local fixtures","tools":["Read"]})).unwrap()).unwrap();
         let session = uuid::Uuid::new_v4().to_string();
         context
             .save_setting(
@@ -1194,7 +1194,7 @@ async fn sdk_initialize_applies_runtime_overrides_and_reports_real_resources() {
         let skill = root.path().join(".claude/skills/sdk-fixture-skill");
         std::fs::create_dir_all(&skill).unwrap();
         std::fs::write(skill.join("SKILL.md"),"---\nname: sdk-fixture-skill\ndescription: Actual discovered SDK fixture\n---\nInspect fixture files.").unwrap();
-        let mut config = claude_core::config::AppConfig::default();
+        let mut config = deepseek_code_core::config::AppConfig::default();
         config.providers.push(serde_json::from_value(json!({"id":"sdk-fixture","name":"SDK fixture provider","provider_type":if anthropic {"anthropic"}else{"openai"},"base_url":server.url,"enabled":true,"is_default":false,"settings":{},"supports_web_search":false,"models":[{"id":"fixture-model","name":"Fixture primary","enabled":true,"supports_vision":false,"supports_tools":true,"supports_text":true,"supports_streaming":true},{"id":"fixture-second","name":"Fixture secondary","enabled":true,"supports_vision":false,"supports_tools":true,"supports_text":true,"supports_streaming":true},{"id":"fixture-disabled","name":"Hidden","enabled":false,"supports_vision":false,"supports_tools":true,"supports_text":true,"supports_streaming":true}]})).unwrap());
         let mut other = config.providers.last().unwrap().clone();
         other.id = "other-fixture".into();
@@ -1463,7 +1463,7 @@ async fn typed_sdk_approval_rewrites_both_provider_histories_and_empty_input_pre
             }
             drop(requests);
             assert!(client.finish().await.0.success());
-            let db = claude_core::db::DbManager::new(root.path().join("data").join(claude_core::runtime::DATABASE_FILE))
+            let db = deepseek_code_core::db::DbManager::new(root.path().join("data").join(deepseek_code_core::runtime::DATABASE_FILE))
                 .unwrap();
             let persisted: String = db
                 .with_conn(|connection| {
@@ -1599,13 +1599,13 @@ async fn sdk_initialize_agents_execute_with_bounded_tools_and_run_local_catalog(
             let parent_limited = case == "parent";
             let server = Server::start(anthropic, Mode::RuntimeAgent).await;
             let root = tempfile::tempdir().unwrap();
-            let paths = claude_core::runtime::RuntimePaths::new(root.path().join("data")).unwrap();
-            let context = claude_core::services::ServiceContext::open(
+            let paths = deepseek_code_core::runtime::RuntimePaths::new(root.path().join("data")).unwrap();
+            let context = deepseek_code_core::services::ServiceContext::open(
                 paths.clone(),
-                Arc::new(claude_core::services::EnvironmentCredentials),
+                Arc::new(deepseek_code_core::services::EnvironmentCredentials),
             )
             .unwrap();
-            let mut config = claude_core::config::AppConfig::default();
+            let mut config = deepseek_code_core::config::AppConfig::default();
             config.providers.push(serde_json::from_value(json!({"id":"sdk-fixture","name":"SDK fixture provider","provider_type":if anthropic {"anthropic"}else{"openai"},"base_url":server.url,"enabled":true,"is_default":false,"settings":{},"supports_web_search":false,"models":[{"id":"fixture-model","name":"Fixture primary","enabled":true,"supports_vision":false,"supports_tools":true,"supports_text":true,"supports_streaming":true},{"id":"fixture-second","name":"Fixture secondary","enabled":true,"supports_vision":false,"supports_tools":true,"supports_text":true,"supports_streaming":true}]})).unwrap());
             std::fs::write(
                 paths.data_dir.join("config.json"),
@@ -1613,12 +1613,12 @@ async fn sdk_initialize_agents_execute_with_bounded_tools_and_run_local_catalog(
             )
             .unwrap();
             let parent_session = if parent_limited {
-                let definition: claude_core::services::agents::Definition = serde_json::from_value(json!({"id":"limited-parent","description":"Read-only parent","system_prompt":"Parent scope","tools":["Agent","Read"]})).unwrap();
-                claude_core::services::agents::install(&context, definition.clone()).unwrap();
-                let id = claude_core::runtime::SessionStore::new(context.db.clone())
+                let definition: deepseek_code_core::services::agents::Definition = serde_json::from_value(json!({"id":"limited-parent","description":"Read-only parent","system_prompt":"Parent scope","tools":["Agent","Read"]})).unwrap();
+                deepseek_code_core::services::agents::install(&context, definition.clone()).unwrap();
+                let id = deepseek_code_core::runtime::SessionStore::new(context.db.clone())
                     .create(root.path(), "fixture-model", "sdk-fixture")
                     .unwrap();
-                claude_core::services::agents::bind(&context.db, &id, &definition).unwrap();
+                deepseek_code_core::services::agents::bind(&context.db, &id, &definition).unwrap();
                 Some(id)
             } else {
                 None
@@ -1701,13 +1701,13 @@ async fn sdk_initialize_agents_execute_with_bounded_tools_and_run_local_catalog(
             assert_eq!(names.contains(&"Bash"), case == "inherit-deny");
             drop(requests);
             assert!(client.finish().await.0.success());
-            let paths = claude_core::runtime::RuntimePaths::new(root.path().join("data")).unwrap();
-            let context = claude_core::services::ServiceContext::open(
+            let paths = deepseek_code_core::runtime::RuntimePaths::new(root.path().join("data")).unwrap();
+            let context = deepseek_code_core::services::ServiceContext::open(
                 paths,
-                Arc::new(claude_core::services::EnvironmentCredentials),
+                Arc::new(deepseek_code_core::services::EnvironmentCredentials),
             )
             .unwrap();
-            assert!(!claude_core::services::agents::list(&context)
+            assert!(!deepseek_code_core::services::agents::list(&context)
                 .unwrap()
                 .iter()
                 .any(|agent| agent.id == "sdk-child"));

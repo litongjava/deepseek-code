@@ -9,7 +9,7 @@ use crate::{
     },
 };
 use anyhow::{ensure, Result};
-use claude_core::services::background_sessions::{self as jobs, Launch};
+use deepseek_code_core::services::background_sessions::{self as jobs, Launch};
 use serde_json::Value;
 
 pub async fn turn(
@@ -68,7 +68,7 @@ async fn single_turn(
         display.set_todos(crate::background_commands::todo_items(&session.paths, &session.id));
     }
     let proposal_frontend = if display.live.is_some() {
-        Some(claude_core::services::goal_proposals::Frontend::acquire(session.store.db.clone(), &session.id)?)
+        Some(deepseek_code_core::services::goal_proposals::Frontend::acquire(session.store.db.clone(), &session.id)?)
     } else { None };
     let job = if std::env::var("CLAUDE_RUST_SINGLE_TURN_WORKER").as_deref() == Ok("1") {
         jobs::spawn_foreground(
@@ -84,7 +84,7 @@ async fn single_turn(
             &environment,
         )?
     } else {
-        use claude_core::services::session_worker::{self, Request};
+        use deepseek_code_core::services::session_worker::{self, Request};
         let worker =
             session_worker::ensure_worker(root, &executable, &session.id, &session.workspace)
                 .await?;
@@ -113,7 +113,7 @@ async fn single_turn(
 }
 
 fn activate_goal_proposal(session: &Session, job: &str) -> Result<Option<String>> {
-    let kickoff = claude_core::services::goal_proposals::activate_from_job(&session.store.db, &session.id, &session.paths.data_dir, &session.workspace, &session.permissions, job)?;
+    let kickoff = deepseek_code_core::services::goal_proposals::activate_from_job(&session.store.db, &session.id, &session.paths.data_dir, &session.workspace, &session.permissions, job)?;
     if kickoff.is_some() { crate::session_commands::goal_notice("Approved session goal is now active."); }
     Ok(kickoff)
 }
@@ -138,7 +138,7 @@ pub async fn attach(cli: &Cli, session: &Session, id: &str, input: &mut Option<T
     }
     let main_execution = is_main_execution(&session.paths.data_dir, &job, &session.id)?;
     let proposal_frontend = if display.live.is_some() && main_execution {
-        Some(claude_core::services::goal_proposals::Frontend::acquire(session.store.db.clone(), &session.id)?)
+        Some(deepseek_code_core::services::goal_proposals::Frontend::acquire(session.store.db.clone(), &session.id)?)
     } else { None };
     present(session, &job, input, &mut display, false, proposal_frontend.as_ref()).await?;
     let kickoff = if main_execution && jobs::get(&session.paths.data_dir, &job.id)?.status == "completed" { activate_goal_proposal(session, &job.id)? } else { None };
@@ -156,18 +156,18 @@ fn authorize_attachment(job: &jobs::Job, session: &str) -> Result<()> {
 }
 
 fn is_main_execution(root: &std::path::Path, job: &jobs::Job, session: &str) -> Result<bool> {
-    Ok(job.session_id == session && claude_core::services::session_worker::job_execution_session(root, job)? == session)
+    Ok(job.session_id == session && deepseek_code_core::services::session_worker::job_execution_session(root, job)? == session)
 }
 
 pub(crate) fn cancel_job(session: &Session, id: &str) -> Result<()> {
     let job = jobs::cancel(&session.paths.data_dir, id)?;
-    let execution_session = claude_core::services::session_worker::job_execution_session(
+    let execution_session = deepseek_code_core::services::session_worker::job_execution_session(
         &session.paths.data_dir,
         &job,
     )?;
-    claude_core::services::async_hooks::signal_cancel(&session.paths.data_dir, &execution_session);
+    deepseek_code_core::services::async_hooks::signal_cancel(&session.paths.data_dir, &execution_session);
     if is_main_execution(&session.paths.data_dir, &job, &session.id)? {
-        claude_core::services::goal_proposals::discard(&session.store.db, &session.id)?;
+        deepseek_code_core::services::goal_proposals::discard(&session.store.db, &session.id)?;
     }
     Ok(())
 }
@@ -178,7 +178,7 @@ async fn present(
     input: &mut Option<TerminalInput>,
     display: &mut TurnDisplay,
     sync_plan_mode: bool,
-    proposal_frontend: Option<&claude_core::services::goal_proposals::Frontend>,
+    proposal_frontend: Option<&deepseek_code_core::services::goal_proposals::Frontend>,
 ) -> Result<()> {
     authorize_attachment(job, &session.id)?;
     let root = &session.paths.data_dir;
@@ -259,11 +259,11 @@ async fn observe(
     input: &mut Option<TerminalInput>,
     display: &mut TurnDisplay,
     sync_plan_mode: bool,
-    proposal_frontend: Option<&claude_core::services::goal_proposals::Frontend>,
+    proposal_frontend: Option<&deepseek_code_core::services::goal_proposals::Frontend>,
 ) -> Result<bool> {
     let root = &session.paths.data_dir;
     let initial_job = jobs::get(root, id)?;
-    let execution_session = claude_core::services::session_worker::job_execution_session(root, &initial_job)?;
+    let execution_session = deepseek_code_core::services::session_worker::job_execution_session(root, &initial_job)?;
     let child_target = (execution_session != initial_job.session_id).then_some(execution_session);
     if let Some(child) = &child_target {
         display.notice(&format!("Task controls apply to owned child session {child}."));
@@ -293,9 +293,9 @@ async fn observe(
     let mut final_mode_synced = false;
     let mut shown_proposal = None::<String>;
     let relay = session.remote_relay();
-    let mut remote_request: Option<claude_core::services::remote_control::PermissionRequest> = None;
+    let mut remote_request: Option<deepseek_code_core::services::remote_control::PermissionRequest> = None;
     let mut remote_interrupts = session.remote_interrupts();
-    let mut local_hooks = claude_core::services::hook_progress::subscribe(&session.id);
+    let mut local_hooks = deepseek_code_core::services::hook_progress::subscribe(&session.id);
     let mut local_hook_ids = Vec::new();
     for (id, message) in local_hooks.snapshot() {
         display.hook_progress(&id, Some(&message));
@@ -442,7 +442,7 @@ async fn observe(
                     notified = std::time::Instant::now();
                 }
             },
-            allowed = claude_core::services::remote_control::remote_decision(&mut remote_request) => {
+            allowed = deepseek_code_core::services::remote_control::remote_decision(&mut remote_request) => {
                 let request = remote_request.take().unwrap().request_id.clone();
                 answer_if_current(root, id, owner, &request, if allowed { "y" } else { "n" })?;
                 answered.insert(request.clone());
@@ -513,14 +513,14 @@ async fn observe(
                         let change = async {
                             let job = jobs::get(root, id)?;
                             ensure!(job.session_id == session.id, "Permission cycling applies to your current session; attach that session directly to change its mode");
-                            let target = claude_core::services::session_worker::job_execution_session(root, &job)?;
+                            let target = deepseek_code_core::services::session_worker::job_execution_session(root, &job)?;
                             let mode = if target != job.session_id {
                                 let current = refresh_child_permission_mode(session, &job, &target).await?;
                                 display.notice(&format!("Changing mode for owned child session {target}."));
                                 match current { "ask" => "accept-edits", "accept-edits" => "plan", _ => "ask" }
                             } else { session.next_permission_mode() };
-                            claude_core::services::session_worker::set_permission_mode(root, &session.id, id, mode).await?;
-                            if target == job.session_id { session.permissions.set_mode(claude_core::services::session_permission_mode::parse(mode)?); }
+                            deepseek_code_core::services::session_worker::set_permission_mode(root, &session.id, id, mode).await?;
+                            if target == job.session_id { session.permissions.set_mode(deepseek_code_core::services::session_permission_mode::parse(mode)?); }
                             Ok::<_, anyhow::Error>(mode)
                         }.await;
                         match change {
@@ -549,8 +549,8 @@ async fn observe(
                             if let Some(message) = crate::session_commands::live_goal_command(session, &prompt)? {
                                 display.notice(&message);
                             } else {
-                                if let Some(goal) = claude_core::services::session_goals::active(&session.store.db, &session.id)?.filter(|g|g.state == "waiting") {
-                                    claude_core::services::session_goals::pause(&session.store.db, &session.id, &goal.id, "New user input interrupted the retry delay")?;
+                                if let Some(goal) = deepseek_code_core::services::session_goals::active(&session.store.db, &session.id)?.filter(|g|g.state == "waiting") {
+                                    deepseek_code_core::services::session_goals::pause(&session.store.db, &session.id, &goal.id, "New user input interrupted the retry delay")?;
                                     jobs::cancel(root, id)?;
                                     cancelled = true;
                                 }
@@ -558,7 +558,7 @@ async fn observe(
                                     // As in the reference CLI the running turn reads it after its
                                     // next tool results; unread messages become the next prompt.
                                     crate::images::share(&session.id, &prompt);
-                                    claude_core::services::input_queue::push(&session.store.db, &session.id, &prompt)?;
+                                    deepseek_code_core::services::input_queue::push(&session.store.db, &session.id, &prompt)?;
                                     queued_inputs.push(prompt);
                                     display.queued(queued_inputs.clone());
                                 } else {
@@ -570,11 +570,11 @@ async fn observe(
                     },
                     Some(Action::BackgroundShell | Action::SendNow) => {
                         if child_target.is_none() {
-                            claude_core::tools::background_shell::request_background(root, &session.id)?;
+                            deepseek_code_core::tools::background_shell::request_background(root, &session.id)?;
                         }
                     },
                     Some(Action::EditQueued) => {
-                        let taken = claude_core::services::input_queue::take(&session.store.db, &session.id)?;
+                        let taken = deepseek_code_core::services::input_queue::take(&session.store.db, &session.id)?;
                         queued_inputs.clear();
                         display.queued(Vec::new());
                         if !taken.is_empty() { display.set_draft(&taken.join("\n")); }
@@ -647,11 +647,11 @@ fn permission_event(event: &Value) -> bool {
 }
 
 async fn refresh_permission_mode(session: &Session, job: &jobs::Job) -> Result<&'static str> {
-    ensure!(claude_core::services::session_worker::job_execution_session(&session.paths.data_dir, job)? == session.id, "Task controls target an owned child, not the owner");
+    ensure!(deepseek_code_core::services::session_worker::job_execution_session(&session.paths.data_dir, job)? == session.id, "Task controls target an owned child, not the owner");
     refresh_permission_mode_with_query(
         session,
         job,
-        claude_core::services::session_worker::permission_mode(
+        deepseek_code_core::services::session_worker::permission_mode(
             &session.paths.data_dir,
             &session.id,
             &job.id,
@@ -661,7 +661,7 @@ async fn refresh_permission_mode(session: &Session, job: &jobs::Job) -> Result<&
 }
 
 async fn refresh_child_permission_mode(session: &Session, job: &jobs::Job, child: &str) -> Result<&'static str> {
-    use claude_core::services::{session_permission_mode, session_worker};
+    use deepseek_code_core::services::{session_permission_mode, session_worker};
     ensure!(session_worker::job_execution_session(&session.paths.data_dir, job)? == child, "Child task target changed");
     let mode = if job.finished_ms.is_some() {
         session_permission_mode::load(&session.store.db, child)?.unwrap_or(session.permissions.get_mode())
@@ -678,7 +678,7 @@ async fn refresh_permission_mode_with_query(
     job: &jobs::Job,
     query: impl std::future::Future<Output = Result<String>>,
 ) -> Result<&'static str> {
-    use claude_core::services::session_permission_mode;
+    use deepseek_code_core::services::session_permission_mode;
     ensure!(
         job.session_id == session.id,
         "Permission mode belongs to another session"
@@ -715,8 +715,8 @@ async fn refresh_permission_mode_with_query(
 }
 
 
-fn plan_event_mode(event: &Value) -> Option<claude_core::permissions::PermissionMode> {
-    use claude_core::permissions::PermissionMode;
+fn plan_event_mode(event: &Value) -> Option<deepseek_code_core::permissions::PermissionMode> {
+    use deepseek_code_core::permissions::PermissionMode;
     if event["type"] != "tool_result" || event["is_error"] != false {
         return None;
     }
@@ -733,7 +733,7 @@ fn plan_event_mode(event: &Value) -> Option<claude_core::permissions::Permission
 
 #[test]
 fn plan_worker_events_only_apply_successful_transitions() {
-    use claude_core::permissions::PermissionMode;
+    use deepseek_code_core::permissions::PermissionMode;
     use serde_json::json;
     let event = |name, output, failed| json!({"type":"tool_result","name":name,"output":output,"is_error":failed});
     assert_eq!(
@@ -879,14 +879,14 @@ mod failure_tests {
     #[tokio::test]
     async fn attachment_cannot_consume_another_tasks_goal_and_main_cancel_revokes_it() {
         use clap::Parser;
-        use claude_core::services::{goal_proposals, session_goals};
+        use deepseek_code_core::services::{goal_proposals, session_goals};
         let temp = tempfile::tempdir().unwrap();
-        let paths = claude_core::runtime::RuntimePaths::new(temp.path().join("data")).unwrap();
-        let store = claude_core::runtime::SessionStore::new(paths.open_database().unwrap());
+        let paths = deepseek_code_core::runtime::RuntimePaths::new(temp.path().join("data")).unwrap();
+        let store = deepseek_code_core::runtime::SessionStore::new(paths.open_database().unwrap());
         let parent = store.create(temp.path(), "fixture", "fixture").unwrap();
         let child = store.create(temp.path(), "fixture", "fixture").unwrap();
         let cli = Cli::try_parse_from(["dcl"]).unwrap();
-        let mut provider = claude_core::runtime::provider_from_config(&crate::config::provider_template("fixture"));
+        let mut provider = deepseek_code_core::runtime::provider_from_config(&crate::config::provider_template("fixture"));
         provider.id = "fixture".into();
         let session = Session::open(&cli, &paths, crate::config::Selection {
             providers: vec![provider], model: "fixture".into(), provider_id: "fixture".into(),
@@ -952,8 +952,8 @@ mod failure_tests {
     async fn attachment_checks_owner_and_reads_completed_job_without_resubmission() {
         use clap::Parser;
         let temp = tempfile::tempdir().unwrap();
-        let paths = claude_core::runtime::RuntimePaths::new(temp.path().join("data")).unwrap();
-        let store = claude_core::runtime::SessionStore::new(paths.open_database().unwrap());
+        let paths = deepseek_code_core::runtime::RuntimePaths::new(temp.path().join("data")).unwrap();
+        let store = deepseek_code_core::runtime::SessionStore::new(paths.open_database().unwrap());
         let parent = store.create(temp.path(), "fixture", "fixture").unwrap();
         let child = store.create(temp.path(), "fixture", "fixture").unwrap();
         let id = uuid::Uuid::new_v4().to_string();
@@ -987,7 +987,7 @@ mod failure_tests {
         std::fs::write(directory.join("output.jsonl"), events).unwrap();
         let cli = Cli::try_parse_from(["dcl"]).unwrap();
         for session_id in [&parent, &child] {
-            let mut provider = claude_core::runtime::provider_from_config(
+            let mut provider = deepseek_code_core::runtime::provider_from_config(
                 &crate::config::provider_template("fixture"),
             );
             provider.id = "fixture".into();
@@ -1027,10 +1027,10 @@ mod failure_tests {
     async fn failed_observation_preserves_running_job_and_original_diagnostic() {
         use clap::Parser;
         let temp = tempfile::tempdir().unwrap();
-        let paths = claude_core::runtime::RuntimePaths::new(temp.path().join("data")).unwrap();
-        let store = claude_core::runtime::SessionStore::new(paths.open_database().unwrap());
+        let paths = deepseek_code_core::runtime::RuntimePaths::new(temp.path().join("data")).unwrap();
+        let store = deepseek_code_core::runtime::SessionStore::new(paths.open_database().unwrap());
         let parent = store.create(temp.path(), "fixture", "fixture").unwrap();
-        let mut provider = claude_core::runtime::provider_from_config(
+        let mut provider = deepseek_code_core::runtime::provider_from_config(
             &crate::config::provider_template("fixture"),
         );
         provider.id = "fixture".into();
@@ -1085,10 +1085,10 @@ mod failure_tests {
     async fn permission_refresh_recovers_completion_race_but_preserves_active_errors() {
         use clap::Parser;
         let temp = tempfile::tempdir().unwrap();
-        let paths = claude_core::runtime::RuntimePaths::new(temp.path().join("data")).unwrap();
-        let store = claude_core::runtime::SessionStore::new(paths.open_database().unwrap());
+        let paths = deepseek_code_core::runtime::RuntimePaths::new(temp.path().join("data")).unwrap();
+        let store = deepseek_code_core::runtime::SessionStore::new(paths.open_database().unwrap());
         let parent = store.create(temp.path(), "fixture", "fixture").unwrap();
-        let mut provider = claude_core::runtime::provider_from_config(
+        let mut provider = deepseek_code_core::runtime::provider_from_config(
             &crate::config::provider_template("fixture"),
         );
         provider.id = "fixture".into();
@@ -1128,7 +1128,7 @@ mod failure_tests {
             serde_json::to_vec(&job).unwrap(),
         )
         .unwrap();
-        use claude_core::{permissions::PermissionMode, services::session_permission_mode};
+        use deepseek_code_core::{permissions::PermissionMode, services::session_permission_mode};
         // The poll already captured this running job. Change its durable state
         // inside the query future to deterministically reproduce the IPC race.
         let old = job.clone();

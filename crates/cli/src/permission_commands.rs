@@ -2,7 +2,7 @@
 use crate::session::Session;
 use anyhow::{Context, Result};
 use crate::terminal::tool_view::Remember;
-use claude_core::{db::DbManager, native_engine::permission_response::Commit, permissions::rules::PermissionAction};
+use deepseek_code_core::{db::DbManager, native_engine::permission_response::Commit, permissions::rules::PermissionAction};
 use std::collections::HashMap;
 
 /// Saves the session's rules and applies them at once.
@@ -41,11 +41,11 @@ pub fn remember_commit(session: &Session, remember: &Remember) -> Result<Commit>
     Ok(match remember.clone() {
         Remember::AcceptEdits | Remember::Auto => {
             let name = if *remember == Remember::Auto { "auto" } else { "accept-edits" };
-            let mode = claude_core::services::session_permission_mode::parse(name)?;
-            Box::new(move || claude_core::services::session_permission_mode::set(&db, &id, &manager, mode))
+            let mode = deepseek_code_core::services::session_permission_mode::parse(name)?;
+            Box::new(move || deepseek_code_core::services::session_permission_mode::set(&db, &id, &manager, mode))
         }
         Remember::Rule(rule) => {
-            claude_core::permissions::patterns::validate(&rule)?;
+            deepseek_code_core::permissions::patterns::validate(&rule)?;
             Box::new(move || {
                 let mut rules = load_rules(&db, &id)?;
                 rules.insert(rule, PermissionAction::Allow);
@@ -60,7 +60,7 @@ pub fn remember_commit(session: &Session, remember: &Remember) -> Result<Commit>
 /// Saves a remembered allow rule to the project's `.claude/settings.local.json`,
 /// as the reference CLI does, so later sessions keep it.
 pub fn save_local(session: &Session, rule: &str) -> Result<()> {
-    claude_core::services::permission_updates::add_local_allow_rule(&session.workspace, &settings_rule(rule))?;
+    deepseek_code_core::services::permission_updates::add_local_allow_rule(&session.workspace, &settings_rule(rule))?;
     Ok(())
 }
 
@@ -96,17 +96,17 @@ pub async fn handle(argument: &str, session: &mut Session) -> Result<()> {
     if let Some(action) = argument.trim().strip_prefix("auto-config").filter(|rest| rest.is_empty() || rest.starts_with(char::is_whitespace)) {
         let context = crate::services::context(&session.paths)?;
         let action = action.trim();
-        let mut config = claude_core::permissions::auto_config::load(&context)?;
+        let mut config = deepseek_code_core::permissions::auto_config::load(&context)?;
         match action {
             "" | "show" => {},
             "off" => {
                 config.enabled = false;
-                claude_core::permissions::auto_config::save(&context, &config)?;
-                if session.permissions.get_mode() == claude_core::permissions::PermissionMode::Auto { session.set_permission_mode("ask").await?; }
+                deepseek_code_core::permissions::auto_config::save(&context, &config)?;
+                if session.permissions.get_mode() == deepseek_code_core::permissions::PermissionMode::Auto { session.set_permission_mode("ask").await?; }
             },
             value if value.starts_with("set ") => {
                 config = serde_json::from_str(value[4..].trim())?;
-                claude_core::permissions::auto_config::save(&context, &config)?;
+                deepseek_code_core::permissions::auto_config::save(&context, &config)?;
             },
             _ => anyhow::bail!("Usage: /permissions auto-config [show|set JSON|off]"),
         }
@@ -116,9 +116,9 @@ pub async fn handle(argument: &str, session: &mut Session) -> Result<()> {
     let mut rules = load(session)?;
     match words.as_slice() {
         [] | ["list"] => {},
-        [mode] if claude_core::permissions::PermissionMode::parse(mode).is_ok() => session.set_permission_mode(mode).await?,
+        [mode] if deepseek_code_core::permissions::PermissionMode::parse(mode).is_ok() => session.set_permission_mode(mode).await?,
         [action @ ("allow" | "deny" | "ask" | "remove"), tool] => {
-            claude_core::permissions::patterns::validate(tool)?;
+            deepseek_code_core::permissions::patterns::validate(tool)?;
             match *action {
                 "remove" => { rules.remove(*tool); },
                 "allow" => { rules.insert((*tool).into(), PermissionAction::Allow); },
@@ -147,7 +147,7 @@ pub async fn handle(argument: &str, session: &mut Session) -> Result<()> {
 }
 
 async fn launch_rule_display(session: &Session) -> Result<String> {
-    use claude_core::services::{background_sessions as jobs, session_worker};
+    use deepseek_code_core::services::{background_sessions as jobs, session_worker};
     use std::fmt::Write;
     let active = jobs::list(&session.paths.data_dir, None)?
         .into_iter()
@@ -184,7 +184,7 @@ async fn launch_rule_display(session: &Session) -> Result<String> {
 }
 
 fn active_launch_snapshot(
-    reply: claude_core::services::session_worker::Reply,
+    reply: deepseek_code_core::services::session_worker::Reply,
     job_id: &str,
 ) -> Result<(String, HashMap<String, PermissionAction>)> {
     anyhow::ensure!(
@@ -220,7 +220,7 @@ mod tests {
 
     #[test]
     fn active_worker_display_requires_authoritative_launch_rules_and_job_identity() {
-        use claude_core::services::session_worker::Reply;
+        use deepseek_code_core::services::session_worker::Reply;
         let snapshot = || {
             let mut reply = Reply::ok(Some("active-job".into()));
             reply.permission_session_id = Some("owned-child".into());
@@ -259,7 +259,7 @@ mod tests {
             serde_json::from_str(&serde_json::to_string(&rules).unwrap()).unwrap();
         assert_eq!(rules, restored);
         for rule in restored.keys() {
-            claude_core::permissions::patterns::validate(rule).unwrap();
+            deepseek_code_core::permissions::patterns::validate(rule).unwrap();
         }
     }
 }

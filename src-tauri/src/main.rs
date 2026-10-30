@@ -86,7 +86,7 @@ async fn cleanup_all_processes(app_handle: &tauri::AppHandle) {
 
 fn main() {
     // Inside a sandbox with a domain allowlist: carry the proxy, then run the command.
-    if let Some(code) = claude_core::tools::sandbox::run_bridge_from_args() {
+    if let Some(code) = deepseek_code_core::tools::sandbox::run_bridge_from_args() {
         std::process::exit(code);
     }
     init_tracing();
@@ -154,7 +154,7 @@ fn main() {
                 tracing::warn!("Failed to load orchestration.toml, using defaults: {}", e);
             }
             // Initialize SQLite database with persistent storage
-            let db_path = data_dir.join(claude_core::runtime::DATABASE_FILE);
+            let db_path = data_dir.join(deepseek_code_core::runtime::DATABASE_FILE);
             let db_manager = match crate::db::DbManager::new(db_path.clone()) {
                 Ok(db) => Arc::new(db),
                 Err(e) => {

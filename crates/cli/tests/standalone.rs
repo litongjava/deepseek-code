@@ -508,11 +508,11 @@ async fn legacy_agent_import_preserves_allowlist_in_real_shared_engine() {
         .contains("READ_ALLOWED_SENTINEL"));
     // Default reads need no approval; an explicit ask still applies to imported agents.
     let id = result["session_id"].as_str().unwrap();
-    let paths = claude_core::runtime::RuntimePaths::new(data.clone()).unwrap();
+    let paths = deepseek_code_core::runtime::RuntimePaths::new(data.clone()).unwrap();
     let db = paths.open_database().unwrap();
     let rules = std::collections::HashMap::from([(
         "Read",
-        claude_core::permissions::rules::PermissionAction::Confirm,
+        deepseek_code_core::permissions::rules::PermissionAction::Confirm,
     )]);
     db.with_conn(|conn| {
         conn.execute(
@@ -591,8 +591,8 @@ async fn continue_fork_and_prompt_file_use_shared_session_without_changing_sourc
         assert!(body.contains("original"));
         assert!(body.contains("follow up"));
     }
-    let paths = claude_core::runtime::RuntimePaths::new(data).unwrap();
-    let store = claude_core::runtime::SessionStore::new(paths.open_database().unwrap());
+    let paths = deepseek_code_core::runtime::RuntimePaths::new(data).unwrap();
+    let store = deepseek_code_core::runtime::SessionStore::new(paths.open_database().unwrap());
     assert_eq!(
         store
             .history(first["session_id"].as_str().unwrap())
@@ -654,8 +654,8 @@ async fn compact_command_generates_summary_and_resume_uses_boundary() {
     assert!(requests[1].to_string().contains("ORIGINAL_SENTINEL"));
     assert!(requests[2].to_string().contains("SUMMARY_SENTINEL"));
     assert!(!requests[2].to_string().contains("ORIGINAL_SENTINEL"));
-    let paths = claude_core::runtime::RuntimePaths::new(data).unwrap();
-    let store = claude_core::runtime::SessionStore::new(paths.open_database().unwrap());
+    let paths = deepseek_code_core::runtime::RuntimePaths::new(data).unwrap();
+    let store = deepseek_code_core::runtime::SessionStore::new(paths.open_database().unwrap());
     assert_eq!(store.history(id).unwrap().len(), 5);
     task.abort();
 }
