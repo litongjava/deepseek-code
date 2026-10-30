@@ -1120,10 +1120,12 @@ impl Frame {
     fn detailed_log(&self, state: &State, width: usize, color: bool) -> Vec<String> {
         let mut logged = self.logged.clone();
         for (_, title, body) in &state.detail_entries {
+            if logged.last().is_some_and(|row| !super::markdown::plain_rendered(row).trim().is_empty()) { logged.push(String::new()); }
             logged.push(change_view::render(&change_view::heading(&format!("\u{25cf} {title}")), width, color));
             logged.extend(body.lines().map(|line| change_view::render(&change_view::body(&format!("  {line}")), width, color)));
         }
         if !state.partial.is_empty() {
+            if logged.last().is_some_and(|row| !super::markdown::plain_rendered(row).trim().is_empty()) { logged.push(String::new()); }
             logged.extend(streamed_rows(state, width, usize::MAX));
         }
         logged

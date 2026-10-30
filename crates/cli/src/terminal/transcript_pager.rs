@@ -86,6 +86,9 @@ fn append_rows(rows: &mut Vec<Row>, text: &str, width: usize) {
 
 fn transcript_rows(lines: &[Line], logged: &[String], width: usize, color: bool) -> Vec<Row> {
     let mut all = rows(lines, width, color);
+    if !all.is_empty() && !logged.is_empty() && all.last().is_some_and(|row| !row.plain.trim().is_empty()) && !super::markdown::plain_rendered(&logged[0]).trim().is_empty() {
+        append_rows(&mut all, "", width);
+    }
     for text in logged {
         append_rows(&mut all, text, width);
     }
@@ -493,10 +496,11 @@ mod tests {
             80,
             true,
         );
-        assert_eq!(all[1].plain, "ANSWER_SENTINEL");
-        assert!(all[1].styled.contains("\x1b[1m"));
-        assert_eq!(find(&all, "answer_sentinel", 0, true), Some(1));
-        assert_eq!(all[2].plain, "NOTICE_SENTINEL");
+        assert_eq!(all[1].plain, "");
+        assert_eq!(all[2].plain, "ANSWER_SENTINEL");
+        assert!(all[2].styled.contains("\x1b[1m"));
+        assert_eq!(find(&all, "answer_sentinel", 0, true), Some(2));
+        assert_eq!(all[3].plain, "NOTICE_SENTINEL");
     }
 
     #[test]

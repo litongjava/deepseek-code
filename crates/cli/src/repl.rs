@@ -47,6 +47,7 @@ fn conversation(session: &Session, id: &str, detailed: bool, mut recorded: Optio
         let rows = deepseek_code_core::db::message_repo::get_messages_by_conversation(conn, id)?;
         let mut lines = Vec::new();
         for message in &rows {
+            if detailed { separate_block(&mut lines); }
             let message_start = lines.len();
             if message.is_compact_boundary {
                 lines.push(change_view::muted("\u{273b} Conversation compacted"));
@@ -80,6 +81,7 @@ fn conversation(session: &Session, id: &str, detailed: bool, mut recorded: Optio
                 for row in rows { recorded.push(row, Some(id)); }
             }
             if let Some(thinking) = message.thinking.as_deref().filter(|text| detailed && !text.trim().is_empty()) {
+                separate_block(&mut lines);
                 let mut text = thinking.lines();
                 lines.push(change_view::muted(&format!("\u{2234} {}", text.next().unwrap_or_default())));
                 lines.extend(text.take(400).map(|line| change_view::muted(&format!("  {line}"))));
@@ -102,6 +104,7 @@ fn conversation(session: &Session, id: &str, detailed: bool, mut recorded: Optio
                 let (id, rows) = recorded.block(short, full);
                 for row in rows { recorded.push(row, Some(id)); }
             }
+            if detailed { separate_block(&mut lines); }
             lines.extend(if detailed {
                 tool_view::expanded(&tool.name, &input, output, tool.is_error, Some(&session.workspace))
             } else {
@@ -111,6 +114,7 @@ fn conversation(session: &Session, id: &str, detailed: bool, mut recorded: Optio
             let answer_start = lines.len();
             let mut text = message.content.lines();
             if let Some(first) = text.next() {
+                if detailed { separate_block(&mut lines); }
                 lines.push(change_view::body(&format!("\u{25cf} {first}")));
                 lines.extend(text.map(|line| change_view::body(&format!("  {line}"))));
             }
@@ -271,5 +275,27 @@ fn record_lines(recorded: &mut crate::terminal::scrollback::Scrollback, lines: &
     for line in lines {
         let text = crate::terminal::change_view::render(line, usize::MAX, std::env::var_os("NO_COLOR").is_none());
         for row in crate::terminal::markdown::wrap_styled(&text, "", "", width) { recorded.push(row, None); }
+    }
+}
+
+fn separate_block(lines: &mut Vec<crate::terminal::change_view::Line>) {
+    if lines.last().is_some_and(|line| !crate::terminal::change_view::plain(std::slice::from_ref(line)).trim().is_empty()) {
+        lines.push(crate::terminal::change_view::body(""));
+    }
+}
+
+#[cfg(test)]
+mod block_spacing_tests {
+    #[test]
+    fn separators_are_single_and_do_not_add_a_leading_blank() {
+        let mut lines = Vec::new();
+        super::separate_block(&mut lines);
+        assert!(lines.is_empty());
+        lines.push(crate::terminal::change_view::body("thought"));
+        super::separate_block(&mut lines);
+        super::separate_block(&mut lines);
+        lines.push(crate::terminal::change_view::body("answer"));
+        assert_eq!(lines.len(), 3);
+        assert!(crate::terminal::change_view::plain(&lines[1..2]).trim().is_empty());
     }
 }
