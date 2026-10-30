@@ -281,9 +281,7 @@ fn track_style(open: &mut Vec<String>, sequence: &str) {
     });
 }
 
-/// Cells to indent continuation rows of a rendered line: its own leading
-/// spaces plus a list marker such as `- ` or `12. `.
-pub fn hanging_indent(rendered: &str) -> usize {
+pub(super) fn plain_rendered(rendered: &str) -> String {
     let mut visible = String::new();
     let mut chars = rendered.chars().peekable();
     while let Some(ch) = chars.next() {
@@ -297,6 +295,13 @@ pub fn hanging_indent(rendered: &str) -> usize {
             visible.push(ch);
         }
     }
+    visible
+}
+
+/// Cells to indent continuation rows of a rendered line: its own leading
+/// spaces plus a list marker such as `- ` or `12. `.
+pub fn hanging_indent(rendered: &str) -> usize {
+    let visible = plain_rendered(rendered);
     let trimmed = visible.trim_start_matches(' ');
     let leading = visible.len() - trimmed.len();
     let marker = if ["- ", "* ", "+ ", "\u{2022} "].iter().any(|marker| trimmed.starts_with(marker)) {

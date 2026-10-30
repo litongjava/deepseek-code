@@ -937,25 +937,34 @@ fn visual_lines(text: &str, width: usize) -> Vec<(String, usize)> {
 fn answer_prefix(state: &State, row: usize) -> &'static str {
     if row == 0 && state.block_start { "\u{25cf} " } else { "  " }
 }
-fn flush_wrapped(state: &mut State, screen: &mut Frame) -> io::Result<()> {
-    let (width, height) = terminal::size().unwrap_or((80, 24));
-    // One content row is reserved for the disclosure once tool/thinking exists.
-    let budget = content_budget(height)
-        .saturating_sub(usize::from(!state.detail_entries.is_empty()))
-        .max(1);
-    let rows = visual_lines(&state.partial, (width as usize).saturating_sub(3));
-    if rows.len() > budget {
-        let count = rows.len() - budget;
-        let end = rows[count - 1].1;
-        for (index, (line, _)) in rows[..count].iter().enumerate() {
-            let prefix = answer_prefix(state, index);
-            screen.log(&format!("{prefix}{}", line.trim_end()))?;
-        }
-        state.block_start = false;
-        state.partial.drain(..end);
-    }
-    Ok(())
+fn streamed_rows(state: &State, width: usize, budget: usize) -> Vec<String> {
+    let rows = visual_lines(&state.partial, width.saturating_sub(2));
+    let first = rows.len().saturating_sub(budget);
+    rows.into_iter().enumerate().skip(first)
+        .map(|(index, (line, _))| if line.is_empty() { line } else { format!("{}{line}", answer_prefix(state, index)) })
+        .collect()
 }
+
+fn stream_text(state: &mut State, screen: &mut Frame, text: &str) {
+    finish_group(state, screen);
+    if state.thinking_span.is_some() {
+        finish_answer(state, screen);
+        finish_thought(state, screen);
+    }
+    state.generated_characters = state.generated_characters.saturating_add(text.chars().count());
+    state.estimate_pending = true;
+    if state.activity.contains("thinking") || state.activity == "Waiting for response" {
+        state.activity = "Composing".into();
+        state.activity_started = Instant::now();
+    }
+    state.partial.push_str(&terminal_text(text).replace("\r\n", "\n"));
+    while let Some(index) = state.partial.find('\n') {
+        let line = state.partial[..index].to_owned();
+        state.partial.drain(..index + 1);
+        emit_text_line(state, screen, &line);
+    }
+}
+
 /// Logs one finished answer line through the Markdown renderer. The first
 /// line of an answer block gets the reference CLI's `●`, later lines indent.
 fn emit_text_line(state: &mut State, screen: &mut Frame, line: &str) {
@@ -1102,8 +1111,46 @@ struct Frame {
     logged_rows: usize,
     /// Lines logged above the frame, for clicks on tool results.
     scrollback: super::scrollback::Scrollback,
+    logged: Vec<String>,
+    history_view: super::transcript_pager::HistoryView,
+    composer_height: usize,
 }
 impl Frame {
+    fn detailed_log(&self, state: &State, width: usize, color: bool) -> Vec<String> {
+        let mut logged = self.logged.clone();
+        for (_, title, body) in &state.detail_entries {
+            logged.push(change_view::render(&change_view::heading(&format!("\u{25cf} {title}")), width, color));
+            logged.extend(body.lines().map(|line| change_view::render(&change_view::body(&format!("  {line}")), width, color)));
+        }
+        if !state.partial.is_empty() {
+            logged.extend(streamed_rows(state, width, usize::MAX));
+        }
+        logged
+    }
+
+    fn refresh_history(&mut self, state: &State, width: usize) {
+        self.history_view.refresh(&state.transcript, &self.logged, width);
+        if !state.partial.is_empty() {
+            self.history_view.append(&format!("{}{}", answer_prefix(state, 0), terminal_text(&state.partial)), width);
+        } else if let Some(group) = &state.group {
+            for line in group_lines(group, width) {
+                self.history_view.append(&line, width);
+            }
+        }
+    }
+
+    fn history_key(&mut self, state: &State, key: crossterm::event::KeyEvent) -> io::Result<bool> {
+        if state.details.expanded && matches!(key.code, KeyCode::PageUp | KeyCode::PageDown) {
+            return Ok(false);
+        }
+        if !super::transcript_pager::HistoryView::is_navigation(key) {
+            return Ok(false);
+        }
+        let size = terminal::size().unwrap_or((80, 24));
+        self.refresh_history(state, size.0.saturating_sub(1) as usize);
+        self.history_view.navigate(key, (size.1 as usize).saturating_sub(self.composer_height))
+    }
+
     fn anchor(&mut self, out: &mut String) {
         if self.cursor_up > 0 {
             out.push_str(&format!("\x1b[{}B", self.cursor_up));
@@ -1134,11 +1181,12 @@ impl Frame {
     }
     /// Erases the frame now and writes anything queued.
     fn clear(&mut self) -> io::Result<()> {
+        self.history_view.close()?;
         self.erase();
         self.flush()
     }
     fn flush(&mut self) -> io::Result<()> {
-        if self.pending.is_empty() {
+        if self.history_view.active() || self.pending.is_empty() {
             return Ok(());
         }
         let mut out = std::mem::take(&mut self.pending);
@@ -1156,6 +1204,7 @@ impl Frame {
     }
     fn log_line(&mut self, text: String, block: Option<usize>) {
         self.erase();
+        self.logged.push(text.clone());
         self.pending.push_str(&text);
         self.pending.push_str("\r\n");
         self.logged_rows += self.scrollback.push(text, block);
@@ -1239,11 +1288,7 @@ impl Frame {
             let content = match &state.group {
                 Some(group) if state.partial.is_empty() && !group.calls.is_empty() => group_lines(group, width),
                 _ if thinking => thinking_lines(state, width, budget),
-                _ => visual_lines(&state.partial, width.saturating_sub(2))
-                    .into_iter()
-                    .enumerate()
-                    .map(|(index, (line, _))| if line.is_empty() { line } else { format!("{}{line}", answer_prefix(state, index)) })
-                    .collect::<Vec<_>>(),
+                _ => streamed_rows(state, width, budget),
             };
             if !panel.lines.is_empty() {
                 // Keep the disclosure reachable without hiding the streaming text.
@@ -1376,21 +1421,31 @@ impl Frame {
             self.panel_toggle = None;
             self.panel_height = 0;
         }
-        let choice_cursor = choice_rows.as_ref().map(|(rows, selected, column)| (rows.len() - *selected, *column));
+        let choice_cursor = choice_rows.as_ref().map(|(_, selected, column)| (*selected, *column));
         if let Some((rows, _, _)) = choice_rows {
             lines = rows;
         }
+        self.composer_height = lines.len();
+        if self.history_view.active() {
+            self.refresh_history(state, width);
+            let input_row = lines.len().saturating_sub(choice_cursor.map_or(3, |(row, _)| row));
+            let cursor_column = choice_cursor.map_or((prompt_width + cursor).min(width), |(_, column)| column);
+            return self.history_view.draw(&lines, input_row, cursor_column, size);
+        }
         content.extend(lines);
         let mut lines = content;
-        let rows = (size.1 as usize).saturating_sub(1).max(3);
+        let rows = (size.1 as usize).saturating_sub(1).max(1);
+        let mut input_row = lines.len().saturating_sub(choice_cursor.map_or(3, |(row, _)| row));
         if lines.len() > rows {
-            let removed = lines.len() - rows;
-            lines.drain(0..removed);
+            let viewport = super::prompt_display::viewport(lines.len(), input_row, rows);
+            let removed = viewport.start;
+            lines = lines[viewport].to_vec();
+            input_row = input_row.saturating_sub(removed);
             self.panel_toggle = self.panel_toggle.and_then(|mut hit| {
                 hit.row = hit.row.checked_sub(removed)?;
-                Some(hit)
+                (hit.row < lines.len()).then_some(hit)
             });
-            self.panel_height = self.panel_height.saturating_sub(removed);
+            self.panel_height = self.panel_height.saturating_sub(removed).min(lines.len());
         }
         // Blank rows above the content keep the input box and footer on the
         // bottom screen rows, however little output there is yet.
@@ -1412,7 +1467,7 @@ impl Frame {
         self.padding = padding;
         self.top = Some((size.1 as usize).saturating_sub(lines.len()) as u16);
         self.logged_rows = 0;
-        let input_row = lines.len().saturating_sub(choice_cursor.map_or(3, |(row, _)| row));
+        let input_row = input_row + padding;
         let cursor_column = match choice_cursor {
             Some((_, column)) => column,
             None => (prompt_width + cursor).min(width),
@@ -1566,29 +1621,7 @@ fn run(
                 },
                 Ok(Update::PermissionMode(mode)) => { state.mode = mode; dirty = true; },
                 Ok(Update::Text(text)) => {
-                    finish_group(state, screen);
-                    if state.thinking_span.is_some() {
-                        finish_answer(state, screen);
-                        finish_thought(state, screen);
-                    }
-                    state.generated_characters = state
-                        .generated_characters
-                        .saturating_add(text.chars().count());
-                    state.estimate_pending = true;
-                    if state.activity.contains("thinking")
-                        || state.activity == "Waiting for response"
-                    {
-                        state.activity = "Composing".into();
-                        state.activity_started = Instant::now();
-                    }
-                    state
-                        .partial
-                        .push_str(&terminal_text(&text).replace("\r\n", "\n"));
-                    while let Some(index) = state.partial.find('\n') {
-                        let line = state.partial[..index].to_owned();
-                        state.partial.drain(..index + 1);
-                        emit_text_line(state, screen, &line);
-                    }
+                    stream_text(state, screen, &text);
                     dirty = true;
                 }
                 Ok(Update::Notice(text)) => {
@@ -1726,6 +1759,7 @@ fn run(
                     dirty = true;
                 }
                 Ok(Update::Stop(error)) => {
+                    screen.history_view.close()?;
                     finish_text(state, screen);
                     let draft = if state.answer.is_some() {
                         state.saved_draft.take().unwrap_or_default().take()
@@ -1790,7 +1824,6 @@ fn run(
             // Cancellation may arrive while waiting for a key. Never submit a
             // dismissed approval draft as a newly queued user prompt.
             if state.dismiss_closed_question() {
-                flush_wrapped(state, screen)?;
                 screen.draw(state)?;
                 continue;
             }
@@ -1800,6 +1833,17 @@ fn run(
                         crate::keybindings::Resolution::Key(key) => key,
                         crate::keybindings::Resolution::Consumed => continue,
                     };
+                    if screen.history_key(state, key)? {
+                        screen.draw(state)?;
+                        continue;
+                    }
+                    if screen.history_view.active() {
+                        screen.history_view.close()?;
+                        if key.code == KeyCode::Esc {
+                            screen.draw(state)?;
+                            continue;
+                        }
+                    }
                     // With a menu open, shift+tab belongs to the menu.
                     if crate::keybindings::is_cycle_permission(key) && state.choice.is_none() {
                         state.cycle_permission(&actions);
@@ -1829,20 +1873,16 @@ fn run(
                     } else if control && key.code == KeyCode::Char('o') {
                         // As at the prompt: the transcript so far, this turn's
                         // calls included, in the full-screen pager.
-                        let mut lines = state.transcript.clone();
-                        for (_, title, body) in &state.detail_entries {
-                            lines.push(change_view::heading(&format!("\u{25cf} {title}")));
-                            lines.extend(body.lines().map(|line| change_view::body(&format!("  {line}"))));
-                        }
-                        if let Some(text) = Some(state.partial.trim()).filter(|text| !text.is_empty()) {
-                            lines.push(change_view::body(&format!("\u{25cf} {text}")));
-                        }
-                        let outcome = super::transcript_pager::run(&lines, &mut || input_reader.next(Duration::from_millis(100)))?;
+                        let width = terminal::size().unwrap_or((80, 24)).0.saturating_sub(1) as usize;
+                        let color = std::env::var_os("NO_COLOR").is_none();
+                        let logged = screen.detailed_log(state, width, color);
+                        let outcome = super::transcript_pager::run_with_logged(&state.transcript, &logged, &mut || input_reader.next(Duration::from_millis(100)))?;
                         if matches!(outcome, super::transcript_pager::Outcome::PrintToScrollback) {
-                            let width = terminal::size().unwrap_or((80, 24)).0.saturating_sub(1) as usize;
-                            let color = std::env::var_os("NO_COLOR").is_none();
-                            for line in &lines {
+                            for line in &state.transcript {
                                 screen.log_rendered(&change_view::render(line, width, color));
+                            }
+                            for line in &logged {
+                                screen.log_rendered(line);
                             }
                         }
                         screen.size = (0, 0);
@@ -1996,6 +2036,7 @@ fn run(
                     }
                 }
                 Event::Paste(text) => {
+                    screen.history_view.close()?;
                     // A dragged or pasted image file shows as `[Image #N]`, as at the prompt.
                     let text = crate::images::pasted_path(&text).map_or(text, |path| format!("{} ", crate::images::attach(path)));
                     if !state.draft.insert_paste(&text) {
@@ -2013,7 +2054,6 @@ fn run(
             dirty = true;
         }
         if dirty {
-            flush_wrapped(state, screen)?;
             screen.draw(state)?;
         }
     }
@@ -2022,6 +2062,46 @@ fn run(
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn streamed_markdown_is_independent_of_delta_boundaries() {
+        let text = format!("**{}**\n- {}\n```rust\nlet text = \"{}\";\n```\n", "a".repeat(700), "word ".repeat(160), "中".repeat(240));
+        let render = |chunk_size: usize| {
+            let mut state = State::new("ask".into());
+            state.markdown = super::super::markdown::MarkdownStream::new(true);
+            let mut screen = Frame::default();
+            let chars: Vec<char> = text.chars().collect();
+            for chunk in chars.chunks(chunk_size) {
+                let delta: String = chunk.iter().collect();
+                stream_text(&mut state, &mut screen, &delta);
+                let partial = state.partial.clone();
+                let preview = streamed_rows(&state, 40, 2);
+                assert!(preview.len() <= 2);
+                assert_eq!(state.partial, partial);
+            }
+            finish_text(&mut state, &mut screen);
+            screen.logged
+        };
+        let whole = render(text.chars().count());
+        assert_eq!(render(17), whole);
+        assert!(whole.iter().any(|line| line.contains("\x1b[1m")));
+        assert!(!whole.iter().any(|line| line.contains("**")));
+    }
+
+    #[test]
+    fn detailed_transcript_includes_completed_lines_notices_and_partial_once() {
+        let mut state = State::new("ask".into());
+        let mut screen = Frame::default();
+        stream_text(&mut state, &mut screen, "ANSWER_SENTINEL\n");
+        screen.log("NOTICE_SENTINEL").unwrap();
+        stream_text(&mut state, &mut screen, "PARTIAL_SENTINEL");
+        let logged = screen.detailed_log(&state, 80, false).join("\n");
+        for text in ["ANSWER_SENTINEL", "NOTICE_SENTINEL", "PARTIAL_SENTINEL"] {
+            assert_eq!(logged.matches(text).count(), 1);
+        }
+        assert!(logged.find("ANSWER_SENTINEL") < logged.find("NOTICE_SENTINEL"));
+        assert!(logged.find("NOTICE_SENTINEL") < logged.find("PARTIAL_SENTINEL"));
+    }
+
     #[test]
     fn oversized_paste_is_rejected_without_partial_draft_changes() {
         let mut draft=Draft::default();draft.insert("keep");

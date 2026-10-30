@@ -4,6 +4,12 @@ use crossterm::style::{ResetColor, SetBackgroundColor, SetForegroundColor};
 use std::io::{self, Write};
 use unicode_width::UnicodeWidthChar;
 
+pub(super) fn viewport(len: usize, cursor_row: usize, height: usize) -> std::ops::Range<usize> {
+    let shown = len.min(height.max(1));
+    let first = cursor_row.saturating_sub(shown.saturating_sub(1)).min(len - shown);
+    first..first + shown
+}
+
 pub fn write_submitted(
     output: &mut impl Write,
     prompt: &str,

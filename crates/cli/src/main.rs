@@ -662,7 +662,7 @@ async fn run(cli: &Cli) -> Result<()> {
             } else {
                 input.as_mut().unwrap().set_details(vec![]);
             }
-            input.as_mut().unwrap().set_transcript(if display.focus || display.diff_panel { vec![] } else { repl::tool_transcript(&session)? });
+            input.as_mut().unwrap().set_transcript(if display.focus || display.diff_panel { vec![] } else { repl::transcript(&session)? });
             match display_commands::statusline(&session, &display).await {
                 Ok(Some(line)) => eprintln!("{line}"),
                 Ok(None) => {},

@@ -3,10 +3,10 @@
 //! between prompts, printing to scrollback and opening in an editor.
 use super::change_view::{self, Line};
 use crossterm::{
-    cursor::{Hide, Show},
-    event::{DisableMouseCapture, EnableMouseCapture, Event, KeyCode, KeyEventKind, KeyModifiers, MouseEventKind},
-    execute,
-    terminal::{self, EnterAlternateScreen, LeaveAlternateScreen},
+    cursor::{Hide, MoveTo, Show},
+    event::{DisableMouseCapture, EnableMouseCapture, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers, MouseEventKind},
+    execute, queue,
+    terminal::{self, Clear, ClearType, EnterAlternateScreen, LeaveAlternateScreen},
 };
 use std::io::{self, Write};
 use unicode_width::UnicodeWidthChar;
@@ -72,6 +72,152 @@ fn rows(lines: &[Line], width: usize, color: bool) -> Vec<Row> {
     rows
 }
 
+fn append_rows(rows: &mut Vec<Row>, text: &str, width: usize) {
+    if text.is_empty() {
+        rows.push(Row { styled: String::new(), plain: String::new() });
+    }
+    for line in text.lines() {
+        for styled in super::markdown::wrap_styled(line, "", "", width.max(1)) {
+            let plain = super::markdown::plain_rendered(&styled);
+            rows.push(Row { styled, plain });
+        }
+    }
+}
+
+fn transcript_rows(lines: &[Line], logged: &[String], width: usize, color: bool) -> Vec<Row> {
+    let mut all = rows(lines, width, color);
+    for text in logged {
+        append_rows(&mut all, text, width);
+    }
+    all
+}
+
+#[derive(Default)]
+pub(super) struct HistoryView {
+    top: Option<usize>,
+    all: Vec<Row>,
+    previous: Vec<u8>,
+}
+
+impl HistoryView {
+    pub(super) fn active(&self) -> bool {
+        self.top.is_some()
+    }
+
+    pub(super) fn refresh(&mut self, lines: &[Line], logged: &[String], width: usize) {
+        self.all = transcript_rows(lines, logged, width.max(1), std::env::var_os("NO_COLOR").is_none());
+    }
+
+    pub(super) fn append(&mut self, text: &str, width: usize) {
+        append_rows(&mut self.all, text, width);
+    }
+
+    pub(super) fn is_navigation(key: KeyEvent) -> bool {
+        matches!(key.code, KeyCode::PageUp | KeyCode::PageDown)
+            || (key.modifiers.contains(KeyModifiers::CONTROL)
+                && matches!(key.code, KeyCode::Home | KeyCode::End))
+    }
+
+    pub(super) fn navigate(&mut self, key: KeyEvent, page: usize) -> io::Result<bool> {
+        if !Self::is_navigation(key) {
+            return Ok(false);
+        }
+        let was_active = self.active();
+        self.move_page(key.code, page.max(1));
+        if !was_active && self.active() {
+            self.previous.clear();
+            // Keep the main screen's scrollback intact without capturing the mouse.
+            execute!(io::stderr(), EnterAlternateScreen)?;
+        } else if was_active && !self.active() {
+            execute!(io::stderr(), LeaveAlternateScreen)?;
+        }
+        Ok(true)
+    }
+
+    fn move_page(&mut self, key: KeyCode, page: usize) {
+        let end = self.all.len().saturating_sub(page);
+        match key {
+            KeyCode::PageUp if !self.all.is_empty() => {
+                self.top = Some(self.top.unwrap_or(end).saturating_sub(page));
+            }
+            KeyCode::Home if !self.all.is_empty() => self.top = Some(0),
+            KeyCode::PageDown => {
+                self.top = self.top.and_then(|top| {
+                    let next = top.saturating_add(page);
+                    (next < end).then_some(next)
+                });
+            }
+            KeyCode::End => self.top = None,
+            _ => {}
+        }
+    }
+
+    pub(super) fn close(&mut self) -> io::Result<()> {
+        if self.top.take().is_some() {
+            execute!(io::stderr(), LeaveAlternateScreen)?;
+        }
+        Ok(())
+    }
+
+    pub(super) fn draw(
+        &mut self,
+        composer: &[String],
+        cursor_row: usize,
+        cursor_col: usize,
+        size: (u16, u16),
+    ) -> io::Result<()> {
+        let mut frame = Vec::new();
+        self.draw_to(&mut frame, composer, cursor_row, cursor_col, size)?;
+        if frame == self.previous {
+            return Ok(());
+        }
+        let mut out = io::stderr().lock();
+        out.write_all(b"\x1b[?2026h")?;
+        out.write_all(&frame)?;
+        out.write_all(b"\x1b[?2026l")?;
+        out.flush()?;
+        self.previous = frame;
+        Ok(())
+    }
+
+    fn draw_to(
+        &mut self,
+        out: &mut impl Write,
+        composer: &[String],
+        cursor_row: usize,
+        cursor_col: usize,
+        size: (u16, u16),
+    ) -> io::Result<()> {
+        let height = size.1.max(1) as usize;
+        let viewport = super::prompt_display::viewport(composer.len(), cursor_row, height);
+        let dropped = viewport.start;
+        let composer = &composer[viewport];
+        let page = height.saturating_sub(composer.len());
+        let top = self.top.unwrap_or(0).min(self.all.len().saturating_sub(page));
+        self.top = Some(top);
+        for row in 0..height {
+            queue!(out, MoveTo(0, row as u16))?;
+            if row < page {
+                if let Some(line) = self.all.get(top + row) {
+                    out.write_all(line.styled.as_bytes())?;
+                }
+            } else {
+                out.write_all(composer[row - page].as_bytes())?;
+            }
+            queue!(out, Clear(ClearType::UntilNewLine))?;
+        }
+        let cursor_row = cursor_row.saturating_sub(dropped).min(composer.len().saturating_sub(1));
+        queue!(out, MoveTo(cursor_col as u16, (page + cursor_row).min(height - 1) as u16))?;
+        Ok(())
+    }
+}
+
+impl Drop for HistoryView {
+    fn drop(&mut self) {
+        let _ = self.close();
+    }
+}
+
 /// The pager outside the prompt, such as the /resume preview.
 pub fn view(lines: &[Line]) -> io::Result<Outcome> {
     let raw = terminal::is_raw_mode_enabled()?;
@@ -90,23 +236,32 @@ pub fn run(
     lines: &[Line],
     next_event: &mut dyn FnMut() -> io::Result<Option<Event>>,
 ) -> io::Result<Outcome> {
+    run_with_logged(lines, &[], next_event)
+}
+
+pub(super) fn run_with_logged(
+    lines: &[Line],
+    logged: &[String],
+    next_event: &mut dyn FnMut() -> io::Result<Option<Event>>,
+) -> io::Result<Outcome> {
     let mut out = io::stderr();
     // This full-screen pager is the one place the wheel belongs to the app:
     // it scrolls the page. The prompt itself never captures the mouse.
     execute!(out, EnterAlternateScreen, Hide, EnableMouseCapture)?;
-    let result = pager(lines, next_event, &mut out);
+    let result = pager(lines, logged, next_event, &mut out);
     execute!(out, Show, DisableMouseCapture, LeaveAlternateScreen)?;
     result
 }
 
 fn pager(
     lines: &[Line],
+    logged: &[String],
     next_event: &mut dyn FnMut() -> io::Result<Option<Event>>,
     out: &mut impl Write,
 ) -> io::Result<Outcome> {
     let color = std::env::var_os("NO_COLOR").is_none();
     let mut size = terminal::size().unwrap_or((80, 24));
-    let mut all = rows(lines, (size.0 as usize).saturating_sub(1).max(10), color);
+    let mut all = transcript_rows(lines, logged, (size.0 as usize).saturating_sub(1).max(10), color);
     // Opens at the end, where the latest turn is.
     let mut top = usize::MAX;
     let mut help = false;
@@ -129,7 +284,7 @@ fn pager(
         let key = match event {
             Event::Resize(cols, rows_count) => {
                 size = (cols, rows_count);
-                all = self::rows(lines, (cols as usize).saturating_sub(1).max(10), color);
+                all = transcript_rows(lines, logged, (cols as usize).saturating_sub(1).max(10), color);
                 continue;
             }
             Event::Mouse(mouse) => {
@@ -176,8 +331,8 @@ fn pager(
             (KeyCode::Char('d'), true) => top = top.saturating_add(page / 2),
             (KeyCode::Char(' ') | KeyCode::PageDown, false) => top = top.saturating_add(page),
             (KeyCode::Char('b') | KeyCode::PageUp, false) => top = top.saturating_sub(page),
-            (KeyCode::Char('g') | KeyCode::Home, false) => top = 0,
-            (KeyCode::Char('G') | KeyCode::End, false) => top = usize::MAX,
+            (KeyCode::Char('g'), false) | (KeyCode::Home, _) => top = 0,
+            (KeyCode::Char('G'), false) | (KeyCode::End, _) => top = usize::MAX,
             (KeyCode::Char('{'), false) => {
                 top = (0..top.min(all.len())).rev().find(|row| is_prompt(&all[*row])).unwrap_or(0);
             }
@@ -293,6 +448,98 @@ mod tests {
     use crossterm::event::KeyEvent;
 
     #[test]
+    fn logged_transcript_rows_keep_styles_and_are_searchable() {
+        let all = transcript_rows(
+            &[change_view::body("previous turn")],
+            &["\x1b[1mANSWER_SENTINEL\x1b[22m".into(), "NOTICE_SENTINEL".into()],
+            80,
+            true,
+        );
+        assert_eq!(all[1].plain, "ANSWER_SENTINEL");
+        assert!(all[1].styled.contains("\x1b[1m"));
+        assert_eq!(find(&all, "answer_sentinel", 0, true), Some(1));
+        assert_eq!(all[2].plain, "NOTICE_SENTINEL");
+    }
+
+    #[test]
+    fn history_page_keys_and_control_home_end_navigate_without_editing() {
+        let mut history = HistoryView::default();
+        let lines: Vec<Line> = (0..100).map(|row| change_view::body(&format!("line {row}"))).collect();
+        history.refresh(&lines, &[], 40);
+        assert!(HistoryView::is_navigation(KeyEvent::new(KeyCode::PageUp, KeyModifiers::NONE)));
+        assert!(HistoryView::is_navigation(KeyEvent::new(KeyCode::PageDown, KeyModifiers::NONE)));
+        assert!(HistoryView::is_navigation(KeyEvent::new(KeyCode::Home, KeyModifiers::CONTROL)));
+        assert!(HistoryView::is_navigation(KeyEvent::new(KeyCode::End, KeyModifiers::CONTROL)));
+        assert!(!HistoryView::is_navigation(KeyEvent::new(KeyCode::Home, KeyModifiers::NONE)));
+        assert!(!HistoryView::is_navigation(KeyEvent::new(KeyCode::End, KeyModifiers::NONE)));
+        history.move_page(KeyCode::PageDown, 10);
+        assert_eq!(history.top, None);
+        history.move_page(KeyCode::PageUp, 10);
+        assert_eq!(history.top, Some(80));
+        history.move_page(KeyCode::PageUp, 10);
+        assert_eq!(history.top, Some(70));
+        history.move_page(KeyCode::PageDown, 10);
+        assert_eq!(history.top, Some(80));
+        history.move_page(KeyCode::PageDown, 10);
+        assert_eq!(history.top, None);
+        history.move_page(KeyCode::Home, 10);
+        assert_eq!(history.top, Some(0));
+        history.move_page(KeyCode::End, 10);
+        assert_eq!(history.top, None);
+    }
+
+    #[test]
+    fn history_draw_keeps_the_composer_on_the_bottom_and_clamps_after_resize() {
+        let mut history = HistoryView::default();
+        let lines: Vec<Line> = (0..20).map(|row| change_view::body(&format!("line {row}"))).collect();
+        history.refresh(&lines, &[], 40);
+        history.move_page(KeyCode::Home, 6);
+        let composer = vec!["border".into(), "prompt draft".into(), "border".into(), "footer".into()];
+        let mut output = Vec::new();
+        history.draw_to(&mut output, &composer, 1, 5, (40, 10)).unwrap();
+        let output = String::from_utf8(output).unwrap();
+        assert!(output.contains("line 0"));
+        assert!(output.contains("line 5"));
+        assert!(!output.contains("line 6"));
+        assert!(output.contains("\x1b[8;1Hprompt draft"));
+        assert!(output.ends_with("\x1b[8;6H"));
+        assert!(!output.contains('\n'));
+        history.top = Some(18);
+        history.draw_to(&mut Vec::new(), &composer, 1, 5, (40, 12)).unwrap();
+        assert_eq!(history.top, Some(12));
+        history.top = None;
+    }
+
+    #[test]
+    fn tiny_history_view_keeps_the_composer_input_visible() {
+        let composer = vec!["border".into(), "INPUT_SENTINEL".into(), "border".into(), "footer".into()];
+        for height in 1..=3 {
+            let mut history = HistoryView::default();
+            let mut output = Vec::new();
+            history.draw_to(&mut output, &composer, 1, 4, (80, height)).unwrap();
+            let output = String::from_utf8(output).unwrap();
+            assert!(output.contains("INPUT_SENTINEL"));
+            let input_row = if height == 1 { 1 } else { 2 };
+            assert!(output.ends_with(&format!("\x1b[{input_row};5H")));
+            history.top = None;
+        }
+    }
+
+    #[test]
+    fn history_handles_empty_short_and_wrapped_streamed_content() {
+        let mut history = HistoryView::default();
+        history.move_page(KeyCode::PageUp, 10);
+        history.move_page(KeyCode::Home, 10);
+        assert_eq!(history.top, None);
+        history.refresh(&[change_view::body("first")], &["\x1b[32m中文中文中文\x1b[0m".into()], 4);
+        assert!(history.all.len() >= 4);
+        history.move_page(KeyCode::Home, 10);
+        assert_eq!(history.top, Some(0));
+        history.move_page(KeyCode::PageDown, 10);
+        assert_eq!(history.top, None);
+    }
+
+    #[test]
     fn long_lines_wrap_and_search_and_prompt_jumps_find_rows() {
         let lines = vec![
             change_view::body(&format!("{} first prompt", crate::terminal::prompt_glyph())),
@@ -327,7 +574,7 @@ mod tests {
         .collect::<Vec<_>>();
         let mut next = || Ok(keys.pop().map(Event::Key));
         let mut screen = Vec::new();
-        let outcome = pager(&lines, &mut next, &mut screen).unwrap();
+        let outcome = pager(&lines, &[], &mut next, &mut screen).unwrap();
         assert!(matches!(outcome, Outcome::PrintToScrollback));
         let screen = String::from_utf8_lossy(&screen);
         assert!(screen.contains("line 90"), "search moved to the match");

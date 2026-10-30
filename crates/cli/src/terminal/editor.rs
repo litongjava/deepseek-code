@@ -22,7 +22,7 @@ pub struct PromptEditor {
     permission_mode: String,
     commands: Vec<(String, String)>,
     details: DetailsPanel,
-    /// The last turn's tool calls, printed into scrollback by Ctrl+O.
+    /// The conversation for keyboard scrolling and Ctrl+O.
     transcript: Vec<crate::terminal::change_view::Line>,
     transcript_printed: bool,
     /// Suggested next prompts, generated after a turn; Tab accepts one.
@@ -506,9 +506,9 @@ impl Screen {
         rows: usize,
         cursor_y: usize,
     ) -> io::Result<()> {
-        // A frame taller than the screen keeps its bottom rows.
-        let dropped = lines.len().saturating_sub(rows);
-        let lines = &lines[dropped..];
+        let viewport = crate::terminal::prompt_display::viewport(lines.len(), row, rows);
+        let dropped = viewport.start;
+        let lines = &lines[viewport];
         let row = row.saturating_sub(dropped).min(lines.len().saturating_sub(1));
         let height = lines.len().max(1);
         let top = rows - height;
@@ -845,6 +845,7 @@ impl PromptEditor {
         let todo_list = self.todos.as_ref().map(|todos| todos()).unwrap_or_default();
         let mut keybinding_pending = crate::keybindings::Pending::default();
         let mut screen = Screen::pinned();
+        let mut history_view = crate::terminal::transcript_pager::HistoryView::default();
         let mut selected = 0usize;
         let mut history_pos = self.history.len();
         let mut draft = String::new();
@@ -873,11 +874,13 @@ impl PromptEditor {
             if yielded.load(std::sync::atomic::Ordering::Acquire) {
                 self.pending_draft = buffer.text();
                 self.pending_cursor = Some(buffer.cursor);
+                history_view.close()?;
                 screen.clear()?;
                 return Err(io::Error::new(io::ErrorKind::WouldBlock, "Prompt yielded"));
             }
             if let Some(notices) = &self.notices {
                 while let Ok(notice) = notices.try_recv() {
+                    history_view.close()?;
                     screen.finish("", "")?;
                     let safe: String = notice
                         .chars()
@@ -1022,7 +1025,7 @@ impl PromptEditor {
                     parts.push("tab to accept suggestion".into());
                 }
                 if self.details.entries.is_empty() && !self.transcript.is_empty() && !self.transcript_printed {
-                    parts.push("ctrl+o to expand tool calls".into());
+                    parts.push("ctrl+o transcript".into());
                 }
                 if let Some(note) = &self.context_note {
                     parts.push(note.clone());
@@ -1096,7 +1099,29 @@ impl PromptEditor {
                     TextStyle::Muted,
                 ));
             }
-            screen.draw(&lines, panel_height + menu_height + cursor_row - first + 1, cursor_col)?;
+            let input_row = panel_height + menu_height + cursor_row - first + 1;
+            if history_view.active() {
+                history_view.refresh(&self.transcript, &[], width);
+                let color = std::env::var_os("NO_COLOR").is_none();
+                let composer: Vec<String> = lines.iter().map(|(text, style)| {
+                    let foreground = match style {
+                        TextStyle::Colored(color) => Some(*color),
+                        TextStyle::Accent => Some(crate::terminal::style::accent()),
+                        TextStyle::Success => Some(crate::terminal::style::success()),
+                        TextStyle::Border => Some(crate::terminal::style::border()),
+                        TextStyle::Plain => None,
+                        TextStyle::Muted => Some(crate::terminal::style::muted()),
+                        TextStyle::Selected => Some(crate::terminal::style::selected()),
+                    };
+                    match foreground.filter(|_| color) {
+                        Some(foreground) => format!("{}{text}{}", SetForegroundColor(foreground), ResetColor),
+                        None => text.clone(),
+                    }
+                }).collect();
+                history_view.draw(&composer, input_row, cursor_col, (cols, rows))?;
+            } else {
+                screen.draw(&lines, input_row, cursor_col)?;
+            }
             let Some(event) = read_editor_event(&mut input_reader)? else {
                 continue;
             };
@@ -1145,6 +1170,8 @@ impl PromptEditor {
                     }
                 }
                 Event::Paste(value) => {
+                    history_view.close()?;
+                    screen.invalidated = true;
                     // A dragged or pasted image file shows as `[Image #N]`, as in the reference CLI.
                     match crate::images::pasted_path(&value) {
                         Some(path) => buffer.insert(&format!("{} ", crate::images::attach(path))),
@@ -1158,6 +1185,21 @@ impl PromptEditor {
                         crate::keybindings::Resolution::Key(key) => key,
                         crate::keybindings::Resolution::Consumed => continue,
                     };
+                    let panel_scroll = self.details.expanded
+                        && matches!(key.code, KeyCode::PageUp | KeyCode::PageDown);
+                    if !panel_scroll && crate::terminal::transcript_pager::HistoryView::is_navigation(key) {
+                        history_view.refresh(&self.transcript, &[], width);
+                        history_view.navigate(key, (rows as usize).saturating_sub(lines.len()))?;
+                        screen.invalidated = true;
+                        continue;
+                    }
+                    if history_view.active() {
+                        history_view.close()?;
+                        screen.invalidated = true;
+                        if key.code == KeyCode::Esc {
+                            continue;
+                        }
+                    }
                     if crate::keybindings::is_cycle_permission(key) {
                         self.preserve_cycle_draft(&buffer);
                         screen.suspend()?;
@@ -1699,6 +1741,25 @@ mod tests {
         assert_eq!(output.matches("\x1b[K").count(), 3);
         assert!(!output.contains("\r\n"));
         assert_eq!(screen.top, Some(7));
+    }
+
+    #[test]
+    fn tiny_pinned_prompt_keeps_input_and_cursor_visible() {
+        let lines = vec![
+            ("top border".into(), TextStyle::Border),
+            ("INPUT_SENTINEL".into(), TextStyle::Plain),
+            ("bottom border".into(), TextStyle::Border),
+            ("footer".into(), TextStyle::Muted),
+        ];
+        for rows in 1..=3 {
+            let mut screen = Screen::pinned();
+            let mut output = Vec::new();
+            screen.draw_pinned_to(&mut output, &lines, 1, 4, rows, 0).unwrap();
+            let output = String::from_utf8(output).unwrap();
+            assert!(output.contains("INPUT_SENTINEL"));
+            let input_row = if rows == 1 { 1 } else { 2 };
+            assert!(output.ends_with(&format!("\x1b[{input_row};5H")));
+        }
     }
 
     #[test]

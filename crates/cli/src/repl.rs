@@ -7,19 +7,6 @@ use claude_core::{
     skills::SkillsManager,
 };
 
-/// The Ctrl+O transcript at the prompt; empty until a turn has used a tool,
-/// so the prompt offers it only when there is something to expand.
-pub fn tool_transcript(session: &Session) -> Result<Vec<crate::terminal::change_view::Line>> {
-    let last_tools = session.store.db.with_conn(|conn| -> Result<bool> {
-        let rows = claude_core::db::message_repo::get_messages_by_conversation(conn, &session.id)?;
-        Ok(match rows.iter().rev().find(|row| row.role == "assistant") {
-            Some(message) => !claude_core::db::message_repo::get_tool_calls_for_message(conn, &message.id)?.is_empty(),
-            None => false,
-        })
-    })??;
-    if last_tools { transcript(session) } else { Ok(Vec::new()) }
-}
-
 /// The whole conversation for the Ctrl+O transcript, as in the reference CLI:
 /// each prompt, each answer under its time and model, its thinking and every
 /// tool call in full.
