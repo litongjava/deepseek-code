@@ -960,8 +960,14 @@ async fn run(cli: &Cli) -> Result<()> {
                 "" => continue,
                 "/exit" | "/quit" | "exit" | "quit" | ".exit" | ":q" => break,
                 "/" | "/help" | "help" | ".help" | ":h" => {
-                    eprintln!("{}", command_catalog::help());
-                    for (name, description) in &skills { eprintln!("  {name:<24} {description}"); }
+                    let mut text = command_catalog::help();
+                    for (name, description) in &skills { text.push_str(&format!("\n  {name:<24} {description}")); }
+                    if terminal::picker::available() {
+                        let lines: Vec<_> = text.lines().map(terminal::change_view::body).collect();
+                        terminal::transcript_pager::view_help(&lines)?;
+                    } else {
+                        eprintln!("{text}");
+                    }
                 },
                 "status" | ".status" => { if let Err(error) = status_commands::run(&session, "").await { eprintln!("Status: {error:#}"); } },
                 "/history" | "history" | ".history" => println!("{}", serde_json::to_string_pretty(&session.store.history(&session.id)?)?),

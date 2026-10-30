@@ -247,12 +247,21 @@ impl Drop for HistoryView {
 
 /// The pager outside the prompt, such as the /resume preview.
 pub fn view(lines: &[Line]) -> io::Result<Outcome> {
+    view_page(lines, false, FOOTER)
+}
+
+/// A standalone help page opens at the beginning of its command list.
+pub fn view_help(lines: &[Line]) -> io::Result<Outcome> {
+    view_page(lines, true, "  Help · ↑↓ / PgUp / PgDn scroll · / search · Esc / q close")
+}
+
+fn view_page(lines: &[Line], from_start: bool, footer: &str) -> io::Result<Outcome> {
     let raw = terminal::is_raw_mode_enabled()?;
     if !raw {
         terminal::enable_raw_mode()?;
     }
     let mut reader = super::paste_input::Reader::new()?;
-    let result = run(lines, &mut || reader.next(std::time::Duration::from_millis(100)));
+    let result = run_page(lines, &[], &mut || reader.next(std::time::Duration::from_millis(100)), from_start, footer);
     drop(reader);
     if !raw {
         execute!(io::stderr(), DisableMouseCapture)?;
@@ -273,10 +282,20 @@ pub(super) fn run_with_logged(
     logged: &[String],
     next_event: &mut dyn FnMut() -> io::Result<Option<Event>>,
 ) -> io::Result<Outcome> {
+    run_page(lines, logged, next_event, false, FOOTER)
+}
+
+fn run_page(
+    lines: &[Line],
+    logged: &[String],
+    next_event: &mut dyn FnMut() -> io::Result<Option<Event>>,
+    from_start: bool,
+    footer: &str,
+) -> io::Result<Outcome> {
     let mut out = io::stderr();
     // Capture scrolling and use the shared retained drag selection.
     execute!(out, EnterAlternateScreen, Hide, EnableMouseCapture)?;
-    let result = pager(lines, logged, next_event, &mut out);
+    let result = pager(lines, logged, next_event, &mut out, from_start, footer);
     execute!(out, Show, LeaveAlternateScreen, EnableMouseCapture)?;
     result
 }
@@ -286,12 +305,14 @@ fn pager(
     logged: &[String],
     next_event: &mut dyn FnMut() -> io::Result<Option<Event>>,
     out: &mut impl Write,
+    from_start: bool,
+    footer: &str,
 ) -> io::Result<Outcome> {
     let color = std::env::var_os("NO_COLOR").is_none();
     let mut size = terminal::size().unwrap_or((80, 24));
     let mut all = transcript_rows(lines, logged, (size.0 as usize).saturating_sub(1).max(10), color);
     // Opens at the end, where the latest turn is.
-    let mut top = usize::MAX;
+    let mut top = if from_start { 0 } else { usize::MAX };
     let mut help = false;
     let mut search: Option<String> = None;
     let mut query = String::new();
@@ -302,7 +323,7 @@ fn pager(
         let page = (size.1 as usize).saturating_sub(footer_rows).max(1);
         top = top.min(all.len().saturating_sub(page));
         if redraw {
-            draw(out, &all, top, page, size, help, search.as_deref(), color)?;
+            draw(out, &all, top, page, size, help, search.as_deref(), color, footer)?;
         }
         // Only an event changes the page; idle polls draw nothing.
         let Some(event) = next_event()? else {
@@ -420,6 +441,7 @@ fn draw(
     help: bool,
     search: Option<&str>,
     color: bool,
+    footer: &str,
 ) -> io::Result<()> {
     let width = (size.0 as usize).saturating_sub(1);
     let muted = |text: &str| if color { format!("\x1b[2m{text}\x1b[0m") } else { text.to_owned() };
@@ -440,7 +462,7 @@ fn draw(
     } else if help {
         frame.push_str(&HELP.iter().map(|line| muted(line)).collect::<Vec<_>>().join("\r\n"));
     } else {
-        frame.push_str(&muted(&clip(FOOTER, width)));
+        frame.push_str(&muted(&clip(footer, width)));
     }
     frame.push_str("\x1b[J\x1b[?2026l");
     out.write_all(frame.as_bytes())?;
@@ -611,6 +633,19 @@ mod tests {
     }
 
     #[test]
+    fn help_opens_at_first_command_and_closes() {
+        let lines: Vec<Line> = (0..100).map(|row| change_view::body(&format!("command {row}"))).collect();
+        let mut next = || Ok(Some(Event::Key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE))));
+        let mut screen = Vec::new();
+        let outcome = pager(&lines, &[], &mut next, &mut screen, true, "Help · Esc to close").unwrap();
+        assert!(matches!(outcome, Outcome::Closed));
+        let screen = String::from_utf8_lossy(&screen);
+        assert!(screen.contains("command 0"));
+        assert!(!screen.contains("command 99"));
+        assert!(screen.contains("Help · Esc to close"));
+    }
+
+    #[test]
     fn keys_scroll_search_and_close() {
         let lines: Vec<Line> = (0..100).map(|row| change_view::body(&format!("line {row}"))).collect();
         let mut keys = vec![
@@ -626,7 +661,7 @@ mod tests {
         .collect::<Vec<_>>();
         let mut next = || Ok(keys.pop().map(Event::Key));
         let mut screen = Vec::new();
-        let outcome = pager(&lines, &[], &mut next, &mut screen).unwrap();
+        let outcome = pager(&lines, &[], &mut next, &mut screen, false, FOOTER).unwrap();
         assert!(matches!(outcome, Outcome::PrintToScrollback));
         let screen = String::from_utf8_lossy(&screen);
         assert!(screen.contains("line 90"), "search moved to the match");
