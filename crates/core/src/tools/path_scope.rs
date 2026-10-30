@@ -13,6 +13,12 @@ pub(crate) async fn scope<F: Future>(directories: Vec<PathBuf>, future: F) -> F:
     ALLOWED.scope(roots, future).await
 }
 
+/// Runs blocking work on another thread with the calling task's roots.
+pub(crate) fn carry<R>(work: impl FnOnce() -> R + Send + 'static) -> impl FnOnce() -> R + Send + 'static {
+    let roots = ALLOWED.try_with(Clone::clone).unwrap_or_default();
+    move || ALLOWED.sync_scope(roots, work)
+}
+
 pub(super) fn allows(canonical: &Path) -> bool {
     ALLOWED
         .try_with(|roots| roots.iter().any(|root| canonical.starts_with(root)))
@@ -35,5 +41,14 @@ mod tests {
         })
         .await;
         assert!(!allows(&root));
+    }
+
+    #[tokio::test]
+    async fn carried_roots_reach_blocking_threads() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().canonicalize().unwrap();
+        let (inside, outside) = (root.clone(), root.clone());
+        assert!(scope(vec![root], async move { tokio::task::spawn_blocking(carry(move || allows(&inside))).await.unwrap() }).await);
+        assert!(!tokio::task::spawn_blocking(carry(move || allows(&outside))).await.unwrap());
     }
 }

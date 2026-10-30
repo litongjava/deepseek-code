@@ -212,7 +212,7 @@ async fn all_modes_recall_ingest_and_run_memory_tools_on_both_protocols() {
         let mut completed = Vec::new();
         while let Ok(event) = rx.try_recv() {
             if let EngineEvent::ToolUseDone { tool_name, is_error, .. } = event {
-                if is_memory_tool(&tool_name) { assert!(!is_error); completed.push(tool_name); }
+                if crate::prompt::code::is_memory_tool(&tool_name) { assert!(!is_error); completed.push(tool_name); }
             }
         }
         assert_eq!(completed, vec!["memory_ingest", "memory_search"], "{mode} {format}");

@@ -30,16 +30,13 @@ async fn parallel_searches_keep_provider_credentials_and_usage_separate() {
     }));
     let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap(); });
     let (tx, mut rx) = mpsc::channel(32);
-    let counter = Arc::new(AtomicUsize::new(0));
-    let a = execute_tool_standalone("WebSearch".into(), json!({"query":"Rust release notes"}), "tool-a".into(), tx.clone(), None,
-        ".".into(), None, None, counter.clone(), 2, search_provider(&base, "model-a"), None, None, None);
-    let b = execute_tool_standalone("WebSearch".into(), json!({"query":"Rust release notes"}), "tool-b".into(), tx.clone(), None,
-        ".".into(), None, None, counter.clone(), 2, search_provider(&base, "model-b"), None, None, None);
+    let (provider_a, provider_b) = (search_provider(&base, "model-a"), search_provider(&base, "model-b"));
+    let a = execute_builtin_tool("WebSearch", json!({"query":"Rust release notes"}), ".", &provider_a, &tx, None, false);
+    let b = execute_builtin_tool("WebSearch", json!({"query":"Rust release notes"}), ".", &provider_b, &tx, None, false);
     let (a, b) = tokio::join!(a, b);
-    assert!(!a.4 && !b.4);
-    assert!(a.3.contains("model-a.example") && !a.3.contains("model-b.example"));
-    assert!(b.3.contains("model-b.example") && !b.3.contains("model-a.example"));
-    assert_eq!(counter.load(Ordering::SeqCst), 2);
+    let (a, b) = (a.unwrap().to_string(), b.unwrap().to_string());
+    assert!(a.contains("model-a.example") && !a.contains("model-b.example"));
+    assert!(b.contains("model-b.example") && !b.contains("model-a.example"));
     let mut completed = Vec::new();
     while let Ok(event) = rx.try_recv() {
         if let EngineEvent::RequestSnapshot(snapshot) = event {

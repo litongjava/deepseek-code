@@ -31,7 +31,7 @@ use crate::permissions::{PermissionManager, PermissionResult};
 use crate::prefetch::PrefetchEngine;
 use crate::streaming::sse_parser::{consume_sse_payloads, merge_tool_args, recover_malformed_tool_input};
 use crate::tools::get_tool_definitions;
-use crate::prompt::{PromptProfile, code::{adapt_tools, is_memory_tool}};
+use crate::prompt::{PromptProfile, code::adapt_tools};
 use crate::mcp::McpToolRegistry;
 use super::mcp_output::McpOutput;
 use crate::memory::{ContextManager, MemExClient, TieredCompressor};
@@ -59,6 +59,9 @@ mod tool_hooks_tests;
 #[cfg(test)]
 #[path = "builtin_failure_tests.rs"]
 mod builtin_failure_tests;
+#[cfg(test)]
+#[path = "parallel_tool_tests.rs"]
+mod parallel_tool_tests;
 
 #[cfg(test)]
 #[path = "turn_budget_tests.rs"]
@@ -224,7 +227,39 @@ struct PendingToolCall {
     id: String,
     name: String,
     input: Value,
-    requires_user_interaction: bool,
+    /// Only reads, so it may run alongside its concurrency-safe neighbours.
+    concurrent: bool,
+}
+
+/// Consecutive concurrency-safe calls form one batch; any other call is a batch of its own.
+fn tool_batches(calls: &[PendingToolCall]) -> Vec<&[PendingToolCall]> {
+    let mut batches = Vec::new();
+    let mut start = 0;
+    for index in 1..=calls.len() {
+        if index == calls.len() || !(calls[index - 1].concurrent && calls[index].concurrent) {
+            batches.push(&calls[start..index]);
+            start = index;
+        }
+    }
+    batches
+}
+
+/// Like the reference CLI's CLAUDE_CODE_MAX_TOOL_USE_CONCURRENCY, default 10.
+fn max_tool_concurrency() -> usize {
+    std::env::var("CLAUDE_CODE_MAX_TOOL_USE_CONCURRENCY").ok().and_then(|value| value.parse().ok()).filter(|value| *value > 0).unwrap_or(10)
+}
+
+enum CallStep {
+    /// The call ended during its checks, or was a tool that runs inside them.
+    Finished((Value, String, bool)),
+    /// A builtin that passed every check and only has to run, with these arguments.
+    Builtin(Value),
+}
+
+struct PreparedCall {
+    /// Present when hooks ran, for the PostToolUse step.
+    pre_contexts: Option<Vec<String>>,
+    step: CallStep,
 }
 
 /// A cancelled child must not leave an unreachable permission sender behind.
@@ -370,13 +405,6 @@ fn shell_state_input(name: &str, input: &Value, cwd: &str, search_config_path: O
     input
 }
 
-/// Writes, scheduled jobs and worktree switches run one at a time in order.
-fn is_serial_builtin(name: &str) -> bool {
-    matches!(name, "Edit" | "Write" | "MultiEdit" | "NotebookEdit" | "ScheduleWakeup")
-        || crate::tools::cron_jobs::is_cron_tool(name)
-        || crate::tools::session_worktree::is_worktree_tool(name)
-}
-
 /// A Read of an image becomes model image content when the model accepts images.
 fn take_read_image(tool_name: &str, value: &mut Value, supports_vision: bool) -> Option<std::result::Result<(String, McpOutput), String>> {
     if tool_name != "Read" { return None; }
@@ -416,7 +444,13 @@ async fn execute_builtin_tool(
     }
     if name != "WebSearch" {
         let file = if matches!(name, "Read" | "Edit" | "Write" | "MultiEdit") { input["file_path"].as_str().map(str::to_owned) } else { None };
-        let mut result = crate::tools::execute_tool_async(name, input, cwd).await?;
+        // File reads and searches are synchronous; a blocking thread lets a batch of them overlap.
+        let mut result = if matches!(name, "Read" | "Glob" | "Grep" | "ListDir") {
+            let (name, cwd) = (name.to_owned(), cwd.to_owned());
+            tokio::task::spawn_blocking(crate::tools::path_scope::carry(move || crate::tools::execute_tool(&name, input, &cwd))).await??
+        } else {
+            crate::tools::execute_tool_async(name, input, cwd).await?
+        };
         if result["is_error"] == true || result["isError"] == true || result["success"] == false || result["exit_code"].as_i64().is_some_and(|code| code != 0) {
             return Err(anyhow!(serde_json::to_string_pretty(&result)?));
         }
@@ -477,151 +511,6 @@ async fn execute_builtin_tool(
     };
     let _ = event_tx.send(EngineEvent::RequestSnapshot(snapshot)).await;
     filter(result)
-}
-
-async fn execute_tool_standalone(
-    tool_name: String,
-    tool_input: Value,
-    tool_use_id: String,
-    event_tx: mpsc::Sender<EngineEvent>,
-    mcp_registry: Option<Arc<McpToolRegistry>>,
-    workspace_cwd: String,
-    permission_manager: Option<Arc<PermissionManager>>,
-    conv_id: Option<String>,
-    completed_count: Arc<AtomicUsize>,
-    total_count: usize,
-    provider: ResolvedProvider,
-    search_config_path: Option<std::path::PathBuf>,
-    allowed_tools: Option<Vec<String>>,
-    output_db: Option<Arc<crate::db::DbManager>>,
-) -> (String, String, Value, String, bool, Option<McpOutput>) {
-    crate::metrics::TOOL_CALLS_TOTAL.inc();
-    let _tool_timer = crate::metrics::TOOL_CALL_DURATION.start_timer();
-
-    let permission_result = if allowed_tools.as_ref().is_some_and(|names| !names.contains(&tool_name)) { PermissionResult::Denied("Tool is not allowed by this agent definition".into()) } else if let Some(ref pm) = permission_manager {
-        let cid = conv_id.clone().unwrap_or_default();
-        let workspace_path = Some(workspace_cwd.clone());
-        let context = crate::permissions::PermissionContext {
-            tool_name: tool_name.clone(),
-            tool_input: tool_input.clone(),
-            conversation_id: cid,
-            user_id: None,
-            workspace_path,
-        };
-        pm.check_permission(&context)
-    } else {
-        PermissionResult::Granted
-    };
-
-    match permission_result {
-        PermissionResult::Denied(reason) => {
-            let output = format!("Permission denied: {}", reason);
-            let count = completed_count.fetch_add(1, Ordering::SeqCst) + 1;
-            let _ = event_tx.send(EngineEvent::ToolUseDone {
-                tool_use_id: tool_use_id.clone(),
-                tool_name: tool_name.clone(),
-                tool_input: tool_input.clone(),
-                output: output.clone(),
-                is_error: true,
-            }).await;
-            let _ = event_tx.send(EngineEvent::PipelineToolResult {
-                tool_use_id: tool_use_id.clone(),
-                tool_name: tool_name.clone(),
-                tool_input: tool_input.clone(),
-                output: output.clone(),
-                is_error: true,
-                completed_count: count,
-                total_count,
-            }).await;
-            return (tool_use_id, tool_name, tool_input, output, true, None);
-        }
-        PermissionResult::RequiresConfirmation(_) => {
-            let output = "Tool requires user confirmation - must be executed serially".to_string();
-            let count = completed_count.fetch_add(1, Ordering::SeqCst) + 1;
-            let _ = event_tx.send(EngineEvent::ToolUseDone {
-                tool_use_id: tool_use_id.clone(),
-                tool_name: tool_name.clone(),
-                tool_input: tool_input.clone(),
-                output: output.clone(),
-                is_error: true,
-            }).await;
-            let _ = event_tx.send(EngineEvent::PipelineToolResult {
-                tool_use_id: tool_use_id.clone(),
-                tool_name: tool_name.clone(),
-                tool_input: tool_input.clone(),
-                output: output.clone(),
-                is_error: true,
-                completed_count: count,
-                total_count,
-            }).await;
-            return (tool_use_id, tool_name, tool_input, output, true, None);
-        }
-        PermissionResult::Granted => {}
-    }
-
-    let mut mcp_output = None;
-    let (mut output_str, mut is_error) = if let Some(ref registry) = mcp_registry {
-        if registry.is_mcp_tool(&tool_name).await {
-            let result = registry.execute_with_provenance(&tool_name, tool_input.clone()).await;
-            match result {
-                Ok(result) => {
-                    let failed = result.value["isError"].as_bool().unwrap_or(false);
-                    if result.is_tool_call {
-                        match McpOutput::from_transport(&result.value) {
-                            Ok(content) => { let output = content.display(); mcp_output = Some(content); (output, failed) }
-                            Err(error) => (format!("Invalid MCP result: {error:#}"), true),
-                        }
-                    } else { (serde_json::to_string_pretty(&result.value).unwrap_or_default(), failed) }
-                }
-                Err(e) => (format!("Error: {}", e), true),
-            }
-        } else {
-            match execute_builtin_tool(&tool_name, shell_state_input(&tool_name, &tool_input, &workspace_cwd, search_config_path.as_deref(), conv_id.as_deref()), &workspace_cwd, &provider, &event_tx, search_config_path.as_deref(), false).await {
-                Ok(mut val) => match take_read_image(&tool_name, &mut val, provider.model.supports_vision) {
-                    Some(Ok((text, content))) => { mcp_output = Some(content); (text, false) }
-                    Some(Err(error)) => (error, true),
-                    None => (serde_json::to_string_pretty(&val).unwrap_or_default(), false),
-                },
-                Err(e) => (format!("Error: {}", e), true),
-            }
-        }
-    } else {
-        match execute_builtin_tool(&tool_name, shell_state_input(&tool_name, &tool_input, &workspace_cwd, search_config_path.as_deref(), conv_id.as_deref()), &workspace_cwd, &provider, &event_tx, search_config_path.as_deref(), false).await {
-            Ok(mut val) => match take_read_image(&tool_name, &mut val, provider.model.supports_vision) {
-                Some(Ok((text, content))) => { mcp_output = Some(content); (text, false) }
-                Some(Err(error)) => (error, true),
-                None => (serde_json::to_string_pretty(&val).unwrap_or_default(), false),
-            },
-            Err(e) => (format!("Error: {}", e), true),
-        }
-    };
-
-    if let (Some(content), Some(db), Some(session)) = (&mcp_output, &output_db, &conv_id) {
-        if let Err(error) = db.with_conn(|conn|content.save(conn, session, &tool_use_id, &output_str, is_error)).and_then(|result|result) {
-            output_str = format!("Cannot retain MCP tool content: {error:#}");
-            is_error = true;
-            mcp_output = None;
-        }
-    }
-    let count = completed_count.fetch_add(1, Ordering::SeqCst) + 1;
-    let _ = event_tx.send(EngineEvent::ToolUseDone {
-        tool_use_id: tool_use_id.clone(),
-        tool_name: tool_name.clone(),
-        tool_input: tool_input.clone(),
-        output: output_str.clone(),
-        is_error,
-    }).await;
-    let _ = event_tx.send(EngineEvent::PipelineToolResult {
-        tool_use_id: tool_use_id.clone(),
-        tool_name: tool_name.clone(),
-        tool_input: tool_input.clone(),
-        output: output_str.clone(),
-        is_error,
-        completed_count: count,
-        total_count,
-    }).await;
-
-    (tool_use_id, tool_name, tool_input, output_str, is_error, mcp_output)
 }
 
 /// Continuations requested in one turn after responses cut off by the output limit.
@@ -790,31 +679,101 @@ impl ToolLoopExecutor {
     }
 
     async fn execute_tool_call(&mut self, name: &str, input: &Value, id: &str) -> (Value, String, bool) {
+        let prepared = Box::pin(self.prepare_tool_call(name, input, id)).await;
+        let ran = match prepared.step {
+            CallStep::Finished(result) => result,
+            CallStep::Builtin(input) => self.run_prepared_builtin(name, &input, id).await,
+        };
+        self.complete_tool_call(name, id, prepared.pre_contexts, ran).await
+    }
+
+    /// Runs the given calls in order, with each run of consecutive
+    /// concurrency-safe calls executing together, like the reference CLI.
+    /// Hooks, permission prompts and result bookkeeping stay serial; only the
+    /// tool bodies overlap. Results follow the order of the calls.
+    async fn execute_tool_batch(&mut self, calls: &[PendingToolCall]) -> Vec<(Value, String, bool)> {
+        if calls.len() < 2 {
+            let mut results = Vec::new();
+            for call in calls { results.push(self.execute_tool_call(&call.name, &call.input, &call.id).await); }
+            return results;
+        }
+        let mut prepared = Vec::with_capacity(calls.len());
+        for call in calls { prepared.push(Box::pin(self.prepare_tool_call(&call.name, &call.input, &call.id)).await); }
+        let cwd = self.get_workspace_cwd().to_owned();
+        let mut pending: Vec<std::pin::Pin<Box<dyn std::future::Future<Output = Option<Result<Value>>> + Send + '_>>> = Vec::new();
+        for (call, prepared) in calls.iter().zip(&prepared) {
+            pending.push(match &prepared.step {
+                CallStep::Builtin(input) => Box::pin(async { Some(self.run_builtin(&call.name, input, &cwd).await) }),
+                CallStep::Finished(_) => Box::pin(async { None }),
+            });
+        }
+        let runs: Vec<_> = futures::stream::iter(pending).buffered(max_tool_concurrency()).collect().await;
+        let mut results = Vec::with_capacity(calls.len());
+        for ((call, prepared), run) in calls.iter().zip(prepared).zip(runs) {
+            let ran = match (prepared.step, run) {
+                (CallStep::Finished(result), _) => result,
+                (CallStep::Builtin(input), Some(result)) => {
+                    let (output, failed) = self.finish_builtin(&call.name, &input, &call.id, result);
+                    (input, output, failed)
+                }
+                (CallStep::Builtin(_), None) => unreachable!("every prepared builtin ran"),
+            };
+            results.push(self.complete_tool_call(&call.name, &call.id, prepared.pre_contexts, ran).await);
+        }
+        results
+    }
+
+    async fn run_prepared_builtin(&mut self, name: &str, input: &Value, id: &str) -> (Value, String, bool) {
+        let cwd = self.get_workspace_cwd().to_owned();
+        let result = self.run_builtin(name, input, &cwd).await;
+        let (output, failed) = self.finish_builtin(name, input, id, result);
+        (input.clone(), output, failed)
+    }
+
+    /// Whether a call only reads, so it may run alongside neighbouring calls.
+    fn is_concurrency_safe(&self, name: &str, input: &Value) -> bool {
+        match name {
+            "Read" | "Glob" | "Grep" | "ListDir" | "WebFetch" | "WebSearch" | "ToolSearch" | "git_status" | "git_diff" | "git_log" => true,
+            "Bash" => !self.skill_shell_active
+                && input["run_in_background"] != true
+                && input["command"].as_str().is_some_and(crate::permissions::shell_read_only::is_read_only)
+                && !self.sandbox_may_ask(),
+            _ => false,
+        }
+    }
+
+    /// PreToolUse hooks and every permission check, in call order. A call that
+    /// is not a plain builtin finishes here.
+    async fn prepare_tool_call(&mut self, name: &str, input: &Value, id: &str) -> PreparedCall {
+        let finished = |input: Value, output: String| PreparedCall { pre_contexts: None, step: CallStep::Finished((input, output, true)) };
         self.mcp_outputs.remove(id);
-        if let Err(error) = self.ensure_permission_continuation() { return (input.clone(), error.to_string(), true); }
+        if let Err(error) = self.ensure_permission_continuation() { return finished(input.clone(), error.to_string()); }
         if self.pending_plan_reset.is_some() {
-            return (input.clone(), "Tool skipped: the user cleared planning context. Request it again from the approved implementation context.".into(), true);
+            return finished(input.clone(), "Tool skipped: the user cleared planning context. Request it again from the approved implementation context.".into());
         }
         use crate::services::tool_hooks::HookEvent;
-        let Some(hooks) = self.hooks.clone() else { return Box::pin(self.execute_tool_call_inner(name, input, id)).await; };
+        let Some(hooks) = self.hooks.clone() else {
+            let step = Box::pin(self.execute_tool_call_inner(name, input, id)).await;
+            return PreparedCall { pre_contexts: None, step };
+        };
         let session = self.conv_id.clone().unwrap_or_else(|| "unknown".into());
         let pre = match hooks.run(HookEvent::PreToolUse, &session, json!({"tool_name":name,"tool_input":input,"tool_use_id":id})).await {
             Ok(outcome) => outcome,
-            Err(error) => return (input.clone(), format!("PreToolUse hook failed; tool not executed: {error:#}"), true),
+            Err(error) => return finished(input.clone(), format!("PreToolUse hook failed; tool not executed: {error:#}")),
         };
-        if pre.blocked { return (input.clone(), format!("PreToolUse hook blocked tool: {}", pre.reason), true); }
+        if pre.blocked { return finished(input.clone(), format!("PreToolUse hook blocked tool: {}", pre.reason)); }
         let mut input = pre.updated_input.unwrap_or_else(|| input.clone());
         if pre.ask_permission {
             if self.permission_manager.as_ref().is_some_and(|manager| manager.get_mode() == crate::permissions::PermissionMode::DontAsk) {
-                return (input, "dontAsk mode: hook requested permission; tool was not executed".into(), true);
+                return finished(input, "dontAsk mode: hook requested permission; tool was not executed".into());
             }
             let hook_decision = self.permission_manager.as_ref().map(|pm| pm.check_permission(&crate::permissions::PermissionContext { tool_name:name.into(), tool_input:input.clone(), conversation_id:self.conv_id.clone().unwrap_or_default(), user_id:None, workspace_path:Some(self.workspace_cwd.clone()) })).unwrap_or(PermissionResult::Granted);
             if let PermissionResult::Denied(reason) = hook_decision {
-                return (input, format!("Permission denied: {reason}"), true);
+                return finished(input, format!("Permission denied: {reason}"));
             }
             input = match self.request_tool_approval(name, &input, id).await {
                 Ok(actual) => actual,
-                Err(error) => return (input, format!("Hook requested permission: {error:#}"), true),
+                Err(error) => return finished(input, format!("Hook requested permission: {error:#}")),
             };
             self.approved_call = Some(tool_approval::ExactApproval { tool:name.into(), input:input.clone(), id:id.into(), pre_tool_hook:false });
         }
@@ -829,20 +788,29 @@ impl ToolLoopExecutor {
             });
             if can_replace_prompt {
                 if let Err(error) = self.validate_approved_input_for(name, &input, true).await {
-                    return (input, format!("PreToolUse allow rejected: {error:#}"), true);
+                    return finished(input, format!("PreToolUse allow rejected: {error:#}"));
                 }
                 self.approved_call = Some(tool_approval::ExactApproval { tool:name.into(), input:input.clone(), id:id.into(), pre_tool_hook:true });
             }
         }
         // Updated arguments pass through the complete normal permission path.
-        let (actual, mut output, mut failed) = Box::pin(self.execute_tool_call_inner(name, &input, id)).await;
+        let step = Box::pin(self.execute_tool_call_inner(name, &input, id)).await;
         self.approved_call = None;
+        for warning in pre.warnings { tracing::warn!("PreToolUse hook: {warning}"); }
+        let pre_contexts = pre.additional_context.into_iter().map(|context|format!("PreToolUse context: {context}")).collect();
+        PreparedCall { pre_contexts: Some(pre_contexts), step }
+    }
+
+    /// PostToolUse hooks for a call that went through `prepare_tool_call`.
+    async fn complete_tool_call(&mut self, name: &str, id: &str, pre_contexts: Option<Vec<String>>, ran: (Value, String, bool)) -> (Value, String, bool) {
+        use crate::services::tool_hooks::HookEvent;
+        let (Some(mut contexts), Some(hooks)) = (pre_contexts, self.hooks.clone()) else { return ran; };
+        let session = self.conv_id.clone().unwrap_or_else(|| "unknown".into());
+        let (actual, mut output, mut failed) = ran;
         let mut mcp_output = self.mcp_outputs.remove(id);
-        let mut contexts: Vec<String> = pre.additional_context.into_iter().map(|context|format!("PreToolUse context: {context}")).collect();
         if mcp_output.is_none() {
             for context in contexts.drain(..) { output.push('\n'); output.push_str(&context); }
         }
-        for warning in pre.warnings { tracing::warn!("PreToolUse hook: {warning}"); }
         let event = if failed { HookEvent::PostToolUseFailure } else { HookEvent::PostToolUse };
         let mut payload = json!({"tool_name":name,"tool_input":actual,"tool_use_id":id});
         if failed { payload["error"] = json!(output); payload["is_interrupt"] = json!(false); }
@@ -1135,24 +1103,6 @@ impl ToolLoopExecutor {
             }
         } else {
             PermissionResult::Granted
-        }
-    }
-
-    fn check_permission_requires_confirmation(&self, tool_name: &str, tool_input: &Value) -> bool {
-        if let Some(ref pm) = self.permission_manager {
-            if pm.get_mode() == crate::permissions::PermissionMode::Auto { return true; }
-            let conv_id = self.conv_id.clone().unwrap_or_default();
-            let workspace_path = Some(self.workspace_cwd.clone());
-            let context = crate::permissions::PermissionContext {
-                tool_name: tool_name.to_string(),
-                tool_input: tool_input.clone(),
-                conversation_id: conv_id,
-                user_id: None,
-                workspace_path,
-            };
-            matches!(pm.check_permission(&context), PermissionResult::RequiresConfirmation(_))
-        } else {
-            false
         }
     }
 
@@ -1532,19 +1482,19 @@ impl ToolLoopExecutor {
         tool_name: &str,
         tool_input: &Value,
         _tool_use_id: &str,
-    ) -> (Value, String, bool) {
-        if self.allowed_tools.as_ref().is_some_and(|names| !names.iter().any(|name| name == tool_name)) { return (tool_input.clone(), "Tool is not allowed by this agent definition".into(), true); }
+    ) -> CallStep {
+        if self.allowed_tools.as_ref().is_some_and(|names| !names.iter().any(|name| name == tool_name)) { return CallStep::Finished((tool_input.clone(), "Tool is not allowed by this agent definition".into(), true)); }
         if self.permission_manager.as_ref().is_some_and(|pm| pm.get_mode() == crate::permissions::PermissionMode::PlanMode)
             && (matches!(tool_name, "Write" | "Edit") || (tool_name == "Read" && self.is_plan_document_tool(tool_name, tool_input))) {
-            return self.execute_plan_document(tool_name, tool_input, _tool_use_id).await;
+            return CallStep::Finished(self.execute_plan_document(tool_name, tool_input, _tool_use_id).await);
         }
         if matches!(tool_name, "EnterPlanMode" | "ExitPlanMode") || (tool_name == "plan_mode" && matches!(tool_input["operation"].as_str(), Some("enter" | "exit"))) {
-            return self.execute_plan_transition(tool_name, tool_input, _tool_use_id).await;
+            return CallStep::Finished(self.execute_plan_transition(tool_name, tool_input, _tool_use_id).await);
         }
         if tool_name == "Agent" || (tool_name == "team" && tool_input["operation"] == "run") {
             match self.check_permission(tool_name, tool_input, _tool_use_id).await {
-                PermissionResult::Denied(reason) => return (tool_input.clone(), format!("Permission denied: {reason}"), true),
-                PermissionResult::RequiresConfirmation(message) => return self.execute_ask_user_confirmation(tool_name, tool_input, _tool_use_id, &message).await,
+                PermissionResult::Denied(reason) => return CallStep::Finished((tool_input.clone(), format!("Permission denied: {reason}"), true)),
+                PermissionResult::RequiresConfirmation(message) => return self.prepare_after_confirmation(tool_name, tool_input, _tool_use_id, &message).await,
                 PermissionResult::Granted => {},
             }
         }
@@ -1552,12 +1502,12 @@ impl ToolLoopExecutor {
             let result = Box::pin(self.execute_team(tool_input)).await;
             let failed = result.is_err();
             let output = match result { Ok(value) => value.to_string(), Err(error) => error.to_string() };
-            return (tool_input.clone(), output, failed);
+            return CallStep::Finished((tool_input.clone(), output, failed));
         }
         if matches!(tool_name, "TeamCreate" | "TeamDelete" | "TeamSpawn") {
             match self.check_permission(tool_name, tool_input, _tool_use_id).await {
-                PermissionResult::Denied(reason) => return (tool_input.clone(), format!("Permission denied: {reason}"), true),
-                PermissionResult::RequiresConfirmation(message) => return self.execute_ask_user_confirmation(tool_name, tool_input, _tool_use_id, &message).await,
+                PermissionResult::Denied(reason) => return CallStep::Finished((tool_input.clone(), format!("Permission denied: {reason}"), true)),
+                PermissionResult::RequiresConfirmation(message) => return self.prepare_after_confirmation(tool_name, tool_input, _tool_use_id, &message).await,
                 PermissionResult::Granted => {},
             }
             let result = if tool_name == "TeamSpawn" {
@@ -1570,12 +1520,12 @@ impl ToolLoopExecutor {
             };
             let failed = result.is_err();
             let output = match result { Ok(value) => value.to_string(), Err(error) => error.to_string() };
-            return (tool_input.clone(), output, failed);
+            return CallStep::Finished((tool_input.clone(), output, failed));
         }
         if matches!(tool_name, "TeamCreate" | "TeamDelete" | "TeamSpawn") {
             match self.check_permission(tool_name, tool_input, _tool_use_id).await {
-                PermissionResult::Denied(reason) => return (tool_input.clone(), format!("Permission denied: {reason}"), true),
-                PermissionResult::RequiresConfirmation(message) => return self.execute_ask_user_confirmation(tool_name, tool_input, _tool_use_id, &message).await,
+                PermissionResult::Denied(reason) => return CallStep::Finished((tool_input.clone(), format!("Permission denied: {reason}"), true)),
+                PermissionResult::RequiresConfirmation(message) => return self.prepare_after_confirmation(tool_name, tool_input, _tool_use_id, &message).await,
                 PermissionResult::Granted => {},
             }
             let result = if tool_name == "TeamSpawn" {
@@ -1595,28 +1545,28 @@ impl ToolLoopExecutor {
             };
             let failed = result.is_err();
             let output = match result { Ok(value) => value.to_string(), Err(error) => error.to_string() };
-            return (tool_input.clone(), output, failed);
+            return CallStep::Finished((tool_input.clone(), output, failed));
         }
         if tool_name == "plan_mode" {
             match self.check_permission(tool_name, tool_input, _tool_use_id).await {
-                PermissionResult::Denied(reason) => return (tool_input.clone(), format!("Permission denied: {reason}"), true),
-                PermissionResult::RequiresConfirmation(message) => return self.execute_ask_user_confirmation(tool_name, tool_input, _tool_use_id, &message).await,
+                PermissionResult::Denied(reason) => return CallStep::Finished((tool_input.clone(), format!("Permission denied: {reason}"), true)),
+                PermissionResult::RequiresConfirmation(message) => return self.prepare_after_confirmation(tool_name, tool_input, _tool_use_id, &message).await,
                 PermissionResult::Granted => {}
             }
             let result = crate::tools::execute_tool_async(tool_name, tool_input.clone(), &self.workspace_cwd).await;
             let failed = result.is_err();
             let output = match result { Ok(value) => value.to_string(), Err(error) => error.to_string() };
-            return (tool_input.clone(), output, failed);
+            return CallStep::Finished((tool_input.clone(), output, failed));
         }
         if tool_name == "ListAgents" {
             let result = match (self.search_config_path.as_deref().and_then(std::path::Path::parent), self.conv_id.as_deref()) {
                 (Some(root), Some(session)) => crate::services::session_messages::context(root).and_then(|context| crate::tools::agent_messages::list_agents(&context, session)),
                 _ => Err(anyhow!("ListAgents needs an interactive session")),
             };
-            return (tool_input.clone(), match &result { Ok(value) => value.to_string(), Err(error) => format!("Error: {error:#}") }, result.is_err());
+            return CallStep::Finished((tool_input.clone(), match &result { Ok(value) => value.to_string(), Err(error) => format!("Error: {error:#}") }, result.is_err()));
         }
         if tool_name == "SendMessage" && tool_input["notify_when_idle"] == true {
-            return (tool_input.clone(), "Error: notify_when_idle is not supported by this runtime yet; send without it.".into(), true);
+            return CallStep::Finished((tool_input.clone(), "Error: notify_when_idle is not supported by this runtime yet; send without it.".into(), true));
         }
         // Like the reference CLI, a bare {to, message} is a send.
         let normalized_message;
@@ -1629,8 +1579,8 @@ impl ToolLoopExecutor {
         } else { tool_input };
         if tool_name == "SendMessage" {
             match self.check_permission(tool_name, tool_input, _tool_use_id).await {
-                PermissionResult::Denied(reason) => return (tool_input.clone(), format!("Team message access denied: {reason}"), true),
-                PermissionResult::RequiresConfirmation(message) => return self.execute_ask_user_confirmation(tool_name, tool_input, _tool_use_id, &message).await,
+                PermissionResult::Denied(reason) => return CallStep::Finished((tool_input.clone(), format!("Team message access denied: {reason}"), true)),
+                PermissionResult::RequiresConfirmation(message) => return self.prepare_after_confirmation(tool_name, tool_input, _tool_use_id, &message).await,
                 PermissionResult::Granted => {}
             }
             let result = match (self.search_config_path.as_deref().and_then(std::path::Path::parent), self.conv_id.as_deref()) {
@@ -1655,17 +1605,17 @@ impl ToolLoopExecutor {
                 }
             }
             let output = match result { Ok(value) => value.to_string(), Err(error) => error.to_string() };
-            return (tool_input.clone(), output, failed);
+            return CallStep::Finished((tool_input.clone(), output, failed));
         }
         if tool_name == "Agent" {
             let normalized = if tool_name == "Agent" { delegation::normalize_agent_input(tool_input, self.delegation_depth == 0 && self.conv_id.is_some()) } else { tool_input.clone() };
             let result = Box::pin(self.execute_delegated_authorized(&normalized, None, None, true)).await;
             let failed = result.is_err();
             let output = match result { Ok(value) => value.to_string(), Err(error) => format!("Delegation failed: {error}") };
-            return (tool_input.clone(), output, failed);
+            return CallStep::Finished((tool_input.clone(), output, failed));
         }
         if tool_name == "AskUserQuestion" {
-            return self.execute_ask_user_question(tool_input, _tool_use_id).await;
+            return CallStep::Finished(self.execute_ask_user_question(tool_input, _tool_use_id).await);
         }
         if tool_name == "ProposeGoal" {
             let result = (|| -> Result<Value> {
@@ -1673,65 +1623,62 @@ impl ToolLoopExecutor {
                 crate::services::goal_proposals::propose(self.goal_db.as_ref().unwrap(), self.conv_id.as_deref().unwrap(), self.search_config_path.as_deref().unwrap().parent().unwrap(), std::path::Path::new(&self.workspace_cwd), self.permission_manager.as_ref().unwrap(), tool_input)
             })();
             let failed = result.is_err();
-            return (tool_input.clone(), match result { Ok(value) => value.to_string(), Err(error) => error.to_string() }, failed);
+            return CallStep::Finished((tool_input.clone(), match result { Ok(value) => value.to_string(), Err(error) => error.to_string() }, failed));
         }
 
         if matches!(tool_name, "memory_search" | "memory_ingest") {
             match self.check_permission(tool_name, tool_input, _tool_use_id).await {
-                PermissionResult::Denied(reason) => return (tool_input.clone(), format!("Permission denied: {reason}"), true),
-                PermissionResult::RequiresConfirmation(message) => return self.execute_ask_user_confirmation(tool_name, tool_input, _tool_use_id, &message).await,
+                PermissionResult::Denied(reason) => return CallStep::Finished((tool_input.clone(), format!("Permission denied: {reason}"), true)),
+                PermissionResult::RequiresConfirmation(message) => return self.prepare_after_confirmation(tool_name, tool_input, _tool_use_id, &message).await,
                 PermissionResult::Granted => {},
             }
         }
         // Route memory_search and memory_ingest directly to MemEx backend
         if tool_name == "memory_search" {
-            return self.execute_memory_search(tool_input).await;
+            return CallStep::Finished(self.execute_memory_search(tool_input).await);
         }
         if tool_name == "memory_ingest" {
-            return self.execute_memory_ingest(tool_input).await;
+            return CallStep::Finished(self.execute_memory_ingest(tool_input).await);
         }
 
         let permission_result = self.check_permission(tool_name, tool_input, _tool_use_id).await;
         match permission_result {
             PermissionResult::Denied(reason) => {
-                return (tool_input.clone(), format!("Permission denied: {}", reason), true);
+                return CallStep::Finished((tool_input.clone(), format!("Permission denied: {}", reason), true));
             }
             PermissionResult::RequiresConfirmation(message) => {
-                return self.execute_ask_user_confirmation(tool_name, tool_input, _tool_use_id, &message).await;
+                return self.prepare_after_confirmation(tool_name, tool_input, _tool_use_id, &message).await;
             }
             PermissionResult::Granted => {}
         }
 
-        let output_str;
-        let mut is_error;
-
         if tool_name == "Workflow" {
             let result = if script_workflow::is_script(tool_input) { self.execute_script_workflow(tool_input).await } else { Box::pin(self.execute_workflow(tool_input)).await };
-            return (tool_input.clone(), match &result { Ok(value)=>value.to_string(),Err(error)=>format!("Workflow failed: {error:#}") }, result.is_err());
+            return CallStep::Finished((tool_input.clone(), match &result { Ok(value)=>value.to_string(),Err(error)=>format!("Workflow failed: {error:#}") }, result.is_err()));
         }
         if crate::tools::session_worktree::is_worktree_tool(tool_name) {
             let result = match (self.search_config_path.as_deref().and_then(std::path::Path::parent).map(std::path::Path::to_path_buf), self.conv_id.clone()) {
                 (Some(root), Some(session)) => crate::tools::session_worktree::execute(tool_name, tool_input, &root, &session, std::path::Path::new(&self.workspace_cwd)).await,
                 _ => Err(anyhow!("Worktree tools need an interactive session")),
             };
-            return match result {
+            return CallStep::Finished(match result {
                 Ok((value, cwd)) => { self.workspace_cwd = cwd.to_string_lossy().into_owned(); (tool_input.clone(), value.to_string(), false) }
                 Err(error) => (tool_input.clone(), format!("Error: {error:#}"), true),
-            };
+            });
         }
         if tool_name == "ScheduleWakeup" {
             let result = match (self.search_config_path.as_deref().and_then(std::path::Path::parent), self.conv_id.as_deref()) {
                 (Some(root), Some(session)) => crate::tools::wakeup::execute(tool_input, root, session, chrono::Utc::now().timestamp()),
                 _ => Err(anyhow!("ScheduleWakeup needs an interactive session")),
             };
-            return (tool_input.clone(), match &result { Ok(value) => value.to_string(), Err(error) => format!("Error: {error:#}") }, result.is_err());
+            return CallStep::Finished((tool_input.clone(), match &result { Ok(value) => value.to_string(), Err(error) => format!("Error: {error:#}") }, result.is_err()));
         }
         if crate::tools::cron_jobs::is_cron_tool(tool_name) {
             let result = match (self.search_config_path.as_deref().and_then(std::path::Path::parent), self.conv_id.as_deref()) {
                 (Some(root), Some(session)) => crate::tools::cron_jobs::execute(tool_name, tool_input, &crate::tools::cron_jobs::Scope { root, session, project: std::path::Path::new(&self.workspace_cwd) }),
                 _ => Err(anyhow!("Scheduled jobs need an interactive session")),
             };
-            return (tool_input.clone(), match &result { Ok(value) => value.to_string(), Err(error) => format!("Error: {error:#}") }, result.is_err());
+            return CallStep::Finished((tool_input.clone(), match &result { Ok(value) => value.to_string(), Err(error) => format!("Error: {error:#}") }, result.is_err()));
         }
         if crate::tools::tasks::is_task(tool_name) {
             let result = async {
@@ -1770,7 +1717,7 @@ impl ToolLoopExecutor {
                 }
                 crate::tools::tasks::execute_for_session_async(tool_name, tool_input.clone(), root, session).await
             }.await;
-            return (tool_input.clone(), match &result { Ok(value) => value.to_string(), Err(error) => format!("Task failed: {error:#}") }, result.is_err());
+            return CallStep::Finished((tool_input.clone(), match &result { Ok(value) => value.to_string(), Err(error) => format!("Task failed: {error:#}") }, result.is_err()));
         }
 
         if tool_name == "Skill" {
@@ -1787,11 +1734,13 @@ impl ToolLoopExecutor {
                     }
                 }
             }
-            return (tool_input.clone(), match &result { Ok(value)=>value.to_string(),Err(error)=>format!("Skill failed: {error:#}") }, result.is_err());
+            return CallStep::Finished((tool_input.clone(), match &result { Ok(value)=>value.to_string(),Err(error)=>format!("Skill failed: {error:#}") }, result.is_err()));
         }
 
         if let Some(ref registry) = self.mcp_registry {
             if registry.is_mcp_tool(tool_name).await {
+                let output_str;
+                let mut is_error;
                 let event_tx = self.event_tx.clone();
                 let waiters = self.answer_waiters.clone();
                 let tool_use_id = _tool_use_id.to_owned();
@@ -1854,24 +1803,13 @@ impl ToolLoopExecutor {
                         is_error = true;
                     }
                 };
-            } else {
-                let cwd = self.get_workspace_cwd().to_string();
-                let result = match self.unread_file_error(tool_name, tool_input) {
-                    Some(error) => Err(anyhow!(error)),
-                    None => self.run_builtin(tool_name, tool_input, &cwd).await,
-                };
-                (output_str, is_error) = self.finish_builtin(tool_name, tool_input, _tool_use_id, result);
+                return CallStep::Finished((tool_input.clone(), output_str, is_error));
             }
-        } else {
-            let cwd = self.get_workspace_cwd().to_string();
-            let result = match self.unread_file_error(tool_name, tool_input) {
-                Some(error) => Err(anyhow!(error)),
-                None => self.run_builtin(tool_name, tool_input, &cwd).await,
-            };
-            (output_str, is_error) = self.finish_builtin(tool_name, tool_input, _tool_use_id, result);
         }
-
-        (tool_input.clone(), output_str, is_error)
+        if let Some(error) = self.unread_file_error(tool_name, tool_input) {
+            return CallStep::Finished((tool_input.clone(), format!("Error: {error}"), true));
+        }
+        CallStep::Builtin(tool_input.clone())
     }
 
     fn file_key(&self, file_path: &str) -> std::path::PathBuf {
@@ -2391,35 +2329,7 @@ impl ToolLoopExecutor {
                                     text_before: full_text.clone(),
                                 }).await;
 
-                                // Memory calls need this executor's configured client, not a generic stub.
-                                let requires_user_interaction = matches!(
-                                    name.as_str(),
-                                    "Workflow"
-                                        | "Skill"
-                                        | "Agent"
-                                        | "SendMessage"
-                                        | "TeamCreate"
-                                        | "TeamDelete"
-                                        | "TeamSpawn"
-                                        | "team"
-                                        | "plan_mode"
-                                        | "EnterPlanMode"
-                                        | "ExitPlanMode"
-                                ) || matches!(
-                                    name.as_str(),
-                                    "AskUserQuestion" | "ProposeGoal"
-                                ) || name.starts_with("mcp__")
-                                    || matches!(
-                                        name.as_str(),
-                                        "ListMcpResources" | "ReadMcpResource"
-                                    )
-                                    || crate::tools::tasks::is_task(&name)
-                                    || is_serial_builtin(&name)
-                                    || (name == "Bash" && self.sandbox_may_ask())
-                                    || is_memory_tool(&name)
-                                    || self.hooks.is_some()
-                                    || self.is_plan_document_tool(&name, &input)
-                                    || self.check_permission_requires_confirmation(&name, &input);
+                                let concurrent = self.is_concurrency_safe(&name, &input);
 
                                 assistant_blocks.push(ContentBlock::ToolUse {
                                     id: id.clone(),
@@ -2431,7 +2341,7 @@ impl ToolLoopExecutor {
                                     id,
                                     name,
                                     input,
-                                    requires_user_interaction,
+                                    concurrent,
                                 });
 
                                 current_tool_use_id = None;
@@ -2503,85 +2413,35 @@ impl ToolLoopExecutor {
             if has_tool_use && !pending_tool_calls.is_empty() {
                 let mut tool_results: Vec<ContentBlock> = Vec::new();
                 if pending_tool_calls.iter().any(|t| matches!(t.name.as_str(), "ExitPlanMode" | "plan_mode")) {
-                    for call in &mut pending_tool_calls { call.requires_user_interaction = true; }
+                    for call in &mut pending_tool_calls { call.concurrent = false; }
                 }
 
-                let (serial_calls, parallel_calls): (Vec<_>, Vec<_>) = pending_tool_calls
-                    .into_iter()
-                    .partition::<Vec<_>, _>(|tc| tc.requires_user_interaction);
-
-                for tc in &serial_calls {
-                    let (actual_input, output_str, is_error) = self.execute_tool_call(&tc.name, &tc.input, &tc.id).await;
-                    for block in &mut assistant_blocks {
-                        if let ContentBlock::ToolUse { id, input, .. } = block { if id == &tc.id { *input = actual_input.clone(); } }
-                    }
-                    let mcp = self.mcp_outputs.remove(&tc.id);
-                    let mcp = self.finish_mcp_output(&tc.id, &tc.name, &output_str, is_error, mcp)?;
-                    if !is_error { if let Some(manager) = &self.permission_manager { manager.record_tool_success(self.conv_id.as_deref().unwrap_or("")); } }
-                    let _ = self.event_tx.send(EngineEvent::ToolUseDone {
-                        tool_use_id: tc.id.clone(),
-                        tool_name: tc.name.clone(),
-                        tool_input: actual_input,
-                        output: output_str.clone(),
-                        is_error,
-                    }).await;
-                    let content = mcp.map(|value|value.content).unwrap_or_else(||json!(self.retained_tool_output(&tc.name, &output_str)));
-                    tool_results.push(ContentBlock::ToolResult {
-                        tool_use_id: tc.id.clone(),
-                        content,
-                        is_error: Some(is_error),
-                    });
-                }
-
-                self.ensure_permission_continuation()?;
-                if !parallel_calls.is_empty() {
-                    let total = parallel_calls.len();
-                    let completed_count = Arc::new(AtomicUsize::new(serial_calls.len()));
-                    let event_tx_clone = self.event_tx.clone();
-                    let mcp_registry_clone = self.mcp_registry.clone();
-                    let workspace_cwd_clone = self.workspace_cwd.clone();
-                    let permission_manager_clone = self.permission_manager.clone();
-                    let conv_id_clone = self.conv_id.clone();
-
-                    let mut futures = Vec::new();
-                    for tc in parallel_calls {
-                        let input = self.tool_run_input(&tc.name, &tc.input);
-                        let fut = execute_tool_standalone(
-                            tc.name,
-                            input,
-                            tc.id.clone(),
-                            event_tx_clone.clone(),
-                            mcp_registry_clone.clone(),
-                            workspace_cwd_clone.clone(),
-                            permission_manager_clone.clone(),
-                            conv_id_clone.clone(),
-                            completed_count.clone(),
-                            total + serial_calls.len(),
-                            self.provider.clone(),
-                            self.search_config_path.clone(),
-                            self.allowed_tools.clone(),
-                            self.goal_db.clone(),
-                        );
-                        futures.push(fut);
-                    }
-
-                    let results = futures::future::join_all(futures).await;
-
-                    for (tool_use_id, tool_name, _tool_input, output_str, is_error, mcp) in results {
-                        if !is_error && tool_name == "Read" { if let Some(path) = _tool_input["file_path"].as_str() { self.record_seen_file(path); } }
-                        let mcp = self.finish_mcp_output(&tool_use_id, &tool_name, &output_str, is_error, mcp)?;
-                        let content = mcp.map(|value|value.content).unwrap_or_else(||json!(self.retained_tool_output(&tool_name, &output_str)));
+                for batch in tool_batches(&pending_tool_calls) {
+                    let results = self.execute_tool_batch(batch).await;
+                    for (tc, (actual_input, output_str, is_error)) in batch.iter().zip(results) {
+                        for block in &mut assistant_blocks {
+                            if let ContentBlock::ToolUse { id, input, .. } = block { if id == &tc.id { *input = actual_input.clone(); } }
+                        }
+                        let mcp = self.mcp_outputs.remove(&tc.id);
+                        let mcp = self.finish_mcp_output(&tc.id, &tc.name, &output_str, is_error, mcp)?;
+                        if !is_error { if let Some(manager) = &self.permission_manager { manager.record_tool_success(self.conv_id.as_deref().unwrap_or("")); } }
+                        let _ = self.event_tx.send(EngineEvent::ToolUseDone {
+                            tool_use_id: tc.id.clone(),
+                            tool_name: tc.name.clone(),
+                            tool_input: actual_input,
+                            output: output_str.clone(),
+                            is_error,
+                        }).await;
+                        let content = mcp.map(|value|value.content).unwrap_or_else(||json!(self.retained_tool_output(&tc.name, &output_str)));
                         tool_results.push(ContentBlock::ToolResult {
-                            tool_use_id: tool_use_id.clone(),
+                            tool_use_id: tc.id.clone(),
                             content,
                             is_error: Some(is_error),
                         });
                     }
                 }
+                self.ensure_permission_continuation()?;
 
-                // Serial tools run first; results still follow the order of the calls.
-                let order: Vec<String> = assistant_blocks.iter().filter_map(|block| match block { ContentBlock::ToolUse { id, .. } => Some(id.clone()), _ => None }).collect();
-                tool_results.sort_by_key(|block| match block { ContentBlock::ToolResult { tool_use_id, .. } => order.iter().position(|id| id == tool_use_id).unwrap_or(usize::MAX), _ => usize::MAX });
                 conversation_messages.push(AnthropicMessage {
                     role: "assistant".to_string(),
                     content: AnthropicContent::Blocks(assistant_blocks),
@@ -3021,31 +2881,7 @@ impl ToolLoopExecutor {
                         text_before: full_text.clone(),
                     }).await;
 
-                    // Memory calls need this executor's configured client, not a generic stub.
-                    let requires_user_interaction =
-                        matches!(
-                            name.as_str(),
-                            "Workflow"
-                                | "Skill"
-                                | "Agent"
-                                | "SendMessage"
-                                | "TeamCreate"
-                                | "TeamDelete"
-                                | "TeamSpawn"
-                                | "team"
-                                | "plan_mode"
-                                | "EnterPlanMode"
-                                | "ExitPlanMode"
-                        ) || matches!(name.as_str(), "AskUserQuestion" | "ProposeGoal")
-                            || name.starts_with("mcp__")
-                            || matches!(name.as_str(), "ListMcpResources" | "ReadMcpResource")
-                            || crate::tools::tasks::is_task(&name)
-                            || is_serial_builtin(&name)
-                            || (name == "Bash" && self.sandbox_may_ask())
-                            || is_memory_tool(&name)
-                            || self.hooks.is_some()
-                            || self.is_plan_document_tool(name, &input)
-                            || self.check_permission_requires_confirmation(name, &input);
+                    let concurrent = self.is_concurrency_safe(name, &input);
 
                     assistant_tool_calls.push(crate::native_engine::openai_client::OpenAIToolCall {
                         id: id.clone(),
@@ -3060,98 +2896,45 @@ impl ToolLoopExecutor {
                         id: id.clone(),
                         name: name.clone(),
                         input,
-                        requires_user_interaction,
+                        concurrent,
                     });
                 }
 
                 let mut tool_results: Vec<OpenAIMessage> = Vec::new();
                 let mut tool_images = Vec::new();
                 if pending_tool_calls.iter().any(|t| matches!(t.name.as_str(), "ExitPlanMode" | "plan_mode")) {
-                    for call in &mut pending_tool_calls { call.requires_user_interaction = true; }
+                    for call in &mut pending_tool_calls { call.concurrent = false; }
                 }
 
-                let (serial_calls, parallel_calls): (Vec<_>, Vec<_>) = pending_tool_calls
-                    .into_iter()
-                    .partition::<Vec<_>, _>(|tc| tc.requires_user_interaction);
-
-                for tc in &serial_calls {
-                    let (actual_input, output_str, is_error) = self.execute_tool_call(&tc.name, &tc.input, &tc.id).await;
-                    for call in &mut assistant_tool_calls {
-                        if call.id == tc.id { call.function.arguments = actual_input.to_string(); }
-                    }
-                    let mcp = self.mcp_outputs.remove(&tc.id);
-                    let mcp = self.finish_mcp_output(&tc.id, &tc.name, &output_str, is_error, mcp)?;
-                    if !is_error { if let Some(manager) = &self.permission_manager { manager.record_tool_success(self.conv_id.as_deref().unwrap_or("")); } }
-                    let _ = self.event_tx.send(EngineEvent::ToolUseDone {
-                        tool_use_id: tc.id.clone(),
-                        tool_name: tc.name.clone(),
-                        tool_input: actual_input,
-                        output: output_str.clone(),
-                        is_error,
-                    }).await;
-                    if let Some(content) = &mcp { tool_images.extend(content.openai_images(&tc.id)); }
-                    let compacted = mcp.map(|value|value.openai_text()).unwrap_or_else(||self.retained_tool_output(&tc.name, &output_str));
-                    tool_results.push(OpenAIMessage {
-                        role: "tool".to_string(),
-                        content: OpenAIContent::Text(compacted),
-                        tool_calls: None,
-                        tool_call_id: Some(tc.id.clone()),
-                        reasoning_content: None, provider_content: None,
-                    });
-                }
-
-                self.ensure_permission_continuation()?;
-                if !parallel_calls.is_empty() {
-                    let total = parallel_calls.len();
-                    let completed_count = Arc::new(AtomicUsize::new(serial_calls.len()));
-                    let event_tx_clone = self.event_tx.clone();
-                    let mcp_registry_clone = self.mcp_registry.clone();
-                    let workspace_cwd_clone = self.workspace_cwd.clone();
-                    let permission_manager_clone = self.permission_manager.clone();
-                    let conv_id_clone = self.conv_id.clone();
-
-                    let mut futures = Vec::new();
-                    for tc in parallel_calls {
-                        let input = self.tool_run_input(&tc.name, &tc.input);
-                        let fut = execute_tool_standalone(
-                            tc.name,
-                            input,
-                            tc.id.clone(),
-                            event_tx_clone.clone(),
-                            mcp_registry_clone.clone(),
-                            workspace_cwd_clone.clone(),
-                            permission_manager_clone.clone(),
-                            conv_id_clone.clone(),
-                            completed_count.clone(),
-                            total + serial_calls.len(),
-                            self.provider.clone(),
-                            self.search_config_path.clone(),
-                            self.allowed_tools.clone(),
-                            self.goal_db.clone(),
-                        );
-                        futures.push(fut);
-                    }
-
-                    let results = futures::future::join_all(futures).await;
-
-                    for (tool_use_id, tool_name, _tool_input, output_str, is_error, mcp) in results {
-                        if !is_error && tool_name == "Read" { if let Some(path) = _tool_input["file_path"].as_str() { self.record_seen_file(path); } }
-                        let mcp = self.finish_mcp_output(&tool_use_id, &tool_name, &output_str, is_error, mcp)?;
-                        if let Some(content) = &mcp { tool_images.extend(content.openai_images(&tool_use_id)); }
-                        let compacted = mcp.map(|value|value.openai_text()).unwrap_or_else(||self.retained_tool_output(&tool_name, &output_str));
+                for batch in tool_batches(&pending_tool_calls) {
+                    let results = self.execute_tool_batch(batch).await;
+                    for (tc, (actual_input, output_str, is_error)) in batch.iter().zip(results) {
+                        for call in &mut assistant_tool_calls {
+                            if call.id == tc.id { call.function.arguments = actual_input.to_string(); }
+                        }
+                        let mcp = self.mcp_outputs.remove(&tc.id);
+                        let mcp = self.finish_mcp_output(&tc.id, &tc.name, &output_str, is_error, mcp)?;
+                        if !is_error { if let Some(manager) = &self.permission_manager { manager.record_tool_success(self.conv_id.as_deref().unwrap_or("")); } }
+                        let _ = self.event_tx.send(EngineEvent::ToolUseDone {
+                            tool_use_id: tc.id.clone(),
+                            tool_name: tc.name.clone(),
+                            tool_input: actual_input,
+                            output: output_str.clone(),
+                            is_error,
+                        }).await;
+                        if let Some(content) = &mcp { tool_images.extend(content.openai_images(&tc.id)); }
+                        let compacted = mcp.map(|value|value.openai_text()).unwrap_or_else(||self.retained_tool_output(&tc.name, &output_str));
                         tool_results.push(OpenAIMessage {
                             role: "tool".to_string(),
                             content: OpenAIContent::Text(compacted),
                             tool_calls: None,
-                            tool_call_id: Some(tool_use_id),
+                            tool_call_id: Some(tc.id.clone()),
                             reasoning_content: None, provider_content: None,
                         });
                     }
                 }
+                self.ensure_permission_continuation()?;
 
-                // Serial tools run first; results still follow the order of the calls.
-                let order: Vec<String> = assistant_tool_calls.iter().map(|call| call.id.clone()).collect();
-                tool_results.sort_by_key(|message| message.tool_call_id.as_ref().and_then(|id| order.iter().position(|item| item == id)).unwrap_or(usize::MAX));
                 conversation_messages.push(OpenAIMessage {
                     role: "assistant".to_string(),
                     content: assistant_content.unwrap_or(OpenAIContent::Text(String::new())),

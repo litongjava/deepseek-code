@@ -389,16 +389,30 @@ impl ToolLoopExecutor {
         tool: &str,
         input: &Value,
         id: &str,
-        _message: &str,
+        message: &str,
     ) -> (Value, String, bool) {
+        match self.prepare_after_confirmation(tool, input, id, message).await {
+            CallStep::Finished(result) => result,
+            CallStep::Builtin(actual) => self.run_prepared_builtin(tool, &actual, id).await,
+        }
+    }
+
+    /// Asks the user, then re-checks the approved arguments; a builtin is left to run.
+    pub(super) async fn prepare_after_confirmation(
+        &mut self,
+        tool: &str,
+        input: &Value,
+        id: &str,
+        _message: &str,
+    ) -> CallStep {
         let actual = match self.request_tool_approval(tool, input, id).await {
             Ok(actual) => actual,
             Err(error) => {
-                return (
+                return CallStep::Finished((
                     input.clone(),
                     format!("Tool approval failed: {error:#}"),
                     true,
-                )
+                ))
             }
         };
         self.approved_call = Some(ExactApproval {
