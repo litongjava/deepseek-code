@@ -1988,7 +1988,7 @@ const MainContent = ({ onNewChat, resetKey, tunerConfig, onOpenDocument, onArtif
                       onMouseDown={(e) => e.preventDefault()}
                       onClick={toggleVoiceInput}
                       className={`p-2 rounded-lg transition-all ${isListening ? 'bg-red-500 text-white animate-pulse shadow-lg shadow-red-500/30 scale-110' : 'text-claude-textSecondary hover:bg-claude-hover hover:text-claude-text'}`}
-                      title={isListening ? '点击停止录音' : '语音输入'}
+                      title={isListening ? t('chat.stopRecording') : t('chat.voiceInput')}
                     >
                       <IconVoice size={20} />
                     </button>
@@ -2210,7 +2210,7 @@ const MainContent = ({ onNewChat, resetKey, tunerConfig, onOpenDocument, onArtif
                         onMouseDown={(e) => e.preventDefault()}
                         onClick={toggleVoiceInput}
                         className={`p-2 rounded-lg transition-all ${isListening ? 'bg-red-500 text-white animate-pulse' : 'text-claude-textSecondary hover:bg-claude-hover hover:text-claude-text'}`}
-                        title="语音输入"
+                        title={t('chat.voiceInput')}
                       >
                         <IconVoice size={20} />
                       </button>
@@ -2218,6 +2218,8 @@ const MainContent = ({ onNewChat, resetKey, tunerConfig, onOpenDocument, onArtif
                     {loading && !inputText.trim() && !pendingFiles.some(f => f.status === 'done') ? (
                       <button
                         onClick={handleStop}
+                        aria-label={t('chat.stopGenerating')}
+                        title={t('chat.stopGenerating')}
                         className="p-2 text-claude-text hover:bg-claude-hover rounded-lg transition-colors"
                       >
                         <svg

@@ -1,6 +1,7 @@
 import React, { useState, useEffect, useRef } from 'react';
 import { ChevronDown, Check, ChevronRight, ArrowLeft } from 'lucide-react';
 import { compareModelNames, Effort, splitModelKey } from '../utils/modelConfig';
+import { useI18n } from '../hooks/useI18n';
 
 export interface SelectableModel {
   id: string; name: string; enabled: number; providerId?: string; providerName?: string;
@@ -13,13 +14,14 @@ interface Props {
   isNewChat?: boolean; dropdownPosition?: 'top' | 'bottom';
 }
 export default function ModelSelector({ currentModelString, models, onModelChange, effort, onEffortChange, dropdownPosition }: Props) {
+  const { t } = useI18n();
   const [open, setOpen] = useState(false);
   const [panel, setPanel] = useState<'main' | 'model' | 'effort'>('main');
   const [up, setUp] = useState(false);
   const [search, setSearch] = useState('');
   const ref = useRef<HTMLDivElement>(null);
   const selected = models.find(m => m.id === currentModelString);
-  const label = selected?.name || splitModelKey(currentModelString).modelId || '选择模型';
+  const label = selected?.name || splitModelKey(currentModelString).modelId || t('models.selectModel');
   const currentEffort = ['off', 'low', 'high', 'max'].includes(effort || '') ? effort! : 'off';
   useEffect(() => { const close = (e: MouseEvent) => { if (!ref.current?.contains(e.target as Node)) setOpen(false); }; document.addEventListener('mousedown', close); return () => document.removeEventListener('mousedown', close); }, []);
   const groups = new Map<string, SelectableModel[]>();
@@ -31,7 +33,7 @@ export default function ModelSelector({ currentModelString, models, onModelChang
   for (const items of groups.values()) items.sort(compareModelNames);
   const row = 'w-full flex items-center justify-between gap-4 px-3 py-2 text-sm rounded-lg hover:bg-claude-hover text-left';
   return <div ref={ref} className="relative inline-block">
-    <button aria-label="模型与 Effort" title={selected?.providerName} className="flex items-center gap-1.5 px-3 py-2 text-sm rounded-lg hover:bg-claude-hover" onClick={() => { setUp(dropdownPosition === 'top' || (dropdownPosition !== 'bottom' && window.innerHeight - (ref.current?.getBoundingClientRect().bottom || 0) < 350)); setOpen(!open); setPanel('main'); setSearch(''); }}><span className="max-w-[200px] truncate">{label}</span><ChevronDown size={14} /></button>
+    <button aria-label={t('models.modelAndEffort')} title={selected?.providerName} className="flex items-center gap-1.5 px-3 py-2 text-sm rounded-lg hover:bg-claude-hover" onClick={() => { setUp(dropdownPosition === 'top' || (dropdownPosition !== 'bottom' && window.innerHeight - (ref.current?.getBoundingClientRect().bottom || 0) < 350)); setOpen(!open); setPanel('main'); setSearch(''); }}><span className="max-w-[200px] truncate">{label}</span><ChevronDown size={14} /></button>
     {open && <div role="dialog" aria-label="模型选择" className={`absolute right-0 ${up ? 'bottom-full mb-2' : 'top-full mt-2'} w-[290px] max-w-[85vw] bg-claude-input text-claude-text rounded-xl border border-claude-border shadow-xl p-1 z-[100]`}>
       {panel === 'main' ? <><button className={row} onClick={() => setPanel('model')}><span>Model</span><span className="flex gap-2 items-center text-claude-textSecondary truncate">{label}<ChevronRight size={14} /></span></button><button className={row} onClick={() => setPanel('effort')}><span>Effort</span><span className="flex gap-2 items-center text-claude-textSecondary capitalize">{currentEffort}<ChevronRight size={14} /></span></button></> : <>
         <button className={row} onClick={() => setPanel('main')}><span className="flex gap-2 items-center"><ArrowLeft size={13} />{panel === 'model' ? 'Model' : 'Effort'}</span></button>

@@ -2,6 +2,8 @@ import { beforeEach, afterEach, describe, expect, it, vi } from 'vitest';
 import { act, fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { invoke } from '@tauri-apps/api/core';
 import VoiceInput from './VoiceInput';
+import { useUIStore } from '../stores/useUIStore';
+import en from '../locales/en.json';
 
 let recordings: FakeRecorder[];
 let stopTrack: ReturnType<typeof vi.fn>;
@@ -18,6 +20,7 @@ class FakeRecorder {
 }
 beforeEach(() => {
   vi.resetAllMocks(); recordings = []; stopTrack = vi.fn();
+  useUIStore.getState().setLanguage('en');
   getMedia = vi.fn().mockResolvedValue({getTracks: () => [{stop: stopTrack}]});
   Object.defineProperty(navigator, 'mediaDevices', {configurable: true, value: {getUserMedia: getMedia}});
   vi.stubGlobal('MediaRecorder', FakeRecorder);
@@ -54,7 +57,7 @@ describe('audio recording lifecycle', () => {
     const view = render(<VoiceInput isOpen onResult={result} onClose={() => {}} />);
     fireEvent.click(screen.getByText('开始录音')); await screen.findByText('停止并转写');fireEvent.click(screen.getByText('停止并转写'));
     await waitFor(() => expect(resolve).toBeDefined());
-    fireEvent.click(screen.getByLabelText('关闭并取消录音'));
+    fireEvent.click(screen.getByLabelText(en.chat.closeVoiceInput));
     await act(async () => {resolve('late transcript');});
     expect(invoke).toHaveBeenCalledWith('voice_cancel', {id:'job'});
     expect(screen.getByLabelText('转写文本')).not.toHaveValue('late transcript');expect(result).not.toHaveBeenCalled();view.unmount();

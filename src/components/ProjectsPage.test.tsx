@@ -42,7 +42,7 @@ const renderProject = () => render(
   <MemoryRouter initialEntries={['/projects?project=project-1']}><ProjectsPage /></MemoryRouter>,
 );
 const openModels = async () => {
-  fireEvent.click(await screen.findByRole('button', { name: '模型与 Effort' }));
+  fireEvent.click(await screen.findByRole('button', { name: 'models.modelAndEffort' }));
   fireEvent.click(within(screen.getByRole('dialog', { name: '模型选择' })).getByRole('button', { name: /^Model / }));
   return screen.getByRole('dialog', { name: '模型选择' });
 };

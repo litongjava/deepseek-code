@@ -38,10 +38,12 @@ import { tauriAPI } from './utils/tauriAPI';
 import ChatHeader from './components/ChatHeader';
 import Tooltip from './components/ui/Tooltip';
 import { useUIStore } from './stores';
+import { useI18n } from './hooks/useI18n';
 
 const isTauri = typeof window !== 'undefined' && !!(window as any).__TAURI_INTERNALS__;
 
 const Layout = () => {
+  const { t } = useI18n();
   const [unreadAnnouncements, setUnreadAnnouncements] = useState<Array<{ id: number; title: string; content: string; created_at: string; updated_at?: string }>>([]);
   const [activeAnnouncementId, setActiveAnnouncementId] = useState<number | null>(null);
   const [isMarkingAnnouncementRead, setIsMarkingAnnouncementRead] = useState(false);
@@ -393,7 +395,7 @@ const Layout = () => {
             {showCodingView && <Tooltip content="Agent Worktree (Ctrl+Shift+A)"><button onClick={() => { setShowAgentPanel(true); setShowAnalyticsPanel(false); }} className="p-1.5 hover:bg-black/5 dark:hover:bg-white/5 rounded-md text-claude-textSecondary hover:text-claude-text transition-colors"><GitBranch size={16} strokeWidth={1.5} /></button></Tooltip>}
             <Tooltip content="使用统计"><button onClick={() => { setShowAnalyticsPanel(true); setShowAgentPanel(false); }} className="p-1.5 hover:bg-black/5 dark:hover:bg-white/5 rounded-md text-claude-textSecondary hover:text-claude-text transition-colors"><BarChart3 size={16} strokeWidth={1.5} /></button></Tooltip>
             <Tooltip content="终端 (Ctrl+`)"><button onClick={() => setShowTerminal(!showTerminal)} className={`p-1.5 hover:bg-black/5 dark:hover:bg-white/5 rounded-md transition-colors ${showTerminal ? 'text-[#C6613F]' : 'text-claude-textSecondary hover:text-claude-text'}`}><Terminal size={16} strokeWidth={1.5} /></button></Tooltip>
-            <Tooltip content="帮助"><button type="button" aria-label="帮助" aria-haspopup="dialog" aria-expanded={showHelpModal} onClick={() => setShowHelpModal(true)} className="p-1.5 hover:bg-black/5 dark:hover:bg-white/5 rounded-md text-claude-textSecondary hover:text-claude-text transition-colors"><HelpCircle size={16} strokeWidth={1.5} /></button></Tooltip>
+            <Tooltip content={t('common.help')}><button type="button" aria-label={t('common.help')} aria-haspopup="dialog" aria-expanded={showHelpModal} onClick={() => setShowHelpModal(true)} className="p-1.5 hover:bg-black/5 dark:hover:bg-white/5 rounded-md text-claude-textSecondary hover:text-claude-text transition-colors"><HelpCircle size={16} strokeWidth={1.5} /></button></Tooltip>
           </div>
         </AppTitleBar>
         <Sidebar isCollapsed={isSidebarCollapsed} toggleSidebar={() => setIsSidebarCollapsed(!isSidebarCollapsed)} refreshTrigger={refreshTrigger} onNewChatClick={handleNewChat} onOpenSettings={() => { navigate('/settings'); setShowUpgrade(false); }} onCloseOverlays={() => setShowUpgrade(false)} tunerConfig={tunerConfig} setTunerConfig={setTunerConfig} titleBarHeight={titleBarHeight} showHelpModal={showHelpModal} onHelpModalChange={setShowHelpModal} />
