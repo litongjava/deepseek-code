@@ -405,11 +405,10 @@ impl DetailsPanel {
             "entries"
         };
         if !self.expanded || budget < 3 {
-            let prefix = format!("{} {entry_label} \u{00b7} ", self.entries.len());
-            let label = clipped(&format!("{prefix}Show more (Ctrl+O)"), width);
+            let label = clipped("View details (Ctrl+O)", width);
             frame.toggle = Some(HitTarget {
                 row: 0,
-                start: prefix.chars().count(),
+                start: 0,
                 end: label.chars().count(),
             });
             frame.lines.push((label, TextStyle::Selected));
@@ -1071,6 +1070,10 @@ impl PromptEditor {
                     lines.push((row, if done { TextStyle::Muted } else if current { TextStyle::Selected } else { TextStyle::Plain }));
                 }
             }
+            if let Some(completion) = crate::terminal::TURN_COMPLETION.lock().unwrap_or_else(|e| e.into_inner()).as_ref() {
+                lines.push((clipped(completion, width), TextStyle::Muted));
+                lines.push((String::new(), TextStyle::Plain));
+            }
             let menu_height = lines.len() - panel_height;
             lines.push(("\u{2500}".repeat(width), TextStyle::Border));
             match &ghost {
@@ -1261,7 +1264,6 @@ impl PromptEditor {
                     if matches!(mouse.kind, MouseEventKind::ScrollUp | MouseEventKind::ScrollDown) {
                         selection.clear()?;
                         pinned.expanded = false;
-                        screen.invalidated = true;
                         history_view.refresh(&[], &above.all(), width);
                         history_view.wheel(mouse.kind == MouseEventKind::ScrollUp, (rows as usize).saturating_sub(lines.len()))?;
                         continue;
@@ -1346,12 +1348,10 @@ impl PromptEditor {
                     if !panel_scroll && crate::terminal::transcript_pager::HistoryView::is_navigation(key) {
                         history_view.refresh(&[], &above.all(), width);
                         history_view.navigate(key, (rows as usize).saturating_sub(lines.len()))?;
-                        screen.invalidated = true;
                         continue;
                     }
                     if history_view.active() {
                         history_view.close()?;
-                        screen.invalidated = true;
                         if key.code == KeyCode::Esc {
                             continue;
                         }
@@ -1614,6 +1614,9 @@ impl PromptEditor {
                             menu_hidden = true;
                         }
                         KeyCode::Enter => {
+                            if text.trim().is_empty() {
+                                continue;
+                            }
                             // Restore the main screen before clearing its composer.
                             // Otherwise dropping HistoryView restores a stale input frame.
                             history_view.close()?;
@@ -2001,7 +2004,8 @@ mod tests {
         let collapsed = details.render(80, 5);
         assert_eq!(collapsed.lines.len(), 1);
         let hit = collapsed.toggle.unwrap();
-        assert!(!hit.contains(0, 0));
+        assert!(hit.contains(0, 0));
+        assert_eq!(collapsed.lines[0].0, "View details (Ctrl+O)");
         assert!(hit.contains(0, hit.start));
         assert!(!hit.contains(1, hit.start));
         assert!(!hit.contains(0, hit.end));

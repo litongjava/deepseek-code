@@ -114,6 +114,7 @@ impl LiveTurn {
         {
             return None;
         }
+        *crate::terminal::TURN_COMPLETION.lock().unwrap_or_else(|e| e.into_inner()) = None;
         let (updates, receiver) = mpsc::channel();
         let (actions, action_receiver) = async_mpsc::unbounded_channel();
         let (ready, initialized) = mpsc::sync_channel(1);
@@ -581,6 +582,8 @@ impl State {
             "Waiting for your answer".to_owned()
         } else if let Some(hook) = &self.hook_activity {
             hook.clone()
+        } else if self.activity.starts_with("Running Bash") {
+            "Working".to_owned()
         } else if self.activity.starts_with("Running") || self.activity == "Cancelling" {
             self.activity.clone()
         } else {
@@ -1338,10 +1341,17 @@ impl Frame {
             let skip = content.len().saturating_sub(budget);
             content.drain(..skip);
         }
-        if !state.details.expanded && state.activity.starts_with("Running Bash") && state.activity_started.elapsed() >= Duration::from_secs(3) {
+        if !state.details.expanded && state.activity.starts_with("Running Bash") {
             // A long command can continue in the background, as in the reference CLI.
             content.retain(|line| !line.is_empty());
-            content.push("  \u{23bf}  (ctrl+b to run in background)".into());
+            let hint = state.activity_started.elapsed() >= Duration::from_secs(3);
+            let keep = budget.saturating_sub(2 + usize::from(hint));
+            let skip = content.len().saturating_sub(keep);
+            content.drain(..skip);
+            content.push(clip(&state.activity, width));
+            if hint {
+                content.push("  Ctrl+B to run in background".into());
+            }
             let skip = content.len().saturating_sub(budget);
             content.drain(..skip);
         }
@@ -1861,16 +1871,7 @@ fn run(
                         }
                         return screen.flush();
                     }
-                    screen.log("")?;
-                    if std::env::var_os("NO_COLOR").is_some() {
-                        screen.log(&footer)?;
-                    } else {
-                        screen.log_rendered(&change_view::render(
-                            &change_view::muted(&footer),
-                            usize::MAX,
-                            true,
-                        ));
-                    }
+                    *crate::terminal::TURN_COMPLETION.lock().unwrap_or_else(|e| e.into_inner()) = Some(footer);
                     return screen.flush();
                 }
                 Err(mpsc::TryRecvError::Empty) => break,
@@ -2452,6 +2453,14 @@ mod tests {
         assert!(!update.contains("draft"));
         assert!(!update.contains('\n'));
         assert!(!update.contains("\x1b[2K"));
+    }
+    #[test]
+    fn bash_activity_keeps_command_out_of_working_status() {
+        let mut state = State::new("ask".into());
+        state.activity = "Running Bash(echo fixture)".into();
+        let status = state.status_line();
+        assert!(status.contains("Working"));
+        assert!(!status.contains("echo fixture"));
     }
     #[test]
     fn questions_preserve_drafts_and_do_not_queue_answers() {
