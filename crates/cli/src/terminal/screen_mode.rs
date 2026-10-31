@@ -6,6 +6,17 @@ use crossterm::{
 };
 use std::io::{self, IsTerminal};
 
+/// Start the interactive session at the top of a clean terminal, before any
+/// onboarding or hook output so that startup diagnostics remain visible.
+pub fn prepare_screen() -> io::Result<()> {
+    execute!(
+        io::stderr(),
+        Clear(ClearType::All),
+        Clear(ClearType::Purge),
+        MoveTo(0, 0)
+    )
+}
+
 #[derive(Default)]
 pub struct ScreenMode {
     fullscreen: bool,

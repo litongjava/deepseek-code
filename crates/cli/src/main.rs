@@ -492,6 +492,9 @@ async fn run(cli: &Cli) -> Result<()> {
         !single && !sdk_stream && io::stdin().is_terminal() && io::stderr().is_terminal()
             && !terminal::screen_reader(),
     );
+    if _exit_cleanup.0 {
+        terminal::screen_mode::prepare_screen()?;
+    }
     let mut input = if single { None } else { Some(session::terminal_input()) };
     let selection = config::select(
         cli,

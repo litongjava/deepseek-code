@@ -529,7 +529,7 @@ impl Screen {
         result
     }
 
-    /// Draws `lines` immediately after the transcript. Content above the
+    /// Draws `lines` at the bottom, leaving short transcripts at the top. Content above the
     /// frame is scrolled up rather than overwritten, so the transcript (and
     /// the terminal's scrollback) keeps everything said.
     fn draw_pinned_to(
@@ -562,14 +562,6 @@ impl Screen {
         }
         let repaint = self.invalidated || anchor != top || self.height != height;
         let mut frame = Vec::new();
-        if anchor < top {
-            // Move visible transcript and composer together into the unused
-            // bottom rows. Inserting at the top discards only blank tail rows,
-            // rather than creating a gap between output and the input box.
-            let shift = top - anchor;
-            queue!(frame, MoveTo(0, 0), crossterm::terminal::ScrollDown(shift as u16))?;
-            self.transcript_end = self.transcript_end.map(|end| end + shift);
-        }
         if anchor > top {
             // The frame grew: scroll the rows above it into scrollback so the
             // whole frame fits on screen.
@@ -579,7 +571,7 @@ impl Screen {
             }
         } else if self.height > height || first || self.invalidated {
             // The frame shrank: erase the rows it no longer covers.
-            queue!(frame, MoveTo(0, top as u16), Clear(ClearType::FromCursorDown))?;
+            queue!(frame, MoveTo(0, anchor.min(top) as u16), Clear(ClearType::FromCursorDown))?;
         }
         for (offset, (text, style)) in lines.iter().enumerate() {
             if !repaint && self.previous.get(offset) == Some(&(text.clone(), *style)) {
@@ -1887,24 +1879,24 @@ mod tests {
         let mut screen = Screen::pinned();
         let lines = frame_lines();
         screen.draw_pinned_to(&mut Vec::new(), &lines, 1, 3, 30, 2).unwrap();
-        assert_eq!(screen.transcript_end, Some(26));
+        assert_eq!(screen.transcript_end, Some(2));
         screen.draw_pinned_to(&mut Vec::new(), &lines, 1, 4, 30, 27).unwrap();
-        assert_eq!(screen.transcript_end, Some(26));
+        assert_eq!(screen.transcript_end, Some(2));
         let mut screen = Screen::pinned();
         screen.draw_pinned_to(&mut Vec::new(), &lines, 1, 3, 10, 9).unwrap();
         assert_eq!(screen.transcript_end, Some(6));
     }
 
     #[test]
-    fn composer_follows_short_transcript_without_padding() {
+    fn composer_stays_at_bottom_without_moving_short_transcript() {
         let mut screen = Screen::pinned();
         let lines = frame_lines();
         let mut output = Vec::new();
-        // A short transcript ends at row 2; keep the composer there.
+        // Keep the short transcript at the top and the composer at the bottom.
         screen.draw_pinned_to(&mut output, &lines, 1, 3, 10, 2).unwrap();
         let output = String::from_utf8(output).unwrap();
-        assert!(output.starts_with("\x1b[1;1H\x1b[4T"), "moves existing content into blank tail rows");
-        assert!(output.contains("\x1b[7;1H"), "first line follows shifted transcript");
+        assert!(!output.contains("\x1b[4T"), "transcript must not scroll down");
+        assert!(output.contains("\x1b[7;1H"), "first line is pinned above the footer");
         assert!(output.contains("\x1b[10;1H"), "footer occupies bottom row");
         assert!(output.ends_with("\x1b[8;4H"), "cursor on the input row");
         assert!(!output.contains("\r\n"), "nothing scrolls when it already fits");
@@ -1935,7 +1927,7 @@ mod tests {
         let mut output = Vec::new();
         screen.draw_pinned_to(&mut output, &lines, 1, 3, 10, 9).unwrap();
         let output = String::from_utf8(output).unwrap();
-        assert!(output.starts_with("\x1b[1;1H\x1b[1T"), "shrinking moves content down together");
+        assert!(output.starts_with("\x1b[7;1H\x1b[J"), "shrinking clears the old frame without moving the transcript");
         assert_eq!(output.matches("\x1b[K").count(), 3);
         assert!(!output.contains("\r\n"));
         assert_eq!(screen.top, Some(7));
