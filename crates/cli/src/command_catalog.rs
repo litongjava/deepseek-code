@@ -61,7 +61,7 @@ pub const COMMANDS: &[(&str, &str)] = &[
     ("/plan", "Enter planning mode (optionally with a task to plan), show the plan, or open it in an editor"),
     ("/vim", "Toggle vim-style editing of the prompt (Esc for normal mode)"),
     ("/lsp", "Language server status and installs: [status] | install LANGUAGE (java, python, typescript, html, css, vue, csharp, go, rust)"),
-    ("/remote-control", "Continue this session from a Remote Control client: [NAME] [--server URL [--save]]|status|disconnect|server (alias /rc)"),
+    ("/remote-control", "Continue this session from a Remote Control client: [NAME] [--server URL [--save]]|listen [--host ADDR] [--port PORT]|status|disconnect|server (alias /rc)"),
     ("/rc", "Alias for /remote-control"),
     ("/reload-skills", "Reload installed skills from disk"),
     ("/resume", "List saved conversations or resume one: [ID]"),

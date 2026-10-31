@@ -264,6 +264,9 @@ pub enum Commands {
     },
     Ssh { config: PathBuf, operation: PathBuf, #[arg(long)] yes: bool },
     Remote { request: PathBuf, #[arg(long)] yes: bool },
+    /// Drive a session shared by another dcl with `/remote-control listen`.
+    #[command(alias = "rc")]
+    RemoteControl { #[command(subcommand)] action: RemoteControlCommands },
     /// Show language server status or install one: lsp [status] | lsp install LANGUAGE [--yes].
     Lsp { action: Option<String>, language: Option<String>, #[arg(long)] yes: bool },
     Help { #[arg(long)] topic:Option<String>, command:Vec<String> },
@@ -353,6 +356,17 @@ pub enum Commands {
     Init {
         #[arg(short, long)]
         name: Option<String>,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+pub enum RemoteControlCommands {
+    /// Connect to HOST[:PORT]; prompts, tools and file changes run on that host.
+    Connect {
+        address: String,
+        /// The token printed by `/remote-control listen`; asked for when omitted.
+        #[arg(long, env = "DCL_REMOTE_CONTROL_TOKEN", hide_env_values = true)]
+        token: Option<String>,
     },
 }
 

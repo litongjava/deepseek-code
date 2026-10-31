@@ -1,6 +1,8 @@
 //! `/remote-control` (`/rc`): exposes the interactive session to a Remote
-//! Control server. Remote prompts run only while the prompt is idle.
-use crate::{session::Session, terminal::input::TerminalInput};
+//! Control server, or with `listen` shares the whole terminal session with
+//! dcl clients on other machines (see `remote_host`). Remote prompts from a
+//! server run only while the prompt is idle.
+use crate::{remote_host, session::Session, terminal::input::TerminalInput};
 use anyhow::{Context, Result};
 use deepseek_code_core::{
     runtime::RuntimePaths,
@@ -10,7 +12,7 @@ use deepseek_code_core::{
 };
 use serde_json::{json, Value};
 
-const USAGE: &str = "Usage: /remote-control [NAME] [--server URL [--save]] | status | disconnect | server [URL|clear]";
+const USAGE: &str = "Usage: /remote-control [NAME] [--server URL [--save]] | listen [--host ADDR] [--port PORT] | status | disconnect | server [URL|clear]";
 
 /// The reference CLI's remoteControlAtStartup, read from user settings
 /// only: a project file must not connect a session to a remote server.
@@ -27,6 +29,16 @@ pub struct Remote {
     deferred: std::collections::VecDeque<String>,
     /// Remote prompts already shown by the remote client; not echoed back.
     remote_prompts: std::collections::VecDeque<String>,
+    /// A bound listener: the REPL hands this session over to `remote_host`.
+    handoff: Option<remote_host::Listening>,
+    /// Client notices from the `remote_host` this dcl runs under.
+    host_notices: Option<tokio::sync::mpsc::UnboundedReceiver<String>>,
+}
+
+/// A Remote Control server update, or a notice from `remote_host`.
+pub enum RemoteUpdate {
+    Server(Update),
+    Notice(String),
 }
 
 /// What the REPL should do with a remote update.
@@ -52,21 +64,55 @@ impl Remote {
         self.deferred.pop_front()
     }
 
+    /// Under `/remote-control listen`, shows when clients connect and leave.
+    pub async fn attach_host(&mut self) {
+        if remote_host::host_address().is_some() {
+            match remote_host::subscribe().await {
+                Ok(notices) => self.host_notices = Some(notices),
+                Err(error) => eprintln!("Remote Control: {error:#}"),
+            }
+        }
+    }
+
+    /// The session to hand over to `remote_host` after `listen`.
+    pub fn take_handoff(&mut self) -> Option<remote_host::Listening> {
+        self.handoff.take()
+    }
+
     /// Next remote update; pending forever when not connected.
-    pub async fn update(&mut self) -> Update {
-        match self.bridge.as_mut() {
-            Some(bridge) => bridge.update().await,
-            None => std::future::pending().await,
+    pub async fn update(&mut self) -> RemoteUpdate {
+        let server = async {
+            match self.bridge.as_mut() {
+                Some(bridge) => bridge.update().await,
+                None => std::future::pending().await,
+            }
+        };
+        let notice = async {
+            match self.host_notices.as_mut() {
+                Some(notices) => notices.recv().await,
+                None => std::future::pending().await,
+            }
+        };
+        tokio::select! {
+            update = server => RemoteUpdate::Server(update),
+            Some(notice) = notice => RemoteUpdate::Notice(notice),
         }
     }
 
     /// `notify` shows a line without disturbing an active prompt editor.
     pub async fn handle(
         &mut self,
-        update: Update,
+        update: RemoteUpdate,
         session: &mut Session,
         notify: impl Fn(String),
     ) -> Result<Action> {
+        let update = match update {
+            RemoteUpdate::Server(update) => update,
+            RemoteUpdate::Notice(notice) => {
+                notify(notice);
+                return Ok(Action::None);
+            }
+        };
         match update {
             Update::Inbound(Inbound::Prompt(text)) => return Ok(Action::Prompt(text)),
             Update::Inbound(Inbound::Control {
@@ -142,7 +188,31 @@ impl Remote {
         input: &mut Option<TerminalInput>,
     ) -> Result<()> {
         let words: Vec<&str> = argument.split_whitespace().collect();
+        let hosted = remote_host::host_address().is_some();
         match words.as_slice() {
+            ["listen", options @ ..] if hosted => {
+                eprintln!("{}", remote_host::control("listen", options).await?);
+                return Ok(());
+            }
+            ["listen", options @ ..] => {
+                anyhow::ensure!(
+                    self.bridge.is_none(),
+                    "Disconnect the Remote Control server first (/remote-control disconnect)"
+                );
+                let options = remote_host::Options::parse(options)?;
+                let listening = remote_host::Listening::bind(&options).await?;
+                eprintln!("{}", listening.banner());
+                self.handoff = Some(listening);
+                return Ok(());
+            }
+            ["status"] if hosted && self.bridge.is_none() => {
+                eprintln!("{}", remote_host::control("status", &[]).await?);
+                return Ok(());
+            }
+            ["disconnect"] if hosted && self.bridge.is_none() => {
+                eprintln!("{}", remote_host::control("stop", &[]).await?);
+                return Ok(());
+            }
             ["status"] => {
                 match &self.bridge {
                     Some(bridge) => eprintln!(

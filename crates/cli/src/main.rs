@@ -69,7 +69,9 @@ mod debug_logging;
 mod resource_commands;
 mod powerup;
 mod feedback_commands;
+mod remote_client;
 mod remote_commands;
+mod remote_host;
 
 use anyhow::{bail, ensure, Context, Result};
 use args::{Cli, Commands, McpCommands, OutputFormat, SessionCommands, SkillsCommands};
@@ -225,6 +227,7 @@ async fn run(cli: &Cli) -> Result<()> {
             let workspace = cli.path.clone().map_or_else(std::env::current_dir, Ok)?;
             return lsp_commands::command(&paths, &workspace, action.as_deref(), language.as_deref(), *yes).await;
         }
+        Some(Commands::RemoteControl { action: args::RemoteControlCommands::Connect { address, token } }) => return remote_client::run(address, token.as_deref()).await,
         Some(Commands::Remote { request, yes }) => return tokio::select! { result=migration::remote(request,*yes)=>result, _=tokio::signal::ctrl_c()=>anyhow::bail!("Remote operation cancelled") },
         Some(Commands::Agents { action }) => {
             let context = services::context(&paths)?;
@@ -584,6 +587,7 @@ async fn run(cli: &Cli) -> Result<()> {
         let mut loops: Vec<(std::time::Duration, String, std::time::Instant)> = Vec::new();
         background_refresh.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
         let mut remote = remote_commands::Remote::default();
+        remote.attach_host().await;
         // As in the reference CLI, remoteControlAtStartup connects every session.
         if remote_commands::at_startup(&paths.data_dir) {
             if let Err(error) = remote.command("", &paths, &session, &mut input).await { eprintln!("Remote Control: {error:#}"); }
@@ -912,6 +916,13 @@ async fn run(cli: &Cli) -> Result<()> {
             }
             if matches!(command, "/remote-control" | "/rc") {
                 if let Err(error) = remote.command(argument, &paths, &session, &mut input).await { eprintln!("Error: {error:#}"); }
+                if let Some(listening) = remote.take_handoff() {
+                    // The session continues in a child dcl that local and remote terminals share.
+                    drop(presence.take());
+                    let args = remote_host::child_args(&std::env::args().skip(1).collect::<Vec<_>>(), cli.prompt.as_deref(), &session.id, &session.workspace);
+                    let code = remote_host::run(listening, args, &session.workspace).await?;
+                    std::process::exit(code);
+                }
                 continue;
             }
             if command == "/plan" {
