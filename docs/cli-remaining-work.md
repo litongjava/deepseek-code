@@ -41,6 +41,7 @@
 - command hook `if` 条件过滤：`7d3c9fe`。
 - `/plan <描述>` 进入计划模式并提交任务一次：`08e92cf`。
 - `/remote-control`：自定义服务端地址、mock、消息/控制转发、重连、拆除 `f2748fa`；工具审批转发与远程中断 `a01e83a`（ConPTY session 4 已验收并记录）。
+- `/remote-control listen` 与 `dcl remote-control connect`：dcl 之间直连的终端镜像。会话以 `--resume` 在 pty 中的子 dcl 继续，本地终端与一个远程客户端共用同一界面（全部命令、菜单、快捷键）；Noise NNpsk0 + 一次性 token；重连时用 vt100 快照回放滚动历史与屏幕；`Ctrl+]` 断开、新连接替换旧连接；子 dcl 经本机控制端口执行 `listen/status/disconnect` 并接收连接提示。Linux 本机双 pty 验收（`deepseek-code-dev/runs/p2p/duo.py`）；跨机器、macOS 与 Windows（ConPTY、按键事件转字节）未验证。
 - 清单"Already implemented"一节：SDK hook 回调、SDK MCP 传输、SDK 自定义子 agent、`/statusline setup`、LSP 生命周期、目标提议、owned-child 恢复与后台任务、内置资源工作流等。
 
 ## 5. 待开发（按优先级）

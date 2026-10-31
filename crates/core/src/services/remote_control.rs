@@ -17,6 +17,7 @@ use tokio::sync::{mpsc, oneshot, watch};
 use tokio_tungstenite::tungstenite::{client::IntoClientRequest, Message};
 
 pub mod mock;
+pub mod peer;
 
 const SETTINGS_FILE: &str = "remote-control.json";
 pub const SERVER_ENV: &str = "CLAUDE_BRIDGE_BASE_URL";
