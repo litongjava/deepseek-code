@@ -96,6 +96,27 @@ pub fn gathering_summary(kinds: &[Gathering], running: bool) -> String {
 
 /// Human-readable text of a tool output; JSON envelopes are unwrapped.
 pub fn result_text(output: &str) -> String {
+    // Strip whole sequences after decoding JSON and before splitting into rows.
+    // Filtering only ESC would leave visible fragments such as `[32m` behind.
+    struct PlainOutput(String);
+    impl vte::Perform for PlainOutput {
+        fn print(&mut self, ch: char) {
+            self.0.push(ch);
+        }
+
+        fn execute(&mut self, byte: u8) {
+            if matches!(byte, b'\n' | b'\r' | b'\t') {
+                self.0.push(char::from(byte));
+            }
+        }
+    }
+    let text = raw_result_text(output);
+    let mut plain = PlainOutput(String::with_capacity(text.len()));
+    vte::Parser::new().advance(&mut plain, text.as_bytes());
+    plain.0
+}
+
+fn raw_result_text(output: &str) -> String {
     // Failed calls wrap the tool's own JSON result as `Error: {...}`.
     let body = output.strip_prefix("Error: ").unwrap_or(output);
     let Ok(Value::Object(fields)) = serde_json::from_str::<Value>(body) else {
@@ -573,6 +594,41 @@ mod tests {
 
         let lines = text(&finished("Bash", &json!({"command":"cargo x"}), "Bash is not available in plan mode", true, None, None));
         assert_eq!(lines[1], "  \u{23bf}  Bash is not available in plan mode");
+    }
+
+    #[test]
+    fn ansi_output_is_clean_in_both_views() {
+        let output = json!({
+            "exit_code": 2,
+            "stdout": "\u{1b}[2m2026-10-31\u{1b}[0m app \u{1b}[32msin\u{1b}[0m [\u{1b}[34minfo\u{1b}[0m]\n\u{1b}]8;;https://example.com\u{1b}\\链接\u{1b}]8;;\u{1b}\\\t正常 [text]\n",
+            "stderr": "\u{1b}[31mfailed\u{1b}[0m"
+        }).to_string();
+        let expected = "2026-10-31 app sin [info]\n链接\t正常 [text]\nfailed\nExit code 2";
+        assert_eq!(result_text(&output), expected);
+        assert_eq!(result_text(&format!("Error: {output}")), expected);
+        let input = json!({"command": "fly logs"});
+        let collapsed = text(&finished("Bash", &input, &output, true, None, None));
+        let full = text(&expanded("Bash", &input, &output, true, None));
+        assert_eq!(&collapsed[1..], &full[1..]);
+        assert_eq!(collapsed[1], "  \u{23bf}  2026-10-31 app sin [info]");
+        assert_eq!(collapsed[2], "     链接 正常 [text]");
+        assert_eq!(collapsed[3], "     failed");
+        assert_eq!(collapsed[4], "     Exit code 2");
+    }
+
+    #[test]
+    fn ansi_sequences_are_removed_before_splitting_rows() {
+        let output = "before\u{1b}]0;hidden\ntitle\u{7}after\n\u{1b}[2K\u{1b}[1G中文\u{1b}(B\n\u{1b}Psecret\u{1b}\\end\u{1b}[38;2;1;2;3m!\u{1b}[0m";
+        assert_eq!(result_text(output), "beforeafter\n中文\nend!");
+        assert_eq!(
+            summary("Bash", output, false),
+            (vec!["beforeafter".into(), "中文".into(), "end!".into()], 0)
+        );
+        assert_eq!(
+            result_text("ordinary [32m text\n\t中文"),
+            "ordinary [32m text\n\t中文"
+        );
+        assert_eq!(result_text("ok\u{1b}[38;2;"), "ok");
     }
 
     #[test]
