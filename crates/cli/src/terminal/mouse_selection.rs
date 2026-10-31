@@ -131,32 +131,52 @@ impl Selection {
             if text.is_empty() {
                 continue;
             }
-            let part = if selected { self.slice(row) } else { String::new() };
-            let mark = if part.is_empty() { String::new() } else { format!("{}:{part}", if row == self.bounds().0.0 as usize { self.bounds().0.1 } else { 0 }) };
+            let part = if selected {
+                self.slice(row)
+            } else {
+                String::new()
+            };
+            let mark = if part.is_empty() {
+                String::new()
+            } else {
+                format!(
+                    "{}:{part}",
+                    if row == self.bounds().0 .0 as usize {
+                        self.bounds().0 .1
+                    } else {
+                        0
+                    }
+                )
+            };
             if painted[row] == mark {
                 continue;
             }
             painted[row] = mark;
+            let rendered = if selected && !part.is_empty() {
+                let (start, end) = self.bounds();
+                let left = if row == start.0 as usize {
+                    start.1 as usize
+                } else {
+                    0
+                };
+                let right = if row == end.0 as usize {
+                    end.1 as usize
+                } else {
+                    usize::MAX
+                };
+                highlight_row(text, left, right)
+            } else {
+                text.clone()
+            };
+            // Publish each row with its highlight already applied. Never paint
+            // an unselected copy first: terminals without synchronized output
+            // support would briefly erase the retained selection on every drag.
             queue!(
                 out,
                 MoveTo(0, row as u16),
-                Print(text),
+                Print(rendered),
                 Print("\x1b[0m\x1b[K")
             )?;
-            if selected {
-                let (start, _) = self.bounds();
-                let col = if row == start.0 as usize { start.1 } else { 0 };
-                let part = self.slice(row);
-                if !part.is_empty() {
-                    queue!(
-                        out,
-                        MoveTo(col, row as u16),
-                        Print("\x1b[7m"),
-                        Print(part),
-                        Print("\x1b[0m")
-                    )?;
-                }
-            }
         }
         queue!(out, RestorePosition)?;
         out.write_all(b"\x1b[?2026l")?;
@@ -164,28 +184,69 @@ impl Selection {
     }
 }
 
+fn highlight_row(text: &str, left: usize, right: usize) -> String {
+    let plain = super::markdown::plain_rendered(text);
+    let mut rendered = String::from("\x1b[0m");
+    let mut cell = 0;
+    let mut inverse = false;
+    for ch in plain.chars() {
+        let width = ch.width().unwrap_or(0);
+        let selected = if width == 0 {
+            inverse
+        } else {
+            cell + width > left && cell < right
+        };
+        if selected != inverse {
+            rendered.push_str(if selected { "\x1b[7m" } else { "\x1b[27m" });
+            inverse = selected;
+        }
+        rendered.push(ch);
+        cell += width;
+    }
+    rendered.push_str("\x1b[0m");
+    rendered
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     #[test]
+    fn highlight_is_applied_before_text_without_repainting_the_row_twice() {
+        assert_eq!(
+            highlight_row("abcdef", 0, 3),
+            "\x1b[0m\x1b[7mabc\x1b[27mdef\x1b[0m"
+        );
+        let row = highlight_row("a中文z", 2, 4);
+        assert_eq!(super::super::markdown::plain_rendered(&row), "a中文z");
+        assert!(row.contains("\x1b[7m中文\x1b[27mz"));
+    }
+    #[test]
     fn selection_repaints_only_changed_rows() {
         let mut selection = Selection {
-            start: Some((1, 0)), end: (1, 2),
-            rows: vec!["untouched".into(), "selected".into(), "also untouched".into()],
+            start: Some((1, 0)),
+            end: (1, 2),
+            rows: vec![
+                "untouched".into(),
+                "selected".into(),
+                "also untouched".into(),
+            ],
             ..Default::default()
         };
         let mut output = Vec::new();
         selection.paint_to(&mut output, true).unwrap();
         let text = String::from_utf8(output).unwrap();
         assert!(!text.contains("untouched"));
-        assert!(text.contains("selected"));
+        assert!(super::super::markdown::plain_rendered(&text).contains("selected"));
         let mut output = Vec::new();
         selection.paint_to(&mut output, true).unwrap();
         assert!(!String::from_utf8(output).unwrap().contains("selected"));
         selection.end = (1, 1);
         let mut output = Vec::new();
         selection.paint_to(&mut output, true).unwrap();
-        assert!(String::from_utf8(output).unwrap().contains("selected"));
+        assert!(
+            super::super::markdown::plain_rendered(&String::from_utf8(output).unwrap())
+                .contains("selected")
+        );
     }
 
     #[test]
@@ -214,7 +275,7 @@ mod tests {
         selection.paint_to(&mut output, true).unwrap();
         let output = String::from_utf8(output).unwrap();
         assert!(!output.contains("\x1b[1;1H"));
-        assert!(output.contains("known history"));
+        assert!(super::super::markdown::plain_rendered(&output).contains("known history"));
     }
 
     #[test]
