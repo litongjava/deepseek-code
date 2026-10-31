@@ -690,8 +690,12 @@ impl Screen {
     }
     pub(crate) fn shortcut_popup(&mut self, context: crate::terminal::shortcuts::Context, next: &mut dyn FnMut() -> io::Result<Option<Event>>) -> io::Result<()> {
         let (cols, rows) = terminal::size().unwrap_or((80, 24));
-        let (_, cursor_y) = position()?;
-        let top = self.top.unwrap_or(cursor_y.saturating_sub(self.cursor_row as u16));
+        // A terminal that does not answer the cursor query still gets the popup.
+        let top = self.top.unwrap_or_else(|| {
+            position()
+                .map_or(0, |(_, row)| row)
+                .saturating_sub(self.cursor_row as u16)
+        });
         let mut background = crate::terminal::scrollback::Scrollback::snapshot().screen(top, rows);
         for (index, (text, _)) in self.previous.iter().enumerate() {
             if let Some(row) = background.get_mut(top as usize + index) { *row = clipped(text, cols as usize); }
