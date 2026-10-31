@@ -1,5 +1,5 @@
 mod sync_runtime;
-mod screenshot_file;
+pub(crate) mod screenshot_file;
 use anyhow::{anyhow, Result};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;

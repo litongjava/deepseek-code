@@ -21,12 +21,56 @@ pub(super) fn save(directory: &Path, encoded: &str) -> Result<(String, &'static 
         .create_new(true)
         .open(&path)?;
     file.write_all(&bytes).context("Cannot save screenshot")?;
+    let canonical = path.canonicalize()?;
+    let receipts = directory.join(".generated");
+    std::fs::create_dir_all(&receipts)?;
+    let receipt = serde_json::json!({"path":canonical,"sha256":STANDARD.encode(ring::digest::digest(&ring::digest::SHA256, &bytes).as_ref())});
+    std::fs::write(
+        receipts.join(path.file_name().unwrap()),
+        serde_json::to_vec(&receipt)?,
+    )?;
     Ok((path.to_string_lossy().into_owned(), mime))
+}
+
+/// Only unchanged files emitted by the screenshot tool receive the Read exception.
+pub(crate) fn readable(path: &Path) -> bool {
+    crate::runtime::resolve_default_data_dir()
+        .ok()
+        .is_some_and(|root| verified(&root.join("screenshots"), path).unwrap_or(false))
+}
+
+fn verified(directory: &Path, path: &Path) -> Result<bool> {
+    let canonical = path.canonicalize()?;
+    let root = directory.canonicalize()?;
+    if canonical.parent() != Some(root.as_path()) || !canonical.is_file() {
+        return Ok(false);
+    }
+    let receipt: serde_json::Value = serde_json::from_slice(&std::fs::read(
+        root.join(".generated").join(canonical.file_name().unwrap()),
+    )?)?;
+    if receipt["path"] != serde_json::to_value(&canonical)? {
+        return Ok(false);
+    }
+    let bytes = std::fs::read(&canonical)?;
+    Ok(receipt["sha256"]
+        == STANDARD.encode(ring::digest::digest(&ring::digest::SHA256, &bytes).as_ref()))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn only_generated_unchanged_files_receive_read_access() {
+        let root = tempfile::tempdir().unwrap();
+        let (path, _) = save(root.path(), &STANDARD.encode(b"\xff\xd8\xffimage")).unwrap();
+        assert!(verified(root.path(), Path::new(&path)).unwrap());
+        let other = root.path().join("manual.jpg");
+        std::fs::copy(&path, &other).unwrap();
+        assert!(!verified(root.path(), &other).unwrap_or(false));
+        std::fs::write(&path, b"replacement").unwrap();
+        assert!(!verified(root.path(), Path::new(&path)).unwrap());
+    }
 
     #[test]
     fn saves_original_bytes_with_matching_extension_and_unique_path() {

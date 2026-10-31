@@ -119,7 +119,7 @@ impl ToolLoopExecutor {
         for key in path_keys {
             if let Some(path) = input.get(*key).and_then(Value::as_str) {
                 // The exact session plan document has a separate checked runtime-data scope.
-                if self.is_plan_document_tool(tool, input) {
+                if self.is_plan_document_tool(tool, input) || (tool == "Read" && crate::tools::screenshot_file::readable(std::path::Path::new(path))) {
                     continue;
                 }
                 validate_workspace_path(path, &self.workspace_cwd, &self.allowed_directories)?;

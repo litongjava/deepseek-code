@@ -34,7 +34,11 @@ pub fn execute(input: Value, cwd: &str) -> Result<Value> {
     if let Some(bytes) = crate::skills::bundled_resources::read(Path::new(file_path)) {
         return text(std::str::from_utf8(bytes)?, &input);
     }
-    let path = super::resolve_path(file_path, cwd)?;
+    let path = if super::screenshot_file::readable(Path::new(file_path)) {
+        Path::new(file_path).canonicalize()?.to_string_lossy().into_owned()
+    } else {
+        super::resolve_path(file_path, cwd)?
+    };
     let path = Path::new(&path);
     if !path.exists() {
         return Ok(json!({"content": format!("File not found: {}", path.display()), "is_error": true}));

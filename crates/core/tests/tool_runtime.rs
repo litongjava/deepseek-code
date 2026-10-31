@@ -30,6 +30,14 @@ async fn worker_tools() {
             .expect("saved screenshot path");
         assert!(std::path::Path::new(path).is_absolute());
         assert_eq!(output["mime_type"], "image/jpeg");
+        let image = execute_tool("Read", json!({"file_path":path}), cwd).unwrap();
+        assert!(image.to_string().contains("image/jpeg"));
+        assert!(execute_tool(
+            "Write",
+            json!({"file_path":path,"content":"overwrite"}),
+            cwd
+        )
+        .is_err());
         assert!(std::fs::read(path)
             .unwrap()
             .starts_with(&[0xff, 0xd8, 0xff]));
