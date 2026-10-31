@@ -34,7 +34,7 @@ impl Default for DeepSeekSearchConfig {
 impl DeepSeekSearchConfig {
     pub fn validate(&self) -> Result<()> {
         let url = reqwest::Url::parse(self.base_url.trim())
-            .map_err(|_| anyhow::anyhow!("搜索 API 地址必须是有效的 HTTP(S) URL"))?;
+            .map_err(|_| anyhow::anyhow!(crate::config::ui_language::text("The search API base URL must be a valid HTTP(S) URL", "搜索 API 地址必须是有效的 HTTP(S) URL")))?;
         if !matches!(url.scheme(), "http" | "https")
             || url.host_str().is_none()
             || !url.username().is_empty()
@@ -42,27 +42,27 @@ impl DeepSeekSearchConfig {
             || url.query().is_some()
             || url.fragment().is_some()
         {
-            bail!("搜索 API 地址必须使用 HTTP(S)，且不能包含用户名、密码、查询参数或片段");
+            bail!(crate::config::ui_language::text("The search API base URL must use HTTP(S) without credentials, query parameters, or fragments", "搜索 API 地址必须使用 HTTP(S)，且不能包含凭据、查询参数或片段"));
         }
         if self.base_url.len() > 4096 {
-            bail!("搜索 API 地址过长");
+            bail!(crate::config::ui_language::text("The search API base URL is too long", "搜索 API 地址过长"));
         }
         if self.model.trim().is_empty()
             || self.model.len() > 256
             || self.model.chars().any(char::is_whitespace)
             || self.model.chars().any(char::is_control)
         {
-            bail!("搜索模型不能为空，且不能包含空白或控制字符");
+            bail!(crate::config::ui_language::text("The search model must be nonempty and contain no whitespace or control characters", "搜索模型不能为空，且不能包含空白或控制字符"));
         }
         if self.api_key.len() > 8192 || self.api_key.chars().any(char::is_control) {
-            bail!("搜索 API Key 格式无效");
+            bail!(crate::config::ui_language::text("Invalid search API key format", "搜索 API Key 格式无效"));
         }
         Ok(())
     }
 
     pub fn resolved_provider(&self) -> Result<ResolvedProvider> {
         if self.api_key.trim().is_empty() {
-            bail!("请在系统设置 → 联网搜索中配置 DeepSeek API Key、搜索地址和模型；搜索不会复用对话的密钥或地址。");
+            bail!(crate::config::ui_language::text("Configure a DeepSeek API key, endpoint, and model in Settings > Web Search. Leave search settings at their defaults to use the current DeepSeek provider.", "请在设置 → 联网搜索中配置 DeepSeek 密钥、地址和模型。保持默认且未配置搜索密钥时使用当前 DeepSeek 供应商。"));
         }
         self.validate()?;
         let model = ModelConfig {
@@ -107,7 +107,7 @@ mod tests {
             .resolved_provider()
             .unwrap_err()
             .to_string()
-            .contains("系统设置 → 联网搜索"));
+            .contains("DeepSeek"));
         let mut search = config.deepseek_search;
         search.api_key = "independent-search-key".into();
         search.base_url = "https://search.example/anthropic/v1".into();

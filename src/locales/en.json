@@ -2,7 +2,7 @@
   "searchSettings": {
     "nav": "Web search",
     "title": "DeepSeek web search",
-    "description": "DeepSeek chat models use this separate search service. If it is not configured, you will be prompted to set it up. Your chat proxy key is not used. Search calls the selected model separately and may incur additional charges.",
+    "description": "Configured search settings take priority. When left at their defaults without a search key, web search uses the current DeepSeek provider endpoint, key, and model. Search makes a separate request and may incur additional charges.",
     "reload": "Reload",
     "baseUrl": "Search API URL",
     "model": "Search model",

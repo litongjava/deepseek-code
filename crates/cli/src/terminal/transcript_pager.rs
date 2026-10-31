@@ -117,7 +117,7 @@ impl HistoryView {
         let was_active = self.active();
         let end = self.all.len().saturating_sub(page);
         let top = self.top.unwrap_or(end);
-        let next = if up { top.saturating_sub(3) } else { top.saturating_add(3).min(end) };
+        let next = if up { top.saturating_sub(1) } else { top.saturating_add(1).min(end) };
         if !up && next >= end {
             self.close()?;
             self.previous.clear();
@@ -355,8 +355,8 @@ fn pager(
                 }
                 selection.clear()?;
                 match mouse.kind {
-                    MouseEventKind::ScrollUp => top = top.saturating_sub(super::SCROLL_SPEED.load(std::sync::atomic::Ordering::Relaxed)),
-                    MouseEventKind::ScrollDown => top = top.saturating_add(super::SCROLL_SPEED.load(std::sync::atomic::Ordering::Relaxed)),
+                    MouseEventKind::ScrollUp => top = wheel_top(top, true),
+                    MouseEventKind::ScrollDown => top = wheel_top(top, false),
                     _ => {}
                 }
                 continue;
@@ -510,10 +510,38 @@ fn open_in_editor(rows: &[Row], out: &mut impl Write) -> io::Result<()> {
     Ok(())
 }
 
+fn wheel_top(top: usize, up: bool) -> usize {
+    let speed = super::SCROLL_SPEED.load(std::sync::atomic::Ordering::Relaxed);
+    if up { top.saturating_sub(speed) } else { top.saturating_add(speed) }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crossterm::event::KeyEvent;
+
+    #[test]
+    fn detail_pager_wheel_moves_one_row_by_default() {
+        assert_eq!(super::super::SCROLL_SPEED.load(std::sync::atomic::Ordering::Relaxed), 1);
+        assert_eq!(wheel_top(40, true), 39);
+        assert_eq!(wheel_top(39, false), 40);
+        assert_eq!(wheel_top(1, true), 0);
+    }
+
+    #[test]
+    fn normal_and_running_history_wheel_moves_one_row() {
+        let mut view = HistoryView::default();
+        view.refresh(&[], &(0..100).map(|n| format!("row {n}")).collect::<Vec<_>>(), 80);
+        view.top = Some(40);
+        view.wheel(true, 20).unwrap();
+        assert_eq!(view.top, Some(39));
+        assert_eq!(view.screen_rows(21, &["prompt".into()])[0], "row 39");
+        view.wheel(false, 20).unwrap();
+        assert_eq!(view.top, Some(40));
+        view.top = Some(1);
+        view.wheel(true, 20).unwrap();
+        assert_eq!(view.top, Some(0));
+    }
 
     #[test]
     fn selection_snapshot_uses_scrolled_rows_without_changing_position() {

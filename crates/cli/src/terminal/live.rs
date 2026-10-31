@@ -22,6 +22,7 @@ pub enum Action {
     GoalDecision { id: String, approved: bool },
     CyclePermission,
     Submit(String),
+    Queue(String),
     SideQuestion(String),
     Cancel,
     Detach,
@@ -312,6 +313,8 @@ struct Choice {
     /// What is being approved, drawn in the frame and erased once answered,
     /// as in the reference CLI.
     preview: Vec<change_view::Line>,
+    expanded: bool,
+    preview_offset: usize,
     question: String,
     options: Vec<String>,
     selected: usize,
@@ -327,6 +330,32 @@ struct Choice {
     checked: Option<Vec<bool>>,
 }
 impl Choice {
+    fn command_preview(&self) -> bool {
+        self.preview.first().is_some_and(|line| matches!(change_view::plain(std::slice::from_ref(line)).trim(), "Bash command" | "PowerShell command"))
+    }
+    fn click_preview(&mut self, row: usize, total: usize) -> bool {
+        if !self.command_preview() || row < 3 || row >= total.saturating_sub(self.options.len() + 2) {
+            return false;
+        }
+        self.expanded = !self.expanded;
+        self.preview_offset = 0;
+        true
+    }
+    fn preview_rows(&self, width: usize, color: bool) -> Vec<String> {
+        self.preview.iter().flat_map(|line| {
+            let text = change_view::render(line, if self.expanded { usize::MAX } else { width }, color);
+            if self.expanded { super::markdown::wrap_styled(&text, "", "", width.max(1)) } else { vec![text] }
+        }).collect()
+    }
+    fn preview_room(&self, height: usize) -> usize {
+        height.saturating_sub(3 + self.options.len() + 4).max(1)
+    }
+    fn scroll_preview(&mut self, up: bool, width: usize, height: usize) {
+        let end = self.preview_rows(width, false).len().saturating_sub(self.preview_room(height));
+        let current = self.preview_offset.min(end);
+        self.preview_offset = if up { current.saturating_sub(1) } else { current.saturating_add(1).min(end) };
+    }
+
     fn amendable(&self) -> bool {
         if self.plan_footer.is_some() || self.option_previews.is_some() {
             return self.selected + 1 == self.options.len();
@@ -777,6 +806,13 @@ impl State {
             });
         }
         self.draft = self.saved_draft.take().unwrap_or_default();
+    }
+    fn queue_message(&mut self, actions: &async_mpsc::UnboundedSender<Action>) -> bool {
+        if self.answer.is_some() || self.draft.characters.iter().all(|ch| ch.is_whitespace()) { return false; }
+        let text = self.draft.take();
+        self.undo.clear();
+        let _ = actions.send(Action::Queue(text));
+        true
     }
     fn submit(&mut self, actions: &async_mpsc::UnboundedSender<Action>) -> Option<String> {
         let text = self.draft.take();
@@ -1251,7 +1287,7 @@ impl Frame {
         let indicator = crate::terminal::style::mode_indicator(&state.mode);
         let mode = format!("{} {}", crate::terminal::style::status_mode(&state.mode), state.model_label);
         let rule = "─".repeat(width);
-        let tip_line = state
+        let _tip_line = state
             .tip
             .as_ref()
             .map(|tip| format!("  \u{23bf}  Tip: {tip}"))
@@ -1325,7 +1361,7 @@ impl Frame {
                     if state.answer.is_some() { "  Goal proposal pending; finish the current question first." }
                     else { "  Proposed goal: Ctrl+Y approve · Ctrl+N decline. Work continues while you decide." }
                 } else {
-                    &tip_line
+                    deepseek_code_core::config::ui_language::text("Tab to queue message · Enter to steer message", "Tab 排队消息 · Enter 引导当前任务")
                 },
                 width,
             ),
@@ -1467,13 +1503,24 @@ impl Frame {
         {
             return Ok(());
         }
-        if !self.lines.is_empty() && self.lines.len() != lines.len() {
+        let previous_top = self.size.1 as usize - self.lines.len().min(self.size.1 as usize);
+        let moved = !self.lines.is_empty() && self.lines.len() != lines.len() && self.pending.is_empty();
+        if !self.lines.is_empty() && self.lines.len() != lines.len() && !moved {
             self.erase();
         }
         let mut out = std::mem::take(&mut self.pending);
         out.push_str("\x1b[?25l");
         self.anchor(&mut out);
-        if self.lines.is_empty() {
+        if moved {
+            let top = self.top.unwrap_or(0) as usize;
+            for row in previous_top.min(top)..size.1 as usize {
+                let next = row.checked_sub(top).and_then(|i| lines.get(i));
+                let old = row.checked_sub(previous_top).and_then(|i| self.lines.get(i));
+                if next == old { continue; }
+                out.push_str(&format!("\x1b[{};1H{}\x1b[K", row + 1, next.map(String::as_str).unwrap_or("")));
+            }
+            out.push_str(&format!("\x1b[{};1H", size.1));
+        } else if self.lines.is_empty() {
             out.push_str(&lines.join("\r\n"));
         } else {
             out.push_str(&row_updates(&self.lines, &lines));
@@ -1519,12 +1566,21 @@ fn choice_lines(choice: &Choice, status: &str, mode: &str, width: usize, height:
         Some(previews) => previews.get(choice.selected).map(Vec::as_slice).unwrap_or_default(),
         None => choice.preview.as_slice(),
     };
+    if choice.command_preview() {
+        let rendered = choice.preview_rows(width, color);
+        let available = choice.preview_room(height);
+        let start = choice.preview_offset.min(rendered.len().saturating_sub(available));
+        rows.extend(rendered.into_iter().skip(start).take(available));
+        let hint = if choice.expanded { " Click command to collapse; wheel scrolls 1 line" } else { " Click command to show full command" };
+        rows.push(paint(clip(hint, width), crate::terminal::style::muted()));
+    } else {
     let shown = if preview.len() > room { room.saturating_sub(1) } else { preview.len() };
     for line in &preview[..shown] {
         rows.push(change_view::render(line, width, color));
     }
     if shown < preview.len() {
         rows.push(paint(clip(&format!(" \u{2026} {} more lines", preview.len() - shown), width), crate::terminal::style::muted()));
+    }
     }
     rows.push(if color { format!("{}{question}{}", SetAttribute(Attribute::Bold), SetAttribute(Attribute::Reset)) } else { question });
     for index in 0..choice.options.len() {
@@ -1738,7 +1794,7 @@ fn run(
                         state.details.toggle();
                     }
                     state.question(reply);
-                    state.choice = Some(Choice { preview: lines, question, options, selected: 0, amend: None, plan_footer, option_previews: None, checked: None });
+                    state.choice = Some(Choice { expanded: false, preview_offset: 0, preview: lines, question, options, selected: 0, amend: None, plan_footer, option_previews: None, checked: None });
                     dirty = true;
                 }
                 Ok(Update::QuestionChoice(question, options, previews, multi, reply)) => {
@@ -1748,7 +1804,7 @@ fn run(
                     }
                     state.question(reply);
                     let checked = multi.then(|| vec![false; options.len()]);
-                    state.choice = Some(Choice { preview: Vec::new(), question, options, selected: 0, amend: None, plan_footer: None, option_previews: Some(previews), checked });
+                    state.choice = Some(Choice { expanded: false, preview_offset: 0, preview: Vec::new(), question, options, selected: 0, amend: None, plan_footer: None, option_previews: Some(previews), checked });
                     dirty = true;
                 }
                 Ok(Update::Question(text, reply)) => {
@@ -1823,7 +1879,7 @@ fn run(
         }
         dirty |= state.dismiss_closed_question();
         if let Some(event) = input_reader.next(Duration::from_millis(25))? {
-            if super::shortcuts::requested(&event) {
+            if super::shortcuts::requested_in_input(&event, state.draft.characters.is_empty()) {
                 selection.clear()?;
                 let background = if screen.history_view.active() {
                     let composer = screen.lines.iter().rev().take(screen.composer_height).cloned().collect::<Vec<_>>().into_iter().rev().collect::<Vec<_>>();
@@ -1982,6 +2038,11 @@ fn run(
                             {
                                 state.draft.insert("\n")
                             }
+                            KeyCode::Tab if state.answer.is_none() => {
+                                if state.queue_message(&actions) {
+                                    screen.log(deepseek_code_core::config::ui_language::text("Message queued for after this turn.", "消息已排队，将在当前任务结束后发送。"))?;
+                                }
+                            }
                             KeyCode::Enter => {
                                 if let Some(message) = state.submit(&actions) {
                                     screen.log(&message)?;
@@ -2027,6 +2088,16 @@ fn run(
                 }
                 Event::Mouse(mouse) => {
                     if matches!(mouse.kind, MouseEventKind::ScrollUp | MouseEventKind::ScrollDown) {
+                        if let Some(choice) = state.choice.as_mut().filter(|choice| choice.command_preview()) {
+                            if choice.expanded {
+                                choice.scroll_preview(mouse.kind == MouseEventKind::ScrollUp, screen.size.0.saturating_sub(1) as usize, screen.size.1 as usize);
+                                selection.clear()?;
+                                screen.draw(state)?;
+                            }
+                            continue;
+                        }
+                    }
+                    if matches!(mouse.kind, MouseEventKind::ScrollUp | MouseEventKind::ScrollDown) {
                         selection.clear()?;
                         screen.pinned.expanded = false;
                         screen.refresh_history(state, screen.size.0.saturating_sub(1) as usize);
@@ -2051,6 +2122,16 @@ fn run(
                         if let Some(row) = snapshot.get_mut(screen.top.unwrap_or(0) as usize + index) { *row = text.clone(); }
                     }
                     let Some(mouse) = selection.event(mouse, snapshot)? else { continue; };
+                    if mouse.kind == MouseEventKind::Down(MouseButton::Left) {
+                        if let Some(choice) = state.choice.as_mut().filter(|choice| choice.command_preview()) {
+                            let origin = screen.top.unwrap_or(0) as usize + screen.padding;
+                            let total = screen.lines.len().saturating_sub(screen.padding);
+                            if (mouse.row as usize).checked_sub(origin).is_some_and(|row| choice.click_preview(row, total)) {
+                                screen.draw(state)?;
+                                continue;
+                            }
+                        }
+                    }
                     if mouse.kind == MouseEventKind::Down(MouseButton::Left) && screen.pinned.click(mouse.row) { screen.lines.clear(); screen.draw(state)?; continue; }
                     let origin = screen.top.unwrap_or(0) + screen.padding as u16;
                     if mouse.kind == MouseEventKind::Down(MouseButton::Left)
@@ -2070,11 +2151,11 @@ fn run(
                         } else if (row as usize) < screen.panel_height {
                             match mouse.kind {
                                 MouseEventKind::ScrollDown => {
-                                    state.details.scroll_by(3, screen.panel_viewport);
+                                    state.details.scroll_by(1, screen.panel_viewport);
                                     dirty = true;
                                 }
                                 MouseEventKind::ScrollUp => {
-                                    state.details.scroll_by(-3, screen.panel_viewport);
+                                    state.details.scroll_by(-1, screen.panel_viewport);
                                     dirty = true;
                                 }
                                 _ => {}
@@ -2109,6 +2190,47 @@ fn run(
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn tab_queue_and_enter_steer_use_distinct_actions() {
+        let mut state = State::new("mode".into());
+        let (send, mut receive) = async_mpsc::unbounded_channel();
+        state.draft.insert("later message");
+        assert!(state.queue_message(&send));
+        assert!(matches!(receive.try_recv().unwrap(), Action::Queue(text) if text == "later message"));
+        state.draft.insert("steer now");
+        state.submit(&send);
+        assert!(matches!(receive.try_recv().unwrap(), Action::Submit(text) if text == "steer now"));
+        assert!(!state.queue_message(&send));
+    }
+
+    #[test]
+    fn approval_command_expands_and_scrolls_one_row_without_approving() {
+        let command = (0..40).map(|i| format!("echo row-{i:02} {}", "x".repeat(90))).collect::<Vec<_>>().join("\n");
+        let approval = super::super::tool_view::approval("Bash", &serde_json::json!({"command": command}), None, false);
+        let mut choice = Choice { expanded: false, preview_offset: 0, preview: approval.lines, question: approval.question, options: approval.options, selected: 0, amend: None, plan_footer: None, option_previews: None, checked: None };
+        assert!(choice.command_preview());
+        assert!(change_view::plain(&choice.preview).contains("row-39"));
+        let collapsed = choice.preview_rows(40, false);
+        assert!(!choice.click_preview(1, 20));
+        assert!(!choice.click_preview(18, 20));
+        assert!(choice.click_preview(6, 20));
+        let expanded = choice.preview_rows(40, false);
+        assert!(expanded.len() > collapsed.len());
+        assert!(expanded.iter().all(|row| UnicodeWidthStr::width(row.as_str()) <= 40));
+        choice.scroll_preview(false, 40, 24);
+        assert_eq!(choice.preview_offset, 1);
+        choice.scroll_preview(true, 40, 24);
+        assert_eq!(choice.preview_offset, 0);
+        for _ in 0..200 { choice.scroll_preview(false, 40, 24); }
+        let (rows, _, _) = choice_lines(&choice, "status", "mode", 40, 24);
+        assert!(rows.iter().any(|row| row.contains("row-39")));
+        assert!(rows.iter().any(|row| row.contains("Yes")));
+        assert_eq!(choice.selected, 0);
+        assert!(choice.click_preview(6, 20));
+        assert!(!choice.expanded);
+        assert_eq!(choice.preview_offset, 0);
+    }
+
     #[test]
     fn streamed_markdown_is_independent_of_delta_boundaries() {
         let text = format!("**{}**\n- {}\n```rust\nlet text = \"{}\";\n```\n", "a".repeat(700), "word ".repeat(160), "中".repeat(240));
@@ -2351,7 +2473,7 @@ mod tests {
         let mut state = State::new("ask".into());
         let (reply, mut received) = oneshot::channel();
         state.question(reply);
-        state.choice = Some(Choice { preview: Vec::new(), question: "Proceed?".into(), options: vec!["Yes".into(), "Always".into(), "No".into()], selected: 1, amend: None, plan_footer: None, option_previews: None, checked: None });
+        state.choice = Some(Choice { expanded: false, preview_offset: 0, preview: Vec::new(), question: "Proceed?".into(), options: vec!["Yes".into(), "Always".into(), "No".into()], selected: 1, amend: None, plan_footer: None, option_previews: None, checked: None });
         // The remember choice takes no note.
         assert!(state.choice_key(key(KeyCode::Tab)));
         assert!(state.choice.as_ref().unwrap().amend.is_none());
@@ -2384,7 +2506,7 @@ mod tests {
         state.draft.insert("queued draft");
         let (reply, mut received) = oneshot::channel();
         state.question(reply);
-        state.choice = Some(Choice { preview: Vec::new(), question: "Proceed?".into(), options: vec!["Yes".into(), "Always".into(), "No".into()], selected: 0, amend: None, plan_footer: None, option_previews: None, checked: None });
+        state.choice = Some(Choice { expanded: false, preview_offset: 0, preview: Vec::new(), question: "Proceed?".into(), options: vec!["Yes".into(), "Always".into(), "No".into()], selected: 0, amend: None, plan_footer: None, option_previews: None, checked: None });
         assert!(state.choice_key(key(KeyCode::Up)));
         assert_eq!(state.choice.as_ref().unwrap().selected, 2);
         assert!(state.choice_key(key(KeyCode::Down)));
@@ -2397,7 +2519,7 @@ mod tests {
 
         let (reply, mut received) = oneshot::channel();
         state.question(reply);
-        state.choice = Some(Choice { preview: Vec::new(), question: "Proceed?".into(), options: vec!["Yes".into(), "No".into()], selected: 0, amend: None, plan_footer: None, option_previews: None, checked: None });
+        state.choice = Some(Choice { expanded: false, preview_offset: 0, preview: Vec::new(), question: "Proceed?".into(), options: vec!["Yes".into(), "No".into()], selected: 0, amend: None, plan_footer: None, option_previews: None, checked: None });
         assert!(state.choice_key(key(KeyCode::Char('3'))));
         assert!(received.try_recv().is_err());
         assert!(state.choice_key(key(KeyCode::Char('2'))));
@@ -2405,14 +2527,14 @@ mod tests {
         // Esc answers the last choice, No.
         let (reply, mut received) = oneshot::channel();
         state.question(reply);
-        state.choice = Some(Choice { preview: Vec::new(), question: "Proceed?".into(), options: vec!["Yes".into(), "Always".into(), "No".into()], selected: 0, amend: None, plan_footer: None, option_previews: None, checked: None });
+        state.choice = Some(Choice { expanded: false, preview_offset: 0, preview: Vec::new(), question: "Proceed?".into(), options: vec!["Yes".into(), "Always".into(), "No".into()], selected: 0, amend: None, plan_footer: None, option_previews: None, checked: None });
         assert!(state.choice_key(key(KeyCode::Esc)));
         assert_eq!(received.try_recv().unwrap(), "3");
         // A question shows the focused option's preview and takes typed text last.
         let previews = vec![vec![change_view::body("tabs preview")], vec![change_view::body("spaces preview")], Vec::new()];
         let (reply, mut received) = oneshot::channel();
         state.question(reply);
-        state.choice = Some(Choice { preview: Vec::new(), question: "Indent?".into(), options: vec!["Tabs".into(), "Spaces".into(), "Type something else".into()], selected: 0, amend: None, plan_footer: None, option_previews: Some(previews), checked: None });
+        state.choice = Some(Choice { expanded: false, preview_offset: 0, preview: Vec::new(), question: "Indent?".into(), options: vec!["Tabs".into(), "Spaces".into(), "Type something else".into()], selected: 0, amend: None, plan_footer: None, option_previews: Some(previews), checked: None });
         let shown = |state: &State| choice_lines(state.choice.as_ref().unwrap(), "status", "esc to interrupt", 60, 24).0.join("\n");
         assert!(shown(&state).contains("tabs preview") && !shown(&state).contains("spaces preview"));
         assert!(state.choice_key(key(KeyCode::Down)));
@@ -2424,13 +2546,13 @@ mod tests {
         assert_eq!(received.try_recv().unwrap(), "3\nown");
         let (reply, mut received) = oneshot::channel();
         state.question(reply);
-        state.choice = Some(Choice { preview: Vec::new(), question: "Indent?".into(), options: vec!["Tabs".into(), "Type something else".into()], selected: 0, amend: None, plan_footer: None, option_previews: Some(vec![Vec::new(), Vec::new()]), checked: None });
+        state.choice = Some(Choice { expanded: false, preview_offset: 0, preview: Vec::new(), question: "Indent?".into(), options: vec!["Tabs".into(), "Type something else".into()], selected: 0, amend: None, plan_footer: None, option_previews: Some(vec![Vec::new(), Vec::new()]), checked: None });
         assert!(state.choice_key(key(KeyCode::Esc)));
         assert_eq!(received.try_recv().unwrap(), "esc");
         // multiSelect: space and numbers toggle, enter submits the checked set.
         let (reply, mut received) = oneshot::channel();
         state.question(reply);
-        state.choice = Some(Choice { preview: Vec::new(), question: "Features?".into(), options: vec!["A".into(), "B".into(), "C".into(), "Type something else".into()], selected: 0, amend: None, plan_footer: None, option_previews: Some(vec![Vec::new(); 4]), checked: Some(vec![false; 4]) });
+        state.choice = Some(Choice { expanded: false, preview_offset: 0, preview: Vec::new(), question: "Features?".into(), options: vec!["A".into(), "B".into(), "C".into(), "Type something else".into()], selected: 0, amend: None, plan_footer: None, option_previews: Some(vec![Vec::new(); 4]), checked: Some(vec![false; 4]) });
         assert!(state.choice_key(key(KeyCode::Char(' '))));
         assert!(state.choice_key(key(KeyCode::Char('3'))));
         assert!(shown(&state).contains("[x] A") && shown(&state).contains("[ ] B") && shown(&state).contains("[x] C"));
@@ -2438,12 +2560,12 @@ mod tests {
         assert!(received.try_recv().is_err());
         assert!(state.choice_key(key(KeyCode::Enter)));
         assert_eq!(received.try_recv().unwrap(), "m:1,3");
-        let (rows, selected, _) = choice_lines(&Choice { preview: Vec::new(), question: "Proceed?".into(), options: vec!["Yes".into(), "No".into()], selected: 1, amend: None, plan_footer: None, option_previews: None, checked: None }, "status", "esc to interrupt", 40, 24);
+        let (rows, selected, _) = choice_lines(&Choice { expanded: false, preview_offset: 0, preview: Vec::new(), question: "Proceed?".into(), options: vec!["Yes".into(), "No".into()], selected: 1, amend: None, plan_footer: None, option_previews: None, checked: None }, "status", "esc to interrupt", 40, 24);
         assert_eq!(rows.len() - selected, 5);
         // The approval preview sits between the rule and the question and is
         // clipped to the screen; answering removes the whole box.
         let preview = (0..30).map(|row| change_view::body(&format!("line {row}"))).collect();
-        let choice = Choice { preview, question: "Proceed?".into(), options: vec!["Yes".into(), "No".into()], selected: 0, amend: None, plan_footer: None, option_previews: None, checked: None };
+        let choice = Choice { expanded: false, preview_offset: 0, preview, question: "Proceed?".into(), options: vec!["Yes".into(), "No".into()], selected: 0, amend: None, plan_footer: None, option_previews: None, checked: None };
         let (rows, _, _) = choice_lines(&choice, "status", "esc to interrupt", 40, 20);
         let strip = |row: &String| {
             let mut text = String::new();
@@ -2671,7 +2793,7 @@ impl TurnDisplay {
             // The call is printed once, with its result, when it finishes; the
             // status line names what is running meanwhile.
             let label = super::tool_view::label(name, input, self.workspace.as_deref());
-            match super::tool_view::gathering(name, input).filter(|_| !matches!(name, "Read" | "Bash")) {
+            match super::tool_view::gathering(name, input).filter(|_| !matches!(name, "Read" | "Bash" | "Grep" | "Glob")) {
                 Some(kind) => live.group(id, kind, label.clone(), GroupStep::Start),
                 None => {
                     let _ = live.updates.send(Update::GroupEnd);
@@ -2753,7 +2875,7 @@ impl TurnDisplay {
                     Some(started) if input.as_object().is_none_or(|fields| fields.is_empty()) => started,
                     _ => input,
                 };
-                if let Some(kind) = super::tool_view::gathering(name, label_input).filter(|_| !matches!(name, "Read" | "Bash")) {
+                if let Some(kind) = super::tool_view::gathering(name, label_input).filter(|_| !matches!(name, "Read" | "Bash" | "Grep" | "Glob")) {
                     let label = super::tool_view::label(name, label_input, self.workspace.as_deref());
                     live.group(id, kind, label, if failed { GroupStep::Failed } else { GroupStep::Done });
                     if !failed {

@@ -25,7 +25,7 @@ pub fn killed() -> std::sync::MutexGuard<'static, String> {
 }
 
 /// Lines a mouse wheel notch scrolls in the transcript pager (/scroll-speed).
-pub static SCROLL_SPEED: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(3);
+pub static SCROLL_SPEED: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(1);
 
 /// When this process started, for the session's wall-clock time in /cost.
 pub static STARTED: std::sync::OnceLock<std::time::Instant> = std::sync::OnceLock::new();

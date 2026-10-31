@@ -15,6 +15,7 @@ pub(super) struct Selection {
     rows: Vec<String>,
     dragged: bool,
     held: bool,
+    painted: std::cell::RefCell<Vec<String>>,
 }
 impl Selection {
     pub fn active(&self) -> bool {
@@ -45,6 +46,7 @@ impl Selection {
                 self.start = Some(point);
                 self.end = point;
                 self.rows = rows;
+                self.painted.borrow_mut().clear();
                 self.dragged = false;
                 Ok(None)
             }
@@ -120,12 +122,21 @@ impl Selection {
         out.flush()
     }
     fn paint_to(&self, out: &mut impl Write, selected: bool) -> io::Result<()> {
+        out.write_all(b"\x1b[?2026h")?;
         queue!(out, SavePosition)?;
+        let mut painted = self.painted.borrow_mut();
+        painted.resize(self.rows.len(), String::new());
         for (row, text) in self.rows.iter().enumerate() {
             // Empty snapshot entries may be untracked terminal content. Never erase them.
             if text.is_empty() {
                 continue;
             }
+            let part = if selected { self.slice(row) } else { String::new() };
+            let mark = if part.is_empty() { String::new() } else { format!("{}:{part}", if row == self.bounds().0.0 as usize { self.bounds().0.1 } else { 0 }) };
+            if painted[row] == mark {
+                continue;
+            }
+            painted[row] = mark;
             queue!(
                 out,
                 MoveTo(0, row as u16),
@@ -148,6 +159,7 @@ impl Selection {
             }
         }
         queue!(out, RestorePosition)?;
+        out.write_all(b"\x1b[?2026l")?;
         Ok(())
     }
 }
@@ -156,6 +168,27 @@ impl Selection {
 mod tests {
     use super::*;
     #[test]
+    fn selection_repaints_only_changed_rows() {
+        let mut selection = Selection {
+            start: Some((1, 0)), end: (1, 2),
+            rows: vec!["untouched".into(), "selected".into(), "also untouched".into()],
+            ..Default::default()
+        };
+        let mut output = Vec::new();
+        selection.paint_to(&mut output, true).unwrap();
+        let text = String::from_utf8(output).unwrap();
+        assert!(!text.contains("untouched"));
+        assert!(text.contains("selected"));
+        let mut output = Vec::new();
+        selection.paint_to(&mut output, true).unwrap();
+        assert!(!String::from_utf8(output).unwrap().contains("selected"));
+        selection.end = (1, 1);
+        let mut output = Vec::new();
+        selection.paint_to(&mut output, true).unwrap();
+        assert!(String::from_utf8(output).unwrap().contains("selected"));
+    }
+
+    #[test]
     fn reverse_selection_uses_display_cells_and_preserves_unicode() {
         let selection = Selection {
             start: Some((1, 3)),
@@ -163,6 +196,7 @@ mod tests {
             rows: vec!["a中文z".into(), "xyz123".into()],
             dragged: true,
             held: false,
+            painted: Default::default(),
         };
         assert_eq!(selection.text(), "中文z\nxyz");
     }
@@ -174,6 +208,7 @@ mod tests {
             rows: vec![String::new(), "known history".into()],
             dragged: true,
             held: false,
+            painted: Default::default(),
         };
         let mut output = Vec::new();
         selection.paint_to(&mut output, true).unwrap();
@@ -190,6 +225,7 @@ mod tests {
             rows: vec!["text".into()],
             dragged: true,
             held: false,
+            painted: Default::default(),
         };
         assert!(selection.retained());
         assert!(!selection.active());

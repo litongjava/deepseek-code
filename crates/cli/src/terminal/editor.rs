@@ -13,6 +13,37 @@ use crossterm::{
 use std::io::{self, Write};
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
+#[derive(Default)]
+struct CommandOverlay {
+    previous: Vec<DisplayLine>,
+    saved: Vec<String>,
+    top: usize,
+}
+impl CommandOverlay {
+    fn draw_to(&mut self, out: &mut impl Write, menu: &[DisplayLine], bottom: usize, background: &[String]) -> io::Result<()> {
+        let shown = menu.len().min(bottom);
+        let menu = &menu[..shown];
+        let top = bottom.saturating_sub(shown);
+        if self.previous == menu && (menu.is_empty() || self.top == top) { return Ok(()); }
+        out.write_all(b"\x1b[?2026h\x1b7")?;
+        for (index, text) in self.saved.iter().enumerate() {
+            write!(out, "\x1b[{};1H\x1b[0m{}\x1b[K", self.top + index + 1, text)?;
+        }
+        self.saved = background.iter().skip(top).take(shown).cloned().collect();
+        self.top = top;
+        for (index, (text, style)) in menu.iter().enumerate() {
+            let color = match style { TextStyle::Selected => crate::terminal::style::selected(), _ => crate::terminal::style::muted() };
+            write!(out, "\x1b[{};1H\x1b[0m", top + index + 1)?;
+            if std::env::var_os("NO_COLOR").is_none() { queue!(out, SetForegroundColor(color))?; }
+            write!(out, "{text}\x1b[0m\x1b[K")?;
+        }
+        out.write_all(b"\x1b8\x1b[?2026l")?;
+        out.flush()?;
+        self.previous = menu.to_vec();
+        Ok(())
+    }
+}
+
 pub struct PromptEditor {
     notices: Option<std::sync::mpsc::Receiver<String>>,
     history: Vec<String>,
@@ -522,7 +553,7 @@ impl Screen {
             .map(|old| old as usize)
             .unwrap_or_else(|| if first { cursor_y } else { cursor_y.saturating_sub(row) })
             .min(rows - 1);
-        let top = anchor.min(bottom_limit);
+        let top = bottom_limit;
         let repaint = self.invalidated || anchor != top || self.height != height;
         let mut frame = Vec::new();
         if anchor > top {
@@ -862,6 +893,7 @@ impl PromptEditor {
         let todo_list = self.todos.as_ref().map(|todos| todos()).unwrap_or_default();
         let mut keybinding_pending = crate::keybindings::Pending::default();
         let mut screen = Screen::pinned();
+        let mut command_overlay = CommandOverlay::default();
         let mut selection = crate::terminal::mouse_selection::Selection::default();
         let mut pinned = crate::terminal::pinned_prompt::PinnedPrompt { text: { let latest = crate::terminal::pinned_prompt::latest(); if latest.is_empty() { self.history.last().cloned().unwrap_or_default() } else { latest } }, ..Default::default() };
         let mut history_view = crate::terminal::transcript_pager::HistoryView::default();
@@ -1010,6 +1042,7 @@ impl PromptEditor {
             if items.is_empty() && mention_query.is_none() && !menu_hidden && text.len() > 1 && text.starts_with('/') && !text.contains(char::is_whitespace) {
                 lines.push((clipped(&format!("  No commands match \"{text}\""), width), TextStyle::Muted));
             }
+            let command_menu: Vec<DisplayLine> = lines.drain(panel_height..).collect();
             if crate::terminal::TODOS_VISIBLE.load(std::sync::atomic::Ordering::Relaxed) {
                 for (row, done, current) in crate::terminal::todo_rows(&todo_list, width) {
                     lines.push((row, if done { TextStyle::Muted } else if current { TextStyle::Selected } else { TextStyle::Plain }));
@@ -1167,13 +1200,18 @@ impl PromptEditor {
                     }
                     background
                 };
+                let bottom = if history_view.active() { (rows as usize).saturating_sub(lines.len()) } else { screen.top.unwrap_or(0) as usize };
+                command_overlay.draw_to(&mut io::stderr().lock(), &command_menu, bottom, &background)?;
                 pinned.draw(width, rows as usize, &background)?;
             }
             above.clone().save();
             let Some(event) = read_editor_event(&mut input_reader)? else {
                 continue;
             };
-            if crate::terminal::shortcuts::requested(&event) {
+            if matches!(&event, Event::Key(key) if matches!(key.code, KeyCode::Esc | KeyCode::Enter | KeyCode::Tab | KeyCode::BackTab)) {
+                command_overlay.draw_to(&mut io::stderr().lock(), &[], 0, &[])?;
+            }
+            if crate::terminal::shortcuts::requested_in_input(&event, buffer.chars.is_empty()) {
                 selection.clear()?;
                 let composer: Vec<String> = lines.iter().map(|(text, _)| text.clone()).collect();
                 let background = if history_view.active() {
@@ -1249,10 +1287,10 @@ impl PromptEditor {
                         } else if (row as usize) < panel_height {
                             match mouse.kind {
                                 MouseEventKind::ScrollDown => {
-                                    self.details.scroll_by(3, panel.viewport)
+                                    self.details.scroll_by(1, panel.viewport)
                                 }
                                 MouseEventKind::ScrollUp => {
-                                    self.details.scroll_by(-3, panel.viewport)
+                                    self.details.scroll_by(-1, panel.viewport)
                                 }
                                 _ => {}
                             }
@@ -1686,6 +1724,25 @@ mod mention_tests {
 #[cfg(test)]
 mod tests {
     #[test]
+    fn slash_menu_overlay_restores_background_without_scrolling() {
+        let mut overlay = CommandOverlay::default();
+        let background: Vec<String> = (0..24).map(|i| format!("message {i}")).collect();
+        let menu = vec![("/help".into(), TextStyle::Selected), ("/resume".into(), TextStyle::Muted)];
+        let mut output = Vec::new();
+        overlay.draw_to(&mut output, &menu, 20, &background).unwrap();
+        assert!(!output.contains(&b'\n'));
+        assert_eq!(overlay.top, 18);
+        output.clear();
+        overlay.draw_to(&mut output, &menu, 20, &background).unwrap();
+        assert!(output.is_empty());
+        overlay.draw_to(&mut output, &[], 0, &[]).unwrap();
+        let output = String::from_utf8(output).unwrap();
+        assert!(output.contains("message 18"));
+        assert!(output.contains("message 19"));
+        assert!(!output.contains('\n'));
+    }
+
+    #[test]
     fn permission_cycle_preserves_multiline_unicode_draft_cursor_and_history() {
         let mut editor = PromptEditor::default();
         editor.history.push("previous".into());
@@ -1795,7 +1852,7 @@ mod tests {
     }
 
     #[test]
-    fn composer_follows_short_transcript_without_filling_the_screen() {
+    fn composer_stays_at_bottom_after_short_transcript() {
         let mut screen = Screen::pinned();
         let lines = frame_lines();
         let mut output = Vec::new();
@@ -1803,11 +1860,11 @@ mod tests {
         screen.draw_pinned_to(&mut output, &lines, 1, 3, 10, 2).unwrap();
         let output = String::from_utf8(output).unwrap();
         assert!(output.starts_with("\x1b[3;1H\x1b[J"), "clears from the cursor");
-        assert!(output.contains("\x1b[3;1H"), "first line follows transcript");
-        assert!(output.contains("\x1b[6;1H"), "last line on row 6");
-        assert!(output.ends_with("\x1b[4;4H"), "cursor on the input row");
+        assert!(output.contains("\x1b[7;1H"), "first line is bottom anchored");
+        assert!(output.contains("\x1b[10;1H"), "footer is on final row");
+        assert!(output.ends_with("\x1b[8;4H"), "cursor on the input row");
         assert!(!output.contains("\r\n"), "nothing scrolls when it already fits");
-        assert_eq!(screen.top, Some(2));
+        assert_eq!(screen.top, Some(6));
     }
 
     #[test]
@@ -1837,7 +1894,7 @@ mod tests {
         assert!(output.starts_with("\x1b[7;1H\x1b[J"), "the old top row is erased");
         assert_eq!(output.matches("\x1b[K").count(), 3);
         assert!(!output.contains("\r\n"));
-        assert_eq!(screen.top, Some(6));
+        assert_eq!(screen.top, Some(7));
     }
 
     #[test]
@@ -1937,6 +1994,10 @@ mod tests {
             .wrapped
             .iter()
             .any(|line| line == "\u{4e2d}\u{6587}a"));
+        details.scroll_by(1, frame.viewport);
+        assert_eq!(details.scroll, 1);
+        details.scroll_by(-1, frame.viewport);
+        assert_eq!(details.scroll, 0);
         details.scroll_by(100, frame.viewport);
         assert_eq!(details.scroll, details.wrapped.len() - frame.viewport);
         details.scroll_by(-100, frame.viewport);

@@ -25,56 +25,28 @@ pub(crate) fn requested(event: &Event) -> bool {
         && (key.code == KeyCode::Char('?') || (key.code == KeyCode::Char('/') && key.modifiers.contains(KeyModifiers::SHIFT))))
 }
 
-fn rows(context: Context) -> Vec<&'static str> {
-    let mut rows = vec![
-        " Keyboard shortcuts",
-        " Shift+/ (?)  Show or close this popup",
-    ];
-    rows.extend_from_slice(match context {
-        Context::Input => &[
-            " Enter  Send message     Shift+Enter / Alt+Enter  New line",
-            " Tab  Complete command     Shift+Tab  Cycle permissions",
-            " Ctrl+O  Detailed transcript     PageUp/PageDown  Scroll messages",
-            " Ctrl+R  Search input history     Ctrl+G  External editor",
-            " Ctrl+U  Delete to start     Ctrl+Y  Paste deleted text",
-            " Alt+P  Model picker     Ctrl+T  Toggle tasks",
-            " Mouse wheel  Scroll     Drag  Select and copy text",
-        ][..],
-        Context::Running => &[
-            " Esc  Interrupt     Shift+Tab  Cycle permissions",
-            " Enter  Queue message or submit answer",
-            " Ctrl+O  Detailed transcript     PageUp/PageDown  Scroll messages",
-            " Ctrl+B  Background task     Ctrl+T  Toggle tasks",
-            " Mouse wheel  Scroll     Drag  Select and copy text",
-        ][..],
-        Context::Pager => &[
-            " Up/Down, j/k, mouse wheel  Scroll",
-            " PageUp/PageDown, b/Space  Page     g/G  Top/bottom",
-            " /  Search     n/N  Next/previous match",
-            " { / }  Previous/next prompt     v  Open in editor",
-            " Drag  Select and copy text",
-            " Esc / q / Ctrl+O  Close page",
-        ][..],
-        Context::Picker => &[
-            " Up/Down  Select     Enter  Confirm     Esc  Cancel",
-            " Type  Filter available entries     Backspace  Delete",
-        ][..],
-        Context::Text => &[
-            " Enter  Save     Esc  Cancel     Backspace  Delete",
-            " Ctrl+U  Clear text",
-        ][..],
-        Context::Answer => &[
-            " Enter  Submit answer     Ctrl+C  Cancel",
-            " Backspace  Delete",
-        ][..],
-        Context::Details => &[
-            " Left/Right  Switch tabs (when available)",
-            " Esc / Enter / Space  Close",
-            " Additional actions are shown in the page footer",
-        ][..],
+pub(crate) fn requested_in_input(event: &Event, empty: bool) -> bool {
+    empty && requested(event)
+}
+
+fn rows(context: Context) -> Vec<String> {
+    let mut entries = vec!["Keyboard shortcuts", "?\tShow shortcuts (empty input only)"];
+    entries.extend_from_slice(match context {
+        Context::Input => &["Enter\tSend message", "Shift+Enter / Alt+Enter\tNew line", "Tab\tComplete command", "Shift+Tab\tCycle permissions", "Ctrl+O\tDetailed transcript", "PageUp / PageDown\tScroll messages", "Ctrl+R\tSearch input history", "Ctrl+G\tExternal editor", "Ctrl+U\tDelete to start", "Ctrl+Y\tPaste deleted text", "Alt+P\tModel picker", "Ctrl+T\tToggle tasks", "Mouse wheel\tScroll", "Drag\tSelect and copy text"][..],
+        Context::Running => &["Tab\tQueue message", "Enter\tSteer message / submit answer", "Esc\tInterrupt", "Shift+Tab\tCycle permissions", "Ctrl+O\tDetailed transcript", "Ctrl+B\tBackground task", "Ctrl+T\tToggle tasks", "Mouse wheel\tScroll", "Drag\tSelect and copy text"][..],
+        Context::Pager => &["Up / Down / j / k\tScroll", "PageUp / PageDown\tPage", "g / G\tTop / bottom", "/\tSearch", "n / N\tNext / previous match", "v\tOpen in editor", "Esc / q / Ctrl+O\tClose page"][..],
+        Context::Picker => &["Up / Down\tSelect", "Enter\tConfirm", "Type\tSearch", "Tab / Ctrl+A\tcwd / all (resume)", "Esc\tCancel"][..],
+        Context::Text => &["Enter\tSave", "Esc\tCancel", "Backspace\tDelete", "Ctrl+U\tClear text"][..],
+        Context::Answer => &["Enter\tSubmit answer", "Ctrl+C\tCancel", "Backspace\tDelete"][..],
+        Context::Details => &["Left / Right\tSwitch tabs", "Esc / Enter / Space\tClose"][..],
     });
-    rows.push(" Esc / ?  Close     Up/Down or mouse wheel  Scroll shortcuts");
-    rows
+    entries.push("Esc / ?\tClose shortcuts");
+    entries.into_iter().map(|row| {
+        match row.split_once('\t') {
+            Some((key, description)) => format!(" {key:<28}{description}"),
+            None => format!(" {row}"),
+        }
+    }).collect()
 }
 
 pub(crate) fn show(
@@ -159,6 +131,17 @@ fn run(
 mod tests {
     use super::*;
     use crossterm::event::KeyEvent;
+    #[test]
+    fn question_mark_opens_only_empty_input_and_columns_align() {
+        let event = Event::Key(KeyEvent::new(KeyCode::Char('?'), KeyModifiers::NONE));
+        assert!(requested_in_input(&event, true));
+        assert!(!requested_in_input(&event, false));
+        let rows = rows(Context::Running);
+        let tab = rows.iter().find(|row| row.contains("Queue message")).unwrap();
+        let enter = rows.iter().find(|row| row.contains("Steer message")).unwrap();
+        assert_eq!(tab.find("Queue message"), enter.find("Steer message"));
+    }
+
     #[test]
     fn question_shortcuts_do_not_capture_pastes_or_modified_commands() {
         for (code, modifiers) in [

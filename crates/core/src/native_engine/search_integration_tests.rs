@@ -78,16 +78,28 @@ async fn search_failure_still_records_provider_usage() {
 }
 
 #[tokio::test]
-async fn deepseek_search_requires_separate_settings_instead_of_chat_credentials() {
-    let mut provider = search_provider("http://127.0.0.1:1", "deepseek-v4.1-flash");
+async fn deepseek_search_falls_back_to_chat_when_unconfigured() {
+    use axum::{http::HeaderMap, routing::post, Json, Router};
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let mut provider = search_provider(&format!("http://{}", listener.local_addr().unwrap()), "deepseek-flash");
     provider.provider.web_search_strategy = None;
-    let (tx, mut rx) = mpsc::channel(8);
-    let error = execute_builtin_tool("WebSearch", json!({"query":"Rust"}), ".", &provider, &tx, None, false)
-        .await.unwrap_err().to_string();
-    assert!(error.contains("DeepSeek") && error.contains("API Key"));
-    assert!(error.contains("联网搜索"));
-    assert!(!error.contains("key-deepseek"));
-    assert!(rx.try_recv().is_err()); // No model request was made or counted.
+    let app = Router::new().route("/v1/messages", post(|headers: HeaderMap, Json(body): Json<Value>| async move {
+        assert_eq!(headers["x-api-key"], "key-deepseek-flash");
+        assert_eq!(body["model"], "deepseek-flash");
+        Json(json!({"model":"deepseek-flash", "content":[{"type":"web_search_tool_result","content":[{"type":"web_search_result","url":"https://example.com","title":"Result"}]}]}))
+    }));
+    let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap(); });
+    let (tx, _rx) = mpsc::channel(16);
+    let value = execute_builtin_tool("WebSearch", json!({"query":"weather"}), ".", &provider, &tx, None, false).await.unwrap();
+    assert_eq!(value["provider_id"], "deepseek-flash");
+    let temp = tempfile::tempdir().unwrap();
+    let path = temp.path().join("config.json");
+    let mut config = crate::config::AppConfig::default();
+    config.deepseek_search.base_url = "https://search.example/v1".into();
+    std::fs::write(&path, serde_json::to_vec(&config).unwrap()).unwrap();
+    let error = execute_builtin_tool("WebSearch", json!({"query":"weather"}), ".", &provider, &tx, Some(&path), false).await.unwrap_err().to_string();
+    assert!(error.contains("DeepSeek"));
+    server.abort();
 }
 
 #[tokio::test]

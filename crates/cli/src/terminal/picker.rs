@@ -32,6 +32,7 @@ pub fn available() -> bool {
 /// An extra key a picker hands back with the entry it was pressed on.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Key {
+    Tab,
     /// Space, while the search box is empty.
     Space,
     Ctrl(char),
@@ -94,7 +95,7 @@ impl Picker<'_> {
             let Some(Event::Key(key)) = next_event()? else {
                 continue;
             };
-            if super::shortcuts::requested(&Event::Key(key)) {
+            if query.is_empty() && super::shortcuts::requested(&Event::Key(key)) {
                 screen.shortcut_popup(super::shortcuts::Context::Picker, next_event)?;
                 continue;
             }
@@ -105,6 +106,7 @@ impl Picker<'_> {
             let extra = match key.code {
                 KeyCode::Char(' ') if query.is_empty() && !control => Some(Key::Space),
                 KeyCode::Char(ch) if control => Some(Key::Ctrl(ch)),
+                KeyCode::Tab => Some(Key::Tab),
                 KeyCode::Left => Some(Key::Left),
                 KeyCode::Right => Some(Key::Right),
                 _ => None,
@@ -174,14 +176,15 @@ impl Picker<'_> {
             let text = if query.is_empty() { "\u{2315} Search\u{2026}".to_owned() } else { format!("\u{2315} {query}") };
             lines.push((clipped(&format!(" {text}"), width), if query.is_empty() { TextStyle::Muted } else { TextStyle::Plain }));
         }
-        // Two rows an entry; the page follows the selection.
-        let page = (height.saturating_sub(lines.len() + 3) / 2).clamp(1, 8);
+        let spaced = self.heading == "Resume session";
+        let page = (height.saturating_sub(lines.len() + 3) / if spaced { 3 } else { 2 }).clamp(1, 8);
         let start = selected.saturating_sub(page - 1).min(shown.len().saturating_sub(page));
         let mut cursor = lines.len();
         if shown.is_empty() {
             lines.push((clipped("   No matches", width), TextStyle::Muted));
         }
         for (position, index) in shown.iter().enumerate().skip(start).take(page) {
+            if spaced && position > start { lines.push((String::new(), TextStyle::Plain)); }
             let entry = &self.entries[*index];
             let current = position == selected;
             if current {
@@ -393,6 +396,13 @@ mod tests {
             .iter()
             .map(|title| Entry { title: title.to_string(), detail: "1 minute ago".into() })
             .collect()
+    }
+
+    #[test]
+    fn empty_resume_allows_tab_scope_switch() {
+        let picker = Picker { heading: "Resume session", subtitle: Some("[cwd] all"), entries: &[], search: true, hint: "Tab: cwd/all", selected: 0 };
+        let mut events = vec![Event::Key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE))].into_iter();
+        assert_eq!(picker.drive_keys(&[Key::Tab], &mut || Ok(events.next())).unwrap(), Picked::Key(Key::Tab, None));
     }
 
     #[test]

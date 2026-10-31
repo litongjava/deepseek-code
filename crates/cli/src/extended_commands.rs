@@ -90,25 +90,17 @@ pub async fn handle(
                     if this_branch {
                         found.retain(|(_, entry)| entry.branch.is_some() && entry.branch == current_branch);
                     }
-                    if found.is_empty() && !all && !this_branch {
-                        eprintln!("No other conversations in this project. Ctrl+A in /resume shows every project once there are some.");
-                        return Ok(true);
-                    }
                     let entries: Vec<_> = found.iter().map(|(_, entry)| Entry { title: entry.title.clone(), detail: entry.detail.clone() }).collect();
-                    let project = if all { "All projects".to_owned() } else { session.workspace.file_name().map(|name| name.to_string_lossy().into_owned()).unwrap_or_default() };
-                    let hint = format!(
-                        "Ctrl+A to {} \u{b7} Ctrl+B to {} \u{b7} Space to preview \u{b7} Ctrl+R to rename \u{b7} Type to search \u{b7} Esc to cancel",
-                        if all { "only show current project" } else { "show all projects" },
-                        if this_branch { "show all branches" } else { "only show current branch" },
-                    );
+                    let project = format!("{}   {}", if all { "cwd  [all]" } else { "[cwd]  all" }, session.workspace.display());
+                    let hint = format!("Tab: cwd/all · Ctrl+A: cwd/all · Ctrl+B: {} · Space: preview · Ctrl+R: rename · Type to search · Esc: cancel", if this_branch { "all branches" } else { "current branch" });
                     let picker = Picker { heading: "Resume session", subtitle: Some(&project), entries: &entries, search: true, hint: &hint, selected };
-                    match picker.run_keys(&[Key::Ctrl('a'), Key::Ctrl('b'), Key::Space, Key::Ctrl('r')])? {
+                    match picker.run_keys(&[Key::Tab, Key::Ctrl('a'), Key::Ctrl('b'), Key::Space, Key::Ctrl('r')])? {
                         Picked::Entry(index) => {
                             session.resume_saved(paths, &found[index].0).await?;
                             crate::repl::show_resumed(session, true)?;
                             return Ok(true);
                         }
-                        Picked::Key(Key::Ctrl('a'), _) => {
+                        Picked::Key(Key::Ctrl('a') | Key::Tab, _) => {
                             all = !all;
                             selected = 0;
                         }
@@ -550,6 +542,15 @@ fn short_size(bytes: i64) -> String {
 /// sessions, newest first, titled by their name or first prompt, with the
 /// branch and saved size of each (messages, tool calls and the request
 /// snapshots, as the reference CLI's transcript files hold them).
+fn resume_title(title: &str, latest: Option<&str>) -> String {
+    let latest = latest.unwrap_or_default().lines().next().unwrap_or_default().trim();
+    if latest.is_empty() || latest == title || crate::background_commands::is_notification(latest) {
+        title.to_owned()
+    } else {
+        format!("{title} ⑂ {latest}")
+    }
+}
+
 fn resumable(session: &Session, all: bool) -> Result<Vec<(String, Resumable)>> {
     let here = session.workspace.canonicalize().unwrap_or_else(|_| session.workspace.clone());
     session.store.db.with_conn(|conn| -> Result<Vec<(String, Resumable)>> {
@@ -568,6 +569,11 @@ fn resumable(session: &Session, all: bool) -> Result<Vec<(String, Resumable)>> {
                     .map(|message| message.content.lines().next().unwrap_or_default().to_owned())
                     .unwrap_or_else(|| "(no prompt)".into()),
             };
+            let latest_prompt: Option<String> = conn.query_row(
+                "SELECT content FROM messages WHERE conversation_id=?1 AND role='user' ORDER BY created_at DESC LIMIT 1",
+                [&row.id], |r| r.get(0),
+            ).ok();
+            let title = resume_title(&title, latest_prompt.as_deref());
             // No row: the session was never used in a git repository.
             let branch: Option<String> = conn
                 .query_row("SELECT value FROM peripheral_settings WHERE key=?1", [format!("cli.git-branch.{}", row.id)], |r| r.get(0))
@@ -580,19 +586,14 @@ fn resumable(session: &Session, all: bool) -> Result<Vec<(String, Resumable)>> {
                 |r| r.get(0),
             )?;
             let mut detail = ago(&row.updated_at);
-            if let Some(branch) = &branch {
-                detail.push_str(&format!(" \u{b7} {branch}"));
-            }
+            detail.push_str(&format!(" \u{b7} {}", branch.as_deref().unwrap_or("HEAD")));
             detail.push_str(&format!(" \u{b7} {}", short_size(size)));
             if all {
                 if let Some(path) = &row.workspace_path {
-                    detail.push_str(&format!(" \u{b7} {}", crate::terminal::home_path(Path::new(path))));
+                    detail.push_str(&format!(" \u{b7} {}", path));
                 }
             }
             found.push((row.id, Resumable { title, detail, branch }));
-            if found.len() == 50 {
-                break;
-            }
         }
         Ok(found)
     })?

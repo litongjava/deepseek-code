@@ -120,11 +120,31 @@ fn conversation(session: &Session, id: &str, detailed: bool, mut recorded: Optio
             }
             if let Some(recorded) = recorded.as_deref_mut() {
                 if lines.len() > answer_start && recorded.needs_separator() { recorded.push(String::new(), None); }
-                record_lines(recorded, &lines[answer_start..], width);
+                for row in rendered_answer(&message.content, width, std::env::var_os("NO_COLOR").is_none()) { recorded.push(row, None); }
             }
         }
         Ok(lines)
     })?
+}
+
+fn rendered_answer(content: &str, width: usize, color: bool) -> Vec<String> {
+    let mut markdown = crate::terminal::markdown::MarkdownStream::new(color);
+    let mut rendered = Vec::new();
+    for line in content.lines() { rendered.extend(markdown.line(line)); }
+    rendered.extend(markdown.finish());
+    rendered.iter().enumerate().flat_map(|(index, line)| {
+        crate::terminal::markdown::wrap_styled(line, if index == 0 { "● " } else { "  " }, "  ", width)
+    }).collect()
+}
+
+#[test]
+fn resumed_answers_keep_markdown_colors_and_flush_tables() {
+    let content = "## Heading\nUse `code` and **bold**\n| A | B |\n| --- | --- |\n| one | two |";
+    let colored = rendered_answer(content, 80, true).join("\n");
+    assert!(colored.contains("\x1b["));
+    assert!(colored.contains("one"));
+    assert!(!colored.contains("**bold**"));
+    assert!(!rendered_answer(content, 80, false).join("\n").contains("\x1b["));
 }
 
 /// `/compact [instructions]`: summarize the session; returns how many

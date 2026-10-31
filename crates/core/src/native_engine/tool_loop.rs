@@ -321,17 +321,26 @@ fn uses_independent_deepseek_search(provider: &ResolvedProvider) -> bool {
     }
 }
 
-async fn independent_search_provider(path: Option<&std::path::Path>) -> Result<ResolvedProvider> {
+async fn independent_search_provider(path: Option<&std::path::Path>, chat: &ResolvedProvider) -> Result<ResolvedProvider> {
     // Read at call time so saving settings takes effect without restarting a turn.
     let settings = if let Some(path) = path {
         match tokio::fs::read(path).await {
             Ok(bytes) => serde_json::from_slice::<crate::config::AppConfig>(&bytes)
-                .map_err(|_| anyhow!("无法读取联网搜索设置，请在系统设置 → 联网搜索中重新保存 DeepSeek 配置。"))?
+                .map_err(|_| anyhow!(crate::config::ui_language::text("Unable to read web search settings. Save the DeepSeek configuration again in Settings > Web Search.", "无法读取联网搜索设置，请重新保存 DeepSeek 配置。")))?
                 .deepseek_search,
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => Default::default(),
-            Err(_) => return Err(anyhow!("无法读取联网搜索设置，请检查应用配置文件权限。")),
+            Err(_) => return Err(anyhow!(crate::config::ui_language::text("Unable to read web search settings. Check the configuration file permissions.", "无法读取联网搜索设置，请检查配置文件权限。"))),
         }
     } else { Default::default() };
+    let defaults = crate::config::DeepSeekSearchConfig::default();
+    if settings.api_key.trim().is_empty()
+        && settings.base_url == defaults.base_url
+        && settings.model == defaults.model
+    {
+        let mut provider = chat.clone();
+        provider.provider.web_search_strategy = Some("deepseek_native".into());
+        return Ok(provider);
+    }
     settings.resolved_provider()
 }
 
@@ -470,7 +479,7 @@ async fn execute_builtin_tool(
 
     let independent;
     let provider = if uses_independent_deepseek_search(provider) {
-        independent = independent_search_provider(search_config_path).await?;
+        independent = independent_search_provider(search_config_path, provider).await?;
         &independent
     } else { provider };
 

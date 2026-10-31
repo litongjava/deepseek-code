@@ -120,7 +120,7 @@ export default function ProviderSettings() {
               <option value="disabled">关闭联网搜索</option>
               {(draft.webSearchStrategy === 'dashscope' || draft.webSearchStrategy === 'bigmodel') && <option value={draft.webSearchStrategy}>{draft.webSearchStrategy}（旧配置，请重新选择）</option>}
             </select></label>
-            <p id="web-search-help" className="mt-2 text-xs text-claude-textSecondary">自动模式下的 DeepSeek 模型和手动选择 DeepSeek 原生搜索，均使用系统设置 → 联网搜索中的独立地址、模型和密钥。其他原生搜索使用此供应商的 API 地址和认证。搜索可能产生额外费用；服务不支持时会提示错误，不会自动改用公共搜索。</p>
+            <p id="web-search-help" className="mt-2 text-xs text-claude-textSecondary">自动模式下的 DeepSeek 模型和手动选择 DeepSeek 原生搜索，优先使用系统设置 → 联网搜索中的独立配置；未配置时使用当前供应商的地址、模型和密钥。其他原生搜索使用此供应商的 API 地址和认证。搜索可能产生额外费用；服务不支持时会提示错误，不会自动改用公共搜索。</p>
           </div>
           <div className="border-t border-claude-border pt-4 space-y-3">
             <div className="flex items-center gap-2"><h4 className="text-sm font-medium flex-1">模型列表</h4><button type="button" disabled={busy || (adding && draft.category !== 'builtin')} onClick={fetchModels} className={buttonClass}><RefreshCw size={12} className="inline mr-1" />获取模型列表</button><button type="button" onClick={() => { edit({ models: [...draft.models, { id: `model-${Date.now()}`, name: '新模型', enabled: true, inputTypes: ['text'], api: draft.category === 'builtin' ? draft.models[0]?.api : undefined }] }); setSearch(''); setPage(Math.floor(draft.models.length / pageSize)); }} className={buttonClass}>添加模型</button></div>

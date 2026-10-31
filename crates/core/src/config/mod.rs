@@ -3,6 +3,7 @@
 //! magic numbers live here now.
 
 pub mod api_endpoints;
+pub mod ui_language;
 mod deepseek_search;
 pub use deepseek_search::DeepSeekSearchConfig;
 

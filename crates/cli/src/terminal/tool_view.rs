@@ -11,6 +11,14 @@ const EXPANDED_LINES: usize = 400;
 
 /// `Bash(ls -la)` for previewable inputs, otherwise the tool name.
 pub fn label(name: &str, input: &Value, workspace: Option<&std::path::Path>) -> String {
+    if matches!(name, "Grep" | "Glob") {
+        let pattern = printable(input["pattern"].as_str().unwrap_or_default());
+        let path = input["path"].as_str().map(|path| super::display_path::label(path, workspace));
+        return match path {
+            Some(path) => format!("{name}(pattern: {pattern}, path: {})", printable(&path)),
+            None => format!("{name}({pattern})"),
+        };
+    }
     // Preserve the file name even when its directory is longer than the preview limit.
     if let Some(path) = input["file_path"].as_str().or_else(|| input["path"].as_str()) {
         return format!("{}({})", printable(name), printable(&super::display_path::label(path, workspace)));
@@ -460,7 +468,7 @@ pub fn approval(name: &str, input: &Value, workspace: Option<&std::path::Path>, 
                         lines.push(change_view::muted(&printable(description)));
                     }
                     lines.push(rule.clone());
-                    for line in command.lines().take(12) {
+                    for line in command.lines() {
                         lines.push(change_view::body(&printable(line)));
                     }
                     lines.push(rule);
@@ -508,6 +516,18 @@ mod tests {
 
     fn text(lines: &[Line]) -> Vec<String> {
         lines.iter().map(|line| change_view::render(line, usize::MAX, false)).collect()
+    }
+
+    #[test]
+    fn search_blocks_show_tool_pattern_path_and_result() {
+        for name in ["Grep", "Glob"] {
+            let input = serde_json::json!({"pattern": "TODO", "path": "src"});
+            let text = change_view::plain(&finished(name, &input, "src/main.rs:12: TODO", false, None, None));
+            assert!(text.contains(name));
+            assert!(text.contains("TODO"));
+            assert!(text.contains("src"));
+            assert!(!text.contains("Searched for"));
+        }
     }
 
     #[test]

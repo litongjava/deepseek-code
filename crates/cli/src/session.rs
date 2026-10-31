@@ -976,6 +976,9 @@ impl Session {
                             crate::terminal::live::Action::Cancel => bail!("Interrupted"),
                             crate::terminal::live::Action::GoalDecision { .. } => progress.notice("Goal proposals require the attached session frontend."),
                             crate::terminal::live::Action::Detach => progress.notice("This turn is not owned by a background worker."),
+                            crate::terminal::live::Action::Queue(prompt) => {
+                                if let Some(reader) = input.as_mut() { reader.queue_prompt(prompt); }
+                            },
                             crate::terminal::live::Action::Submit(prompt) => {
                                 if let Some(message) = crate::session_commands::live_goal_command(self, &prompt)? { progress.notice(&message); }
                                 else if queues_mid_turn(&prompt) {
@@ -1419,7 +1422,7 @@ impl Session {
                                 match self.cycle_permission_mode().await { Ok(mode)=>progress.set_permission_mode(mode),Err(error)=>progress.notice(&format!("Permission mode: {error:#}")) }
                             },
                             Some(crate::terminal::live::Action::Cancel)|None => { progress.notice("Side question cancelled."); break; },
-                            Some(crate::terminal::live::Action::Submit(prompt)) => if let Some(reader)=input.as_mut() { reader.queue_prompt(prompt); },
+                            Some(crate::terminal::live::Action::Submit(prompt) | crate::terminal::live::Action::Queue(prompt)) => if let Some(reader)=input.as_mut() { reader.queue_prompt(prompt); },
                             Some(_) => progress.notice("Finishing the current side question; another can be sent from the next prompt."),
                         },
                         _ = tokio::signal::ctrl_c() => break,
@@ -1434,7 +1437,7 @@ impl Session {
         for action in progress.finish(error.as_deref()) {
             if let Some(reader)=input.as_mut() {
                 match action {
-                    crate::terminal::live::Action::Submit(prompt)=>reader.queue_prompt(prompt),
+                    crate::terminal::live::Action::Submit(prompt)|crate::terminal::live::Action::Queue(prompt)=>reader.queue_prompt(prompt),
                     crate::terminal::live::Action::SideQuestion(question)=>reader.queue_prompt(format!("/btw {question}")),
                     crate::terminal::live::Action::Draft(draft)=>reader.restore_draft(draft),
                     crate::terminal::live::Action::CyclePermission => { self.cycle_permission_mode().await?; },
@@ -1517,7 +1520,7 @@ async fn wait_answer(session: &Session, progress: &mut crate::terminal::live::Tu
                     Some(crate::terminal::live::Action::Detach)=>progress.notice("Answer the pending question before detaching."),
                     Some(crate::terminal::live::Action::GoalDecision { .. })=>progress.notice("Answer the pending question first."),
                     Some(crate::terminal::live::Action::EditQueued|crate::terminal::live::Action::BackgroundShell|crate::terminal::live::Action::SendNow)=>{},
-                    Some(crate::terminal::live::Action::Submit(prompt))=>if let Some(reader)=input.as_mut(){reader.queue_prompt(prompt);},
+                    Some(crate::terminal::live::Action::Submit(prompt) | crate::terminal::live::Action::Queue(prompt))=>if let Some(reader)=input.as_mut(){reader.queue_prompt(prompt);},
                     Some(crate::terminal::live::Action::SideQuestion(question))=>if let Some(reader)=input.as_mut(){reader.queue_prompt(format!("/btw {question}"));},
                     Some(crate::terminal::live::Action::Draft(draft))=>if let Some(reader)=input.as_ref(){reader.restore_draft(draft);},
                 },

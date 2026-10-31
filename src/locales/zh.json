@@ -2,7 +2,7 @@
   "searchSettings": {
     "nav": "联网搜索",
     "title": "DeepSeek 联网搜索",
-    "description": "DeepSeek 对话模型使用此独立搜索服务；未配置会提示设置，不使用聊天中转密钥。搜索会单独调用所选模型，并可能产生额外费用。",
+    "description": "优先使用独立搜索配置；未配置搜索密钥且地址和模型保持默认时，使用当前 DeepSeek 供应商的地址、密钥和模型。搜索会单独发起请求，可能产生额外费用。",
     "reload": "重新加载",
     "baseUrl": "搜索 API 地址",
     "model": "搜索模型",

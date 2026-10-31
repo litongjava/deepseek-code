@@ -246,7 +246,7 @@ fn restore(input: &mut Option<TerminalInput>, action: Action) {
         match action {
             Action::CyclePermission => input.queue_permission_cycle(),
             Action::Draft(draft) => input.restore_draft(draft),
-            Action::Submit(prompt) => input.queue_prompt(prompt),
+            Action::Submit(prompt) | Action::Queue(prompt) => input.queue_prompt(prompt),
             Action::SideQuestion(question) => input.queue_prompt(format!("/btw {question}")),
             _ => {}
         }
