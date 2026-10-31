@@ -233,6 +233,9 @@ async fn present(
     for action in display.finish(footer) {
         restore(input, action);
     }
+    if let Err(error) = crate::repl::save_completion(session) {
+        eprintln!("Could not save turn completion status: {error}");
+    }
     match result {
         Ok(_) => Ok(()),
         Err(_) => {

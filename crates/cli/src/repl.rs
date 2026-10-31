@@ -22,6 +22,7 @@ pub fn transcript_of(session: &Session, id: &str) -> Result<Vec<crate::terminal:
 /// After a resume, as in the reference CLI: the screen starts over with the
 /// banner and the conversation so far, one short line per tool call.
 pub fn show_resumed(session: &Session, clear: bool) -> Result<()> {
+    *crate::terminal::TURN_COMPLETION.lock().unwrap_or_else(|e| e.into_inner()) = None;
     use std::io::IsTerminal;
     if !std::io::stderr().is_terminal() {
         return Ok(());
@@ -38,6 +39,40 @@ pub fn show_resumed(session: &Session, clear: bool) -> Result<()> {
     eprint!("{out}");
     recorded.save();
     Ok(())
+}
+
+/// Save presentation metadata against the final message, so rewind and session
+/// switching cannot accidentally display a different turn's completion status.
+pub fn save_completion(session: &Session) -> Result<()> {
+    let status = crate::terminal::TURN_COMPLETION.lock().unwrap_or_else(|e| e.into_inner()).clone();
+    let Some(status) = status else { return Ok(()); };
+    let messages = session.store.db.with_conn(|conn| {
+        deepseek_code_core::db::message_repo::get_messages_by_conversation(conn, &session.id)
+    })??;
+    if let Some(message) = messages.last().filter(|m| m.role == "assistant") {
+        let directory = session.paths.data_dir.join("turn-completions");
+        std::fs::create_dir_all(&directory)?;
+        let key = hex_message_id(&message.id);
+        std::fs::write(directory.join(key), status)?;
+    }
+    Ok(())
+}
+
+fn hex_message_id(id: &str) -> String {
+    id.as_bytes().iter().map(|byte| format!("{byte:02x}")).collect()
+}
+
+fn completion_for_message(data_dir: &std::path::Path, message: &deepseek_code_core::db::message_repo::MessageRow) -> Option<String> {
+    if message.role != "assistant" { return None; }
+    let path = data_dir.join("turn-completions").join(hex_message_id(&message.id));
+    Some(match std::fs::read_to_string(path) {
+        Ok(status) => status,
+        // Legacy message timestamps are save times, not measured completion times.
+        Err(_) => match chrono::DateTime::parse_from_rfc3339(&message.created_at) {
+            Ok(time) => format!("✻ Previous turn · saved {} · duration unavailable", time.with_timezone(&chrono::Local).format("%-I:%M %p")),
+            Err(_) => "✻ Previous turn · duration unavailable".into(),
+        },
+    })
 }
 
 fn conversation(session: &Session, id: &str, detailed: bool, mut recorded: Option<&mut crate::terminal::scrollback::Scrollback>) -> Result<Vec<crate::terminal::change_view::Line>> {
@@ -121,6 +156,19 @@ fn conversation(session: &Session, id: &str, detailed: bool, mut recorded: Optio
             if let Some(recorded) = recorded.as_deref_mut() {
                 if lines.len() > answer_start && recorded.needs_separator() { recorded.push(String::new(), None); }
                 for row in rendered_answer(&message.content, width, std::env::var_os("NO_COLOR").is_none()) { recorded.push(row, None); }
+            }
+            let saved = session.paths.data_dir.join("turn-completions").join(hex_message_id(&message.id));
+            // Only the final legacy message has a fallback; intermediate tool
+            // messages must not be presented as completed turns.
+            if saved.is_file() || rows.last().is_some_and(|last| last.id == message.id) {
+                if let Some(status) = completion_for_message(&session.paths.data_dir, message) {
+                    separate_block(&mut lines);
+                    lines.push(change_view::muted(&status));
+                    if let Some(recorded) = recorded.as_deref_mut() {
+                        if recorded.needs_separator() { recorded.push(String::new(), None); }
+                        recorded.push(change_view::render(&change_view::muted(&status), width, std::env::var_os("NO_COLOR").is_none()), None);
+                    }
+                }
             }
         }
         Ok(lines)
@@ -271,6 +319,24 @@ fn rename(store: &SessionStore, id: &str, title: &str) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn completion_restores_exact_status_and_never_leaks_to_another_message() {
+        let dir = tempfile::tempdir().unwrap();
+        let paths = RuntimePaths::new(dir.path().join("data")).unwrap();
+        let store = SessionStore::new(paths.open_database().unwrap());
+        let id = store.create(dir.path(), "model", "provider").unwrap();
+        store.append(&id, "assistant", "Finished").unwrap();
+        store.append(&id, "user", "Next turn").unwrap();
+        let messages = store.db.with_conn(|conn| deepseek_code_core::db::message_repo::get_messages_by_conversation(conn, &id)).unwrap().unwrap();
+        assert!(completion_for_message(&paths.data_dir, &messages[0]).unwrap().contains("duration unavailable"));
+        let directory = paths.data_dir.join("turn-completions");
+        std::fs::create_dir_all(&directory).unwrap();
+        let status = "✻ Worked for 1m 30s · done 5:45 PM";
+        std::fs::write(directory.join(hex_message_id(&messages[0].id)), status).unwrap();
+        assert_eq!(completion_for_message(&paths.data_dir, &messages[0]).as_deref(), Some(status));
+        assert_eq!(completion_for_message(&paths.data_dir, &messages[1]), None);
+    }
 
     #[test]
     fn rename_persists_without_losing_history_and_rejects_empty_titles() {

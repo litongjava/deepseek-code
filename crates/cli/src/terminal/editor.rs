@@ -1070,10 +1070,8 @@ impl PromptEditor {
                     lines.push((row, if done { TextStyle::Muted } else if current { TextStyle::Selected } else { TextStyle::Plain }));
                 }
             }
-            if let Some(completion) = crate::terminal::TURN_COMPLETION.lock().unwrap_or_else(|e| e.into_inner()).as_ref() {
-                lines.push((clipped(completion, width), TextStyle::Muted));
-                lines.push((String::new(), TextStyle::Plain));
-            }
+            // Reserved composer spacing, even for new or resumed sessions.
+            lines.push((String::new(), TextStyle::Plain));
             let menu_height = lines.len() - panel_height;
             lines.push(("\u{2500}".repeat(width), TextStyle::Border));
             match &ghost {

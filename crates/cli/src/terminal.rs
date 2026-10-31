@@ -6,7 +6,7 @@
 use serde::{Deserialize, Serialize};
 
 static SCREEN_READER: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
-/// Completion status owned by the composer, not by the scrolling transcript.
+/// Last completion status, retained for per-message persistence after the turn.
 pub static TURN_COMPLETION: std::sync::Mutex<Option<String>> = std::sync::Mutex::new(None);
 pub fn configure_accessibility(enabled: bool) {
     SCREEN_READER.store(enabled, std::sync::atomic::Ordering::Relaxed);

@@ -1434,6 +1434,7 @@ impl Session {
             progress.set_running_shells(crate::background_commands::running_shells(&self.paths, &self.id));
             progress.set_running_agents(crate::background_commands::running_agents(&self.paths, &self.store.db, &self.id).len());
         }
+        let save_completion = progress.is_live();
         for action in progress.finish(error.as_deref()) {
             if let Some(reader)=input.as_mut() {
                 match action {
@@ -1444,6 +1445,11 @@ impl Session {
                     // Unread messages were already queued as the next prompts.
                     crate::terminal::live::Action::Cancel|crate::terminal::live::Action::Detach|crate::terminal::live::Action::GoalDecision { .. }|crate::terminal::live::Action::EditQueued|crate::terminal::live::Action::BackgroundShell|crate::terminal::live::Action::SendNow=>{},
                 }
+            }
+        }
+        if save_completion {
+            if let Err(error) = crate::repl::save_completion(self) {
+                eprintln!("Could not save turn completion status: {error}");
             }
         }
         if let Some(error) = error {

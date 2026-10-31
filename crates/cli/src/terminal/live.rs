@@ -1343,11 +1343,12 @@ impl Frame {
         }
         if !state.details.expanded && state.activity.starts_with("Running Bash") {
             // A long command can continue in the background, as in the reference CLI.
-            content.retain(|line| !line.is_empty());
             let hint = state.activity_started.elapsed() >= Duration::from_secs(3);
-            let keep = budget.saturating_sub(2 + usize::from(hint));
+            while content.last().is_some_and(String::is_empty) { content.pop(); }
+            let keep = budget.saturating_sub(3 + usize::from(hint));
             let skip = content.len().saturating_sub(keep);
             content.drain(..skip);
+            content.push(String::new());
             content.push(clip(&state.activity, width));
             if hint {
                 content.push("  Ctrl+B to run in background".into());
@@ -1871,6 +1872,12 @@ fn run(
                         }
                         return screen.flush();
                     }
+                    screen.log("")?;
+                    screen.log_rendered(&change_view::render(
+                        &change_view::muted(&footer),
+                        usize::MAX,
+                        std::env::var_os("NO_COLOR").is_none(),
+                    ));
                     *crate::terminal::TURN_COMPLETION.lock().unwrap_or_else(|e| e.into_inner()) = Some(footer);
                     return screen.flush();
                 }
