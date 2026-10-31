@@ -1,4 +1,5 @@
-﻿use anyhow::{anyhow, Result};
+mod sync_runtime;
+use anyhow::{anyhow, Result};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::fs;
@@ -456,6 +457,7 @@ pub fn execute_tool(name: &str, input: serde_json::Value, cwd: &str) -> Result<s
 }
 
 pub async fn execute_tool_async(name: &str, input: serde_json::Value, cwd: &str) -> Result<serde_json::Value> {
+    if name == "computer_use" { return tool_computer_use_async(input).await; }
     if name == "LSP" || name == "lsp" { return lsp::execute(input, cwd).await; }
     if name == "worktree" { return worktrees::execute(input, cwd).await; }
     if external_agents::is_external_agent(name) { return external_agents::execute(name, input, cwd).await; }
@@ -835,6 +837,10 @@ fn tool_ask_user_question(input: serde_json::Value) -> Result<serde_json::Value>
 }
 
 fn tool_computer_use(input: serde_json::Value) -> Result<serde_json::Value> {
+    sync_runtime::run(tool_computer_use_async(input))
+}
+
+async fn tool_computer_use_async(input: serde_json::Value) -> Result<serde_json::Value> {
     use crate::computer_use::{
         ComputerAction, ComputerActionType, ComputerUseConfig, ComputerUseManager, MouseButton,
         ScreenCoordinate,
@@ -898,17 +904,7 @@ fn tool_computer_use(input: serde_json::Value) -> Result<serde_json::Value> {
 
     let manager = ComputerUseManager::new(ComputerUseConfig::default());
 
-    let rt = tokio::runtime::Handle::try_current();
-    let result: crate::computer_use::ComputerActionResult = match rt {
-        Ok(handle) => handle.block_on(manager.execute_action(action))?,
-        Err(_) => {
-            let rt = tokio::runtime::Builder::new_current_thread()
-                .enable_time()
-                .build()
-                .map_err(|e| anyhow!("Failed to create fallback runtime: {}", e))?;
-            rt.block_on(manager.execute_action(action))?
-        }
-    };
+    let result = manager.execute_action(action).await?;
 
     Ok(serde_json::json!({
         "success": result.success,
@@ -1136,17 +1132,8 @@ async fn tool_bash_async(input: serde_json::Value, cwd: &str) -> Result<serde_js
 // Sync wrapper: delegates to tool_bash_async via block_on.
 // Single source of truth — avoids duplicating shell/danger/error logic.
 fn tool_bash(input: serde_json::Value, cwd: &str) -> Result<serde_json::Value> {
-    let handle = match tokio::runtime::Handle::try_current() {
-        Ok(h) => h,
-        Err(_) => {
-            let rt = tokio::runtime::Builder::new_current_thread()
-                .enable_time()
-                .build()
-                .map_err(|e| anyhow!("Cannot create runtime for sync bash: {}", e))?;
-            rt.handle().clone()
-        }
-    };
-    handle.block_on(tool_bash_async(input, cwd))
+    let cwd = cwd.to_owned();
+    sync_runtime::run(async move { tool_bash_async(input, &cwd).await })
 }
 
 pub fn find_git_bash() -> Option<String> {
