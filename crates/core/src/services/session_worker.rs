@@ -1,5 +1,6 @@
 //! Persistent session ownership, independent of individual model-turn jobs.
 //! Provider credentials cross a local IPC stream in memory, never a job file.
+mod recovery;
 use super::background_sessions::{self as jobs, Job, SessionClaim};
 use anyhow::{ensure, Context, Result};
 use serde::{Deserialize, Serialize};
@@ -336,13 +337,19 @@ pub async fn ensure_worker(
     session: &str,
     workspace: &Path,
 ) -> Result<Worker> {
+    let base = worker_path(root, session)?;
+    fs::create_dir_all(&base)?;
+    // Serialize recovery and startup across frontends. OS releases this lock on exit.
+    let lock = fs::OpenOptions::new().create(true).truncate(false).read(true).write(true)
+        .open(base.join("startup.lock"))?;
+    lock.try_lock().context("Session worker startup or recovery is already in progress; retry shortly")?;
     if let Some(worker) = current(root, session)? {
+        ensure!(worker.root == root && worker.session_id == session, "Session worker metadata does not match the requested session");
         if worker.status != "stopped" {
-            ensure!(
-                jobs::now().saturating_sub(worker.heartbeat_ms) < 10_000,
-                "Session worker heartbeat expired; inspect its active job before recovery"
-            );
-            return wait_ready(worker).await;
+            if jobs::now().saturating_sub(worker.heartbeat_ms) < 10_000 {
+                return wait_ready(worker).await;
+            }
+            recovery::recover(&worker)?;
         }
     }
     let id = uuid::Uuid::new_v4().to_string();
