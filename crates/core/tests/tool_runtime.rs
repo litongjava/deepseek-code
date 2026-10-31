@@ -22,6 +22,18 @@ async fn worker_tools() {
         .await
         .unwrap();
     assert_eq!(output["success"], true);
+    assert!(output.get("screenshot").is_none());
+    #[cfg(windows)]
+    {
+        let path = output["screenshot_path"]
+            .as_str()
+            .expect("saved screenshot path");
+        assert!(std::path::Path::new(path).is_absolute());
+        assert_eq!(output["mime_type"], "image/jpeg");
+        assert!(std::fs::read(path)
+            .unwrap()
+            .starts_with(&[0xff, 0xd8, 0xff]));
+    }
     assert_eq!(
         execute_tool("computer_use", input, cwd).unwrap()["success"],
         true

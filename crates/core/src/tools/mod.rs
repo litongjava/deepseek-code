@@ -1,4 +1,5 @@
 mod sync_runtime;
+mod screenshot_file;
 use anyhow::{anyhow, Result};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -310,7 +311,7 @@ pub fn get_tool_definitions() -> Vec<ToolDefinition> {
         },
         ToolDefinition {
             name: "computer_use".to_string(),
-            description: "Control the computer: move mouse, click, type text, press keys, take screenshots. Use this to interact with the desktop GUI.".to_string(),
+            description: "Control the computer: move mouse, click, type text, press keys, take screenshots. Use this to interact with the desktop GUI. Screenshots are saved locally; results contain screenshot_path (absolute path) and mime_type, not Base64 image data.".to_string(),
             input_schema: serde_json::json!({
                 "type": "object",
                 "properties": {
@@ -905,11 +906,22 @@ async fn tool_computer_use_async(input: serde_json::Value) -> Result<serde_json:
     let manager = ComputerUseManager::new(ComputerUseConfig::default());
 
     let result = manager.execute_action(action).await?;
+    let screenshot = match result.screenshot.as_deref().filter(|data| !data.is_empty()) {
+        Some(data) => {
+            let directory = crate::runtime::resolve_default_data_dir()?.join("screenshots");
+            Some(screenshot_file::save(&directory, data)?)
+        }
+        None => None,
+    };
+    if action_type_str == "Screenshot" && result.success && screenshot.is_none() {
+        return Err(anyhow!("Screenshot capture returned no image"));
+    }
 
     Ok(serde_json::json!({
         "success": result.success,
         "action": action_type_str,
-        "screenshot": result.screenshot,
+        "screenshot_path": screenshot.as_ref().map(|(path, _)| path),
+        "mime_type": screenshot.as_ref().map(|(_, mime)| mime),
         "error": result.error,
         "duration_ms": result.duration_ms,
     }))
