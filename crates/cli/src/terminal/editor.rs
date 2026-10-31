@@ -469,11 +469,13 @@ pub(crate) struct Screen {
     previous: Vec<DisplayLine>,
     invalidated: bool,
     cursor_col: usize,
-    /// The prompt keeps its last line on the screen's last row instead of
+    /// The prompt follows transcript output and scrolls only when needed instead of
     /// following the cursor. Modals that follow output stay unpinned.
     pinned: bool,
     /// Screen row of the frame's first line while pinned.
     top: Option<u16>,
+    /// End of transcript before the composer was pinned below empty screen rows.
+    transcript_end: Option<usize>,
 }
 impl Screen {
     /// A frame pinned to the bottom rows, as the prompt is.
@@ -553,7 +555,11 @@ impl Screen {
             .map(|old| old as usize)
             .unwrap_or_else(|| if first { cursor_y } else { cursor_y.saturating_sub(row) })
             .min(rows - 1);
-        let top = bottom_limit;
+        let top = anchor.min(bottom_limit);
+        if first { self.transcript_end = Some(cursor_y.min(rows - 1)); }
+        if anchor > top {
+            self.transcript_end = self.transcript_end.map(|end| end.saturating_sub(anchor - top));
+        }
         let repaint = self.invalidated || anchor != top || self.height != height;
         let mut frame = Vec::new();
         if anchor > top {
@@ -729,8 +735,12 @@ impl Screen {
         let mut out = io::stderr();
         out.write_all(b"\x1b[?2026h")?;
         self.erase(&mut out)?;
+        if let Some(end) = self.transcript_end.take() {
+            queue!(out, MoveTo(0, end as u16), Clear(ClearType::FromCursorDown))?;
+        }
+        let mut submitted = Vec::new();
         crate::terminal::prompt_display::write_submitted(
-            &mut out,
+            &mut submitted,
             prompt,
             text,
             terminal::size()
@@ -739,6 +749,15 @@ impl Screen {
             std::env::var_os("NO_COLOR").is_none(),
             true,
         )?;
+        out.write_all(&submitted)?;
+        if !text.trim().is_empty() {
+            let mut history = crate::terminal::scrollback::Scrollback::snapshot();
+            for line in String::from_utf8_lossy(&submitted).split_terminator("\r\n") {
+                history.push(line.to_owned(), None);
+            }
+            history.save();
+            crate::terminal::pinned_prompt::remember(text);
+        }
         out.write_all(b"\x1b[?2026l")?;
         out.flush()
     }
@@ -1852,7 +1871,20 @@ mod tests {
     }
 
     #[test]
-    fn composer_stays_at_bottom_after_short_transcript() {
+    fn submission_anchor_excludes_bottom_padding_and_tracks_scrolling() {
+        let mut screen = Screen::pinned();
+        let lines = frame_lines();
+        screen.draw_pinned_to(&mut Vec::new(), &lines, 1, 3, 30, 2).unwrap();
+        assert_eq!(screen.transcript_end, Some(2));
+        screen.draw_pinned_to(&mut Vec::new(), &lines, 1, 4, 30, 27).unwrap();
+        assert_eq!(screen.transcript_end, Some(2));
+        let mut screen = Screen::pinned();
+        screen.draw_pinned_to(&mut Vec::new(), &lines, 1, 3, 10, 9).unwrap();
+        assert_eq!(screen.transcript_end, Some(6));
+    }
+
+    #[test]
+    fn composer_follows_short_transcript_without_padding() {
         let mut screen = Screen::pinned();
         let lines = frame_lines();
         let mut output = Vec::new();
@@ -1860,11 +1892,11 @@ mod tests {
         screen.draw_pinned_to(&mut output, &lines, 1, 3, 10, 2).unwrap();
         let output = String::from_utf8(output).unwrap();
         assert!(output.starts_with("\x1b[3;1H\x1b[J"), "clears from the cursor");
-        assert!(output.contains("\x1b[7;1H"), "first line is bottom anchored");
-        assert!(output.contains("\x1b[10;1H"), "footer is on final row");
-        assert!(output.ends_with("\x1b[8;4H"), "cursor on the input row");
+        assert!(output.contains("\x1b[3;1H"), "first line follows transcript");
+        assert!(output.contains("\x1b[6;1H"), "footer follows composer");
+        assert!(output.ends_with("\x1b[4;4H"), "cursor on the input row");
         assert!(!output.contains("\r\n"), "nothing scrolls when it already fits");
-        assert_eq!(screen.top, Some(6));
+        assert_eq!(screen.top, Some(2));
     }
 
     #[test]
@@ -1894,7 +1926,7 @@ mod tests {
         assert!(output.starts_with("\x1b[7;1H\x1b[J"), "the old top row is erased");
         assert_eq!(output.matches("\x1b[K").count(), 3);
         assert!(!output.contains("\r\n"));
-        assert_eq!(screen.top, Some(7));
+        assert_eq!(screen.top, Some(6));
     }
 
     #[test]
