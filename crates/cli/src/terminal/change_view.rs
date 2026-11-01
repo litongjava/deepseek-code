@@ -314,6 +314,15 @@ pub fn tool_call(label: &str, detail: &str, _failed: bool) -> Line {
     }
     Line(spans)
 }
+/// Puts a shell command's number left of its header: `● #3 Bash(ls -la)`.
+pub fn number_header(line: &mut Line, number: usize) {
+    let at = usize::from(line.0.first().is_some_and(|first| first.text == "\u{25cf} "));
+    line.0.insert(at, span(format!("#{number} "), Style::Muted));
+}
+/// The `⎿  Running…` row under a call that has not finished.
+pub fn running(detail: &str) -> Line {
+    Line(vec![span("  \u{23bf}  ", Style::TerminalDefault), span(format!("Running\u{2026}{detail}"), Style::Muted)])
+}
 /// One todo under `Update Todos`: done items struck through, the current one bold.
 pub fn todo_item(text: &str, status: &str, first: bool) -> Line {
     let (mark, style) = match status {

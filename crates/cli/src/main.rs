@@ -86,6 +86,15 @@ use std::{
     path::PathBuf,
 };
 
+/// Prints a turn or command error once, after removing an input box a
+/// finished turn left on screen for the prompt.
+fn report_error(error: &anyhow::Error) {
+    if !worker_frontend::already_presented(error) {
+        terminal::release_handoff();
+        eprintln!("Error: {error:#}");
+    }
+}
+
 #[tokio::main]
 async fn main() -> std::process::ExitCode {
     #[cfg(windows)]
@@ -121,7 +130,9 @@ async fn main() -> std::process::ExitCode {
     cli.normalize();
     terminal::configure_accessibility(cli.ax_screen_reader);
     debug_logging::install(cli.verbose);
-    if let Err(error) = Box::pin(run(&cli)).await {
+    let result = Box::pin(run(&cli)).await;
+    terminal::release_handoff();
+    if let Err(error) = result {
         if !worker_frontend::already_presented(&error) {
             if let Err(output_error) = output::report_startup_error(&cli, &error) {
                 eprintln!("Cannot write error result: {output_error}");
@@ -626,11 +637,11 @@ async fn run(cli: &Cli) -> Result<()> {
                 match background_commands::wake_for_notifications(cli, &mut session, &mut input).await {
                     Ok(true) => continue 'repl,
                     Ok(false) => {},
-                    Err(error) => if !worker_frontend::already_presented(&error) { eprintln!("Error: {error:#}"); },
+                    Err(error) => report_error(&error),
                 }
             }
             if let Some(prompt) = remote.take_deferred() {
-                if let Err(error) = session.turn(cli, &prompt, &mut input).await { if !worker_frontend::already_presented(&error) { eprintln!("Error: {error:#}"); } }
+                if let Err(error) = session.turn(cli, &prompt, &mut input).await { report_error(&error); }
             }
             if let Err(error) = remote.sync(&session) { eprintln!("Remote Control: {error:#}"); }
             if presence.as_ref().is_none_or(|(id, _)| *id != session.id) {
@@ -830,7 +841,7 @@ async fn run(cli: &Cli) -> Result<()> {
                 terminal::prompt::Input::Cancelled => { eprintln!("Prompt discarded."); continue; },
                 terminal::prompt::Input::Prompt(prompt) => {
                     if !prompt.trim().is_empty() {
-                        if let Err(error) = prompt_turn(cli, &mut session, &prompt, &mut input).await { if !worker_frontend::already_presented(&error) { eprintln!("Error: {error:#}"); } }
+                        if let Err(error) = prompt_turn(cli, &mut session, &prompt, &mut input).await { report_error(&error); }
                     }
                     continue;
                 },
@@ -887,7 +898,7 @@ async fn run(cli: &Cli) -> Result<()> {
             match background_commands::handle(cli, command, argument, &paths, &mut session, &mut input).await {
                 Ok(background_commands::Outcome::Handled) => continue,
                 Ok(background_commands::Outcome::Exit) => break,
-                Err(error) => { if !worker_frontend::already_presented(&error) { eprintln!("Error: {error:#}"); } continue; },
+                Err(error) => { report_error(&error); continue; },
                 Ok(background_commands::Outcome::NotHandled) => {},
             }
             if command == "/scroll-speed" {
@@ -909,7 +920,7 @@ async fn run(cli: &Cli) -> Result<()> {
             if command.starts_with("/mcp__") {
                 match mcp_prompts::expand(&session, command, argument).await {
                     Ok(Some(prompt)) => if let Err(error) = session.turn(cli, &prompt, &mut input).await {
-                        if !worker_frontend::already_presented(&error) { eprintln!("Error: {error:#}"); }
+                        report_error(&error);
                     },
                     Ok(None) => {}
                     Err(error) => eprintln!("Error: {error:#}"),
@@ -920,7 +931,7 @@ async fn run(cli: &Cli) -> Result<()> {
                 match repl_loop::run(argument, &mut loops) {
                     Ok(repl_loop::Outcome::Message(message)) => eprintln!("{message}"),
                     Ok(repl_loop::Outcome::Run(prompt)) => if let Err(error) = session.turn(cli, &prompt, &mut input).await {
-                        if !worker_frontend::already_presented(&error) { eprintln!("Error: {error:#}"); }
+                        report_error(&error);
                     },
                     Err(error) => eprintln!("Error: {error:#}"),
                 }
@@ -942,7 +953,7 @@ async fn run(cli: &Cli) -> Result<()> {
             if command == "/plan" {
                 match extended_commands::plan_task(argument, &paths, &mut session).await {
                     Ok(Some(task)) => if let Err(error) = session.turn(cli, &task, &mut input).await {
-                        if !worker_frontend::already_presented(&error) { eprintln!("Error: {error:#}"); }
+                        report_error(&error);
                     },
                     Err(error) => eprintln!("Error: {error:#}"),
                     Ok(None) => {},
@@ -953,7 +964,7 @@ async fn run(cli: &Cli) -> Result<()> {
                 match session_commands::handle(command, argument, &paths, &mut session).await {
                     Ok(_) if !argument.trim().is_empty() && !session_commands::is_goal_clear(argument) => {
                         if let Err(error) = session.turn(cli, argument.trim(), &mut input).await {
-                            if !worker_frontend::already_presented(&error) { eprintln!("Error: {error:#}"); }
+                            report_error(&error);
                         }
                     },
                     Err(error) => eprintln!("Error: {error:#}"),
@@ -1001,10 +1012,10 @@ async fn run(cli: &Cli) -> Result<()> {
                 "/history" | "history" | ".history" => println!("{}", serde_json::to_string_pretty(&session.store.history(&session.id)?)?),
                 "/tools" | "tools" | ".tools" => for tool in deepseek_code_core::tools::get_tool_definitions() { eprintln!("{}: {}", tool.name, tool.description); },
                 command if skills.contains_key(command.split_whitespace().next().unwrap_or(command)) => {
-                    if let Err(error) = session.turn(cli, &line, &mut input).await { if !worker_frontend::already_presented(&error) { eprintln!("Error: {error:#}"); } }
+                    if let Err(error) = session.turn(cli, &line, &mut input).await { report_error(&error); }
                 },
                 command if command.starts_with('/') => eprintln!("Unknown command: {}. Use /help; use /multiline to send text starting with /.", command.split_whitespace().next().unwrap_or(command)),
-                _ => if let Err(error) = prompt_turn(cli, &mut session, &line, &mut input).await { if !worker_frontend::already_presented(&error) { eprintln!("Error: {error:#}"); } },
+                _ => if let Err(error) = prompt_turn(cli, &mut session, &line, &mut input).await { report_error(&error); },
             }
         }
         if remote.is_connected() {

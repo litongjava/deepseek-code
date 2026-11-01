@@ -1586,6 +1586,7 @@ name = "deepseek-code-cli"
 version = "3.1.0"
 dependencies = [
  "anyhow",
+ "arboard",
  "axum 0.8.9",
  "base64 0.22.1",
  "chrono",
@@ -1594,6 +1595,7 @@ dependencies = [
  "crossterm",
  "deepseek-code-core",
  "dirs 5.0.1",
+ "png 0.18.1",
  "portable-pty",
  "ring",
  "rquickjs",

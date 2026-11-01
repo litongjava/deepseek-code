@@ -44,6 +44,7 @@ impl PinnedPrompt {
         };
         let previous_height = self.height;
         self.height = rows.len();
+        OVERLAY_ROWS.store(self.height, std::sync::atomic::Ordering::Relaxed);
         queue!(out, SavePosition)?;
         // Only restore rows exposed when the overlay shrinks. Repainting the
         // background beneath an unchanged overlay makes it visibly flash.
@@ -72,6 +73,19 @@ impl PinnedPrompt {
             false
         }
     }
+}
+
+/// Top screen rows the pinned prompt was last drawn over.
+static OVERLAY_ROWS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
+/// Moves the transcript rows `[pinned prompt, end)` down by `rows`, leaving the
+/// pinned prompt in place so no stale copy of it joins the transcript.
+pub(super) fn scroll_transcript_down(end: usize, rows: usize) -> String {
+    let first = OVERLAY_ROWS.load(std::sync::atomic::Ordering::Relaxed).min(end.saturating_sub(1));
+    if rows == 0 || end <= first {
+        return String::new();
+    }
+    format!("\x1b[{};{}r\x1b[{rows}T\x1b[r", first + 1, end + rows)
 }
 
 static LAST: std::sync::Mutex<String> = std::sync::Mutex::new(String::new());

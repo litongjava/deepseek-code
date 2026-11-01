@@ -374,6 +374,11 @@ fn copy_osc52(text: &str) -> bool {
 }
 
 pub(crate) fn copy_text(text: &str) -> Result<()> {
+    // In-process first: a drag selection copies without a PowerShell start-up pause.
+    #[cfg(windows)]
+    if crate::images::native_clipboard::set_text(text) {
+        return Ok(());
+    }
     #[cfg(windows)]
     let mut command = {
         use std::os::windows::process::CommandExt;

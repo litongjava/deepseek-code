@@ -8,7 +8,7 @@ use crossterm::{
     },
     execute, queue,
     style::{Attribute, ResetColor, SetAttribute, SetForegroundColor},
-    terminal::{self, Clear, ClearType, ScrollDown},
+    terminal::{self, Clear, ClearType},
 };
 use std::io::{self, Write};
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
@@ -559,7 +559,7 @@ impl Screen {
         if first && self.align_transcript && anchor < top {
             // Move the transcript into unused tail rows with the composer, so
             // completion stays one reserved blank row above the input border.
-            queue!(frame, ScrollDown((top - anchor) as u16))?;
+            frame.extend_from_slice(crate::terminal::pinned_prompt::scroll_transcript_down(anchor, top - anchor).as_bytes());
             self.transcript_end = Some(top);
         }
         if anchor > top {
@@ -918,6 +918,9 @@ impl PromptEditor {
         // Read once per prompt; ctrl+t toggles whether they show.
         let todo_list = self.todos.as_ref().map(|todos| todos()).unwrap_or_default();
         let mut keybinding_pending = crate::keybindings::Pending::default();
+        // A finished turn left its input box on the bottom rows; the first
+        // frame below redraws it in place.
+        crate::terminal::take_handoff();
         let mut screen = Screen::pinned();
         screen.align_transcript = !above.all().is_empty()
             && !self.history.last().is_some_and(|line| line.trim_start().starts_with('/'));
@@ -1295,8 +1298,16 @@ impl PromptEditor {
                     for (index, (text, _)) in screen.previous.iter().enumerate() {
                         if let Some(row) = snapshot.get_mut(origin as usize + index) { *row = text.clone(); }
                     }
-                    let Some(mouse) = selection.event(mouse, snapshot)? else { continue; };
+                    let Some(mouse) = selection.event(mouse, snapshot.clone())? else { continue; };
                     if mouse.kind == MouseEventKind::Down(MouseButton::Left) && pinned.click(mouse.row) { screen.invalidated = true; continue; }
+                    // A click on a turn's closing line, such as a failure with
+                    // its `/tasks show` command, selects and copies the line.
+                    if mouse.kind == MouseEventKind::Down(MouseButton::Left)
+                        && crate::terminal::mouse_selection::is_status_row(&snapshot, mouse.row)
+                    {
+                        selection.select_row(mouse.row, snapshot)?;
+                        continue;
+                    }
                     let toggled = (mouse.kind == MouseEventKind::Down(MouseButton::Left))
                         .then(|| above.toggle(origin, mouse.row))
                         .flatten();
@@ -1502,11 +1513,18 @@ impl PromptEditor {
                             continue;
                         }
                     }
-                    if control && key.code == KeyCode::Char('v') {
+                    if crate::images::is_image_paste_key(key) {
                         // Ctrl+V with an image on the clipboard attaches it as
-                        // [Image #N]; text pastes arrive as bracketed paste instead.
-                        if let Ok(Some(path)) = crate::images::paste_clipboard() {
-                            buffer.insert(&format!("{} ", crate::images::attach(path)));
+                        // [Image #N]. Terminals that paste text themselves send
+                        // bracketed paste instead; others pass the key on.
+                        match crate::images::paste() {
+                            Some(crate::images::Pasted::Image(placeholder)) => buffer.insert(&placeholder),
+                            Some(crate::images::Pasted::Text(text)) => {
+                                buffer.pasted = true;
+                                buffer.insert(&text);
+                                buffer.paste_end = buffer.chars.len();
+                            }
+                            None => {}
                         }
                         continue;
                     }

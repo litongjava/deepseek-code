@@ -20,6 +20,23 @@ pub fn task_output_activity(name: &str, input: &Value) -> Option<&'static str> {
     })
 }
 
+/// Shell commands started this session, numbered from 1.
+static COMMANDS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
+/// The next shell command's number, or `None` for other tools.
+pub fn command_number(name: &str) -> Option<usize> {
+    matches!(name, "Bash" | "PowerShell")
+        .then(|| COMMANDS.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1)
+}
+
+/// The numbered form of a call's lines: `● #3 Bash(ls -la)`.
+pub fn numbered(mut lines: Vec<Line>, number: Option<usize>) -> Vec<Line> {
+    if let (Some(number), Some(first)) = (number, lines.first_mut()) {
+        change_view::number_header(first, number);
+    }
+    lines
+}
+
 /// `Bash(ls -la)` for previewable inputs, otherwise the tool name.
 pub fn label(name: &str, input: &Value, workspace: Option<&std::path::Path>) -> String {
     if matches!(name, "Grep" | "Glob") {
@@ -787,9 +804,10 @@ mod tests {
 pub fn thought(text: &str, seconds: Option<u64>) -> (Vec<Line>, Vec<Line>) {
     let text = text.trim_end();
     let count = text.lines().count();
+    let unit = if count == 1 { "line" } else { "lines" };
     let title = match seconds {
-        Some(seconds) => format!("Thought for {seconds}s {count} lines"),
-        None => format!("Thought {count} lines"),
+        Some(seconds) => format!("Thought for {seconds}s {count} {unit}"),
+        None => format!("Thought {count} {unit}"),
     };
     let readable = |text: &str| change_view::styled(text, change_view::Style::TerminalDefault);
     let short = vec![readable(&format!("{title} (click to expand)"))];

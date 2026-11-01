@@ -26,6 +26,30 @@ pub fn killed() -> std::sync::MutexGuard<'static, String> {
     KILLED.lock().unwrap_or_else(|error| error.into_inner())
 }
 
+/// The screen row a finished turn's transcript ends on while its input box
+/// stays on the bottom rows for the prompt that follows.
+static HANDOFF: std::sync::Mutex<Option<u16>> = std::sync::Mutex::new(None);
+
+/// Records a finished turn's input box left on screen for the next prompt.
+pub fn hand_off(row: u16) {
+    *HANDOFF.lock().unwrap_or_else(|error| error.into_inner()) = Some(row);
+}
+/// The prompt or the next turn redraws the input box in place.
+pub fn take_handoff() -> Option<u16> {
+    HANDOFF.lock().unwrap_or_else(|error| error.into_inner()).take()
+}
+/// Removes a handed-over input box before other output follows the turn.
+pub fn release_handoff() {
+    use std::io::{IsTerminal, Write};
+    if let Some(row) = take_handoff() {
+        let mut out = std::io::stderr();
+        if out.is_terminal() {
+            let _ = write!(out, "\x1b[{};1H\x1b[J", row + 1);
+            let _ = out.flush();
+        }
+    }
+}
+
 /// Lines a mouse wheel notch scrolls in the transcript pager (/scroll-speed).
 pub static SCROLL_SPEED: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(1);
 

@@ -34,5 +34,11 @@ base64 = "0.22"
 tracing = "0.1"
 vte = "0.15"
 
+[target.'cfg(windows)'.dependencies]
+# Native clipboard access: Ctrl+V images (PNG, bitmaps and copied image
+# files) without spawning PowerShell, and fast text copy for selections.
+arboard = { version = "3.6", default-features = false, features = ["image-data"] }
+png = "0.18"
+
 [dev-dependencies]
 axum = "0.8"

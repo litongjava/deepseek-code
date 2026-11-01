@@ -46,6 +46,12 @@ enum Update {
     /// terminal select text). Ctrl+O lists the full
     /// text without a click.
     Expandable(Vec<change_view::Line>, Vec<change_view::Line>),
+    /// A call started: its header, shown as `● Bash(ls)  ⎿  Running…`, and
+    /// whether it runs a shell command.
+    ToolStarted(String, change_view::Line, bool),
+    /// A call finished: its result replaces the running form in one frame,
+    /// with the full form a click shows when there is one.
+    Finished(String, Vec<change_view::Line>, Option<Vec<change_view::Line>>),
     /// The session's working directory, shown in the footer.
     Workspace(String),
     ShellContext(std::path::PathBuf, String),
@@ -117,6 +123,9 @@ impl LiveTurn {
             return None;
         }
         *crate::terminal::TURN_COMPLETION.lock().unwrap_or_else(|e| e.into_inner()) = None;
+        // The first frame clears from the cursor down, over any input box the
+        // previous turn left for the prompt.
+        crate::terminal::take_handoff();
         let (updates, receiver) = mpsc::channel();
         let (actions, action_receiver) = async_mpsc::unbounded_channel();
         let (ready, initialized) = mpsc::sync_channel(1);
@@ -174,6 +183,12 @@ impl LiveTurn {
     }
     fn styled(&self, lines: Vec<change_view::Line>) {
         let _ = self.updates.send(Update::Styled(lines));
+    }
+    fn tool_started(&self, id: &str, header: change_view::Line, shell: bool) {
+        let _ = self.updates.send(Update::ToolStarted(id.into(), header, shell));
+    }
+    fn finished(&self, id: &str, short: Vec<change_view::Line>, full: Option<Vec<change_view::Line>>) {
+        let _ = self.updates.send(Update::Finished(id.into(), short, full));
     }
     pub fn permission_mode(&self, mode: &str) {
         let _ = self.updates.send(Update::PermissionMode(mode.into()));
@@ -420,6 +435,8 @@ struct State {
     details: super::input::editor::DetailsPanel,
     detail_entries: Vec<(String, String, String)>,
     group: Option<Group>,
+    /// Calls that have started and not finished, in the order they started.
+    running: Vec<Running>,
     /// Messages typed during the turn, shown until the model reads them.
     queued: Vec<String>,
     transcript: Vec<change_view::Line>,
@@ -450,6 +467,17 @@ struct State {
     verb: &'static str,
     frame: usize,
 }
+
+/// A call in progress, drawn where its result will be written.
+struct Running {
+    id: String,
+    header: change_view::Line,
+    started: Instant,
+    shell: bool,
+}
+
+/// Rows of reasoning shown under `● Thinking for 2s…` while it streams.
+const THINKING_PREVIEW_ROWS: usize = 2;
 
 /// Commands `submit` accepts while the model works.
 const LIVE_COMMANDS: &[&str] = &["/btw", "/background", "/goal"];
@@ -526,6 +554,7 @@ impl State {
             details: Default::default(),
             detail_entries: Vec::new(),
             group: None,
+            running: Vec::new(),
             queued: Vec::new(),
             transcript: Vec::new(),
             shells: 0,
@@ -592,7 +621,8 @@ impl State {
             "Waiting for your answer".to_owned()
         } else if let Some(hook) = &self.hook_activity {
             hook.clone()
-        } else if self.activity.starts_with("Running Bash") {
+        } else if self.activity.starts_with("Running Bash") || (self.activity.starts_with("Running") && !self.running.is_empty()) {
+            // The call itself shows above, in its transcript form.
             "Working".to_owned()
         } else if self.activity.starts_with("Running") || self.activity == "Cancelling" {
             self.activity.clone()
@@ -962,7 +992,49 @@ fn terminal_text(text: &str) -> String {
         .replace('\n', "\r\n")
 }
 fn content_budget(height: u16) -> usize {
-    (height as usize).saturating_sub(9).clamp(2, 8)
+    (height as usize).saturating_sub(10).clamp(2, 8)
+}
+/// Calls in progress in their transcript form: `● #2 Bash(ls)` over
+/// `⎿  Running…`. A shell command adds the Ctrl+B hint and, once clicked,
+/// its latest output. Returns the rows and those of the running shell call.
+fn running_lines(state: &State, width: usize, budget: usize, color: bool) -> (Vec<String>, Option<std::ops::Range<usize>>) {
+    let mut rows = Vec::new();
+    let mut shell = None;
+    let foreground = state.activity.starts_with("Running Bash");
+    for (index, call) in state.running.iter().enumerate() {
+        if index > 0 {
+            rows.push(String::new());
+        }
+        let first = rows.len();
+        rows.push(change_view::render(&call.header, width, color));
+        let elapsed = call.started.elapsed().as_secs();
+        let detail = if elapsed >= 2 { format!(" ({})", short_duration(elapsed)) } else { String::new() };
+        rows.push(change_view::render(&change_view::running(&detail), width, color));
+        if !(call.shell && foreground && index + 1 == state.running.len()) {
+            continue;
+        }
+        if state.shell_expanded {
+            let output = state.shell_context.as_ref().map(|(root, session)| {
+                deepseek_code_core::tools::background_shell::foreground_output(root, session)
+                    .unwrap_or_else(|error| format!("Could not read output: {error}"))
+            }).unwrap_or_default();
+            let output = terminal_text(&output);
+            let lines: Vec<_> = output.trim_end().lines().map(|row| clip(row, width.saturating_sub(5))).collect();
+            let room = budget.saturating_sub(rows.len() + 2);
+            if lines.is_empty() {
+                rows.push("     Waiting for command output\u{2026}".into());
+            } else {
+                rows.extend(lines.iter().skip(lines.len().saturating_sub(room)).map(|row| format!("     {row}")));
+            }
+        }
+        // A long command can continue in the background, as in the reference CLI.
+        if call.started.elapsed() >= Duration::from_secs(3) {
+            let hint = if state.shell_expanded { "     Ctrl+B to run in background \u{b7} click to hide output" } else { "     Ctrl+B to run in background \u{b7} click to show output" };
+            rows.push(if color { change_view::render(&change_view::muted(hint), width, true) } else { clip(hint, width) });
+        }
+        shell = Some(first..rows.len());
+    }
+    (rows, shell)
 }
 /// Return complete display rows with their original UTF-8 byte endpoints.
 /// Rows break after the last space that fits; a space reaching the edge
@@ -1149,21 +1221,32 @@ fn finish_answer(state: &mut State, screen: &mut Frame) {
 struct Frame {
     pinned: super::pinned_prompt::PinnedPrompt,
     lines: Vec<String>,
-    cursor_up: usize,
+    /// Frame row of the cursor: the input line, or the selected menu option.
+    input_row: usize,
     cursor_column: usize,
     size: (u16, u16),
     panel_toggle: Option<super::input::editor::HitTarget>,
     panel_height: usize,
     panel_viewport: usize,
-    /// Output not yet written. Erasing the frame, logging above it and drawing
-    /// it again go out in one write so the terminal never shows a blank frame.
+    /// Output that must precede the next frame, such as clearing the rows
+    /// below a toggled tool result.
     pending: String,
-    /// Screen row of the frame's first line. Blank rows above the content keep
-    /// the input box and footer on the last screen rows.
+    /// Transcript lines not written yet, with their screen rows. They go out
+    /// with the next frame in one write, so the terminal never shows a blank
+    /// frame.
+    logs: Vec<(String, usize)>,
+    /// Screen row of the frame's first line; the transcript ends right above.
     top: Option<u16>,
+    /// Blank rows between the live content and the status line. The content
+    /// stays right below the transcript, where its finished form is written,
+    /// while the input box keeps the bottom rows.
     padding: usize,
-    /// Screen rows logged since the frame was last drawn.
-    logged_rows: usize,
+    /// Whether the frame ends with the input box, rather than a menu question.
+    input_box: bool,
+    /// Whether the turn's first frame has moved a short transcript down onto it.
+    aligned: bool,
+    /// Frame rows of the running Bash call; a click shows its output.
+    shell_rows: Option<std::ops::Range<usize>>,
     /// Lines logged above the frame, for clicks on tool results.
     scrollback: super::scrollback::Scrollback,
     logged: Vec<String>,
@@ -1214,47 +1297,85 @@ impl Frame {
         self.history_view.navigate(key, (size.1 as usize).saturating_sub(self.composer_height))
     }
 
-    fn anchor(&mut self, out: &mut String) {
-        if self.cursor_up > 0 {
-            out.push_str(&format!("\x1b[{}B", self.cursor_up));
-        }
-        out.push('\r');
-        self.cursor_up = 0;
-    }
-    /// Queues erasing the frame, leaving the cursor on its first row.
-    fn erase(&mut self) {
-        if self.lines.is_empty() {
+    /// Writes the queued transcript lines from the frame's first row, after
+    /// clearing the old frame, and moves the frame below them.
+    fn write_logs(&mut self, out: &mut String, rows: usize) {
+        let Some(top) = self.top else { return; };
+        if self.logs.is_empty() {
             return;
         }
-        let mut out = std::mem::take(&mut self.pending);
-        out.push_str("\x1b[?25l");
-        self.anchor(&mut out);
-        out.push_str("\x1b[2K");
-        let rows = self.lines.len().min(
-            terminal::size()
-                .map(|(_, height)| usize::from(height))
-                .unwrap_or(self.lines.len())
-                .max(1),
-        );
-        for _ in 1..rows {
-            out.push_str("\x1b[1A\r\x1b[2K");
+        out.push_str(&format!("\x1b[{};1H\x1b[J", top + 1));
+        let mut row = top as usize;
+        for (text, height) in self.logs.drain(..) {
+            out.push_str(&text);
+            out.push_str("\r\n");
+            row += height;
         }
+        // Lines written past the bottom row scrolled the screen.
+        self.top = Some(row.min(rows.saturating_sub(1)) as u16);
         self.lines.clear();
-        self.pending = out;
     }
-    /// Erases the frame now and writes anything queued.
+    /// Writes anything queued and removes the frame from the screen.
     fn clear(&mut self) -> io::Result<()> {
         self.history_view.close()?;
-        self.erase();
-        self.flush()
-    }
-    fn flush(&mut self) -> io::Result<()> {
-        if self.history_view.active() || self.pending.is_empty() {
+        let rows = terminal::size().map_or(24, |(_, rows)| rows as usize).max(1);
+        let mut out = std::mem::take(&mut self.pending);
+        if self.top.is_none() && !self.logs.is_empty() {
+            self.top = Some(crossterm::cursor::position().map_or(0, |(_, row)| row));
+        }
+        self.write_logs(&mut out, rows);
+        if let (Some(top), false) = (self.top, self.lines.is_empty()) {
+            out.push_str(&format!("\x1b[{};1H\x1b[J", top + 1));
+        }
+        self.lines.clear();
+        if out.is_empty() {
             return Ok(());
         }
-        let mut out = std::mem::take(&mut self.pending);
-        out.push_str("\x1b[?25h");
         write(&out)
+    }
+    /// Ends the turn in the idle prompt's layout: the closing lines join the
+    /// transcript and the input box stays on its rows, so the prompt that
+    /// follows takes over without the box moving or blinking.
+    fn hand_off(&mut self) -> io::Result<()> {
+        self.history_view.close()?;
+        let rows = terminal::size().map_or(24, |(_, rows)| rows as usize).max(1);
+        match self.hand_off_output(rows) {
+            Some((out, row)) => {
+                write(&out)?;
+                crate::terminal::hand_off(row);
+                Ok(())
+            }
+            None => self.clear(),
+        }
+    }
+    /// The hand-off output and the row the prompt continues on.
+    fn hand_off_output(&mut self, rows: usize) -> Option<(String, u16)> {
+        if !self.input_box || self.lines.len() < 4 || self.top.is_none() || rows < 8 {
+            return None;
+        }
+        let input_box = self.lines[self.lines.len() - 4..].to_vec();
+        let mut out = std::mem::take(&mut self.pending);
+        self.write_logs(&mut out, rows);
+        let mut top = self.top.unwrap_or(0) as usize;
+        // The prompt writes a separator row and its own blank row above the box.
+        let height = 2 + input_box.len();
+        if top + height > rows {
+            out.push_str(&format!("\x1b[{rows};1H"));
+            for _ in 0..top + height - rows {
+                out.push_str("\r\n");
+            }
+            top = rows - height;
+        }
+        for row in top..rows - input_box.len() {
+            out.push_str(&format!("\x1b[{};1H\x1b[K", row + 1));
+        }
+        for (index, line) in input_box.iter().enumerate() {
+            out.push_str(&format!("\x1b[{};1H{line}\x1b[K", rows - input_box.len() + index + 1));
+        }
+        out.push_str(&format!("\x1b[{};1H\x1b[?25h", top + 1));
+        self.lines.clear();
+        self.top = None;
+        Some((format!("\x1b[?25l{out}"), top as u16))
     }
     /// Queues a plain line above the frame; the next draw writes both.
     fn log(&mut self, text: &str) -> io::Result<()> {
@@ -1266,11 +1387,9 @@ impl Frame {
         self.log_line(line.to_owned(), None);
     }
     fn log_line(&mut self, text: String, block: Option<usize>) {
-        self.erase();
         self.logged.push(text.clone());
-        self.pending.push_str(&text);
-        self.pending.push_str("\r\n");
-        self.logged_rows += self.scrollback.push(text, block);
+        let height = self.scrollback.push(text.clone(), block);
+        self.logs.push((text, height));
     }
     fn separate_block(&mut self) {
         if self.scrollback.needs_separator() { self.log_rendered(""); }
@@ -1289,19 +1408,114 @@ impl Frame {
         let Some((start, lines)) = self.top.and_then(|top| self.scrollback.toggle(top, row)) else {
             return false;
         };
-        self.pending = format!("\x1b[?25l\x1b[{};1H\x1b[J", start + 1);
+        self.logs.clear();
+        self.pending = format!("\x1b[{};1H\x1b[J", start + 1);
         self.lines.clear();
-        self.cursor_up = 0;
         self.top = Some(start);
-        self.logged_rows = 0;
         for (line, block) in lines {
             self.log_line(line, block);
         }
         true
     }
+    /// Places the frame right below the transcript and pads it to the bottom
+    /// row: blank rows go between the content and the status line. Returns
+    /// the output, or `None` when the screen already shows this frame.
+    fn place(
+        &mut self,
+        mut lines: Vec<String>,
+        content_rows: usize,
+        mut input_row: usize,
+        cursor_column: usize,
+        size: (u16, u16),
+        cursor_y: &mut dyn FnMut() -> usize,
+    ) -> Option<String> {
+        let rows = (size.1 as usize).max(1);
+        let mut out = std::mem::take(&mut self.pending);
+        if self.top.is_none() || self.size != size {
+            // The first frame, a terminal reflow after a resize, or a
+            // full-screen view in between: the cursor shows where we are.
+            if self.size != (0, 0) && self.size != size {
+                // The terminal reflowed what was logged; only new lines are clickable.
+                self.scrollback.clear();
+            }
+            let cursor_y = cursor_y();
+            let top = if self.lines.is_empty() { cursor_y } else { cursor_y.saturating_sub(self.input_row) };
+            let top = top.min(rows - 1);
+            out.push_str(&format!("\x1b[{};1H\x1b[J", top + 1));
+            self.top = Some(top as u16);
+            self.lines.clear();
+        }
+        // Scroll before writing the new rows. ConPTY paints what is pending
+        // right before each scroll, so the first scroll comes before any
+        // change and every later one after putting the status line and input
+        // box back on their final rows: no flush shows them moved or missing.
+        let log_rows: usize = self.logs.iter().map(|(_, height)| height).sum();
+        if let Some(top) = self.top.map(usize::from) {
+            let lift = (top + log_rows + lines.len()).saturating_sub(rows).min(top);
+            let anchored = &lines[content_rows.min(lines.len())..];
+            let anchored = &anchored[anchored.len().saturating_sub(rows)..];
+            for step in 0..lift {
+                // Only over rows the transcript has already scrolled out of.
+                if step > 0 && rows - anchored.len() >= top - step {
+                    for (index, line) in anchored.iter().enumerate() {
+                        out.push_str(&format!("\x1b[{};1H{line}\x1b[K", rows - anchored.len() + index + 1));
+                    }
+                }
+                out.push_str(&format!("\x1b[{rows};1H\r\n"));
+            }
+            if lift > 0 {
+                self.top = Some((top - lift) as u16);
+                self.lines.clear();
+            }
+        }
+        self.write_logs(&mut out, rows);
+        let mut top = self.top.unwrap_or(0) as usize;
+        let mut repaint = self.lines.is_empty();
+        if top + lines.len() > rows {
+            // The frame grew past the bottom: the transcript scrolls up.
+            out.push_str(&format!("\x1b[{rows};1H"));
+            for _ in 0..top + lines.len() - rows {
+                out.push_str("\r\n");
+            }
+            top = rows.saturating_sub(lines.len());
+            repaint = true;
+        }
+        let mut padding = rows - top - lines.len().min(rows - top);
+        if !std::mem::replace(&mut self.aligned, true) {
+            // The turn's first frame: a short transcript moves down onto it,
+            // as the idle prompt keeps it, so the turn ends without moving it.
+            let scroll = super::pinned_prompt::scroll_transcript_down(top, padding);
+            if !scroll.is_empty() {
+                out.push_str(&scroll);
+                top += padding;
+                padding = 0;
+                repaint = true;
+            }
+        }
+        lines.splice(content_rows..content_rows, std::iter::repeat_n(String::new(), padding));
+        input_row += padding;
+        for (index, line) in lines.iter().enumerate() {
+            if !repaint && self.lines.get(index) == Some(line) {
+                continue;
+            }
+            out.push_str(&format!("\x1b[{};1H{line}\x1b[K", top + index + 1));
+        }
+        self.size = size;
+        if out.is_empty() && self.input_row == input_row && self.cursor_column == cursor_column {
+            return None;
+        }
+        out.push_str(&format!("\x1b[{};{}H\x1b[?25h", top + input_row + 1, cursor_column + 1));
+        self.lines = lines;
+        self.top = Some(top as u16);
+        self.padding = padding;
+        self.input_row = input_row;
+        self.cursor_column = cursor_column;
+        Some(format!("\x1b[?25l{out}"))
+    }
     fn draw(&mut self, state: &mut State) -> io::Result<()> {
         let size = terminal::size().unwrap_or((80, 24));
         let width = (size.0 as usize).saturating_sub(1).max(4);
+        let color = std::env::var_os("NO_COLOR").is_none();
         let prompt = if state.answer.is_some() { "Answer \u{203a} ".to_owned() } else { format!("{} ", crate::terminal::prompt_glyph()) };
         let prompt_width = prompt.chars().count();
         let (draft, cursor) = state.draft.visible(width.saturating_sub(prompt_width + 1));
@@ -1310,97 +1524,65 @@ impl Frame {
         let mode = format!("{} {}", crate::terminal::style::status_mode(&state.mode), state.model_label);
         let mode = if super::scrollback::compact() { format!("{mode} · Compact · Alt+M") } else { mode };
         let rule = "─".repeat(width);
-        let _tip_line = state
-            .tip
-            .as_ref()
-            .map(|tip| format!("  \u{23bf}  Tip: {tip}"))
-            .unwrap_or_default();
-        let budget = if state.shell_expanded { (size.1 as usize).saturating_sub(9).max(2) } else if state.activity.starts_with("Running Bash") { (2 + usize::from(state.activity_started.elapsed() >= Duration::from_secs(3)) + if state.queued.is_empty() { 0 } else { state.queued.len() + 2 }).min(content_budget(size.1)) } else { content_budget(size.1) };
+        let budget = if state.shell_expanded { (size.1 as usize).saturating_sub(10).max(2) } else { content_budget(size.1) };
         let panel = state.details.render(width, budget);
         self.panel_toggle = panel.toggle;
         self.panel_height = panel.lines.len();
         self.panel_viewport = panel.viewport;
-        // The reference CLI shows reasoning on its own, without the disclosure row.
-        let thinking = state.partial.is_empty()
-            && state.thinking_span.is_some()
-            && state.group.as_ref().is_none_or(|group| group.calls.is_empty());
-        let mut content = if state.details.expanded {
-            panel
-                .lines
-                .iter()
-                .map(|(text, _)| text.clone())
-                .collect::<Vec<_>>()
+        self.shell_rows = None;
+        // The live content flows right below the transcript: the reasoning
+        // preview, the streaming answer and running calls in the form they
+        // keep once finished, so nothing jumps when they join the transcript.
+        let mut content: Vec<String> = if state.details.expanded {
+            panel.lines.iter().map(|(text, _)| text.clone()).collect()
         } else {
-            let content = match &state.group {
+            self.panel_toggle = None;
+            self.panel_height = 0;
+            // The reference CLI shows reasoning on its own, without the disclosure row.
+            let thinking = state.partial.is_empty()
+                && state.thinking_span.is_some()
+                && state.group.as_ref().is_none_or(|group| group.calls.is_empty());
+            let mut content = match &state.group {
                 Some(group) if state.partial.is_empty() && !group.calls.is_empty() => group_lines(group, width),
-                _ if thinking => thinking_lines(state, width, budget),
+                _ if thinking => thinking_lines(state, width, THINKING_PREVIEW_ROWS + 1),
+                _ if state.partial.is_empty() => Vec::new(),
                 _ => streamed_rows(state, width, budget),
             };
-            if !panel.lines.is_empty() {
-                // Keep the disclosure reachable without hiding the streaming text.
-                self.panel_toggle = None;
+            let (running, shell) = running_lines(state, width, budget, color);
+            if !running.is_empty() {
+                if !content.is_empty() { content.push(String::new()); }
+                self.shell_rows = shell.map(|rows| rows.start + content.len()..rows.end + content.len());
+                content.extend(running);
+            }
+            if crate::terminal::TODOS_VISIBLE.load(std::sync::atomic::Ordering::Relaxed) && !state.todos.is_empty() {
+                // ctrl+t: the todo list below the work in progress.
+                if !content.is_empty() { content.push(String::new()); }
+                content.extend(crate::terminal::todo_rows(&state.todos, width).into_iter().map(|(row, done, current)| {
+                    if done { format!("\x1b[2m{row}\x1b[0m") } else if current { format!("\x1b[1m{row}\x1b[0m") } else { row }
+                }));
+            }
+            if !state.queued.is_empty() {
+                // Messages waiting for the model, below all work in progress.
+                if !content.is_empty() { content.push(String::new()); }
+                content.extend(state.queued.iter().map(|text| clip(&format!("{} {}", crate::terminal::prompt_glyph(), terminal_text(text).replace('\n', " ")), width)));
+                content.push("  ctrl+x ctrl+s to send now".into());
             }
             content
         };
-        if !state.details.expanded && crate::terminal::TODOS_VISIBLE.load(std::sync::atomic::Ordering::Relaxed) {
-            // ctrl+t: the todo list above the status line.
-            content.retain(|line| !line.is_empty());
-            content.extend(crate::terminal::todo_rows(&state.todos, width).into_iter().map(|(row, done, current)| {
-                if done { format!("\x1b[2m{row}\x1b[0m") } else if current { format!("\x1b[1m{row}\x1b[0m") } else { row }
-            }));
-            let skip = content.len().saturating_sub(budget);
+        if content.len() > budget {
+            let skip = content.len() - budget;
             content.drain(..skip);
+            self.shell_rows = self.shell_rows.take().filter(|rows| rows.end > skip).map(|rows| rows.start.saturating_sub(skip)..rows.end - skip);
         }
-        if !state.details.expanded && state.activity.starts_with("Running Bash") {
-            // A long command can continue in the background, as in the reference CLI.
-            let hint = state.activity_started.elapsed() >= Duration::from_secs(3);
-            while content.last().is_some_and(String::is_empty) { content.pop(); }
-            let keep = if state.shell_expanded { 0 } else { budget.saturating_sub(3 + usize::from(hint)) };
-            let skip = content.len().saturating_sub(keep);
-            content.drain(..skip);
-            content.push(String::new());
-            content.push(clip(&state.activity, width));
-            if state.shell_expanded {
-                let output = state.shell_context.as_ref().map(|(root, session)| {
-                    deepseek_code_core::tools::background_shell::foreground_output(root, session)
-                        .unwrap_or_else(|error| format!("Could not read output: {error}"))
-                }).unwrap_or_default();
-                let output = terminal_text(&output);
-                let rows: Vec<_> = output.trim_end().lines().map(|row| clip(row, width.saturating_sub(2))).collect();
-                let queue_rows = if state.queued.is_empty() { 0 } else { state.queued.len() + 2 };
-                let available = budget.saturating_sub(3 + usize::from(hint) + queue_rows);
-                if available > 0 {
-                    if rows.is_empty() { content.push("  Waiting for command output...".into()); }
-                    else { content.extend(rows.iter().skip(rows.len().saturating_sub(available)).map(|row| format!("  {row}"))); }
-                }
-            }
-            if hint {
-                content.push("  Ctrl+B to run in background".into());
-            }
-            let skip = content.len().saturating_sub(budget);
-            content.drain(..skip);
-        }
-        if !state.details.expanded && state.activity.starts_with("Running Bash") {
-            while content.last().is_some_and(String::is_empty) { content.pop(); }
-            content.splice(0..0, std::iter::repeat_n(String::new(), budget.saturating_sub(content.len())));
-        }
-        content.resize(budget, String::new());
-        content.truncate(budget);
-        if !state.details.expanded && !state.queued.is_empty() {
-            // Pin queued messages below all message/activity blocks. The status
-            // frame supplies the trailing blank line.
-            let mut rows = vec![String::new()];
-            rows.extend(state.queued.iter().map(|text| clip(&format!("{} {}", crate::terminal::prompt_glyph(), terminal_text(text).replace('\n', " ")), width)));
-            rows.push("  ctrl+x ctrl+s to send now".into());
-            rows.truncate(budget);
-            let keep = budget - rows.len();
-            let mut occupied = content;
-            while occupied.last().is_some_and(String::is_empty) { occupied.pop(); }
-            let skip = occupied.len().saturating_sub(keep);
-            occupied.drain(..skip);
-            occupied.splice(0..0, std::iter::repeat_n(String::new(), keep - occupied.len()));
-            occupied.extend(rows);
-            content = occupied;
+        // One blank row separates the content from the transcript, as it will
+        // once the content is written there.
+        if !content.is_empty() && self.scrollback.needs_separator() {
+            content.insert(0, String::new());
+            self.shell_rows = self.shell_rows.take().map(|rows| rows.start + 1..rows.end + 1);
+            self.panel_toggle = self.panel_toggle.map(|mut hit| {
+                hit.row += 1;
+                hit
+            });
         }
         let mut lines = vec![
             String::new(),
@@ -1429,7 +1611,7 @@ impl Frame {
             rule,
             clip(&mode, width),
         ];
-        if std::env::var_os("NO_COLOR").is_some() {
+        if !color {
             lines[1] = status;
         } else {
             use crossterm::style::{ResetColor, SetForegroundColor};
@@ -1462,25 +1644,16 @@ impl Frame {
                 );
             }
         }
-        // The content viewport has a fixed height throughout the turn, so a long
-        // stream grows into scrollback without making the composer jump.
-        if !state.details.expanded && !panel.lines.is_empty() && !thinking {
-            let label = panel.lines[0].0.clone();
-            content[budget - 1] = label;
-            self.panel_height = budget;
-            self.panel_toggle = panel.toggle.map(|mut hit| {
-                hit.row = budget - 1;
-                hit
-            });
-        }
+        // A blank row above the input box, as at the idle prompt, so the
+        // finished turn hands over without moving the box.
+        lines.insert(3, String::new());
         let menu = state.menu();
         if !menu.is_empty() && !state.details.expanded {
-            // The `/` menu takes the bottom of the work area, above the input.
+            // The `/` menu sits right above the input box.
             let selected = state.menu_selected.min(menu.len() - 1);
-            let shown = menu.len().min(budget).min(5);
+            let shown = menu.len().min(5);
             let name_width = menu.iter().map(|(name, _)| name.width()).max().unwrap_or(0) + 2;
-            let color = std::env::var_os("NO_COLOR").is_none();
-            let rows = menu.iter().take(shown).enumerate().map(|(index, (name, description))| {
+            let rows: Vec<String> = menu.iter().take(shown).enumerate().map(|(index, (name, description))| {
                 let prefix = if index == selected { "  \u{276f} " } else { "    " };
                 let row = clip(&format!("{prefix}{name:<name_width$}{description}"), width);
                 match (color, index == selected) {
@@ -1488,9 +1661,8 @@ impl Frame {
                     (true, true) => format!("{}{row}\x1b[0m", crossterm::style::SetForegroundColor(crate::terminal::style::selected())),
                     (true, false) => format!("{}{row}\x1b[0m", crossterm::style::SetForegroundColor(crate::terminal::style::muted())),
                 }
-            });
-            content.splice(budget - shown.., rows);
-            self.panel_toggle = None;
+            }).collect();
+            lines.splice(4..4, rows);
         }
         // Between the turn status and editor; preserve the cursor's distance
         // from the bottom and reserve input room on small screens.
@@ -1508,11 +1680,13 @@ impl Frame {
             content.clear();
             self.panel_toggle = None;
             self.panel_height = 0;
+            self.shell_rows = None;
         }
         let choice_cursor = choice_rows.as_ref().map(|(_, selected, column)| (*selected, *column));
         if let Some((rows, _, _)) = choice_rows {
             lines = rows;
         }
+        self.input_box = choice_cursor.is_none();
         self.composer_height = lines.len();
         if super::scrollback::compact() && !self.history_view.active() {
             self.refresh_history(state, width);
@@ -1526,89 +1700,37 @@ impl Frame {
             if super::scrollback::compact() { return Ok(()); }
             return self.pinned.draw(width, size.1 as usize, &self.history_view.screen_rows(size.1 as usize, &lines));
         }
-        // Separate the transcript from the current live message/activity region.
-        if content.first().is_some_and(|row| !row.is_empty()) {
-            content.insert(0, String::new());
-        }
+        let mut content_rows = content.len();
         content.extend(lines);
         let mut lines = content;
-        let rows = (size.1 as usize).saturating_sub(1).max(1);
+        let rows = (size.1 as usize).max(1);
+        let limit = rows.saturating_sub(1).max(1);
         let mut input_row = lines.len().saturating_sub(choice_cursor.map_or(3, |(row, _)| row));
-        if lines.len() > rows {
-            let viewport = super::prompt_display::viewport(lines.len(), input_row, rows);
+        if lines.len() > limit {
+            let viewport = super::prompt_display::viewport(lines.len(), input_row, limit);
             let removed = viewport.start;
             lines = lines[viewport].to_vec();
             input_row = input_row.saturating_sub(removed);
+            content_rows = content_rows.saturating_sub(removed);
             self.panel_toggle = self.panel_toggle.and_then(|mut hit| {
                 hit.row = hit.row.checked_sub(removed)?;
                 (hit.row < lines.len()).then_some(hit)
             });
             self.panel_height = self.panel_height.saturating_sub(removed).min(lines.len());
+            self.shell_rows = self.shell_rows.take().filter(|rows| rows.end > removed).map(|rows| rows.start.saturating_sub(removed)..rows.end - removed);
         }
-        // Blank rows above the content keep the input box and footer on the
-        // bottom screen rows, however little output there is yet.
-        let old_top = self.top;
-        let resized = self.size != size;
-        if resized && !self.lines.is_empty() {
-            self.erase();
-        }
-        let start = match self.top {
-            Some(top) if !resized => (top as usize + self.logged_rows).min(size.1.saturating_sub(1) as usize),
-            _ => {
-                // The terminal reflowed what was logged; only new lines are clickable.
-                if self.size != (0, 0) { self.scrollback.clear(); }
-                write(&std::mem::take(&mut self.pending))?;
-                crossterm::cursor::position().map_or(0, |(_, row)| row as usize)
-            }
-        };
-        let padding = pad_live_frame(&mut lines, start, size.1 as usize);
-        self.padding = padding;
-        self.top = Some(start.min((size.1 as usize).saturating_sub(lines.len())) as u16);
-        self.logged_rows = 0;
-        let input_row = input_row + padding;
         let cursor_column = match choice_cursor {
             Some((_, column)) => column,
             None => (prompt_width + cursor).min(width),
         };
-        if self.pending.is_empty()
-            && self.lines == lines
-            && self.size == size
-            && self.cursor_column == cursor_column
-        {
+        let Some(out) = self.place(lines, content_rows, input_row, cursor_column, size, &mut || {
+            crossterm::cursor::position().map_or(0, |(_, row)| row as usize)
+        }) else {
             return Ok(());
-        }
-        let previous_top = old_top.unwrap_or(0) as usize;
-        let moved = !self.lines.is_empty() && self.lines.len() != lines.len() && self.pending.is_empty();
-        if !self.lines.is_empty() && self.lines.len() != lines.len() && !moved {
-            self.erase();
-        }
-        let mut out = std::mem::take(&mut self.pending);
-        out.push_str("\x1b[?25l");
-        self.anchor(&mut out);
-        if moved {
-            let top = self.top.unwrap_or(0) as usize;
-            for row in previous_top.min(top)..size.1 as usize {
-                let next = row.checked_sub(top).and_then(|i| lines.get(i));
-                let old = row.checked_sub(previous_top).and_then(|i| self.lines.get(i));
-                if next == old { continue; }
-                out.push_str(&format!("\x1b[{};1H{}\x1b[K", row + 1, next.map(String::as_str).unwrap_or("")));
-            }
-            out.push_str(&format!("\x1b[{};1H", top + lines.len()));
-        } else if self.lines.is_empty() {
-            out.push_str(&lines.join("\r\n"));
-        } else {
-            out.push_str(&row_updates(&self.lines, &lines));
-        }
-        self.cursor_up = lines.len() - 1 - input_row;
-        if self.cursor_up > 0 {
-            out.push_str(&format!("\x1b[{}A", self.cursor_up));
-        }
-        out.push_str(&format!("\r\x1b[{cursor_column}C\x1b[?25h"));
-        self.lines = lines;
-        self.size = size;
-        self.cursor_column = cursor_column;
+        };
         write(&out)?;
-        let origin = self.top.unwrap_or(0);
+        let top = self.top.unwrap_or(0);
+        let origin = top;
         let mut background = self.scrollback.screen(origin, size.1);
         for (index, text) in self.lines.iter().enumerate() {
             if let Some(row) = background.get_mut(origin as usize + index) { *row = text.clone(); }
@@ -1691,34 +1813,6 @@ fn choice_lines(choice: &Choice, status: &str, mode: &str, width: usize, height:
     (rows, selected, column)
 }
 
-// All activities share the same bottom anchor, including Running Bash.
-fn pad_live_frame(lines: &mut Vec<String>, start: usize, rows: usize) -> usize {
-    let padding = rows.saturating_sub(start).saturating_sub(lines.len());
-    lines.splice(0..0, std::iter::repeat_n(String::new(), padding));
-    padding
-}
-
-fn row_updates(previous: &[String], next: &[String]) -> String {
-    let mut output = String::new();
-    for (row, line) in next.iter().enumerate() {
-        if previous.get(row) == Some(line) {
-            continue;
-        }
-        let up = next.len() - 1 - row;
-        if up > 0 {
-            output.push_str(&format!("\x1b[{up}A"));
-        }
-        output.push('\r');
-        output.push_str(line);
-        output.push_str("\x1b[K");
-        if up > 0 {
-            output.push_str(&format!("\x1b[{up}B"));
-        }
-        output.push('\r');
-    }
-    output
-}
-
 fn write(text: &str) -> io::Result<()> {
     let mut output = io::stderr().lock();
     // Synchronized output: terminals that support it present the whole update
@@ -1777,6 +1871,32 @@ fn run(
                 Ok(Update::Expandable(short, full)) => {
                     finish_text(state, screen);
                     screen.log_block(short, full);
+                    dirty = true;
+                }
+                Ok(Update::ToolStarted(id, header, shell)) => {
+                    // Earlier text and reasoning join the transcript first, so
+                    // the call shows right below them, where it will stay.
+                    finish_text(state, screen);
+                    if !state.running.iter().any(|call| call.id == id) {
+                        state.running.push(Running { id, header, started: Instant::now(), shell });
+                    }
+                    dirty = true;
+                }
+                Ok(Update::Finished(id, short, full)) => {
+                    state.running.retain(|call| call.id != id);
+                    finish_text(state, screen);
+                    match full {
+                        Some(full) => screen.log_block(short, full),
+                        None if short.is_empty() => {}
+                        None => {
+                            screen.separate_block();
+                            let width = terminal::size().unwrap_or((80, 24)).0.saturating_sub(1) as usize;
+                            let color = std::env::var_os("NO_COLOR").is_none();
+                            for line in short {
+                                screen.log_rendered(&change_view::render(&line, width, color));
+                            }
+                        }
+                    }
                     dirty = true;
                 }
                 Ok(Update::ShellContext(root, session)) => { state.shell_context = Some((root, session)); }
@@ -1921,7 +2041,7 @@ fn run(
                     if !draft.is_empty() {
                         let _ = actions.send(Action::Draft(draft));
                     }
-                    screen.erase();
+                    state.running.clear();
                     // As in the reference CLI, after a blank line:
                     // "✻ Churned for 7m 7s · done 10:41 AM".
                     let mut footer = format!(
@@ -1953,7 +2073,7 @@ fn run(
                         } else {
                             screen.log_rendered(&change_view::render(&change_view::failure(line), usize::MAX, true));
                         }
-                        return screen.flush();
+                        return screen.hand_off();
                     }
                     screen.log("")?;
                     screen.log_rendered(&change_view::render(
@@ -1962,7 +2082,7 @@ fn run(
                         std::env::var_os("NO_COLOR").is_none(),
                     ));
                     *crate::terminal::TURN_COMPLETION.lock().unwrap_or_else(|e| e.into_inner()) = Some(footer);
-                    return screen.flush();
+                    return screen.hand_off();
                 }
                 Err(mpsc::TryRecvError::Empty) => break,
                 Err(mpsc::TryRecvError::Disconnected) => return Ok(()),
@@ -2031,6 +2151,21 @@ fn run(
                     if state.choice_key(key) || state.menu_key(key) {
                     } else if control && matches!(key.code, KeyCode::Char('y' | 'n')) && state.goal_proposal.is_some() && state.answer.is_none() {
                         state.decide_goal(key.code == KeyCode::Char('y'), &actions);
+                    } else if crate::images::is_image_paste_key(key) && state.answer.is_none() {
+                        // As at the prompt: an image on the clipboard joins the
+                        // message being written as [Image #N].
+                        match crate::images::paste() {
+                            Some(crate::images::Pasted::Image(placeholder)) => {
+                                state.undo.push((state.draft.characters.clone(), state.draft.cursor));
+                                state.draft.insert(&placeholder);
+                            }
+                            Some(crate::images::Pasted::Text(text)) => {
+                                if !state.draft.insert_paste(&text) {
+                                    screen.log("Paste not inserted: the active draft limit is 32768 characters. Shorten the text and paste again.")?;
+                                }
+                            }
+                            None => {}
+                        }
                     } else if control && key.code == KeyCode::Char('t') {
                         crate::terminal::TODOS_VISIBLE.fetch_xor(true, std::sync::atomic::Ordering::Relaxed);
                     } else if control && key.code == KeyCode::Char('x') {
@@ -2219,8 +2354,8 @@ fn run(
                     let Some(mouse) = selection.event(mouse, snapshot)? else { continue; };
                     if mouse.kind == MouseEventKind::Down(MouseButton::Left)
                         && state.activity.starts_with("Running Bash")
-                        && mouse.row.checked_sub(screen.top.unwrap_or(0)).and_then(|row| screen.lines.get(row as usize))
-                            .is_some_and(|row| row.starts_with("Running Bash") || row.contains("Ctrl+B to run in background"))
+                        && mouse.row.checked_sub(screen.top.unwrap_or(0))
+                            .is_some_and(|row| screen.shell_rows.as_ref().is_some_and(|rows| rows.contains(&(row as usize))))
                     {
                         state.shell_expanded = !state.shell_expanded;
                         screen.draw(state)?;
@@ -2237,7 +2372,8 @@ fn run(
                         }
                     }
                     if mouse.kind == MouseEventKind::Down(MouseButton::Left) && screen.pinned.click(mouse.row) { screen.lines.clear(); screen.draw(state)?; continue; }
-                    let origin = screen.top.unwrap_or(0) + screen.padding as u16;
+                    // The details panel is live content at the top of the frame.
+                    let origin = screen.top.unwrap_or(0);
                     if mouse.kind == MouseEventKind::Down(MouseButton::Left)
                         && screen.top.is_some_and(|top| mouse.row < top)
                     {
@@ -2309,28 +2445,122 @@ fn run(
 #[cfg(test)]
 mod tests {
     use super::*;
+    fn composer(status: &str) -> Vec<String> {
+        ["", status, "hint", "", "rule", "> draft", "rule", "footer"].map(String::from).to_vec()
+    }
+    fn place(frame: &mut Frame, terminal: &mut vt100::Parser, content: &[&str], status: &str, cursor: usize) {
+        let mut lines: Vec<String> = content.iter().map(|row| row.to_string()).collect();
+        lines.extend(composer(status));
+        let input_row = lines.len() - 3;
+        let (rows, cols) = terminal.screen().size();
+        if let Some(output) = frame.place(lines, content.len(), input_row, 2, (cols, rows), &mut || cursor) {
+            terminal.process(output.as_bytes());
+        }
+    }
+    fn screen(terminal: &vt100::Parser) -> Vec<String> {
+        terminal.screen().rows(0, 80).collect()
+    }
+
     #[test]
-    fn live_activity_transitions_keep_composer_on_bottom_screen_rows() {
-        for height in [10, 24, 40] {
-            for start in [0, 2, height - 1] {
-                let mut terminal = vt100::Parser::new(height as u16, 80, 100);
-                terminal.process(format!("\x1b[{};1H", start + 1).as_bytes());
-                let mut previous = Vec::new();
-                for activity in ["Thinking", "Running Bash: echo hello", "Working", "Running Bash: pwd", "Done"] {
-                    let mut lines = vec![activity.to_owned(), String::new(), "border".into(), "prompt> draft".into(), "border".into(), "mode".into()];
-                    pad_live_frame(&mut lines, start, height);
-                    let output = if previous.is_empty() {
-                        lines.join("\r\n")
-                    } else {
-                        row_updates(&previous, &lines)
-                    };
-                    terminal.process(output.as_bytes());
-                    let screen = terminal.screen();
-                    assert_eq!(screen.rows(0, 80).nth(height - 1).unwrap(), "mode");
-                    assert_eq!(screen.rows(0, 80).nth(height - 3).unwrap(), "prompt> draft", "{activity} at start {start}, height {height}");
-                    previous = lines;
-                }
+    fn live_content_follows_the_transcript_and_the_input_box_never_moves() {
+        for height in [16u16, 24, 40] {
+            let rows = height as usize;
+            let mut terminal = vt100::Parser::new(height, 80, 200);
+            terminal.process(b"banner\r\nprompt\r\n");
+            let mut frame = Frame::default();
+            // The first frame moves the short transcript down onto it.
+            place(&mut frame, &mut terminal, &["", "\u{25cf} Thinking for 1s\u{2026}", "  \u{23bf}  reasoning"], "thinking", 2);
+            let first = screen(&terminal);
+            assert_eq!(first[rows - 1], "footer");
+            assert_eq!(first[rows - 3], "> draft");
+            assert_eq!(first[rows - 7], "thinking");
+            assert_eq!(first[rows - 9], "  \u{23bf}  reasoning");
+            assert_eq!(first[rows - 11], "");
+            assert_eq!(first[rows - 12], "prompt");
+            assert_eq!(terminal.screen().cursor_position(), (height - 3, 2));
+            // The reasoning joins the transcript and the call shows in its place.
+            frame.log_rendered("Thought for 1s 1 line");
+            place(&mut frame, &mut terminal, &["", "\u{25cf} #1 Bash(ls)", "  \u{23bf}  Running\u{2026}"], "working", 0);
+            let second = screen(&terminal);
+            assert_eq!(second[rows - 12], "Thought for 1s 1 line");
+            assert_eq!(second[rows - 10], "\u{25cf} #1 Bash(ls)");
+            assert_eq!(second[rows - 9], "  \u{23bf}  Running\u{2026}");
+            assert_eq!(second[rows - 13], "prompt");
+            for row in [rows - 8, rows - 5, rows - 4, rows - 3, rows - 2, rows - 1] {
+                assert_eq!(first[row], second[row], "row {row} at height {height}");
             }
+            // A shorter frame leaves blank rows above the status line instead
+            // of moving anything.
+            frame.log_rendered("");
+            frame.log_rendered("\u{25cf} #1 Bash(ls)");
+            frame.log_rendered("  \u{23bf}  file");
+            place(&mut frame, &mut terminal, &[], "working", 0);
+            let third = screen(&terminal);
+            assert_eq!(third[rows - 9], "  \u{23bf}  file");
+            assert_eq!(third[rows - 7], "working");
+            assert_eq!(third[rows - 1], "footer");
+            // The turn hands over in the idle prompt's layout: completion, a
+            // separator row and the prompt's blank row above the same box.
+            frame.log_rendered("");
+            frame.log_rendered("\u{273b} Worked for 2s");
+            frame.input_box = true;
+            let (output, row) = frame.hand_off_output(rows).unwrap();
+            terminal.process(output.as_bytes());
+            let done = screen(&terminal);
+            assert_eq!(row as usize, rows - 6);
+            assert_eq!(done[rows - 7], "\u{273b} Worked for 2s");
+            assert_eq!(done[rows - 8], "");
+            assert_eq!(done[rows - 9], "  \u{23bf}  file");
+            assert_eq!(done[rows - 6], "");
+            assert_eq!(done[rows - 5], "");
+            for row in rows - 4..rows {
+                assert_eq!(done[row], third[row]);
+            }
+            assert_eq!(terminal.screen().cursor_position(), (height - 6, 0));
+        }
+    }
+
+    #[test]
+    fn a_turn_starting_on_the_bottom_row_keeps_the_rows_above_it() {
+        let mut terminal = vt100::Parser::new(20, 80, 200);
+        for index in 0..20 {
+            terminal.process(format!("row {index}\r\n").as_bytes());
+        }
+        let mut frame = Frame::default();
+        place(&mut frame, &mut terminal, &[], "status", 19);
+        let rows = screen(&terminal);
+        assert_eq!(rows[10], "row 18");
+        assert_eq!(rows[11], "row 19");
+        assert_eq!(rows[13], "status");
+        assert_eq!(rows[19], "footer");
+    }
+
+    #[test]
+    fn unchanged_frames_write_nothing_and_scrolls_precede_new_rows() {
+        let mut terminal = vt100::Parser::new(20, 80, 200);
+        let mut frame = Frame::default();
+        let lines = || {
+            let mut lines = vec![String::new(), "live".to_owned()];
+            lines.extend(composer("status"));
+            lines
+        };
+        place(&mut frame, &mut terminal, &["", "live"], "status", 0);
+        let input_row = lines().len() - 3;
+        assert!(frame.place(lines(), 2, input_row, 2, (80, 20), &mut || 0).is_none());
+        // A full screen: each logged line scrolls before any row changes.
+        for index in 0..30 {
+            frame.log_rendered(&format!("line {index}"));
+            let output = frame.place(lines(), 2, input_row, 2, (80, 20), &mut || 0).unwrap();
+            if index >= 10 {
+                let scroll = output.find("\r\n").unwrap();
+                let first_write = output.find("line ").unwrap();
+                assert!(scroll < first_write, "the scroll precedes the new rows");
+            }
+            terminal.process(output.as_bytes());
+            let rows = screen(&terminal);
+            assert_eq!(rows[19], "footer");
+            assert_eq!(rows[17], "> draft");
+            assert_eq!(rows[index.min(9)], format!("line {index}"));
         }
     }
 
@@ -2612,15 +2842,17 @@ mod tests {
 
     #[test]
     fn stable_timer_updates_never_clear_the_frame_or_scroll() {
-        let before = vec!["answer".into(), "working 1s".into(), "draft".into()];
-        assert_eq!(row_updates(&before, &before), "");
-        let after = vec!["answer".into(), "working 2s".into(), "draft".into()];
-        let update = row_updates(&before, &after);
+        let mut terminal = vt100::Parser::new(24, 80, 100);
+        let mut frame = Frame::default();
+        place(&mut frame, &mut terminal, &["answer"], "working 1s", 0);
+        let mut lines = vec!["answer".to_owned()];
+        lines.extend(composer("working 2s"));
+        let update = frame.place(lines, 1, 6, 2, (80, 24), &mut || 0).unwrap();
         assert!(update.contains("working 2s"));
         assert!(!update.contains("answer"));
         assert!(!update.contains("draft"));
         assert!(!update.contains('\n'));
-        assert!(!update.contains("\x1b[2K"));
+        assert!(!update.contains("\x1b[J"));
     }
     #[test]
     fn bash_activity_keeps_command_out_of_working_status() {
@@ -2865,6 +3097,8 @@ pub struct TurnDisplay {
     finished: std::collections::HashMap<String, (String, Value, String, bool)>,
     /// Lines added and removed per file this turn, for the closing summary.
     changes: std::collections::BTreeMap<String, (u64, u64)>,
+    /// The session-wide numbers of this turn's shell commands.
+    numbers: std::collections::HashMap<String, usize>,
 }
 impl TurnDisplay {
     pub fn new(
@@ -2894,6 +3128,7 @@ impl TurnDisplay {
             tools: Default::default(),
             finished: Default::default(),
             changes: Default::default(),
+            numbers: Default::default(),
         })
     }
     pub fn is_live(&self) -> bool {
@@ -2978,7 +3213,13 @@ impl TurnDisplay {
             match super::tool_view::gathering(name, input).filter(|_| !matches!(name, "Read" | "Bash" | "Grep" | "Glob")) {
                 Some(kind) => live.group(id, kind, label.clone(), GroupStep::Start),
                 None => {
-                    let _ = live.updates.send(Update::GroupEnd);
+                    // Shown in its transcript form until the result replaces it.
+                    let number = super::tool_view::command_number(name);
+                    if let Some(number) = number {
+                        self.numbers.insert(id.to_owned(), number);
+                    }
+                    let header = super::tool_view::numbered(vec![change_view::tool_call(&label, "", false)], number);
+                    live.tool_started(id, header.into_iter().next().unwrap_or_else(|| change_view::tool_call(&label, "", false)), matches!(name, "Bash" | "PowerShell"));
                 }
             }
             let activity = super::tool_view::task_output_activity(name, input)
@@ -3048,9 +3289,9 @@ impl TurnDisplay {
                 // Summary plus four diff rows; a click, where the terminal reports one,
                 // shows the diff. Ctrl+O has the full text regardless.
                 if display_lines.len() > 1 {
-                    let _ = live.updates.send(Update::Expandable(change_view::collapsed_change(&display_lines), display_lines));
+                    live.finished(id, change_view::collapsed_change(&display_lines), Some(display_lines));
                 } else {
-                    live.styled(display_lines);
+                    live.finished(id, display_lines, None);
                 }
             } else {
                 // A mirrored completion can arrive without the call's input;
@@ -3068,19 +3309,20 @@ impl TurnDisplay {
                         return;
                     }
                 }
-                let short = super::tool_view::finished(
+                let number = self.numbers.get(id).copied();
+                let short = super::tool_view::numbered(super::tool_view::finished(
                     name,
                     label_input,
                     output,
                     failed,
                     elapsed,
                     self.workspace.as_deref(),
-                );
+                ), number);
                 if name != "TodoWrite" {
-                    let full = super::tool_view::expanded_block(name, label_input, output, failed, elapsed, self.workspace.as_deref());
-                    let _ = live.updates.send(Update::Expandable(short, full));
+                    let full = super::tool_view::numbered(super::tool_view::expanded_block(name, label_input, output, failed, elapsed, self.workspace.as_deref()), number);
+                    live.finished(id, short, Some(full));
                 } else {
-                    live.styled(short);
+                    live.finished(id, short, None);
                 }
             }
             live.activity("Working");

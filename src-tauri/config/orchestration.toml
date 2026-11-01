@@ -11,7 +11,9 @@
 
 [tool_loop]
 # Maximum number of back-and-forth tool-calling iterations per turn.
-max_tool_iterations = 50
+# Unset means unlimited: a turn runs until the model stops calling tools or
+# the user interrupts it. Set a positive number to cap long turns.
+# max_tool_iterations = 50
 
 # Token threshold at which automatic context compression triggers.
 # Reduced from 2.5M to 600K to stay safely below most models' context limits.

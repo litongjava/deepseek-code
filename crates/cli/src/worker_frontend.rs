@@ -815,7 +815,9 @@ fn failure_message(id: &str, status: &str, diagnostic: &str) -> String {
         return "Interrupted".into();
     }
     let lower = diagnostic.to_ascii_lowercase();
-    let reason = if lower.contains("timed out") || lower.contains("timeout") {
+    let reason = if lower.contains("max tool iterations") {
+        "Stopped at the --max-turns limit; send a follow-up to continue".to_owned()
+    } else if lower.contains("timed out") || lower.contains("timeout") {
         "Request timed out".to_owned()
     } else if lower.contains("error sending request") || lower.contains("connection") {
         "Connection failed".to_owned()
@@ -1210,6 +1212,11 @@ mod failure_tests {
         }
         for (status, diagnostic, expected) in [
             ("cancelled", "output token limit", "Interrupted"),
+            (
+                "failed",
+                "Max tool iterations reached (session s-1)",
+                "Stopped at the --max-turns limit; send a follow-up to continue. Details: /tasks show id",
+            ),
             (
                 "failed",
                 "output token limit request timeout",

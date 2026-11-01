@@ -79,6 +79,28 @@ impl Selection {
             _ => Ok(Some(mouse)),
         }
     }
+    /// Selects one whole row, as a drag across it would, and copies its text.
+    pub fn select_row(&mut self, row: u16, rows: Vec<String>) -> io::Result<()> {
+        let width = rows
+            .get(row as usize)
+            .map_or(0, |text| unicode_width::UnicodeWidthStr::width(super::markdown::plain_rendered(text).trim_end()));
+        if width == 0 {
+            return Ok(());
+        }
+        self.clear()?;
+        self.rows = rows;
+        self.painted.borrow_mut().clear();
+        self.start = Some((row, 0));
+        self.end = (row, width as u16);
+        self.dragged = true;
+        self.held = false;
+        self.paint(true)?;
+        let text = self.text();
+        if !text.is_empty() {
+            let _ = crate::extended_commands::copy_text(&text);
+        }
+        Ok(())
+    }
     fn bounds(&self) -> ((u16, u16), (u16, u16)) {
         let start = self.start.unwrap_or(self.end);
         (start.min(self.end), start.max(self.end))
@@ -182,6 +204,12 @@ impl Selection {
         out.write_all(b"\x1b[?2026l")?;
         Ok(())
     }
+}
+
+/// Whether a screen row is a turn's closing status, `✻ Worked for 4s · done`.
+pub(super) fn is_status_row(rows: &[String], row: u16) -> bool {
+    rows.get(row as usize)
+        .is_some_and(|text| super::markdown::plain_rendered(text).starts_with("\u{273b} "))
 }
 
 fn highlight_row(text: &str, left: usize, right: usize) -> String {

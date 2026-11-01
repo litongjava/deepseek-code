@@ -25,6 +25,34 @@ pub fn attach(path: PathBuf) -> String {
     format!("[Image #{number}]")
 }
 
+/// Ctrl+V pastes a clipboard image; Alt+V too, for terminals that keep
+/// Ctrl+V for their own text paste.
+pub fn is_image_paste_key(key: crossterm::event::KeyEvent) -> bool {
+    use crossterm::event::{KeyCode, KeyModifiers};
+    matches!(key.code, KeyCode::Char('v' | 'V'))
+        && (key.modifiers == KeyModifiers::CONTROL || key.modifiers == KeyModifiers::ALT)
+}
+
+/// What Ctrl+V takes from the clipboard.
+pub enum Pasted {
+    /// The `[Image #N]` placeholder of a clipboard image.
+    Image(String),
+    /// Clipboard text, when the terminal passed Ctrl+V on instead of pasting.
+    Text(String),
+}
+
+/// The clipboard's image, or else its text.
+pub fn paste() -> Option<Pasted> {
+    if let Ok(Some(path)) = paste_clipboard() {
+        return Some(Pasted::Image(format!("{} ", attach(path))));
+    }
+    #[cfg(windows)]
+    let text = native_clipboard::text();
+    #[cfg(not(windows))]
+    let text: Option<String> = None;
+    text.filter(|text| !text.is_empty()).map(|text| Pasted::Text(text.replace("\r\n", "\n")))
+}
+
 /// The image file a paste consists of, as a terminal drops a dragged file:
 /// a path, possibly quoted or with backslash-escaped spaces.
 pub fn pasted_path(text: &str) -> Option<PathBuf> {
@@ -110,6 +138,7 @@ pub fn content(workspace: &Path, prompt: &str) -> Result<Option<Value>> {
     Ok(Some(Value::Array(blocks)))
 }
 
+#[cfg(not(windows))]
 fn run(program: &str, args: &[&str]) -> Option<Vec<u8>> {
     let output = std::process::Command::new(program)
         .args(args)
@@ -120,34 +149,38 @@ fn run(program: &str, args: &[&str]) -> Option<Vec<u8>> {
     (output.status.success() && !output.stdout.is_empty()).then_some(output.stdout)
 }
 
-/// Saves a clipboard image as PNG under `<data dir>/pasted-images`.
+/// Saves a clipboard image as PNG under `<data dir>/pasted-images`, or returns
+/// the image file copied in a file manager.
 pub fn paste_clipboard() -> Result<Option<PathBuf>> {
     let dir = deepseek_code_core::runtime::resolve_default_data_dir()?.join("pasted-images");
-    std::fs::create_dir_all(&dir)?;
     let path = dir.join(format!("{}.png", uuid::Uuid::new_v4()));
-    let path_text = path.to_string_lossy().into_owned();
-    let bytes = if cfg!(windows) {
-        let script = format!(
-            "Add-Type -AssemblyName System.Windows.Forms; $i=[Windows.Forms.Clipboard]::GetImage(); if ($i) {{ $i.Save('{}', [System.Drawing.Imaging.ImageFormat]::Png) }}",
-            path_text.replace('\'', "''")
-        );
-        run("powershell", &["-NoProfile", "-STA", "-Command", &script]);
-        std::fs::read(&path).ok()
-    } else if cfg!(target_os = "macos") {
-        run("pngpaste", &["-"]).or_else(|| {
-            let script = format!(
-                "set f to open for access POSIX file \"{path_text}\" with write permission\nwrite (the clipboard as «class PNGf») to f\nclose access f"
-            );
-            run("osascript", &["-e", &script]);
-            std::fs::read(&path).ok()
-        })
-    } else if std::env::var_os("WAYLAND_DISPLAY").is_some() {
-        run("wl-paste", &["--type", "image/png"])
-    } else {
-        run("xclip", &["-selection", "clipboard", "-t", "image/png", "-o"])
+    #[cfg(windows)]
+    let bytes = match native_clipboard::image() {
+        Some(native_clipboard::Image::File(file)) => return Ok(Some(file)),
+        Some(native_clipboard::Image::Png(bytes)) => Some(bytes),
+        None => None,
+    };
+    #[cfg(not(windows))]
+    let bytes = {
+        std::fs::create_dir_all(&dir)?;
+        let path_text = path.to_string_lossy().into_owned();
+        if cfg!(target_os = "macos") {
+            run("pngpaste", &["-"]).or_else(|| {
+                let script = format!(
+                    "set f to open for access POSIX file \"{path_text}\" with write permission\nwrite (the clipboard as «class PNGf») to f\nclose access f"
+                );
+                run("osascript", &["-e", &script]);
+                std::fs::read(&path).ok()
+            })
+        } else if std::env::var_os("WAYLAND_DISPLAY").is_some() {
+            run("wl-paste", &["--type", "image/png"])
+        } else {
+            run("xclip", &["-selection", "clipboard", "-t", "image/png", "-o"])
+        }
     };
     match bytes.filter(|bytes| bytes.starts_with(b"\x89PNG")) {
         Some(bytes) => {
+            std::fs::create_dir_all(&dir)?;
             std::fs::write(&path, bytes)?;
             Ok(Some(path))
         }
@@ -155,6 +188,54 @@ pub fn paste_clipboard() -> Result<Option<PathBuf>> {
             let _ = std::fs::remove_file(&path);
             Ok(None)
         }
+    }
+}
+
+/// The Windows clipboard read in-process: the `PNG` format browsers and
+/// screenshot tools publish, device-independent bitmaps, and image files
+/// copied in Explorer.
+#[cfg(windows)]
+pub(crate) mod native_clipboard {
+    use std::path::PathBuf;
+
+    pub enum Image {
+        Png(Vec<u8>),
+        File(PathBuf),
+    }
+
+    pub fn image() -> Option<Image> {
+        let mut clipboard = arboard::Clipboard::new().ok()?;
+        if let Ok(image) = clipboard.get_image() {
+            return encode_png(image.width, image.height, &image.bytes).map(Image::Png);
+        }
+        let files = clipboard.get().file_list().ok()?;
+        files
+            .into_iter()
+            .find(|file| deepseek_code_core::runtime::image_media_type(file).is_some() && file.is_file())
+            .map(Image::File)
+    }
+
+    pub fn text() -> Option<String> {
+        arboard::Clipboard::new().ok()?.get_text().ok()
+    }
+
+    pub fn set_text(text: &str) -> bool {
+        arboard::Clipboard::new().and_then(|mut clipboard| clipboard.set_text(text)).is_ok()
+    }
+
+    /// RGBA pixels as a PNG file.
+    pub fn encode_png(width: usize, height: usize, rgba: &[u8]) -> Option<Vec<u8>> {
+        if width == 0 || height == 0 || rgba.len() != width.checked_mul(height)?.checked_mul(4)? {
+            return None;
+        }
+        let mut bytes = Vec::new();
+        let mut encoder = png::Encoder::new(&mut bytes, u32::try_from(width).ok()?, u32::try_from(height).ok()?);
+        encoder.set_color(png::ColorType::Rgba);
+        encoder.set_depth(png::BitDepth::Eight);
+        let mut writer = encoder.write_header().ok()?;
+        writer.write_image_data(rgba).ok()?;
+        writer.finish().ok()?;
+        Some(bytes)
     }
 }
 
