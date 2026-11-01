@@ -761,7 +761,9 @@ impl Screen {
                 history.push(line.to_owned(), None);
             }
             history.save();
-            crate::terminal::pinned_prompt::remember(text);
+            if !text.trim_start().starts_with('/') {
+                crate::terminal::pinned_prompt::remember(text);
+            }
         }
         out.write_all(b"\x1b[?2026l")?;
         out.flush()
@@ -917,10 +919,11 @@ impl PromptEditor {
         let todo_list = self.todos.as_ref().map(|todos| todos()).unwrap_or_default();
         let mut keybinding_pending = crate::keybindings::Pending::default();
         let mut screen = Screen::pinned();
-        screen.align_transcript = !above.all().is_empty();
+        screen.align_transcript = !above.all().is_empty()
+            && !self.history.last().is_some_and(|line| line.trim_start().starts_with('/'));
         let mut command_overlay = CommandOverlay::default();
         let mut selection = crate::terminal::mouse_selection::Selection::default();
-        let mut pinned = crate::terminal::pinned_prompt::PinnedPrompt { text: { let latest = crate::terminal::pinned_prompt::latest(); if latest.is_empty() { self.history.last().cloned().unwrap_or_default() } else { latest } }, ..Default::default() };
+        let mut pinned = crate::terminal::pinned_prompt::PinnedPrompt { text: { let latest = crate::terminal::pinned_prompt::latest(); if latest.is_empty() { self.history.iter().rev().find(|line| !line.trim_start().starts_with('/')).cloned().unwrap_or_default() } else { latest } }, ..Default::default() };
         let mut history_view = crate::terminal::transcript_pager::HistoryView::default();
         let mut selected = 0usize;
         let mut history_pos = self.history.len();

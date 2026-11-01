@@ -22,6 +22,7 @@ use tokio::{
 
 /// Set in the child dcl: `PORT:SECRET` of this process's loopback control socket.
 pub const HOST_ENV: &str = "DCL_REMOTE_CONTROL_HOST";
+pub const HANDOFF_ENV: &str = "DCL_REMOTE_CONTROL_HANDOFF";
 const SCROLLBACK: usize = 10_000;
 const CLIENT_QUEUE: usize = 4096;
 
@@ -86,10 +87,28 @@ impl Listening {
 
     pub fn banner(&self) -> String {
         format!(
-            "Remote Control listening on {}\nToken: {}\nOn the other machine: dcl remote-control connect {}",
+            "Remote Control listening on {}\nToken: {}\nWaiting for a client.\nOn the other machine: dcl --rc connect {} --token",
             self.url, self.token, self.url
         )
     }
+}
+
+/// Strip only the remote launcher arguments; preserve session and permission flags.
+pub fn launch_args(original: &[String]) -> Vec<String> {
+    let mut args = Vec::new();
+    let mut rest = original.iter();
+    let mut launcher = false;
+    while let Some(arg) = rest.next() {
+        if !launcher && matches!(arg.as_str(), "--rc" | "rc" | "remote-control") {
+            launcher = true;
+            rest.next(); // listen
+            continue;
+        }
+        if matches!(arg.as_str(), "--host" | "--port") { rest.next(); continue; }
+        if arg.starts_with("--host=") || arg.starts_with("--port=") { continue; }
+        args.push(arg.clone());
+    }
+    args
 }
 
 /// Arguments that restart this dcl on the same session: the original ones
@@ -597,6 +616,9 @@ pub async fn run(listening: Listening, args: Vec<String>, workspace: &Path) -> R
     let mut command = CommandBuilder::new(std::env::current_exe()?);
     command.args(&args);
     command.cwd(workspace);
+    if args.iter().any(|arg| arg == "--resume") {
+        command.env(HANDOFF_ENV, "1");
+    }
     command.env(
         HOST_ENV,
         format!("{}:{secret}", control.local_addr()?.port()),
@@ -707,7 +729,12 @@ pub async fn run(listening: Listening, args: Vec<String>, workspace: &Path) -> R
             },
             Some(request) = requests.recv() => match request {
                 Control::Status(reply) => { let _ = reply.send(host.status()); },
-                Control::Subscribe(subscriber) => host.subscribers.push(subscriber),
+                Control::Subscribe(subscriber) => {
+                    if let Some(listening) = &host.listening {
+                        let _ = subscriber.send(listening.banner());
+                    }
+                    host.subscribers.push(subscriber);
+                },
                 Control::Stop(reply) => {
                     let text = if host.listening.take().is_some() {
                         host.drop_client("was disconnected");
@@ -764,6 +791,11 @@ mod tests {
 
     fn strings(values: &[&str]) -> Vec<String> {
         values.iter().map(|value| value.to_string()).collect()
+    }
+
+    #[test]
+    fn launcher_keeps_permission_and_workspace_flags() {
+        assert_eq!(launch_args(&strings(&["--rc", "listen", "--port", "30087", "--dangerously-skip-permissions", "-C", "/work"])), strings(&["--dangerously-skip-permissions", "-C", "/work"]));
     }
 
     #[test]

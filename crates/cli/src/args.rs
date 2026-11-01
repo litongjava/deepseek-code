@@ -161,6 +161,11 @@ impl Cli {
     pub fn try_parse_with_mode_source<I, T>(args: I) -> Result<Self, clap::Error>
     where I: IntoIterator<Item=T>, T: Into<std::ffi::OsString> + Clone {
         use clap::{CommandFactory, FromArgMatches};
+        let mut args: Vec<std::ffi::OsString> = args.into_iter().map(Into::into).collect();
+        // Accept the launcher spelling while retaining clap's subcommand validation.
+        if let Some(index) = args.iter().position(|arg| arg == "--rc") {
+            args[index] = "remote-control".into();
+        }
         let matches = Self::command().try_get_matches_from(args)?;
         let mut cli = Self::from_arg_matches(&matches)?;
         cli.permission_mode_explicit = matches.value_source("permission_mode") == Some(clap::parser::ValueSource::CommandLine);
@@ -361,11 +366,18 @@ pub enum Commands {
 
 #[derive(Debug, Subcommand)]
 pub enum RemoteControlCommands {
+    /// Share a new interactive session with another dcl terminal.
+    Listen {
+        #[arg(long, default_value = "0.0.0.0")]
+        host: std::net::IpAddr,
+        #[arg(long, default_value_t = 30086)]
+        port: u16,
+    },
     /// Connect to HOST[:PORT]; prompts, tools and file changes run on that host.
     Connect {
         address: String,
         /// The token printed by `/remote-control listen`; asked for when omitted.
-        #[arg(long, env = "DCL_REMOTE_CONTROL_TOKEN", hide_env_values = true)]
+        #[arg(long, num_args = 0..=1, default_missing_value = "", env = "DCL_REMOTE_CONTROL_TOKEN", hide_env_values = true)]
         token: Option<String>,
     },
 }
@@ -706,4 +718,14 @@ mod tests {
             Some(Commands::StressTest { concurrency: 2, .. })
         ));
     }
+    #[test]
+    fn remote_launcher_accepts_listen_and_optional_token_prompt() {
+        let mut cli = Cli::try_parse_with_mode_source(["dcl", "--rc", "listen", "--dangerously-skip-permissions"]).unwrap();
+        cli.normalize();
+        assert!(matches!(cli.command, Some(Commands::RemoteControl { action: RemoteControlCommands::Listen { port: 30086, .. } })));
+        assert!(matches!(cli.permission_mode, PermissionModeArg::Bypass));
+        let cli = Cli::try_parse_with_mode_source(["dcl", "--rc", "connect", "192.168.1.20:30086", "--token"]).unwrap();
+        assert!(matches!(cli.command, Some(Commands::RemoteControl { action: RemoteControlCommands::Connect { token: Some(token), .. } }) if token.is_empty()));
+    }
+
 }

@@ -201,7 +201,7 @@ impl Remote {
                 );
                 let options = remote_host::Options::parse(options)?;
                 let listening = remote_host::Listening::bind(&options).await?;
-                eprintln!("{}", listening.banner());
+                eprintln!("Starting Remote Control listener…");
                 self.handoff = Some(listening);
                 return Ok(());
             }
@@ -300,7 +300,14 @@ impl Remote {
             }
         }
         anyhow::ensure!(!save || server.is_some(), "--save requires --server URL");
-        let endpoint = Endpoint::resolve(&paths.data_dir, server)?;
+        let endpoint = match Endpoint::resolve(&paths.data_dir, server) {
+            Ok(endpoint) => endpoint,
+            Err(error) if words.is_empty() => {
+                eprintln!("Remote Control: {error}\nShare this terminal directly: /remote-control listen\nConnect on another machine: dcl --rc connect HOST:30086 --token\n{USAGE}");
+                return Ok(());
+            }
+            Err(error) => return Err(error),
+        };
         if save {
             let mut settings = remote_control::load_settings(&paths.data_dir)?;
             settings.server_url = Some(endpoint.base_url.clone());

@@ -228,6 +228,13 @@ async fn run(cli: &Cli) -> Result<()> {
             return lsp_commands::command(&paths, &workspace, action.as_deref(), language.as_deref(), *yes).await;
         }
         Some(Commands::RemoteControl { action: args::RemoteControlCommands::Connect { address, token } }) => return remote_client::run(address, token.as_deref()).await,
+        Some(Commands::RemoteControl { action: args::RemoteControlCommands::Listen { host, port } }) => {
+            let listening = remote_host::Listening::bind(&remote_host::Options { host: *host, port: *port }).await?;
+            let args = remote_host::launch_args(&std::env::args().skip(1).collect::<Vec<_>>());
+            let workspace = cli.path.clone().unwrap_or(std::env::current_dir()?);
+            let code = remote_host::run(listening, args, &workspace).await?;
+            std::process::exit(code);
+        },
         Some(Commands::Remote { request, yes }) => return tokio::select! { result=migration::remote(request,*yes)=>result, _=tokio::signal::ctrl_c()=>anyhow::bail!("Remote operation cancelled") },
         Some(Commands::Agents { action }) => {
             let context = services::context(&paths)?;
@@ -492,7 +499,7 @@ async fn run(cli: &Cli) -> Result<()> {
         !single && !sdk_stream && io::stdin().is_terminal() && io::stderr().is_terminal()
             && !terminal::screen_reader(),
     );
-    if _exit_cleanup.0 {
+    if _exit_cleanup.0 && std::env::var_os(remote_host::HANDOFF_ENV).is_none() {
         terminal::screen_mode::prepare_screen()?;
     }
     let mut input = if single { None } else { Some(session::terminal_input()) };
@@ -540,9 +547,11 @@ async fn run(cli: &Cli) -> Result<()> {
             for warning in outcome { eprintln!("Setup hook: {warning}"); }
         }
         if !single {
-            eprintln!("{}", terminal::banner(&session.model, &session.workspace));
+            if std::env::var_os(remote_host::HANDOFF_ENV).is_none() {
+                eprintln!("{}", terminal::banner(&session.model, &session.workspace));
+            }
             // --resume and --continue show the conversation so far, as in the reference CLI.
-            if resumed.is_some() { repl::show_resumed(&session, false)?; }
+            if resumed.is_some() && std::env::var_os(remote_host::HANDOFF_ENV).is_none() { repl::show_resumed(&session, false)?; }
         }
         if !sdk_stream {
             let initial = session.initial_hook_message.take();
@@ -922,6 +931,8 @@ async fn run(cli: &Cli) -> Result<()> {
                 if let Some(listening) = remote.take_handoff() {
                     // The session continues in a child dcl that local and remote terminals share.
                     drop(presence.take());
+                    // The old OS input reader must be gone before the host owns stdin.
+                    drop(input.take());
                     let args = remote_host::child_args(&std::env::args().skip(1).collect::<Vec<_>>(), cli.prompt.as_deref(), &session.id, &session.workspace);
                     let code = remote_host::run(listening, args, &session.workspace).await?;
                     std::process::exit(code);
