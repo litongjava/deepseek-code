@@ -236,7 +236,7 @@ impl TerminalInput {
         let _ = self.requests.send(Message::Effort(effort));
     }
 
-    /// Rows for running background agents, shown under the footer.
+    /// Rows for running background agents, shown above the editor.
     pub fn set_agent_rows(&self, rows: Box<dyn Fn(usize) -> Vec<String> + Send>) {
         let _ = self.requests.send(Message::AgentRows(rows));
     }

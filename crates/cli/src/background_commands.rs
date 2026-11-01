@@ -453,6 +453,7 @@ pub(crate) fn todo_items(paths: &RuntimePaths, session: &str) -> Vec<(String, St
 }
 
 /// One background agent started by this session.
+#[derive(Clone)]
 pub(crate) struct Agent {
     pub agent_type: String,
     pub description: String,
@@ -541,19 +542,36 @@ pub(crate) fn answer_agent_question(paths: &RuntimePaths, session: &Session) -> 
     Ok(true)
 }
 
-/// The rows under the footer while agents run, as in the reference CLI:
-/// `● main` and `◯ general  Find the logging code  13s · ↓ 6.6k tokens`.
+/// Read the child task's own usage and description.
+pub(crate) fn foreground_agent(context: &deepseek_code_core::services::ServiceContext, id: &str, kind: &str) -> Option<Agent> {
+    let record = context.setting::<serde_json::Value>(&format!("delegation.{id}")).ok().flatten()?;
+    let description = context.setting::<String>(&format!("agent-description.{id}")).ok().flatten().unwrap_or_else(|| kind.into());
+    let started_ms = chrono::DateTime::parse_from_rfc3339(record["started_at"].as_str()?).ok()?.timestamp_millis().max(0) as u64;
+    let output_tokens = context.db.with_conn(|conn| conn.query_row("SELECT COALESCE(SUM(output_tokens),0) FROM model_requests WHERE conversation_id=?1", [id], |row| row.get::<_, i64>(0))).ok().and_then(Result::ok).unwrap_or(0);
+    Some(Agent { agent_type: kind.into(), description, started_ms, output_tokens })
+}
+
+/// Shared width-bounded panel for the idle editor and live turn.
 pub(crate) fn agent_rows(agents: &[Agent], width: usize) -> Vec<String> {
-    if agents.is_empty() {
-        return Vec::new();
+    use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
+    fn fit(text: &str, width: usize) -> String {
+        let mut used = 0;
+        text.chars().filter(|ch| !ch.is_control()).take_while(|ch| {
+            used += ch.width().unwrap_or(0);
+            used <= width
+        }).collect()
     }
+    if agents.is_empty() { return Vec::new(); }
     let now = chrono::Utc::now().timestamp_millis().max(0) as u64;
-    let mut rows = vec!["  \u{25cf} main".to_owned()];
+    let mut rows = vec![fit("● main", width)];
     for agent in agents {
         let tokens = if agent.output_tokens >= 1000 { format!("{:.1}k", agent.output_tokens as f64 / 1000.0) } else { agent.output_tokens.to_string() };
-        let right = format!("{} \u{b7} \u{2193} {tokens} tokens", runtime(agent.started_ms, Some(now)));
-        let left = format!("  \u{25ef} {}  {}", agent.agent_type, agent.description);
-        let pad = width.saturating_sub(left.chars().count() + right.chars().count()).max(2);
+        let right = format!("{}  ↓ {tokens} tokens", runtime(agent.started_ms, Some(now)));
+        let kind = match agent.agent_type.as_str() { "explore" => "Explore", other => other };
+        let left = format!("  {kind}  {}", agent.description);
+        let right = fit(&right, width);
+        let left = fit(&left, width.saturating_sub(right.width() + 2));
+        let pad = width.saturating_sub(left.width() + right.width());
         rows.push(format!("{left}{}{right}", " ".repeat(pad)));
     }
     rows
@@ -1015,9 +1033,35 @@ mod agent_row_tests {
         assert!(agent_rows(&[], 80).is_empty());
         let started = chrono::Utc::now().timestamp_millis() as u64 - 13_000;
         let rows = agent_rows(&[Agent { agent_type: "general".into(), description: "Find the logging code".into(), started_ms: started, output_tokens: 6_600 }], 80);
-        assert_eq!(rows[0], "  \u{25cf} main");
-        assert!(rows[1].starts_with("  \u{25ef} general  Find the logging code"), "{rows:?}");
-        assert!(rows[1].ends_with("13s \u{b7} \u{2193} 6.6k tokens"), "{rows:?}");
+        assert_eq!(rows[0], "● main");
+        assert!(rows[1].starts_with("  general  Find the logging code"), "{rows:?}");
+        assert!(rows[1].ends_with("13s  ↓ 6.6k tokens"), "{rows:?}");
         assert_eq!(rows[1].chars().count(), 80);
     }
+    #[test]
+    fn agent_columns_preserve_usage_with_wide_text_and_small_windows() {
+        use unicode_width::UnicodeWidthStr;
+        let agent = Agent { agent_type: "explore".into(), description: "检索数据库定义和注册中心".repeat(10), started_ms: chrono::Utc::now().timestamp_millis() as u64 - 66_000, output_tokens: 57_800 };
+        for width in [4, 18, 40, 80, 120] {
+            let rows = agent_rows(std::slice::from_ref(&agent), width);
+            assert!(rows.iter().all(|row| row.width() <= width));
+            if width >= 40 { assert!(rows[1].ends_with("1m 6s  ↓ 57.8k tokens")); }
+            if width >= 80 { assert!(rows[1].starts_with("  Explore  检索")); }
+        }
+    }
+
+    #[test]
+    fn foreground_panel_reads_only_child_usage_and_description() {
+        let dir = tempfile::tempdir().unwrap();
+        let paths = RuntimePaths::new(dir.path().to_owned()).unwrap();
+        let context = crate::services::context(&paths).unwrap();
+        context.save_setting("delegation.child", &serde_json::json!({"started_at":"2026-11-01T00:00:00Z"})).unwrap();
+        context.save_setting("agent-description.child", &"Locate registry code").unwrap();
+        context.db.with_conn(|conn| conn.execute_batch("INSERT INTO conversations(id,created_at,updated_at) VALUES ('child','now','now'),('parent','now','now'); INSERT INTO messages(id,conversation_id,role,content,created_at,sort_order) VALUES ('m1','child','assistant','','now',0),('m2','parent','assistant','','now',0); INSERT INTO model_requests(id,message_id,conversation_id,output_tokens) VALUES ('r1','m1','child',1200),('r2','m1','child',300),('r3','m2','parent',99999);")).unwrap().unwrap();
+        let agent = foreground_agent(&context, "child", "explore").unwrap();
+        assert_eq!(agent.description, "Locate registry code");
+        assert_eq!(agent.output_tokens, 1500);
+        assert!(foreground_agent(&context, "missing", "explore").is_none());
+    }
+
 }

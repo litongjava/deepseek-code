@@ -868,6 +868,7 @@ impl ToolLoopExecutor {
         } else {
             agents::bind(&context.db, &id, &definition)?;
         }
+        context.save_setting(&format!("agent-description.{id}"), &input["description"].as_str().unwrap_or(prompt))?;
         sessions.append(&id, "user", prompt)?;
         let (events, receiver) = tokio::sync::mpsc::channel(500);
         let mut system = format!(

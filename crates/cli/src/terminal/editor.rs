@@ -66,7 +66,7 @@ pub struct PromptEditor {
     /// Background shells still running, shown as "1 shell · ↓ to manage".
     shells: usize,
     shell_counter: Option<Box<dyn Fn() -> usize + Send>>,
-    /// Rows for running background agents at a width, shown under the footer.
+    /// Rows for running background agents at a width, shown above the editor.
     agent_rows: Option<Box<dyn Fn(usize) -> Vec<String> + Send>>,
     /// The model and reasoning effort, at the right of the footer.
     effort: Option<String>,
@@ -1073,6 +1073,9 @@ impl PromptEditor {
                     lines.push((row, if done { TextStyle::Muted } else if current { TextStyle::Selected } else { TextStyle::Plain }));
                 }
             }
+            // Keep the same agent panel above the editor between turns.
+            let limit = (rows as usize).saturating_sub(10).min(8);
+            lines.extend(agents.iter().take(limit).map(|row| (clipped(row, width), TextStyle::Muted)));
             // Reserved composer spacing, even for new or resumed sessions.
             lines.push((String::new(), TextStyle::Plain));
             let menu_height = lines.len() - panel_height;
@@ -1168,8 +1171,7 @@ impl PromptEditor {
             } else {
                 lines.push((clipped(&footer, width), footer_style));
             }
-            // Running background agents, as in the reference CLI.
-            lines.extend(agents.iter().map(|row| (clipped(row, width), TextStyle::Muted)));
+
             if !self.details.entries.is_empty() {
                 lines.push((
                     clipped("Ctrl+O details \u{00b7} PgUp/PgDn scroll", width),

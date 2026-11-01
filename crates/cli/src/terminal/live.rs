@@ -69,6 +69,7 @@ enum Update {
     Shells(usize),
     /// Background agents still running when the turn ends.
     Agents(usize),
+    AgentProgress(String, String, String),
     /// The todo list ctrl+t shows, as (content, status).
     Todos(Vec<(String, String)>),
     /// The conversation before this turn, for the Ctrl+O transcript.
@@ -427,6 +428,8 @@ struct State {
     chord: Option<Instant>,
     todos: Vec<(String, String)>,
     agents: usize,
+    foreground_agents: Vec<(String, String)>,
+    agent_panel: Vec<crate::background_commands::Agent>,
     /// Draft states before each edit, for ctrl+_.
     undo: Vec<(Vec<char>, usize)>,
     /// When reasoning began and last streamed, for "Thought for 2s".
@@ -529,6 +532,8 @@ impl State {
             chord: None,
             todos: Vec::new(),
             agents: 0,
+            foreground_agents: Vec::new(),
+            agent_panel: Vec::new(),
             undo: Vec::new(),
             thinking_span: None,
             thinking_characters: 0,
@@ -1487,6 +1492,16 @@ impl Frame {
             content.splice(budget - shown.., rows);
             self.panel_toggle = None;
         }
+        // Between the turn status and editor; preserve the cursor's distance
+        // from the bottom and reserve input room on small screens.
+        let mut agent_rows = crate::background_commands::agent_rows(&state.agent_panel, width);
+        let limit = (size.1 as usize).saturating_sub(10).min(8);
+        if agent_rows.len() > limit && limit > 1 {
+            let hidden = agent_rows.len() - limit + 1;
+            agent_rows.truncate(limit - 1);
+            agent_rows.push(clip(&format!("  … {hidden} more agents"), width));
+        } else { agent_rows.truncate(limit); }
+        lines.splice(2..2, agent_rows);
         let choice_rows = state.choice.as_ref().map(|choice| choice_lines(choice, &lines[1], &mode, width, size.1 as usize));
         if choice_rows.is_some() {
             // The approval box takes the place of the streaming area.
@@ -1721,6 +1736,8 @@ fn run(
 ) -> io::Result<()> {
     let mut selection = super::mouse_selection::Selection::default();
     let mut last_tick = Instant::now();
+    let mut last_agents = Instant::now() - Duration::from_secs(1);
+    let mut agent_context = None;
     let mut input_reader = super::paste_input::Reader::new()?;
     screen.draw(state)?;
     loop {
@@ -1829,6 +1846,15 @@ fn run(
                 Ok(Update::PinnedPrompt(text)) => { screen.pinned.text = text; dirty = true; },
                 Ok(Update::Shells(count)) => state.shells = count,
                 Ok(Update::Agents(count)) => state.agents = count,
+                Ok(Update::AgentProgress(id, kind, status)) => {
+                    if matches!(status.as_str(), "completed" | "failed" | "cancelled") {
+                        state.foreground_agents.retain(|(key, _)| *key != id);
+                    } else if !state.foreground_agents.iter().any(|(key, _)| *key == id) {
+                        state.foreground_agents.push((id, kind));
+                    }
+                    last_agents = Instant::now() - Duration::from_secs(1);
+                    dirty = true;
+                },
                 Ok(Update::Todos(todos)) => {
                     state.todos = todos;
                     dirty = true;
@@ -2254,6 +2280,21 @@ fn run(
                 _ => {}
             }
         }
+        if last_agents.elapsed() >= Duration::from_secs(1) {
+            last_agents = Instant::now();
+            if let Some((root, session)) = &state.shell_context {
+                if agent_context.is_none() {
+                    agent_context = deepseek_code_core::runtime::RuntimePaths::new(root.clone()).ok()
+                        .and_then(|paths| crate::services::context(&paths).ok());
+                }
+                if let Some(context) = &agent_context {
+                    state.agent_panel = crate::background_commands::running_agents(&context.paths, &context.db, session);
+                    state.agent_panel.extend(state.foreground_agents.iter().filter_map(|(id, kind)| crate::background_commands::foreground_agent(context, id, kind)));
+
+                    dirty = true;
+                }
+            }
+        }
         if last_tick.elapsed() >= Duration::from_millis(120) {
             last_tick = Instant::now();
             state.frame = state.frame.wrapping_add(1);
@@ -2290,6 +2331,31 @@ mod tests {
                     previous = lines;
                 }
             }
+        }
+    }
+
+    /// Run in ConPTY to inspect the real renderer, cursor, resize and removal.
+    #[test]
+    #[ignore = "requires an interactive terminal"]
+    fn agent_panel_terminal_fixture() {
+        let mut state = State::new("default".into());
+        state.draft.insert("draft stays editable");
+        state.agent_panel = ["Grepping mysql-schema.sql and sentinel usage", "Locating forward/proxy code", "Searching dubbo pages for registries"].iter().enumerate().map(|(i, description)| crate::background_commands::Agent {
+            agent_type: "explore".into(), description: (*description).into(),
+            started_ms: chrono::Utc::now().timestamp_millis() as u64 - [66000, 57000, 52000][i],
+            output_tokens: [57800, 91800, 53200][i],
+        }).collect();
+        let mut frame = Frame::default();
+        for step in 0..80 {
+            if step == 50 { state.agent_panel.clear(); }
+            frame.draw(&mut state).unwrap();
+            if step < 50 {
+                let rows: Vec<_> = frame.lines.iter().map(|line| super::super::tool_view::result_text(line)).collect();
+                let main = rows.iter().position(|line| line.contains("● main")).unwrap();
+                let draft = rows.iter().position(|line| line.contains("draft stays editable")).unwrap();
+                assert!(main < draft);
+            }
+            std::thread::sleep(Duration::from_millis(100));
         }
     }
 
@@ -3078,10 +3144,7 @@ impl TurnDisplay {
     }
     pub fn agent_progress(&mut self, id: &str, kind: &str, status: &str, tool: Option<&str>) {
         if let Some(live) = &self.live {
-            live.notice(&format!(
-                "  Agent {kind} [{id}] \u{b7} {status} {}",
-                tool.unwrap_or("")
-            ));
+            let _ = live.updates.send(Update::AgentProgress(id.into(), kind.into(), status.into()));
         } else {
             self.fallback.agent_progress(id, kind, status, tool);
         }
