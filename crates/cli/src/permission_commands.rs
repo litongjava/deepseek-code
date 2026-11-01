@@ -36,13 +36,34 @@ fn save(db: &DbManager, session: &str, rules: &HashMap<String, PermissionAction>
 /// The approval prompt's session choice, published by the engine only after
 /// it accepts the reviewed call: an allow rule saved for this session,
 /// accept-edits mode or auto mode.
-pub fn remember_commit(session: &Session, remember: &Remember) -> Result<Commit> {
-    let (db, id, manager) = (session.store.db.clone(), session.id.clone(), session.permissions.clone());
+pub async fn remember_commit(session: &Session, remember: &Remember) -> Result<Commit> {
+    let (db, id, manager) = (
+        session.store.db.clone(),
+        session.id.clone(),
+        session.permissions.clone(),
+    );
     Ok(match remember.clone() {
-        Remember::AcceptEdits | Remember::Auto => {
-            let name = if *remember == Remember::Auto { "auto" } else { "accept-edits" };
+        Remember::Auto => {
+            let config = session.approval_auto_config().await?;
+            let context = crate::services::context(&session.paths)?;
+            Box::new(move || {
+                deepseek_code_core::permissions::auto_config::save(&context, &config)?;
+                deepseek_code_core::services::session_permission_mode::set(
+                    &db,
+                    &id,
+                    &manager,
+                    deepseek_code_core::permissions::PermissionMode::Auto,
+                )?;
+                deepseek_code_core::permissions::set_full_access(false);
+                Ok(())
+            })
+        }
+        Remember::AcceptEdits => {
+            let name = "accept-edits";
             let mode = deepseek_code_core::services::session_permission_mode::parse(name)?;
-            Box::new(move || deepseek_code_core::services::session_permission_mode::set(&db, &id, &manager, mode))
+            Box::new(move || {
+                deepseek_code_core::services::session_permission_mode::set(&db, &id, &manager, mode)
+            })
         }
         Remember::Rule(rule) => {
             deepseek_code_core::permissions::patterns::validate(&rule)?;
@@ -211,6 +232,48 @@ fn active_launch_snapshot(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn approval_auto_enables_only_on_commit_and_persists_mode() {
+        use crate::{args::Cli, config::Selection};
+        use deepseek_code_core::{permissions::auto_config, runtime::RuntimePaths};
+        let temp = tempfile::tempdir().unwrap();
+        let paths = RuntimePaths::new(temp.path().join("data")).unwrap();
+        let selection = Selection {
+            providers: vec![serde_json::from_value(serde_json::json!({
+                "id":"fixture","name":"Fixture","base_url":"http://127.0.0.1:1",
+                "api_key":"unused","api_format":"openai","enabled":true,
+                "models":[{"id":"fixture","name":"Fixture","enabled":true,
+                    "supports_vision":false,"supports_web_search":false}]
+            }))
+            .unwrap()],
+            provider_id: "fixture".into(),
+            model: "fixture".into(),
+        };
+        let cli =
+            Cli::try_parse_with_mode_source(["dcl", "--path", temp.path().to_str().unwrap()]).unwrap();
+        let session = Session::open(&cli, &paths, selection, None).await.unwrap();
+        let context = crate::services::context(&paths).unwrap();
+        assert!(session.approval_auto_available().await);
+        let commit = remember_commit(&session, &Remember::Auto).await.unwrap();
+        assert!(!auto_config::load(&context).unwrap().enabled);
+        assert_eq!(session.permission_mode(), "ask");
+        commit().unwrap();
+        let config = auto_config::load(&context).unwrap();
+        assert!(config.enabled);
+        assert_eq!(
+            config.classifier,
+            Some(auto_config::ClassifierSelection::Current)
+        );
+        assert_eq!(session.permission_mode(), "auto");
+        assert_eq!(
+            deepseek_code_core::services::session_permission_mode::load(&session.store.db, &session.id)
+                .unwrap(),
+            Some(deepseek_code_core::permissions::PermissionMode::Auto)
+        );
+        assert!(!session.approval_auto_available().await);
+        session.close().await.unwrap();
+    }
 
     #[test]
     fn sandbox_hosts_are_saved_as_web_fetch_domains() {

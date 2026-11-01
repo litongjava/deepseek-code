@@ -540,7 +540,7 @@ pub fn approval(name: &str, input: &Value, workspace: Option<&std::path::Path>, 
         _ => {}
     }
     if auto {
-        options.push("Yes, and switch to auto mode \u{b7} auto mode handles these prompts for you".into());
+        options.push("Yes, do not ask again \u{b7} enable and switch to auto mode".into());
     }
     options.push("No".into());
     Approval { lines, question, options, remember, auto }
@@ -553,6 +553,23 @@ mod tests {
 
     fn text(lines: &[Line]) -> Vec<String> {
         lines.iter().map(|line| change_view::render(line, usize::MAX, false)).collect()
+    }
+
+    #[test]
+    fn compound_command_can_enable_auto_without_a_broad_allow_rule() {
+        let menu = approval(
+            "Bash",
+            &json!({"command": "cd repo && git branch backup; git status 2>&1"}),
+            None,
+            true,
+        );
+        assert_eq!(menu.options.len(), 3);
+        assert!(menu.options[1].contains("do not ask again"));
+        assert_eq!(menu.remember, None);
+        assert_eq!(menu.decide("2").grant, Some(Remember::Auto));
+        assert!(!menu.decide("3").allowed);
+        assert!(!menu.decide("n").allowed);
+        assert!(menu.text().contains("2 switch to auto mode"));
     }
 
     #[test]
@@ -686,7 +703,7 @@ mod tests {
         assert!(bash.decide("n").rejection().1, "a bare No ends the turn");
         // With auto mode configured, a third choice switches to it.
         let auto = approval("Bash", &json!({"command":"touch notes.txt"}), None, true);
-        assert_eq!(auto.options[2], "Yes, and switch to auto mode \u{b7} auto mode handles these prompts for you");
+        assert_eq!(auto.options[2], "Yes, do not ask again \u{b7} enable and switch to auto mode");
         assert_eq!(auto.decide("3").grant, Some(Remember::Auto));
         assert!(!auto.decide("4").allowed);
         assert!(auto.text().ends_with("(1/y yes, 2 yes for this session, 3 switch to auto mode, 4/n no)"));

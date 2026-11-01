@@ -389,7 +389,7 @@ async fn observe(
                             // Tool approvals get the same menu as a foreground turn; the
                             // worker rebuilds the options from the same call to decide.
                             let tool = question.tool.as_ref().filter(|tool| question.kind == "permission" && tool["tool_name"] != "ExitPlanMode");
-                            let auto = tool.is_some() && session.auto_mode_available().await;
+                            let auto = tool.is_some() && session.approval_auto_available().await;
                             let menu = tool.map(|tool| {
                                 crate::terminal::tool_view::approval(tool["tool_name"].as_str().unwrap_or_default(), &tool["input"], Some(&session.workspace), auto)
                             });

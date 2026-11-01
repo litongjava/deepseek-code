@@ -564,6 +564,28 @@ impl Session {
         }
     }
 
+    /// Prepare configuration without saving it before the user selects Auto.
+    pub(crate) async fn approval_auto_config(
+        &self,
+    ) -> Result<deepseek_code_core::permissions::auto_config::AutoConfig> {
+        use deepseek_code_core::permissions::auto_config::{self, ClassifierSelection};
+        let context = crate::services::context(&self.paths)?;
+        let mut config = auto_config::load(&context)?;
+        config.enabled = true;
+        config
+            .classifier
+            .get_or_insert(ClassifierSelection::Current);
+        config.resolve(
+            &context.paths.providers()?,
+            &self.selected_provider().await?,
+        )?;
+        Ok(config)
+    }
+
+    pub(crate) async fn approval_auto_available(&self) -> bool {
+        self.permissions.get_mode() != PermissionMode::Auto && self.approval_auto_config().await.is_ok()
+    }
+
     pub async fn set_permission_mode(&self, value: &str) -> Result<()> {
         if deepseek_code_core::services::background_sessions::worker_directory(&self.paths.data_dir, &self.id)?.is_none() {
             if let Some(job) = deepseek_code_core::services::background_sessions::list(&self.paths.data_dir, None)?.into_iter().find(|job|job.session_id == self.id && matches!(job.status.as_str(), "starting" | "running" | "unresponsive")) {
@@ -1066,7 +1088,7 @@ impl Session {
                     },
                     EngineEvent::ToolPermission { request_id, tool_use_id, tool_name, input: tool_input } => {
                         progress.clear();
-                        let auto = tool_name != "ExitPlanMode" && self.auto_mode_available().await;
+                        let auto = tool_name != "ExitPlanMode" && self.approval_auto_available().await;
                         let approval = (tool_name != "ExitPlanMode").then(|| crate::terminal::tool_view::approval(&tool_name, &tool_input, Some(&self.workspace), auto));
                         let question = match &approval {
                             Some(approval) => approval.text(),
@@ -1118,7 +1140,7 @@ impl Session {
                                 None => Decision { allowed: ["y", "yes", "1", "\u{662f}", "\u{5141}\u{8bb8}"].contains(&answer.trim().to_lowercase().as_str()), grant: None, note: None },
                             };
                             let commit = match decision.grant.as_ref() {
-                                Some(grant) => match crate::permission_commands::remember_commit(self, grant) {
+                                Some(grant) => match crate::permission_commands::remember_commit(self, grant).await {
                                     Ok(commit) => Some((commit, grant.clone())),
                                     Err(error) => { progress.notice(&format!("Approved once; the session grant was not saved: {error:#}")); None },
                                 },
