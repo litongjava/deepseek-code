@@ -31,7 +31,7 @@ pub(super) fn recover(worker: &Worker) -> Result<()> {
 }
 
 #[cfg(windows)]
-fn exited(pid: u32) -> bool {
+pub(super) fn exited(pid: u32) -> bool {
     use windows::Win32::{
         Foundation::{CloseHandle, ERROR_INVALID_PARAMETER},
         System::Threading::{OpenProcess, WaitForSingleObject, PROCESS_SYNCHRONIZE},
@@ -54,7 +54,7 @@ fn exited(pid: u32) -> bool {
 }
 
 #[cfg(unix)]
-fn exited(pid: u32) -> bool {
+pub(super) fn exited(pid: u32) -> bool {
     // ESRCH is 3 on supported Unix targets. Permission errors remain unknown.
     unsafe extern "C" {
         fn kill(pid: i32, signal: i32) -> i32;

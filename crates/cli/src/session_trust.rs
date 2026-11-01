@@ -24,6 +24,47 @@ fn shell_tasks(paths: &RuntimePaths, id: &str) -> anyhow::Result<Vec<serde_json:
         .collect())
 }
 
+/// Explicit quit cancels this session's work and waits for its host to stop.
+pub async fn quit_worker(paths: &RuntimePaths, id: &str) -> anyhow::Result<()> {
+    use deepseek_code_core::services::{background_sessions as jobs, session_worker};
+    if session_worker::current(&paths.data_dir, id)?.is_none_or(|worker| worker.status == "stopped")
+    {
+        return Ok(());
+    }
+    for job in jobs::list(&paths.data_dir, None)? {
+        if job.session_id == id && job.finished_ms.is_none() {
+            jobs::cancel(&paths.data_dir, &job.id)?;
+        }
+    }
+    for task in shell_tasks(paths, id)? {
+        if task["status"] == "running" {
+            deepseek_code_core::tools::tasks::execute_for_session_async(
+                "TaskStop",
+                serde_json::json!({"task_id":task["id"]}),
+                &paths.data_dir,
+                id,
+            )
+            .await?;
+        }
+    }
+    tokio::time::timeout(std::time::Duration::from_secs(20), async {
+        loop {
+            match session_worker::shutdown(&paths.data_dir, id).await {
+                Ok(()) => return Ok(()),
+                Err(error)
+                    if error.to_string().contains("active turn")
+                        || error.to_string().contains("running background shell") =>
+                {
+                    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+                }
+                Err(error) => return Err(error),
+            }
+        }
+    })
+    .await
+    .map_err(|_| anyhow::anyhow!("Timed out stopping the session worker on quit"))?
+}
+
 pub async fn shutdown_worker(paths: &RuntimePaths, id: &str) -> anyhow::Result<()> {
     uuid::Uuid::parse_str(id)?;
     let mut active = shell_tasks(paths, id)?

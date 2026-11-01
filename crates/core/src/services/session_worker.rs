@@ -104,7 +104,7 @@ fn worker_path(root: &Path, session: &str) -> Result<PathBuf> {
 pub fn read_worker(dir: &Path) -> Result<Worker> {
     Ok(serde_json::from_slice(&fs::read(dir.join("worker.json"))?)?)
 }
-fn current(root: &Path, session: &str) -> Result<Option<Worker>> {
+pub fn current(root: &Path, session: &str) -> Result<Option<Worker>> {
     let base = worker_path(root, session)?;
     let pointer = match fs::read(base.join("current.json")) {
         Ok(data) => data,
@@ -502,7 +502,10 @@ pub async fn shutdown(root: &Path, session: &str) -> Result<()> {
             call(&worker, &Request::Shutdown).await?;
             tokio::time::timeout(Duration::from_secs(10), async {
                 loop {
-                    if read_worker(&directory(&worker))?.status == "stopped" {
+                    if read_worker(&directory(&worker))?.status == "stopped"
+                        && worker.supervisor_pid.is_none_or(recovery::exited)
+                        && worker.child_pid.is_none_or(recovery::exited)
+                    {
                         return Ok::<_, anyhow::Error>(());
                     }
                     tokio::time::sleep(Duration::from_millis(50)).await;

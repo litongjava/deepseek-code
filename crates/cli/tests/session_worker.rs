@@ -587,3 +587,41 @@ async fn persistent_engine_reuses_mcp_refreshes_settings_and_recovers_after_cras
 
 #[path = "support/session_worker_launch_rules.rs"]
 mod launch_rules;
+
+#[path = "../src/session_trust.rs"]
+#[allow(dead_code)]
+mod quit_cleanup;
+
+#[tokio::test]
+async fn explicit_quit_stops_idle_worker_without_waiting_five_minutes() {
+    let temp = tempfile::tempdir().unwrap();
+    let paths = RuntimePaths::new(temp.path().join("data")).unwrap();
+    let workspace = temp.path().join("workspace");
+    std::fs::create_dir(&workspace).unwrap();
+    let store = SessionStore::new(paths.open_database().unwrap());
+    let session = store.create(&workspace, "fixture", "cli-runtime").unwrap();
+    let host = worker::ensure_worker(
+        &paths.data_dir,
+        &test_cli_executable(),
+        &session,
+        &workspace,
+    )
+    .await
+    .unwrap();
+    let _cleanup = Cleanup(vec![host.supervisor_pid.unwrap()]);
+    tokio::time::timeout(
+        Duration::from_secs(15),
+        quit_cleanup::quit_worker(&paths, &session),
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    assert_eq!(
+        worker::current(&paths.data_dir, &session)
+            .unwrap()
+            .unwrap()
+            .status,
+        "stopped"
+    );
+    quit_cleanup::quit_worker(&paths, &session).await.unwrap();
+}

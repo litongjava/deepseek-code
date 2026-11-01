@@ -972,7 +972,10 @@ async fn run(cli: &Cli) -> Result<()> {
             }
             match line.trim() {
                 "" => continue,
-                "/exit" | "/quit" | "exit" | "quit" | ".exit" | ":q" => break,
+                "/exit" | "/quit" | "exit" | "quit" | ".exit" | ":q" => {
+                    session_trust::quit_worker(&session.paths, &session.id).await?;
+                    break;
+                },
                 "/" | "/help" | "help" | ".help" | ":h" => {
                     let mut text = command_catalog::help();
                     for (name, description) in &skills { text.push_str(&format!("\n  {name:<24} {description}")); }
