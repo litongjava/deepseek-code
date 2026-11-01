@@ -1546,8 +1546,7 @@ impl Frame {
                 crossterm::cursor::position().map_or(0, |(_, row)| row as usize)
             }
         };
-        let padding = if state.activity.starts_with("Running Bash") { 0 } else { (size.1 as usize).saturating_sub(start).saturating_sub(lines.len()) };
-        lines.splice(0..0, std::iter::repeat_n(String::new(), padding));
+        let padding = pad_live_frame(&mut lines, start, size.1 as usize);
         self.padding = padding;
         self.top = Some(start.min((size.1 as usize).saturating_sub(lines.len())) as u16);
         self.logged_rows = 0;
@@ -1675,6 +1674,13 @@ fn choice_lines(choice: &Choice, status: &str, mode: &str, width: usize, height:
         _ => 1,
     };
     (rows, selected, column)
+}
+
+// All activities share the same bottom anchor, including Running Bash.
+fn pad_live_frame(lines: &mut Vec<String>, start: usize, rows: usize) -> usize {
+    let padding = rows.saturating_sub(start).saturating_sub(lines.len());
+    lines.splice(0..0, std::iter::repeat_n(String::new(), padding));
+    padding
 }
 
 fn row_updates(previous: &[String], next: &[String]) -> String {
@@ -2262,6 +2268,31 @@ fn run(
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn live_activity_transitions_keep_composer_on_bottom_screen_rows() {
+        for height in [10, 24, 40] {
+            for start in [0, 2, height - 1] {
+                let mut terminal = vt100::Parser::new(height as u16, 80, 100);
+                terminal.process(format!("\x1b[{};1H", start + 1).as_bytes());
+                let mut previous = Vec::new();
+                for activity in ["Thinking", "Running Bash: echo hello", "Working", "Running Bash: pwd", "Done"] {
+                    let mut lines = vec![activity.to_owned(), String::new(), "border".into(), "prompt> draft".into(), "border".into(), "mode".into()];
+                    pad_live_frame(&mut lines, start, height);
+                    let output = if previous.is_empty() {
+                        lines.join("\r\n")
+                    } else {
+                        row_updates(&previous, &lines)
+                    };
+                    terminal.process(output.as_bytes());
+                    let screen = terminal.screen();
+                    assert_eq!(screen.rows(0, 80).nth(height - 1).unwrap(), "mode");
+                    assert_eq!(screen.rows(0, 80).nth(height - 3).unwrap(), "prompt> draft", "{activity} at start {start}, height {height}");
+                    previous = lines;
+                }
+            }
+        }
+    }
+
     #[test]
     fn tab_queue_and_enter_steer_use_distinct_actions() {
         let mut state = State::new("mode".into());
