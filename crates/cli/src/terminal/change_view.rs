@@ -588,3 +588,10 @@ mod tests {
         assert!(change("{}", true).is_none());
     }
 }
+
+/// Keep the heading and four actual diff rows in the collapsed result.
+pub fn collapsed_change(lines: &[Line]) -> Vec<Line> {
+    let mut preview: Vec<Line> = lines.first().cloned().into_iter().collect();
+    preview.extend(lines.iter().skip(1).filter(|line| line.0.iter().any(|span| matches!(span.style, Style::AddedGutter | Style::RemovedGutter))).take(4).cloned());
+    preview
+}

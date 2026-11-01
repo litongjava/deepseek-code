@@ -59,7 +59,8 @@ impl Scrollback {
     /// A tool result's short lines, to be written and recorded with `push`.
     pub(crate) fn block(&mut self, short: Vec<Line>, full: Vec<Line>) -> (usize, Vec<String>) {
         let lines = collapsed(&short);
-        let whole = change_view::plain(&short).trim_start().starts_with("Thought");
+        let plain = change_view::plain(&short);
+        let whole = plain.trim_start().starts_with("Thought") || plain.contains("Updated ");
         self.blocks.push(Block {
             short,
             full,
@@ -274,6 +275,20 @@ mod tests {
         assert!(history.toggle_history(0));
         assert!(history.toggle_history(6));
         assert_eq!(history.all().len(), 1);
+    }
+
+    #[test]
+    fn file_change_header_expands_all_diff_rows_and_body_collapses() {
+        let mut history = Scrollback::default();
+        let mut full = vec![change_view::success("Updated test.rs (+12 -0)")];
+        full.extend((0..12).map(|i| change_view::body(&format!("line {i}"))));
+        let (id, rows) = history.block(full[..5].to_vec(), full);
+        for row in rows { history.push(row, Some(id)); }
+        assert_eq!(history.all().len(), 5);
+        assert!(history.toggle_history(0));
+        assert_eq!(history.all().len(), 13);
+        assert!(history.toggle_history(3));
+        assert_eq!(history.all().len(), 5);
     }
 
     #[test]

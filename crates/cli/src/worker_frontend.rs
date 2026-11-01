@@ -62,6 +62,7 @@ async fn single_turn(
         &root.join("keybindings.json"),
         history,
     )?.with_workspace(&session.workspace);
+    display.set_shell_context(root, &session.id);
     display.set_pinned_prompt(prompt);
     display.set_model_label(&crate::session_commands::model_label(session).await);
     if display.is_live() {
@@ -130,6 +131,7 @@ pub async fn attach(cli: &Cli, session: &Session, id: &str, input: &mut Option<T
         &session.paths.data_dir.join("keybindings.json"),
         Vec::new(),
     )?.with_workspace(&workspace);
+    display.set_shell_context(&session.paths.data_dir, &job.session_id);
     display.set_model_label(&crate::session_commands::model_label(session).await);
     display.notice(&format!(
         "Attached to task {id}. Esc cancels; Ctrl+B or /background detaches without restarting."

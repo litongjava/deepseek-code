@@ -405,13 +405,6 @@ impl DetailsPanel {
             "entries"
         };
         if !self.expanded || budget < 3 {
-            let label = clipped("View details (Ctrl+O)", width);
-            frame.toggle = Some(HitTarget {
-                row: 0,
-                start: 0,
-                end: label.chars().count(),
-            });
-            frame.lines.push((label, TextStyle::Selected));
             return frame;
         }
         if self.cached_width != width || self.wrapped.is_empty() {
@@ -1991,7 +1984,7 @@ mod tests {
         assert_eq!(menu_page(&[3], 0, 0), (0, 0));
     }
     #[test]
-    fn detail_disclosure_has_separate_expand_and_bottom_collapse_targets() {
+    fn collapsed_details_are_hidden_and_expanded_details_keep_collapse_target() {
         let mut details = DetailsPanel {
             entries: vec![(
                 "Read src/main.rs".into(),
@@ -2000,13 +1993,8 @@ mod tests {
             ..Default::default()
         };
         let collapsed = details.render(80, 5);
-        assert_eq!(collapsed.lines.len(), 1);
-        let hit = collapsed.toggle.unwrap();
-        assert!(hit.contains(0, 0));
-        assert_eq!(collapsed.lines[0].0, "View details (Ctrl+O)");
-        assert!(hit.contains(0, hit.start));
-        assert!(!hit.contains(1, hit.start));
-        assert!(!hit.contains(0, hit.end));
+        assert!(collapsed.lines.is_empty());
+        assert!(collapsed.toggle.is_none());
         details.toggle();
         let expanded = details.render(80, 5);
         assert_eq!(expanded.lines.len(), 5);
@@ -2014,7 +2002,7 @@ mod tests {
         assert_eq!(expanded.toggle.unwrap().row, 4);
         assert!(expanded.lines.last().unwrap().0.starts_with("Show less"));
         details.toggle();
-        assert_eq!(details.render(80, 5).lines.len(), 1);
+        assert!(details.render(80, 5).lines.is_empty());
     }
     #[test]
     fn detail_scroll_clamps_and_resize_reflows_full_output() {
@@ -2063,7 +2051,7 @@ mod tests {
             ..Default::default()
         };
         assert!(panel.render(80, 0).lines.is_empty());
-        assert_eq!(panel.render(80, 2).lines.len(), 1);
+        assert!(panel.render(80, 2).lines.is_empty());
     }
     #[test]
     fn pasted_unicode_is_editable_and_control_codes_are_removed() {

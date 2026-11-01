@@ -48,6 +48,7 @@ enum Update {
     Expandable(Vec<change_view::Line>, Vec<change_view::Line>),
     /// The session's working directory, shown in the footer.
     Workspace(String),
+    ShellContext(std::path::PathBuf, String),
     /// The model and reasoning effort, shown in the footer.
     ModelLabel(String),
     Activity(String),
@@ -395,6 +396,8 @@ struct State {
     /// right of the footer.
     model_label: String,
     workspace: String,
+    shell_context: Option<(std::path::PathBuf, String)>,
+    shell_expanded: bool,
     /// The highlighted `/` command, and whether Esc closed the menu.
     menu_selected: usize,
     menu_hidden: bool,
@@ -499,6 +502,8 @@ impl State {
             mode,
             model_label: String::new(),
             workspace: String::new(),
+            shell_context: None,
+            shell_expanded: false,
             menu_selected: 0,
             menu_hidden: false,
             activity: "Waiting for response".into(),
@@ -814,6 +819,7 @@ impl State {
         if self.answer.is_some() || self.draft.characters.iter().all(|ch| ch.is_whitespace()) { return false; }
         let text = self.draft.take();
         self.undo.clear();
+        self.queued.push(text.clone());
         let _ = actions.send(Action::Queue(text));
         true
     }
@@ -1295,7 +1301,7 @@ impl Frame {
             .as_ref()
             .map(|tip| format!("  \u{23bf}  Tip: {tip}"))
             .unwrap_or_default();
-        let budget = content_budget(size.1);
+        let budget = if state.shell_expanded { (size.1 as usize).saturating_sub(9).max(2) } else if state.activity.starts_with("Running Bash") { (2 + usize::from(state.activity_started.elapsed() >= Duration::from_secs(3)) + if state.queued.is_empty() { 0 } else { state.queued.len() + 2 }).min(content_budget(size.1)) } else { content_budget(size.1) };
         let panel = state.details.render(width, budget);
         self.panel_toggle = panel.toggle;
         self.panel_height = panel.lines.len();
@@ -1322,16 +1328,6 @@ impl Frame {
             }
             content
         };
-        if !state.details.expanded && !state.queued.is_empty() {
-            // Waiting messages stay at the bottom of the work area.
-            let mut rows: Vec<String> = state.queued.iter().map(|text| clip(&format!("{} {}", crate::terminal::prompt_glyph(), terminal_text(text).replace('\n', " ")), width)).collect();
-            rows.push("  ctrl+x ctrl+s to send now".into());
-            content.retain(|line| !line.is_empty());
-            let keep = budget.saturating_sub(rows.len().min(budget));
-            let skip = content.len().saturating_sub(keep);
-            content.drain(..skip);
-            content.extend(rows.into_iter().take(budget));
-        }
         if !state.details.expanded && crate::terminal::TODOS_VISIBLE.load(std::sync::atomic::Ordering::Relaxed) {
             // ctrl+t: the todo list above the status line.
             content.retain(|line| !line.is_empty());
@@ -1345,19 +1341,53 @@ impl Frame {
             // A long command can continue in the background, as in the reference CLI.
             let hint = state.activity_started.elapsed() >= Duration::from_secs(3);
             while content.last().is_some_and(String::is_empty) { content.pop(); }
-            let keep = budget.saturating_sub(3 + usize::from(hint));
+            let keep = if state.shell_expanded { 0 } else { budget.saturating_sub(3 + usize::from(hint)) };
             let skip = content.len().saturating_sub(keep);
             content.drain(..skip);
             content.push(String::new());
             content.push(clip(&state.activity, width));
+            if state.shell_expanded {
+                let output = state.shell_context.as_ref().map(|(root, session)| {
+                    deepseek_code_core::tools::background_shell::foreground_output(root, session)
+                        .unwrap_or_else(|error| format!("Could not read output: {error}"))
+                }).unwrap_or_default();
+                let output = terminal_text(&output);
+                let rows: Vec<_> = output.trim_end().lines().map(|row| clip(row, width.saturating_sub(2))).collect();
+                let queue_rows = if state.queued.is_empty() { 0 } else { state.queued.len() + 2 };
+                let available = budget.saturating_sub(3 + usize::from(hint) + queue_rows);
+                if available > 0 {
+                    if rows.is_empty() { content.push("  Waiting for command output...".into()); }
+                    else { content.extend(rows.iter().skip(rows.len().saturating_sub(available)).map(|row| format!("  {row}"))); }
+                }
+            }
             if hint {
                 content.push("  Ctrl+B to run in background".into());
             }
             let skip = content.len().saturating_sub(budget);
             content.drain(..skip);
         }
+        if !state.details.expanded && state.activity.starts_with("Running Bash") {
+            while content.last().is_some_and(String::is_empty) { content.pop(); }
+            content.splice(0..0, std::iter::repeat_n(String::new(), budget.saturating_sub(content.len())));
+        }
         content.resize(budget, String::new());
         content.truncate(budget);
+        if !state.details.expanded && !state.queued.is_empty() {
+            // Pin queued messages below all message/activity blocks. The status
+            // frame supplies the trailing blank line.
+            let mut rows = vec![String::new()];
+            rows.extend(state.queued.iter().map(|text| clip(&format!("{} {}", crate::terminal::prompt_glyph(), terminal_text(text).replace('\n', " ")), width)));
+            rows.push("  ctrl+x ctrl+s to send now".into());
+            rows.truncate(budget);
+            let keep = budget - rows.len();
+            let mut occupied = content;
+            while occupied.last().is_some_and(String::is_empty) { occupied.pop(); }
+            let skip = occupied.len().saturating_sub(keep);
+            occupied.drain(..skip);
+            occupied.splice(0..0, std::iter::repeat_n(String::new(), keep - occupied.len()));
+            occupied.extend(rows);
+            content = occupied;
+        }
         let mut lines = vec![
             String::new(),
             format!(
@@ -1467,6 +1497,10 @@ impl Frame {
             self.history_view.draw(&lines, input_row, cursor_column, size)?;
             return self.pinned.draw(width, size.1 as usize, &self.history_view.screen_rows(size.1 as usize, &lines));
         }
+        // Separate the transcript from the current live message/activity region.
+        if content.first().is_some_and(|row| !row.is_empty()) {
+            content.insert(0, String::new());
+        }
         content.extend(lines);
         let mut lines = content;
         let rows = (size.1 as usize).saturating_sub(1).max(1);
@@ -1484,6 +1518,7 @@ impl Frame {
         }
         // Blank rows above the content keep the input box and footer on the
         // bottom screen rows, however little output there is yet.
+        let old_top = self.top;
         let resized = self.size != size;
         if resized && !self.lines.is_empty() {
             self.erase();
@@ -1497,10 +1532,10 @@ impl Frame {
                 crossterm::cursor::position().map_or(0, |(_, row)| row as usize)
             }
         };
-        let padding = (size.1 as usize).saturating_sub(start).saturating_sub(lines.len());
+        let padding = if state.activity.starts_with("Running Bash") { 0 } else { (size.1 as usize).saturating_sub(start).saturating_sub(lines.len()) };
         lines.splice(0..0, std::iter::repeat_n(String::new(), padding));
         self.padding = padding;
-        self.top = Some((size.1 as usize).saturating_sub(lines.len()) as u16);
+        self.top = Some(start.min((size.1 as usize).saturating_sub(lines.len())) as u16);
         self.logged_rows = 0;
         let input_row = input_row + padding;
         let cursor_column = match choice_cursor {
@@ -1514,7 +1549,7 @@ impl Frame {
         {
             return Ok(());
         }
-        let previous_top = self.size.1 as usize - self.lines.len().min(self.size.1 as usize);
+        let previous_top = old_top.unwrap_or(0) as usize;
         let moved = !self.lines.is_empty() && self.lines.len() != lines.len() && self.pending.is_empty();
         if !self.lines.is_empty() && self.lines.len() != lines.len() && !moved {
             self.erase();
@@ -1530,7 +1565,7 @@ impl Frame {
                 if next == old { continue; }
                 out.push_str(&format!("\x1b[{};1H{}\x1b[K", row + 1, next.map(String::as_str).unwrap_or("")));
             }
-            out.push_str(&format!("\x1b[{};1H", size.1));
+            out.push_str(&format!("\x1b[{};1H", top + lines.len()));
         } else if self.lines.is_empty() {
             out.push_str(&lines.join("\r\n"));
         } else {
@@ -1707,6 +1742,7 @@ fn run(
                     screen.log_block(short, full);
                     dirty = true;
                 }
+                Ok(Update::ShellContext(root, session)) => { state.shell_context = Some((root, session)); }
                 Ok(Update::Workspace(path)) => {
                     state.workspace = path;
                     dirty = true;
@@ -1722,6 +1758,7 @@ fn run(
                 Ok(Update::Activity(activity)) => {
                     if state.activity != activity {
                         state.activity_started = Instant::now();
+                        state.shell_expanded = false;
                     }
                     state.activity = activity;
                     dirty = true;
@@ -2047,9 +2084,7 @@ fn run(
                                 state.draft.insert("\n")
                             }
                             KeyCode::Tab if state.answer.is_none() => {
-                                if state.queue_message(&actions) {
-                                    screen.log(deepseek_code_core::config::ui_language::text("Message queued for after this turn.", "消息已排队，将在当前任务结束后发送。"))?;
-                                }
+                                state.queue_message(&actions);
                             }
                             KeyCode::Enter => {
                                 if let Some(message) = state.submit(&actions) {
@@ -2130,6 +2165,15 @@ fn run(
                         if let Some(row) = snapshot.get_mut(screen.top.unwrap_or(0) as usize + index) { *row = text.clone(); }
                     }
                     let Some(mouse) = selection.event(mouse, snapshot)? else { continue; };
+                    if mouse.kind == MouseEventKind::Down(MouseButton::Left)
+                        && state.activity.starts_with("Running Bash")
+                        && mouse.row.checked_sub(screen.top.unwrap_or(0)).and_then(|row| screen.lines.get(row as usize))
+                            .is_some_and(|row| row.starts_with("Running Bash") || row.contains("Ctrl+B to run in background"))
+                    {
+                        state.shell_expanded = !state.shell_expanded;
+                        screen.draw(state)?;
+                        continue;
+                    }
                     if mouse.kind == MouseEventKind::Down(MouseButton::Left) {
                         if let Some(choice) = state.choice.as_mut().filter(|choice| choice.command_preview()) {
                             let origin = screen.top.unwrap_or(0) as usize + screen.padding;
@@ -2738,6 +2782,11 @@ impl TurnDisplay {
     pub fn is_live(&self) -> bool {
         self.live.is_some()
     }
+    pub fn set_shell_context(&self, root: &std::path::Path, session: &str) {
+        if let Some(live) = &self.live {
+            let _ = live.updates.send(Update::ShellContext(root.to_path_buf(), session.to_owned()));
+        }
+    }
     pub fn with_workspace(mut self, workspace: &std::path::Path) -> Self {
         if let Some(live) = &self.live {
             let _ = live.updates.send(Update::Workspace(crate::terminal::home_path(workspace)));
@@ -2876,10 +2925,10 @@ impl TurnDisplay {
                 let display_lines =
                     change_view::change_in_workspace(output, failed, self.workspace.as_deref())
                         .unwrap_or_else(|| lines.clone());
-                // One summary line; a click, where the terminal reports one,
+                // Summary plus four diff rows; a click, where the terminal reports one,
                 // shows the diff. Ctrl+O has the full text regardless.
                 if display_lines.len() > 1 {
-                    let _ = live.updates.send(Update::Expandable(display_lines[..1].to_vec(), display_lines));
+                    let _ = live.updates.send(Update::Expandable(change_view::collapsed_change(&display_lines), display_lines));
                 } else {
                     live.styled(display_lines);
                 }

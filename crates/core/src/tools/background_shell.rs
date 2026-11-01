@@ -170,8 +170,36 @@ impl Drop for AbortOnDrop {
     }
 }
 
-/// A foreground Bash call that the user can move to the background while it
-/// runs; it then continues as a managed shell task with the same logs.
+/// Read bounded output from foreground calls owned by this session.
+/// Background calls are excluded by their absent active marker.
+pub fn foreground_output(root: &Path, session: &str) -> Result<String> {
+    let base = root.join("shell-tasks").join(uuid::Uuid::parse_str(session)?.to_string());
+    let mut output = String::new();
+    let Ok(entries) = std::fs::read_dir(base) else { return Ok(output); };
+    for entry in entries.flatten() {
+        let directory = entry.path();
+        if !directory.join("foreground-active").exists() { continue; }
+        if let Ok(command) = std::fs::read_to_string(directory.join("command.txt")) {
+            output.push_str(&format!("{command}\n"));
+        }
+        for stream in ["stdout", "stderr"] {
+            use std::io::{Read, Seek, SeekFrom};
+            if let Ok(mut file) = std::fs::File::open(directory.join(format!("{stream}.log"))) {
+                let length = file.metadata()?.len();
+                file.seek(SeekFrom::Start(length.saturating_sub(32768)))?;
+                let mut bytes = Vec::new();
+                file.take(32768).read_to_end(&mut bytes)?;
+                if !bytes.is_empty() { output.push_str(&format!("[{stream}]\n{}\n", String::from_utf8_lossy(&bytes))); }
+            }
+        }
+    }
+    Ok(output)
+}
+struct ForegroundMarker(PathBuf);
+impl Drop for ForegroundMarker {
+    fn drop(&mut self) { let _ = std::fs::remove_file(&self.0); }
+}
+
 pub(super) async fn run_foreground(
     mut command: Command,
     timeout: Duration,
@@ -192,6 +220,10 @@ pub(super) async fn run_foreground(
     let log_dir = format!("fg-{}", uuid::Uuid::new_v4());
     let directory = session_directory.join(&log_dir);
     std::fs::create_dir_all(&directory)?;
+    std::fs::write(directory.join("command.txt"), command_text)?;
+    let marker = directory.join("foreground-active");
+    std::fs::write(&marker, b"running")?;
+    let _foreground_marker = ForegroundMarker(marker);
     let signal = session_directory.join("background-now");
     let started = std::time::SystemTime::now();
     let started_ms = chrono::Utc::now().timestamp_millis();
@@ -728,5 +760,26 @@ mod tests {
                 assert!(observed["result"].as_str().unwrap().contains("timed_out"));
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod foreground_output_tests {
+    use super::*;
+    #[test]
+    fn output_tracks_appends_and_excludes_other_sessions_and_background_tasks() {
+        let root = tempfile::tempdir().unwrap();
+        let session = uuid::Uuid::new_v4().to_string();
+        let path = root.path().join("shell-tasks").join(&session).join("fg-test");
+        std::fs::create_dir_all(&path).unwrap();
+        std::fs::write(path.join("foreground-active"), b"running").unwrap();
+        std::fs::write(path.join("stdout.log"), b"first").unwrap();
+        assert!(foreground_output(root.path(), &session).unwrap().contains("first"));
+        std::fs::write(path.join("stdout.log"), b"first\nsecond").unwrap();
+        assert!(foreground_output(root.path(), &session).unwrap().contains("second"));
+        assert!(foreground_output(root.path(), &uuid::Uuid::new_v4().to_string()).unwrap().is_empty());
+        std::fs::remove_file(path.join("foreground-active")).unwrap();
+        assert!(foreground_output(root.path(), &session).unwrap().is_empty());
+        assert!(foreground_output(root.path(), "../invalid").is_err());
     }
 }
