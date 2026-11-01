@@ -468,6 +468,8 @@ pub(crate) struct Screen {
     top: Option<u16>,
     /// End of transcript before the composer was pinned below empty screen rows.
     transcript_end: Option<usize>,
+    /// Only conversation output follows the composer; the startup banner stays at the top.
+    align_transcript: bool,
 }
 impl Screen {
     /// A frame pinned to the bottom rows, as the prompt is.
@@ -554,7 +556,7 @@ impl Screen {
         }
         let repaint = self.invalidated || anchor != top || self.height != height;
         let mut frame = Vec::new();
-        if first && anchor < top {
+        if first && self.align_transcript && anchor < top {
             // Move the transcript into unused tail rows with the composer, so
             // completion stays one reserved blank row above the input border.
             queue!(frame, ScrollDown((top - anchor) as u16))?;
@@ -915,6 +917,7 @@ impl PromptEditor {
         let todo_list = self.todos.as_ref().map(|todos| todos()).unwrap_or_default();
         let mut keybinding_pending = crate::keybindings::Pending::default();
         let mut screen = Screen::pinned();
+        screen.align_transcript = !above.all().is_empty();
         let mut command_overlay = CommandOverlay::default();
         let mut selection = crate::terminal::mouse_selection::Selection::default();
         let mut pinned = crate::terminal::pinned_prompt::PinnedPrompt { text: { let latest = crate::terminal::pinned_prompt::latest(); if latest.is_empty() { self.history.last().cloned().unwrap_or_default() } else { latest } }, ..Default::default() };
@@ -1021,7 +1024,7 @@ impl PromptEditor {
             let max_input = (rows as usize / 3).max(1);
             // As in the reference CLI one footer line suffices; a tip helps only
             // before the first prompt.
-            let show_tip = items.is_empty() && search.is_none() && rows >= 12 && self.history.is_empty();
+            let show_tip = search.is_none() && rows >= 12 && self.history.is_empty();
             let first = cursor_row.saturating_sub(max_input - 1);
             let input_height = input_lines.len().saturating_sub(first).min(max_input);
             let panel_budget = (rows as usize)
@@ -1236,9 +1239,9 @@ impl PromptEditor {
             let Some(event) = read_editor_event(&mut input_reader)? else {
                 continue;
             };
-            if matches!(&event, Event::Key(key) if matches!(key.code, KeyCode::Esc | KeyCode::Enter | KeyCode::Tab | KeyCode::BackTab)) {
-                command_overlay.draw_to(&mut io::stderr().lock(), &[], 0, &[])?;
-            }
+            // Remove the overlay before an event can resize, scroll or repaint
+            // its background. Otherwise a menu row can enter the transcript.
+            command_overlay.draw_to(&mut io::stderr().lock(), &[], 0, &[])?;
             if crate::terminal::shortcuts::requested_in_input(&event, buffer.chars.is_empty()) {
                 selection.clear()?;
                 let composer: Vec<String> = lines.iter().map(|(text, _)| text.clone()).collect();
@@ -1887,6 +1890,7 @@ mod tests {
     #[test]
     fn submission_anchor_excludes_bottom_padding_and_tracks_scrolling() {
         let mut screen = Screen::pinned();
+        screen.align_transcript = true;
         let lines = frame_lines();
         screen.draw_pinned_to(&mut Vec::new(), &lines, 1, 3, 30, 2).unwrap();
         assert_eq!(screen.transcript_end, Some(26));
@@ -1904,6 +1908,7 @@ mod tests {
         let mut lines = vec![(String::new(), TextStyle::Plain)];
         lines.extend(frame_lines());
         let mut screen = Screen::pinned();
+        screen.align_transcript = true;
         let mut output = Vec::new();
         screen.draw_pinned_to(&mut output, &lines, 2, 3, 12, 2).unwrap();
         terminal.process(&output);
@@ -1922,6 +1927,7 @@ mod tests {
     #[test]
     fn composer_stays_at_bottom_with_short_transcript_adjacent() {
         let mut screen = Screen::pinned();
+        screen.align_transcript = true;
         let lines = frame_lines();
         let mut output = Vec::new();
         // Move the short transcript down into the otherwise unused tail rows.
@@ -1933,6 +1939,32 @@ mod tests {
         assert!(output.ends_with("\x1b[8;4H"), "cursor on the input row");
         assert!(!output.contains("\r\n"), "nothing scrolls when it already fits");
         assert_eq!(screen.top, Some(6));
+    }
+
+    #[test]
+    fn startup_banner_and_slash_menu_remain_stable() {
+        let mut terminal = vt100::Parser::new(24, 80, 100);
+        terminal.process(b"DeepSeek Code\r\nworkspace\r\n");
+        let mut screen = Screen::pinned();
+        let lines = frame_lines();
+        let mut output = Vec::new();
+        screen.draw_pinned_to(&mut output, &lines, 1, 3, 24, 2).unwrap();
+        terminal.process(&output);
+        assert_eq!(terminal.screen().rows(0, 80).next().unwrap(), "DeepSeek Code");
+        let original: Vec<_> = terminal.screen().rows(0, 80).collect();
+        let mut overlay = CommandOverlay::default();
+        let menu = vec![("/add-dir".into(), TextStyle::Selected), ("/agents".into(), TextStyle::Muted)];
+        for bottom in [20, 19, 20] {
+            output.clear();
+            overlay.draw_to(&mut output, &menu, bottom, &original).unwrap();
+            terminal.process(&output);
+            assert_eq!(terminal.screen().contents().matches("/add-dir").count(), 1);
+            output.clear();
+            overlay.draw_to(&mut output, &[], 0, &[]).unwrap();
+            terminal.process(&output);
+            assert_eq!(terminal.screen().rows(0, 80).collect::<Vec<_>>(), original);
+        }
+        assert_eq!(screen.transcript_end, Some(2));
     }
 
     #[test]
