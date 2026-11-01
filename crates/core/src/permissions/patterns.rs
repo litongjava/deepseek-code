@@ -284,16 +284,6 @@ pub fn matching_action(
     let mut selected = None;
     for (text, action) in rules {
         if let Ok(rule) = Rule::parse(text) {
-            // A restricted shell allow must fall back to confirmation for
-            // complex syntax, even if the manager's default mode allows tools.
-            if *action == PermissionAction::Allow
-                && rule.content.is_some()
-                && rule.tool == "Bash"
-                && !rule.matches(context, action)
-                && rule.matches(context, &PermissionAction::Confirm)
-            {
-                selected = Some(PermissionAction::Confirm);
-            }
             if !rule.matches(context, action) {
                 continue;
             }

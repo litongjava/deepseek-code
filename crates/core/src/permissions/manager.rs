@@ -786,6 +786,46 @@ mod session_rule_tests {
     }
 
     #[test]
+    fn unrelated_maven_allow_does_not_prompt_for_compound_git_in_bypass() {
+        let manager = PermissionManager::new(Arc::new(super::super::AuditLogger::new(16)));
+        manager
+            .set_launch_rules(
+                "one",
+                HashMap::from([(
+                    "Bash(mvn -pl tio-boot -am compile)".into(),
+                    PermissionAction::Allow,
+                )]),
+            )
+            .unwrap();
+        let context = PermissionContext {
+            tool_name: "Bash".into(),
+            tool_input: serde_json::json!({"command":"cd repo && git ls-remote origin refs/heads/main 2>&1"}),
+            conversation_id: "one".into(),
+            user_id: None,
+            workspace_path: None,
+        };
+        manager.set_mode(PermissionMode::BypassPermissions);
+        assert_eq!(
+            manager.check_permission(&context),
+            PermissionResult::Granted
+        );
+        manager.set_mode(PermissionMode::AskPermissions);
+        assert!(matches!(
+            manager.check_permission(&context),
+            PermissionResult::RequiresConfirmation(_)
+        ));
+        manager.set_mode(PermissionMode::BypassPermissions);
+        manager.set_session_rules(
+            "one",
+            HashMap::from([("Bash".into(), PermissionAction::Deny)]),
+        );
+        assert!(matches!(
+            manager.check_permission(&context),
+            PermissionResult::Denied(_)
+        ));
+    }
+
+    #[test]
     fn pattern_rules_enforce_denies_and_complex_shell_confirmation() {
         let manager = PermissionManager::new(Arc::new(super::super::AuditLogger::new(16)));
         let mut context = PermissionContext {
@@ -817,6 +857,11 @@ mod session_rule_tests {
             HashMap::from([("Bash(git *)".into(), PermissionAction::Allow)]),
         );
         context.tool_input = serde_json::json!({"command":"git status; evil"});
+        assert_eq!(
+            manager.check_permission(&context),
+            PermissionResult::Granted
+        );
+        manager.set_mode(PermissionMode::AskPermissions);
         assert!(matches!(
             manager.check_permission(&context),
             PermissionResult::RequiresConfirmation(_)
@@ -829,7 +874,10 @@ mod session_rule_tests {
         ));
         // ...and runs plain inspection commands.
         context.tool_input = serde_json::json!({"command":"git status"});
-        assert_eq!(manager.check_permission(&context), PermissionResult::Granted);
+        assert_eq!(
+            manager.check_permission(&context),
+            PermissionResult::Granted
+        );
         context.tool_name = "Read".into();
         manager.set_session_rules(
             "one",
