@@ -8,7 +8,7 @@ use crossterm::{
     },
     execute, queue,
     style::{Attribute, ResetColor, SetAttribute, SetForegroundColor},
-    terminal::{self, Clear, ClearType},
+    terminal::{self, Clear, ClearType, ScrollDown},
 };
 use std::io::{self, Write};
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
@@ -521,7 +521,7 @@ impl Screen {
         result
     }
 
-    /// Draws `lines` at the bottom, leaving short transcripts at the top. Content above the
+    /// Draws `lines` at the bottom, keeping short transcripts adjacent. Content above the
     /// frame is scrolled up rather than overwritten, so the transcript (and
     /// the terminal's scrollback) keeps everything said.
     fn draw_pinned_to(
@@ -554,6 +554,12 @@ impl Screen {
         }
         let repaint = self.invalidated || anchor != top || self.height != height;
         let mut frame = Vec::new();
+        if first && anchor < top {
+            // Move the transcript into unused tail rows with the composer, so
+            // completion stays one reserved blank row above the input border.
+            queue!(frame, ScrollDown((top - anchor) as u16))?;
+            self.transcript_end = Some(top);
+        }
         if anchor > top {
             // The frame grew: scroll the rows above it into scrollback so the
             // whole frame fits on screen.
@@ -563,7 +569,8 @@ impl Screen {
             }
         } else if self.height > height || first || self.invalidated {
             // The frame shrank: erase the rows it no longer covers.
-            queue!(frame, MoveTo(0, anchor.min(top) as u16), Clear(ClearType::FromCursorDown))?;
+            let clear_from = if first { top } else { anchor.min(top) };
+            queue!(frame, MoveTo(0, clear_from as u16), Clear(ClearType::FromCursorDown))?;
         }
         for (offset, (text, style)) in lines.iter().enumerate() {
             if !repaint && self.previous.get(offset) == Some(&(text.clone(), *style)) {
@@ -1882,23 +1889,45 @@ mod tests {
         let mut screen = Screen::pinned();
         let lines = frame_lines();
         screen.draw_pinned_to(&mut Vec::new(), &lines, 1, 3, 30, 2).unwrap();
-        assert_eq!(screen.transcript_end, Some(2));
+        assert_eq!(screen.transcript_end, Some(26));
         screen.draw_pinned_to(&mut Vec::new(), &lines, 1, 4, 30, 27).unwrap();
-        assert_eq!(screen.transcript_end, Some(2));
+        assert_eq!(screen.transcript_end, Some(26));
         let mut screen = Screen::pinned();
         screen.draw_pinned_to(&mut Vec::new(), &lines, 1, 3, 10, 9).unwrap();
         assert_eq!(screen.transcript_end, Some(6));
     }
 
     #[test]
-    fn composer_stays_at_bottom_without_moving_short_transcript() {
+    fn completion_has_one_blank_row_before_bottom_composer() {
+        let mut terminal = vt100::Parser::new(12, 40, 100);
+        terminal.process(b"reply\r\ncompleted\r\n");
+        let mut lines = vec![(String::new(), TextStyle::Plain)];
+        lines.extend(frame_lines());
+        let mut screen = Screen::pinned();
+        let mut output = Vec::new();
+        screen.draw_pinned_to(&mut output, &lines, 2, 3, 12, 2).unwrap();
+        terminal.process(&output);
+        let rows: Vec<_> = terminal.screen().rows(0, 40).collect();
+        assert_eq!(rows[5], "reply");
+        assert_eq!(rows[6], "completed");
+        assert_eq!(rows[7], "");
+        assert_eq!(rows[8], lines[1].0);
+        assert_eq!(rows[11], lines[4].0);
+        output.clear();
+        screen.draw_pinned_to(&mut output, &lines, 2, 4, 12, 9).unwrap();
+        terminal.process(&output);
+        assert_eq!(terminal.screen().rows(0, 40).collect::<Vec<_>>(), rows);
+    }
+
+    #[test]
+    fn composer_stays_at_bottom_with_short_transcript_adjacent() {
         let mut screen = Screen::pinned();
         let lines = frame_lines();
         let mut output = Vec::new();
-        // Keep the short transcript at the top and the composer at the bottom.
+        // Move the short transcript down into the otherwise unused tail rows.
         screen.draw_pinned_to(&mut output, &lines, 1, 3, 10, 2).unwrap();
         let output = String::from_utf8(output).unwrap();
-        assert!(!output.contains("\x1b[4T"), "transcript must not scroll down");
+        assert!(output.contains("\x1b[4T"), "transcript follows the composer into unused rows");
         assert!(output.contains("\x1b[7;1H"), "first line is pinned above the footer");
         assert!(output.contains("\x1b[10;1H"), "footer occupies bottom row");
         assert!(output.ends_with("\x1b[8;4H"), "cursor on the input row");
