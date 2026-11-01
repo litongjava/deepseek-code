@@ -1178,8 +1178,12 @@ impl PromptEditor {
                 ));
             }
             let input_row = panel_height + menu_height + cursor_row - first + 1;
+            if crate::terminal::scrollback::compact() && !history_view.active() {
+                history_view.refresh(&[], &above.presentation(), width);
+                history_view.show_compact((rows as usize).saturating_sub(lines.len()))?;
+            }
             if history_view.active() {
-                history_view.refresh(&[], &above.all(), width);
+                history_view.refresh(&[], &above.presentation(), width);
                 let color = std::env::var_os("NO_COLOR").is_none();
                 let composer: Vec<String> = lines.iter().map(|(text, style)| {
                     let foreground = match style {
@@ -1219,7 +1223,7 @@ impl PromptEditor {
                 };
                 let bottom = if history_view.active() { (rows as usize).saturating_sub(lines.len()) } else { screen.top.unwrap_or(0) as usize };
                 command_overlay.draw_to(&mut io::stderr().lock(), &command_menu, bottom, &background)?;
-                pinned.draw(width, rows as usize, &background)?;
+                if !crate::terminal::scrollback::compact() { pinned.draw(width, rows as usize, &background)?; }
             }
             above.clone().save();
             let Some(event) = read_editor_event(&mut input_reader)? else {
@@ -1255,7 +1259,7 @@ impl PromptEditor {
                     if matches!(mouse.kind, MouseEventKind::ScrollUp | MouseEventKind::ScrollDown) {
                         selection.clear()?;
                         pinned.expanded = false;
-                        history_view.refresh(&[], &above.all(), width);
+                        history_view.refresh(&[], &above.presentation(), width);
                         history_view.wheel(mouse.kind == MouseEventKind::ScrollUp, (rows as usize).saturating_sub(lines.len()))?;
                         continue;
                     }
@@ -1265,7 +1269,7 @@ impl PromptEditor {
                         if let Some(click) = selection.event(mouse, snapshot)? {
                             if click.kind == MouseEventKind::Down(MouseButton::Left) && pinned.click(click.row) { continue; }
                             if click.kind == MouseEventKind::Down(MouseButton::Left) {
-                                if let Some(index) = history_view.row_index(click.row as usize, (rows as usize).saturating_sub(lines.len())) { above.toggle_history(index); }
+                                if let Some(index) = history_view.row_index(click.row as usize, (rows as usize).saturating_sub(lines.len())) { above.click_presentation(index); }
                             }
                         }
                         continue;
@@ -1334,14 +1338,19 @@ impl PromptEditor {
                         crate::keybindings::Resolution::Key(key) => key,
                         crate::keybindings::Resolution::Consumed => continue,
                     };
+                    if crate::terminal::scrollback::compact_key(key) {
+                        crate::terminal::scrollback::toggle_compact();
+                        history_view.close()?;
+                        continue;
+                    }
                     let panel_scroll = self.details.expanded
                         && matches!(key.code, KeyCode::PageUp | KeyCode::PageDown);
                     if !panel_scroll && crate::terminal::transcript_pager::HistoryView::is_navigation(key) {
-                        history_view.refresh(&[], &above.all(), width);
+                        history_view.refresh(&[], &above.presentation(), width);
                         history_view.navigate(key, (rows as usize).saturating_sub(lines.len()))?;
                         continue;
                     }
-                    if history_view.active() {
+                    if history_view.active() && !crate::terminal::scrollback::compact() {
                         history_view.close()?;
                         if key.code == KeyCode::Esc {
                             continue;

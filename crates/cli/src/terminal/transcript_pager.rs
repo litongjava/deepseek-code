@@ -127,6 +127,14 @@ impl HistoryView {
         if !was_active { self.previous.clear(); execute!(io::stderr(), EnterAlternateScreen)?; }
         Ok(())
     }
+    pub(super) fn show_compact(&mut self, page: usize) -> io::Result<()> {
+        if !self.active() {
+            self.previous.clear();
+            execute!(io::stderr(), EnterAlternateScreen)?;
+        }
+        self.top = Some(self.all.len().saturating_sub(page));
+        Ok(())
+    }
     pub(super) fn active(&self) -> bool {
         self.top.is_some()
     }

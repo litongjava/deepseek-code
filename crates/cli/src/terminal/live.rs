@@ -1179,7 +1179,13 @@ impl Frame {
     }
 
     fn refresh_history(&mut self, state: &State, width: usize) {
-        self.history_view.refresh(&[], &self.scrollback.all(), width);
+        self.history_view.refresh(&[], &self.scrollback.presentation(), width);
+        if state.activity.starts_with("Running Bash") {
+            self.history_view.append(&format!("\n{}", state.activity), width);
+        }
+        if !state.queued.is_empty() {
+            self.history_view.append(&format!("\n{}\n", state.queued.join("\n")), width);
+        }
         if !state.partial.is_empty() {
             self.history_view.append(&format!("{}{}", answer_prefix(state, 0), terminal_text(&state.partial)), width);
         } else if let Some(group) = &state.group {
@@ -1295,6 +1301,7 @@ impl Frame {
         let status = clip(&state.status_line(), width);
         let indicator = crate::terminal::style::mode_indicator(&state.mode);
         let mode = format!("{} {}", crate::terminal::style::status_mode(&state.mode), state.model_label);
+        let mode = if super::scrollback::compact() { format!("{mode} · Compact · Alt+M") } else { mode };
         let rule = "─".repeat(width);
         let _tip_line = state
             .tip
@@ -1490,11 +1497,16 @@ impl Frame {
             lines = rows;
         }
         self.composer_height = lines.len();
+        if super::scrollback::compact() && !self.history_view.active() {
+            self.refresh_history(state, width);
+            self.history_view.show_compact((size.1 as usize).saturating_sub(lines.len()))?;
+        }
         if self.history_view.active() {
             self.refresh_history(state, width);
             let input_row = lines.len().saturating_sub(choice_cursor.map_or(3, |(row, _)| row));
             let cursor_column = choice_cursor.map_or((prompt_width + cursor).min(width), |(_, column)| column);
             self.history_view.draw(&lines, input_row, cursor_column, size)?;
+            if super::scrollback::compact() { return Ok(()); }
             return self.pinned.draw(width, size.1 as usize, &self.history_view.screen_rows(size.1 as usize, &lines));
         }
         // Separate the transcript from the current live message/activity region.
@@ -1955,11 +1967,17 @@ fn run(
                         crate::keybindings::Resolution::Key(key) => key,
                         crate::keybindings::Resolution::Consumed => continue,
                     };
+                    if super::scrollback::compact_key(key) {
+                        super::scrollback::toggle_compact();
+                        screen.history_view.close()?;
+                        screen.draw(state)?;
+                        continue;
+                    }
                     if screen.history_key(state, key)? {
                         screen.draw(state)?;
                         continue;
                     }
-                    if screen.history_view.active() {
+                    if screen.history_view.active() && !super::scrollback::compact() {
                         screen.history_view.close()?;
                         if key.code == KeyCode::Esc {
                             screen.draw(state)?;
@@ -2154,7 +2172,7 @@ fn run(
                         if let Some(click) = selection.event(mouse, snapshot)? {
                             if click.kind == MouseEventKind::Down(MouseButton::Left) && screen.pinned.click(click.row) { screen.draw(state)?; continue; }
                             if click.kind == MouseEventKind::Down(MouseButton::Left) {
-                                if let Some(index) = screen.history_view.row_index(click.row as usize, (screen.size.1 as usize).saturating_sub(composer.len())) { screen.scrollback.toggle_history(index); }
+                                if let Some(index) = screen.history_view.row_index(click.row as usize, (screen.size.1 as usize).saturating_sub(composer.len())) { screen.scrollback.click_presentation(index); }
                             }
                             screen.draw(state)?;
                         }
