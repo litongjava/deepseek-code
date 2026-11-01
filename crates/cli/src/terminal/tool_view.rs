@@ -9,6 +9,17 @@ const SUMMARY_LINES: usize = 4;
 /// Lines of one result printed by the details view before truncation.
 const EXPANDED_LINES: usize = 400;
 
+/// Describe task retrieval without exposing the internal tool name in progress.
+pub fn task_output_activity(name: &str, input: &Value) -> Option<&'static str> {
+    (name == "TaskOutput").then(|| {
+        if input["block"] == false || input["timeout"] == 0 {
+            "Reading background task output"
+        } else {
+            "Waiting for background task to finish"
+        }
+    })
+}
+
 /// `Bash(ls -la)` for previewable inputs, otherwise the tool name.
 pub fn label(name: &str, input: &Value, workspace: Option<&std::path::Path>) -> String {
     if matches!(name, "Grep" | "Glob") {
@@ -168,6 +179,11 @@ fn printable(line: &str) -> String {
 
 /// Inline result lines and the number of lines left for the details view.
 pub fn summary(name: &str, output: &str, failed: bool) -> (Vec<String>, usize) {
+    if name == "Bash" && !failed && serde_json::from_str::<Value>(output).is_ok_and(|value| {
+        value["task_id"].is_string() && value["status"] == "running"
+    }) {
+        return (vec!["Running in background (/tasks to view)".into()], 0);
+    }
     if !failed && serde_json::from_str::<Value>(output).is_ok_and(|value| value["backgrounded"] == true) {
         if name == "Agent" {
             return (vec!["Backgrounded agent (\u{2193} to manage \u{b7} ctrl+o to expand)".into()], 0);
@@ -758,9 +774,10 @@ pub fn thought(text: &str, seconds: Option<u64>) -> (Vec<Line>, Vec<Line>) {
         Some(seconds) => format!("Thought for {seconds}s {count} lines"),
         None => format!("Thought {count} lines"),
     };
-    let short = vec![change_view::muted(&format!("{title} (click to expand)"))];
-    let mut full = vec![change_view::muted(&title)];
-    full.extend(text.lines().map(|row| change_view::body(&printable(row))));
-    full.push(change_view::muted("(click to collapse)"));
+    let readable = |text: &str| change_view::styled(text, change_view::Style::TerminalDefault);
+    let short = vec![readable(&format!("{title} (click to expand)"))];
+    let mut full = vec![readable(&title)];
+    full.extend(text.lines().map(|row| readable(&printable(row))));
+    full.push(readable("(click to collapse)"));
     (short, full)
 }

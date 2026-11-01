@@ -1024,6 +1024,7 @@ fn stream_text(state: &mut State, screen: &mut Frame, text: &str) {
 /// Logs one finished answer line through the Markdown renderer. The first
 /// line of an answer block gets the reference CLI's `●`, later lines indent.
 fn emit_text_line(state: &mut State, screen: &mut Frame, line: &str) {
+    state.markdown.set_width(terminal::size().map_or(80, |(cols, _)| cols as usize).saturating_sub(3));
     for rendered in state.markdown.line(line) {
         log_answer_line(state, screen, &rendered);
     }
@@ -1077,7 +1078,7 @@ fn thinking_lines(state: &State, width: usize, budget: usize) -> Vec<String> {
     let skip = rows.len().saturating_sub(budget.saturating_sub(1).max(1));
     for (index, row) in rows.into_iter().skip(skip).enumerate() {
         let prefix = if index == 0 { "  \u{23bf}  " } else { "     " };
-        lines.push(format!("\x1b[2m{prefix}{row}\x1b[0m"));
+        lines.push(format!("{prefix}{row}"));
     }
     lines
 }
@@ -1132,6 +1133,7 @@ fn finish_answer(state: &mut State, screen: &mut Frame) {
         let line = std::mem::take(&mut state.partial);
         emit_text_line(state, screen, &line);
     }
+    state.markdown.set_width(terminal::size().map_or(80, |(cols, _)| cols as usize).saturating_sub(3));
     for rendered in state.markdown.finish() {
         log_answer_line(state, screen, &rendered);
     }
@@ -2882,7 +2884,10 @@ impl TurnDisplay {
                     let _ = live.updates.send(Update::GroupEnd);
                 }
             }
-            live.activity(&format!("Running {label}"));
+            let activity = super::tool_view::task_output_activity(name, input)
+                .map(str::to_owned)
+                .unwrap_or_else(|| format!("Running {label}"));
+            live.activity(&activity);
         } else {
             self.fallback.tool_started(id, name, input);
         }

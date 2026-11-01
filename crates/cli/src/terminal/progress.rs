@@ -110,7 +110,9 @@ impl TurnProgress {
         }
         self.tools.insert(id.into(), Instant::now());
         self.notice(&format!("• {}", tool_preview_in_workspace(name, input, self.workspace.as_deref())));
-        let label = if name == "Agent" {
+        let label = if let Some(activity) = super::tool_view::task_output_activity(name, input) {
+            activity.to_owned()
+        } else if name == "Agent" {
             format!("Running subagent: {name}")
         } else {
             format!("Working: {name}")

@@ -13,6 +13,7 @@ pub struct MarkdownStream {
     color: bool,
     code_fence: Option<String>,
     table: Vec<String>,
+    width: Option<usize>,
 }
 
 fn strip_controls(text: &str) -> String {
@@ -22,6 +23,10 @@ fn strip_controls(text: &str) -> String {
 impl MarkdownStream {
     pub fn new(color: bool) -> Self {
         Self { color, ..Default::default() }
+    }
+
+    pub fn set_width(&mut self, width: usize) {
+        self.width = Some(width.max(2));
     }
 
     fn paint(&self, (open, close): (&str, &str), text: &str) -> String {
@@ -155,21 +160,50 @@ impl MarkdownStream {
             MarkdownStream::new(false).inline(cell)
         }).collect()).collect();
         let columns = plain.iter().map(Vec::len).max().unwrap_or(0);
-        let widths: Vec<usize> = (0..columns)
-            .map(|column| plain.iter().filter_map(|row| row.get(column)).map(|cell| cell.width()).max().unwrap_or(0))
+        let mut widths: Vec<usize> = (0..columns)
+            .map(|column| plain.iter().filter_map(|row| row.get(column)).map(|cell| cell.width()).max().unwrap_or(0).max(2))
             .collect();
         let has_header = rows.get(1).is_some_and(is_separator);
+        let available = self.width.unwrap_or(usize::MAX);
+        let separators = columns.saturating_sub(1) * 3;
+        // A wide Unicode character needs two cells. Extremely narrow tables
+        // become stacked fields instead of overflowing the terminal.
+        if columns * 2 + separators > available {
+            return body.iter().flat_map(|row| {
+                let mut lines: Vec<String> = row.iter()
+                    .flat_map(|cell| wrap_styled(cell, "", "", available)).collect();
+                lines.push(String::new());
+                lines
+            }).collect();
+        }
+        while widths.iter().sum::<usize>() + separators > available {
+            let column = widths.iter().enumerate().max_by_key(|(_, width)| **width).unwrap().0;
+            widths[column] -= 1;
+        }
         let mut output = Vec::new();
-        for (index, (row, plain_row)) in body.iter().zip(&plain).enumerate() {
-            let cells: Vec<String> = (0..columns)
-                .map(|column| {
-                    let text = row.get(column).cloned().unwrap_or_default();
-                    let width = plain_row.get(column).map_or(0, |cell| cell.width());
-                    let cell = format!("{text}{}", " ".repeat(widths[column].saturating_sub(width)));
-                    if index == 0 && has_header { self.paint(BOLD, &cell) } else { cell }
-                })
-                .collect();
-            output.push(cells.join(&self.paint(DIM, " \u{2502} ")));
+        for (index, row) in body.iter().enumerate() {
+            let wrapped: Vec<Vec<String>> = (0..columns).map(|column| {
+                wrap_styled(row.get(column).map(String::as_str).unwrap_or(""), "", "", widths[column])
+            }).collect();
+            let height = wrapped.iter().map(Vec::len).max().unwrap_or(1);
+            for line in 0..height {
+                let cells: Vec<String> = (0..columns)
+                    .map(|column| {
+                        let text = wrapped[column].get(line).cloned().unwrap_or_default();
+                        let mut visible = String::new();
+                        let mut escape = false;
+                        for ch in text.chars() {
+                            if ch == '\x1b' { escape = true; }
+                            else if escape { if ch == 'm' { escape = false; } }
+                            else { visible.push(ch); }
+                        }
+                        let width = visible.width();
+                        let cell = format!("{text}{}", " ".repeat(widths[column].saturating_sub(width)));
+                        if index == 0 && has_header { self.paint(BOLD, &cell) } else { cell }
+                    })
+                    .collect();
+                output.push(cells.join(&self.paint(DIM, " \u{2502} ")));
+            }
             if index == 0 && has_header {
                 let rule: Vec<String> = widths.iter().map(|width| "\u{2500}".repeat(*width)).collect();
                 output.push(self.paint(DIM, &rule.join("\u{2500}\u{253c}\u{2500}")));
@@ -316,6 +350,30 @@ pub fn hanging_indent(rendered: &str) -> usize {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn wide_tables_wrap_cells_without_moving_other_columns() {
+        for color in [false, true] {
+            for width in [28, 60, 100] {
+                let mut stream = MarkdownStream::new(color);
+                stream.set_width(width);
+                for line in ["| 序号 | 模块 | JDK | 耗时 |", "|---|---|---|---|",
+                    "| 1 | **java-model** | 21 | 13.1s |",
+                    "| 2 | `中文模块` / java-uni-ai-server / java-manin-server / tio-http-file-server | 8 | 24.5s |"] {
+                    assert!(stream.line(line).is_empty());
+                }
+                let output = stream.finish();
+                let plain: Vec<_> = output.iter().map(|line| super::super::tool_view::result_text(line)).collect();
+                assert!(plain.iter().all(|line| line.width() <= width));
+                let positions: Vec<Vec<usize>> = plain.iter().filter(|line| line.contains('│')).map(|line| {
+                    line.match_indices('│').map(|(at, _)| line[..at].width()).collect()
+                }).collect();
+                assert!(positions.len() >= 3);
+                assert!(positions.iter().all(|row| row == &positions[0]));
+                assert!(plain.iter().any(|line| line.contains("21") && line.contains("13.1s")));
+            }
+        }
+    }
 
     fn plain(lines: &[&str]) -> Vec<String> {
         let mut stream = MarkdownStream::new(false);

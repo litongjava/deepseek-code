@@ -177,6 +177,7 @@ fn conversation(session: &Session, id: &str, detailed: bool, mut recorded: Optio
 
 fn rendered_answer(content: &str, width: usize, color: bool) -> Vec<String> {
     let mut markdown = crate::terminal::markdown::MarkdownStream::new(color);
+    markdown.set_width(width.saturating_sub(2));
     let mut rendered = Vec::new();
     for line in content.lines() { rendered.extend(markdown.line(line)); }
     rendered.extend(markdown.finish());
