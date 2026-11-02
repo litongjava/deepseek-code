@@ -1443,8 +1443,8 @@ impl Frame {
             // The first frame, a terminal reflow after a resize, or a
             // full-screen view in between: the cursor shows where we are.
             if self.size != (0, 0) && self.size != size {
-                // The terminal reflowed what was logged; only new lines are clickable.
-                self.scrollback.clear();
+                // Recompute hit targets without discarding conversation history.
+                self.scrollback.reflow(size.0 as usize);
             }
             let cursor_y = cursor_y();
             let top = if self.lines.is_empty() { cursor_y } else { cursor_y.saturating_sub(self.input_row) };
@@ -1702,11 +1702,14 @@ impl Frame {
         }
         if self.history_view.active() {
             self.refresh_history(state, width);
-            let input_row = lines.len().saturating_sub(choice_cursor.map_or(3, |(row, _)| row));
-            let cursor_column = choice_cursor.map_or((prompt_width + cursor).min(width), |(_, column)| column);
-            self.history_view.draw(&lines, input_row, cursor_column, size)?;
-            if super::scrollback::compact() { return Ok(()); }
-            return self.pinned.draw(width, size.1 as usize, &self.history_view.screen_rows(size.1 as usize, &lines));
+            let input_row = lines
+                .len()
+                .saturating_sub(choice_cursor.map_or(3, |(row, _)| row));
+            let cursor_column =
+                choice_cursor.map_or((prompt_width + cursor).min(width), |(_, column)| column);
+            self.history_view
+                .draw(&lines, input_row, cursor_column, size)?;
+            return Ok(());
         }
         let mut content_rows = content.len();
         content.extend(lines);
@@ -2016,8 +2019,13 @@ fn run(
                     // As in the reference CLI the message joins the transcript
                     // where the model read it; a task notification was already
                     // announced when the command finished.
-                    if deepseek_code_core::tools::background_shell::notification_summary(&text).is_none() {
-                        screen.log(&format!("{} {}", crate::terminal::prompt_glyph(), terminal_text(&text)))?;
+                    if deepseek_code_core::tools::background_shell::notification_summary(&text)
+                        .is_none()
+                    {
+                        let (block, rows) = screen.scrollback.prompt(&text);
+                        for row in rows {
+                            screen.log_line(row, Some(block));
+                        }
                     }
                     dirty = true;
                 }
@@ -2364,16 +2372,39 @@ fn run(
                         continue;
                     }
                     if screen.history_view.active() {
-                        let composer = screen.lines.iter().rev().take(screen.composer_height).cloned().collect::<Vec<_>>().into_iter().rev().collect::<Vec<_>>();
-                        let snapshot = screen.history_view.screen_rows(screen.size.1 as usize, &composer);
+                        let composer = screen
+                            .lines
+                            .iter()
+                            .rev()
+                            .take(screen.composer_height)
+                            .cloned()
+                            .collect::<Vec<_>>()
+                            .into_iter()
+                            .rev()
+                            .collect::<Vec<_>>();
+                        let snapshot = screen
+                            .history_view
+                            .screen_rows(screen.size.1 as usize, &composer);
                         if let Some(click) = selection.event(mouse, snapshot.clone())? {
-                            if click.kind == MouseEventKind::Down(MouseButton::Left) && screen.pinned.click(click.row) { screen.draw(state)?; continue; }
                             if click.kind == MouseEventKind::Down(MouseButton::Left) {
-                                if let Some(index) = screen.history_view.row_index(click.row as usize, (screen.size.1 as usize).saturating_sub(composer.len())) {
-                                    if let Some(review) = screen.scrollback.review_presentation(index, screen.size.0.saturating_sub(1) as usize) {
-                                        super::file_review::show(review, &snapshot, &mut || input_reader.next(Duration::from_millis(100)))?;
+                                if let Some(index) = screen.history_view.row_index(
+                                    click.row as usize,
+                                    (screen.size.1 as usize).saturating_sub(composer.len()),
+                                ) {
+                                    if let Some(review) = screen.scrollback.review_presentation(
+                                        index,
+                                        screen.size.0.saturating_sub(1) as usize,
+                                    ) {
+                                        super::file_review::show(review, &snapshot, &mut || {
+                                            input_reader.next(Duration::from_millis(100))
+                                        })?;
                                         screen.size = (0, 0);
-                                    } else { screen.scrollback.click_presentation(index); }
+                                    } else {
+                                        screen.scrollback.click_presentation(
+                                            index,
+                                            screen.size.0.saturating_sub(1) as usize,
+                                        );
+                                    }
                                 }
                             }
                             screen.draw(state)?;
@@ -2382,12 +2413,45 @@ fn run(
                     }
                     let mut snapshot = screen.scrollback.screen(screen.top.unwrap_or(0), screen.size.1);
                     for (index, text) in screen.lines.iter().enumerate() {
-                        if let Some(row) = snapshot.get_mut(screen.top.unwrap_or(0) as usize + index) { *row = text.clone(); }
+                        if let Some(row) =
+                            snapshot.get_mut(screen.top.unwrap_or(0) as usize + index)
+                        {
+                            *row = text.clone();
+                        }
                     }
-                    let Some(mouse) = selection.event(mouse, snapshot.clone())? else { continue; };
+                    let Some(mouse) = selection.event(mouse, snapshot.clone())? else {
+                        continue;
+                    };
+                    if mouse.kind == MouseEventKind::Down(MouseButton::Left)
+                        && screen.pinned.click(mouse.row)
+                    {
+                        screen.pinned.expanded = false;
+                        let width = screen.size.0.saturating_sub(1) as usize;
+                        let row = screen.scrollback.expand_prompt(&screen.pinned.text, width);
+                        screen.refresh_history(state, width);
+                        screen.history_view.open_at(row)?;
+                        screen.draw(state)?;
+                        continue;
+                    }
                     if mouse.kind == MouseEventKind::Down(MouseButton::Left) {
-                        if let Some(review) = screen.scrollback.review_at(screen.top.unwrap_or(0), mouse.row) {
-                            super::file_review::show(review, &snapshot, &mut || input_reader.next(Duration::from_millis(100)))?;
+                        if let Some(id) = screen
+                            .scrollback
+                            .prompt_at(screen.top.unwrap_or(0), mouse.row)
+                        {
+                            let width = screen.size.0.saturating_sub(1) as usize;
+                            let row = screen.scrollback.expand_prompt_id(id, width);
+                            screen.refresh_history(state, width);
+                            screen.history_view.open_at(row)?;
+                            screen.draw(state)?;
+                            continue;
+                        }
+                        if let Some(review) = screen
+                            .scrollback
+                            .review_at(screen.top.unwrap_or(0), mouse.row)
+                        {
+                            super::file_review::show(review, &snapshot, &mut || {
+                                input_reader.next(Duration::from_millis(100))
+                            })?;
                             screen.size = (0, 0);
                             screen.draw(state)?;
                             continue;
@@ -2412,7 +2476,6 @@ fn run(
                             }
                         }
                     }
-                    if mouse.kind == MouseEventKind::Down(MouseButton::Left) && screen.pinned.click(mouse.row) { screen.lines.clear(); screen.draw(state)?; continue; }
                     // The details panel is live content at the top of the frame.
                     let origin = screen.top.unwrap_or(0);
                     if mouse.kind == MouseEventKind::Down(MouseButton::Left)
@@ -3558,6 +3621,32 @@ mod completion_tests {
         assert!(text.find("first").unwrap() < text.find("second").unwrap());
         assert!(text.contains("before"));
         assert!(!text.contains("failed"));
+    }
+
+    #[test]
+    #[ignore = "requires an interactive terminal"]
+    fn history_live_terminal_fixture() {
+        let mut history = super::super::scrollback::Scrollback::default();
+        let prompt = (0..80)
+            .map(|i| format!("LIVE_INPUT_{i:02}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let rows = history.record_prompt(&prompt);
+        for row in rows {
+            eprintln!("{row}");
+        }
+        history.save();
+        let temp = tempfile::tempdir().unwrap();
+        let live = LiveTurn::start(
+            "ask",
+            crate::keybindings::load(&temp.path().join("keys.json")).unwrap(),
+            vec![],
+            None,
+        )
+        .unwrap();
+        live.notice("Live history acceptance");
+        std::thread::sleep(Duration::from_secs(12));
+        live.finish(None);
     }
 
     #[test]

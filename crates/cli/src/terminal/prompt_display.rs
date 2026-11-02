@@ -4,6 +4,28 @@ use crossterm::style::{ResetColor, SetBackgroundColor, SetForegroundColor};
 use std::io::{self, Write};
 use unicode_width::UnicodeWidthChar;
 
+/// Emit exactly the same rows retained for selection and history navigation.
+pub(crate) fn write_recorded(
+    output: &mut impl Write,
+    history: &mut super::scrollback::Scrollback,
+    text: &str,
+    width: usize,
+    raw: bool,
+) -> io::Result<()> {
+    let newline = if raw { "\r\n" } else { "\n" };
+    let rule = "─".repeat(width.max(4));
+    for row in [String::new(), rule.clone()] {
+        write!(output, "{row}{newline}")?;
+        history.push(row, None);
+    }
+    for row in history.record_prompt(text) {
+        write!(output, "{row}{newline}")?;
+    }
+    write!(output, "{rule}{newline}")?;
+    history.push(rule, None);
+    Ok(())
+}
+
 pub(super) fn viewport(len: usize, cursor_row: usize, height: usize) -> std::ops::Range<usize> {
     let shown = len.min(height.max(1));
     let first = cursor_row.saturating_sub(shown.saturating_sub(1)).min(len - shown);
@@ -139,6 +161,19 @@ pub fn layout(prompt: &str, chars: &[char], limit: usize) -> (Vec<String>, Vec<(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn recorded_prompt_matches_emitted_rows_and_retains_full_text() {
+        let mut history = super::super::scrollback::Scrollback::default();
+        let mut output = Vec::new();
+        let text = "first\nsecond\nthird\nLAST_LINE";
+        write_recorded(&mut output, &mut history, text, 40, true).unwrap();
+        let emitted = String::from_utf8(output).unwrap();
+        assert_eq!(emitted, format!("{}\r\n", history.all().join("\r\n")));
+        assert!(!emitted.contains("LAST_LINE"));
+        history.expand_prompt(text, 40);
+        assert!(history.all().iter().any(|row| row.contains("LAST_LINE")));
+    }
 
     #[test]
     fn submitted_prompts_keep_rules_wrap_unicode_and_cannot_emit_controls() {

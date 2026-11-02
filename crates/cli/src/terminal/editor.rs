@@ -738,7 +738,12 @@ impl Screen {
         queue!(out, Clear(ClearType::FromCursorDown), ResetColor)?;
         Ok(())
     }
-    fn finish(&mut self, text: &str, prompt: &str) -> io::Result<()> {
+    fn finish(
+        &mut self,
+        text: &str,
+        _prompt: &str,
+        history: &mut crate::terminal::scrollback::Scrollback,
+    ) -> io::Result<()> {
         // Clear menu and borders, retaining just submitted input in scrollback.
         let mut out = io::stderr();
         out.write_all(b"\x1b[?2026h")?;
@@ -746,24 +751,14 @@ impl Screen {
         if let Some(end) = self.transcript_end.take() {
             queue!(out, MoveTo(0, end as u16), Clear(ClearType::FromCursorDown))?;
         }
-        let mut submitted = Vec::new();
-        crate::terminal::prompt_display::write_submitted(
-            &mut submitted,
-            prompt,
-            text,
-            terminal::size()
-                .map(|(cols, _)| cols.saturating_sub(1) as usize)
-                .unwrap_or(79),
-            std::env::var_os("NO_COLOR").is_none(),
-            true,
-        )?;
-        out.write_all(&submitted)?;
         if !text.trim().is_empty() {
-            let mut history = crate::terminal::scrollback::Scrollback::snapshot();
-            for line in String::from_utf8_lossy(&submitted).split_terminator("\r\n") {
-                history.push(line.to_owned(), None);
-            }
-            history.save();
+            crate::terminal::prompt_display::write_recorded(
+                &mut out,
+                history,
+                text,
+                terminal::size().map_or(79, |(cols, _)| cols.saturating_sub(1) as usize),
+                true,
+            )?;
             if !text.trim_start().starts_with('/') {
                 crate::terminal::pinned_prompt::remember(text);
             }
@@ -973,7 +968,7 @@ impl PromptEditor {
             if let Some(notices) = &self.notices {
                 while let Ok(notice) = notices.try_recv() {
                     history_view.close()?;
-                    screen.finish("", "")?;
+                    screen.finish("", "", &mut above)?;
                     let safe: String = notice
                         .chars()
                         .filter(|ch| !ch.is_control() || matches!(ch, '\n' | '\t'))
@@ -1249,9 +1244,20 @@ impl PromptEditor {
                     }
                     background
                 };
-                let bottom = if history_view.active() { (rows as usize).saturating_sub(lines.len()) } else { screen.top.unwrap_or(0) as usize };
-                command_overlay.draw_to(&mut io::stderr().lock(), &command_menu, bottom, &background)?;
-                if !crate::terminal::scrollback::compact() { pinned.draw(width, rows as usize, &background)?; }
+                let bottom = if history_view.active() {
+                    (rows as usize).saturating_sub(lines.len())
+                } else {
+                    screen.top.unwrap_or(0) as usize
+                };
+                command_overlay.draw_to(
+                    &mut io::stderr().lock(),
+                    &command_menu,
+                    bottom,
+                    &background,
+                )?;
+                if !history_view.active() && !crate::terminal::scrollback::compact() {
+                    pinned.draw(width, rows as usize, &background)?;
+                }
             }
             above.clone().save();
             let Some(event) = read_editor_event(&mut input_reader)? else {
@@ -1278,7 +1284,8 @@ impl PromptEditor {
                 continue;
             }
             match event {
-                Event::Resize(_, _) => {
+                Event::Resize(columns, _) => {
+                    above.reflow(columns as usize);
                     // The terminal reflowed the prompt; the next draw places it
                     // on the last rows again.
                     screen.reflow();
@@ -1292,16 +1299,27 @@ impl PromptEditor {
                         continue;
                     }
                     if history_view.active() {
-                        let composer = lines.iter().map(|(text, _)| text.clone()).collect::<Vec<_>>();
+                        let composer = lines
+                            .iter()
+                            .map(|(text, _)| text.clone())
+                            .collect::<Vec<_>>();
                         let snapshot = history_view.screen_rows(rows as usize, &composer);
                         if let Some(click) = selection.event(mouse, snapshot.clone())? {
-                            if click.kind == MouseEventKind::Down(MouseButton::Left) && pinned.click(click.row) { continue; }
                             if click.kind == MouseEventKind::Down(MouseButton::Left) {
-                                if let Some(index) = history_view.row_index(click.row as usize, (rows as usize).saturating_sub(lines.len())) {
+                                if let Some(index) = history_view.row_index(
+                                    click.row as usize,
+                                    (rows as usize).saturating_sub(lines.len()),
+                                ) {
                                     if let Some(review) = above.review_presentation(index, width) {
-                                        crate::terminal::file_review::show(review, &snapshot, &mut || read_editor_event(&mut input_reader))?;
+                                        crate::terminal::file_review::show(
+                                            review,
+                                            &snapshot,
+                                            &mut || read_editor_event(&mut input_reader),
+                                        )?;
                                         screen.reflow();
-                                    } else { above.click_presentation(index); }
+                                    } else {
+                                        above.click_presentation(index, width);
+                                    }
                                 }
                             }
                         }
@@ -1311,17 +1329,37 @@ impl PromptEditor {
                     let origin = cursor_y.saturating_sub(screen.cursor_row as u16);
                     let mut snapshot = above.screen(origin, rows);
                     for (index, (text, _)) in screen.previous.iter().enumerate() {
-                        if let Some(row) = snapshot.get_mut(origin as usize + index) { *row = text.clone(); }
+                        if let Some(row) = snapshot.get_mut(origin as usize + index) {
+                            *row = text.clone();
+                        }
                     }
-                    let Some(mouse) = selection.event(mouse, snapshot.clone())? else { continue; };
+                    let Some(mouse) = selection.event(mouse, snapshot.clone())? else {
+                        continue;
+                    };
+                    if mouse.kind == MouseEventKind::Down(MouseButton::Left)
+                        && pinned.click(mouse.row)
+                    {
+                        pinned.expanded = false;
+                        let row = above.expand_prompt(&pinned.text, width);
+                        history_view.refresh(&[], &above.presentation(), width);
+                        history_view.open_at(row)?;
+                        continue;
+                    }
                     if mouse.kind == MouseEventKind::Down(MouseButton::Left) {
+                        if let Some(id) = above.prompt_at(origin, mouse.row) {
+                            let row = above.expand_prompt_id(id, width);
+                            history_view.refresh(&[], &above.presentation(), width);
+                            history_view.open_at(row)?;
+                            continue;
+                        }
                         if let Some(review) = above.review_at(origin, mouse.row) {
-                            crate::terminal::file_review::show(review, &snapshot, &mut || read_editor_event(&mut input_reader))?;
+                            crate::terminal::file_review::show(review, &snapshot, &mut || {
+                                read_editor_event(&mut input_reader)
+                            })?;
                             screen.reflow();
                             continue;
                         }
                     }
-                    if mouse.kind == MouseEventKind::Down(MouseButton::Left) && pinned.click(mouse.row) { screen.invalidated = true; continue; }
                     // A click on a turn's closing line, such as a failure with
                     // its `/tasks show` command, selects and copies the line.
                     if mouse.kind == MouseEventKind::Down(MouseButton::Left)
@@ -1437,16 +1475,22 @@ impl PromptEditor {
                         }
                         continue;
                     }
-                    if key.modifiers.contains(KeyModifiers::ALT) && matches!(key.code, KeyCode::Char('>' | '<' | '.' | ',')) {
+                    if key.modifiers.contains(KeyModifiers::ALT)
+                        && matches!(key.code, KeyCode::Char('>' | '<' | '.' | ','))
+                    {
                         self.preserve_cycle_draft(&buffer);
-                        let command = if matches!(key.code, KeyCode::Char('>' | '.')) { "/effort +" } else { "/effort -" };
-                        screen.finish("", &prompt)?;
+                        let command = if matches!(key.code, KeyCode::Char('>' | '.')) {
+                            "/effort +"
+                        } else {
+                            "/effort -"
+                        };
+                        screen.finish("", &prompt, &mut above)?;
                         return Ok(Some(super::PromptEvent::Line(command.into())));
                     }
                     if key.code == KeyCode::Char('p') && key.modifiers.contains(KeyModifiers::ALT) {
                         // alt+p opens the model picker, as in the reference CLI.
                         let model = "/model".to_owned();
-                        screen.finish(&model, &prompt)?;
+                        screen.finish(&model, &prompt, &mut above)?;
                         return Ok(Some(super::PromptEvent::Line(model)));
                     }
                     if control && key.code == KeyCode::Char('t') {
@@ -1506,14 +1550,14 @@ impl PromptEditor {
                         continue;
                     }
                     if control && key.code == KeyCode::Char('c') {
-                        screen.finish("", &prompt)?;
+                        screen.finish("", &prompt, &mut above)?;
                         return Err(io::Error::new(
                             io::ErrorKind::Interrupted,
                             "Input cancelled",
                         ));
                     }
                     if control && key.code == KeyCode::Char('d') && buffer.chars.is_empty() {
-                        screen.finish("", &prompt)?;
+                        screen.finish("", &prompt, &mut above)?;
                         return Ok(None);
                     }
                     if self.vim && !control {
@@ -1572,10 +1616,11 @@ impl PromptEditor {
                             let outcome = crate::terminal::transcript_pager::run(&self.transcript, &mut || read_editor_event(&mut input_reader))?;
                             screen.invalidated = true;
                             self.transcript_printed = true;
-                            if matches!(outcome, crate::terminal::transcript_pager::Outcome::Closed) {
+                            if matches!(outcome, crate::terminal::transcript_pager::Outcome::Closed)
+                            {
                                 continue;
                             }
-                            screen.finish("", "")?;
+                            screen.finish("", "", &mut above)?;
                             let width = terminal::size()
                                 .map(|(cols, _)| cols.saturating_sub(1) as usize)
                                 .unwrap_or(79);
@@ -1683,7 +1728,7 @@ impl PromptEditor {
                             // Restore the main screen before clearing its composer.
                             // Otherwise dropping HistoryView restores a stale input frame.
                             history_view.close()?;
-                            screen.finish(&text, &prompt)?;
+                            screen.finish(&text, &prompt, &mut above)?;
                             if !text.trim().is_empty() && self.history.last() != Some(&text) {
                                 self.history.push(text.clone());
                             }
@@ -1694,10 +1739,12 @@ impl PromptEditor {
                             return Ok(Some(super::PromptEvent::Line(text)));
                         }
                         KeyCode::Esc if items.is_empty() && buffer.chars.is_empty() => {
-                            if last_esc.is_some_and(|at| at.elapsed() < std::time::Duration::from_secs(1)) {
+                            if last_esc
+                                .is_some_and(|at| at.elapsed() < std::time::Duration::from_secs(1))
+                            {
                                 // As in the reference CLI, Esc Esc goes back to an earlier turn.
                                 let rewind = "/rewind".to_owned();
-                                screen.finish(&rewind, &prompt)?;
+                                screen.finish(&rewind, &prompt, &mut above)?;
                                 return Ok(Some(super::PromptEvent::Line(rewind)));
                             }
                             last_esc = Some(std::time::Instant::now());
@@ -1725,16 +1772,22 @@ impl PromptEditor {
                         // As in the reference CLI, ↓ past the newest prompt manages
                         // the running background shells.
                         KeyCode::Left if buffer.chars.is_empty() && items.is_empty() => {
-                            if left_press.is_some_and(|at| at.elapsed() < std::time::Duration::from_secs(1)) {
+                            if left_press
+                                .is_some_and(|at| at.elapsed() < std::time::Duration::from_secs(1))
+                            {
                                 let tasks = "/tasks".to_owned();
-                                screen.finish(&tasks, &prompt)?;
+                                screen.finish(&tasks, &prompt, &mut above)?;
                                 return Ok(Some(super::PromptEvent::Line(tasks)));
                             }
                             left_press = Some(std::time::Instant::now());
                         }
-                        KeyCode::Down if (self.shells > 0 || !agents.is_empty()) && buffer.chars.is_empty() && history_pos == self.history.len() => {
+                        KeyCode::Down
+                            if (self.shells > 0 || !agents.is_empty())
+                                && buffer.chars.is_empty()
+                                && history_pos == self.history.len() =>
+                        {
                             let tasks = "/tasks".to_owned();
-                            screen.finish(&tasks, &prompt)?;
+                            screen.finish(&tasks, &prompt, &mut above)?;
                             return Ok(Some(super::PromptEvent::Line(tasks)));
                         }
                         KeyCode::Down => {
@@ -1812,6 +1865,43 @@ mod mention_tests {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    #[ignore = "requires an interactive terminal"]
+    fn history_submission_terminal_fixture() {
+        let mut editor = PromptEditor::default();
+        editor.set_draft(
+            (0..80)
+                .map(|i| format!("FIRST_INPUT_{i:02}"))
+                .collect::<Vec<_>>()
+                .join("\n"),
+        );
+        let first = editor.readline("❯ ").unwrap();
+        assert!(matches!(first, Some(super::super::PromptEvent::Line(_))));
+        let history = crate::terminal::scrollback::Scrollback::snapshot();
+        assert!(
+            history
+                .all()
+                .iter()
+                .any(|row| row.contains("FIRST_INPUT_00"))
+        );
+        assert!(
+            history
+                .all()
+                .iter()
+                .any(|row| row.contains("click to expand"))
+        );
+        editor.set_draft("SECOND_INPUT".into());
+        editor.readline("❯ ").unwrap();
+        let history = crate::terminal::scrollback::Scrollback::snapshot();
+        assert!(
+            history
+                .all()
+                .iter()
+                .any(|row| row.contains("FIRST_INPUT_00"))
+        );
+        assert!(history.all().iter().any(|row| row.contains("SECOND_INPUT")));
+        editor.readline("❯ ").unwrap();
+    }
     #[test]
     fn slash_menu_overlay_restores_background_without_scrolling() {
         let mut overlay = CommandOverlay::default();

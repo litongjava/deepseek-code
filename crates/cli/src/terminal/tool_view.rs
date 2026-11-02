@@ -115,6 +115,11 @@ pub fn gathering_summary(kinds: &[Gathering], running: bool) -> String {
 
 /// Human-readable text of a tool output; JSON envelopes are unwrapped.
 pub fn result_text(output: &str) -> String {
+    plain_terminal_text(&raw_result_text(output))
+}
+
+/// Sanitize literal terminal text without interpreting it as a tool envelope.
+pub fn plain_terminal_text(text: &str) -> String {
     // Strip whole sequences after decoding JSON and before splitting into rows.
     // Filtering only ESC would leave visible fragments such as `[32m` behind.
     struct PlainOutput(String);
@@ -129,7 +134,6 @@ pub fn result_text(output: &str) -> String {
             }
         }
     }
-    let text = raw_result_text(output);
     let mut plain = PlainOutput(String::with_capacity(text.len()));
     vte::Parser::new().advance(&mut plain, text.as_bytes());
     plain.0

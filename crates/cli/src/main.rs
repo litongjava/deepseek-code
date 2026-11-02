@@ -585,11 +585,20 @@ async fn run(cli: &Cli) -> Result<()> {
             if !single {
                 let display = display_commands::load(&session)?;
                 terminal::style::configure(&display.theme, &display.color);
-                terminal::prompt_display::write_submitted(
+                if io::stderr().is_terminal() && !terminal::screen_reader() {
+                    let mut history = terminal::scrollback::Scrollback::take();
+                    terminal::prompt_display::write_recorded(
+                        &mut io::stderr(), &mut history, &prompt,
+                        crossterm::terminal::size().map_or(79, |(cols, _)| cols.saturating_sub(1) as usize), false,
+                    )?;
+                    history.save();
+                } else {
+                    terminal::prompt_display::write_submitted(
                     &mut io::stderr(), &format!("{} ", terminal::prompt_glyph()), &prompt,
                     crossterm::terminal::size().map(|(cols, _)| cols.saturating_sub(1) as usize).unwrap_or(79),
                     io::stderr().is_terminal() && std::env::var_os("NO_COLOR").is_none() && !terminal::screen_reader(), false,
                 )?;
+                }
             }
             // As in the reference CLI, /compact also works without a terminal.
             let compact = prompt.trim().strip_prefix("/compact").filter(|rest| rest.is_empty() || rest.starts_with(char::is_whitespace));

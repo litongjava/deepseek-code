@@ -17,6 +17,7 @@ struct Logged {
 /// A tool result with hidden lines, shown short or in full.
 #[derive(Clone)]
 struct Block {
+    prompt: Option<String>,
     review: Option<super::file_review::Review>,
     short: Vec<Line>,
     full: Vec<Line>,
@@ -61,16 +62,21 @@ impl Scrollback {
         *LAST.lock().unwrap_or_else(|poison| poison.into_inner()) = Some(self);
     }
     pub(super) fn snapshot() -> Self {
-        LAST.lock().unwrap_or_else(|poison| poison.into_inner()).clone().unwrap_or_default()
+        LAST.lock()
+            .unwrap_or_else(|poison| poison.into_inner())
+            .clone()
+            .unwrap_or_default()
     }
-    pub(super) fn take() -> Self {
+    pub(crate) fn take() -> Self {
         LAST.lock()
             .unwrap_or_else(|poison| poison.into_inner())
             .take()
             .unwrap_or_default()
     }
-    pub(super) fn clear(&mut self) {
-        self.logged.clear();
+    pub(super) fn reflow(&mut self, columns: usize) {
+        for line in &mut self.logged {
+            line.rows = screen_rows(&line.text, columns);
+        }
     }
     /// Records a written line; returns the screen rows it takes.
     pub(crate) fn push(&mut self, text: String, block: Option<usize>) -> usize {
@@ -85,6 +91,7 @@ impl Scrollback {
         let plain = change_view::plain(&short);
         let whole = plain.trim_start().starts_with("Thought") || plain.contains("Updated ");
         self.blocks.push(Block {
+            prompt: None,
             review: None,
             short,
             full,
@@ -94,6 +101,75 @@ impl Scrollback {
             compact_level: 0,
         });
         (self.blocks.len() - 1, lines)
+    }
+    /// Keep prompt text and its disclosure target together across turns.
+    pub(crate) fn prompt(&mut self, text: &str) -> (usize, Vec<String>) {
+        let width = terminal::size().unwrap_or((80, 24)).0.saturating_sub(1) as usize;
+        let clean = super::tool_view::plain_terminal_text(text);
+        let rows = super::prompt_display::layout(
+            &format!("{} ", crate::terminal::prompt_glyph()),
+            &clean.chars().collect::<Vec<_>>(),
+            width.max(4),
+        )
+        .0;
+        let mut full: Vec<Line> = rows.iter().map(|row| change_view::body(row)).collect();
+        let short = if rows.len() > 3 {
+            let mut short = full[..2].to_vec();
+            short.push(change_view::muted(&format!(
+                "  +{} lines (click to expand)",
+                rows.len() - 2
+            )));
+            full.push(change_view::muted("  (click to collapse)"));
+            short
+        } else {
+            full.clone()
+        };
+        let (id, rows) = self.block(short, full);
+        self.blocks[id].prompt = Some(text.to_owned());
+        self.blocks[id].whole = true;
+        (id, rows)
+    }
+    pub(crate) fn record_prompt(&mut self, text: &str) -> Vec<String> {
+        let (id, rows) = self.prompt(text);
+        for row in &rows {
+            self.push(row.clone(), Some(id));
+        }
+        rows
+    }
+    /// Open the actual prompt in scrollable history instead of a clipped overlay.
+    pub(super) fn expand_prompt(&mut self, text: &str, width: usize) -> usize {
+        let id = self
+            .blocks
+            .iter()
+            .rposition(|block| block.prompt.as_deref() == Some(text))
+            .unwrap_or_else(|| {
+                self.record_prompt(text);
+                self.blocks.len() - 1
+            });
+        self.expand_prompt_id(id, width)
+    }
+    pub(super) fn expand_prompt_id(&mut self, id: usize, width: usize) -> usize {
+        let index = self
+            .logged
+            .iter()
+            .position(|line| line.block == Some(id))
+            .unwrap();
+        if !self.blocks[id].body_open {
+            self.toggle_history(index);
+        }
+        self.blocks[id].compact_level = 2;
+        let rows = if compact() {
+            self.compact_rows()
+        } else {
+            self.logged
+                .iter()
+                .map(|line| (line.text.clone(), line.block))
+                .collect()
+        };
+        rows.iter()
+            .take_while(|(_, block)| *block != Some(id))
+            .map(|(text, _)| super::markdown::wrap_styled(text, "", "", width.max(1)).len())
+            .sum()
     }
     pub(super) fn file(&mut self, review: super::file_review::Review) -> (usize, Vec<String>) {
         let summary = review.files[review.selected].summary.clone();
@@ -105,9 +181,22 @@ impl Scrollback {
         let id = self.logged.get(self.line_at(bottom, row)?)?.block?;
         self.blocks[id].review.clone()
     }
-    pub(super) fn review_presentation(&self, row: usize, width: usize) -> Option<super::file_review::Review> {
-        let rows = if compact() { self.compact_rows() } else {
-            self.logged.iter().map(|line| (line.text.clone(), line.block)).collect()
+    pub(super) fn prompt_at(&self, bottom: u16, row: u16) -> Option<usize> {
+        let id = self.logged.get(self.line_at(bottom, row)?)?.block?;
+        self.blocks[id].prompt.as_ref().map(|_| id)
+    }
+    pub(super) fn review_presentation(
+        &self,
+        row: usize,
+        width: usize,
+    ) -> Option<super::file_review::Review> {
+        let rows = if compact() {
+            self.compact_rows()
+        } else {
+            self.logged
+                .iter()
+                .map(|line| (line.text.clone(), line.block))
+                .collect()
         };
         let mut offset = 0;
         for (text, id) in rows {
@@ -133,7 +222,7 @@ impl Scrollback {
                 index += 1;
                 continue;
             };
-            if self.blocks[first].review.is_some() {
+            if self.blocks[first].review.is_some() || self.blocks[first].prompt.is_some() {
                 result.push((self.logged[index].text.clone(), Some(first)));
                 index += 1;
                 continue;
@@ -142,8 +231,12 @@ impl Scrollback {
             index += 1;
             while index < self.logged.len() {
                 if let Some(id) = self.logged[index].block {
-                    if self.blocks[id].review.is_some() { break; }
-                    if !ids.contains(&id) { ids.push(id); }
+                    if self.blocks[id].review.is_some() || self.blocks[id].prompt.is_some() {
+                        break;
+                    }
+                    if !ids.contains(&id) {
+                        ids.push(id);
+                    }
                     index += 1;
                 } else if self.logged[index].text.trim().is_empty()
                     && self.logged.get(index + 1).is_some_and(|line| line.block.is_some()) {
@@ -182,17 +275,51 @@ impl Scrollback {
         result
     }
     pub(crate) fn presentation(&self) -> Vec<String> {
-        if compact() { self.compact_rows().into_iter().map(|(text, _)| text).collect() } else { self.all() }
+        if compact() {
+            self.compact_rows()
+                .into_iter()
+                .map(|(text, _)| text)
+                .collect()
+        } else {
+            self.all()
+        }
     }
-    pub(crate) fn click_presentation(&mut self, row: usize) -> bool {
-        if !compact() { return self.toggle_history(row); }
-        let Some(id) = self.compact_rows().get(row).and_then(|(_, id)| *id) else { return false; };
-        if self.blocks[id].review.is_some() { return false; }
+    pub(crate) fn click_presentation(&mut self, row: usize, width: usize) -> bool {
+        let rows = self.presentation();
+        let mut offset = 0;
+        let Some(row) = rows.iter().position(|text| {
+            offset += super::markdown::wrap_styled(text, "", "", width.max(1)).len();
+            row < offset
+        }) else {
+            return false;
+        };
+        if !compact() {
+            return self.toggle_history(row);
+        }
+        let Some(id) = self.compact_rows().get(row).and_then(|(_, id)| *id) else {
+            return false;
+        };
+        if self.blocks[id].prompt.is_some() {
+            let Some(index) = self.logged.iter().position(|line| line.block == Some(id)) else {
+                return false;
+            };
+            return self.toggle_history(index);
+        }
+        if self.blocks[id].review.is_some() {
+            return false;
+        }
         if self.blocks[id].compact_level == 0 {
-            let mut index = self.logged.iter().position(|line| line.block == Some(id)).unwrap();
+            let mut index = self
+                .logged
+                .iter()
+                .position(|line| line.block == Some(id))
+                .unwrap();
             while index < self.logged.len() {
                 if let Some(member) = self.logged[index].block {
-                    if self.blocks[member].review.is_some() { break; }
+                    if self.blocks[member].review.is_some() || self.blocks[member].prompt.is_some()
+                    {
+                        break;
+                    }
                     self.blocks[member].compact_level = 1;
                     index += 1;
                 } else if self.logged[index].text.trim().is_empty()
@@ -212,11 +339,7 @@ impl Scrollback {
         if line.block.is_none() {
             return false;
         }
-        let bottom = self.logged.len();
-        if bottom > u16::MAX as usize {
-            return false;
-        }
-        let Some((_, rows)) = self.toggle(bottom as u16, row as u16) else {
+        let Some((_, rows)) = self.toggle_index(row, 0) else {
             return false;
         };
         for (text, block) in rows {
@@ -262,6 +385,13 @@ impl Scrollback {
         row: u16,
     ) -> Option<(u16, Vec<(String, Option<usize>)>)> {
         let index = self.line_at(bottom, row)?;
+        self.toggle_index(index, bottom)
+    }
+    fn toggle_index(
+        &mut self,
+        index: usize,
+        bottom: u16,
+    ) -> Option<(u16, Vec<(String, Option<usize>)>)> {
         let block = self.logged[index].block?;
         let first = self
             .logged
@@ -378,6 +508,46 @@ fn screen_rows(text: &str, columns: usize) -> usize {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn identical_prompts_keep_distinct_targets_and_literal_json() {
+        let mut history = super::Scrollback::default();
+        let text = "{\"stdout\":\"literal prompt\"}\nsecond\nthird\nlast";
+        history.record_prompt(text);
+        history.push("BETWEEN".into(), None);
+        history.record_prompt(text);
+        history.expand_prompt_id(0, 80);
+        assert!(history.blocks[0].body_open);
+        assert!(!history.blocks[1].body_open);
+        assert!(history.all()[0].contains("stdout"));
+    }
+    #[test]
+    fn prompt_history_survives_reflow_and_expands_without_losing_the_tail() {
+        let mut history = super::Scrollback::default();
+        let text = (0..120)
+            .map(|i| format!("PROMPT_{i}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        history.record_prompt(&text);
+        history.push("AFTER_PROMPT".into(), None);
+        assert!(!history.all().iter().any(|row| row.contains("PROMPT_119")));
+        history.reflow(18);
+        assert!(history.click_presentation(0, 18));
+        assert!(history.all().iter().any(|row| row.contains("PROMPT_119")));
+        assert_eq!(history.all().last().unwrap(), "AFTER_PROMPT");
+        assert!(history.click_presentation(0, 18));
+        assert!(!history.all().iter().any(|row| row.contains("PROMPT_119")));
+        history.expand_prompt(&text, 18);
+        assert!(history.all().iter().any(|row| row.contains("PROMPT_119")));
+    }
+
+    #[test]
+    fn wrapped_history_click_targets_the_correct_block() {
+        let mut history = super::Scrollback::default();
+        history.push("01234567890123456789".into(), None);
+        history.record_prompt("ONE\nTWO\nTHREE\nFOUR");
+        assert!(history.click_presentation(2, 10));
+        assert!(history.all().iter().any(|row| row.contains("FOUR")));
+    }
     use super::*;
 
     #[test]

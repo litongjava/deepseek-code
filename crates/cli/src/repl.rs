@@ -98,9 +98,15 @@ fn conversation(session: &Session, id: &str, detailed: bool, mut recorded: Optio
                 continue;
                 }
                 let mut text = message.content.lines();
-                lines.push(change_view::body(&format!("{} {}", crate::terminal::prompt_glyph(), text.next().unwrap_or_default())));
+                lines.push(change_view::body(&format!(
+                    "{} {}",
+                    crate::terminal::prompt_glyph(),
+                    text.next().unwrap_or_default()
+                )));
                 lines.extend(text.map(|line| change_view::body(&format!("  {line}"))));
-                if let Some(recorded) = recorded.as_deref_mut() { record_lines(recorded, &lines[message_start..], width); }
+                if let Some(recorded) = recorded.as_deref_mut() {
+                    recorded.record_prompt(&message.content);
+                }
                 continue;
             }
             if detailed {

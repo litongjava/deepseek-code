@@ -103,6 +103,14 @@ pub(super) struct HistoryView {
 }
 
 impl HistoryView {
+    pub(super) fn open_at(&mut self, row: usize) -> io::Result<()> {
+        if !self.active() {
+            execute!(io::stderr(), EnterAlternateScreen)?;
+        }
+        self.top = Some(row);
+        self.previous.clear();
+        Ok(())
+    }
     pub(super) fn screen_rows(&self, height: usize, composer: &[String]) -> Vec<String> {
         let page = height.saturating_sub(composer.len());
         let mut result = vec![String::new(); height];
@@ -117,8 +125,12 @@ impl HistoryView {
         let was_active = self.active();
         let end = self.all.len().saturating_sub(page);
         let top = self.top.unwrap_or(end);
-        let next = if up { top.saturating_sub(1) } else { top.saturating_add(1).min(end) };
-        if !up && next >= end {
+        let next = if up {
+            top.saturating_sub(1)
+        } else {
+            top.saturating_add(1).min(end)
+        };
+        if !up && top >= end {
             self.close()?;
             self.previous.clear();
             return Ok(());
@@ -177,10 +189,9 @@ impl HistoryView {
             }
             KeyCode::Home if !self.all.is_empty() => self.top = Some(0),
             KeyCode::PageDown => {
-                self.top = self.top.and_then(|top| {
-                    let next = top.saturating_add(page);
-                    (next < end).then_some(next)
-                });
+                self.top = self
+                    .top
+                    .and_then(|top| (top < end).then_some(top.saturating_add(page).min(end)));
             }
             KeyCode::End => self.top = None,
             _ => {}
@@ -598,6 +609,8 @@ mod tests {
         assert_eq!(history.top, Some(70));
         history.move_page(KeyCode::PageDown, 10);
         assert_eq!(history.top, Some(80));
+        history.move_page(KeyCode::PageDown, 10);
+        assert_eq!(history.top, Some(90));
         history.move_page(KeyCode::PageDown, 10);
         assert_eq!(history.top, None);
         history.move_page(KeyCode::Home, 10);
