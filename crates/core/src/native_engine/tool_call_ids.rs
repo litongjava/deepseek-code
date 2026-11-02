@@ -42,10 +42,57 @@ pub(super) fn normalize_chat(body: &mut Value) {
     }
 }
 
+/// Keep Anthropic calls paired across gateways with stricter upstream ID limits.
+pub(super) fn normalize_anthropic(body: &mut Value) {
+    if let Some(messages) = body["messages"].as_array_mut() {
+        for message in messages {
+            if let Some(blocks) = message["content"].as_array_mut() {
+                for block in blocks {
+                    let key = match block["type"].as_str() {
+                        Some("tool_use") => "id",
+                        Some("tool_result") => "tool_use_id",
+                        _ => continue,
+                    };
+                    if let Some(id) = block.get_mut(key) {
+                        normalize(id);
+                    }
+                }
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn anthropic_gateway_ids_preserve_pairs_and_opaque_content() {
+        let id = "a".repeat(74);
+        let mut body = json!({"messages":[
+            {"role":"assistant","content":[
+                {"type":"thinking","thinking":id,"signature":id},
+                {"type":"tool_use","id":id,"name":"Grep","input":{"pattern":id}},
+                {"type":"tool_use","id":"short","name":"Read","input":{}}
+            ]},
+            {"role":"user","content":[{"type":"tool_result","tool_use_id":id,"content":id}]}
+        ]});
+        normalize_anthropic(&mut body);
+        let blocks = &body["messages"][0]["content"];
+        assert!(blocks[1]["id"].as_str().unwrap().len() <= 64);
+        assert_eq!(
+            blocks[1]["id"],
+            body["messages"][1]["content"][0]["tool_use_id"]
+        );
+        assert_eq!(blocks[0]["signature"], id);
+        assert_eq!(blocks[1]["input"]["pattern"], id);
+        assert_eq!(blocks[2]["id"], "short");
+        assert_eq!(body["messages"][1]["content"][0]["content"], id);
+        let original = body.clone();
+        normalize_anthropic(&mut body);
+        assert_eq!(body, original);
+    }
 
     #[test]
     fn long_call_ids_keep_pairs_distinct_and_short_ids_unchanged() {

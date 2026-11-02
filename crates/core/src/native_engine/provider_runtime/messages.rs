@@ -241,6 +241,9 @@ pub(super) fn request(
             body
         }
     };
+    if api == "anthropic-messages" {
+        super::super::tool_call_ids::normalize_anthropic(&mut body);
+    }
     if api == "anthropic-messages" && metadata["compat"]["supportsCacheControlOnTools"] != false {
         crate::performance::apply_conversation_cache(&mut body);
     }

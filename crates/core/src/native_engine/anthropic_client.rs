@@ -172,6 +172,7 @@ impl AnthropicClient {
     }
 
     fn apply_options(&self, body: &mut Value, provider: &ResolvedProvider) -> Result<()> {
+        super::tool_call_ids::normalize_anthropic(body);
         crate::services::anthropic_auth::apply_fast(body, provider.model.fast, &provider.model.id, &provider.provider.base_url)?;
         if let Some(schema) = &self.response_schema {
             if crate::structured_output::provider_enforces_schema(&provider.provider.base_url) {
