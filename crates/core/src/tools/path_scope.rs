@@ -30,17 +30,21 @@ pub(crate) fn carry<R>(
     move || PERMISSIONS.sync_scope(manager, || ALLOWED.sync_scope(roots, work))
 }
 
-pub(super) fn allows(canonical: &Path) -> bool {
-    // The permission gate still enforces explicit rules before tool execution.
-    // Read the live mode so a mid-turn permission change takes effect immediately.
-    if PERMISSIONS
+/// Trusted execution context, never derived from model-supplied tool arguments.
+/// Read the live mode so changing out of bypass takes effect immediately.
+pub(super) fn bypass_permissions() -> bool {
+    PERMISSIONS
         .try_with(|manager| {
             manager.as_ref().is_some_and(|manager| {
                 manager.get_mode() == crate::permissions::PermissionMode::BypassPermissions
             })
         })
         .unwrap_or(false)
-    {
+}
+
+pub(super) fn allows(canonical: &Path) -> bool {
+    // The permission gate still enforces explicit rules before tool execution.
+    if bypass_permissions() {
         return true;
     }
     ALLOWED

@@ -565,6 +565,31 @@ pub fn is_dangerous_command(command: &str) -> bool {
 mod command_filter_tests {
     use super::is_dangerous_command;
 
+    #[tokio::test]
+    async fn bypass_executes_filtered_text_and_tracks_live_mode_without_argument_spoofing() {
+        use crate::permissions::{AuditLogger, PermissionManager, PermissionMode};
+        let manager = std::sync::Arc::new(PermissionManager::new(std::sync::Arc::new(AuditLogger::new(16))));
+        let dir = tempfile::tempdir().unwrap();
+        crate::config::OrchestrationConfig::init_global().unwrap();
+        // echo/Write-Output only: never execute a shutdown in the test runner.
+        let cases = if cfg!(windows) { vec![("cmd", "echo shutdown /s /t 0"), ("powershell", "Write-Output 'shutdown /s /t 0'")] }
+                    else { vec![("sh", "printf '%s' 'shutdown /s /t 0'")] };
+        for (shell, command) in cases {
+            let input = serde_json::json!({"shell":shell,"command":command,"__bypass_permissions":true});
+            let run = || super::tool_bash_async(input.clone(), dir.path().to_str().unwrap());
+            assert_eq!(run().await.unwrap()["blocked"], true);
+            super::path_scope::with_permissions(Some(manager.clone()), async {
+                manager.set_mode(PermissionMode::BypassPermissions);
+                let result = run().await.unwrap();
+                assert_eq!(result["exit_code"], 0, "{result}");
+                assert!(result["stdout"].as_str().unwrap().contains("shutdown /s /t 0"));
+                manager.set_mode(PermissionMode::AskPermissions);
+                assert_eq!(run().await.unwrap()["blocked"], true);
+            }).await;
+            assert_eq!(run().await.unwrap()["blocked"], true);
+        }
+    }
+
     #[test]
     fn ordinary_http_requests_are_not_unconditionally_blocked() {
         for command in [
@@ -940,7 +965,7 @@ async fn tool_bash_async(input: serde_json::Value, cwd: &str) -> Result<serde_js
     let timeout = std::time::Duration::from_millis(timeout_ms);
     let shell_type = input["shell"].as_str().unwrap_or("bash");
 
-    if is_dangerous_command(command) {
+    if !path_scope::bypass_permissions() && is_dangerous_command(command) {
         return Ok(serde_json::json!({
             "error": "Command blocked by security filter: dangerous command detected",
             "is_error": true,

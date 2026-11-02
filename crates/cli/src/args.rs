@@ -89,7 +89,7 @@ pub struct Cli {
     pub allow_dangerously_skip_permissions: bool,
     /// Full Access: bypass mode that also ignores deny rules and runs commands
     /// outside the sandbox. Only for disposable machines.
-    #[arg(long, global = true)]
+    #[arg(long, visible_alias = "yolo", global = true)]
     pub full_access: bool,
     /// Allow matching tools without confirmation for this launch; deny and Plan still apply.
     #[arg(long, visible_alias = "allowedTools", num_args = 1.., global = true)]
@@ -618,6 +618,17 @@ pub enum PluginCommands {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn yolo_is_full_access_and_keeps_explicit_worker_modes() {
+        let mut cli = super::Cli::try_parse_with_mode_source(["dcl", "--yolo"]).unwrap();
+        cli.normalize();
+        assert!(cli.full_access && cli.allow_dangerously_skip_permissions);
+        assert!(matches!(cli.permission_mode, super::PermissionModeArg::Bypass));
+        let mut worker = super::Cli::try_parse_with_mode_source(["dcl", "--yolo", "--permission-mode", "plan"]).unwrap();
+        worker.normalize();
+        assert!(worker.full_access);
+        assert!(matches!(worker.permission_mode, super::PermissionModeArg::Plan));
+    }
     #[test]
     fn permission_mode_tracks_explicit_ask_without_confusing_default() {
         assert!(!super::Cli::try_parse_with_mode_source(["dcl"]).unwrap().permission_mode_explicit);
