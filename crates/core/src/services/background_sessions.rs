@@ -48,11 +48,19 @@ pub(crate) fn save<T: Serialize>(path: &Path, value: &T) -> Result<()> {
     let mut temporary = tempfile::NamedTempFile::new_in(path.parent().context("Missing parent")?)?;
     serde_json::to_writer(&mut temporary, value)?;
     temporary.flush()?;
+    // Flush file contents before publishing the name, including after power loss.
+    temporary.as_file().sync_all()?;
     // Windows readers/antivirus can briefly deny replacement of a live state
     // file. Retry the same complete temporary file; never expose partial JSON.
     for attempt in 0..=20 {
         match temporary.persist(path) {
-            Ok(_) => return Ok(()),
+            Ok(file) => {
+                file.sync_all()?;
+                // Persist the renamed directory entry on Unix as well.
+                #[cfg(unix)]
+                fs::File::open(path.parent().context("Missing parent")?)?.sync_all()?;
+                return Ok(());
+            }
             Err(error)
                 if error.error.kind() == std::io::ErrorKind::PermissionDenied && attempt < 20 =>
             {
@@ -375,8 +383,21 @@ pub fn list(root: &Path, parent: Option<&str>) -> Result<Vec<Job>> {
             Ok(job) => job,
             // A new supervisor creates its directory before publishing state.
             // Another session's discovery must not fail during this window.
-            Err(error) if error.downcast_ref::<std::io::Error>()
-                .is_some_and(|error| error.kind() == std::io::ErrorKind::NotFound) => continue,
+            Err(error)
+                if error
+                    .downcast_ref::<std::io::Error>()
+                    .is_some_and(|error| error.kind() == std::io::ErrorKind::NotFound) =>
+            {
+                continue
+            }
+            // One damaged record must not prevent unrelated sessions from starting.
+            // Preserve the original bytes and ownership claims for diagnosis; direct
+            // reads and control operations still fail instead of guessing task state.
+            Err(error) if error.downcast_ref::<serde_json::Error>().is_some() => {
+                tracing::warn!(path = %entry.path().display(), error = %error,
+                    "Skipping unreadable background task state; original file preserved");
+                continue;
+            }
             Err(error) => return Err(error),
         };
         if parent.map_or(true, |id| job.parent_session_id == id) {
@@ -885,7 +906,7 @@ mod tests {
         (root, dir, id)
     }
     #[test]
-    fn discovery_tolerates_concurrent_unpublished_jobs_but_reports_bad_state() {
+    fn discovery_tolerates_concurrent_unpublished_jobs_and_bad_state() {
         let (root, dir, id) = fixture("");
         let new_id = uuid::Uuid::new_v4().to_string();
         let new_dir = directory(root.path(), &new_id).unwrap();
@@ -909,8 +930,41 @@ mod tests {
         publish.send(()).unwrap();
         writer.join().unwrap();
         assert_eq!(list(root.path(), None).unwrap().len(), 2);
-        fs::write(directory(root.path(), &new_id).unwrap().join("state.json"), b"invalid").unwrap();
-        assert!(format!("{:#}", list(root.path(), None).unwrap_err()).contains("Parsing task state"));
+        fs::write(
+            directory(root.path(), &new_id).unwrap().join("state.json"),
+            b"invalid",
+        )
+        .unwrap();
+        assert_eq!(list(root.path(), None).unwrap().len(), 1);
+        assert!(
+            format!("{:#}", get(root.path(), &new_id).unwrap_err()).contains("Parsing task state")
+        );
+    }
+
+    #[test]
+    fn discovery_preserves_crash_damaged_records_and_ownership() {
+        let (root, dir, id) = fixture("");
+        let claim = root.path().join("background-tasks/session-test.claim");
+        fs::write(&claim, &id).unwrap();
+        for bytes in [
+            Vec::new(),
+            vec![0; 409],
+            b"{\"id\":".to_vec(),
+            b"{}".to_vec(),
+            vec![255],
+        ] {
+            fs::write(dir.join("state.json"), &bytes).unwrap();
+            assert!(list(root.path(), None).unwrap().is_empty());
+            assert!(list(root.path(), Some("parent")).unwrap().is_empty());
+            assert!(get(root.path(), &id).is_err());
+            assert!(cancel(root.path(), &id).is_err());
+            assert_eq!(fs::read(dir.join("state.json")).unwrap(), bytes);
+            assert_eq!(fs::read_to_string(&claim).unwrap(), id);
+        }
+        // Filesystem failures are not classified as damaged JSON.
+        fs::remove_file(dir.join("state.json")).unwrap();
+        fs::create_dir(dir.join("state.json")).unwrap();
+        assert!(list(root.path(), None).is_err());
     }
 
     #[test]
