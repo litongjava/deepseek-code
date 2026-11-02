@@ -156,7 +156,11 @@ pub fn select(
         .model
         .as_deref()
         .or(resumed_model)
-        .or(prefs["model"].as_str())
+        .or_else(|| prefs["model"].as_str().filter(|saved| {
+            cli.provider.as_deref().is_none_or(|explicit| {
+                saved.split_once("::").is_some_and(|(provider, _)| provider == explicit)
+            })
+        }))
         .or(first_model)
         .unwrap_or(if std::env::var_os("DEEPSEEK_API_KEY").is_some() {
             "deepseek-flash"
@@ -461,6 +465,30 @@ mod budget_tests {
 #[cfg(test)]
 mod search_tests {
     use super::*;
+
+    #[test]
+    fn saved_selection_survives_restart_and_explicit_provider_wins() {
+        use clap::Parser;
+        let root = tempfile::tempdir().unwrap();
+        let paths = RuntimePaths::new(root.path().join("data")).unwrap();
+        let mut manager = ConfigManager::new(paths.data_dir.clone());
+        manager.update_config(|config| {
+            config.providers = ["first", "second"].into_iter().map(|id| {
+                let mut provider = provider_template("fixture-model");
+                provider.id = id.into();
+                provider.api_key = Some("fixture-only".into());
+                provider
+            }).collect();
+            config.default_provider_id = Some("first".into());
+        }).unwrap();
+        save_default_model(&paths, "second", "fixture-model").unwrap();
+        let selected = select(&Cli::parse_from(["dcl"]), &paths, None, None).unwrap();
+        assert_eq!(selected.provider_id, "second");
+        let selected = select(&Cli::parse_from(["dcl", "--provider", "first"]), &paths, None, None).unwrap();
+        assert_eq!(selected.provider_id, "first");
+        let selected = select(&Cli::parse_from(["dcl"]), &paths, Some("fixture-model"), Some("first")).unwrap();
+        assert_eq!(selected.provider_id, "first");
+    }
 
     #[test]
     fn search_settings_are_saved_where_web_search_reads_them() {

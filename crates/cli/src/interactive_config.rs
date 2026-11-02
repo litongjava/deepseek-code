@@ -714,6 +714,7 @@ pub async fn handle(
                 .map(|model| model.id.clone())
                 .context("The saved provider has no enabled models")?;
             session.switch(paths, select(paths, &id, &model)?).await?;
+            config::save_default_model(paths, &session.provider_id, &session.model)?;
             status(session);
         }
         return Ok(true);
@@ -814,6 +815,7 @@ pub async fn handle(
                         if models[index].id != session.model {
                             let selection = select(paths, &provider.id, &models[index].id)?;
                             session.switch(paths, selection).await?;
+                            config::save_default_model(paths, &session.provider_id, &session.model)?;
                             status(session);
                             command_eprintln!("Conversation history preserved. Use /test to verify connectivity.");
                         }
@@ -852,6 +854,7 @@ pub async fn handle(
     };
     let selection = select(paths, &provider, &model)?;
     session.switch(paths, selection).await?;
+    config::save_default_model(paths, &session.provider_id, &session.model)?;
     status(session);
     command_eprintln!("Conversation history preserved. Use /test to verify connectivity.");
     Ok(true)
