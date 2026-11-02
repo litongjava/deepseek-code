@@ -50,10 +50,11 @@ pub fn execute(input: Value, cwd: &str) -> Result<Value> {
     if let Some(media_type) = image_media_type(&extension) {
         return image(path, media_type);
     }
+    let pages = optional_pages(&input)?;
     if extension == "pdf" {
-        return pdf(path, input["pages"].as_str());
+        return pdf(path, pages);
     }
-    anyhow::ensure!(input.get("pages").map_or(true, Value::is_null), "pages applies only to PDF files");
+    anyhow::ensure!(pages.is_none(), "pages applies only to PDF files; omit pages for text files and use offset/limit for line ranges");
     let content = std::fs::read_to_string(path).map_err(|error| anyhow!("Cannot read {} as UTF-8 text: {error}", path.display()))?;
     if extension == "ipynb" {
         if let Ok(notebook) = serde_json::from_str::<Value>(&content) {
@@ -61,6 +62,15 @@ pub fn execute(input: Value, cwd: &str) -> Result<Value> {
         }
     }
     text(&content, &input)
+}
+
+// Empty optional strings from model adapters are placeholders, not page ranges.
+fn optional_pages(input: &Value) -> Result<Option<&str>> {
+    match input.get("pages") {
+        None | Some(Value::Null) => Ok(None),
+        Some(Value::String(value)) => Ok(Some(value.trim()).filter(|value| !value.is_empty())),
+        _ => bail!("pages must be a PDF page-range string or null"),
+    }
 }
 
 fn text(content: &str, input: &Value) -> Result<Value> {
@@ -190,6 +200,24 @@ mod tests {
         assert_eq!(image["image"]["media_type"], "image/png");
         assert_eq!(image["image"]["data"], "iVBORw==");
         assert!(execute(json!({"file_path":"a.txt","pages":"1"}), cwd).is_err());
+    }
+
+    #[test]
+    fn empty_page_placeholders_do_not_block_text_or_notebook_reads() {
+        let dir = tempfile::tempdir().unwrap();
+        let cwd = dir.path().to_str().unwrap();
+        std::fs::write(dir.path().join("guide.md"), "# 中文指南\n正文").unwrap();
+        std::fs::write(dir.path().join("notebook.ipynb"), r#"{"cells":[{"cell_type":"markdown","source":["中文"]}]}"#).unwrap();
+        for pages in [Value::Null, json!(""), json!(" \t\r\n")] {
+            for file in ["guide.md", "notebook.ipynb"] {
+                let result = execute(json!({"file_path":file,"pages":pages}), cwd).unwrap();
+                assert!(result["content"].as_str().unwrap().contains("中文"));
+            }
+            assert_eq!(optional_pages(&json!({"pages":pages})).unwrap(), None);
+        }
+        assert_eq!(optional_pages(&json!({"pages":" 2-4 "})).unwrap(), Some("2-4"));
+        assert!(execute(json!({"file_path":"guide.md","pages":"1-2"}), cwd).is_err());
+        assert!(optional_pages(&json!({"pages":3})).is_err());
     }
 
     #[test]
