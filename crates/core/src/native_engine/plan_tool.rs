@@ -42,10 +42,7 @@ impl ToolLoopExecutor {
         let Some(session) = self.conv_id.as_deref() else {
             return false;
         };
-        self.permission_manager
-            .as_ref()
-            .is_some_and(|pm| pm.get_mode() == PermissionMode::PlanMode)
-            && plans::is_document_tool(root, session, tool, input)
+        plans::is_document_tool(root, session, tool, input)
     }
 
     pub(super) async fn execute_plan_document(
@@ -655,6 +652,57 @@ mod tests {
         .with_search_config_path(root.join("settings.json"))
         .with_permission_manager(manager.clone());
         (executor, rx, manager)
+    }
+
+    #[tokio::test]
+    async fn dedicated_plan_path_survives_mode_changes_and_bypass_still_obeys_denies() {
+        let root = tempfile::tempdir().unwrap();
+        let (mut executor, _events, manager) = document_executor(root.path());
+        let target = plans::path(root.path(), "file-session").unwrap();
+        let spelling = target
+            .to_string_lossy()
+            .trim_start_matches("\\\\?\\")
+            .replace('\\', "/");
+        let write = json!({"file_path":spelling,"content":"# Plan survives a mode change"});
+        for mode in [PermissionMode::PlanMode, PermissionMode::BypassPermissions] {
+            manager.set_mode(mode);
+            executor
+                .validate_approved_input("Write", &write)
+                .await
+                .unwrap();
+            let (_, output, failed) = executor
+                .execute_tool_call("Write", &write, "plan-write")
+                .await;
+            assert!(!failed, "{output}");
+        }
+        manager.set_mode(PermissionMode::Auto);
+        assert!(executor.is_plan_document_tool("Write", &write));
+        executor
+            .validate_approved_input("Write", &write)
+            .await
+            .unwrap();
+        manager.set_mode(PermissionMode::BypassPermissions);
+        let outside = tempfile::tempdir().unwrap();
+        let input = json!({"file_path":outside.path().join("approved.txt"),"content":"allowed"});
+        executor
+            .validate_approved_input("Write", &input)
+            .await
+            .unwrap();
+        manager.set_session_rules(
+            "file-session",
+            std::collections::HashMap::from([(
+                "Write".into(),
+                crate::permissions::rules::PermissionAction::Deny,
+            )]),
+        );
+        assert!(executor
+            .validate_approved_input("Write", &input)
+            .await
+            .is_err());
+        assert!(executor
+            .validate_approved_input("Write", &write)
+            .await
+            .is_err());
     }
 
     #[tokio::test]

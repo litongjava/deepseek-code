@@ -65,7 +65,8 @@ async fn run_case(cancel: bool, team: bool) {
         let workspace = mock_workspace.clone(); let team_id = mock_team.clone(); let captured = captured.clone(); async move {
             captured.lock().unwrap().push(body.clone());
             let messages = body["messages"].as_array().unwrap();
-            let child = messages.iter().any(|m| m["role"] == "user" && m["content"] == "inspect child");
+            // Child prompts can contain inherited project/context reminders.
+            let child = messages.iter().any(|m| m["role"] == "system" && m["content"].as_str().is_some_and(|text| text.contains("Child session ID:")));
             let has_tools = messages.iter().any(|m| m["role"] == "tool");
             let response = if !child && !has_tools {
                 if team { stream(json!({"tool_calls":[call("team-1","team",json!({"operation":"run","team_id":team_id}),0)]}), "tool_calls") }

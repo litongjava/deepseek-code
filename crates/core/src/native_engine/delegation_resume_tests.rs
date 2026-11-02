@@ -66,6 +66,87 @@ fn fixture() -> (
     (temp, context, store, parent, cwd)
 }
 #[tokio::test]
+async fn foreground_agent_accepts_model_effort_and_worktree_without_backgrounding() {
+    let (_temp, context, _store, parent, cwd) = fixture();
+    for args in [
+        vec!["init"],
+        vec![
+            "-c",
+            "user.name=Fixture",
+            "-c",
+            "user.email=fixture@example.invalid",
+            "commit",
+            "--allow-empty",
+            "-m",
+            "fixture",
+        ],
+    ] {
+        let output = std::process::Command::new("git")
+            .args(args)
+            .current_dir(&cwd)
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+    let (url, api, server) = endpoint().await;
+    let registry: OwnedChildren = Default::default();
+    let mut executor = owner(&context, &parent, &cwd, &url, registry.clone());
+    let mut alternate = executor.provider.model.clone();
+    alternate.id = "alternate".into();
+    executor.provider.provider.models.push(alternate);
+    let result = executor.execute_delegated(&json!({"prompt":"inspect","run_in_background":false,"model":"alternate","effort":"high","isolation":"worktree"})).await.unwrap();
+    let child = result["session_id"].as_str().unwrap();
+    assert_eq!(result["status"], "completed");
+    assert_ne!(result["backgrounded"], true);
+    let retained = registry.lock().unwrap();
+    let child_executor = &retained[child].executor;
+    assert_eq!(child_executor.provider.model.id, "alternate");
+    assert_eq!(
+        child_executor.provider.model.effort.as_deref(),
+        Some("high")
+    );
+    assert_ne!(
+        std::path::Path::new(&child_executor.workspace_cwd)
+            .canonicalize()
+            .unwrap(),
+        cwd.canonicalize().unwrap()
+    );
+    assert_eq!(executor.provider.model.id, "fixture");
+    assert_eq!(api.requests.lock().unwrap()[0]["model"], "alternate");
+    drop(retained);
+    executor
+        .resume_owned_child(child, Some("inspect again"), false)
+        .await
+        .unwrap();
+    assert_eq!(api.requests.lock().unwrap().len(), 2);
+    context
+        .db
+        .with_conn(|conn| {
+            conn.execute(
+                "UPDATE conversation_worktrees SET source_path=?1 WHERE conversation_id=?2",
+                rusqlite::params![context.paths.data_dir.to_string_lossy(), child],
+            )
+        })
+        .unwrap()
+        .unwrap();
+    assert!(executor
+        .resume_owned_child(child, Some("reject changed binding"), false)
+        .await
+        .is_err());
+    assert!(executor
+        .execute_delegated(&json!({"prompt":"inspect","model":"missing"}))
+        .await
+        .unwrap_err()
+        .to_string()
+        .contains("Unknown model"));
+    server.abort();
+}
+
+#[tokio::test]
 async fn explicit_resume_sendmessage_and_safe_boundary_keep_original_child_provider() {
     let (_temp, context, store, parent, cwd) = fixture();
     let (a, api_a, server_a) = endpoint().await;

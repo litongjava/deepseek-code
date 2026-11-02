@@ -250,7 +250,7 @@ pub fn save(root: &Path, session: &str, content: &str) -> Result<PathBuf> {
     Ok(path)
 }
 
-/// Exact advertised absolute path only: no aliases, traversal, alternate session or tool.
+/// Exact session path only, including equivalent Windows drive/UNC spellings.
 pub fn is_document_tool(root: &Path, session: &str, tool: &str, input: &serde_json::Value) -> bool {
     if !matches!(tool, "Read" | "Write" | "Edit") {
         return false;
@@ -265,7 +265,28 @@ pub fn is_document_tool(root: &Path, session: &str, tool: &str, input: &serde_js
         return false;
     }
     let candidate = Path::new(candidate);
-    candidate.is_absolute() && path(root, session).is_ok_and(|expected| candidate == expected)
+    candidate.is_absolute()
+        && path(root, session).is_ok_and(|expected| {
+            #[cfg(windows)]
+            {
+                // Normalize only the Windows namespace prefix and separators. Never
+                // canonicalize a model path through a link or collapse traversal.
+                fn spelling(path: &Path) -> String {
+                    let text = path.to_string_lossy().replace('/', "\\");
+                    let text = if let Some(unc) = text.strip_prefix("\\\\?\\UNC\\") {
+                        format!("\\\\{unc}")
+                    } else {
+                        text.strip_prefix("\\\\?\\").unwrap_or(&text).to_owned()
+                    };
+                    text.to_ascii_lowercase()
+                }
+                spelling(candidate) == spelling(&expected)
+            }
+            #[cfg(not(windows))]
+            {
+                candidate == expected
+            }
+        })
 }
 
 pub fn edit_document(
@@ -375,6 +396,18 @@ mod tests {
         let target = path(root.path(), "one").unwrap();
         let write = json!({"file_path":target,"content":"# Initial plan\nTest twice twice"});
         assert!(is_document_tool(root.path(), "one", "Write", &write));
+        #[cfg(windows)]
+        for spelling in [
+            target
+                .to_string_lossy()
+                .trim_start_matches("\\\\?\\")
+                .replace('\\', "/"),
+            target.to_string_lossy().to_uppercase(),
+        ] {
+            let input = json!({"file_path":spelling,"content":"# Windows plan"});
+            assert!(is_document_tool(root.path(), "one", "Write", &input));
+            assert!(!is_document_tool(root.path(), "two", "Write", &input));
+        }
         assert!(!is_document_tool(root.path(), "two", "Write", &write));
         assert!(!is_document_tool(root.path(), "one", "Bash", &write));
         for name in [

@@ -134,8 +134,19 @@ fn owned_binding(
         let root=if child_row.project_id.as_deref().is_none_or(str::is_empty) {std::path::Path::new(expected).parent().context("Private root missing")?.to_path_buf()} else {context.paths.data_dir.join("workspaces")};
         let actual=crate::native_engine::workspace::resolve_workspace(conn,&root,child,None)?.0.canonicalize()?;
         let owner=crate::native_engine::workspace::resolve_workspace(conn,&root,parent,None)?.0.canonicalize()?;
-        ensure!(actual==owner && actual==std::path::Path::new(expected).canonicalize()?,"Owner/child workspace no longer matches");
-        Ok(json!({"runtime":context.paths.data_dir.canonicalize()?,"parent_project":parent_row.project_id,"parent_mode":parent_row.workspace_mode,"child_project":child_row.project_id,"child_mode":child_row.workspace_mode,"cwd":actual,"provider":child_row.provider,"model":child_row.model}))
+        let isolated = if actual != owner && parent_row.project_id == child_row.project_id {
+            use rusqlite::OptionalExtension;
+            let saved: Option<(String, String)> = conn.query_row(
+                "SELECT source_path,path FROM conversation_worktrees WHERE conversation_id=?1",
+                [child], |row| Ok((row.get(0)?, row.get(1)?)),
+            ).optional()?;
+            saved.is_some_and(|(source, path)| {
+                std::path::Path::new(&source).canonicalize().ok().as_ref() == Some(&owner)
+                    && std::path::Path::new(&path).canonicalize().ok().as_ref() == Some(&actual)
+            })
+        } else { false };
+        ensure!((actual==owner || isolated) && actual==std::path::Path::new(expected).canonicalize()?,"Owner/child workspace no longer matches");
+        Ok(json!({"runtime":context.paths.data_dir.canonicalize()?,"parent_project":parent_row.project_id,"parent_mode":parent_row.workspace_mode,"child_project":child_row.project_id,"child_mode":child_row.workspace_mode,"owner_cwd":owner,"cwd":actual,"provider":child_row.provider,"model":child_row.model}))
     })?
 }
 
@@ -567,10 +578,6 @@ impl ToolLoopExecutor {
         if input["run_in_background"] == true && schema.is_none() && tools.is_none() {
             return self.spawn_background_agent(&input);
         }
-        ensure!(
-            ["model", "effort", "isolation"].iter().all(|key| input[*key].is_null()),
-            "model, effort and isolation apply to background agents; omit run_in_background or set it to true"
-        );
         let mut prepared = Box::pin(self.prepare_delegated_child(&input, schema, tools)).await?;
         if web_research {
             prepared.child.raw_web_fetch = true;
@@ -578,14 +585,14 @@ impl ToolLoopExecutor {
                 manager.allow_in_session(&prepared.id, "WebFetch");
             }
         }
-        self.run_owned_child(
+        Box::pin(self.run_owned_child(
             prepared.context,
             prepared.id,
             prepared.agent_type,
             prepared.child,
             prepared.receiver,
             prepared.policy,
-        )
+        ))
         .await
     }
 
@@ -734,6 +741,29 @@ impl ToolLoopExecutor {
         if let Some(effort) = runtime.as_ref().and_then(|agent| agent.effort.clone()) {
             provider.model.effort = Some(effort);
         }
+        if let Some(model) = input["model"]
+            .as_str()
+            .filter(|model| !model.trim().is_empty())
+        {
+            if model != provider.model.id {
+                provider.model = crate::native_engine::provider_manager::resolve_model_selection(
+                    &provider.provider.models,
+                    model,
+                )
+                .with_context(|| format!("Unknown model for agent provider: {model}"))?;
+            }
+        }
+        if let Some(effort) = input["effort"].as_str() {
+            ensure!(
+                ["low", "medium", "high", "xhigh", "max"].contains(&effort),
+                "Invalid effort"
+            );
+            provider.model.effort = Some(effort.into());
+        }
+        ensure!(
+            input["isolation"].is_null() || input["isolation"] == "worktree",
+            "Unsupported isolation mode"
+        );
         if let Some(agent) = &runtime {
             if !agent.disallowed_tools.is_empty() {
                 let available = match definition.tools.take() {
@@ -849,6 +879,25 @@ impl ToolLoopExecutor {
                 &provider.provider.id,
             )?
         };
+        let child_workspace = if input["isolation"] == "worktree" {
+            let worktree_input = json!({"name":format!("agent-{}", &id[..8.min(id.len())])});
+            let worktree: std::pin::Pin<
+                Box<
+                    dyn std::future::Future<Output = Result<(Value, std::path::PathBuf)>>
+                        + Send
+                        + '_,
+                >,
+            > = Box::pin(crate::tools::session_worktree::execute(
+                "EnterWorktree",
+                &worktree_input,
+                root,
+                &id,
+                std::path::Path::new(&self.workspace_cwd),
+            ));
+            worktree.await?.1.to_string_lossy().into_owned()
+        } else {
+            self.workspace_cwd.clone()
+        };
         if runtime.is_some() {
             // Preserve the effective tool boundary on a later standalone child resume,
             // without making the SDK prompt/definition available after this run.
@@ -910,7 +959,7 @@ impl ToolLoopExecutor {
             Some(system),
             child_max_tokens,
             events,
-            self.workspace_cwd.clone(),
+            child_workspace,
             self.reasoning_mode.clone(),
         )
         .with_runtime_agents(self.runtime_agents.clone())

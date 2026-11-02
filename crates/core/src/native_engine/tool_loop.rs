@@ -1486,9 +1486,17 @@ impl ToolLoopExecutor {
         _tool_use_id: &str,
     ) -> CallStep {
         if self.allowed_tools.as_ref().is_some_and(|names| !names.iter().any(|name| name == tool_name)) { return CallStep::Finished((tool_input.clone(), "Tool is not allowed by this agent definition".into(), true)); }
-        if self.permission_manager.as_ref().is_some_and(|pm| pm.get_mode() == crate::permissions::PermissionMode::PlanMode)
-            && (matches!(tool_name, "Write" | "Edit") || (tool_name == "Read" && self.is_plan_document_tool(tool_name, tool_input))) {
-            return CallStep::Finished(self.execute_plan_document(tool_name, tool_input, _tool_use_id).await);
+        if self.is_plan_document_tool(tool_name, tool_input)
+            || (self
+                .permission_manager
+                .as_ref()
+                .is_some_and(|pm| pm.get_mode() == crate::permissions::PermissionMode::PlanMode)
+                && matches!(tool_name, "Write" | "Edit"))
+        {
+            return CallStep::Finished(
+                self.execute_plan_document(tool_name, tool_input, _tool_use_id)
+                    .await,
+            );
         }
         if matches!(tool_name, "EnterPlanMode" | "ExitPlanMode") || (tool_name == "plan_mode" && matches!(tool_input["operation"].as_str(), Some("enter" | "exit"))) {
             return CallStep::Finished(self.execute_plan_transition(tool_name, tool_input, _tool_use_id).await);
