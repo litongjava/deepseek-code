@@ -42,6 +42,7 @@ pub async fn run_from_env() -> Result<bool> {
     };
     std::env::remove_var(service::HOST_ENV);
     let dir = PathBuf::from(value);
+    let _lifetime = service::host_lifetime_lock(&dir)?;
     let worker = service::read_worker(&dir)?;
     ensure!(
         service::directory(&worker).canonicalize()? == dir.canonicalize()?,

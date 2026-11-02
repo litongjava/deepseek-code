@@ -27,6 +27,7 @@ fn shell_tasks(paths: &RuntimePaths, id: &str) -> anyhow::Result<Vec<serde_json:
 /// Explicit quit cancels this session's work and waits for its host to stop.
 pub async fn quit_worker(paths: &RuntimePaths, id: &str) -> anyhow::Result<()> {
     use deepseek_code_core::services::{background_sessions as jobs, session_worker};
+    session_worker::recover_session(&paths.data_dir, id)?;
     if session_worker::current(&paths.data_dir, id)?.is_none_or(|worker| worker.status == "stopped")
     {
         return Ok(());

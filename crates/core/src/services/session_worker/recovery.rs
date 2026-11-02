@@ -1,5 +1,220 @@
 use super::*;
 
+pub(super) fn startup_lock(base: &Path) -> Result<fs::File> {
+    let lock = fs::OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .read(true)
+        .write(true)
+        .open(base.join("startup.lock"))?;
+    lock.try_lock()
+        .context("Session worker startup or recovery is already in progress; retry shortly")?;
+    Ok(lock)
+}
+
+pub(super) fn prepare_lifetime_locks(dir: &Path) -> Result<()> {
+    for name in ["supervisor.lock", "host.lock"] {
+        fs::File::create(dir.join(name))?.sync_all()?;
+    }
+    Ok(())
+}
+
+pub(super) fn lifetime_lock(dir: &Path, name: &str) -> Result<fs::File> {
+    let lock = fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(dir.join(name))?;
+    lock.try_lock()
+        .context("Session worker process is already running")?;
+    ensure!(
+        !dir.join("retired.json").exists(),
+        "Session worker generation was retired; refusing delayed startup"
+    );
+    Ok(lock)
+}
+
+// Migration for workers created before lifetime locks existed. A record from
+// before this boot cannot refer to a surviving process, even if a PID was reused.
+fn predates_boot(dir: &Path) -> Result<bool> {
+    let Some(uptime) = uptime() else {
+        return Ok(false);
+    };
+    let Some(boot) = std::time::SystemTime::now().checked_sub(uptime + Duration::from_secs(5))
+    else {
+        return Ok(false);
+    };
+    let path = dir.join("worker.json");
+    Ok(path.metadata()?.modified()? < boot)
+}
+
+#[cfg(windows)]
+fn uptime() -> Option<Duration> {
+    #[link(name = "kernel32")]
+    unsafe extern "system" {
+        fn GetTickCount64() -> u64;
+    }
+    Some(Duration::from_millis(unsafe { GetTickCount64() }))
+}
+#[cfg(target_os = "linux")]
+fn uptime() -> Option<Duration> {
+    let text = fs::read_to_string("/proc/uptime").ok()?;
+    let seconds = text.split_whitespace().next()?.parse::<f64>().ok()?;
+    Duration::try_from_secs_f64(seconds).ok()
+}
+#[cfg(not(any(windows, target_os = "linux")))]
+fn uptime() -> Option<Duration> {
+    None
+}
+
+fn damaged(error: &anyhow::Error) -> bool {
+    error.downcast_ref::<serde_json::Error>().is_some()
+        || error
+            .downcast_ref::<std::io::Error>()
+            .is_some_and(|e| e.kind() == std::io::ErrorKind::NotFound)
+}
+
+// The recovery journal is written before ownership is detached. A retry can
+// finish recovery after a crash without guessing whether the old turn succeeded.
+fn archive(path: &Path, backup: &Path) -> Result<()> {
+    match fs::read(path) {
+        Ok(bytes) => {
+            if !backup.exists() {
+                let mut file = fs::OpenOptions::new()
+                    .write(true)
+                    .create_new(true)
+                    .open(backup)?;
+                file.write_all(&bytes)?;
+                file.sync_all()?;
+            }
+            fs::remove_file(path)?;
+            Ok(())
+        }
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(e) => Err(e.into()),
+    }
+}
+
+pub(super) fn repair(root: &Path, session: &str) -> Result<bool> {
+    let base = worker_path(root, session)?;
+    let claim_path = root
+        .join("background-tasks")
+        .join(format!("session-{session}.claim"));
+    if !base.join("current.json").exists() && !claim_path.exists() {
+        return Ok(false);
+    }
+    let observed = current(root, session);
+    let worker = match observed {
+        Ok(worker) => worker,
+        Err(e) if damaged(&e) => None,
+        Err(e) => return Err(e),
+    };
+    if let Some(worker) = &worker {
+        ensure!(
+            worker.root == root && worker.session_id == session,
+            "Session worker metadata does not match the requested session"
+        );
+        if worker.status == "stopped" && !claim_path.exists() {
+            return Ok(false);
+        }
+    }
+    let mut guards = Vec::new();
+    let mut generations = Vec::new();
+    // Include all generations when either pointer is unreadable; a live old host
+    // must never disappear merely because its JSON was damaged.
+    for entry in fs::read_dir(&base)? {
+        let entry = entry?;
+        if !entry.file_type()?.is_dir()
+            || uuid::Uuid::parse_str(&entry.file_name().to_string_lossy()).is_err()
+        {
+            continue;
+        }
+        let dir = entry.path();
+        let metadata = read_worker(&dir).ok();
+        if dir.join("retired.json").exists() {
+            generations.push(dir);
+            continue;
+        }
+        if dir.join("supervisor.lock").exists() && dir.join("host.lock").exists() {
+            for name in ["supervisor.lock", "host.lock"] {
+                let lock = fs::OpenOptions::new()
+                    .read(true)
+                    .write(true)
+                    .open(dir.join(name))?;
+                match lock.try_lock() {
+                    Ok(()) => guards.push(lock),
+                    Err(std::fs::TryLockError::WouldBlock) => {
+                        ensure!(worker.is_some(), "Worker metadata is damaged but its process is still running; retry after it exits");
+                        return Ok(false);
+                    }
+                    Err(e) => return Err(e.into()),
+                }
+            }
+        } else {
+            // Older binaries do not hold lifetime locks. Require positive process
+            // exit evidence rather than interpreting a missing lock as a dead owner.
+            if predates_boot(&dir)? {
+                generations.push(dir);
+                continue;
+            }
+            let Some(old) = metadata else {
+                anyhow::bail!("Legacy worker metadata is damaged and process ownership cannot be verified; restart the computer before recovery");
+            };
+            if old.status != "stopped"
+                && !(old.supervisor_pid.is_some_and(exited) && old.child_pid.is_some_and(exited))
+            {
+                ensure!(
+                    worker.is_some(),
+                    "Worker metadata is damaged and an older owner may still be alive"
+                );
+                return Ok(false);
+            }
+        }
+        generations.push(dir);
+    }
+    ensure!(
+        !generations.is_empty() || worker.as_ref().is_some_and(|w| w.status == "stopped"),
+        "Session worker ownership could not be verified; original records preserved"
+    );
+    for dir in &generations {
+        jobs::save(
+            &dir.join("retired.json"),
+            &serde_json::json!({"reason":"Recovered abandoned worker; previous task outcome is unknown", "at_ms":jobs::now()}),
+        )?;
+    }
+    // Only foreground turns belong to this worker. Detached agents are independent.
+    for mut job in jobs::list(root, None)? {
+        if job.session_id == session && job.foreground && job.finished_ms.is_none() {
+            let path = jobs::directory(root, &job.id)?.join("state.json");
+            let backup = path.with_file_name("state.before-recovery.json");
+            if !backup.exists() {
+                fs::copy(&path, &backup)?;
+                fs::OpenOptions::new()
+                    .write(true)
+                    .open(&backup)?
+                    .sync_all()?;
+            }
+            job.status = "failed".into();
+            job.error = Some(
+                "Worker exited unexpectedly; previous task outcome is unknown and was not replayed"
+                    .into(),
+            );
+            job.finished_ms = Some(jobs::now());
+            job.heartbeat_ms = jobs::now();
+            jobs::save(&path, &job)?;
+        }
+    }
+    let backup = base.join(format!("recovery-{}", uuid::Uuid::new_v4()));
+    fs::create_dir(&backup)?;
+    archive(&base.join("current.json"), &backup.join("current.json"))?;
+    archive(&claim_path, &backup.join("owner.claim"))?;
+    tracing::warn!(
+        session,
+        "Recovered abandoned session worker; original generation and task logs preserved"
+    );
+    drop(guards);
+    Ok(true)
+}
+
 /// A stale heartbeat alone is never proof that ownership can be taken over.
 pub(super) fn recover(worker: &Worker) -> Result<()> {
     ensure!(
@@ -117,6 +332,111 @@ mod tests {
         pid
     }
 
+    #[test]
+    fn corrupt_metadata_recovers_without_replaying_or_discarding_evidence() {
+        let root = tempfile::tempdir().unwrap();
+        let worker = fixture(root.path(), dead_pid());
+        prepare_lifetime_locks(&directory(&worker)).unwrap();
+        let id = uuid::Uuid::new_v4().to_string();
+        let job = begin_job(&worker, &id, "unfinished").unwrap();
+        let state = jobs::directory(root.path(), &id)
+            .unwrap()
+            .join("state.json");
+        let original = fs::read(&state).unwrap();
+        for name in ["worker.json", "active.json"] {
+            fs::write(directory(&worker).join(name), [0; 478]).unwrap();
+        }
+        let pointer = worker_path(root.path(), &worker.session_id)
+            .unwrap()
+            .join("current.json");
+        fs::write(&pointer, [0; 38]).unwrap();
+        assert!(recover_session(root.path(), &worker.session_id).unwrap());
+        assert!(current(root.path(), &worker.session_id).unwrap().is_none());
+        assert!(!recover_session(root.path(), &worker.session_id).unwrap());
+        assert_eq!(
+            fs::read(directory(&worker).join("worker.json")).unwrap(),
+            vec![0; 478]
+        );
+        assert_eq!(
+            fs::read(state.with_file_name("state.before-recovery.json")).unwrap(),
+            original
+        );
+        assert_eq!(jobs::get(root.path(), &job.id).unwrap().status, "failed");
+        assert!(lifetime_lock(&directory(&worker), "host.lock").is_err());
+        assert!(SessionClaim::acquire(root.path(), &worker.session_id, "next").is_ok());
+    }
+
+    #[test]
+    fn corrupt_task_and_claim_do_not_prevent_next_turn() {
+        let root = tempfile::tempdir().unwrap();
+        let worker = fixture(root.path(), dead_pid());
+        prepare_lifetime_locks(&directory(&worker)).unwrap();
+        let id = uuid::Uuid::new_v4().to_string();
+        begin_job(&worker, &id, "unfinished").unwrap();
+        let state = jobs::directory(root.path(), &id)
+            .unwrap()
+            .join("state.json");
+        fs::write(&state, [0; 409]).unwrap();
+        fs::write(
+            root.path()
+                .join("background-tasks")
+                .join(format!("session-{}.claim", worker.session_id)),
+            [0; 36],
+        )
+        .unwrap();
+        assert!(recover_session(root.path(), &worker.session_id).unwrap());
+        assert_eq!(fs::read(&state).unwrap(), vec![0; 409]);
+        assert!(jobs::list(root.path(), Some(&worker.session_id))
+            .unwrap()
+            .is_empty());
+    }
+
+    #[test]
+    fn live_host_blocks_recovery_even_when_all_json_is_corrupt() {
+        let root = tempfile::tempdir().unwrap();
+        let worker = fixture(root.path(), dead_pid());
+        prepare_lifetime_locks(&directory(&worker)).unwrap();
+        let _host = lifetime_lock(&directory(&worker), "host.lock").unwrap();
+        fs::write(directory(&worker).join("worker.json"), [0; 478]).unwrap();
+        assert!(recover_session(root.path(), &worker.session_id)
+            .unwrap_err()
+            .to_string()
+            .contains("still running"));
+        assert!(!directory(&worker).join("retired.json").exists());
+        assert!(SessionClaim::acquire(root.path(), &worker.session_id, "other").is_err());
+    }
+
+    #[test]
+    fn damaged_legacy_owner_is_not_assumed_dead() {
+        let root = tempfile::tempdir().unwrap();
+        let worker = fixture(root.path(), std::process::id());
+        fs::write(directory(&worker).join("worker.json"), [0; 478]).unwrap();
+        assert!(recover_session(root.path(), &worker.session_id).is_err());
+        assert!(SessionClaim::acquire(root.path(), &worker.session_id, "other").is_err());
+    }
+
+    #[test]
+    fn legacy_corrupt_record_from_previous_boot_recovers() {
+        let Some(uptime) = uptime() else {
+            return;
+        };
+        let root = tempfile::tempdir().unwrap();
+        let worker = fixture(root.path(), std::process::id());
+        let dir = directory(&worker);
+        fs::write(dir.join("worker.json"), [0; 478]).unwrap();
+        let before_boot = std::time::SystemTime::now() - uptime - Duration::from_secs(60);
+        // Only file timestamps are used: directory timestamps can change when
+        // diagnostics or recovery receipts are created after reboot.
+        fs::OpenOptions::new()
+            .write(true)
+            .open(dir.join("worker.json"))
+            .unwrap()
+            .set_times(fs::FileTimes::new().set_modified(before_boot))
+            .unwrap();
+        assert!(recover_session(root.path(), &worker.session_id).unwrap());
+        assert!(current(root.path(), &worker.session_id).unwrap().is_none());
+    }
+
     #[tokio::test]
     async fn stale_idle_worker_reaches_new_startup() {
         let root = tempfile::tempdir().unwrap();
@@ -131,7 +451,7 @@ mod tests {
         .await
         .unwrap_err();
         assert!(!error.to_string().contains("heartbeat expired"));
-        assert_eq!(read_worker(&directory(&worker)).unwrap().status, "stopped");
+        assert!(directory(&worker).join("retired.json").exists());
         assert_ne!(
             current(root.path(), &worker.session_id)
                 .unwrap()

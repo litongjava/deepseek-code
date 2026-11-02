@@ -102,7 +102,26 @@ fn worker_path(root: &Path, session: &str) -> Result<PathBuf> {
     Ok(root.join("session-workers").join(session))
 }
 pub fn read_worker(dir: &Path) -> Result<Worker> {
-    Ok(serde_json::from_slice(&fs::read(dir.join("worker.json"))?)?)
+    let path = dir.join("worker.json");
+    serde_json::from_slice(&fs::read(&path)?)
+        .with_context(|| format!("Invalid session worker metadata at {}", path.display()))
+}
+
+/// Hold this OS lock for the entire host lifetime, independently of JSON state.
+pub fn host_lifetime_lock(dir: &Path) -> Result<fs::File> {
+    recovery::lifetime_lock(dir, "host.lock")
+}
+
+/// Recover only abandoned ownership; never submits or replays an old prompt.
+pub fn recover_session(root: &Path, session: &str) -> Result<bool> {
+    let base = worker_path(root, session)?;
+    if !base.exists() {
+        return Ok(false);
+    }
+    let lock = recovery::startup_lock(&base)?;
+    let result = recovery::repair(root, session);
+    drop(lock);
+    result
 }
 pub fn current(root: &Path, session: &str) -> Result<Option<Worker>> {
     let base = worker_path(root, session)?;
@@ -340,9 +359,8 @@ pub async fn ensure_worker(
     let base = worker_path(root, session)?;
     fs::create_dir_all(&base)?;
     // Serialize recovery and startup across frontends. OS releases this lock on exit.
-    let lock = fs::OpenOptions::new().create(true).truncate(false).read(true).write(true)
-        .open(base.join("startup.lock"))?;
-    lock.try_lock().context("Session worker startup or recovery is already in progress; retry shortly")?;
+    let _lock = recovery::startup_lock(&base)?;
+    recovery::repair(root, session)?;
     if let Some(worker) = current(root, session)? {
         ensure!(worker.root == root && worker.session_id == session, "Session worker metadata does not match the requested session");
         if worker.status != "stopped" {
@@ -378,6 +396,7 @@ pub async fn ensure_worker(
         active_job: None,
         error: None,
     };
+    recovery::prepare_lifetime_locks(&dir)?;
     jobs::save(&dir.join("worker.json"), &worker)?;
     jobs::save(
         &worker_path(root, session)?.join("current.json"),
@@ -497,6 +516,7 @@ pub async fn finish_job(worker: &Worker, id: &str, error: Option<String>) -> Res
     anyhow::bail!("Supervisor did not acknowledge completed turn")
 }
 pub async fn shutdown(root: &Path, session: &str) -> Result<()> {
+    recover_session(root, session)?;
     if let Some(worker) = current(root, session)? {
         if worker.status != "stopped" {
             call(&worker, &Request::Shutdown).await?;
@@ -628,6 +648,7 @@ pub fn run_supervisor_from_env() -> Result<bool> {
     };
     std::env::remove_var(SUPERVISOR_ENV);
     let dir = PathBuf::from(value);
+    let _lifetime = recovery::lifetime_lock(&dir, "supervisor.lock")?;
     let mut worker = read_worker(&dir)?;
     let result = supervise(&dir, &mut worker);
     worker.status = "stopped".into();

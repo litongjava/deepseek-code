@@ -205,6 +205,12 @@ fn assert_no_secret(path: &Path) {
         if path.is_dir() {
             assert_no_secret(&path);
         } else {
+            // Windows exclusive lifetime locks reject reads while held. They
+            // contain no payload; verify that invariant before skipping them.
+            if matches!(path.file_name().and_then(|s| s.to_str()), Some("supervisor.lock" | "host.lock")) {
+                assert_eq!(std::fs::metadata(&path).unwrap().len(), 0);
+                continue;
+            }
             let bytes = std::fs::read(&path).unwrap();
             assert!(
                 !String::from_utf8_lossy(&bytes).contains("fixture-secret-only-in-memory"),
@@ -625,3 +631,6 @@ async fn explicit_quit_stops_idle_worker_without_waiting_five_minutes() {
     );
     quit_cleanup::quit_worker(&paths, &session).await.unwrap();
 }
+
+#[path = "support/session_worker_recovery.rs"]
+mod recovery;

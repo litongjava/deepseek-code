@@ -32,6 +32,9 @@ async fn single_turn(
     input: &mut Option<TerminalInput>,
 ) -> Result<Option<String>> {
     let root = &session.paths.data_dir;
+    if deepseek_code_core::services::session_worker::recover_session(root, &session.id)? {
+        eprintln!("Recovered interrupted worker state; previous work was preserved and will not be replayed.");
+    }
     ensure!(!jobs::list(root, Some(&session.id))?.iter().any(|job| job.session_id == session.id && matches!(job.status.as_str(), "starting" | "running" | "unresponsive")),
         "This session already has an active worker. Use /tasks attach ID, /tasks cancel ID, or /clear to work in a new session; the current prompt was not submitted.");
     let provider = session.selected_provider().await?;
