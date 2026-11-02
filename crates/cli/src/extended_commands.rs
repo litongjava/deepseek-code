@@ -257,7 +257,7 @@ pub async fn handle(
     Ok(true)
 }
 
-fn peer_sessions(
+pub(crate) fn peer_sessions(
     _store: &deepseek_code_core::runtime::SessionStore,
     root: &Path,
     _workspace: &Path,

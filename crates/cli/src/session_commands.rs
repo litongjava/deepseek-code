@@ -460,14 +460,38 @@ pub fn live_goal_command(session: &Session, prompt: &str) -> Result<Option<Strin
 /// the turn's output.
 pub(crate) fn is_live_inspection(line: &str) -> bool {
     let line = line.trim();
-    matches!(line, "/status" | "/status --check" | "/effort +" | "/effort -" | "/tasks" | "/tasks list")
-        || line.strip_prefix("/tasks show ").is_some_and(|id| id.split_whitespace().count() == 1)
+    matches!(
+        line,
+        "/list-agents"
+            | "/list-agents list"
+            | "/list-agents inbox"
+            | "/list-agents sent"
+            | "/status"
+            | "/status --check"
+            | "/effort +"
+            | "/effort -"
+            | "/tasks"
+            | "/tasks list"
+    ) || line
+        .strip_prefix("/tasks show ")
+        .is_some_and(|id| id.split_whitespace().count() == 1)
 }
 
 /// The answer for `is_live_inspection`, or None for every other command.
 pub async fn live_inspection(session: &Session, prompt: &str) -> Option<String> {
     if !is_live_inspection(prompt) {
         return None;
+    }
+    if prompt.trim().starts_with("/list-agents") {
+        let result = match prompt.split_whitespace().nth(1) {
+            Some("inbox" | "sent") => crate::services::context(&session.paths).and_then(|context| deepseek_code_core::tools::agent_messages::execute_live(&context, &session.id, serde_json::json!({"operation":if prompt.trim().ends_with("sent") { "sent" } else { "receive" },"unread_only":false}))),
+            _ => crate::extended_commands::peer_sessions(&session.store, &session.paths.data_dir, &session.workspace, &session.id).map(|peers| serde_json::json!(peers)),
+        };
+        return Some(
+            result
+                .and_then(|value| Ok(serde_json::to_string_pretty(&value)?))
+                .unwrap_or_else(|error| format!("Agents: {error:#}")),
+        );
     }
     if prompt.trim().starts_with("/tasks") {
         return Some(crate::background_commands::live_tasks(session, prompt.trim()).await.unwrap_or_else(|error| format!("Tasks: {error:#}")));

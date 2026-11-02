@@ -1229,6 +1229,7 @@ impl ToolLoopExecutor {
         };
         context.save_setting(&state.key, &state.value)?;
         let _ = self.event_tx.send(state.progress("started", None)).await;
+        let mut last_preview = Instant::now();
         let mut assistant_id = uuid::Uuid::new_v4().to_string();
         let mut tool_rows: HashMap<String, crate::db::message_repo::ToolCallRow> = HashMap::new();
         let collect_web_evidence = child.response_schema.is_some();
@@ -1246,8 +1247,28 @@ impl ToolLoopExecutor {
                                 assistant_id = uuid::Uuid::new_v4().to_string();
                                 tool_rows.clear();
                             }
-                            event @ (EngineEvent::AskUser {..} | EngineEvent::ToolPermission {..} | EngineEvent::Usage(_) | EngineEvent::AgentProgress {..}) => { let _ = self.event_tx.send(event).await; }
+                            event @ (EngineEvent::AskUser {..} | EngineEvent::ToolPermission {..} | EngineEvent::AgentProgress {..}) => { let _ = self.event_tx.send(event).await; }
+                            EngineEvent::Usage(usage) => {
+                                if let Some(tokens) = usage["output_tokens"].as_u64().or_else(|| usage["completion_tokens"].as_u64()) {
+                                    // Usage updates may lack request IDs; keep the latest reported count.
+                                    state.value["output_tokens"] = json!(tokens);
+                                    context.save_setting(&state.key, &state.value)?;
+                                }
+                                let _ = self.event_tx.send(EngineEvent::Usage(usage)).await;
+                            }
+                            EngineEvent::Text(text) | EngineEvent::Thinking(text) => {
+                                let mut preview = state.value["preview"].as_str().unwrap_or_default().to_owned();
+                                preview.push_str(&text);
+                                if preview.chars().count() > 8000 { preview = preview.chars().rev().take(8000).collect::<String>().chars().rev().collect(); }
+                                state.value["preview"] = json!(preview);
+                                if last_preview.elapsed().as_millis() >= 250 {
+                                    context.save_setting(&state.key, &state.value)?;
+                                    last_preview = Instant::now();
+                                }
+                            }
                             EngineEvent::ToolUseStart { tool_name, .. } => {
+                                state.value["current_tool"] = json!(&tool_name);
+                                context.save_setting(&state.key, &state.value)?;
                                 let _ = self.event_tx.send(state.progress("running", Some(tool_name))).await;
                             }
                             EngineEvent::ToolUseDone { tool_use_id, tool_name, tool_input, output, is_error }
@@ -1273,6 +1294,8 @@ impl ToolLoopExecutor {
                                     let _ = self.event_tx.send(state.progress("failed", None)).await;
                                     return Err(error);
                                 }
+                                state.value["current_tool"] = Value::Null;
+                                context.save_setting(&state.key, &state.value)?;
                                 tool_rows.insert(row.id.clone(), row.clone());
                                 let status = if is_error { "tool_failed" } else { "tool_completed" };
                                 let _ = self.event_tx.send(state.progress(status, Some(row.name.clone()))).await;
@@ -1286,6 +1309,17 @@ impl ToolLoopExecutor {
         };
         match result {
             Ok((text, reason)) => {
+                // A short response may finish in the same poll that queues its events.
+                // Preserve the final preview even when no streaming tick was observed.
+                state.value["preview"] = json!(text.chars().rev().take(8000).collect::<String>().chars().rev().collect::<String>());
+                while let Ok(event) = receiver.try_recv() {
+                    if let EngineEvent::Usage(usage) = event {
+                        if let Some(tokens) = usage["output_tokens"].as_u64().or_else(|| usage["completion_tokens"].as_u64()) {
+                            state.value["output_tokens"] = json!(tokens);
+                        }
+                        let _ = self.event_tx.send(EngineEvent::Usage(usage)).await;
+                    }
+                }
                 let failed = matches!(
                     reason.as_deref(),
                     Some(

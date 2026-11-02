@@ -480,6 +480,7 @@ pub(crate) fn todo_items(paths: &RuntimePaths, session: &str) -> Vec<(String, St
 /// One background agent started by this session.
 #[derive(Clone)]
 pub(crate) struct Agent {
+    pub session_id: String,
     pub agent_type: String,
     pub description: String,
     pub started_ms: u64,
@@ -496,10 +497,11 @@ pub(crate) fn running_agents(paths: &RuntimePaths, db: &deepseek_code_core::db::
             let record = context.setting::<serde_json::Value>(&format!("background-agent.{}", job.id)).ok().flatten()?;
             let output_tokens = db.with_conn(|conn| conn.query_row("SELECT COALESCE(SUM(output_tokens),0) FROM model_requests WHERE conversation_id=?1", [&job.session_id], |row| row.get::<_, i64>(0))).ok().and_then(Result::ok).unwrap_or(0);
             Some(Agent {
+                session_id: job.session_id.clone(),
                 agent_type: record["agent_type"].as_str().unwrap_or("general").to_owned(),
                 description: record["description"].as_str().unwrap_or(&job.title).to_owned(),
                 started_ms: job.started_ms,
-                output_tokens,
+                output_tokens: if output_tokens > 0 { output_tokens } else { -1 },
             })
         })
         .collect()
@@ -573,7 +575,16 @@ pub(crate) fn foreground_agent(context: &deepseek_code_core::services::ServiceCo
     let description = context.setting::<String>(&format!("agent-description.{id}")).ok().flatten().unwrap_or_else(|| kind.into());
     let started_ms = chrono::DateTime::parse_from_rfc3339(record["started_at"].as_str()?).ok()?.timestamp_millis().max(0) as u64;
     let output_tokens = context.db.with_conn(|conn| conn.query_row("SELECT COALESCE(SUM(output_tokens),0) FROM model_requests WHERE conversation_id=?1", [id], |row| row.get::<_, i64>(0))).ok().and_then(Result::ok).unwrap_or(0);
-    Some(Agent { agent_type: kind.into(), description, started_ms, output_tokens })
+    let output_tokens = record["output_tokens"]
+        .as_i64()
+        .unwrap_or(if output_tokens > 0 { output_tokens } else { -1 });
+    Some(Agent {
+        session_id: id.into(),
+        agent_type: kind.into(),
+        description,
+        started_ms,
+        output_tokens,
+    })
 }
 
 /// Shared width-bounded panel for the idle editor and live turn.
@@ -590,9 +601,21 @@ pub(crate) fn agent_rows(agents: &[Agent], width: usize) -> Vec<String> {
     let now = chrono::Utc::now().timestamp_millis().max(0) as u64;
     let mut rows = vec![fit("● main", width)];
     for agent in agents {
-        let tokens = if agent.output_tokens >= 1000 { format!("{:.1}k", agent.output_tokens as f64 / 1000.0) } else { agent.output_tokens.to_string() };
-        let right = format!("{}  ↓ {tokens} tokens", runtime(agent.started_ms, Some(now)));
-        let kind = match agent.agent_type.as_str() { "explore" => "Explore", other => other };
+        let tokens = if agent.output_tokens < 0 {
+            "pending".into()
+        } else if agent.output_tokens >= 1000 {
+            format!("{:.1}k", agent.output_tokens as f64 / 1000.0)
+        } else {
+            agent.output_tokens.to_string()
+        };
+        let right = format!(
+            "{}  ↓ {tokens} tokens",
+            runtime(agent.started_ms, Some(now))
+        );
+        let kind = match agent.agent_type.as_str() {
+            "explore" => "Explore",
+            other => other,
+        };
         let left = format!("  {kind}  {}", agent.description);
         let right = fit(&right, width);
         let left = fit(&left, width.saturating_sub(right.width() + 2));
@@ -1057,7 +1080,16 @@ mod agent_row_tests {
     fn running_agents_list_under_main_with_time_and_tokens() {
         assert!(agent_rows(&[], 80).is_empty());
         let started = chrono::Utc::now().timestamp_millis() as u64 - 13_000;
-        let rows = agent_rows(&[Agent { agent_type: "general".into(), description: "Find the logging code".into(), started_ms: started, output_tokens: 6_600 }], 80);
+        let rows = agent_rows(
+            &[Agent {
+                session_id: "fixture".into(),
+                agent_type: "general".into(),
+                description: "Find the logging code".into(),
+                started_ms: started,
+                output_tokens: 6_600,
+            }],
+            80,
+        );
         assert_eq!(rows[0], "● main");
         assert!(rows[1].starts_with("  general  Find the logging code"), "{rows:?}");
         assert!(rows[1].ends_with("13s  ↓ 6.6k tokens"), "{rows:?}");
@@ -1066,7 +1098,13 @@ mod agent_row_tests {
     #[test]
     fn agent_columns_preserve_usage_with_wide_text_and_small_windows() {
         use unicode_width::UnicodeWidthStr;
-        let agent = Agent { agent_type: "explore".into(), description: "检索数据库定义和注册中心".repeat(10), started_ms: chrono::Utc::now().timestamp_millis() as u64 - 66_000, output_tokens: 57_800 };
+        let agent = Agent {
+            session_id: "fixture".into(),
+            agent_type: "explore".into(),
+            description: "检索数据库定义和注册中心".repeat(10),
+            started_ms: chrono::Utc::now().timestamp_millis() as u64 - 66_000,
+            output_tokens: 57_800,
+        };
         for width in [4, 18, 40, 80, 120] {
             let rows = agent_rows(std::slice::from_ref(&agent), width);
             assert!(rows.iter().all(|row| row.width() <= width));
@@ -1089,4 +1127,41 @@ mod agent_row_tests {
         assert!(foreground_agent(&context, "missing", "explore").is_none());
     }
 
+}
+
+/// Read only the selected child's execution, never the parent's transcript.
+pub(crate) fn agent_execution(
+    context: &deepseek_code_core::services::ServiceContext,
+    id: &str,
+) -> String {
+    let mut lines = vec![format!("Session {id}")];
+    if let Ok(Some(value)) = context.setting::<serde_json::Value>(&format!("delegation.{id}")) {
+        lines.push(format!(
+            "Status: {}",
+            value["status"].as_str().unwrap_or("unknown")
+        ));
+        if let Some(tool) = value["current_tool"].as_str() {
+            lines.push(format!("Running: {tool}"));
+        }
+        if let Some(text) = value["preview"].as_str() {
+            lines.push(text.to_owned());
+        }
+    }
+    let saved = context.db.with_conn(|conn| -> anyhow::Result<()> {
+        for message in deepseek_code_core::db::message_repo::get_messages_by_conversation(conn, id)?
+        {
+            if message.role == "assistant" {
+                lines.push(message.content);
+            }
+            for tool in
+                deepseek_code_core::db::message_repo::get_tool_calls_for_message(conn, &message.id)?
+            {
+                lines.push(format!("{}({})", tool.name, tool.input.unwrap_or_default()));
+                lines.push(tool.output.unwrap_or_default());
+            }
+        }
+        Ok(())
+    });
+    match saved { Ok(Ok(())) => {}, Ok(Err(error)) => lines.push(format!("Execution history unavailable: {error}")), Err(error) => lines.push(format!("Execution history unavailable: {error}")) }
+    safe_output(&lines.join("\n"))
 }

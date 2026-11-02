@@ -176,7 +176,7 @@ pub fn notices(context: &ServiceContext, recipient: &str) -> Result<Vec<String>>
     valid_id(recipient)?;
     context.db.with_conn(|conn|->Result<_>{schema(conn)?;let tx=rusqlite::Transaction::new_unchecked(conn,rusqlite::TransactionBehavior::Immediate)?;
         let rows={let mut q=tx.prepare("SELECT id,sender FROM session_inbox WHERE recipient=?1 AND notified=0 ORDER BY rowid LIMIT 16")?;let values=q.query_map([recipient],|r|Ok((r.get::<_,String>(0)?,r.get::<_,String>(1)?)))?.collect::<rusqlite::Result<Vec<_>>>()?;values};
-        let mut result=Vec::new();for (id,sender) in rows {tx.execute("UPDATE session_inbox SET notified=1 WHERE id=?1",[&id])?;result.push(format!("Message {id} from {sender}. /list-agents inbox shows content and delivery state; pending messages enter context at the next safe model boundary. Retained owned children may continue inside their existing worker; independent idle sessions require a new user turn."));}tx.commit()?;Ok(result)
+        let mut result=Vec::new();for (id,sender) in rows {tx.execute("UPDATE session_inbox SET notified=1 WHERE id=?1",[&id])?;result.push(format!("Agent message received from {sender} (message {id}). This is a delivery notification. Use /list-agents inbox to view its content and delivery state; pending messages enter context at the next safe model boundary."));}tx.commit()?;Ok(result)
     })?
 }
 fn lock_path(root: &Path, session: &str) -> Result<PathBuf> {

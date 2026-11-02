@@ -103,6 +103,8 @@ async fn foreground_agent_accepts_model_effort_and_worktree_without_backgroundin
     assert_eq!(result["status"], "completed");
     assert_ne!(result["backgrounded"], true);
     let retained = registry.lock().unwrap();
+    let progress = context.setting::<Value>(&format!("delegation.{child}")).unwrap().unwrap();
+    assert_eq!(progress["preview"], "child complete");
     let child_executor = &retained[child].executor;
     assert_eq!(child_executor.provider.model.id, "alternate");
     assert_eq!(

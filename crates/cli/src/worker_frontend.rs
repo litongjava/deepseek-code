@@ -561,7 +561,7 @@ async fn observe(
                                 display.notice(&message);
                             } else if let Some(message) = crate::session_commands::live_inspection(session, &prompt).await {
                                 // Answered here so status never waits for a long tool call.
-                                if !matches!(prompt.trim(), "/effort +" | "/effort -") || !message.starts_with("Reasoning effort:") { display.notice(&message); }
+                                if !matches!(prompt.trim(), "/effort +" | "/effort -") || !message.starts_with("Reasoning effort:") { display.inspection(&prompt, &message); }
                                 display.set_model_label(&crate::session_commands::model_label(session).await);
                             } else {
                                 if let Some(goal) = deepseek_code_core::services::session_goals::active(&session.store.db, &session.id)?.filter(|g|g.state == "waiting") {

@@ -53,7 +53,7 @@ pub const COMMANDS: &[(&str, &str)] = &[
     ("/agents", "Show the subagents DeepSeek Code can delegate to"),
     ("/loop", "Repeat a prompt or command on an interval (e.g. /loop 5m /foo); omit the interval to let the model self-pace"),
     ("/scroll-speed", "Adjust mouse wheel scroll speed in the transcript pager: 1-10"),
-    ("/list-agents", "List available agent definitions"),
+    ("/list-agents", "List sessions and agent message delivery"),
     (
         "/tasks",
         "Manage tasks and sessions: list|show|attach|pending|answer|cancel|sessions|stop-session",

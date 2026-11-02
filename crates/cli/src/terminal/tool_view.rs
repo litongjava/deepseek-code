@@ -268,6 +268,18 @@ fn raw_result_text(output: &str) -> String {
         }
         return text;
     }
+    if fields.get("mode").and_then(Value::as_str) == Some("plan")
+        && fields.contains_key("planFilePath")
+    {
+        let plan = fields
+            .get("plan")
+            .and_then(Value::as_str)
+            .filter(|s| !s.trim().is_empty());
+        return match plan {
+            Some(plan) => format!("Planning enabled. Current plan:\n{plan}"),
+            None => "Planning enabled. No plan has been written yet. The agent will investigate your request, write the plan, and show it for approval before implementation.".into(),
+        };
+    }
     for key in ["error", "message", "result", "content"] {
         if let Some(text) = fields.get(key).and_then(Value::as_str) {
             return text.trim_end().to_owned();
@@ -656,6 +668,15 @@ pub fn approval(name: &str, input: &Value, workspace: Option<&std::path::Path>, 
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn plan_result_shows_content_or_explicit_pending_state() {
+        let pending = result_text(&serde_json::json!({"mode":"plan","planFilePath":"plan.md","plan":null,"message":"internal instructions"}).to_string());
+        assert!(pending.contains("No plan has been written"));
+        let ready = result_text(&serde_json::json!({"mode":"plan","planFilePath":"plan.md","plan":"# Visible plan\nInspect permissions"}).to_string());
+        assert!(ready.contains("Inspect permissions"));
+        assert!(!ready.contains("internal instructions"));
+    }
 
     #[test]
     fn background_shell_binding_rejects_non_shell_and_invalid_ids() {

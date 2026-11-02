@@ -40,6 +40,7 @@ enum Update {
     PermissionMode(String),
     Text(String),
     Notice(String),
+    Inspection(String, String),
     Styled(Vec<change_view::Line>),
     FileSummary(Vec<change_view::Line>, Vec<super::file_review::File>),
     /// A tool result with hidden lines: the short form to show, and the full
@@ -447,6 +448,10 @@ struct State {
     running: Vec<Running>,
     /// Messages typed during the turn, shown until the model reads them.
     queued: Vec<String>,
+    notices: Vec<String>,
+    status_page: Option<String>,
+    inspection_scroll: usize,
+    agent_detail: Option<String>,
     transcript: Vec<change_view::Line>,
     shells: usize,
     /// When ctrl+x was pressed, for the ctrl+x ctrl+s chord.
@@ -488,7 +493,14 @@ struct Running {
 const THINKING_PREVIEW_ROWS: usize = 2;
 
 /// Commands `submit` accepts while the model works.
-const LIVE_COMMANDS: &[&str] = &["/btw", "/background", "/goal", "/status", "/tasks"];
+const LIVE_COMMANDS: &[&str] = &[
+    "/btw",
+    "/background",
+    "/goal",
+    "/list-agents",
+    "/status",
+    "/tasks",
+];
 
 /// Spinner glyphs, played forward and back.
 const SPINNER: &[&str] = if cfg!(target_os = "macos") {
@@ -564,6 +576,10 @@ impl State {
             group: None,
             running: Vec::new(),
             queued: Vec::new(),
+            notices: Vec::new(),
+            status_page: None,
+            inspection_scroll: 0,
+            agent_detail: None,
             transcript: Vec::new(),
             shells: 0,
             chord: None,
@@ -629,7 +645,11 @@ impl State {
             "Waiting for your answer".to_owned()
         } else if let Some(hook) = &self.hook_activity {
             hook.clone()
-        } else if self.activity.starts_with("Running Bash") || (self.activity.starts_with("Running") && !self.running.is_empty()) {
+        } else if !self.foreground_agents.is_empty() {
+            "Waiting for foreground agent".to_owned()
+        } else if self.activity.starts_with("Running Bash")
+            || (self.activity.starts_with("Running") && !self.running.is_empty())
+        {
             // The call itself shows above, in its transcript form.
             "Working".to_owned()
         } else if self.activity.starts_with("Running") || self.activity == "Cancelling" {
@@ -1297,6 +1317,12 @@ impl Frame {
             if logged.last().is_some_and(|row| !super::markdown::plain_rendered(row).trim().is_empty()) { logged.push(String::new()); }
             logged.extend(streamed_rows(state, width, usize::MAX));
         }
+        logged.extend(
+            state
+                .notices
+                .iter()
+                .flat_map(|text| text.lines().map(str::to_owned)),
+        );
         logged
     }
 
@@ -1315,6 +1341,14 @@ impl Frame {
             for line in group_lines(group, width) {
                 self.history_view.append(&line, width);
             }
+        }
+        let (running, _) = running_lines(state, width, content_budget(self.size.1), false);
+        if !running.is_empty() {
+            self.history_view
+                .append(&format!("\n{}", running.join("\n")), width);
+        }
+        for notice in &state.notices {
+            self.history_view.append(&format!("\n{notice}\n"), width);
         }
     }
 
@@ -1717,7 +1751,17 @@ impl Frame {
             agent_rows.push(clip(&format!("  … {hidden} more agents"), width));
         } else { agent_rows.truncate(limit); }
         lines.splice(2..2, agent_rows);
-        let choice_rows = state.choice.as_ref().map(|choice| choice_lines(choice, &lines[1], &mode, width, size.1 as usize));
+        if !state.notices.is_empty() {
+            content.push(String::new());
+            for notice in &state.notices {
+                content.extend(terminal_text(notice).lines().map(|line| clip(line, width)));
+                content.push(String::new());
+            }
+        }
+        let choice_rows = state
+            .choice
+            .as_ref()
+            .map(|choice| choice_lines(choice, &lines[1], &mode, width, size.1 as usize));
         if choice_rows.is_some() {
             // The approval box takes the place of the streaming area.
             content.clear();
@@ -1876,10 +1920,13 @@ fn run(
     updates: mpsc::Receiver<Update>,
     actions: async_mpsc::UnboundedSender<Action>,
 ) -> io::Result<()> {
+    let _alternate_cleanup = AlternateCleanup;
     let mut selection = super::mouse_selection::Selection::default();
     let mut last_tick = Instant::now();
     let mut last_agents = Instant::now() - Duration::from_secs(1);
     let mut agent_context = None;
+    let mut agent_preview = String::new();
+    let mut agent_click: Option<(usize, Instant)> = None;
     let mut input_reader = super::paste_input::Reader::new()?;
     screen.draw(state)?;
     loop {
@@ -1897,13 +1944,25 @@ fn run(
                 },
                 Ok(Update::PermissionMode(mode)) => { state.mode = mode; dirty = true; },
                 Ok(Update::Text(text)) => {
+                    flush_notices(state, screen)?;
                     stream_text(state, screen, &text);
                     dirty = true;
                 }
                 Ok(Update::Notice(text)) => {
                     finish_text(state, screen);
-                    screen.separate_block();
-                    screen.log(&text)?;
+                    state.notices.push(text);
+                    dirty = true;
+                }
+                Ok(Update::Inspection(command, text)) => {
+                    if command.trim() == "/status" {
+                        if state.status_page.is_none() {
+                            execute!(io::stderr(), terminal::EnterAlternateScreen)?;
+                        }
+                        state.inspection_scroll = 0;
+                        state.status_page = Some(text);
+                    } else {
+                        state.notices.push(format!("{command}\n{text}"));
+                    }
                     dirty = true;
                 }
                 Ok(Update::Styled(lines)) => {
@@ -1950,6 +2009,7 @@ fn run(
                 }
                 Ok(Update::BackgroundFinished(id, short, full, task)) => {
                     state.running.retain(|call| call.id != id);
+                    flush_notices(state, screen)?;
                     finish_text(state, screen);
                     screen.log_block(short, full);
                     if let Some((root, session)) = &state.shell_context {
@@ -1959,6 +2019,7 @@ fn run(
                 }
                 Ok(Update::Finished(id, short, full)) => {
                     state.running.retain(|call| call.id != id);
+                    flush_notices(state, screen)?;
                     finish_text(state, screen);
                     match full {
                         Some(full) => screen.log_block(short, full),
@@ -2111,8 +2172,16 @@ fn run(
                     dirty = true;
                 }
                 Ok(Update::Stop(error)) => {
+                    if state.status_page.take().is_some() {
+                        execute!(io::stderr(), terminal::LeaveAlternateScreen)?;
+                    }
+                    state.agent_detail = None;
                     screen.history_view.close()?;
                     finish_text(state, screen);
+                    for notice in std::mem::take(&mut state.notices) {
+                        screen.separate_block();
+                        screen.log(&notice)?;
+                    }
                     let draft = if state.answer.is_some() {
                         state.saved_draft.take().unwrap_or_default().take()
                     } else {
@@ -2185,6 +2254,46 @@ fn run(
                 };
                 super::shortcuts::show(super::shortcuts::Context::Running, &background, &mut || input_reader.next(Duration::from_millis(25)))?;
                 screen.draw(state)?;
+                continue;
+            }
+            if state.status_page.is_some() || state.agent_detail.is_some() {
+                match &event {
+                    Event::Key(key) if matches!(key.code, KeyCode::PageDown | KeyCode::Down) => {
+                        state.inspection_scroll = state.inspection_scroll.saturating_add(1);
+                    }
+                    Event::Key(key) if matches!(key.code, KeyCode::PageUp | KeyCode::Up) => {
+                        state.inspection_scroll = state.inspection_scroll.saturating_sub(1);
+                    }
+                    Event::Mouse(mouse) if mouse.kind == MouseEventKind::ScrollDown => {
+                        state.inspection_scroll = state.inspection_scroll.saturating_add(3);
+                    }
+                    Event::Mouse(mouse) if mouse.kind == MouseEventKind::ScrollUp => {
+                        state.inspection_scroll = state.inspection_scroll.saturating_sub(3);
+                    }
+                    _ => {}
+                }
+            }
+            if state.status_page.is_some() {
+                if matches!(&event, Event::Key(key) if matches!(key.code, KeyCode::Esc | KeyCode::Char('q')) || key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char('c'))
+                {
+                    state.status_page = None;
+                    execute!(io::stderr(), terminal::LeaveAlternateScreen)?;
+                    screen.lines.clear();
+                    screen.draw(state)?;
+                }
+                continue;
+            }
+            if state.agent_detail.is_some()
+                && matches!(&event, Event::Key(key) if key.code == KeyCode::Esc)
+            {
+                state.agent_detail = None;
+                screen.lines.clear();
+                screen.draw(state)?;
+                continue;
+            }
+            if state.agent_detail.is_some()
+                && matches!(&event, Event::Key(key) if matches!(key.code, KeyCode::Up | KeyCode::Down | KeyCode::PageUp | KeyCode::PageDown))
+            {
                 continue;
             }
             // Cancellation may arrive while waiting for a key. Never submit a
@@ -2402,8 +2511,43 @@ fn run(
                     dirty = true;
                 }
                 Event::Mouse(mouse) => {
-                    if matches!(mouse.kind, MouseEventKind::ScrollUp | MouseEventKind::ScrollDown) {
-                        if let Some(choice) = state.choice.as_mut().filter(|choice| choice.command_preview()) {
+                    if mouse.kind == MouseEventKind::Down(MouseButton::Left)
+                        && state.choice.is_none()
+                    {
+                        let start = if screen.history_view.active() {
+                            (screen.size.1 as usize).saturating_sub(screen.composer_height) + 3
+                        } else {
+                            screen.top.unwrap_or(0) as usize
+                                + screen.lines.len().saturating_sub(screen.composer_height)
+                                + 3
+                        };
+                        if let Some(index) = (mouse.row as usize)
+                            .checked_sub(start)
+                            .filter(|i| *i < state.agent_panel.len())
+                        {
+                            if agent_click.is_some_and(|(old, when)| {
+                                old == index && when.elapsed() < Duration::from_millis(500)
+                            }) {
+                                state.agent_detail =
+                                    Some(state.agent_panel[index].session_id.clone());
+                                last_agents = Instant::now() - Duration::from_secs(1);
+                                state.inspection_scroll = 0;
+                                agent_click = None;
+                            } else {
+                                agent_click = Some((index, Instant::now()));
+                            }
+                            continue;
+                        }
+                    }
+                    if matches!(
+                        mouse.kind,
+                        MouseEventKind::ScrollUp | MouseEventKind::ScrollDown
+                    ) {
+                        if let Some(choice) = state
+                            .choice
+                            .as_mut()
+                            .filter(|choice| choice.command_preview())
+                        {
                             if choice.expanded {
                                 choice.scroll_preview(mouse.kind == MouseEventKind::ScrollUp, screen.size.0.saturating_sub(1) as usize, screen.size.1 as usize);
                                 selection.clear()?;
@@ -2596,6 +2740,7 @@ fn run(
                     state.agent_panel = crate::background_commands::running_agents(&context.paths, &context.db, session);
                     state.agent_panel.extend(state.foreground_agents.iter().filter_map(|(id, kind)| crate::background_commands::foreground_agent(context, id, kind)));
 
+                    if let Some(id) = &state.agent_detail { agent_preview = crate::background_commands::agent_execution(context, id); }
                     dirty = true;
                 }
             }
@@ -2606,9 +2751,75 @@ fn run(
             dirty = true;
         }
         if dirty && !selection.retained() {
-            screen.draw(state)?;
+            if let Some(text) = &state.status_page {
+                draw_inspection(
+                    "Status · ↑/↓ scroll · Esc to close",
+                    text,
+                    false,
+                    state.inspection_scroll,
+                )?;
+            } else {
+                screen.draw(state)?;
+                if state.agent_detail.is_some() && agent_context.is_some() {
+                    draw_inspection(
+                        "Agent execution · ↑/↓ scroll · Esc to close",
+                        &agent_preview,
+                        true,
+                        state.inspection_scroll,
+                    )?;
+                }
+            }
         }
     }
+}
+
+fn flush_notices(state: &mut State, screen: &mut Frame) -> io::Result<()> {
+    for notice in std::mem::take(&mut state.notices) {
+        screen.separate_block();
+        screen.log(&notice)?;
+    }
+    Ok(())
+}
+
+struct AlternateCleanup;
+impl Drop for AlternateCleanup {
+    fn drop(&mut self) {
+        let _ = execute!(io::stderr(), terminal::LeaveAlternateScreen);
+    }
+}
+
+/// Paint a read-only view while the event loop continues to consume progress.
+fn draw_inspection(title: &str, text: &str, sidebar: bool, scroll: usize) -> io::Result<()> {
+    let (columns, rows) = terminal::size()?;
+    let left = if sidebar { columns / 2 } else { 0 };
+    let width = columns.saturating_sub(left + 1) as usize;
+    let body = terminal_text(text);
+    let wrapped = body.lines()
+        .flat_map(|line| super::markdown::wrap_styled(line, "", "", width))
+        .collect::<Vec<_>>();
+    let body: Vec<_> = wrapped.iter().map(String::as_str).collect();
+    let max = body.len().saturating_sub(rows.saturating_sub(2) as usize);
+    let skip = if sidebar {
+        max.saturating_sub(scroll)
+    } else {
+        scroll.min(max)
+    };
+    let mut out = String::from("\x1b7");
+    for row in 0..rows {
+        let line = if row == 0 {
+            title
+        } else {
+            body.get(skip + row as usize - 1).copied().unwrap_or("")
+        };
+        out.push_str(&format!(
+            "\x1b[{};{}H\x1b[K{}",
+            row + 1,
+            left + 1,
+            clip(line, width)
+        ));
+    }
+    out.push_str("\x1b8");
+    write(&out)
 }
 
 #[cfg(test)]
@@ -2628,6 +2839,17 @@ mod tests {
     }
     fn screen(terminal: &vt100::Parser) -> Vec<String> {
         terminal.screen().rows(0, 80).collect()
+    }
+
+    #[test]
+    fn foreground_wait_is_explicit_and_unknown_usage_is_not_zero() {
+        let mut state = State::new("ask".into());
+        state.foreground_agents.push(("child".into(), "general".into()));
+        assert!(state.status_line().contains("Waiting for foreground agent"));
+        let agent = crate::background_commands::Agent { session_id: "child".into(), agent_type: "general".into(), description: "Inspect".into(), started_ms: 0, output_tokens: -1 };
+        let rows = crate::background_commands::agent_rows(&[agent], 100).join("\n");
+        assert!(rows.contains("pending"));
+        assert!(!rows.contains("↓ 0 tokens"));
     }
 
     #[test]
@@ -2777,12 +2999,58 @@ mod tests {
 
     /// Run in ConPTY to inspect the real renderer, cursor, resize and removal.
     #[test]
+    #[ignore = "interactive ConPTY acceptance"]
+    fn inspection_terminal_fixture() {
+        let temp = tempfile::tempdir().unwrap();
+        let paths =
+            deepseek_code_core::runtime::RuntimePaths::new(temp.path().to_path_buf()).unwrap();
+        let context = crate::services::context(&paths).unwrap();
+        context.save_setting("delegation.child", &serde_json::json!({"status":"running","preview":"CHILD_EXECUTION_SENTINEL","started_at":chrono::Utc::now().to_rfc3339()})).unwrap();
+        context
+            .save_setting("agent-description.child", &"Inspect fixture")
+            .unwrap();
+        let mut display =
+            TurnDisplay::new(true, "ask", &temp.path().join("keys.json"), vec![]).unwrap();
+        display.set_shell_context(&paths.data_dir, "parent");
+        display.agent_progress("child", "general", "started", None);
+        display.tool_started(
+            "agent-call",
+            "Agent",
+            &serde_json::json!({"description":"Inspect fixture"}),
+        );
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        runtime.block_on(async {
+            loop {
+                match display.action().await {
+                    Some(Action::Submit(command)) if command == "/status" => {
+                        display.inspection(&command, "STATUS_SENTINEL\nToken usage: 42")
+                    }
+                    Some(Action::Submit(command)) => {
+                        display.inspection(&command, "TASKS_SENTINEL\nLatest output")
+                    }
+                    Some(Action::Cancel) => break,
+                    _ => {}
+                }
+            }
+        });
+    }
+
+    #[test]
     #[ignore = "requires an interactive terminal"]
     fn agent_panel_terminal_fixture() {
         let mut state = State::new("default".into());
         state.draft.insert("draft stays editable");
-        state.agent_panel = ["Grepping mysql-schema.sql and sentinel usage", "Locating forward/proxy code", "Searching dubbo pages for registries"].iter().enumerate().map(|(i, description)| crate::background_commands::Agent {
-            agent_type: "explore".into(), description: (*description).into(),
+        state.agent_panel = [
+            "Grepping mysql-schema.sql and sentinel usage",
+            "Locating forward/proxy code",
+            "Searching dubbo pages for registries",
+        ]
+        .iter()
+        .enumerate()
+        .map(|(i, description)| crate::background_commands::Agent {
+            session_id: format!("fixture-{i}"),
+            agent_type: "explore".into(),
+            description: (*description).into(),
             started_ms: chrono::Utc::now().timestamp_millis() as u64 - [66000, 57000, 52000][i],
             output_tokens: [57800, 91800, 53200][i],
         }).collect();
@@ -3307,7 +3575,17 @@ mod tests {
         let mut state = State::new("ask".into());
         state.draft.set("/");
         let names: Vec<_> = state.menu().into_iter().map(|(name, _)| name).collect();
-        assert_eq!(names, vec!["/background", "/btw", "/goal", "/status", "/tasks"]);
+        assert_eq!(
+            names,
+            vec![
+                "/background",
+                "/btw",
+                "/goal",
+                "/list-agents",
+                "/status",
+                "/tasks"
+            ]
+        );
         state.draft.set("/bt");
         assert!(state.menu_key(crossterm::event::KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE)));
         assert_eq!(state.draft.characters.iter().collect::<String>(), "/btw ");
@@ -3658,6 +3936,15 @@ impl TurnDisplay {
     pub fn clear(&mut self) {
         if self.live.is_none() {
             self.fallback.clear();
+        }
+    }
+    pub fn inspection(&mut self, command: &str, text: &str) {
+        if let Some(live) = &self.live {
+            let _ = live
+                .updates
+                .send(Update::Inspection(command.into(), text.into()));
+        } else {
+            self.notice(text);
         }
     }
     pub fn notice(&mut self, text: &str) {
