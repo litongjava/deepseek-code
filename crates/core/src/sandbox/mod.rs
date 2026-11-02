@@ -30,7 +30,7 @@ impl Default for SandboxConfig {
                 "powershell".to_string(),
             ],
             max_output_size: 10000,
-            allow_network: false,
+            allow_network: true,
             allow_filesystem: true,
             allowed_paths: vec!["/tmp".to_string(), "/sandbox".to_string()],
         }

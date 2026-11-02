@@ -26,8 +26,8 @@ export default function SlashCommandSuggestions({ anchorRef, boundaryRef, comman
       const bottomLimit = Math.min(window.innerHeight, boundary?.bottom ?? window.innerHeight) - margin;
       const above = Math.max(0, rect.top - topLimit - gap);
       const below = Math.max(0, bottomLimit - rect.bottom - gap);
-      const desiredHeight = Math.min(320, menu.scrollHeight + menu.offsetHeight - menu.clientHeight);
-      const openAbove = above >= desiredHeight || above >= below;
+      // Choose a side from available space, not the changing filtered results.
+      const openAbove = above >= 320 || above >= below;
       const maxHeight = Math.min(320, openAbove ? above : below);
       const width = Math.min(rect.width, Math.max(0, window.innerWidth - margin * 2));
 
@@ -35,7 +35,8 @@ export default function SlashCommandSuggestions({ anchorRef, boundaryRef, comman
         width,
         maxHeight,
         left: Math.max(margin, Math.min(rect.left, window.innerWidth - width - margin)),
-        top: openAbove ? rect.top - gap - Math.min(desiredHeight, maxHeight) : rect.bottom + gap,
+        top: openAbove ? undefined : rect.bottom + gap,
+        bottom: openAbove ? window.innerHeight - rect.top + gap : undefined,
         visibility: rect.bottom < topLimit || rect.top > bottomLimit ? 'hidden' : 'visible',
       });
     };
@@ -56,7 +57,7 @@ export default function SlashCommandSuggestions({ anchorRef, boundaryRef, comman
       window.removeEventListener('resize', updatePosition);
       window.removeEventListener('scroll', handleScroll, true);
     };
-  }, [anchorRef, boundaryRef, commands.length]);
+  }, [anchorRef, boundaryRef]);
 
   return createPortal(
     <div
