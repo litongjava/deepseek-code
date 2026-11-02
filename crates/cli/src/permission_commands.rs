@@ -55,6 +55,7 @@ pub async fn remember_commit(session: &Session, remember: &Remember) -> Result<C
                     deepseek_code_core::permissions::PermissionMode::Auto,
                 )?;
                 deepseek_code_core::permissions::set_full_access(false);
+                publish_mode(&id, "auto");
                 Ok(())
             })
         }
@@ -62,7 +63,11 @@ pub async fn remember_commit(session: &Session, remember: &Remember) -> Result<C
             let name = "accept-edits";
             let mode = deepseek_code_core::services::session_permission_mode::parse(name)?;
             Box::new(move || {
-                deepseek_code_core::services::session_permission_mode::set(&db, &id, &manager, mode)
+                deepseek_code_core::services::session_permission_mode::set(
+                    &db, &id, &manager, mode,
+                )?;
+                publish_mode(&id, name);
+                Ok(())
             })
         }
         Remember::Rule(rule) => {
@@ -76,6 +81,16 @@ pub async fn remember_commit(session: &Session, remember: &Remember) -> Result<C
             })
         }
     })
+}
+
+fn publish_mode(session: &str, mode: &str) {
+    // Notify only after the engine has committed the reviewed approval.
+    // A notification failure must not invalidate an already committed grant.
+    if let Err(error) = deepseek_code_core::services::session_worker::emit_event(
+        &serde_json::json!({"type":"permission_mode", "mode":mode, "session_id":session}),
+    ) {
+        eprintln!("Could not publish permission mode: {error}");
+    }
 }
 
 /// Saves a remembered allow rule to the project's `.claude/settings.local.json`,
@@ -261,6 +276,7 @@ mod tests {
         commit().unwrap();
         let config = auto_config::load(&context).unwrap();
         assert!(config.enabled);
+        assert_eq!(config.failure_policy, auto_config::FailurePolicy::Manual);
         assert_eq!(
             config.classifier,
             Some(auto_config::ClassifierSelection::Current)
@@ -272,6 +288,10 @@ mod tests {
             Some(deepseek_code_core::permissions::PermissionMode::Auto)
         );
         assert!(!session.approval_auto_available().await);
+        let mut configured = config;
+        configured.failure_policy = auto_config::FailurePolicy::Deny;
+        auto_config::save(&context, &configured).unwrap();
+        assert_eq!(session.approval_auto_config().await.unwrap(), configured);
         session.close().await.unwrap();
     }
 

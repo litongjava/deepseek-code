@@ -571,6 +571,14 @@ impl Session {
         use deepseek_code_core::permissions::auto_config::{self, ClassifierSelection};
         let context = crate::services::context(&self.paths)?;
         let mut config = auto_config::load(&context)?;
+        // A first-time menu setup must retain a human fallback through the host.
+        // Preserve an existing configuration, including an explicit deny policy.
+        if context
+            .setting::<serde_json::Value>(auto_config::KEY)?
+            .is_none()
+        {
+            config.failure_policy = auto_config::FailurePolicy::Manual;
+        }
         config.enabled = true;
         config
             .classifier
@@ -878,8 +886,18 @@ impl Session {
             && !cli.print
             && !cli.print_short
             && !crate::display_commands::load(self)?.focus;
-        self.engine.set_auto_manual_interactive(input.is_some());
-        self.engine.set_permission_host_available(input.is_some() || self.sdk_permissions.is_some() || std::env::var_os(deepseek_code_core::services::background_sessions::CONTROL_ENV).is_some());
+        self.engine.set_auto_manual_interactive(
+            input.is_some()
+                || self.sdk_permissions.is_some()
+                || std::env::var_os(deepseek_code_core::services::background_sessions::CONTROL_ENV)
+                    .is_some(),
+        );
+        self.engine.set_permission_host_available(
+            input.is_some()
+                || self.sdk_permissions.is_some()
+                || std::env::var_os(deepseek_code_core::services::background_sessions::CONTROL_ENV)
+                    .is_some(),
+        );
         // A host flag and a live, session-owned frontend lease are both required.
         // SDK/Desktop engines never enable this local terminal tool.
         self.engine.set_local_goal_frontend(

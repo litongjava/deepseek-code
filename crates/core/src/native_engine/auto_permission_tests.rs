@@ -311,6 +311,36 @@ async fn auto_failure_fallback_requires_explicit_manual_config_and_interactive_h
             );
             assert_eq!(calls.load(Ordering::SeqCst), 1);
             assert_eq!(manager.auto_stats("auto-session").unknown_usage_requests, 1);
+            let mut oversized = tool.clone();
+            oversized.tool_input = json!({"command": "x".repeat(40_000)});
+            let limited = crate::native_engine::auto_permissions::authorize(
+                &context,
+                &manager,
+                &oversized,
+                &executor.provider,
+                &[],
+                interactive,
+            )
+            .await;
+            let message = match limited.result {
+                crate::permissions::PermissionResult::RequiresConfirmation(message) => {
+                    assert!(manual && interactive);
+                    assert!(message.contains("requesting manual permission"));
+                    message
+                }
+                crate::permissions::PermissionResult::Denied(message) => {
+                    assert!(!manual || !interactive);
+                    assert!(message.contains(if manual {
+                        "no manual approval host"
+                    } else {
+                        "failure_policy=deny"
+                    }));
+                    message
+                }
+                _ => panic!("Oversized classifier input must never grant permission"),
+            };
+            assert!(message.contains("InputLimit"));
+            assert_eq!(calls.load(Ordering::SeqCst), 1);
             manager.set_session_rules(
                 "auto-session",
                 HashMap::from([("Bash".into(), PermissionAction::Confirm)]),

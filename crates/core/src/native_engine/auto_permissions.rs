@@ -333,9 +333,18 @@ pub async fn authorize(
             "Auto permission denied: {:?}",
             verdict.reason_code
         )),
-        Err(failure) => fallback(&format!(
-            "Auto classifier unavailable ({failure:?}); action requires manual permission"
-        )),
+        Err(failure) => {
+            let action = if config.failure_policy == FailurePolicy::Deny {
+                "action denied by failure_policy=deny"
+            } else if interactive {
+                "requesting manual permission"
+            } else {
+                "action denied because no manual approval host is available"
+            };
+            fallback(&format!(
+                "Auto classifier unavailable ({failure:?}); {action}"
+            ))
+        }
     };
     AutoAuthorization {
         result,
