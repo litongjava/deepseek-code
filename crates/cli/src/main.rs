@@ -72,6 +72,7 @@ mod feedback_commands;
 mod remote_client;
 mod remote_commands;
 mod remote_host;
+mod restart;
 
 use anyhow::{bail, ensure, Context, Result};
 use args::{Cli, Commands, McpCommands, OutputFormat, SessionCommands, SkillsCommands};
@@ -545,6 +546,8 @@ async fn run(cli: &Cli) -> Result<()> {
     let mut session = session::Session::open(cli, &paths, selection, resumed.as_ref().map(|s| s.id.as_str())).await?;
     startup_options::apply(cli, &mut session).await?;
     let mut screen_mode = terminal::screen_mode::ScreenMode::default();
+    // Set by /restart; the replacement starts after this session is closed.
+    let mut restart_args: Option<Vec<String>> = None;
     let result = async {
         if !sdk_stream { session.start_hooks(if resumed.is_some() { "resume" } else { "startup" }).await?; }
         if cli.init || cli.init_only || cli.maintenance {
@@ -992,6 +995,22 @@ async fn run(cli: &Cli) -> Result<()> {
                 Err(error) => { eprintln!("Error: {error:#}"); continue; },
                 Ok(false) => {},
             }
+            // Match the exact command so a skill such as /restart-notes still runs.
+            let restart_line = line.trim();
+            if restart_line == "/restart" || restart_line.starts_with("/restart ") {
+                if restart_line != "/restart" {
+                    eprintln!("Usage: /restart");
+                    continue;
+                }
+                restart_args = Some(restart::args(
+                    &std::env::args().skip(1).collect::<Vec<_>>(),
+                    cli.prompt.as_deref(),
+                    &session.id,
+                    &session.workspace,
+                ));
+                session_trust::quit_worker(&session.paths, &session.id).await?;
+                break;
+            }
             match line.trim() {
                 "" => continue,
                 "/exit" | "/quit" | "exit" | "quit" | ".exit" | ":q" => {
@@ -1025,7 +1044,7 @@ async fn run(cli: &Cli) -> Result<()> {
     }.await;
     if !single { terminal::title::clear(); }
     session.end_hooks(if result.is_ok() && !single { "prompt_input_exit" } else { "other" }).await;
-    let resume_hint = !single && !sdk_stream
+    let resume_hint = restart_args.is_none() && !single && !sdk_stream
         && session.store.history(&session.id).is_ok_and(|rows| !rows.is_empty());
     let shutdown = session.close().await;
     // Restore the shell before printing the one message that must survive cleanup.
@@ -1034,6 +1053,13 @@ async fn run(cli: &Cli) -> Result<()> {
     drop(_exit_cleanup);
     if resume_hint {
         eprintln!("\nResume this session with:\ndcl --resume {}", session.id);
+    }
+    if let Some(args) = restart_args.take() {
+        // Release the session and its database before the replacement opens it.
+        shutdown?;
+        drop(session);
+        eprintln!("Restarting dcl in this conversation\u{2026}");
+        return restart::relaunch(&args);
     }
     // A completed single turn already wrote its terminal result. Shutdown may
     // still fail, but stdout must not acquire a second result record.

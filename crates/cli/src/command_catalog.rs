@@ -70,6 +70,7 @@ pub const COMMANDS: &[(&str, &str)] = &[
         "Show terminal capabilities and keyboard shortcuts",
     ),
     ("/help", "Show commands"),
+    ("/restart", "Restart dcl on this conversation; the process is replaced in place"),
     ("/exit", "Exit (also /quit)"),
     ("/quit", "Exit"),
     ("/status", "Version, account, API and tool status; --check probes HTTP reachability"),
