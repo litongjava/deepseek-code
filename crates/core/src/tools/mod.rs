@@ -565,6 +565,18 @@ pub fn is_dangerous_command(command: &str) -> bool {
 mod command_filter_tests {
     use super::is_dangerous_command;
 
+    #[test]
+    fn powershell_candidates_follow_the_running_windows_root() {
+        use std::ffi::OsStr;
+        let root = OsStr::new("X:/Windows");
+        let programs = OsStr::new("X:/Program Files");
+        let candidates = super::windows_powershell_candidates("powershell", Some(root), Some(programs));
+        assert_eq!(candidates[0], std::path::Path::new(root).join("System32/WindowsPowerShell/v1.0/powershell.exe"));
+        let modern = super::windows_powershell_candidates("pwsh", Some(root), Some(programs));
+        assert_eq!(modern[1], candidates[0]);
+        assert!(super::windows_powershell_candidates("powershell", None, None).is_empty());
+    }
+
     #[tokio::test]
     async fn bypass_executes_filtered_text_and_tracks_live_mode_without_argument_spoofing() {
         use crate::permissions::{AuditLogger, PermissionManager, PermissionMode};
@@ -1177,7 +1189,29 @@ pub fn find_git_bash() -> Option<String> {
     find_shell("bash")
 }
 
+#[cfg(any(windows, test))]
+fn windows_powershell_candidates(shell: &str, system_root: Option<&std::ffi::OsStr>, program_files: Option<&std::ffi::OsStr>) -> Vec<PathBuf> {
+    let native = system_root.map(|root| PathBuf::from(root).join("System32").join("WindowsPowerShell").join("v1.0").join("powershell.exe"));
+    let modern = program_files.map(|root| PathBuf::from(root).join("PowerShell").join("7").join("pwsh.exe"));
+    if shell == "pwsh" { modern.into_iter().chain(native).collect() }
+    else { native.into_iter().chain(modern).collect() }
+}
+
 pub fn find_shell(shell_name: &str) -> Option<String> {
+    #[cfg(windows)]
+    if matches!(shell_name, "powershell" | "pwsh") {
+        // PE lives on X:, and a Windows installation can use another drive.
+        // Prefer the running OS over an offline installation's C:\Windows.
+        let system_root = std::env::var_os("SystemRoot").or_else(|| std::env::var_os("WINDIR"));
+        let program_files = std::env::var_os("ProgramFiles");
+        let candidates = windows_powershell_candidates(shell_name, system_root.as_deref(), program_files.as_deref());
+        if let Some(path) = candidates.into_iter().find(|path| path.is_file()) {
+            return Some(path.to_string_lossy().into_owned());
+        }
+        return lsp_servers::find_on_path(shell_name)
+            .or_else(|| (shell_name == "pwsh").then(|| lsp_servers::find_on_path("powershell")).flatten())
+            .map(|path| path.to_string_lossy().into_owned());
+    }
     let candidates = match (shell_name, cfg!(target_os = "windows")) {
         ("bash", true) => vec![
             r"C:\Program Files\Git\bin\bash.exe".to_string(),
