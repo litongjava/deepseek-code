@@ -78,9 +78,44 @@ pub(crate) fn mcp_label(name: &str, input: &Value) -> Option<String> {
     })
 }
 
+/// Full MCP identity and input are visible without opening details.
+pub(crate) fn mcp_call(name: &str, input: &Value) -> Option<String> {
+    let summary = mcp_label(name, input)?;
+    // JSON escapes control characters rather than allowing terminal execution.
+    Some(format!(
+        "{}({input}) · {summary}",
+        printable(&plain_terminal_text(name))
+    ))
+}
+
+pub(super) fn is_mcp_header(line: &Line) -> bool {
+    line.0.first().is_some_and(|span| span.text == "● ")
+        && line.0.iter().any(|span| span.text.starts_with("mcp__"))
+}
+
+/// Wrap literal calls without Markdown's whitespace trimming.
+pub(super) fn wrap_call(text: &str, width: usize) -> Vec<String> {
+    use unicode_width::UnicodeWidthChar;
+    let width = width.max(2);
+    let mut rows = Vec::new();
+    let mut row = String::new();
+    let mut cells = 0;
+    for ch in plain_terminal_text(text).chars() {
+        let size = ch.width().unwrap_or(0);
+        if cells + size > width && !row.is_empty() {
+            rows.push(std::mem::take(&mut row));
+            cells = 0;
+        }
+        row.push(ch);
+        cells += size;
+    }
+    rows.push(row);
+    rows
+}
+
 /// `Bash(ls -la)` for previewable inputs, otherwise the tool name.
 pub fn label(name: &str, input: &Value, workspace: Option<&std::path::Path>) -> String {
-    if let Some(label) = mcp_label(name, input) { return label; }
+    if let Some(label) = mcp_call(name, input) { return label; }
     if matches!(name, "Grep" | "Glob") {
         let pattern = printable(input["pattern"].as_str().unwrap_or_default());
         let path = input["path"].as_str().map(|path| super::display_path::label(path, workspace));
@@ -330,12 +365,6 @@ pub fn expanded(
         _ => label(name, input, workspace),
     };
     let mut lines = vec![change_view::tool_call(&header, if failed { "error" } else { "" }, failed)];
-    if mcp_label(name, input).is_some() {
-        lines.push(change_view::muted(&format!("  Tool: {}", printable(&plain_terminal_text(name)))));
-        for row in serde_json::to_string_pretty(input).unwrap_or_default().lines() {
-            lines.push(change_view::muted(&format!("  {}", printable(row))));
-        }
-    }
     let diff = change_view::details(name, output, failed);
     let text = diff.unwrap_or_else(|| result_text(output));
     let rows: Vec<&str> = text.lines().collect();
@@ -897,7 +926,7 @@ mod mcp_display_tests {
     fn mcp_labels_are_shared_and_details_preserve_input() {
         let name = "mcp__codegraph__codegraph_explore";
         let input = json!({"query":"中文符号", "projectPath":"../docs", "maxFiles":7});
-        assert_eq!(label(name, &input, None), "Exploration: 中文符号");
+        assert_eq!(label(name, &input, None), format!("{name}({input}) · Exploration: 中文符号"));
         assert_eq!(
             super::super::progress::tool_preview_in_workspace(name, &input, None),
             label(name, &input, None)
@@ -946,5 +975,37 @@ mod mcp_display_tests {
         assert_eq!(clean, "docs / search: hello world");
         assert!(mcp_label("Read", &json!({})).is_none());
         assert!(mcp_label("mcp__broken", &json!({})).is_none());
+    }
+}
+
+#[cfg(test)]
+mod mcp_full_input_tests {
+    use super::*;
+
+    #[test]
+    fn full_mcp_input_is_inline_in_finished_and_history_views() {
+        let name = "mcp__codegraph__codegraph_explore";
+        let input = serde_json::json!({"query": "中文🦀".repeat(150), "maxFiles": 17,
+            "projectPath": "../other project", "options": {"enabled": false}, "extra": null});
+        let json = input.to_string();
+        for lines in [
+            finished(name, &input, "ok", false, None, None),
+            expanded(name, &input, "ok", false, None),
+        ] {
+            let text = change_view::plain(&lines);
+            assert!(text.contains(&format!("{name}({json})")));
+            assert!(text.contains("Exploration:"));
+            assert_eq!(text.matches(name).count(), 1);
+        }
+    }
+
+    #[test]
+    fn mcp_json_escapes_terminal_controls_without_losing_arguments() {
+        let input =
+            serde_json::json!({"query": "\u{1b}[31mhello\nworld", "secondary": "a  b\t\r\n"});
+        let text = mcp_call("mcp__docs__search", &input).unwrap();
+        assert!(!text.contains('\u{1b}'));
+        assert!(text.contains(&input.to_string()));
+        assert!(text.contains("docs / search: hello world"));
     }
 }

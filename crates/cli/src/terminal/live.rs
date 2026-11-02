@@ -1019,7 +1019,10 @@ fn running_lines(state: &State, width: usize, budget: usize, color: bool) -> (Ve
             rows.push(String::new());
         }
         let first = rows.len();
-        rows.push(change_view::render(&call.header, width, color));
+        // MCP inputs are already in scrollback, outside the live frame budget.
+        if !super::tool_view::is_mcp_header(&call.header) {
+            rows.push(change_view::render(&call.header, width, color));
+        }
         let elapsed = call.started.elapsed().as_secs();
         let detail = if elapsed >= 2 { format!(" ({})", short_duration(elapsed)) } else { String::new() };
         rows.push(change_view::render(&change_view::running(&detail), width, color));
@@ -1938,6 +1941,9 @@ fn run(
                     // the call shows right below them, where it will stay.
                     finish_text(state, screen);
                     if !state.running.iter().any(|call| call.id == id) {
+                        if super::tool_view::is_mcp_header(&header) {
+                            screen.log_block(vec![header.clone()], vec![header.clone()]);
+                        }
                         state.running.push(Running { id, header, started: Instant::now(), shell });
                     }
                     dirty = true;
@@ -3926,5 +3932,49 @@ mod completion_tests {
             assert_eq!(display.finished.len(), 1);
             assert!(display.tools.is_empty());
         }
+    }
+}
+
+#[cfg(test)]
+mod mcp_started_tests {
+    use super::*;
+
+    #[test]
+    fn started_mcp_call_reaches_scrollback_without_expansion_or_frame_clipping() {
+        let temp = tempfile::tempdir().unwrap();
+        let mut display =
+            TurnDisplay::new(false, "ask", &temp.path().join("keys.json"), vec![]).unwrap();
+        let (send, receive) = mpsc::channel();
+        let (_, actions) = async_mpsc::unbounded_channel();
+        display.live = Some(LiveTurn {
+            updates: send,
+            actions,
+            worker: None,
+        });
+        let name = "mcp__codegraph__codegraph_explore";
+        let input = serde_json::json!({"query": "中文🦀".repeat(150), "maxFiles": 12, "projectPath": "../docs"});
+        display.tool_started("one", name, &input);
+        let header = receive
+            .try_iter()
+            .find_map(|update| match update {
+                Update::ToolStarted(_, header, _) => Some(header),
+                _ => None,
+            })
+            .unwrap();
+        assert!(super::super::tool_view::is_mcp_header(&header));
+        let mut screen = Frame::default();
+        screen.log_block(vec![header.clone()], vec![header.clone()]);
+        let text = super::super::tool_view::plain_terminal_text(&screen.logged.concat());
+        assert!(text.contains(&format!("{name}({input})")));
+        let mut state = State::new("ask".into());
+        state.running.push(Running {
+            id: "one".into(),
+            header,
+            started: Instant::now(),
+            shell: false,
+        });
+        let (rows, _) = running_lines(&state, 30, 2, false);
+        assert_eq!(rows.len(), 1);
+        assert!(rows[0].contains("Running"));
     }
 }

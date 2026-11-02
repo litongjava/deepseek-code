@@ -115,7 +115,8 @@ impl TurnProgress {
         self.tools.insert(id.into(), Instant::now());
         let next = self.numbers.values().copied().max().unwrap_or(0) + 1;
         let number = *self.numbers.entry(id.to_owned()).or_insert(next);
-        self.notice(&format!("• #{number} {}", tool_preview_in_workspace(name, input, self.workspace.as_deref())));
+        let preview = format!("• #{number} {}", tool_preview_in_workspace(name, input, self.workspace.as_deref()));
+        self.notice_with_wrap(&preview, super::tool_view::mcp_call(name, input).is_some());
         let label = if let Some(activity) = super::tool_view::task_output_activity(name, input) {
             activity.to_owned()
         } else if name == "Agent" {
@@ -151,6 +152,9 @@ impl TurnProgress {
         let elapsed = self.tools.remove(id).map(|start| start.elapsed());
         let next = self.numbers.values().copied().max().unwrap_or(0) + 1;
         let number = format!("#{} ", self.numbers.entry(id.to_owned()).or_insert(next));
+        if let Some(call) = super::tool_view::mcp_call(name, input) {
+            self.notice_with_wrap(&format!("  {number}{call}"), true);
+        }
         self.notice(&format!("  {number}{}", tool_result_summary(name, output, failed, elapsed).trim_start()));
         self.set_activity("Working");
     }
@@ -181,6 +185,10 @@ impl TurnProgress {
     }
 
     fn notice(&mut self, message: &str) {
+        self.notice_with_wrap(message, false);
+    }
+
+    fn notice_with_wrap(&mut self, message: &str, wrap: bool) {
         self.clear();
         if !self.enabled {
             return;
@@ -191,10 +199,9 @@ impl TurnProgress {
         }
         let (width, _) = crossterm::terminal::size().unwrap_or((80, 24));
         let width = width as usize;
-        eprintln!(
-            "{}",
-            clipped(&single_line(message), width.saturating_sub(1))
-        );
+        for row in notice_rows(message, width.saturating_sub(1), wrap) {
+            eprintln!("{row}");
+        }
     }
 
     fn set_status(&mut self, activity: &str, phase: &'static str) {
@@ -436,6 +443,14 @@ impl ReportedUsage {
     }
 }
 
+fn notice_rows(message: &str, width: usize, wrap: bool) -> Vec<String> {
+    if wrap {
+        super::tool_view::wrap_call(message, width)
+    } else {
+        vec![clipped(&single_line(message), width)]
+    }
+}
+
 pub(super) fn single_line(text: &str) -> String {
     text.chars()
         .filter(|c| !c.is_control() || c.is_whitespace())
@@ -460,7 +475,7 @@ pub(crate) fn display_name(name: &str) -> &str {
 }
 
 pub(crate) fn tool_preview_in_workspace(name: &str, input: &Value, workspace: Option<&std::path::Path>) -> String {
-    if let Some(label) = super::tool_view::mcp_label(name, input) { return label; }
+    if let Some(label) = super::tool_view::mcp_call(name, input) { return label; }
     let name = single_line(name);
     let preview = if name == "WebFetch" {
         input["url"].as_str().map(single_line)
@@ -881,4 +896,24 @@ mod tests {
         assert_eq!(progress.activity, "Another task");
     }
 
+}
+
+#[cfg(test)]
+mod mcp_notice_tests {
+    use super::*;
+
+    #[test]
+    fn fallback_wraps_full_mcp_name_and_all_arguments() {
+        let input = serde_json::json!({"query": "中文🦀".repeat(150), "secondary": [1, false], "z": "tail"});
+        let preview = tool_preview("mcp__docs__search", &input);
+        for width in [20, 79] {
+            let rows = notice_rows(&preview, width, true);
+            let text = rows.concat();
+            assert!(rows.len() > 1);
+            assert!(text.contains(&format!("mcp__docs__search({input})")));
+            assert!(rows
+                .iter()
+                .all(|row| unicode_width::UnicodeWidthStr::width(row.as_str()) <= width));
+        }
+    }
 }

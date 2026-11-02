@@ -531,7 +531,7 @@ impl Scrollback {
         let header_rows = if entry.header_open {
             rendered(&entry.full[..1]).len()
         } else {
-            1
+            collapsed(&entry.short[..1]).len()
         };
         if entry.whole {
             entry.header_open = !entry.header_open;
@@ -574,17 +574,21 @@ fn collapsed(lines: &[Line]) -> Vec<String> {
     let width = terminal::size().unwrap_or((80, 24)).0.saturating_sub(1) as usize;
     lines
         .iter()
-        .map(|line| {
+        .flat_map(|line| {
             let color = std::env::var_os("NO_COLOR").is_none();
+            if super::tool_view::is_mcp_header(line) {
+                let text = change_view::render(line, usize::MAX, color);
+                return super::tool_view::wrap_call(&text, width);
+            }
             let plain = change_view::plain(std::slice::from_ref(line));
-            if unicode_width::UnicodeWidthStr::width(plain.trim_end()) > width {
+            vec![if unicode_width::UnicodeWidthStr::width(plain.trim_end()) > width {
                 format!(
                     "{}…",
                     change_view::render(line, width.saturating_sub(1), color)
                 )
             } else {
                 change_view::render(line, width, color)
-            }
+            }]
         })
         .collect()
 }
@@ -596,7 +600,11 @@ fn rendered(lines: &[Line]) -> Vec<String> {
         .iter()
         .flat_map(|line| {
             let text = change_view::render(line, usize::MAX, color);
-            super::markdown::wrap_styled(&text, "", "", width)
+            if super::tool_view::is_mcp_header(line) {
+                super::tool_view::wrap_call(&text, width)
+            } else {
+                super::markdown::wrap_styled(&text, "", "", width)
+            }
         })
         .collect()
 }
@@ -887,5 +895,25 @@ mod tests {
         assert!(lines.all()[0].contains("full header"));
         assert!(lines.toggle_history(0));
         assert!(lines.all()[0].contains("short header"));
+    }
+}
+
+#[cfg(test)]
+mod mcp_wrapping_tests {
+    use super::*;
+
+    #[test]
+    fn collapsed_numbered_mcp_headers_keep_all_parameters() {
+        let name = "mcp__codegraph__codegraph_explore";
+        let input = serde_json::json!({"query": "中文🦀".repeat(150), "maxFiles": 12, "z": "secondary-tail"});
+        let lines = super::super::tool_view::numbered(
+            super::super::tool_view::finished(name, &input, "ok", false, None, None),
+            Some(4),
+        );
+        let rows = collapsed(&lines);
+        let text = super::super::tool_view::plain_terminal_text(&rows.concat());
+        assert!(rows.len() > 3);
+        assert!(text.contains(&format!("{name}({input})")));
+        assert!(text.contains("#4"));
     }
 }
