@@ -53,6 +53,7 @@ enum Update {
     /// A call finished: its result replaces the running form in one frame,
     /// with the full form a click shows when there is one.
     Finished(String, Vec<change_view::Line>, Option<Vec<change_view::Line>>),
+    BackgroundFinished(String, Vec<change_view::Line>, Vec<change_view::Line>, String),
     /// The session's working directory, shown in the footer.
     Workspace(String),
     ShellContext(std::path::PathBuf, String),
@@ -1908,6 +1909,15 @@ fn run(
                     }
                     dirty = true;
                 }
+                Ok(Update::BackgroundFinished(id, short, full, task)) => {
+                    state.running.retain(|call| call.id != id);
+                    finish_text(state, screen);
+                    screen.log_block(short, full);
+                    if let Some((root, session)) = &state.shell_context {
+                        screen.scrollback.bind_background(root.clone(), session.clone(), task);
+                    }
+                    dirty = true;
+                }
                 Ok(Update::Finished(id, short, full)) => {
                     state.running.retain(|call| call.id != id);
                     finish_text(state, screen);
@@ -3460,7 +3470,11 @@ impl TurnDisplay {
                 ), number);
                 if name != "TodoWrite" {
                     let full = super::tool_view::numbered(super::tool_view::expanded_block(name, label_input, output, failed, elapsed, self.workspace.as_deref()), number);
-                    live.finished(id, short, Some(full));
+                    if let Some(task) = super::tool_view::background_shell_id(name, output, failed) {
+                        let _ = live.updates.send(Update::BackgroundFinished(id.into(), short, full, task));
+                    } else {
+                        live.finished(id, short, Some(full));
+                    }
                 } else {
                     live.finished(id, short, None);
                 }

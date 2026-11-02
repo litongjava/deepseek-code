@@ -139,6 +139,14 @@ pub fn plain_terminal_text(text: &str) -> String {
     plain.0
 }
 
+pub(super) fn background_shell_id(name: &str, output: &str, failed: bool) -> Option<String> {
+    if failed || !matches!(name, "Bash" | "PowerShell") { return None; }
+    let value: Value = serde_json::from_str(output).ok()?;
+    if value["status"] != "running" && value["backgrounded"] != true { return None; }
+    let id = value["task_id"].as_str()?;
+    uuid::Uuid::parse_str(id).ok().map(|id| id.to_string())
+}
+
 fn raw_result_text(output: &str) -> String {
     // Failed calls wrap the tool's own JSON result as `Error: {...}`.
     let body = output.strip_prefix("Error: ").unwrap_or(output);
@@ -194,13 +202,13 @@ pub fn summary(name: &str, output: &str, failed: bool) -> (Vec<String>, usize) {
     if name == "Bash" && !failed && serde_json::from_str::<Value>(output).is_ok_and(|value| {
         value["task_id"].is_string() && value["status"] == "running"
     }) {
-        return (vec!["Running in background (/tasks to view)".into()], 0);
+        return (vec!["Running in background (click to show output · /tasks to view)".into()], 0);
     }
     if !failed && serde_json::from_str::<Value>(output).is_ok_and(|value| value["backgrounded"] == true) {
         if name == "Agent" {
             return (vec!["Backgrounded agent (\u{2193} to manage \u{b7} ctrl+o to expand)".into()], 0);
         }
-        return (vec!["Running in the background (\u{2193} to manage)".into()], 0);
+        return (vec!["Running in the background (click to show output · \u{2193} to manage)".into()], 0);
     }
     // The model reads the full rejection text; the transcript shows the answer.
     if let Some(rest) = output.split_once(REJECTED).map(|(_, rest)| rest) {
@@ -562,6 +570,17 @@ pub fn approval(name: &str, input: &Value, workspace: Option<&std::path::Path>, 
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn background_shell_binding_rejects_non_shell_and_invalid_ids() {
+        let id = uuid::Uuid::new_v4().to_string();
+        let output = json!({"task_id":id,"status":"running"}).to_string();
+        assert_eq!(background_shell_id("Bash", &output, false), Some(id.clone()));
+        assert_eq!(background_shell_id("Bash", &json!({"task_id":id,"backgrounded":true}).to_string(), false), Some(id));
+        assert!(background_shell_id("Agent", &output, false).is_none());
+        assert!(background_shell_id("Bash", &output, true).is_none());
+        assert!(background_shell_id("Bash", r#"{"task_id":"../other","status":"running"}"#, false).is_none());
+    }
 
     fn text(lines: &[Line]) -> Vec<String> {
         lines.iter().map(|line| change_view::render(line, usize::MAX, false)).collect()

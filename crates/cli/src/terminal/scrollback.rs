@@ -17,6 +17,7 @@ struct Logged {
 /// A tool result with hidden lines, shown short or in full.
 #[derive(Clone)]
 struct Block {
+    background: Option<(std::path::PathBuf, String, String)>,
     prompt: Option<String>,
     review: Option<super::file_review::Review>,
     short: Vec<Line>,
@@ -91,6 +92,7 @@ impl Scrollback {
         let plain = change_view::plain(&short);
         let whole = plain.trim_start().starts_with("Thought") || plain.contains("Updated ");
         self.blocks.push(Block {
+            background: None,
             prompt: None,
             review: None,
             short,
@@ -101,6 +103,39 @@ impl Scrollback {
             compact_level: 0,
         });
         (self.blocks.len() - 1, lines)
+    }
+
+    pub(super) fn bind_background(&mut self, root: std::path::PathBuf, session: String, task: String) {
+        if let Some(block) = self.blocks.last_mut() {
+            block.background = Some((root, session, task));
+            block.whole = true;
+        }
+    }
+
+    fn refresh_background(&mut self, id: usize) {
+        let entry = &mut self.blocks[id];
+        let Some((root, session, task)) = &entry.background else { return; };
+        // Use the session-owned task API, never paths supplied by tool output.
+        let result = deepseek_code_core::tools::tasks::execute_for_session(
+            "TaskOutput", serde_json::json!({"task_id": task, "block": false}), root, session,
+        );
+        let mut full = entry.full[..1].to_vec();
+        match result {
+            Ok(value) => {
+                let status = value["status"].as_str().unwrap_or("unknown");
+                let exit = value["result"]["exit_code"].as_i64().map(|code| format!(" · exit {code}")).unwrap_or_default();
+                full.push(change_view::muted(&format!("  Background task {task} · {status}{exit} (click to collapse)")));
+                if matches!(status, "completed" | "failed" | "cancelled") {
+                    entry.short.truncate(1);
+                    entry.short.push(change_view::muted(&format!("  Background task {status}{exit} (click to show output)")));
+                }
+                let output = super::tool_view::result_text(&value.to_string());
+                if output.is_empty() { full.push(change_view::muted("  (No output yet)")); }
+                else { full.extend(output.lines().map(|line| change_view::body(&format!("  {line}")))); }
+            }
+            Err(error) => full.push(change_view::muted(&format!("  Output unavailable: {} (click to collapse)", super::tool_view::plain_terminal_text(&error.to_string())))),
+        }
+        entry.full = full;
     }
     /// Keep prompt text and its disclosure target together across turns.
     pub(crate) fn prompt(&mut self, text: &str) -> (usize, Vec<String>) {
@@ -327,6 +362,7 @@ impl Scrollback {
                 else { break; }
             }
         } else {
+            if self.blocks[id].compact_level == 1 { self.refresh_background(id); }
             self.blocks[id].compact_level = if self.blocks[id].compact_level == 1 { 2 } else { 1 };
         }
         true
@@ -399,6 +435,7 @@ impl Scrollback {
             .position(|line| line.block == Some(block))?;
         let above: usize = self.logged.iter().skip(first).map(|line| line.rows).sum();
         let start = (bottom as usize).saturating_sub(above) as u16;
+        if !self.blocks[block].body_open { self.refresh_background(block); }
         let entry = &mut self.blocks[block];
         if entry.review.is_some() { return None; }
         let header_rows = if entry.header_open {
@@ -508,6 +545,47 @@ fn screen_rows(text: &str, columns: usize) -> usize {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn background_click_refreshes_owned_logs_and_survives_prompt_handoff() {
+        use serde_json::json;
+        let root = tempfile::tempdir().unwrap();
+        let session = uuid::Uuid::new_v4().to_string();
+        let task = uuid::Uuid::new_v4().to_string();
+        std::fs::create_dir_all(root.path().join("tasks")).unwrap();
+        let db = deepseek_code_core::db::DbManager::new(root.path().join("tasks").join(format!("{session}.sqlite3"))).unwrap();
+        let record = json!({"id":task,"status":"completed","metadata":{"managed_shell":true},"output":{"exit_code":0}});
+        db.with_conn(|conn| {
+            conn.execute_batch("CREATE TABLE tasks(id TEXT PRIMARY KEY, body TEXT NOT NULL)").unwrap();
+            conn.execute("INSERT INTO tasks VALUES (?1,?2)", [&task, &record.to_string()]).unwrap();
+        }).unwrap();
+        let logs = root.path().join("shell-tasks").join(&session).join(&task);
+        std::fs::create_dir_all(&logs).unwrap();
+        std::fs::write(logs.join("stdout.log"), "FIRST\n").unwrap();
+        std::fs::write(logs.join("stderr.log"), "\x1b[31mERROR\x1b[0m\n").unwrap();
+        let mut history = super::Scrollback::default();
+        let short = vec![super::change_view::body("Bash(fixture)"), super::change_view::body("Running in background (click to show output)")];
+        let (id, rows) = history.block(short.clone(), short);
+        for row in rows { history.push(row, Some(id)); }
+        history.bind_background(root.path().to_owned(), session, task);
+        history.push("AFTER".into(), None);
+        assert!(history.toggle_history(1));
+        assert!(history.all().iter().any(|line| line.contains("FIRST")));
+        assert!(history.all().iter().any(|line| line.contains("ERROR")));
+        assert_eq!(history.all().last().unwrap(), "AFTER");
+        assert!(history.toggle_history(1));
+        assert!(!history.all().iter().any(|line| line.contains("FIRST")));
+        std::fs::write(logs.join("stdout.log"), "FIRST\nLATEST\n").unwrap();
+        // The same retained blocks are used by the live turn and idle prompt.
+        let mut restored = history.clone();
+        assert!(restored.toggle_history(1));
+        assert!(restored.all().iter().any(|line| line.contains("LATEST")));
+        restored.toggle_history(1);
+        restored.blocks[id].background.as_mut().unwrap().1 = uuid::Uuid::new_v4().to_string();
+        restored.toggle_history(1);
+        assert!(restored.all().iter().any(|line| line.contains("Output unavailable")));
+        assert!(!restored.all().iter().any(|line| line.contains("LATEST")));
+        assert!(!logs.join("cancel").exists());
+    }
     #[test]
     fn identical_prompts_keep_distinct_targets_and_literal_json() {
         let mut history = super::Scrollback::default();
