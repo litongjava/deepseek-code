@@ -19,12 +19,6 @@ pub struct AutoStats {
     pub cache_write_tokens: u64,
     pub unknown_usage_requests: u64,
 }
-impl AutoStats {
-    pub fn denial_limit(&self) -> bool {
-        self.denied_consecutive >= 3 || self.denied_total >= 20
-    }
-}
-
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum ClassifierSelection {

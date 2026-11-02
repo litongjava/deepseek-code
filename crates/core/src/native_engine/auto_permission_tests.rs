@@ -339,7 +339,7 @@ async fn auto_failure_fallback_requires_explicit_manual_config_and_interactive_h
 }
 
 #[tokio::test]
-async fn auto_denial_threshold_stops_requests_and_success_resets_only_consecutive_count() {
+async fn auto_denials_do_not_limit_requests_and_success_resets_only_consecutive_count() {
     let root = tempfile::tempdir().unwrap();
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let endpoint = format!("http://{}", listener.local_addr().unwrap());
@@ -350,8 +350,8 @@ async fn auto_denial_threshold_stops_requests_and_success_resets_only_consecutiv
         post(move || {
             let requests = requests.clone();
             async move {
-                requests.fetch_add(1, Ordering::SeqCst);
-                Json(response("deny"))
+                let n = requests.fetch_add(1, Ordering::SeqCst);
+                Json(response(if n < 21 { "deny" } else { "allow" }))
             }
         }),
     );
@@ -359,7 +359,7 @@ async fn auto_denial_threshold_stops_requests_and_success_resets_only_consecutiv
         axum::serve(listener, app).await.unwrap();
     });
     let (mut executor, _events, manager) = executor(root.path(), &endpoint);
-    for n in 0..4 {
+    for n in 0..21 {
         let (_, _, failed) = executor
             .execute_tool_call(
                 "Write",
@@ -369,16 +369,24 @@ async fn auto_denial_threshold_stops_requests_and_success_resets_only_consecutiv
             .await;
         assert!(failed);
     }
-    assert_eq!(calls.load(Ordering::SeqCst), 3);
-    assert!(manager.auto_stats("auto-session").denial_limit());
+    assert_eq!(calls.load(Ordering::SeqCst), 21);
+    assert_eq!(manager.auto_stats("auto-session").denied_consecutive, 21);
+    assert!(!root.path().join("denied.txt").exists());
+    let (_, output, failed) = executor
+        .execute_tool_call(
+            "Write",
+            &json!({"file_path":"approved-after-denials.txt","content":"approved"}),
+            "approved-after-denials",
+        )
+        .await;
+    assert!(!failed, "{output}");
+    assert!(root.path().join("approved-after-denials.txt").exists());
+    assert_eq!(calls.load(Ordering::SeqCst), 22);
+    // The outer execution loop records successful tools after dispatch.
     manager.record_tool_success("auto-session");
     let stats = manager.auto_stats("auto-session");
     assert_eq!(stats.denied_consecutive, 0);
-    assert_eq!(stats.denied_total, 3);
-    assert!(!stats.denial_limit());
-    manager.update_auto_stats("auto-session", |stats| stats.denied_total = 20);
-    manager.record_tool_success("auto-session");
-    assert!(manager.auto_stats("auto-session").denial_limit());
+    assert_eq!(stats.denied_total, 21);
     assert_eq!(manager.auto_stats("other-session").denied_total, 0);
     server.abort();
 }

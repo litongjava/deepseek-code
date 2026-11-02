@@ -1074,15 +1074,6 @@ impl ToolLoopExecutor {
         self
     }
 
-    fn ensure_auto_not_exhausted(&self) -> Result<()> {
-        if !self.auto_manual_interactive {
-            if let Some(manager) = &self.permission_manager {
-                anyhow::ensure!(manager.get_mode() != crate::permissions::PermissionMode::Auto || !manager.auto_stats(self.conv_id.as_deref().unwrap_or("")).denial_limit(), "Auto permission denial limit reached; stopping the headless turn");
-            }
-        }
-        Ok(())
-    }
-
     async fn check_permission(&self, tool_name: &str, tool_input: &Value, tool_use_id: &str) -> PermissionResult {
         if let Some(approval) = self.approved_call.as_ref().filter(|approval| approval.tool == tool_name && approval.input == *tool_input && approval.id == tool_use_id) {
             return self.permission_hard_denial_for(tool_name, tool_input, approval.pre_tool_hook).map(PermissionResult::Denied).unwrap_or(PermissionResult::Granted);
@@ -2028,7 +2019,6 @@ impl ToolLoopExecutor {
                     )),
                 });
             }
-            self.ensure_auto_not_exhausted()?;
             self.ensure_permission_continuation()?;
             self.resume_pending_owned_children().await;
             let queued = self.deliver_queued_inputs(iteration).await;
@@ -2536,7 +2526,6 @@ impl ToolLoopExecutor {
                     provider_content: None,
                 });
             }
-            self.ensure_auto_not_exhausted()?;
             self.ensure_permission_continuation()?;
             self.resume_pending_owned_children().await;
             let queued = self.deliver_queued_inputs(iteration).await;
