@@ -449,3 +449,148 @@ async fn auto_input_limit_never_counts_a_network_attempt() {
     assert_eq!(stats.denied_total, 0);
     assert!(!root.path().join("too-large.txt").exists());
 }
+
+#[tokio::test]
+async fn auto_rejected_classification_asks_host_and_respects_answer_for_external_write() {
+    for approve in [false, true] {
+        let root = tempfile::tempdir().unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        let file = outside.path().join("approved.txt");
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let endpoint = format!("http://{}", listener.local_addr().unwrap());
+        let app = Router::new().route(
+            "/v1/chat/completions",
+            post(|| async { Json(response("deny")) }),
+        );
+        let server = tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
+        let (executor, mut events, _manager) = executor(root.path(), &endpoint);
+        let mut executor = executor.with_auto_manual_interactive(true);
+        let waiters = executor.answer_waiters.clone();
+        let input = json!({"file_path":file,"content":"approved"});
+        let pending = tokio::spawn(async move {
+            executor
+                .execute_tool_call("Write", &input, "external-write")
+                .await
+        });
+        let request = tokio::time::timeout(std::time::Duration::from_secs(10), async {
+            loop {
+                if let EngineEvent::ToolPermission { request_id, .. } = events.recv().await.unwrap()
+                {
+                    break request_id;
+                }
+            }
+        })
+        .await
+        .unwrap();
+        waiters
+            .lock()
+            .await
+            .remove(&request)
+            .unwrap()
+            .send(if approve { "yes" } else { "no" }.into())
+            .unwrap();
+        let (_, output, failed) = pending.await.unwrap();
+        assert_eq!(failed, !approve, "{output}");
+        assert_eq!(file.exists(), approve);
+        if approve {
+            assert_eq!(std::fs::read_to_string(&file).unwrap(), "approved");
+        }
+        server.abort();
+    }
+}
+
+#[tokio::test]
+async fn auto_allows_exact_external_write_without_manual_host() {
+    let root = tempfile::tempdir().unwrap();
+    let outside = tempfile::tempdir().unwrap();
+    let file = outside.path().join("new/sub/file.txt");
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let endpoint = format!("http://{}", listener.local_addr().unwrap());
+    let app = Router::new().route(
+        "/v1/chat/completions",
+        post(|| async { Json(response("allow")) }),
+    );
+    let server = tokio::spawn(async move {
+        axum::serve(listener, app).await.unwrap();
+    });
+    let (mut executor, _events, _manager) = executor(root.path(), &endpoint);
+    let (_, output, failed) = executor
+        .execute_tool_call(
+            "Write",
+            &json!({"file_path":file,"content":"approved"}),
+            "external-write",
+        )
+        .await;
+    assert!(!failed, "{output}");
+    assert_eq!(std::fs::read_to_string(file).unwrap(), "approved");
+    server.abort();
+}
+
+#[tokio::test]
+async fn auto_missing_authority_and_configuration_fall_back_without_weakening_deny() {
+    use crate::permissions::PermissionResult;
+    for interactive in [false, true] {
+        let root = tempfile::tempdir().unwrap();
+        let (executor, _events, manager) = executor(root.path(), "http://127.0.0.1:1");
+        let mut executor = executor.with_auto_manual_interactive(interactive);
+        executor.conv_id = Some("no-verified-history".into());
+        let input = json!({"file_path":"file.txt","content":"test"});
+        let result = executor
+            .check_permission("Write", &input, "no-history")
+            .await;
+        assert_eq!(
+            matches!(result, PermissionResult::RequiresConfirmation(_)),
+            interactive
+        );
+        if !interactive {
+            assert!(matches!(result, PermissionResult::Denied(_)));
+        }
+        executor.search_config_path = None;
+        let result = executor
+            .check_permission("Write", &input, "no-config")
+            .await;
+        assert_eq!(
+            matches!(result, PermissionResult::RequiresConfirmation(_)),
+            interactive
+        );
+        manager.set_session_rules(
+            "no-verified-history",
+            HashMap::from([("Write".into(), PermissionAction::Deny)]),
+        );
+        assert!(matches!(
+            executor.check_permission("Write", &input, "deny").await,
+            PermissionResult::Denied(_)
+        ));
+    }
+}
+
+#[tokio::test]
+async fn auto_dangerous_shell_keyword_asks_then_executes_only_approved_command() {
+    let root = tempfile::tempdir().unwrap();
+    let (executor, mut events, _manager) = executor(root.path(), "http://127.0.0.1:1");
+    let mut executor = executor.with_auto_manual_interactive(true);
+    let waiters = executor.answer_waiters.clone();
+    // Print the keyword, never execute a destructive command.
+    let input = if cfg!(windows) {
+        json!({"shell":"powershell","command":"Write-Output 'shutdown /s /t 0'"})
+    } else {
+        json!({"shell":"sh","command":"printf '%s' 'shutdown /s /t 0'"})
+    };
+    let pending =
+        tokio::spawn(async move { executor.execute_tool_call("Bash", &input, "keyword").await });
+    let EngineEvent::ToolPermission { request_id, .. } = events.recv().await.unwrap() else {
+        panic!("expected manual approval without classifier request")
+    };
+    waiters
+        .lock()
+        .await
+        .remove(&request_id)
+        .unwrap()
+        .send("yes".into())
+        .unwrap();
+    let (_, output, failed) = pending.await.unwrap();
+    assert!(!failed, "{output}");
+    assert!(output.contains("shutdown /s /t 0"));
+}

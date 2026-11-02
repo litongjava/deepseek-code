@@ -460,6 +460,7 @@ pub(crate) fn display_name(name: &str) -> &str {
 }
 
 pub(crate) fn tool_preview_in_workspace(name: &str, input: &Value, workspace: Option<&std::path::Path>) -> String {
+    if let Some(label) = super::tool_view::mcp_label(name, input) { return label; }
     let name = single_line(name);
     let preview = if name == "WebFetch" {
         input["url"].as_str().map(single_line)

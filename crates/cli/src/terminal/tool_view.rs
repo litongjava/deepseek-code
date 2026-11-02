@@ -28,8 +28,59 @@ pub fn numbered(mut lines: Vec<Line>, number: Option<usize>) -> Vec<Line> {
     lines
 }
 
+/// A display-only MCP label. Routing and stored input keep their raw identity.
+pub(crate) fn mcp_label(name: &str, input: &Value) -> Option<String> {
+    let (server, tool) = name.strip_prefix("mcp__")?.split_once("__")?;
+    if server.is_empty() || tool.is_empty() {
+        return None;
+    }
+    let clean = |text: &str| super::progress::single_line(&plain_terminal_text(text));
+    let title = if server == "codegraph" && tool == "codegraph_explore" {
+        "Exploration".to_owned()
+    } else {
+        format!(
+            "{} / {}",
+            clean(server),
+            clean(&tool.replace(['_', '-'], " "))
+        )
+    };
+    let argument = [
+        "query",
+        "url",
+        "file_path",
+        "path",
+        "pattern",
+        "operation",
+        "prompt",
+        "name",
+        "id",
+    ]
+    .iter()
+    .find_map(|key| {
+        input[*key]
+            .as_str()
+            .filter(|value| !value.trim().is_empty())
+    })
+    .map(clean);
+    Some(match argument {
+        Some(argument) => {
+            let preview: String = argument.chars().take(100).collect();
+            format!(
+                "{title}: {preview}{}",
+                if argument.chars().count() > 100 {
+                    "…"
+                } else {
+                    ""
+                }
+            )
+        }
+        None => title,
+    })
+}
+
 /// `Bash(ls -la)` for previewable inputs, otherwise the tool name.
 pub fn label(name: &str, input: &Value, workspace: Option<&std::path::Path>) -> String {
+    if let Some(label) = mcp_label(name, input) { return label; }
     if matches!(name, "Grep" | "Glob") {
         let pattern = printable(input["pattern"].as_str().unwrap_or_default());
         let path = input["path"].as_str().map(|path| super::display_path::label(path, workspace));
@@ -279,6 +330,12 @@ pub fn expanded(
         _ => label(name, input, workspace),
     };
     let mut lines = vec![change_view::tool_call(&header, if failed { "error" } else { "" }, failed)];
+    if mcp_label(name, input).is_some() {
+        lines.push(change_view::muted(&format!("  Tool: {}", printable(&plain_terminal_text(name)))));
+        for row in serde_json::to_string_pretty(input).unwrap_or_default().lines() {
+            lines.push(change_view::muted(&format!("  {}", printable(row))));
+        }
+    }
     let diff = change_view::details(name, output, failed);
     let text = diff.unwrap_or_else(|| result_text(output));
     let rows: Vec<&str> = text.lines().collect();
@@ -829,4 +886,65 @@ pub fn thought(text: &str, seconds: Option<u64>) -> (Vec<Line>, Vec<Line>) {
     full.extend(text.lines().map(|row| readable(&printable(row))));
     full.push(readable("(click to collapse)"));
     (short, full)
+}
+
+#[cfg(test)]
+mod mcp_display_tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn mcp_labels_are_shared_and_details_preserve_input() {
+        let name = "mcp__codegraph__codegraph_explore";
+        let input = json!({"query":"中文符号", "projectPath":"../docs", "maxFiles":7});
+        assert_eq!(label(name, &input, None), "Exploration: 中文符号");
+        assert_eq!(
+            super::super::progress::tool_preview_in_workspace(name, &input, None),
+            label(name, &input, None)
+        );
+        let finished = change_view::plain(&finished(name, &input, "result", false, None, None));
+        assert!(finished.contains("Exploration: 中文符号"));
+        let details = change_view::plain(&expanded(name, &input, "result", false, None));
+        assert!(details.contains(name));
+        assert!(details.contains("projectPath"));
+        assert!(details.contains("../docs"));
+        assert!(details.contains("maxFiles"));
+    }
+
+    #[test]
+    fn mcp_labels_handle_missing_unicode_long_and_control_arguments() {
+        assert_eq!(
+            mcp_label("mcp__docs__search_pages", &json!({})).unwrap(),
+            "docs / search pages"
+        );
+        assert_eq!(
+            mcp_label(
+                "mcp__docs__search_pages",
+                &json!({"query":"","url":"https://example.com"})
+            )
+            .unwrap(),
+            "docs / search pages: https://example.com"
+        );
+        let query = "中".repeat(150);
+        let input = json!({"query":query});
+        let short = mcp_label("mcp__codegraph__codegraph_explore", &input).unwrap();
+        assert!(short.ends_with('…'));
+        assert_eq!(short.matches('中').count(), 100);
+        assert!(change_view::plain(&expanded(
+            "mcp__codegraph__codegraph_explore",
+            &input,
+            "ok",
+            false,
+            None
+        ))
+        .contains(&query));
+        let clean = mcp_label(
+            "mcp__docs__search",
+            &json!({"query":"\u{1b}[31mhello\u{1b}[0m\nworld"}),
+        )
+        .unwrap();
+        assert_eq!(clean, "docs / search: hello world");
+        assert!(mcp_label("Read", &json!({})).is_none());
+        assert!(mcp_label("mcp__broken", &json!({})).is_none());
+    }
 }

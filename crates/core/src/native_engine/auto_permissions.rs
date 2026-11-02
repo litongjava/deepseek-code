@@ -207,6 +207,22 @@ impl AutoAuthorization {
     }
 }
 
+/// Classifier rejection means that automatic approval is unavailable, not a
+/// policy denial. Only a connected approval host may authorize the fallback.
+pub(super) fn manual_fallback(
+    interactive: bool,
+    message: &str,
+) -> crate::permissions::PermissionResult {
+    use crate::permissions::PermissionResult;
+    if interactive {
+        PermissionResult::RequiresConfirmation(format!("{message}; requesting manual permission"))
+    } else {
+        PermissionResult::Denied(format!(
+            "{message}; action denied because no manual approval host is available"
+        ))
+    }
+}
+
 pub async fn authorize(
     context: &crate::services::ServiceContext,
     manager: &crate::permissions::PermissionManager,
@@ -217,15 +233,7 @@ pub async fn authorize(
 ) -> AutoAuthorization {
     use crate::permissions::{PermissionMode, PermissionResult};
     let denied = |message: &str| PermissionResult::Denied(message.into());
-    // An unavailable classifier is not a denial. Interactive hosts retain the
-    // user's final decision, including for configurations saved with old defaults.
-    let fallback = |message: &str| {
-        if interactive {
-            PermissionResult::RequiresConfirmation(format!("{message}; requesting manual permission"))
-        } else {
-            denied(&format!("{message}; action denied because no manual approval host is available"))
-        }
-    };
+    let fallback = |message: &str| manual_fallback(interactive, message);
     let Some((decision, expected)) = manager.evaluate_stable(tool) else {
         return AutoAuthorization::plain(
             denied("Permission policy changed repeatedly; retry the action"),
@@ -243,7 +251,7 @@ pub async fn authorize(
     // Positive persisted provenance is the only source of user authorization.
     let mut authorized_messages = match crate::services::permission_authority::history(&context.db, &tool.conversation_id, config.max_input_tokens as usize) {
         Ok(history) if !history.is_empty() => history,
-        Ok(_) => return AutoAuthorization::plain(denied("No verified user authorization is recorded for this session; provide a new explicit user request before using Auto"),None),
+        Ok(_) => return AutoAuthorization::plain(fallback("No verified user authorization is recorded for this session; provide a new explicit user request before using Auto"),None),
         Err(error) => return AutoAuthorization::plain(fallback(&format!("Verified user authorization could not be loaded: {error}")),None),
     };
     let expected_authority = authorized_messages.clone();
@@ -330,8 +338,8 @@ pub async fn authorize(
         });
     let result = match outcome.verdict {
         Ok(verdict) if verdict.decision == Decision::Allow => PermissionResult::Granted,
-        Ok(verdict) => denied(&format!(
-            "Auto permission denied: {:?}",
+        Ok(verdict) => fallback(&format!(
+            "Auto requires manual approval: {:?}",
             verdict.reason_code
         )),
         Err(failure) => {

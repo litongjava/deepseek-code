@@ -988,7 +988,23 @@ impl ToolLoopExecutor {
             .filter(|_| tool_input["dangerouslyDisableSandbox"] != true)
             .and_then(crate::tools::sandbox::register_asker);
         // Boxed: tool futures are large and this runs nested inside delegated children.
-        let mut run = Box::pin(execute_builtin_tool(tool_name, input.clone(), cwd, &self.provider, &self.event_tx, self.search_config_path.as_deref(), self.skill_shell_active));
+        let mut run = Box::pin(crate::tools::path_scope::with_permissions(
+            self.permission_manager.clone(),
+            crate::tools::path_scope::approved_auto_call(
+                tool_name,
+                &input,
+                cwd,
+                execute_builtin_tool(
+                    tool_name,
+                    input.clone(),
+                    cwd,
+                    &self.provider,
+                    &self.event_tx,
+                    self.search_config_path.as_deref(),
+                    self.skill_shell_active,
+                ),
+            ),
+        ));
         let Some((_guard, mut questions)) = asker else { return run.await };
         loop {
             tokio::select! {
@@ -1152,8 +1168,13 @@ impl ToolLoopExecutor {
             if self.is_plan_document_tool(tool_name, tool_input) {
                 pm.check_plan_document_permission(&context)
             } else if pm.get_mode() == crate::permissions::PermissionMode::Auto {
-                let Some(root) = self.search_config_path.as_deref().and_then(std::path::Path::parent) else { return PermissionResult::Denied("Auto classifier requires a configured data directory".into()); };
-                let service = match crate::services::session_messages::context(root) { Ok(service) => service, Err(_) => return PermissionResult::Denied("Auto classifier settings unavailable".into()) };
+                let decision = pm.evaluate_permission(&context);
+                if !decision.classifier_eligible { return decision.result; }
+                if tool_name == "Bash" && tool_input["command"].as_str().is_some_and(crate::tools::is_dangerous_command) {
+                    return super::auto_permissions::manual_fallback(self.auto_manual_interactive, "Potentially dangerous shell command requires manual approval");
+                }
+                let Some(root) = self.search_config_path.as_deref().and_then(std::path::Path::parent) else { return super::auto_permissions::manual_fallback(self.auto_manual_interactive, "Auto classifier requires a configured data directory"); };
+                let service = match crate::services::session_messages::context(root) { Ok(service) => service, Err(_) => return super::auto_permissions::manual_fallback(self.auto_manual_interactive, "Auto classifier settings unavailable") };
                 let authorization = super::auto_permissions::authorize(&service, pm, &context, &self.provider, &self.auto_history, self.auto_manual_interactive).await
                     .with_denial_hook(self.hooks.as_deref(), &context, tool_use_id).await;
                 if let Some(telemetry) = authorization.telemetry { let _ = self.event_tx.send(EngineEvent::Usage(telemetry)).await; }
@@ -1251,21 +1272,6 @@ impl ToolLoopExecutor {
             anyhow::ensure!(!incoming.is_empty(), "Hook wake already consumed");
             self.messages.extend(incoming.into_iter().map(|content| json!({"role":"user","content":format!("<system-reminder>\n{content}\n</system-reminder>")})));
             self.require_hook_wake = false;
-        }
-        if self
-            .permission_manager
-            .as_ref()
-            .is_some_and(|pm| pm.get_mode() == crate::permissions::PermissionMode::Auto)
-        {
-            let root = self
-                .search_config_path
-                .as_deref()
-                .and_then(std::path::Path::parent)
-                .ok_or_else(|| anyhow!("Auto permissions require a configured data directory"))?;
-            let context = crate::services::session_messages::context(root)?;
-            let (config, _) = super::auto_permissions::configured(&context, &self.provider)?;
-            let authority = crate::services::permission_authority::history(&context.db, self.conv_id.as_deref().unwrap_or(""), config.max_input_tokens as usize)?;
-            anyhow::ensure!(!authority.is_empty(), "No verified user authorization is recorded for this session; provide a new explicit user request before using Auto");
         }
         // A previous invocation may have been dropped while executing a manual
         // skill. Explicit invocation authority never carries into the next turn.

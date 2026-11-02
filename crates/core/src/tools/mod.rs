@@ -731,9 +731,9 @@ fn search_results_follow_domain_filters() {
     assert_eq!(urls(serde_json::json!({})).len(), 4);
 }
 
-/// Plan mode can inspect files anywhere without expanding writable roots.
+/// Plan and Auto can inspect files anywhere without expanding writable roots.
 pub(super) fn resolve_read_path(file_path: &str, cwd: &str) -> Result<String> {
-    if path_scope::plan_mode() {
+    if path_scope::external_reads() {
         let path = Path::new(file_path);
         return Ok(if path.is_absolute() {
             path.to_path_buf()
@@ -992,7 +992,7 @@ async fn tool_bash_async(input: serde_json::Value, cwd: &str) -> Result<serde_js
     let timeout = std::time::Duration::from_millis(timeout_ms);
     let shell_type = input["shell"].as_str().unwrap_or("bash");
 
-    if !path_scope::bypass_permissions() && is_dangerous_command(command) {
+    if !path_scope::bypass_permissions() && !path_scope::approved_auto_command(command) && is_dangerous_command(command) {
         return Ok(serde_json::json!({
             "error": "Command blocked by security filter: dangerous command detected",
             "is_error": true,

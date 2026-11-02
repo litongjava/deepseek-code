@@ -123,6 +123,10 @@ impl ToolLoopExecutor {
                 if self.is_plan_document_tool(tool, input)
                     || self.permission_manager.as_ref().is_some_and(|manager| {
                         manager.get_mode() == crate::permissions::PermissionMode::BypassPermissions
+                            || (manager.get_mode() == crate::permissions::PermissionMode::Auto
+                                && matches!(tool, "Read" | "Glob" | "Grep" | "ListDir" | "Write" | "Edit" | "MultiEdit" | "NotebookEdit"))
+                            || (manager.get_mode() == crate::permissions::PermissionMode::PlanMode
+                                && matches!(tool, "Read" | "Glob" | "Grep" | "ListDir"))
                     })
                     || (tool == "Read"
                         && crate::tools::screenshot_file::readable(std::path::Path::new(path)))

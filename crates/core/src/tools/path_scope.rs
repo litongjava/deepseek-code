@@ -4,6 +4,8 @@ use std::{
     path::{Path, PathBuf},
 };
 tokio::task_local! { static ALLOWED: Vec<PathBuf>; }
+tokio::task_local! { static EXACT_WRITE: Option<PathBuf>; }
+tokio::task_local! { static EXACT_COMMAND: Option<String>; }
 tokio::task_local! { static PERMISSIONS: Option<std::sync::Arc<crate::permissions::PermissionManager>>; }
 
 pub(crate) async fn with_permissions<F: Future>(
@@ -21,13 +23,75 @@ pub(crate) async fn scope<F: Future>(directories: Vec<PathBuf>, future: F) -> F:
     ALLOWED.scope(roots, future).await
 }
 
+/// Already approved built-ins receive one-call capabilities, never a parent
+/// directory grant or an exception to operating-system sandbox restrictions.
+pub(crate) async fn approved_auto_call<F: Future>(
+    tool: &str,
+    input: &serde_json::Value,
+    cwd: &str,
+    future: F,
+) -> F::Output {
+    let key = match tool {
+        "Write" | "Edit" | "MultiEdit" => Some("file_path"),
+        "NotebookEdit" => Some("notebook_path"),
+        _ => None,
+    };
+    let target = key.and_then(|key| input[key].as_str()).and_then(|path| {
+        let path = Path::new(path);
+        canonical_target(&if path.is_absolute() {
+            path.to_path_buf()
+        } else {
+            Path::new(cwd).join(path)
+        })
+    });
+    let command = (tool == "Bash")
+        .then(|| input["command"].as_str().map(str::to_owned))
+        .flatten();
+    EXACT_COMMAND
+        .scope(command, EXACT_WRITE.scope(target, future))
+        .await
+}
+
+fn canonical_target(path: &Path) -> Option<PathBuf> {
+    if let Ok(path) = path.canonicalize() {
+        return Some(path);
+    }
+    Some(canonical_target(path.parent()?)?.join(path.file_name()?))
+}
+
+pub(super) fn approved_auto_command(command: &str) -> bool {
+    auto_mode()
+        && EXACT_COMMAND
+            .try_with(|approved| approved.as_deref() == Some(command))
+            .unwrap_or(false)
+}
+
+pub(super) fn external_reads() -> bool {
+    plan_mode() || auto_mode()
+}
+
+fn auto_mode() -> bool {
+    PERMISSIONS
+        .try_with(|manager| {
+            manager.as_ref().is_some_and(|manager| {
+                manager.get_mode() == crate::permissions::PermissionMode::Auto
+            })
+        })
+        .unwrap_or(false)
+}
+
 /// Runs blocking work on another thread with the calling task's roots.
 pub(crate) fn carry<R>(
     work: impl FnOnce() -> R + Send + 'static,
 ) -> impl FnOnce() -> R + Send + 'static {
     let roots = ALLOWED.try_with(Clone::clone).unwrap_or_default();
     let manager = PERMISSIONS.try_with(Clone::clone).unwrap_or_default();
-    move || PERMISSIONS.sync_scope(manager, || ALLOWED.sync_scope(roots, work))
+    let exact = EXACT_WRITE.try_with(Clone::clone).unwrap_or_default();
+    move || {
+        PERMISSIONS.sync_scope(manager, || {
+            ALLOWED.sync_scope(roots, || EXACT_WRITE.sync_scope(exact, work))
+        })
+    }
 }
 
 /// Trusted execution context, never derived from model-supplied tool arguments.
@@ -57,6 +121,13 @@ pub(super) fn allows(canonical: &Path) -> bool {
     if bypass_permissions() {
         return true;
     }
+    if auto_mode()
+        && EXACT_WRITE
+            .try_with(|target| target.as_deref() == Some(canonical))
+            .unwrap_or(false)
+    {
+        return true;
+    }
     ALLOWED
         .try_with(|roots| roots.iter().any(|root| canonical.starts_with(root)))
         .unwrap_or(false)
@@ -65,6 +136,39 @@ pub(super) fn allows(canonical: &Path) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[tokio::test]
+    async fn auto_external_paths_are_readable_but_write_grants_are_exact_and_temporary() {
+        use crate::permissions::PermissionMode;
+        use serde_json::json;
+        let project = tempfile::tempdir().unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        let file = outside.path().join("new/sub/file.txt");
+        let other = outside.path().join("other.txt");
+        let cwd = project.path().to_str().unwrap();
+        let input = json!({"file_path":file,"content":"approved"});
+        let manager = crate::runtime::default_permissions();
+        manager.set_mode(PermissionMode::Auto);
+        with_permissions(Some(manager.clone()), async {
+            assert!(super::super::resolve_read_path(file.to_str().unwrap(), cwd).is_ok());
+            assert!(super::super::resolve_path(file.to_str().unwrap(), cwd).is_err());
+            approved_auto_call("Write", &input, cwd, async {
+                assert!(super::super::resolve_path(file.to_str().unwrap(), cwd).is_ok());
+                assert!(super::super::resolve_path(other.to_str().unwrap(), cwd).is_err());
+                let copied = file.clone();
+                assert!(!tokio::spawn(async move { allows(&copied) }).await.unwrap());
+                manager.set_mode(PermissionMode::PlanMode);
+                assert!(super::super::resolve_path(file.to_str().unwrap(), cwd).is_err());
+                manager.set_mode(PermissionMode::Auto);
+            })
+            .await;
+            assert!(super::super::resolve_path(file.to_str().unwrap(), cwd).is_err());
+            manager.set_mode(PermissionMode::AskPermissions);
+            assert!(super::super::resolve_read_path(file.to_str().unwrap(), cwd).is_err());
+        })
+        .await;
+        assert!(super::super::resolve_read_path(file.to_str().unwrap(), cwd).is_err());
+    }
+
     #[tokio::test]
     async fn plan_reads_external_files_without_granting_write_or_leaking_scope() {
         use crate::permissions::PermissionMode;
