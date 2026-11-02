@@ -15,6 +15,7 @@ pub mod generation;
 pub mod model_listing;
 mod tool_call_ids;
 mod file_state;
+mod utf8_stream;
 
 pub use engine_core::NativeEngine;
 

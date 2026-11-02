@@ -6,7 +6,6 @@ use reqwest::Client;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::pin::Pin;
-use tokio_stream::StreamExt;
 
 /// Merges adjacent messages that share a role. The Messages API requires
 /// alternating roles; Anthropic tolerates and merges repeats server side, but
@@ -297,19 +296,9 @@ impl AnthropicClient {
             Ok(resp)
         }).await?;
 
-        let stream = response.bytes_stream();
-        let event_stream = stream
-            .map(|chunk| {
-                match chunk {
-                    Ok(bytes) => {
-                        let text = String::from_utf8_lossy(&bytes);
-                        Ok(text.to_string())
-                    }
-                    Err(e) => Err(anyhow::anyhow!("Stream error: {}", e)),
-                }
-            });
-
-        Ok(Box::pin(event_stream))
+        Ok(Box::pin(super::utf8_stream::decode(
+            response.bytes_stream(),
+        )))
     }
 
     pub async fn send_message_stream_with_thinking(
@@ -386,19 +375,9 @@ impl AnthropicClient {
             Ok(resp)
         }).await?;
 
-        let stream = response.bytes_stream();
-        let event_stream = stream
-            .map(|chunk| {
-                match chunk {
-                    Ok(bytes) => {
-                        let text = String::from_utf8_lossy(&bytes);
-                        Ok(text.to_string())
-                    }
-                    Err(e) => Err(anyhow::anyhow!("Stream error: {}", e)),
-                }
-            });
-
-        Ok(Box::pin(event_stream))
+        Ok(Box::pin(super::utf8_stream::decode(
+            response.bytes_stream(),
+        )))
     }
 }
 

@@ -352,19 +352,9 @@ impl OpenAIClient {
             Ok(resp)
         }).await?;
 
-        let stream = response.bytes_stream();
-        let event_stream = stream
-            .map(|chunk| {
-                match chunk {
-                    Ok(bytes) => {
-                        let text = String::from_utf8_lossy(&bytes);
-                        Ok(text.to_string())
-                    }
-                    Err(e) => Err(anyhow::anyhow!("Stream error: {}", e)),
-                }
-            });
-
-        Ok(Box::pin(event_stream))
+        Ok(Box::pin(super::utf8_stream::decode(
+            response.bytes_stream(),
+        )))
     }
 }
 

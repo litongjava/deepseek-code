@@ -23,6 +23,7 @@ dirs = "5"
 rustyline = { version = "15", default-features = false }
 crossterm = "0.28"
 unicode-width = "0.2"
+pulldown-cmark = { version = "0.13", default-features = false }
 cpal = "0.15"
 axum = "0.8"
 tempfile = "3"

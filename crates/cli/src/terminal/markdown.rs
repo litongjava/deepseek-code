@@ -1,6 +1,6 @@
-//! Line-by-line Markdown rendering for streamed answers: emphasis, inline
-//! code, headings, quotes, rules, fenced code without fences, and tables
-//! aligned once complete. Model text never supplies terminal escapes.
+//! Preserve Markdown source and parse complete blocks with CommonMark events.
+//! Only stable blocks enter scrollback; the open block remains a mutable preview.
+use pulldown_cmark::{Event, Options, Parser, Tag, TagEnd};
 use unicode_width::UnicodeWidthStr;
 
 const BOLD: (&str, &str) = ("\x1b[1m", "\x1b[22m");
@@ -8,169 +8,254 @@ const ITALIC: (&str, &str) = ("\x1b[3m", "\x1b[23m");
 const CODE: (&str, &str) = ("\x1b[38;2;175;135;255m", "\x1b[39m");
 const DIM: (&str, &str) = ("\x1b[2m", "\x1b[22m");
 
+fn display_text(text: &str) -> String {
+    text.chars()
+        .filter(|ch| !ch.is_control() || matches!(ch, '\n' | '\r' | '\t'))
+        .collect()
+}
+
 #[derive(Default)]
 pub struct MarkdownStream {
     color: bool,
-    code_fence: Option<String>,
-    table: Vec<String>,
+    source: String,
+    committed: usize,
     width: Option<usize>,
-}
-
-fn strip_controls(text: &str) -> String {
-    text.chars().filter(|ch| !ch.is_control() || *ch == '\t').map(|ch| if ch == '\t' { ' ' } else { ch }).collect()
 }
 
 impl MarkdownStream {
     pub fn new(color: bool) -> Self {
-        Self { color, ..Default::default() }
+        Self {
+            color,
+            ..Default::default()
+        }
     }
-
     pub fn set_width(&mut self, width: usize) {
         self.width = Some(width.max(2));
     }
-
     fn paint(&self, (open, close): (&str, &str), text: &str) -> String {
         if self.color {
             format!("{open}{text}{close}")
         } else {
-            text.to_owned()
+            text.into()
         }
     }
-
-    /// Renders one complete line; tables are held until they end.
     pub fn line(&mut self, raw: &str) -> Vec<String> {
-        let line = strip_controls(raw);
-        let trimmed = line.trim_start();
-        if let Some(fence) = &self.code_fence {
-            if trimmed.starts_with(fence.as_str()) && trimmed.trim_start_matches(fence.chars().next().unwrap_or('`')).trim().is_empty() {
-                self.code_fence = None;
-                return Vec::new();
-            }
-            return vec![self.paint(CODE, &format!("  {line}"))];
-        }
-        let mut output = Vec::new();
-        let is_table = trimmed.starts_with('|') && trimmed.trim_end().ends_with('|') && trimmed.len() > 1;
-        if !is_table && !self.table.is_empty() {
-            output.extend(self.flush_table());
-        }
-        if is_table {
-            self.table.push(trimmed.trim_end().to_owned());
-            return output;
-        }
-        for fence in ["```", "~~~"] {
-            if trimmed.starts_with(fence) {
-                let marker: String = trimmed.chars().take_while(|ch| *ch == fence.chars().next().unwrap()).collect();
-                // A fence closed on the same line must not color the rest of
-                // the answer or discard its body when upstream joins lines.
-                let rest = &trimmed[marker.len()..];
-                if rest.trim_end().ends_with(marker.as_str()) {
-                    output.push(self.block(&line));
-                    return output;
-                }
-                self.code_fence = Some(marker);
-                return output;
+        self.source.push_str(raw);
+        self.source.push('\n');
+        let blocks = self.blocks(&self.source);
+        // A following root block stabilizes the preceding block. A table,
+        // setext heading or multiline inline span can still change the tail.
+        let count = blocks.len().saturating_sub(1);
+        let mut lines = Vec::new();
+        for (end, block) in blocks.into_iter().take(count) {
+            if end > self.committed {
+                lines.extend(block);
+                self.committed = end;
             }
         }
-        output.push(self.block(&line));
-        output
+        lines
     }
-
-    /// Emits anything still held, such as a table at the end of the answer.
+    pub fn preview(&self, tail: &str, width: usize) -> Vec<String> {
+        let source = format!("{}{tail}", self.source);
+        let mut renderer = Self::new(self.color);
+        renderer.set_width(width);
+        renderer
+            .blocks(&source)
+            .into_iter()
+            .filter(|(end, _)| *end > self.committed)
+            .flat_map(|(_, rows)| rows)
+            .collect()
+    }
     pub fn finish(&mut self) -> Vec<String> {
-        self.code_fence = None;
-        self.flush_table()
+        let lines = self
+            .blocks(&self.source)
+            .into_iter()
+            .filter(|(end, _)| *end > self.committed)
+            .flat_map(|(_, rows)| rows)
+            .collect();
+        self.source.clear();
+        self.committed = 0;
+        lines
     }
-
-    fn block(&self, line: &str) -> String {
-        let trimmed = line.trim_start();
-        let indent = &line[..line.len() - trimmed.len()];
-        if !trimmed.is_empty() && trimmed.chars().all(|ch| matches!(ch, '-' | '*' | '_' | ' ')) && trimmed.chars().filter(|ch| !ch.is_whitespace()).count() >= 3 {
-            return self.paint(DIM, &"\u{2500}".repeat(40));
+    fn blocks(&self, source: &str) -> Vec<(usize, Vec<String>)> {
+        let options =
+            Options::ENABLE_TABLES | Options::ENABLE_STRIKETHROUGH | Options::ENABLE_TASKLISTS;
+        let mut blocks = Vec::new();
+        let mut events = Vec::new();
+        let mut depth = 0usize;
+        let mut start = 0;
+        let mut last_end = 0;
+        for (event, range) in Parser::new_ext(source, options).into_offset_iter() {
+            if depth == 0 {
+                start = range.start;
+            }
+            match &event {
+                Event::Start(_) => depth += 1,
+                Event::End(_) => depth = depth.saturating_sub(1),
+                _ => {}
+            }
+            events.push(event);
+            if depth == 0 {
+                let mut rows = self.render_events(std::mem::take(&mut events));
+                if last_end > 0 && source[..start].ends_with("\n\n") {
+                    rows.insert(0, String::new());
+                }
+                last_end = range.end;
+                blocks.push((range.end, rows));
+            }
         }
-        let hashes = trimmed.chars().take_while(|ch| *ch == '#').count();
-        if (1..=6).contains(&hashes) && trimmed[hashes..].starts_with(' ') {
-            return self.paint(BOLD, &self.inline(trimmed[hashes..].trim()));
-        }
-        if let Some(quote) = trimmed.strip_prefix("> ").or_else(|| (trimmed == ">").then_some("")) {
-            return format!("{indent}{} {}", self.paint(DIM, "\u{258e}"), self.paint(ITALIC, &self.inline(quote)));
-        }
-        format!("{indent}{}", self.inline(trimmed))
+        blocks
     }
-
-    /// Bold, italic, inline code and links; unmatched markers stay literal.
-    fn inline(&self, text: &str) -> String {
-        let chars: Vec<char> = text.chars().collect();
-        let find = |from: usize, marker: &[char]| -> Option<usize> {
-            (from..=chars.len().saturating_sub(marker.len())).find(|&at| chars[at..at + marker.len()] == *marker)
+    fn render_events(&self, events: Vec<Event<'_>>) -> Vec<String> {
+        let mut rows = Vec::new();
+        let mut line = String::new();
+        let mut styles: Vec<(&str, &str)> = Vec::new();
+        let mut lists: Vec<Option<u64>> = Vec::new();
+        let mut quotes = 0;
+        let mut code = false;
+        let mut links: Vec<String> = Vec::new();
+        let mut table: Option<Vec<Vec<String>>> = None;
+        let flush = |line: &mut String, rows: &mut Vec<String>| {
+            if !line.is_empty() {
+                rows.push(std::mem::take(line));
+            }
         };
-        let collect = |from: usize, to: usize| chars[from..to].iter().collect::<String>();
-        let mut output = String::new();
-        let mut index = 0;
-        while index < chars.len() {
-            let ch = chars[index];
-            let next = chars.get(index + 1).copied();
-            if ch == '`' {
-                if let Some(end) = find(index + 1, &['`']) {
-                    output.push_str(&self.paint(CODE, &collect(index + 1, end)));
-                    index = end + 1;
-                    continue;
+        for event in events {
+            match event {
+                Event::Start(Tag::CodeBlock(_)) => {
+                    flush(&mut line, &mut rows);
+                    code = true;
                 }
-            }
-            if (ch == '*' || ch == '_') && next == Some(ch) {
-                if let Some(end) = find(index + 2, &[ch, ch]).filter(|end| *end > index + 2) {
-                    output.push_str(&self.paint(BOLD, &self.inline(&collect(index + 2, end))));
-                    index = end + 2;
-                    continue;
+                Event::End(TagEnd::CodeBlock) => {
+                    if !line.is_empty() {
+                        rows.push(self.paint(CODE, &format!("  {}", std::mem::take(&mut line))));
+                    }
+                    code = false;
                 }
-            }
-            if (ch == '*' || ch == '_')
-                && next.is_some_and(|next| !next.is_whitespace() && next != ch)
-                && (index == 0 || !chars[index - 1].is_alphanumeric())
-            {
-                let closing = find(index + 1, &[ch]).filter(|end| {
-                    !chars[end - 1].is_whitespace() && chars.get(end + 1).is_none_or(|after| !after.is_alphanumeric())
-                });
-                if let Some(end) = closing {
-                    output.push_str(&self.paint(ITALIC, &collect(index + 1, end)));
-                    index = end + 1;
-                    continue;
+                Event::Start(Tag::Heading { .. }) | Event::Start(Tag::Strong) => styles.push(BOLD),
+                Event::Start(Tag::Emphasis) => styles.push(ITALIC),
+                Event::Start(Tag::Strikethrough) => styles.push(("\x1b[9m", "\x1b[29m")),
+                Event::End(TagEnd::Strong | TagEnd::Emphasis | TagEnd::Strikethrough) => {
+                    styles.pop();
                 }
-            }
-            if ch == '[' {
-                if let Some(close) = find(index + 1, &[']', '(']) {
-                    if let Some(end) = find(close + 2, &[')']) {
-                        let label = collect(index + 1, close);
-                        let url = collect(close + 2, end);
-                        output.push_str(&label);
-                        if label != url {
-                            output.push_str(&self.paint(DIM, &format!(" ({url})")));
+                Event::End(TagEnd::Heading(_)) => {
+                    styles.pop();
+                    flush(&mut line, &mut rows);
+                }
+                Event::Start(Tag::BlockQuote(_)) => {
+                    flush(&mut line, &mut rows);
+                    quotes += 1;
+                    styles.push(ITALIC);
+                }
+                Event::End(TagEnd::BlockQuote(_)) => {
+                    flush(&mut line, &mut rows);
+                    quotes -= 1;
+                    styles.pop();
+                }
+                Event::Start(Tag::List(first)) => {
+                    flush(&mut line, &mut rows);
+                    lists.push(first);
+                }
+                Event::End(TagEnd::List(_)) => {
+                    flush(&mut line, &mut rows);
+                    lists.pop();
+                }
+                Event::Start(Tag::Item) => {
+                    flush(&mut line, &mut rows);
+                    line.push_str(&"  ".repeat(lists.len().saturating_sub(1)));
+                    match lists.last_mut() {
+                        Some(Some(n)) => {
+                            line.push_str(&format!("{n}. "));
+                            *n += 1;
                         }
-                        index = end + 1;
-                        continue;
+                        _ => line.push_str("- "),
                     }
                 }
+                Event::End(TagEnd::Item | TagEnd::Paragraph) => flush(&mut line, &mut rows),
+                Event::Start(Tag::Link { dest_url, .. } | Tag::Image { dest_url, .. }) => {
+                    links.push(display_text(&dest_url))
+                }
+                Event::End(TagEnd::Link | TagEnd::Image) => {
+                    if let Some(url) = links.pop() {
+                        if !plain_rendered(&line).ends_with(&url) {
+                            line.push_str(&self.paint(DIM, &format!(" ({url})")));
+                        }
+                    }
+                }
+                Event::Start(Tag::Table(_)) => table = Some(Vec::new()),
+                Event::Start(Tag::TableHead | Tag::TableRow) => {
+                    if let Some(table) = &mut table {
+                        table.push(Vec::new());
+                    }
+                }
+                Event::End(TagEnd::TableCell) => {
+                    if let Some(row) = table.as_mut().and_then(|table| table.last_mut()) {
+                        row.push(std::mem::take(&mut line));
+                    }
+                }
+                Event::End(TagEnd::Table) => {
+                    rows.extend(self.table_rows(table.take().unwrap_or_default()));
+                }
+                Event::Text(text) | Event::Html(text) | Event::InlineHtml(text) => {
+                    let text = display_text(&text);
+                    if code {
+                        // Code whitespace belongs to the command, including blank lines.
+                        for part in text.split_inclusive('\n') {
+                            line.push_str(part.trim_end_matches(['\r', '\n']));
+                            if part.ends_with('\n') {
+                                rows.push(
+                                    self.paint(CODE, &format!("  {}", std::mem::take(&mut line))),
+                                );
+                            }
+                        }
+                    } else {
+                        if line.is_empty() && quotes > 0 {
+                            line.push_str(&"▎ ".repeat(quotes));
+                        }
+                        let mut text = text.to_string();
+                        for style in styles.iter().rev() {
+                            text = self.paint(*style, &text);
+                        }
+                        line.push_str(&text);
+                    }
+                }
+                Event::Code(text) => line.push_str(&self.paint(CODE, &display_text(&text))),
+                Event::SoftBreak | Event::HardBreak => {
+                    rows.push(std::mem::take(&mut line));
+                }
+                Event::Rule => {
+                    rows.push(self.paint(DIM, &"─".repeat(self.width.unwrap_or(40).min(40))))
+                }
+                Event::TaskListMarker(checked) => {
+                    line.push_str(if checked { "[x] " } else { "[ ] " })
+                }
+                _ => {}
             }
-            output.push(ch);
-            index += 1;
         }
-        output
+        if code && !line.is_empty() {
+            line = self.paint(CODE, &format!("  {line}"));
+        }
+        flush(&mut line, &mut rows);
+        // Sanitize only rendered text so parser offsets still address the source.
+        rows.into_iter()
+            .map(|row| {
+                row.chars()
+                    .filter(|ch| !ch.is_control() || matches!(ch, '\t' | '\x1b'))
+                    .collect::<String>()
+                    .replace('\t', "    ")
+            })
+            .collect()
     }
-
-    fn flush_table(&mut self) -> Vec<String> {
-        let rows: Vec<Vec<String>> = std::mem::take(&mut self.table)
+    fn table_rows(&self, body: Vec<Vec<String>>) -> Vec<String> {
+        let plain: Vec<Vec<String>> = body
             .iter()
-            .map(|row| row.trim().trim_matches('|').split('|').map(|cell| cell.trim().to_owned()).collect())
+            .map(|row| row.iter().map(|cell| plain_rendered(cell)).collect())
             .collect();
-        let is_separator = |row: &Vec<String>| row.iter().all(|cell| !cell.is_empty() && cell.chars().all(|ch| matches!(ch, '-' | ':' | ' ')));
-        let body: Vec<Vec<String>> = rows.iter().filter(|row| !is_separator(row)).map(|row| row.iter().map(|cell| self.inline(cell)).collect()).collect();
-        let plain: Vec<Vec<String>> = rows.iter().filter(|row| !is_separator(row)).map(|row| row.iter().map(|cell| {
-            MarkdownStream::new(false).inline(cell)
-        }).collect()).collect();
         let columns = plain.iter().map(Vec::len).max().unwrap_or(0);
         let mut widths: Vec<usize> = (0..columns)
             .map(|column| plain.iter().filter_map(|row| row.get(column)).map(|cell| cell.width()).max().unwrap_or(0).max(2))
             .collect();
-        let has_header = rows.get(1).is_some_and(is_separator);
+        let has_header = true;
         let available = self.width.unwrap_or(usize::MAX);
         let separators = columns.saturating_sub(1) * 3;
         // A wide Unicode character needs two cells. Extremely narrow tables
@@ -361,11 +446,14 @@ mod tests {
     #[test]
     fn same_line_fences_preserve_content_and_do_not_leak_code_style() {
         let mut stream = MarkdownStream::new(true);
-        let line = stream.line("```textAI 请求工具 → Auto 分类器```");
+        stream.line("```textAI 请求工具 → Auto 分类器```");
+        let line = stream.preview("", 120);
         assert!(plain_rendered(&line.join("")).contains("AI 请求工具"));
+        stream.line("");
+        stream.line("**一句话：** Auto 正常处理");
         assert_eq!(
-            stream.line("**一句话：** Auto 正常处理"),
-            ["\x1b[1m一句话：\x1b[22m Auto 正常处理"]
+            stream.finish().last().unwrap(),
+            "\x1b[1m一句话：\x1b[22m Auto 正常处理"
         );
     }
 
@@ -419,8 +507,64 @@ mod tests {
     #[test]
     fn colored_output_wraps_spans_without_model_escapes() {
         let mut stream = MarkdownStream::new(true);
-        let line = stream.line("**bold**\x1b[2J");
+        stream.line("**bold**\x1b[2J");
+        let line = stream.finish();
         assert_eq!(line, ["\x1b[1mbold\x1b[22m[2J"]);
+    }
+
+    #[test]
+    fn standard_parser_handles_multiline_spans_backtick_runs_and_setext() {
+        assert_eq!(
+            plain(&["``a ` b`` and \\*literal\\* &amp; **bold**"]),
+            ["a ` b and *literal* & bold"]
+        );
+        let mut stream = MarkdownStream::new(true);
+        assert!(stream.line("Heading").is_empty());
+        assert!(stream.line("=======").is_empty());
+        assert!(stream.preview("", 80)[0].contains("\x1b[1mHeading"));
+        assert!(stream.line("").is_empty());
+        let committed = stream.line("**across");
+        assert!(committed.iter().any(|line| line.contains("Heading")));
+        stream.line("lines**");
+        let tail = stream.finish();
+        assert!(tail.iter().any(|line| line.contains("\x1b[1macross")));
+        assert!(tail.iter().any(|line| line.contains("\x1b[1mlines")));
+        assert!(!tail.join("\n").contains("Heading"));
+    }
+
+    #[test]
+    fn fenced_commands_preserve_spaces_blank_lines_and_literal_markers() {
+        let output = plain(&[
+            "```bat",
+            "git clone --depth 1 repo",
+            "",
+            "  echo **literal**",
+            "```",
+            "",
+            "after",
+        ]);
+        assert!(output.contains(&"  git clone --depth 1 repo".into()));
+        assert!(output.contains(&"  ".into()));
+        assert!(output.contains(&"    echo **literal**".into()));
+        assert!(!output.join("\n").contains("batgit"));
+    }
+
+    #[test]
+    fn control_characters_do_not_shift_stream_commit_offsets() {
+        let output = plain(&["first\x1b[2J", "", "second", "", "third"]);
+        assert_eq!(
+            output.iter().filter(|line| line.contains("first")).count(),
+            1
+        );
+        assert_eq!(
+            output.iter().filter(|line| line.contains("second")).count(),
+            1
+        );
+        assert_eq!(
+            output.iter().filter(|line| line.contains("third")).count(),
+            1
+        );
+        assert!(!output.join("").contains('\x1b'));
     }
 
     #[test]

@@ -1083,10 +1083,24 @@ fn answer_prefix(state: &State, row: usize) -> &'static str {
     if row == 0 && state.block_start { "\u{25cf} " } else { "  " }
 }
 fn streamed_rows(state: &State, width: usize, budget: usize) -> Vec<String> {
-    let rows = visual_lines(&state.partial, width.saturating_sub(2));
+    let rendered = state
+        .markdown
+        .preview(&state.partial, width.saturating_sub(3));
+    let rows: Vec<String> = rendered
+        .iter()
+        .flat_map(|line| super::markdown::wrap_styled(line, "", "", width.saturating_sub(2)))
+        .collect();
     let first = rows.len().saturating_sub(budget);
-    rows.into_iter().enumerate().skip(first)
-        .map(|(index, (line, _))| if line.is_empty() { line } else { format!("{}{line}", answer_prefix(state, index)) })
+    rows.into_iter()
+        .enumerate()
+        .skip(first)
+        .map(|(index, line)| {
+            if line.is_empty() {
+                line
+            } else {
+                format!("{}{line}", answer_prefix(state, index))
+            }
+        })
         .collect()
 }
 
@@ -1103,7 +1117,7 @@ fn stream_text(state: &mut State, screen: &mut Frame, text: &str) {
         state.activity = "Composing".into();
         state.activity_started = Instant::now();
     }
-    state.partial.push_str(&terminal_text(text).replace("\r\n", "\n"));
+    state.partial.push_str(text);
     while let Some(index) = state.partial.find('\n') {
         let line = state.partial[..index].to_owned();
         state.partial.drain(..index + 1);
@@ -1276,7 +1290,7 @@ impl Frame {
             logged.push(change_view::render(&change_view::heading(&format!("\u{25cf} {title}")), width, color));
             logged.extend(body.lines().map(|line| change_view::render(&change_view::body(&format!("  {line}")), width, color)));
         }
-        if !state.partial.is_empty() {
+        if !state.markdown.preview(&state.partial, width).is_empty() {
             if logged.last().is_some_and(|row| !super::markdown::plain_rendered(row).trim().is_empty()) { logged.push(String::new()); }
             logged.extend(streamed_rows(state, width, usize::MAX));
         }
@@ -1291,8 +1305,9 @@ impl Frame {
         if !state.queued.is_empty() {
             self.history_view.append(&format!("\n{}\n", state.queued.join("\n")), width);
         }
-        if !state.partial.is_empty() {
-            self.history_view.append(&format!("{}{}", answer_prefix(state, 0), terminal_text(&state.partial)), width);
+        let preview = streamed_rows(state, width, usize::MAX);
+        if !preview.is_empty() {
+            self.history_view.append(&preview.join("\n"), width);
         } else if let Some(group) = &state.group {
             for line in group_lines(group, width) {
                 self.history_view.append(&line, width);
@@ -1571,7 +1586,6 @@ impl Frame {
             let mut content = match &state.group {
                 Some(group) if state.partial.is_empty() && !group.calls.is_empty() => group_lines(group, width),
                 _ if thinking => thinking_lines(state, width, THINKING_PREVIEW_ROWS + 1),
-                _ if state.partial.is_empty() => Vec::new(),
                 _ => streamed_rows(state, width, budget),
             };
             let (running, shell) = running_lines(state, width, budget, color);
@@ -2823,7 +2837,12 @@ mod tests {
 
     #[test]
     fn streamed_markdown_is_independent_of_delta_boundaries() {
-        let text = format!("**{}**\n- {}\n```rust\nlet text = \"{}\";\n```\n", "a".repeat(700), "word ".repeat(160), "中".repeat(240));
+        let text = format!(
+            "**{}**\r\n- {}\r\n```rust\r\n\tlet text = \"{}\";\r\n\r\n```\r\n",
+            "a".repeat(700),
+            "word ".repeat(160),
+            "中".repeat(240)
+        );
         let render = |chunk_size: usize| {
             let mut state = State::new("ask".into());
             state.markdown = super::super::markdown::MarkdownStream::new(true);
@@ -2842,6 +2861,7 @@ mod tests {
         };
         let whole = render(text.chars().count());
         assert_eq!(render(17), whole);
+        assert_eq!(render(1), whole);
         assert!(whole.iter().any(|line| line.contains("\x1b[1m")));
         assert!(!whole.iter().any(|line| line.contains("**")));
     }
@@ -2851,6 +2871,8 @@ mod tests {
         let mut state = State::new("ask".into());
         let mut screen = Frame::default();
         stream_text(&mut state, &mut screen, "ANSWER_SENTINEL\n");
+        // Notices finish the pending Markdown block before entering scrollback.
+        finish_text(&mut state, &mut screen);
         screen.log("NOTICE_SENTINEL").unwrap();
         stream_text(&mut state, &mut screen, "PARTIAL_SENTINEL");
         let logged = screen.detailed_log(&state, 80, false).join("\n");
