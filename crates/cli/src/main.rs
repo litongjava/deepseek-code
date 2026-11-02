@@ -742,6 +742,13 @@ async fn run(cli: &Cli) -> Result<()> {
             let line = 'read: loop { tokio::select! {
                 line = input.as_mut().expect("interactive reader").read_prompt(prompt) => break 'read match line {
                     Ok(Some(terminal::input::PromptEvent::Line(line))) => line,
+                    Ok(Some(terminal::input::PromptEvent::StepEffort(up))) => {
+                        if let Err(error) = session_commands::step_effort(&session, up).await {
+                            input.as_ref().unwrap().notice(format!("Reasoning effort: {error:#}"));
+                        }
+                        input.as_ref().unwrap().set_effort(Some(session_commands::model_label(&session).await));
+                        continue 'read;
+                    },
                     Ok(Some(terminal::input::PromptEvent::CyclePermission)) => {
                         if let Err(error) = session.cycle_permission_mode().await { command_eprintln!("Permission mode: {error:#}"); }
                         continue 'repl;

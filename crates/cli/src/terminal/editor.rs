@@ -71,6 +71,10 @@ pub struct PromptEditor {
     agent_rows: Option<Box<dyn Fn(usize) -> Vec<String> + Send>>,
     /// The model and reasoning effort, at the right of the footer.
     effort: Option<String>,
+    effort_control: Option<(
+        std::sync::Arc<std::sync::Mutex<Option<String>>>,
+        tokio::sync::mpsc::UnboundedSender<bool>,
+    )>,
     /// The todo list that ctrl+t shows above the input.
     todos: Option<Box<dyn Fn() -> Vec<(String, String)> + Send>>,
     /// Vim-style editing (`/vim`).
@@ -99,6 +103,7 @@ impl Default for PromptEditor {
             agent_rows: None,
             todos: None,
             effort: None,
+            effort_control: None,
             vim: false,
             keybindings: crate::keybindings::Keybindings::default(),
             commands: crate::command_catalog::COMMANDS
@@ -849,8 +854,12 @@ impl PromptEditor {
     pub fn set_agent_rows(&mut self, rows: Box<dyn Fn(usize) -> Vec<String> + Send>) {
         self.agent_rows = Some(rows);
     }
-    pub fn set_effort(&mut self, effort: Option<String>) {
-        self.effort = effort;
+    pub fn set_effort_control(
+        &mut self,
+        label: std::sync::Arc<std::sync::Mutex<Option<String>>>,
+        steps: tokio::sync::mpsc::UnboundedSender<bool>,
+    ) {
+        self.effort_control = Some((label, steps));
     }
     pub fn set_todos(&mut self, todos: Box<dyn Fn() -> Vec<(String, String)> + Send>) {
         self.todos = Some(todos);
@@ -964,6 +973,12 @@ impl PromptEditor {
                 history_view.close()?;
                 screen.clear()?;
                 return Err(io::Error::new(io::ErrorKind::WouldBlock, "Prompt yielded"));
+            }
+            if let Some((label, _)) = &self.effort_control {
+                self.effort = label
+                    .lock()
+                    .unwrap_or_else(|error| error.into_inner())
+                    .clone();
             }
             if let Some(notices) = &self.notices {
                 while let Ok(notice) = notices.try_recv() {
@@ -1499,14 +1514,10 @@ impl PromptEditor {
                     if key.modifiers.contains(KeyModifiers::ALT)
                         && matches!(key.code, KeyCode::Char('>' | '<' | '.' | ','))
                     {
-                        self.preserve_cycle_draft(&buffer);
-                        let command = if matches!(key.code, KeyCode::Char('>' | '.')) {
-                            "/effort +"
-                        } else {
-                            "/effort -"
-                        };
-                        screen.finish("", &prompt, &mut above)?;
-                        return Ok(Some(super::PromptEvent::Line(command.into())));
+                        if let Some((_, steps)) = &self.effort_control {
+                            let _ = steps.send(matches!(key.code, KeyCode::Char('>' | '.')));
+                        }
+                        continue;
                     }
                     if key.code == KeyCode::Char('p') && key.modifiers.contains(KeyModifiers::ALT) {
                         // alt+p opens the model picker, as in the reference CLI.

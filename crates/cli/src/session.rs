@@ -1019,7 +1019,7 @@ impl Session {
                             crate::terminal::live::Action::Submit(prompt) => {
                                 if let Some(message) = crate::session_commands::live_goal_command(self, &prompt)? { progress.notice(&message); progress.set_model_label(&crate::session_commands::model_label(self).await); }
                                 // Answered here so status never waits for a long tool call.
-                                else if let Some(message) = crate::session_commands::live_inspection(self, &prompt).await { progress.notice(&message); progress.set_model_label(&crate::session_commands::model_label(self).await); }
+                                else if let Some(message) = crate::session_commands::live_inspection(self, &prompt).await { if !matches!(prompt.trim(), "/effort +" | "/effort -") || !message.starts_with("Reasoning effort:") { progress.notice(&message); } progress.set_model_label(&crate::session_commands::model_label(self).await); }
                                 else if queues_mid_turn(&prompt) {
                                     // As in the reference CLI the model reads it after its next
                                     // tool results, or as the next prompt.

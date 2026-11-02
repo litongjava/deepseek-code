@@ -17,6 +17,7 @@ pub(crate) mod editor;
 pub enum PromptEvent {
     Line(String),
     CyclePermission,
+    StepEffort(bool),
 }
 
 enum Message {
@@ -35,7 +36,6 @@ enum Message {
     Workspace(std::path::PathBuf),
     ContextNote(Option<String>),
     Shells(usize),
-    Effort(Option<String>),
     ShellCounter(Box<dyn Fn() -> usize + Send>),
     AgentRows(Box<dyn Fn(usize) -> Vec<String> + Send>),
     Todos(Box<dyn Fn() -> Vec<(String, String)> + Send>),
@@ -65,6 +65,8 @@ pub struct TerminalInput {
     pending: Option<PendingRead>,
     fixture: Option<mpsc::UnboundedReceiver<String>>,
     queued: std::collections::VecDeque<PromptEvent>,
+    effort: Arc<std::sync::Mutex<Option<String>>>,
+    effort_steps: mpsc::UnboundedReceiver<bool>,
 }
 
 impl TerminalInput {
@@ -72,6 +74,9 @@ impl TerminalInput {
         let (requests, rx) = std::sync::mpsc::channel::<Message>();
         let (notices, notice_rx) = std::sync::mpsc::channel();
         let (suggestions, suggestion_rx) = std::sync::mpsc::channel();
+        let effort = Arc::new(std::sync::Mutex::new(None));
+        let editor_effort = effort.clone();
+        let (step_tx, effort_steps) = mpsc::unbounded_channel();
         std::thread::spawn(move || {
             let terminal = !crate::terminal::screen_reader()
                 && io::stdin().is_terminal()
@@ -79,6 +84,7 @@ impl TerminalInput {
                 && io::stderr().is_terminal()
                 && std::env::var("TERM").as_deref() != Ok("dumb");
             let mut editor = editor::PromptEditor::default();
+            editor.set_effort_control(editor_effort, step_tx);
             editor.set_notices(notice_rx);
             editor.set_suggestions(suggestion_rx);
             let mut plain = io::BufReader::new(io::stdin());
@@ -130,10 +136,6 @@ impl TerminalInput {
                         editor.set_shells(count);
                         continue;
                     }
-                    Message::Effort(effort) => {
-                        editor.set_effort(effort);
-                        continue;
-                    }
                     Message::ShellCounter(counter) => {
                         editor.set_shell_counter(counter);
                         continue;
@@ -174,6 +176,8 @@ impl TerminalInput {
             pending: None,
             fixture: None,
             queued: Default::default(),
+            effort,
+            effort_steps,
         }
     }
 
@@ -233,7 +237,10 @@ impl TerminalInput {
     /// The model and reasoning effort at the right of the footer, as
     /// "deepseek-flash · ● high".
     pub fn set_effort(&self, effort: Option<String>) {
-        let _ = self.requests.send(Message::Effort(effort));
+        *self
+            .effort
+            .lock()
+            .unwrap_or_else(|error| error.into_inner()) = effort;
     }
 
     /// Rows for running background agents, shown above the editor.
@@ -339,7 +346,9 @@ impl TerminalInput {
         match self.read_with(prompt, false, true).await? {
             Some(PromptEvent::Line(line)) => Ok(Some(line)),
             None => Ok(None),
-            Some(PromptEvent::CyclePermission) => Err(io::Error::other("Permission cycle is not a question answer")),
+            Some(PromptEvent::CyclePermission | PromptEvent::StepEffort(_)) => {
+                Err(io::Error::other("Shortcut is not a question answer"))
+            }
         }
     }
 
@@ -347,9 +356,9 @@ impl TerminalInput {
         match self.read(prompt, false).await? {
             Some(PromptEvent::Line(line)) => Ok(Some(line)),
             None => Ok(None),
-            Some(PromptEvent::CyclePermission) => Err(io::Error::other(
-                "Permission cycle is not a question answer",
-            )),
+            Some(PromptEvent::CyclePermission | PromptEvent::StepEffort(_)) => Err(
+                io::Error::other("Permission cycle is not a question answer"),
+            ),
         }
     }
 
@@ -386,7 +395,10 @@ impl TerminalInput {
         }
         // Keep the outstanding response in the handle across select! cancellation.
         // There is never a second reader racing for stdin or losing its next line.
-        let result = (&mut self.pending.as_mut().unwrap().receive).await;
+        let result = tokio::select! {
+            result = &mut self.pending.as_mut().unwrap().receive => result,
+            Some(up) = self.effort_steps.recv(), if repl => return Ok(Some(PromptEvent::StepEffort(up))),
+        };
         self.pending = None;
         result.unwrap_or_else(|_| {
             Err(io::Error::new(
@@ -408,6 +420,8 @@ impl From<mpsc::UnboundedReceiver<String>> for TerminalInput {
             pending: None,
             fixture: Some(fixture),
             queued: Default::default(),
+            effort: Default::default(),
+            effort_steps: mpsc::unbounded_channel().1,
         }
     }
 }
@@ -438,6 +452,51 @@ fn read_plain(reader: &mut impl BufRead, prompt: &str) -> io::Result<Option<Stri
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn effort_shortcuts_keep_the_same_pending_editor_read() {
+        let (requests, receive) = std::sync::mpsc::channel();
+        let (steps, effort_steps) = mpsc::unbounded_channel();
+        let mut input = TerminalInput {
+            requests,
+            notices: std::sync::mpsc::channel().0,
+            suggestions: std::sync::mpsc::channel().0,
+            pending: None,
+            fixture: None,
+            queued: Default::default(),
+            effort: Default::default(),
+            effort_steps,
+        };
+        steps.send(true).unwrap();
+        assert!(matches!(
+            input.read_prompt("prompt").await.unwrap(),
+            Some(PromptEvent::StepEffort(true))
+        ));
+        let Message::Read(request) = receive.try_recv().unwrap() else {
+            panic!()
+        };
+        for up in [false, true, true] {
+            steps.send(up).unwrap();
+            assert!(
+                matches!(input.read_prompt("prompt").await.unwrap(), Some(PromptEvent::StepEffort(value)) if value == up)
+            );
+            assert!(receive.try_recv().is_err());
+            assert!(!request.cancelled.load(Ordering::Acquire));
+        }
+        input.set_effort(Some("model · high".into()));
+        assert_eq!(
+            input.effort.lock().unwrap().as_deref(),
+            Some("model · high")
+        );
+        request
+            .response
+            .send(Ok(Some(PromptEvent::Line("unchanged draft".into()))))
+            .unwrap();
+        assert!(
+            matches!(input.read_prompt("prompt").await.unwrap(), Some(PromptEvent::Line(line)) if line == "unchanged draft")
+        );
+        assert!(input.pending.is_none());
+    }
 
     #[tokio::test]
     async fn piped_answer_reader_cancels_without_stealing_the_next_line() {
@@ -513,6 +572,8 @@ mod tests {
             pending: None,
             fixture: None,
             queued: Default::default(),
+            effort: Default::default(),
+            effort_steps: mpsc::unbounded_channel().1,
         };
         let reader = std::thread::spawn(move || {
             let Message::Read(first) = receive.recv().unwrap() else {
