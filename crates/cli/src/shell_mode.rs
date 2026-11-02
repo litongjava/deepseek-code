@@ -54,8 +54,10 @@ pub async fn run(session: &Session, command: &str) -> Result<()> {
         output = child.wait_with_output() => output?,
         _ = tokio::signal::ctrl_c() => anyhow::bail!("Command interrupted"),
     };
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    let stderr = String::from_utf8_lossy(&output.stderr);
+    let stdout =
+        crate::terminal::tool_view::plain_terminal_text(&String::from_utf8_lossy(&output.stdout));
+    let stderr =
+        crate::terminal::tool_view::plain_terminal_text(&String::from_utf8_lossy(&output.stderr));
     let color = std::env::var_os("NO_COLOR").is_none();
     let mut text = String::new();
     let mut first = true;
@@ -67,20 +69,61 @@ pub async fn run(session: &Session, command: &str) -> Result<()> {
         text.push_str("  \u{23bf}  (No output)\n");
     }
     if !output.status.success() {
-        text.push_str(&format!("     Exit code {}\n", output.status.code().unwrap_or(-1)));
+        text.push_str(&format!(
+            "     Exit code {}\n",
+            output.status.code().unwrap_or(-1)
+        ));
     }
-    if color {
-        eprint!("\x1b[38;2;253;93;177m!\x1b[39m {command}\n\x1b[90m{text}\x1b[39m");
-    } else {
-        eprint!("! {command}\n{text}");
+    let mut history = crate::terminal::scrollback::Scrollback::take();
+    let safe_command = crate::terminal::tool_view::plain_terminal_text(command);
+    let rendered = format!("! {safe_command}\n{text}");
+    for (index, line) in rendered.lines().enumerate() {
+        let styled = if color && index == 0 {
+            format!("\x1b[38;2;253;93;177m{line}\x1b[39m")
+        } else if color {
+            format!("\x1b[90m{line}\x1b[39m")
+        } else {
+            line.to_owned()
+        };
+        eprintln!("{styled}");
+        history.push(styled, None);
     }
-    session.store.append(&session.id, "user", &transcript(command, &stdout, &stderr))?;
+    history.save();
+    session
+        .store
+        .append(&session.id, "user", &transcript(command, &stdout, &stderr))?;
     Ok(())
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    #[ignore = "requires an interactive terminal and clipboard"]
+    async fn shell_copy_terminal_fixture() {
+        use clap::Parser;
+        let dir = tempfile::tempdir().unwrap();
+        let paths =
+            deepseek_code_core::runtime::RuntimePaths::new(dir.path().join("data")).unwrap();
+        let provider = serde_json::from_value(serde_json::json!({
+            "id":"fixture", "name":"Fixture", "base_url":"http://127.0.0.1:1",
+            "api_key":"fixture-only", "api_format":"openai", "enabled":true,
+            "models":[{"id":"fixture", "name":"Fixture", "enabled":true,
+                "supports_vision":false, "supports_web_search":false}]
+        }))
+        .unwrap();
+        let selection = crate::config::Selection {
+            providers: vec![provider],
+            provider_id: "fixture".into(),
+            model: "fixture".into(),
+        };
+        let cli = crate::args::Cli::parse_from(["dcl", "--print"]);
+        let session = Session::open(&cli, &paths, selection, None).await.unwrap();
+        run(&session, "echo COPY_OUTPUT_SENTINEL").await.unwrap();
+        let mut editor = crate::terminal::input::editor::PromptEditor::default();
+        editor.readline("❯ ").unwrap();
+    }
 
     #[test]
     fn transcript_matches_the_reference_format_and_is_bounded() {
