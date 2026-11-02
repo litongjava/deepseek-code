@@ -274,6 +274,8 @@ pub enum Commands {
     RemoteControl { #[command(subcommand)] action: RemoteControlCommands },
     /// Show language server status or install one: lsp [status] | lsp install LANGUAGE [--yes].
     Lsp { action: Option<String>, language: Option<String>, #[arg(long)] yes: bool },
+    /// Initialize Node.js, Python or CodeGraph for this platform.
+    InitEnv { #[arg(value_parser = ["node", "python", "codegraph", "all"])] target: String, #[arg(long)] dry_run: bool },
     Help { #[arg(long)] topic:Option<String>, command:Vec<String> },
     /// Install and run versioned Node.js/Python plugin bundles.
     Plugin { #[command(subcommand)] action: PluginCommands },

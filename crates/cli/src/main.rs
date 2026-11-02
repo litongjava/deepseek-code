@@ -1,6 +1,7 @@
 ﻿mod hook_progress;
 mod workflows_view;
 mod lsp_commands;
+mod env_init;
 mod prompt_suggestion;
 mod shell_mode;
 mod mentions;
@@ -238,6 +239,10 @@ async fn run(cli: &Cli) -> Result<()> {
         Some(Commands::Lsp { action, language, yes }) => {
             let workspace = cli.path.clone().map_or_else(std::env::current_dir, Ok)?;
             return lsp_commands::command(&paths, &workspace, action.as_deref(), language.as_deref(), *yes).await;
+        }
+        Some(Commands::InitEnv { target, dry_run }) => {
+            let workspace = cli.path.clone().map_or_else(std::env::current_dir, Ok)?;
+            return env_init::run(&paths, &workspace, target, *dry_run).await;
         }
         Some(Commands::RemoteControl { action: args::RemoteControlCommands::Connect { address, token } }) => return remote_client::run(address, token.as_deref()).await,
         Some(Commands::RemoteControl { action: args::RemoteControlCommands::Listen { host, port } }) => {
