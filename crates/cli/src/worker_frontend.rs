@@ -839,7 +839,7 @@ fn failure_message(id: &str, status: &str, diagnostic: &str) -> String {
             .collect::<Vec<_>>()
             .windows(2)
             .find_map(|pair| {
-                ((pair[0] == "http" || pair[0] == "status") && pair[1].len() == 3)
+                ((pair[0] == "http" || pair[0] == "status" || pair[0] == "error") && pair[1].len() == 3)
                     .then(|| pair[1].parse::<u16>().ok())
                     .flatten()
                     .filter(|code| (400..600).contains(code))
@@ -856,6 +856,9 @@ fn failure_message(id: &str, status: &str, diagnostic: &str) -> String {
             return format!(
                 "The response was cut off at the output token limit even after automatic continuations; send a follow-up to continue or raise the limit with --max-tokens. Details: /tasks show {id}"
             );
+        }
+        if http == Some(400) && lower.contains("call_id") && lower.contains("string too long") {
+            return format!("HTTP 400: tool call ID exceeds the provider length limit. Details: /tasks show {id}");
         }
         http.map(|code| format!("HTTP {code}"))
             .unwrap_or_else(|| "Request failed".into())
@@ -1252,6 +1255,13 @@ mod failure_tests {
         ] {
             assert_eq!(failure_message("id", status, diagnostic), expected);
         }
+    }
+
+    #[test]
+    fn model_api_errors_show_status_and_call_id_limit_without_private_body() {
+        let diagnostic = "Model API error 400: Invalid input[1].call_id: string too long secret";
+        assert_eq!(failure_message("task", "failed", diagnostic), "HTTP 400: tool call ID exceeds the provider length limit. Details: /tasks show task");
+        assert_eq!(failure_message("task", "failed", "Model API error 401: secret"), "HTTP 401. Details: /tasks show task");
     }
 
     #[test]

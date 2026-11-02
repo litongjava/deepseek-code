@@ -217,6 +217,7 @@ impl OpenAIClient {
             "max_tokens": max_tokens,
             "messages": body_messages,
         });
+        super::tool_call_ids::normalize_chat(&mut body);
         if crate::performance::accepts_mid_system(&base_url) { crate::performance::move_system_tail_chat(&mut body); }
 
         if !tools.is_empty() {
@@ -311,6 +312,7 @@ impl OpenAIClient {
             "stream": true,
             "stream_options": { "include_usage": true },
         });
+        super::tool_call_ids::normalize_chat(&mut body);
         if crate::performance::accepts_mid_system(&base_url) { crate::performance::move_system_tail_chat(&mut body); }
 
         if !tools.is_empty() {

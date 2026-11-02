@@ -108,6 +108,7 @@ pub(super) fn request(
                 }
             }
         }
+        super::super::tool_call_ids::normalize_chat(&mut body);
         return Ok(body);
     }
     let mut input = Vec::new();
@@ -178,6 +179,9 @@ pub(super) fn request(
                 }
             }
         }
+    }
+    if api == "openai-responses" {
+        super::super::tool_call_ids::normalize_responses(&mut input);
     }
     let mut body = match api {
         "openai-responses" => {

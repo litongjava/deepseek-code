@@ -12,6 +12,8 @@ pub mod task_context;
 pub mod context_compressor;
 pub mod workspace;
 pub mod generation;
+pub mod model_listing;
+mod tool_call_ids;
 mod file_state;
 
 pub use engine_core::NativeEngine;

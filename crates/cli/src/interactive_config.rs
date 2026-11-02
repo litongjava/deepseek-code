@@ -33,7 +33,7 @@ async fn ask_valid<T>(
         let answer = if answer.is_empty() { default.unwrap_or_default().to_owned() } else { answer };
         match check(&answer) {
             Ok(value) => return Ok(value),
-            Err(reason) => eprintln!("  {reason}"),
+            Err(reason) => command_eprintln!("  {reason}"),
         }
     }
     bail!("Provider setup cancelled after three invalid answers; nothing was saved")
@@ -122,13 +122,134 @@ fn deepseek_base_url(protocol: &str, url: &str) -> Option<String> {
         .then(|| format!("{trimmed}/anthropic"))
 }
 
+/// The protocols the wizard offers, in prompt order.
+const PROTOCOLS: &[(&str, &str)] = &[
+    ("openai", "OpenAI Chat Completions-compatible endpoints"),
+    ("anthropic", "Claude and Anthropic-compatible endpoints"),
+    ("gemini", "Google Gemini"),
+    ("responses", "OpenAI Responses-compatible endpoints"),
+];
+
+/// Accepts the numbered choice, or the protocol name for convenience.
+fn parse_protocol(value: &str) -> std::result::Result<String, String> {
+    match value.trim().to_ascii_lowercase().as_str() {
+        "" | "1" | "openai" => Ok("openai".into()),
+        "2" | "anthropic" | "claude" => Ok("anthropic".into()),
+        "3" | "gemini" => Ok("gemini".into()),
+        "4" | "responses" | "openai-responses" => Ok("responses".into()),
+        _ => Err("Enter 1, 2, 3 or 4 (openai, anthropic, gemini or responses).".into()),
+    }
+}
+
+fn validate_model_ids(value: &str) -> std::result::Result<Vec<String>, String> {
+    let models: Vec<_> = value.split(',').map(str::trim).filter(|s| !s.is_empty()).collect();
+    if models.is_empty() {
+        Err("Enter at least one model ID (e.g. deepseek-flash).".into())
+    } else if models
+        .iter()
+        .any(|m| m.contains("::") || m.contains(char::is_whitespace))
+    {
+        Err("Model IDs cannot contain spaces or ::; separate several with commas.".into())
+    } else {
+        Ok(models.into_iter().map(str::to_owned).collect())
+    }
+}
+
+fn push_unique(models: &mut Vec<String>, model: String) {
+    if !models.contains(&model) {
+        models.push(model);
+    }
+}
+
+/// Reads comma-separated numbers from the listed models, or typed IDs.
+fn parse_model_selection(
+    value: &str,
+    listed: &[String],
+) -> std::result::Result<Vec<String>, String> {
+    let tokens: Vec<_> = value.split(',').map(str::trim).filter(|s| !s.is_empty()).collect();
+    if tokens.is_empty() {
+        return Ok(vec![listed[0].clone()]);
+    }
+    let mut chosen = Vec::new();
+    for token in tokens {
+        if token.eq_ignore_ascii_case("all") {
+            for model in listed {
+                push_unique(&mut chosen, model.clone());
+            }
+        } else if let Ok(number) = token.parse::<usize>() {
+            let model = number
+                .checked_sub(1)
+                .and_then(|index| listed.get(index))
+                .ok_or_else(|| format!("Enter a number from 1 to {}, a model ID, or all.", listed.len()))?;
+            push_unique(&mut chosen, model.clone());
+        } else if token.contains("::") || token.contains(char::is_whitespace) {
+            return Err("Model IDs cannot contain spaces or ::; separate several with commas.".into());
+        } else {
+            push_unique(&mut chosen, token.to_owned());
+        }
+    }
+    Ok(chosen)
+}
+
+/// Lists the endpoint's models as a numbered choice. When the endpoint cannot
+/// be reached, or the key is not in this terminal, typed IDs still work.
+async fn choose_models(
+    input: &mut TerminalInput,
+    protocol: &str,
+    url: &str,
+    api_key: Option<&str>,
+) -> Result<Vec<String>> {
+    let listed = match api_key.filter(|key| !key.is_empty()) {
+        Some(key) => {
+            command_eprintln!("  Listing models from {url}…");
+            match tokio::time::timeout(
+                std::time::Duration::from_secs(20),
+                deepseek_code_core::native_engine::model_listing::list_models(protocol, url, key),
+            )
+            .await
+            {
+                Ok(Ok(models)) => models,
+                Ok(Err(error)) => {
+                    command_eprintln!("  Could not list models: {error:#}");
+                    Vec::new()
+                }
+                Err(_) => {
+                    command_eprintln!("  Listing models timed out.");
+                    Vec::new()
+                }
+            }
+        }
+        None => Vec::new(),
+    };
+    if listed.is_empty() {
+        return ask_valid(
+            input,
+            "Model IDs (comma separated; first is default)",
+            None,
+            validate_model_ids,
+        )
+        .await;
+    }
+    command_eprintln!("Models available from {url}:");
+    for (index, model) in listed.iter().enumerate() {
+        command_eprintln!("  {:>2}. {model}", index + 1);
+    }
+    ask_valid(
+        input,
+        "Model numbers (comma separated; first is default, all for every model)",
+        Some("1"),
+        |value| parse_model_selection(value, &listed),
+    )
+    .await
+}
+
 pub async fn wizard(
     paths: &RuntimePaths,
     input: &mut TerminalInput,
     edit: Option<&str>,
 ) -> Result<String> {
     paths.read_config()?;
-    eprintln!(
+    command_eprintln!(
         "Provider setup; /cancel cancels. Enter an API key directly, or the NAME of an environment variable that holds it."
     );
     let mut manager = ConfigManager::new(paths.data_dir.clone());
@@ -151,15 +272,11 @@ pub async fn wizard(
         "Provider exists; use /provider edit {id}"
     );
     ensure!(edit.is_none() || previous.is_some(), "Provider not found");
-    let protocol = ask_valid(input, "Protocol (openai / anthropic / gemini)", None, |value| {
-        let value = value.to_ascii_lowercase();
-        if ["openai", "anthropic", "claude", "gemini"].contains(&value.as_str()) {
-            Ok(value)
-        } else {
-            Err("Enter openai, anthropic or gemini.".into())
-        }
-    })
-    .await?;
+    command_eprintln!("Protocol:");
+    for (index, (name, description)) in PROTOCOLS.iter().enumerate() {
+        command_eprintln!("  {}. {name} — {description}", index + 1);
+    }
+    let protocol = ask_valid(input, "Protocol (1-4)", Some("1"), parse_protocol).await?;
     let url = ask_valid(input, "Base URL", None, |url| {
         if !(url.starts_with("http://") || url.starts_with("https://")) {
             Err("The URL must start with http:// or https:// (e.g. https://api.deepseek.com).".into())
@@ -172,7 +289,7 @@ pub async fn wizard(
     .await?;
     let url = match deepseek_base_url(&protocol, &url) {
         Some(corrected) => {
-            eprintln!("  DeepSeek serves the Anthropic protocol at {corrected}; using that URL.");
+            command_eprintln!("  DeepSeek serves the Anthropic protocol at {corrected}; using that URL.");
             corrected
         }
         None => url,
@@ -187,32 +304,28 @@ pub async fn wizard(
     .await?;
     let (stored_key, key_env) = match credential {
         Credential::Key(key) => {
-            eprintln!("  The key will be saved in config.json, readable only by you.");
+            command_eprintln!("  The key will be saved in config.json, readable only by you.");
             (Some(key), None)
         }
         Credential::Env(name) => {
             if std::env::var_os(&name).is_none() {
-                eprintln!("  Note: {name} is not set in this terminal; set it before selecting this provider.");
+                command_eprintln!("  Note: {name} is not set in this terminal; set it before selecting this provider.");
             }
             (None, Some(name))
         }
     };
-    let models = ask_valid(input, "Model IDs (comma separated; first is default)", None, |models| {
-        let models: Vec<_> = models.split(',').map(str::trim).filter(|s| !s.is_empty()).collect();
-        if models.is_empty() {
-            Err("Enter at least one model ID (e.g. deepseek-flash).".into())
-        } else if models.iter().any(|m| m.contains("::") || m.contains(char::is_whitespace)) {
-            Err("Model IDs cannot contain spaces or ::; separate several with commas.".into())
-        } else {
-            Ok(models.join(","))
-        }
-    })
-    .await?;
-    let models: Vec<_> = models.split(',').collect();
-    let mut provider = previous.unwrap_or_else(|| config::provider_template(models[0]));
+    let key_for_listing = match (&stored_key, &key_env) {
+        (Some(key), _) => Some(key.clone()),
+        (None, Some(name)) => std::env::var(name).ok(),
+        (None, None) => None,
+    };
+    let models = choose_models(input, &protocol, &url, key_for_listing.as_deref()).await?;
+    let mut provider = previous.unwrap_or_else(|| config::provider_template(&models[0]));
     provider.id = id.clone();
     provider.name = id.clone();
-    provider.provider_type = if protocol == "claude" {
+    provider.provider_type = if protocol == "responses" {
+        "openai".into()
+    } else if protocol == "claude" {
         "anthropic".into()
     } else {
         protocol.clone()
@@ -229,14 +342,20 @@ pub async fn wizard(
         .iter()
         .map(|id| {
             let mut model = config::provider_template(id).models.remove(0);
-            model.id = (*id).into();
-            model.name = (*id).into();
+            model.id = id.clone();
+            model.name = id.clone();
+            if protocol == "responses" {
+                model.api = Some("openai-responses".into());
+            }
             if protocol == "gemini" {
                 model.api = Some("google-generative-ai".into());
             }
             model
         })
         .collect();
+    if protocol == "responses" {
+        provider.settings.insert("builtinId".into(), json!("openai"));
+    }
     if protocol == "gemini" {
         provider
             .settings
@@ -247,14 +366,14 @@ pub async fn wizard(
         c.providers.push(provider);
     })?;
     match (&stored_key, &key_env) {
-        (Some(_), _) => eprintln!(
+        (Some(_), _) => command_eprintln!(
             "Saved {id} ({} models); the API key is stored in config.json (readable only by you).",
             models.len()
         ),
         (None, Some(name)) if std::env::var_os(name).is_some() => {
-            eprintln!("Saved {id} ({} models); the API key is read from {name}.", models.len());
+            command_eprintln!("Saved {id} ({} models); the API key is read from {name}.", models.len());
         }
-        (None, Some(name)) => eprintln!(
+        (None, Some(name)) => command_eprintln!(
             "Saved {id} ({} models). Set {name} in the launching shell before selecting it.",
             models.len()
         ),
@@ -273,7 +392,7 @@ pub fn select(paths: &RuntimePaths, provider: &str, model: &str) -> Result<confi
 }
 
 pub fn status(session: &Session) {
-    eprintln!(
+    command_eprintln!(
         "Provider: {}\nModel: {}\nRouting: {}",
         session.provider_id,
         session.model,
@@ -393,16 +512,16 @@ async fn configure_preset(paths: &RuntimePaths, input: &mut TerminalInput, prese
     let key_env = preset_key_env(preset);
     loop {
         let api_key = if std::env::var_os(&key_env).is_some_and(|value| !value.is_empty()) {
-            eprintln!("Using the API key from {key_env}.");
+            command_eprintln!("Using the API key from {key_env}.");
             None
         } else {
-            eprintln!("Get an API key at {}", preset.key_url);
+            command_eprintln!("Get an API key at {}", preset.key_url);
             let prompt = format!("Paste the API key (hidden), or press Enter to set {key_env} yourself: ");
             let key = input.read_secret(&prompt).await?.context("Input closed")?.trim().to_owned();
             if key.is_empty() {
-                eprintln!("Set it in your shell, then start dcl again:");
-                eprintln!("  bash/zsh:   export {key_env}=<your key>");
-                eprintln!("  PowerShell: setx {key_env} \"<your key>\"   (then open a new terminal)");
+                command_eprintln!("Set it in your shell, then start dcl again:");
+                command_eprintln!("  bash/zsh:   export {key_env}=<your key>");
+                command_eprintln!("  PowerShell: setx {key_env} \"<your key>\"   (then open a new terminal)");
                 return Ok(None);
             }
             anyhow::ensure!(!key.contains(char::is_whitespace), "An API key has no spaces; paste it again");
@@ -419,10 +538,10 @@ async fn configure_preset(paths: &RuntimePaths, input: &mut TerminalInput, prese
             c.default_provider_id = Some(provider.id.clone());
             c.providers.push(provider);
         })?;
-        eprintln!("Checking the connection with {model}…");
+        command_eprintln!("Checking the connection with {model}…");
         match verify(paths, preset.id, &model).await {
             Ok(()) => {
-                eprintln!(
+                command_eprintln!(
                     "Connected. {} is saved as the default provider{}.",
                     preset.name.trim_end_matches(" (recommended)"),
                     if api_key.is_some() { " (key stored in config.json, readable only by you)" } else { "" }
@@ -432,9 +551,9 @@ async fn configure_preset(paths: &RuntimePaths, input: &mut TerminalInput, prese
                 return Ok(Some(select(paths, preset.id, &model)?));
             }
             Err(error) => {
-                eprintln!("The connection test failed: {error:#}");
+                command_eprintln!("The connection test failed: {error:#}");
                 if api_key.is_none() {
-                    eprintln!("Check the value of {key_env}, or unset it to paste a key here.");
+                    command_eprintln!("Check the value of {key_env}, or unset it to paste a key here.");
                     return Ok(None);
                 }
                 let again = ask(input, "Paste a different key? [Y/n]").await?;
@@ -457,9 +576,9 @@ async fn choose_default_model(input: &mut TerminalInput, preset: &Preset) -> Res
         let picker = Picker { heading: "Choose the default model", subtitle: Some("Change it later with /model"), entries: &entries, search: false, hint: "Enter to confirm \u{b7} Esc for the first", selected: 0 };
         return Ok(preset.models[picker.run()?.unwrap_or(0)].to_owned());
     }
-    eprintln!("\nChoose the default model:");
+    command_eprintln!("\nChoose the default model:");
     for (index, model) in preset.models.iter().enumerate() {
-        eprintln!("  {}. {model}", index + 1);
+        command_eprintln!("  {}. {model}", index + 1);
     }
     let choice = ask(input, "Number [1]").await?;
     let index = choice.parse::<usize>().ok().filter(|n| (1..=preset.models.len()).contains(n)).unwrap_or(1);
@@ -471,18 +590,18 @@ async fn choose_default_model(input: &mut TerminalInput, preset: &Preset) -> Res
 pub async fn setup(paths: &RuntimePaths, input: &mut TerminalInput) -> Result<config::Selection> {
     let saved: Vec<_> = paths.read_config()?.providers.into_iter().filter(|p| p.enabled).collect();
     if saved.is_empty() {
-        eprintln!("Welcome to DeepSeek Code! Connect a model provider to get started.");
+        command_eprintln!("Welcome to DeepSeek Code! Connect a model provider to get started.");
     }
     loop {
-        eprintln!("\nChoose a provider:");
+        command_eprintln!("\nChoose a provider:");
         for (index, preset) in PRESETS.iter().enumerate() {
-            eprintln!("  {:>2}. {}", index + 1, preset.name);
+            command_eprintln!("  {:>2}. {}", index + 1, preset.name);
         }
         let custom = PRESETS.len() + 1;
-        eprintln!("  {custom:>2}. Another OpenAI- or Anthropic-compatible endpoint");
+        command_eprintln!("  {custom:>2}. Another OpenAI- or Anthropic-compatible endpoint");
         for provider in &saved {
             let models: Vec<_> = provider.models.iter().filter(|m| m.enabled).map(|m| m.id.as_str()).collect();
-            eprintln!("      saved: {} ({})", provider.id, models.join(", "));
+            command_eprintln!("      saved: {} ({})", provider.id, models.join(", "));
         }
         let choice = ask(input, "Number or saved provider ID [1]").await?;
         let choice = if choice.is_empty() { "1".to_owned() } else { choice };
@@ -513,7 +632,7 @@ pub async fn setup(paths: &RuntimePaths, input: &mut TerminalInput) -> Result<co
         match result {
             Ok(Some(selection)) => return Ok(selection),
             Ok(None) => {}
-            Err(error) => eprintln!("Error: {error:#}"),
+            Err(error) => command_eprintln!("Error: {error:#}"),
         }
     }
 }
@@ -560,7 +679,7 @@ pub async fn handle(
     if command == "/test" {
         ensure!(words.next().is_none(), "Usage: /test");
         status(session);
-        eprintln!(
+        command_eprintln!(
             "Testing a real text request (no tools or conversation history); Ctrl+C cancels."
         );
         let started = std::time::Instant::now();
@@ -568,7 +687,7 @@ pub async fn handle(
             result = session.engine.generate_text(&session.provider_id, &session.model, "This is a connection test. Reply only OK.", "Reply OK.") => result?,
             _ = tokio::signal::ctrl_c() => bail!("Test cancelled"),
         };
-        eprintln!(
+        command_eprintln!(
             "Connection test passed in {:.2}s. Response: {}",
             started.elapsed().as_secs_f64(),
             response.chars().take(200).collect::<String>()
@@ -607,7 +726,7 @@ pub async fn handle(
     let providers: Vec<_> = config.providers.iter().filter(|p| p.enabled).collect();
     let (provider, model) = if command == "/provider" {
         for (i, p) in providers.iter().enumerate() {
-            eprintln!("{}. {} — {} ({})", i + 1, p.id, p.name, p.provider_type);
+            command_eprintln!("{}. {} — {} ({})", i + 1, p.id, p.name, p.provider_type);
         }
         if argument == Some("list") {
             return Ok(true);
@@ -690,13 +809,13 @@ pub async fn handle(
                         let chosen = (efforts[effort] != "default").then(|| efforts[effort].to_owned());
                         if chosen != current_effort {
                             crate::session_commands::set_session_effort(session, chosen.clone())?;
-                            eprintln!("Session effort: {}", chosen.as_deref().unwrap_or("default"));
+                            command_eprintln!("Session effort: {}", chosen.as_deref().unwrap_or("default"));
                         }
                         if models[index].id != session.model {
                             let selection = select(paths, &provider.id, &models[index].id)?;
                             session.switch(paths, selection).await?;
                             status(session);
-                            eprintln!("Conversation history preserved. Use /test to verify connectivity.");
+                            command_eprintln!("Conversation history preserved. Use /test to verify connectivity.");
                         }
                         return Ok(true);
                     }
@@ -705,7 +824,7 @@ pub async fn handle(
             }
         }
         for (i, m) in models.iter().enumerate() {
-            eprintln!("{}. {}", i + 1, m.id);
+            command_eprintln!("{}. {}", i + 1, m.id);
         }
         if argument == Some("list") {
             return Ok(true);
@@ -734,7 +853,7 @@ pub async fn handle(
     let selection = select(paths, &provider, &model)?;
     session.switch(paths, selection).await?;
     status(session);
-    eprintln!("Conversation history preserved. Use /test to verify connectivity.");
+    command_eprintln!("Conversation history preserved. Use /test to verify connectivity.");
     Ok(true)
 }
 
@@ -757,6 +876,26 @@ mod tests {
         let anthropic = preset_provider(&PRESETS[1], None).unwrap();
         assert_eq!(anthropic.settings["builtinId"], "anthropic");
         assert_eq!(anthropic.models[0].api.as_deref(), Some("anthropic-messages"));
+    }
+
+    #[test]
+    fn numbered_protocol_and_model_choices_are_parsed() {
+        assert_eq!(parse_protocol("").unwrap(), "openai");
+        assert_eq!(parse_protocol("1").unwrap(), "openai");
+        assert_eq!(parse_protocol("2").unwrap(), "anthropic");
+        assert_eq!(parse_protocol("Claude").unwrap(), "anthropic");
+        assert_eq!(parse_protocol("3").unwrap(), "gemini");
+        assert_eq!(parse_protocol("4").unwrap(), "responses");
+        assert_eq!(parse_protocol("OpenAI-Responses").unwrap(), "responses");
+        assert!(parse_protocol("5").is_err());
+        let listed = vec!["model-a".to_owned(), "model-b".to_owned(), "model-c".to_owned()];
+        assert_eq!(parse_model_selection("", &listed).unwrap(), ["model-a"]);
+        assert_eq!(parse_model_selection("2,3", &listed).unwrap(), ["model-b", "model-c"]);
+        assert_eq!(parse_model_selection("2,2", &listed).unwrap(), ["model-b"]);
+        assert_eq!(parse_model_selection("all", &listed).unwrap(), listed);
+        assert_eq!(parse_model_selection("typed-model", &listed).unwrap(), ["typed-model"]);
+        assert!(parse_model_selection("9", &listed).unwrap_err().contains("1 to 3"));
+        assert!(parse_model_selection("two words", &listed).unwrap_err().contains("cannot contain spaces"));
     }
 
     #[test]
@@ -843,6 +982,55 @@ mod tests {
         .await
         .unwrap();
         assert_eq!(paths.read_config().unwrap().providers.len(), 3);
+    }
+
+    #[tokio::test]
+    async fn wizard_saves_responses_transport_and_edit_clears_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let paths = RuntimePaths::new(dir.path().to_path_buf()).unwrap();
+        wizard(&paths, &mut answers(&["responses-test", "4", "http://localhost:8317/v1", "UNSET_RESPONSES_TEST_KEY", "custom-model"]), None).await.unwrap();
+        let saved = paths.read_config().unwrap();
+        let provider = saved.providers.iter().find(|p| p.id == "responses-test").unwrap();
+        assert_eq!(provider.provider_type, "openai");
+        assert_eq!(provider.settings["builtinId"], "openai");
+        assert_eq!(provider.models[0].api.as_deref(), Some("openai-responses"));
+        let runtime = deepseek_code_core::runtime::provider_from_config(provider);
+        assert_eq!(runtime.builtin_id.as_deref(), Some("openai"));
+        assert_eq!(runtime.models[0].api.as_deref(), Some("openai-responses"));
+        wizard(&paths, &mut answers(&["1", "http://localhost:8317/v1", "UNSET_RESPONSES_TEST_KEY", "custom-model"]), Some("responses-test")).await.unwrap();
+        let saved = paths.read_config().unwrap();
+        let provider = saved.providers.iter().find(|p| p.id == "responses-test").unwrap();
+        assert!(!provider.settings.contains_key("builtinId"));
+        assert!(provider.models[0].api.is_none());
+    }
+
+    #[tokio::test]
+    async fn wizard_lists_the_endpoint_models_and_accepts_numbers() {
+        use axum::{routing::get, Json, Router};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let base = format!("http://{}", listener.local_addr().unwrap());
+        let app = Router::new().route(
+            "/v1/models",
+            get(|headers: axum::http::HeaderMap| async move {
+                assert_eq!(headers["authorization"], "Bearer 123456");
+                Json(json!({"data": [{"id": "model-a"}, {"id": "model-b"}]}))
+            }),
+        );
+        tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        let dir = tempfile::tempdir().unwrap();
+        let paths = RuntimePaths::new(dir.path().to_path_buf()).unwrap();
+        let url = format!("{base}/v1");
+        wizard(
+            &paths,
+            &mut answers(&["listed", "1", &url, "123456", "2"]),
+            None,
+        )
+        .await
+        .unwrap();
+        let config = paths.read_config().unwrap();
+        let provider = config.providers.iter().find(|p| p.id == "listed").unwrap();
+        assert_eq!(provider.models.len(), 1);
+        assert_eq!(provider.models[0].id, "model-b");
     }
 
     #[tokio::test]
@@ -1016,7 +1204,7 @@ async fn settings_menu(
             argument
         } else {
             let display = crate::display_commands::load(session)?;
-            eprintln!("Settings | {}\nProvider: {} | Model: {}\nPermissions: {} | Theme: {} | Color: {} | Focus: {} | Renderer: {}\nprovider | model | permissions | theme | color | focus | output-style | statusline | tui | effort | autocompact\nChoose a setting, or enter done to return.", paths.data_dir.display(), session.provider_id, session.model, session.permission_mode(), display.theme, display.color, display.focus, display.tui);
+            command_eprintln!("Settings | {}\nProvider: {} | Model: {}\nPermissions: {} | Theme: {} | Color: {} | Focus: {} | Renderer: {}\nprovider | model | permissions | theme | color | focus | output-style | statusline | tui | effort | autocompact\nChoose a setting, or enter done to return.", paths.data_dir.display(), session.provider_id, session.model, session.permission_mode(), display.theme, display.color, display.focus, display.tui);
             ask(input, "Setting").await?
         };
         if matches!(choice.as_str(), "" | "done" | "exit") {
@@ -1063,7 +1251,7 @@ async fn settings_menu(
             crate::statusline_commands::handle(&value, session, input).await?;
         } else if setting == "permissions" {
             if value.is_empty() {
-                eprintln!("Permission mode: {}", session.permission_mode());
+                command_eprintln!("Permission mode: {}", session.permission_mode());
             } else {
                 session.set_permission_mode(&value).await?;
             }
