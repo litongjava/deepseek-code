@@ -148,7 +148,11 @@ impl LiveTurn {
             state.history = history;
             state.history_index = state.history.len();
             state.tip = tip;
-            let mut screen = Frame { scrollback: super::scrollback::Scrollback::take(), ..Frame::default() };
+            let scrollback = super::scrollback::Scrollback::take();
+            // The welcome banner is outside conversation history. On the first
+            // turn, keep it in place instead of shifting the whole screen down.
+            let aligned = !scrollback.has_turn_output();
+            let mut screen = Frame { scrollback, aligned, preserve_welcome: aligned, ..Frame::default() };
             let _ = run(&mut state, &mut screen, receiver, actions);
             let _ = screen.clear();
             // The prompt that follows starts right below these lines.
@@ -1254,6 +1258,7 @@ struct Frame {
     input_box: bool,
     /// Whether the turn's first frame has moved a short transcript down onto it.
     aligned: bool,
+    preserve_welcome: bool,
     /// Frame rows of the running Bash call; a click shows its output.
     shell_rows: Option<std::ops::Range<usize>>,
     /// Lines logged above the frame, for clicks on tool results.
@@ -1747,6 +1752,8 @@ impl Frame {
         for (index, text) in self.lines.iter().enumerate() {
             if let Some(row) = background.get_mut(origin as usize + index) { *row = text.clone(); }
         }
+        if self.preserve_welcome && top > 0 { return Ok(()); }
+        self.preserve_welcome = false;
         self.pinned.draw(width, size.1 as usize, &background)
     }
 }
@@ -2129,7 +2136,7 @@ fn run(
                 Err(mpsc::TryRecvError::Disconnected) => return Ok(()),
             }
         }
-        dirty |= state.dismiss_closed_question();
+        if !selection.retained() { dirty |= state.dismiss_closed_question(); }
         if let Some(event) = input_reader.next(Duration::from_millis(25))? {
             if super::shortcuts::requested_in_input(&event, state.draft.characters.is_empty()) {
                 selection.clear()?;
@@ -2150,7 +2157,7 @@ fn run(
             }
             // Cancellation may arrive while waiting for a key. Never submit a
             // dismissed approval draft as a newly queued user prompt.
-            if state.dismiss_closed_question() {
+            if !selection.retained() && state.dismiss_closed_question() {
                 screen.draw(state)?;
                 continue;
             }
@@ -2573,6 +2580,29 @@ mod tests {
     }
     fn screen(terminal: &vt100::Parser) -> Vec<String> {
         terminal.screen().rows(0, 80).collect()
+    }
+
+    #[test]
+    fn first_turn_keeps_welcome_at_top_and_composer_at_bottom() {
+        for height in [20u16, 36, 50] {
+            let mut terminal = vt100::Parser::new(height, 100, 200);
+            terminal.process(b"WELCOME\r\nMODEL\r\nWORKSPACE\r\n\r\nPROMPT\r\n");
+            let mut history = super::super::scrollback::Scrollback::default();
+            history.push("────────".into(), None);
+            history.record_prompt("PROMPT");
+            history.push("────────".into(), None);
+            assert!(!history.has_turn_output());
+            let mut frame = Frame { aligned: !history.has_turn_output(), scrollback: history, ..Frame::default() };
+            place(&mut frame, &mut terminal, &["Thinking", "Reasoning"], "working", 5);
+            let rows = screen(&terminal);
+            assert_eq!(rows[0], "WELCOME");
+            assert_eq!(rows[1], "MODEL");
+            assert_eq!(rows[2], "WORKSPACE");
+            assert_eq!(rows[5], "Thinking");
+            assert_eq!(rows[height as usize - 1], "footer");
+            frame.log_block(vec![change_view::body("Bash(test)")], vec![change_view::body("result")]);
+            assert!(frame.scrollback.has_turn_output());
+        }
     }
 
     #[test]

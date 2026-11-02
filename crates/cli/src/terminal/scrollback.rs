@@ -58,6 +58,9 @@ pub(crate) fn compact_key(key: crossterm::event::KeyEvent) -> bool {
 }
 
 impl Scrollback {
+    pub(super) fn has_turn_output(&self) -> bool {
+        self.blocks.iter().any(|block| block.prompt.is_none())
+    }
     pub(super) fn handoff() -> Handoff { Handoff(Self::take()) }
     pub(crate) fn save(self) {
         *LAST.lock().unwrap_or_else(|poison| poison.into_inner()) = Some(self);
@@ -258,6 +261,9 @@ impl Scrollback {
                 continue;
             };
             if self.blocks[first].review.is_some() || self.blocks[first].prompt.is_some() {
+                if result.last().is_some_and(|(text, id): &(String, Option<usize>)| *id != Some(first) && !text.trim().is_empty()) {
+                    result.push((String::new(), None));
+                }
                 result.push((self.logged[index].text.clone(), Some(first)));
                 index += 1;
                 continue;
@@ -274,9 +280,13 @@ impl Scrollback {
                     }
                     index += 1;
                 } else if self.logged[index].text.trim().is_empty()
-                    && self.logged.get(index + 1).is_some_and(|line| line.block.is_some()) {
+                    && self.logged.get(index + 1).and_then(|line| line.block)
+                        .is_some_and(|id| self.blocks[id].prompt.is_none() && self.blocks[id].review.is_none()) {
                     index += 1;
                 } else { break; }
+            }
+            if result.last().is_some_and(|(text, _)| !text.trim().is_empty()) {
+                result.push((String::new(), None));
             }
             if self.blocks[first].compact_level == 0 {
                 let mut counts = [0usize; 6];
@@ -545,6 +555,28 @@ fn screen_rows(text: &str, columns: usize) -> usize {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn compact_keeps_blank_lines_between_tool_and_prompt_blocks() {
+        let mut history = super::Scrollback::default();
+        for label in ["Read(a)", "Grep(b)"] {
+            let short = vec![super::change_view::body(label)];
+            let (id, rows) = history.block(short.clone(), short);
+            for row in rows { history.push(row, Some(id)); }
+            history.push(String::new(), None);
+        }
+        history.record_prompt("NEXT INPUT");
+        let short = vec![super::change_view::body("Bash(c)")];
+        let (id, rows) = history.block(short.clone(), short);
+        for row in rows { history.push(row, Some(id)); }
+        for level in [0, 1, 2] {
+            for block in &mut history.blocks { block.compact_level = level; }
+            let rows = history.compact_rows();
+            let input = rows.iter().position(|(text, _)| text.contains("NEXT INPUT")).unwrap();
+            assert!(rows[input - 1].0.is_empty(), "level {level}");
+            assert!(rows[input + 1].0.is_empty(), "level {level}");
+            assert!(rows[input - 1].1.is_none());
+        }
+    }
     #[test]
     fn background_click_refreshes_owned_logs_and_survives_prompt_handoff() {
         use serde_json::json;

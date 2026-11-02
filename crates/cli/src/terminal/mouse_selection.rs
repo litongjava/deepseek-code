@@ -40,6 +40,9 @@ impl Selection {
     ) -> io::Result<Option<MouseEvent>> {
         let point = (mouse.row, mouse.column);
         match mouse.kind {
+            // Passive mouse movement must not trigger a history redraw over
+            // the retained highlight after the button has been released.
+            MouseEventKind::Moved if self.retained() => Ok(None),
             MouseEventKind::Down(MouseButton::Left) => {
                 self.clear()?;
                 self.held = true;
@@ -319,6 +322,22 @@ mod tests {
         assert!(selection.retained());
         assert!(!selection.active());
         assert_eq!(selection.text(), "text");
+    }
+
+    #[test]
+    fn passive_motion_preserves_released_selection_and_suppresses_redraw() {
+        let mut selection = Selection {
+            start: Some((0, 0)), end: (0, 4), rows: vec!["text".into()],
+            dragged: true, held: false, painted: Default::default(),
+        };
+        for column in [5, 20, 3] {
+            assert!(selection.event(MouseEvent {
+                kind: MouseEventKind::Moved, column, row: 0,
+                modifiers: crossterm::event::KeyModifiers::NONE,
+            }, vec!["new streamed output".into()]).unwrap().is_none());
+            assert!(selection.retained());
+            assert_eq!(selection.text(), "text");
+        }
     }
 
     #[test]
