@@ -302,6 +302,7 @@ mod question_tests {
             Ok(Reply::Permission(PermissionResponse::Allow { .. }))
         ));
         let context = PermissionContext {
+            mcp_read_only: false,
             tool_name: "Write".into(),
             tool_input: json!({"path":"first"}),
             conversation_id: "one".into(),

@@ -307,6 +307,7 @@ mod tests {
 
     fn context(tool: &str, input: serde_json::Value, workspace: &Path) -> PermissionContext {
         PermissionContext {
+            mcp_read_only: false,
             tool_name: tool.into(),
             tool_input: input,
             conversation_id: "test".into(),

@@ -406,7 +406,7 @@ async fn observe(
                                     let text = plan["plan"].as_str().unwrap_or_default().to_owned();
                                     let path = plan["planFilePath"].as_str().unwrap_or_default().to_owned();
                                     let width = crossterm::terminal::size().map_or(80, |(cols, _)| cols.saturating_sub(1) as usize);
-                                    let view = crate::terminal::plan_view::review(&text, &path, session.auto_mode_available().await, width);
+                                    let view = crate::terminal::plan_view::review(&text, &path, session.auto_mode_available().await, plan["returnToBypass"] == true, width);
                                     pending_plan = Some((text, path));
                                     live.plan_choice(view.lines, view.question, view.options, view.footer)
                                 }
@@ -485,7 +485,7 @@ async fn observe(
                     if answer == "edit" {
                         crate::display_commands::edit_file(std::path::Path::new(&path), "").await?;
                     }
-                    if crate::terminal::plan_view::decide(&answer, false).rejected {
+                    if crate::terminal::plan_view::decide(&answer, false, false).rejected {
                         let width = crossterm::terminal::size().map_or(80, |(cols, _)| cols.saturating_sub(1) as usize);
                         display.styled_lines(crate::terminal::plan_view::rejected(&plan, width));
                     }
@@ -729,6 +729,10 @@ async fn refresh_permission_mode_with_query(
         }
     };
     session.permissions.set_mode(mode);
+    deepseek_code_core::permissions::set_full_access(
+        session.full_access
+            && mode == deepseek_code_core::permissions::PermissionMode::BypassPermissions,
+    );
     Ok(session.permission_mode())
 }
 
@@ -744,7 +748,16 @@ fn plan_event_mode(event: &Value) -> Option<deepseek_code_core::permissions::Per
         "ExitPlanMode" | "plan_mode" if output["approved"] == true && output["mode"] == "ask" => {
             Some(PermissionMode::AskPermissions)
         }
-        "ExitPlanMode" | "plan_mode" if output["approved"] == true && output["mode"] == "accept_edits" => Some(PermissionMode::AcceptEdits),
+        "ExitPlanMode" | "plan_mode"
+            if output["approved"] == true && output["mode"] == "accept_edits" =>
+        {
+            Some(PermissionMode::AcceptEdits)
+        }
+        "ExitPlanMode" | "plan_mode"
+            if output["approved"] == true && output["mode"] == "bypass" =>
+        {
+            Some(PermissionMode::BypassPermissions)
+        }
         _ => None,
     }
 }

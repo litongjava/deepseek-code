@@ -19,6 +19,7 @@ fn mcp_server_denials_cover_its_tools_without_matching_other_servers_or_native_t
             ("Write", false),
         ] {
             let context = PermissionContext {
+                mcp_read_only: false,
                 tool_name: tool.into(),
                 tool_input: serde_json::json!({}),
                 conversation_id: "session".into(),
@@ -55,6 +56,7 @@ fn launch_rules_survive_sdk_patches_and_fork_without_persisting_or_resetting_epo
     manager.set_launch_rules("parent", rules).unwrap();
     assert_eq!(revision, manager.policy_snapshot());
     let context = PermissionContext {
+        mcp_read_only: false,
         tool_name: "Write".into(),
         tool_input: serde_json::json!({"file_path":"output.txt","content":"blocked"}),
         conversation_id: "parent".into(),
@@ -122,6 +124,7 @@ fn launch_rule_validation_is_atomic_and_scoped_allow_respects_other_denials() {
         )
         .unwrap();
     let mut context = PermissionContext {
+        mcp_read_only: false,
         tool_name: "Bash".into(),
         tool_input: serde_json::json!({"command":"git status --short"}),
         conversation_id: "session".into(),

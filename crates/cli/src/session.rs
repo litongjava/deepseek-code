@@ -267,6 +267,7 @@ impl Session {
             )
         })??;
         let permissions = runtime::default_permissions();
+        permissions.set_plan_launch_permissions(cli.allow_dangerously_skip_permissions, cli.full_access);
         let loaded = deepseek_code_core::services::permission_updates::load_settings(
             &paths.data_dir,
             &workspace,
@@ -543,9 +544,25 @@ impl Session {
         let provider = self.selected_provider().await?;
         let mut history = self.store.model_history(&self.id, &provider.provider.api_format)?;
         history.push(json!({"role":"user","content":user_prompt}));
-        let tool = deepseek_code_core::permissions::PermissionContext { tool_name:"Bash".into(), tool_input:input.clone(), conversation_id:self.id.clone(), user_id:None, workspace_path:Some(self.workspace.to_string_lossy().into_owned()) };
-        let authorization = deepseek_code_core::native_engine::auto_permissions::authorize(&context, &self.permissions, &tool, &provider, &history, interactive).await
-            .with_denial_hook(Some(hooks), &tool, tool_use_id).await;
+        let tool = deepseek_code_core::permissions::PermissionContext {
+            mcp_read_only: false,
+            tool_name: "Bash".into(),
+            tool_input: input.clone(),
+            conversation_id: self.id.clone(),
+            user_id: None,
+            workspace_path: Some(self.workspace.to_string_lossy().into_owned()),
+        };
+        let authorization = deepseek_code_core::native_engine::auto_permissions::authorize(
+            &context,
+            &self.permissions,
+            &tool,
+            &provider,
+            &history,
+            interactive,
+        )
+        .await
+        .with_denial_hook(Some(hooks), &tool, tool_use_id)
+        .await;
         Ok(authorization.result)
     }
 
@@ -1238,12 +1255,13 @@ impl Session {
                             let plan = tool_input["plan"].as_str().unwrap_or_default().to_owned();
                             let path = tool_input["planFilePath"].as_str().unwrap_or_default().to_owned();
                             let auto = self.auto_mode_available().await;
+                            let bypass = tool_input["returnToBypass"] == true;
                             let menu = match deepseek_code_core::services::background_sessions::worker_plan(&self.paths.data_dir, &self.id, &request_id, &question, tool_input.clone()).await? {
                                 Some(answer) => answer.strip_prefix("plan:").map(str::to_owned).ok_or(answer),
                                 None => match progress.live.as_ref() {
                                     Some(live) if input.is_some() => {
                                         let width = crossterm::terminal::size().map_or(80, |(cols, _)| cols.saturating_sub(1) as usize);
-                                        let view = crate::terminal::plan_view::review(&plan, &path, auto, width);
+                                        let view = crate::terminal::plan_view::review(&plan, &path, auto, bypass, width);
                                         let reply = live.plan_choice(view.lines, view.question, view.options, view.footer);
                                         let answer = wait_answer(self, &mut progress, input, reply).await?;
                                         if answer == "edit" {
@@ -1256,7 +1274,7 @@ impl Session {
                             };
                             match menu {
                                 Ok(answer) => {
-                                    let decision = crate::terminal::plan_view::decide(&answer, auto);
+                                    let decision = crate::terminal::plan_view::decide(&answer, auto, bypass);
                                     if decision.rejected && progress.is_live() {
                                         let width = crossterm::terminal::size().map_or(80, |(cols, _)| cols.saturating_sub(1) as usize);
                                         progress.styled_lines(crate::terminal::plan_view::rejected(&plan, width));

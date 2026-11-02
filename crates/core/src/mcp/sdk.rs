@@ -164,7 +164,7 @@ impl Run {
                             ensure!(tool.get("description").is_none_or(Value::is_string), "MCP description must be text");
                             let output_schema = tool.get("outputSchema").cloned();
                             if let Some(schema) = &output_schema { crate::structured_output::validate_schema(schema).context("Invalid MCP output schema")?; }
-                            tools.push(Tool { original:original.into(), output_schema, definition:McpToolDefinition { name:full_name, description:tool["description"].as_str().unwrap_or("").into(), input_schema:schema.clone(), server_name:name.clone() } });
+                            tools.push(Tool { original:original.into(), output_schema, definition:McpToolDefinition { name:full_name, description:tool["description"].as_str().unwrap_or("").into(), input_schema:schema.clone(), annotations:tool.get("annotations").cloned(), server_name:name.clone() } });
                             ensure!(all_names.len() <= 1024, "SDK MCP tool limit is 1024");
                         }
                         cursor = next_cursor(&listed)?;

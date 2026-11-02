@@ -732,6 +732,7 @@ mod tests {
         allow().unwrap();
         deny().unwrap();
         let context = PermissionContext {
+            mcp_read_only: false,
             tool_name: "Write".into(),
             tool_input: json!({}),
             conversation_id: "one".into(),
@@ -761,6 +762,7 @@ mod tests {
         .unwrap();
         assert_eq!(
             child.check_permission(&PermissionContext {
+                mcp_read_only: false,
                 tool_name: "Write".into(),
                 tool_input: json!({}),
                 conversation_id: "child".into(),
@@ -776,6 +778,7 @@ mod tests {
         manager.set_mode(PermissionMode::AskPermissions);
         let updates = Arc::new(Updates::new(manager.clone(), "one".into()));
         let context = PermissionContext {
+            mcp_read_only: false,
             tool_name: "Write".into(),
             tool_input: json!({"path":"test"}),
             conversation_id: "one".into(),

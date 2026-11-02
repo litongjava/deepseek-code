@@ -192,6 +192,7 @@ pub fn apply(
     let (root, path) = scoped(root, Path::new(&document.path))?;
     ensure!(
         permissions.check_permission(&PermissionContext {
+            mcp_read_only: false,
             tool_name: "Write".into(),
             tool_input: serde_json::json!({"file_path":path,"content":preview.proposed}),
             conversation_id: "magic-docs".into(),

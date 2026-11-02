@@ -216,6 +216,7 @@ async fn execute(
         // Each job carries its own launch permissions.
         session.bypass_available = cli.allow_dangerously_skip_permissions;
         session.full_access = cli.full_access;
+        session.permissions.set_plan_launch_permissions(cli.allow_dangerously_skip_permissions, cli.full_access);
         session.auto_route =
             std::env::var("CLAUDE_RUST_WORKER_AUTO_ROUTE").as_deref() == Ok("true");
         session

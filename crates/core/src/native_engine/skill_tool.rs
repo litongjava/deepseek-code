@@ -348,6 +348,7 @@ mod tests {
         );
         manager.inherit_session_rules("parent", "child");
         let context = crate::permissions::PermissionContext {
+            mcp_read_only: false,
             tool_name: "Bash".into(),
             tool_input: json!({"command":"echo test"}),
             conversation_id: "child".into(),

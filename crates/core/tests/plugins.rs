@@ -72,6 +72,7 @@ fn bundle_paths_and_permissions_are_validated() {
     assert!(bundle.validate().is_err());
     let permissions = deepseek_code_core::runtime::default_permissions();
     let context = deepseek_code_core::permissions::PermissionContext {
+        mcp_read_only: false,
         tool_name: "PluginRun".into(),
         tool_input: json!({"plugin":"x","command":"run"}),
         conversation_id: "test".into(),

@@ -45,6 +45,123 @@ fn fixture() -> (
 }
 
 #[tokio::test]
+async fn bypass_plan_requires_origin_and_explicit_approval_and_survives_worker_handoff() {
+    // Full Access is process-wide; isolate this test from parallel permission tests.
+    if std::env::var_os("DCL_BYPASS_PLAN_TEST_CHILD").is_none() {
+        let status = std::process::Command::new(std::env::current_exe().unwrap())
+            .args(["--exact", "native_engine::tool_loop::plan_tool::approval_tests::bypass_plan_requires_origin_and_explicit_approval_and_survives_worker_handoff", "--test-threads=1"])
+            .env("DCL_BYPASS_PLAN_TEST_CHILD", "1")
+            .status().unwrap();
+        assert!(status.success());
+        return;
+    }
+    use crate::services::session_permission_mode as modes;
+    for answer in [
+        "bypass_keep",
+        "ordinary",
+        "1",
+        "3",
+        "4",
+        "cancel",
+        "changed",
+        "revoked",
+        "db_failure",
+    ] {
+        let (_temp, context, _sessions, mut executor, mut events, manager) = fixture();
+        let session = executor.conv_id.clone().unwrap();
+        manager.set_plan_launch_permissions(true, answer != "ordinary");
+        modes::set(
+            &context.db,
+            &session,
+            &manager,
+            PermissionMode::BypassPermissions,
+        )
+        .unwrap();
+        executor
+            .plan_transition("EnterPlanMode", &json!({}), "enter")
+            .await
+            .unwrap();
+        assert!(modes::plan_returns_to_bypass(&context.db, &session, &manager).unwrap());
+        // A newly started worker restores the origin, but needs its own launch authority.
+        let worker = crate::runtime::default_permissions();
+        worker.set_plan_launch_permissions(true, true);
+        modes::set(&context.db, &session, &worker, PermissionMode::PlanMode).unwrap();
+        assert!(modes::plan_returns_to_bypass(&context.db, &session, &worker).unwrap());
+        worker.set_plan_launch_permissions(false, false);
+        assert!(!modes::plan_returns_to_bypass(&context.db, &session, &worker).unwrap());
+        if answer == "db_failure" {
+            context.db.with_conn(|conn| conn.execute_batch("CREATE TRIGGER fail_bypass BEFORE UPDATE ON peripheral_settings WHEN NEW.value='bypass' BEGIN SELECT RAISE(ABORT,'fixture failure'); END;")).unwrap().unwrap();
+        }
+        let waiters = executor.answer_waiters.clone();
+        let input = json!({"plan":"# Return to bypass after approval"});
+        let mut future = Box::pin(executor.plan_transition("ExitPlanMode", &input, "exit"));
+        let event = tokio::select! { event = events.recv() => event.unwrap(), result = &mut future => panic!("No approval: {result:?}") };
+        let EngineEvent::AskUser {
+            request_id,
+            tool_input,
+            options,
+            ..
+        } = event
+        else {
+            panic!("Wrong event")
+        };
+        assert_eq!(tool_input["returnToBypass"], true);
+        assert!(options[0].contains("bypass") && options[1].contains("bypass"));
+        assert_eq!(manager.get_mode(), PermissionMode::PlanMode);
+        if answer == "cancel" {
+            drop(future);
+            assert!(waiters.lock().await.is_empty());
+            continue;
+        }
+        if answer == "changed" {
+            manager.set_mode(PermissionMode::AskPermissions);
+            manager.set_mode(PermissionMode::PlanMode);
+        }
+        if answer == "revoked" {
+            manager.set_plan_launch_permissions(false, false);
+        }
+        waiters
+            .lock()
+            .await
+            .remove(&request_id)
+            .unwrap()
+            .send(
+                if matches!(answer, "changed" | "revoked" | "db_failure" | "ordinary") {
+                    "bypass_keep"
+                } else {
+                    answer
+                }
+                .into(),
+            )
+            .unwrap();
+        let result = future.await;
+        assert_eq!(crate::permissions::full_access(), matches!(answer, "bypass_keep" | "1"));
+        crate::permissions::set_full_access(false);
+        assert_eq!(
+            result.is_err(),
+            matches!(answer, "changed" | "revoked" | "db_failure"),
+            "{answer}: {result:?}"
+        );
+        let expected = match answer {
+            "bypass_keep" | "ordinary" | "1" => PermissionMode::BypassPermissions,
+            "3" => PermissionMode::AskPermissions,
+            _ => PermissionMode::PlanMode,
+        };
+        assert_eq!(manager.get_mode(), expected, "{answer}");
+        assert_eq!(modes::load(&context.db, &session).unwrap(), Some(expected));
+        assert_eq!(
+            crate::services::plan_approval::latest_boundary(&context.db, &session)
+                .unwrap()
+                .is_some(),
+            answer == "1"
+        );
+        if let Ok(result) = result {
+            assert_eq!(result["mode"], modes::name(expected));
+        }
+    }
+}
+
+#[tokio::test]
 async fn approval_choices_preserve_rules_cancel_waiters_and_rollback_failed_boundary() {
     for choice in [
         "1",
@@ -54,6 +171,7 @@ async fn approval_choices_preserve_rules_cancel_waiters_and_rollback_failed_boun
         "feedback: add tests",
         "auto",
         "bypassPermissions",
+        "bypass_keep",
         "db_failure",
         "cancel",
     ] {
@@ -92,7 +210,10 @@ async fn approval_choices_preserve_rules_cancel_waiters_and_rollback_failed_boun
         let result = future.await;
         assert_eq!(
             result.is_err(),
-            matches!(choice, "auto" | "bypassPermissions" | "db_failure"),
+            matches!(
+                choice,
+                "auto" | "bypassPermissions" | "bypass_keep" | "db_failure"
+            ),
             "{choice}: {result:?}"
         );
         assert_eq!(

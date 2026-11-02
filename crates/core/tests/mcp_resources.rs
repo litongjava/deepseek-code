@@ -68,7 +68,7 @@ async fn configured_server_tools_are_namespaced_for_dispatch_and_server_rules() 
     let script = temp.path().join("tools.cjs");
     std::fs::write(&script, r#"require('readline').createInterface({input:process.stdin}).on('line',line=>{
       const r=JSON.parse(line); if(r.id===undefined)return;
-      const result=r.method==='tools/list'?{tools:[{name:'echo.v2',description:'Echo',inputSchema:{type:'object'}}]}:
+      const result=r.method==='tools/list'?{tools:[{name:'echo.v2',description:'Echo',inputSchema:{type:'object'},annotations:{readOnlyHint:true,custom:'preserved'}}]}:
       r.method==='tools/call'?{content:[{type:'text',text:process.argv[2]+':'+r.params.name}]}:
       r.method==='resources/list'?{resources:[]}:
       {protocolVersion:'2024-11-05',capabilities:{tools:{}},serverInfo:{name:'fixture',version:'1'}};
@@ -94,6 +94,14 @@ async fn configured_server_tools_are_namespaced_for_dispatch_and_server_rules() 
     }
     let manager = Arc::new(manager);
     let registry = McpToolRegistry::new(manager.clone());
+    let discovered = registry.get_all_tools().await.unwrap();
+    for tool in discovered
+        .iter()
+        .filter(|tool| tool.name.starts_with("mcp__"))
+    {
+        assert!(tool.is_read_only());
+        assert_eq!(tool.annotations.as_ref().unwrap()["custom"], "preserved");
+    }
     let mut names = registry
         .get_all_tools()
         .await
@@ -126,6 +134,7 @@ async fn configured_server_tools_are_namespaced_for_dispatch_and_server_rules() 
         .unwrap();
     for (tool, denied) in [("mcp__alpha__echo_v2", true), ("mcp__beta_srv__echo_v2", false)] {
         let result = permissions.check_permission(&PermissionContext {
+            mcp_read_only: false,
             tool_name: tool.into(),
             tool_input: json!({}),
             conversation_id: "session".into(),

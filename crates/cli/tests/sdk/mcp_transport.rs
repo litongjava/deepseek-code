@@ -428,8 +428,8 @@ async fn sdk_mcp_timeout_cancels_request_and_tolerates_only_its_late_reply() {
 }
 
 #[tokio::test]
-async fn sdk_mcp_plan_and_explicit_deny_override_host_hook_allow() {
-    for mode in ["plan", "deny"] {
+async fn sdk_mcp_plan_defaults_to_read_only_and_explicit_restrictions_override_host_hook_allow() {
+    for mode in ["plan", "plan-write", "plan-invalid", "deny"] {
         let root = tempfile::tempdir().unwrap();
         let server = start_server(false, vec![("mcp__first__echo", json!({"value":"ONE"}))]).await;
         let denied_session = if mode == "deny" {
@@ -450,7 +450,7 @@ async fn sdk_mcp_plan_and_explicit_deny_override_host_hook_allow() {
         } else {
             None
         };
-        let extra = if mode == "plan" {
+        let extra = if mode.starts_with("plan") {
             vec!["--permission-mode", "plan"]
         } else {
             vec![
@@ -484,12 +484,26 @@ async fn sdk_mcp_plan_and_explicit_deny_override_host_hook_allow() {
                     json!({"behavior":"allow"})
                 } else {
                     called |= frame["request"]["message"]["method"] == "tools/call";
-                    mcp_response(&frame, "")
+                    let mut response = mcp_response(&frame, "");
+                    if frame["request"]["message"]["method"] == "tools/list"
+                        && response["mcp_response"]["result"]["tools"]
+                            .as_array()
+                            .is_some_and(|tools| !tools.is_empty())
+                    {
+                        if mode == "plan-write" {
+                            response["mcp_response"]["result"]["tools"][0]["annotations"] =
+                                json!({"readOnlyHint":false});
+                        } else if mode == "plan-invalid" {
+                            response["mcp_response"]["result"]["tools"][0]["annotations"] =
+                                json!({"readOnlyHint":"true"});
+                        }
+                    }
+                    response
                 };
                 answer(&mut client, &frame, response).await;
             }
         }
-        assert!(!called, "{mode} must block actual MCP invocation");
+        assert_eq!(called, mode == "plan", "{mode} actual MCP invocation");
         client.finish().await;
     }
 }

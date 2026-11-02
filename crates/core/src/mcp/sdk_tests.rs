@@ -42,6 +42,12 @@ impl Host for Fixture {
                 "notifications/initialized" => return Ok(Value::Null),
                 "tools/list" => {
                     let mut result = json!({"tools":[{"name":"echo","inputSchema":{"type":"object","properties":{"value":{"type":"string"}},"required":["value"]},"outputSchema":{"type":"object","properties":{"value":{"type":"string"}},"required":["value"]}}]});
+                    result["tools"][0]["annotations"] = match failure.as_str() {
+                        "readonly" => json!({"readOnlyHint":true}),
+                        "readonly-false" => json!({"readOnlyHint":false}),
+                        "readonly-malformed" => json!({"readOnlyHint":"true"}),
+                        _ => Value::Null,
+                    };
                     if failure == "schema" {
                         result["tools"][0]["inputSchema"] =
                             json!({"$ref":"https://invalid/schema"});
@@ -230,4 +236,29 @@ fn sdk_mcp_names_reject_collisions_and_protocol_syntax() {
         validate_names(&json!(["first", "second-2"])).unwrap(),
         vec!["first", "second-2"]
     );
+}
+
+#[tokio::test]
+async fn sdk_mcp_preserves_read_only_annotations_without_coercion() {
+    for (fixture, expected) in [
+        ("readonly", true),
+        ("readonly-false", false),
+        ("readonly-malformed", false),
+        ("", true),
+    ] {
+        let (runtime, _) = setup(fixture);
+        let tools = runtime.tools().await.unwrap();
+        assert_eq!(tools[0].is_read_only(), expected);
+        assert_eq!(
+            tools[0].annotations.as_ref().unwrap()["readOnlyHint"],
+            match fixture {
+                "readonly" => json!(true),
+                "readonly-false" => json!(false),
+                "readonly-malformed" => json!("true"),
+                _ => Value::Null,
+            }
+        );
+        runtime.clear();
+        assert!(runtime.tools().await.unwrap().is_empty());
+    }
 }

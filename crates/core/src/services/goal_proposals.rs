@@ -300,6 +300,7 @@ fn review_policy(
 ) -> Result<crate::permissions::manager::PolicySnapshot> {
     let policy = permissions.policy_snapshot();
     let context = PermissionContext {
+        mcp_read_only: false,
         tool_name: "ProposeGoal".into(),
         tool_input: json!({"condition":condition}),
         conversation_id: session.into(),

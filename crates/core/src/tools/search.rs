@@ -70,7 +70,7 @@ fn sort_by_mtime(paths: &mut [PathBuf]) {
 
 pub fn glob(input: Value, cwd: &str) -> Result<Value> {
     let pattern = input["pattern"].as_str().ok_or_else(|| anyhow!("pattern required"))?;
-    let base = super::resolve_path(input["path"].as_str().unwrap_or(cwd), cwd)?;
+    let base = super::resolve_read_path(input["path"].as_str().unwrap_or(cwd), cwd)?;
     anyhow::ensure!(Path::new(&base).is_dir(), "Directory does not exist: {base}");
     let matcher = globset::GlobBuilder::new(&pattern.replace('\\', "/")).literal_separator(true).build()?.compile_matcher();
     let base_path = Path::new(&base);
@@ -109,7 +109,7 @@ fn number(input: &Value, key: &str) -> Option<usize> {
 
 pub fn grep(input: Value, cwd: &str) -> Result<Value> {
     let pattern = input["pattern"].as_str().ok_or_else(|| anyhow!("pattern required"))?;
-    let root = super::resolve_path(input["path"].as_str().unwrap_or(cwd), cwd)?;
+    let root = super::resolve_read_path(input["path"].as_str().unwrap_or(cwd), cwd)?;
     let root = Path::new(&root);
     anyhow::ensure!(root.exists(), "Path does not exist: {}", root.display());
     let mode = input["output_mode"].as_str().unwrap_or("files_with_matches").to_owned();

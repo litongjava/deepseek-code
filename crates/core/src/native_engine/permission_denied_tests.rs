@@ -366,6 +366,7 @@ async fn permission_denied_provenance_excludes_static_asks_failures_and_stale_re
             );
         }
         let tool = PermissionContext {
+            mcp_read_only: false,
             tool_name: "Write".into(),
             tool_input: json!({"file_path":"never-executed.txt","content":"EXACT_FINAL_INPUT"}),
             conversation_id: "fixture".into(),

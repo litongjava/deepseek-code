@@ -9,6 +9,7 @@ use serde_json::{json, Value};
 
 fn permission(session: &Session, tool: &str, input: Value) -> PermissionResult {
     session.permissions.check_permission(&PermissionContext {
+        mcp_read_only: false,
         tool_name: tool.into(),
         tool_input: input,
         conversation_id: session.id.clone(),

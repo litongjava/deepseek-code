@@ -430,6 +430,7 @@ async fn launch_rule_changes_block_retained_child_resume_without_consuming_its_i
             .unwrap();
         assert!(matches!(
             manager.check_permission(&PermissionContext {
+                mcp_read_only: false,
                 tool_name: "Write".into(),
                 tool_input: json!({"file_path":"blocked.txt","content":"blocked"}),
                 conversation_id: child.into(),

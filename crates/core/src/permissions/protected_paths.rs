@@ -89,6 +89,7 @@ mod tests {
         let manager = PermissionManager::new(std::sync::Arc::new(AuditLogger::new(16)));
         manager.set_mode(PermissionMode::AcceptEdits);
         let mut context = PermissionContext {
+            mcp_read_only: false,
             tool_name: "Write".into(),
             tool_input: serde_json::json!({"file_path":dir.path().join(".bashrc")}),
             conversation_id: "home-test".into(),

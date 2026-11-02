@@ -202,6 +202,7 @@ impl QueryEngine {
         workspace_path: Option<String>,
     ) -> PermissionResult {
         let context = PermissionContext {
+            mcp_read_only: false,
             tool_name: tool_name.to_string(),
             tool_input,
             conversation_id: conversation_id.to_string(),

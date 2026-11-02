@@ -73,6 +73,8 @@ pub struct ModeSnapshot { pub mode: PermissionMode, revision: u64 }
 pub struct PolicySnapshot { pub mode: ModeSnapshot, revision: u64 }
 
 pub struct PermissionManager {
+    bypass_available: std::sync::atomic::AtomicBool,
+    full_access_available: std::sync::atomic::AtomicBool,
     policy_revision: Mutex<u64>,
     auto_stats: Mutex<HashMap<String, super::auto_config::AutoStats>>,
     ruleset: Mutex<PermissionRuleset>,
@@ -238,6 +240,8 @@ impl PermissionManager {
             .cloned()
             .unwrap_or_default();
         Self {
+            bypass_available: std::sync::atomic::AtomicBool::new(false),
+            full_access_available: std::sync::atomic::AtomicBool::new(false),
             policy_revision: Mutex::new(0),
             auto_stats: Mutex::new(HashMap::new()),
             ruleset: Mutex::new(
@@ -294,6 +298,8 @@ impl PermissionManager {
 
     pub fn new(audit_logger: AuditLoggerRef) -> Self {
         Self {
+            bypass_available: std::sync::atomic::AtomicBool::new(false),
+            full_access_available: std::sync::atomic::AtomicBool::new(false),
             policy_revision: Mutex::new(0),
             auto_stats: Mutex::new(HashMap::new()),
             ruleset: Mutex::new(PermissionRuleset::new()),
@@ -315,6 +321,27 @@ impl PermissionManager {
         let mut guard = self.always_allow_checker.lock().unwrap_or_else(|e| e.into_inner());
         *guard = Some(Arc::from(checker));
         tracing::info!(module = "Permission", "Always allow checker registered");
+    }
+
+    /// Launch authority is host-owned and never inferred from tool arguments.
+    pub fn set_plan_launch_permissions(&self, available: bool, full_access: bool) {
+        let mut revision = self
+            .policy_revision
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        self.bypass_available
+            .store(available, std::sync::atomic::Ordering::Relaxed);
+        self.full_access_available.store(full_access, std::sync::atomic::Ordering::Relaxed);
+        *revision = revision.wrapping_add(1);
+    }
+
+    pub fn full_access_available(&self) -> bool {
+        self.full_access_available.load(std::sync::atomic::Ordering::Relaxed)
+    }
+
+    pub fn bypass_available(&self) -> bool {
+        self.bypass_available
+            .load(std::sync::atomic::Ordering::Relaxed)
     }
 
     pub fn set_mode(&self, mode: PermissionMode) {
@@ -591,9 +618,18 @@ impl PermissionManager {
             }
             return decision(self.request_confirmation(context), PlanBoundary);
         }
-        if mode == PermissionMode::PlanMode && !read_only && !plan_document && !delegation {
+        if mode == PermissionMode::PlanMode
+            && !read_only
+            && !context.mcp_read_only
+            && !plan_document
+            && !delegation
+        {
             return decision(
-                PermissionResult::Denied("Plan mode: write operations are not allowed".into()),
+                PermissionResult::Denied(if context.tool_name.starts_with("mcp__") {
+                    "Plan mode: MCP tool has a false or invalid annotations.readOnlyHint".into()
+                } else {
+                    "Plan mode: write operations are not allowed".into()
+                }),
                 PlanBoundary,
             );
         }
@@ -764,6 +800,7 @@ mod session_rule_tests {
         let child = manager.fork_session("parent", "child");
         manager.clear_runtime_rules("parent");
         let context = PermissionContext {
+            mcp_read_only: false,
             tool_name: "Write".into(),
             tool_input: serde_json::json!({"path":"test"}),
             conversation_id: "child".into(),
@@ -798,6 +835,7 @@ mod session_rule_tests {
             )
             .unwrap();
         let context = PermissionContext {
+            mcp_read_only: false,
             tool_name: "Bash".into(),
             tool_input: serde_json::json!({"command":"cd repo && git ls-remote origin refs/heads/main 2>&1"}),
             conversation_id: "one".into(),
@@ -829,6 +867,7 @@ mod session_rule_tests {
     fn pattern_rules_enforce_denies_and_complex_shell_confirmation() {
         let manager = PermissionManager::new(Arc::new(super::super::AuditLogger::new(16)));
         let mut context = PermissionContext {
+            mcp_read_only: false,
             tool_name: "Bash".into(),
             tool_input: serde_json::json!({"command":"git status"}),
             conversation_id: "one".into(),
@@ -893,6 +932,7 @@ mod session_rule_tests {
     fn explicit_denies_survive_bypass_and_allow_cannot_override_plan() {
         let manager = PermissionManager::new(Arc::new(super::super::AuditLogger::new(16)));
         let context = PermissionContext {
+            mcp_read_only: false,
             tool_name: "Write".into(),
             tool_input: serde_json::json!({"path":"test"}),
             conversation_id: "one".into(),
@@ -940,6 +980,7 @@ mod policy_tests {
     }
     fn context(tool: &str) -> PermissionContext {
         PermissionContext {
+            mcp_read_only: false,
             tool_name: tool.into(),
             tool_input: serde_json::json!({"path":"fixture","content":"\u{4f60}\u{597d}\u{4e16}\u{754c}".repeat(40)}),
             conversation_id: "session".into(),
@@ -947,6 +988,67 @@ mod policy_tests {
             workspace_path: None,
         }
     }
+    #[test]
+    fn mcp_read_only_is_host_owned_and_only_relaxes_plan_boundary() {
+        let mut context = context("mcp__fixture__inspect");
+        context.tool_input = serde_json::json!({"readOnlyHint":true,"mcp_read_only":true});
+        let manager = manager(PermissionMode::PlanMode);
+        assert!(matches!(
+            manager.check_permission(&context),
+            PermissionResult::Denied(_)
+        ));
+        context.mcp_read_only = true;
+        assert_eq!(
+            manager.check_permission(&context),
+            PermissionResult::Granted
+        );
+        for mode in [PermissionMode::AskPermissions, PermissionMode::Auto] {
+            manager.set_mode(mode);
+            assert!(matches!(
+                manager.check_permission(&context),
+                PermissionResult::RequiresConfirmation(_)
+            ));
+        }
+        manager.set_mode(PermissionMode::PlanMode);
+        for (action, denied) in [
+            (PermissionAction::Deny, true),
+            (PermissionAction::Confirm, false),
+        ] {
+            manager.set_session_rules(
+                "session",
+                HashMap::from([(context.tool_name.clone(), action)]),
+            );
+            let result = manager.check_permission(&context);
+            assert_eq!(matches!(result, PermissionResult::Denied(_)), denied);
+            assert_eq!(
+                matches!(result, PermissionResult::RequiresConfirmation(_)),
+                !denied
+            );
+        }
+        manager.set_session_rules("session", HashMap::new());
+        manager.set_tool_permission(
+            &context.tool_name,
+            ToolPermission {
+                tool_name: context.tool_name.clone(),
+                allowed: false,
+                requires_confirmation: false,
+                scope: super::super::PermissionScope::ToolSpecific,
+                level: super::super::PermissionLevel::Execute,
+            },
+        );
+        assert!(matches!(
+            manager.check_permission(&context),
+            PermissionResult::Denied(_)
+        ));
+        let mut serialized = serde_json::to_value(&context).unwrap();
+        serialized["mcp_read_only"] = serde_json::json!(true);
+        assert!(
+            !serde_json::from_value::<PermissionContext>(serialized)
+                .unwrap()
+                .mcp_read_only
+        );
+    }
+
     #[test]
     fn default_reads_and_unapproved_side_effects_follow_mode() {
         for mode in [
@@ -984,6 +1086,7 @@ mod policy_tests {
     #[test]
     fn workspace_reads_in_the_shell_run_without_asking_in_default_modes() {
         let shell = |command: &str| PermissionContext {
+            mcp_read_only: false,
             tool_name: "Bash".into(),
             tool_input: serde_json::json!({"command": command}),
             conversation_id: "session".into(),

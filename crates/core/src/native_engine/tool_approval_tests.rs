@@ -105,6 +105,7 @@ async fn typed_approval_validates_before_committing_and_uses_effective_input() {
         assert!(cleared);
         if allowed {
             let context = crate::permissions::PermissionContext {
+                mcp_read_only: false,
                 tool_name: "Write".into(),
                 tool_input: json!({"file_path":"another.txt","content":"no grant"}),
                 conversation_id: String::new(),
@@ -441,6 +442,7 @@ async fn pre_tool_allow_is_exact_and_cannot_replace_hard_rules_or_prior_ask() {
         if case == "allow" {
             assert!(matches!(
                 manager.check_permission(&crate::permissions::PermissionContext {
+                    mcp_read_only: false,
                     tool_name: "Write".into(),
                     tool_input: input,
                     conversation_id: String::new(),
@@ -451,4 +453,56 @@ async fn pre_tool_allow_is_exact_and_cannot_replace_hard_rules_or_prior_ask() {
             ));
         }
     }
+}
+
+#[tokio::test]
+async fn mcp_plan_capability_applies_to_normal_and_approval_checks_and_clears_on_refresh() {
+    crate::config::OrchestrationConfig::init_global().unwrap();
+    let provider = ResolvedProvider {
+        provider: serde_json::from_value(json!({"id":"fixture","name":"fixture","base_url":"http://127.0.0.1:1","api_key":"unused","api_format":"openai","models":[],"enabled":true})).unwrap(),
+        model: serde_json::from_value(json!({"id":"fixture","name":"fixture","enabled":true,"supports_vision":false,"supports_web_search":false})).unwrap(),
+    };
+    let (tx, _events) = mpsc::channel(16);
+    let mut executor = ToolLoopExecutor::new(
+        provider,
+        vec![],
+        None,
+        128,
+        tx,
+        ".".into(),
+        ReasoningMode::Standard,
+    );
+    let manager = Arc::new(crate::permissions::PermissionManager::new(Arc::new(
+        crate::permissions::AuditLogger::new(16),
+    )));
+    manager.set_mode(crate::permissions::PermissionMode::PlanMode);
+    executor = executor.with_permission_manager(manager.clone());
+    let name = "mcp__fixture__inspect";
+    let input = json!({"readOnlyHint":true});
+    assert!(matches!(
+        executor.check_permission(name, &input, "one").await,
+        PermissionResult::Denied(_)
+    ));
+    executor.mcp_read_only_tools.insert(name.into());
+    assert_eq!(
+        executor.check_permission(name, &input, "one").await,
+        PermissionResult::Granted
+    );
+    assert!(executor.permission_hard_denial(name, &input).is_none());
+    executor.allowed_tools = Some(vec!["Read".into()]);
+    assert!(executor.permission_hard_denial(name, &input).is_some());
+    executor.allowed_tools = None;
+    executor.approved_call = Some(tool_approval::ExactApproval {
+        tool: name.into(),
+        input: input.clone(),
+        id: "one".into(),
+        pre_tool_hook: false,
+    });
+    executor.refresh_mcp_tools().await.unwrap();
+    assert!(executor.mcp_read_only_tools.is_empty());
+    assert!(matches!(
+        executor.check_permission(name, &input, "one").await,
+        PermissionResult::Denied(_)
+    ));
+    assert!(executor.permission_hard_denial(name, &input).is_some());
 }

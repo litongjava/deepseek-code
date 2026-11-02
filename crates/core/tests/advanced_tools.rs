@@ -10,6 +10,7 @@ use serde_json::json;
 fn advanced_tools_respect_read_edit_and_execution_modes() {
     let manager = PermissionManager::new(std::sync::Arc::new(AuditLogger::new(100)));
     let context = |name: &str| PermissionContext {
+        mcp_read_only: false,
         tool_name: name.into(),
         tool_input: json!({}),
         conversation_id: "fixture".into(),

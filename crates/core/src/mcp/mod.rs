@@ -52,6 +52,8 @@ pub struct McpTool {
     pub name: String,
     pub description: String,
     pub input_schema: serde_json::Value,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub annotations: Option<serde_json::Value>,
     pub server_name: String,
 }
 
@@ -823,6 +825,7 @@ impl McpConnector {
                             .unwrap_or("")
                             .to_string(),
                         input_schema: t.get("inputSchema").cloned().unwrap_or(serde_json::json!({})),
+                        annotations: t.get("annotations").cloned(),
                         server_name: String::new(),
                     })
                 }).collect()

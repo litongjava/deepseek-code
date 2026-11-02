@@ -42,6 +42,16 @@ pub(super) fn bypass_permissions() -> bool {
         .unwrap_or(false)
 }
 
+pub(super) fn plan_mode() -> bool {
+    PERMISSIONS
+        .try_with(|manager| {
+            manager.as_ref().is_some_and(|manager| {
+                manager.get_mode() == crate::permissions::PermissionMode::PlanMode
+            })
+        })
+        .unwrap_or(false)
+}
+
 pub(super) fn allows(canonical: &Path) -> bool {
     // The permission gate still enforces explicit rules before tool execution.
     if bypass_permissions() {
@@ -55,6 +65,66 @@ pub(super) fn allows(canonical: &Path) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[tokio::test]
+    async fn plan_reads_external_files_without_granting_write_or_leaking_scope() {
+        use crate::permissions::PermissionMode;
+        use serde_json::json;
+        crate::config::OrchestrationConfig::init_global().unwrap();
+        let project = tempfile::tempdir().unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        let file = outside.path().join("reference.txt");
+        std::fs::write(&file, "outside UTF-8 reference: 中文").unwrap();
+        let cwd = project.path().to_string_lossy().into_owned();
+        let manager = crate::runtime::default_permissions();
+        manager.set_mode(PermissionMode::PlanMode);
+        with_permissions(Some(manager.clone()), async {
+            for (tool, input) in [
+                ("Read", json!({"file_path":file})),
+                ("Glob", json!({"path":outside.path(),"pattern":"*.txt"})),
+                (
+                    "Grep",
+                    json!({"path":outside.path(),"pattern":"中文","output_mode":"content"}),
+                ),
+            ] {
+                let working = cwd.clone();
+                let output = tokio::task::spawn_blocking(carry(move || {
+                    crate::tools::execute_tool(tool, input, &working)
+                }))
+                .await
+                .unwrap()
+                .unwrap();
+                assert!(
+                    output.to_string().contains(if tool == "Glob" {
+                        "reference.txt"
+                    } else {
+                        "中文"
+                    }),
+                    "{output}"
+                );
+            }
+            assert!(crate::tools::execute_tool(
+                "Write",
+                json!({"file_path":file,"content":"changed"}),
+                &cwd
+            )
+            .is_err());
+            assert!(crate::tools::execute_tool(
+                "Edit",
+                json!({"file_path":file,"old_string":"outside","new_string":"changed"}),
+                &cwd
+            )
+            .is_err());
+            manager.set_mode(PermissionMode::AskPermissions);
+            assert!(crate::tools::execute_tool("Read", json!({"file_path":file}), &cwd).is_err());
+        })
+        .await;
+        assert!(crate::tools::execute_tool("Read", json!({"file_path":file}), &cwd).is_err());
+        assert_eq!(
+            std::fs::read_to_string(file).unwrap(),
+            "outside UTF-8 reference: 中文"
+        );
+    }
+
     #[tokio::test]
     async fn bypass_tracks_live_mode_and_carries_without_leaking() {
         use crate::permissions::{AuditLogger, PermissionManager, PermissionMode};

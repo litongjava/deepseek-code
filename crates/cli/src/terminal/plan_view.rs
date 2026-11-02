@@ -12,7 +12,7 @@ pub struct Review {
     pub footer: String,
 }
 
-pub fn review(plan: &str, path: &str, auto: bool, width: usize) -> Review {
+pub fn review(plan: &str, path: &str, auto: bool, bypass: bool, width: usize) -> Review {
     let rule = change_view::muted(&"\u{254c}".repeat(width.max(20)));
     let mut lines = vec![
         change_view::heading("Ready to code?"),
@@ -30,7 +30,7 @@ pub fn review(plan: &str, path: &str, auto: bool, width: usize) -> Review {
         lines,
         question: "DeepSeek Code has written up a plan and is ready to execute. Would you like to proceed?".into(),
         options: vec![
-            if auto { "Yes, and use auto mode" } else { "Yes, auto-accept edits" }.into(),
+            if bypass { "Yes, return to bypass mode" } else if auto { "Yes, and use auto mode" } else { "Yes, auto-accept edits" }.into(),
             "Yes, manually approve edits".into(),
             "Tell DeepSeek Code what to change".into(),
         ],
@@ -55,14 +55,19 @@ pub struct Decision {
 
 /// `answer` is what the menu sent: `1`, `2`, `2\nnote`, `3\nchanges`,
 /// `esc` or `edit`.
-pub fn decide(answer: &str, auto: bool) -> Decision {
+pub fn decide(answer: &str, auto: bool, bypass: bool) -> Decision {
     let (choice, text) = answer.split_once('\n').unwrap_or((answer, ""));
     let text = text.trim().to_owned();
     let mut decision = Decision { engine: String::new(), mode: None, note: None, stop: false, rejected: false };
     match choice.trim() {
         "1" => {
-            decision.engine = "accept_edits_keep".into();
-            decision.mode = auto.then_some("auto");
+            decision.engine = if bypass {
+                "bypass_keep"
+            } else {
+                "accept_edits_keep"
+            }
+            .into();
+            decision.mode = (auto && !bypass).then_some("auto");
         }
         "2" => {
             decision.engine = "manual_keep".into();
@@ -105,21 +110,43 @@ mod tests {
 
     #[test]
     fn plan_choices_map_to_the_engine_answers() {
-        assert_eq!(decide("1", true).mode, Some("auto"));
-        assert_eq!(decide("1", false).engine, "accept_edits_keep");
-        assert_eq!(decide("2\nadd a test too", false).note.as_deref(), Some("add a test too"));
-        let revise = decide("3\nuse TypeError", false);
+        assert_eq!(decide("1", true, true).engine, "bypass_keep");
+        assert_eq!(decide("1", true, true).mode, None);
+        assert_eq!(decide("2", true, true).engine, "manual_keep");
+        assert!(review("Plan", "/w/plan.md", true, true, 40).options[0].contains("bypass"));
+        assert_eq!(decide("1", true, false).mode, Some("auto"));
+        assert_eq!(decide("1", false, false).engine, "accept_edits_keep");
+        assert_eq!(
+            decide("2\nadd a test too", false, false).note.as_deref(),
+            Some("add a test too")
+        );
+        let revise = decide("3\nuse TypeError", false, false);
         assert_eq!(revise.engine, "feedback: use TypeError");
         assert!(revise.rejected && !revise.stop);
-        let esc = decide("esc", false);
+        let esc = decide("esc", false, false);
         assert!(esc.stop && esc.rejected && esc.engine.contains("STOP"));
-        assert!(decide("edit", false).engine.contains("edited the plan file"));
+        assert!(decide("edit", false, false)
+            .engine
+            .contains("edited the plan file"));
     }
 
     #[test]
     fn review_offers_the_reference_choices_and_the_rejected_box_frames_the_plan() {
-        let view = review("Plan: fix divide\nRaise ValueError", "/w/plan.md", false, 40);
-        assert_eq!(view.options, ["Yes, auto-accept edits", "Yes, manually approve edits", "Tell DeepSeek Code what to change"]);
+        let view = review(
+            "Plan: fix divide\nRaise ValueError",
+            "/w/plan.md",
+            false,
+            false,
+            40,
+        );
+        assert_eq!(
+            view.options,
+            [
+                "Yes, auto-accept edits",
+                "Yes, manually approve edits",
+                "Tell DeepSeek Code what to change"
+            ]
+        );
         assert!(view.footer.contains("/w/plan.md"));
         let boxed: Vec<String> = rejected("Plan: fix divide", 40).iter().map(|line| change_view::render(line, usize::MAX, false)).collect();
         assert!(boxed[0].contains("User rejected"));

@@ -10,7 +10,23 @@ pub struct McpToolDefinition {
     pub name: String,
     pub description: String,
     pub input_schema: serde_json::Value,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub annotations: Option<serde_json::Value>,
     pub server_name: String,
+}
+
+impl McpToolDefinition {
+    pub fn is_read_only(&self) -> bool {
+        // Missing annotations default to read-only; explicit invalid values do not.
+        match self
+            .annotations
+            .as_ref()
+            .and_then(|value| value.get("readOnlyHint"))
+        {
+            None => true,
+            Some(value) => value.as_bool() == Some(true),
+        }
+    }
 }
 
 pub struct McpToolRegistry {
@@ -74,6 +90,7 @@ impl McpToolRegistry {
                     "List live MCP resources from an enabled running server; server_id is required."
                         .into(),
                 input_schema: serde_json::json!({"type":"object","properties":{"server_id":{"type":"string"}},"required":["server_id"]}),
+                annotations: None,
                 server_name: "MCP resources".into(),
             },
             McpToolDefinition {
@@ -81,6 +98,7 @@ impl McpToolRegistry {
                 description: "Read actual MCP resource contents from an enabled running server."
                     .into(),
                 input_schema: serde_json::json!({"type":"object","properties":{"server_id":{"type":"string"},"uri":{"type":"string"}},"required":["server_id","uri"]}),
+                annotations: None,
                 server_name: "MCP resources".into(),
             },
         ];
@@ -99,6 +117,7 @@ impl McpToolRegistry {
                         name: qualified_tool_name(&server.config.id, &tool.name),
                         description: tool.description.clone(),
                         input_schema: tool.input_schema.clone(),
+                        annotations: tool.annotations.clone(),
                         server_name: server.config.name.clone(),
                     });
                 }

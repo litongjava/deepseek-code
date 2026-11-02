@@ -49,16 +49,49 @@ pub fn settings(data_dir: &Path, workspace: &Path) -> Value {
     merged
 }
 
-/// What the tool receives when the sandbox is on: writable paths and network.
-pub fn policy(settings: &Value, workspace: &Path, data_dir: &Path, extra_writable: &[PathBuf]) -> Option<Value> {
-    // Full Access runs commands without the sandbox.
-    if crate::permissions::full_access() {
+/// Apply Full Access only to the current executor's bypass mode.
+pub fn effective_policy(
+    settings: &Value,
+    workspace: &Path,
+    data_dir: &Path,
+    extra_writable: &[PathBuf],
+    mode: crate::permissions::PermissionMode,
+) -> Option<Value> {
+    if mode == crate::permissions::PermissionMode::BypassPermissions
+        && crate::permissions::full_access()
+    {
         return None;
     }
-    if settings["enabled"] != true { return None; }
-    let mut writable: Vec<String> = vec![workspace.to_string_lossy().into_owned(), std::env::temp_dir().to_string_lossy().into_owned()];
-    writable.extend(extra_writable.iter().map(|path| path.to_string_lossy().into_owned()));
-    writable.extend(settings["filesystem"]["allowWrite"].as_array().into_iter().flatten().filter_map(Value::as_str).map(str::to_owned));
+    policy(settings, workspace, data_dir, extra_writable)
+}
+
+/// What the tool receives when the sandbox is on: writable paths and network.
+pub fn policy(
+    settings: &Value,
+    workspace: &Path,
+    data_dir: &Path,
+    extra_writable: &[PathBuf],
+) -> Option<Value> {
+    if settings["enabled"] != true {
+        return None;
+    }
+    let mut writable: Vec<String> = vec![
+        workspace.to_string_lossy().into_owned(),
+        std::env::temp_dir().to_string_lossy().into_owned(),
+    ];
+    writable.extend(
+        extra_writable
+            .iter()
+            .map(|path| path.to_string_lossy().into_owned()),
+    );
+    writable.extend(
+        settings["filesystem"]["allowWrite"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter_map(Value::as_str)
+            .map(str::to_owned),
+    );
     let network = &settings["network"];
     let strings = |value: &Value| value.as_array().into_iter().flatten().filter_map(Value::as_str).map(str::to_owned).collect::<Vec<_>>();
     // Domain filtering applies once either list is configured.

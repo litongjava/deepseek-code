@@ -731,6 +731,21 @@ fn search_results_follow_domain_filters() {
     assert_eq!(urls(serde_json::json!({})).len(), 4);
 }
 
+/// Plan mode can inspect files anywhere without expanding writable roots.
+pub(super) fn resolve_read_path(file_path: &str, cwd: &str) -> Result<String> {
+    if path_scope::plan_mode() {
+        let path = Path::new(file_path);
+        return Ok(if path.is_absolute() {
+            path.to_path_buf()
+        } else {
+            Path::new(cwd).join(path)
+        }
+        .to_string_lossy()
+        .into_owned());
+    }
+    resolve_path(file_path, cwd)
+}
+
 pub fn resolve_path(file_path: &str, cwd: &str) -> Result<String> {
     let resolved = if Path::new(file_path).is_absolute() { PathBuf::from(file_path) } else { Path::new(cwd).join(file_path) };
     if !is_path_allowed(&resolved, cwd) {

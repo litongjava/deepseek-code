@@ -257,6 +257,7 @@ impl IdeClient {
                             .take(8192)
                             .collect(),
                         input_schema: tool["inputSchema"].clone(),
+                        annotations: tool.get("annotations").cloned(),
                         server_name: "ide".into(),
                     });
             }

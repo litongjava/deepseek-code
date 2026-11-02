@@ -169,6 +169,7 @@ pub struct ToolLoopExecutor {
     /// Files read or written in this conversation and the state seen then.
     file_state: super::file_state::FileState,
     mcp_tools: Vec<crate::tools::ToolDefinition>,
+    mcp_read_only_tools: std::collections::HashSet<String>,
     streaming_tool_args: HashMap<String, StreamingToolCall>,
     conv_id: Option<String>,
     answer_waiters: Arc<Mutex<HashMap<String, oneshot::Sender<String>>>>,
@@ -399,14 +400,27 @@ fn ask_user_questions(input: &Value) -> Result<Vec<Value>> {
 /// Bash keeps its working directory per session in a file the tool reads and
 /// updates, and gets the sandbox policy when settings enable one. Added only
 /// at execution, so the model never sees these fields.
-fn shell_state_input(name: &str, input: &Value, cwd: &str, search_config_path: Option<&std::path::Path>, conv_id: Option<&str>) -> Value {
+fn shell_state_input(
+    name: &str,
+    input: &Value,
+    cwd: &str,
+    search_config_path: Option<&std::path::Path>,
+    conv_id: Option<&str>,
+    mode: crate::permissions::PermissionMode,
+) -> Value {
     let mut input = input.clone();
     if name == "Bash" {
         if let (Some(root), Some(session)) = (search_config_path.and_then(std::path::Path::parent), conv_id) {
             input["__cwd_state"] = json!(root.join("shell-cwd").join(session).to_string_lossy());
             let _ = std::fs::create_dir_all(root.join("shell-cwd"));
             let settings = crate::tools::sandbox::settings(root, std::path::Path::new(cwd));
-            if let Some(policy) = crate::tools::sandbox::policy(&settings, std::path::Path::new(cwd), root, &[root.join("shell-cwd")]) {
+            if let Some(policy) = crate::tools::sandbox::effective_policy(
+                &settings,
+                std::path::Path::new(cwd),
+                root,
+                &[root.join("shell-cwd")],
+                mode,
+            ) {
                 input["__sandbox"] = policy;
             }
         }
@@ -584,6 +598,7 @@ impl ToolLoopExecutor {
             mcp_outputs: HashMap::new(),
             file_state: Default::default(),
             mcp_tools: Vec::new(),
+            mcp_read_only_tools: std::collections::HashSet::new(),
             streaming_tool_args: HashMap::new(),
             conv_id: None,
             answer_waiters: Arc::new(Mutex::new(HashMap::new())),
@@ -778,7 +793,20 @@ impl ToolLoopExecutor {
             if self.permission_manager.as_ref().is_some_and(|manager| manager.get_mode() == crate::permissions::PermissionMode::DontAsk) {
                 return finished(input, "dontAsk mode: hook requested permission; tool was not executed".into());
             }
-            let hook_decision = self.permission_manager.as_ref().map(|pm| pm.check_permission(&crate::permissions::PermissionContext { tool_name:name.into(), tool_input:input.clone(), conversation_id:self.conv_id.clone().unwrap_or_default(), user_id:None, workspace_path:Some(self.workspace_cwd.clone()) })).unwrap_or(PermissionResult::Granted);
+            let hook_decision = self
+                .permission_manager
+                .as_ref()
+                .map(|pm| {
+                    pm.check_permission(&crate::permissions::PermissionContext {
+                        mcp_read_only: self.mcp_read_only_tools.contains(name),
+                        tool_name: name.into(),
+                        tool_input: input.clone(),
+                        conversation_id: self.conv_id.clone().unwrap_or_default(),
+                        user_id: None,
+                        workspace_path: Some(self.workspace_cwd.clone()),
+                    })
+                })
+                .unwrap_or(PermissionResult::Granted);
             if let PermissionResult::Denied(reason) = hook_decision {
                 return finished(input, format!("Permission denied: {reason}"));
             }
@@ -790,10 +818,15 @@ impl ToolLoopExecutor {
         }
         if pre.allow_permission && !pre.ask_permission && !matches!(name, "AskUserQuestion" | "AskUser" | "EnterPlanMode" | "ExitPlanMode" | "plan_mode") {
             let can_replace_prompt = self.permission_manager.as_ref().is_none_or(|manager| {
-                let decision = manager.evaluate_permission(&crate::permissions::PermissionContext {
-                    tool_name: name.into(), tool_input: input.clone(), conversation_id: self.conv_id.clone().unwrap_or_default(),
-                    user_id: None, workspace_path: Some(self.workspace_cwd.clone()),
-                });
+                let decision =
+                    manager.evaluate_permission(&crate::permissions::PermissionContext {
+                        mcp_read_only: self.mcp_read_only_tools.contains(name),
+                        tool_name: name.into(),
+                        tool_input: input.clone(),
+                        conversation_id: self.conv_id.clone().unwrap_or_default(),
+                        user_id: None,
+                        workspace_path: Some(self.workspace_cwd.clone()),
+                    });
                 decision.origin == crate::permissions::DecisionOrigin::DefaultPrompt
                     || matches!(decision.result, PermissionResult::Granted)
             });
@@ -912,7 +945,7 @@ impl ToolLoopExecutor {
 
     pub fn with_permission_manager(mut self, manager: Arc<PermissionManager>) -> Self {
         if manager.get_mode() == crate::permissions::PermissionMode::PlanMode {
-            self.system_prompt.get_or_insert_with(String::new).push_str("\nThis turn starts in read-only plan mode. Investigate without modifying project files until ExitPlanMode succeeds. Read-only shell commands (for example ls, cat, grep, git status/log/diff, Get-ChildItem, Get-Content) run directly; any other command asks the user first. Write a concrete Markdown implementation and verification plan to the dedicated session plan file using Write/Edit, then call ExitPlanMode (the legacy plan text parameter is also accepted). It requests explicit user approval before returning to normal ask permissions. Do not claim approval without a successful ExitPlanMode result.\n");
+            self.system_prompt.get_or_insert_with(String::new).push_str("\nThis turn starts in read-only plan mode. Investigate without modifying project files until ExitPlanMode succeeds. Read-only shell commands (for example ls, cat, grep, git status/log/diff, Get-ChildItem, Get-Content) run directly; any other command asks the user first. Write a concrete Markdown implementation and verification plan to the dedicated session plan file using Write/Edit, then call ExitPlanMode (the legacy plan text parameter is also accepted). It requests explicit user approval of the execution mode, including a return to bypass when offered. Read, Glob and Grep may inspect files outside the project. MCP tools default to read-only unless their readOnlyHint explicitly says otherwise. Do not claim approval without a successful ExitPlanMode result.\n");
         }
         self.permission_manager = Some(manager);
         self
@@ -939,8 +972,21 @@ impl ToolLoopExecutor {
     /// allowlist runs, hosts outside the list are put to the user, as in the
     /// reference CLI; "don't ask again" saves a SandboxNetwork(domain:) rule.
     async fn run_builtin(&self, tool_name: &str, tool_input: &Value, cwd: &str) -> Result<Value> {
-        let input = shell_state_input(tool_name, &self.tool_run_input(tool_name, tool_input), cwd, self.search_config_path.as_deref(), self.conv_id.as_deref());
-        let asker = input.get("__sandbox").filter(|_| tool_input["dangerouslyDisableSandbox"] != true).and_then(crate::tools::sandbox::register_asker);
+        let input = shell_state_input(
+            tool_name,
+            &self.tool_run_input(tool_name, tool_input),
+            cwd,
+            self.search_config_path.as_deref(),
+            self.conv_id.as_deref(),
+            self.permission_manager
+                .as_ref()
+                .map(|manager| manager.get_mode())
+                .unwrap_or_default(),
+        );
+        let asker = input
+            .get("__sandbox")
+            .filter(|_| tool_input["dangerouslyDisableSandbox"] != true)
+            .and_then(crate::tools::sandbox::register_asker);
         // Boxed: tool futures are large and this runs nested inside delegated children.
         let mut run = Box::pin(execute_builtin_tool(tool_name, input.clone(), cwd, &self.provider, &self.event_tx, self.search_config_path.as_deref(), self.skill_shell_active));
         let Some((_guard, mut questions)) = asker else { return run.await };
@@ -969,8 +1015,19 @@ impl ToolLoopExecutor {
     fn sandbox_may_ask(&self) -> bool {
         let Some(root) = self.search_config_path.as_deref().and_then(std::path::Path::parent) else { return false };
         let workspace = std::path::Path::new(&self.workspace_cwd);
-        crate::tools::sandbox::policy(&crate::tools::sandbox::settings(root, workspace), workspace, root, &[])
-            .is_some_and(|policy| policy["network_rules"]["restricted"] == true && policy["network"] != false)
+        crate::tools::sandbox::effective_policy(
+            &crate::tools::sandbox::settings(root, workspace),
+            workspace,
+            root,
+            &[],
+            self.permission_manager
+                .as_ref()
+                .map(|manager| manager.get_mode())
+                .unwrap_or_default(),
+        )
+        .is_some_and(|policy| {
+            policy["network_rules"]["restricted"] == true && policy["network"] != false
+        })
     }
 
     async fn approve_sandbox_host(&self, host: &str) -> bool {
@@ -1085,6 +1142,7 @@ impl ToolLoopExecutor {
             let workspace_path = Some(self.workspace_cwd.clone());
 
             let context = crate::permissions::PermissionContext {
+                mcp_read_only: self.mcp_read_only_tools.contains(tool_name),
                 tool_name: tool_name.to_string(),
                 tool_input: tool_input.clone(),
                 conversation_id: conv_id,
@@ -1287,15 +1345,34 @@ impl ToolLoopExecutor {
 
     async fn refresh_mcp_tools(&mut self) -> Result<()> {
         self.mcp_tools.clear();
+        self.mcp_read_only_tools.clear();
         if let Some(registry) = &self.mcp_registry {
             let mut builtin = get_tool_definitions();
             builtin.extend(delegation::definitions());
             builtin.push(script_workflow::definition());
             let builtin = builtin.into_iter().map(|tool| tool.name).collect::<std::collections::HashSet<_>>();
-            self.mcp_tools = registry.get_all_tools().await?.into_iter().map(|tool| {
-                anyhow::ensure!(!builtin.contains(&tool.name), "MCP tool conflicts with native tool: {}", tool.name);
-                Ok(crate::tools::ToolDefinition { name:tool.name, description:tool.description, input_schema:tool.input_schema })
-            }).collect::<Result<Vec<_>>>()?;
+            let discovered = registry.get_all_tools().await?;
+            let read_only = discovered
+                .iter()
+                .filter(|tool| tool.is_read_only())
+                .map(|tool| tool.name.clone())
+                .collect();
+            self.mcp_tools = discovered
+                .into_iter()
+                .map(|tool| {
+                    anyhow::ensure!(
+                        !builtin.contains(&tool.name),
+                        "MCP tool conflicts with native tool: {}",
+                        tool.name
+                    );
+                    Ok(crate::tools::ToolDefinition {
+                        name: tool.name,
+                        description: tool.description,
+                        input_schema: tool.input_schema,
+                    })
+                })
+                .collect::<Result<Vec<_>>>()?;
+            self.mcp_read_only_tools = read_only;
         }
         Ok(())
     }

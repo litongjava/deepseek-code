@@ -12,10 +12,27 @@ pub const OPTIONS: [&str; 4] = [
 pub enum Choice {
     ClearEdits,
     KeepEdits,
+    ClearBypass,
+    KeepBypass,
     Manual,
     Revise(String),
 }
+pub const BYPASS_CLEAR: &str = "Yes, clear context and return to bypass mode";
+pub const BYPASS_KEEP: &str = "Yes, return to bypass mode (keep context)";
+
+pub fn options(bypass: bool) -> [&'static str; 4] {
+    if bypass {
+        [BYPASS_CLEAR, BYPASS_KEEP, OPTIONS[2], OPTIONS[3]]
+    } else {
+        OPTIONS
+    }
+}
+
 pub fn parse(answer: &str) -> Result<Choice> {
+    parse_for_mode(answer, false)
+}
+
+pub fn parse_for_mode(answer: &str, bypass: bool) -> Result<Choice> {
     let answer = answer.trim();
     // Desktop's existing AskUser route returns one question→answer mapping.
     if answer.starts_with('{') {
@@ -34,9 +51,11 @@ pub fn parse(answer: &str) -> Result<Choice> {
             !selected.trim().starts_with('{'),
             "Nested plan answers are unsupported"
         );
-        return parse(selected);
+        return parse_for_mode(selected, bypass);
     }
     Ok(match answer {
+        "1" | "bypass_clear" | BYPASS_CLEAR if bypass => Choice::ClearBypass,
+        "2" | "bypass_keep" | BYPASS_KEEP if bypass => Choice::KeepBypass,
         "1" | "accept_edits_clear" => Choice::ClearEdits,
         "2" | "accept_edits_keep" => Choice::KeepEdits,
         "3" | "manual_keep" | "yes" | "y" | "allow" | "approved" | "允许" | "是" => {
@@ -62,7 +81,24 @@ pub fn commit_approved_boundary(
     manager: &crate::permissions::PermissionManager,
     expected: crate::permissions::manager::ModeSnapshot,
 ) -> Result<String> {
-    commit_boundary_inner(context, session, content, Some((manager, expected)))
+    commit_approved_boundary_mode(
+        context,
+        session,
+        content,
+        manager,
+        expected,
+        crate::permissions::PermissionMode::AcceptEdits,
+    )
+}
+pub fn commit_approved_boundary_mode(
+    context: &ServiceContext,
+    session: &str,
+    content: &str,
+    manager: &crate::permissions::PermissionManager,
+    expected: crate::permissions::manager::ModeSnapshot,
+    mode: crate::permissions::PermissionMode,
+) -> Result<String> {
+    commit_boundary_inner(context, session, content, Some((manager, expected, mode)))
 }
 pub fn commit_approved_mode(
     context: &ServiceContext,
@@ -86,6 +122,7 @@ fn commit_boundary_inner(
     transition: Option<(
         &crate::permissions::PermissionManager,
         crate::permissions::manager::ModeSnapshot,
+        crate::permissions::PermissionMode,
     )>,
 ) -> Result<String> {
     context.db.with_conn(|conn| -> Result<String> {
@@ -111,10 +148,10 @@ fn commit_boundary_inner(
         )?;
         crate::db::conversation_repo::increment_message_count(&tx, session)?;
         tx.execute("INSERT INTO peripheral_settings(key,value) VALUES(?1,?2) ON CONFLICT(key) DO UPDATE SET value=excluded.value",rusqlite::params![format!("plan.context_boundary.{session}"),serde_json::json!({"boundary_id":id}).to_string()])?;
-        if let Some((manager, expected)) = transition {
+        if let Some((manager, expected, mode)) = transition {
             super::permission_authority::record_conn(&tx,session,super::permission_authority::Source::ApprovedPlan,&serde_json::json!(content))?;
-            tx.execute("INSERT INTO peripheral_settings(key,value) VALUES(?1,'accept-edits') ON CONFLICT(key) DO UPDATE SET value=excluded.value",[format!("cli.permission-mode.{session}")])?;
-            manager.commit_mode_transition(expected, crate::permissions::PermissionMode::AcceptEdits, || { tx.commit()?; Ok(()) })?;
+            tx.execute("INSERT INTO peripheral_settings(key,value) VALUES(?1,?2) ON CONFLICT(key) DO UPDATE SET value=excluded.value",[format!("cli.permission-mode.{session}"), super::session_permission_mode::name(mode).into()])?;
+            manager.commit_mode_transition(expected, mode, || { tx.commit()?; Ok(()) })?;
         } else { tx.commit()?; }
         Ok(id)
     })?

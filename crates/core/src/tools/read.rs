@@ -37,7 +37,7 @@ pub fn execute(input: Value, cwd: &str) -> Result<Value> {
     let path = if super::screenshot_file::readable(Path::new(file_path)) {
         Path::new(file_path).canonicalize()?.to_string_lossy().into_owned()
     } else {
-        super::resolve_path(file_path, cwd)?
+        super::resolve_read_path(file_path, cwd)?
     };
     let path = Path::new(&path);
     if !path.exists() {

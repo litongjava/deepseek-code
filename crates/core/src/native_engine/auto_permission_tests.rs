@@ -293,6 +293,7 @@ async fn auto_failure_fallback_asks_interactive_hosts_even_with_legacy_deny_poli
             }
             auto_config::save(&context, &config).unwrap();
             let tool = crate::permissions::PermissionContext {
+                mcp_read_only: false,
                 tool_name: "Bash".into(),
                 tool_input: json!({"command":"echo fixture","shell":"powershell"}),
                 conversation_id: "auto-session".into(),

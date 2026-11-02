@@ -38,6 +38,7 @@ impl ToolLoopExecutor {
         }
         let manager = self.permission_manager.as_ref()?;
         let context = crate::permissions::PermissionContext {
+            mcp_read_only: self.mcp_read_only_tools.contains(tool),
             tool_name: tool.into(),
             tool_input: input.clone(),
             conversation_id: self.conv_id.clone().unwrap_or_default(),

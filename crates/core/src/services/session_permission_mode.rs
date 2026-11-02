@@ -37,8 +37,40 @@ pub fn set(
 ) -> Result<()> {
     db.with_conn(|conn| -> Result<()> {
         let tx = crate::db::write_transaction(&conn)?;
+        if mode == PermissionMode::PlanMode {
+            let previous: Option<String> = tx.query_row(
+                "SELECT value FROM peripheral_settings WHERE key=?1",
+                [format!("cli.permission-mode.{session}")], |row| row.get(0),
+            ).optional()?;
+            // Preserve the origin across worker handoff and repeated plan entry.
+            if previous.as_deref() != Some("plan") {
+                let bypass = manager.bypass_available()
+                    && (manager.get_mode() == PermissionMode::BypassPermissions
+                        || previous.as_deref() == Some("bypass"));
+                tx.execute("INSERT INTO peripheral_settings(key,value) VALUES(?1,?2) ON CONFLICT(key) DO UPDATE SET value=excluded.value", [format!("plan.return-bypass.{session}"), bypass.to_string()])?;
+            }
+        }
         tx.execute("INSERT INTO peripheral_settings(key,value) VALUES(?1,?2) ON CONFLICT(key) DO UPDATE SET value=excluded.value", [format!("cli.permission-mode.{session}"), name(mode).into()])?;
         manager.commit_mode_update(mode, || { tx.commit()?; Ok(()) })
     })??;
     Ok(())
+}
+
+pub fn plan_returns_to_bypass(
+    db: &DbManager,
+    session: &str,
+    manager: &PermissionManager,
+) -> Result<bool> {
+    if !manager.bypass_available() || manager.get_mode() != PermissionMode::PlanMode {
+        return Ok(false);
+    }
+    let value: Option<String> = db.with_conn(|conn| {
+        conn.query_row(
+            "SELECT value FROM peripheral_settings WHERE key=?1",
+            [format!("plan.return-bypass.{session}")],
+            |row| row.get(0),
+        )
+        .optional()
+    })??;
+    Ok(value.as_deref() == Some("true"))
 }

@@ -190,6 +190,7 @@ mod tests {
         )
         .unwrap();
         let tool = PermissionContext {
+            mcp_read_only: false,
             tool_name: "Bash".into(),
             tool_input: json!({"command":"echo fixture"}),
             conversation_id: parent.clone(),

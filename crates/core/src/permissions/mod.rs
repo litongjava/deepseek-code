@@ -47,6 +47,9 @@ pub struct ToolPermission {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PermissionContext {
+    /// Host-discovered MCP capability; never accepted from serialized input.
+    #[serde(skip)]
+    pub mcp_read_only: bool,
     pub tool_name: String,
     pub tool_input: serde_json::Value,
     pub conversation_id: String,

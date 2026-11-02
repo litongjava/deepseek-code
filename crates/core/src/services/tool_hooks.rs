@@ -134,6 +134,7 @@ impl ActiveHook {
         let tool = input.get("tool_name").and_then(Value::as_str).unwrap_or("");
         rule.matches(
             &crate::permissions::PermissionContext {
+                mcp_read_only: false,
                 tool_name: crate::permissions::patterns::canonical_tool_name(tool).into(),
                 tool_input: input.get("tool_input").cloned().unwrap_or(Value::Null),
                 conversation_id: String::new(),
