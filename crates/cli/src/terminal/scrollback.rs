@@ -17,6 +17,7 @@ struct Logged {
 /// A tool result with hidden lines, shown short or in full.
 #[derive(Clone)]
 struct Block {
+    review: Option<super::file_review::Review>,
     short: Vec<Line>,
     full: Vec<Line>,
     header_open: bool,
@@ -34,6 +35,19 @@ pub(crate) struct Scrollback {
 /// The last turn's lines, handed from the live view to the prompt after it.
 static LAST: std::sync::Mutex<Option<Scrollback>> = std::sync::Mutex::new(None);
 
+/// Return the prompt's retained rows to the next live turn on every exit path.
+pub(super) struct Handoff(Scrollback);
+impl std::ops::Deref for Handoff {
+    type Target = Scrollback;
+    fn deref(&self) -> &Scrollback { &self.0 }
+}
+impl std::ops::DerefMut for Handoff {
+    fn deref_mut(&mut self) -> &mut Scrollback { &mut self.0 }
+}
+impl Drop for Handoff {
+    fn drop(&mut self) { std::mem::take(&mut self.0).save(); }
+}
+
 static COMPACT: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 pub(crate) fn compact() -> bool { COMPACT.load(std::sync::atomic::Ordering::Relaxed) }
 pub(crate) fn toggle_compact() { COMPACT.fetch_xor(true, std::sync::atomic::Ordering::Relaxed); }
@@ -42,6 +56,7 @@ pub(crate) fn compact_key(key: crossterm::event::KeyEvent) -> bool {
 }
 
 impl Scrollback {
+    pub(super) fn handoff() -> Handoff { Handoff(Self::take()) }
     pub(crate) fn save(self) {
         *LAST.lock().unwrap_or_else(|poison| poison.into_inner()) = Some(self);
     }
@@ -70,6 +85,7 @@ impl Scrollback {
         let plain = change_view::plain(&short);
         let whole = plain.trim_start().starts_with("Thought") || plain.contains("Updated ");
         self.blocks.push(Block {
+            review: None,
             short,
             full,
             header_open: false,
@@ -78,6 +94,28 @@ impl Scrollback {
             compact_level: 0,
         });
         (self.blocks.len() - 1, lines)
+    }
+    pub(super) fn file(&mut self, review: super::file_review::Review) -> (usize, Vec<String>) {
+        let summary = review.files[review.selected].summary.clone();
+        let (id, lines) = self.block(vec![summary.clone()], vec![summary]);
+        self.blocks[id].review = Some(review);
+        (id, lines)
+    }
+    pub(super) fn review_at(&self, bottom: u16, row: u16) -> Option<super::file_review::Review> {
+        let id = self.logged.get(self.line_at(bottom, row)?)?.block?;
+        self.blocks[id].review.clone()
+    }
+    pub(super) fn review_presentation(&self, row: usize, width: usize) -> Option<super::file_review::Review> {
+        let rows = if compact() { self.compact_rows() } else {
+            self.logged.iter().map(|line| (line.text.clone(), line.block)).collect()
+        };
+        let mut offset = 0;
+        for (text, id) in rows {
+            let height = super::markdown::wrap_styled(&text, "", "", width.max(1)).len();
+            if row < offset + height { return self.blocks.get(id?)?.review.clone(); }
+            offset += height;
+        }
+        None
     }
     pub(crate) fn needs_separator(&self) -> bool {
         self.logged.back().is_some_and(|line| !super::markdown::plain_rendered(&line.text).trim().is_empty())
@@ -95,10 +133,16 @@ impl Scrollback {
                 index += 1;
                 continue;
             };
+            if self.blocks[first].review.is_some() {
+                result.push((self.logged[index].text.clone(), Some(first)));
+                index += 1;
+                continue;
+            }
             let mut ids = vec![first];
             index += 1;
             while index < self.logged.len() {
                 if let Some(id) = self.logged[index].block {
+                    if self.blocks[id].review.is_some() { break; }
                     if !ids.contains(&id) { ids.push(id); }
                     index += 1;
                 } else if self.logged[index].text.trim().is_empty()
@@ -143,10 +187,12 @@ impl Scrollback {
     pub(crate) fn click_presentation(&mut self, row: usize) -> bool {
         if !compact() { return self.toggle_history(row); }
         let Some(id) = self.compact_rows().get(row).and_then(|(_, id)| *id) else { return false; };
+        if self.blocks[id].review.is_some() { return false; }
         if self.blocks[id].compact_level == 0 {
             let mut index = self.logged.iter().position(|line| line.block == Some(id)).unwrap();
             while index < self.logged.len() {
                 if let Some(member) = self.logged[index].block {
+                    if self.blocks[member].review.is_some() { break; }
                     self.blocks[member].compact_level = 1;
                     index += 1;
                 } else if self.logged[index].text.trim().is_empty()
@@ -224,6 +270,7 @@ impl Scrollback {
         let above: usize = self.logged.iter().skip(first).map(|line| line.rows).sum();
         let start = (bottom as usize).saturating_sub(above) as u16;
         let entry = &mut self.blocks[block];
+        if entry.review.is_some() { return None; }
         let header_rows = if entry.header_open {
             rendered(&entry.full[..1]).len()
         } else {
@@ -332,6 +379,24 @@ fn screen_rows(text: &str, columns: usize) -> usize {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn file_review_targets_survive_expansion_and_remain_separate_in_compact_view() {
+        let mut history = Scrollback::default();
+        let (id, rows) = history.block(vec![change_view::body("tool")], vec![change_view::body("tool"), change_view::body("extra")]);
+        for row in rows { history.push(row, Some(id)); }
+        let files = std::sync::Arc::new(vec![super::super::file_review::File {
+            label: "test.rs".into(), summary: change_view::body("test.rs +1"), details: vec![change_view::body("+new")],
+        }]);
+        let (id, rows) = history.file(super::super::file_review::Review { files, selected: 0 });
+        for row in rows { history.push(row, Some(id)); }
+        assert_eq!(history.review_at(2, 1).unwrap().files[0].label, "test.rs");
+        assert!(history.review_at(2, 0).is_none());
+        assert!(history.toggle_history(0));
+        assert_eq!(history.review_at(3, 2).unwrap().files[0].label, "test.rs");
+        assert!(history.compact_rows().last().unwrap().0.contains("test.rs +1"));
+        assert!(!history.toggle_history(2));
+    }
 
     #[test]
     fn screen_rows_count_wrapped_rows_without_style_escapes() {

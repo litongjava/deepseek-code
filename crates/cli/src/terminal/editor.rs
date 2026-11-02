@@ -895,7 +895,7 @@ impl PromptEditor {
         // Capture both tool disclosure clicks and drag selection.
         execute!(io::stderr(), EnableBracketedPaste, EnableMouseCapture)?;
         let mut input_reader = crate::terminal::paste_input::Reader::new()?;
-        let mut above = crate::terminal::scrollback::Scrollback::take();
+        let mut above = crate::terminal::scrollback::Scrollback::handoff();
         let mut buffer = self.resume_buffer();
         // As in the reference CLI, a stashed draft returns after the prompt
         // that was sent instead.
@@ -1284,10 +1284,15 @@ impl PromptEditor {
                     if history_view.active() {
                         let composer = lines.iter().map(|(text, _)| text.clone()).collect::<Vec<_>>();
                         let snapshot = history_view.screen_rows(rows as usize, &composer);
-                        if let Some(click) = selection.event(mouse, snapshot)? {
+                        if let Some(click) = selection.event(mouse, snapshot.clone())? {
                             if click.kind == MouseEventKind::Down(MouseButton::Left) && pinned.click(click.row) { continue; }
                             if click.kind == MouseEventKind::Down(MouseButton::Left) {
-                                if let Some(index) = history_view.row_index(click.row as usize, (rows as usize).saturating_sub(lines.len())) { above.click_presentation(index); }
+                                if let Some(index) = history_view.row_index(click.row as usize, (rows as usize).saturating_sub(lines.len())) {
+                                    if let Some(review) = above.review_presentation(index, width) {
+                                        crate::terminal::file_review::show(review, &snapshot, &mut || read_editor_event(&mut input_reader))?;
+                                        screen.reflow();
+                                    } else { above.click_presentation(index); }
+                                }
                             }
                         }
                         continue;
@@ -1299,6 +1304,13 @@ impl PromptEditor {
                         if let Some(row) = snapshot.get_mut(origin as usize + index) { *row = text.clone(); }
                     }
                     let Some(mouse) = selection.event(mouse, snapshot.clone())? else { continue; };
+                    if mouse.kind == MouseEventKind::Down(MouseButton::Left) {
+                        if let Some(review) = above.review_at(origin, mouse.row) {
+                            crate::terminal::file_review::show(review, &snapshot, &mut || read_editor_event(&mut input_reader))?;
+                            screen.reflow();
+                            continue;
+                        }
+                    }
                     if mouse.kind == MouseEventKind::Down(MouseButton::Left) && pinned.click(mouse.row) { screen.invalidated = true; continue; }
                     // A click on a turn's closing line, such as a failure with
                     // its `/tasks show` command, selects and copies the line.

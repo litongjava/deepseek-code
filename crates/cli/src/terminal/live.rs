@@ -41,6 +41,7 @@ enum Update {
     Text(String),
     Notice(String),
     Styled(Vec<change_view::Line>),
+    FileSummary(Vec<change_view::Line>, Vec<super::file_review::File>),
     /// A tool result with hidden lines: the short form to show, and the full
     /// one when the terminal reports a click (Shift-drag still lets the
     /// terminal select text). Ctrl+O lists the full
@@ -1868,6 +1869,21 @@ fn run(
                     }
                     dirty = true;
                 }
+                Ok(Update::FileSummary(lines, files)) => {
+                    finish_text(state, screen);
+                    screen.separate_block();
+                    let width = terminal::size().unwrap_or((80, 24)).0.saturating_sub(1) as usize;
+                    let color = std::env::var_os("NO_COLOR").is_none();
+                    if let Some(header) = lines.first() {
+                        screen.log_rendered(&change_view::render(header, width, color));
+                    }
+                    let files = std::sync::Arc::new(files);
+                    for selected in 0..files.len() {
+                        let (block, rows) = screen.scrollback.file(super::file_review::Review { files: files.clone(), selected });
+                        for row in rows { screen.log_line(row, Some(block)); }
+                    }
+                    dirty = true;
+                }
                 Ok(Update::Expandable(short, full)) => {
                     finish_text(state, screen);
                     screen.log_block(short, full);
@@ -2338,10 +2354,15 @@ fn run(
                     if screen.history_view.active() {
                         let composer = screen.lines.iter().rev().take(screen.composer_height).cloned().collect::<Vec<_>>().into_iter().rev().collect::<Vec<_>>();
                         let snapshot = screen.history_view.screen_rows(screen.size.1 as usize, &composer);
-                        if let Some(click) = selection.event(mouse, snapshot)? {
+                        if let Some(click) = selection.event(mouse, snapshot.clone())? {
                             if click.kind == MouseEventKind::Down(MouseButton::Left) && screen.pinned.click(click.row) { screen.draw(state)?; continue; }
                             if click.kind == MouseEventKind::Down(MouseButton::Left) {
-                                if let Some(index) = screen.history_view.row_index(click.row as usize, (screen.size.1 as usize).saturating_sub(composer.len())) { screen.scrollback.click_presentation(index); }
+                                if let Some(index) = screen.history_view.row_index(click.row as usize, (screen.size.1 as usize).saturating_sub(composer.len())) {
+                                    if let Some(review) = screen.scrollback.review_presentation(index, screen.size.0.saturating_sub(1) as usize) {
+                                        super::file_review::show(review, &snapshot, &mut || input_reader.next(Duration::from_millis(100)))?;
+                                        screen.size = (0, 0);
+                                    } else { screen.scrollback.click_presentation(index); }
+                                }
                             }
                             screen.draw(state)?;
                         }
@@ -2351,7 +2372,15 @@ fn run(
                     for (index, text) in screen.lines.iter().enumerate() {
                         if let Some(row) = snapshot.get_mut(screen.top.unwrap_or(0) as usize + index) { *row = text.clone(); }
                     }
-                    let Some(mouse) = selection.event(mouse, snapshot)? else { continue; };
+                    let Some(mouse) = selection.event(mouse, snapshot.clone())? else { continue; };
+                    if mouse.kind == MouseEventKind::Down(MouseButton::Left) {
+                        if let Some(review) = screen.scrollback.review_at(screen.top.unwrap_or(0), mouse.row) {
+                            super::file_review::show(review, &snapshot, &mut || input_reader.next(Duration::from_millis(100)))?;
+                            screen.size = (0, 0);
+                            screen.draw(state)?;
+                            continue;
+                        }
+                    }
                     if mouse.kind == MouseEventKind::Down(MouseButton::Left)
                         && state.activity.starts_with("Running Bash")
                         && mouse.row.checked_sub(screen.top.unwrap_or(0))
@@ -3097,6 +3126,7 @@ pub struct TurnDisplay {
     finished: std::collections::HashMap<String, (String, Value, String, bool)>,
     /// Lines added and removed per file this turn, for the closing summary.
     changes: std::collections::BTreeMap<String, (u64, u64)>,
+    change_details: std::collections::BTreeMap<String, Vec<change_view::Line>>,
     /// The session-wide numbers of this turn's shell commands.
     numbers: std::collections::HashMap<String, usize>,
 }
@@ -3128,6 +3158,7 @@ impl TurnDisplay {
             tools: Default::default(),
             finished: Default::default(),
             changes: Default::default(),
+            change_details: Default::default(),
             numbers: Default::default(),
         })
     }
@@ -3257,6 +3288,13 @@ impl TurnDisplay {
                     let entry = self.changes.entry(path.to_owned()).or_default();
                     entry.0 += change["added"].as_u64().unwrap_or(0);
                     entry.1 += change["removed"].as_u64().unwrap_or(0);
+                    let details = self.change_details.entry(path.to_owned()).or_default();
+                    if !details.is_empty() { details.push(change_view::muted("--- Next edit ---")); }
+                    if let Some(lines) = change_view::change_in_workspace(output, false, self.workspace.as_deref()) {
+                        details.extend(lines.into_iter().skip(1));
+                    } else {
+                        details.push(change_view::muted("Diff unavailable for this change."));
+                    }
                 }
             }
         }
@@ -3429,7 +3467,7 @@ impl TurnDisplay {
         let files = self.changes.len();
         let mut lines = vec![change_view::tool_call(
             &format!("Changed {files} file{} ({})", if files == 1 { "" } else { "s" }, counts(total)),
-            "Ctrl+O shows the diffs",
+            "Click a file to review · Ctrl+O shows the diffs",
             false,
         )];
         let labels: Vec<String> = self
@@ -3448,7 +3486,12 @@ impl TurnDisplay {
         if let Some(live) = self.live.take() {
             let summary = self.change_summary();
             if !summary.is_empty() {
-                live.styled(summary);
+                let files = self.changes.keys().zip(summary.iter().skip(1)).map(|(path, summary)| super::file_review::File {
+                    label: super::display_path::label(path, self.workspace.as_deref()),
+                    summary: summary.clone(),
+                    details: self.change_details.get(path).cloned().unwrap_or_default(),
+                }).collect();
+                let _ = live.updates.send(Update::FileSummary(summary, files));
             }
             live.finish(error)
         } else {
@@ -3463,6 +3506,44 @@ impl TurnDisplay {
 mod completion_tests {
     use super::*;
     #[test]
+    fn review_retains_ordered_edits_and_ignores_failed_and_duplicate_results() {
+        let temp = tempfile::tempdir().unwrap();
+        let mut display = TurnDisplay::new(false, "ask", &temp.path().join("keys.json"), vec![]).unwrap().with_workspace(temp.path());
+        let output = |text: &str| serde_json::json!({"success":true,"file_change":{"version":1,"verified":true,"path":"a.rs","added":1,"removed":1,"rows":[{"kind":"removed","old_line":1,"text":"before"},{"kind":"added","new_line":1,"text":text}]}}).to_string();
+        display.tool_finished("1", "Edit", &serde_json::json!({}), &output("first"), false);
+        display.tool_finished("1", "Edit", &serde_json::json!({}), &output("first"), false);
+        display.tool_finished("2", "Edit", &serde_json::json!({}), &output("second"), false);
+        display.tool_finished("3", "Edit", &serde_json::json!({}), &output("failed"), true);
+        let text = change_view::plain(&display.change_details["a.rs"]);
+        assert_eq!(text.matches("first").count(), 1);
+        assert!(text.find("first").unwrap() < text.find("second").unwrap());
+        assert!(text.contains("before"));
+        assert!(!text.contains("failed"));
+    }
+
+    #[test]
+    #[ignore = "requires an interactive terminal"]
+    fn file_review_terminal_fixture() {
+        let temp = tempfile::tempdir().unwrap();
+        let mut display = TurnDisplay::new(true, "ask", &temp.path().join("keys.json"), vec![]).unwrap().with_workspace(temp.path());
+        display.notice("File review acceptance fixture");
+        for (index, path) in ["src/calc.rs", "notes.txt"].iter().enumerate() {
+            let mut rows = vec![serde_json::json!({"kind":"removed","old_line":1,"text":"return 41;"})];
+            rows.extend((1..=65).map(|n| serde_json::json!({"kind":"added","new_line":n,"text":format!("return {}; // change {n}", 41 + n)})));
+            let output = serde_json::json!({"success":true,"file_change":{"version":1,"verified":true,"path":temp.path().join(path),"added":65,"removed":1,"rows":rows}}).to_string();
+            display.tool_finished(&index.to_string(), "Edit", &serde_json::json!({}), &output, false);
+        }
+        display.finish(None);
+        let mut editor = super::super::input::editor::PromptEditor::default();
+        editor.set_draft("draft stays editable".into());
+        let answer = editor.readline("❯ ").unwrap();
+        assert!(matches!(answer, Some(super::super::input::PromptEvent::Line(text)) if text == "draft stays editable"));
+        let live = LiveTurn::start("ask", crate::keybindings::load(&temp.path().join("keys.json")).unwrap(), vec![], None).unwrap();
+        live.notice("Next turn: previous file changes remain clickable");
+        std::thread::sleep(Duration::from_secs(20));
+        live.finish(None);
+    }
+    #[test]
     fn changed_files_are_summarised_per_turn() {
         let temp = tempfile::tempdir().unwrap();
         let mut display = TurnDisplay::new(false, "ask", &temp.path().join("keys.json"), vec![]).unwrap().with_workspace(temp.path());
@@ -3474,7 +3555,7 @@ mod completion_tests {
         display.tool_finished("3", "Write", &serde_json::json!({}), &output("README.md", 4, 0), false);
         display.tool_finished("4", "Write", &serde_json::json!({}), &output("ignored.md", 9, 0), true);
         let lines: Vec<String> = display.change_summary().iter().map(|line| change_view::render(line, usize::MAX, false)).collect();
-        assert_eq!(lines[0], "\u{25cf} Changed 2 files (+16 \u{2212}3) \u{b7} Ctrl+O shows the diffs");
+        assert_eq!(lines[0], "\u{25cf} Changed 2 files (+16 \u{2212}3) \u{b7} Click a file to review · Ctrl+O shows the diffs");
         assert_eq!(lines[1], "    README.md    +4");
         assert_eq!(lines[2], "    src/main.rs  +12 \u{2212}3");
     }

@@ -162,6 +162,7 @@ pub mod tips;
 pub mod markdown;
 pub mod vim;
 mod display_path;
+mod file_review;
 pub(crate) mod scrollback;
 mod mouse_selection;
 mod pinned_prompt;
