@@ -138,6 +138,7 @@
 - [x] Live /status includes request usage and remaining context, with request-ID deduplication.
 - [x] Grep uses workspace-relative paths; shell guidance avoids redundant cd.
 - [x] Add `dcl init-env node|python|codegraph|all` and `--dry-run`, with Windows/macOS/Linux installation paths.
-- [ ] Run actual installers on clean Windows, macOS and Linux hosts and verify the CodeGraph MCP handshake. Windows control-flow tests and preview are complete; actual installation is not claimed.
+- [x] Run actual installers in isolated macOS ARM64 and Linux x86_64 environments; verify repeat initialization and CodeGraph MCP handshake, tool list and source query. CLI 306 passed / 3 ignored on each, shell 5 and search 2 passed.
+- [ ] Run actual installers on a clean Windows host. Windows control-flow tests and preview are complete; actual installation is not claimed.
 
 Acceptance evidence: development record `acceptance-20261102.md` and `ux-20261102-K9WURy/assertions.json`. User documentation is in the separate documentation repository under `cli/environment-init.md` and `cli/interface.md`.

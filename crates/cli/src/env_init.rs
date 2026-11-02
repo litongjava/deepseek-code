@@ -25,7 +25,8 @@ if ($LASTEXITCODE -ne 0) { throw 'Node verification failed' }
 "#
         }
         ("node", false) => {
-            r#"set -eu
+            // nvm uses optional shell variables and must not inherit nounset.
+            r#"set -e
 export NVM_DIR="${NVM_DIR:-$HOME/.nvm}"
 if [ ! -s "$NVM_DIR/nvm.sh" ]; then
   installer=$(mktemp)
@@ -74,8 +75,9 @@ if [ ! -x "$prefix/bin/conda" ]; then
     Linux-aarch64|Linux-arm64) platform=Linux-aarch64;;
     *) echo 'Unsupported Miniconda platform' >&2; exit 1;;
   esac
-  installer=$(mktemp)
-  trap 'rm -f "$installer"' EXIT
+  installer_dir=$(mktemp -d)
+  installer="$installer_dir/install.sh"
+  trap 'rm -f "$installer"; rmdir "$installer_dir"' EXIT
   curl -fLsS "https://repo.anaconda.com/miniconda/Miniconda3-latest-$platform.sh" -o "$installer"
   bash "$installer" -b -p "$prefix"
 fi
@@ -151,7 +153,7 @@ async fn codegraph(paths: &RuntimePaths, workspace: &Path) -> Result<()> {
     let bootstrap = if cfg!(windows) {
         r#"$ErrorActionPreference='Stop'; $env:NVM_HOME=[Environment]::GetEnvironmentVariable('NVM_HOME','User'); if (-not $env:NVM_HOME) { $env:NVM_HOME=[Environment]::GetEnvironmentVariable('NVM_HOME','Machine') }; $env:NVM_SYMLINK=[Environment]::GetEnvironmentVariable('NVM_SYMLINK','User'); if (-not $env:NVM_SYMLINK) { $env:NVM_SYMLINK=[Environment]::GetEnvironmentVariable('NVM_SYMLINK','Machine') }; $env:Path=[Environment]::ExpandEnvironmentVariables([Environment]::GetEnvironmentVariable('Path','Machine')+';'+[Environment]::GetEnvironmentVariable('Path','User'))+';'+$env:Path; npm.cmd install --global @colbymchenry/codegraph; if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }; $prefix=npm.cmd prefix --global; if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }; & (Join-Path $prefix.Trim() 'codegraph.cmd') install --yes --init; exit $LASTEXITCODE"#
     } else {
-        r#"set -eu; export NVM_DIR="${NVM_DIR:-$HOME/.nvm}"; if [ -s "$NVM_DIR/nvm.sh" ]; then . "$NVM_DIR/nvm.sh"; fi; npm install --global @colbymchenry/codegraph; codegraph install --yes --init"#
+        r#"set -e; export NVM_DIR="${NVM_DIR:-$HOME/.nvm}"; if [ -s "$NVM_DIR/nvm.sh" ]; then . "$NVM_DIR/nvm.sh"; fi; npm install --global @colbymchenry/codegraph; codegraph install --yes --init"#
     };
     let mut command = tokio::process::Command::new(if cfg!(windows) {
         "powershell.exe"
@@ -176,7 +178,7 @@ async fn codegraph(paths: &RuntimePaths, workspace: &Path) -> Result<()> {
     let probe = if cfg!(windows) {
         r#"$env:NVM_HOME=[Environment]::GetEnvironmentVariable('NVM_HOME','User'); if (-not $env:NVM_HOME) { $env:NVM_HOME=[Environment]::GetEnvironmentVariable('NVM_HOME','Machine') }; $env:NVM_SYMLINK=[Environment]::GetEnvironmentVariable('NVM_SYMLINK','User'); if (-not $env:NVM_SYMLINK) { $env:NVM_SYMLINK=[Environment]::GetEnvironmentVariable('NVM_SYMLINK','Machine') }; $env:Path=[Environment]::ExpandEnvironmentVariables([Environment]::GetEnvironmentVariable('Path','Machine')+';'+[Environment]::GetEnvironmentVariable('Path','User'))+';'+$env:Path; [Console]::OutputEncoding=[Text.UTF8Encoding]::new(); node -p process.execPath; if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }; npm.cmd root --global; exit $LASTEXITCODE"#
     } else {
-        r#"set -eu; export NVM_DIR="${NVM_DIR:-$HOME/.nvm}"; if [ -s "$NVM_DIR/nvm.sh" ]; then . "$NVM_DIR/nvm.sh"; fi; node -p process.execPath; npm root --global"#
+        r#"set -e; export NVM_DIR="${NVM_DIR:-$HOME/.nvm}"; if [ -s "$NVM_DIR/nvm.sh" ]; then . "$NVM_DIR/nvm.sh"; fi; node -p process.execPath; npm root --global"#
     };
     let mut command = tokio::process::Command::new(if cfg!(windows) {
         "powershell.exe"
@@ -244,6 +246,57 @@ mod tests {
             assert!(script("node", windows).contains("nvm"));
             assert!(script("python", windows).contains("python=3"));
             assert!(!script("python", windows).contains("D:/"));
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn unix_bootstrap_accepts_nvm_optional_variables_and_shell_installer_names() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let bin = dir.path().join("bin");
+        let nvm = dir.path().join(".nvm");
+        std::fs::create_dir_all(&bin).unwrap();
+        std::fs::create_dir_all(&nvm).unwrap();
+        std::fs::write(
+            nvm.join("nvm.sh"),
+            "nvm() { printf '%s' \"$DCL_UNSET_OPTIONAL_VARIABLE\"; }\nnode() { echo NODE_VERIFIED; }\n",
+        )
+        .unwrap();
+        // Model the installer's suffix check and create a minimal conda stand-in.
+        let curl = bin.join("curl");
+        std::fs::write(
+            &curl,
+            r##"#!/bin/bash
+while [ "$1" != '-o' ]; do shift; done
+cat > "$2" <<'INSTALLER'
+case "$0" in *.sh) ;; *) exit 42;; esac
+mkdir -p "$HOME/miniconda3/bin"
+cat > "$HOME/miniconda3/bin/conda" <<'CONDA'
+#!/bin/bash
+echo CONDA_VERIFIED
+CONDA
+chmod +x "$HOME/miniconda3/bin/conda"
+INSTALLER
+"##,
+        )
+        .unwrap();
+        std::fs::set_permissions(&curl, std::fs::Permissions::from_mode(0o755)).unwrap();
+        for (target, marker) in [("node", "NODE_VERIFIED"), ("python", "CONDA_VERIFIED")] {
+            let result = std::process::Command::new("bash")
+                .args(["-c", script(target, false)])
+                .env("HOME", dir.path())
+                .env("NVM_DIR", &nvm)
+                .env("PATH", format!("{}:/usr/bin:/bin", bin.display()))
+                .env_remove("DCL_UNSET_OPTIONAL_VARIABLE")
+                .output()
+                .unwrap();
+            assert!(
+                result.status.success(),
+                "{target}: {}",
+                String::from_utf8_lossy(&result.stderr)
+            );
+            assert!(String::from_utf8_lossy(&result.stdout).contains(marker));
         }
     }
 
