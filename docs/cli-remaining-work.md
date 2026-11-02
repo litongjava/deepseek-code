@@ -1,5 +1,7 @@
 # deepseek-code-cli 剩余工作清单（新 session 入口）
 
+维护说明：长期开发记录、验收证据和脚本已迁到相邻的 `dev-support/deepseek-code`，可复用环境放在 `dev-support/environments`。下文旧 `temp/claude-code-cli-dev` 引用对应迁移后的同名文件；新记录不再写入临时目录。
+
 更新：2026-10-18。本文汇总独立 Rust CLI 与原版 Claude Code 对齐的未完成项，供新 session 直接接手。详细审计依据见 `D:/code/project/project-harven/temp/claude-code-cli-dev/remaining-parity-acceptance-checklist.md`（以下简称"清单"）。
 
 ## 1. 起步

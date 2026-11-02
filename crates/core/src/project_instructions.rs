@@ -285,7 +285,19 @@ mod tests {
         fs::write(project.path().join("AGENTS.md"), "project marker\n").unwrap();
         fs::write(project.path().join("CLAUDE.local.md"), "local marker").unwrap();
         let all = load_all(Some(user.path()), project.path()).unwrap();
-        let scopes: Vec<_> = all.iter().map(|item| item.scope).collect();
+        // Ancestor instructions may exist on the developer's machine. Verify
+        // fixture ordering without assuming the host's ancestor chain is empty.
+        assert_eq!(all.first().unwrap().scope, Scope::User);
+        let user_root = user.path().canonicalize().unwrap();
+        let project_root = project.path().canonicalize().unwrap();
+        let scopes: Vec<_> = all
+            .iter()
+            .filter(|item| {
+                let path = item.path.canonicalize().unwrap();
+                path.starts_with(&user_root) || path.starts_with(&project_root)
+            })
+            .map(|item| item.scope)
+            .collect();
         assert_eq!(scopes, [Scope::User, Scope::Project, Scope::Local]);
         let reminder = reminder(&all).unwrap();
         assert!(reminder.starts_with(&format!("<system-reminder>\n{PREAMBLE}\n\nContents of ")));
