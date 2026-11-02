@@ -60,8 +60,14 @@ pub(super) async fn run_logged(
         .map(|(out, err)| (Some(out), Some(err)))
         .unwrap_or_default();
     let execution = async {
+        // Reap the root before waiting for EOF: descendants may inherit the pipes.
+        let wait = async {
+            let status = child.wait().await;
+            drop(tree);
+            status
+        };
         let (status, out, err) = tokio::join!(
-            child.wait(),
+            wait,
             capture(stdout, &mut stdout_bytes, &mut out_cut, out_log),
             capture(stderr, &mut stderr_bytes, &mut err_cut, err_log)
         );
@@ -73,8 +79,6 @@ pub(super) async fn run_logged(
         Some(timeout) => tokio::time::timeout(timeout, execution).await,
         None => Ok(execution.await),
     };
-    // Closing the process tree also terminates descendants holding inherited pipes.
-    drop(tree);
     match result {
         Ok(Ok(status)) => Ok(json!({
             "stdout":super::limit_output(&String::from_utf8_lossy(&stdout_bytes)),
@@ -96,6 +100,19 @@ pub(super) async fn run_logged(
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[tokio::test]
+    async fn root_exit_does_not_wait_for_inherited_pipes() {
+        crate::config::OrchestrationConfig::init_global().unwrap();
+        let mut command = Command::new("node");
+        command.args(["-e", "require('child_process').spawn(process.execPath,['-e','setInterval(()=>{},10000)'],{stdio:'inherit'}).unref();console.log('root done');setTimeout(()=>process.exit(0),200)"]);
+        let started = std::time::Instant::now();
+        let result = run(&mut command, Duration::from_secs(8), "node-fixture")
+            .await
+            .unwrap();
+        assert_eq!(result["success"], true, "{result}");
+        assert!(result["stdout"].as_str().unwrap().contains("root done"));
+        assert!(started.elapsed() < Duration::from_secs(5));
+    }
     #[tokio::test]
     async fn output_is_bounded_while_both_pipes_are_drained() {
         crate::config::OrchestrationConfig::init_global().unwrap();

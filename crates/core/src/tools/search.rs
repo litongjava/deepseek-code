@@ -147,14 +147,14 @@ pub fn grep(input: Value, cwd: &str) -> Result<Value> {
         let Ok(bytes) = std::fs::read(entry.path()) else { continue };
         if bytes[..bytes.len().min(8192)].contains(&0) { continue; }
         let content = String::from_utf8_lossy(&bytes);
-        let (lines, count) = search_file(&regex, &content, entry.path(), &options);
+        let (lines, count) = search_file(&regex, &content, entry.path().strip_prefix(cwd).unwrap_or(entry.path()), &options);
         if count > 0 { hits.push((entry.path().to_path_buf(), lines, count)); }
     }
     let mut paths: Vec<PathBuf> = hits.iter().map(|(p, _, _)| p.clone()).collect();
     if options.mode == "files_with_matches" { sort_by_mtime(&mut paths); } else { paths.sort(); }
     let output: Vec<String> = match options.mode.as_str() {
-        "files_with_matches" => paths.iter().map(|p| p.to_string_lossy().into_owned()).collect(),
-        "count" => paths.iter().map(|p| { let hit = hits.iter().find(|h| &h.0 == p).unwrap(); format!("{}:{}", p.display(), hit.2) }).collect(),
+        "files_with_matches" => paths.iter().map(|p| p.strip_prefix(cwd).unwrap_or(p).to_string_lossy().into_owned()).collect(),
+        "count" => paths.iter().map(|p| { let hit = hits.iter().find(|h| &h.0 == p).unwrap(); format!("{}:{}", p.strip_prefix(cwd).unwrap_or(p).display(), hit.2) }).collect(),
         _ => paths.iter().flat_map(|p| hits.iter().find(|h| &h.0 == p).unwrap().1.clone()).collect(),
     };
     let skip = number(&input, "offset").unwrap_or(0);
@@ -240,7 +240,7 @@ mod tests {
         assert_eq!(run(json!({"pattern":"ALPHA","-i":true,"glob":"*.py"}))["numFiles"], 1);
         assert_eq!(run(json!({"pattern":"ALPHA","glob":"*.py"}))["content"], "No matches found");
 
-        let a = root.join("src/a.rs").display().to_string();
+        let a = Path::new("src").join("a.rs").display().to_string();
         let lines = run(json!({"pattern":"beta","output_mode":"content","-B":1,"path":"src"}));
         assert_eq!(lines["content"], format!("{a}-2-let x = 1;\n{a}:3:fn beta() {{}}"));
         let only = run(json!({"pattern":"fn \\w+","output_mode":"content","-o":true,"path":"src","-n":false}));
