@@ -28,10 +28,10 @@ pub async fn handle(
         );
         let saved = checkpoints::list(&paths.data_dir, &session.id)?;
         if saved.is_empty() {
-            eprintln!("No checkpoints captured for this session. Checkpoints are created around turns in supported Git worktrees.");
+            command_eprintln!("No checkpoints captured for this session. Checkpoints are created around turns in supported Git worktrees.");
         }
         for checkpoint in saved {
-            eprintln!(
+            command_eprintln!(
                 "{}  {}  {} file changes{}\n  message: {}",
                 checkpoint.id,
                 checkpoint.created_at,
@@ -44,7 +44,7 @@ pub async fn handle(
                 checkpoint.message_id
             );
         }
-        eprintln!("/rewind preview ID previews conflicts. Choose /rewind code ID, conversation ID, or both ID. Code restores only this turn's recorded file-edit tool targets. Bash and unrelated workspace changes are not tracked; later edits to the same files are protected.");
+        command_eprintln!("/rewind preview ID previews conflicts. Choose /rewind code ID, conversation ID, or both ID. Code restores only this turn's recorded file-edit tool targets. Bash and unrelated workspace changes are not tracked; later edits to the same files are protected.");
         return Ok(true);
     }
     ensure!(
@@ -59,7 +59,7 @@ pub async fn handle(
     if action == "preview" {
         let checkpoint = checkpoints::get(&paths.data_dir, &session.id, id)?;
         ensure_workspace(paths, session, &checkpoint)?;
-        println!(
+        command_println!(
             "{}",
             serde_json::to_string_pretty(&checkpoints::preview(&paths.data_dir, &session.id, id)?)?
         );
@@ -67,10 +67,10 @@ pub async fn handle(
     }
     let (restored, rewound) = apply(action, id, paths, session).await?;
     if let Some(count) = restored {
-        eprintln!("Restored {count} file changes from checkpoint {id}.");
+        command_eprintln!("Restored {count} file changes from checkpoint {id}.");
     }
     if let Some((message, previous)) = rewound {
-        eprintln!("Conversation rewound to before message {message} in session {}. Original transcript retained as {previous}.", session.id);
+        command_eprintln!("Conversation rewound to before message {message} in session {}. Original transcript retained as {previous}.", session.id);
     }
     Ok(true)
 }
@@ -142,7 +142,7 @@ async fn pick(paths: &RuntimePaths, session: &mut Session) -> Result<bool> {
     use crate::terminal::picker::{Entry, Picker};
     let saved = checkpoints::list(&paths.data_dir, &session.id)?;
     if saved.is_empty() {
-        eprintln!("No checkpoints captured for this session. Checkpoints are created around turns in supported Git worktrees.");
+        command_eprintln!("No checkpoints captured for this session. Checkpoints are created around turns in supported Git worktrees.");
         return Ok(true);
     }
     let messages = session
@@ -227,7 +227,7 @@ async fn pick(paths: &RuntimePaths, session: &mut Session) -> Result<bool> {
         crate::background_commands::copy_settings(session, &branch)?;
         session.resume_saved(paths, &branch).await?;
         redraw(session)?;
-        eprintln!(
+        command_eprintln!(
             "  \u{23bf}  Summarized {count} message{} {} (ctrl+o to see full summary)",
             if count == 1 { "" } else { "s" },
             if part == compaction::Part::From { "from here" } else { "up to here" }
@@ -241,7 +241,7 @@ async fn pick(paths: &RuntimePaths, session: &mut Session) -> Result<bool> {
         redraw(session)?;
         *crate::terminal::NEXT_DRAFT.lock().unwrap_or_else(|error| error.into_inner()) = Some(prompt);
     } else if let Some(count) = restored {
-        eprintln!("  \u{23bf}  Restored {count} file{} to before: {}", if count == 1 { "" } else { "s" }, entries[index].title);
+        command_eprintln!("  \u{23bf}  Restored {count} file{} to before: {}", if count == 1 { "" } else { "s" }, entries[index].title);
     }
     Ok(true)
 }
@@ -288,11 +288,11 @@ fn ago(created_at: &str) -> String {
 /// Clears the screen and shows the conversation as it now is.
 fn redraw(session: &Session) -> Result<()> {
     eprint!("\x1b[2J\x1b[3J\x1b[H");
-    eprintln!("{}", crate::terminal::banner(&session.model, &session.workspace));
+    command_eprintln!("{}", crate::terminal::banner(&session.model, &session.workspace));
     let color = std::env::var_os("NO_COLOR").is_none();
     let width = crossterm::terminal::size().map_or(80, |(columns, _)| columns as usize).saturating_sub(1);
     for line in crate::repl::transcript_of(session, &session.id)? {
-        eprintln!("{}", crate::terminal::change_view::render(&line, width, color));
+        command_eprintln!("{}", crate::terminal::change_view::render(&line, width, color));
     }
     Ok(())
 }

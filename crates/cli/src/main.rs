@@ -1,4 +1,21 @@
-﻿mod hook_progress;
+// Local command output shares the terminal's display-only history.
+macro_rules! command_eprintln {
+    ($($arg:tt)*) => {{
+        use std::io::IsTerminal as _;
+        if std::io::stderr().is_terminal() {
+            let _ = crate::terminal::print_recorded(&format!("{}\n", format_args!($($arg)*)));
+        } else { std::eprintln!($($arg)*); }
+    }};
+}
+macro_rules! command_println {
+    ($($arg:tt)*) => {{
+        use std::io::IsTerminal as _;
+        if std::io::stdout().is_terminal() && std::io::stderr().is_terminal() {
+            let _ = crate::terminal::print_recorded(&format!("{}\n", format_args!($($arg)*)));
+        } else { std::println!($($arg)*); }
+    }};
+}
+mod hook_progress;
 mod workflows_view;
 mod lsp_commands;
 mod env_init;
@@ -946,16 +963,16 @@ async fn run(cli: &Cli) -> Result<()> {
             }
             if command == "/loop" {
                 match repl_loop::run(argument, &mut loops) {
-                    Ok(repl_loop::Outcome::Message(message)) => eprintln!("{message}"),
+                    Ok(repl_loop::Outcome::Message(message)) => command_eprintln!("{message}"),
                     Ok(repl_loop::Outcome::Run(prompt)) => if let Err(error) = session.turn(cli, &prompt, &mut input).await {
                         report_error(&error);
                     },
-                    Err(error) => eprintln!("Error: {error:#}"),
+                    Err(error) => command_eprintln!("Error: {error:#}"),
                 }
                 continue;
             }
             if matches!(command, "/remote-control" | "/rc") {
-                if let Err(error) = remote.command(argument, &paths, &session, &mut input).await { eprintln!("Error: {error:#}"); }
+                if let Err(error) = remote.command(argument, &paths, &session, &mut input).await { command_eprintln!("Error: {error:#}"); }
                 if let Some(listening) = remote.take_handoff() {
                     // The session continues in a child dcl that local and remote terminals share.
                     drop(presence.take());
@@ -972,7 +989,7 @@ async fn run(cli: &Cli) -> Result<()> {
                     Ok(Some(task)) => if let Err(error) = session.turn(cli, &task, &mut input).await {
                         report_error(&error);
                     },
-                    Err(error) => eprintln!("Error: {error:#}"),
+                    Err(error) => command_eprintln!("Error: {error:#}"),
                     Ok(None) => {},
                 }
                 continue;
@@ -984,19 +1001,19 @@ async fn run(cli: &Cli) -> Result<()> {
                             report_error(&error);
                         }
                     },
-                    Err(error) => eprintln!("Error: {error:#}"),
+                    Err(error) => command_eprintln!("Error: {error:#}"),
                     _ => {},
                 }
                 continue;
             }
             match lsp_commands::handle(line.trim(), &session, input.as_mut().unwrap()).await {
                 Ok(true) => continue,
-                Err(error) => { eprintln!("Error: {error:#}"); continue; },
+                Err(error) => { command_eprintln!("Error: {error:#}"); continue; },
                 Ok(false) => {},
             }
             match interactive_config::handle(line.trim(), &paths, &mut session, input.as_mut().unwrap()).await {
                 Ok(true) => continue,
-                Err(error) => { eprintln!("Error: {error:#}"); continue; },
+                Err(error) => { command_eprintln!("Error: {error:#}"); continue; },
                 Ok(false) => {},
             }
             match repl::handle(&line, &paths, &mut session).await {
@@ -1006,14 +1023,14 @@ async fn run(cli: &Cli) -> Result<()> {
                     }
                     continue;
                 },
-                Err(error) => { eprintln!("Error: {error:#}"); continue; },
+                Err(error) => { command_eprintln!("Error: {error:#}"); continue; },
                 Ok(false) => {},
             }
             // Match the exact command so a skill such as /restart-notes still runs.
             let restart_line = line.trim();
             if restart_line == "/restart" || restart_line.starts_with("/restart ") {
                 if restart_line != "/restart" {
-                    eprintln!("Usage: /restart");
+                    command_eprintln!("Usage: /restart");
                     continue;
                 }
                 restart_args = Some(restart::args(
@@ -1038,16 +1055,16 @@ async fn run(cli: &Cli) -> Result<()> {
                         let lines: Vec<_> = text.lines().map(terminal::change_view::body).collect();
                         terminal::transcript_pager::view_help(&lines)?;
                     } else {
-                        eprintln!("{text}");
+                        command_eprintln!("{text}");
                     }
                 },
-                "status" | ".status" => { if let Err(error) = status_commands::run(&session, "").await { eprintln!("Status: {error:#}"); } },
-                "/history" | "history" | ".history" => println!("{}", serde_json::to_string_pretty(&session.store.history(&session.id)?)?),
-                "/tools" | "tools" | ".tools" => for tool in deepseek_code_core::tools::get_tool_definitions() { eprintln!("{}: {}", tool.name, tool.description); },
+                "status" | ".status" => { if let Err(error) = status_commands::run(&session, "").await { command_eprintln!("Status: {error:#}"); } },
+                "/history" | "history" | ".history" => command_println!("{}", serde_json::to_string_pretty(&session.store.history(&session.id)?)?),
+                "/tools" | "tools" | ".tools" => for tool in deepseek_code_core::tools::get_tool_definitions() { command_eprintln!("{}: {}", tool.name, tool.description); },
                 command if skills.contains_key(command.split_whitespace().next().unwrap_or(command)) => {
                     if let Err(error) = session.turn(cli, &line, &mut input).await { report_error(&error); }
                 },
-                command if command.starts_with('/') => eprintln!("Unknown command: {}. Use /help; use /multiline to send text starting with /.", command.split_whitespace().next().unwrap_or(command)),
+                command if command.starts_with('/') => command_eprintln!("Unknown command: {}. Use /help; use /multiline to send text starting with /.", command.split_whitespace().next().unwrap_or(command)),
                 _ => if let Err(error) = prompt_turn(cli, &mut session, &line, &mut input).await { report_error(&error); },
             }
         }

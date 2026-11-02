@@ -345,3 +345,47 @@ pub mod init {
 
 #[path = "terminal/answer_input.rs"]
 mod answer_input;
+
+/// Writes local UI output and retains the same rows for mouse selection.
+/// This cache is never appended to model conversation messages.
+pub(crate) fn print_recorded(text: &str) -> std::io::Result<()> {
+    use std::io::Write;
+    release_handoff();
+    let mut history = scrollback::Scrollback::take();
+    let mut out = std::io::stderr().lock();
+    let raw = crossterm::terminal::is_raw_mode_enabled()?;
+    let newline = if raw { "\r\n" } else { "\n" };
+    let width = crossterm::terminal::size().map_or(79, |(cols, _)| cols.saturating_sub(1) as usize).max(1);
+    for row in text.lines() {
+        if row.is_empty() {
+            writeln_recorded(&mut out, &mut history, row, newline)?;
+        } else {
+            for wrapped in markdown::wrap_styled(row, "", "", width) {
+                writeln_recorded(&mut out, &mut history, &wrapped, newline)?;
+            }
+        }
+    }
+    out.flush()?;
+    history.save();
+    Ok(())
+}
+
+fn writeln_recorded(out: &mut impl std::io::Write, history: &mut scrollback::Scrollback, row: &str, newline: &str) -> std::io::Result<()> {
+    write!(out, "{row}{newline}")?;
+    history.push(row.to_owned(), None);
+    Ok(())
+}
+
+#[cfg(test)]
+mod command_output_tests {
+    #[test]
+    fn output_rows_match_selection_history_including_blank_lines() {
+        let mut history = super::scrollback::Scrollback::default();
+        let mut output = Vec::new();
+        for row in ["Language servers", "Python: pylsp", "", "TypeScript: available"] {
+            super::writeln_recorded(&mut output, &mut history, row, "\r\n").unwrap();
+        }
+        assert_eq!(String::from_utf8(output).unwrap(), history.all().join("\r\n") + "\r\n");
+        assert_eq!(history.all().len(), 4);
+    }
+}

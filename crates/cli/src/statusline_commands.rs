@@ -31,7 +31,7 @@ async fn authorize(
             PermissionResult::RequiresConfirmation(_) => confirmation = true,
         }
     }
-    eprintln!("{preview}");
+    command_eprintln!("{preview}");
     if confirmation {
         let answer = tokio::select! {
             line = input.read_answer("Allow this status line operation? [y/N] ") => line?.context("Input closed")?,
@@ -57,12 +57,12 @@ pub async fn handle(argument: &str, session: &Session, input: &mut TerminalInput
     let argument = argument.trim();
     if matches!(argument, "" | "show") {
         let current = crate::display_commands::load(session)?;
-        eprintln!("Status line command: {:?}\nRust user settings: {}\n/statusline setup [description] imports PS1/PowerShell prompt or describes a new display.\n/statusline command <shell script> sets a command; /statusline off disables it.", current.statusline.as_deref().unwrap_or("off"), setup::path(&session.paths.data_dir).display());
+        command_eprintln!("Status line command: {:?}\nRust user settings: {}\n/statusline setup [description] imports PS1/PowerShell prompt or describes a new display.\n/statusline command <shell script> sets a command; /statusline off disables it.", current.statusline.as_deref().unwrap_or("off"), setup::path(&session.paths.data_dir).display());
         return Ok(());
     }
     if argument == "off" {
         setup::save(&session.paths.data_dir, None)?;
-        eprintln!("Status line disabled for this Rust data directory.");
+        command_eprintln!("Status line disabled for this Rust data directory.");
         return Ok(());
     }
     let (verb, rest) = argument
@@ -115,7 +115,7 @@ pub async fn handle(argument: &str, session: &Session, input: &mut TerminalInput
                     profiles.push(json!({"path":candidate,"text":text}));
                     break;
                 }
-                eprintln!("No prompt definition in {}", candidate.display());
+                command_eprintln!("No prompt definition in {}", candidate.display());
             }
         }
         if request.is_empty()
@@ -123,11 +123,11 @@ pub async fn handle(argument: &str, session: &Session, input: &mut TerminalInput
                 .iter()
                 .any(|profile| setup::has_prompt_definition(profile["text"].as_str().unwrap_or("")))
         {
-            eprintln!("No PS1 or PowerShell prompt definition found. Use /statusline setup <desired fields and colors> to describe a status line.");
+            command_eprintln!("No PS1 or PowerShell prompt definition found. Use /statusline setup <desired fields and colors> to describe a status line.");
             return Ok(());
         }
         let payload = payload(session).await?;
-        eprintln!(
+        command_eprintln!(
             "Statusline setup: generating a proposal with {} (no shell or file-write tools).",
             session.model
         );
@@ -140,7 +140,7 @@ pub async fn handle(argument: &str, session: &Session, input: &mut TerminalInput
             _ = tokio::signal::ctrl_c() => bail!("Status line setup cancelled; settings unchanged"),
         };
         let proposal = setup::parse_proposal(&result)?;
-        eprintln!(
+        command_eprintln!(
             "{}",
             proposal
                 .explanation
@@ -159,7 +159,7 @@ pub async fn handle(argument: &str, session: &Session, input: &mut TerminalInput
         ("Write", json!({"file_path":destination,"content":serde_json::to_string(&setup::Settings{command:Some(command.clone())})?})),
     ], input, &format!("Configure recurring status line command for this Rust data directory:\n{}\nCommand (escaped):\n{command:?}", destination.display())).await?;
     setup::save(&session.paths.data_dir, Some(command))?;
-    eprintln!("Status line saved. It will run at the next prompt. Use /statusline setup <changes> to refine it.");
+    command_eprintln!("Status line saved. It will run at the next prompt. Use /statusline setup <changes> to refine it.");
     Ok(())
 }
 

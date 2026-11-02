@@ -9,18 +9,18 @@ pub async fn show(session: &Session) -> Result<()> {
         let autocompact = match window { Some(window) => crate::session_commands::autocompact(session, window)?, None => None };
         let color = std::env::var_os("NO_COLOR").is_none();
         if let Some(grid) = request.as_ref().and_then(|request| grid(request, window, autocompact, color, "Measured from the last request; the next one includes this turn's messages.")) {
-            eprintln!("{grid}");
+            command_eprintln!("{grid}");
             return Ok(());
         }
         if request.is_none() {
             // As in the reference CLI, estimate before anything was sent.
             if let Some(grid) = grid(&estimate(session, window)?, window, autocompact, color, "Estimated before the first request, from a recent request\u{2019}s system prompt and tools and this session\u{2019}s messages.") {
-                eprintln!("{grid}");
+                command_eprintln!("{grid}");
                 return Ok(());
             }
         }
     }
-    eprintln!("{}", render(request));
+    command_eprintln!("{}", render(request));
     Ok(())
 }
 fn render(request: Option<deepseek_code_core::services::context_usage::LastRequest>) -> String {

@@ -257,15 +257,15 @@ pub async fn handle(
                 crate::hooks_menu::run(runner.list())?;
                 return Ok(true);
             }
-            println!("{}", serde_json::to_string_pretty(runner.list())?);
-            eprintln!("Effective command/HTTP/prompt lifecycle hooks from settings.json and .claude/settings[.local].json. PermissionDenied runs only after an auto-classifier rejection; retry:true is advice to the model, never approval.");
+            command_println!("{}", serde_json::to_string_pretty(runner.list())?);
+            command_eprintln!("Effective command/HTTP/prompt lifecycle hooks from settings.json and .claude/settings[.local].json. PermissionDenied runs only after an auto-classifier rejection; retry:true is advice to the model, never approval.");
         }
         "/cd" | "/add-dir" => {
             if argument.is_empty() {
                 let workspace = session
                     .store
                     .workspace(&session.id, &paths.data_dir.join("workspaces"))?;
-                eprintln!("Working directory: {}", workspace.display());
+                command_eprintln!("Working directory: {}", workspace.display());
                 if command == "/add-dir" {
                     session.store.db.with_conn(|conn| -> Result<()> {
                         if let Some(project) =
@@ -275,7 +275,7 @@ pub async fn handle(
                             )?
                         {
                             for folder in project.folders {
-                                eprintln!("  {}", folder.path);
+                                command_eprintln!("  {}", folder.path);
                             }
                         }
                         Ok(())
@@ -300,10 +300,10 @@ pub async fn handle(
                     )
                     .await?;
                     for warning in outcome.warnings {
-                        eprintln!("CwdChanged hook: {warning}");
+                        command_eprintln!("CwdChanged hook: {warning}");
                     }
                 }
-                eprintln!(
+                command_eprintln!(
                     "{}: {}",
                     if command == "/cd" {
                         "Working directory"
@@ -320,7 +320,7 @@ pub async fn handle(
         }
         "/effort" => {
             if matches!(argument, "+" | "-") {
-                eprintln!("{}", step_effort(session, argument == "+").await?);
+                command_eprintln!("{}", step_effort(session, argument == "+").await?);
                 return Ok(true);
             }
             let mut settings = load(&session.store.db, &session.id)?;
@@ -328,7 +328,7 @@ pub async fn handle(
                 settings.effort = parse_effort(argument)?;
                 save(&session.store.db, &session.id, &settings)?;
             }
-            eprintln!(
+            command_eprintln!(
                 "Session effort: {} (default follows --effort or the model default)",
                 settings.effort.as_deref().unwrap_or("default")
             );
@@ -356,7 +356,7 @@ pub async fn handle(
                     None => "on by default once the model has a configured context window".into(),
                 },
             };
-            eprintln!("Autocompact: {status}");
+            command_eprintln!("Autocompact: {status}");
         }
         "/recap" => {
             ensure!(argument.is_empty(), "Usage: /recap");
@@ -370,7 +370,7 @@ pub async fn handle(
             };
             let recap = recap.split_whitespace().collect::<Vec<_>>().join(" ");
             ensure!(!recap.is_empty(), "Model returned an empty recap");
-            println!("{recap}");
+            command_println!("{recap}");
         }
         "/goal" => {
             use deepseek_code_core::services::session_goals as goals;
@@ -381,9 +381,9 @@ pub async fn handle(
                     &session.id,
                     &format!("{command} {argument}"),
                 )? {
-                    eprintln!("Goal cleared. The current turn may finish; automatic goal continuation is disabled.");
+                    command_eprintln!("Goal cleared. The current turn may finish; automatic goal continuation is disabled.");
                 } else {
-                    eprintln!("No goal set");
+                    command_eprintln!("No goal set");
                 }
                 return Ok(true);
             } else if !argument.is_empty() {
@@ -395,7 +395,7 @@ pub async fn handle(
                     &format!("{command} {argument}"),
                 )?;
             }
-            eprintln!("{}", goal_status(session)?);
+            command_eprintln!("{}", goal_status(session)?);
         }
         _ => return Ok(false),
     }
@@ -550,7 +550,7 @@ pub fn goal_notice(message: &str) {
     )
     .unwrap_or(false)
     {
-        eprintln!("{message}");
+        command_eprintln!("{message}");
     }
 }
 

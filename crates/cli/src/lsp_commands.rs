@@ -52,7 +52,7 @@ pub fn install_question(language: &lsp_servers::Language) -> Result<String> {
         );
     }
     Ok(format!(
-        "Install {} for {}? This {}, under {}. [y/N]",
+        "Install {} for {}?\n  This {}.\n  Location: {}\nContinue? [y/N]",
         language.command,
         language.name,
         lsp_servers::install_description(language),
@@ -68,12 +68,13 @@ pub fn language(id: &str) -> Result<&'static lsp_servers::Language> {
 }
 
 pub async fn install(language: &lsp_servers::Language) -> Result<()> {
-    eprintln!("Installing {} for {}\u{2026}", language.command, language.name);
+    let started = std::time::Instant::now();
+    crate::terminal::print_recorded(&format!("Installing {} for {}... (Ctrl+C to cancel)", language.command, language.name))?;
     let launch = tokio::select! {
-        result = lsp_servers::install(language, &|line: &str| eprintln!("  {line}")) => result?,
+        result = lsp_servers::install(language, &|line: &str| { let _ = crate::terminal::print_recorded(&format!("  {line}")); }) => result?,
         _ = tokio::signal::ctrl_c() => bail!("Installation cancelled"),
     };
-    eprintln!("Installed. {} starts as {}", language.name, launch.command.display());
+    crate::terminal::print_recorded(&format!("Installed {} ({:.1}s).\n  Command: {}\n  Use /lsp list to check availability.\n", language.name, started.elapsed().as_secs_f64(), launch.command.display()))?;
     Ok(())
 }
 
@@ -95,16 +96,19 @@ pub async fn handle(
         (None | Some("status" | "list"), None) => {
             let context = crate::services::context(&session.paths)?;
             let plugins = deepseek_code_core::services::plugins::all_language_servers(&context)?;
-            eprintln!("{}", status_text(&session.workspace, &plugins));
+            let text = status_text(&session.workspace, &plugins);
+            crate::terminal::print_recorded(&text)?;
         }
         (Some("install"), Some(id)) => {
             let language = language(id)?;
             let question = install_question(language)?;
-            let answer = input.read_answer(&format!("{question} ")).await?.unwrap_or_default();
+            let (details, prompt) = question.rsplit_once('\n').unwrap();
+            crate::terminal::print_recorded(details)?;
+            let answer = input.read_answer(&format!("{prompt} ")).await?.unwrap_or_default();
             if is_yes(&answer) {
                 install(language).await?;
             } else {
-                eprintln!("Not installed.");
+                crate::terminal::print_recorded("Not installed.")?;
             }
         }
         _ => bail!("Usage: /lsp [status] | /lsp install LANGUAGE"),
@@ -118,7 +122,7 @@ pub async fn command(paths: &deepseek_code_core::runtime::RuntimePaths, workspac
         (None | Some("status" | "list"), None) => {
             let context = crate::services::context(paths)?;
             let plugins = deepseek_code_core::services::plugins::all_language_servers(&context)?;
-            println!("{}", status_text(workspace, &plugins));
+            command_println!("{}", status_text(workspace, &plugins));
             Ok(())
         }
         (Some("install"), Some(id)) => {
@@ -132,7 +136,7 @@ pub async fn command(paths: &deepseek_code_core::runtime::RuntimePaths, workspac
                 let mut answer = String::new();
                 std::io::stdin().lock().read_line(&mut answer)?;
                 if !is_yes(&answer) {
-                    eprintln!("Not installed.");
+                    crate::terminal::print_recorded("Not installed.")?;
                     return Ok(());
                 }
             }

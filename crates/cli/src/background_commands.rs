@@ -24,12 +24,12 @@ pub async fn handle(
     match command {
         "/btw" => {
             ensure!(!argument.trim().is_empty(), "Usage: /btw QUESTION");
-            eprintln!("Answering a separate, tool-free side question. Main conversation history is unchanged. You can also ask /btw while a foreground turn is running.");
+            command_eprintln!("Answering a separate, tool-free side question. Main conversation history is unchanged. You can also ask /btw while a foreground turn is running.");
             let answer = tokio::select! {
                 answer = side_question(session, argument.trim()) => answer?,
                 _ = tokio::signal::ctrl_c() => anyhow::bail!("Side question cancelled; main conversation unchanged"),
             };
-            println!("\n{answer}\n");
+            command_println!("\n{answer}\n");
         }
         "/fork" | "/subtask" | "/background" => {
             let prompt = argument.trim();
@@ -45,14 +45,14 @@ pub async fn handle(
                 let executable = std::env::current_exe()?;
                 deepseek_code_core::services::session_parking::park(&context, &session.id, &target, &executable).await
                     .with_context(||format!("Session {target} remains saved; idle worker preparation failed"))?;
-                eprintln!("Session {target}: idle worker waiting for input. No model request or task was started. Worker exits after 5 idle minutes; the saved session remains resumable.");
-                eprintln!("Resume: dcl --data-dir \"{}\" --resume {target}", paths.data_dir.display());
-                eprintln!("Saved provider: {}; model: {}. Temporary provider credentials must be supplied again when resuming. Bypass permissions require explicit opt-in on resume.", session.provider_id, session.model);
+                command_eprintln!("Session {target}: idle worker waiting for input. No model request or task was started. Worker exits after 5 idle minutes; the saved session remains resumable.");
+                command_eprintln!("Resume: dcl --data-dir \"{}\" --resume {target}", paths.data_dir.display());
+                command_eprintln!("Saved provider: {}; model: {}. Temporary provider credentials must be supplied again when resuming. Bypass permissions require explicit opt-in on resume.", session.provider_id, session.model);
                 if command == "/background" {
-                    eprintln!("Current session moved to the background; returning this terminal to the shell.");
+                    command_eprintln!("Current session moved to the background; returning this terminal to the shell.");
                     return Ok(Outcome::Exit);
                 }
-                eprintln!("Copied session is ready; current session {} retained. /tasks sessions shows live worker state; /tasks stop-session {target} stops its idle worker.", session.id);
+                command_eprintln!("Copied session is ready; current session {} retained. /tasks sessions shows live worker state; /tasks stop-session {target} stops its idle worker.", session.id);
                 return Ok(Outcome::Handled);
             }
             let child_id = session.store.fork(&session.id)?;
@@ -78,7 +78,7 @@ pub async fn handle(
                 prompt,
                 &environment,
             )?;
-            eprintln!("Background task {} starting; child session {}. Use /tasks show {} or /tasks cancel {}. Permission questions remain pending; use /tasks pending ID and /tasks answer ID REQUEST ANSWER.", job.id, child_id, job.id, job.id);
+            command_eprintln!("Background task {} starting; child session {}. Use /tasks show {} or /tasks cancel {}. Permission questions remain pending; use /tasks pending ID and /tasks answer ID REQUEST ANSWER.", job.id, child_id, job.id, job.id);
         }
         "/tasks" | "/workflows" => {
             if command == "/workflows" {
@@ -92,7 +92,7 @@ pub async fn handle(
                         let job =
                             crate::workflow_commands::run(cli, paths, session, name, &args)
                                 .await?;
-                        eprintln!(
+                        command_eprintln!(
                             "Workflow {name} started as task {}. Use /tasks show {} or /tasks cancel {}.",
                             job.id, job.id, job.id
                         );
@@ -107,8 +107,8 @@ pub async fn handle(
                         .into_iter()
                         .find(|workflow| workflow.name == name);
                         if let Some(workflow) = workflow {
-                            println!("{}", workflow.content);
-                            eprintln!("{}", workflow.path.display());
+                            command_println!("{}", workflow.content);
+                            command_eprintln!("{}", workflow.path.display());
                             return Ok(Outcome::Handled);
                         }
                     }
@@ -124,12 +124,12 @@ pub async fn handle(
                             &session.workspace,
                         )?;
                         if workflows.is_empty() {
-                            eprintln!("No local workflows in <data-dir>/workflows or <workspace>/.claude/workflows. Hosted workflows need a vendor account.");
+                            command_eprintln!("No local workflows in <data-dir>/workflows or <workspace>/.claude/workflows. Hosted workflows need a vendor account.");
                         } else {
-                            eprintln!("Local workflows:");
+                            command_eprintln!("Local workflows:");
                         }
                         for workflow in &workflows {
-                            eprintln!("{}", crate::workflow_commands::print(workflow));
+                            command_eprintln!("{}", crate::workflow_commands::print(workflow));
                         }
                     }
                     _ => {}
@@ -140,14 +140,14 @@ pub async fn handle(
                 "sessions" => {
                     ensure!(parts.next().is_none(), "Usage: /tasks sessions");
                     let reports = deepseek_code_core::services::session_parking::list(&crate::services::context(paths)?, &session.id).await?;
-                    if reports.is_empty() { eprintln!("No saved background sessions registered by this session."); }
+                    if reports.is_empty() { command_eprintln!("No saved background sessions registered by this session."); }
                     for report in reports { print_parked(&report); }
                 }
                 "stop-session" => {
                     let id = parts.next().context("Usage: /tasks stop-session SESSION_ID")?;
                     ensure!(parts.next().is_none(), "Usage: /tasks stop-session SESSION_ID");
                     deepseek_code_core::services::session_parking::stop(&crate::services::context(paths)?, &session.id, id).await?;
-                    eprintln!("Worker stopped for session {id}; conversation remains saved. Resume with /resume {id}.");
+                    command_eprintln!("Worker stopped for session {id}; conversation remains saved. Resume with /resume {id}.");
                 }
                 "records" => {
                     let legacy = parts.next();
@@ -158,7 +158,7 @@ pub async fn handle(
                         deepseek_code_core::tools::tasks::execute_for_session(name, serde_json::json!({}), &paths.data_dir, &session.id)
                     };
                     let records = serde_json::json!({"tasks":read("TaskList")?["tasks"],"todos":read("TodoRead")?["todos"],"legacy_read_only":legacy.is_some()});
-                    println!("{}", serde_json::to_string_pretty(&records)?);
+                    command_println!("{}", serde_json::to_string_pretty(&records)?);
                 }
 
                 "list" if command == "/tasks" && argument.trim().is_empty() && crate::terminal::picker::available() => {
@@ -182,7 +182,7 @@ pub async fn handle(
                         Vec::new()
                     };
                     if command == "/workflows" {
-                        eprintln!(
+                        command_eprintln!(
                             "Background runs started by this session (local workflow files run as tasks):"
                         );
                     }
@@ -190,20 +190,20 @@ pub async fn handle(
                         deepseek_code_core::services::session_parking::list(&crate::services::context(paths)?, &session.id).await?
                     } else { Vec::new() };
                     if jobs.is_empty() && shells.is_empty() && parked.is_empty() {
-                        eprintln!("No background processes started by this session.");
+                        command_eprintln!("No background processes started by this session.");
                     }
                     for job in jobs {
-                        eprintln!(
+                        command_eprintln!(
                             "{}  {}  {}\n  session: {}",
                             job.id, job.status, job.title, job.session_id
                         );
                         if let Some(question) = background_sessions::pending_question(&paths.data_dir, &job.id, &session.id)? {
-                            eprintln!("  awaiting {}: {} (use /tasks pending {})", question.kind, question.request_id, job.id);
+                            command_eprintln!("  awaiting {}: {} (use /tasks pending {})", question.kind, question.request_id, job.id);
                         }
                     }
                     for report in parked { print_parked(&report); }
                     for task in shells {
-                        eprintln!("{}  {}  {}\n  shell · /tasks show {} · /tasks cancel {}",
+                        command_eprintln!("{}  {}  {}\n  shell · /tasks show {} · /tasks cancel {}",
                             task["id"].as_str().unwrap_or("?"),
                             task["status"].as_str().unwrap_or("unknown"),
                             safe_output(task["subject"].as_str().unwrap_or("Background shell")),
@@ -214,14 +214,14 @@ pub async fn handle(
                 "shutdown-worker" => {
                     ensure!(parts.next().is_none(), "Usage: /tasks shutdown-worker");
                     deepseek_code_core::services::session_worker::shutdown(&paths.data_dir,&session.id).await?;
-                    eprintln!("Idle session worker shutdown requested; the next prompt starts a fresh worker.");
+                    command_eprintln!("Idle session worker shutdown requested; the next prompt starts a fresh worker.");
                 }
                 "pending" => {
                     let id = parts.next().ok_or_else(||anyhow::anyhow!("Usage: /tasks pending ID"))?;
                     ensure!(parts.next().is_none(), "Usage: /tasks pending ID");
                     match background_sessions::pending_question(&paths.data_dir, id, &session.id)? {
-                        Some(question) => println!("{}",serde_json::to_string_pretty(&question)?),
-                        None => eprintln!("No pending question."),
+                        Some(question) => command_println!("{}",serde_json::to_string_pretty(&question)?),
+                        None => command_eprintln!("No pending question."),
                     }
                 }
                 "answer" => {
@@ -230,7 +230,7 @@ pub async fn handle(
                     let answer = parts.collect::<Vec<_>>().join(" ");
                     ensure!(!answer.is_empty(), "Usage: /tasks answer ID REQUEST ANSWER");
                     background_sessions::answer_question(&paths.data_dir, id, &session.id, request, &answer)?;
-                    eprintln!("Answer delivered to the existing worker; no request restarted.");
+                    command_eprintln!("Answer delivered to the existing worker; no request restarted.");
                 }
                 "attach" => {
                     let id = parts.next().ok_or_else(|| anyhow::anyhow!("Usage: /tasks attach ID"))?;
@@ -244,10 +244,10 @@ pub async fn handle(
                     ensure!(parts.next().is_none(), "Usage: /tasks show ID");
                     if command == "/tasks" && managed_shell_records(paths, &session.id)?.iter().any(|task| task["id"] == id) {
                         let output = shell_control(paths, &session.id, id, false).await?;
-                        eprintln!("Shell {id} · {}", output["status"].as_str().unwrap_or("unknown"));
+                        command_eprintln!("Shell {id} · {}", output["status"].as_str().unwrap_or("unknown"));
                         for stream in ["stdout", "stderr"] {
                             if let Some(text) = output[stream].as_str().filter(|text| !text.is_empty()) {
-                                println!("{}", safe_output(text));
+                                command_println!("{}", safe_output(text));
                             }
                         }
                         return Ok(Outcome::Handled);
@@ -268,7 +268,7 @@ pub async fn handle(
                         let lines: Vec<_> = text.lines().map(crate::terminal::change_view::body).collect();
                         crate::terminal::transcript_pager::view(&lines)?;
                     } else {
-                        println!("{}", safe_output(&text));
+                        command_println!("{}", safe_output(&text));
                     }
                 }
                 "cancel" | "stop" => {
@@ -279,7 +279,7 @@ pub async fn handle(
                     if command == "/tasks" && managed_shell_records(paths, &session.id)?.iter().any(|task| task["id"] == id) {
                         let output = shell_control(paths, &session.id, id, true).await?;
                         let action = if output["cancellation_requested"] == true { "Cancellation requested" } else { "No cancellation needed" };
-                        eprintln!("{action} for shell {id} (reported {}). Use /tasks show {id} for confirmed status and output.", output["status"].as_str().unwrap_or("unknown"));
+                        command_eprintln!("{action} for shell {id} (reported {}). Use /tasks show {id} for confirmed status and output.", output["status"].as_str().unwrap_or("unknown"));
                         return Ok(Outcome::Handled);
                     }
                     ensure!(
@@ -288,7 +288,7 @@ pub async fn handle(
                         "Task belongs to another session"
                     );
                     crate::worker_frontend::cancel_job(session, id)?;
-                    eprintln!("Cancellation requested for {id}; /tasks shows the confirmed terminal state.");
+                    command_eprintln!("Cancellation requested for {id}; /tasks shows the confirmed terminal state.");
                 }
                 _ => anyhow::bail!(
                     "Usage: /tasks [list|running|completed|failed|show ID|attach ID|pending ID|answer ID REQUEST ANSWER|cancel ID|sessions|stop-session SESSION_ID|shutdown-worker]; /workflows [list|show NAME|run NAME [ARGS]|cancel ID]"
@@ -301,7 +301,7 @@ pub async fn handle(
 }
 
 fn print_parked(report: &deepseek_code_core::services::session_parking::ParkedStatus) {
-    eprintln!(
+    command_eprintln!(
         "Session {} | {} | worker {}{}",
         report.session.session_id,
         match report.activity.as_str() {
@@ -317,9 +317,9 @@ fn print_parked(report: &deepseek_code_core::services::session_parking::ParkedSt
             .unwrap_or_default()
     );
     if let Some(id) = &report.active_job {
-        eprintln!("  task: {id}");
+        command_eprintln!("  task: {id}");
     }
-    eprintln!(
+    command_eprintln!(
         "  resume: /resume {} | permission mode on resume: {}",
         report.session.session_id, report.resume_permission_mode
     );
@@ -356,7 +356,7 @@ async fn tasks_menu(paths: &RuntimePaths, session: &Session) -> Result<()> {
                 .map(Task::Job),
         );
         if tasks.is_empty() {
-            eprintln!("No background tasks.");
+            command_eprintln!("No background tasks.");
             return Ok(());
         }
         let single = tasks.len() == 1;
@@ -410,7 +410,7 @@ async fn tasks_menu(paths: &RuntimePaths, session: &Session) -> Result<()> {
                 let key = details("Shell details", &rows, &format!("{back}Esc/Enter/Space to close{stop}"), if stop.is_empty() { &[] } else { &['x'] })?;
                 if key == Some('x') {
                     shell_control(paths, &session.id, &id, true).await?;
-                    eprintln!("Stopped shell {id}.");
+                    command_eprintln!("Stopped shell {id}.");
                 }
                 key
             }
@@ -426,7 +426,7 @@ async fn tasks_menu(paths: &RuntimePaths, session: &Session) -> Result<()> {
                 let key = details("Task details", &rows, &format!("{back}t to view transcript \u{b7} Esc/Enter/Space to close \u{b7} x to stop"), &['x', 't'])?;
                 if key == Some('x') {
                     background_sessions::cancel(&paths.data_dir, &job.id)?;
-                    eprintln!("Stopping task {}.", job.id);
+                    command_eprintln!("Stopping task {}.", job.id);
                 }
                 if key == Some('t') {
                     crate::terminal::transcript_pager::view(&crate::repl::transcript_of(session, &job.session_id)?)?;

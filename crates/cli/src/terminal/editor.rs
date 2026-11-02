@@ -1238,7 +1238,7 @@ impl PromptEditor {
                     history_view.screen_rows(rows as usize, &composer)
                 } else {
                     let origin = screen.top.unwrap_or(0);
-                    let mut background = above.screen(origin, rows);
+                    let mut background = above.screen(screen.transcript_end.unwrap_or(origin as usize) as u16, rows);
                     for (index, text) in composer.iter().enumerate() {
                         if let Some(row) = background.get_mut(origin as usize + index) { *row = text.clone(); }
                     }
@@ -1273,7 +1273,7 @@ impl PromptEditor {
                     history_view.screen_rows(rows as usize, &composer)
                 } else {
                     let origin = screen.top.unwrap_or(0);
-                    let mut background = above.screen(origin, rows);
+                    let mut background = above.screen(screen.transcript_end.unwrap_or(origin as usize) as u16, rows);
                     for (index, text) in composer.iter().enumerate() {
                         if let Some(row) = background.get_mut(origin as usize + index) { *row = text.clone(); }
                     }
@@ -1327,7 +1327,8 @@ impl PromptEditor {
                     }
                     let (_, cursor_y) = position()?;
                     let origin = cursor_y.saturating_sub(screen.cursor_row as u16);
-                    let mut snapshot = above.screen(origin, rows);
+                    let transcript_bottom = screen.transcript_end.unwrap_or(origin as usize) as u16;
+                    let mut snapshot = above.screen(transcript_bottom, rows);
                     for (index, (text, _)) in screen.previous.iter().enumerate() {
                         if let Some(row) = snapshot.get_mut(origin as usize + index) {
                             *row = text.clone();
@@ -1346,13 +1347,13 @@ impl PromptEditor {
                         continue;
                     }
                     if mouse.kind == MouseEventKind::Down(MouseButton::Left) {
-                        if let Some(id) = above.prompt_at(origin, mouse.row) {
+                        if let Some(id) = above.prompt_at(transcript_bottom, mouse.row) {
                             let row = above.expand_prompt_id(id, width);
                             history_view.refresh(&[], &above.presentation(), width);
                             history_view.open_at(row)?;
                             continue;
                         }
-                        if let Some(review) = above.review_at(origin, mouse.row) {
+                        if let Some(review) = above.review_at(transcript_bottom, mouse.row) {
                             crate::terminal::file_review::show(review, &snapshot, &mut || {
                                 read_editor_event(&mut input_reader)
                             })?;
@@ -1369,7 +1370,7 @@ impl PromptEditor {
                         continue;
                     }
                     let toggled = (mouse.kind == MouseEventKind::Down(MouseButton::Left))
-                        .then(|| above.toggle(origin, mouse.row))
+                        .then(|| above.toggle(transcript_bottom, mouse.row))
                         .flatten();
                     if let Some((start, lines)) = toggled {
                         // Redraw from the clicked tool result down, then the prompt.
@@ -2034,6 +2035,21 @@ mod tests {
         let output = String::from_utf8(output).unwrap();
         assert_eq!(output.matches("\x1b[K").count(), 4);
         assert!(!output.contains('\n'));
+    }
+
+    #[test]
+    fn command_selection_anchors_to_output_before_bottom_padding() {
+        let mut screen = Screen::pinned();
+        screen.align_transcript = false;
+        screen.draw_pinned_to(&mut Vec::new(), &frame_lines(), 1, 3, 36, 20).unwrap();
+        let mut history = crate::terminal::scrollback::Scrollback::default();
+        history.push("Python".into(), None);
+        history.push("TypeScript".into(), None);
+        let snapshot = history.screen(screen.transcript_end.unwrap() as u16, 36);
+        assert_eq!(snapshot[18], "Python");
+        assert_eq!(snapshot[19], "TypeScript");
+        assert!(snapshot[20..].iter().all(String::is_empty));
+        assert_ne!(screen.top.map(usize::from), screen.transcript_end);
     }
 
     #[test]

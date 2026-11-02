@@ -261,7 +261,7 @@ pub async fn compact(paths: &RuntimePaths, session: &mut Session, instructions: 
         ) => report?,
         _ = tokio::signal::ctrl_c() => anyhow::bail!("Compaction interrupted; check /history for a completed summary. Original transcript retained"),
     };
-    for warning in &report.warnings { eprintln!("Hook: {warning}"); }
+    for warning in &report.warnings { command_eprintln!("Hook: {warning}"); }
     Ok(report.summarized_messages)
 }
 
@@ -293,7 +293,7 @@ pub async fn handle(line: &str, paths: &RuntimePaths, session: &mut Session) -> 
         "/compact" => {
             let summarized = compact(paths, session, argument).await?;
             // As in the reference CLI; the summary is in the Ctrl+O transcript.
-            eprintln!(
+            command_eprintln!(
                 "  \u{23bf}  Compacted (ctrl+o to see full summary)\n     {summarized} messages summarized; the original transcript remains in /history."
             );
         }
@@ -301,7 +301,7 @@ pub async fn handle(line: &str, paths: &RuntimePaths, session: &mut Session) -> 
             ensure!(argument.trim().is_empty(), "Usage: /clear");
             let previous = session.id.clone();
             session.clear().await?;
-            eprintln!(
+            command_eprintln!(
                 "New session: {}. Previous history retained: {previous}",
                 session.id
             );
@@ -316,7 +316,7 @@ pub async fn handle(line: &str, paths: &RuntimePaths, session: &mut Session) -> 
                 .rposition(|row| row.is_compact_boundary)
                 .unwrap_or(0);
             let bytes: usize = rows[start..].iter().map(|row| row.content.len()).sum();
-            eprintln!("Saved messages: {}\nActive messages: {}\nActive message text: {bytes} UTF-8 bytes\nCompacted: {}\nCounts exclude system instructions and tool payloads; this is not a token estimate.", rows.len(), rows.len() - start, rows.iter().any(|row| row.is_compact_boundary));
+            command_eprintln!("Saved messages: {}\nActive messages: {}\nActive message text: {bytes} UTF-8 bytes\nCompacted: {}\nCounts exclude system instructions and tool payloads; this is not a token estimate.", rows.len(), rows.len() - start, rows.iter().any(|row| row.is_compact_boundary));
         }
         "/permissions" => {
             crate::permission_commands::handle(argument, session).await?;
@@ -324,7 +324,7 @@ pub async fn handle(line: &str, paths: &RuntimePaths, session: &mut Session) -> 
         "/rename" => {
             let title = argument.trim();
             rename(&session.store, &session.id, title)?;
-            eprintln!("Session renamed: {title}");
+            command_eprintln!("Session renamed: {title}");
         }
         "/sessions" => {
             ensure!(argument.trim().is_empty(), "Usage: /sessions");
@@ -332,12 +332,12 @@ pub async fn handle(line: &str, paths: &RuntimePaths, session: &mut Session) -> 
                 .store
                 .db
                 .with_conn(conversation_repo::list_conversations)??;
-            println!("{}", serde_json::to_string_pretty(&sessions)?);
+            command_println!("{}", serde_json::to_string_pretty(&sessions)?);
         }
         "/skills" => {
             ensure!(argument.trim().is_empty(), "Usage: /skills");
             let manager = SkillsManager::with_path(paths.data_dir.join("skills"));
-            println!(
+            command_println!(
                 "{}",
                 serde_json::to_string_pretty(&manager.load_skills().await?)?
             );
@@ -353,7 +353,7 @@ pub async fn handle(line: &str, paths: &RuntimePaths, session: &mut Session) -> 
             let Some(crate::args::Commands::Mcp { action }) = parsed.command else { unreachable!() };
             crate::mcp(paths, &action).await?;
         }
-        "/end" | "/cancel" => eprintln!("No unfinished prompt. Use /multiline to compose one."),
+        "/end" | "/cancel" => command_eprintln!("No unfinished prompt. Use /multiline to compose one."),
         _ => return crate::extended_commands::handle(command, argument, paths, session).await,
     }
     Ok(true)

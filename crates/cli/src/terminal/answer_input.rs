@@ -127,6 +127,12 @@ fn read_terminal(prompt: &str, flag: &AtomicBool, secret: bool) -> io::Result<Op
                         cancelled(flag)?;
                         eprint!("\r\n");
                         io::stderr().flush()?;
+                        let visible = if secret { "*".repeat(value.chars().count()) } else { value.clone() };
+                        let mut history = super::scrollback::Scrollback::take();
+                        for row in format!("{safe_prompt}{visible}").lines() {
+                            history.push(row.to_owned(), None);
+                        }
+                        history.save();
                         return Ok(Some(value));
                     }
                     KeyCode::Backspace => {

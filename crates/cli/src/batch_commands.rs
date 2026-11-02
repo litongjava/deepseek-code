@@ -11,7 +11,7 @@ use deepseek_code_core::{
 use std::{process::Stdio, time::Duration};
 
 fn display(batch: &Batch) {
-    eprintln!(
+    command_eprintln!(
         "Batch {} — {}\n{}\nBase commit: {}\nVerification: {}",
         batch.id,
         batch.status,
@@ -20,7 +20,7 @@ fn display(batch: &Batch) {
         batch.proposal.verification
     );
     for (index, worker) in batch.workers.iter().enumerate() {
-        eprintln!(
+        command_eprintln!(
             "{}. {} [{}]\n   paths: {}\n   branch: {}",
             index + 1,
             worker.title,
@@ -28,24 +28,24 @@ fn display(batch: &Batch) {
             batch.proposal.units[index].paths.join(", "),
             worker.branch
         );
-        eprintln!("   task: {}", batch.proposal.units[index].instructions);
+        command_eprintln!("   task: {}", batch.proposal.units[index].instructions);
         if let Some(job) = &worker.job_id {
-            eprintln!("   task ID: {job}");
+            command_eprintln!("   task ID: {job}");
         }
         if let Some(pr) = &worker.pr {
-            eprintln!("   verified PR: {pr}");
+            command_eprintln!("   verified PR: {pr}");
         }
         if let Some(note) = &worker.note {
-            eprintln!("   {note}");
+            command_eprintln!("   {note}");
         }
     }
     if let Some(error) = &batch.error {
-        eprintln!("Batch error: {error}");
+        command_eprintln!("Batch error: {error}");
     }
     if batch.status == "planned" {
-        eprintln!("No workers started. /batch run {} starts isolated workers using the current permission mode and existing deny rules. Answer worker permission requests using /tasks pending and /tasks answer. Add --permission-mode MODE only to explicitly choose a different mode. Local commits only; add --publish to authorize pushes and PR creation.",batch.id);
+        command_eprintln!("No workers started. /batch run {} starts isolated workers using the current permission mode and existing deny rules. Answer worker permission requests using /tasks pending and /tasks answer. Add --permission-mode MODE only to explicitly choose a different mode. Local commits only; add --publish to authorize pushes and PR creation.",batch.id);
     } else {
-        eprintln!(
+        command_eprintln!(
             "Concurrency: {}; permissions: {}; publication: {}",
             batch.concurrency,
             batch.permission_mode,
@@ -132,7 +132,7 @@ pub async fn handle(
                 display(&batch);
             }
             if argument.is_empty() {
-                eprintln!("Usage: /batch INSTRUCTION | /batch show ID | /batch run ID [--concurrency N] [--permission-mode MODE] [--publish] | /batch cancel ID | /batch logs ID UNIT");
+                command_eprintln!("Usage: /batch INSTRUCTION | /batch show ID | /batch run ID [--concurrency N] [--permission-mode MODE] [--publish] | /batch cancel ID | /batch logs ID UNIT");
             }
         }
         Some("show" | "cancel" | "logs") => {
@@ -147,7 +147,7 @@ pub async fn handle(
                 "cancel" => {
                     ensure!(words.next().is_none(), "Usage: /batch cancel ID");
                     batch::cancel(&paths.data_dir, id)?;
-                    eprintln!("Cancellation requested; inspect /batch show {id} for confirmed completion.");
+                    command_eprintln!("Cancellation requested; inspect /batch show {id} for confirmed completion.");
                 }
                 "logs" => {
                     let index = words
@@ -167,8 +167,8 @@ pub async fn handle(
                         .as_deref()
                         .context("This worker has not started")?;
                     let (output, error) = background_sessions::output(&paths.data_dir, job)?;
-                    println!("{output}");
-                    eprintln!("{error}");
+                    command_println!("{output}");
+                    command_eprintln!("{error}");
                 }
                 _ => {
                     ensure!(words.next().is_none(), "Usage: /batch show ID");
@@ -256,7 +256,7 @@ pub async fn handle(
                 .kill_on_drop(true);
             #[cfg(windows)]
             process.creation_flags(0x08000000);
-            eprintln!("Researching a batch plan in a separate read-only session. No workers will start until /batch run ID.");
+            command_eprintln!("Researching a batch plan in a separate read-only session. No workers will start until /batch run ID.");
             let output = tokio::select! {result=tokio::time::timeout(Duration::from_secs(600),process.output())=>result.context("Batch planning timed out")??,_=tokio::signal::ctrl_c()=>anyhow::bail!("Batch planning cancelled")};
             ensure!(
                 output.status.success(),

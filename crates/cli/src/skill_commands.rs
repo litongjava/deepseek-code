@@ -27,7 +27,7 @@ pub async fn finish_background(
         && !cli.print_short
         && cli.output_format == OutputFormat::Text
     {
-        eprintln!("Skill task {} started in isolated session {}. Use /tasks show {}, /tasks pending {} or /tasks cancel {}.",job.id,job.session_id,job.id,job.id,job.id);
+        command_eprintln!("Skill task {} started in isolated session {}. Use /tasks show {}, /tasks pending {} or /tasks cancel {}.",job.id,job.session_id,job.id,job.id,job.id);
         return Ok(());
     }
     let mut cursor = 0;
@@ -52,7 +52,7 @@ pub async fn finish_background(
                                 object.insert("child_session_id".into(),serde_json::json!(job.session_id));
                                 object.insert("task_id".into(),serde_json::json!(job.id));
                             }
-                            println!("{}",serde_json::to_string(&event)?);
+                            command_println!("{}",serde_json::to_string(&event)?);
                             std::io::stdout().flush()?;
                         }
                     }
@@ -93,10 +93,10 @@ pub async fn finish_background(
     result["error"] = serde_json::json!(error);
     if cli.output_format == OutputFormat::Text {
         if let Some(text) = result["result"].as_str() {
-            println!("{text}");
+            command_println!("{text}");
         }
     } else {
-        println!("{}", serde_json::to_string(&result)?);
+        command_println!("{}", serde_json::to_string(&result)?);
     }
     std::io::stdout().flush()?;
     if let Some(error) = error {
@@ -236,7 +236,7 @@ pub async fn prepare_invocation(
                     false
                 };
                 let permit = invocation::authorize(input.clone(), decision, confirmed)?;
-                eprintln!("Running skill /{name} shell expansion...");
+                command_eprintln!("Running skill /{name} shell expansion...");
                 let result = invocation::execute(permit, &session.workspace).await;
                 if result.is_ok() { session.permissions.record_tool_success(&session.id); }
                 let (event, payload) = match &result {

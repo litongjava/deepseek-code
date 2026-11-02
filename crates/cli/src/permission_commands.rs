@@ -89,7 +89,7 @@ fn publish_mode(session: &str, mode: &str) {
     if let Err(error) = deepseek_code_core::services::session_worker::emit_event(
         &serde_json::json!({"type":"permission_mode", "mode":mode, "session_id":session}),
     ) {
-        eprintln!("Could not publish permission mode: {error}");
+        command_eprintln!("Could not publish permission mode: {error}");
     }
 }
 
@@ -169,15 +169,15 @@ pub async fn handle(argument: &str, session: &mut Session) -> Result<()> {
     session
         .permissions
         .set_session_rules(&session.id, rules.clone());
-    eprintln!("{}", launch_rule_display(session).await?);
+    command_eprintln!("{}", launch_rule_display(session).await?);
     if rules.is_empty() {
-        eprintln!("  (none)");
+        command_eprintln!("  (none)");
     }
     for (tool, action) in rules
         .into_iter()
         .collect::<std::collections::BTreeMap<_, _>>()
     {
-        eprintln!("  {tool}: {action:?}");
+        command_eprintln!("  {tool}: {action:?}");
     }
     Ok(())
 }

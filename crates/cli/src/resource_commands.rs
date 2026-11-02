@@ -26,7 +26,7 @@ pub async fn handle(command: &str, argument: &str, paths: &RuntimePaths) -> Resu
             } else {
                 cli_resources::STICKERS
             };
-            eprintln!("Opening {url}");
+            command_eprintln!("Opening {url}");
             cli_resources::open_link(url)?;
         }
         "/mobile" => {
@@ -43,7 +43,7 @@ pub async fn handle(command: &str, argument: &str, paths: &RuntimePaths) -> Resu
                 } else {
                     ("iOS", cli_resources::IOS)
                 };
-                eprintln!("{platform}: {url}\n{}", cli_resources::mobile_qr(android)?);
+                command_eprintln!("{platform}: {url}\n{}", cli_resources::mobile_qr(android)?);
             }
         }
         "/release-notes" => {
@@ -55,7 +55,7 @@ pub async fn handle(command: &str, argument: &str, paths: &RuntimePaths) -> Resu
                 notes = cli_resources::release_notes(&paths.data_dir, argument == "refresh") => notes?,
                 _ = tokio::signal::ctrl_c() => anyhow::bail!("Release notes request cancelled"),
             };
-            eprintln!(
+            command_eprintln!(
                 "Official Claude Code release notes · {} · fetched {}\n{}",
                 if notes.cached { "cached" } else { "live" },
                 notes.fetched_at,
@@ -64,7 +64,7 @@ pub async fn handle(command: &str, argument: &str, paths: &RuntimePaths) -> Resu
             let limit = if argument == "all" { usize::MAX } else { 100 };
             for line in notes.text.lines().take(limit) {
                 // Remote Markdown may contain terminal escape sequences.
-                println!(
+                command_println!(
                     "{}",
                     line.chars()
                         .filter(|ch| !ch.is_control() || *ch == '\t')
@@ -72,7 +72,7 @@ pub async fn handle(command: &str, argument: &str, paths: &RuntimePaths) -> Resu
                 );
             }
             if notes.text.lines().count() > limit {
-                eprintln!("Use /release-notes all to show the complete changelog.");
+                command_eprintln!("Use /release-notes all to show the complete changelog.");
             }
         }
         "/powerup" => {
@@ -83,13 +83,13 @@ pub async fn handle(command: &str, argument: &str, paths: &RuntimePaths) -> Resu
             let words = argument.split_whitespace().collect::<Vec<_>>();
             match words.as_slice() {
                 [] | ["list"] => {
-                    eprintln!(
+                    command_eprintln!(
                         "Discover CLI features · {}/{} completed",
                         completed.len(),
                         LESSONS.len()
                     );
                     for (id, title, _) in LESSONS {
-                        eprintln!(
+                        command_eprintln!(
                             "  {} {id:<12} {title}",
                             if completed.contains(*id) {
                                 "✓"
@@ -98,12 +98,12 @@ pub async fn handle(command: &str, argument: &str, paths: &RuntimePaths) -> Resu
                             }
                         );
                     }
-                    eprintln!("/powerup TOPIC opens a lesson; /powerup done TOPIC records completion; /powerup reset clears progress.");
+                    command_eprintln!("/powerup TOPIC opens a lesson; /powerup done TOPIC records completion; /powerup reset clears progress.");
                 }
                 ["reset"] => {
                     completed.clear();
                     context.save_setting("cli.powerup.completed", &completed)?;
-                    eprintln!("Lesson progress reset.");
+                    command_eprintln!("Lesson progress reset.");
                 }
                 [id] | ["read", id] | ["done", id] => {
                     let (_, title, text) = LESSONS
@@ -113,9 +113,9 @@ pub async fn handle(command: &str, argument: &str, paths: &RuntimePaths) -> Resu
                     if words.first() == Some(&"done") {
                         completed.insert((*id).into());
                         context.save_setting("cli.powerup.completed", &completed)?;
-                        eprintln!("Completed: {title}");
+                        command_eprintln!("Completed: {title}");
                     } else {
-                        eprintln!("{title}\n\n{text}\n\nWhen finished: /powerup done {id}");
+                        command_eprintln!("{title}\n\n{text}\n\nWhen finished: /powerup done {id}");
                     }
                 }
                 _ => anyhow::bail!("Usage: /powerup [TOPIC|read TOPIC|done TOPIC|reset]"),

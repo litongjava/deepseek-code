@@ -9,7 +9,7 @@ use deepseek_code_core::services::{
 use std::time::Duration;
 
 pub async fn run(session: &Session, argument: &str) -> Result<()> {
-    eprint!("{}", text(session, argument).await?);
+    crate::terminal::print_recorded(&text(session, argument).await?)?;
     Ok(())
 }
 

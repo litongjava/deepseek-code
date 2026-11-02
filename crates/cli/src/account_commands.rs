@@ -12,13 +12,13 @@ pub async fn run(paths: &RuntimePaths, command: &crate::args::AuthCommands) -> R
     match command {
         crate::args::AuthCommands::Login => {
             login_account(paths).await?;
-            eprintln!("Signed in. Start dcl to use the Anthropic account provider.");
+            command_eprintln!("Signed in. Start dcl to use the Anthropic account provider.");
         }
         crate::args::AuthCommands::Logout => {
             remove_account(paths).await?;
-            eprintln!("Signed out locally. Official CLI and browser sessions were not changed.");
+            command_eprintln!("Signed out locally. Official CLI and browser sessions were not changed.");
         }
-        crate::args::AuthCommands::Status => println!(
+        crate::args::AuthCommands::Status => command_println!(
             "{}",
             serde_json::to_string_pretty(&anthropic_auth::status(&paths.data_dir)?)?
         ),
@@ -28,9 +28,9 @@ pub async fn run(paths: &RuntimePaths, command: &crate::args::AuthCommands) -> R
 
 async fn login_account(paths: &RuntimePaths) -> Result<()> {
     let flow = anthropic_auth::begin_login().await?;
-    eprintln!("Authorize this Rust CLI in your browser. Callback expires in five minutes; Ctrl+C cancels.\n{}", flow.authorization_url);
+    command_eprintln!("Authorize this Rust CLI in your browser. Callback expires in five minutes; Ctrl+C cancels.\n{}", flow.authorization_url);
     if let Err(error) = anthropic_auth::open_browser(&flow.authorization_url) {
-        eprintln!("{error}. Open the URL above manually.");
+        command_eprintln!("{error}. Open the URL above manually.");
     }
     tokio::select! {
         result = flow.finish(&paths.data_dir) => { result?; },
@@ -70,7 +70,7 @@ pub async fn handle(
                 "Usage: /login [status]"
             );
             if argument.trim() == "status" {
-                println!(
+                command_println!(
                     "{}",
                     serde_json::to_string_pretty(&anthropic_auth::status(&paths.data_dir)?)?
                 );
@@ -87,7 +87,7 @@ pub async fn handle(
                     },
                 )
                 .await?;
-            eprintln!("Signed in to Anthropic for this application. Selected Claude Sonnet 4.6. Credentials are stored separately from the official CLI.");
+            command_eprintln!("Signed in to Anthropic for this application. Selected Claude Sonnet 4.6. Credentials are stored separately from the official CLI.");
         }
         "/logout" => {
             ensure!(argument.trim().is_empty(), "Usage: /logout");
@@ -117,7 +117,7 @@ pub async fn handle(
                         .await?;
                 }
             }
-            eprintln!("Signed out of this application's Anthropic account. Official CLI credentials were not changed. Browser/server-side sessions are not revoked.");
+            command_eprintln!("Signed out of this application's Anthropic account. Official CLI credentials were not changed. Browser/server-side sessions are not revoked.");
         }
         "/fast" => {
             let argument = argument.trim();
@@ -134,7 +134,7 @@ pub async fn handle(
                     ),
                     "Fast mode requires an Anthropic messages provider"
                 );
-                eprintln!("Checking Anthropic fast-mode account eligibility (extra usage billing may apply)…");
+                command_eprintln!("Checking Anthropic fast-mode account eligibility (extra usage billing may apply)…");
                 tokio::select! {
                     result = anthropic_auth::check_fast_eligibility(&selected.provider.api_key, &selected.provider.base_url, &selected.model.id) => result?,
                     _ = tokio::signal::ctrl_c() => anyhow::bail!("Fast-mode check cancelled; setting unchanged"),
@@ -144,7 +144,7 @@ pub async fn handle(
                 session.set_fast(false).await?;
             }
             let current = session.selected_provider().await?;
-            eprintln!("Fast mode: {} for {}. This is a session setting; service eligibility and rate limits still apply.", if current.model.fast { "on" } else { "off" }, current.model.id);
+            command_eprintln!("Fast mode: {} for {}. This is a session setting; service eligibility and rate limits still apply.", if current.model.fast { "on" } else { "off" }, current.model.id);
         }
         _ => return Ok(false),
     }

@@ -28,7 +28,7 @@ pub async fn handle(
             };
             let history = session.store.history(&session.id)?;
             let text = response(&history, number)?;
-            eprintln!("{}", copy_with_file(text)?);
+            command_eprintln!("{}", copy_with_file(text)?);
         }
         "/export" => {
             let history = session.store.history(&session.id)?;
@@ -49,13 +49,13 @@ pub async fn handle(
                         match crate::terminal::picker::text_input("Save to file:", &default)?.filter(|name| !name.is_empty()) {
                             Some(name) => name,
                             None => {
-                                eprintln!("  \u{23bf}  Export cancelled");
+                                command_eprintln!("  \u{23bf}  Export cancelled");
                                 return Ok(true);
                             }
                         }
                     }
                     None => {
-                        eprintln!("  \u{23bf}  Export cancelled");
+                        command_eprintln!("  \u{23bf}  Export cancelled");
                         return Ok(true);
                     }
                 }
@@ -64,16 +64,16 @@ pub async fn handle(
             };
             let argument = argument.as_str();
             if argument == "clipboard" {
-                eprintln!("{}", copy_with_file(&text)?);
+                command_eprintln!("{}", copy_with_file(&text)?);
             } else {
                 let path = Path::new(argument.trim_matches('"'));
                 export_file(path, &text)?;
-                eprintln!("Exported conversation to {}", path.display());
+                command_eprintln!("Exported conversation to {}", path.display());
             }
         }
         "/branch" => {
             let id = session.branch_saved(paths, argument).await?;
-            eprintln!("Switched to branch {id}; original conversation retained.");
+            command_eprintln!("Switched to branch {id}; original conversation retained.");
         }
         "/resume" => {
             if argument.is_empty() && crate::terminal::picker::available() {
@@ -121,7 +121,7 @@ pub async fn handle(
                         }
                         Picked::Key(..) => {}
                         Picked::Cancel => {
-                            eprintln!("  \u{23bf}  Resume cancelled");
+                            command_eprintln!("  \u{23bf}  Resume cancelled");
                             return Ok(true);
                         }
                     }
@@ -131,8 +131,8 @@ pub async fn handle(
                     .store
                     .db
                     .with_conn(conversation_repo::list_conversations)??;
-                println!("{}", serde_json::to_string_pretty(&sessions)?);
-                eprintln!("Use /resume ID to switch conversations.");
+                command_println!("{}", serde_json::to_string_pretty(&sessions)?);
+                command_eprintln!("Use /resume ID to switch conversations.");
             } else {
                 session.resume_saved(paths, argument).await?;
                 crate::repl::show_resumed(session, true)?;
@@ -146,24 +146,24 @@ pub async fn handle(
             if argument.is_empty() && session.permission_mode() != "plan" {
                 session.set_permission_mode("plan").await?;
                 let path = deepseek_code_core::services::plans::path(&paths.data_dir, &session.id)?;
-                eprintln!("Plan mode enabled. Plan file: {}. Claude will submit it for approval before implementation.", path.display());
+                command_eprintln!("Plan mode enabled. Plan file: {}. Claude will submit it for approval before implementation.", path.display());
             } else {
                 let path = deepseek_code_core::services::plans::path(&paths.data_dir, &session.id)?;
                 let plan = deepseek_code_core::services::plans::read(&paths.data_dir, &session.id)?;
                 if argument == "open" {
                     ensure!(plan.is_some(), "No plan written yet. Describe the task in plan mode first.");
                     crate::display_commands::edit_file(&path, "").await?;
-                    eprintln!("Edited plan: {}. Claude must request approval of the updated document.", path.display());
+                    command_eprintln!("Edited plan: {}. Claude must request approval of the updated document.", path.display());
                 } else if let Some(plan) = plan {
-                    println!("Current Plan\n{}\n\n{plan}", path.display());
+                    command_println!("Current Plan\n{}\n\n{plan}", path.display());
                 } else {
-                    eprintln!("No plan written yet. Plan file: {}. Describe the task in plan mode first.", path.display());
+                    command_eprintln!("No plan written yet. Plan file: {}. Describe the task in plan mode first.", path.display());
                 }
             }
         }
         "/terminal-setup" => {
             ensure!(argument.is_empty(), "Usage: /terminal-setup");
-            eprintln!("{}", terminal_setup());
+            command_eprintln!("{}", terminal_setup());
         }
         "/agents" => {
             // As in the reference CLI, subagents are chosen by asking for one;
@@ -177,13 +177,13 @@ pub async fn handle(
                 text.push_str(&format!("       \u{2022} {:<width$}{description}\n", agent.id));
             }
             text.push_str("     /list-agents shows the sessions running now.");
-            eprintln!("{text}");
+            command_eprintln!("{text}");
         }
         "/list-agents" => {
             if argument == "definitions" {
                 let context = crate::services::context(paths)?;
                 for agent in deepseek_code_core::services::agents::list(&context)? {
-                    println!("{}: {}", agent.id, agent.description);
+                    command_println!("{}: {}", agent.id, agent.description);
                 }
             } else {
                 let peers = peer_sessions(
@@ -204,8 +204,8 @@ pub async fn handle(
                             let runtime=deepseek_code_core::services::session_worker::runtime_status(&paths.data_dir,id).await;
                             peer["worker"]=serde_json::to_value(runtime)?;
                         }
-                        println!("{}", serde_json::to_string_pretty(&observed)?);
-                        eprintln!("Trusted source-project sessions, including worktrees. kind distinguishes teammate, team-lead, subagent and independent session; teammates also report team, teammate_name and member_status. receiver_active is an OS-locked model consumer; worker reports a bounded live probe. Saved alone does not mean running. /list-agents message SESSION_ID TEXT queues context; inbox/sent show delivery state, read MESSAGE_ID marks human read only. Idle recipients consume messages on their next explicit turn. /list-agents inbox legacy reads the old project mailbox.");
+                        command_println!("{}", serde_json::to_string_pretty(&observed)?);
+                        command_eprintln!("Trusted source-project sessions, including worktrees. kind distinguishes teammate, team-lead, subagent and independent session; teammates also report team, teammate_name and member_status. receiver_active is an OS-locked model consumer; worker reports a bounded live probe. Saved alone does not mean running. /list-agents message SESSION_ID TEXT queues context; inbox/sent show delivery state, read MESSAGE_ID marks human read only. Idle recipients consume messages on their next explicit turn. /list-agents inbox legacy reads the old project mailbox.");
                         None
                     }
                     "message" => {
@@ -216,8 +216,8 @@ pub async fn handle(
                     }
                     "inbox" if rest.trim()=="legacy" => {
                         let result=deepseek_code_core::tools::agent_messages::execute_for_session(serde_json::json!({"operation":"receive"}),&session.workspace.to_string_lossy(),&session.id)?;
-                        println!("{}",serde_json::to_string_pretty(&result)?);
-                        eprintln!("Legacy repository mailbox; these rows are not automatically injected into live context.");
+                        command_println!("{}",serde_json::to_string_pretty(&result)?);
+                        command_eprintln!("Legacy repository mailbox; these rows are not automatically injected into live context.");
                         None
                     }
                     "inbox" => {
@@ -232,7 +232,7 @@ pub async fn handle(
                         let id=rest.trim().strip_prefix("legacy ").unwrap().trim();
                         ensure!(!id.is_empty() && !id.contains(char::is_whitespace), "Usage: /list-agents read legacy MESSAGE_ID");
                         let result=deepseek_code_core::tools::agent_messages::execute_for_session(serde_json::json!({"operation":"mark_read","message_id":id}),&session.workspace.to_string_lossy(),&session.id)?;
-                        println!("{}",serde_json::to_string_pretty(&result)?);
+                        command_println!("{}",serde_json::to_string_pretty(&result)?);
                         None
                     }
                     "read" => {
@@ -245,9 +245,9 @@ pub async fn handle(
                     let result = deepseek_code_core::tools::agent_messages::execute_live(
                         &crate::services::context(paths)?, &session.id, request,
                     )?;
-                    println!("{}", serde_json::to_string_pretty(&result)?);
+                    command_println!("{}", serde_json::to_string_pretty(&result)?);
                     if verb == "message" {
-                        eprintln!("Queued durably. Active recipients receive it at the next safe model boundary; idle/offline recipients need their next explicit turn. context_committed means saved context, not proof of model processing. Check /list-agents sent.");
+                        command_eprintln!("Queued durably. Active recipients receive it at the next safe model boundary; idle/offline recipients need their next explicit turn. context_committed means saved context, not proof of model processing. Check /list-agents sent.");
                     }
                 }
             }
@@ -284,7 +284,7 @@ pub async fn plan_task(argument: &str, paths: &RuntimePaths, session: &mut Sessi
     }
     if session.permission_mode() == "plan" {
         handle("/plan", "show", paths, session).await?;
-        eprintln!("Already in plan mode; the description was not submitted. Send it as a normal message.");
+        command_eprintln!("Already in plan mode; the description was not submitted. Send it as a normal message.");
         return Ok(None);
     }
     handle("/plan", "", paths, session).await?;

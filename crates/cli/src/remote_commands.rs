@@ -69,7 +69,7 @@ impl Remote {
         if remote_host::host_address().is_some() {
             match remote_host::subscribe().await {
                 Ok(notices) => self.host_notices = Some(notices),
-                Err(error) => eprintln!("Remote Control: {error:#}"),
+                Err(error) => command_eprintln!("Remote Control: {error:#}"),
             }
         }
     }
@@ -191,7 +191,7 @@ impl Remote {
         let hosted = remote_host::host_address().is_some();
         match words.as_slice() {
             ["listen", options @ ..] if hosted => {
-                eprintln!("{}", remote_host::control("listen", options).await?);
+                command_eprintln!("{}", remote_host::control("listen", options).await?);
                 return Ok(());
             }
             ["listen", options @ ..] => {
@@ -201,29 +201,29 @@ impl Remote {
                 );
                 let options = remote_host::Options::parse(options)?;
                 let listening = remote_host::Listening::bind(&options).await?;
-                eprintln!("Starting Remote Control listener…");
+                command_eprintln!("Starting Remote Control listener…");
                 self.handoff = Some(listening);
                 return Ok(());
             }
             ["status"] if hosted && self.bridge.is_none() => {
-                eprintln!("{}", remote_host::control("status", &[]).await?);
+                command_eprintln!("{}", remote_host::control("status", &[]).await?);
                 return Ok(());
             }
             ["disconnect"] if hosted && self.bridge.is_none() => {
-                eprintln!("{}", remote_host::control("stop", &[]).await?);
+                command_eprintln!("{}", remote_host::control("stop", &[]).await?);
                 return Ok(());
             }
             ["status"] => {
                 match &self.bridge {
-                    Some(bridge) => eprintln!(
+                    Some(bridge) => command_eprintln!(
                         "Remote Control {}: {}",
                         describe(&bridge.status()),
                         bridge.url
                     ),
-                    None => eprintln!("Remote Control is not connected."),
+                    None => command_eprintln!("Remote Control is not connected."),
                 }
                 let settings = remote_control::load_settings(&paths.data_dir)?;
-                eprintln!(
+                command_eprintln!(
                     "Saved server: {}",
                     settings.server_url.as_deref().unwrap_or("(none)")
                 );
@@ -235,7 +235,7 @@ impl Remote {
             }
             ["server"] => {
                 let settings = remote_control::load_settings(&paths.data_dir)?;
-                eprintln!(
+                command_eprintln!(
                     "Remote Control server: {}",
                     settings.server_url.as_deref().unwrap_or("(none)")
                 );
@@ -245,7 +245,7 @@ impl Remote {
                 let mut settings = remote_control::load_settings(&paths.data_dir)?;
                 settings.server_url = None;
                 remote_control::save_settings(&paths.data_dir, &settings)?;
-                eprintln!("Remote Control server cleared.");
+                command_eprintln!("Remote Control server cleared.");
                 return Ok(());
             }
             ["server", url] => {
@@ -257,7 +257,7 @@ impl Remote {
                         .to_owned(),
                 );
                 remote_control::save_settings(&paths.data_dir, &settings)?;
-                eprintln!(
+                command_eprintln!(
                     "Remote Control server saved: {}",
                     settings.server_url.unwrap_or_default()
                 );
@@ -266,7 +266,7 @@ impl Remote {
             _ => {}
         }
         if let Some(bridge) = &self.bridge {
-            eprintln!(
+            command_eprintln!(
                 "Remote Control {}: {}",
                 describe(&bridge.status()),
                 bridge.url
@@ -282,7 +282,7 @@ impl Remote {
             if answer.is_some_and(|answer| matches!(answer.trim(), "y" | "Y" | "yes")) {
                 return self.disconnect().await;
             }
-            eprintln!("Remote Control remains connected.");
+            command_eprintln!("Remote Control remains connected.");
             return Ok(());
         }
         let mut server = None;
@@ -303,7 +303,7 @@ impl Remote {
         let endpoint = match Endpoint::resolve(&paths.data_dir, server) {
             Ok(endpoint) => endpoint,
             Err(error) if words.is_empty() => {
-                eprintln!("Remote Control: {error}\nShare this terminal directly: /remote-control listen\nConnect on another machine: dcl --rc connect HOST:30086 --token\n{USAGE}");
+                command_eprintln!("Remote Control: {error}\nShare this terminal directly: /remote-control listen\nConnect on another machine: dcl --rc connect HOST:30086 --token\n{USAGE}");
                 return Ok(());
             }
             Err(error) => return Err(error),
@@ -313,13 +313,13 @@ impl Remote {
             settings.server_url = Some(endpoint.base_url.clone());
             remote_control::save_settings(&paths.data_dir, &settings)?;
         }
-        eprintln!("Remote Control connecting to {}…", endpoint.base_url);
+        command_eprintln!("Remote Control connecting to {}…", endpoint.base_url);
         let registration = registration(session, &name.join(" "))?;
         let bridge = tokio::select! {
             bridge = Bridge::connect(endpoint, registration, Timing::default()) => bridge?,
             _ = tokio::signal::ctrl_c() => anyhow::bail!("Remote Control connection cancelled"),
         };
-        eprintln!(
+        command_eprintln!(
             "Remote Control active: {}\nUse /remote-control again to see the link or disconnect.",
             bridge.url
         );
@@ -337,7 +337,7 @@ impl Remote {
         self.deferred.clear();
         self.remote_prompts.clear();
         let result = bridge.disconnect().await;
-        eprintln!("Remote Control disconnected.");
+        command_eprintln!("Remote Control disconnected.");
         result
     }
 

@@ -92,15 +92,15 @@ pub async fn handle(session: &Session, argument: &str) -> Result<bool> {
     match words.first().map(String::as_str).unwrap_or("status") {
         "status" => {
             ensure!(words.len() <= 1, "Usage: /ide status");
-            println!("{}", serde_json::to_string_pretty(&session.ide.status().await)?);
-            println!("Language servers: {}", serde_json::to_string_pretty(&deepseek_code_core::tools::lsp_status(&session.workspace.to_string_lossy()).await?)?);
-            eprintln!("/ide list | connect [PORT] | disconnect | tools | selection | open FILE [LINE] | diagnostics [FILE]\n/ide lsp FILE OPERATION [LINE CHARACTER] (1-based)");
+            command_println!("{}", serde_json::to_string_pretty(&session.ide.status().await)?);
+            command_println!("Language servers: {}", serde_json::to_string_pretty(&deepseek_code_core::tools::lsp_status(&session.workspace.to_string_lossy()).await?)?);
+            command_eprintln!("/ide list | connect [PORT] | disconnect | tools | selection | open FILE [LINE] | diagnostics [FILE]\n/ide lsp FILE OPERATION [LINE CHARACTER] (1-based)");
         },
         "list" => {
             ensure!(words.len() == 1, "Usage: /ide list");
             let editors = ide::discover(&ide::lock_directory()?, &session.workspace)?;
-            if editors.is_empty() { eprintln!("No editor extension lockfiles found in {}", ide::lock_directory()?.display()); }
-            for editor in editors { eprintln!("{}  {}  {}  {}",editor.port,editor.name,editor.transport,if editor.matches_workspace {"workspace matches"} else {"different workspace"}); }
+            if editors.is_empty() { command_eprintln!("No editor extension lockfiles found in {}", ide::lock_directory()?.display()); }
+            for editor in editors { command_eprintln!("{}  {}  {}  {}",editor.port,editor.name,editor.transport,if editor.matches_workspace {"workspace matches"} else {"different workspace"}); }
         },
         "connect" => {
             ensure!(words.len() <= 2, "Usage: /ide connect [PORT]");
@@ -109,18 +109,18 @@ pub async fn handle(session: &Session, argument: &str) -> Result<bool> {
             let state = session.ide.status().await;
             let editor = state.editor.context("IDE did not connect")?;
             context.save_setting(&key(session), &Some(Choice {port:editor.port,workspace:session.workspace.canonicalize()?}))?;
-            eprintln!("Connected to {} on port {} ({} tools).",editor.name,editor.port,session.ide.tools().await.len());
+            command_eprintln!("Connected to {} on port {} ({} tools).",editor.name,editor.port,session.ide.tools().await.len());
         },
         "disconnect" => {
             ensure!(words.len() == 1, "Usage: /ide disconnect");
             context.save_setting(&key(session), &Option::<Choice>::None)?;
             session.ide.disconnect().await;
-            eprintln!("IDE disconnected.");
+            command_eprintln!("IDE disconnected.");
         },
         "tools" => {
             ensure!(words.len() == 1, "Usage: /ide tools");
             restore(session).await?;
-            println!("{}",serde_json::to_string_pretty(&session.ide.tools().await)?);
+            command_println!("{}",serde_json::to_string_pretty(&session.ide.tools().await)?);
         },
         "selection" => {
             ensure!(words.len() == 1, "Usage: /ide selection");
@@ -129,7 +129,7 @@ pub async fn handle(session: &Session, argument: &str) -> Result<bool> {
             let value = if tools.iter().any(|t|t.name == "mcp__ide__getCurrentSelection") {
                 session.ide.call_tool("mcp__ide__getCurrentSelection",serde_json::json!({})).await?
             } else { session.ide.status().await.selection.unwrap_or(serde_json::Value::Null) };
-            println!("{}",serde_json::to_string_pretty(&value)?);
+            command_println!("{}",serde_json::to_string_pretty(&value)?);
         },
         "open" | "diagnostics" => {
             let open = words[0] == "open";
@@ -155,7 +155,7 @@ pub async fn handle(session: &Session, argument: &str) -> Result<bool> {
                 ensure!(definition.input_schema["properties"].get("startLine").is_some(),"This editor's openFile tool does not support line numbers; use /ide open FILE");
                 params["startLine"] = serde_json::json!(line);
             }
-            println!("{}",serde_json::to_string_pretty(&session.ide.call_tool(tool,params).await?)?);
+            command_println!("{}",serde_json::to_string_pretty(&session.ide.call_tool(tool,params).await?)?);
         },
         _ => anyhow::bail!("Usage: /ide [status|list|connect [PORT]|disconnect|tools|selection|open FILE [LINE]|diagnostics [FILE]|lsp FILE OPERATION [LINE CHARACTER]]"),
     }
@@ -172,7 +172,7 @@ async fn pick(session: &Session, context: &deepseek_code_core::services::Service
         .filter(|editor| editor.matches_workspace)
         .collect();
     if editors.is_empty() {
-        eprintln!("  \u{23bf}  No available IDEs detected. Open this project in an editor whose extension dcl can connect to (see /ide list).");
+        command_eprintln!("  \u{23bf}  No available IDEs detected. Open this project in an editor whose extension dcl can connect to (see /ide list).");
         return Ok(());
     }
     let connected = session.ide.status().await.editor.map(|editor| editor.port);
@@ -199,12 +199,12 @@ async fn pick(session: &Session, context: &deepseek_code_core::services::Service
         Some(editor) => {
             connect(session, Some(editor.port)).await?;
             context.save_setting(&key(session), &Some(Choice { port: editor.port, workspace: session.workspace.canonicalize()? }))?;
-            eprintln!("  \u{23bf}  Connected to {}.", editor.name);
+            command_eprintln!("  \u{23bf}  Connected to {}.", editor.name);
         }
         None => {
             context.save_setting(&key(session), &Option::<Choice>::None)?;
             session.ide.disconnect().await;
-            eprintln!("  \u{23bf}  Disconnected from IDE.");
+            command_eprintln!("  \u{23bf}  Disconnected from IDE.");
         }
     }
     Ok(())

@@ -95,14 +95,14 @@ pub async fn handle(
                 _ => anyhow::bail!("Usage: /debug [on|off|status]"),
             }
             match crate::debug_logging::destination() {
-                Some(path) => eprintln!("Debug logging: {}", path.display()),
-                None => eprintln!("Debug logging is off."),
+                Some(path) => command_eprintln!("Debug logging: {}", path.display()),
+                None => command_eprintln!("Debug logging is off."),
             }
         }
         "/tui" => {
             let mut settings = load(session)?;
             if argument.is_empty() {
-                eprintln!(
+                command_eprintln!(
                     "Terminal renderer: {}. /tui default|fullscreen",
                     settings.tui
                 );
@@ -125,7 +125,7 @@ pub async fn handle(
             crate::keybindings::ensure_file(&path)?;
             edit_file(&path, "").await?;
             crate::keybindings::load(&path)?;
-            eprintln!("Keybindings validated; they take effect at the next prompt.");
+            command_eprintln!("Keybindings validated; they take effect at the next prompt.");
         }
         "/ide" => {
             if crate::ide_commands::handle(session, argument).await? { return Ok(true); }
@@ -137,11 +137,11 @@ pub async fn handle(
             )?;
             let words = split_arguments(argument)?;
             if words.is_empty() || words == ["status"] {
-                println!(
+                command_println!(
                     "{}",
                     serde_json::to_string_pretty(&deepseek_code_core::tools::lsp_status(&root).await?)?
                 );
-                eprintln!("LSP language services. Use /ide lsp FILE OPERATION [LINE CHARACTER] (1-based).");
+                command_eprintln!("LSP language services. Use /ide lsp FILE OPERATION [LINE CHARACTER] (1-based).");
             } else {
                 ensure!(
                     words.first().is_some_and(|s| s == "lsp")
@@ -160,7 +160,7 @@ pub async fn handle(
                     result = deepseek_code_core::tools::execute_tool_async("LSP", params, &root) => result?,
                     _ = tokio::signal::ctrl_c() => anyhow::bail!("LSP query cancelled"),
                 };
-                println!("{}", serde_json::to_string_pretty(&result)?);
+                command_println!("{}", serde_json::to_string_pretty(&result)?);
             }
         }
         "/theme" | "/color" | "/focus" | "/output-style" | "/statusline" => {
@@ -168,7 +168,7 @@ pub async fn handle(
             match command {
                 "/theme" => {
                     if argument.is_empty() {
-                        eprintln!("Theme: {}. Available: dark, light, dark-daltonized, light-daltonized, dark-ansi, light-ansi", settings.theme);
+                        command_eprintln!("Theme: {}. Available: dark, light, dark-daltonized, light-daltonized, dark-ansi, light-ansi", settings.theme);
                         return Ok(true);
                     }
                     ensure!(
@@ -187,7 +187,7 @@ pub async fn handle(
                 }
                 "/color" => {
                     if argument.is_empty() {
-                        eprintln!("Prompt color: {}. Available: default, red, orange, yellow, green, blue, purple, pink, cyan", settings.color);
+                        command_eprintln!("Prompt color: {}. Available: default, red, orange, yellow, green, blue, purple, pink, cyan", settings.color);
                         return Ok(true);
                     }
                     ensure!(
@@ -210,7 +210,7 @@ pub async fn handle(
                 }
                 "/output-style" => {
                     if argument.is_empty() {
-                        eprintln!(
+                        command_eprintln!(
                             "Output style: {}\n  default\n  explanatory\n  learning",
                             settings.output_style
                         );
@@ -221,7 +221,7 @@ pub async fn handle(
                                 .flatten()
                                 .filter(|e| e.path().extension().is_some_and(|s| s == "md"))
                             {
-                                eprintln!(
+                                command_eprintln!(
                                     "  {}",
                                     entry.path().file_stem().unwrap().to_string_lossy()
                                 );
@@ -254,7 +254,7 @@ pub async fn handle(
                 _ => unreachable!(),
             }
             save(session, &settings)?;
-            eprintln!(
+            command_eprintln!(
                 "{} updated for this session.",
                 command.trim_start_matches('/')
             );
@@ -282,7 +282,7 @@ pub async fn handle(
                 .await?;
             }
             save(session, &settings)?;
-            eprintln!("Diff panel {}. Ctrl+O expands or collapses; PgUp/PgDn scrolls. /diff toggles the panel.", if settings.diff_panel { "on" } else { "off" });
+            command_eprintln!("Diff panel {}. Ctrl+O expands or collapses; PgUp/PgDn scrolls. /diff toggles the panel.", if settings.diff_panel { "on" } else { "off" });
         }
         // /cost is the reference CLI's name for the same session cost view.
         "/usage" | "/cost" => {
@@ -296,7 +296,7 @@ pub async fn handle(
                     Err(error)=>value["account_plan_error"]=json!(error.to_string()),
                 }
             }
-            println!("{}", serde_json::to_string_pretty(&value)?);
+            command_println!("{}", serde_json::to_string_pretty(&value)?);
         }
         "/memory" => {
             let paths_by_scope = memory_paths(&paths.data_dir, &session.workspace);
@@ -330,34 +330,34 @@ pub async fn handle(
                             Ok(metadata) => format!("{} bytes", metadata.len()),
                             Err(_) => "missing".into(),
                         };
-                        eprintln!("{scope:7} {} [{status}]", path.display());
+                        command_eprintln!("{scope:7} {} [{status}]", path.display());
                     }
-                    eprintln!("Use /memory user|project|local to open a file (created if missing); /memory show prints loaded project instructions.");
+                    command_eprintln!("Use /memory user|project|local to open a file (created if missing); /memory show prints loaded project instructions.");
                 }
                 "show" => {
                     let instructions = deepseek_code_core::project_instructions::render(
                         &deepseek_code_core::project_instructions::load_all(Some(&paths.data_dir), &session.workspace)?,
                     );
                     if instructions.is_empty() {
-                        eprintln!("No project instructions found. /memory project opens the file.");
+                        command_eprintln!("No project instructions found. /memory project opens the file.");
                     } else {
-                        println!("{instructions}");
+                        command_println!("{instructions}");
                     }
                 }
                 "user" => {
                     let (_, path) = &paths_by_scope[0];
                     edit_file(path, "# User instructions\n\n").await?;
-                    eprintln!("Instructions will be loaded on the next session.");
+                    command_eprintln!("Instructions will be loaded on the next session.");
                 }
                 "project" | "edit" => {
                     let (_, path) = &paths_by_scope[1];
                     edit_file(path, "# Project instructions\n\n").await?;
-                    eprintln!("Instructions will be loaded on the next turn.");
+                    command_eprintln!("Instructions will be loaded on the next turn.");
                 }
                 "local" => {
                     let (_, path) = &paths_by_scope[2];
                     edit_file(path, "# Local project instructions\n\n").await?;
-                    eprintln!("Instructions will be loaded on the next turn.");
+                    command_eprintln!("Instructions will be loaded on the next turn.");
                 }
                 _ => anyhow::bail!("Usage: /memory [list|show|user|project|local|edit]"),
             }
@@ -385,7 +385,7 @@ pub async fn handle(
             session.reload_plugins().await?;
             let context = crate::services::context(paths)?;
             let plugins = deepseek_code_core::services::plugins::list(&context)?;
-            eprintln!("Reloaded {} enabled plugins, including commands, hooks, MCP servers and language services.", plugins.iter().filter(|plugin| plugin.enabled).count());
+            command_eprintln!("Reloaded {} enabled plugins, including commands, hooks, MCP servers and language services.", plugins.iter().filter(|plugin| plugin.enabled).count());
         }
         _ => return Ok(false),
     }
