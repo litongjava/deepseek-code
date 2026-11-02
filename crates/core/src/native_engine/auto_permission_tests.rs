@@ -256,10 +256,11 @@ async fn auto_discards_allow_after_rule_mode_or_config_changes_and_cancellation(
 }
 
 #[tokio::test]
-async fn auto_failure_fallback_requires_explicit_manual_config_and_interactive_host() {
+async fn auto_failure_fallback_asks_interactive_hosts_even_with_legacy_deny_policy() {
     use crate::permissions::auto_config::FailurePolicy;
     for manual in [false, true] {
         for interactive in [false, true] {
+          for failure in ["transport", "invalid", "timeout", "configuration"] {
             let root = tempfile::tempdir().unwrap();
             let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
             let endpoint = format!("http://{}", listener.local_addr().unwrap());
@@ -271,7 +272,10 @@ async fn auto_failure_fallback_requires_explicit_manual_config_and_interactive_h
                     let requests = requests.clone();
                     async move {
                         requests.fetch_add(1, Ordering::SeqCst);
-                        axum::http::StatusCode::SERVICE_UNAVAILABLE
+                        if failure == "timeout" {
+                            tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+                        }
+                        (if failure == "transport" { axum::http::StatusCode::SERVICE_UNAVAILABLE } else { axum::http::StatusCode::OK }, Json(response("invalid")))
                     }
                 }),
             );
@@ -282,10 +286,12 @@ async fn auto_failure_fallback_requires_explicit_manual_config_and_interactive_h
             let context =
                 crate::services::session_messages::context(&root.path().join("data")).unwrap();
             let mut config = auto_config::load(&context).unwrap();
-            if manual {
-                config.failure_policy = FailurePolicy::Manual;
-                auto_config::save(&context, &config).unwrap();
+            config.failure_policy = if manual { FailurePolicy::Manual } else { FailurePolicy::Deny };
+            config.timeout_ms = 100;
+            if failure == "configuration" {
+                config.classifier = Some(ClassifierSelection::Named { provider_id: "missing".into(), model_id: "missing".into() });
             }
+            auto_config::save(&context, &config).unwrap();
             let tool = crate::permissions::PermissionContext {
                 tool_name: "Bash".into(),
                 tool_input: json!({"command":"echo fixture","shell":"powershell"}),
@@ -307,10 +313,11 @@ async fn auto_failure_fallback_requires_explicit_manual_config_and_interactive_h
                     authorization.result,
                     crate::permissions::PermissionResult::RequiresConfirmation(_)
                 ),
-                manual && interactive
+                interactive
             );
-            assert_eq!(calls.load(Ordering::SeqCst), 1);
-            assert_eq!(manager.auto_stats("auto-session").unknown_usage_requests, 1);
+            let attempts = if failure == "configuration" { 0 } else { 1 };
+            assert_eq!(calls.load(Ordering::SeqCst), attempts);
+            assert_eq!(manager.auto_stats("auto-session").requests, attempts as u64);
             let mut oversized = tool.clone();
             oversized.tool_input = json!({"command": "x".repeat(40_000)});
             let limited = crate::native_engine::auto_permissions::authorize(
@@ -324,23 +331,20 @@ async fn auto_failure_fallback_requires_explicit_manual_config_and_interactive_h
             .await;
             let message = match limited.result {
                 crate::permissions::PermissionResult::RequiresConfirmation(message) => {
-                    assert!(manual && interactive);
+                    assert!(interactive);
                     assert!(message.contains("requesting manual permission"));
                     message
                 }
                 crate::permissions::PermissionResult::Denied(message) => {
-                    assert!(!manual || !interactive);
-                    assert!(message.contains(if manual {
-                        "no manual approval host"
-                    } else {
-                        "failure_policy=deny"
-                    }));
+                    assert!(!interactive);
+                    assert!(message.contains("no manual approval host"));
                     message
                 }
                 _ => panic!("Oversized classifier input must never grant permission"),
             };
-            assert!(message.contains("InputLimit"));
-            assert_eq!(calls.load(Ordering::SeqCst), 1);
+            assert!(message.contains(if failure == "configuration" { "configuration" } else { "InputLimit" }));
+            assert_eq!(manager.auto_stats("auto-session").denied_total, 0);
+            assert_eq!(calls.load(Ordering::SeqCst), attempts);
             manager.set_session_rules(
                 "auto-session",
                 HashMap::from([("Bash".into(), PermissionAction::Confirm)]),
@@ -360,10 +364,11 @@ async fn auto_failure_fallback_requires_explicit_manual_config_and_interactive_h
             ));
             assert_eq!(
                 calls.load(Ordering::SeqCst),
-                1,
+                attempts,
                 "explicit asks must never invoke classifier"
             );
             server.abort();
+          }
         }
     }
 }
@@ -440,6 +445,6 @@ async fn auto_input_limit_never_counts_a_network_attempt() {
     let stats = manager.auto_stats("auto-session");
     assert_eq!(stats.requests, 0);
     assert_eq!(stats.unknown_usage_requests, 0);
-    assert_eq!(stats.denied_total, 1);
+    assert_eq!(stats.denied_total, 0);
     assert!(!root.path().join("too-large.txt").exists());
 }

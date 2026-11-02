@@ -32,8 +32,8 @@ pub enum ClassifierSelection {
 #[derive(Clone, Copy, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum FailurePolicy {
-    #[default]
     Deny,
+    #[default]
     Manual,
 }
 
@@ -54,7 +54,7 @@ impl Default for AutoConfig {
             classifier: None,
             timeout_ms: 15_000,
             max_input_tokens: 8192,
-            failure_policy: FailurePolicy::Deny,
+            failure_policy: FailurePolicy::Manual,
         }
     }
 }
@@ -175,6 +175,6 @@ mod tests {
         }
         .validate()
         .is_err());
-        assert_eq!(AutoConfig::default().failure_policy, FailurePolicy::Deny);
+        assert_eq!(AutoConfig::default().failure_policy, FailurePolicy::Manual);
     }
 }

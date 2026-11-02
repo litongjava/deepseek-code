@@ -215,9 +215,17 @@ pub async fn authorize(
     messages: &[Value],
     interactive: bool,
 ) -> AutoAuthorization {
-    use crate::permissions::auto_config::FailurePolicy;
     use crate::permissions::{PermissionMode, PermissionResult};
     let denied = |message: &str| PermissionResult::Denied(message.into());
+    // An unavailable classifier is not a denial. Interactive hosts retain the
+    // user's final decision, including for configurations saved with old defaults.
+    let fallback = |message: &str| {
+        if interactive {
+            PermissionResult::RequiresConfirmation(format!("{message}; requesting manual permission"))
+        } else {
+            denied(&format!("{message}; action denied because no manual approval host is available"))
+        }
+    };
     let Some((decision, expected)) = manager.evaluate_stable(tool) else {
         return AutoAuthorization::plain(
             denied("Permission policy changed repeatedly; retry the action"),
@@ -229,21 +237,14 @@ pub async fn authorize(
     }
     let (config, provider) = match configured(context, current) {
         Ok(config) => config,
-        Err(_) => return AutoAuthorization::plain(denied("Auto classifier configuration or selected provider is unavailable; review /permissions auto-config"), None),
-    };
-    let fallback = |message: &str| {
-        if interactive && config.failure_policy == FailurePolicy::Manual {
-            PermissionResult::RequiresConfirmation(message.into())
-        } else {
-            denied(message)
-        }
+        Err(_) => return AutoAuthorization::plain(fallback("Auto classifier configuration or selected provider is unavailable; review /permissions auto-config"), None),
     };
     // Protocol role=user also carries peer messages, summaries and tool data.
     // Positive persisted provenance is the only source of user authorization.
     let mut authorized_messages = match crate::services::permission_authority::history(&context.db, &tool.conversation_id, config.max_input_tokens as usize) {
         Ok(history) if !history.is_empty() => history,
         Ok(_) => return AutoAuthorization::plain(denied("No verified user authorization is recorded for this session; provide a new explicit user request before using Auto"),None),
-        Err(error) => return AutoAuthorization::plain(denied(&format!("Verified user authorization could not be loaded: {error}")),None),
+        Err(error) => return AutoAuthorization::plain(fallback(&format!("Verified user authorization could not be loaded: {error}")),None),
     };
     let expected_authority = authorized_messages.clone();
     authorized_messages.extend(
@@ -269,12 +270,12 @@ pub async fn authorize(
             },
         )
         .await;
-    let allowed = outcome
+    let rejected = outcome
         .verdict
         .as_ref()
-        .is_ok_and(|v| v.decision == Decision::Allow);
+        .is_ok_and(|v| v.decision == Decision::Deny);
     let stats = manager.update_auto_stats(&tool.conversation_id, |stats| {
-        if !allowed {
+        if rejected {
             stats.denied_consecutive = stats.denied_consecutive.saturating_add(1);
             stats.denied_total = stats.denied_total.saturating_add(1);
         }
@@ -334,15 +335,8 @@ pub async fn authorize(
             verdict.reason_code
         )),
         Err(failure) => {
-            let action = if config.failure_policy == FailurePolicy::Deny {
-                "action denied by failure_policy=deny"
-            } else if interactive {
-                "requesting manual permission"
-            } else {
-                "action denied because no manual approval host is available"
-            };
             fallback(&format!(
-                "Auto classifier unavailable ({failure:?}); {action}"
+                "Auto classifier unavailable ({failure:?})"
             ))
         }
     };
