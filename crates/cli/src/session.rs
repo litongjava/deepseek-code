@@ -1004,6 +1004,8 @@ impl Session {
                             },
                             crate::terminal::live::Action::Submit(prompt) => {
                                 if let Some(message) = crate::session_commands::live_goal_command(self, &prompt)? { progress.notice(&message); }
+                                // Answered here so status never waits for a long tool call.
+                                else if let Some(message) = crate::session_commands::live_inspection(self, &prompt).await { progress.notice(&message); }
                                 else if queues_mid_turn(&prompt) {
                                     // As in the reference CLI the model reads it after its next
                                     // tool results, or as the next prompt.
@@ -1012,7 +1014,10 @@ impl Session {
                                     pending_inputs.push(prompt);
                                     progress.queued(pending_inputs.clone());
                                 }
-                                else if let Some(reader)=input.as_mut() { reader.queue_prompt(prompt); }
+                                else {
+                                    if let Some(notice) = crate::session_commands::queued_notice(&prompt) { progress.notice(&notice); }
+                                    if let Some(reader)=input.as_mut() { reader.queue_prompt(prompt); }
+                                }
                             },
                             crate::terminal::live::Action::BackgroundShell | crate::terminal::live::Action::SendNow => {
                                 deepseek_code_core::tools::background_shell::request_background(&self.paths.data_dir, &self.id)?;

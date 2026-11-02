@@ -557,6 +557,9 @@ async fn observe(
                         if jobs::get(root, id)?.session_id == session.id {
                             if let Some(message) = crate::session_commands::live_goal_command(session, &prompt)? {
                                 display.notice(&message);
+                            } else if let Some(message) = crate::session_commands::live_inspection(session, &prompt).await {
+                                // Answered here so status never waits for a long tool call.
+                                display.notice(&message);
                             } else {
                                 if let Some(goal) = deepseek_code_core::services::session_goals::active(&session.store.db, &session.id)?.filter(|g|g.state == "waiting") {
                                     deepseek_code_core::services::session_goals::pause(&session.store.db, &session.id, &goal.id, "New user input interrupted the retry delay")?;
@@ -571,6 +574,9 @@ async fn observe(
                                     queued_inputs.push(prompt);
                                     display.queued(queued_inputs.clone());
                                 } else {
+                                    if let Some(notice) = crate::session_commands::queued_notice(&prompt) {
+                                        display.notice(&notice);
+                                    }
                                     restore(input, Action::Submit(prompt));
                                 }
                                 if jobs::get(root, id)?.status == "completed" { return Ok(false); }

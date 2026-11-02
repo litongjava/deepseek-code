@@ -894,8 +894,13 @@ impl State {
             let _ = actions.send(Action::Submit(text));
             return None;
         }
+        // Status reads state only, so it answers now instead of after the turn.
+        if crate::session_commands::is_live_inspection(&text) {
+            let _ = actions.send(Action::Submit(text));
+            return None;
+        }
         if text.trim().starts_with('/') && !(self.goal_proposal.is_some() && self.activity.starts_with("Task complete")) {
-            return Some("While working, use /btw QUESTION or type a prompt to queue; other commands are available after completion.".into());
+            return Some("While working, use /btw QUESTION, /status or type a prompt to queue; other commands are available after completion.".into());
         }
         let _ = actions.send(Action::Submit(text.clone()));
         // Plain text waits under the work until the model reads it.
@@ -3059,6 +3064,20 @@ mod tests {
         state.submit(&send);
         assert!(receive.try_recv().is_err());
     }
+    #[test]
+    fn status_answers_during_a_turn_while_other_commands_wait() {
+        let mut state = State::new("ask".into());
+        let (send, mut receive) = async_mpsc::unbounded_channel();
+        for prompt in ["/status", "/status --check"] {
+            state.draft.insert(prompt);
+            assert!(state.submit(&send).is_none());
+            assert!(matches!(receive.try_recv().unwrap(), Action::Submit(text) if text == prompt));
+        }
+        state.draft.insert("/cost");
+        assert!(state.submit(&send).is_some());
+        assert!(receive.try_recv().is_err());
+    }
+
     #[test]
     fn live_goal_controls_reach_owner_without_accepting_other_slash_commands() {
         let mut state = State::new("ask".into());

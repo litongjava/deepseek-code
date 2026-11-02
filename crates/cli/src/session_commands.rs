@@ -414,6 +414,41 @@ pub fn live_goal_command(session: &Session, prompt: &str) -> Result<Option<Strin
     Ok(None)
 }
 
+/// Read-only commands answered while a turn runs, so they never wait behind
+/// the tool call in progress. `--check` is left out: its request would stall
+/// the turn's output.
+pub(crate) fn is_live_inspection(line: &str) -> bool {
+    matches!(line.trim(), "/status" | "/status --check")
+}
+
+/// The answer for `is_live_inspection`, or None for every other command.
+pub async fn live_inspection(session: &Session, prompt: &str) -> Option<String> {
+    if !is_live_inspection(prompt) {
+        return None;
+    }
+    if prompt.trim().ends_with("--check") {
+        return Some(
+            "The connection check would stall this turn; /status shows the current state now.".into(),
+        );
+    }
+    Some(match crate::status_commands::text(session, "").await {
+        Ok(text) => text,
+        Err(error) => format!("Status: {error:#}"),
+    })
+}
+
+/// A command that was queued for the next prompt says so instead of looking
+/// ignored.
+pub(crate) fn queued_notice(prompt: &str) -> Option<String> {
+    let prompt = prompt.trim();
+    (prompt.starts_with('/') || prompt.starts_with('!')).then(|| {
+        format!(
+            "{} queued; it runs once this turn finishes.",
+            prompt.split_whitespace().next().unwrap_or(prompt)
+        )
+    })
+}
+
 pub fn migrate_goal(session: &Session) -> Result<()> {
     let mut settings = load(&session.store.db, &session.id)?;
     if let Some(goal) = settings.goal.take() {
@@ -810,6 +845,35 @@ pub async fn prepare_turn(session: &Session, context_window: Option<u32>) -> Res
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn only_status_answers_while_a_turn_runs() {
+        assert!(is_live_inspection("/status"));
+        assert!(is_live_inspection("  /status  "));
+        assert!(is_live_inspection("/status --check"));
+        for queued in [
+            "/status line",
+            "/model",
+            "/cost",
+            "status",
+            "",
+        ] {
+            assert!(!is_live_inspection(queued), "{queued}");
+        }
+    }
+
+    #[test]
+    fn queued_commands_and_shell_input_say_so_but_plain_text_does_not() {
+        assert_eq!(
+            queued_notice("/model sonnet").as_deref(),
+            Some("/model queued; it runs once this turn finishes.")
+        );
+        assert_eq!(
+            queued_notice("  !ls  ").as_deref(),
+            Some("!ls queued; it runs once this turn finishes.")
+        );
+        assert_eq!(queued_notice("fix the tests").as_deref(), None);
+    }
 
     #[test]
     fn autocompact_defaults_to_the_reference_threshold_until_turned_off() {
