@@ -29,6 +29,8 @@ pub(super) struct Review {
 struct View {
     review: Review,
     top: usize,
+    sidebar: Option<usize>,
+    dragging_divider: bool,
 }
 
 impl View {
@@ -40,10 +42,68 @@ impl View {
     }
 
     fn layout(&self, width: usize, height: usize) -> (usize, usize, usize) {
-        let sidebar = (width / 3).clamp(12, 38).min(width.saturating_sub(12));
+        let sidebar = self
+            .sidebar
+            .unwrap_or((width / 3).clamp(12, 38))
+            .max(12)
+            .min(width.saturating_sub(12));
         let page = height.saturating_sub(3).max(1);
         let first = self.review.selected.saturating_sub(page.saturating_sub(1));
         (sidebar, page, first)
+    }
+
+    fn divider(
+        &mut self,
+        mouse: crossterm::event::MouseEvent,
+        width: usize,
+        height: usize,
+    ) -> bool {
+        let (sidebar, page, _) = self.layout(width, height);
+        match mouse.kind {
+            MouseEventKind::Down(MouseButton::Left)
+                if mouse.column as usize >= sidebar
+                    && mouse.column as usize <= sidebar + 2
+                    && mouse.row >= 2
+                    && (mouse.row as usize) < page + 2 =>
+            {
+                self.dragging_divider = true;
+                true
+            }
+            MouseEventKind::Drag(MouseButton::Left) | MouseEventKind::Up(MouseButton::Left)
+                if self.dragging_divider =>
+            {
+                self.sidebar = Some(
+                    (mouse.column as usize)
+                        .saturating_sub(1)
+                        .max(12)
+                        .min(width.saturating_sub(12)),
+                );
+                if matches!(mouse.kind, MouseEventKind::Up(_)) {
+                    self.dragging_divider = false;
+                }
+                true
+            }
+            _ => false,
+        }
+    }
+
+    fn key(&mut self, key: KeyCode, page: usize) -> bool {
+        match key {
+            KeyCode::Tab | KeyCode::Right | KeyCode::Down => {
+                self.select((self.review.selected + 1) % self.review.files.len())
+            }
+            KeyCode::BackTab | KeyCode::Left | KeyCode::Up => self.select(
+                (self.review.selected + self.review.files.len() - 1) % self.review.files.len(),
+            ),
+            KeyCode::Char('k') => self.top = self.top.saturating_sub(1),
+            KeyCode::Char('j') => self.top = self.top.saturating_add(1),
+            KeyCode::PageUp => self.top = self.top.saturating_sub(page),
+            KeyCode::PageDown | KeyCode::Char(' ') => self.top = self.top.saturating_add(page),
+            KeyCode::Home => self.top = 0,
+            KeyCode::End => self.top = usize::MAX,
+            _ => return false,
+        }
+        true
     }
 
     fn render(&mut self, width: usize, height: usize, color: bool) -> Vec<String> {
@@ -96,7 +156,7 @@ impl View {
             }
         }
         rows.push(clip(
-            "Esc close | Tab/Shift+Tab files | Up/Down/PgUp/PgDn scroll",
+            "Esc close | Up/Down/Tab files | j/k/PgUp/PgDn scroll | Drag divider",
         ));
         rows.truncate(height);
         rows
@@ -115,7 +175,12 @@ pub(super) fn show(
     }
     let mut out = io::stderr();
     execute!(out, SavePosition, Hide)?;
-    let mut view = View { review, top: 0 };
+    let mut view = View {
+        review,
+        top: 0,
+        sidebar: None,
+        dragging_divider: false,
+    };
     let result = (|| {
         let mut size = terminal::size().unwrap_or((80, 24));
         let mut selection = super::mouse_selection::Selection::default();
@@ -135,9 +200,15 @@ pub(super) fn show(
             match event {
                 Event::Resize(w, h) => {
                     selection.clear()?;
+                    view.dragging_divider = false;
                     size = (w, h);
                 }
                 Event::Mouse(mouse) => {
+                    if view.divider(mouse, width, height) {
+                        selection.clear()?;
+                        redraw = true;
+                        continue;
+                    }
                     let Some(mouse) = selection.event(mouse, rows.clone())? else {
                         continue;
                     };
@@ -161,23 +232,9 @@ pub(super) fn show(
                     match key.code {
                         KeyCode::Esc | KeyCode::Char('q') => break,
                         KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-                            break
+                            break;
                         }
-                        KeyCode::Tab | KeyCode::Right => {
-                            view.select((view.review.selected + 1) % view.review.files.len())
-                        }
-                        KeyCode::BackTab | KeyCode::Left => view.select(
-                            (view.review.selected + view.review.files.len() - 1)
-                                % view.review.files.len(),
-                        ),
-                        KeyCode::Up | KeyCode::Char('k') => view.top = view.top.saturating_sub(1),
-                        KeyCode::Down | KeyCode::Char('j') => view.top = view.top.saturating_add(1),
-                        KeyCode::PageUp => view.top = view.top.saturating_sub(page),
-                        KeyCode::PageDown | KeyCode::Char(' ') => {
-                            view.top = view.top.saturating_add(page)
-                        }
-                        KeyCode::Home => view.top = 0,
-                        KeyCode::End => view.top = usize::MAX,
+                        code if view.key(code, page) => {}
                         _ => continue,
                     }
                 }
@@ -217,6 +274,31 @@ fn paint(out: &mut impl Write, rows: &[String], size: (u16, u16)) -> io::Result<
 mod tests {
     use super::*;
 
+    #[test]
+    fn arrows_select_files_and_drag_resizes_without_selecting_text() {
+        let mut view = view();
+        assert!(view.key(KeyCode::Down, 20));
+        assert_eq!(view.review.selected, 1);
+        assert!(view.key(KeyCode::Char('j'), 20));
+        assert_eq!(view.top, 1);
+        assert!(view.key(KeyCode::Up, 20));
+        assert_eq!(view.review.selected, 0);
+        assert_eq!(view.top, 0);
+        let mouse = |kind, column| crossterm::event::MouseEvent {
+            kind,
+            column,
+            row: 5,
+            modifiers: KeyModifiers::NONE,
+        };
+        assert!(view.divider(mouse(MouseEventKind::Down(MouseButton::Left), 34), 100, 24));
+        assert!(view.divider(mouse(MouseEventKind::Drag(MouseButton::Left), 61), 100, 24));
+        assert_eq!(view.layout(100, 24).0, 60);
+        assert!(view.divider(mouse(MouseEventKind::Up(MouseButton::Left), 61), 100, 24));
+        assert!(!view.dragging_divider);
+        assert_eq!(view.layout(40, 24).0, 28);
+        assert_eq!(view.layout(100, 24).0, 60);
+    }
+
     fn view() -> View {
         View {
             review: Review {
@@ -240,6 +322,8 @@ mod tests {
                 selected: 0,
             },
             top: 0,
+            sidebar: None,
+            dragging_divider: false,
         }
     }
 
