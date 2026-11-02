@@ -1,4 +1,5 @@
-//! Interactive provider management. Credentials remain environment references.
+//! Interactive provider management. Credentials are stored inline, or read
+//! from the environment when the user names a variable.
 use crate::terminal::input::TerminalInput;
 use crate::{args::Cli, config, session::Session};
 use anyhow::{bail, ensure, Context, Result};
@@ -17,12 +18,12 @@ async fn ask(input: &mut TerminalInput, prompt: &str) -> Result<String> {
 }
 
 /// Asks until `check` accepts the answer, explaining each rejection.
-async fn ask_valid(
+async fn ask_valid<T>(
     input: &mut TerminalInput,
     prompt: &str,
     default: Option<&str>,
-    check: impl Fn(&str) -> std::result::Result<String, String>,
-) -> Result<String> {
+    check: impl Fn(&str) -> std::result::Result<T, String>,
+) -> Result<T> {
     let label = match default {
         Some(default) => format!("{prompt} [{default}]"),
         None => prompt.to_owned(),
@@ -38,23 +39,78 @@ async fn ask_valid(
     bail!("Provider setup cancelled after three invalid answers; nothing was saved")
 }
 
+/// Where the wizard keeps the credential for the provider it saves.
+#[derive(Debug)]
+enum Credential {
+    /// Written to `api_key` in config.json.
+    Key(String),
+    /// The name of an environment variable read at launch.
+    Env(String),
+}
+
 fn looks_like_secret(value: &str) -> bool {
     let lower = value.to_ascii_lowercase();
     ["sk-", "sk_", "key-", "bearer "].iter().any(|prefix| lower.starts_with(prefix))
         || (value.len() >= 32 && value.chars().any(|c| c.is_ascii_lowercase()) && value.chars().any(|c| c.is_ascii_digit()))
 }
 
-fn check_env_name(value: &str) -> std::result::Result<String, String> {
+fn strip_prefix_ignore_case<'a>(value: &'a str, prefix: &str) -> Option<&'a str> {
+    value
+        .get(..prefix.len())
+        .filter(|head| head.eq_ignore_ascii_case(prefix))
+        .map(|_| &value[prefix.len()..])
+}
+
+fn is_env_name(value: &str) -> bool {
+    !value.is_empty()
+        && !value.as_bytes()[0].is_ascii_digit()
+        && value.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
+}
+
+/// Variable names are conventionally upper case; anything else is more likely
+/// a key the user pasted. `set` covers lower-case names already exported.
+fn looks_like_env_name(value: &str) -> bool {
+    is_env_name(value)
+        && (value.chars().all(|c| !c.is_ascii_lowercase())
+            || std::env::var_os(value).is_some())
+}
+
+fn key_credential(value: &str) -> std::result::Result<Credential, String> {
+    let value = strip_prefix_ignore_case(value, "bearer ").unwrap_or(value).trim();
+    if value.is_empty() {
+        return Err("Enter an API key, or an environment variable NAME such as DEEPSEEK_API_KEY.".into());
+    }
+    if value.chars().any(char::is_whitespace) || value.chars().any(char::is_control) {
+        return Err("An API key has no spaces or control characters; paste just the key, or enter an environment variable NAME (e.g. DEEPSEEK_API_KEY).".into());
+    }
+    Ok(Credential::Key(value.to_owned()))
+}
+
+fn env_credential(value: &str) -> std::result::Result<Credential, String> {
+    if is_env_name(value) {
+        Ok(Credential::Env(value.to_owned()))
+    } else {
+        Err("Enter an environment variable NAME: letters, digits and _, not starting with a digit (e.g. DEEPSEEK_API_KEY), or prefix a literal key with key:.".into())
+    }
+}
+
+/// Accepts either an inline API key or the name of an environment variable.
+/// `key:` and `env:` force one meaning when the value is ambiguous.
+fn parse_credential(value: &str) -> std::result::Result<Credential, String> {
+    let value = value.trim();
+    if let Some(key) = strip_prefix_ignore_case(value, "key:") {
+        return key_credential(key);
+    }
+    if let Some(name) = strip_prefix_ignore_case(value, "env:") {
+        return env_credential(name.trim());
+    }
     if looks_like_secret(value) {
-        return Err("That looks like an API key, not a variable name, and it was not saved. Put the key in an environment variable first (bash: export DEEPSEEK_API_KEY=sk-...; Windows: setx DEEPSEEK_API_KEY sk-... and open a new terminal), then enter the variable's name, e.g. DEEPSEEK_API_KEY.".into());
+        return key_credential(value);
     }
-    if value.is_empty()
-        || value.as_bytes()[0].is_ascii_digit()
-        || !value.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
-    {
-        return Err("Enter an environment variable NAME: letters, digits and _, not starting with a digit (e.g. DEEPSEEK_API_KEY).".into());
+    if looks_like_env_name(value) {
+        return Ok(Credential::Env(value.to_owned()));
     }
-    Ok(value.to_owned())
+    key_credential(value)
 }
 
 /// DeepSeek serves the Anthropic protocol under `/anthropic`.
@@ -72,7 +128,9 @@ pub async fn wizard(
     edit: Option<&str>,
 ) -> Result<String> {
     paths.read_config()?;
-    eprintln!("Provider setup; /cancel cancels. Enter environment variable NAMES, never API keys.");
+    eprintln!(
+        "Provider setup; /cancel cancels. Enter an API key directly, or the NAME of an environment variable that holds it."
+    );
     let mut manager = ConfigManager::new(paths.data_dir.clone());
     let id = match edit {
         Some(id) => id.to_owned(),
@@ -106,7 +164,7 @@ pub async fn wizard(
         if !(url.starts_with("http://") || url.starts_with("https://")) {
             Err("The URL must start with http:// or https:// (e.g. https://api.deepseek.com).".into())
         } else if url.contains('@') || url.contains('?') || url.contains('#') {
-            Err("Leave credentials, query strings and fragments out of the URL; keys go in an environment variable.".into())
+            Err("Leave credentials, query strings and fragments out of the URL; enter the API key in the next question.".into())
         } else {
             Ok(url.to_owned())
         }
@@ -120,10 +178,25 @@ pub async fn wizard(
         None => url,
     };
     let suggested = url.contains("deepseek.com").then_some("DEEPSEEK_API_KEY");
-    let key_env = ask_valid(input, "API key environment variable name", suggested, check_env_name).await?;
-    if std::env::var_os(&key_env).is_none() {
-        eprintln!("  Note: {key_env} is not set in this terminal; set it before selecting this provider.");
-    }
+    let credential = ask_valid(
+        input,
+        "API key, or environment variable name (key:<key> forces a literal key)",
+        suggested,
+        parse_credential,
+    )
+    .await?;
+    let (stored_key, key_env) = match credential {
+        Credential::Key(key) => {
+            eprintln!("  The key will be saved in config.json, readable only by you.");
+            (Some(key), None)
+        }
+        Credential::Env(name) => {
+            if std::env::var_os(&name).is_none() {
+                eprintln!("  Note: {name} is not set in this terminal; set it before selecting this provider.");
+            }
+            (None, Some(name))
+        }
+    };
     let models = ask_valid(input, "Model IDs (comma separated; first is default)", None, |models| {
         let models: Vec<_> = models.split(',').map(str::trim).filter(|s| !s.is_empty()).collect();
         if models.is_empty() {
@@ -145,10 +218,13 @@ pub async fn wizard(
         protocol.clone()
     };
     provider.base_url = url;
-    provider.api_key = None;
+    provider.api_key = stored_key.clone();
     provider.enabled = true;
     provider.settings.remove("builtinId");
-    provider.settings.insert("apiKeyEnv".into(), json!(key_env));
+    provider.settings.remove("apiKeyEnv");
+    if let Some(name) = &key_env {
+        provider.settings.insert("apiKeyEnv".into(), json!(name));
+    }
     provider.models = models
         .iter()
         .map(|id| {
@@ -170,13 +246,19 @@ pub async fn wizard(
         c.providers.retain(|p| p.id != id);
         c.providers.push(provider);
     })?;
-    if std::env::var_os(&key_env).is_some() {
-        eprintln!("Saved {id} ({} models); the API key is read from {key_env}.", models.len());
-    } else {
-        eprintln!(
-            "Saved {id} ({} models). Set {key_env} in the launching shell before selecting it.",
+    match (&stored_key, &key_env) {
+        (Some(_), _) => eprintln!(
+            "Saved {id} ({} models); the API key is stored in config.json (readable only by you).",
             models.len()
-        );
+        ),
+        (None, Some(name)) if std::env::var_os(name).is_some() => {
+            eprintln!("Saved {id} ({} models); the API key is read from {name}.", models.len());
+        }
+        (None, Some(name)) => eprintln!(
+            "Saved {id} ({} models). Set {name} in the launching shell before selecting it.",
+            models.len()
+        ),
+        (None, None) => unreachable!("the wizard always has a credential"),
     }
     Ok(id)
 }
@@ -678,11 +760,22 @@ mod tests {
     }
 
     #[test]
-    fn provider_answers_explain_rejections_and_fix_deepseek_urls() {
-        let error = check_env_name("sk-170b23aa867d47839ee0a01eddf73ff5").unwrap_err();
-        assert!(error.contains("looks like an API key") && error.contains("DEEPSEEK_API_KEY"));
-        assert!(check_env_name("1KEY").unwrap_err().contains("letters, digits"));
-        assert_eq!(check_env_name("DEEPSEEK_API_KEY").unwrap(), "DEEPSEEK_API_KEY");
+    fn provider_answers_accept_keys_or_variable_names_and_fix_deepseek_urls() {
+        for key in ["sk-170b23aa867d47839ee0a01eddf73ff5", "123456"] {
+            match parse_credential(key) {
+                Ok(Credential::Key(value)) => assert_eq!(value, key),
+                other => panic!("{key} was not read as a key: {other:?}"),
+            }
+        }
+        match parse_credential("DEEPSEEK_API_KEY") {
+            Ok(Credential::Env(name)) => assert_eq!(name, "DEEPSEEK_API_KEY"),
+            other => panic!("an environment name was not recognised: {other:?}"),
+        }
+        assert!(matches!(parse_credential("env:DEEPSEEK_API_KEY"), Ok(Credential::Env(_))));
+        assert!(matches!(parse_credential("key:DEEPSEEK_API_KEY"), Ok(Credential::Key(_))));
+        assert!(parse_credential("two words").unwrap_err().contains("no spaces"));
+        assert!(parse_credential("env:1KEY").unwrap_err().contains("letters, digits"));
+        assert!(parse_credential("").unwrap_err().contains("Enter an API key"));
         assert_eq!(
             deepseek_base_url("anthropic", "https://api.deepseek.com/").as_deref(),
             Some("https://api.deepseek.com/anthropic")
@@ -700,7 +793,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn wizard_preserves_other_providers_and_never_saves_credentials() {
+    async fn wizard_preserves_other_providers_and_stores_environment_references() {
         let dir = tempfile::tempdir().unwrap();
         let paths = RuntimePaths::new(dir.path().to_path_buf()).unwrap();
         for (id, protocol) in [("one", "openai"), ("two", "anthropic"), ("three", "gemini")] {
@@ -750,6 +843,62 @@ mod tests {
         .await
         .unwrap();
         assert_eq!(paths.read_config().unwrap().providers.len(), 3);
+    }
+
+    #[tokio::test]
+    async fn wizard_accepts_a_pasted_key_and_can_switch_back_to_a_variable() {
+        let dir = tempfile::tempdir().unwrap();
+        let paths = RuntimePaths::new(dir.path().to_path_buf()).unwrap();
+        wizard(
+            &paths,
+            &mut answers(&[
+                "local",
+                "openai",
+                "http://127.0.0.1:8318/v1",
+                "123456",
+                "model-a",
+            ]),
+            None,
+        )
+        .await
+        .unwrap();
+        let config = paths.read_config().unwrap();
+        let provider = config.providers.iter().find(|p| p.id == "local").unwrap();
+        assert_eq!(provider.api_key.as_deref(), Some("123456"));
+        assert!(!provider.settings.contains_key("apiKeyEnv"));
+        wizard(
+            &paths,
+            &mut answers(&[
+                "openai",
+                "http://127.0.0.1:8318/v1",
+                "DEEPSEEK_API_KEY",
+                "model-a",
+            ]),
+            Some("local"),
+        )
+        .await
+        .unwrap();
+        let config = paths.read_config().unwrap();
+        let provider = config.providers.iter().find(|p| p.id == "local").unwrap();
+        assert!(provider.api_key.is_none());
+        assert_eq!(provider.settings["apiKeyEnv"], "DEEPSEEK_API_KEY");
+        wizard(
+            &paths,
+            &mut answers(&[
+                "openai",
+                "http://127.0.0.1:8318/v1",
+                "key:ABC123",
+                "model-a",
+            ]),
+            Some("local"),
+        )
+        .await
+        .unwrap();
+        let config = paths.read_config().unwrap();
+        let provider = config.providers.iter().find(|p| p.id == "local").unwrap();
+        assert_eq!(provider.api_key.as_deref(), Some("ABC123"));
+        assert!(!provider.settings.contains_key("apiKeyEnv"));
+        select(&paths, "local", "model-a").unwrap();
     }
 
     #[tokio::test]
