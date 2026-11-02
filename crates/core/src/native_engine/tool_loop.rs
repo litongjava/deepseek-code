@@ -1261,7 +1261,7 @@ impl ToolLoopExecutor {
             .map(|root| (root.to_path_buf(), self.conv_id.clone().unwrap_or_default()));
         let result = crate::tools::background_shell::scope(
             context,
-            crate::tools::path_scope::scope(directories, self.execute_scoped()),
+            crate::tools::path_scope::with_permissions(self.permission_manager.clone(), crate::tools::path_scope::scope(directories, self.execute_scoped())),
         )
         .await;
         if result.is_ok() {
