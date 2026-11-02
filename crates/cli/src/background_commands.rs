@@ -344,6 +344,31 @@ enum Task {
 
 /// `/tasks` as in the reference CLI: background shells and detached work;
 /// a single task opens its details directly, `x` stops it.
+pub(crate) async fn live_tasks(session: &Session, prompt: &str) -> Result<String> {
+    let paths = &session.paths;
+    let shells = managed_shell_records(paths, &session.id)?;
+    if let Some(id) = prompt.strip_prefix("/tasks show ").map(str::trim) {
+        if shells.iter().any(|task| task["id"] == id) {
+            let output = shell_control(paths, &session.id, id, false).await?;
+            return Ok(safe_output(&format!("Shell {id} · {}\n{}\n{}", output["status"].as_str().unwrap_or("unknown"), output["stdout"].as_str().unwrap_or_default(), output["stderr"].as_str().unwrap_or_default())));
+        }
+        let job = background_sessions::get(&paths.data_dir, id)?;
+        ensure!(job.parent_session_id == session.id, "Task belongs to another session");
+        let (output, errors) = background_sessions::output(&paths.data_dir, id)?;
+        return Ok(safe_output(&format!("Task {id} · {}\n{output}\n{errors}", job.status)));
+    }
+    let mut lines = Vec::new();
+    for shell in shells {
+        lines.push(format!("Shell {} · {}\n  {}", shell["id"].as_str().unwrap_or_default(), shell["status"].as_str().unwrap_or("unknown"), shell["metadata"]["command"].as_str().unwrap_or_default()));
+    }
+    for job in background_sessions::list(&paths.data_dir, Some(&session.id))? {
+        lines.push(format!("Task {} · {}\n  {}", job.id, job.status, job.title));
+    }
+    if lines.is_empty() { lines.push("No background tasks.".into()); }
+    lines.push("/tasks show ID reads the latest output; repeat to refresh. The current request continues.".into());
+    Ok(safe_output(&lines.join("\n")))
+}
+
 async fn tasks_menu(paths: &RuntimePaths, session: &Session) -> Result<()> {
     use crate::terminal::picker::{details, Entry, Picker};
     let mut selected = 0;

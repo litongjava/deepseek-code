@@ -459,13 +459,18 @@ pub fn live_goal_command(session: &Session, prompt: &str) -> Result<Option<Strin
 /// the tool call in progress. `--check` is left out: its request would stall
 /// the turn's output.
 pub(crate) fn is_live_inspection(line: &str) -> bool {
-    matches!(line.trim(), "/status" | "/status --check" | "/effort +" | "/effort -")
+    let line = line.trim();
+    matches!(line, "/status" | "/status --check" | "/effort +" | "/effort -" | "/tasks" | "/tasks list")
+        || line.strip_prefix("/tasks show ").is_some_and(|id| id.split_whitespace().count() == 1)
 }
 
 /// The answer for `is_live_inspection`, or None for every other command.
 pub async fn live_inspection(session: &Session, prompt: &str) -> Option<String> {
     if !is_live_inspection(prompt) {
         return None;
+    }
+    if prompt.trim().starts_with("/tasks") {
+        return Some(crate::background_commands::live_tasks(session, prompt.trim()).await.unwrap_or_else(|error| format!("Tasks: {error:#}")));
     }
     if matches!(prompt.trim(), "/effort +" | "/effort -") {
         return Some(step_effort(session, prompt.trim().ends_with('+')).await.unwrap_or_else(|error| format!("{error:#}")));
@@ -895,6 +900,11 @@ mod tests {
         assert!(is_live_inspection("/status"));
         assert!(is_live_inspection("  /status  "));
         assert!(is_live_inspection("/status --check"));
+        assert!(is_live_inspection("/tasks"));
+        assert!(is_live_inspection("/tasks list"));
+        assert!(is_live_inspection("/tasks show example"));
+        assert!(!is_live_inspection("/tasks cancel example"));
+        assert!(!is_live_inspection("/tasks show example extra"));
         for queued in [
             "/status line",
             "/model",

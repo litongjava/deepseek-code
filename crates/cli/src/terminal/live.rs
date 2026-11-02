@@ -483,7 +483,7 @@ struct Running {
 const THINKING_PREVIEW_ROWS: usize = 2;
 
 /// Commands `submit` accepts while the model works.
-const LIVE_COMMANDS: &[&str] = &["/btw", "/background", "/goal", "/status"];
+const LIVE_COMMANDS: &[&str] = &["/btw", "/background", "/goal", "/status", "/tasks"];
 
 /// Spinner glyphs, played forward and back.
 const SPINNER: &[&str] = if cfg!(target_os = "macos") {
@@ -902,7 +902,7 @@ impl State {
             return None;
         }
         if text.trim().starts_with('/') && !(self.goal_proposal.is_some() && self.activity.starts_with("Task complete")) {
-            return Some("While working, use /btw QUESTION, /status or type a prompt to queue; other commands are available after completion.".into());
+            return Some("While working, use /btw QUESTION, /status, /tasks, /tasks show ID or type a prompt to queue; other commands are available after completion.".into());
         }
         let _ = actions.send(Action::Submit(text.clone()));
         // Plain text waits under the work until the model reads it.
@@ -3150,7 +3150,7 @@ mod tests {
     fn status_answers_during_a_turn_while_other_commands_wait() {
         let mut state = State::new("ask".into());
         let (send, mut receive) = async_mpsc::unbounded_channel();
-        for prompt in ["/status", "/status --check"] {
+        for prompt in ["/status", "/status --check", "/tasks", "/tasks show example"] {
             state.draft.insert(prompt);
             assert!(state.submit(&send).is_none());
             assert!(matches!(receive.try_recv().unwrap(), Action::Submit(text) if text == prompt));
@@ -3192,7 +3192,7 @@ mod tests {
         let mut state = State::new("ask".into());
         state.draft.set("/");
         let names: Vec<_> = state.menu().into_iter().map(|(name, _)| name).collect();
-        assert_eq!(names, vec!["/background", "/btw", "/goal", "/status"]);
+        assert_eq!(names, vec!["/background", "/btw", "/goal", "/status", "/tasks"]);
         state.draft.set("/bt");
         assert!(state.menu_key(crossterm::event::KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE)));
         assert_eq!(state.draft.characters.iter().collect::<String>(), "/btw ");
