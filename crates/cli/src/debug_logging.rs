@@ -9,6 +9,7 @@ type FilterHandle = reload::Handle<EnvFilter, Registry>;
 static FILTER: OnceLock<FilterHandle> = OnceLock::new();
 static DESTINATION: RwLock<Option<PathBuf>> = RwLock::new(None);
 static FILE: RwLock<Option<Arc<Mutex<std::fs::File>>>> = RwLock::new(None);
+static TERMINAL_FILE: RwLock<Option<Arc<Mutex<std::fs::File>>>> = RwLock::new(None);
 
 struct RedactingWriter {
     output: Box<dyn Write + Send>,
@@ -57,7 +58,8 @@ pub fn install(verbose: bool) {
             tracing_subscriber::fmt::layer()
                 .with_ansi(false)
                 .with_writer(|| -> Box<dyn Write + Send> {
-                    let file = FILE.read().unwrap_or_else(|e| e.into_inner()).clone();
+                    let file = FILE.read().unwrap_or_else(|e| e.into_inner()).clone()
+                        .or_else(|| TERMINAL_FILE.read().unwrap_or_else(|e| e.into_inner()).clone());
                     let output: Box<dyn Write + Send> = match file {
                         Some(file) => Box::new(SharedFile(file)),
                         None => Box::new(io::stderr()),
@@ -69,6 +71,20 @@ pub fn install(verbose: bool) {
                 }),
         )
         .init();
+}
+
+/// Keep asynchronous diagnostics out of the interactive screen's row history.
+pub fn configure_terminal(path: PathBuf) -> anyhow::Result<()> {
+    use std::io::IsTerminal;
+    if !io::stderr().is_terminal() {
+        return Ok(());
+    }
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    let file = std::fs::OpenOptions::new().create(true).append(true).open(path)?;
+    *TERMINAL_FILE.write().unwrap_or_else(|e| e.into_inner()) = Some(Arc::new(Mutex::new(file)));
+    Ok(())
 }
 
 pub fn configure(path: Option<PathBuf>) -> anyhow::Result<()> {

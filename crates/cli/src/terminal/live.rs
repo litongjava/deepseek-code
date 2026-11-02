@@ -1131,8 +1131,9 @@ fn log_answer_line(state: &mut State, screen: &mut Frame, rendered: &str) {
     // terminal break words at the edge.
     let width = terminal::size().map_or(80, |(cols, _)| cols as usize).saturating_sub(1);
     let indent = " ".repeat(2 + super::markdown::hanging_indent(rendered));
-    for row in super::markdown::wrap_styled(rendered, first, &indent, width) {
-        screen.log_rendered(&row);
+    screen.logged.push(format!("{first}{rendered}"));
+    for row in screen.scrollback.push_flow(rendered, first, &indent, width) {
+        screen.logs.push((row, 1));
     }
 }
 
@@ -1402,8 +1403,17 @@ impl Frame {
     }
     fn log_line(&mut self, text: String, block: Option<usize>) {
         self.logged.push(text.clone());
-        let height = self.scrollback.push(text.clone(), block);
-        self.logs.push((text, height));
+        if block.is_none() {
+            let width = terminal::size().unwrap_or((80, 24)).0.saturating_sub(1) as usize;
+            for line in text.split("\r\n") {
+                for row in self.scrollback.push_flow(line, "", "", width) {
+                    self.logs.push((row, 1));
+                }
+            }
+        } else {
+            let height = self.scrollback.push(text.clone(), block);
+            self.logs.push((text, height));
+        }
     }
     fn separate_block(&mut self) {
         if self.scrollback.needs_separator() { self.log_rendered(""); }
@@ -1426,8 +1436,10 @@ impl Frame {
         self.pending = format!("\x1b[{};1H\x1b[J", start + 1);
         self.lines.clear();
         self.top = Some(start);
-        for (line, block) in lines {
-            self.log_line(line, block);
+        for line in lines {
+            let text = line.text.clone();
+            let height = self.scrollback.push_logged(line);
+            self.logs.push((text, height));
         }
         true
     }
@@ -2533,7 +2545,23 @@ fn run(
                     }
                     dirty = true;
                 }
-                Event::Resize(_, _) => dirty = true,
+                Event::Resize(columns, rows) => {
+                    selection.discard();
+                    screen.scrollback.reflow(columns as usize);
+                    if screen.history_view.active() {
+                        screen.refresh_history(state, columns.saturating_sub(1) as usize);
+                    } else {
+                        let bottom = rows
+                            .saturating_sub(screen.lines.len() as u16)
+                            .min(rows.saturating_sub(1));
+                        screen.pending = screen.scrollback.repaint(bottom, rows, columns);
+                        screen.logs.clear();
+                        screen.lines.clear();
+                        screen.top = Some(bottom);
+                        screen.size = (columns, rows);
+                    }
+                    dirty = true;
+                }
                 _ => {}
             }
         }
@@ -2580,6 +2608,25 @@ mod tests {
     }
     fn screen(terminal: &vt100::Parser) -> Vec<String> {
         terminal.screen().rows(0, 80).collect()
+    }
+
+    #[test]
+    fn long_completion_matches_the_selection_snapshot_and_reflows() {
+        let columns = terminal::size().unwrap_or((80, 24)).0;
+        let mut terminal = vt100::Parser::new(30, columns, 200);
+        let mut frame = Frame::default();
+        place(&mut frame, &mut terminal, &[], "working", 0);
+        let error = format!("Model API error 400: {}", "service rejects image input ".repeat(6));
+        frame.log_rendered(&error);
+        place(&mut frame, &mut terminal, &[], "done", 0);
+        let bottom = frame.top.unwrap();
+        let snapshot = frame.scrollback.screen(bottom, 30);
+        let actual: Vec<_> = terminal.screen().rows(0, columns).collect();
+        for row in 0..bottom as usize {
+            assert_eq!(snapshot[row].trim_end(), actual[row].trim_end());
+        }
+        frame.scrollback.reflow(240);
+        assert!(frame.scrollback.all().iter().any(|line| line == &error));
     }
 
     #[test]

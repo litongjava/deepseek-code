@@ -24,6 +24,10 @@ impl Selection {
     pub fn retained(&self) -> bool {
         self.start.is_some()
     }
+    /// Old coordinates are invalid after a resize; do not repaint their snapshot.
+    pub fn discard(&mut self) {
+        *self = Self::default();
+    }
     pub fn clear(&mut self) -> io::Result<()> {
         if self.start.is_some() {
             self.paint(false)?;
@@ -241,6 +245,21 @@ fn highlight_row(text: &str, left: usize, right: usize) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn resize_discards_stale_coordinates_without_repainting_old_rows() {
+        let mut selection = Selection {
+            start: Some((1, 0)),
+            end: (1, 20),
+            rows: vec!["old".into(); 3],
+            held: true,
+            ..Default::default()
+        };
+        selection.discard();
+        assert!(!selection.active() && !selection.retained());
+        let mut output = Vec::new();
+        selection.paint_to(&mut output, false).unwrap();
+        assert!(!String::from_utf8(output).unwrap().contains("old"));
+    }
     #[test]
     fn highlight_is_applied_before_text_without_repainting_the_row_twice() {
         assert_eq!(

@@ -163,8 +163,23 @@ fn conversation(session: &Session, id: &str, detailed: bool, mut recorded: Optio
                 lines.extend(text.map(|line| change_view::body(&format!("  {line}"))));
             }
             if let Some(recorded) = recorded.as_deref_mut() {
-                if lines.len() > answer_start && recorded.needs_separator() { recorded.push(String::new(), None); }
-                for row in rendered_answer(&message.content, width, std::env::var_os("NO_COLOR").is_none()) { recorded.push(row, None); }
+                if lines.len() > answer_start && recorded.needs_separator() {
+                    recorded.push(String::new(), None);
+                }
+                let mut markdown = crate::terminal::markdown::MarkdownStream::new(
+                    std::env::var_os("NO_COLOR").is_none(),
+                );
+                markdown.set_width(width.saturating_sub(2));
+                let mut rendered: Vec<_> = message
+                    .content
+                    .lines()
+                    .flat_map(|line| markdown.line(line))
+                    .collect();
+                rendered.extend(markdown.finish());
+                for (index, line) in rendered.iter().enumerate() {
+                    let indent = " ".repeat(2 + crate::terminal::markdown::hanging_indent(line));
+                    recorded.push_flow(line, if index == 0 { "● " } else { "  " }, &indent, width);
+                }
             }
             let saved = session.paths.data_dir.join("turn-completions").join(hex_message_id(&message.id));
             // Only the final legacy message has a fallback; intermediate tool
@@ -184,6 +199,7 @@ fn conversation(session: &Session, id: &str, detailed: bool, mut recorded: Optio
     })?
 }
 
+#[cfg(test)]
 fn rendered_answer(content: &str, width: usize, color: bool) -> Vec<String> {
     let mut markdown = crate::terminal::markdown::MarkdownStream::new(color);
     markdown.set_width(width.saturating_sub(2));

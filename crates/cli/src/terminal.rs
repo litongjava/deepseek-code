@@ -360,8 +360,8 @@ pub(crate) fn print_recorded(text: &str) -> std::io::Result<()> {
         if row.is_empty() {
             writeln_recorded(&mut out, &mut history, row, newline)?;
         } else {
-            for wrapped in markdown::wrap_styled(row, "", "", width) {
-                writeln_recorded(&mut out, &mut history, &wrapped, newline)?;
+            for wrapped in history.push_flow(row, "", "", width) {
+                write!(out, "{wrapped}{newline}")?;
             }
         }
     }

@@ -9,10 +9,17 @@ use unicode_width::UnicodeWidthChar;
 /// One logged line as written, the screen rows it takes and the tool result
 /// it belongs to.
 #[derive(Clone)]
-struct Logged {
-    text: String,
+pub(super) struct Logged {
+    pub text: String,
     rows: usize,
-    block: Option<usize>,
+    pub block: Option<usize>,
+    flow: Option<std::sync::Arc<Flow>>,
+}
+#[derive(Clone)]
+struct Flow {
+    text: String,
+    first: String,
+    indent: String,
 }
 /// A tool result with hidden lines, shown short or in full.
 #[derive(Clone)]
@@ -78,15 +85,76 @@ impl Scrollback {
             .unwrap_or_default()
     }
     pub(super) fn reflow(&mut self, columns: usize) {
-        for line in &mut self.logged {
-            line.rows = screen_rows(&line.text, columns);
+        let mut previous: Option<std::sync::Arc<Flow>> = None;
+        for mut line in std::mem::take(&mut self.logged) {
+            if let Some(flow) = &line.flow {
+                if previous
+                    .as_ref()
+                    .is_some_and(|last| std::sync::Arc::ptr_eq(last, flow))
+                {
+                    continue;
+                }
+                previous = Some(flow.clone());
+                for text in super::markdown::wrap_styled(
+                    &flow.text,
+                    &flow.first,
+                    &flow.indent,
+                    columns.saturating_sub(1),
+                ) {
+                    self.logged.push_back(Logged {
+                        rows: screen_rows(&text, columns),
+                        text,
+                        block: None,
+                        flow: Some(flow.clone()),
+                    });
+                }
+            } else {
+                previous = None;
+                line.rows = screen_rows(&line.text, columns);
+                self.logged.push_back(line);
+            }
         }
+    }
+    /// Retain the logical line so a temporary narrow viewport is reversible.
+    pub(crate) fn push_flow(
+        &mut self,
+        text: &str,
+        first: &str,
+        indent: &str,
+        width: usize,
+    ) -> Vec<String> {
+        let flow = std::sync::Arc::new(Flow {
+            text: text.into(),
+            first: first.into(),
+            indent: indent.into(),
+        });
+        let rows = super::markdown::wrap_styled(text, first, indent, width);
+        for row in &rows {
+            self.logged.push_back(Logged {
+                text: row.clone(),
+                rows: 1,
+                block: None,
+                flow: Some(flow.clone()),
+            });
+        }
+        rows
+    }
+    pub(super) fn push_logged(&mut self, mut line: Logged) -> usize {
+        line.rows = screen_rows(&line.text, terminal::size().unwrap_or((80, 24)).0 as usize);
+        let rows = line.rows;
+        self.logged.push_back(line);
+        rows
     }
     /// Records a written line; returns the screen rows it takes.
     pub(crate) fn push(&mut self, text: String, block: Option<usize>) -> usize {
         let (columns, _height) = terminal::size().unwrap_or((80, 24));
         let rows = screen_rows(&text, columns as usize);
-        self.logged.push_back(Logged { text, rows, block });
+        self.logged.push_back(Logged {
+            text,
+            rows,
+            block,
+            flow: None,
+        });
         rows
     }
     /// A tool result's short lines, to be written and recorded with `push`.
@@ -388,8 +456,8 @@ impl Scrollback {
         let Some((_, rows)) = self.toggle_index(row, 0) else {
             return false;
         };
-        for (text, block) in rows {
-            self.push(text, block);
+        for line in rows {
+            self.push_logged(line);
         }
         true
     }
@@ -406,10 +474,16 @@ impl Scrollback {
         None
     }
     pub(super) fn screen(&self, bottom: u16, height: u16) -> Vec<String> {
+        self.screen_at(
+            bottom,
+            height,
+            terminal::size().unwrap_or((80, 24)).0 as usize,
+        )
+    }
+    fn screen_at(&self, bottom: u16, height: u16, width: usize) -> Vec<String> {
         let mut rows = vec![String::new(); height as usize];
         let mut end = bottom as usize;
         for line in self.logged.iter().rev() {
-            let width = terminal::size().unwrap_or((80, 24)).0 as usize;
             let wrapped = super::markdown::wrap_styled(&line.text, "", "", width);
             for text in wrapped.iter().rev() {
                 if end == 0 {
@@ -423,21 +497,27 @@ impl Scrollback {
         }
         rows
     }
+    /// Repaint only the current viewport, leaving the terminal scrollback intact.
+    pub(super) fn repaint(&self, bottom: u16, height: u16, width: u16) -> String {
+        let mut out = String::from("\x1b[0m\x1b[H\x1b[2J");
+        for (row, text) in self
+            .screen_at(bottom, height, width as usize)
+            .iter()
+            .take(bottom as usize)
+            .enumerate()
+        {
+            out.push_str(&format!("\x1b[{};1H{text}\x1b[0m\x1b[K", row + 1));
+        }
+        out.push_str(&format!("\x1b[{};1H", bottom + 1));
+        out
+    }
     /// Switches the tool result on `row` between its short and full form.
     /// Returns the screen row to redraw from and the lines to write there.
-    pub(super) fn toggle(
-        &mut self,
-        bottom: u16,
-        row: u16,
-    ) -> Option<(u16, Vec<(String, Option<usize>)>)> {
+    pub(super) fn toggle(&mut self, bottom: u16, row: u16) -> Option<(u16, Vec<Logged>)> {
         let index = self.line_at(bottom, row)?;
         self.toggle_index(index, bottom)
     }
-    fn toggle_index(
-        &mut self,
-        index: usize,
-        bottom: u16,
-    ) -> Option<(u16, Vec<(String, Option<usize>)>)> {
+    fn toggle_index(&mut self, index: usize, bottom: u16) -> Option<(u16, Vec<Logged>)> {
         let block = self.logged[index].block?;
         let first = self
             .logged
@@ -474,11 +554,15 @@ impl Scrollback {
         let after = self
             .logged
             .drain(first..)
-            .filter(|line| line.block != Some(block))
-            .map(|line| (line.text, line.block));
+            .filter(|line| line.block != Some(block));
         let rows = lines
             .into_iter()
-            .map(|line| (line, Some(block)))
+            .map(|text| Logged {
+                text,
+                rows: 1,
+                block: Some(block),
+                flow: None,
+            })
             .chain(after)
             .collect();
         Some((start, rows))
@@ -555,6 +639,36 @@ fn screen_rows(text: &str, columns: usize) -> usize {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn logical_answers_reflow_after_resize_and_tool_disclosure_without_losing_text() {
+        let mut history = super::Scrollback::default();
+        let short = vec![super::change_view::body("Read(file)")];
+        let full = vec![short[0].clone(), super::change_view::body("details")];
+        let (id, rows) = history.block(short, full);
+        for row in rows {
+            history.push(row, Some(id));
+        }
+        let text = "Auto 是用模型处理原本默认需要你确认的操作。";
+        history.push_flow(text, "● ", "  ", 6);
+        assert!(history.all().len() > 3);
+        history.toggle_history(0);
+        history.reflow(100);
+        assert!(history.all().iter().any(|row| row == &format!("● {text}")));
+        history.reflow(8);
+        history.reflow(100);
+        assert_eq!(
+            history
+                .all()
+                .iter()
+                .filter(|row| row.contains(text))
+                .count(),
+            1
+        );
+        let mut terminal = vt100::Parser::new(30, 100, 0);
+        terminal.process(history.repaint(24, 30, 100).as_bytes());
+        assert!(terminal.screen().contents().contains(text));
+    }
+
     #[test]
     fn compact_keeps_blank_lines_between_tool_and_prompt_blocks() {
         let mut history = super::Scrollback::default();

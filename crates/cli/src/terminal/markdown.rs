@@ -60,6 +60,13 @@ impl MarkdownStream {
         for fence in ["```", "~~~"] {
             if trimmed.starts_with(fence) {
                 let marker: String = trimmed.chars().take_while(|ch| *ch == fence.chars().next().unwrap()).collect();
+                // A fence closed on the same line must not color the rest of
+                // the answer or discard its body when upstream joins lines.
+                let rest = &trimmed[marker.len()..];
+                if rest.trim_end().ends_with(marker.as_str()) {
+                    output.push(self.block(&line));
+                    return output;
+                }
                 self.code_fence = Some(marker);
                 return output;
             }
@@ -350,6 +357,17 @@ pub fn hanging_indent(rendered: &str) -> usize {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn same_line_fences_preserve_content_and_do_not_leak_code_style() {
+        let mut stream = MarkdownStream::new(true);
+        let line = stream.line("```textAI 请求工具 → Auto 分类器```");
+        assert!(plain_rendered(&line.join("")).contains("AI 请求工具"));
+        assert_eq!(
+            stream.line("**一句话：** Auto 正常处理"),
+            ["\x1b[1m一句话：\x1b[22m Auto 正常处理"]
+        );
+    }
 
     #[test]
     fn wide_tables_wrap_cells_without_moving_other_columns() {

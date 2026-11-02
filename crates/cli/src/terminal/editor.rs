@@ -1284,11 +1284,31 @@ impl PromptEditor {
                 continue;
             }
             match event {
-                Event::Resize(columns, _) => {
+                Event::Resize(columns, new_rows) => {
+                    selection.discard();
                     above.reflow(columns as usize);
+                    if history_view.active() {
+                        history_view.refresh(
+                            &[],
+                            &above.presentation(),
+                            columns.saturating_sub(1) as usize,
+                        );
+                        screen.reflow();
+                    } else {
+                        let bottom = new_rows
+                            .saturating_sub(lines.len() as u16)
+                            .min(new_rows.saturating_sub(1));
+                        let mut out = io::stderr().lock();
+                        write!(
+                            out,
+                            "\x1b[?2026h{}\x1b[?2026l",
+                            above.repaint(bottom, new_rows, columns)
+                        )?;
+                        out.flush()?;
+                        screen = Screen::pinned();
+                    }
                     // The terminal reflowed the prompt; the next draw places it
                     // on the last rows again.
-                    screen.reflow();
                 }
                 Event::Mouse(mouse) => {
                     if matches!(mouse.kind, MouseEventKind::ScrollUp | MouseEventKind::ScrollDown) {
@@ -1375,10 +1395,10 @@ impl PromptEditor {
                     if let Some((start, lines)) = toggled {
                         // Redraw from the clicked tool result down, then the prompt.
                         let mut out = format!("\x1b[?25l\x1b[{};1H\x1b[J", start + 1);
-                        for (line, block) in lines {
-                            out.push_str(&line);
+                        for line in lines {
+                            out.push_str(&line.text);
                             out.push_str("\r\n");
-                            above.push(line, block);
+                            above.push_logged(line);
                         }
                         let mut stderr = io::stderr().lock();
                         stderr.write_all(out.as_bytes())?;

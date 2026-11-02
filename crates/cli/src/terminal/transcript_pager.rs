@@ -360,6 +360,7 @@ fn pager(
         redraw = true;
         let key = match event {
             Event::Resize(cols, rows_count) => {
+                selection.discard();
                 size = (cols, rows_count);
                 all = transcript_rows(lines, logged, (cols as usize).saturating_sub(1).max(10), color);
                 continue;

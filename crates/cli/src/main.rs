@@ -110,7 +110,7 @@ use std::{
 fn report_error(error: &anyhow::Error) {
     if !worker_frontend::already_presented(error) {
         terminal::release_handoff();
-        eprintln!("Error: {error:#}");
+        command_eprintln!("Error: {error:#}");
     }
 }
 
@@ -200,6 +200,7 @@ async fn run(cli: &Cli) -> Result<()> {
     // Engine code that has no RuntimePaths (e.g. the task tools) and child
     // processes resolve the data directory from the environment.
     std::env::set_var(deepseek_code_core::runtime::DATA_DIR_ENV, &paths.data_dir);
+    debug_logging::configure_terminal(paths.data_dir.join("logs").join(format!("cli-{}.log", std::process::id())))?;
     if let Some(path) = &cli.path {
         std::env::set_current_dir(path).context("Cannot open project directory")?;
     }
@@ -647,7 +648,7 @@ async fn run(cli: &Cli) -> Result<()> {
         remote.attach_host().await;
         // As in the reference CLI, remoteControlAtStartup connects every session.
         if remote_commands::at_startup(&paths.data_dir) {
-            if let Err(error) = remote.command("", &paths, &session, &mut input).await { eprintln!("Remote Control: {error:#}"); }
+            if let Err(error) = remote.command("", &paths, &session, &mut input).await { command_eprintln!("Remote Control: {error:#}"); }
         }
         let mut last_config_error = String::new();
         terminal::tips::start_session(&paths.data_dir);
@@ -664,7 +665,7 @@ async fn run(cli: &Cli) -> Result<()> {
             terminal::title::apply(&session.id);
             let idle_deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(60);
             let mut idle_notified = false;
-            for notice in background_commands::collect_completed(&session)? { eprintln!("{notice}"); }
+            for notice in background_commands::collect_completed(&session)? { command_eprintln!("{notice}"); }
             // A background command that finished meanwhile starts a turn, as in
             // the reference CLI.
             if !composer.is_pending() {
@@ -677,7 +678,7 @@ async fn run(cli: &Cli) -> Result<()> {
             if let Some(prompt) = remote.take_deferred() {
                 if let Err(error) = session.turn(cli, &prompt, &mut input).await { report_error(&error); }
             }
-            if let Err(error) = remote.sync(&session) { eprintln!("Remote Control: {error:#}"); }
+            if let Err(error) = remote.sync(&session) { command_eprintln!("Remote Control: {error:#}"); }
             if presence.as_ref().is_none_or(|(id, _)| *id != session.id) {
                 drop(presence.take());
                 presence = deepseek_code_core::services::session_messages::PresenceLease::acquire(&paths.data_dir, &session.id)
@@ -695,13 +696,13 @@ async fn run(cli: &Cli) -> Result<()> {
             }
             skills = skill_commands::load_for_workspace(&paths, &session.workspace).await?;
             if let Err(error) = input.as_mut().unwrap().set_keybindings(&paths.data_dir.join("keybindings.json")) {
-                eprintln!("Keybindings: {error:#}");
+                command_eprintln!("Keybindings: {error:#}");
             }
             let display = display_commands::load(&session)?;
             if screen_mode.set(&display.tui)? {
                 for row in session.store.history(&session.id)? {
                     let content: String = row["content"].as_str().unwrap_or("").chars().filter(|c| !c.is_control() || matches!(c, '\n' | '\t')).collect();
-                    eprintln!("\n{}\n{content}", row["role"].as_str().unwrap_or("message"));
+                    command_eprintln!("\n{}\n{content}", row["role"].as_str().unwrap_or("message"));
                 }
             }
             terminal::style::configure(&display.theme, &display.color);
@@ -724,16 +725,16 @@ async fn run(cli: &Cli) -> Result<()> {
             if display.diff_panel && !display.focus {
                 match deepseek_code_core::services::worktree_diff::snapshot(&session.workspace, display.diff_staged).await {
                     Ok(diff) => input.as_mut().unwrap().set_panel(vec![(if display.diff_staged { "Staged diff" } else { "Uncommitted changes (untracked files listed by name)" }.into(), diff)], true),
-                    Err(error) => { eprintln!("Diff: {error:#}"); input.as_mut().unwrap().set_details(vec![]); },
+                    Err(error) => { command_eprintln!("Diff: {error:#}"); input.as_mut().unwrap().set_details(vec![]); },
                 }
             } else {
                 input.as_mut().unwrap().set_details(vec![]);
             }
             input.as_mut().unwrap().set_transcript(if display.focus || display.diff_panel { vec![] } else { repl::transcript(&session)? });
             match display_commands::statusline(&session, &display).await {
-                Ok(Some(line)) => eprintln!("{line}"),
+                Ok(Some(line)) => command_eprintln!("{line}"),
                 Ok(None) => {},
-                Err(error) => eprintln!("Status line: {error:#}"),
+                Err(error) => command_eprintln!("Status line: {error:#}"),
             }
             input.as_ref().expect("interactive reader").set_permission_mode(session.permission_mode());
             let idle_prompt = format!("\n{} ", terminal::prompt_glyph());
@@ -742,20 +743,20 @@ async fn run(cli: &Cli) -> Result<()> {
                 line = input.as_mut().expect("interactive reader").read_prompt(prompt) => break 'read match line {
                     Ok(Some(terminal::input::PromptEvent::Line(line))) => line,
                     Ok(Some(terminal::input::PromptEvent::CyclePermission)) => {
-                        if let Err(error) = session.cycle_permission_mode().await { eprintln!("Permission mode: {error:#}"); }
+                        if let Err(error) = session.cycle_permission_mode().await { command_eprintln!("Permission mode: {error:#}"); }
                         continue 'repl;
                     },
                     Err(error) if error.kind() == io::ErrorKind::Interrupted => {
                         if composer.is_pending() {
                             composer.cancel();
-                            eprintln!("Prompt discarded.");
+                            command_eprintln!("Prompt discarded.");
                             continue 'repl;
                         }
                         break 'repl;
                     },
                     Err(error) => return Err(error.into()),
                     Ok(None) => {
-                        if composer.is_pending() { eprintln!("Unfinished prompt discarded."); }
+                        if composer.is_pending() { command_eprintln!("Unfinished prompt discarded."); }
                         break 'repl;
                     }
                 },
@@ -775,10 +776,10 @@ async fn run(cli: &Cli) -> Result<()> {
                     if !composer.is_pending()
                         && deepseek_code_core::services::async_hooks::has_pending_wake(&paths.data_dir, &session.id)
                         && input.as_mut().expect("interactive reader").yield_prompt().await? {
-                        if let Err(error) = session.wake_hooks(cli, &mut input).await { eprintln!("Hook wake: {error:#}"); }
+                        if let Err(error) = session.wake_hooks(cli, &mut input).await { command_eprintln!("Hook wake: {error:#}"); }
                         continue 'repl;
                     }
-                    if let Err(error) = session.sync_workspace() { eprintln!("Worktree: {error:#}"); }
+                    if let Err(error) = session.sync_workspace() { command_eprintln!("Worktree: {error:#}"); }
                     // A due CronCreate job runs as if typed, once the input is empty.
                     if !composer.is_pending() {
                         let scope = deepseek_code_core::tools::cron_jobs::Scope { root: &paths.data_dir, session: &session.id, project: &session.workspace };
@@ -786,7 +787,7 @@ async fn run(cli: &Cli) -> Result<()> {
                             Ok(due) if !due.is_empty() => {
                                 if input.as_mut().expect("interactive reader").yield_prompt().await? {
                                     for prompt in due {
-                                        eprintln!("\u{23f0} Scheduled: {}", prompt.lines().next().unwrap_or_default());
+                                        command_eprintln!("\u{23f0} Scheduled: {}", prompt.lines().next().unwrap_or_default());
                                         input.as_mut().expect("interactive reader").queue_prompt(prompt);
                                     }
                                     continue 'repl;
@@ -794,14 +795,14 @@ async fn run(cli: &Cli) -> Result<()> {
                                 for prompt in due { deepseek_code_core::services::input_queue::push(&session.store.db, &session.id, &prompt)?; }
                             }
                             Ok(_) => {}
-                            Err(error) => eprintln!("Scheduled jobs: {error:#}"),
+                            Err(error) => command_eprintln!("Scheduled jobs: {error:#}"),
                         }
                     }
                     // A self-paced /loop wakes as if its input were typed again.
                     if !composer.is_pending() && deepseek_code_core::tools::wakeup::is_due(&paths.data_dir, &session.id, chrono::Utc::now().timestamp())
                         && input.as_mut().expect("interactive reader").yield_prompt().await? {
                         if let Some((prompt, reason)) = deepseek_code_core::tools::wakeup::take_due(&paths.data_dir, &session.id, chrono::Utc::now().timestamp()).unwrap_or(None) {
-                            eprintln!("\u{21bb} Loop wakeup: {reason}");
+                            command_eprintln!("\u{21bb} Loop wakeup: {reason}");
                             input.as_mut().expect("interactive reader").queue_prompt(prompt);
                             continue 'repl;
                         }
@@ -811,7 +812,7 @@ async fn run(cli: &Cli) -> Result<()> {
                         if !composer.is_pending() && input.as_mut().expect("interactive reader").yield_prompt().await? {
                             let (every, prompt, next) = &mut loops[index];
                             *next = std::time::Instant::now() + *every;
-                            eprintln!("\u{21bb} Loop: {prompt}");
+                            command_eprintln!("\u{21bb} Loop: {prompt}");
                             input.as_mut().expect("interactive reader").queue_prompt(prompt.clone());
                             continue 'repl;
                         }
@@ -821,7 +822,7 @@ async fn run(cli: &Cli) -> Result<()> {
                     if !composer.is_pending()
                         && background_commands::agent_question(&paths, &session.id).is_some()
                         && input.as_mut().expect("interactive reader").yield_prompt().await? {
-                        if let Err(error) = background_commands::answer_agent_question(&paths, &session) { eprintln!("Agent question: {error:#}"); }
+                        if let Err(error) = background_commands::answer_agent_question(&paths, &session) { command_eprintln!("Agent question: {error:#}"); }
                         continue 'repl;
                     }
                     let notices = background_commands::collect_completed(&session)?;
@@ -830,7 +831,7 @@ async fn run(cli: &Cli) -> Result<()> {
                     if !composer.is_pending()
                         && deepseek_code_core::services::input_queue::any(&session.store.db, &session.id, background_commands::is_notification).unwrap_or(false)
                         && input.as_mut().expect("interactive reader").yield_prompt().await? {
-                        for notice in notices { eprintln!("{notice}"); }
+                        for notice in notices { command_eprintln!("{notice}"); }
                         continue 'repl;
                     }
                     for notice in notices {
@@ -842,13 +843,13 @@ async fn run(cli: &Cli) -> Result<()> {
                     match remote.handle(update, &mut session, |line| reader.notice(line)).await {
                         Ok(remote_commands::Action::Prompt(prompt)) => {
                             if !input.as_mut().expect("interactive reader").yield_prompt().await? {
-                                eprintln!("Remote prompt queued until the current input is submitted.");
+                                command_eprintln!("Remote prompt queued until the current input is submitted.");
                                 remote.defer(prompt);
                             } else if composer.is_pending() {
-                                eprintln!("Remote prompt queued until the multiline prompt is finished.");
+                                command_eprintln!("Remote prompt queued until the multiline prompt is finished.");
                                 remote.defer(prompt);
                             } else {
-                                eprintln!("Remote prompt: {}", prompt.lines().next().unwrap_or_default());
+                                command_eprintln!("Remote prompt: {}", prompt.lines().next().unwrap_or_default());
                                 remote.defer(prompt);
                                 continue 'repl;
                             }
@@ -857,14 +858,14 @@ async fn run(cli: &Cli) -> Result<()> {
                             if input.as_mut().expect("interactive reader").yield_prompt().await? { continue 'repl; }
                         },
                         Ok(remote_commands::Action::None) => {},
-                        Err(error) => eprintln!("Remote Control: {error:#}"),
+                        Err(error) => command_eprintln!("Remote Control: {error:#}"),
                     }
                     input.as_ref().expect("interactive reader").set_permission_mode(session.permission_mode());
                 },
                 _ = tokio::signal::ctrl_c() => {
                     if composer.is_pending() {
                         composer.cancel();
-                        eprintln!("Prompt discarded.");
+                        command_eprintln!("Prompt discarded.");
                         continue 'repl;
                     }
                     break 'repl;
@@ -872,7 +873,7 @@ async fn run(cli: &Cli) -> Result<()> {
             } };
             let line = match composer.push(line) {
                 terminal::prompt::Input::Pending => continue,
-                terminal::prompt::Input::Cancelled => { eprintln!("Prompt discarded."); continue; },
+                terminal::prompt::Input::Cancelled => { command_eprintln!("Prompt discarded."); continue; },
                 terminal::prompt::Input::Prompt(prompt) => {
                     if !prompt.trim().is_empty() {
                         if let Err(error) = prompt_turn(cli, &mut session, &prompt, &mut input).await { report_error(&error); }
@@ -884,20 +885,20 @@ async fn run(cli: &Cli) -> Result<()> {
             if line.trim() == "/vim" {
                 let on = !terminal::vim::enabled(&paths.data_dir);
                 match terminal::vim::set_enabled(&paths.data_dir, on) {
-                    Ok(()) => eprintln!("{}", if on { "Vim mode on: Esc for normal mode, i/a to insert." } else { "Vim mode off." }),
-                    Err(error) => eprintln!("Error: {error:#}"),
+                    Ok(()) => command_eprintln!("{}", if on { "Vim mode on: Esc for normal mode, i/a to insert." } else { "Vim mode off." }),
+                    Err(error) => command_eprintln!("Error: {error:#}"),
                 }
                 continue;
             }
             if let Some(note) = line.trim_start().strip_prefix("# ").filter(|_| !line.contains(['\n', '\r'])) {
                 match memory_shortcut::save(&session.workspace, note) {
-                    Ok(path) => eprintln!("Saved to {}: - {}", path.display(), note.trim()),
-                    Err(error) => eprintln!("Error: {error:#}"),
+                    Ok(path) => command_eprintln!("Saved to {}: - {}", path.display(), note.trim()),
+                    Err(error) => command_eprintln!("Error: {error:#}"),
                 }
                 continue;
             }
             if let Some(command) = line.trim_start().strip_prefix('!') {
-                if let Err(error) = shell_mode::run(&session, command).await { eprintln!("Error: {error:#}"); }
+                if let Err(error) = shell_mode::run(&session, command).await { command_eprintln!("Error: {error:#}"); }
                 continue;
             }
             if line.trim() == "/reload-skills" {
@@ -905,9 +906,9 @@ async fn run(cli: &Cli) -> Result<()> {
                     Ok(updated) => {
                         skills = updated;
                         input.as_mut().unwrap().set_commands(skill_commands::catalog(&skills));
-                        eprintln!("Loaded {} skill commands.", skills.len());
+                        command_eprintln!("Loaded {} skill commands.", skills.len());
                     },
-                    Err(error) => eprintln!("Cannot reload skills: {error:#}"),
+                    Err(error) => command_eprintln!("Cannot reload skills: {error:#}"),
                 }
                 continue;
             }
@@ -915,18 +916,18 @@ async fn run(cli: &Cli) -> Result<()> {
             let command = command_catalog::canonical(command);
             if command == "/powerup" && powerup::interactive_topic(argument).is_some() && powerup::available() {
                 if let Err(error) = input.as_mut().unwrap().powerup(paths.clone(), argument.to_owned()).await {
-                    eprintln!("Power-ups: {error:#}");
+                    command_eprintln!("Power-ups: {error:#}");
                 }
                 continue;
             }
             match design_commands::handle(cli, command, argument, &paths, &mut session).await {
                 Ok(true) => continue,
-                Err(error) => { eprintln!("Error: {error:#}"); continue; },
+                Err(error) => { command_eprintln!("Error: {error:#}"); continue; },
                 Ok(false) => {},
             }
             match batch_commands::handle(cli, command, argument, &paths, &mut session).await {
                 Ok(true) => continue,
-                Err(error) => { eprintln!("Error: {error:#}"); continue; },
+                Err(error) => { command_eprintln!("Error: {error:#}"); continue; },
                 Ok(false) => {},
             }
             match background_commands::handle(cli, command, argument, &paths, &mut session, &mut input).await {
@@ -939,14 +940,14 @@ async fn run(cli: &Cli) -> Result<()> {
                 // As in the reference CLI: lines per mouse wheel notch, kept.
                 let file = paths.data_dir.join("scroll-speed");
                 match argument.trim() {
-                    "" => eprintln!("Scroll speed: {} lines per wheel notch. /scroll-speed 1-20 changes it.", terminal::SCROLL_SPEED.load(std::sync::atomic::Ordering::Relaxed)),
+                    "" => command_eprintln!("Scroll speed: {} lines per wheel notch. /scroll-speed 1-20 changes it.", terminal::SCROLL_SPEED.load(std::sync::atomic::Ordering::Relaxed)),
                     value => match value.parse::<usize>().ok().filter(|speed| (1..=20).contains(speed)) {
                         Some(speed) => {
                             terminal::SCROLL_SPEED.store(speed, std::sync::atomic::Ordering::Relaxed);
-                            if let Err(error) = std::fs::write(&file, speed.to_string()) { eprintln!("Scroll speed set for this session; not saved: {error}"); }
-                            else { eprintln!("Scroll speed: {speed} lines per wheel notch."); }
+                            if let Err(error) = std::fs::write(&file, speed.to_string()) { command_eprintln!("Scroll speed set for this session; not saved: {error}"); }
+                            else { command_eprintln!("Scroll speed: {speed} lines per wheel notch."); }
                         }
-                        None => eprintln!("Usage: /scroll-speed 1-20"),
+                        None => command_eprintln!("Usage: /scroll-speed 1-20"),
                     },
                 }
                 continue;
@@ -957,7 +958,7 @@ async fn run(cli: &Cli) -> Result<()> {
                         report_error(&error);
                     },
                     Ok(None) => {}
-                    Err(error) => eprintln!("Error: {error:#}"),
+                    Err(error) => command_eprintln!("Error: {error:#}"),
                 }
                 continue;
             }
@@ -1069,7 +1070,7 @@ async fn run(cli: &Cli) -> Result<()> {
             }
         }
         if remote.is_connected() {
-            if let Err(error) = remote.disconnect().await { eprintln!("Remote Control: {error:#}"); }
+            if let Err(error) = remote.disconnect().await { command_eprintln!("Remote Control: {error:#}"); }
         }
         Ok(())
     }.await;
