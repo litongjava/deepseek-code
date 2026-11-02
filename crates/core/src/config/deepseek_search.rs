@@ -70,7 +70,7 @@ impl DeepSeekSearchConfig {
             name: self.model.trim().into(),
             enabled: true,
             max_tokens: Some(2048),
-            supports_vision: false,
+            supports_vision: true,
             supports_web_search: true,
             context_window: None,
             supports_text: true,

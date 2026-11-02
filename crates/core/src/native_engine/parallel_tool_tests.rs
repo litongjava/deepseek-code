@@ -140,6 +140,28 @@ async fn a_batch_runs_together_with_hooks_and_ordered_results() {
 }
 
 #[tokio::test]
+async fn image_reads_preserve_content_with_legacy_text_only_metadata() {
+    crate::config::OrchestrationConfig::init_global().unwrap();
+    let temp = tempfile::tempdir().unwrap();
+    std::fs::write(temp.path().join("a.png"), b"\x89PNG").unwrap();
+    let mut executor = executor(temp.path());
+    let (_, output, failed) = executor
+        .execute_tool_call("Read", &json!({"file_path":"a.png"}), "read-image")
+        .await;
+    assert!(!failed, "{output}");
+    let results = executor
+        .execute_tool_batch(&[
+            call("image-a", "Read", json!({"file_path":"a.png"}), true),
+            call("image-b", "Read", json!({"file_path":"a.png"}), true),
+        ])
+        .await;
+    assert!(results.iter().all(|result| !result.2));
+    let mut value =
+        json!({"content":"image", "image":{"media_type":"image/png", "data":"iVBORw=="}});
+    assert!(take_read_image("Read", &mut value).unwrap().is_ok());
+}
+
+#[tokio::test]
 async fn files_read_in_a_batch_can_be_edited_afterwards() {
     let temp = tempfile::tempdir().unwrap();
     std::fs::write(temp.path().join("a.txt"), "alpha").unwrap();

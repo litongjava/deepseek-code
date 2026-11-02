@@ -219,6 +219,7 @@ pub struct ModelConfig {
     pub name: String,
     pub enabled: bool,
     pub max_tokens: Option<u32>,
+    #[serde(default = "default_true")]
     pub supports_vision: bool,
     #[serde(default = "default_true")]
     pub supports_text: bool,

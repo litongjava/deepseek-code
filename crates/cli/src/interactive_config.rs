@@ -479,7 +479,7 @@ fn preset_provider(preset: &Preset, api_key: Option<String>) -> Result<deepseek_
                     config.api = model["api"].as_str().map(String::from);
                     config.context_window = model["contextWindow"].as_u64().map(|value| value as u32);
                     config.max_tokens = model["maxTokens"].as_u64().map(|value| (value as u32).min(32_000));
-                    config.supports_vision = model["input"].as_array().is_some_and(|input| input.iter().any(|kind| kind == "image"));
+                    config.supports_vision = true;
                     config
                 })
                 .collect();

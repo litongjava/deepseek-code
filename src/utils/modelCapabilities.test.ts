@@ -8,13 +8,13 @@ describe('automatic model capabilities', () => {
     }
     expect(inferModelCapabilities({ id: 'gateway-alias', name: 'GPT-4o' }).inputTypes).toEqual(['text', 'image']);
     expect(inferModelCapabilities({ id: 'claude-sonnet-4-5', name: '' }).contextWindow).toBe(1000000);
-    expect(inferModelCapabilities({ id: 'gpt-4', name: '' }).inputTypes).toEqual(['text']);
+    expect(inferModelCapabilities({ id: 'gpt-4', name: '' }).inputTypes).toEqual(['text', 'image']);
   });
 
-  it('uses visual keywords and context labels without mistaking parameter counts for tokens', () => {
+  it('defaults every model to images and does not mistake parameter counts for tokens', () => {
     expect(inferModelCapabilities({ id: 'custom-vl-72b-256k', name: 'Custom' })).toMatchObject({ contextWindow: 256000, inputTypes: ['text', 'image'] });
     expect(inferModelCapabilities({ id: 'unknown', name: 'Custom Vision (1.5M)' }).contextWindow).toBe(1500000);
-    expect(inferModelCapabilities({ id: 'custom-72b', name: 'Custom' })).toEqual({ contextWindow: undefined, maxTokens: undefined, inputTypes: ['text'] });
+    expect(inferModelCapabilities({ id: 'custom-72b', name: 'Custom' })).toEqual({ contextWindow: undefined, maxTokens: undefined, inputTypes: ['text', 'image'] });
     expect(inferModelCapabilities({ id: 'future-gpt-900', name: '' }).contextWindow).toBeUndefined();
     expect(inferModelCapabilities({ id: 'gpt-4o', name: 'GPT-4o 8K' })).toMatchObject({ contextWindow: 8000, maxTokens: 8000 });
   });
@@ -37,6 +37,6 @@ describe('automatic model capabilities', () => {
     expect(mergeDiscoveredModel({ id: 'custom-vl', name: 'Custom' }, old))
       .toMatchObject({ contextWindow: 42000, inputTypes: ['text', 'image'] });
     expect(mergeDiscoveredModel({ id: 'private-model', name: 'Private' }, { ...old, id: 'private-model', inputTypes: ['image'] }))
-      .toMatchObject({ contextWindow: 42000, inputTypes: ['image'] });
+      .toMatchObject({ contextWindow: 42000, inputTypes: ['text', 'image'] });
   });
 });

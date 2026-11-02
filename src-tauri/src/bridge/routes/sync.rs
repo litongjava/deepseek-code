@@ -130,7 +130,7 @@ async fn sync_push(
                                     .get("maxTokens")
                                     .and_then(|v| v.as_u64())
                                     .map(|v| v as u32),
-                                supports_vision: false,
+                                supports_vision: true,
                                 supports_text: true,
                                 api: None,
                                 supports_tools: true,

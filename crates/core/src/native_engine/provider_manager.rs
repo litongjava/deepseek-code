@@ -57,6 +57,7 @@ pub struct ModelConfig {
     pub name: String,
     pub enabled: bool,
     pub max_tokens: Option<u32>,
+    #[serde(default = "default_true")]
     pub supports_vision: bool,
     pub supports_web_search: bool,
     #[serde(default)]

@@ -414,13 +414,15 @@ fn shell_state_input(name: &str, input: &Value, cwd: &str, search_config_path: O
     input
 }
 
-/// A Read of an image becomes model image content when the model accepts images.
-fn take_read_image(tool_name: &str, value: &mut Value, supports_vision: bool) -> Option<std::result::Result<(String, McpOutput), String>> {
-    if tool_name != "Read" { return None; }
-    let image = value.as_object_mut()?.remove("image")?;
-    if !supports_vision {
-        return Some(Err("Error: The selected model does not accept images, so this image file cannot be shown to it.".to_owned()));
+/// Preserve image content and let the endpoint validate its input capabilities.
+fn take_read_image(
+    tool_name: &str,
+    value: &mut Value,
+) -> Option<std::result::Result<(String, McpOutput), String>> {
+    if tool_name != "Read" {
+        return None;
     }
+    let image = value.as_object_mut()?.remove("image")?;
     let text = value["content"].as_str().unwrap_or_default().to_owned();
     let transport = json!({"content":[{"type":"image","mimeType":image["media_type"],"data":image["data"]},{"type":"text","text":text}]});
     Some(McpOutput::from_transport(&transport).map(|content| (text, content)).map_err(|error| format!("Error: {error:#}")))
@@ -1126,9 +1128,9 @@ impl ToolLoopExecutor {
     }
 
     /// The blocks for a queued message whose `[Image #N]` names pasted
-    /// images, when the model accepts images.
+    /// images, regardless of cached model capability metadata.
     fn queued_images(&self, text: &str) -> Option<Vec<Value>> {
-        if !self.provider.model.supports_vision || !text.contains("[Image #") {
+        if !text.contains("[Image #") {
             return None;
         }
         let id = self.conv_id.as_deref()?;
@@ -1854,7 +1856,7 @@ impl ToolLoopExecutor {
         if matches!(tool_name, "Read" | "Edit" | "Write" | "MultiEdit" | "NotebookEdit") {
             if let Some(file_path) = tool_input["file_path"].as_str().or_else(|| tool_input["notebook_path"].as_str()) { self.record_seen_file(file_path); }
         }
-        match take_read_image(tool_name, &mut value, self.provider.model.supports_vision) {
+        match take_read_image(tool_name, &mut value) {
             Some(Ok((text, content))) => { self.mcp_outputs.insert(tool_use_id.to_owned(), content); return (text, false); }
             Some(Err(error)) => return (error, true),
             None => {}

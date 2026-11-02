@@ -846,12 +846,6 @@ impl Session {
         }
         system.push_str("\nThe user is working in the standalone DeepSeek Code terminal frontend. No Desktop window or Bridge server is running. Use the available native tools directly.\n");
         let cwd = &self.workspace;
-        if self.sdk_content.is_some() {
-            anyhow::ensure!(
-                self.selected_provider().await?.model.supports_vision,
-                "Selected model does not accept Image input"
-            );
-        }
         let mut checkpoint = if hook_wake {
             None
         } else {

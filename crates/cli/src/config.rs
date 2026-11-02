@@ -75,10 +75,9 @@ pub(crate) fn default_context_window(model: &str) -> Option<u32> {
     }
 }
 
-/// Models that accept image input (DeepSeek-V4.1-Flash and Claude).
-pub(crate) fn default_supports_vision(model: &str) -> bool {
-    let model = model.to_ascii_lowercase();
-    model.starts_with("deepseek-flash") || model.contains("claude")
+/// Send images by default; the selected endpoint reports unsupported input.
+pub(crate) fn default_supports_vision(_model: &str) -> bool {
+    true
 }
 
 pub(crate) fn provider_template(model: &str) -> ProviderConfig {
@@ -458,7 +457,14 @@ mod budget_tests {
         assert_eq!(default_max_tokens("gpt-4o"), 8192);
         assert_eq!(default_context_window("deepseek-flash"), Some(1_048_576));
         assert_eq!(default_context_window("gpt-4o"), None);
-        assert!(default_supports_vision("deepseek-flash") && !default_supports_vision("deepseek-v4-pro"));
+        for model in [
+            "deepseek-flash",
+            "deepseek-v4-pro",
+            "gpt-6-astra",
+            "custom-model",
+        ] {
+            assert!(default_supports_vision(model));
+        }
     }
 }
 

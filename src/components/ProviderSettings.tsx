@@ -42,7 +42,7 @@ export default function ProviderSettings() {
   const chooseBuiltin = (id: string) => {
     const entry = catalog.providers.find(p => p.id === id)!;
     setBuiltinId(id);
-    setDraft({ ...emptyProvider(), id: entry.id, name: entry.name, baseUrl: entry.baseUrl, category: 'builtin', builtinId: id, format: 'harness', models: entry.models.map(m => ({ ...m, maxTokens: Math.min(m.maxTokens, m.contextWindow) })) as ProviderModel[] });
+    setDraft({ ...emptyProvider(), id: entry.id, name: entry.name, baseUrl: entry.baseUrl, category: 'builtin', builtinId: id, format: 'harness', models: entry.models.map(m => ({ ...m, inputTypes: ['text', 'image'], maxTokens: Math.min(m.maxTokens, m.contextWindow) })) as ProviderModel[] });
     setPage(0);
   };
   const beginAdd = () => { setAdding(true); setSelectedId(null); setCategory('builtin'); chooseBuiltin(builtinId); setError(''); setNotice(''); setSearch(''); };
@@ -53,7 +53,7 @@ export default function ProviderSettings() {
     try {
       const ids = draft.models.map(m => m.id.trim());
       if (ids.some(id => !id) || new Set(ids).size !== ids.length) throw new Error('模型 ID 不能为空或重复');
-      if (draft.models.some(m => !(m.inputTypes || ['text']).length)) throw new Error('每个模型至少选择一种输入类型');
+      if (draft.models.some(m => !(m.inputTypes || ['text', 'image']).length)) throw new Error('每个模型至少选择一种输入类型');
       const data = { ...draft, id: draft.id.trim(), name: draft.name.trim(), baseUrl: draft.baseUrl.trim(), models: draft.models.map(m => ({ ...m, id: m.id.trim(), name: m.name.trim() || m.id.trim() })) };
       const saved = adding ? await createProvider(data) : await updateProvider(selectedId!, data);
       setProviders(prev => adding ? [...prev, saved] : prev.map(p => p.id === selectedId ? saved : p));
@@ -123,13 +123,13 @@ export default function ProviderSettings() {
             <p id="web-search-help" className="mt-2 text-xs text-claude-textSecondary">自动模式下的 DeepSeek 模型和手动选择 DeepSeek 原生搜索，优先使用系统设置 → 联网搜索中的独立配置；未配置时使用当前供应商的地址、模型和密钥。其他原生搜索使用此供应商的 API 地址和认证。搜索可能产生额外费用；服务不支持时会提示错误，不会自动改用公共搜索。</p>
           </div>
           <div className="border-t border-claude-border pt-4 space-y-3">
-            <div className="flex items-center gap-2"><h4 className="text-sm font-medium flex-1">模型列表</h4><button type="button" disabled={busy || (adding && draft.category !== 'builtin')} onClick={fetchModels} className={buttonClass}><RefreshCw size={12} className="inline mr-1" />获取模型列表</button><button type="button" onClick={() => { edit({ models: [...draft.models, { id: `model-${Date.now()}`, name: '新模型', enabled: true, inputTypes: ['text'], api: draft.category === 'builtin' ? draft.models[0]?.api : undefined }] }); setSearch(''); setPage(Math.floor(draft.models.length / pageSize)); }} className={buttonClass}>添加模型</button></div>
+            <div className="flex items-center gap-2"><h4 className="text-sm font-medium flex-1">模型列表</h4><button type="button" disabled={busy || (adding && draft.category !== 'builtin')} onClick={fetchModels} className={buttonClass}><RefreshCw size={12} className="inline mr-1" />获取模型列表</button><button type="button" onClick={() => { edit({ models: [...draft.models, { id: `model-${Date.now()}`, name: '新模型', enabled: true, inputTypes: ['text', 'image'], api: draft.category === 'builtin' ? draft.models[0]?.api : undefined }] }); setSearch(''); setPage(Math.floor(draft.models.length / pageSize)); }} className={buttonClass}>添加模型</button></div>
             <input aria-label="搜索模型" className={inputClass} value={search} placeholder="搜索模型" onChange={e => { setSearch(e.target.value); setPage(0); }} />
-            <p className="text-xs text-claude-textSecondary">修改模型 ID / 名称或获取列表时，自动识别 Text / Image 输入能力和上下文；接口参数优先，缺失时参考模型目录与名称。无法识别的上下文留空，可手动调整。</p>
+            <p className="text-xs text-claude-textSecondary">所有模型默认允许发送图片，由服务端判断是否支持并返回错误。修改模型 ID / 名称或获取列表时自动识别上下文；无法识别的上下文留空，可手动调整。</p>
             {visibleModels.slice(page * pageSize, (page + 1) * pageSize).map(({ m, index }) => <div key={index} className="border border-claude-border rounded-xl p-3 space-y-3">
               <div className="flex gap-2 items-center"><input type="checkbox" aria-label={`启用 ${m.name}`} checked={m.enabled !== false} onChange={e => updateModel(index, { enabled: e.target.checked })} /><input required aria-label="模型 ID" className={inputClass} value={m.id} onChange={e => updateModel(index, { id: e.target.value })} /><input required aria-label="模型名称" className={inputClass} value={m.name} onChange={e => updateModel(index, { name: e.target.value })} /><button type="button" aria-label={`删除模型 ${m.name}`} onClick={() => { edit({ models: draft.models.filter((_, i) => i !== index) }); setPage(0); }}><Trash2 size={14} /></button></div>
               <div className="grid grid-cols-2 gap-2"><TokenField label="Context window" value={m.contextWindow} onChange={value => updateModel(index, { contextWindow: value })} /><TokenField label="Max output tokens" value={m.maxTokens} onChange={value => updateModel(index, { maxTokens: value })} /></div>
-              <div className="text-xs text-claude-textSecondary">Input types<div className="flex gap-4 mt-1 text-claude-text">{['text', 'image'].map(type => <label key={type} className="flex gap-1.5 items-center"><input type="checkbox" checked={(m.inputTypes || ['text']).includes(type)} onChange={e => { const input = m.inputTypes || ['text']; updateModel(index, { inputTypes: e.target.checked ? [...input, type] : input.filter(t => t !== type) }); }} />{type === 'text' ? 'Text' : 'Image'}</label>)}</div></div>
+              <div className="text-xs text-claude-textSecondary">Input types<div className="flex gap-4 mt-1 text-claude-text">{['text', 'image'].map(type => <label key={type} className="flex gap-1.5 items-center"><input type="checkbox" checked={(m.inputTypes || ['text', 'image']).includes(type)} onChange={e => { const input = m.inputTypes || ['text', 'image']; updateModel(index, { inputTypes: e.target.checked ? [...input, type] : input.filter(t => t !== type) }); }} />{type === 'text' ? 'Text' : 'Image'}</label>)}</div></div>
             </div>)}
             {!visibleModels.length && <p className="text-sm text-claude-textSecondary">暂无模型，请添加模型或获取列表。</p>}
             {visibleModels.length > pageSize && <div className="flex justify-between items-center text-xs"><button type="button" disabled={!page} onClick={() => setPage(page - 1)} className={buttonClass}>上一页</button>{page + 1} / {Math.ceil(visibleModels.length / pageSize)}<button type="button" disabled={(page + 1) * pageSize >= visibleModels.length} onClick={() => setPage(page + 1)} className={buttonClass}>下一页</button></div>}

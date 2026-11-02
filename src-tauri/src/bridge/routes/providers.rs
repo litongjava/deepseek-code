@@ -41,7 +41,7 @@ fn parse_models(value: &Value, old: &[ModelConfig]) -> Result<Vec<ModelConfig>, 
         Ok(ModelConfig { id: id.clone(), name:v["name"].as_str().filter(|s| !s.trim().is_empty()).unwrap_or(&id).to_string(),
             enabled:v["enabled"].as_bool().unwrap_or(true), max_tokens, context_window,
             supports_text:input.map(|a| a.iter().any(|t| t == "text")).unwrap_or_else(|| previous.map_or(true, |m| m.supports_text)),
-            supports_vision:input.map(|a| a.iter().any(|t| t == "image")).unwrap_or_else(|| previous.map_or(false, |m| m.supports_vision)),
+            supports_vision:input.map(|a| a.iter().any(|t| t == "image")).unwrap_or_else(|| previous.map_or(true, |m| m.supports_vision)),
             api:v["api"].as_str().map(String::from).or_else(|| previous.and_then(|m| m.api.clone())),
             supports_tools:previous.map_or(true, |m| m.supports_tools), supports_streaming:true,
             cost_per_1k_input:previous.and_then(|m| m.cost_per_1k_input), cost_per_1k_output:previous.and_then(|m| m.cost_per_1k_output) })

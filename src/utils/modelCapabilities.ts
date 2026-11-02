@@ -46,12 +46,11 @@ export function inferModelCapabilities(model: Pick<ProviderModel, 'id' | 'name'>
     try { namedContext = parseTokenLimit(limit[1]); } catch { /* Keep unknown limits empty. */ }
   }
   // A size such as 72B is a parameter count, not a context window.
-  const vision = /(?:^|[\s\-_/])(vision|vl|vlm|multimodal)(?:$|[\s\-_/])/i.test(identity);
   const contextWindow = namedContext ?? known?.contextWindow;
   return {
     contextWindow,
     maxTokens: contextWindow && known?.maxTokens ? Math.min(known.maxTokens, contextWindow) : known?.maxTokens,
-    inputTypes: known?.inputTypes ? [...known.inputTypes] : vision ? ['text', 'image'] : ['text'],
+    inputTypes: ['text', 'image'],
   };
 }
 
@@ -77,7 +76,6 @@ export function mergeDiscoveredModel(fetched: ProviderModel, previous?: Provider
     enabled: previous?.enabled ?? fetched.enabled,
     contextWindow: fetched.contextWindow ?? inferred.contextWindow ?? previous?.contextWindow,
     maxTokens: fetched.maxTokens ?? inferred.maxTokens ?? previous?.maxTokens,
-    inputTypes: fetched.inputTypes ?? (lookup(fetched.id) || lookup(fetched.name) || inferred.inputTypes?.includes('image') ? inferred.inputTypes : undefined)
-      ?? previous?.inputTypes ?? inferred.inputTypes,
+    inputTypes: fetched.inputTypes ?? inferred.inputTypes,
   });
 }

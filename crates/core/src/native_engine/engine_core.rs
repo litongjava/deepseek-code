@@ -1150,7 +1150,6 @@ fn validate_model_input(model: &crate::native_engine::provider_manager::ModelCon
         if let Some(parts) = content.as_array() {
             for part in parts {
                 match part["type"].as_str().unwrap_or("") {
-                    "image" | "image_url" | "input_image" if !model.supports_vision => anyhow::bail!("Selected model does not accept Image input"),
                     "text" | "input_text" if !model.supports_text => anyhow::bail!("Selected model does not accept Text input"),
                     _ => {}
                 }
@@ -1167,7 +1166,10 @@ mod provider_input_tests {
     fn provider_input_capabilities_are_enforced() {
         let mut model: crate::native_engine::provider_manager::ModelConfig = serde_json::from_value(serde_json::json!({"id":"m","name":"M","enabled":true,"max_tokens":32000,"supports_vision":false,"supports_web_search":false})).unwrap();
         assert!(validate_model_input(&model,&[serde_json::json!({"role":"user","content":"hello"})]).is_ok());
-        assert!(validate_model_input(&model,&[serde_json::json!({"role":"user","content":[{"type":"image_url","image_url":{"url":"data:image/png;base64,AA=="}}]})]).is_err());
+        // Stale capability metadata must not prevent the endpoint from deciding.
+        for kind in ["image", "image_url", "input_image"] {
+            assert!(validate_model_input(&model,&[serde_json::json!({"role":"user","content":[{"type":kind,"image_url":{"url":"data:image/png;base64,AA=="}}]})]).is_ok());
+        }
         model.supports_text = false;
         assert!(validate_model_input(&model,&[serde_json::json!({"role":"user","content":"hello"})]).is_err());
     }

@@ -642,7 +642,7 @@ async fn embedded_images_reach_both_providers_and_survive_history_and_fork() {
         let paths = deepseek_code_core::runtime::RuntimePaths::new(root.path().join("data")).unwrap();
         let mut config = deepseek_code_core::config::AppConfig::default();
         std::fs::create_dir_all(&paths.data_dir).unwrap();
-        config.providers.push(serde_json::from_value(json!({"id":"vision-fixture","name":"Vision fixture","provider_type":"openai","base_url":server.url,"enabled":true,"is_default":false,"settings":{},"supports_web_search":false,"models":[{"id":"fixture-model","name":"fixture-model","enabled":true,"supports_vision":true,"supports_tools":true,"supports_text":true,"supports_streaming":true}]})).unwrap());
+        config.providers.push(serde_json::from_value(json!({"id":"vision-fixture","name":"Vision fixture","provider_type":"openai","base_url":server.url,"enabled":true,"is_default":false,"settings":{},"supports_web_search":false,"models":[{"id":"fixture-model","name":"fixture-model","enabled":true,"supports_vision":false,"supports_tools":true,"supports_text":true,"supports_streaming":true}]})).unwrap());
         std::fs::write(
             paths.data_dir.join("config.json"),
             serde_json::to_vec(&config).unwrap(),
