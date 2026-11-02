@@ -129,3 +129,15 @@
 1. 测试通过 + 必要的 ConPTY 验收 + commit。
 2. 在 `temp/claude-code-cli-dev` 记录：commit、fixture/终端场景、结果、失败/取消/持久化覆盖、剩余外部要求；同步勾选清单并更新 `cli-parity-current.md` 对应行。终端逐帧快照（`frame-*`）验收后可删除，保留命名快照与 `raw-ansi.log`。
 3. 若用户希望，在 `claude-code-cli-doc`（当前为空）编写面向用户的使用手册（安装、配置、常用命令、远程控制等）。
+
+## 2026-11-02 CLI improvements
+
+- [x] Reap exited shell roots before waiting for inherited output pipes; preserve timeout diagnostics and descendant cleanup.
+- [x] Number every tool call, restore transcript numbers and continue numbering after resume.
+- [x] Alt+> / Alt+< adjust persisted effort; preserve draft text and paste folding.
+- [x] Live /status includes request usage and remaining context, with request-ID deduplication.
+- [x] Grep uses workspace-relative paths; shell guidance avoids redundant cd.
+- [x] Add `dcl init-env node|python|codegraph|all` and `--dry-run`, with Windows/macOS/Linux installation paths.
+- [ ] Run actual installers on clean Windows, macOS and Linux hosts and verify the CodeGraph MCP handshake. Windows control-flow tests and preview are complete; actual installation is not claimed.
+
+Acceptance evidence: development record `acceptance-20261102.md` and `ux-20261102-K9WURy/assertions.json`. User documentation is in the separate documentation repository under `cli/environment-init.md` and `cli/interface.md`.

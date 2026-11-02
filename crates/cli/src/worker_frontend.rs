@@ -65,6 +65,7 @@ async fn single_turn(
         &root.join("keybindings.json"),
         history,
     )?.with_workspace(&session.workspace);
+    display.restore_numbers(session)?;
     display.set_shell_context(root, &session.id);
     display.set_pinned_prompt(prompt);
     display.set_model_label(&crate::session_commands::model_label(session).await);
@@ -134,6 +135,7 @@ pub async fn attach(cli: &Cli, session: &Session, id: &str, input: &mut Option<T
         &session.paths.data_dir.join("keybindings.json"),
         Vec::new(),
     )?.with_workspace(&workspace);
+    display.restore_numbers(session)?;
     display.set_shell_context(&session.paths.data_dir, &job.session_id);
     display.set_model_label(&crate::session_commands::model_label(session).await);
     display.notice(&format!(
@@ -560,6 +562,7 @@ async fn observe(
                             } else if let Some(message) = crate::session_commands::live_inspection(session, &prompt).await {
                                 // Answered here so status never waits for a long tool call.
                                 display.notice(&message);
+                                display.set_model_label(&crate::session_commands::model_label(session).await);
                             } else {
                                 if let Some(goal) = deepseek_code_core::services::session_goals::active(&session.store.db, &session.id)?.filter(|g|g.state == "waiting") {
                                     deepseek_code_core::services::session_goals::pause(&session.store.db, &session.id, &goal.id, "New user input interrupted the retry delay")?;

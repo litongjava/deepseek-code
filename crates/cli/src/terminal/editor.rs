@@ -49,6 +49,7 @@ pub struct PromptEditor {
     history: Vec<String>,
     pending_draft: String,
     pending_cursor: Option<usize>,
+    pending_paste: Option<(usize, usize)>,
     permission_mode: String,
     commands: Vec<(String, String)>,
     details: DetailsPanel,
@@ -83,6 +84,7 @@ impl Default for PromptEditor {
             history: Vec::new(),
             pending_draft: String::new(),
             pending_cursor: None,
+            pending_paste: None,
             permission_mode: "ask".into(),
             details: DetailsPanel::default(),
             transcript: Vec::new(),
@@ -119,6 +121,7 @@ struct Buffer {
     cursor: usize,
     pasted: bool,
     paste_end: usize,
+    paste_start: usize,
 }
 impl Buffer {
     fn text(&self) -> String {
@@ -810,6 +813,7 @@ impl PromptEditor {
     fn preserve_cycle_draft(&mut self, buffer: &Buffer) {
         self.pending_draft = buffer.chars.iter().collect();
         self.pending_cursor = Some(buffer.cursor);
+        self.pending_paste = buffer.pasted.then_some((buffer.paste_start, buffer.paste_end));
     }
 
     fn resume_buffer(&mut self) -> Buffer {
@@ -817,6 +821,11 @@ impl PromptEditor {
         buffer.set(&std::mem::take(&mut self.pending_draft));
         if let Some(cursor) = self.pending_cursor.take() {
             buffer.cursor = cursor.min(buffer.chars.len());
+        }
+        if let Some((start, end)) = self.pending_paste.take() {
+            buffer.pasted = true;
+            buffer.paste_start = start.min(buffer.chars.len());
+            buffer.paste_end = end.min(buffer.chars.len());
         }
         buffer
     }
@@ -860,6 +869,7 @@ impl PromptEditor {
     pub fn set_draft(&mut self, draft: String) {
         self.pending_draft = draft;
         self.pending_cursor = None;
+        self.pending_paste = None;
     }
     pub fn set_commands(&mut self, commands: Vec<(String, String)>) {
         self.commands = commands;
@@ -1021,8 +1031,8 @@ impl PromptEditor {
             selected = selected.min(items.len().saturating_sub(1));
             // Wrap by display cells, never by UTF-8 bytes. Keep cursor in viewport.
             let prompt = clipped(prompt, width.saturating_sub(2));
-            let prefix: String = buffer.chars.iter().take(buffer.paste_end).collect();
-            let label = buffer.pasted.then(|| crate::terminal::paste_input::paste_label(&prefix)).flatten().map(|label| format!("{}{}", label, buffer.chars.iter().skip(buffer.paste_end).collect::<String>()));
+            let prefix: String = buffer.chars.iter().skip(buffer.paste_start).take(buffer.paste_end.saturating_sub(buffer.paste_start)).collect();
+            let label = buffer.pasted.then(|| crate::terminal::paste_input::paste_label(&prefix)).flatten().map(|label| format!("{}{}{}", buffer.chars.iter().take(buffer.paste_start).collect::<String>(), label, buffer.chars.iter().skip(buffer.paste_end).collect::<String>()));
             let shown = label.as_ref().map(|label| label.chars().collect::<Vec<_>>());
             let chars = shown.as_ref().unwrap_or(&buffer.chars);
             let (input_lines, positions) = crate::terminal::prompt_display::layout(&prompt, chars, width.saturating_sub(1));
@@ -1358,6 +1368,7 @@ impl PromptEditor {
                 Event::Paste(value) => {
                     selection.clear()?;
                     buffer.pasted = true;
+                    buffer.paste_start = buffer.cursor;
                     history_view.close()?;
                     screen.invalidated = true;
                     // A dragged or pasted image file shows as `[Image #N]`, as in the reference CLI.
@@ -1365,7 +1376,7 @@ impl PromptEditor {
                         Some(path) => buffer.insert(&format!("{} ", crate::images::attach(path))),
                         None => buffer.insert(&value),
                     }
-                    buffer.paste_end = buffer.chars.len();
+                    buffer.paste_end = buffer.cursor;
                     selected = 0;
                     menu_hidden = false;
                 }
@@ -1425,6 +1436,12 @@ impl PromptEditor {
                             last_state = (buffer.chars.clone(), buffer.cursor);
                         }
                         continue;
+                    }
+                    if key.modifiers.contains(KeyModifiers::ALT) && matches!(key.code, KeyCode::Char('>' | '<' | '.' | ',')) {
+                        self.preserve_cycle_draft(&buffer);
+                        let command = if matches!(key.code, KeyCode::Char('>' | '.')) { "/effort +" } else { "/effort -" };
+                        screen.finish("", &prompt)?;
+                        return Ok(Some(super::PromptEvent::Line(command.into())));
                     }
                     if key.code == KeyCode::Char('p') && key.modifiers.contains(KeyModifiers::ALT) {
                         // alt+p opens the model picker, as in the reference CLI.
@@ -1533,8 +1550,9 @@ impl PromptEditor {
                             Some(crate::images::Pasted::Image(placeholder)) => buffer.insert(&placeholder),
                             Some(crate::images::Pasted::Text(text)) => {
                                 buffer.pasted = true;
+                    buffer.paste_start = buffer.cursor;
                                 buffer.insert(&text);
-                                buffer.paste_end = buffer.chars.len();
+                                buffer.paste_end = buffer.cursor;
                             }
                             None => {}
                         }
@@ -1820,11 +1838,17 @@ mod tests {
         let mut buffer = Buffer::default();
         buffer.set("hello \u{4e2d}\u{6587}\nworld");
         buffer.cursor = 3;
+        buffer.pasted = true;
+        buffer.paste_start = 6;
+        buffer.paste_end = buffer.chars.len();
         editor.preserve_cycle_draft(&buffer);
         editor.set_permission_mode("plan".into());
         let restored = editor.resume_buffer();
         assert_eq!(restored.chars, buffer.chars);
         assert_eq!(restored.cursor, 3);
+        assert!(restored.pasted);
+        assert_eq!(restored.paste_start, 6);
+        assert_eq!(restored.paste_end, buffer.chars.len());
         assert_eq!(editor.history, vec!["previous"]);
         assert!(editor.pending_draft.is_empty());
     }

@@ -92,6 +92,43 @@ pub fn set_effort(session: &Session, effort: Option<&str>) -> Result<()> {
     save(&session.store.db, &session.id, &settings)
 }
 
+/// Adjust the persisted effort for subsequent model requests.
+pub async fn step_effort(session: &Session, up: bool) -> Result<String> {
+    let current = effective_effort(session, session.selected_provider().await?.model.effort.as_deref())?;
+    let index = EFFORTS.iter().position(|level| Some(*level) == current.as_deref()).unwrap_or(0);
+    let index = if up { (index + 1).min(EFFORTS.len() - 1) } else { index.saturating_sub(1) };
+    set_effort(session, Some(EFFORTS[index]))?;
+    Ok(format!("Reasoning effort: {} (next turn)", EFFORTS[index]))
+}
+
+/// Share request accounting with a separate attached frontend during a turn.
+pub fn save_live_requests(session: &Session, snapshots: &[Value]) -> Result<()> {
+    let key = format!("cli.live-requests.{}", session.id);
+    // Store only accounting fields, never prompt bodies or credentials.
+    let values: Vec<Value> = snapshots.iter().map(|snapshot| {
+        let mut value = serde_json::Map::new();
+        for key in ["id", "startedAt", "inputTokens", "outputTokens", "contextUsage"] {
+            if let Some(field) = snapshot.get(key) { value.insert(key.into(), field.clone()); }
+        }
+        Value::Object(value)
+    }).collect();
+    let value = serde_json::to_string(&values)?;
+    session.store.db.with_conn(|conn| conn.execute(
+        "INSERT INTO peripheral_settings(key,value) VALUES(?1,?2) ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+        [&key, &value],
+    ))??;
+    Ok(())
+}
+
+pub fn live_requests(session: &Session) -> Result<Vec<Value>> {
+    session.store.db.with_conn(|conn| -> Result<Vec<Value>> {
+        let mut statement = conn.prepare("SELECT value FROM peripheral_settings WHERE key=?1")?;
+        let mut rows = statement.query([format!("cli.live-requests.{}", session.id)])?;
+        let raw: Option<String> = rows.next()?.map(|row| row.get(0)).transpose()?;
+        Ok(raw.and_then(|raw| serde_json::from_str(&raw).ok()).unwrap_or_default())
+    })?
+}
+
 /// Copy only behavioral settings, retaining independent state after branching.
 pub fn copy_settings(db: &DbManager, from: &str, to: &str) -> Result<()> {
     save(db, to, &load(db, from)?)?;
@@ -282,6 +319,10 @@ pub async fn handle(
             }
         }
         "/effort" => {
+            if matches!(argument, "+" | "-") {
+                eprintln!("{}", step_effort(session, argument == "+").await?);
+                return Ok(true);
+            }
             let mut settings = load(&session.store.db, &session.id)?;
             if !argument.is_empty() {
                 settings.effort = parse_effort(argument)?;
@@ -418,13 +459,16 @@ pub fn live_goal_command(session: &Session, prompt: &str) -> Result<Option<Strin
 /// the tool call in progress. `--check` is left out: its request would stall
 /// the turn's output.
 pub(crate) fn is_live_inspection(line: &str) -> bool {
-    matches!(line.trim(), "/status" | "/status --check")
+    matches!(line.trim(), "/status" | "/status --check" | "/effort +" | "/effort -")
 }
 
 /// The answer for `is_live_inspection`, or None for every other command.
 pub async fn live_inspection(session: &Session, prompt: &str) -> Option<String> {
     if !is_live_inspection(prompt) {
         return None;
+    }
+    if matches!(prompt.trim(), "/effort +" | "/effort -") {
+        return Some(step_effort(session, prompt.trim().ends_with('+')).await.unwrap_or_else(|error| format!("{error:#}")));
     }
     if prompt.trim().ends_with("--check") {
         return Some(

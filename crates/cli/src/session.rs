@@ -953,6 +953,7 @@ impl Session {
             _ = tokio::signal::ctrl_c() => bail!("Interrupted before model request"),
         };
         let mut progress = crate::terminal::live::TurnDisplay::new(interactive_display, self.permission_mode(), &self.paths.data_dir.join("keybindings.json"), self.store.history(&self.id)?.iter().filter(|row|row["role"]=="user").filter_map(|row|row["content"].as_str().map(str::to_owned)).filter(|text| !crate::background_commands::is_notification(text)).collect())?.with_workspace(&self.workspace);
+        progress.restore_numbers(self)?;
         progress.set_shell_context(&self.paths.data_dir, &self.id);
         if progress.is_live() {
             progress.set_model_label(&crate::session_commands::model_label(self).await);
@@ -972,6 +973,7 @@ impl Session {
         let mut completed = false;
         let mut stop = None::<String>;
         let mut snapshots = Vec::<Value>::new();
+        crate::session_commands::save_live_requests(self, &[])?;
         let mut goal_requests = crate::session_commands::GoalRequests::default();
         let mut observed_plan_boundary = deepseek_code_core::services::plan_approval::latest_boundary(&self.store.db, &self.id)?;
         let mut tool_started = std::collections::HashMap::<String, std::time::Instant>::new();
@@ -1021,9 +1023,9 @@ impl Session {
                                 if let Some(reader) = input.as_mut() { reader.queue_prompt(prompt); }
                             },
                             crate::terminal::live::Action::Submit(prompt) => {
-                                if let Some(message) = crate::session_commands::live_goal_command(self, &prompt)? { progress.notice(&message); }
+                                if let Some(message) = crate::session_commands::live_goal_command(self, &prompt)? { progress.notice(&message); progress.set_model_label(&crate::session_commands::model_label(self).await); }
                                 // Answered here so status never waits for a long tool call.
-                                else if let Some(message) = crate::session_commands::live_inspection(self, &prompt).await { progress.notice(&message); }
+                                else if let Some(message) = crate::session_commands::live_inspection(self, &prompt).await { progress.notice(&message); progress.set_model_label(&crate::session_commands::model_label(self).await); }
                                 else if queues_mid_turn(&prompt) {
                                     // As in the reference CLI the model reads it after its next
                                     // tool results, or as the next prompt.
@@ -1349,6 +1351,7 @@ impl Session {
                     EngineEvent::RequestSnapshot(snapshot) => {
                         goal_requests.observe(&snapshot);
                         if let Some(old) = snapshots.iter_mut().find(|s| s["id"] == snapshot["id"]) { *old = snapshot; } else { snapshots.push(snapshot); }
+                        crate::session_commands::save_live_requests(self, &snapshots)?;
                     },
                     EngineEvent::BudgetWarning { message, .. } => { progress.notice(&message); },
                     _ => {},
@@ -1421,6 +1424,7 @@ impl Session {
                 Ok(())
             })??;
         }
+        crate::session_commands::save_live_requests(self, &[])?;
         if let Some(goal) = turn_goal {
             let (tokens, requests, unreported) = goal_requests.usage();
             deepseek_code_core::services::session_goals::record_turn(

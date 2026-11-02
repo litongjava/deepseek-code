@@ -81,6 +81,7 @@ fn conversation(session: &Session, id: &str, detailed: bool, mut recorded: Optio
     session.store.db.with_conn(|conn| {
         let rows = deepseek_code_core::db::message_repo::get_messages_by_conversation(conn, id)?;
         let mut lines = Vec::new();
+        let mut tool_number = 0;
         for message in &rows {
             if detailed { separate_block(&mut lines); }
             let message_start = lines.len();
@@ -125,6 +126,8 @@ fn conversation(session: &Session, id: &str, detailed: bool, mut recorded: Optio
                 record_lines(recorded, &lines[message_start..], width);
             }
             for tool in deepseek_code_core::db::message_repo::get_tool_calls_for_message(conn, &message.id)? {
+            tool_number += 1;
+            let number = Some(tool_number);
             let input = tool
                 .input
                 .as_deref()
@@ -136,15 +139,15 @@ fn conversation(session: &Session, id: &str, detailed: bool, mut recorded: Optio
                 let elapsed = deepseek_code_core::db::message_repo::tool_duration(conn, &tool.id)?.map(std::time::Duration::from_millis);
                 let full = tool_view::expanded_block(&tool.name, &input, output, tool.is_error, elapsed, Some(&session.workspace));
                 if recorded.needs_separator() { recorded.push(String::new(), None); }
-                let (id, rows) = recorded.block(short, full);
+                let (id, rows) = recorded.block(tool_view::numbered(short, number), tool_view::numbered(full, number));
                 for row in rows { recorded.push(row, Some(id)); }
             }
             if detailed { separate_block(&mut lines); }
-            lines.extend(if detailed {
+            lines.extend(tool_view::numbered(if detailed {
                 tool_view::expanded(&tool.name, &input, output, tool.is_error, Some(&session.workspace))
             } else {
                 tool_view::finished(&tool.name, &input, output, tool.is_error, None, Some(&session.workspace))
-            });
+            }, number));
             }
             let answer_start = lines.len();
             let mut text = message.content.lines();
@@ -194,6 +197,51 @@ fn resumed_answers_keep_markdown_colors_and_flush_tables() {
     assert!(colored.contains("one"));
     assert!(!colored.contains("**bold**"));
     assert!(!rendered_answer(content, 80, false).join("\n").contains("\x1b["));
+}
+
+#[tokio::test]
+async fn all_tools_keep_numbers_in_resume_and_detailed_transcript() {
+    use clap::Parser;
+    use deepseek_code_core::db::message_repo;
+    let root = tempfile::tempdir().unwrap();
+    let paths = RuntimePaths::new(root.path().join("data")).unwrap();
+    let provider = serde_json::from_value(serde_json::json!({"id":"fixture","name":"Fixture","base_url":"http://127.0.0.1:1","api_key":"fixture-only","api_format":"openai","enabled":true,"models":[{"id":"fixture","name":"Fixture","enabled":true,"supports_vision":false,"supports_web_search":false}]})).unwrap();
+    let selection = crate::config::Selection { providers: vec![provider], provider_id: "fixture".into(), model: "fixture".into() };
+    let cli = crate::args::Cli::parse_from(["dcl", "--print"]);
+    let store = SessionStore::new(paths.open_database().unwrap());
+    let id = store.create(root.path(), "fixture", "fixture").unwrap();
+    let session = Session::open(&cli, &paths, selection, Some(&id)).await.unwrap();
+    let names = ["Read", "Grep", "Edit", "Bash", "mcp__codegraph__explore"];
+    session.store.db.with_conn(|conn| -> Result<()> {
+        message_repo::insert_message(conn, "answer", &id, "assistant", "done", None, "2026-11-02T00:00:00Z", false, 0)?;
+        for (index, name) in names.iter().enumerate() {
+            message_repo::insert_tool_call(conn, &format!("call-{index}"), "answer", name, Some("{}"), Some("ok"), false, index as i64)?;
+        }
+        Ok(())
+    }).unwrap().unwrap();
+    for detailed in [false, true] {
+        let lines = conversation(&session, &id, detailed, None).unwrap();
+        let text = crate::terminal::change_view::plain(&lines);
+        for (index, name) in names.iter().enumerate() {
+            assert!(text.contains(&format!("#{} {name}", index + 1)), "{text}");
+        }
+    }
+    let mut display = crate::terminal::live::TurnDisplay::new(false, "ask", &paths.data_dir.join("keybindings.json"), vec![]).unwrap();
+    display.restore_numbers(&session).unwrap();
+    let snapshot = serde_json::json!({"id":"request-fixture","startedAt":1000,"model":"fixture","status":"completed","inputTokens":123000,"outputTokens":22600,"usage":{"prompt_tokens":123000,"completion_tokens":22600},"systemPrompt":"must not be copied into live accounting"});
+    crate::session_commands::save_live_requests(&session, &[snapshot.clone()]).unwrap();
+    let live = crate::session_commands::live_requests(&session).unwrap();
+    assert!(live[0].get("systemPrompt").is_none());
+    let before = crate::status_commands::text(&session, "").await.unwrap();
+    assert!(before.contains("146K total  (123K input + 22.6K output)"), "{before}");
+    session.store.db.with_conn(|conn| message_repo::save_request_snapshots(conn, "answer", &serde_json::json!([snapshot]))).unwrap().unwrap();
+    let after = crate::status_commands::text(&session, "").await.unwrap();
+    assert!(after.contains("146K total  (123K input + 22.6K output)"), "{after}");
+    for _ in 0..10 { crate::session_commands::step_effort(&session, true).await.unwrap(); }
+    assert_eq!(crate::session_commands::session_effort(&session).unwrap().as_deref(), Some("max"));
+    for _ in 0..10 { crate::session_commands::step_effort(&session, false).await.unwrap(); }
+    assert_eq!(crate::session_commands::session_effort(&session).unwrap(), None);
+    session.close().await.unwrap();
 }
 
 /// `/compact [instructions]`: summarize the session; returns how many

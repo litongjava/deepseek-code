@@ -20,15 +20,6 @@ pub fn task_output_activity(name: &str, input: &Value) -> Option<&'static str> {
     })
 }
 
-/// Shell commands started this session, numbered from 1.
-static COMMANDS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
-
-/// The next shell command's number, or `None` for other tools.
-pub fn command_number(name: &str) -> Option<usize> {
-    matches!(name, "Bash" | "PowerShell")
-        .then(|| COMMANDS.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1)
-}
-
 /// The numbered form of a call's lines: `● #3 Bash(ls -la)`.
 pub fn numbered(mut lines: Vec<Line>, number: Option<usize>) -> Vec<Line> {
     if let (Some(number), Some(first)) = (number, lines.first_mut()) {

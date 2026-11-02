@@ -256,6 +256,7 @@ impl Drop for RawGuard {
 struct Draft {
     pasted: bool,
     paste_end: usize,
+    paste_start: usize,
     characters: Vec<char>,
     cursor: usize,
 }
@@ -264,9 +265,10 @@ impl Draft {
         let normalized = text.replace("\r\n", "\n").replace('\r', "\n");
         let count = normalized.chars().filter(|ch| !ch.is_control() || matches!(ch, '\n' | '\t')).count();
         if self.characters.len().saturating_add(count) > 32_768 { return false; }
+        self.paste_start = self.cursor;
         self.insert(&normalized);
         self.pasted = true;
-        self.paste_end = self.characters.len();
+        self.paste_end = self.cursor;
         true
     }
     fn insert(&mut self, text: &str) {
@@ -295,8 +297,8 @@ impl Draft {
     }
     fn visible(&self, width: usize) -> (String, usize) {
         if self.pasted {
-            if let Some(label) = super::paste_input::paste_label(&self.characters.iter().take(self.paste_end).collect::<String>()) {
-                let text = clip(&format!("{}{}", label, self.characters.iter().skip(self.paste_end).collect::<String>()), width);
+            if let Some(label) = super::paste_input::paste_label(&self.characters.iter().skip(self.paste_start).take(self.paste_end.saturating_sub(self.paste_start)).collect::<String>()) {
+                let text = clip(&format!("{}{}{}", self.characters.iter().take(self.paste_start).collect::<String>(), label, self.characters.iter().skip(self.paste_end).collect::<String>()), width);
                 return (text.clone(), text.chars().count());
             }
         }
@@ -481,7 +483,7 @@ struct Running {
 const THINKING_PREVIEW_ROWS: usize = 2;
 
 /// Commands `submit` accepts while the model works.
-const LIVE_COMMANDS: &[&str] = &["/btw", "/background", "/goal"];
+const LIVE_COMMANDS: &[&str] = &["/btw", "/background", "/goal", "/status"];
 
 /// Spinner glyphs, played forward and back.
 const SPINNER: &[&str] = if cfg!(target_os = "macos") {
@@ -2142,6 +2144,11 @@ fn run(
                         crate::keybindings::Resolution::Key(key) => key,
                         crate::keybindings::Resolution::Consumed => continue,
                     };
+                    if key.modifiers.contains(KeyModifiers::ALT) && matches!(key.code, KeyCode::Char('>' | '<' | '.' | ',')) {
+                        let command = if matches!(key.code, KeyCode::Char('>' | '.')) { "/effort +" } else { "/effort -" };
+                        let _ = actions.send(Action::Submit(command.into()));
+                        continue;
+                    }
                     if super::scrollback::compact_key(key) {
                         super::scrollback::toggle_compact();
                         screen.history_view.close()?;
@@ -2716,6 +2723,18 @@ mod tests {
     }
 
     #[test]
+    fn paste_label_preserves_typed_prefix_and_suffix() {
+        let mut draft = Draft::default();
+        draft.insert("before after");
+        draft.cursor = 7;
+        let pasted = "line\n".repeat(100);
+        assert!(draft.insert_paste(&pasted));
+        let visible = draft.visible(120).0;
+        assert!(visible.starts_with("before [Pasted Content"), "{visible}");
+        assert!(visible.ends_with("after"), "{visible}");
+        assert_eq!(draft.take(), format!("before {pasted}after"));
+    }
+    #[test]
     fn oversized_paste_is_rejected_without_partial_draft_changes() {
         let mut draft=Draft::default();draft.insert("keep");
         assert!(!draft.insert_paste(&"x".repeat(32_768)));
@@ -3110,7 +3129,7 @@ mod tests {
         let mut state = State::new("ask".into());
         state.draft.set("/");
         let names: Vec<_> = state.menu().into_iter().map(|(name, _)| name).collect();
-        assert_eq!(names, vec!["/background", "/btw", "/goal"]);
+        assert_eq!(names, vec!["/background", "/btw", "/goal", "/status"]);
         state.draft.set("/bt");
         assert!(state.menu_key(crossterm::event::KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE)));
         assert_eq!(state.draft.characters.iter().collect::<String>(), "/btw ");
@@ -3180,6 +3199,21 @@ impl TurnDisplay {
             change_details: Default::default(),
             numbers: Default::default(),
         })
+    }
+    pub fn restore_numbers(&mut self, session: &crate::session::Session) -> anyhow::Result<()> {
+        self.numbers = session.store.db.with_conn(|conn| -> anyhow::Result<_> {
+            let mut numbers = std::collections::HashMap::new();
+            for message in deepseek_code_core::db::message_repo::get_messages_by_conversation(conn, &session.id)? {
+                for tool in deepseek_code_core::db::message_repo::get_tool_calls_for_message(conn, &message.id)? {
+                    let number = numbers.len() + 1;
+                    let id = tool.id.strip_prefix(&format!("{}:", message.id)).unwrap_or(&tool.id).to_owned();
+                    numbers.insert(id, number);
+                }
+            }
+            Ok(numbers)
+        })??;
+        self.fallback.restore_numbers(self.numbers.clone());
+        Ok(())
     }
     pub fn is_live(&self) -> bool {
         self.live.is_some()
@@ -3260,18 +3294,10 @@ impl TurnDisplay {
             // The call is printed once, with its result, when it finishes; the
             // status line names what is running meanwhile.
             let label = super::tool_view::label(name, input, self.workspace.as_deref());
-            match super::tool_view::gathering(name, input).filter(|_| !matches!(name, "Read" | "Bash" | "Grep" | "Glob")) {
-                Some(kind) => live.group(id, kind, label.clone(), GroupStep::Start),
-                None => {
-                    // Shown in its transcript form until the result replaces it.
-                    let number = super::tool_view::command_number(name);
-                    if let Some(number) = number {
-                        self.numbers.insert(id.to_owned(), number);
-                    }
-                    let header = super::tool_view::numbered(vec![change_view::tool_call(&label, "", false)], number);
-                    live.tool_started(id, header.into_iter().next().unwrap_or_else(|| change_view::tool_call(&label, "", false)), matches!(name, "Bash" | "PowerShell"));
-                }
-            }
+            let next = self.numbers.values().copied().max().unwrap_or(0) + 1;
+            let number = Some(*self.numbers.entry(id.to_owned()).or_insert(next));
+            let header = super::tool_view::numbered(vec![change_view::tool_call(&label, "", false)], number);
+            live.tool_started(id, header.into_iter().next().unwrap_or_else(|| change_view::tool_call(&label, "", false)), matches!(name, "Bash" | "PowerShell"));
             let activity = super::tool_view::task_output_activity(name, input)
                 .map(str::to_owned)
                 .unwrap_or_else(|| format!("Running {label}"));
@@ -3300,6 +3326,8 @@ impl TurnDisplay {
             id.to_owned(),
             (name.into(), input.clone(), output.into(), failed),
         );
+        let next = self.numbers.values().copied().max().unwrap_or(0) + 1;
+        self.numbers.entry(id.to_owned()).or_insert(next);
         if !failed {
             if let Ok(value) = serde_json::from_str::<Value>(output) {
                 let change = &value["file_change"];
@@ -3340,9 +3368,9 @@ impl TurnDisplay {
                     &format!("{name} - completed"),
                     &format!("{}\n\n{}", change_view::plain(&lines), body),
                 );
-                let display_lines =
+                let display_lines = super::tool_view::numbered(
                     change_view::change_in_workspace(output, failed, self.workspace.as_deref())
-                        .unwrap_or_else(|| lines.clone());
+                        .unwrap_or_else(|| lines.clone()), self.numbers.get(id).copied());
                 // Summary plus four diff rows; a click, where the terminal reports one,
                 // shows the diff. Ctrl+O has the full text regardless.
                 if display_lines.len() > 1 {
@@ -3358,14 +3386,6 @@ impl TurnDisplay {
                     Some(started) if input.as_object().is_none_or(|fields| fields.is_empty()) => started,
                     _ => input,
                 };
-                if let Some(kind) = super::tool_view::gathering(name, label_input).filter(|_| !matches!(name, "Read" | "Bash" | "Grep" | "Glob")) {
-                    let label = super::tool_view::label(name, label_input, self.workspace.as_deref());
-                    live.group(id, kind, label, if failed { GroupStep::Failed } else { GroupStep::Done });
-                    if !failed {
-                        live.activity("Working");
-                        return;
-                    }
-                }
                 let number = self.numbers.get(id).copied();
                 let short = super::tool_view::numbered(super::tool_view::finished(
                     name,

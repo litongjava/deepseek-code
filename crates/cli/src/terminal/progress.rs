@@ -30,6 +30,7 @@ pub struct TurnProgress {
     line_open: bool,
     usage: ReportedUsage,
     tools: HashMap<String, Instant>,
+    numbers: HashMap<String, usize>,
     finished_tools: HashMap<String, (String, Value, String, bool)>,
     agents: HashMap<String, Instant>,
 }
@@ -68,6 +69,7 @@ impl TurnProgress {
             line_open: false,
             usage: ReportedUsage::default(),
             tools: HashMap::new(),
+            numbers: HashMap::new(),
             finished_tools: HashMap::new(),
             agents: HashMap::new(),
         };
@@ -104,12 +106,16 @@ impl TurnProgress {
         }
     }
 
+    pub fn restore_numbers(&mut self, numbers: HashMap<String, usize>) { self.numbers = numbers; }
+
     pub fn tool_started(&mut self, id: &str, name: &str, input: &Value) {
         if self.tools.contains_key(id) || self.finished_tools.contains_key(id) {
             return;
         }
         self.tools.insert(id.into(), Instant::now());
-        self.notice(&format!("• {}", tool_preview_in_workspace(name, input, self.workspace.as_deref())));
+        let next = self.numbers.values().copied().max().unwrap_or(0) + 1;
+        let number = *self.numbers.entry(id.to_owned()).or_insert(next);
+        self.notice(&format!("• #{number} {}", tool_preview_in_workspace(name, input, self.workspace.as_deref())));
         let label = if let Some(activity) = super::tool_view::task_output_activity(name, input) {
             activity.to_owned()
         } else if name == "Agent" {
@@ -143,7 +149,9 @@ impl TurnProgress {
             (name.into(), input.clone(), output.into(), failed),
         );
         let elapsed = self.tools.remove(id).map(|start| start.elapsed());
-        self.notice(&tool_result_summary(name, output, failed, elapsed));
+        let next = self.numbers.values().copied().max().unwrap_or(0) + 1;
+        let number = format!("#{} ", self.numbers.entry(id.to_owned()).or_insert(next));
+        self.notice(&format!("  {number}{}", tool_result_summary(name, output, failed, elapsed).trim_start()));
         self.set_activity("Working");
     }
     pub fn agent_progress(&mut self, id: &str, agent_type: &str, status: &str, tool: Option<&str>) {

@@ -83,7 +83,9 @@ pub async fn text(session: &Session, argument: &str) -> Result<String> {
     let title = session
         .store
         .db
-        .with_conn(|conn| deepseek_code_core::db::conversation_repo::get_conversation(conn, &session.id))
+        .with_conn(|conn| {
+            deepseek_code_core::db::conversation_repo::get_conversation(conn, &session.id)
+        })
         .ok()
         .and_then(Result::ok)
         .flatten()
@@ -91,43 +93,184 @@ pub async fn text(session: &Session, argument: &str) -> Result<String> {
         .filter(|title| !title.trim().is_empty())
         .unwrap_or_else(|| "(unnamed) \u{b7} /rename".into());
     let language_servers = deepseek_code_core::tools::lsp_servers::status(&session.workspace);
-    let installed = language_servers.iter().filter(|row| row["installed"] == true).count();
+    let installed = language_servers
+        .iter()
+        .filter(|row| row["installed"] == true)
+        .count();
+    let usage = crate::display_commands::usage(session)?;
+    let mut input = session.store.db.with_conn(|conn| conn.query_row(
+        "SELECT COALESCE(SUM(CASE WHEN json_valid(usage_json) AND json_extract(usage_json,'$.input_tokens') IS NOT NULL AND json_extract(usage_json,'$.prompt_tokens') IS NULL THEN COALESCE(input_tokens,0)+COALESCE(cache_read_tokens,0)+COALESCE(cache_write_tokens,0) ELSE COALESCE(input_tokens,0) END),0) FROM model_requests WHERE conversation_id=?1",
+        [&session.id], |row| row.get::<_, u64>(0),
+    ))??;
+    let mut output = usage["output_tokens"].as_u64().unwrap_or(0);
+    let live = crate::session_commands::live_requests(session)?;
+    for snapshot in &live {
+        let saved = session.store.db.with_conn(|conn| {
+            conn.query_row(
+                "SELECT EXISTS(SELECT 1 FROM model_requests WHERE id=?1 AND conversation_id=?2)",
+                [snapshot["id"].as_str().unwrap_or_default(), &session.id],
+                |row| row.get::<_, bool>(0),
+            )
+        })??;
+        if !saved {
+            input = input.saturating_add(snapshot["inputTokens"].as_u64().unwrap_or(0));
+            output = output.saturating_add(snapshot["outputTokens"].as_u64().unwrap_or(0));
+        }
+    }
+    let request =
+        deepseek_code_core::services::context_usage::last_request(&session.store.db, &session.id)?;
+    let latest = live.last().filter(|snapshot| {
+        request
+            .as_ref()
+            .and_then(|request| request.started_at_ms)
+            .unwrap_or(0)
+            <= snapshot["startedAt"].as_i64().unwrap_or(0)
+    });
+    let used = latest
+        .map(|snapshot| {
+            snapshot["inputTokens"]
+                .as_u64()
+                .or_else(|| snapshot["contextUsage"]["estimated_input_tokens"].as_u64())
+        })
+        .unwrap_or_else(|| {
+            request.as_ref().and_then(|request| {
+                request.reported_input_tokens.or_else(|| {
+                    request
+                        .usage
+                        .as_ref()
+                        .and_then(|usage| usage.estimated_input_tokens)
+                })
+            })
+        });
+    let measured = latest
+        .map(|snapshot| snapshot["inputTokens"].is_u64())
+        .unwrap_or_else(|| {
+            request
+                .as_ref()
+                .is_some_and(|request| request.reported_input_tokens.is_some())
+        });
+    let context = match (
+        used,
+        session.context_window().await.filter(|window| *window > 0),
+    ) {
+        (Some(used), Some(window)) => format!(
+            "{}% left ({} used / {}; {})",
+            (u64::from(window).saturating_sub(used) * 100 / u64::from(window)),
+            token_count(used),
+            token_count(u64::from(window)),
+            if measured {
+                "last request"
+            } else {
+                "estimated last request"
+            }
+        ),
+        _ => "unknown (no request or configured window)".into(),
+    };
     let mut sections = vec![
         vec![
             ("Version", env!("CARGO_PKG_VERSION").to_owned()),
             ("Session name", runtime_status::label(&title)),
             ("Session ID", runtime_status::label(&session.id)),
-            ("cwd", runtime_status::label(&session.workspace.to_string_lossy())),
-            ("Data directory", runtime_status::label(&session.paths.data_dir.to_string_lossy())),
+            (
+                "cwd",
+                runtime_status::label(&session.workspace.to_string_lossy()),
+            ),
+            (
+                "Data directory",
+                runtime_status::label(&session.paths.data_dir.to_string_lossy()),
+            ),
         ],
         vec![
-            ("Provider", format!("{} ({})", runtime_status::label(&provider.provider.name), runtime_status::label(&session.provider_id))),
-            ("Model", format!("{} \u{b7} /model", runtime_status::label(&session.model))),
-            ("API endpoint", runtime_status::origin(&provider.provider.base_url)),
+            (
+                "Provider",
+                format!(
+                    "{} ({})",
+                    runtime_status::label(&provider.provider.name),
+                    runtime_status::label(&session.provider_id)
+                ),
+            ),
+            (
+                "Model",
+                format!("{} \u{b7} /model", runtime_status::label(&session.model)),
+            ),
+            (
+                "API endpoint",
+                runtime_status::origin(&provider.provider.base_url),
+            ),
             ("API key", account.to_owned()),
             ("Reachability", reachability),
-            ("Permission mode", format!("{} \u{b7} Shift+Tab to cycle", session.permission_mode())),
-            ("Routing", if session.auto_route { "automatic" } else { "selected provider" }.to_owned()),
+            (
+                "Permission mode",
+                format!("{} \u{b7} Shift+Tab to cycle", session.permission_mode()),
+            ),
+            (
+                "Routing",
+                if session.auto_route {
+                    "automatic"
+                } else {
+                    "selected provider"
+                }
+                .to_owned(),
+            ),
+            (
+                "Token usage",
+                format!(
+                    "{} total  ({} input + {} output)",
+                    token_count(input.saturating_add(output)),
+                    token_count(input),
+                    token_count(output)
+                ),
+            ),
+            ("Context window", context),
         ],
     ];
     let mut tools_section = vec![(
         "Worker",
-        format!("{}{}", state_label(&worker.state), worker.pid.map(|pid| format!(" (PID {pid})")).unwrap_or_default()),
+        format!(
+            "{}{}",
+            state_label(&worker.state),
+            worker
+                .pid
+                .map(|pid| format!(" (PID {pid})"))
+                .unwrap_or_default()
+        ),
     )];
     match &tools {
         Some(tools) => {
-            let running = tools.mcp.iter().filter(|server| server.state == "manager_reports_running").count();
-            tools_section.push(("MCP servers", format!("{running} running, {} configured \u{b7} /mcp", tools.mcp.len())));
+            let running = tools
+                .mcp
+                .iter()
+                .filter(|server| server.state == "manager_reports_running")
+                .count();
+            tools_section.push((
+                "MCP servers",
+                format!(
+                    "{running} running, {} configured \u{b7} /mcp",
+                    tools.mcp.len()
+                ),
+            ));
             tools_section.push(("Built-in tools", tools.native_tools.to_string()));
         }
-        None => tools_section.push(("Tools", "snapshot unavailable (inspection timed out)".into())),
+        None => tools_section.push((
+            "Tools",
+            "snapshot unavailable (inspection timed out)".into(),
+        )),
     }
     tools_section.push((
         "Language servers",
-        format!("{installed} of {} installed \u{b7} /lsp", language_servers.len()),
+        format!(
+            "{installed} of {} installed \u{b7} /lsp",
+            language_servers.len()
+        ),
     ));
     sections.push(tools_section);
-    let width = sections.iter().flatten().map(|(label, _)| label.len()).max().unwrap_or(0) + 2;
+    let width = sections
+        .iter()
+        .flatten()
+        .map(|(label, _)| label.len())
+        .max()
+        .unwrap_or(0)
+        + 2;
     let mut output = String::from("Status\n");
     for section in &sections {
         output.push('\n');
@@ -139,6 +282,15 @@ pub async fn text(session: &Session, argument: &str) -> Result<String> {
         output.push_str(&render_tools(&tools, scope));
     }
     Ok(output)
+}
+fn token_count(value: u64) -> String {
+    if value >= 100_000 {
+        format!("{:.0}K", value as f64 / 1000.0)
+    } else if value >= 1000 {
+        format!("{:.1}K", value as f64 / 1000.0)
+    } else {
+        value.to_string()
+    }
 }
 fn state_label(state: &str) -> String {
     runtime_status::label(state).replace('_', " ")
@@ -156,7 +308,10 @@ fn render_tools(tools: &RuntimeStatus, scope: &str) -> String {
             runtime_status::label(&server.name),
             state_label(&server.state).replace("manager reports running", "running"),
             server.tools,
-            server.pid.map(|pid| format!(", PID {pid}")).unwrap_or_default()
+            server
+                .pid
+                .map(|pid| format!(", PID {pid}"))
+                .unwrap_or_default()
         ));
     }
     if !tools.lsp_pooled.is_empty() {
@@ -167,7 +322,10 @@ fn render_tools(tools: &RuntimeStatus, scope: &str) -> String {
             "    {}: {}{}\n",
             server.name,
             state_label(&server.state),
-            server.pid.map(|pid| format!(", PID {pid}")).unwrap_or_default()
+            server
+                .pid
+                .map(|pid| format!(", PID {pid}"))
+                .unwrap_or_default()
         ));
     }
     output.push_str(&format!("\n  Observed in: {scope}\n"));
