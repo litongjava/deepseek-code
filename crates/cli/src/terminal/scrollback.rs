@@ -183,6 +183,73 @@ impl Scrollback {
         }
     }
 
+    /// Replace a running call in place, preserving later blocks and disclosure.
+    pub(super) fn replace_block(
+        &mut self,
+        block: usize,
+        short: Vec<Line>,
+        full: Vec<Line>,
+        bottom: u16,
+    ) -> Option<(u16, Vec<(String, usize)>)> {
+        let first = self
+            .logged
+            .iter()
+            .position(|line| line.block == Some(block))?;
+        let above: usize = self.logged.iter().skip(first).map(|line| line.rows).sum();
+        let start = (bottom as usize).saturating_sub(above) as u16;
+        let mut hidden = above.saturating_sub(bottom as usize);
+        let entry = self.blocks.get_mut(block)?;
+        entry.short = short;
+        entry.full = full;
+        let mut lines = if entry.header_open {
+            rendered(&entry.full[..1])
+        } else {
+            collapsed(&entry.short[..1])
+        };
+        lines.extend(if entry.body_open {
+            rendered(&entry.full[1..])
+        } else {
+            collapsed(&entry.short[1..])
+        });
+        let after = self
+            .logged
+            .drain(first..)
+            .filter(|line| line.block != Some(block));
+        let rows: Vec<_> = lines
+            .into_iter()
+            .map(|text| Logged {
+                text,
+                rows: 1,
+                block: Some(block),
+                flow: None,
+            })
+            .chain(after)
+            .collect();
+        let mut visible = Vec::new();
+        let columns = terminal::size().unwrap_or((80, 24)).0 as usize;
+        for mut line in rows {
+            line.rows = screen_rows(&line.text, columns);
+            self.logged.push_back(line.clone());
+            // Keep the full record, but never replay a title already in native scrollback.
+            if hidden >= line.rows {
+                hidden -= line.rows;
+                continue;
+            }
+            if hidden > 0 {
+                for text in super::markdown::wrap_styled(&line.text, "", "", columns)
+                    .into_iter()
+                    .skip(hidden)
+                {
+                    visible.push((text, 1));
+                }
+                hidden = 0;
+            } else {
+                visible.push((line.text, line.rows));
+            }
+        }
+        Some((start, visible))
+    }
+
     fn refresh_background(&mut self, id: usize) {
         let entry = &mut self.blocks[id];
         let Some((root, session, task)) = &entry.background else { return; };

@@ -451,9 +451,32 @@ impl PermissionManager {
     fn is_read_only_tool(tool_name: &str) -> bool {
         matches!(
             tool_name,
-            "Read" | "ListDir" | "Grep" | "Glob" | "WebFetch" | "WebSearch" | "memory_search"
-                | "TodoRead" | "Skill" | "SkillRead" | "TaskGet" | "TaskList" | "TaskOutput" | "ToolSearch" | "ProposeGoal" | "plan_mode" | "EnterPlanMode" | "ExitPlanMode" | "brief" | "SyntheticOutput"
-                | "ListAgents" | "CronList" | "ReportFindings"
+            "Read"
+                | "ListDir"
+                | "Grep"
+                | "Glob"
+                | "WebFetch"
+                | "WebSearch"
+                | "memory_search"
+                | "TodoRead"
+                | "Skill"
+                | "SkillRead"
+                | "TaskGet"
+                | "TaskList"
+                | "TaskOutput"
+                | "ToolSearch"
+                | "ProposeGoal"
+                | "plan_mode"
+                | "EnterPlanMode"
+                | "ExitPlanMode"
+                | "brief"
+                | "SyntheticOutput"
+                | "ListAgents"
+                | "CronList"
+                | "ReportFindings"
+                | "git_status"
+                | "git_diff"
+                | "git_log"
         )
     }
 
@@ -608,12 +631,22 @@ impl PermissionManager {
                     context.tool_input["operation"].as_str(),
                     Some("get" | "list" | "merge" | "sources")
                 ));
-        // Plan mode may inspect the project with shell commands: read-only
-        // ones run, any other command is the user's call instead of a denial.
+        // Plan mode permits shell commands except those rejected by the shared
+        // danger filter. Explicit ask/deny settings still take precedence.
         let shell = matches!(context.tool_name.as_str(), "Bash" | "PowerShell");
         if mode == PermissionMode::PlanMode && shell && !plan_document {
             let command = context.tool_input["command"].as_str().unwrap_or_default();
-            if super::shell_read_only::is_read_only(command) && !actions.contains(&PermissionAction::Confirm) {
+            if crate::tools::is_dangerous_command(command) {
+                return decision(
+                    PermissionResult::Denied(
+                        "Plan mode: dangerous shell command is not allowed".into(),
+                    ),
+                    PlanBoundary,
+                );
+            }
+            if !actions.contains(&PermissionAction::Confirm)
+                && !setting.as_ref().is_some_and(|p| p.requires_confirmation)
+            {
                 return decision(PermissionResult::Granted, PlanBoundary);
             }
             return decision(self.request_confirmation(context), PlanBoundary);
@@ -906,12 +939,11 @@ mod session_rule_tests {
             PermissionResult::RequiresConfirmation(_)
         ));
         manager.set_mode(PermissionMode::PlanMode);
-        // Plan mode asks before a command it cannot prove read-only...
-        assert!(matches!(
+        // Plan mode permits commands outside the read-only recognizer.
+        assert_eq!(
             manager.check_permission(&context),
-            PermissionResult::RequiresConfirmation(_)
-        ));
-        // ...and runs plain inspection commands.
+            PermissionResult::Granted
+        );
         context.tool_input = serde_json::json!({"command":"git status"});
         assert_eq!(
             manager.check_permission(&context),
@@ -988,6 +1020,64 @@ mod policy_tests {
             workspace_path: None,
         }
     }
+    #[test]
+    fn plan_allows_ordinary_commands_and_git_tools_but_preserves_boundaries() {
+        let manager = manager(PermissionMode::PlanMode);
+        for tool in ["git_status", "git_diff", "git_log"] {
+            assert_eq!(
+                manager.check_permission(&context(tool)),
+                PermissionResult::Granted
+            );
+        }
+        for tool in ["Bash", "PowerShell"] {
+            for command in [
+                "git status",
+                "cargo test --locked",
+                "npm install",
+                "npm run build",
+                "Get-Content README.md -Encoding UTF8",
+                "echo result > result.txt",
+            ] {
+                let mut input = context(tool);
+                input.tool_input = serde_json::json!({"command":command});
+                assert_eq!(
+                    manager.check_permission(&input),
+                    PermissionResult::Granted,
+                    "{command}"
+                );
+            }
+            for command in ["rm -rf /", "shutdown /s", "diskpart"] {
+                let mut input = context(tool);
+                input.tool_input = serde_json::json!({"command":command});
+                assert!(matches!(
+                    manager.check_permission(&input),
+                    PermissionResult::Denied(_)
+                ));
+            }
+        }
+        assert!(matches!(
+            manager.check_permission(&context("Edit")),
+            PermissionResult::Denied(_)
+        ));
+        manager.set_session_rules(
+            "session",
+            HashMap::from([
+                ("Bash".into(), PermissionAction::Confirm),
+                ("git_status".into(), PermissionAction::Deny),
+            ]),
+        );
+        let mut shell = context("Bash");
+        shell.tool_input = serde_json::json!({"command":"cargo test"});
+        assert!(matches!(
+            manager.check_permission(&shell),
+            PermissionResult::RequiresConfirmation(_)
+        ));
+        assert!(matches!(
+            manager.check_permission(&context("git_status")),
+            PermissionResult::Denied(_)
+        ));
+    }
+
     #[test]
     fn mcp_read_only_is_host_owned_and_only_relaxes_plan_boundary() {
         let mut context = context("mcp__fixture__inspect");
@@ -1073,7 +1163,7 @@ mod policy_tests {
                         assert_eq!(result, PermissionResult::Granted)
                     }
                     PermissionMode::PlanMode if tool == "Bash" => {
-                        assert!(matches!(result, PermissionResult::RequiresConfirmation(_)))
+                        assert_eq!(result, PermissionResult::Granted)
                     }
                     PermissionMode::DontAsk | PermissionMode::PlanMode => {
                         assert!(matches!(result, PermissionResult::Denied(_)))

@@ -80,10 +80,10 @@ pub(crate) fn mcp_label(name: &str, input: &Value) -> Option<String> {
 
 /// Full MCP identity and input are visible without opening details.
 pub(crate) fn mcp_call(name: &str, input: &Value) -> Option<String> {
-    let summary = mcp_label(name, input)?;
+    mcp_label(name, input)?;
     // JSON escapes control characters rather than allowing terminal execution.
     Some(format!(
-        "{}({input}) · {summary}",
+        "{}({input})",
         printable(&plain_terminal_text(name))
     ))
 }
@@ -236,6 +236,15 @@ pub(super) fn background_shell_id(name: &str, output: &str, failed: bool) -> Opt
 fn raw_result_text(output: &str) -> String {
     // Failed calls wrap the tool's own JSON result as `Error: {...}`.
     let body = output.strip_prefix("Error: ").unwrap_or(output);
+    if let Ok(value) = serde_json::from_str::<Value>(body) {
+        if let Some(text) = deepseek_code_core::mcp::presentation::body(&value) {
+            return if output.starts_with("Error: ") {
+                format!("Error: {text}")
+            } else {
+                text
+            };
+        }
+    }
     let Ok(Value::Object(fields)) = serde_json::from_str::<Value>(body) else {
         return output.trim_end().to_owned();
     };
@@ -947,13 +956,13 @@ mod mcp_display_tests {
     fn mcp_labels_are_shared_and_details_preserve_input() {
         let name = "mcp__codegraph__codegraph_explore";
         let input = json!({"query":"中文符号", "projectPath":"../docs", "maxFiles":7});
-        assert_eq!(label(name, &input, None), format!("{name}({input}) · Exploration: 中文符号"));
+        assert_eq!(label(name, &input, None), format!("{name}({input})"));
         assert_eq!(
             super::super::progress::tool_preview_in_workspace(name, &input, None),
             label(name, &input, None)
         );
         let finished = change_view::plain(&finished(name, &input, "result", false, None, None));
-        assert!(finished.contains("Exploration: 中文符号"));
+        assert!(!finished.contains("Exploration:"));
         let details = change_view::plain(&expanded(name, &input, "result", false, None));
         assert!(details.contains(name));
         assert!(details.contains("projectPath"));
@@ -1015,7 +1024,7 @@ mod mcp_full_input_tests {
         ] {
             let text = change_view::plain(&lines);
             assert!(text.contains(&format!("{name}({json})")));
-            assert!(text.contains("Exploration:"));
+            assert!(!text.contains("Exploration:"));
             assert_eq!(text.matches(name).count(), 1);
         }
     }
@@ -1027,6 +1036,6 @@ mod mcp_full_input_tests {
         let text = mcp_call("mcp__docs__search", &input).unwrap();
         assert!(!text.contains('\u{1b}'));
         assert!(text.contains(&input.to_string()));
-        assert!(text.contains("docs / search: hello world"));
+        assert!(!text.contains(" · "));
     }
 }

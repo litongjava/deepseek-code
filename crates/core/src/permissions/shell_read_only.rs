@@ -1,6 +1,6 @@
-//! Conservative recognition of shell commands that only read. Plan mode runs
-//! these without asking, and so do ask and accept-edits modes when every path
-//! stays in the workspace; anything unrecognised still needs the user's approval.
+//! Conservative recognition of shell commands that only read. Ask and
+//! accept-edits modes permit these when every path stays in the workspace.
+//! The same classification determines which shell calls may run concurrently.
 
 /// Programs that never write files or run other commands with ordinary arguments.
 const READ_ONLY_PROGRAMS: &[&str] = &[

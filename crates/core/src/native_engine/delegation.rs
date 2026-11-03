@@ -51,7 +51,7 @@ pub(super) fn definitions() -> Vec<ToolDefinition> {
             "subagent_type":{"description":"The type of specialized agent to use for this task","type":"string"},
             "model":{"description":"Optional model override for this agent: a model ID configured for the current provider. If omitted, the agent uses the parent's model.","type":"string"},
             "effort":{"description":"Reasoning effort for this agent. Set this ONLY when the user, or instructions such as AGENTS.md or a skill, explicitly ask that this agent or delegated work run at a specific effort level, never on your own judgment; otherwise omit it and the agent runs at its usual effort.","type":"string","enum":["low","medium","high","xhigh","max"]},
-            "isolation":{"description":"Isolation mode. \"worktree\" creates a git worktree so the agent works on an isolated copy of the repo.","type":"string","enum":["worktree"]},
+            "isolation":{"description":"Optional isolation. Omit or use null for the current workspace. Use worktree only when the task requests an isolated copy.","type":["string","null"],"enum":["worktree",null]},
             "run_in_background":{"description":"Defaults to true. Set to false to wait for the agent's result in this turn.","type":"boolean"}
         },"required":["description","prompt"],"additionalProperties":false})
     }]
@@ -77,6 +77,9 @@ struct ChildState {
     key: String,
     value: Value,
     event_tx: tokio::sync::mpsc::Sender<EngineEvent>,
+    request_id: String,
+    request_base: u64,
+    streamed_bytes: u64,
 }
 
 struct TeamTaskGuard {
@@ -99,6 +102,49 @@ impl Drop for TeamTaskGuard {
     }
 }
 impl ChildState {
+    fn snapshot(&mut self, snapshot: &Value, assistant: &str) -> Result<()> {
+        let session = self.value["session_id"]
+            .as_str()
+            .context("Child session missing")?;
+        let total = self.context.db.with_conn(|conn| -> Result<u64> {
+            conn.execute("INSERT OR IGNORE INTO messages(id,conversation_id,role,content,created_at,sort_order) VALUES(?1,?2,'assistant','',?3,(SELECT COALESCE(MAX(sort_order),-1)+1 FROM messages WHERE conversation_id=?2))", rusqlite::params![assistant,session,chrono::Utc::now().to_rfc3339()])?;
+            crate::db::request_repo::save_request(conn, assistant, snapshot)?;
+            Ok(conn.query_row("SELECT COALESCE(SUM(output_tokens),0) FROM model_requests WHERE conversation_id=?1", [session], |row| row.get(0))?)
+        })??;
+        let id = snapshot["id"].as_str().unwrap_or_default();
+        if self.request_id != id {
+            self.request_id = id.to_owned();
+            self.request_base = total;
+            self.streamed_bytes = 0;
+        }
+        if snapshot["outputTokens"].is_number() {
+            self.value["output_tokens"] = json!(total);
+            self.value["output_tokens_estimated"] = json!(false);
+        }
+        self.context.save_setting(&self.key, &self.value)
+    }
+
+    fn usage(&mut self, usage: &Value) {
+        if let Some(tokens) = usage["output_tokens"]
+            .as_u64()
+            .or_else(|| usage["completion_tokens"].as_u64())
+            .filter(|tokens| *tokens > 0)
+        {
+            self.value["output_tokens"] = json!(self.request_base.saturating_add(tokens));
+            self.value["output_tokens_estimated"] = json!(false);
+        }
+    }
+
+    fn streamed(&mut self, text: &str) {
+        self.streamed_bytes = self.streamed_bytes.saturating_add(text.len() as u64);
+        if self.streamed_bytes > 0 {
+            self.value["output_tokens"] = json!(self
+                .request_base
+                .saturating_add(self.streamed_bytes.div_ceil(3)));
+            self.value["output_tokens_estimated"] = json!(true);
+        }
+    }
+
     fn progress(&self, status: &str, tool_name: Option<String>) -> EngineEvent {
         EngineEvent::AgentProgress {
             session_id: self.value["session_id"].as_str().unwrap_or_default().into(),
@@ -576,7 +622,7 @@ impl ToolLoopExecutor {
             return Box::pin(self.resume_owned_child(id, input["prompt"].as_str(), false)).await;
         }
         if input["run_in_background"] == true && schema.is_none() && tools.is_none() {
-            return self.spawn_background_agent(&input);
+            return Box::pin(self.spawn_background_agent(&input)).await;
         }
         let mut prepared = Box::pin(self.prepare_delegated_child(&input, schema, tools)).await?;
         if web_research {
@@ -630,8 +676,11 @@ impl ToolLoopExecutor {
     /// session as a background task with the same provider, model and
     /// permission mode, and this call returns at once. The host announces it
     /// and wakes this session when it finishes.
-    fn spawn_background_agent(&self, input: &Value) -> Result<Value> {
-        ensure!(self.delegation_depth == 0, "Background agents start from the main session only");
+    async fn spawn_background_agent(&self, input: &Value) -> Result<Value> {
+        ensure!(
+            self.delegation_depth == 0,
+            "Background agents start from the main session only"
+        );
         let prompt = input["prompt"].as_str().context("prompt is required")?;
         ensure!(!prompt.trim().is_empty() && prompt.len() <= 64_000, "Child prompt must contain 1–64000 bytes");
         let parent = self.conv_id.clone().context("Child owner unavailable")?;
@@ -666,17 +715,39 @@ impl ToolLoopExecutor {
             ensure!(["low", "medium", "high", "xhigh", "max"].contains(&effort), "Invalid effort");
             arguments.extend(["--effort".into(), effort.into()]);
         }
-        match input["isolation"].as_str() {
-            None => {}
-            Some("worktree") => arguments.extend(["--worktree".into(), format!("agent-{}", &child[..8.min(child.len())])]),
+        let child_workspace = match input["isolation"].as_str() {
+            None => std::path::PathBuf::from(&self.workspace_cwd),
+            Some("worktree") => {
+                // Bind before launch; --resume and --worktree stay mutually exclusive.
+                let input = json!({"name":format!("agent-{}", &child[..8.min(child.len())])});
+                let worktree: std::pin::Pin<
+                    Box<
+                        dyn std::future::Future<Output = Result<(Value, std::path::PathBuf)>>
+                            + Send
+                            + '_,
+                    >,
+                > = Box::pin(crate::tools::session_worktree::execute(
+                    "EnterWorktree",
+                    &input,
+                    &root,
+                    &child,
+                    std::path::Path::new(&self.workspace_cwd),
+                ));
+                worktree.await?.1
+            }
             Some(other) => anyhow::bail!("Unsupported isolation mode: {other}"),
-        }
+        };
+        agents::bind(&context.db, &child, &definition)?;
         arguments.extend(["--".into(), prompt.into()]);
         let executable = std::env::current_exe()?;
         let job = crate::services::background_sessions::spawn(
             &root,
             &executable,
-            crate::services::background_sessions::Launch { executable: executable.clone(), arguments, cwd: std::path::PathBuf::from(&self.workspace_cwd) },
+            crate::services::background_sessions::Launch {
+                executable: executable.clone(),
+                arguments,
+                cwd: child_workspace,
+            },
             &parent,
             &child,
             &format!("Agent: {description}"),
@@ -689,6 +760,7 @@ impl ToolLoopExecutor {
         Ok(json!({
             "agent_id": job.id,
             "session_id": child,
+            "to": child,
             "status": "running",
             "backgrounded": true,
             "description": description,
@@ -1226,6 +1298,9 @@ impl ToolLoopExecutor {
             key: format!("delegation.{id}"),
             event_tx: self.event_tx.clone(),
             value: json!({"session_id":id,"parent_session_id":self.conv_id,"agent_type":agent_type,"status":"running","started_at":chrono::Utc::now().to_rfc3339()}),
+            request_id: String::new(),
+            request_base: 0,
+            streamed_bytes: 0,
         };
         context.save_setting(&state.key, &state.value)?;
         let _ = self.event_tx.send(state.progress("started", None)).await;
@@ -1249,14 +1324,21 @@ impl ToolLoopExecutor {
                             }
                             event @ (EngineEvent::AskUser {..} | EngineEvent::ToolPermission {..} | EngineEvent::AgentProgress {..}) => { let _ = self.event_tx.send(event).await; }
                             EngineEvent::Usage(usage) => {
-                                if let Some(tokens) = usage["output_tokens"].as_u64().or_else(|| usage["completion_tokens"].as_u64()) {
-                                    // Usage updates may lack request IDs; keep the latest reported count.
-                                    state.value["output_tokens"] = json!(tokens);
+                                state.usage(&usage);
+                                context.save_setting(&state.key, &state.value)?;
+                            }
+                            EngineEvent::RequestSnapshot(snapshot) => {
+                                state.snapshot(&snapshot, &assistant_id)?;
+                            }
+                            EngineEvent::ToolArgDelta { delta, .. } => {
+                                state.streamed(&delta);
+                                if last_preview.elapsed().as_millis() >= 250 {
                                     context.save_setting(&state.key, &state.value)?;
+                                    last_preview = Instant::now();
                                 }
-                                let _ = self.event_tx.send(EngineEvent::Usage(usage)).await;
                             }
                             EngineEvent::Text(text) | EngineEvent::Thinking(text) => {
+                                state.streamed(&text);
                                 let mut preview = state.value["preview"].as_str().unwrap_or_default().to_owned();
                                 preview.push_str(&text);
                                 if preview.chars().count() > 8000 { preview = preview.chars().rev().take(8000).collect::<String>().chars().rev().collect(); }
@@ -1313,11 +1395,12 @@ impl ToolLoopExecutor {
                 // Preserve the final preview even when no streaming tick was observed.
                 state.value["preview"] = json!(text.chars().rev().take(8000).collect::<String>().chars().rev().collect::<String>());
                 while let Ok(event) = receiver.try_recv() {
-                    if let EngineEvent::Usage(usage) = event {
-                        if let Some(tokens) = usage["output_tokens"].as_u64().or_else(|| usage["completion_tokens"].as_u64()) {
-                            state.value["output_tokens"] = json!(tokens);
+                    match event {
+                        EngineEvent::Usage(usage) => state.usage(&usage),
+                        EngineEvent::RequestSnapshot(snapshot) => {
+                            state.snapshot(&snapshot, &assistant_id)?
                         }
-                        let _ = self.event_tx.send(EngineEvent::Usage(usage)).await;
+                        _ => {}
                     }
                 }
                 let failed = matches!(
@@ -1429,4 +1512,59 @@ fn agent_input_maps_subagent_type_and_defaults_to_background_in_the_main_session
     let child = normalize_agent_input(&json!({"prompt":"p","subagent_type":"reviewer","run_in_background":false}), true);
     assert_eq!((child["agent_type"].as_str(), child["run_in_background"].as_bool()), (Some("reviewer"), Some(false)));
     assert!(normalize_agent_input(&json!({"prompt":"p"}), false)["run_in_background"].is_null());
+}
+
+#[cfg(test)]
+#[test]
+fn child_usage_accumulates_requests_without_counting_repeated_snapshots_or_parent_usage() {
+    let temp = tempfile::tempdir().unwrap();
+    let context = crate::services::session_messages::context(temp.path()).unwrap();
+    let sessions = SessionStore::new(context.db.clone());
+    let id = sessions.create(temp.path(), "fixture", "fixture").unwrap();
+    let (event_tx, _) = tokio::sync::mpsc::channel(32);
+    let mut state = ChildState {
+        context: context.clone(),
+        key: format!("delegation.{id}"),
+        value: json!({"session_id":id,"status":"completed"}),
+        event_tx,
+        request_id: String::new(),
+        request_base: 0,
+        streamed_bytes: 0,
+    };
+    let request = |id: &str, tokens: Value| json!({"id":id,"number":1,"status":"running","outputTokens":tokens});
+    state
+        .snapshot(&request("r1", Value::Null), "assistant")
+        .unwrap();
+    state.usage(&json!({"output_tokens":0}));
+    state.streamed("streaming answer");
+    assert!(state.value["output_tokens"].as_u64().unwrap() > 0);
+    assert_eq!(state.value["output_tokens_estimated"], true);
+    state
+        .snapshot(&request("r1", json!(100)), "assistant")
+        .unwrap();
+    state
+        .snapshot(&request("r1", json!(100)), "assistant")
+        .unwrap();
+    state
+        .snapshot(&request("r2", Value::Null), "assistant")
+        .unwrap();
+    state.usage(&json!({"completion_tokens":30}));
+    assert_eq!(state.value["output_tokens"], 130);
+    state
+        .snapshot(&request("r2", json!(30)), "assistant")
+        .unwrap();
+    assert_eq!(state.value["output_tokens"], 130);
+    assert_eq!(state.value["output_tokens_estimated"], false);
+    let count = context
+        .db
+        .with_conn(|conn| {
+            conn.query_row(
+                "SELECT COUNT(*) FROM model_requests WHERE conversation_id=?1",
+                [&id],
+                |r| r.get::<_, i64>(0),
+            )
+        })
+        .unwrap()
+        .unwrap();
+    assert_eq!(count, 2);
 }

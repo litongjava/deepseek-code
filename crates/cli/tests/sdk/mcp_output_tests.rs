@@ -116,7 +116,17 @@ async fn post_mcp_output_reaches_both_providers_display_storage_and_resume() {
             .as_array_mut()
             .unwrap()
             .push(json!({"type":"text","text":"PostToolUse context: POST_CONTEXT"}));
-        assert_eq!(serde_json::from_str::<Value>(output).unwrap(), expected);
+        assert_eq!(
+            output,
+            "SDK_REDACTED\n[image: image/png]\nPostToolUse context: POST_CONTEXT"
+        );
+        let typed = frames
+            .iter()
+            .filter(|frame| frame["type"] == "user")
+            .map(|frame| &frame["message"]["content"][0])
+            .find(|block| block["content"].to_string().contains("SDK_REDACTED"))
+            .expect("typed MCP result for SDK client");
+        assert_eq!(typed["content"], expected);
         assert!(!completed.iter().any(|f| f
             .to_string()
             .contains("MUST_NOT_REPLACE_NATIVE_OR_RESOURCE")));

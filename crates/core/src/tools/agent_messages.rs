@@ -25,7 +25,7 @@ pub(super) fn list_agents_definition() -> super::ToolDefinition {
 pub fn list_agents(context: &crate::services::ServiceContext, session: &str) -> Result<Value> {
     let mut rows = Vec::new();
     for job in crate::services::background_sessions::list(&context.paths.data_dir, Some(session))? {
-        rows.push(json!({"to":job.session_id,"name":job.title,"kind":"background agent","status":job.status}));
+        rows.push(json!({"to":job.session_id,"agent_id":job.id,"name":job.title,"kind":"background agent","status":job.status}));
     }
     for peer in crate::services::session_messages::peers(context, session)? {
         if peer["current"] == true || rows.iter().any(|row| row["to"] == peer["id"]) { continue; }
@@ -125,7 +125,13 @@ pub fn execute_live(
             let to = input["to"].as_str().context("to is required")?;
             let content = message_content(&input)?;
             let Some(team) = teams::team_for_session(root, session)? else {
-                // Without a team the recipient must already be a session UUID.
+                // Resolve only this sender's owned background task aliases.
+                let target = crate::services::background_sessions::list(root, Some(session))?
+                    .into_iter()
+                    .find(|job| job.id == to)
+                    .map(|job| job.session_id)
+                    .unwrap_or_else(|| to.to_owned());
+                let to = target.as_str();
                 let message = live::send(context, session, to, &content)?;
                 let active = live::receiver_active(root, to)?;
                 let open = live::session_open(root, to)?;
@@ -412,6 +418,55 @@ pub(super) fn execute(input: Value, cwd: &str) -> Result<Value> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn owned_background_task_ids_route_to_sessions_including_failed_launches() {
+        use crate::{runtime::SessionStore, services::session_messages as live};
+        let temp = tempfile::tempdir().unwrap();
+        let context = live::context(temp.path()).unwrap();
+        let sessions = SessionStore::new(context.db.clone());
+        let parent = sessions.create(temp.path(), "fixture", "fixture").unwrap();
+        let child = sessions.fork(&parent).unwrap();
+        let stranger = sessions.fork(&parent).unwrap();
+        let task = uuid::Uuid::new_v4().to_string();
+        let directory = temp.path().join("background-tasks").join(&task);
+        std::fs::create_dir_all(&directory).unwrap();
+        let job = crate::services::background_sessions::Job {
+            id: task.clone(),
+            foreground: false,
+            parent_session_id: parent.clone(),
+            session_id: child.clone(),
+            title: "fixture".into(),
+            status: "failed".into(),
+            supervisor_pid: None,
+            child_pid: None,
+            started_ms: 0,
+            heartbeat_ms: 0,
+            finished_ms: Some(0),
+            exit_code: Some(2),
+            error: None,
+        };
+        std::fs::write(
+            directory.join("state.json"),
+            serde_json::to_vec(&job).unwrap(),
+        )
+        .unwrap();
+        let sent = super::execute_live(
+            &context,
+            &parent,
+            serde_json::json!({"operation":"send","to":task,"message":"follow up"}),
+        )
+        .unwrap();
+        assert_eq!(sent["to"], child);
+        assert_eq!(sent["delivery"], "next_resume");
+        assert_eq!(live::inbox(&context, &child, false).unwrap().len(), 1);
+        assert!(super::execute_live(
+            &context,
+            &stranger,
+            serde_json::json!({"operation":"send","to":task,"message":"unowned"})
+        )
+        .is_err());
+    }
+
     use super::*;
     #[test]
     fn team_names_broadcast_requests_and_timeouts_use_live_inbox() {

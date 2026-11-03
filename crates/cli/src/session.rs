@@ -997,8 +997,10 @@ impl Session {
         let mut pending_inputs = Vec::<String>::new();
         // The mode chosen with a plan, applied once the engine has approved it.
         let mut plan_mode_after: Option<(String, &'static str)> = None;
-        let mut sdk_messages = (cli.output_format == OutputFormat::StreamJson)
-            .then(|| crate::sdk_messages::Translator::new(&self.id, cli.include_partial_messages));
+        let mut sdk_messages = (cli.output_format == OutputFormat::StreamJson).then(|| {
+            crate::sdk_messages::Translator::new(&self.id, cli.include_partial_messages)
+                .with_database(self.store.db.clone())
+        });
         // num_turns and permission_denials for the json result, as stream-json reports them.
         let (mut model_rounds, mut round_open, mut denials) = (0u32, false, Vec::<Value>::new());
         let mut refresh = tokio::time::interval(std::time::Duration::from_secs(1));

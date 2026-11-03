@@ -10,6 +10,7 @@ use tokio::sync::{Mutex, RwLock};
 pub mod composio;
 pub mod control;
 pub mod elicitation;
+pub mod presentation;
 pub mod tool_executor;
 pub mod transfer;
 pub mod sdk;

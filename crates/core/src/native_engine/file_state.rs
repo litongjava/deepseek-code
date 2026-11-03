@@ -25,6 +25,68 @@ pub(super) fn store(root: &Path, session: &str) -> PathBuf {
 }
 
 impl FileState {
+    /// Recognize only source fences whose numbered lines still match disk.
+    /// Paths mentioned in call graphs or summaries are not read evidence.
+    pub fn record_codegraph(&mut self, root: &Path, output: &str, store: Option<&Path>) {
+        let Ok(root) = root.canonicalize() else {
+            return;
+        };
+        let mut path = None;
+        let mut in_source = false;
+        let mut fence = false;
+        let mut lines = Vec::<(usize, String)>::new();
+        for line in output.lines() {
+            if line == "**Source Code**" {
+                in_source = true;
+            }
+            if !in_source {
+                continue;
+            }
+            if !fence {
+                if let Some(name) = line
+                    .strip_prefix("**`")
+                    .and_then(|s| s.split_once("`**").map(|(name, _)| name))
+                {
+                    path = root
+                        .join(name)
+                        .canonicalize()
+                        .ok()
+                        .filter(|path| path.starts_with(&root));
+                } else if line.starts_with("```") && path.is_some() {
+                    fence = true;
+                    lines.clear();
+                }
+                continue;
+            }
+            if line.starts_with("```") {
+                if let Some(path) = path.take() {
+                    let before = stamp(&path);
+                    if !lines.is_empty() {
+                        if let Ok(text) = std::fs::read_to_string(&path) {
+                            let disk: Vec<_> = text.lines().collect();
+                            if lines.iter().all(|(number, shown)| {
+                                *number > 0
+                                    && disk.get(number - 1).is_some_and(|actual| *actual == shown)
+                            }) && before.is_some()
+                                && before == stamp(&path)
+                            {
+                                self.load(store);
+                                self.seen
+                                    .insert(path.to_string_lossy().into_owned(), before.unwrap());
+                                self.save(store);
+                            }
+                        }
+                    }
+                }
+                fence = false;
+            } else if let Some((number, source)) = line.split_once('\t') {
+                if let Ok(number) = number.trim().parse::<usize>() {
+                    lines.push((number, source.into()));
+                }
+            }
+        }
+    }
+
     fn load(&mut self, store: Option<&Path>) {
         if self.loaded { return; }
         self.loaded = true;
@@ -70,6 +132,27 @@ impl FileState {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn codegraph_requires_matching_source_and_preserves_external_change_protection() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("a.rs");
+        std::fs::write(&path, "first\nsecond\n").unwrap();
+        let path = path.canonicalize().unwrap();
+        let mut state = FileState::default();
+        let source = "**Source Code**\n**`a.rs`** — symbol\n```rust\n1\tfirst\n2\tsecond\n```";
+        state.record_codegraph(dir.path(), "**`a.rs`**\n1\tfirst", None);
+        assert!(state.check("Edit", &path, None, Vec::new).is_some());
+        state.record_codegraph(dir.path(), &source.replace("second", "stale"), None);
+        assert!(state.check("Edit", &path, None, Vec::new).is_some());
+        state.record_codegraph(dir.path(), source, None);
+        assert!(state.check("Edit", &path, None, Vec::new).is_none());
+        std::fs::write(&path, "external modification").unwrap();
+        assert!(state
+            .check("Edit", &path, None, Vec::new)
+            .unwrap()
+            .contains("modified since read"));
+    }
 
     #[test]
     fn edits_need_a_read_and_a_matching_disk_state_across_executors() {

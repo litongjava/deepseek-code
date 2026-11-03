@@ -33,6 +33,43 @@ fn call(id: &str, name: &str, input: Value, concurrent: bool) -> PendingToolCall
     }
 }
 
+#[tokio::test]
+async fn codegraph_body_is_read_evidence_before_edit_and_external_changes_still_fail() {
+    let temp = tempfile::tempdir().unwrap();
+    std::fs::create_dir(temp.path().join(".codegraph")).unwrap();
+    let file = temp.path().join("sample.rs");
+    std::fs::write(&file, "fn old() {}\n").unwrap();
+    let mut executor = executor(temp.path());
+    let source = "**Source Code**\n**`sample.rs`** — old\n```rust\n1\tfn old() {}\n```";
+    executor
+        .complete_tool_call(
+            "mcp__codegraph__codegraph_explore",
+            "explore",
+            None,
+            (json!({}), source.into(), false),
+        )
+        .await;
+    let result = executor
+        .execute_tool_call(
+            "Edit",
+            &json!({"file_path":"sample.rs","old_string":"old","new_string":"new"}),
+            "edit",
+        )
+        .await;
+    assert!(!result.2, "{}", result.1);
+    assert_eq!(std::fs::read_to_string(&file).unwrap(), "fn new() {}\n");
+    std::fs::write(&file, "externally changed\n").unwrap();
+    let result = executor
+        .execute_tool_call(
+            "Write",
+            &json!({"file_path":"sample.rs","content":"overwrite"}),
+            "write",
+        )
+        .await;
+    assert!(result.2);
+    assert!(result.1.contains("modified since read"));
+}
+
 #[test]
 fn batches_group_only_consecutive_concurrency_safe_calls() {
     let calls: Vec<_> = [true, true, false, true, false, true, true]

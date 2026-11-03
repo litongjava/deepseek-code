@@ -71,6 +71,101 @@ async fn cli(root: &Path, data: &Path, endpoint: &str, options: &[&str]) -> std:
 }
 
 #[tokio::test]
+async fn background_agent_binds_worktree_before_resuming_child() {
+    let temp = tempfile::tempdir().unwrap();
+    let source = temp.path().join("source");
+    std::fs::create_dir(&source).unwrap();
+    git(&source, &["init", "-b", "main"]);
+    git(&source, &["config", "user.name", "Fixture"]);
+    git(
+        &source,
+        &["config", "user.email", "fixture@example.invalid"],
+    );
+    std::fs::write(source.join("tracked.txt"), "source original").unwrap();
+    git(&source, &["add", "."]);
+    git(&source, &["commit", "-m", "initial"]);
+    let paths = RuntimePaths::new(temp.path().join("data")).unwrap();
+    let parent = uuid::Uuid::new_v4().to_string();
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let endpoint = format!("http://{}/v1", listener.local_addr().unwrap());
+    let app = Router::new().route("/v1/chat/completions", post(|Json(body):Json<Value>| async move {
+        let messages = body["messages"].as_array().unwrap();
+        let child = messages.iter().any(|message| message["content"].as_str().is_some_and(|text| text.contains("BACKGROUND_CHILD_FIXTURE")));
+        let tools = messages.iter().filter(|message| message["role"] == "tool").count();
+        let call = |name: &str, input: Value| json!({"tool_calls":[{"index":0,"id":format!("fixture-{tools}"),"type":"function","function":{"name":name,"arguments":input.to_string()}}]});
+        let delta = if child {
+            match tools {
+                0 => call("Read", json!({"file_path":"tracked.txt"})),
+                1 => call("Write", json!({"file_path":"tracked.txt","content":"background isolated edit"})),
+                _ => json!({"content":"child complete"}),
+            }
+        } else if tools == 0 {
+            call("Agent",json!({"description":"Background isolation fixture","prompt":"BACKGROUND_CHILD_FIXTURE","isolation":"worktree","run_in_background":true}))
+        } else {json!({"content":"parent complete"})};
+        let finish = if delta.get("tool_calls").is_some() {"tool_calls"} else {"stop"};
+        ([("content-type","text/event-stream")],format!("data: {}\n\ndata: {}\n\ndata: [DONE]\n\n",json!({"choices":[{"index":0,"delta":delta,"finish_reason":null}]}),json!({"choices":[{"index":0,"delta":{},"finish_reason":finish}],"usage":{"prompt_tokens":10,"completion_tokens":25}})))
+    }));
+    let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+    let output = cli(
+        &source,
+        &paths.data_dir,
+        &endpoint,
+        &["--session-id", &parent],
+    )
+    .await;
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let job = tokio::time::timeout(Duration::from_secs(40), async {
+        loop {
+            if let Some(job) = deepseek_code_core::services::background_sessions::list(
+                &paths.data_dir,
+                Some(&parent),
+            )
+            .unwrap()
+            .into_iter()
+            .next()
+            {
+                if matches!(job.status.as_str(), "completed" | "failed" | "cancelled") {
+                    break job;
+                }
+            }
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+    })
+    .await
+    .unwrap();
+    let errors = std::fs::read_to_string(
+        paths
+            .data_dir
+            .join("background-tasks")
+            .join(&job.id)
+            .join("stderr.log"),
+    )
+    .unwrap();
+    assert_eq!(job.status, "completed", "{errors}");
+    let store = SessionStore::new(paths.open_database().unwrap());
+    let workspace = store
+        .workspace(&job.session_id, &paths.data_dir.join("workspaces"))
+        .unwrap();
+    assert_ne!(
+        workspace.canonicalize().unwrap(),
+        source.canonicalize().unwrap()
+    );
+    assert_eq!(
+        std::fs::read_to_string(workspace.join("tracked.txt")).unwrap(),
+        "background isolated edit"
+    );
+    assert_eq!(
+        std::fs::read_to_string(source.join("tracked.txt")).unwrap(),
+        "source original"
+    );
+    server.abort();
+}
+
+#[tokio::test]
 async fn named_and_generated_worktrees_isolate_dirty_sources_and_resume_after_process_exit() {
     let root = tempfile::tempdir().unwrap();
     let source = root.path().join("source");

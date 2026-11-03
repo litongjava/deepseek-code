@@ -1085,7 +1085,7 @@ async fn sdk_plan_clear_boundary_survives_actual_cli_process() {
 }
 
 #[tokio::test]
-async fn auto_extension_uses_only_explicit_classifier_and_never_executes_on_failure() {
+async fn auto_extension_uses_explicit_classifier_and_requests_host_on_failure() {
     for outcome in ["allow", "deny", "malformed", "unavailable", "timeout"] {
         let server = Server::start(false, Mode::Approval).await;
         let root = tempfile::tempdir().unwrap();
@@ -1135,6 +1135,7 @@ async fn auto_extension_uses_only_explicit_classifier_and_never_executes_on_fail
             "success"
         );
         client.send(json!({"type":"user","message":{"role":"user","content":[{"type":"text","text":"Write approval.txt with the requested content"},{"type":"text","text":"SDK_AUTHORITY_TEXT: only edit that requested file"}]}})).await;
+        let mut host_requests = 0;
         loop {
             let line = tokio::time::timeout(Duration::from_secs(20), client.output.next_line())
                 .await
@@ -1142,10 +1143,15 @@ async fn auto_extension_uses_only_explicit_classifier_and_never_executes_on_fail
                 .unwrap()
                 .unwrap();
             let frame: Value = serde_json::from_str(&line).unwrap();
-            assert_ne!(
-                frame["type"], "control_request",
-                "headless auto never falls back to host approval: {frame}"
-            );
+            if frame["type"] == "control_request" {
+                assert_ne!(
+                    outcome, "allow",
+                    "classified approval does not require the host"
+                );
+                assert_eq!(frame["request"]["subtype"], "can_use_tool");
+                host_requests += 1;
+                client.send(json!({"type":"control_response","response":{"subtype":"success","request_id":frame["request_id"],"response":{"behavior":"deny","message":"Fixture host denied fallback"}}})).await;
+            }
             if frame["type"] == "result" {
                 break;
             }
@@ -1155,6 +1161,7 @@ async fn auto_extension_uses_only_explicit_classifier_and_never_executes_on_fail
             outcome == "allow"
         );
         assert_eq!(requests.lock().unwrap().len(), 1);
+        assert_eq!(host_requests, usize::from(outcome != "allow"));
         assert!(client.finish().await.0.success());
         classifier.abort();
     }

@@ -36,6 +36,7 @@ enum Block {
 
 pub struct Translator {
     session_id: String,
+    database: Option<std::sync::Arc<deepseek_code_core::db::DbManager>>,
     partial: bool,
     message_id: String,
     model: String,
@@ -51,6 +52,7 @@ impl Translator {
     pub fn new(session_id: &str, partial: bool) -> Self {
         Self {
             session_id: session_id.to_owned(),
+            database: None,
             partial,
             message_id: String::new(),
             model: String::new(),
@@ -60,6 +62,24 @@ impl Translator {
             turns: 0,
             denials: Vec::new(),
         }
+    }
+
+    pub fn with_database(mut self, database: std::sync::Arc<deepseek_code_core::db::DbManager>) -> Self {
+        self.database = Some(database);
+        self
+    }
+
+    fn result_content(&self, id: &str, output: &str) -> Value {
+        // Display text is independent of the typed MCP content sent to SDK clients.
+        let saved = self.database.as_ref().and_then(|db| {
+            db.with_conn(|conn| conn.query_row(
+                "SELECT content_json FROM mcp_tool_outputs WHERE conversation_id=?1 AND tool_use_id=?2 AND display_text=?3",
+                [&self.session_id, id, output], |row| row.get::<_, String>(0),
+            )).ok().and_then(Result::ok)
+        });
+        saved
+            .and_then(|content| serde_json::from_str(&content).ok())
+            .unwrap_or_else(|| tool_result_content(output))
     }
 
     fn envelope(&self, kind: &str, message: Value) -> Value {
@@ -192,7 +212,7 @@ impl Translator {
                 emit_json(&self.envelope(
                     "user",
                     json!({"role":"user","content":[{"type":"tool_result","tool_use_id":tool_use_id,
-                        "content":tool_result_content(output),"is_error":is_error}]}),
+                        "content":self.result_content(tool_use_id, output),"is_error":is_error}]}),
                 ))
             }
             EngineEvent::MessageStop { stop_reason, .. } => {

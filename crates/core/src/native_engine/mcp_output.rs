@@ -9,6 +9,8 @@ use serde_json::{json, Value};
 pub(crate) struct McpOutput {
     pub content: Value,
     pub metadata: Value,
+    #[serde(default)]
+    display_body: Option<String>,
 }
 
 impl McpOutput {
@@ -30,14 +32,24 @@ impl McpOutput {
                 metadata[key] = value.clone();
             }
         }
-        Ok(Self { content, metadata })
+        let display_body = crate::mcp::presentation::body(result).filter(|body| !body.is_empty());
+        Ok(Self {
+            content,
+            metadata,
+            display_body,
+        })
     }
 
     pub fn replace(&mut self, replacement: &Value) {
         self.content = normalize(replacement);
+        self.display_body = crate::mcp::presentation::body(replacement);
     }
 
     pub fn append_context(&mut self, context: &str) {
+        if let Some(body) = &mut self.display_body {
+            body.push('\n');
+            body.push_str(context);
+        }
         match &mut self.content {
             Value::Array(blocks) => blocks.push(json!({"type":"text","text":context})),
             Value::String(value) => {
@@ -50,7 +62,10 @@ impl McpOutput {
 
     /// Human output and durable tool rows use the same content, without metadata.
     pub fn display(&self) -> String {
-        text(&self.content)
+        self.display_body
+            .clone()
+            .or_else(|| crate::mcp::presentation::body(&self.content))
+            .unwrap_or_else(|| text(&self.content))
     }
 
     pub fn has_images(&self) -> bool {
@@ -119,6 +134,7 @@ impl McpOutput {
             Ok(Self {
                 content: serde_json::from_str(&content)?,
                 metadata: serde_json::from_str(&metadata)?,
+                display_body: Some(display.to_owned()),
             })
         })
         .transpose()
@@ -230,9 +246,12 @@ mod tests {
     fn structured_content_and_metadata_are_independent_of_replacement() {
         let mut output = McpOutput::from_transport(&json!({"content":[{"type":"text","text":"raw"}],"structuredContent":{"answer":42},"_meta":{"trace":"test"}})).unwrap();
         assert_eq!(output.content, json!("{\"answer\":42}"));
+        assert_eq!(output.display(), "raw");
         output.replace(&json!({"content":"ordinary object","isError":false}));
         assert_eq!(output.metadata["structuredContent"]["answer"], 42);
         assert!(output.content.as_str().unwrap().contains("ordinary object"));
+        assert!(output.display().contains("ordinary object"));
+        assert!(!output.display().contains("raw"));
     }
 
     #[test]

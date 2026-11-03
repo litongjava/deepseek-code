@@ -1302,6 +1302,7 @@ struct Frame {
     /// Lines logged above the frame, for clicks on tool results.
     scrollback: super::scrollback::Scrollback,
     logged: Vec<String>,
+    tool_blocks: std::collections::HashMap<String, usize>,
     history_view: super::transcript_pager::HistoryView,
     composer_height: usize,
 }
@@ -1471,12 +1472,41 @@ impl Frame {
         if self.scrollback.needs_separator() { self.log_rendered(""); }
     }
     /// Logs a tool result that a click expands and collapses.
-    fn log_block(&mut self, short: Vec<change_view::Line>, full: Vec<change_view::Line>) {
+    fn log_block(&mut self, short: Vec<change_view::Line>, full: Vec<change_view::Line>) -> usize {
         self.separate_block();
         let (block, lines) = self.scrollback.block(short, full);
         for line in lines {
             self.log_line(line, Some(block));
         }
+        block
+    }
+
+    fn finish_tool_block(
+        &mut self,
+        id: &str,
+        short: Vec<change_view::Line>,
+        full: Vec<change_view::Line>,
+    ) {
+        if let Some(block) = self.tool_blocks.remove(id) {
+            let queued: usize = self.logs.iter().map(|(_, height)| height).sum();
+            let bottom = self
+                .top
+                .unwrap_or(0)
+                .saturating_add(queued.min(u16::MAX as usize) as u16);
+            if let Some((start, lines)) =
+                self.scrollback
+                    .replace_block(block, short.clone(), full.clone(), bottom)
+            {
+                self.logs.clear();
+                self.pending = format!("\x1b[{};1H\x1b[J", start + 1);
+                self.lines.clear();
+                self.top = Some(start);
+                self.logs.extend(lines);
+                self.logged = self.scrollback.all();
+                return;
+            }
+        }
+        self.log_block(short, full);
     }
     /// Switches a clicked tool result between its short and full form and
     /// redraws everything below it, the frame included.
@@ -2001,7 +2031,9 @@ fn run(
                     finish_text(state, screen);
                     if !state.running.iter().any(|call| call.id == id) {
                         if super::tool_view::is_mcp_header(&header) {
-                            screen.log_block(vec![header.clone()], vec![header.clone()]);
+                            let block =
+                                screen.log_block(vec![header.clone()], vec![header.clone()]);
+                            screen.tool_blocks.insert(id.clone(), block);
                         }
                         state.running.push(Running { id, header, started: Instant::now(), shell });
                     }
@@ -2022,7 +2054,7 @@ fn run(
                     flush_notices(state, screen)?;
                     finish_text(state, screen);
                     match full {
-                        Some(full) => screen.log_block(short, full),
+                        Some(full) => screen.finish_tool_block(&id, short, full),
                         None if short.is_empty() => {}
                         None => {
                             screen.separate_block();
@@ -2846,7 +2878,14 @@ mod tests {
         let mut state = State::new("ask".into());
         state.foreground_agents.push(("child".into(), "general".into()));
         assert!(state.status_line().contains("Waiting for foreground agent"));
-        let agent = crate::background_commands::Agent { session_id: "child".into(), agent_type: "general".into(), description: "Inspect".into(), started_ms: 0, output_tokens: -1 };
+        let agent = crate::background_commands::Agent {
+            session_id: "child".into(),
+            agent_type: "general".into(),
+            description: "Inspect".into(),
+            started_ms: 0,
+            output_tokens: -1,
+            tokens_estimated: false,
+        };
         let rows = crate::background_commands::agent_rows(&[agent], 100).join("\n");
         assert!(rows.contains("pending"));
         assert!(!rows.contains("↓ 0 tokens"));
@@ -3053,7 +3092,9 @@ mod tests {
             description: (*description).into(),
             started_ms: chrono::Utc::now().timestamp_millis() as u64 - [66000, 57000, 52000][i],
             output_tokens: [57800, 91800, 53200][i],
-        }).collect();
+            tokens_estimated: false,
+        })
+        .collect();
         let mut frame = Frame::default();
         for step in 0..80 {
             if step == 50 { state.agent_panel.clear(); }
@@ -4227,6 +4268,40 @@ mod mcp_started_tests {
     use super::*;
 
     #[test]
+    #[ignore = "interactive ConPTY acceptance"]
+    fn mcp_completion_terminal_fixture() {
+        let temp = tempfile::tempdir().unwrap();
+        let keys = temp.path().join("keys.json");
+        let paths =
+            deepseek_code_core::runtime::RuntimePaths::new(temp.path().to_path_buf()).unwrap();
+        let context = crate::services::context(&paths).unwrap();
+        context.save_setting("delegation.child", &serde_json::json!({"status":"running","started_at":chrono::Utc::now().to_rfc3339(),"output_tokens":125,"output_tokens_estimated":true})).unwrap();
+        context
+            .save_setting("agent-description.child", &"Streaming fixture")
+            .unwrap();
+        let mut display = TurnDisplay::new(true, "plan", &keys, vec![]).unwrap();
+        display.set_shell_context(temp.path(), "parent");
+        display.agent_progress("child", "general", "started", None);
+        let name = "mcp__codegraph__codegraph_explore";
+        let input = serde_json::json!({"query":"chat theme composer streaming animation CSS","projectPath":"../fixture","maxFiles":4});
+        display.tool_started("mcp-one", name, &input);
+        std::thread::sleep(Duration::from_secs(4));
+        let output = serde_json::json!([{"type":"text","text":"MCP_BODY_SENTINEL\nSecond body line\nThird body line\nFourth body line\nLAST_BODY_SENTINEL"}]).to_string();
+        display.tool_finished("mcp-one", name, &input, &output, false);
+        display.tool_finished("mcp-one", name, &input, &output, false);
+        context.save_setting("delegation.child", &serde_json::json!({"status":"running","started_at":chrono::Utc::now().to_rfc3339(),"output_tokens":1500,"output_tokens_estimated":false})).unwrap();
+        display.before_text("MCP_FIXTURE_DONE\n");
+        std::thread::sleep(Duration::from_secs(24));
+        display.agent_progress("child", "general", "completed", None);
+        display.finish(None);
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        runtime.block_on(async {
+            let mut input = super::super::input::TerminalInput::new();
+            let _ = input.read_prompt("fixture").await;
+        });
+    }
+
+    #[test]
     fn started_mcp_call_reaches_scrollback_without_expansion_or_frame_clipping() {
         let temp = tempfile::tempdir().unwrap();
         let mut display =
@@ -4250,7 +4325,8 @@ mod mcp_started_tests {
             .unwrap();
         assert!(super::super::tool_view::is_mcp_header(&header));
         let mut screen = Frame::default();
-        screen.log_block(vec![header.clone()], vec![header.clone()]);
+        let block = screen.log_block(vec![header.clone()], vec![header.clone()]);
+        screen.tool_blocks.insert("one".into(), block);
         let text = super::super::tool_view::plain_terminal_text(&screen.logged.concat());
         assert!(text.contains(&format!("{name}({input})")));
         let mut state = State::new("ask".into());
@@ -4263,5 +4339,48 @@ mod mcp_started_tests {
         let (rows, _) = running_lines(&state, 30, 2, false);
         assert_eq!(rows.len(), 1);
         assert!(rows[0].contains("Running"));
+        let output =
+            serde_json::json!([{"type":"text","text":"MCP body\nsecond line"}]).to_string();
+        let short = super::super::tool_view::finished(name, &input, &output, false, None, None);
+        let full = super::super::tool_view::expanded(name, &input, &output, false, None);
+        screen.finish_tool_block("one", short, full);
+        let text =
+            super::super::tool_view::plain_terminal_text(&screen.scrollback.all().join("\n"));
+        assert_eq!(text.matches(name).count(), 1);
+        assert!(text.contains("MCP body"));
+        assert!(!text.contains("Exploration:"));
+        assert!(!text.contains("\"type\""));
+    }
+
+    #[test]
+    fn completed_offscreen_call_updates_history_without_replaying_its_title() {
+        let mut screen = Frame::default();
+        let header = change_view::heading("● mcp__fixture__inspect({})");
+        let block = screen.log_block(vec![header.clone()], vec![header.clone()]);
+        screen.tool_blocks.insert("offscreen".into(), block);
+        for _ in 0..40 {
+            screen.log_rendered("later output");
+        }
+        screen.logs.clear();
+        screen.top = Some(12);
+        screen.finish_tool_block(
+            "offscreen",
+            vec![header.clone(), change_view::body("  body")],
+            vec![header, change_view::body("  body")],
+        );
+        assert_eq!(
+            screen
+                .scrollback
+                .all()
+                .join("\n")
+                .matches("mcp__fixture__inspect")
+                .count(),
+            1
+        );
+        assert!(!screen
+            .logs
+            .iter()
+            .any(|(line, _)| line.contains("mcp__fixture__inspect")));
+        assert!(screen.scrollback.all().join("\n").contains("body"));
     }
 }

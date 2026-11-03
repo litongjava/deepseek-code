@@ -485,23 +485,62 @@ pub(crate) struct Agent {
     pub description: String,
     pub started_ms: u64,
     pub output_tokens: i64,
+    pub tokens_estimated: bool,
+}
+
+fn child_output_tokens(
+    context: &deepseek_code_core::services::ServiceContext,
+    session: &str,
+) -> i64 {
+    let mut requests = std::collections::HashMap::<String, i64>::new();
+    let _ = context.db.with_conn(|conn| -> anyhow::Result<()> {
+        let mut statement = conn.prepare("SELECT id,output_tokens FROM model_requests WHERE conversation_id=?1 AND output_tokens IS NOT NULL")?;
+        for row in statement.query_map([session], |row| Ok((row.get::<_,String>(0)?, row.get::<_,i64>(1)?)))? {
+            let (id, tokens) = row?;
+            requests.insert(id, tokens);
+        }
+        Ok(())
+    });
+    if let Ok(Some(values)) =
+        context.setting::<Vec<serde_json::Value>>(&format!("cli.live-requests.{session}"))
+    {
+        for value in values {
+            if let (Some(id), Some(tokens)) = (value["id"].as_str(), value["outputTokens"].as_i64())
+            {
+                requests.insert(id.to_owned(), tokens);
+            }
+        }
+    }
+    requests.values().copied().sum()
 }
 
 /// This session's background agents that are still running.
-pub(crate) fn running_agents(paths: &RuntimePaths, db: &deepseek_code_core::db::DbManager, session: &str) -> Vec<Agent> {
-    let Ok(context) = crate::services::context(paths) else { return Vec::new() };
-    let Ok(jobs) = background_sessions::list(&paths.data_dir, Some(session)) else { return Vec::new() };
+pub(crate) fn running_agents(
+    paths: &RuntimePaths,
+    _db: &deepseek_code_core::db::DbManager,
+    session: &str,
+) -> Vec<Agent> {
+    let Ok(context) = crate::services::context(paths) else {
+        return Vec::new();
+    };
+    let Ok(jobs) = background_sessions::list(&paths.data_dir, Some(session)) else {
+        return Vec::new();
+    };
     jobs.into_iter()
         .filter(|job| matches!(job.status.as_str(), "starting" | "running" | "unresponsive"))
         .filter_map(|job| {
-            let record = context.setting::<serde_json::Value>(&format!("background-agent.{}", job.id)).ok().flatten()?;
-            let output_tokens = db.with_conn(|conn| conn.query_row("SELECT COALESCE(SUM(output_tokens),0) FROM model_requests WHERE conversation_id=?1", [&job.session_id], |row| row.get::<_, i64>(0))).ok().and_then(Result::ok).unwrap_or(0);
+            let record = context
+                .setting::<serde_json::Value>(&format!("background-agent.{}", job.id))
+                .ok()
+                .flatten()?;
+            let output_tokens = child_output_tokens(&context, &job.session_id);
             Some(Agent {
                 session_id: job.session_id.clone(),
                 agent_type: record["agent_type"].as_str().unwrap_or("general").to_owned(),
                 description: record["description"].as_str().unwrap_or(&job.title).to_owned(),
                 started_ms: job.started_ms,
                 output_tokens: if output_tokens > 0 { output_tokens } else { -1 },
+                tokens_estimated: false,
             })
         })
         .collect()
@@ -570,20 +609,36 @@ pub(crate) fn answer_agent_question(paths: &RuntimePaths, session: &Session) -> 
 }
 
 /// Read the child task's own usage and description.
-pub(crate) fn foreground_agent(context: &deepseek_code_core::services::ServiceContext, id: &str, kind: &str) -> Option<Agent> {
-    let record = context.setting::<serde_json::Value>(&format!("delegation.{id}")).ok().flatten()?;
-    let description = context.setting::<String>(&format!("agent-description.{id}")).ok().flatten().unwrap_or_else(|| kind.into());
-    let started_ms = chrono::DateTime::parse_from_rfc3339(record["started_at"].as_str()?).ok()?.timestamp_millis().max(0) as u64;
-    let output_tokens = context.db.with_conn(|conn| conn.query_row("SELECT COALESCE(SUM(output_tokens),0) FROM model_requests WHERE conversation_id=?1", [id], |row| row.get::<_, i64>(0))).ok().and_then(Result::ok).unwrap_or(0);
+pub(crate) fn foreground_agent(
+    context: &deepseek_code_core::services::ServiceContext,
+    id: &str,
+    kind: &str,
+) -> Option<Agent> {
+    let record = context
+        .setting::<serde_json::Value>(&format!("delegation.{id}"))
+        .ok()
+        .flatten()?;
+    let description = context
+        .setting::<String>(&format!("agent-description.{id}"))
+        .ok()
+        .flatten()
+        .unwrap_or_else(|| kind.into());
+    let started_ms = chrono::DateTime::parse_from_rfc3339(record["started_at"].as_str()?)
+        .ok()?
+        .timestamp_millis()
+        .max(0) as u64;
+    let output_tokens = child_output_tokens(context, id);
     let output_tokens = record["output_tokens"]
         .as_i64()
-        .unwrap_or(if output_tokens > 0 { output_tokens } else { -1 });
+        .unwrap_or(0)
+        .max(output_tokens);
     Some(Agent {
         session_id: id.into(),
         agent_type: kind.into(),
         description,
         started_ms,
-        output_tokens,
+        output_tokens: if output_tokens > 0 { output_tokens } else { -1 },
+        tokens_estimated: record["output_tokens_estimated"] == true,
     })
 }
 
@@ -607,6 +662,11 @@ pub(crate) fn agent_rows(agents: &[Agent], width: usize) -> Vec<String> {
             format!("{:.1}k", agent.output_tokens as f64 / 1000.0)
         } else {
             agent.output_tokens.to_string()
+        };
+        let tokens = if agent.tokens_estimated {
+            format!("~{tokens}")
+        } else {
+            tokens
         };
         let right = format!(
             "{}  ↓ {tokens} tokens",
@@ -942,11 +1002,21 @@ fn agent_notice(session: &Session, report: String) -> Result<String> {
     };
     let status = report.lines().find_map(|line| line.strip_prefix("Status: ")).unwrap_or("completed");
     let description = record["description"].as_str().unwrap_or("background agent");
-    let summary = match status {
+    let mut summary = match status {
         "completed" => format!("Agent \"{description}\" completed"),
         "cancelled" => format!("Agent \"{description}\" was stopped"),
         other => format!("Agent \"{description}\" {other}"),
     };
+    if status == "failed" {
+        if let Some(reason) = report
+            .split_once("\n\n")
+            .map(|(_, body)| body)
+            .and_then(|body| body.lines().find(|line| !line.trim().is_empty()))
+        {
+            summary.push_str(": ");
+            summary.push_str(&safe_output(reason).chars().take(400).collect::<String>());
+        }
+    }
     deepseek_code_core::services::input_queue::push(
         &session.store.db,
         &session.id,
@@ -1087,6 +1157,7 @@ mod agent_row_tests {
                 description: "Find the logging code".into(),
                 started_ms: started,
                 output_tokens: 6_600,
+                tokens_estimated: false,
             }],
             80,
         );
@@ -1104,6 +1175,7 @@ mod agent_row_tests {
             description: "检索数据库定义和注册中心".repeat(10),
             started_ms: chrono::Utc::now().timestamp_millis() as u64 - 66_000,
             output_tokens: 57_800,
+            tokens_estimated: false,
         };
         for width in [4, 18, 40, 80, 120] {
             let rows = agent_rows(std::slice::from_ref(&agent), width);
@@ -1124,6 +1196,24 @@ mod agent_row_tests {
         let agent = foreground_agent(&context, "child", "explore").unwrap();
         assert_eq!(agent.description, "Locate registry code");
         assert_eq!(agent.output_tokens, 1500);
+        context
+            .save_setting(
+                "cli.live-requests.child",
+                &serde_json::json!([
+                    {"id":"r1","outputTokens":1200}, {"id":"r4","outputTokens":200},
+                    {"id":"r5","outputTokens":null}
+                ]),
+            )
+            .unwrap();
+        assert_eq!(
+            foreground_agent(&context, "child", "explore")
+                .unwrap()
+                .output_tokens,
+            1700
+        );
+        context.save_setting("delegation.child", &serde_json::json!({"started_at":"2026-11-01T00:00:00Z","output_tokens":1900,"output_tokens_estimated":true})).unwrap();
+        let estimated = foreground_agent(&context, "child", "explore").unwrap();
+        assert!(agent_rows(&[estimated], 120)[1].contains("~1.9k tokens"));
         assert!(foreground_agent(&context, "missing", "explore").is_none());
     }
 

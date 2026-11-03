@@ -848,7 +848,10 @@ impl ToolLoopExecutor {
     /// PostToolUse hooks for a call that went through `prepare_tool_call`.
     async fn complete_tool_call(&mut self, name: &str, id: &str, pre_contexts: Option<Vec<String>>, ran: (Value, String, bool)) -> (Value, String, bool) {
         use crate::services::tool_hooks::HookEvent;
-        let (Some(mut contexts), Some(hooks)) = (pre_contexts, self.hooks.clone()) else { return ran; };
+        let (Some(mut contexts), Some(hooks)) = (pre_contexts, self.hooks.clone()) else {
+            self.record_codegraph_result(name, &ran.0, &ran.1, ran.2);
+            return ran;
+        };
         let session = self.conv_id.clone().unwrap_or_else(|| "unknown".into());
         let (actual, mut output, mut failed) = ran;
         let mut mcp_output = self.mcp_outputs.remove(id);
@@ -877,6 +880,7 @@ impl ToolLoopExecutor {
         } else {
             for context in contexts { output.push('\n'); output.push_str(&context); }
         }
+        self.record_codegraph_result(name, &actual, &output, failed);
         (actual, output, failed)
     }
 
@@ -945,7 +949,7 @@ impl ToolLoopExecutor {
 
     pub fn with_permission_manager(mut self, manager: Arc<PermissionManager>) -> Self {
         if manager.get_mode() == crate::permissions::PermissionMode::PlanMode {
-            self.system_prompt.get_or_insert_with(String::new).push_str("\nThis turn starts in read-only plan mode. Investigate without modifying project files until ExitPlanMode succeeds. Read-only shell commands (for example ls, cat, grep, git status/log/diff, Get-ChildItem, Get-Content) run directly; any other command asks the user first. Write a concrete Markdown implementation and verification plan to the dedicated session plan file using Write/Edit, then call ExitPlanMode (the legacy plan text parameter is also accepted). It requests explicit user approval of the execution mode, including a return to bypass when offered. Read, Glob and Grep may inspect files outside the project. MCP tools default to read-only unless their readOnlyHint explicitly says otherwise. Do not claim approval without a successful ExitPlanMode result.\n");
+            self.system_prompt.get_or_insert_with(String::new).push_str("\nThis turn starts in plan mode. Investigate and prepare a plan before implementation. Shell commands, including builds and tests, run directly unless the shared danger filter rejects them or an explicit ask/deny rule applies. Direct project editing tools remain blocked. Write a concrete Markdown implementation and verification plan to the dedicated session plan file using Write/Edit, then call ExitPlanMode (the legacy plan text parameter is also accepted). It requests explicit user approval of the execution mode, including a return to bypass when offered. Read, Glob and Grep may inspect files outside the project. MCP tools default to read-only unless their readOnlyHint explicitly says otherwise. Do not claim approval without a successful ExitPlanMode result.\n");
         }
         self.permission_manager = Some(manager);
         self
@@ -1920,6 +1924,20 @@ impl ToolLoopExecutor {
         let key = self.file_key(file_path);
         let store = self.file_state_store();
         self.file_state.record(&key, store.as_deref());
+    }
+
+    fn record_codegraph_result(&mut self, name: &str, input: &Value, output: &str, failed: bool) {
+        if failed || name != "mcp__codegraph__codegraph_explore" {
+            return;
+        }
+        let requested = self.file_key(input["projectPath"].as_str().unwrap_or(&self.workspace_cwd));
+        let root = requested
+            .ancestors()
+            .find(|path| path.join(".codegraph").is_dir())
+            .unwrap_or(&requested);
+        let store = self.file_state_store();
+        self.file_state
+            .record_codegraph(root, output, store.as_deref());
     }
 
     /// Like the reference CLI, Edit and overwriting Write require the file to
