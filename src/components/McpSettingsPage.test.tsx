@@ -37,3 +37,60 @@ it('adds a WebSocket server with its URL', async () => {
   fireEvent.click(screen.getByRole('button', { name: 'Add' }));
   await waitFor(() => expect(invoke).toHaveBeenCalledWith('mcp_add_server', { config: { id: 'live', name: 'live', command: '', cwd: null, args: [], type: 'ws', url: 'wss://mcp.example.com/ws', headers: {}, env: {}, enabled: true } }));
 });
+
+
+it.each(['Start', 'Stop', 'Restart', 'Enabled', 'Delete'])('refreshes servers and tools after %s', async action => {
+  let running = action === 'Stop' || action === 'Restart';
+  let enabled = true;
+  let removed = false;
+  const confirm = vi.spyOn(window, 'confirm').mockReturnValue(true);
+  vi.mocked(invoke).mockImplementation(async cmd => {
+    if (cmd === 'mcp_list_servers') return removed ? [] : [{ id: 'fixture', name: 'Fixture', command: 'node', args: [], enabled, running, tools_count: running ? 1 : 0, resources_count: 0, transport_type: 'stdio' }];
+    if (cmd === 'mcp_list_tools') return running && enabled && !removed ? [{ name: 'fixture-tool', description: '', server_name: 'Fixture' }] : [];
+    if (cmd === 'mcp_start_server') running = true;
+    if (cmd === 'mcp_stop_server') running = false;
+    if (cmd === 'mcp_toggle_server') enabled = false;
+    if (cmd === 'mcp_remove_server') removed = true;
+  });
+  render(<McpSettingsPage />);
+  await screen.findByTitle('Edit');
+  const callsBefore = vi.mocked(invoke).mock.calls.filter(([cmd]) => cmd === 'mcp_list_tools').length;
+  fireEvent.click(action === 'Enabled' ? screen.getByRole('checkbox', { name: 'Enabled' }) : screen.getByTitle(action));
+  await waitFor(() => expect(vi.mocked(invoke).mock.calls.filter(([cmd]) => cmd === 'mcp_list_tools').length).toBeGreaterThan(callsBefore));
+  if (running && enabled && !removed) expect(await screen.findByText('Available MCP Tools (1)')).toBeInTheDocument();
+  else await waitFor(() => expect(screen.queryByText('Available MCP Tools (1)')).not.toBeInTheDocument());
+  confirm.mockRestore();
+});
+
+it('shows list and tools failures instead of empty success and retries them', async () => {
+  let fail = true;
+  vi.mocked(invoke).mockImplementation(async cmd => {
+    if (cmd === 'mcp_list_servers' || cmd === 'mcp_list_tools') {
+      if (fail) throw new Error('IPC unavailable');
+      return [];
+    }
+  });
+  render(<McpSettingsPage />);
+  expect(await screen.findByRole('alert')).toHaveTextContent('Failed to load MCP servers');
+  expect(screen.getByRole('alert')).toHaveTextContent('Failed to load MCP tools');
+  expect(screen.queryByText('No MCP servers configured')).not.toBeInTheDocument();
+  fail = false;
+  fireEvent.click(screen.getByRole('button', { name: 'Retry' }));
+  expect(await screen.findByText('No MCP servers configured')).toBeInTheDocument();
+  expect(screen.queryByRole('alert')).not.toBeInTheDocument();
+});
+
+it('keeps the form and exposes native mutation errors', async () => {
+  vi.mocked(invoke).mockImplementation(async cmd => {
+    if (cmd === 'mcp_list_servers' || cmd === 'mcp_list_tools') return [];
+    if (cmd === 'mcp_add_server') throw new Error('Configuration is read-only');
+  });
+  render(<McpSettingsPage />);
+  fireEvent.click(await screen.findByRole('button', { name: 'Add Server' }));
+  fireEvent.change(screen.getByPlaceholderText('my-mcp-server'), { target: { value: 'fixture' } });
+  fireEvent.change(screen.getByPlaceholderText('npx'), { target: { value: 'node' } });
+  fireEvent.click(screen.getByRole('button', { name: 'Add' }));
+  expect(await screen.findByRole('alert')).toHaveTextContent('Configuration is read-only');
+  expect(screen.getByPlaceholderText('my-mcp-server')).toHaveValue('fixture');
+  expect(screen.queryByText('Server added')).not.toBeInTheDocument();
+});

@@ -195,3 +195,145 @@ async fn skills_bridge_streams_with_permissions_rejects_disabled_and_cancels_dis
     server.abort();
     model.abort();
 }
+
+
+#[tokio::test]
+async fn skills_management_contract_persists_changes_and_reports_failures() {
+    let dir = tempfile::tempdir().unwrap();
+    let paths = RuntimePaths::new(dir.path().into()).unwrap();
+    let bridge = BridgeServer::new(dir.path().into(), paths.open_database().unwrap());
+    let key = bridge.get_api_key().to_string();
+    let reserved = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let port = reserved.local_addr().unwrap().port();
+    drop(reserved);
+    let server = tokio::spawn(async move {
+        bridge.start(port).await.unwrap();
+    });
+    let base = format!("http://127.0.0.1:{port}");
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(10))
+        .build()
+        .unwrap();
+    tokio::time::timeout(std::time::Duration::from_secs(10), async {
+        loop {
+            if client.get(format!("{base}/health")).send().await.is_ok() {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .unwrap();
+    let list_url = format!("{base}/api/skills");
+    let payload = json!({"name":"management-fixture","description":"Fixture", "content":"---\nname: management-fixture\ndescription: Fixture\nenabled: false\n---\nInstructions"});
+    let created = client
+        .post(&list_url)
+        .header("x-api-key", &key)
+        .json(&payload)
+        .send()
+        .await
+        .unwrap()
+        .error_for_status()
+        .unwrap()
+        .json::<Value>()
+        .await
+        .unwrap();
+    assert!(created["id"].as_str().unwrap().starts_with("skill_"));
+    assert_eq!(created["enabled"], false);
+    assert_eq!(created["isExample"], false);
+    assert_eq!(created["source"], "user");
+    assert!(created["sourceDir"].is_string());
+    let endpoint = format!("{list_url}/{}", created["id"].as_str().unwrap());
+    let list = client
+        .get(&list_url)
+        .header("x-api-key", &key)
+        .send()
+        .await
+        .unwrap()
+        .error_for_status()
+        .unwrap()
+        .json::<Value>()
+        .await
+        .unwrap();
+    assert!(list["skills"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|item| item["id"] == created["id"]));
+    let duplicate = client
+        .post(&list_url)
+        .header("x-api-key", &key)
+        .json(&payload)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(duplicate.status(), reqwest::StatusCode::BAD_REQUEST);
+    assert!(duplicate.json::<Value>().await.unwrap()["error"].is_string());
+    client.patch(&endpoint).header("x-api-key", &key).json(&json!({"name":"updated-fixture","description":"Updated", "content":"Updated instructions"})).send().await.unwrap().error_for_status().unwrap();
+    client
+        .patch(format!("{endpoint}/toggle"))
+        .header("x-api-key", &key)
+        .json(&json!({"enabled":true}))
+        .send()
+        .await
+        .unwrap()
+        .error_for_status()
+        .unwrap();
+    let detail = client
+        .get(&endpoint)
+        .header("x-api-key", &key)
+        .send()
+        .await
+        .unwrap()
+        .error_for_status()
+        .unwrap()
+        .json::<Value>()
+        .await
+        .unwrap();
+    assert_eq!(detail["name"], "updated-fixture");
+    assert_eq!(detail["description"], "Updated");
+    assert_eq!(detail["enabled"], true);
+    assert!(detail["content"]
+        .as_str()
+        .unwrap()
+        .contains("Updated instructions"));
+    client
+        .delete(&endpoint)
+        .header("x-api-key", &key)
+        .send()
+        .await
+        .unwrap()
+        .error_for_status()
+        .unwrap();
+    assert_eq!(
+        client
+            .get(&endpoint)
+            .header("x-api-key", &key)
+            .send()
+            .await
+            .unwrap()
+            .status(),
+        reqwest::StatusCode::NOT_FOUND
+    );
+    for suffix in ["", "/toggle"] {
+        let failure = client
+            .patch(format!("{endpoint}{suffix}"))
+            .header("x-api-key", &key)
+            .json(&json!({"enabled":false}))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(failure.status(), reqwest::StatusCode::BAD_REQUEST);
+    }
+    assert_eq!(
+        client
+            .delete(&endpoint)
+            .header("x-api-key", &key)
+            .send()
+            .await
+            .unwrap()
+            .status(),
+        reqwest::StatusCode::BAD_REQUEST
+    );
+    server.abort();
+}

@@ -13,7 +13,7 @@ vi.mock('../api', () => ({
   getUserUsage: vi.fn(async () => ({})),
   getSessions: vi.fn(async () => ({ sessions: [] })),
   getProviderModels: vi.fn(async () => []),
-  getSkills: vi.fn(async () => ({ examples: [], my_skills: [] })),
+  getSkills: vi.fn(async () => ({ skills: [] })),
   getGithubStatus: vi.fn(async () => ({ connected: false })),
 }));
 vi.mock('./ProviderSettings', () => ({ default: () => null }));

@@ -49,6 +49,8 @@ const McpSettingsPage = () => {
     headers: '',
   });
   const [msg, setMsg] = useState('');
+  const [serverError, setServerError] = useState('');
+  const [toolsError, setToolsError] = useState('');
   const [msgType, setMsgType] = useState<'success' | 'error'>('success');
 
   useEffect(() => {
@@ -58,40 +60,43 @@ const McpSettingsPage = () => {
 
   const loadServers = async () => {
     try {
-      console.log('[MCP] Calling mcp_list_servers...');
+      setServerError('');
       const result = await invoke<McpServer[]>('mcp_list_servers');
 
       setServers(result);
     } catch (e: unknown) {
       console.error('[MCP] Failed to load MCP servers:', e);
-      setMsg(`Failed to load MCP servers: ${e}`);
-      setMsgType('error');
+      setServerError(`Failed to load MCP servers: ${e}`);
     } finally {
-      console.log('[MCP] Setting loading to false');
       setLoading(false);
     }
   };
 
   const loadTools = async () => {
     try {
+      setToolsError('');
       const result = await invoke<McpTool[]>('mcp_list_tools');
       setTools(result);
     } catch (e: unknown) {
-      console.error('Failed to load MCP tools:', e);
+      setTools([]);
+      setToolsError(`Failed to load MCP tools: ${e}`);
     }
+  };
+
+  const refresh = async () => {
+    await Promise.all([loadServers(), loadTools()]);
   };
 
   const showMessage = (message: string, type: 'success' | 'error' = 'success') => {
     setMsg(message);
     setMsgType(type);
-    setTimeout(() => setMsg(''), 3000);
   };
 
   const handleStart = async (id: string) => {
     try {
       await invoke('mcp_start_server', { id });
       showMessage('Server started');
-      loadServers();
+      await refresh();
     } catch (e: unknown) {
       showMessage(`Failed to start: ${e}`, 'error');
     }
@@ -101,7 +106,7 @@ const McpSettingsPage = () => {
     try {
       await invoke('mcp_stop_server', { id });
       showMessage('Server stopped');
-      loadServers();
+      await refresh();
     } catch (e: unknown) {
       showMessage(`Failed to stop: ${e}`, 'error');
     }
@@ -111,7 +116,7 @@ const McpSettingsPage = () => {
     try {
       await invoke('mcp_restart_server', { id });
       showMessage('Server restarted');
-      loadServers();
+      await refresh();
     } catch (e: unknown) {
       showMessage(`Failed to restart: ${e}`, 'error');
     }
@@ -121,7 +126,7 @@ const McpSettingsPage = () => {
     try {
       await invoke('mcp_toggle_server', { id, enabled });
       showMessage(enabled ? 'Server enabled' : 'Server disabled');
-      loadServers();
+      await refresh();
     } catch (e: unknown) {
       showMessage(`Failed to toggle: ${e}`, 'error');
     }
@@ -132,8 +137,7 @@ const McpSettingsPage = () => {
     try {
       await invoke('mcp_remove_server', { id });
       showMessage('Server removed');
-      loadServers();
-      loadTools();
+      await refresh();
     } catch (e: unknown) {
       showMessage(`Failed to remove: ${e}`, 'error');
     }
@@ -168,8 +172,11 @@ const McpSettingsPage = () => {
         throw new Error('Arguments must be a JSON array of strings');
       }
       const env = formData.env ? JSON.parse(formData.env) : {};
+      if (!env || typeof env !== 'object' || Array.isArray(env) || !Object.values(env).every(value => typeof value === 'string')) {
+        throw new Error('Environment variables must be a JSON object of strings');
+      }
       const headers = remote && formData.headers.trim() ? JSON.parse(formData.headers) : {};
-      if (typeof headers !== 'object' || Array.isArray(headers) || !Object.values(headers).every(value => typeof value === 'string')) {
+      if (!headers || typeof headers !== 'object' || Array.isArray(headers) || !Object.values(headers).every(value => typeof value === 'string')) {
         throw new Error('Headers must be a JSON object of strings');
       }
       // The engine reads the reference CLI's `type`, `url` and `headers` keys.
@@ -205,8 +212,7 @@ const McpSettingsPage = () => {
       setShowAddForm(false);
       setEditingServer(null);
       resetForm();
-      loadServers();
-      loadTools();
+      await refresh();
     } catch (e: unknown) {
       showMessage(`Failed to save: ${e}`, 'error');
     }
@@ -240,7 +246,7 @@ const McpSettingsPage = () => {
 
   return (
     <div className="space-y-6">
-      <McpLegacyImport onImported={loadServers} />
+      <McpLegacyImport onImported={refresh} />
       <div className="flex items-center justify-between">
         <h3 className="text-[18px] font-medium text-claude-text">MCP Servers</h3>
         <button
@@ -256,8 +262,13 @@ const McpSettingsPage = () => {
         </button>
       </div>
 
+      {(serverError || toolsError) && <div role="alert" className="px-3 py-2 rounded-lg text-[14px] bg-red-50 text-red-700">
+        {serverError && <p>{serverError}</p>}
+        {toolsError && <p>{toolsError}</p>}
+        <button onClick={refresh} className="mt-2 underline">Retry</button>
+      </div>}
       {msg && (
-        <div className={`px-3 py-2 rounded-lg text-[14px] ${
+        <div role={msgType === 'error' ? 'alert' : 'status'} className={`px-3 py-2 rounded-lg text-[14px] ${
           msgType === 'success' ? 'bg-green-50 text-green-700' : 'bg-red-50 text-red-700'
         }`}>
           {msg}
@@ -384,13 +395,13 @@ const McpSettingsPage = () => {
 
       {/* Server List */}
       <div className="space-y-3">
-        {servers.length === 0 ? (
+        {servers.length === 0 ? (!serverError && (
           <div className="text-center py-12 text-[#999] text-[14px]">
             <Server size={48} className="mx-auto mb-3 opacity-40" />
             <p>No MCP servers configured</p>
             <p className="text-[12px] mt-1">Add a server to extend DeepSeek Code with external tools</p>
           </div>
-        ) : (
+        )) : (
           servers.map((server) => (
             <div
               key={server.id}

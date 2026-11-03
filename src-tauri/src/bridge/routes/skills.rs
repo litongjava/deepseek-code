@@ -8,63 +8,106 @@ use serde_json;
 use std::collections::HashMap;
 
 use super::super::AppState;
-use crate::skills::{Skill, SkillsManager, SuperpowersCategory};
-use axum::{http::StatusCode, response::{IntoResponse, Response}};
 use crate::native_engine::engine_core::ChatRequest;
+use crate::skills::{SkillsManager, SuperpowersCategory};
+use axum::{
+    http::StatusCode,
+    response::{IntoResponse, Response},
+};
 
-async fn skills_list(State(state): State<AppState>) -> Json<serde_json::Value> {
-    let skill_manager = state.skills_manager.clone();
-    let manager: tokio::sync::MutexGuard<'_, SkillsManager> = skill_manager.lock().await;
-    match manager.load_skills().await {
-        Ok(skills) => Json(serde_json::json!({ "skills": skills })),
-        Err(e) => Json(serde_json::json!({ "skills": [], "error": format!("{}", e) })),
-    }
+type SkillResponse = Result<Json<serde_json::Value>, (StatusCode, Json<serde_json::Value>)>;
+
+fn skill_error(error: impl std::fmt::Display) -> (StatusCode, Json<serde_json::Value>) {
+    (
+        StatusCode::BAD_REQUEST,
+        Json(serde_json::json!({ "error": error.to_string() })),
+    )
 }
 
-async fn skills_create(State(state): State<AppState>, Json(skill): Json<Skill>) -> Json<serde_json::Value> {
-    let skill_manager = state.skills_manager.clone();
-    let manager: tokio::sync::MutexGuard<'_, SkillsManager> = skill_manager.lock().await;
-    match manager.create_skill(&skill.name, &skill.description, &skill.content.unwrap_or_default()) {
-        Ok(_) => Json(serde_json::json!({ "ok": true })),
-        Err(e) => Json(serde_json::json!({ "error": format!("{}", e) })),
-    }
+async fn skills_list(State(state): State<AppState>) -> SkillResponse {
+    let manager = state.skills_manager.lock().await;
+    manager
+        .load_skills()
+        .await
+        .map(|skills| Json(serde_json::json!({ "skills": skills })))
+        .map_err(|error| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(serde_json::json!({ "error": error.to_string() })),
+            )
+        })
 }
 
-async fn skill_get(Path(name): Path<String>, State(state): State<AppState>) -> Json<serde_json::Value> {
-    let skill_manager = state.skills_manager.clone();
-    let manager: tokio::sync::MutexGuard<'_, SkillsManager> = skill_manager.lock().await;
-    match manager.get_skill_by_id(&name).await {
-        Ok(Some(skill)) => Json(serde_json::to_value(skill).unwrap_or_default()),
-        Ok(None) => Json(serde_json::json!({ "error": "Skill not found" })),
-        Err(e) => Json(serde_json::json!({ "error": format!("{}", e) })),
+#[derive(Deserialize)]
+struct CreateSkillRequest {
+    name: String,
+    #[serde(default)]
+    description: String,
+    #[serde(default)]
+    content: String,
+}
+
+async fn skills_create(
+    State(state): State<AppState>,
+    Json(skill): Json<CreateSkillRequest>,
+) -> SkillResponse {
+    let manager = state.skills_manager.lock().await;
+    manager
+        .create_skill(&skill.name, &skill.description, &skill.content)
+        .map(|skill| Json(serde_json::json!(skill)))
+        .map_err(skill_error)
+}
+
+async fn skill_get(Path(name): Path<String>, State(state): State<AppState>) -> SkillResponse {
+    let manager = state.skills_manager.lock().await;
+    match manager.get_skill_by_id(&name).await.map_err(skill_error)? {
+        Some(skill) => Ok(Json(serde_json::json!(skill))),
+        None => Err((
+            StatusCode::NOT_FOUND,
+            Json(serde_json::json!({ "error": "Skill not found" })),
+        )),
     }
 }
 
 #[derive(Deserialize)]
-struct SkillFileQuery { path: String }
-async fn skill_file(Path(name): Path<String>, Query(query): Query<SkillFileQuery>, State(state): State<AppState>) -> Response {
+struct SkillFileQuery {
+    path: String,
+}
+async fn skill_file(
+    Path(name): Path<String>,
+    Query(query): Query<SkillFileQuery>,
+    State(state): State<AppState>,
+) -> Response {
     let manager = state.skills_manager.lock().await;
     match manager.get_skill_content(&name, &query.path) {
         Ok(content) => Json(serde_json::json!({"content":content})).into_response(),
-        Err(error) => (StatusCode::BAD_REQUEST, Json(serde_json::json!({"error":error.to_string()}))).into_response(),
+        Err(error) => (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({"error":error.to_string()})),
+        )
+            .into_response(),
     }
 }
 
-async fn skill_update(Path(name): Path<String>, State(state): State<AppState>, Json(updates): Json<HashMap<String, serde_json::Value>>) -> Json<serde_json::Value> {
+async fn skill_update(
+    Path(name): Path<String>,
+    State(state): State<AppState>,
+    Json(updates): Json<HashMap<String, serde_json::Value>>,
+) -> SkillResponse {
     let skill_manager = state.skills_manager.clone();
     let manager: tokio::sync::MutexGuard<'_, SkillsManager> = skill_manager.lock().await;
     match manager.update_skill(&name, updates) {
-        Ok(_) => Json(serde_json::json!({ "ok": true })),
-        Err(e) => Json(serde_json::json!({ "error": format!("{}", e) })),
+        Ok(_) => Ok(Json(serde_json::json!({ "ok": true }))),
+        Err(e) => Err(skill_error(e)),
     }
 }
 
-async fn skill_delete(Path(name): Path<String>, State(state): State<AppState>) -> Json<serde_json::Value> {
+async fn skill_delete(Path(name): Path<String>, State(state): State<AppState>) -> SkillResponse {
     let skill_manager = state.skills_manager.clone();
     let manager: tokio::sync::MutexGuard<'_, SkillsManager> = skill_manager.lock().await;
     match manager.delete_skill(&name) {
-        Ok(_) => Json(serde_json::json!({ "ok": true })),
-        Err(e) => Json(serde_json::json!({ "error": format!("{}", e) })),
+        Ok(_) => Ok(Json(serde_json::json!({ "ok": true }))),
+        Err(e) => Err(skill_error(e)),
     }
 }
 
@@ -73,17 +116,27 @@ pub struct SkillEnableRequest {
     pub enabled: bool,
 }
 
-async fn skill_enable(Path(name): Path<String>, State(state): State<AppState>, Json(req): Json<SkillEnableRequest>) -> Json<serde_json::Value> {
+async fn skill_enable(
+    Path(name): Path<String>,
+    State(state): State<AppState>,
+    Json(req): Json<SkillEnableRequest>,
+) -> SkillResponse {
     let skill_manager = state.skills_manager.clone();
     let manager: tokio::sync::MutexGuard<'_, SkillsManager> = skill_manager.lock().await;
     let update = async {
-        let skill = manager.get_skill_by_id(&name).await?.ok_or_else(||anyhow::anyhow!("Skill not found"))?;
-        if skill.enabled != req.enabled { manager.toggle_skill(&name).await?; }
+        let skill = manager
+            .get_skill_by_id(&name)
+            .await?
+            .ok_or_else(|| anyhow::anyhow!("Skill not found"))?;
+        if skill.enabled != req.enabled {
+            manager.toggle_skill(&name).await?;
+        }
         anyhow::Ok(())
-    }.await;
+    }
+    .await;
     match update {
-        Ok(_) => Json(serde_json::json!({ "ok": true })),
-        Err(e) => Json(serde_json::json!({ "error": format!("{}", e) })),
+        Ok(_) => Ok(Json(serde_json::json!({ "ok": true }))),
+        Err(e) => Err(skill_error(e)),
     }
 }
 
