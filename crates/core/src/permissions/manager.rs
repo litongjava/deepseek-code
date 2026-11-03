@@ -1037,6 +1037,8 @@ mod policy_tests {
                 "npm run build",
                 "Get-Content README.md -Encoding UTF8",
                 "echo result > result.txt",
+                "codegraph init --yes \"D:/reference library\"",
+                "codegraph index \"/srv/reference-library\"",
             ] {
                 let mut input = context(tool);
                 input.tool_input = serde_json::json!({"command":command});
@@ -1076,6 +1078,10 @@ mod policy_tests {
             manager.check_permission(&context("git_status")),
             PermissionResult::Denied(_)
         ));
+        shell.tool_input = serde_json::json!({"command":"codegraph init --yes /srv/reference-library"});
+        assert!(matches!(manager.check_permission(&shell), PermissionResult::RequiresConfirmation(_)));
+        manager.set_session_rules("session", HashMap::from([("Bash".into(), PermissionAction::Deny)]));
+        assert!(matches!(manager.check_permission(&shell), PermissionResult::Denied(_)));
     }
 
     #[test]

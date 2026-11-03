@@ -205,7 +205,7 @@ pub async fn handle(
                             peer["worker"]=serde_json::to_value(runtime)?;
                         }
                         command_println!("{}", serde_json::to_string_pretty(&observed)?);
-                        command_eprintln!("Trusted source-project sessions, including worktrees. kind distinguishes teammate, team-lead, subagent and independent session; teammates also report team, teammate_name and member_status. receiver_active is an OS-locked model consumer; worker reports a bounded live probe. Saved alone does not mean running. /list-agents message SESSION_ID TEXT queues context; inbox/sent show delivery state, read MESSAGE_ID marks human read only. Idle recipients consume messages on their next explicit turn. /list-agents inbox legacy reads the old project mailbox.");
+                        command_eprintln!("Current session family, including its parent and child agents. kind distinguishes teammate, team-lead, subagent and independent session; teammates also report team, teammate_name and member_status. receiver_active is an OS-locked model consumer; worker reports a bounded live probe. Saved alone does not mean running. /list-agents message SESSION_ID TEXT queues context; inbox/sent show delivery state, read MESSAGE_ID marks human read only. Idle recipients consume messages on their next explicit turn. /list-agents inbox legacy reads the old project mailbox.");
                         None
                     }
                     "message" => {
@@ -263,8 +263,9 @@ pub(crate) fn peer_sessions(
     _workspace: &Path,
     current: &str,
 ) -> Result<Vec<Value>> {
-    let context=deepseek_code_core::services::session_messages::context(root)?;
-    let mut peers=deepseek_code_core::services::session_messages::peers(&context,current)?;
+    let context = deepseek_code_core::services::session_messages::context(root)?;
+    let mut peers =
+        deepseek_code_core::services::session_messages::session_peers(&context, current)?;
     for peer in &mut peers {
         let id=peer["id"].as_str().unwrap_or_default().to_owned();
         peer["status"]=serde_json::json!(if id==current {"attached"} else if peer["receiver_active"]==true {"active_receiver"} else {"saved"});
@@ -436,9 +437,18 @@ mod tests {
         std::fs::create_dir_all(&other).unwrap();
         let parent = store.create(&project, "test", "cli-runtime").unwrap();
         let child = store.create(&project, "test", "cli-runtime").unwrap();
+        let unrelated = store.create(&project, "test", "cli-runtime").unwrap();
+        crate::services::context(&paths)
+            .unwrap()
+            .save_setting(
+                &format!("delegation.{child}"),
+                &json!({"session_id":child,"parent_session_id":parent}),
+            )
+            .unwrap();
         store.create(&other, "test", "cli-runtime").unwrap();
         let peers = peer_sessions(&store, &paths.data_dir, &project, &parent).unwrap();
         assert_eq!(peers.len(), 2);
+        assert!(!peers.iter().any(|peer| peer["id"] == unrelated));
         assert_eq!(
             peers.iter().find(|p| p["id"] == parent).unwrap()["status"],
             "attached"

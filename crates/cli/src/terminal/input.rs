@@ -37,7 +37,9 @@ enum Message {
     ContextNote(Option<String>),
     Shells(usize),
     ShellCounter(Box<dyn Fn() -> usize + Send>),
-    AgentRows(Box<dyn Fn(usize) -> Vec<String> + Send>),
+    Subagents(deepseek_code_core::services::ServiceContext, String),
+    AgentDetails(Box<dyn Fn(&str) -> String + Send>),
+    AgentRows(Box<dyn Fn() -> Vec<crate::background_commands::Agent> + Send>),
     Todos(Box<dyn Fn() -> Vec<(String, String)> + Send>),
     Vim(bool),
     Read(Request),
@@ -138,6 +140,14 @@ impl TerminalInput {
                     }
                     Message::ShellCounter(counter) => {
                         editor.set_shell_counter(counter);
+                        continue;
+                    }
+                    Message::Subagents(context, session) => {
+                        editor.set_subagents(context, session);
+                        continue;
+                    }
+                    Message::AgentDetails(details) => {
+                        editor.set_agent_details(details);
                         continue;
                     }
                     Message::AgentRows(rows) => {
@@ -244,8 +254,19 @@ impl TerminalInput {
     }
 
     /// Rows for running background agents, shown above the editor.
-    pub fn set_agent_rows(&self, rows: Box<dyn Fn(usize) -> Vec<String> + Send>) {
+    pub fn set_agent_rows(
+        &self,
+        rows: Box<dyn Fn() -> Vec<crate::background_commands::Agent> + Send>,
+    ) {
         let _ = self.requests.send(Message::AgentRows(rows));
+    }
+
+    pub fn set_subagents(&self, context: deepseek_code_core::services::ServiceContext, session: String) {
+        let _ = self.requests.send(Message::Subagents(context, session));
+    }
+
+    pub fn set_agent_details(&self, details: Box<dyn Fn(&str) -> String + Send>) {
+        let _ = self.requests.send(Message::AgentDetails(details));
     }
 
     /// Reads the todo list that ctrl+t shows.

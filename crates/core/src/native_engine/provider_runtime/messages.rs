@@ -226,17 +226,8 @@ pub(super) fn request(
             if !tools.is_empty() {
                 body["tools"] = tools.iter().map(|t| json!({"name":t.name,"description":t.description,"input_schema":t.input_schema})).collect();
             }
-            if let Some(effort) = effort.filter(|v| *v != "off") {
-                if max_tokens < 2048 {
-                    bail!("Anthropic thinking requires at least 2048 output tokens");
-                }
-                let budget = match effort {
-                    "low" => 1024,
-                    "medium" => 4096,
-                    _ => 16384,
-                }
-                .min(max_tokens - 1);
-                body["thinking"] = json!({"type":"enabled","budget_tokens":budget});
+            if let Some(effort) = effort {
+                super::super::anthropic_client::apply_effort(&mut body, effort, &provider.model.id, max_tokens)?;
             }
             body
         }

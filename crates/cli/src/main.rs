@@ -84,6 +84,7 @@ mod design_commands;
 mod ide_commands;
 mod startup_options;
 mod debug_logging;
+mod resource_sampling;
 mod resource_commands;
 mod powerup;
 mod feedback_commands;
@@ -197,6 +198,7 @@ async fn run(cli: &Cli) -> Result<()> {
         None => deepseek_code_core::runtime::resolve_default_data_dir()?,
     };
     let paths = RuntimePaths::new(absolute(data_dir)?)?;
+    let _resource_sampler = resource_sampling::start(&paths.data_dir);
     // Engine code that has no RuntimePaths (e.g. the task tools) and child
     // processes resolve the data directory from the environment.
     std::env::set_var(deepseek_code_core::runtime::DATA_DIR_ENV, &paths.data_dir);
@@ -565,8 +567,17 @@ async fn run(cli: &Cli) -> Result<()> {
         let folder = cli.path.clone().unwrap_or(std::env::current_dir()?);
         startup_prompts::confirm(&paths.data_dir, &folder, matches!(cli.permission_mode, args::PermissionModeArg::Bypass), cli.full_access)?;
     }
-    deepseek_code_core::permissions::set_full_access(cli.full_access && matches!(cli.permission_mode, args::PermissionModeArg::Bypass));
-    let mut session = session::Session::open(cli, &paths, selection, resumed.as_ref().map(|s| s.id.as_str())).await?;
+    deepseek_code_core::permissions::set_full_access(
+        cli.full_access && matches!(cli.permission_mode, args::PermissionModeArg::Bypass),
+    );
+    let mut session = session::Session::open(
+        cli,
+        &paths,
+        selection,
+        resumed.as_ref().map(|s| s.id.as_str()),
+    )
+    .await?;
+    resource_sampling::session(&session.id);
     startup_options::apply(cli, &mut session).await?;
     let mut screen_mode = terminal::screen_mode::ScreenMode::default();
     // Set by /restart; the replacement starts after this session is closed.
@@ -662,6 +673,7 @@ async fn run(cli: &Cli) -> Result<()> {
             terminal::SCROLL_SPEED.store(speed, std::sync::atomic::Ordering::Relaxed);
         }
         'repl: loop {
+            resource_sampling::session(&session.id);
             terminal::title::apply(&session.id);
             let idle_deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(60);
             let mut idle_notified = false;
@@ -718,7 +730,10 @@ async fn run(cli: &Cli) -> Result<()> {
             input.as_ref().unwrap().set_shell_counter(Box::new(move || background_commands::running_shells(&counter_paths, &counter_session)));
             input.as_ref().unwrap().set_effort(Some(session_commands::model_label(&session).await));
             let (agent_paths, agent_db, agent_session) = (paths.clone(), session.store.db.clone(), session.id.clone());
-            input.as_ref().unwrap().set_agent_rows(Box::new(move |width| background_commands::agent_rows(&background_commands::running_agents(&agent_paths, &agent_db, &agent_session), width)));
+            input.as_ref().unwrap().set_agent_rows(Box::new(move || background_commands::running_agents(&agent_paths, &agent_db, &agent_session)));
+            let agent_context = services::context(&paths)?;
+            input.as_ref().unwrap().set_subagents(agent_context.clone(), session.id.clone());
+            input.as_ref().unwrap().set_agent_details(Box::new(move |id| background_commands::agent_execution(&agent_context, id)));
             let (todo_paths, todo_session) = (paths.clone(), session.id.clone());
             input.as_ref().unwrap().set_todos(Box::new(move || background_commands::todo_items(&todo_paths, &todo_session)));
             input.as_ref().unwrap().set_vim(terminal::vim::enabled(&paths.data_dir));

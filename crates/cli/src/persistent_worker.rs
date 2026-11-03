@@ -44,6 +44,8 @@ pub async fn run_from_env() -> Result<bool> {
     let dir = PathBuf::from(value);
     let _lifetime = service::host_lifetime_lock(&dir)?;
     let worker = service::read_worker(&dir)?;
+    let _resource_sampler = crate::resource_sampling::start(&worker.root);
+    crate::resource_sampling::session(&worker.session_id);
     ensure!(
         service::directory(&worker).canonicalize()? == dir.canonicalize()?,
         "Invalid session host directory"

@@ -949,7 +949,7 @@ impl ToolLoopExecutor {
 
     pub fn with_permission_manager(mut self, manager: Arc<PermissionManager>) -> Self {
         if manager.get_mode() == crate::permissions::PermissionMode::PlanMode {
-            self.system_prompt.get_or_insert_with(String::new).push_str("\nThis turn starts in plan mode. Investigate and prepare a plan before implementation. Shell commands, including builds and tests, run directly unless the shared danger filter rejects them or an explicit ask/deny rule applies. Direct project editing tools remain blocked. Write a concrete Markdown implementation and verification plan to the dedicated session plan file using Write/Edit, then call ExitPlanMode (the legacy plan text parameter is also accepted). It requests explicit user approval of the execution mode, including a return to bypass when offered. Read, Glob and Grep may inspect files outside the project. MCP tools default to read-only unless their readOnlyHint explicitly says otherwise. Do not claim approval without a successful ExitPlanMode result.\n");
+            self.system_prompt.get_or_insert_with(String::new).push_str("\nThis turn starts in plan mode. Investigate and prepare a plan before implementation. Shell commands, including builds and tests, run directly unless the shared danger filter rejects them or an explicit ask/deny rule applies. Direct project editing tools remain blocked. Write a concrete Markdown implementation and verification plan to the dedicated session plan file using Write/Edit, then call ExitPlanMode (the legacy plan text parameter is also accepted). It requests explicit user approval of the execution mode, including a return to bypass when offered. Read, Glob and Grep may inspect files outside the project. CodeGraph initialization and index refresh may generate indexes in external reference directories using Shell; use an explicit directory in the command. MCP tools default to read-only unless their readOnlyHint explicitly says otherwise. Do not claim approval without a successful ExitPlanMode result.\n");
         }
         self.permission_manager = Some(manager);
         self
@@ -1305,7 +1305,7 @@ impl ToolLoopExecutor {
         if self.permission_manager.as_ref().is_some_and(|pm| pm.get_mode() == crate::permissions::PermissionMode::PlanMode) {
             if let (Some(root), Some(session)) = (self.search_config_path.as_deref().and_then(std::path::Path::parent), self.conv_id.as_deref()) {
                 let path = crate::services::plans::path(root, session)?;
-                self.system_prompt.get_or_insert_with(String::new).push_str(&format!("\nWhile planning mode is active, the only writable plan file for this session is: {}. Use its exact absolute path with Write/Edit; all other file changes remain prohibited until the user approves leaving plan mode.\n", path.display()));
+                self.system_prompt.get_or_insert_with(String::new).push_str(&format!("\nWhile planning mode is active, the only writable plan file for this session is: {}. Use its exact absolute path with Write/Edit. Shell commands follow the Plan shell policy; CodeGraph initialization and index refresh are allowed for the current project or external reference directories, including generated index files. Direct project editing tools remain blocked until plan approval.\n", path.display()));
             }
         }
 
@@ -1329,15 +1329,46 @@ impl ToolLoopExecutor {
             .as_deref()
             .and_then(|p| p.parent())
             .map(|root| (root.to_path_buf(), self.conv_id.clone().unwrap_or_default()));
-        let result = crate::tools::background_shell::scope(
+        let parent_session = self.request_parent_session();
+        let identity = super::request_identity::TurnIdentity::new(self.conv_id.clone(), parent_session);
+        let result = identity.scope(crate::tools::background_shell::scope(
             context,
             crate::tools::path_scope::with_permissions(self.permission_manager.clone(), crate::tools::path_scope::scope(directories, self.execute_scoped())),
-        )
+        ))
         .await;
         if result.is_ok() {
             async_hook_guard.0 = None;
         }
         result
+    }
+
+    fn request_parent_session(&self) -> Option<String> {
+        let session = self.conv_id.as_deref()?;
+        if let Some(parent) = self
+            .goal_db
+            .as_ref()
+            .and_then(|db| {
+                db.with_conn(|conn| {
+                    conn.query_row(
+                        "SELECT value FROM peripheral_settings WHERE key=?1",
+                        [format!("delegation.{session}")],
+                        |row| row.get::<_, String>(0),
+                    )
+                    .ok()
+                })
+                .ok()
+                .flatten()
+            })
+            .and_then(|raw| serde_json::from_str::<Value>(&raw).ok())
+            .and_then(|value| value["parent_session_id"].as_str().map(str::to_owned))
+        {
+            return Some(parent);
+        }
+        let root = self.search_config_path.as_deref()?.parent()?;
+        let directory =
+            crate::services::background_sessions::worker_directory(root, session).ok()??;
+        let job = crate::services::background_sessions::read_job(&directory).ok()?;
+        (job.parent_session_id != session).then_some(job.parent_session_id)
     }
 
     fn drain_async_hook_messages(&self) -> Vec<String> {

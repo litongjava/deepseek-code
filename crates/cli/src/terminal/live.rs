@@ -41,6 +41,7 @@ enum Update {
     Text(String),
     Notice(String),
     Inspection(String, String),
+    Copy(usize, String, String),
     Styled(Vec<change_view::Line>),
     FileSummary(Vec<change_view::Line>, Vec<super::file_review::File>),
     /// A tool result with hidden lines: the short form to show, and the full
@@ -451,6 +452,7 @@ struct State {
     notices: Vec<String>,
     status_page: Option<String>,
     inspection_scroll: usize,
+    subagents_open: bool,
     agent_detail: Option<String>,
     transcript: Vec<change_view::Line>,
     shells: usize,
@@ -498,6 +500,7 @@ const LIVE_COMMANDS: &[&str] = &[
     "/background",
     "/goal",
     "/list-agents",
+    "/subagents",
     "/status",
     "/tasks",
 ];
@@ -579,6 +582,7 @@ impl State {
             notices: Vec::new(),
             status_page: None,
             inspection_scroll: 0,
+            subagents_open: false,
             agent_detail: None,
             transcript: Vec::new(),
             shells: 0,
@@ -911,6 +915,10 @@ impl State {
             }
             let _ = actions.send(Action::SideQuestion(question.trim().into()));
             return Some("Side question submitted; main task continues.".into());
+        }
+        if text.trim() == "/subagents" {
+            self.subagents_open = true;
+            return None;
         }
         if text.trim() == "/background" {
             let _ = actions.send(Action::Detach);
@@ -1327,13 +1335,41 @@ impl Frame {
         logged
     }
 
+    fn drag_selection(
+        &mut self,
+        state: &mut State,
+        selection: &mut super::mouse_selection::Selection,
+        mouse: crossterm::event::MouseEvent,
+        up: bool,
+    ) -> io::Result<()> {
+        let page = (self.size.1 as usize).saturating_sub(self.composer_height);
+        if page == 0 {
+            return Ok(());
+        }
+        if !selection.document() {
+            self.refresh_history(state, self.size.0.saturating_sub(1) as usize);
+            let Some(top) = selection.promote(self.history_view.document_rows(), page) else {
+                return Ok(());
+            };
+            self.history_view.open_at(top)?;
+        }
+        self.history_view.drag_scroll(up, page);
+        self.draw(state)?;
+        selection.scroll_to(self.history_view.top(), page, mouse)
+    }
+
     fn refresh_history(&mut self, state: &State, width: usize) {
         self.history_view.refresh(&[], &self.scrollback.presentation(), width);
         if state.activity.starts_with("Running Bash") {
             self.history_view.append(&format!("\n{}", state.activity), width);
         }
         if !state.queued.is_empty() {
-            self.history_view.append(&format!("\n{}\n", state.queued.join("\n")), width);
+            for text in &state.queued {
+                self.history_view.append(
+                    &format!("\n\n{} {}\n\n\n", crate::terminal::prompt_glyph(), text),
+                    width,
+                );
+            }
         }
         let preview = streamed_rows(state, width, usize::MAX);
         if !preview.is_empty() {
@@ -1670,8 +1706,18 @@ impl Frame {
             }
             if !state.queued.is_empty() {
                 // Messages waiting for the model, below all work in progress.
-                if !content.is_empty() { content.push(String::new()); }
-                content.extend(state.queued.iter().map(|text| clip(&format!("{} {}", crate::terminal::prompt_glyph(), terminal_text(text).replace('\n', " ")), width)));
+                for text in &state.queued {
+                    content.extend([String::new(), String::new()]);
+                    content.push(clip(
+                        &format!(
+                            "{} {}",
+                            crate::terminal::prompt_glyph(),
+                            terminal_text(text).replace('\n', " ")
+                        ),
+                        width,
+                    ));
+                    content.extend([String::new(), String::new()]);
+                }
                 content.push("  ctrl+x ctrl+s to send now".into());
             }
             content
@@ -1816,6 +1862,7 @@ impl Frame {
                 .saturating_sub(choice_cursor.map_or(3, |(row, _)| row));
             let cursor_column =
                 choice_cursor.map_or((prompt_width + cursor).min(width), |(_, column)| column);
+            self.lines = lines.clone();
             self.history_view
                 .draw(&lines, input_row, cursor_column, size)?;
             return Ok(());
@@ -1954,15 +2001,22 @@ fn run(
     let mut selection = super::mouse_selection::Selection::default();
     let mut last_tick = Instant::now();
     let mut last_agents = Instant::now() - Duration::from_secs(1);
+    let mut subagents: Option<super::subagents::View> = None;
     let mut agent_context = None;
     let mut agent_preview = String::new();
     let mut agent_click: Option<(usize, Instant)> = None;
+    let mut copy_click = super::mouse_selection::CopyClick::default();
+    let mut drag_mouse = None;
+    let mut last_drag = Instant::now();
     let mut input_reader = super::paste_input::Reader::new()?;
     screen.draw(state)?;
     loop {
         let mut dirty = false;
         while !selection.retained() {
             match updates.try_recv() {
+                Ok(Update::Copy(number, command, body)) => {
+                    screen.scrollback.bind_tool_copy(number, command, body)
+                }
                 Ok(Update::GoalProposal(proposal)) => {
                     if let Some((id, condition)) = &proposal {
                         if state.goal_proposal.as_ref().is_none_or(|old| old.0 != *id) {
@@ -1980,7 +2034,8 @@ fn run(
                 }
                 Ok(Update::Notice(text)) => {
                     finish_text(state, screen);
-                    state.notices.push(text);
+                    screen.separate_block();
+                    screen.log(&text)?;
                     dirty = true;
                 }
                 Ok(Update::Inspection(command, text)) => {
@@ -2164,10 +2219,14 @@ fn run(
                     if deepseek_code_core::tools::background_shell::notification_summary(&text)
                         .is_none()
                     {
+                        screen.separate_block();
+                        screen.log_rendered("");
                         let (block, rows) = screen.scrollback.prompt(&text);
                         for row in rows {
                             screen.log_line(row, Some(block));
                         }
+                        screen.log_rendered("");
+                        screen.log_rendered("");
                     }
                     dirty = true;
                 }
@@ -2204,6 +2263,8 @@ fn run(
                     dirty = true;
                 }
                 Ok(Update::Stop(error)) => {
+                    drop(subagents.take());
+                    state.subagents_open = false;
                     if state.status_page.take().is_some() {
                         execute!(io::stderr(), terminal::LeaveAlternateScreen)?;
                     }
@@ -2235,7 +2296,7 @@ fn run(
                     // As in the reference CLI, a turn that leaves agents running
                     // says so instead of its duration.
                     if state.agents > 0 && error.is_none() {
-                        footer = format!("\u{273b} Waiting for {} background agent{} to finish", state.agents, if state.agents == 1 { "" } else { "s" });
+                        footer = format!("\u{273b} {} background agent{} running · ready for input; completion will notify", state.agents, if state.agents == 1 { "" } else { "s" });
                     }
                     // As in the reference CLI: "· 1 shell still running".
                     if state.shells > 0 {
@@ -2262,6 +2323,13 @@ fn run(
                         usize::MAX,
                         std::env::var_os("NO_COLOR").is_none(),
                     ));
+                    if state.agents > 0 && error.is_none() {
+                        screen.log_rendered(&change_view::render(
+                            &change_view::muted("Use /subagents to switch between this session's subagents"),
+                            usize::MAX,
+                            std::env::var_os("NO_COLOR").is_none(),
+                        ));
+                    }
                     *crate::terminal::TURN_COMPLETION.lock().unwrap_or_else(|e| e.into_inner()) = Some(footer);
                     return screen.hand_off();
                 }
@@ -2270,7 +2338,41 @@ fn run(
             }
         }
         if !selection.retained() { dirty |= state.dismiss_closed_question(); }
+        if state.subagents_open && subagents.is_none() {
+            if let Some((root, session)) = &state.shell_context {
+                if let Ok(context) = deepseek_code_core::runtime::RuntimePaths::new(root.clone()).and_then(|paths| crate::services::context(&paths)) {
+                    screen.history_view.close()?;
+                    let mut view = super::subagents::View::new(context, session.clone());
+                    view.enter()?;
+                    subagents = Some(view);
+                }
+            }
+            state.subagents_open = false;
+        }
         if let Some(event) = input_reader.next(Duration::from_millis(25))? {
+            if let Some(view) = &mut subagents {
+                if view.event(&event) {
+                    subagents = None;
+                    screen.lines.clear();
+                    screen.pending = screen.scrollback.repaint(screen.top.unwrap_or(0), screen.size.1, screen.size.0);
+                    screen.draw(state)?;
+                } else { view.draw()?; }
+                continue;
+            }
+            if state.answer.is_none() && matches!(&event, Event::Key(key) if key.kind != KeyEventKind::Release && key.modifiers.contains(KeyModifiers::ALT) && matches!(key.code, KeyCode::Left | KeyCode::Right)) {
+                if let Some((root, session)) = &state.shell_context {
+                    if let Ok(context) = deepseek_code_core::runtime::RuntimePaths::new(root.clone()).and_then(|paths| crate::services::context(&paths)) {
+                        let mut view = super::subagents::View::new(context, session.clone());
+                        if !view.event(&event) {
+                            screen.history_view.close()?;
+                            view.enter()?;
+                            view.draw()?;
+                            subagents = Some(view);
+                        }
+                    }
+                }
+                continue;
+            }
             if super::shortcuts::requested_in_input(&event, state.draft.characters.is_empty()) {
                 selection.clear()?;
                 let background = if screen.history_view.active() {
@@ -2319,6 +2421,14 @@ fn run(
                 && matches!(&event, Event::Key(key) if key.code == KeyCode::Esc)
             {
                 state.agent_detail = None;
+                screen.history_view.invalidate();
+                if !screen.history_view.active() {
+                    screen.pending = screen.scrollback.repaint(
+                        screen.top.unwrap_or(0),
+                        screen.size.1,
+                        screen.size.0,
+                    );
+                }
                 screen.lines.clear();
                 screen.draw(state)?;
                 continue;
@@ -2543,19 +2653,49 @@ fn run(
                     dirty = true;
                 }
                 Event::Mouse(mouse) => {
+                    if mouse.kind == MouseEventKind::Drag(MouseButton::Left) {
+                        drag_mouse = Some(mouse);
+                    }
+                    if mouse.kind == MouseEventKind::Up(MouseButton::Left) {
+                        drag_mouse = None;
+                    }
+                    let page = (screen.size.1 as usize).saturating_sub(screen.composer_height);
+                    if selection.active()
+                        && (matches!(
+                            mouse.kind,
+                            MouseEventKind::ScrollUp | MouseEventKind::ScrollDown
+                        ) || (mouse.kind == MouseEventKind::Drag(MouseButton::Left)
+                            && (mouse.row == 0 || mouse.row as usize >= page.saturating_sub(1))))
+                    {
+                        screen.drag_selection(
+                            state,
+                            &mut selection,
+                            mouse,
+                            mouse.kind == MouseEventKind::ScrollUp || mouse.row == 0,
+                        )?;
+                        last_drag = Instant::now();
+                        continue;
+                    }
                     if mouse.kind == MouseEventKind::Down(MouseButton::Left)
                         && state.choice.is_none()
                     {
-                        let start = if screen.history_view.active() {
-                            (screen.size.1 as usize).saturating_sub(screen.composer_height) + 3
+                        let snapshot = if screen.history_view.active() {
+                            screen
+                                .history_view
+                                .screen_rows(screen.size.1 as usize, &screen.lines)
                         } else {
-                            screen.top.unwrap_or(0) as usize
-                                + screen.lines.len().saturating_sub(screen.composer_height)
-                                + 3
+                            let mut rows = vec![String::new(); screen.size.1 as usize];
+                            for (index, line) in screen.lines.iter().enumerate() {
+                                if let Some(row) =
+                                    rows.get_mut(screen.top.unwrap_or(0) as usize + index)
+                                {
+                                    *row = line.clone();
+                                }
+                            }
+                            rows
                         };
-                        if let Some(index) = (mouse.row as usize)
-                            .checked_sub(start)
-                            .filter(|i| *i < state.agent_panel.len())
+                        if let Some(index) =
+                            agent_row_at(&snapshot, mouse.row as usize, state.agent_panel.len())
                         {
                             if agent_click.is_some_and(|(old, when)| {
                                 old == index && when.elapsed() < Duration::from_millis(500)
@@ -2570,6 +2710,27 @@ fn run(
                             }
                             continue;
                         }
+                    }
+                    let copy = if mouse.kind != MouseEventKind::Down(MouseButton::Left) {
+                        None
+                    } else if screen.history_view.active() {
+                        screen
+                            .history_view
+                            .row_index(mouse.row as usize, page)
+                            .and_then(|index| {
+                                screen.scrollback.copy_presentation(
+                                    index,
+                                    screen.size.0.saturating_sub(1) as usize,
+                                )
+                            })
+                    } else {
+                        screen
+                            .scrollback
+                            .copy_at(screen.top.unwrap_or(0), mouse.row)
+                    };
+                    if copy_click.event(mouse, copy) {
+                        selection.clear()?;
+                        continue;
                     }
                     if matches!(
                         mouse.kind,
@@ -2610,7 +2771,20 @@ fn run(
                         let snapshot = screen
                             .history_view
                             .screen_rows(screen.size.1 as usize, &composer);
-                        if let Some(click) = selection.event(mouse, snapshot.clone())? {
+                        let page = (screen.size.1 as usize).saturating_sub(composer.len());
+                        let event = if (mouse.row as usize) < page
+                            || selection.active() && selection.document()
+                        {
+                            selection.document_event(
+                                mouse,
+                                screen.history_view.document_rows(),
+                                screen.history_view.top(),
+                                page,
+                            )?
+                        } else {
+                            selection.event(mouse, snapshot.clone())?
+                        };
+                        if let Some(click) = event {
                             if click.kind == MouseEventKind::Down(MouseButton::Left) {
                                 if let Some(index) = screen.history_view.row_index(
                                     click.row as usize,
@@ -2742,6 +2916,9 @@ fn run(
                     dirty = true;
                 }
                 Event::Resize(columns, rows) => {
+                    if screen.size == (columns, rows) {
+                        continue;
+                    }
                     selection.discard();
                     screen.scrollback.reflow(columns as usize);
                     if screen.history_view.active() {
@@ -2759,6 +2936,15 @@ fn run(
                     dirty = true;
                 }
                 _ => {}
+            }
+        }
+        if selection.active() && last_drag.elapsed() >= Duration::from_millis(80) {
+            if let Some(mouse) = drag_mouse {
+                let page = (screen.size.1 as usize).saturating_sub(screen.composer_height);
+                if mouse.row == 0 || mouse.row as usize >= page.saturating_sub(1) {
+                    screen.drag_selection(state, &mut selection, mouse, mouse.row == 0)?;
+                    last_drag = Instant::now();
+                }
             }
         }
         if last_agents.elapsed() >= Duration::from_secs(1) {
@@ -2783,7 +2969,9 @@ fn run(
             dirty = true;
         }
         if dirty && !selection.retained() {
-            if let Some(text) = &state.status_page {
+            if let Some(view) = &mut subagents {
+                view.draw()?;
+            } else if let Some(text) = &state.status_page {
                 draw_inspection(
                     "Status · ↑/↓ scroll · Esc to close",
                     text,
@@ -2805,6 +2993,19 @@ fn run(
     }
 }
 
+pub(super) fn agent_row_at(rows: &[String], row: usize, count: usize) -> Option<usize> {
+    let start = rows
+        .iter()
+        .position(|line| super::markdown::plain_rendered(line).trim() == "● main")?
+        + 1;
+    row.checked_sub(start).filter(|index| {
+        *index < count
+            && rows
+                .get(row)
+                .is_some_and(|line| !line.contains("more agents"))
+    })
+}
+
 fn flush_notices(state: &mut State, screen: &mut Frame) -> io::Result<()> {
     for notice in std::mem::take(&mut state.notices) {
         screen.separate_block();
@@ -2821,7 +3022,12 @@ impl Drop for AlternateCleanup {
 }
 
 /// Paint a read-only view while the event loop continues to consume progress.
-fn draw_inspection(title: &str, text: &str, sidebar: bool, scroll: usize) -> io::Result<()> {
+pub(super) fn draw_inspection(
+    title: &str,
+    text: &str,
+    sidebar: bool,
+    scroll: usize,
+) -> io::Result<()> {
     let (columns, rows) = terminal::size()?;
     let left = if sidebar { columns / 2 } else { 0 };
     let width = columns.saturating_sub(left + 1) as usize;
@@ -2871,6 +3077,83 @@ mod tests {
     }
     fn screen(terminal: &vt100::Parser) -> Vec<String> {
         terminal.screen().rows(0, 80).collect()
+    }
+
+    #[test]
+    fn agent_hit_targets_use_visible_rows_after_layout_changes() {
+        let rows = vec![
+            "padding".into(),
+            "● main".into(),
+            "  general Child".into(),
+            "more agents".into(),
+        ];
+        assert_eq!(agent_row_at(&rows, 2, 1), Some(0));
+        assert_eq!(agent_row_at(&rows, 1, 1), None);
+        assert_eq!(agent_row_at(&rows, 3, 3), None);
+    }
+
+    #[test]
+    #[ignore = "interactive ConPTY acceptance"]
+    fn session_interaction_terminal_fixture() {
+        let temp = tempfile::tempdir().unwrap();
+        let paths =
+            deepseek_code_core::runtime::RuntimePaths::new(temp.path().to_path_buf()).unwrap();
+        let context = crate::services::context(&paths).unwrap();
+        context.save_setting("delegation.child", &serde_json::json!({"status":"running","preview":"CHILD_DETAIL_SENTINEL","started_at":chrono::Utc::now().to_rfc3339()})).unwrap();
+        context
+            .save_setting("agent-description.child", &"Child fixture")
+            .unwrap();
+        let keys = temp.path().join("keys.json");
+        let mut display = TurnDisplay::new(true, "ask", &keys, vec![]).unwrap();
+        display.set_shell_context(&paths.data_dir, "parent");
+        display.agent_progress("child", "general", "started", None);
+        display.before_text(
+            &(0..100)
+                .map(|index| format!("HISTORY_{index:03} text\n\n"))
+                .collect::<String>(),
+        );
+        display.tool_started("list", "ListDir", &serde_json::json!({"path":"desktop"}));
+        display.tool_finished("list", "ListDir", &serde_json::json!({"path":"desktop"}), r#"{"entries":[{"name":"advanced","is_dir":true},{"name":"configuration","is_dir":true}]}"#, false);
+        display.tool_started(
+            "copy",
+            "Bash",
+            &serde_json::json!({"command":"echo  COPY_COMMAND_SENTINEL"}),
+        );
+        display.tool_finished(
+            "copy",
+            "Bash",
+            &serde_json::json!({"command":"echo  COPY_COMMAND_SENTINEL"}),
+            r#"{"stdout":"COPY_BODY_SENTINEL\nsecond line"}"#,
+            false,
+        );
+        display.queued_delivered("APPENDED_MESSAGE_SENTINEL");
+        display.tool_finished("plan", "ExitPlanMode", &serde_json::json!({}), &serde_json::json!({"approved":true,"planFilePath":"plan.md","message":"Plan approved.","plan":"# PLAN_TITLE_SENTINEL\n\nPLAN_BODY_SENTINEL"}).to_string(), false);
+        display.notice("Agent message from child · queued · message-id\nMESSAGE_BODY_SENTINEL");
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        runtime.block_on(async {
+            loop {
+                match display.action().await {
+                    Some(Action::Submit(text)) if text == "/tasks" => break,
+                    Some(Action::Submit(text)) if text == "/status" => {
+                        display.inspection(&text, "STATUS_SENTINEL")
+                    }
+                    Some(Action::Submit(text)) => display.inspection(&text, "INSPECTION_SENTINEL"),
+                    Some(Action::Cancel) => break,
+                    _ => {}
+                }
+            }
+        });
+        display.set_running_agents(1);
+        display.finish(None);
+        let mut editor = super::super::input::editor::PromptEditor::default();
+        let agent =
+            crate::background_commands::foreground_agent(&context, "child", "general").unwrap();
+        editor.set_agent_rows(Box::new(move || vec![agent.clone()]));
+        editor.set_subagents(context.clone(), "parent".into());
+        editor.set_agent_details(Box::new(move |id| {
+            crate::background_commands::agent_execution(&context, id)
+        }));
+        editor.readline("❯ ").unwrap();
     }
 
     #[test]
@@ -3624,6 +3907,7 @@ mod tests {
                 "/goal",
                 "/list-agents",
                 "/status",
+                "/subagents",
                 "/tasks"
             ]
         );
@@ -3901,6 +4185,19 @@ impl TurnDisplay {
                     }
                 } else {
                     live.finished(id, short, None);
+                }
+            }
+            let _ = live.updates.send(Update::Copy(
+                self.numbers[id],
+                super::tool_view::copy_command(name, input),
+                super::tool_view::result_text(output),
+            ));
+            if name == "ExitPlanMode" && !failed {
+                if let Ok(value) = serde_json::from_str::<Value>(output) {
+                    if let Some(plan) = value["plan"].as_str().filter(|_| value["approved"] == true)
+                    {
+                        live.notice(&format!("Approved plan:\n\n{plan}"));
+                    }
                 }
             }
             live.activity("Working");

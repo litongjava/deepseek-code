@@ -24,6 +24,7 @@ struct Flow {
 /// A tool result with hidden lines, shown short or in full.
 #[derive(Clone)]
 struct Block {
+    copy: Option<(String, String)>,
     background: Option<(std::path::PathBuf, String, String)>,
     prompt: Option<String>,
     review: Option<super::file_review::Review>,
@@ -163,6 +164,7 @@ impl Scrollback {
         let plain = change_view::plain(&short);
         let whole = plain.trim_start().starts_with("Thought") || plain.contains("Updated ");
         self.blocks.push(Block {
+            copy: None,
             background: None,
             prompt: None,
             review: None,
@@ -174,6 +176,101 @@ impl Scrollback {
             compact_level: 0,
         });
         (self.blocks.len() - 1, lines)
+    }
+
+    pub(super) fn bind_tool_copy(&mut self, number: usize, command: String, body: String) {
+        let marker = format!("#{} ", number);
+        if let Some(block) = self.blocks.iter_mut().rev().find(|block| {
+            change_view::plain(&block.short[..block.short.len().min(1)]).contains(&marker)
+        }) {
+            block.copy = Some((command, body));
+        }
+    }
+    pub(crate) fn bind_copy(&mut self, id: usize, command: String, body: String) {
+        if let Some(block) = self.blocks.get_mut(id) {
+            block.copy = Some((command, body));
+        }
+    }
+    fn copy_logged(&self, row: usize) -> Option<String> {
+        let line = self.logged.get(row)?;
+        if let Some(id) = line.block {
+            let block = &self.blocks[id];
+            if let Some(prompt) = &block.prompt {
+                return Some(prompt.clone());
+            }
+            if let Some((command, body)) = &block.copy {
+                let header = self.logged.iter().position(|line| line.block == Some(id))?;
+                let header_rows = if block.header_open {
+                    rendered(&block.full[..block.full.len().min(1)]).len()
+                } else {
+                    collapsed(&block.short[..block.short.len().min(1)]).len()
+                };
+                return Some(
+                    if row < header + header_rows {
+                        command
+                    } else {
+                        body
+                    }
+                    .clone(),
+                );
+            }
+            return Some(change_view::plain(&block.full));
+        }
+        let start = (0..=row)
+            .rev()
+            .find(|index| {
+                self.logged[*index].block.is_some() || self.logged[*index].text.trim().is_empty()
+            })
+            .map_or(0, |index| index + 1);
+        let end = (row..self.logged.len())
+            .find(|index| {
+                self.logged[*index].block.is_some() || self.logged[*index].text.trim().is_empty()
+            })
+            .unwrap_or(self.logged.len());
+        (start < end).then(|| {
+            self.logged
+                .iter()
+                .skip(start)
+                .take(end - start)
+                .map(|line| super::markdown::plain_rendered(&line.text))
+                .collect::<Vec<_>>()
+                .join("\n")
+        })
+    }
+    pub(super) fn copy_at(&self, bottom: u16, row: u16) -> Option<String> {
+        self.copy_logged(self.line_at(bottom, row)?)
+    }
+    pub(super) fn copy_presentation(&self, row: usize, width: usize) -> Option<String> {
+        let rows = if compact() {
+            self.compact_rows()
+        } else {
+            self.logged
+                .iter()
+                .map(|line| (line.text.clone(), line.block))
+                .collect()
+        };
+        let mut offset = 0;
+        for (index, (text, id)) in rows.iter().enumerate() {
+            let height = super::markdown::wrap_styled(text, "", "", width.max(1)).len();
+            if row < offset + height {
+                if !compact() {
+                    return self.copy_logged(index);
+                }
+                if let Some(id) = id {
+                    let block = &self.blocks[*id];
+                    if let Some(prompt) = &block.prompt {
+                        return Some(prompt.clone());
+                    }
+                    if let Some((command, body)) = &block.copy {
+                        let first = index == 0 || rows[index - 1].1 != Some(*id);
+                        return Some(if first { command } else { body }.clone());
+                    }
+                }
+                return Some(super::markdown::plain_rendered(text));
+            }
+            offset += height;
+        }
+        None
     }
 
     pub(super) fn bind_background(&mut self, root: std::path::PathBuf, session: String, task: String) {
@@ -714,6 +811,27 @@ fn screen_rows(text: &str, columns: usize) -> usize {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn copy_targets_keep_complete_commands_and_bodies_separate() {
+        let mut history = Scrollback::default();
+        let command = "echo  spaced\nsecond command";
+        let body = "first\n\n中文 last";
+        let (id, rows) = history.block(
+            vec![
+                change_view::tool_call("Bash(echo...)", "", false),
+                change_view::tool_output("first", true, false),
+            ],
+            vec![],
+        );
+        history.bind_copy(id, command.into(), body.into());
+        for row in rows {
+            history.push(row, Some(id));
+        }
+        assert_eq!(history.copy_logged(0).as_deref(), Some(command));
+        assert_eq!(history.copy_logged(1).as_deref(), Some(body));
+        assert_eq!(history.copy_presentation(0, 100).as_deref(), Some(command));
+    }
+
     #[test]
     fn logical_answers_reflow_after_resize_and_tool_disclosure_without_losing_text() {
         let mut history = super::Scrollback::default();

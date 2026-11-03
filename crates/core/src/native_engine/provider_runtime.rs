@@ -332,9 +332,11 @@ pub async fn stream_with_schema_observed(
     } else {
         None
     };
+    let identity = super::request_identity::RequestIdentity::new(context_capture);
     let response = retry_with_backoff(|| async {
         let mut request = client
             .post(&url)
+            .headers(identity.headers())
             .header("content-type", "application/json")
             .body(encoded_body.clone());
         if entry["id"] == "github-copilot" {
@@ -351,8 +353,7 @@ pub async fn stream_with_schema_observed(
         if let Some(account) = &account {
             request = request
                 .header("chatgpt-account-id", account)
-                .header("OpenAI-Beta", "responses=experimental")
-                .header("originator", "claude-rust");
+                .header("OpenAI-Beta", "responses=experimental");
         }
         match api {
             "anthropic-messages" => {

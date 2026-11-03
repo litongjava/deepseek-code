@@ -68,7 +68,9 @@ pub struct PromptEditor {
     shells: usize,
     shell_counter: Option<Box<dyn Fn() -> usize + Send>>,
     /// Rows for running background agents at a width, shown above the editor.
-    agent_rows: Option<Box<dyn Fn(usize) -> Vec<String> + Send>>,
+    subagent_context: Option<(deepseek_code_core::services::ServiceContext, String)>,
+    agent_details: Option<Box<dyn Fn(&str) -> String + Send>>,
+    agent_rows: Option<Box<dyn Fn() -> Vec<crate::background_commands::Agent> + Send>>,
     /// The model and reasoning effort, at the right of the footer.
     effort: Option<String>,
     effort_control: Option<(
@@ -101,6 +103,8 @@ impl Default for PromptEditor {
             shells: 0,
             shell_counter: None,
             agent_rows: None,
+            agent_details: None,
+            subagent_context: None,
             todos: None,
             effort: None,
             effort_control: None,
@@ -558,7 +562,7 @@ impl Screen {
             .unwrap_or_else(|| if first { cursor_y } else { cursor_y.saturating_sub(row) })
             .min(rows - 1);
         let top = bottom_limit;
-        if first { self.transcript_end = Some(cursor_y.min(rows - 1)); }
+        if first { self.transcript_end = Some(anchor); }
         if anchor > top {
             self.transcript_end = self.transcript_end.map(|end| end.saturating_sub(anchor - top));
         }
@@ -772,6 +776,26 @@ impl Screen {
         out.flush()
     }
 }
+fn write_notice(
+    out: &mut impl Write,
+    history: &mut crate::terminal::scrollback::Scrollback,
+    notice: &str,
+    width: usize,
+) -> io::Result<()> {
+    let safe: String = notice.chars()
+        .filter(|ch| !ch.is_control() || matches!(ch, '\n' | '\t')).collect();
+    if history.needs_separator() {
+        write!(out, "\r\n")?;
+        history.push(String::new(), None);
+    }
+    for line in safe.lines() {
+        for row in history.push_flow(line, "", "", width.max(1)) {
+            write!(out, "{row}\r\n")?;
+        }
+    }
+    Ok(())
+}
+
 fn move_screen_row(out: &mut impl Write, current: &mut usize, target: usize) -> io::Result<()> {
     if target < *current {
         queue!(out, MoveUp((*current - target) as u16))?;
@@ -851,7 +875,18 @@ impl PromptEditor {
     pub fn set_shell_counter(&mut self, counter: Box<dyn Fn() -> usize + Send>) {
         self.shell_counter = Some(counter);
     }
-    pub fn set_agent_rows(&mut self, rows: Box<dyn Fn(usize) -> Vec<String> + Send>) {
+    pub fn set_subagents(&mut self, context: deepseek_code_core::services::ServiceContext, session: String) {
+        self.subagent_context = Some((context, session));
+    }
+
+    pub fn set_agent_details(&mut self, details: Box<dyn Fn(&str) -> String + Send>) {
+        self.agent_details = Some(details);
+    }
+
+    pub fn set_agent_rows(
+        &mut self,
+        rows: Box<dyn Fn() -> Vec<crate::background_commands::Agent> + Send>,
+    ) {
         self.agent_rows = Some(rows);
     }
     pub fn set_effort_control(
@@ -934,8 +969,8 @@ impl PromptEditor {
         let mut keybinding_pending = crate::keybindings::Pending::default();
         // A finished turn left its input box on the bottom rows; the first
         // frame below redraws it in place.
-        crate::terminal::take_handoff();
         let mut screen = Screen::pinned();
+        screen.top = crate::terminal::take_handoff();
         screen.align_transcript = !above.all().is_empty()
             && !self.history.last().is_some_and(|line| line.trim_start().starts_with('/'));
         let mut command_overlay = CommandOverlay::default();
@@ -950,6 +985,14 @@ impl PromptEditor {
         let mut shortcuts = false;
         let mut last_shell_count = std::time::Instant::now();
         let mut agents: Vec<String> = Vec::new();
+        let mut agent_records = Vec::<crate::background_commands::Agent>::new();
+        let mut agent_click: Option<(String, std::time::Instant)> = None;
+        let mut subagents: Option<crate::terminal::subagents::View> = None;
+        let mut agent_detail: Option<String> = None;
+        let mut agent_preview = String::new();
+        let mut agent_scroll = 0usize;
+        let mut selection_size = None;
+        let mut copy_click = crate::terminal::mouse_selection::CopyClick::default();
         let mut last_agents = std::time::Instant::now() - std::time::Duration::from_secs(5);
         // ← twice on an empty prompt opens the agents and tasks view.
         let mut left_press: Option<std::time::Instant> = None;
@@ -970,9 +1013,21 @@ impl PromptEditor {
             if yielded.load(std::sync::atomic::Ordering::Acquire) {
                 self.pending_draft = buffer.text();
                 self.pending_cursor = Some(buffer.cursor);
+                drop(subagents.take());
                 history_view.close()?;
                 screen.clear()?;
                 return Err(io::Error::new(io::ErrorKind::WouldBlock, "Prompt yielded"));
+            }
+            if let Some(view) = &mut subagents {
+                view.draw()?;
+                if let Some(event) = read_editor_event(&mut input_reader)? {
+                    if view.event(&event) {
+                        subagents = None;
+                        screen.invalidated = true;
+                        history_view.invalidate();
+                    }
+                }
+                continue;
             }
             if let Some((label, _)) = &self.effort_control {
                 self.effort = label
@@ -981,16 +1036,15 @@ impl PromptEditor {
                     .clone();
             }
             if let Some(notices) = &self.notices {
-                while let Ok(notice) = notices.try_recv() {
+                while subagents.is_none() {
+                    let Ok(notice) = notices.try_recv() else { break; };
                     history_view.close()?;
                     screen.finish("", "", &mut above)?;
-                    let safe: String = notice
-                        .chars()
-                        .filter(|ch| !ch.is_control() || matches!(ch, '\n' | '\t'))
-                        .collect();
-                    write!(io::stderr(), "{}\r\n", safe.replace('\n', "\r\n"))?;
+                    write_notice(&mut io::stderr(), &mut above, &notice,
+                        terminal::size().map_or(79, |(cols, _)| cols.saturating_sub(1) as usize))?;
                     io::stderr().flush()?;
                     screen = Screen::pinned();
+                    screen.align_transcript = true;
                 }
             }
             if let Some(suggestions) = &self.suggestions {
@@ -1016,7 +1070,11 @@ impl PromptEditor {
             if last_agents.elapsed() >= std::time::Duration::from_secs(1) {
                 last_agents = std::time::Instant::now();
                 if let Some(rows) = &self.agent_rows {
-                    agents = rows(width);
+                    agent_records = rows();
+                    agents = crate::background_commands::agent_rows(&agent_records, width);
+                    if let (Some(id), Some(details)) = (&agent_detail, &self.agent_details) {
+                        agent_preview = details(id);
+                    }
                 }
             }
             let text = buffer.text();
@@ -1241,6 +1299,10 @@ impl PromptEditor {
                 if !selection.retained() { history_view.draw(&composer, input_row, cursor_col, (cols, rows))?; }
             } else if !selection.retained() {
                 if screen.height == 0 && above.needs_separator() {
+                    if let Some(top) = screen.top {
+                        execute!(io::stderr(), MoveTo(0, top))?;
+                        screen.top = Some(top.saturating_add(1).min(rows.saturating_sub(1)));
+                    }
                     write!(io::stderr(), "\r\n")?;
                     io::stderr().flush()?;
                     above.push(String::new(), None);
@@ -1274,13 +1336,31 @@ impl PromptEditor {
                     pinned.draw(width, rows as usize, &background)?;
                 }
             }
-            above.clone().save();
+            if agent_detail.is_some() {
+                crate::terminal::live::draw_inspection(
+                    "Agent execution · ↑/↓ scroll · Esc to close",
+                    &agent_preview,
+                    true,
+                    agent_scroll,
+                )?;
+            }
             let Some(event) = read_editor_event(&mut input_reader)? else {
                 continue;
             };
             // Remove the overlay before an event can resize, scroll or repaint
             // its background. Otherwise a menu row can enter the transcript.
             command_overlay.draw_to(&mut io::stderr().lock(), &[], 0, &[])?;
+            if matches!(&event, Event::Key(key) if key.kind != KeyEventKind::Release && key.modifiers.contains(KeyModifiers::ALT) && matches!(key.code, KeyCode::Left | KeyCode::Right)) {
+                if let Some((context, session)) = &self.subagent_context {
+                    let mut view = crate::terminal::subagents::View::new(context.clone(), session.clone());
+                    if !view.event(&event) {
+                        history_view.close()?;
+                        view.enter()?;
+                        subagents = Some(view);
+                    }
+                    continue;
+                }
+            }
             if crate::terminal::shortcuts::requested_in_input(&event, buffer.chars.is_empty()) {
                 selection.clear()?;
                 let composer: Vec<String> = lines.iter().map(|(text, _)| text.clone()).collect();
@@ -1298,8 +1378,54 @@ impl PromptEditor {
                 screen.invalidated = true;
                 continue;
             }
+            if agent_detail.is_some() {
+                match &event {
+                    Event::Key(key) if key.code == KeyCode::Esc => {
+                        agent_detail = None;
+                        history_view.invalidate();
+                        if !history_view.active() {
+                            write!(
+                                io::stderr(),
+                                "{}",
+                                above.repaint(
+                                    screen
+                                        .transcript_end
+                                        .unwrap_or(screen.top.unwrap_or(0) as usize)
+                                        as u16,
+                                    rows,
+                                    cols
+                                )
+                            )?;
+                            io::stderr().flush()?;
+                        }
+                        screen.invalidated = true;
+                        continue;
+                    }
+                    Event::Key(key) if key.code == KeyCode::Up => {
+                        agent_scroll += 1;
+                        continue;
+                    }
+                    Event::Key(key) if key.code == KeyCode::Down => {
+                        agent_scroll = agent_scroll.saturating_sub(1);
+                        continue;
+                    }
+                    Event::Mouse(mouse) if mouse.kind == MouseEventKind::ScrollUp => {
+                        agent_scroll += 1;
+                        continue;
+                    }
+                    Event::Mouse(mouse) if mouse.kind == MouseEventKind::ScrollDown => {
+                        agent_scroll = agent_scroll.saturating_sub(1);
+                        continue;
+                    }
+                    Event::Key(_) | Event::Paste(_) => continue,
+                    _ => {}
+                }
+            }
             match event {
                 Event::Resize(columns, new_rows) => {
+                    if selection_size == Some((columns, new_rows)) && selection.active() {
+                        continue;
+                    }
                     selection.discard();
                     above.reflow(columns as usize);
                     if history_view.active() {
@@ -1326,7 +1452,104 @@ impl PromptEditor {
                     // on the last rows again.
                 }
                 Event::Mouse(mouse) => {
-                    if matches!(mouse.kind, MouseEventKind::ScrollUp | MouseEventKind::ScrollDown) {
+                    if mouse.kind == MouseEventKind::Down(MouseButton::Left) {
+                        selection_size = Some((cols, rows));
+                    }
+                    let composer: Vec<String> =
+                        lines.iter().map(|(text, _)| text.clone()).collect();
+                    let snapshot = if history_view.active() {
+                        history_view.screen_rows(rows as usize, &composer)
+                    } else {
+                        let mut snapshot = above.screen(
+                            screen
+                                .transcript_end
+                                .unwrap_or(screen.top.unwrap_or(0) as usize)
+                                as u16,
+                            rows,
+                        );
+                        for (index, text) in composer.iter().enumerate() {
+                            if let Some(row) =
+                                snapshot.get_mut(screen.top.unwrap_or(0) as usize + index)
+                            {
+                                *row = text.clone();
+                            }
+                        }
+                        snapshot
+                    };
+                    if mouse.kind == MouseEventKind::Down(MouseButton::Left) {
+                        if let Some(index) = crate::terminal::live::agent_row_at(
+                            &snapshot,
+                            mouse.row as usize,
+                            agent_records.len(),
+                        ) {
+                            let id = agent_records[index].session_id.clone();
+                            if agent_click.as_ref().is_some_and(|(old, at)| {
+                                old == &id && at.elapsed() < std::time::Duration::from_millis(500)
+                            }) {
+                                if let Some(details) = &self.agent_details {
+                                    agent_preview = details(&id);
+                                }
+                                agent_detail = Some(id);
+                                agent_scroll = 0;
+                                agent_click = None;
+                            } else {
+                                agent_click = Some((id, std::time::Instant::now()));
+                            }
+                            continue;
+                        }
+                    }
+                    let copy = if mouse.kind != MouseEventKind::Down(MouseButton::Left) {
+                        None
+                    } else if history_view.active() {
+                        history_view
+                            .row_index(
+                                mouse.row as usize,
+                                (rows as usize).saturating_sub(lines.len()),
+                            )
+                            .and_then(|index| above.copy_presentation(index, width))
+                    } else {
+                        above.copy_at(
+                            screen
+                                .transcript_end
+                                .unwrap_or(screen.top.unwrap_or(0) as usize)
+                                as u16,
+                            mouse.row,
+                        )
+                    };
+                    if copy_click.event(mouse, copy) {
+                        selection.clear()?;
+                        continue;
+                    }
+                    let page = (rows as usize).saturating_sub(lines.len());
+                    if selection.active()
+                        && page > 0
+                        && (matches!(
+                            mouse.kind,
+                            MouseEventKind::ScrollUp | MouseEventKind::ScrollDown
+                        ) || mouse.kind == MouseEventKind::Drag(MouseButton::Left)
+                            && (mouse.row == 0 || mouse.row as usize >= page.saturating_sub(1)))
+                    {
+                        if !selection.document() {
+                            history_view.refresh(&[], &above.presentation(), width);
+                            if let Some(top) = selection.promote(history_view.document_rows(), page)
+                            {
+                                history_view.open_at(top)?;
+                            }
+                        }
+                        if selection.document() {
+                            history_view.drag_scroll(
+                                mouse.kind == MouseEventKind::ScrollUp || mouse.row == 0,
+                                page,
+                            );
+                            history_view.draw(&composer, input_row, cursor_col, (cols, rows))?;
+                            selection.scroll_to(history_view.top(), page, mouse)?;
+                        }
+                        continue;
+                    }
+                    if matches!(
+                        mouse.kind,
+                        MouseEventKind::ScrollUp | MouseEventKind::ScrollDown
+                    ) {
                         selection.clear()?;
                         pinned.expanded = false;
                         history_view.refresh(&[], &above.presentation(), width);
@@ -1339,7 +1562,19 @@ impl PromptEditor {
                             .map(|(text, _)| text.clone())
                             .collect::<Vec<_>>();
                         let snapshot = history_view.screen_rows(rows as usize, &composer);
-                        if let Some(click) = selection.event(mouse, snapshot.clone())? {
+                        let selected = if (mouse.row as usize) < page
+                            || selection.active() && selection.document()
+                        {
+                            selection.document_event(
+                                mouse,
+                                history_view.document_rows(),
+                                history_view.top(),
+                                page,
+                            )?
+                        } else {
+                            selection.event(mouse, snapshot.clone())?
+                        };
+                        if let Some(click) = selected {
                             if click.kind == MouseEventKind::Down(MouseButton::Left) {
                                 if let Some(index) = history_view.row_index(
                                     click.row as usize,
@@ -1754,6 +1989,17 @@ impl PromptEditor {
                             menu_hidden = true;
                         }
                         KeyCode::Enter => {
+                            if text.trim() == "/subagents" {
+                                if let Some((context, session)) = &self.subagent_context {
+                                    history_view.close()?;
+                                    let mut view = crate::terminal::subagents::View::new(context.clone(), session.clone());
+                                    view.enter()?;
+                                    subagents = Some(view);
+                                    buffer.set("");
+                                    menu_hidden = true;
+                                    continue;
+                                }
+                            }
                             if text.trim().is_empty() {
                                 continue;
                             }
@@ -2066,6 +2312,20 @@ mod tests {
         let output = String::from_utf8(output).unwrap();
         assert_eq!(output.matches("\x1b[K").count(), 4);
         assert!(!output.contains('\n'));
+    }
+
+    #[test]
+    fn handoff_anchor_survives_an_unrelated_cursor_move_and_notices_are_recorded() {
+        let mut screen = Screen::pinned();
+        screen.top = Some(20);
+        screen.draw_pinned_to(&mut Vec::new(), &frame_lines(), 1, 3, 36, 0).unwrap();
+        assert_eq!(screen.transcript_end, Some(20));
+        let mut history = crate::terminal::scrollback::Scrollback::default();
+        history.push("Previous answer".into(), None);
+        let mut output = Vec::new();
+        write_notice(&mut output, &mut history, "Agent sender · queued\n中文 body\nsecond line", 80).unwrap();
+        assert_eq!(history.all().join("\r\n") + "\r\n",
+            "Previous answer\r\n".to_owned() + &String::from_utf8(output).unwrap());
     }
 
     #[test]

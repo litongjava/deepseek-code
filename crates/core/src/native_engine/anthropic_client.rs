@@ -223,9 +223,11 @@ impl AnthropicClient {
         if let Some(effort) = provider.model.effort.as_deref() { apply_effort(&mut body, effort, &provider.model.id, max_tokens)?; }
         self.apply_options(&mut body, provider)?;
         crate::performance::apply_prompt_cache(&mut body);
+        let identity = super::request_identity::RequestIdentity::new(None);
         let request = || async {
             let request = self.client
                 .post(&url)
+                .headers(identity.headers())
                 .header("anthropic-version", "2023-06-01")
                 .header("content-type", "application/json")
                 .json(&body);
@@ -284,9 +286,11 @@ impl AnthropicClient {
         if let Some(effort) = provider.model.effort.as_deref() { apply_effort(&mut body, effort, &provider.model.id, max_tokens)?; }
         self.apply_options(&mut body, provider)?;
         crate::performance::apply_prompt_cache(&mut body);
+        let identity = super::request_identity::RequestIdentity::new(None);
         let response = retry_with_backoff(|| async {
             let request = self.client
                 .post(&url)
+                .headers(identity.headers())
                 .header("anthropic-version", "2023-06-01")
                 .header("content-type", "application/json")
                 .json(&body);
@@ -361,9 +365,11 @@ impl AnthropicClient {
 
         self.apply_options(&mut body, provider)?;
         crate::performance::apply_conversation_cache(&mut body);
+        let identity = super::request_identity::RequestIdentity::new(context_capture);
         let response = retry_with_backoff(|| async {
             let request = self.client
                 .post(&url)
+                .headers(identity.headers())
                 .header("anthropic-version", "2023-06-01")
                 .header("content-type", "application/json")
                 .json(&body);
@@ -388,14 +394,42 @@ impl Default for AnthropicClient {
 }
 
 pub fn apply_effort(body: &mut Value, effort: &str, model: &str, max_tokens: u32) -> Result<()> {
-    if effort == "off" { body["thinking"] = json!({"type":"disabled"}); return Ok(()); }
-    if model.contains("opus-4-6") || model.contains("opus-4-7") || model.contains("sonnet-4-6") {
+    anyhow::ensure!(
+        ["off", "low", "medium", "high", "xhigh", "max"].contains(&effort),
+        "Invalid effort"
+    );
+    if effort == "off" {
+        body["thinking"] = json!({"type":"disabled"});
+        return Ok(());
+    }
+    let model = model.to_ascii_lowercase();
+    let adaptive =
+        model.contains("opus-4-6") || model.contains("opus-4-7") || model.contains("sonnet-4-6");
+    // Compatible endpoints may expose non-Claude models or aliases. Preserve the
+    // selected effort instead of reducing it to a capped legacy token budget.
+    let claude = ["claude", "opus", "sonnet", "haiku"]
+        .iter()
+        .any(|family| model.contains(family));
+    if adaptive || !claude {
         body["thinking"] = json!({"type":"adaptive"});
-        body["output_config"] = json!({"effort": if effort == "max" && model.contains("sonnet") { "high" } else { effort }});
+        body["output_config"]["effort"] = json!(if effort == "max" && model.contains("sonnet") {
+            "high"
+        } else {
+            effort
+        });
     } else {
-        if max_tokens <= 1024 { anyhow::bail!("Thinking requires max output tokens greater than 1024"); }
-        let budget = match effort { "low" => 2048, "medium" => 5000, "high" => 10000, "xhigh" => 16000, "max" => 32000, _ => anyhow::bail!("Invalid effort") };
-        body["thinking"] = json!({"type":"enabled", "budget_tokens": budget.min(max_tokens - 1)});
+        if max_tokens <= 1024 {
+            anyhow::bail!("Thinking requires max output tokens greater than 1024");
+        }
+        let budget = match effort {
+            "low" => 2048,
+            "medium" => 5000,
+            "high" => 10000,
+            "xhigh" => 16000,
+            "max" => 32000,
+            _ => unreachable!(),
+        };
+        body["thinking"] = json!({"type":"enabled", "budget_tokens":budget.min(max_tokens - 1)});
     }
     Ok(())
 }

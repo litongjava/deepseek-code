@@ -150,6 +150,7 @@ pub mod input;
 pub mod progress;
 pub mod prompt_display;
 pub mod live;
+pub(crate) mod subagents;
 pub(crate) mod paste_input;
 pub mod change_view;
 pub mod question_menu;

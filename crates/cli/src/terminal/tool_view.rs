@@ -204,6 +204,13 @@ pub fn result_text(output: &str) -> String {
     plain_terminal_text(&raw_result_text(output))
 }
 
+pub(crate) fn copy_command(name: &str, input: &Value) -> String {
+    input["command"]
+        .as_str()
+        .map(str::to_owned)
+        .unwrap_or_else(|| format!("{name}({input})"))
+}
+
 /// Sanitize literal terminal text without interpreting it as a tool envelope.
 pub fn plain_terminal_text(text: &str) -> String {
     // Strip whole sequences after decoding JSON and before splitting into rows.
@@ -277,6 +284,45 @@ fn raw_result_text(output: &str) -> String {
         }
         return text;
     }
+    if let Some(entries) = fields
+        .get("entries")
+        .and_then(Value::as_array)
+        .filter(|entries| {
+            entries
+                .iter()
+                .all(|entry| entry["name"].is_string() && entry["is_dir"].is_boolean())
+        })
+    {
+        if entries.is_empty() {
+            return "(Empty directory)".into();
+        }
+        return entries
+            .iter()
+            .map(|entry| {
+                format!(
+                    "- {}{}",
+                    entry["name"].as_str().unwrap(),
+                    if entry["is_dir"] == true { "/" } else { "" }
+                )
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+    }
+    if fields.get("approved") == Some(&Value::Bool(true)) && fields.contains_key("planFilePath") {
+        if let Some(plan) = fields
+            .get("plan")
+            .and_then(Value::as_str)
+            .filter(|plan| !plan.trim().is_empty())
+        {
+            return format!(
+                "{}\n\n{plan}",
+                fields
+                    .get("message")
+                    .and_then(Value::as_str)
+                    .unwrap_or("Plan approved.")
+            );
+        }
+    }
     if fields.get("mode").and_then(Value::as_str) == Some("plan")
         && fields.contains_key("planFilePath")
     {
@@ -322,12 +368,23 @@ pub fn summary(name: &str, output: &str, failed: bool) -> (Vec<String>, usize) {
         let note = rest.split_once("the user said:\n").map(|(_, note)| printable(note.trim()));
         return (vec![note.map_or_else(|| "Rejected".to_owned(), |note| format!("Rejected: {note}"))], 0);
     }
-    let text = result_text(output);
+    let text = if name == "ExitPlanMode" && !failed {
+        serde_json::from_str::<Value>(output)
+            .ok()
+            .and_then(|value| value["message"].as_str().map(str::to_owned))
+            .unwrap_or_else(|| result_text(output))
+    } else {
+        result_text(output)
+    };
     let lines: Vec<&str> = text.lines().collect();
     if lines.is_empty() {
         return (vec![if failed { "Failed without output" } else { "(No output)" }.into()], 0);
     }
-    let shown = lines.len().min(SUMMARY_LINES);
+    let shown = if name == "ExitPlanMode" && !failed {
+        lines.len()
+    } else {
+        lines.len().min(SUMMARY_LINES)
+    };
     (
         lines[..shown].iter().map(|line| printable(line)).collect(),
         lines.len() - shown,
@@ -1037,5 +1094,34 @@ mod mcp_full_input_tests {
         assert!(!text.contains('\u{1b}'));
         assert!(text.contains(&input.to_string()));
         assert!(!text.contains(" · "));
+    }
+}
+
+#[cfg(test)]
+mod result_regressions {
+    use super::*;
+    #[test]
+    fn directory_lists_decode_and_keep_unicode_and_empty_state() {
+        assert_eq!(
+            result_text(
+                r#"{"entries":[{"name":"目录","is_dir":true,"size":0},{"name":"a.md","is_dir":false,"size":12}]}"#
+            ),
+            "- 目录/\n- a.md"
+        );
+        assert_eq!(result_text(r#"{"entries":[]}"#), "(Empty directory)");
+        assert!(result_text(r#"{"entries":[{"bad":true}]}"#).contains("bad"));
+    }
+    #[test]
+    fn approved_plan_remains_available_in_expanded_history() {
+        let output = serde_json::json!({"approved":true,"planFilePath":"plan.md","plan":"# Plan\n中文内容","message":"Plan approved."}).to_string();
+        assert!(result_text(&output).contains("# Plan\n中文内容"));
+        assert!(change_view::plain(&expanded(
+            "ExitPlanMode",
+            &serde_json::json!({}),
+            &output,
+            false,
+            None
+        ))
+        .contains("中文内容"));
     }
 }

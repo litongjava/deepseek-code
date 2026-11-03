@@ -243,9 +243,11 @@ impl OpenAIClient {
             }
         }
         if let Some(messages) = body["messages"].as_array_mut() { for message in messages { if let Some(object) = message.as_object_mut() { object.remove("provider_content"); } } }
+        let identity = super::request_identity::RequestIdentity::new(None);
         let request = || async {
             let response = self.client
                 .post(&url)
+                .headers(identity.headers())
                 .header("Authorization", format!("Bearer {}", provider.provider.api_key))
                 .header("content-type", "application/json")
                 .json(&body)
@@ -339,9 +341,11 @@ impl OpenAIClient {
         }
         if let Some(messages) = body["messages"].as_array_mut() { for message in messages { if let Some(object) = message.as_object_mut() { object.remove("provider_content"); } } }
         if let Some(capture) = context_capture { capture.record("openai-completions", &body, provider.model.context_window, max_tokens).await; }
+        let identity = super::request_identity::RequestIdentity::new(context_capture);
         let response = retry_with_backoff(|| async {
             let resp = self.client
                 .post(&url)
+                .headers(identity.headers())
                 .header("Authorization", format!("Bearer {}", provider.provider.api_key))
                 .header("content-type", "application/json")
                 .json(&body)

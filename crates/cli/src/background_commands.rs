@@ -1238,20 +1238,107 @@ pub(crate) fn agent_execution(
         }
     }
     let saved = context.db.with_conn(|conn| -> anyhow::Result<()> {
-        for message in deepseek_code_core::db::message_repo::get_messages_by_conversation(conn, id)?
-        {
-            if message.role == "assistant" {
-                lines.push(message.content);
-            }
-            for tool in
-                deepseek_code_core::db::message_repo::get_tool_calls_for_message(conn, &message.id)?
-            {
-                lines.push(format!("{}({})", tool.name, tool.input.unwrap_or_default()));
-                lines.push(tool.output.unwrap_or_default());
+        // Bound both row count and payload before loading a long child transcript.
+        let mut statement = conn.prepare("SELECT id,role,substr(content,-65536) FROM (SELECT id,role,content,sort_order FROM messages WHERE conversation_id=?1 ORDER BY sort_order DESC LIMIT 20) ORDER BY sort_order")?;
+        let messages = statement.query_map([id], |row| Ok((row.get::<_,String>(0)?, row.get::<_,String>(1)?, row.get::<_,String>(2)?)))?.collect::<Result<Vec<_>, _>>()?;
+        for (message_id, role, content) in messages {
+            if matches!(role.as_str(), "user" | "assistant") { lines.push(format!("{}: {content}", if role == "user" { "User" } else { "Assistant" })); }
+            let mut statement = conn.prepare("SELECT name,substr(input,1,8192),substr(output,-16384) FROM (SELECT name,input,output,sort_order FROM tool_calls WHERE message_id=?1 ORDER BY sort_order DESC LIMIT 30) ORDER BY sort_order")?;
+            for row in statement.query_map([message_id], |row| Ok((row.get::<_,String>(0)?, row.get::<_,Option<String>>(1)?, row.get::<_,Option<String>>(2)?)))? {
+                let (name, input, output) = row?;
+                lines.push(format!("{name}({})", input.unwrap_or_default()));
+                lines.push(output.unwrap_or_default());
             }
         }
         Ok(())
     });
     match saved { Ok(Ok(())) => {}, Ok(Err(error)) => lines.push(format!("Execution history unavailable: {error}")), Err(error) => lines.push(format!("Execution history unavailable: {error}")) }
+    // A detached worker commits its assistant row at turn completion. Its bounded
+    // event tail provides tool progress while that row is still in memory.
+    let job_ids = context.db.with_conn(|conn| -> anyhow::Result<Vec<String>> {
+        let mut statement = conn.prepare("SELECT key,value FROM peripheral_settings WHERE key LIKE 'background-agent.%'")?;
+        let mut ids = Vec::new();
+        for row in statement.query_map([], |row| Ok((row.get::<_,String>(0)?, row.get::<_,String>(1)?)))? {
+            let (key, raw) = row?;
+            if serde_json::from_str::<serde_json::Value>(&raw).is_ok_and(|value| value["session_id"] == id) {
+                if let Some(key) = key.strip_prefix("background-agent.") { ids.push(key.to_owned()); }
+            }
+        }
+        Ok(ids)
+    }).ok().and_then(Result::ok).unwrap_or_default();
+    for job_id in job_ids {
+        if let Ok(job) = background_sessions::get(&context.paths.data_dir, &job_id) {
+            if job.session_id != id || !matches!(job.status.as_str(), "starting" | "running" | "unresponsive") { continue; }
+            if let Ok((output, _)) = background_sessions::output(&context.paths.data_dir, &job_id) {
+                lines.push(format!("Live worker: {}", job.status));
+                lines.extend(agent_event_tail(&output, id));
+            }
+        }
+    }
     safe_output(&lines.join("\n"))
+}
+
+fn agent_event_tail(output: &str, session: &str) -> Vec<String> {
+    let mut lines = Vec::new();
+    for raw in output
+        .lines()
+        .rev()
+        .take(120)
+        .collect::<Vec<_>>()
+        .into_iter()
+        .rev()
+    {
+        let Ok(value) = serde_json::from_str::<serde_json::Value>(raw) else {
+            continue;
+        };
+        if value["session_id"].as_str().is_some_and(|id| id != session) {
+            continue;
+        }
+        match value["type"].as_str() {
+            Some("assistant") => {
+                for block in value["message"]["content"].as_array().into_iter().flatten() {
+                    if let Some(text) = block["text"].as_str() {
+                        lines.push(format!("Assistant: {text}"));
+                    }
+                    if block["type"] == "tool_use" {
+                        lines.push(format!(
+                            "{}({})",
+                            block["name"].as_str().unwrap_or("Tool"),
+                            block["input"]
+                        ));
+                    }
+                }
+            }
+            Some("tool_result") => {
+                if let Some(output) = value["output"].as_str() {
+                    lines.push(crate::terminal::tool_view::result_text(output));
+                }
+            }
+            Some("stream_event") => {
+                if let Some(text) = value["event"]["delta"]["text"].as_str() {
+                    lines.push(text.to_owned());
+                }
+            }
+            _ => {}
+        }
+    }
+    lines
+}
+
+#[cfg(test)]
+mod live_agent_tail_tests {
+    #[test]
+    fn live_tail_uses_complete_records_and_does_not_duplicate_sdk_tool_results() {
+        let output = [
+            "truncated prefix",
+            r#"{"type":"assistant","session_id":"child","message":{"content":[{"type":"tool_use","name":"Read","input":{"path":"a"}}]}}"#,
+            r#"{"type":"tool_result","output":"LIVE_RESULT"}"#,
+            r#"{"type":"user","session_id":"child","message":{"content":[{"type":"tool_result","content":"LIVE_RESULT"}]}}"#,
+            r#"{"type":"assistant","session_id":"other","message":{"content":[{"type":"text","text":"OTHER_SESSION"}]}}"#,
+        ].join("\n");
+        let text = super::agent_event_tail(&output, "child").join("\n");
+        assert!(text.contains("Read("));
+        assert_eq!(text.matches("LIVE_RESULT").count(), 1);
+        assert!(!text.contains("OTHER_SESSION"));
+    }
 }

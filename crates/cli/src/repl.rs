@@ -146,6 +146,7 @@ fn conversation(session: &Session, id: &str, detailed: bool, mut recorded: Optio
                 let full = tool_view::expanded_block(&tool.name, &input, output, tool.is_error, elapsed, Some(&session.workspace));
                 if recorded.needs_separator() { recorded.push(String::new(), None); }
                 let (id, rows) = recorded.block(tool_view::numbered(short, number), tool_view::numbered(full, number));
+                recorded.bind_copy(id, tool_view::copy_command(&tool.name, &input), tool_view::result_text(output));
                 for row in rows { recorded.push(row, Some(id)); }
             }
             if detailed { separate_block(&mut lines); }
@@ -305,6 +306,13 @@ pub async fn handle(line: &str, paths: &RuntimePaths, session: &mut Session) -> 
         return Ok(true);
     }
     match command {
+        "/subagents" => {
+            ensure!(argument.trim().is_empty(), "Usage: /subagents");
+            let context = crate::services::context(paths)?;
+            for entry in crate::terminal::subagents::entries(&context, &session.id)? {
+                command_println!("- {}{}  {}", entry.label, if entry.current { " (current)" } else { "" }, entry.id);
+            }
+        }
         "/status" => crate::status_commands::run(session, argument).await?,
         "/compact" => {
             let summarized = compact(paths, session, argument).await?;

@@ -462,7 +462,8 @@ pub(crate) fn is_live_inspection(line: &str) -> bool {
     let line = line.trim();
     matches!(
         line,
-        "/list-agents"
+        "/subagents"
+            | "/list-agents"
             | "/list-agents list"
             | "/list-agents inbox"
             | "/list-agents sent"
@@ -481,6 +482,9 @@ pub(crate) fn is_live_inspection(line: &str) -> bool {
 pub async fn live_inspection(session: &Session, prompt: &str) -> Option<String> {
     if !is_live_inspection(prompt) {
         return None;
+    }
+    if prompt.trim() == "/subagents" {
+        return Some(crate::services::context(&session.paths).and_then(|context| crate::terminal::subagents::entries(&context, &session.id)).map(|entries| entries.into_iter().map(|entry| format!("- {}{}  {}", entry.label, if entry.current { " (current)" } else { "" }, entry.id)).collect::<Vec<_>>().join("\n")).unwrap_or_else(|error| format!("Subagents: {error:#}")));
     }
     if prompt.trim().starts_with("/list-agents") {
         let result = match prompt.split_whitespace().nth(1) {

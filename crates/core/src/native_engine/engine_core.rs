@@ -828,7 +828,8 @@ impl QueryEngine {
                     let title_model = state.model.clone();
                     let pm = provider_manager_title.clone();
                     let db_t = db_title.clone();
-                    tokio::spawn(async move {
+                    let title_identity = super::request_identity::TurnIdentity::new(Some(title_conv_id.clone()), None);
+                    tokio::spawn(title_identity.scope(async move {
                         tracing::info!(module = "EngineCore", "Auto-generating title for conv_id={}", title_conv_id);
                         let title_conv_id_inner = title_conv_id.clone();
                         let result = tokio::task::spawn_blocking(move || {
@@ -965,7 +966,7 @@ impl QueryEngine {
                                 }
                             }
                         }
-                    });
+                    }));
                 }
             }
         });

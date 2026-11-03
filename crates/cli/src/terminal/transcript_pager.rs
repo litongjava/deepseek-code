@@ -100,9 +100,31 @@ pub(super) struct HistoryView {
     top: Option<usize>,
     all: Vec<Row>,
     previous: Vec<u8>,
+    cached_logged: Vec<String>,
+    cached_width: usize,
+    base_len: usize,
 }
 
 impl HistoryView {
+    pub(super) fn invalidate(&mut self) {
+        self.previous.clear();
+    }
+    pub(super) fn document_rows(&self) -> Vec<String> {
+        self.all.iter().map(|row| row.styled.clone()).collect()
+    }
+    pub(super) fn top(&self) -> usize {
+        self.top.unwrap_or(0)
+    }
+    pub(super) fn drag_scroll(&mut self, up: bool, page: usize) {
+        let top = self.top();
+        self.top = Some(if up {
+            top.saturating_sub(1)
+        } else {
+            top.saturating_add(1)
+                .min(self.all.len().saturating_sub(page))
+        });
+        self.previous.clear();
+    }
     pub(super) fn open_at(&mut self, row: usize) -> io::Result<()> {
         if !self.active() {
             execute!(io::stderr(), EnterAlternateScreen)?;
@@ -152,7 +174,19 @@ impl HistoryView {
     }
 
     pub(super) fn refresh(&mut self, lines: &[Line], logged: &[String], width: usize) {
-        self.all = transcript_rows(lines, logged, width.max(1), std::env::var_os("NO_COLOR").is_none());
+        if lines.is_empty() && self.cached_width == width && self.cached_logged == logged {
+            self.all.truncate(self.base_len);
+            return;
+        }
+        self.all = transcript_rows(
+            lines,
+            logged,
+            width.max(1),
+            std::env::var_os("NO_COLOR").is_none(),
+        );
+        self.cached_width = if lines.is_empty() { width } else { 0 };
+        self.cached_logged = logged.to_vec();
+        self.base_len = self.all.len();
     }
 
     pub(super) fn append(&mut self, text: &str, width: usize) {

@@ -2,6 +2,10 @@
 use std::path::{Component, Path};
 
 pub(super) fn label(path: &str, workspace: Option<&Path>) -> String {
+    let path = readable(path);
+    let path = path.as_str();
+    let workspace = workspace.map(|value| readable(&value.to_string_lossy()));
+    let workspace = workspace.as_deref().map(Path::new);
     let Some(workspace) = workspace else {
         return path.into();
     };
@@ -41,9 +45,37 @@ pub(super) fn label(path: &str, workspace: Option<&Path>) -> String {
     }
 }
 
+/// Windows extended paths remain unchanged for I/O; hide only their display prefix.
+fn readable(path: &str) -> String {
+    if let Some(rest) = path.strip_prefix(r"\\?\UNC\") {
+        format!(r"\\{rest}")
+    } else if let Some(rest) = path.strip_prefix(r"\\?\") {
+        if rest.as_bytes().get(1) == Some(&b':') {
+            rest.into()
+        } else {
+            path.into()
+        }
+    } else {
+        path.into()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn extended_paths_are_display_only_and_unc_is_preserved() {
+        assert_eq!(
+            label(r"\\?\C:\Users\name\plans\plan.md", None),
+            r"C:\Users\name\plans\plan.md"
+        );
+        assert_eq!(
+            label(r"\\?\UNC\server\share\a.md", None),
+            r"\\server\share\a.md"
+        );
+        assert_eq!(label(r"\\?\Volume{abc}\a", None), r"\\?\Volume{abc}\a");
+    }
 
     #[test]
     fn workspace_labels_preserve_external_and_ambiguous_paths() {

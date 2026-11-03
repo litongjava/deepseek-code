@@ -174,9 +174,41 @@ pub fn mark_read(context: &ServiceContext, recipient: &str, id: &str) -> Result<
 /// At-most-once UI notices; the durable inbox remains readable after a UI crash.
 pub fn notices(context: &ServiceContext, recipient: &str) -> Result<Vec<String>> {
     valid_id(recipient)?;
-    context.db.with_conn(|conn|->Result<_>{schema(conn)?;let tx=rusqlite::Transaction::new_unchecked(conn,rusqlite::TransactionBehavior::Immediate)?;
-        let rows={let mut q=tx.prepare("SELECT id,sender FROM session_inbox WHERE recipient=?1 AND notified=0 ORDER BY rowid LIMIT 16")?;let values=q.query_map([recipient],|r|Ok((r.get::<_,String>(0)?,r.get::<_,String>(1)?)))?.collect::<rusqlite::Result<Vec<_>>>()?;values};
-        let mut result=Vec::new();for (id,sender) in rows {tx.execute("UPDATE session_inbox SET notified=1 WHERE id=?1",[&id])?;result.push(format!("Agent message received from {sender} (message {id}). This is a delivery notification. Use /list-agents inbox to view its content and delivery state; pending messages enter context at the next safe model boundary."));}tx.commit()?;Ok(result)
+    context.db.with_conn(|conn| -> Result<_> {
+        schema(conn)?;
+        // Empty polls stay read-only and never compete for the writer lock.
+        let pending: bool = conn.query_row(
+            "SELECT EXISTS(SELECT 1 FROM session_inbox WHERE recipient=?1 AND notified=0)",
+            [recipient],
+            |row| row.get(0),
+        )?;
+        if !pending {
+            return Ok(Vec::new());
+        }
+        let tx =
+            rusqlite::Transaction::new_unchecked(conn, rusqlite::TransactionBehavior::Immediate)?;
+        let rows = {
+            let mut query = tx.prepare(&format!(
+                "{SELECT} WHERE recipient=?1 AND notified=0 ORDER BY rowid LIMIT 16"
+            ))?;
+            let rows = query
+                .query_map([recipient], row)?
+                .collect::<rusqlite::Result<Vec<_>>>()?;
+            rows
+        };
+        let mut result = Vec::new();
+        for message in rows {
+            tx.execute(
+                "UPDATE session_inbox SET notified=1 WHERE id=?1",
+                [&message.id],
+            )?;
+            result.push(format!(
+                "Agent message from {} · {} · {}\n{}",
+                message.sender, message.state, message.id, message.content
+            ));
+        }
+        tx.commit()?;
+        Ok(result)
     })?
 }
 fn lock_path(root: &Path, session: &str) -> Result<PathBuf> {
@@ -364,8 +396,76 @@ pub fn peers(context: &ServiceContext, session: &str) -> Result<Vec<serde_json::
     })?
 }
 
+/// Session family only: ancestors, siblings and descendants, excluding unrelated saved sessions.
+pub fn session_peers(context: &ServiceContext, session: &str) -> Result<Vec<serde_json::Value>> {
+    context.db.with_conn(|conn| -> Result<_> {
+        let source = project(conn, &context.paths.data_dir, session)?;
+        let mut links = Vec::new();
+        let mut query = conn.prepare("SELECT key,value FROM peripheral_settings WHERE key LIKE 'delegation.%' OR key LIKE 'background-agent.%'")?;
+        for row in query.query_map([], |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)))? {
+            let (key, value) = row?;
+            let Ok(value) = serde_json::from_str::<serde_json::Value>(&value) else { continue; };
+            let child = value["session_id"].as_str().or_else(|| key.strip_prefix("delegation."));
+            let parent = value["parent_session_id"].as_str().or_else(|| value["parent"].as_str());
+            if let (Some(parent), Some(child)) = (parent, child) { links.push((parent.to_owned(), child.to_owned())); }
+        }
+        let mut members = std::collections::HashSet::from([session.to_owned()]);
+        loop {
+            let before = members.len();
+            for (parent, child) in &links {
+                if members.contains(parent) || members.contains(child) { members.insert(parent.clone()); members.insert(child.clone()); }
+            }
+            if members.len() == before { break; }
+        }
+        let mut result = Vec::new();
+        for id in members {
+            if project(conn, &context.paths.data_dir, &id).is_ok_and(|other| other == source) {
+                if let Some(row) = conversation_repo::get_conversation(conn, &id)? {
+                    result.push(serde_json::json!({"id":id,"title":row.title,"current":id==session,"receiver_active":receiver_active(&context.paths.data_dir,&id)?,"saved":true}));
+                }
+            }
+        }
+        result.sort_by_key(|row| (row["current"] != true, row["id"].as_str().unwrap_or_default().to_owned()));
+        Ok(result)
+    })?
+}
+
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn family_excludes_unrelated_saved_sessions_and_notices_include_body_once() {
+        let (_temp, context, store, parent, child) = fixture();
+        let other = store.fork(&parent).unwrap();
+        let grandchild = store.fork(&child).unwrap();
+        context
+            .save_setting(
+                &format!("background-agent.job"),
+                &serde_json::json!({"parent":parent,"session_id":child}),
+            )
+            .unwrap();
+        context
+            .save_setting(
+                &format!("delegation.{grandchild}"),
+                &serde_json::json!({"parent_session_id":child,"session_id":grandchild}),
+            )
+            .unwrap();
+        for current in [&parent, &child, &grandchild] {
+            let peers = session_peers(&context, current).unwrap();
+            assert_eq!(peers.len(), 3);
+            assert!(!peers.iter().any(|row| row["id"] == other));
+            assert_eq!(peers.iter().filter(|row| row["current"] == true).count(), 1);
+        }
+        let message = send(&context, &child, &parent, "中文 body\nsecond line").unwrap();
+        let notices = notices(&context, &parent).unwrap();
+        assert!(notices[0].contains("中文 body\nsecond line"));
+        assert!(notices[0].contains(&child) && notices[0].contains("queued"));
+        assert!(super::notices(&context, &parent).unwrap().is_empty());
+        let inbox = inbox(&context, &parent, false).unwrap();
+        assert_eq!(inbox[0].id, message.id);
+        assert!(!inbox[0].read);
+        assert_eq!(inbox[0].state, "queued");
+    }
+
     #[test]
     fn presence_marks_an_open_session_until_released() {
         let dir = tempfile::tempdir().unwrap();

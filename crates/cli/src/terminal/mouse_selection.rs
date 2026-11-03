@@ -9,13 +9,38 @@ use std::io::{self, Write};
 use unicode_width::UnicodeWidthChar;
 
 #[derive(Default)]
+pub(super) struct CopyClick(Option<(u16, u16, std::time::Instant, String)>);
+impl CopyClick {
+    pub fn event(&mut self, mouse: MouseEvent, text: Option<String>) -> bool {
+        if matches!(mouse.kind, MouseEventKind::Drag(_)) {
+            self.0 = None;
+        }
+        if mouse.kind != MouseEventKind::Down(MouseButton::Left) {
+            return false;
+        }
+        if let Some((row, col, when, text)) = self.0.take() {
+            if row == mouse.row
+                && col.abs_diff(mouse.column) <= 3
+                && when.elapsed() < std::time::Duration::from_millis(500)
+            {
+                let _ = crate::extended_commands::copy_text(&text);
+                return true;
+            }
+        }
+        self.0 = text.map(|text| (mouse.row, mouse.column, std::time::Instant::now(), text));
+        false
+    }
+}
+
+#[derive(Default)]
 pub(super) struct Selection {
-    start: Option<(u16, u16)>,
-    end: (u16, u16),
+    start: Option<(usize, usize)>,
+    end: (usize, usize),
     rows: Vec<String>,
     dragged: bool,
     held: bool,
     painted: std::cell::RefCell<Vec<String>>,
+    viewport: Option<(usize, usize)>,
 }
 impl Selection {
     pub fn active(&self) -> bool {
@@ -34,6 +59,7 @@ impl Selection {
         }
         self.start = None;
         self.held = false;
+        self.viewport = None;
         Ok(())
     }
     /// Returns a click only after release without motion. A drag copies text.
@@ -42,13 +68,20 @@ impl Selection {
         mouse: MouseEvent,
         rows: Vec<String>,
     ) -> io::Result<Option<MouseEvent>> {
-        let point = (mouse.row, mouse.column);
+        let point = (
+            self.viewport.map_or(mouse.row as usize, |view| {
+                view.0 + (mouse.row as usize).min(view.1.saturating_sub(1))
+            }),
+            mouse.column as usize,
+        );
         match mouse.kind {
             // Passive mouse movement must not trigger a history redraw over
             // the retained highlight after the button has been released.
             MouseEventKind::Moved if self.retained() => Ok(None),
             MouseEventKind::Down(MouseButton::Left) => {
+                let viewport = self.viewport;
                 self.clear()?;
+                self.viewport = viewport;
                 self.held = true;
                 self.start = Some(point);
                 self.end = point;
@@ -97,8 +130,9 @@ impl Selection {
         self.clear()?;
         self.rows = rows;
         self.painted.borrow_mut().clear();
-        self.start = Some((row, 0));
-        self.end = (row, width as u16);
+        self.viewport = None;
+        self.start = Some((row as usize, 0));
+        self.end = (row as usize, width);
         self.dragged = true;
         self.held = false;
         self.paint(true)?;
@@ -108,7 +142,61 @@ impl Selection {
         }
         Ok(())
     }
-    fn bounds(&self) -> ((u16, u16), (u16, u16)) {
+    /// Use document coordinates so scrolling cannot discard the selection anchor.
+    pub fn document_event(
+        &mut self,
+        mouse: MouseEvent,
+        rows: Vec<String>,
+        top: usize,
+        page: usize,
+    ) -> io::Result<Option<MouseEvent>> {
+        self.viewport = Some((top, page));
+        self.event(mouse, rows)
+    }
+    pub fn document(&self) -> bool {
+        self.viewport.is_some()
+    }
+    pub fn promote(&mut self, rows: Vec<String>, page: usize) -> Option<usize> {
+        let start = self.start?;
+        let visible: Vec<_> = self.rows.iter().map(|row|
+            super::markdown::plain_rendered(row).trim_end().to_owned()).collect();
+        let document: Vec<_> = rows.iter().map(|row|
+            super::markdown::plain_rendered(row).trim_end().to_owned()).collect();
+        let anchor = visible.get(start.0)?;
+        // Repeated code lines need their surrounding rows to identify the anchor.
+        let index = document.iter().enumerate().filter(|(_, row)| *row == anchor)
+            .max_by_key(|(index, _)| {
+                visible.iter().enumerate()
+                    .filter(|(row, text)| !text.is_empty() && row.abs_diff(start.0) <= 12)
+                    .filter(|(row, text)| index.checked_add(*row)
+                        .and_then(|value| value.checked_sub(start.0))
+                        .and_then(|value| document.get(value)) == Some(*text))
+                    .count()
+            }).map(|(index, _)| index)?;
+        let top = index
+            .saturating_sub(start.0)
+            .min(rows.len().saturating_sub(page));
+        self.start = Some((index, start.1));
+        self.end.0 = top + self.end.0.min(page.saturating_sub(1));
+        self.rows = rows;
+        self.viewport = Some((top, page));
+        self.painted.borrow_mut().clear();
+        Some(top)
+    }
+    pub fn scroll_to(&mut self, top: usize, page: usize, mouse: MouseEvent) -> io::Result<()> {
+        self.viewport = Some((top, page));
+        self.end = (
+            top + (mouse.row as usize).min(page.saturating_sub(1)),
+            mouse.column as usize,
+        );
+        self.dragged = true;
+        self.repaint()
+    }
+    pub fn repaint(&self) -> io::Result<()> {
+        self.painted.borrow_mut().clear();
+        self.paint(true)
+    }
+    fn bounds(&self) -> ((usize, usize), (usize, usize)) {
         let start = self.start.unwrap_or(self.end);
         (start.min(self.end), start.max(self.end))
     }
@@ -155,7 +243,8 @@ impl Selection {
         queue!(out, SavePosition)?;
         let mut painted = self.painted.borrow_mut();
         painted.resize(self.rows.len(), String::new());
-        for (row, text) in self.rows.iter().enumerate() {
+        let (top, page) = self.viewport.unwrap_or((0, self.rows.len()));
+        for (row, text) in self.rows.iter().enumerate().skip(top).take(page) {
             // Empty snapshot entries may be untracked terminal content. Never erase them.
             if text.is_empty() {
                 continue;
@@ -202,7 +291,7 @@ impl Selection {
             // support would briefly erase the retained selection on every drag.
             queue!(
                 out,
-                MoveTo(0, row as u16),
+                MoveTo(0, (row - top) as u16),
                 Print(rendered),
                 Print("\x1b[0m\x1b[K")
             )?;
@@ -245,6 +334,45 @@ fn highlight_row(text: &str, left: usize, right: usize) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn promotion_uses_context_for_repeated_code_lines() {
+        let mut selection = Selection {
+            start: Some((1, 0)), end: (0, 0),
+            rows: vec!["first function".into(), "}".into(), "first result".into()],
+            ..Default::default()
+        };
+        let rows = ["prefix", "first function", "}", "first result", "second function", "}", "second result"]
+            .map(str::to_owned).to_vec();
+        assert_eq!(selection.promote(rows, 3), Some(1));
+        assert_eq!(selection.start, Some((2, 0)));
+    }
+
+    #[test]
+    fn document_selection_spans_screens_in_both_directions() {
+        let rows = (0..80)
+            .map(|index| format!("ROW_{index:02} 中文"))
+            .collect::<Vec<_>>();
+        let mut selection = Selection {
+            start: Some((65, 0)),
+            end: (12, 0),
+            rows,
+            dragged: true,
+            viewport: Some((10, 20)),
+            ..Default::default()
+        };
+        let text = selection.text();
+        assert!(text.starts_with("ROW_12 中文\nROW_13"));
+        assert!(text.contains("ROW_40 中文"));
+        let mut painted = Vec::new();
+        selection.paint_to(&mut painted, true).unwrap();
+        let painted = String::from_utf8(painted).unwrap();
+        assert!(!painted.contains("ROW_40"));
+        assert!(painted.contains("ROW_12"));
+        selection.start = Some((12, 0));
+        selection.end = (65, 0);
+        assert_eq!(selection.text(), text);
+    }
+
     #[test]
     fn resize_discards_stale_coordinates_without_repainting_old_rows() {
         let mut selection = Selection {
@@ -308,6 +436,7 @@ mod tests {
             dragged: true,
             held: false,
             painted: Default::default(),
+            viewport: None,
         };
         assert_eq!(selection.text(), "中文z\nxyz");
     }
@@ -320,6 +449,7 @@ mod tests {
             dragged: true,
             held: false,
             painted: Default::default(),
+            viewport: None,
         };
         let mut output = Vec::new();
         selection.paint_to(&mut output, true).unwrap();
@@ -337,6 +467,7 @@ mod tests {
             dragged: true,
             held: false,
             painted: Default::default(),
+            viewport: None,
         };
         assert!(selection.retained());
         assert!(!selection.active());
@@ -346,8 +477,13 @@ mod tests {
     #[test]
     fn passive_motion_preserves_released_selection_and_suppresses_redraw() {
         let mut selection = Selection {
-            start: Some((0, 0)), end: (0, 4), rows: vec!["text".into()],
-            dragged: true, held: false, painted: Default::default(),
+            start: Some((0, 0)),
+            end: (0, 4),
+            rows: vec!["text".into()],
+            dragged: true,
+            held: false,
+            painted: Default::default(),
+            viewport: None,
         };
         for column in [5, 20, 3] {
             assert!(selection.event(MouseEvent {

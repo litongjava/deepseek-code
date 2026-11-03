@@ -20,6 +20,7 @@ pub struct RequestTrace {
 
 impl RequestTrace {
     pub fn new(mut snapshot: Value) -> Self {
+        super::request_identity::annotate(&mut snapshot);
         snapshot["status"] = json!("running");
         snapshot["responseBlocks"] = json!([]);
         Self {

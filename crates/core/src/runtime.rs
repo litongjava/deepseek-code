@@ -57,8 +57,24 @@ impl RuntimePaths {
     }
 
     pub fn open_database(&self) -> Result<Arc<DbManager>> {
-        let db = Arc::new(DbManager::new(self.data_dir.join(DATABASE_FILE)).context("Opening shared database pool")?);
+        // Keep one initialized pool per data directory while any host owns it.
+        // Status polling must not create pool threads or rerun migrations.
+        static DATABASES: std::sync::OnceLock<
+            std::sync::Mutex<std::collections::HashMap<PathBuf, std::sync::Weak<DbManager>>>,
+        > = std::sync::OnceLock::new();
+        std::fs::create_dir_all(&self.data_dir)?;
+        let path = self.data_dir.canonicalize()?.join(DATABASE_FILE);
+        let mut databases = DATABASES
+            .get_or_init(Default::default)
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        if let Some(db) = databases.get(&path).and_then(std::sync::Weak::upgrade) {
+            return Ok(db);
+        }
+        databases.retain(|_, db| db.strong_count() > 0);
+        let db = Arc::new(DbManager::new(path.clone()).context("Opening shared database pool")?);
         db.init().context("Initializing shared database schema")?;
+        databases.insert(path, Arc::downgrade(&db));
         Ok(db)
     }
 
@@ -494,5 +510,28 @@ mod data_dir_tests {
         assert_eq!(resolve(Some("".into()), Some(home.clone())).unwrap(), home.join(DATA_DIR_NAME));
         assert_eq!(resolve(Some("/data/dcl".into()), Some(home)).unwrap(), PathBuf::from("/data/dcl"));
         assert!(resolve(None, None).is_err());
+    }
+}
+
+#[cfg(test)]
+mod pool_reuse_tests {
+    use super::*;
+    #[test]
+    fn status_contexts_reuse_initialized_pool_and_isolate_directories() {
+        let root = tempfile::tempdir().unwrap();
+        let paths = RuntimePaths::new(root.path().join("data")).unwrap();
+        let first = paths.open_database().unwrap();
+        for _ in 0..20 {
+            assert!(Arc::ptr_eq(&first, &paths.open_database().unwrap()));
+        }
+        let alias = RuntimePaths::new(paths.data_dir.join(".")).unwrap();
+        assert!(Arc::ptr_eq(&first, &alias.open_database().unwrap()));
+        let other = RuntimePaths::new(root.path().join("other"))
+            .unwrap()
+            .open_database()
+            .unwrap();
+        assert!(!Arc::ptr_eq(&first, &other));
+        drop(first);
+        assert!(paths.open_database().is_ok());
     }
 }
