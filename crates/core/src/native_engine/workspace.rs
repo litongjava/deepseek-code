@@ -4,8 +4,6 @@ use std::path::{Path, PathBuf};
 
 use crate::db::{conversation_repo, project_repo};
 
-pub const CODE_PROJECT_REQUIRED: &str = "Select a project before sending messages in Code mode";
-
 /// Use persisted mode, never infer Code from a directory, model, or client prompt.
 pub fn conversation_prompt_profile(conn: &Connection, id: &str) -> Result<crate::prompt::PromptProfile> {
     Ok(conversation_repo::get_conversation(conn, id)?
@@ -21,7 +19,6 @@ pub fn conversation_project(conn: &Connection, id: &str) -> Result<Option<projec
             ensure!(!project.is_archived, "Select an active project before sending messages");
             return Ok(Some(project));
         }
-        ensure!(conversation.workspace_mode != "code", CODE_PROJECT_REQUIRED);
     }
     Ok(None)
 }
@@ -34,7 +31,6 @@ fn private_workspace_owner(conn: &Connection, id: &str) -> Result<Option<String>
     if binding(id)?.is_none() { return Ok(None); }
     let child = conversation_repo::get_conversation(conn,id)?.context("Private child not found")?;
     let mode = child.workspace_mode;
-    ensure!(mode != "code", "Code sessions cannot inherit a private workspace");
     let mut current=id.to_owned();
     let mut seen=std::collections::HashSet::new();
     for _ in 0..16 {
@@ -138,11 +134,12 @@ mod tests {
     }
 
     #[test]
-    fn code_cannot_bypass_project_requirement_with_a_workspace_override() {
+    fn code_without_project_uses_private_workspace() {
         let (conn, root) = fixture("code");
-        assert!(conversation_project(&conn, "session").unwrap_err().to_string().contains(CODE_PROJECT_REQUIRED));
-        assert!(resolve_workspace(&conn, root.path(), "session", root.path().to_str()).is_err());
-        assert!(!root.path().join("session").exists());
+        assert!(conversation_project(&conn, "session").unwrap().is_none());
+        let (path, project) = resolve_workspace(&conn, root.path(), "session", root.path().to_str()).unwrap();
+        assert!(project.is_none());
+        assert_eq!(path, root.path().canonicalize().unwrap().join("session"));
     }
 
     #[test]

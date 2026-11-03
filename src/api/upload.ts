@@ -1,3 +1,4 @@
+import { handleUnauthorized } from '../utils/login';
 import { API_BASE, getToken, detectBridgePort, request } from './client';
 
 export interface UploadResult {
@@ -30,9 +31,7 @@ export async function uploadFile(
 
     xhr.addEventListener('load', () => {
       if (xhr.status === 401) {
-        localStorage.removeItem('auth_token');
-        localStorage.removeItem('user');
-        window.location.hash = '#/login'; window.location.reload();
+        handleUnauthorized();
         reject(new Error('认证失效'));
         return;
       }

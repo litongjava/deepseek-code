@@ -52,6 +52,37 @@ pub async fn execute_for_session_async(
     session: &str,
 ) -> Result<Value> {
     uuid::Uuid::parse_str(session).context("Invalid task session ID")?;
+    if matches!(name, "TaskGet" | "TaskOutput" | "TaskStop") {
+        if let Some(id) = input["task_id"].as_str().or_else(|| input["taskId"].as_str()).or_else(|| input["id"].as_str()) {
+            if uuid::Uuid::parse_str(id).is_ok() && root.join("background-tasks").join(id).join("state.json").exists() {
+                use crate::services::background_sessions;
+                let mut job = background_sessions::get(root, id)?;
+                ensure!(job.parent_session_id == session, "Task belongs to another session");
+                if name == "TaskOutput" {
+                    let block = input.get("block").map(|value| value.as_bool().context("block must be boolean")).transpose()?.unwrap_or(true);
+                    let timeout = input.get("timeout").map(|value| value.as_u64().context("TaskOutput timeout must be an integer number of milliseconds")).transpose()?.unwrap_or(30_000);
+                    ensure!(timeout <= 600_000, "TaskOutput timeout must be 0..600000 milliseconds");
+                    let deadline = tokio::time::Instant::now() + std::time::Duration::from_millis(timeout);
+                    while block && matches!(job.status.as_str(), "starting" | "running") && tokio::time::Instant::now() < deadline {
+                        tokio::time::sleep_until((tokio::time::Instant::now() + std::time::Duration::from_millis(100)).min(deadline)).await;
+                        job = background_sessions::get(root, id)?;
+                    }
+                }
+                if name == "TaskStop" { job = background_sessions::cancel(root, id)?; }
+                let (stdout, stderr) = background_sessions::output(root, id)?;
+                let mut stdout = stdout.lines().filter_map(|line| serde_json::from_str::<Value>(line).ok()).filter_map(|event| {
+                    event["result"].as_str().or_else(|| event["delta"].as_str()).map(str::to_owned)
+                }).collect::<Vec<_>>().join("\n");
+                if root.join(crate::runtime::DATABASE_FILE).exists() {
+                    let execution = crate::services::session_worker::job_execution_session(root, &job)?;
+                    let conn = rusqlite::Connection::open_with_flags(root.join(crate::runtime::DATABASE_FILE), rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)?;
+                    let report: Option<String> = conn.query_row("SELECT content FROM messages WHERE conversation_id=?1 AND role='assistant' AND content<>'' ORDER BY sort_order DESC LIMIT 1", [&execution], |row| row.get(0)).optional()?;
+                    if let Some(report) = report { stdout = report; }
+                }
+                return Ok(json!({"task_id":job.id,"subject":job.title,"status":job.status,"stdout":stdout,"stderr":stderr,"exit_code":job.exit_code,"error":job.error,"retrieval_status":if matches!(job.status.as_str(),"completed"|"failed"|"cancelled") {"success"} else {"not_ready"}}));
+            }
+        }
+    }
     if let Some(output) = super::background_shell::control_async(name, &input, root, session).await? {
         return Ok(output);
     }
@@ -394,6 +425,23 @@ fn validate_todo(todo: &Value) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[tokio::test]
+    async fn detached_agent_lookup_reads_report_and_rejects_other_sessions() {
+        let root = tempfile::tempdir().unwrap();
+        let parent = uuid::Uuid::new_v4().to_string();
+        let id = uuid::Uuid::new_v4().to_string();
+        let dir = root.path().join("background-tasks").join(&id);
+        std::fs::create_dir_all(&dir).unwrap();
+        let job = json!({"id":id,"parent_session_id":parent,"session_id":uuid::Uuid::new_v4().to_string(),"title":"Review changes","status":"completed","supervisor_pid":null,"child_pid":null,"started_ms":0,"heartbeat_ms":0,"finished_ms":1,"exit_code":0,"error":null});
+        std::fs::write(dir.join("state.json"), job.to_string()).unwrap();
+        std::fs::write(dir.join("output.jsonl"), "{\"type\":\"result\",\"result\":\"Review report\"}\n").unwrap();
+        for name in ["TaskGet", "TaskOutput"] {
+            let output = execute_for_session_async(name, json!({"task_id":id,"block":false}), root.path(), &parent).await.unwrap();
+            assert_eq!(output["subject"], "Review changes");
+            assert_eq!(output["stdout"], "Review report");
+            assert!(execute_for_session_async(name, json!({"task_id":id}), root.path(), &uuid::Uuid::new_v4().to_string()).await.is_err());
+        }
+    }
     fn execute(name: &str, input: Value, cwd: &str) -> Result<Value> {
         execute_at(name, input, &Path::new(cwd).join("test-data/tasks.sqlite3"))
     }

@@ -54,3 +54,20 @@ it('resolves an existing unqualified model before applying a new-session default
   expect(result.current.resolveModelForNewChat('other')).toBe('a::other');
   expect(result.current.resolveModelForNewChat()).toBe('b::same');
 });
+
+it('restores conversations by model name across provider prefixes without selecting disabled models', async () => {
+  const { result } = renderHook(() => useModelCatalog({ current: 'legacy-conversation' }));
+  await waitFor(() => expect(result.current.selectorModels).toHaveLength(4));
+  expect(result.current.resolveConversationModel('same')).toBe('a::same');
+  expect(result.current.resolveConversationModel('b::same')).toBe('b::same');
+  expect(result.current.resolveConversationModel('removed::other')).toBe('a::other');
+  expect(result.current.resolveConversationModel('disabled')).toBeUndefined();
+  expect(result.current.resolveConversationModel('unknown')).toBeUndefined();
+});
+
+it('uses the shared CLI selection when Desktop has no explicit selection', async () => {
+  useGeneralSettingsStore.setState(normalizeGeneralSettings({}));
+  vi.mocked(getProviders).mockResolvedValue([providers[0], { ...providers[1], defaultModel: 'other' }]);
+  renderHook(() => useModelCatalog({ current: null }));
+  await waitFor(() => expect(useChatStore.getState().currentModel).toBe('b::other'));
+});

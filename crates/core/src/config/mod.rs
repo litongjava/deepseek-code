@@ -297,6 +297,20 @@ impl ConfigManager {
         &self.config
     }
 
+    /// Refresh shared CLI/Desktop configuration without discarding valid state on failure.
+    pub fn reload(&mut self) -> Result<()> {
+        if self.config_path.exists() {
+            self.config = serde_json::from_str(&std::fs::read_to_string(&self.config_path)?)?;
+        }
+        Ok(())
+    }
+
+    pub fn saved_cli_model(&self) -> Option<String> {
+        let path = self.config_path.parent()?.join("cli.json");
+        let prefs: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(path).ok()?).ok()?;
+        prefs["model"].as_str().map(str::to_owned)
+    }
+
     pub fn update_config<F>(&mut self, f: F) -> Result<()>
     where
         F: FnOnce(&mut AppConfig),
@@ -355,6 +369,21 @@ impl ConfigManager {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn shared_config_reload_observes_changes_and_preserves_state_on_invalid_json() {
+        let root = tempfile::tempdir().unwrap();
+        let mut desktop = ConfigManager::new(root.path().to_path_buf());
+        let mut cli = ConfigManager::new(root.path().to_path_buf());
+        cli.update_config(|config| config.default_provider_id = Some("shared".into())).unwrap();
+        desktop.reload().unwrap();
+        assert_eq!(desktop.get_config().default_provider_id.as_deref(), Some("shared"));
+        std::fs::write(root.path().join("cli.json"), r#"{"model":"shared::model"}"#).unwrap();
+        assert_eq!(desktop.saved_cli_model().as_deref(), Some("shared::model"));
+        std::fs::write(root.path().join("config.json"), "invalid").unwrap();
+        assert!(desktop.reload().is_err());
+        assert_eq!(desktop.get_config().default_provider_id.as_deref(), Some("shared"));
+    }
 
     #[test]
     fn test_default_values() {

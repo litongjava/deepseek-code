@@ -187,7 +187,6 @@ const MainContent = ({ onNewChat, resetKey, tunerConfig, onOpenDocument, onArtif
   const conversationGit = useConversationGit(activeId, isCodeMode ? currentProjectId : null, loading);
   useEffect(() => { setShowGitChanges(false); }, [activeId, currentProjectId, isCodeMode]);
   const gitSetupPending = !activeId && isCodeMode && !!pendingProjectId && (sessionGit?.projectId !== pendingProjectId || !sessionGit.ready);
-  const codeProjectRequired = isCodeMode && !(activeId ? currentProjectId : pendingProjectId);
 
   useEffect(() => {
     if (!pendingProjectId) setSessionGit(null);
@@ -287,6 +286,7 @@ const MainContent = ({ onNewChat, resetKey, tunerConfig, onOpenDocument, onArtif
   const {
     selectorModels,
     isModelSelectable,
+    resolveConversationModel,
     resolveModelForNewChat,
     resolveModelForMode,
     currentProviderSupportsWebSearch,
@@ -847,9 +847,10 @@ const MainContent = ({ onNewChat, resetKey, tunerConfig, onOpenDocument, onArtif
         const currentMode = (localStorage.getItem('user_mode') === 'selfhosted' ? 'selfhosted' : 'clawparrot') as 'clawparrot' | 'selfhosted';
         const otherMode = currentMode === 'selfhosted' ? 'clawparrot' : 'selfhosted';
         const existingOverride = getCrossModeOverride(conversationId);
-        if (isModelSelectable(data.model)) {
+        const matchingModel = resolveConversationModel(data.model);
+        if (matchingModel) {
           // Available in current mode → just use it.
-          setCurrentModelString(data.model);
+          setCurrentModelString(matchingModel);
           setCrossModeWarning(null);
         } else if (existingOverride === otherMode) {
           // User already opted into cross-mode for this conv earlier; keep silent.
@@ -1071,10 +1072,6 @@ const MainContent = ({ onNewChat, resetKey, tunerConfig, onOpenDocument, onArtif
     const files = queuedFiles ?? pendingFiles;
     const effectiveText = (typeof overrideText === 'string') ? overrideText : inputText;
     const selectedProjectId = activeId ? currentProjectId : pendingProjectId;
-    if (isCodeMode && !selectedProjectId) {
-      setProjectAddToast(t('chat.selectCodeProject'));
-      return;
-    }
     if (selectedProjectId) {
       const project: Project = await getProject(selectedProjectId);
       if (project.is_archived) { setProjectAddToast(t('chat.selectCodeProject')); return; }
@@ -1853,7 +1850,6 @@ const MainContent = ({ onNewChat, resetKey, tunerConfig, onOpenDocument, onArtif
             <ProjectWorkspaceBar projectId={pendingProjectId} onSelect={handleAttachToProject} disabled={loading || modeChanging}>
               {isCodeMode && pendingProjectId && <SessionGitSettings key={`${pendingProjectId}:${resetKey}`} projectId={pendingProjectId} disabled={loading || modeChanging} initialSelection={sessionGit} onChange={setSessionGit} />}
             </ProjectWorkspaceBar>
-            {codeProjectRequired && <p className="mb-2 text-xs text-claude-textSecondary">{t('chat.selectCodeProject')}</p>}
             {filteredCommands.length > 0 && (
               <SlashCommandSuggestions
                 anchorRef={slashCommandAnchorRef}
@@ -1977,8 +1973,8 @@ const MainContent = ({ onNewChat, resetKey, tunerConfig, onOpenDocument, onArtif
                   <button
                     onMouseDown={(e) => e.preventDefault()}
                     onClick={() => handleSend()}
-                    disabled={codeProjectRequired || gitSetupPending || modeChanging || (!inputText.trim() && !pendingFiles.some(f => f.status === 'done')) || pendingFiles.some(f => f.status === 'uploading')}
-                    title={codeProjectRequired ? t('chat.selectCodeProject') : t('chat.send')}
+                    disabled={gitSetupPending || modeChanging || (!inputText.trim() && !pendingFiles.some(f => f.status === 'done')) || pendingFiles.some(f => f.status === 'uploading')}
+                    title={t('chat.send')}
                     className="p-2 bg-[#C6613F] text-white rounded-lg hover:bg-[#D97757] transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
                   >
                     <ArrowUp size={22} strokeWidth={2.5} />
@@ -2077,7 +2073,6 @@ const MainContent = ({ onNewChat, resetKey, tunerConfig, onOpenDocument, onArtif
                 <ProjectWorkspaceBar projectId={activeId ? currentProjectId : pendingProjectId} onSelect={handleAttachToProject} disabled={loading || modeChanging}>
                   {!activeId && isCodeMode && pendingProjectId && <SessionGitSettings key={`${pendingProjectId}:${resetKey}`} projectId={pendingProjectId} disabled={loading || modeChanging} initialSelection={sessionGit} onChange={setSessionGit} />}
                 </ProjectWorkspaceBar>}
-              {codeProjectRequired && <p className="mb-2 text-xs text-claude-textSecondary">{t('chat.selectCodeProject')}</p>}
               <input
                 type="file"
                 ref={fileInputRef}
@@ -2223,8 +2218,8 @@ const MainContent = ({ onNewChat, resetKey, tunerConfig, onOpenDocument, onArtif
                         <button
                         onMouseDown={(e) => e.preventDefault()}
                         onClick={() => handleSend()}
-                        disabled={codeProjectRequired || gitSetupPending || modeChanging || (!inputText.trim() && !pendingFiles.some(f => f.status === 'done')) || pendingFiles.some(f => f.status === 'uploading')}
-                        title={codeProjectRequired ? t('chat.selectCodeProject') : t('chat.send')}
+                        disabled={gitSetupPending || modeChanging || (!inputText.trim() && !pendingFiles.some(f => f.status === 'done')) || pendingFiles.some(f => f.status === 'uploading')}
+                        title={t('chat.send')}
                         className="p-2 bg-[#C6613F] text-white rounded-lg hover:bg-[#D97757] transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
                       >
                         <ArrowUp size={22} strokeWidth={2.5} />

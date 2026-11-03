@@ -1,3 +1,4 @@
+import { handleUnauthorized } from '../utils/login';
 import { formatChatStreamError } from '../utils/chatErrors';
 import { processMetadata, restoreProcessMetadata } from '../features/trajectory/model';
 import { useWorkspaceModeStore, conversationWorkspaceMode } from '../stores/useWorkspaceModeStore';
@@ -354,9 +355,7 @@ export async function exportConversation(id: string): Promise<void> {
     headers: token ? { Authorization: `Bearer ${token}` } : {},
   });
   if (res.status === 401) {
-    localStorage.removeItem('auth_token');
-    localStorage.removeItem('user');
-    window.location.hash = '#/login'; window.location.reload();
+    handleUnauthorized();
     throw new Error('认证失效');
   }
   if (!res.ok) {

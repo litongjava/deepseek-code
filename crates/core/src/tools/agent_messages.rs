@@ -25,6 +25,7 @@ pub(super) fn list_agents_definition() -> super::ToolDefinition {
 pub fn list_agents(context: &crate::services::ServiceContext, session: &str) -> Result<Value> {
     let mut rows = Vec::new();
     for job in crate::services::background_sessions::list(&context.paths.data_dir, Some(session))? {
+        if job.foreground { continue; }
         rows.push(json!({"to":job.session_id,"agent_id":job.id,"name":job.title,"kind":"background agent","status":job.status}));
     }
     for peer in crate::services::session_messages::session_peers(context, session)? {
@@ -139,6 +140,10 @@ pub fn execute_live(
                 let open = live::session_open(root, to)?;
                 let mut result = json!({"message":message,"state":"queued","processed":false,
                     "to":to,"delivered":[delivered(None,to)]});
+                let name = crate::services::background_sessions::list(root, Some(session))?
+                    .into_iter().find(|job| job.session_id == to).map(|job| job.title)
+                    .unwrap_or_else(|| "Agent".into());
+                result["recipient_name"] = json!(name);
                 delivery(&mut result, active, open);
                 return Ok(result);
             };

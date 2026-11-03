@@ -1,4 +1,5 @@
 import { getErrorMessage } from '../utils/errorHelpers';
+import { loginEnabled } from '../utils/login';
 import React, { useState, useEffect } from 'react';
 import { ArrowLeft, ChevronRight, Smartphone, MonitorIcon, LogOut, MoreHorizontal, Check, X, Puzzle, Globe, Clock, Settings, Cpu, UserRound, Info, BarChart3 } from 'lucide-react';
 import { useNavigate } from 'react-router-dom';
@@ -777,7 +778,7 @@ const SettingsPage = ({ onCreateWithDeepSeek }: { onCreateWithDeepSeek?: () => v
             {([
               { value: 'selfhosted', label: t('settings.selfHosted'), desc: t('settings.selfHostedSubtitle') },
               { value: 'clawparrot', label: t('settings.clawparrot'), desc: t('settings.clawparrotSubtitle') },
-            ] as const).map(opt => {
+            ] as const).filter(opt => loginEnabled || opt.value === 'selfhosted').map(opt => {
               const current = localStorage.getItem('user_mode') || 'selfhosted';
               const active = current === opt.value;
               return (

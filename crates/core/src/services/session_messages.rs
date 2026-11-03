@@ -202,10 +202,13 @@ pub fn notices(context: &ServiceContext, recipient: &str) -> Result<Vec<String>>
                 "UPDATE session_inbox SET notified=1 WHERE id=?1",
                 [&message.id],
             )?;
-            result.push(format!(
-                "Agent message from {} · {} · {}\n{}",
-                message.sender, message.state, message.id, message.content
-            ));
+            let sender = super::background_sessions::list(&context.paths.data_dir, Some(recipient))?
+                .into_iter().find(|job| job.session_id == message.sender).map(|job| job.title)
+                .or(conversation_repo::get_conversation(&tx, &message.sender)?
+                .and_then(|row| row.title)
+                .filter(|title| !title.trim().is_empty() && !title.eq_ignore_ascii_case("CLI session")))
+                .unwrap_or_else(|| "Agent".into());
+            result.push(format!("Agent message from {sender} · {}\n{}", message.state, message.content));
         }
         tx.commit()?;
         Ok(result)
@@ -458,7 +461,8 @@ mod tests {
         let message = send(&context, &child, &parent, "中文 body\nsecond line").unwrap();
         let notices = notices(&context, &parent).unwrap();
         assert!(notices[0].contains("中文 body\nsecond line"));
-        assert!(notices[0].contains(&child) && notices[0].contains("queued"));
+        assert!(notices[0].contains("Agent message from") && notices[0].contains("queued"));
+        assert!(!notices[0].contains(&child));
         assert!(super::notices(&context, &parent).unwrap().is_empty());
         let inbox = inbox(&context, &parent, false).unwrap();
         assert_eq!(inbox[0].id, message.id);

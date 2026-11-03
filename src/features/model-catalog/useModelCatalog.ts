@@ -17,6 +17,11 @@ export function useModelCatalog(viewingIdRef: React.MutableRefObject<string | nu
   const isSelfHostedMode = localStorage.getItem('user_mode') === 'selfhosted';
   const selectorModels = (modelCatalog?.all || []) as SelectableModel[];
   const isModelSelectable = useCallback((id: string) => selectorModels.some(m => m.id === id && Number(m.enabled) === 1), [modelCatalog]);
+  const resolveConversationModel = useCallback((id: string) => {
+    const available = selectorModels.filter(model => Number(model.enabled) === 1);
+    return available.find(model => model.id === id)?.id
+      || available.find(model => splitModelKey(model.id).modelId === splitModelKey(id).modelId)?.id;
+  }, [modelCatalog]);
   const resolveModelForNewChat = useCallback((preferred?: string | null, mode = useWorkspaceModeStore.getState().mode) => {
     const configured = isSelfHostedMode ? modeDefault(mode) : '';
     if (preferred && isModelSelectable(preferred)) return preferred;
@@ -44,11 +49,13 @@ export function useModelCatalog(viewingIdRef: React.MutableRefObject<string | nu
         if (cancelled) return;
         setProvidersCache(providers);
         const all = providers.filter(p => p.enabled).flatMap(p => p.models.filter(m => m.enabled !== false).map(m => ({ ...m, id: modelKey(p.id, m.id), modelId: m.id, providerId: p.id, providerName: p.name, enabled: 1 })));
+        const sharedProvider = providers.find(provider => provider.enabled && provider.defaultModel && provider.models.some(model => model.id === provider.defaultModel && model.enabled !== false));
+        const sharedModel = sharedProvider ? modelKey(sharedProvider.id, sharedProvider.defaultModel!) : '';
         setModelCatalog({ all, common: all, fallback_model: all[0]?.id || null });
         if (!viewingIdRef.current) setCurrentModel(previous => {
           if (all.some(m => m.id === previous)) return previous;
           const configured = modeDefault(useWorkspaceModeStore.getState().mode);
-          const saved = all.some(m => m.id === configured) ? configured : previous || localStorage.getItem('default_model') || '';
+          const saved = all.some(m => m.id === configured) ? configured : previous || localStorage.getItem('default_model') || sharedModel;
           if (all.some(m => m.id === saved)) return saved;
           const legacy = all.filter(m => m.modelId === stripThinking(saved));
           return legacy.length === 1 ? legacy[0].id : all[0]?.id || '';
@@ -61,6 +68,6 @@ export function useModelCatalog(viewingIdRef: React.MutableRefObject<string | nu
     return () => { cancelled = true; clearInterval(timer); window.removeEventListener('providers-changed', load); };
   }, [isSelfHostedMode]);
   const providerId = splitModelKey(currentModel).providerId;
-  return { selectorModels, isModelSelectable, resolveModelForNewChat, resolveModelForMode, isSelfHostedMode, selfHostedModels: selectorModels,
+  return { selectorModels, isModelSelectable, resolveConversationModel, resolveModelForNewChat, resolveModelForMode, isSelfHostedMode, selfHostedModels: selectorModels,
     currentProviderSupportsWebSearch: providersCache.find(p => p.id === providerId)?.supportsWebSearch === true };
 }

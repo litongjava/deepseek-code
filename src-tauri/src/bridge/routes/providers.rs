@@ -96,9 +96,20 @@ fn parse_provider(v: Value, old: Option<&ProviderConfig>) -> Result<ProviderConf
     Ok(p)
 }
 async fn providers_list(State(state): State<AppState>) -> ApiResult {
-    let guard = state.config_manager.lock().await;
-    let cm = guard.as_ref().ok_or_else(|| io_error("Config unavailable"))?;
-    Ok(Json(json!({"providers":cm.get_config().providers.iter().map(provider_json).collect::<Vec<_>>()})))
+    let mut guard = state.config_manager.lock().await;
+    let cm = guard.as_mut().ok_or_else(|| io_error("Config unavailable"))?;
+    cm.reload().map_err(io_error)?;
+    let selected = cm.saved_cli_model();
+    let default_provider = cm.get_default_provider().map(|provider| provider.id.as_str());
+    let providers = cm.get_config().providers.iter().map(|provider| {
+        let mut value = provider_json(provider);
+        let selected_model = selected.as_deref().and_then(|key| key.split_once("::")).filter(|(id, _)| *id == provider.id).map(|(_, model)| model);
+        value["defaultModel"] = json!(selected_model.or_else(|| {
+            (selected.is_none() && default_provider == Some(provider.id.as_str())).then(|| provider.models.iter().find(|model| model.enabled).map(|model| model.id.as_str())).flatten()
+        }));
+        value
+    }).collect::<Vec<_>>();
+    Ok(Json(json!({"providers":providers})))
 }
 async fn providers_create(State(state): State<AppState>, Json(value): Json<Value>) -> ApiResult {
     let provider = parse_provider(value, None).map_err(bad)?;

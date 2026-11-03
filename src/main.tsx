@@ -1,13 +1,14 @@
 import React from 'react';
 import ReactDOM from 'react-dom/client';
 import App from './App';
+import { loginEnabled } from './utils/login';
 import BackendStartup from './components/BackendStartup';
 import './index.css';
 import { initializeGeneralSettings, useGeneralSettingsStore } from './stores/useGeneralSettingsStore';
 import { useChatStore } from './stores/useChatStore';
 
-// First launch uses local providers; preserve an existing hosted-mode choice.
-if (!localStorage.getItem('user_mode')) {
+// Local use is the default; hosted choices apply only when login is enabled.
+if (!loginEnabled || !localStorage.getItem('user_mode')) {
   localStorage.setItem('user_mode', 'selfhosted');
 }
 

@@ -132,7 +132,7 @@ pub fn get_tool_definitions() -> Vec<ToolDefinition> {
                 "type": "object",
                 "properties": {
                     "command": { "description": "The command to execute", "type": "string" },
-                    "timeout": { "description": "Optional timeout in milliseconds (max 600000 for a foreground command)", "type": "number" },
+                    "timeout": { "description": "Positive timeout in milliseconds: 1..600000 foreground, 1..86400000 background. Omit for no background runtime limit; zero is invalid.", "type": "number", "minimum": 1, "maximum": 86400000 },
                     "description": { "description": "Clear, concise description of what this command does in active voice. Never use words like \"complex\" or \"risk\" in the description - just describe what it does.\n\nSay what the command does in plain words: do not echo the command's text, its flags, or file paths - the user reads this description, often without seeing the command.\n\nFor simple commands (git, npm, standard CLI tools), keep it brief (5-10 words):\n- ls → \"List files in current directory\"\n- git status → \"Show working tree status\"\n- npm install → \"Install package dependencies\"\n\nFor commands that are harder to parse at a glance (piped commands, obscure flags, etc.), add enough context to clarify what it does:\n- find . -name \"*.tmp\" -exec rm {} \\; → \"Find and delete all .tmp files recursively\"\n- git reset --hard origin/main → \"Discard all local changes and match remote main\"\n- curl -s url | jq '.data[]' → \"Fetch JSON from URL and extract data array elements\"", "type": "string" },
                     "run_in_background": { "description": "Set to true to run this command in the background.", "type": "boolean" },
                     "dangerouslyDisableSandbox": { "description": "Set this to true to dangerously override sandbox mode and run commands without sandboxing.", "type": "boolean" },
@@ -402,6 +402,12 @@ pub fn get_tool_definitions() -> Vec<ToolDefinition> {
     defs.extend(external_agents::definitions());
     defs.extend(crate::services::plans::definitions());
     defs.extend(content_compat::definitions());
+    for def in &mut defs {
+        if matches!(def.name.as_str(), "ListDir" | "git_status" | "git_diff") {
+            def.input_schema["required"] = serde_json::json!([]);
+            def.input_schema["properties"]["path"]["default"] = serde_json::json!(".");
+        }
+    }
     // The legacy `lsp` alias stays dispatchable but is no longer advertised.
     defs
 }
@@ -449,7 +455,16 @@ macro_rules! tool_dispatch {
     };
 }
 
+fn directory_input(name: &str, mut input: serde_json::Value, cwd: &str) -> Result<serde_json::Value> {
+    if matches!(name, "ListDir" | "git_status" | "git_diff") {
+        let path = input["path"].as_str().filter(|path| !path.trim().is_empty()).unwrap_or(".");
+        input["path"] = serde_json::json!(resolve_read_path(path, cwd)?);
+    }
+    Ok(input)
+}
+
 pub fn execute_tool(name: &str, input: serde_json::Value, cwd: &str) -> Result<serde_json::Value> {
+    let input = directory_input(name, input, cwd)?;
     tool_dispatch!(name, input, cwd,
         Bash => tool_bash(input, cwd),
         WebFetch => tool_web_fetch_blocking(input),
@@ -458,6 +473,7 @@ pub fn execute_tool(name: &str, input: serde_json::Value, cwd: &str) -> Result<s
 }
 
 pub async fn execute_tool_async(name: &str, input: serde_json::Value, cwd: &str) -> Result<serde_json::Value> {
+    let input = directory_input(name, input, cwd)?;
     if name == "computer_use" { return tool_computer_use_async(input).await; }
     if name == "LSP" || name == "lsp" { return lsp::execute(input, cwd).await; }
     if name == "worktree" { return worktrees::execute(input, cwd).await; }
@@ -821,7 +837,8 @@ fn tool_multi_edit(input: serde_json::Value, cwd: &str) -> Result<serde_json::Va
 
     let content = fs::read_to_string(&path)?;
     let before = file_change::snapshot(&content);
-    let mut new_content = content;
+    let crlf = content.contains("\r\n");
+    let mut new_content = content.replace("\r\n", "\n");
     let mut total_replacements = 0;
     let mut failed_edits: Vec<String> = Vec::new();
 
@@ -830,8 +847,10 @@ fn tool_multi_edit(input: serde_json::Value, cwd: &str) -> Result<serde_json::Va
         let new_string = edit.get("new_string").and_then(|s| s.as_str());
 
         if let (Some(old), Some(new)) = (old_string, new_string) {
-            if new_content.contains(old) {
-                new_content = new_content.replace(old, new);
+            let old = old.replace("\r\n", "\n");
+            let new = new.replace("\r\n", "\n");
+            if !old.is_empty() && new_content.contains(&old) {
+                new_content = new_content.replace(&old, &new);
                 total_replacements += 1;
             } else {
                 failed_edits.push(old.to_string());
@@ -843,10 +862,11 @@ fn tool_multi_edit(input: serde_json::Value, cwd: &str) -> Result<serde_json::Va
         return Ok(serde_json::json!({
             "success": false,
             "error": format!("Some edits failed: {:?}", failed_edits),
-            "replacements": total_replacements
+            "replacements": 0
         }));
     }
 
+    let new_content = if crlf { new_content.replace('\n', "\r\n") } else { new_content };
     utf8::write_utf8(Path::new(&path), &new_content)?;
 
     Ok(serde_json::json!({
@@ -1599,3 +1619,37 @@ fn tool_git_add(input: serde_json::Value) -> Result<serde_json::Value> {
 async fn tool_web_search_async(input: serde_json::Value) -> Result<serde_json::Value> { tool_web_search_blocking(input) }
 
 pub(crate) async fn execute_public_web_search(input: serde_json::Value) -> Result<serde_json::Value> { web::search(input).await }
+
+#[cfg(test)]
+mod directory_edit_regressions {
+    use super::*;
+    use serde_json::json;
+
+    #[tokio::test]
+    async fn omitted_directory_uses_session_workspace() {
+        let root = tempfile::tempdir().unwrap();
+        fs::write(root.path().join("sentinel.txt"), "hello").unwrap();
+        let cwd = root.path().to_str().unwrap();
+        assert!(run_git_command(&["init"], cwd).unwrap().status.success());
+        for input in [json!({}), json!({"path":"."}), json!({"path":null})] {
+            let list = execute_tool("ListDir", input.clone(), cwd).unwrap();
+            assert!(list["entries"].as_array().unwrap().iter().any(|entry| entry["name"] == "sentinel.txt"));
+            let status = execute_tool_async("git_status", input.clone(), cwd).await.unwrap();
+            assert!(status["files"].as_array().unwrap().iter().any(|file| file["file"] == "sentinel.txt"));
+            assert_eq!(execute_tool("git_diff", input, cwd).unwrap()["diff"], "");
+        }
+    }
+
+    #[test]
+    fn multi_edit_matches_lf_preserves_crlf_and_rolls_back_failure() {
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("file.txt");
+        fs::write(&path, "one\r\ntwo\r\n").unwrap();
+        let input = json!({"file_path":"file.txt","edits":[{"old_string":"one\ntwo\n","new_string":"three\nfour\n"}]});
+        assert_eq!(tool_multi_edit(input, root.path().to_str().unwrap()).unwrap()["success"], true);
+        assert_eq!(fs::read_to_string(&path).unwrap(), "three\r\nfour\r\n");
+        let input = json!({"file_path":"file.txt","edits":[{"old_string":"three","new_string":"changed"},{"old_string":"missing","new_string":"bad"}]});
+        assert_eq!(tool_multi_edit(input, root.path().to_str().unwrap()).unwrap()["replacements"], 0);
+        assert_eq!(fs::read_to_string(path).unwrap(), "three\r\nfour\r\n");
+    }
+}

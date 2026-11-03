@@ -359,10 +359,12 @@ pub(crate) async fn live_tasks(session: &Session, prompt: &str) -> Result<String
     }
     let mut lines = Vec::new();
     for shell in shells {
-        lines.push(format!("Shell {} · {}\n  {}", shell["id"].as_str().unwrap_or_default(), shell["status"].as_str().unwrap_or("unknown"), shell["metadata"]["command"].as_str().unwrap_or_default()));
+        lines.push(format!("- {} · {}\n  /tasks show {}", shell["subject"].as_str().unwrap_or("Background command"), shell["status"].as_str().unwrap_or("unknown"), shell["id"].as_str().unwrap_or_default()));
     }
     for job in background_sessions::list(&paths.data_dir, Some(&session.id))? {
-        lines.push(format!("Task {} · {}\n  {}", job.id, job.status, job.title));
+        if !job.foreground {
+            lines.push(format!("- {} · {}\n  /tasks show {}", job.title.lines().next().unwrap_or("Agent"), job.status, job.id));
+        }
     }
     if lines.is_empty() { lines.push("No background tasks.".into()); }
     lines.push("/tasks show ID reads the latest output; repeat to refresh. The current request continues.".into());

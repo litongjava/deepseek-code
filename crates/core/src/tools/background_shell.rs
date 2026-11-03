@@ -146,7 +146,7 @@ pub(crate) fn start(
         completion.finish(status, output);
     });
     Ok(
-        json!({"task_id":id,"status":"running","stdout_file":stdout,"stderr_file":stderr,"message":"Managed background command started. Use TaskOutput with task_id for current logs, TaskStop to terminate it. It runs until completion, timeout, cancellation, or worker exit."}),
+        json!({"task_id":id,"subject":description,"status":"running","stdout_file":stdout,"stderr_file":stderr,"message":format!("Background command \"{description}\" started. Use TaskOutput for output and TaskStop to stop it.")}),
     )
 }
 
@@ -324,7 +324,7 @@ pub(super) fn control(
             std::fs::write(directory.join("cancel"), b"cancel")?;
         }
         return Ok(Some(
-            json!({"task_id":id,"status":status,"cancellation_requested":active,"message":"Cancellation is requested, not confirmed. TaskOutput reports terminal status after the owner terminates the shell process tree; an unresponsive owner may not have received it yet."}),
+            json!({"task_id":id,"subject":task["subject"],"status":status,"cancellation_requested":active,"message":"Cancellation is requested, not confirmed. TaskOutput reports terminal status after the owner terminates the shell process tree; an unresponsive owner may not have received it yet."}),
         ));
     }
     let read = |name| -> Result<String> {
@@ -340,7 +340,7 @@ pub(super) fn control(
         }
     };
     Ok(Some(
-        json!({"task_id":id,"status":status,"stdout":read("stdout.log")?,"stderr":read("stderr.log")?,"result":task["output"],"block":false,"retrieval_status":if terminal(&status) {"success"} else {"not_ready"}}),
+        json!({"task_id":id,"subject":task["subject"],"status":status,"stdout":read("stdout.log")?,"stderr":read("stderr.log")?,"result":task["output"],"block":false,"retrieval_status":if terminal(&status) {"success"} else {"not_ready"}}),
     ))
 }
 

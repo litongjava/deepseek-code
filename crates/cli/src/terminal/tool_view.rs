@@ -115,6 +115,11 @@ pub(super) fn wrap_call(text: &str, width: usize) -> Vec<String> {
 
 /// `Bash(ls -la)` for previewable inputs, otherwise the tool name.
 pub fn label(name: &str, input: &Value, workspace: Option<&std::path::Path>) -> String {
+    if name == "Skill" {
+        if let Some(skill) = input["skill"].as_str().or_else(|| input["name"].as_str()) {
+            return format!("Skill({})", printable(skill));
+        }
+    }
     if let Some(label) = mcp_call(name, input) { return label; }
     if matches!(name, "Grep" | "Glob") {
         let pattern = printable(input["pattern"].as_str().unwrap_or_default());
@@ -255,6 +260,29 @@ fn raw_result_text(output: &str) -> String {
     let Ok(Value::Object(fields)) = serde_json::from_str::<Value>(body) else {
         return output.trim_end().to_owned();
     };
+    if let Some(diff) = fields.get("diff").and_then(Value::as_str) {
+        return if diff.is_empty() { "(No changes)".into() } else { diff.trim_end().into() };
+    }
+    if let Some(agents) = fields.get("agents").and_then(Value::as_array) {
+        return agents.iter().map(|agent| format!("- {} · {} · {}", agent["name"].as_str().unwrap_or("Agent").lines().next().unwrap_or("Agent"), agent["kind"].as_str().unwrap_or("agent"), agent["status"].as_str().unwrap_or("unknown"))).collect::<Vec<_>>().join("\n");
+    }
+    if let Some(instructions) = fields.get("instructions").and_then(Value::as_str) {
+        return instructions.trim_end().into();
+    }
+    if let Some(files) = fields.get("files").and_then(Value::as_array).filter(|files| files.iter().all(|file| file["status"].is_string() && file["file"].is_string())) {
+        if files.is_empty() { return "(Working tree clean)".into(); }
+        return files.iter().map(|file| {
+            let status = match file["status"].as_str().unwrap().trim() {
+                "??" => "Untracked", "M" => "Modified", "A" => "Added", "D" => "Deleted", "R" => "Renamed", "C" => "Copied", "UU" => "Conflict", other => other,
+            };
+            format!("- {status}: {}", file["file"].as_str().unwrap())
+        }).collect::<Vec<_>>().join("\n");
+    }
+    if let Some(message) = fields.get("message").filter(|message| message.is_object()) {
+        if let Some(content) = message["content"].as_str() {
+            return format!("To: {}\nDelivery: {}\n{}{}", fields.get("recipient_name").or_else(|| fields.get("to")).and_then(Value::as_str).unwrap_or("agent"), fields.get("state").and_then(Value::as_str).unwrap_or("queued"), content, fields.get("note").and_then(Value::as_str).map(|note| format!("\n{note}")).unwrap_or_default());
+        }
+    }
     if fields.contains_key("stdout") || fields.contains_key("stderr") {
         let mut text = fields
             .get("stdout")
@@ -350,6 +378,17 @@ fn printable(line: &str) -> String {
         .collect()
 }
 
+fn result_label(name: &str, input: &Value, output: &str, workspace: Option<&std::path::Path>) -> String {
+    if matches!(name, "TaskGet" | "TaskOutput" | "TaskStop") {
+        if let Ok(value) = serde_json::from_str::<Value>(output) {
+            if let Some(subject) = value["subject"].as_str() {
+                return format!("{name}({})", printable(subject));
+            }
+        }
+    }
+    label(name, input, workspace)
+}
+
 /// Inline result lines and the number of lines left for the details view.
 pub fn summary(name: &str, output: &str, failed: bool) -> (Vec<String>, usize) {
     if name == "Bash" && !failed && serde_json::from_str::<Value>(output).is_ok_and(|value| {
@@ -420,7 +459,7 @@ pub fn finished(
     }
     let _ = elapsed;
     let (shown, hidden) = summary(name, output, failed);
-    let mut lines = vec![change_view::tool_call(&label(name, input, workspace), "", failed)];
+    let mut lines = vec![change_view::tool_call(&result_label(name, input, output, workspace), "", failed)];
     for (index, line) in shown.iter().enumerate() {
         lines.push(change_view::tool_output(line, index == 0, failed));
     }
@@ -440,7 +479,7 @@ pub fn expanded(
 ) -> Vec<Line> {
     let header = match input["command"].as_str() {
         Some(command) if name == "Bash" => format!("{name}({})", super::progress::single_line(command)),
-        _ => label(name, input, workspace),
+        _ => result_label(name, input, output, workspace),
     };
     let mut lines = vec![change_view::tool_call(&header, if failed { "error" } else { "" }, failed)];
     let diff = change_view::details(name, output, failed);
@@ -1110,6 +1149,18 @@ mod result_regressions {
         );
         assert_eq!(result_text(r#"{"entries":[]}"#), "(Empty directory)");
         assert!(result_text(r#"{"entries":[{"bad":true}]}"#).contains("bad"));
+    }
+
+    #[test]
+    fn structured_tools_are_readable_and_tasks_are_named() {
+        assert_eq!(result_text(r#"{"files":[{"file":"new.txt","status":"??"},{"file":"old.txt","status":"M"}]}"#), "- Untracked: new.txt\n- Modified: old.txt");
+        assert_eq!(result_text(r#"{"diff":"--- a\n+++ b\n+hello"}"#), "--- a\n+++ b\n+hello");
+        assert_eq!(result_text(r##"{"execution":"inline","instructions":"# Skill\nBody"}"##), "# Skill\nBody");
+        assert_eq!(label("Skill", &serde_json::json!({"skill":"browser"}), None), "Skill(browser)");
+        for name in ["TaskGet", "TaskOutput", "TaskStop"] {
+            let output = r#"{"subject":"Run checks","stdout":"done"}"#;
+            assert_eq!(result_label(name, &serde_json::json!({}), output, None), format!("{name}(Run checks)"));
+        }
     }
     #[test]
     fn approved_plan_remains_available_in_expanded_history() {

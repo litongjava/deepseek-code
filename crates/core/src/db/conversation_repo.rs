@@ -1,5 +1,5 @@
 use anyhow::Result;
-use rusqlite::{params, Connection};
+use rusqlite::{params, Connection, OptionalExtension};
 use serde::{Deserialize, Serialize};
 
 /// Copy history through the selected response, keeping the source session intact.
@@ -268,7 +268,7 @@ pub fn get_conversation(conn: &Connection, id: &str) -> Result<Option<Conversati
     )?;
     let mut rows = stmt.query(params![id])?;
     match rows.next()? {
-        Some(row) => Ok(Some(row_to_conversation(row)?)),
+        Some(row) => Ok(Some(with_session_title(conn, row_to_conversation(row)?)?)),
         None => Ok(None),
     }
 }
@@ -280,9 +280,23 @@ pub fn list_conversations(conn: &Connection) -> Result<Vec<ConversationRow>> {
     let rows = stmt.query_map([], |row| row_to_conversation(row))?;
     let mut result = Vec::new();
     for row in rows {
-        result.push(row?);
+        result.push(with_session_title(conn, row?)?);
     }
     Ok(result)
+}
+
+fn with_session_title(conn: &Connection, mut row: ConversationRow) -> Result<ConversationRow> {
+    if row.title.as_deref().is_some_and(|title| title.eq_ignore_ascii_case("CLI session")) {
+        let prompt: Option<String> = conn.query_row(
+            "SELECT content FROM messages WHERE conversation_id=?1 AND role='user' ORDER BY sort_order LIMIT 1",
+            [&row.id], |message| message.get(0),
+        ).optional()?;
+        if let Some(prompt) = prompt {
+            let title = prompt.lines().find(|line| !line.trim().is_empty()).unwrap_or_default().trim();
+            if !title.is_empty() { row.title = Some(title.chars().take(80).collect()); }
+        }
+    }
+    Ok(row)
 }
 
 pub fn update_conversation_title(conn: &Connection, id: &str, title: &str) -> Result<()> {
@@ -297,7 +311,7 @@ pub fn update_conversation_title(conn: &Connection, id: &str, title: &str) -> Re
 pub fn update_title_if_empty(conn: &Connection, id: &str, title: &str) -> Result<bool> {
     let now = chrono::Utc::now().to_rfc3339();
     let mut stmt = conn.prepare_cached(
-        "UPDATE conversations SET title = ?1, updated_at = ?2 WHERE id = ?3 AND (title IS NULL OR title = '')"
+        "UPDATE conversations SET title = ?1, updated_at = ?2 WHERE id = ?3 AND (title IS NULL OR title = '' OR lower(title) = 'cli session')"
     )?;
     let rows = stmt.execute(params![title, now, id])?;
     Ok(rows > 0)
@@ -356,6 +370,20 @@ pub fn archive_conversation(conn: &Connection, id: &str, archived: bool) -> Resu
 #[cfg(test)]
 mod workspace_mode_tests {
     use super::*;
+
+    #[test]
+    fn cli_placeholder_titles_use_history_and_accept_generated_names() {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(crate::db::schema::SCHEMA_SQL).unwrap();
+        migrate_workspace_mode(&conn).unwrap();
+        insert_conversation(&conn, "legacy", Some("CLI session"), None, None, None, None, false, false, false, "now", "now", 1).unwrap();
+        crate::db::message_repo::insert_message(&conn, "prompt", "legacy", "user", "Fix task names\nDetails", None, "now", false, 0).unwrap();
+        assert_eq!(get_conversation(&conn, "legacy").unwrap().unwrap().title.as_deref(), Some("Fix task names"));
+        assert_eq!(list_conversations(&conn).unwrap()[0].title.as_deref(), Some("Fix task names"));
+        assert!(update_title_if_empty(&conn, "legacy", "Task display fixes").unwrap());
+        assert!(!update_title_if_empty(&conn, "legacy", "Replacement").unwrap());
+        assert_eq!(get_conversation(&conn, "legacy").unwrap().unwrap().title.as_deref(), Some("Task display fixes"));
+    }
 
     #[test]
     fn legacy_migration_is_idempotent_and_preserves_history() {

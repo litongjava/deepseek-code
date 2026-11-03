@@ -1,3 +1,4 @@
+import { handleUnauthorized } from './utils/login';
 import { readChatResponseError, formatChatStreamError } from './utils/chatErrors';
 import { pendingMarkerLength } from './utils/streamMarkers';
 import { processMetadata, restoreProcessMetadata } from './features/trajectory/model';
@@ -134,9 +135,7 @@ async function request(path: string, options: RequestInit = {}) {
   const base = isGatewayRoute(path) ? CHENGDU_API : API_BASE;
   const res = await fetch(`${base}${path}`, { ...options, headers });
   if (res.status === 401) {
-    localStorage.removeItem('auth_token');
-    localStorage.removeItem('user');
-    window.location.hash = '#/login'; window.location.reload();
+    handleUnauthorized();
     throw new Error('认证失效');
   }
   if (!res.ok) {
@@ -916,9 +915,7 @@ export async function exportConversation(id: string): Promise<void> {
     headers: token ? { Authorization: `Bearer ${token}` } : {},
   });
   if (res.status === 401) {
-    localStorage.removeItem('auth_token');
-    localStorage.removeItem('user');
-    window.location.hash = '#/login'; window.location.reload();
+    handleUnauthorized();
     throw new Error('认证失效');
   }
   if (!res.ok) {
@@ -1059,6 +1056,7 @@ export interface ProviderModel {
 }
 export type WebSearchStrategy = 'auto' | 'openai_native' | 'anthropic_native' | 'deepseek_native' | 'public' | 'disabled' | 'dashscope' | 'bigmodel';
 export interface Provider {
+  defaultModel?: string | null;
   id: string; name: string; apiKey: string; baseUrl: string;
   format: 'anthropic' | 'openai' | 'harness'; category?: 'builtin' | 'custom'; builtinId?: string; models: ProviderModel[]; enabled: boolean;
   icon?: string;
@@ -1364,9 +1362,7 @@ export async function uploadFile(
 
     xhr.addEventListener('load', () => {
       if (xhr.status === 401) {
-        localStorage.removeItem('auth_token');
-        localStorage.removeItem('user');
-        window.location.hash = '#/login'; window.location.reload();
+        handleUnauthorized();
         reject(new Error('认证失效'));
         return;
       }

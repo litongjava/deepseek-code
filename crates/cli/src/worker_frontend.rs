@@ -556,6 +556,13 @@ async fn observe(
                         else { display.notice("A side question is already running."); }
                     },
                     Some(Action::Submit(prompt)) => {
+                        if crate::session_commands::is_live_inspection(&prompt) {
+                            if let Some(message) = crate::session_commands::live_inspection(session, &prompt).await {
+                                display.inspection(&prompt, &message);
+                                display.set_model_label(&crate::session_commands::model_label(session).await);
+                            }
+                            continue;
+                        }
                         if jobs::get(root, id)?.session_id == session.id {
                             if let Some(message) = crate::session_commands::live_goal_command(session, &prompt)? {
                                 display.notice(&message);

@@ -1,4 +1,5 @@
 import React, { useState, useEffect, useCallback, useRef } from 'react';
+import { loginEnabled } from './utils/login';
 import { HashRouter, Routes, Route, Navigate, useLocation, useNavigate } from 'react-router-dom';
 import { BellRing, Menu, ArrowLeft, ArrowRight, GitBranch, BarChart3, Terminal, HelpCircle } from 'lucide-react';
 import Sidebar from './components/Sidebar';
@@ -58,7 +59,7 @@ const Layout = () => {
 
   // Check auth validity on mount
   useEffect(() => {
-    if (!isTauri) {
+    if (!loginEnabled || !isTauri) {
       setAuthChecked(true);
       setAuthValid(true);
       return;
@@ -506,7 +507,7 @@ const App = () => {
     <ErrorBoundary>
       <HashRouter>
         <Routes>
-          <Route path="/login" element={<WindowFrame><Auth /></WindowFrame>} />
+          <Route path="/login" element={loginEnabled ? <WindowFrame><Auth /></WindowFrame> : <Navigate to="/" replace />} />
           <Route path="/admin" element={<WindowFrame><AdminLayout /></WindowFrame>}>
             <Route index element={<AdminDashboard />} />
             <Route path="keys" element={<AdminKeyPool />} />

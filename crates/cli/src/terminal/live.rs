@@ -451,6 +451,7 @@ struct State {
     queued: Vec<String>,
     notices: Vec<String>,
     status_page: Option<String>,
+    inspection_title: String,
     inspection_scroll: usize,
     subagents_open: bool,
     agent_detail: Option<String>,
@@ -581,6 +582,7 @@ impl State {
             queued: Vec::new(),
             notices: Vec::new(),
             status_page: None,
+            inspection_title: "Status".into(),
             inspection_scroll: 0,
             subagents_open: false,
             agent_detail: None,
@@ -2039,11 +2041,12 @@ fn run(
                     dirty = true;
                 }
                 Ok(Update::Inspection(command, text)) => {
-                    if command.trim() == "/status" {
+                    if command.trim() == "/status" || command.trim().starts_with("/tasks") {
                         if state.status_page.is_none() {
                             execute!(io::stderr(), terminal::EnterAlternateScreen)?;
                         }
                         state.inspection_scroll = 0;
+                        state.inspection_title = if command.trim().starts_with("/tasks") { "Tasks" } else { "Status" }.into();
                         state.status_page = Some(text);
                     } else {
                         state.notices.push(format!("{command}\n{text}"));
@@ -2309,12 +2312,14 @@ fn run(
                         error.contains("interrupt") || error.contains("cancelled")
                     });
                     if interrupted {
-                        let line = "  \u{23bf}  Interrupted \u{b7} What should DeepSeek Code do instead?";
+                        screen.separate_block();
+                        let line = "Interrupted \u{b7} What should DeepSeek Code do instead?";
                         if std::env::var_os("NO_COLOR").is_some() {
                             screen.log(line)?;
                         } else {
                             screen.log_rendered(&change_view::render(&change_view::failure(line), usize::MAX, true));
                         }
+                        screen.log("")?;
                         return screen.hand_off();
                     }
                     screen.log("")?;
@@ -2973,7 +2978,7 @@ fn run(
                 view.draw()?;
             } else if let Some(text) = &state.status_page {
                 draw_inspection(
-                    "Status · ↑/↓ scroll · Esc to close",
+                    &format!("{} · ↑/↓ scroll · Esc to close", state.inspection_title),
                     text,
                     false,
                     state.inspection_scroll,
@@ -3355,6 +3360,21 @@ mod tests {
                 }
             }
         });
+    }
+
+    #[test]
+    #[ignore = "interactive ConPTY acceptance"]
+    fn interruption_terminal_fixture() {
+        let temp = tempfile::tempdir().unwrap();
+        let mut display = TurnDisplay::new(true, "ask", &temp.path().join("keys.json"), vec![]).unwrap();
+        let input = serde_json::json!({"pattern":"sentinel"});
+        display.tool_started("grep", "Grep", &input);
+        display.tool_finished("grep", "Grep", &input, "No matches found", false);
+        tokio::runtime::Runtime::new().unwrap().block_on(async {
+            while !matches!(display.action().await, Some(Action::Cancel) | None) {}
+        });
+        display.finish(Some("Interrupted"));
+        std::thread::sleep(Duration::from_secs(2));
     }
 
     #[test]

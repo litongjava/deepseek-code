@@ -372,7 +372,6 @@ impl SessionStore {
                 rusqlite::params![new_id, id],
             )?;
             if owned.is_some() && source.project_id.as_deref().is_none_or(str::is_empty) {
-                ensure!(source.workspace_mode != "code", "Code children require a trusted project");
                 tx.execute("INSERT INTO conversation_private_workspace_bindings(child_id,parent_id) VALUES(?1,?2)", rusqlite::params![new_id,id])?;
             }
             if let Some((root, expected)) = owned {

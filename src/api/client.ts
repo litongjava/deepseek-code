@@ -1,3 +1,4 @@
+import { handleUnauthorized } from '../utils/login';
 import { getErrorMessage } from '../utils/errorHelpers';
 import { getSecure, setSecure, removeSecure } from '../services/secureStorage';
 
@@ -105,9 +106,7 @@ export async function request(path: string, options: RequestInit = {}) {
   const base = isGatewayRoute(path) ? CHENGDU_API : API_BASE;
   const res = await fetch(`${base}${path}`, { ...options, headers });
   if (res.status === 401) {
-    localStorage.removeItem('auth_token');
-    localStorage.removeItem('user');
-    window.location.hash = '#/login'; window.location.reload();
+    handleUnauthorized();
     throw new Error('认证失效');
   }
   if (!res.ok) {

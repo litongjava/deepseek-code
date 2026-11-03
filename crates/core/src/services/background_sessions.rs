@@ -809,10 +809,9 @@ pub fn collect_completed(
             .find(|event| event["type"] == "result")
             .and_then(|event| event["result"].as_str().map(str::to_owned));
         let result = if execution_session != job.session_id {
-            Some(format!(
-                "Owned child {execution_session} ended with status {}. Its transcript remains in the child session; inspect /tasks show {} and /list-agents inbox for the result. {}",
-                job.status, job.id, job.error.as_deref().unwrap_or("")
-            ))
+            store.db.with_conn(|conn| crate::db::message_repo::get_messages_by_conversation(conn, &execution_session))??
+                .into_iter().rev().find(|message| message.role == "assistant" && !message.content.trim().is_empty())
+                .map(|message| message.content).or(result)
         } else if job.session_id == parent {
             Some(if job.status == "completed" {
                 "The worker completed and stored its answer directly in this session. This notice does not duplicate that answer.".to_owned()

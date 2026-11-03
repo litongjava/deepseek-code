@@ -113,6 +113,7 @@ pub fn name_topic(session: &crate::session::Session, prompt: &str) {
         named.push(session.id.clone());
     }
     let engine = session.side_engine();
+    let db = session.store.db.clone();
     let (id, provider, model) = (
         session.id.clone(),
         session.provider_id.clone(),
@@ -125,6 +126,7 @@ pub fn name_topic(session: &crate::session::Session, prompt: &str) {
             .await
             .map(|reply| tidy(&reply))
         {
+            let _ = db.with_conn(|conn| deepseek_code_core::db::conversation_repo::update_title_if_empty(conn, &id, &title));
             *TOPIC.lock().unwrap_or_else(|error| error.into_inner()) = Some((id, title));
         }
     });
