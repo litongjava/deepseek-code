@@ -621,6 +621,9 @@ impl PermissionManager {
                 ToolSetting,
             );
         }
+        if mode == PermissionMode::BypassPermissions {
+            return decision(PermissionResult::Granted, Mode);
+        }
         // Delegation inherits the parent authority; children check their own tools.
         // Auto still classifies the spawn itself, matching the native Agent tool.
         let delegation = context.tool_name == "Agent"
@@ -656,6 +659,13 @@ impl PermissionManager {
             && !context.mcp_read_only
             && !plan_document
             && !delegation
+            && !(context.tool_name == "SendMessage"
+                && matches!(
+                    context.tool_input["operation"].as_str(),
+                    None | Some(
+                        "send" | "receive" | "peers" | "sent" | "pending_count" | "mark_read"
+                    )
+                ))
         {
             return decision(
                 PermissionResult::Denied(if context.tool_name.starts_with("mcp__") {
@@ -1021,6 +1031,28 @@ mod policy_tests {
         }
     }
     #[test]
+    fn plan_allows_messages_without_allowing_team_control() {
+        let manager = manager(PermissionMode::PlanMode);
+        let mut call = context("SendMessage");
+        for operation in [
+            "send",
+            "receive",
+            "peers",
+            "sent",
+            "pending_count",
+            "mark_read",
+        ] {
+            call.tool_input = serde_json::json!({"operation":operation});
+            assert_eq!(manager.check_permission(&call), PermissionResult::Granted);
+        }
+        call.tool_input = serde_json::json!({"operation":"shutdown_request"});
+        assert!(matches!(
+            manager.check_permission(&call),
+            PermissionResult::Denied(_)
+        ));
+    }
+
+    #[test]
     fn plan_allows_ordinary_commands_and_git_tools_but_preserves_boundaries() {
         let manager = manager(PermissionMode::PlanMode);
         for tool in ["git_status", "git_diff", "git_log"] {
@@ -1240,7 +1272,7 @@ mod policy_tests {
         assert!(matches!(manager(PermissionMode::PlanMode).check_permission(&context("memory_ingest")), PermissionResult::Denied(_)));
     }
     #[test]
-    fn explicit_ask_and_deny_override_all_permissive_modes_and_saved_approvals() {
+    fn bypass_skips_ask_but_preserves_deny_and_other_modes_keep_ask() {
         for mode in [
             PermissionMode::AskPermissions,
             PermissionMode::AcceptEdits,
@@ -1259,9 +1291,18 @@ mod policy_tests {
                 HashMap::from([("Read".into(), PermissionAction::Confirm)]),
             );
             let decision = manager.evaluate_permission(&context("Read"));
-            assert_eq!(decision.origin, DecisionOrigin::ExplicitRule);
+            assert_eq!(
+                decision.origin,
+                if mode == PermissionMode::BypassPermissions {
+                    DecisionOrigin::Mode
+                } else {
+                    DecisionOrigin::ExplicitRule
+                }
+            );
             assert!(!decision.classifier_eligible);
-            if mode == PermissionMode::DontAsk {
+            if mode == PermissionMode::BypassPermissions {
+                assert_eq!(decision.result, PermissionResult::Granted);
+            } else if mode == PermissionMode::DontAsk {
                 assert!(matches!(decision.result, PermissionResult::Denied(_)));
             } else {
                 assert!(matches!(
@@ -1331,10 +1372,10 @@ mod policy_tests {
             level: super::super::PermissionLevel::Write,
         };
         manager.set_tool_permission("Write", permission.clone());
-        assert!(matches!(
+        assert_eq!(
             manager.check_permission(&context("Write")),
-            PermissionResult::RequiresConfirmation(_)
-        ));
+            PermissionResult::Granted
+        );
         manager.set_tool_permission(
             "Write",
             ToolPermission {

@@ -14,11 +14,12 @@ const PROMPT: &str = "Name the topic of the user's request in 2 to 5 words, in t
 struct TitleState {
     text: String,
     running: usize,
+    background: bool,
 }
 
 impl TitleState {
     fn rendered(&self) -> String {
-        if self.running > 0 && !self.text.is_empty() {
+        if (self.running > 0 || self.background) && !self.text.is_empty() {
             format!("⏳ {}", self.text.trim_start_matches("✳ "))
         } else {
             self.text.clone()
@@ -29,6 +30,7 @@ impl TitleState {
 static CURRENT: Mutex<TitleState> = Mutex::new(TitleState {
     text: String::new(),
     running: 0,
+    background: false,
 });
 
 fn emit(text: &str) {
@@ -62,6 +64,14 @@ impl Drop for RunningTitle {
     fn drop(&mut self) {
         let mut state = CURRENT.lock().unwrap_or_else(|error| error.into_inner());
         state.running = state.running.saturating_sub(1);
+        emit(&state.rendered());
+    }
+}
+
+pub(crate) fn background(running: bool) {
+    let mut state = CURRENT.lock().unwrap_or_else(|error| error.into_inner());
+    if state.background != running {
+        state.background = running;
         emit(&state.rendered());
     }
 }
@@ -141,8 +151,12 @@ mod tests {
         let mut state = TitleState {
             text: "✳ 修复工具详情".into(),
             running: 0,
+            background: false,
         };
         assert_eq!(state.rendered(), "✳ 修复工具详情");
+        state.background = true;
+        assert!(state.rendered().starts_with("⏳"));
+        state.background = false;
         state.running = 1;
         assert_eq!(state.rendered(), "⏳ 修复工具详情");
         state.text = "✳ 新会话标题".into();

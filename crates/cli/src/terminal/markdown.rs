@@ -407,7 +407,7 @@ fn track_style(open: &mut Vec<String>, sequence: &str) {
     });
 }
 
-pub(super) fn plain_rendered(rendered: &str) -> String {
+pub(crate) fn plain_rendered(rendered: &str) -> String {
     let mut visible = String::new();
     let mut chars = rendered.chars().peekable();
     while let Some(ch) = chars.next() {

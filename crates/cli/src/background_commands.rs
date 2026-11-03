@@ -969,6 +969,29 @@ pub(crate) fn is_notification(text: &str) -> bool {
     text.starts_with(deepseek_code_core::tools::background_shell::NOTIFICATION_START)
 }
 
+/// Human-readable summaries for one or several queued task notifications.
+pub(crate) fn notification_text(text: &str) -> Option<String> {
+    use deepseek_code_core::tools::background_shell::{notification_summary, NOTIFICATION_START};
+    if !is_notification(text) {
+        return None;
+    }
+    Some(
+        text.split(NOTIFICATION_START)
+            .filter(|part| !part.trim().is_empty())
+            .map(|part| {
+                let notification = format!("{NOTIFICATION_START}{part}");
+                format!(
+                    "● {}",
+                    safe_output(
+                        notification_summary(&notification).unwrap_or("Background task updated")
+                    )
+                )
+            })
+            .collect::<Vec<_>>()
+            .join("\n\n"),
+    )
+}
+
 /// Finished background shells: each is queued for the model as a task
 /// notification, as in the reference CLI, and announced once.
 fn shell_notifications(session: &Session) -> Result<Vec<String>> {
@@ -1226,35 +1249,41 @@ pub(crate) fn agent_execution(
     context: &deepseek_code_core::services::ServiceContext,
     id: &str,
 ) -> String {
-    let mut lines = vec![format!("Session {id}")];
+    crate::terminal::markdown::plain_rendered(&agent_transcript(context, id).all().join("\n"))
+}
+
+pub(crate) fn agent_transcript(
+    context: &deepseek_code_core::services::ServiceContext,
+    id: &str,
+) -> crate::terminal::scrollback::Scrollback {
+    let mut transcript = crate::terminal::agent_transcript::Transcript::default();
     if let Ok(Some(value)) = context.setting::<serde_json::Value>(&format!("delegation.{id}")) {
-        lines.push(format!(
+        transcript.note(&format!(
             "Status: {}",
             value["status"].as_str().unwrap_or("unknown")
         ));
-        if let Some(tool) = value["current_tool"].as_str() {
-            lines.push(format!("Running: {tool}"));
-        }
-        if let Some(text) = value["preview"].as_str() {
-            lines.push(text.to_owned());
-        }
     }
     let saved = context.db.with_conn(|conn| -> anyhow::Result<()> {
-        // Bound both row count and payload before loading a long child transcript.
         let mut statement = conn.prepare("SELECT id,role,substr(content,-65536) FROM (SELECT id,role,content,sort_order FROM messages WHERE conversation_id=?1 ORDER BY sort_order DESC LIMIT 20) ORDER BY sort_order")?;
         let messages = statement.query_map([id], |row| Ok((row.get::<_,String>(0)?, row.get::<_,String>(1)?, row.get::<_,String>(2)?)))?.collect::<Result<Vec<_>, _>>()?;
         for (message_id, role, content) in messages {
-            if matches!(role.as_str(), "user" | "assistant") { lines.push(format!("{}: {content}", if role == "user" { "User" } else { "Assistant" })); }
-            let mut statement = conn.prepare("SELECT name,substr(input,1,8192),substr(output,-16384) FROM (SELECT name,input,output,sort_order FROM tool_calls WHERE message_id=?1 ORDER BY sort_order DESC LIMIT 30) ORDER BY sort_order")?;
-            for row in statement.query_map([message_id], |row| Ok((row.get::<_,String>(0)?, row.get::<_,Option<String>>(1)?, row.get::<_,Option<String>>(2)?)))? {
-                let (name, input, output) = row?;
-                lines.push(format!("{name}({})", input.unwrap_or_default()));
-                lines.push(output.unwrap_or_default());
+            if role == "user" { transcript.user(&content); continue; }
+            if role != "assistant" { continue; }
+            let mut statement = conn.prepare("SELECT name,substr(input,1,8192),substr(output,-16384),is_error FROM (SELECT name,input,output,is_error,sort_order FROM tool_calls WHERE message_id=?1 ORDER BY sort_order DESC LIMIT 30) ORDER BY sort_order")?;
+            for row in statement.query_map([message_id], |row| Ok((row.get::<_,String>(0)?, row.get::<_,Option<String>>(1)?, row.get::<_,Option<String>>(2)?, row.get::<_,bool>(3)?)))? {
+                let (name, input, output, failed) = row?;
+                let input = input.and_then(|input| serde_json::from_str(&input).ok()).unwrap_or_default();
+                transcript.tool(&name, &input, &output.unwrap_or_default(), failed);
             }
+            transcript.assistant(&content);
         }
         Ok(())
     });
-    match saved { Ok(Ok(())) => {}, Ok(Err(error)) => lines.push(format!("Execution history unavailable: {error}")), Err(error) => lines.push(format!("Execution history unavailable: {error}")) }
+    match saved {
+        Ok(Ok(())) => {}
+        Ok(Err(error)) => transcript.note(&format!("Execution history unavailable: {error}")),
+        Err(error) => transcript.note(&format!("Execution history unavailable: {error}")),
+    }
     // A detached worker commits its assistant row at turn completion. Its bounded
     // event tail provides tool progress while that row is still in memory.
     let job_ids = context.db.with_conn(|conn| -> anyhow::Result<Vec<String>> {
@@ -1272,59 +1301,19 @@ pub(crate) fn agent_execution(
         if let Ok(job) = background_sessions::get(&context.paths.data_dir, &job_id) {
             if job.session_id != id || !matches!(job.status.as_str(), "starting" | "running" | "unresponsive") { continue; }
             if let Ok((output, _)) = background_sessions::output(&context.paths.data_dir, &job_id) {
-                lines.push(format!("Live worker: {}", job.status));
-                lines.extend(agent_event_tail(&output, id));
+                transcript.note(&format!("Live worker: {}", job.status));
+                transcript.events(&output, id);
             }
         }
     }
-    safe_output(&lines.join("\n"))
+    transcript.history
 }
 
+#[cfg(test)]
 fn agent_event_tail(output: &str, session: &str) -> Vec<String> {
-    let mut lines = Vec::new();
-    for raw in output
-        .lines()
-        .rev()
-        .take(120)
-        .collect::<Vec<_>>()
-        .into_iter()
-        .rev()
-    {
-        let Ok(value) = serde_json::from_str::<serde_json::Value>(raw) else {
-            continue;
-        };
-        if value["session_id"].as_str().is_some_and(|id| id != session) {
-            continue;
-        }
-        match value["type"].as_str() {
-            Some("assistant") => {
-                for block in value["message"]["content"].as_array().into_iter().flatten() {
-                    if let Some(text) = block["text"].as_str() {
-                        lines.push(format!("Assistant: {text}"));
-                    }
-                    if block["type"] == "tool_use" {
-                        lines.push(format!(
-                            "{}({})",
-                            block["name"].as_str().unwrap_or("Tool"),
-                            block["input"]
-                        ));
-                    }
-                }
-            }
-            Some("tool_result") => {
-                if let Some(output) = value["output"].as_str() {
-                    lines.push(crate::terminal::tool_view::result_text(output));
-                }
-            }
-            Some("stream_event") => {
-                if let Some(text) = value["event"]["delta"]["text"].as_str() {
-                    lines.push(text.to_owned());
-                }
-            }
-            _ => {}
-        }
-    }
-    lines
+    let mut transcript = crate::terminal::agent_transcript::Transcript::default();
+    transcript.events(output, session);
+    transcript.history.all()
 }
 
 #[cfg(test)]
@@ -1333,7 +1322,7 @@ mod live_agent_tail_tests {
     fn live_tail_uses_complete_records_and_does_not_duplicate_sdk_tool_results() {
         let output = [
             "truncated prefix",
-            r#"{"type":"assistant","session_id":"child","message":{"content":[{"type":"tool_use","name":"Read","input":{"path":"a"}}]}}"#,
+            r#"{"type":"assistant","session_id":"child","message":{"content":[{"type":"tool_use","name":"Read","input":{"file_path":"a"}}]}}"#,
             r#"{"type":"tool_result","output":"LIVE_RESULT"}"#,
             r#"{"type":"user","session_id":"child","message":{"content":[{"type":"tool_result","content":"LIVE_RESULT"}]}}"#,
             r#"{"type":"assistant","session_id":"other","message":{"content":[{"type":"text","text":"OTHER_SESSION"}]}}"#,

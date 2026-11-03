@@ -374,6 +374,13 @@ impl Scrollback {
     }
     /// Keep prompt text and its disclosure target together across turns.
     pub(crate) fn prompt(&mut self, text: &str) -> (usize, Vec<String>) {
+        if let Some(summary) = crate::background_commands::notification_text(text) {
+            let lines = summary.lines().map(change_view::body).collect::<Vec<_>>();
+            let (id, rows) = self.block(lines.clone(), lines);
+            self.blocks[id].prompt = Some(summary);
+            self.blocks[id].whole = true;
+            return (id, rows);
+        }
         let width = terminal::size().unwrap_or((80, 24)).0.saturating_sub(1) as usize;
         let clean = super::tool_view::plain_terminal_text(text);
         let rows = super::prompt_display::layout(
@@ -811,6 +818,25 @@ fn screen_rows(text: &str, columns: usize) -> usize {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn task_notifications_render_summaries_without_user_prompt_or_xml() {
+        let mut history = Scrollback::default();
+        let text = "<task-notification>\n<summary>Agent one completed</summary>\n</task-notification>\n\n<task-notification>\n<summary>Agent two failed</summary>\n</task-notification>";
+        let rows = history.record_prompt(text).join("\n");
+        assert!(rows.contains("● Agent one completed"));
+        assert!(rows.contains("● Agent two failed"));
+        assert!(!rows.contains("task-notification"));
+        assert!(!rows.contains(crate::terminal::prompt_glyph()));
+        let compact = history
+            .compact_rows()
+            .into_iter()
+            .map(|(text, _)| text)
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(compact.contains("Agent one completed") && compact.contains("Agent two failed"));
+        assert!(!compact.contains("used 1 tool"));
+    }
+
     #[test]
     fn copy_targets_keep_complete_commands_and_bodies_separate() {
         let mut history = Scrollback::default();

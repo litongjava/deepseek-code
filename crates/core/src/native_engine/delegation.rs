@@ -1049,6 +1049,18 @@ impl ToolLoopExecutor {
         child.delegation_depth = self.delegation_depth + 1;
         child.durable_user_input = self.durable_user_input;
         child.auto_manual_interactive = self.auto_manual_interactive;
+        child.delegation_parent = self
+            .conv_id
+            .as_ref()
+            .zip(self.permission_manager.as_ref())
+            .map(|(parent, manager)| (parent.clone(), manager.clone()));
+        *child
+            .observed_parent_mode
+            .lock()
+            .unwrap_or_else(|error| error.into_inner()) = self
+            .permission_manager
+            .as_ref()
+            .map(|manager| manager.get_mode());
         child.permission_manager = self.permission_manager.as_ref().map(|manager| {
             Arc::new(manager.fork_session(self.conv_id.as_deref().unwrap_or_default(), &id))
         });

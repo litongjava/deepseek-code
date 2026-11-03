@@ -763,15 +763,23 @@ mod tests {
         let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
         let provider=ResolvedProvider{provider:serde_json::from_value(json!({"id":"fixture","name":"fixture","base_url":format!("http://{address}"),"api_key":"placeholder","api_format":"openai","models":[],"enabled":true})).unwrap(),model:serde_json::from_value(json!({"id":"fixture","name":"fixture","enabled":true,"supports_vision":false,"supports_web_search":false})).unwrap()};
         let manager = crate::runtime::default_permissions();
-        manager.set_mode(crate::permissions::PermissionMode::BypassPermissions);
-        if mode == "permission" {
-            manager.set_session_rules(
-                &parent,
-                std::collections::HashMap::from([(
+        manager.set_mode(if matches!(mode, "permission" | "hook_permission") {
+            crate::permissions::PermissionMode::AskPermissions
+        } else {
+            crate::permissions::PermissionMode::BypassPermissions
+        });
+        if matches!(mode, "permission" | "hook_permission") {
+            let mut rules = std::collections::HashMap::from([(
+                "Workflow".into(),
+                crate::permissions::rules::PermissionAction::Allow,
+            )]);
+            if mode == "permission" {
+                rules.insert(
                     "WebSearch".into(),
                     crate::permissions::rules::PermissionAction::Confirm,
-                )]),
-            );
+                );
+            }
+            manager.set_session_rules(&parent, rules);
         }
         if mode == "denied_search" {
             manager.set_session_rules(

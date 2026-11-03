@@ -41,6 +41,42 @@ async fn pre_tool_hook_blocks_real_write_before_execution() {
 }
 
 #[tokio::test]
+async fn bypass_skips_hook_approval_but_preserves_hook_denial() {
+    for decision in ["ask", "deny"] {
+        let root = tempfile::tempdir().unwrap();
+        let output = json!({"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":decision}}).to_string();
+        let command = if cfg!(windows) {
+            format!("[Console]::Out.Write('{output}')")
+        } else {
+            format!("printf '%s' '{output}'")
+        };
+        write_hook(root.path(), "PreToolUse", &command);
+        let manager = crate::runtime::default_permissions();
+        manager.set_mode(crate::permissions::PermissionMode::BypassPermissions);
+        let mut executor = executor(root.path())
+            .with_permission_manager(manager)
+            .with_permission_host(false);
+        let (events, mut received) = mpsc::channel(32);
+        executor.event_tx = events;
+        let (_, output, failed) = executor
+            .execute_tool_call(
+                "Write",
+                &json!({"file_path":"allowed.txt","content":"written"}),
+                "hook-bypass",
+            )
+            .await;
+        assert_eq!(failed, decision == "deny", "{output}");
+        assert_eq!(root.path().join("allowed.txt").exists(), decision == "ask");
+        while let Ok(event) = received.try_recv() {
+            assert!(!matches!(
+                event,
+                EngineEvent::ToolPermission { .. } | EngineEvent::AskUser { .. }
+            ));
+        }
+    }
+}
+
+#[tokio::test]
 async fn modified_input_is_executed_and_post_context_reaches_tool_result() {
     let root = tempfile::tempdir().unwrap();
     let hook_output = r#"{"hookSpecificOutput":{"hookEventName":"PreToolUse","updatedInput":{"file_path":"actual.txt","content":"hook content"}}}"#;

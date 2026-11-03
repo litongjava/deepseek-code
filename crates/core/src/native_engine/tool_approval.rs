@@ -251,6 +251,7 @@ impl ToolLoopExecutor {
                 }
             }
         };
+        let mut granted_by_mode = false;
         let response = async {
             tokio::pin!(hook);
             let mut text_rx = text_rx;
@@ -276,6 +277,13 @@ impl ToolLoopExecutor {
                                 PermissionResponse::Deny { message, interrupt: false },
                             )
                             .await;
+                        }
+                    },
+                    _ = tokio::time::sleep(Duration::from_millis(250)) => {
+                        self.sync_parent_permission_mode();
+                        if self.permission_manager.as_ref().is_some_and(|manager| manager.get_mode() == crate::permissions::PermissionMode::BypassPermissions) {
+                            granted_by_mode = true;
+                            break Ok(PermissionResponse::Allow { updated_input: None, commit: None, note: None });
                         }
                     },
                     answer = &mut text_rx, if !text_done => {
@@ -377,7 +385,13 @@ impl ToolLoopExecutor {
                     self.permission_manager
                         .as_ref()
                         .map(|manager| manager.policy_snapshot())
-                        == reviewed_policy,
+                        == reviewed_policy
+                        || (granted_by_mode
+                            && self
+                                .permission_manager
+                                .as_ref()
+                                .is_some_and(|manager| manager.get_mode()
+                                    == crate::permissions::PermissionMode::BypassPermissions)),
                     "Permission policy changed during review; request approval again"
                 );
                 if let Some(commit) = commit {

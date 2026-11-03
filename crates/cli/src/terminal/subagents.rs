@@ -88,6 +88,8 @@ pub(crate) struct View {
     watching: bool,
     scroll: usize,
     text: String,
+    history: super::scrollback::Scrollback,
+    first_row: usize,
     refreshed: Instant,
     entered: bool,
     last_frame: String,
@@ -111,6 +113,8 @@ impl View {
             watching: false,
             scroll: 0,
             text: String::new(),
+            history: Default::default(),
+            first_row: 0,
             refreshed: Instant::now() - Duration::from_secs(2),
             entered: false,
             last_frame: String::new(),
@@ -130,6 +134,7 @@ impl View {
         }
         self.watching = true;
         self.scroll = 0;
+        self.text.clear();
         self.refreshed = Instant::now() - Duration::from_secs(2);
         false
     }
@@ -139,6 +144,10 @@ impl View {
         self.last_frame.clear();
         match event {
             Event::Key(key) if key.kind != KeyEventKind::Release => {
+                if super::scrollback::compact_key(*key) {
+                    super::scrollback::toggle_compact();
+                    return false;
+                }
                 if key.modifiers.contains(KeyModifiers::ALT)
                     && matches!(key.code, KeyCode::Left | KeyCode::Right)
                 {
@@ -181,6 +190,12 @@ impl View {
             Event::Mouse(mouse) if self.watching => match mouse.kind {
                 MouseEventKind::ScrollUp => self.scroll = self.scroll.saturating_add(3),
                 MouseEventKind::ScrollDown => self.scroll = self.scroll.saturating_sub(3),
+                MouseEventKind::Down(crossterm::event::MouseButton::Left) if mouse.row >= 3 => {
+                    self.history.click_presentation(
+                        self.first_row + mouse.row as usize - 3,
+                        self.last_size.0.saturating_sub(2).max(1) as usize,
+                    );
+                }
                 _ => {}
             },
             _ => {}
@@ -192,6 +207,14 @@ impl View {
         let refresh_due = self.refreshed.elapsed() >= Duration::from_secs(1);
         if refresh_due {
             self.refreshed = Instant::now();
+            super::title::background(
+                !crate::background_commands::running_agents(
+                    &self.context.paths,
+                    &self.context.db,
+                    &self.session,
+                )
+                .is_empty(),
+            );
             let selected = self.entries[self.selected].id.clone();
             if let Ok(entries) = entries(&self.context, &self.session) {
                 self.selected = entries
@@ -201,15 +224,23 @@ impl View {
                 self.entries = entries;
             }
             if self.watching {
-                self.text = crate::background_commands::agent_execution(
+                let history = crate::background_commands::agent_transcript(
                     &self.context,
                     &self.entries[self.selected].id,
                 );
+                let text = history.all().join("\n");
+                if text != self.text {
+                    self.text = text;
+                    self.history = history;
+                }
             }
         }
         let (cols, rows) = crossterm::terminal::size()?;
         if !refresh_due && self.last_size == (cols, rows) && !self.last_frame.is_empty() {
             return Ok(());
+        }
+        if self.last_size.0 != cols {
+            self.history.reflow(cols.saturating_sub(1).max(2) as usize);
         }
         self.last_size = (cols, rows);
         let width = cols.saturating_sub(2).max(1) as usize;
@@ -225,14 +256,16 @@ impl View {
                 self.entries[self.selected].label, self.entries[self.selected].id
             );
             let body = self
-                .text
-                .lines()
+                .history
+                .presentation()
+                .iter()
                 .flat_map(|line| super::markdown::wrap_styled(line, "", "", width))
                 .collect::<Vec<_>>();
             let start = body
                 .len()
                 .saturating_sub(height)
                 .saturating_sub(self.scroll);
+            self.first_row = start;
             lines.extend(body.into_iter().skip(start).take(height));
         } else {
             let start = self.selected.saturating_sub(height - 1);
@@ -257,7 +290,7 @@ impl View {
         for row in 0..rows as usize {
             let line = if row == rows.saturating_sub(1) as usize {
                 if self.watching {
-                    "↑/↓ scroll · alt+←/→ switch · esc list"
+                    "↑/↓ scroll · click expand · alt+m compact · alt+←/→ switch · esc list"
                 } else {
                     "enter select · esc back"
                 }
@@ -311,8 +344,32 @@ mod tests {
             .save_setting(&format!("agent-description.{child}"), &"Inspect child")
             .unwrap();
         store.append(&child, "user", "CHILD_USER_SENTINEL").unwrap();
-        store
-            .append(&child, "assistant", "CHILD_ANSWER_SENTINEL")
+        let assistant = store
+            .append(
+                &child,
+                "assistant",
+                "CHILD_ANSWER_SENTINEL **bold** and `code`",
+            )
+            .unwrap();
+        let output = (1..=9)
+            .map(|number| format!("CHILD_TOOL_LINE_{number}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        context
+            .db
+            .with_conn(|conn| {
+                deepseek_code_core::db::message_repo::insert_tool_call(
+                    conn,
+                    "child-tool",
+                    &assistant,
+                    "Read",
+                    Some(r#"{"file_path":"fixture.md"}"#),
+                    Some(&output),
+                    false,
+                    0,
+                )
+            })
+            .unwrap()
             .unwrap();
         assert!(!entries(&context, &parent)
             .unwrap()
@@ -340,8 +397,11 @@ mod tests {
         assert!(view.watching);
         assert_eq!(view.entries[view.selected].id, child);
         let body = crate::background_commands::agent_execution(&context, &child);
-        assert!(body.contains("User: CHILD_USER_SENTINEL"));
-        assert!(body.contains("Assistant: CHILD_ANSWER_SENTINEL"));
+        assert!(body.contains(&format!(
+            "{} CHILD_USER_SENTINEL",
+            crate::terminal::prompt_glyph()
+        )));
+        assert!(body.contains("● CHILD_ANSWER_SENTINEL"));
         assert!(!view.event(&Event::Key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE))));
         assert!(!view.watching);
         assert!(view.event(&Event::Key(KeyEvent::new(KeyCode::Left, KeyModifiers::ALT))));
@@ -361,6 +421,12 @@ mod tests {
         let mut display = super::super::live::TurnDisplay::new(true, "ask", &keys, vec![]).unwrap();
         display.set_shell_context(&context.paths.data_dir, &parent);
         display.before_text("MAIN_TRANSCRIPT_SENTINEL\n");
+        super::super::title::start();
+        let mut notifications = super::super::scrollback::Scrollback::default();
+        super::super::prompt_display::write_recorded(&mut io::stderr(), &mut notifications,
+            "<task-notification>\n<summary>Agent NOTICE_SENTINEL completed</summary>\n</task-notification>", 130, true).unwrap();
+        notifications.save();
+        display.queued_delivered("<task-notification>\n<summary>Agent INTERNAL_NOTICE completed</summary>\n</task-notification>");
         let runtime = tokio::runtime::Runtime::new().unwrap();
         runtime.block_on(async {
             while let Some(action) = display.action().await {
@@ -374,6 +440,17 @@ mod tests {
         display.finish(None);
         let mut editor = super::super::input::editor::PromptEditor::default();
         editor.set_subagents(context, parent);
+        editor.set_agent_rows(Box::new(|| {
+            vec![crate::background_commands::Agent {
+                session_id: "fixture-background".into(),
+                agent_type: "general".into(),
+                description: "RUNNING_BACKGROUND_SENTINEL".into(),
+                started_ms: chrono::Utc::now().timestamp_millis() as u64,
+                output_tokens: 0,
+                tokens_estimated: false,
+            }]
+        }));
         editor.readline("IDLE_SENTINEL ❯ ").unwrap();
+        super::super::title::background(false);
     }
 }

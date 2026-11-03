@@ -198,6 +198,8 @@ pub struct ToolLoopExecutor {
     owned_children: delegation::OwnedChildren,
     child_resumes: Arc<AtomicUsize>,
     subagent_hook_context: Option<(String, String)>,
+    delegation_parent: Option<(String, Arc<PermissionManager>)>,
+    observed_parent_mode: std::sync::Mutex<Option<crate::permissions::PermissionMode>>,
     hooks: Option<Arc<crate::services::tool_hooks::HookRunner>>,
     stop_hook_active: bool,
     stop_hook_blocks: u64,
@@ -623,6 +625,8 @@ impl ToolLoopExecutor {
             owned_children: Default::default(),
             child_resumes: Arc::new(AtomicUsize::new(0)),
             subagent_hook_context: None,
+            delegation_parent: None,
+            observed_parent_mode: std::sync::Mutex::new(None),
             hooks: None,
             stop_hook_active: false,
             stop_hook_blocks: 0,
@@ -772,6 +776,10 @@ impl ToolLoopExecutor {
     /// is not a plain builtin finishes here.
     async fn prepare_tool_call(&mut self, name: &str, input: &Value, id: &str) -> PreparedCall {
         let finished = |input: Value, output: String| PreparedCall { pre_contexts: None, step: CallStep::Finished((input, output, true)) };
+        if !input.is_object() {
+            return finished(input.clone(), format!("Invalid {name} arguments: expected a complete JSON object; resend the call with all required fields. Tool was not executed."));
+        }
+        self.sync_parent_permission_mode();
         self.mcp_outputs.remove(id);
         if let Err(error) = self.ensure_permission_continuation() { return finished(input.clone(), error.to_string()); }
         if self.pending_plan_reset.is_some() {
@@ -789,7 +797,7 @@ impl ToolLoopExecutor {
         };
         if pre.blocked { return finished(input.clone(), format!("PreToolUse hook blocked tool: {}", pre.reason)); }
         let mut input = pre.updated_input.unwrap_or_else(|| input.clone());
-        if pre.ask_permission {
+        if pre.ask_permission && !self.permission_manager.as_ref().is_some_and(|manager| manager.get_mode() == crate::permissions::PermissionMode::BypassPermissions) {
             if self.permission_manager.as_ref().is_some_and(|manager| manager.get_mode() == crate::permissions::PermissionMode::DontAsk) {
                 return finished(input, "dontAsk mode: hook requested permission; tool was not executed".into());
             }
@@ -1154,6 +1162,7 @@ impl ToolLoopExecutor {
     }
 
     async fn check_permission(&self, tool_name: &str, tool_input: &Value, tool_use_id: &str) -> PermissionResult {
+        self.sync_parent_permission_mode();
         if let Some(approval) = self.approved_call.as_ref().filter(|approval| approval.tool == tool_name && approval.input == *tool_input && approval.id == tool_use_id) {
             return self.permission_hard_denial_for(tool_name, tool_input, approval.pre_tool_hook).map(PermissionResult::Denied).unwrap_or(PermissionResult::Granted);
         }
@@ -2408,6 +2417,9 @@ impl ToolLoopExecutor {
                                     let name = block.and_then(|b| b.get("name")).and_then(|n| n.as_str()).unwrap_or("").to_string();
                                     current_tool_use_id = Some(id.clone());
                                     current_tool_name = Some(name.clone());
+                                    if let Some(input) = block.and_then(|block| block.get("input")).filter(|input| input.is_object()) {
+                                        self.handle_streaming_tool_arg_delta(&id, &name, &input.to_string());
+                                    }
 
                                     // Announce only after the complete arguments arrive. Consumers
                                     // use this event to capture pre-edit file contents/checkpoints.
@@ -2437,10 +2449,8 @@ impl ToolLoopExecutor {
                                 }
                                 "input_json_delta" => {
                                     let partial = delta.and_then(|d| d.get("partial_json")).and_then(|p| p.as_str()).unwrap_or("");
-                                    if !partial.is_empty() {
-                                        if let (Some(ref id), Some(ref name)) = (&current_tool_use_id, &current_tool_name) {
-                                            self.handle_streaming_tool_arg_delta(id, name, partial);
-                                        }
+                                    if let (Some(ref id), Some(ref name)) = (&current_tool_use_id, &current_tool_name) {
+                                        self.handle_streaming_tool_arg_delta(id, name, partial);
                                     }
                                 }
                                 _ => {}
@@ -2561,7 +2571,10 @@ impl ToolLoopExecutor {
                     let results = self.execute_tool_batch(batch).await;
                     for (tc, (actual_input, output_str, is_error)) in batch.iter().zip(results) {
                         for block in &mut assistant_blocks {
-                            if let ContentBlock::ToolUse { id, input, .. } = block { if id == &tc.id { *input = actual_input.clone(); } }
+                            if let ContentBlock::ToolUse { id, input, .. } = block { if id == &tc.id {
+                                // Keep the rejected call paired with its error in valid API history.
+                                *input = if actual_input.is_object() { actual_input.clone() } else { json!({}) };
+                            } }
                         }
                         let mcp = self.mcp_outputs.remove(&tc.id);
                         let mcp = self.finish_mcp_output(&tc.id, &tc.name, &output_str, is_error, mcp)?;
@@ -3011,7 +3024,7 @@ impl ToolLoopExecutor {
                 for idx in &indices {
                     let (id, name, args_str) = &openai_tool_args[idx];
                     let input: Value = serde_json::from_str(args_str).unwrap_or_else(|_| {
-                        recover_malformed_tool_input(name, args_str).unwrap_or(json!({}))
+                        recover_malformed_tool_input(name, args_str).unwrap_or(Value::Null)
                     });
 
                     let _ = self.event_tx.send(EngineEvent::ToolUseStart {
@@ -3277,7 +3290,11 @@ impl ToolLoopExecutor {
             .map(|s| s.accumulated_args.clone())
             .unwrap_or_default();
 
-        let merged = merge_tool_args(&prev_args, delta);
+        let merged = if prev_args == "{}" && delta != "{}" {
+            delta.to_owned()
+        } else {
+            merge_tool_args(&prev_args, delta)
+        };
 
         let delta_to_emit = if merged.starts_with(&prev_args) && !prev_args.is_empty() {
             merged[prev_args.len()..].to_string()
@@ -3305,9 +3322,9 @@ impl ToolLoopExecutor {
         if let Some(stc) = self.streaming_tool_args.remove(tool_use_id) {
             let parsed: Option<Value> = serde_json::from_str(&stc.accumulated_args).ok();
             parsed.or_else(|| recover_malformed_tool_input(&stc.name, &stc.accumulated_args))
-                .unwrap_or(json!({}))
+                .unwrap_or(Value::Null)
         } else {
-            json!({})
+            Value::Null
         }
     }
 }

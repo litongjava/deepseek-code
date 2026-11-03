@@ -517,7 +517,7 @@ fn plan_child_stream(format: &str, call: Option<(&str, &str, Value)>) -> String 
 }
 
 #[tokio::test]
-async fn child_plan_clear_is_isolated_persists_new_segment_and_resumes_cleanly() {
+async fn child_plan_review_returns_without_approval_or_implementation_and_resumes_cleanly() {
     use crate::native_engine::provider_manager::ApiFormat;
     use crate::permissions::PermissionMode;
     for format in ["openai", "anthropic"] {
@@ -625,82 +625,49 @@ async fn child_plan_clear_is_isolated_persists_new_segment_and_resumes_cleanly()
         .unwrap()
         .unwrap();
         let child = created["session_id"].as_str().unwrap().to_owned();
-        assert_eq!(
-            std::fs::read_to_string(&destination).unwrap(),
-            "approved implementation"
-        );
-        assert_eq!(
-            permissions.mode_snapshot(),
-            parent_mode,
-            "Child approval changed owner permission mode"
-        );
         assert!(
-            crate::services::plan_approval::latest_boundary(&context.db, &parent)
-                .unwrap()
-                .is_none()
+            !destination.exists(),
+            "Review must not authorize implementation"
         );
-        let boundary = crate::services::plan_approval::latest_boundary(&context.db, &child)
-            .unwrap()
-            .unwrap();
-        let parent_history = serde_json::to_string(
-            &store
-                .model_history(&parent, &executor.provider.provider.api_format)
-                .unwrap(),
-        )
-        .unwrap();
-        assert!(parent_history.contains("PARENT_CONTEXT_MUST_SURVIVE"));
-        context.db.with_conn(|conn| {
-            let before:(String,i64)=conn.query_row("SELECT t.message_id,m.sort_order FROM tool_calls t JOIN messages m ON m.id=t.message_id WHERE m.conversation_id=?1 AND t.name='Read'",[&child],|r|Ok((r.get(0)?,r.get(1)?))).unwrap();
-            let after:(String,i64,i64,bool)=conn.query_row("SELECT t.message_id,m.sort_order,t.sort_order,t.is_error FROM tool_calls t JOIN messages m ON m.id=t.message_id WHERE m.conversation_id=?1 AND t.name='Write'",[&child],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?))).unwrap();
-            let boundary_order:i64=conn.query_row("SELECT sort_order FROM messages WHERE id=?1",[&boundary],|r|r.get(0)).unwrap();
-            assert_ne!(before.0,after.0,"Child must rotate its assistant segment after clearing context");
-            assert!(before.1<boundary_order && after.1>boundary_order);
-            assert_eq!(after.2,0,"Post-clear tool ordering starts at zero");
-            assert!(!after.3);
-        }).unwrap();
-        {
-            let retained = registry.lock().unwrap();
-            assert_eq!(
-                retained[&child]
-                    .executor
-                    .permission_manager
-                    .as_ref()
+        assert_eq!(permissions.mode_snapshot(), parent_mode);
+        for session in [&parent, &child] {
+            assert!(
+                crate::services::plan_approval::latest_boundary(&context.db, session)
                     .unwrap()
-                    .get_mode(),
-                PermissionMode::AcceptEdits
+                    .is_none()
             );
         }
+        let history = store
+            .model_history(&child, &executor.provider.provider.api_format)
+            .unwrap();
+        let history = serde_json::to_string(&history).unwrap();
+        assert!(history.contains("APPROVED_CHILD_PLAN"));
+        assert!(history.contains("OLD_CHILD_TOOL_CONTENT"));
+        assert_eq!(
+            registry.lock().unwrap()[&child]
+                .executor
+                .permission_manager
+                .as_ref()
+                .unwrap()
+                .get_mode(),
+            PermissionMode::PlanMode
+        );
         tokio::time::timeout(
             std::time::Duration::from_secs(20),
-            executor.resume_owned_child(&child, Some("RESUME_IMPLEMENTED_CHILD"), false),
+            executor.resume_owned_child(&child, Some("RESUME_REVIEW_CHILD"), false),
         )
         .await
         .unwrap()
         .unwrap();
-        assert_eq!(permissions.mode_snapshot(), parent_mode);
         drop(executor);
         assert_eq!(
             reader.await.unwrap(),
-            (1, 0),
-            "Child reset must not reset the parent host"
+            (0, 0),
+            "Child review must not prompt or reset the parent"
         );
-        let requests = requests.lock().unwrap();
-        assert_eq!(requests.len(), 5);
-        assert!(requests[1]["messages"]
+        assert!(requests.lock().unwrap().last().unwrap()["messages"]
             .to_string()
-            .contains("OLD_CHILD_TOOL_CONTENT"));
-        for request in &requests[2..] {
-            let history = request["messages"].to_string();
-            assert!(!history.contains("OLD_CHILD_PROMPT_MUST_DISAPPEAR"));
-            assert!(!history.contains("OLD_CHILD_TOOL_CONTENT"));
-            assert!(history.contains("APPROVED_CHILD_PLAN"));
-        }
-        assert!(requests[4]["messages"]
-            .to_string()
-            .contains("RESUME_IMPLEMENTED_CHILD"));
-        assert!(requests[4]["messages"]
-            .to_string()
-            .contains("approved implementation"));
+            .contains("RESUME_REVIEW_CHILD"));
         server.abort();
     }
 }

@@ -92,8 +92,8 @@ fn conversation(session: &Session, id: &str, detailed: bool, mut recorded: Optio
                 continue;
             }
             if message.role == "user" {
-                if let Some(summary) = deepseek_code_core::tools::background_shell::notification_summary(&message.content) {
-                    lines.push(change_view::body(&format!("\u{25cf} {summary}")));
+                if let Some(summary) = crate::background_commands::notification_text(&message.content) {
+                    lines.extend(summary.lines().map(change_view::body));
                     if let Some(recorded) = recorded.as_deref_mut() { record_lines(recorded, &lines[message_start..], width); }
                 continue;
                 }

@@ -31,18 +31,84 @@ fn plan_allowed_prompts(input: &Value) -> Result<Vec<Value>> {
 }
 
 impl ToolLoopExecutor {
+    fn delegated_parent(&self) -> Option<String> {
+        if let Some((parent, _)) = &self.delegation_parent {
+            return Some(parent.clone());
+        }
+        let root = self.search_config_path.as_deref()?.parent()?;
+        let session = self.conv_id.as_deref()?;
+        // Only a live worker control channel can supply a cross-process parent.
+        // Historical relationships alone must not re-enable bypass on resume.
+        let directory =
+            crate::services::background_sessions::worker_directory(root, session).ok()??;
+        let job = crate::services::background_sessions::read_job(&directory).ok()?;
+        (job.parent_session_id != session).then_some(job.parent_session_id)
+    }
+
+    fn plan_document_owner(&self, tool: &str, input: &Value) -> Option<String> {
+        let root = self.search_config_path.as_deref()?.parent()?;
+        let session = self.conv_id.as_deref()?;
+        if plans::is_document_tool(root, session, tool, input) {
+            return Some(session.to_owned());
+        }
+        let parent = self.delegated_parent()?;
+        plans::is_document_tool(root, &parent, tool, input).then_some(parent)
+    }
+
     pub(super) fn is_plan_document_tool(&self, tool: &str, input: &Value) -> bool {
-        let Some(root) = self
+        self.plan_document_owner(tool, input).is_some()
+    }
+
+    /// Follow parent mode changes without undoing a child's explicit Plan entry.
+    pub(super) fn sync_parent_permission_mode(&self) {
+        let Some(parent) = self.delegated_parent() else {
+            return;
+        };
+        let Some(manager) = &self.permission_manager else {
+            return;
+        };
+        let context = self
             .search_config_path
             .as_deref()
             .and_then(std::path::Path::parent)
-        else {
-            return false;
+            .and_then(|root| crate::services::session_messages::context(root).ok());
+        let mode = self
+            .delegation_parent
+            .as_ref()
+            .map(|(_, parent)| parent.get_mode())
+            .or_else(|| {
+                context.as_ref().and_then(|context| {
+                    crate::services::session_permission_mode::load(&context.db, &parent)
+                        .ok()
+                        .flatten()
+                })
+            });
+        let Some(mode) = mode else {
+            return;
         };
-        let Some(session) = self.conv_id.as_deref() else {
-            return false;
-        };
-        plans::is_document_tool(root, session, tool, input)
+        let mut observed = self
+            .observed_parent_mode
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        if *observed == Some(mode) {
+            return;
+        }
+        if manager.get_mode() != mode {
+            if let (Some(context), Some(session)) = (&context, self.conv_id.as_deref()) {
+                if let Err(error) = crate::services::session_permission_mode::set(
+                    &context.db,
+                    session,
+                    manager,
+                    mode,
+                ) {
+                    tracing::warn!("Unable to inherit parent permission mode: {error:#}");
+                    return;
+                }
+            } else {
+                manager.set_mode(mode);
+            }
+        }
+        *observed = Some(mode);
     }
 
     pub(super) async fn execute_plan_document(
@@ -64,7 +130,8 @@ impl ToolLoopExecutor {
             if let PermissionResult::Denied(reason) = self.check_permission(tool, input, id).await { anyhow::bail!("{reason}"); }
             anyhow::ensure!(self.is_plan_document_tool(tool, input), "Plan permission or file path changed; retry the operation");
             let root = self.search_config_path.as_deref().and_then(std::path::Path::parent).context("Plan storage unavailable")?;
-            let session = self.conv_id.as_deref().context("Plan session unavailable")?;
+            let owner = self.plan_document_owner(tool, input).context("Plan session unavailable")?;
+            let session = owner.as_str();
             if tool == "Read" {
                 let content = plans::read(root, session)?.context("Plan file does not exist")?;
                 let offset = input["offset"].as_u64().unwrap_or(1).max(1) as usize;
@@ -188,6 +255,13 @@ impl ToolLoopExecutor {
         let plan = plans::read(&root, &session)?
             .filter(|plan| !plan.trim().is_empty())
             .ok_or_else(|| anyhow!("No plan written yet; write the session plan file, then call ExitPlanMode (or supply plan text)"))?;
+        if self.delegated_parent().is_some()
+            && crate::services::teams::team_for_session(&root, &session)?.is_none()
+        {
+            return Ok(
+                json!({"approved":false,"mode":"plan","submitted":true,"plan":plan,"planFilePath":path,"message":"Plan review complete. Return the plan and findings to the parent agent; only the parent requests implementation approval."}),
+            );
+        }
         let expected_mode = manager.mode_snapshot();
         anyhow::ensure!(
             expected_mode.mode == PermissionMode::PlanMode,
@@ -403,7 +477,7 @@ mod tests {
             for answer in [Some("yes"), Some("no"), None] {
                 let root = tempfile::tempdir().unwrap();
                 let parent = crate::runtime::default_permissions();
-                parent.set_mode(PermissionMode::BypassPermissions);
+                parent.set_mode(PermissionMode::AskPermissions);
                 parent.set_session_rules(
                     "parent",
                     std::collections::HashMap::from([
@@ -456,7 +530,7 @@ mod tests {
                     panic!("Explicit confirmation was bypassed");
                 };
                 assert_eq!(tool_name, name);
-                assert_eq!(child.get_mode(), PermissionMode::BypassPermissions);
+                assert_eq!(child.get_mode(), PermissionMode::AskPermissions);
                 let sender = waiters.lock().await.remove(&request_id).unwrap();
                 if let Some(answer) = answer {
                     sender.send(answer.into()).unwrap();
@@ -474,16 +548,16 @@ mod tests {
                     .unwrap();
                     assert_eq!(current.is_null(), failed);
                 }
-                assert_eq!(parent.get_mode(), PermissionMode::BypassPermissions);
+                assert_eq!(parent.get_mode(), PermissionMode::AskPermissions);
                 assert_eq!(
                     child.get_mode(),
                     if failed {
-                        PermissionMode::BypassPermissions
+                        PermissionMode::AskPermissions
                     } else {
                         PermissionMode::PlanMode
                     }
                 );
-                child.set_mode(PermissionMode::BypassPermissions);
+                child.set_mode(PermissionMode::AskPermissions);
                 let context = crate::permissions::PermissionContext {
                     mcp_read_only: false,
                     tool_name: "Write".into(),
@@ -686,6 +760,310 @@ mod tests {
         .with_search_config_path(root.join("settings.json"))
         .with_permission_manager(manager.clone());
         (executor, rx, manager)
+    }
+
+    #[tokio::test]
+    async fn delegated_plan_review_and_parent_document_need_no_approval() {
+        let root = tempfile::tempdir().unwrap();
+        let (mut executor, _events, manager) = document_executor(root.path());
+        let parent = crate::runtime::default_permissions();
+        parent.set_mode(PermissionMode::PlanMode);
+        executor.delegation_parent = Some(("parent-session".into(), parent.clone()));
+        let target = plans::path(root.path(), "parent-session").unwrap();
+        let input = json!({"file_path":target,"content":"# Parent plan"});
+        assert!(executor.is_plan_document_tool("Write", &input));
+        let (_, output, failed) = executor
+            .execute_plan_document("Write", &input, "write")
+            .await;
+        assert!(!failed, "{output}");
+        assert_eq!(
+            plans::read(root.path(), "parent-session")
+                .unwrap()
+                .as_deref(),
+            Some("# Parent plan")
+        );
+        plans::save(root.path(), "file-session", "# Review findings").unwrap();
+        let result = executor
+            .plan_transition("ExitPlanMode", &json!({}), "review")
+            .await
+            .unwrap();
+        assert_eq!(result["submitted"], true);
+        assert_eq!(manager.get_mode(), PermissionMode::PlanMode);
+        let context = crate::services::session_messages::context(root.path()).unwrap();
+        parent.set_mode(PermissionMode::BypassPermissions);
+        executor.sync_parent_permission_mode();
+        assert_eq!(manager.get_mode(), PermissionMode::BypassPermissions);
+        assert_eq!(
+            crate::services::session_permission_mode::load(&context.db, "file-session").unwrap(),
+            Some(PermissionMode::BypassPermissions)
+        );
+        manager.set_mode(PermissionMode::PlanMode);
+        executor.sync_parent_permission_mode();
+        assert_eq!(
+            manager.get_mode(),
+            PermissionMode::PlanMode,
+            "An unchanged parent must not undo child Plan entry"
+        );
+        parent.set_mode(PermissionMode::AskPermissions);
+        executor.sync_parent_permission_mode();
+        assert_eq!(manager.get_mode(), PermissionMode::AskPermissions);
+    }
+
+    #[tokio::test]
+    async fn pending_child_approval_follows_bypass_and_preserves_deny() {
+        for denied in [false, true] {
+            let root = tempfile::tempdir().unwrap();
+            let (mut executor, mut events, manager) = document_executor(root.path());
+            let parent = crate::runtime::default_permissions();
+            parent.set_mode(PermissionMode::AskPermissions);
+            manager.set_mode(PermissionMode::AskPermissions);
+            executor.delegation_parent = Some(("parent-session".into(), parent.clone()));
+            let destination = root.path().join("project").join("approved.txt");
+            let input = json!({"file_path":destination,"content":"approved"});
+            let task = tokio::spawn(async move {
+                executor.execute_tool_call("Write", &input, "waiting").await
+            });
+            assert!(matches!(
+                timeout(Duration::from_secs(3), events.recv())
+                    .await
+                    .unwrap(),
+                Some(EngineEvent::ToolPermission { .. })
+            ));
+            if denied {
+                manager.set_session_rules(
+                    "file-session",
+                    std::collections::HashMap::from([(
+                        "Write".into(),
+                        crate::permissions::rules::PermissionAction::Deny,
+                    )]),
+                );
+            }
+            parent.set_mode(PermissionMode::BypassPermissions);
+            let (_, output, failed) = timeout(Duration::from_secs(3), task)
+                .await
+                .unwrap()
+                .unwrap();
+            assert_eq!(failed, denied, "{output}");
+            assert_eq!(destination.exists(), !denied);
+        }
+    }
+
+    #[test]
+    fn historical_parent_record_does_not_restore_bypass() {
+        let root = tempfile::tempdir().unwrap();
+        let (executor, _events, manager) = document_executor(root.path());
+        let context = crate::services::session_messages::context(root.path()).unwrap();
+        context
+            .save_setting(
+                "delegation.file-session",
+                &json!({"parent_session_id":"old-parent"}),
+            )
+            .unwrap();
+        context.db.with_conn(|conn| conn.execute("INSERT INTO peripheral_settings(key,value) VALUES('cli.permission-mode.old-parent','bypass')", [])).unwrap().unwrap();
+        executor.sync_parent_permission_mode();
+        assert_eq!(manager.get_mode(), PermissionMode::PlanMode);
+        assert!(executor.delegated_parent().is_none());
+    }
+
+    #[tokio::test]
+    async fn background_worker_permissions_follow_live_parent() {
+        use crate::services::{background_sessions, session_permission_mode};
+        for denied in [false, true] {
+            let root = tempfile::tempdir().unwrap();
+            let context = crate::services::session_messages::context(root.path()).unwrap();
+            let parent = crate::runtime::default_permissions();
+            session_permission_mode::set(
+                &context.db,
+                "parent-session",
+                &parent,
+                PermissionMode::PlanMode,
+            )
+            .unwrap();
+            let id = uuid::Uuid::new_v4().to_string();
+            let directory = background_sessions::directory(root.path(), &id).unwrap();
+            std::fs::create_dir_all(&directory).unwrap();
+            let job = background_sessions::Job {
+                id,
+                foreground: false,
+                parent_session_id: "parent-session".into(),
+                session_id: "file-session".into(),
+                title: "Permission fixture".into(),
+                status: "running".into(),
+                supervisor_pid: None,
+                child_pid: None,
+                started_ms: 0,
+                heartbeat_ms: 0,
+                finished_ms: None,
+                exit_code: None,
+                error: None,
+            };
+            background_sessions::save(&directory.join("state.json"), &job).unwrap();
+            let log = root.path().join("worker.log");
+            let mut worker = tokio::process::Command::new(std::env::current_exe().unwrap())
+                .args(["native_engine::tool_loop::plan_tool::tests::background_worker_permission_fixture", "--exact", "--ignored", "--nocapture"])
+                .env(background_sessions::CONTROL_ENV, &directory)
+                .env("DCL_PERMISSION_TEST_ROOT", root.path())
+                .env("DCL_PERMISSION_TEST_DENIED", denied.to_string())
+                .stdout(std::fs::File::create(&log).unwrap())
+                .stderr(std::process::Stdio::null())
+                .kill_on_drop(true)
+                .spawn().unwrap();
+            for (signal, mode) in [
+                ("plan-reviewed", PermissionMode::AskPermissions),
+                ("permission-pending", PermissionMode::BypassPermissions),
+                ("permission-finished", PermissionMode::AskPermissions),
+            ] {
+                timeout(Duration::from_secs(15), async {
+                    while !root.path().join(signal).exists() {
+                        assert!(
+                            worker.try_wait().unwrap().is_none(),
+                            "{}",
+                            std::fs::read_to_string(&log).unwrap()
+                        );
+                        tokio::time::sleep(Duration::from_millis(20)).await;
+                    }
+                })
+                .await
+                .unwrap_or_else(|_| {
+                    panic!(
+                        "Waiting for {signal}: {}",
+                        std::fs::read_to_string(&log).unwrap()
+                    )
+                });
+                session_permission_mode::set(&context.db, "parent-session", &parent, mode).unwrap();
+            }
+            let status = timeout(Duration::from_secs(15), worker.wait())
+                .await
+                .unwrap()
+                .unwrap();
+            assert!(
+                status.success(),
+                "{}",
+                std::fs::read_to_string(&log).unwrap()
+            );
+            assert_eq!(root.path().join("project/approved.txt").exists(), !denied);
+            assert_eq!(
+                plans::read(root.path(), "parent-session")
+                    .unwrap()
+                    .as_deref(),
+                Some("# Revised parent plan")
+            );
+            assert_eq!(
+                session_permission_mode::load(&context.db, "file-session").unwrap(),
+                Some(PermissionMode::AskPermissions)
+            );
+        }
+    }
+
+    #[tokio::test]
+    #[ignore = "isolated subprocess fixture for background worker permissions"]
+    async fn background_worker_permission_fixture() {
+        let root = std::path::PathBuf::from(std::env::var_os("DCL_PERMISSION_TEST_ROOT").unwrap());
+        let (mut executor, mut events, manager) = document_executor(&root);
+        let plan = plans::path(&root, "parent-session").unwrap();
+        for (tool, input) in [
+            ("Write", json!({"file_path":plan,"content":"# Parent plan"})),
+            ("Read", json!({"file_path":plan})),
+            (
+                "Edit",
+                json!({"file_path":plan,"old_string":"# Parent plan","new_string":"# Revised parent plan"}),
+            ),
+            ("ExitPlanMode", json!({"plan":"# Review complete"})),
+        ] {
+            let (_, output, failed) = executor.execute_tool_call(tool, &input, tool).await;
+            assert!(!failed, "{output}");
+            if tool == "ExitPlanMode" {
+                assert_eq!(
+                    serde_json::from_str::<Value>(&output).unwrap()["submitted"],
+                    true
+                );
+            }
+        }
+        while let Ok(event) = events.try_recv() {
+            assert!(!matches!(
+                event,
+                EngineEvent::ToolPermission { .. } | EngineEvent::AskUser { .. }
+            ));
+        }
+        std::fs::write(root.join("plan-reviewed"), "ready").unwrap();
+        timeout(Duration::from_secs(10), async {
+            while manager.get_mode() != PermissionMode::AskPermissions {
+                executor.sync_parent_permission_mode();
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        })
+        .await
+        .unwrap();
+        let input = json!({"file_path":root.join("project/approved.txt"),"content":"approved"});
+        let task = tokio::spawn(async move {
+            let result = executor
+                .execute_tool_call("Write", &input, "pending-write")
+                .await;
+            (executor, result)
+        });
+        assert!(matches!(
+            timeout(Duration::from_secs(5), events.recv())
+                .await
+                .unwrap(),
+            Some(EngineEvent::ToolPermission { .. })
+        ));
+        let denied = std::env::var("DCL_PERMISSION_TEST_DENIED").unwrap() == "true";
+        if denied {
+            manager.set_session_rules(
+                "file-session",
+                std::collections::HashMap::from([(
+                    "Write".into(),
+                    crate::permissions::rules::PermissionAction::Deny,
+                )]),
+            );
+        }
+        std::fs::write(root.join("permission-pending"), "ready").unwrap();
+        let (executor, (_, output, failed)) = timeout(Duration::from_secs(10), task)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(failed, denied, "{output}");
+        assert_eq!(manager.get_mode(), PermissionMode::BypassPermissions);
+        std::fs::write(root.join("permission-finished"), "ready").unwrap();
+        timeout(Duration::from_secs(10), async {
+            while manager.get_mode() != PermissionMode::AskPermissions {
+                executor.sync_parent_permission_mode();
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        })
+        .await
+        .unwrap();
+    }
+
+    #[tokio::test]
+    async fn missing_stream_arguments_do_not_execute_default_directory_tools() {
+        let root = tempfile::tempdir().unwrap();
+        let (mut executor, _events, _) = document_executor(root.path());
+        assert_eq!(
+            executor.finalize_streaming_tool_args("missing"),
+            Value::Null
+        );
+        executor.handle_streaming_tool_arg_delta("explicit", "ListDir", "{}");
+        assert_eq!(executor.finalize_streaming_tool_args("explicit"), json!({}));
+        executor.handle_streaming_tool_arg_delta("blank", "ListDir", "{}");
+        executor.handle_streaming_tool_arg_delta("blank", "ListDir", "");
+        assert_eq!(executor.finalize_streaming_tool_args("blank"), Value::Null);
+        executor.handle_streaming_tool_arg_delta("read", "Read", "{}");
+        executor.handle_streaming_tool_arg_delta("read", "Read", r#"{"file_path":"a"}"#);
+        assert_eq!(
+            executor.finalize_streaming_tool_args("read")["file_path"],
+            "a"
+        );
+        let prepared = executor
+            .prepare_tool_call("ListDir", &Value::Null, "missing")
+            .await;
+        match prepared.step {
+            CallStep::Finished((_, message, failed)) => {
+                assert!(failed);
+                assert!(message.contains("Tool was not executed"));
+            }
+            _ => panic!("Invalid arguments were executed"),
+        }
     }
 
     #[tokio::test]
@@ -913,6 +1291,108 @@ mod tests {
             assert!(waiters.lock().await.is_empty());
         }
     }
+    #[tokio::test]
+    async fn empty_and_initial_tool_arguments_are_handled_on_both_protocols() {
+        use axum::{routing::post, Json, Router};
+        for format in ["anthropic", "openai"] {
+            let root = tempfile::tempdir().unwrap();
+            let source = root.path().join("project").join("source.txt");
+            let (mut executor, mut events, _) = document_executor(root.path());
+            std::fs::write(&source, "SOURCE_SENTINEL").unwrap();
+            let requests = Arc::new(Mutex::new(Vec::<Value>::new()));
+            let captured = requests.clone();
+            let app = Router::new().route(if format == "anthropic" { "/v1/messages" } else { "/v1/chat/completions" }, post(move |Json(body): Json<Value>| {
+                let captured = captured.clone();
+                let source = source.clone();
+                async move {
+                    let mut requests = captured.lock().await;
+                    let first = requests.is_empty();
+                    requests.push(body);
+                    let calls = [("empty-dir", "ListDir", "".to_owned()), ("empty-read", "Read", "".to_owned()), ("valid-read", "Read", json!({"file_path":source}).to_string())];
+                    let mut events = Vec::new();
+                    if format == "anthropic" {
+                        events.push(json!({"type":"message_start","message":{"id":"fixture","model":"fixture","usage":{"input_tokens":1}}}));
+                        if first {
+                            for (index, (id, name, args)) in calls.iter().enumerate() {
+                                let initial = if args.is_empty() { json!({}) } else { serde_json::from_str::<Value>(args).unwrap() };
+                                events.push(json!({"type":"content_block_start","index":index,"content_block":{"type":"tool_use","id":id,"name":name,"input":initial}}));
+                                if args.is_empty() { events.push(json!({"type":"content_block_delta","index":index,"delta":{"type":"input_json_delta","partial_json":""}})); }
+                                events.push(json!({"type":"content_block_stop","index":index}));
+                            }
+                        } else {
+                            events.push(json!({"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}));
+                            events.push(json!({"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"RECOVERED"}}));
+                            events.push(json!({"type":"content_block_stop","index":0}));
+                        }
+                        events.push(json!({"type":"message_delta","delta":{"stop_reason":if first {"tool_use"} else {"end_turn"}},"usage":{"output_tokens":1}}));
+                        events.push(json!({"type":"message_stop"}));
+                    } else {
+                        let delta = if first { json!({"tool_calls":calls.iter().enumerate().map(|(index,(id,name,args))|json!({"index":index,"id":id,"type":"function","function":{"name":name,"arguments":args}})).collect::<Vec<_>>()}) } else { json!({"content":"RECOVERED"}) };
+                        events.push(json!({"choices":[{"index":0,"delta":delta,"finish_reason":if first {"tool_calls"} else {"stop"}}]}));
+                    }
+                    let mut stream = events.iter().map(|event| format!("data: {event}\n\n")).collect::<String>();
+                    if format == "openai" { stream.push_str("data: [DONE]\n\n"); }
+                    ([("content-type", "text/event-stream")], stream)
+                }
+            }));
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            executor.provider.provider.base_url =
+                format!("http://{}", listener.local_addr().unwrap());
+            executor.provider.provider.api_format = if format == "anthropic" {
+                crate::native_engine::provider_manager::ApiFormat::Anthropic
+            } else {
+                crate::native_engine::provider_manager::ApiFormat::OpenAI
+            };
+            executor.messages = vec![json!({"role":"user","content":"Inspect the file"})];
+            let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+            let reader = tokio::spawn(async move {
+                let mut results = Vec::new();
+                while let Some(event) = events.recv().await {
+                    if let EngineEvent::ToolUseDone {
+                        output, is_error, ..
+                    } = event
+                    {
+                        results.push((output, is_error));
+                    }
+                }
+                results
+            });
+            let result = timeout(Duration::from_secs(10), executor.execute())
+                .await
+                .unwrap()
+                .unwrap();
+            drop(executor);
+            let results = reader.await.unwrap();
+            assert_eq!(result.0, "RECOVERED");
+            assert_eq!(results.len(), 3);
+            assert!(
+                results[..2]
+                    .iter()
+                    .all(|(output, failed)| *failed && output.contains("Tool was not executed")),
+                "{format}: {results:?}"
+            );
+            assert!(
+                !results[2].1 && results[2].0.contains("SOURCE_SENTINEL"),
+                "{format}: {results:?}"
+            );
+            let requests = requests.lock().await;
+            assert_eq!(requests.len(), 2);
+            if format == "anthropic" {
+                for message in requests[1]["messages"].as_array().unwrap() {
+                    for block in message["content"].as_array().into_iter().flatten() {
+                        if block["type"] == "tool_use" {
+                            assert!(
+                                block["input"].is_object(),
+                                "Rejected calls still need valid API history: {block}"
+                            );
+                        }
+                    }
+                }
+            }
+            server.abort();
+        }
+    }
+
     #[tokio::test]
     async fn model_streams_route_plan_file_tools_through_session_executor_on_both_protocols() {
         use axum::{http::header, routing::post, Json, Router};

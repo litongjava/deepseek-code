@@ -13,6 +13,16 @@ pub(crate) fn write_recorded(
     raw: bool,
 ) -> io::Result<()> {
     let newline = if raw { "\r\n" } else { "\n" };
+    if crate::background_commands::is_notification(text) {
+        write!(output, "{newline}")?;
+        if history.needs_separator() {
+            history.push(String::new(), None);
+        }
+        for row in history.record_prompt(text) {
+            write!(output, "{row}{newline}")?;
+        }
+        return Ok(());
+    }
     let rule = "─".repeat(width.max(4));
     for row in [String::new(), rule.clone()] {
         write!(output, "{row}{newline}")?;
@@ -41,6 +51,14 @@ pub fn write_submitted(
     raw: bool,
 ) -> io::Result<()> {
     let newline = if raw { "\r\n" } else { "\n" };
+    if let Some(summary) = crate::background_commands::notification_text(text) {
+        write!(output, "{newline}")?;
+        for line in summary.lines() {
+            write!(output, "{line}{newline}")?;
+        }
+        return Ok(());
+    }
+
     if text.is_empty() {
         return write!(output, "{newline}");
     }

@@ -1071,6 +1071,7 @@ impl PromptEditor {
                 last_agents = std::time::Instant::now();
                 if let Some(rows) = &self.agent_rows {
                     agent_records = rows();
+                    crate::terminal::title::background(!agent_records.is_empty());
                     agents = crate::background_commands::agent_rows(&agent_records, width);
                     if let (Some(id), Some(details)) = (&agent_detail, &self.agent_details) {
                         agent_preview = details(id);

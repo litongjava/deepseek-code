@@ -2214,14 +2214,11 @@ fn run(
                     if let Some(index) = state.queued.iter().position(|queued| *queued == text) {
                         state.queued.remove(index);
                     }
-                    screen.pinned.text = text.clone();
-                    super::pinned_prompt::remember(&text);
-                    // As in the reference CLI the message joins the transcript
-                    // where the model read it; a task notification was already
-                    // announced when the command finished.
-                    if deepseek_code_core::tools::background_shell::notification_summary(&text)
-                        .is_none()
-                    {
+                    // Task notifications are already announced and must not replace
+                    // the user's pinned prompt with the internal model payload.
+                    if !crate::background_commands::is_notification(&text) {
+                        screen.pinned.text = text.clone();
+                        super::pinned_prompt::remember(&text);
                         screen.separate_block();
                         screen.log_rendered("");
                         let (block, rows) = screen.scrollback.prompt(&text);
@@ -2961,6 +2958,7 @@ fn run(
                 }
                 if let Some(context) = &agent_context {
                     state.agent_panel = crate::background_commands::running_agents(&context.paths, &context.db, session);
+                    super::title::background(!state.agent_panel.is_empty());
                     state.agent_panel.extend(state.foreground_agents.iter().filter_map(|(id, kind)| crate::background_commands::foreground_agent(context, id, kind)));
 
                     if let Some(id) = &state.agent_detail { agent_preview = crate::background_commands::agent_execution(context, id); }
@@ -4271,7 +4269,10 @@ impl TurnDisplay {
             Some(live) => {
                 let _ = live.updates.send(Update::QueuedDelivered(text.into()));
             }
-            None => self.notice(&format!("{} {text}", crate::terminal::prompt_glyph())),
+            None => self.notice(
+                &crate::background_commands::notification_text(text)
+                    .unwrap_or_else(|| format!("{} {text}", crate::terminal::prompt_glyph())),
+            ),
         }
     }
     pub fn set_draft(&mut self, text: &str) {
