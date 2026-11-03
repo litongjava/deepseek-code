@@ -1,0 +1,16 @@
+.streaming-reveal-grapheme {
+  animation-duration: 90ms;
+  animation-timing-function: cubic-bezier(.215,.61,.355,1);
+  animation-fill-mode: both;
+}
+@keyframes streaming-reveal-0 {
+  from { filter: blur(6px); opacity: 0; }
+  to { filter: blur(0); opacity: 1; }
+}
+@keyframes streaming-reveal-1 {
+  from { filter: blur(6px); opacity: 0; }
+  to { filter: blur(0); opacity: 1; }
+}
+@media (prefers-reduced-motion: reduce) {
+  .streaming-reveal-grapheme { animation: none; filter: none; opacity: 1; }
+}

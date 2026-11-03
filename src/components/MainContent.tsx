@@ -1,3 +1,5 @@
+import { useComposerDrop } from '../features/chat/useComposerDrop';
+import { useCommittedCallback } from '../features/chat/useCommittedCallback';
 import React, { useState, useEffect, useRef, useMemo, useCallback } from 'react';
 import { planModeFromTool, approvedPermissionModeFromTool } from '../features/streaming/planMode';
 import { ChevronDown, FileText, ArrowUp, RotateCcw, Pencil, Copy, Check, Paperclip, ListCollapse, Globe, Clock, Info, Github, Plus, Loader2, Smartphone, Terminal, Monitor } from 'lucide-react';
@@ -46,7 +48,6 @@ import LoginRequiredModal from '../features/modals/LoginRequiredModal';
 import CrossModeWarningModal from '../features/modals/CrossModeWarningModal';
 import MessageAttachments from './MessageAttachments';
 import DocumentCard, { DocumentInfo } from './DocumentCard';
-import { copyToClipboard } from '../utils/clipboard';
 import {
   extractTextContent,
   formatMessageTime,
@@ -148,7 +149,6 @@ const MainContent = ({ onNewChat, resetKey, tunerConfig, onOpenDocument, onArtif
   const {
     showPlusMenu, setShowPlusMenu,
     inputHeight, setInputHeight,
-    isDragging, setIsDragging,
     showSkillsSubmenu, setShowSkillsSubmenu,
     showProjectsSubmenu, setShowProjectsSubmenu,
     showGithubModal, setShowGithubModal,
@@ -176,7 +176,6 @@ const MainContent = ({ onNewChat, resetKey, tunerConfig, onOpenDocument, onArtif
     toolPermissionDialog, setToolPermissionDialog,
     askUserDialog, setAskUserDialog,
     expandedMessages, toggleExpandedMessage,
-    copiedMessageIdx, setCopiedMessageIdx,
     editingMessageIdx, setEditingMessageIdx,
     editingContent, setEditingContent,
     pendingFiles, setPendingFiles,
@@ -390,7 +389,7 @@ const MainContent = ({ onNewChat, resetKey, tunerConfig, onOpenDocument, onArtif
     scrollToBottom,
     scheduleScrollToBottomAfterRender,
     handleScroll,
-  } = useScrollToBottom(messages, loading, inputHeight);
+  } = useScrollToBottom(messages, loading, inputHeight, activeId);
 
   const toggleResearchMode = useCallback(async () => {
     const next = !researchMode;
@@ -1235,7 +1234,7 @@ const MainContent = ({ onNewChat, resetKey, tunerConfig, onOpenDocument, onArtif
 
     // Force scroll to bottom and track state
     isAtBottomRef.current = true;
-    setTimeout(() => scrollToBottom('auto'), 50);
+    scheduleScrollToBottomAfterRender();
 
     // Prepare assistant message placeholder
     const assistantMsgIndex = messages.length + 1;
@@ -1457,17 +1456,6 @@ const MainContent = ({ onNewChat, resetKey, tunerConfig, onOpenDocument, onArtif
     isCreatingRef.current = false;
   };
 
-  // 复制消息内容
-  // 复制消息内容
-  const handleCopyMessage = (content: string, idx: number) => {
-    copyToClipboard(content).then((success) => {
-      if (success) {
-        setCopiedMessageIdx(idx);
-        setTimeout(() => setCopiedMessageIdx(null), 2000);
-      }
-    });
-  };
-
   // 重新发送消息
   const handleResendMessage = async (content: string, idx: number) => {
     if (loading) return;
@@ -1503,7 +1491,7 @@ const MainContent = ({ onNewChat, resetKey, tunerConfig, onOpenDocument, onArtif
     }
     // 直接重新发送
     isAtBottomRef.current = true;
-    setTimeout(() => scrollToBottom('auto'), 50);
+    scheduleScrollToBottomAfterRender();
     const controller = new AbortController();
     const conversationId = activeId!;
     const streamRequestId = beginStreamSession(conversationId);
@@ -1629,7 +1617,7 @@ const MainContent = ({ onNewChat, resetKey, tunerConfig, onOpenDocument, onArtif
 
     // 直接发送新内容
     isAtBottomRef.current = true;
-    setTimeout(() => scrollToBottom('auto'), 50);
+    scheduleScrollToBottomAfterRender();
 
     const conversationId = activeId;
     if (!conversationId) return;
@@ -1717,26 +1705,7 @@ const MainContent = ({ onNewChat, resetKey, tunerConfig, onOpenDocument, onArtif
 
   useCreatedProject(handleNewChat);
 
-  const handleDragOver = (e: React.DragEvent) => {
-    e.preventDefault();
-    e.stopPropagation();
-    setIsDragging(true);
-  };
-
-  const handleDragLeave = (e: React.DragEvent) => {
-    e.preventDefault();
-    e.stopPropagation();
-    setIsDragging(false);
-  };
-
-  const handleDrop = (e: React.DragEvent) => {
-    e.preventDefault();
-    e.stopPropagation();
-    setIsDragging(false);
-    if (e.dataTransfer.files.length > 0) {
-      handleFilesSelected(e.dataTransfer.files);
-    }
-  };
+  const { composerRef, isDragging, handleDragOver, handleDragLeave, handleDrop } = useComposerDrop(handleFilesSelected, activeId);
 
   const handlePaste = (e: React.ClipboardEvent) => {
     // 1. 优先检查图片
@@ -1835,10 +1804,20 @@ const MainContent = ({ onNewChat, resetKey, tunerConfig, onOpenDocument, onArtif
     </>
   );
 
+  const messageActions = {
+    onInspect: useCommittedCallback((id: string) => { setInspectId(id); setConversationView('trajectory'); }),
+    onEditCancel: useCommittedCallback(handleEditCancel),
+    onEditSave: useCommittedCallback(handleEditSave),
+    onResend: useCommittedCallback(handleResendMessage),
+    onEdit: useCommittedCallback(handleEditMessage),
+    onBranch: useCommittedCallback(handleBranchMessage),
+    onOpenResearch: useCommittedCallback((id: string) => setOpenedResearchMsgId(id)),
+  };
+
   // MODE 1: Landing Page (No ID)
   if (!activeId && messages.length === 0) {
     return (
-      <div ref={slashCommandBoundaryRef} className={`flex-1 min-h-0 min-w-0 bg-claude-bg h-full flex flex-col relative overflow-hidden text-claude-text chat-font-scope ${showEntranceAnimation ? 'animate-slide-in' : ''}`}>
+      <div ref={slashCommandBoundaryRef} className={`flex-1 min-h-0 min-w-0 bg-claude-bg h-full flex flex-col relative overflow-hidden text-claude-text chat-font-scope chat-surface ${showEntranceAnimation ? 'animate-slide-in' : ''}`}>
 
         {/* Centered Content */}
         <div
@@ -1899,8 +1878,10 @@ const MainContent = ({ onNewChat, resetKey, tunerConfig, onOpenDocument, onArtif
               }}
             />
             <div
-              className={`bg-claude-input border shadow-[0_2px_8px_rgba(0,0,0,0.02)] hover:shadow-[0_2px_8px_rgba(0,0,0,0.08)] hover:border-[#CCC] dark:hover:border-[#5a5a58] focus-within:shadow-[0_2px_8px_rgba(0,0,0,0.08)] focus-within:border-[#CCC] dark:focus-within:border-[#5a5a58] transition-all duration-200 flex flex-col max-h-[60vh] font-sans ${isDragging ? 'border-[#D97757] bg-orange-50/30' : 'border-claude-border dark:border-[#3a3a38]'}`}
+              className="chat-composer border flex flex-col max-h-[60vh] font-sans"
               style={{ borderRadius: `${tunerConfig?.inputRadius || 16}px` }}
+              ref={composerRef}
+              data-dragging={isDragging}
               onDragOver={handleDragOver}
               onDragLeave={handleDragLeave}
               onDrop={handleDrop}
@@ -2042,7 +2023,7 @@ const MainContent = ({ onNewChat, resetKey, tunerConfig, onOpenDocument, onArtif
   // MODE 2: Chat Interface (Has ID or Messages)
   return (
     <div className="relative flex h-full min-h-0 min-w-0 flex-1 overflow-hidden">
-    <div className="flex-1 min-h-0 min-w-0 bg-claude-bg h-full flex flex-col overflow-clip text-claude-text chat-root chat-font-scope">
+    <div className="flex-1 min-h-0 min-w-0 bg-claude-bg h-full flex flex-col overflow-clip text-claude-text chat-root chat-font-scope chat-surface">
       {showCodingView && <div className="flex shrink-0 gap-5 border-b border-claude-border px-5 text-sm" role="tablist" aria-label="会话视图">
         {(['chat', 'trajectory'] as const).map(view => <button type="button" key={view} role="tab" aria-selected={conversationView === view} onClick={() => setConversationView(view)} className={`py-3 ${conversationView === view ? 'border-b-2 border-blue-500 text-blue-500' : 'text-claude-textSecondary'}`}>{view === 'chat' ? 'Chat' : 'Trajectory'}</button>)}
       </div>}
@@ -2061,26 +2042,24 @@ const MainContent = ({ onNewChat, resetKey, tunerConfig, onOpenDocument, onArtif
           >
             <MessageList
               conversationId={activeId}
-              onInspect={id => { setInspectId(id); setConversationView('trajectory'); }}
+              onInspect={messageActions.onInspect}
               messages={messages}
               loading={loading}
               expandedMessages={expandedMessages}
               editingMessageIdx={editingMessageIdx}
               editingContent={editingContent}
-              copiedMessageIdx={copiedMessageIdx}
               compactStatus={compactStatus}
               onSetEditingContent={setEditingContent}
-              onEditCancel={handleEditCancel}
-              onEditSave={handleEditSave}
+              onEditCancel={messageActions.onEditCancel}
+              onEditSave={messageActions.onEditSave}
               onToggleExpand={toggleExpandedMessage}
-              onResend={handleResendMessage}
-              onEdit={handleEditMessage}
-              onBranch={handleBranchMessage}
-              onCopy={handleCopyMessage}
+              onResend={messageActions.onResend}
+              onEdit={messageActions.onEdit}
+              onBranch={messageActions.onBranch}
               onOpenDocument={onOpenDocument}
               onSetMessages={setMessages}
               messageContentRefs={messageContentRefs}
-              onOpenResearch={(msgId) => setOpenedResearchMsgId(msgId)}
+              onOpenResearch={messageActions.onOpenResearch}
               t={t}
             />
             <div ref={messagesEndRef} />
@@ -2111,9 +2090,11 @@ const MainContent = ({ onNewChat, resetKey, tunerConfig, onOpenDocument, onArtif
                 }}
               />
               <div
-                className={`bg-claude-input border shadow-[0_2px_8px_rgba(0,0,0,0.02)] hover:shadow-[0_2px_8px_rgba(0,0,0,0.08)] hover:border-[#CCC] dark:hover:border-[#5a5a58] focus-within:shadow-[0_2px_8px_rgba(0,0,0,0.08)] focus-within:border-[#CCC] dark:focus-within:border-[#5a5a58] transition-all duration-200 flex flex-col font-sans ${isDragging ? 'border-[#D97757] bg-orange-50/30' : 'border-claude-border dark:border-[#3a3a38]'}`}
+                className="chat-composer border flex flex-col font-sans"
                 style={{ borderRadius: `${inputBarRadius}px` }}
-                onDragOver={handleDragOver}
+                ref={composerRef}
+                data-dragging={isDragging}
+              onDragOver={handleDragOver}
                 onDragLeave={handleDragLeave}
                 onDrop={handleDrop}
               >

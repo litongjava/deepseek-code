@@ -1,3 +1,4 @@
+import CopyButton from '../trajectory/CopyButton';
 import React from 'react';
 import WorkDetails from '../trajectory/WorkDetails';
 import ResponseFooter from './ResponseFooter';
@@ -6,8 +7,6 @@ import { openChatLink } from '../../utils/chatLinks';
 import {
   RotateCcw,
   Pencil,
-  Copy,
-  Check,
   Globe,
   Info,
   Loader2,
@@ -42,7 +41,6 @@ interface MessageListProps {
   expandedMessages: Set<number>;
   editingMessageIdx: number | null;
   editingContent: string;
-  copiedMessageIdx: number | null;
   compactStatus: { state: string; message?: string };
   onSetEditingContent: (v: string) => void;
   onEditCancel: () => void;
@@ -50,7 +48,6 @@ interface MessageListProps {
   onToggleExpand: (idx: number) => void;
   onResend: (content: string, idx: number) => void;
   onEdit: (content: string, idx: number) => void;
-  onCopy: (content: string, idx: number) => void;
   onBranch: (idx: number) => void | Promise<void>;
   onOpenDocument?: (doc: DocumentInfo) => void;
   onSetMessages: (messages: any[] | ((prev: any[]) => any[])) => void;
@@ -62,8 +59,8 @@ interface MessageListProps {
 
 const MessageList = React.memo<MessageListProps>(({
   conversationId, messages, loading, expandedMessages, editingMessageIdx, editingContent,
-  copiedMessageIdx, compactStatus, onSetEditingContent, onEditCancel, onEditSave,
-  onToggleExpand, onResend, onEdit, onCopy, onBranch, onOpenDocument, onSetMessages,
+  compactStatus, onSetEditingContent, onEditCancel, onEditSave,
+  onToggleExpand, onResend, onEdit, onBranch, onOpenDocument, onSetMessages,
   messageContentRefs, onOpenResearch, onInspect, t,
 }) => {
   const showCodingView = useGeneralSettingsStore(state => state.showCodingView);
@@ -251,14 +248,12 @@ const MessageList = React.memo<MessageListProps>(({
                 )}
                 <div className="flex items-center gap-1.5 mt-1.5 pr-1">
                   {msg.created_at && (
-                    <span className="text-[12px] text-claude-textSecondary mr-1">{formatMessageTime(msg.created_at)}</span>
+                    <span className="text-[12px] tabular-nums text-claude-textSecondary mr-1">{formatMessageTime(msg.created_at)}</span>
                   )}
-                  <div className="flex items-center gap-0.5 overflow-hidden transition-all duration-200 ease-in-out max-w-0 opacity-0 group-hover:max-w-[200px] group-hover:opacity-100">
+                  <div className="message-actions flex items-center gap-0.5 opacity-0 transition-opacity duration-150 group-hover:opacity-100 group-focus-within:opacity-100">
                     <button onClick={() => onResend(msg.content, idx)} className="p-1 text-claude-textSecondary hover:text-claude-text hover:bg-claude-hover rounded transition-colors" title="重新发送"><RotateCcw size={14} /></button>
                     <button onClick={() => onEdit(msg.content, idx)} className="p-1 text-claude-textSecondary hover:text-claude-text hover:bg-claude-hover rounded transition-colors" title="编辑"><Pencil size={14} /></button>
-                    <button onClick={() => onCopy(msg.content, idx)} className="p-1 text-claude-textSecondary hover:text-claude-text hover:bg-claude-hover rounded transition-colors" title="复制">
-                      {copiedMessageIdx === idx ? <Check size={14} className="text-green-500" /> : <Copy size={14} />}
-                    </button>
+                    <CopyButton key={`${conversationId}:${idx}`} text={extractTextContent(msg.content)} />
                   </div>
                 </div>
               </div>
