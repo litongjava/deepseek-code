@@ -1,5 +1,6 @@
 import React, { useState, useEffect } from 'react';
-import { FileText, File, X, Code2, Download, FolderOpen, Github, Image as ImageIcon } from 'lucide-react';
+import ImageLightbox from './ImageLightbox';
+import { FileText, File, Code2, Download, FolderOpen, Github, Image as ImageIcon } from 'lucide-react';
 import { getAttachmentUrl } from '../api';
 
 interface Attachment {
@@ -234,26 +235,7 @@ const MessageAttachments: React.FC<MessageAttachmentsProps> = ({ attachments, on
         ))}
       </div>
 
-      {/* 灯箱 */}
-      {lightboxUrl && (
-        <div
-          className="fixed inset-0 z-[100] bg-black/80 flex items-center justify-center backdrop-blur-sm"
-          onClick={() => setLightboxUrl(null)}
-        >
-          <button
-            className="absolute top-4 right-4 text-white/70 hover:text-white transition-colors bg-black/20 hover:bg-black/40 rounded-full p-2"
-            onClick={() => setLightboxUrl(null)}
-          >
-            <X size={24} />
-          </button>
-          <img
-            src={lightboxUrl}
-            alt="preview"
-            className="max-w-[95vw] max-h-[95vh] object-contain rounded-lg shadow-2xl"
-            onClick={(e) => e.stopPropagation()}
-          />
-        </div>
-      )}
+      {lightboxUrl && <ImageLightbox src={lightboxUrl} onClose={() => setLightboxUrl(null)} />}
     </>
   );
 };

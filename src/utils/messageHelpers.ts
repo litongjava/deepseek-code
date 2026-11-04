@@ -1,3 +1,4 @@
+import type { TurnRecord } from '../features/message-list/turnTiming';
 import { DocumentInfo } from '../components/DocumentCard';
 import { DocumentDraftInfo } from '../components/DocumentCreationProcess';
 import type { PendingFile } from '../components/FileUploadPreview';
@@ -75,6 +76,7 @@ function fileToBase64(file: File): Promise<string> {
 }
 
 interface MessageLike {
+  turn?: TurnRecord;
   id?: string;
   role?: string;
   content?: string;
@@ -94,6 +96,8 @@ interface MessageLike {
 }
 
 interface GenerationState {
+  turn?: TurnRecord;
+  assistant_id?: string;
   text?: string;
   thinking?: string;
   thinkingSummary?: string;
@@ -107,7 +111,8 @@ interface GenerationState {
 
 export function extractTextContent(content: unknown): string {
   if (!content) return '';
-  if (typeof content !== 'string') return String(content);
+  if (Array.isArray(content)) return content.filter(block => block?.type === 'text' && typeof block.text === 'string').map(block => block.text).join('\n');
+  if (typeof content !== 'string') return '';
   if (content.startsWith('[')) {
     try {
       const parsed: unknown = JSON.parse(content);
@@ -328,6 +333,8 @@ export function sanitizeInlineArtifactMessage(message: MessageLike) {
 export function applyGenerationState(message: MessageLike, state: GenerationState) {
   const base = {
     ...message,
+    id: state.assistant_id || message.id,
+    turn: state.turn || message.turn,
     content: state.text || message.content,
     thinking: state.thinking || message.thinking,
     thinkingSummary: state.thinkingSummary || message.thinkingSummary,

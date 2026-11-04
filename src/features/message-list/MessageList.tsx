@@ -1,7 +1,10 @@
 import CopyButton from '../trajectory/CopyButton';
 import React from 'react';
+import UserContentBlocks from './UserContentBlocks';
+import { turnLabel } from './turnTiming';
+import { contentBlocks, hasUnavailableImages, type UserContent } from '../../utils/userContent';
 import WorkDetails from '../trajectory/WorkDetails';
-import ResponseFooter from './ResponseFooter';
+import ResponseFooter, { responseDividerClassName } from './ResponseFooter';
 import { useGeneralSettingsStore } from '../../stores/useGeneralSettingsStore';
 import { openChatLink } from '../../utils/chatLinks';
 import {
@@ -46,8 +49,8 @@ interface MessageListProps {
   onEditCancel: () => void;
   onEditSave: () => void;
   onToggleExpand: (idx: number) => void;
-  onResend: (content: string, idx: number) => void;
-  onEdit: (content: string, idx: number) => void;
+  onResend: (content: UserContent, idx: number) => void;
+  onEdit: (content: UserContent, idx: number) => void;
   onBranch: (idx: number) => void | Promise<void>;
   onOpenDocument?: (doc: DocumentInfo) => void;
   onSetMessages: (messages: any[] | ((prev: any[]) => any[])) => void;
@@ -100,6 +103,7 @@ const MessageList = React.memo<MessageListProps>(({
       })()}
       {messages.map((msg: any, idx: number) => {
         const isCurrentlyStreaming = loading && idx === messages.length - 1;
+        const timingLabel = msg.role === 'assistant' && (msg.turn?.status !== 'running' || loading) && !messages.slice(0, idx).some(previous => previous.role === 'assistant' && previous.turn?.turnId === msg.turn?.turnId) ? turnLabel(msg.turn) : null;
         const isPairStart = msg.role === 'user' && (idx === 0 || messages[idx - 1]?.role === 'assistant');
         return (
         <div key={idx} className="group" style={{ marginBottom: isPairStart && idx > 0 ? '28px' : 'var(--msg-gap)' }}>
@@ -154,7 +158,7 @@ const MessageList = React.memo<MessageListProps>(({
                     </button>
                     <button
                       onClick={onEditSave}
-                      disabled={!editingContent.trim() || editingContent === msg.content}
+                      disabled={!editingContent.trim() || editingContent === extractTextContent(msg.content)}
                       className="px-3 py-1.5 text-[13px] font-medium text-white bg-claude-text hover:bg-claude-textSecondary rounded-lg transition-colors disabled:opacity-30 disabled:cursor-not-allowed"
                     >
                       {t('chat.saveEdit')}
@@ -176,33 +180,7 @@ const MessageList = React.memo<MessageListProps>(({
                     </div>
                   </div>
                 )}
-                {(() => {
-                  // Handle content blocks (text + images)
-                  const content = msg.content;
-                  const isContentBlocks = Array.isArray(content);
-                  if (isContentBlocks) {
-                    return (
-                      <div className="space-y-3">
-                        {content.map((block: any, bi: number) => {
-                          if (block.type === 'image_url' || block.type === 'image') {
-                            const url = block.image_url?.url || block.source?.data || '';
-                            const isBase64 = url.startsWith('data:') || (!url.startsWith('http') && url.length > 100);
-                            const imgSrc = isBase64 ? url : '';
-                            return (
-                              <div key={bi} className="rounded-xl overflow-hidden border border-claude-border max-w-[400px]">
-                                <img src={imgSrc} alt="Uploaded image" className="w-full h-auto max-h-[400px] object-contain bg-white" />
-                              </div>
-                            );
-                          }
-                          if (block.type === 'text' && block.text?.trim()) {
-                            return <div key={bi} className="conversation-text text-[15px] leading-relaxed whitespace-pre-wrap break-words">{block.text}</div>;
-                          }
-                          return null;
-                        })}
-                      </div>
-                    );
-                  }
-                  const displayText = extractTextContent(content); return displayText && displayText.trim() !== ''; })() && (
+                {contentBlocks(msg.content) ? <UserContentBlocks content={msg.content} /> : !!extractTextContent(msg.content).trim() && (
                   <div className="max-w-[85%] w-fit">
                     <div
                       className="conversation-text bg-[var(--msg-user-bg)] text-claude-text px-4 py-[10px] text-[15px] leading-relaxed font-sans font-[400] whitespace-pre-wrap break-words relative overflow-hidden"
@@ -246,6 +224,7 @@ const MessageList = React.memo<MessageListProps>(({
                     })()}
                   </div>
                 )}
+                {!contentBlocks(msg.content) && hasUnavailableImages(msg.content) && <div role="note" className="text-sm text-claude-textSecondary">Image unavailable: this historical message contains only a placeholder.</div>}
                 <div className="flex items-center gap-1.5 mt-1.5 pr-1">
                   {msg.created_at && (
                     <span className="text-[12px] tabular-nums text-claude-textSecondary mr-1">{formatMessageTime(msg.created_at)}</span>
@@ -260,6 +239,7 @@ const MessageList = React.memo<MessageListProps>(({
             )
           ) : (
             <div className="px-1 text-claude-text text-[16.5px] leading-normal mt-2">
+              {timingLabel && <div className="mb-4 text-sm tabular-nums text-claude-textSecondary" aria-label="Turn duration">{timingLabel}<div className={`${responseDividerClassName} mt-3`} /></div>}
               {/* Research badge */}
               {msg.research && (
                 <button

@@ -1,3 +1,4 @@
+import { applyTurnTiming } from '../message-list/turnTiming';
 import { useChatStore } from '../../stores/useChatStore';
 import { getConversation, getContextSize, getAttachmentUrl } from '../../api';
 import { planModeFromTool, approvedPermissionModeFromTool } from './planMode';
@@ -282,6 +283,11 @@ export function createStreamCallbacks(ctx: StreamContext) {
 
   const onSystemEvents = (event: string, message: string, data: any) => {
     if (!isStreamSessionActive(conversationId, streamRequestId)) return;
+    if (event === 'turn_timing') {
+      if (data?.conversation_id && data.conversation_id !== conversationId) return;
+      setMessagesFor(conversationId, prev => applyTurnTiming(prev, data?.turn, data?.assistant_id));
+      return;
+    }
     if (event === 'request_snapshot') { onRequestSnapshot(data); return; }
     if (event === 'tool_permission_resolved' && typeof data?.request_id === 'string') {
       if (data.conversation_id && data.conversation_id !== conversationId) return;
@@ -344,7 +350,7 @@ export function createStreamCallbacks(ctx: StreamContext) {
     if (event === 'context_reset' && data?.boundary_id) {
       setMessagesFor(conversationId, prev => {
         if (prev.some(message => message.id === data.boundary_id)) return prev;
-        const next = [...prev, { id: data.boundary_id, role: 'user', content: data.content, is_compact_boundary: true }, { id: data.assistant_id, role: 'assistant', content: '' }];
+        const next = [...prev, { id: data.boundary_id, role: 'user', content: data.content, is_compact_boundary: true }, { id: data.assistant_id, role: 'assistant', content: '', turn: data.turn }];
         messagesBufferRef.current.set(conversationId, next);
         return next;
       });
@@ -579,7 +585,13 @@ export function createStreamCallbacks(ctx: StreamContext) {
   };
 
   const onSystemEventsLight = (event: string, message: string, data: any) => {
+    if (event === 'context_reset') { onSystemEvents(event, message, data); return; }
     if (!isStreamSessionActive(conversationId, streamRequestId)) return;
+    if (event === 'turn_timing') {
+      if (data?.conversation_id && data.conversation_id !== conversationId) return;
+      setMessagesFor(conversationId, prev => applyTurnTiming(prev, data?.turn, data?.assistant_id));
+      return;
+    }
     if (event === 'request_snapshot') { onRequestSnapshot(data); return; }
     if (event === 'tool_permission_resolved' && typeof data?.request_id === 'string') {
       if (data.conversation_id && data.conversation_id !== conversationId) return;

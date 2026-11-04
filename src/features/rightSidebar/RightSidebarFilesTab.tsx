@@ -1,102 +1,119 @@
 import { useCallback, useEffect, useState } from 'react';
-import { AlertCircle, FolderOpen, FolderX, Loader2, RefreshCw } from 'lucide-react';
-import type { FsFileNode } from '../../api';
+import { FolderOpen, FolderX, RefreshCw, X } from 'lucide-react';
+import type { FsFileNode, FsTreeResponse } from '../../api';
+import { listWorkspaceTree, searchWorkspaceFiles, type WorkspaceRoot, type WorkspaceScope, type WorkspaceSearch, type WorkspaceSearchMatch } from '../../api/workspaceFiles';
 import { useI18n } from '../../hooks/useI18n';
 import { useChatStore } from '../../stores/useChatStore';
+import { useRightSidebarStore, workspaceScopeKey, type SidebarFileTab } from '../../stores/useRightSidebarStore';
 import RightSidebarEmptyState from './RightSidebarEmptyState';
+import FileActionsToolbar from './files/FileActionsToolbar';
 import FilePreview from './files/FilePreview';
 import FileTree from './files/FileTree';
-import { baseName } from './files/fileUtils';
 import { useFileTree } from './files/useFileTree';
-import { useWorkspaceFolder } from './files/useWorkspaceFolder';
+import { useCurrentWorkspaceScope, useWorkspaceRoots } from './files/useWorkspaceScope';
 
 export default function RightSidebarFilesTab() {
-  const { t } = useI18n();
-  const workspace = useWorkspaceFolder();
-
-  if (workspace.status === 'loading') {
-    return (
-      <div className="flex h-full items-center justify-center gap-2 text-[13px] text-claude-textSecondary" role="status">
-        <Loader2 size={14} className="animate-spin" aria-hidden="true" />{t('rightSidebar.filesLoading')}
-      </div>
-    );
-  }
-  if (workspace.status === 'none') {
-    return <RightSidebarEmptyState icon={FolderX} title={t('rightSidebar.filesNoWorkspaceTitle')} description={t('rightSidebar.filesNoWorkspaceDescription')} />;
-  }
-  return <WorkspaceFiles key={workspace.path} root={workspace.path} />;
+  const currentScope = useCurrentWorkspaceScope();
+  const tabs = useRightSidebarStore(state => state.tabs);
+  const activeId = useRightSidebarStore(state => state.tab);
+  const active = tabs.find(tab => tab.id === activeId);
+  const file = active?.kind === 'file' ? active : undefined;
+  const scope = file?.scope ?? currentScope;
+  const scopes = new Map<string, WorkspaceScope>([[workspaceScopeKey(scope), scope]]);
+  for (const tab of tabs) if (tab.kind === 'file') scopes.set(workspaceScopeKey(tab.scope), tab.scope);
+  return <>{[...scopes].map(([key, item]) => <div key={key} hidden={key !== workspaceScopeKey(scope)} className="h-full">
+    <WorkspaceFiles scope={item} activeFile={file && workspaceScopeKey(file.scope) === key ? file : undefined} active={key === workspaceScopeKey(scope)} />
+  </div>)}</>;
 }
 
-function WorkspaceFiles({ root }: { root: string }) {
+function WorkspaceFiles({ scope, activeFile, active }: { scope: WorkspaceScope; activeFile?: SidebarFileTab; active: boolean }) {
   const { t } = useI18n();
-  const tree = useFileTree(root);
-  const { refresh } = tree;
-  const [openFile, setOpenFile] = useState<FsFileNode | null>(null);
-  const [reloadKey, setReloadKey] = useState(0);
-  const [focusRequest, setFocusRequest] = useState<{ path: string } | null>(null);
-  const rootState = tree.dirs[root];
-
-  const refreshAll = useCallback(() => {
-    refresh();
-    setReloadKey(key => key + 1);
-  }, [refresh]);
-
-  // A finished chat turn may have changed files: reload what is shown.
-  useEffect(() => useChatStore.subscribe((state, prev) => {
-    if (prev.loading && !state.loading) refreshAll();
-  }), [refreshAll]);
-
-  const closeFile = () => {
-    if (openFile) setFocusRequest({ path: openFile.path });
-    setOpenFile(null);
-  };
-
-  return (
-    <div className="flex h-full min-h-0 flex-col">
-      <div className="flex h-9 flex-shrink-0 items-center gap-2 border-b border-claude-border pl-3 pr-2">
-        <FolderOpen size={15} strokeWidth={1.6} className="flex-shrink-0 text-[#C6613F]" aria-hidden="true" />
-        <span className="min-w-0 flex-1 truncate text-[13px] font-medium text-claude-text" title={root}>{baseName(root)}</span>
-        <button
-          type="button"
-          onClick={refreshAll}
-          aria-label={t('rightSidebar.filesRefresh')}
-          title={t('rightSidebar.filesRefresh')}
-          className="rounded-md p-1 text-claude-textSecondary transition-colors hover:bg-claude-btn-hover hover:text-claude-text"
-        >
-          <RefreshCw size={14} className={rootState?.status === 'loading' ? 'animate-spin' : ''} aria-hidden="true" />
-        </button>
+  const { roots, loading, error, refresh } = useWorkspaceRoots(scope);
+  const tabs = useRightSidebarStore(state => state.tabs);
+  const openFile = useRightSidebarStore(state => state.openFile);
+  const visible = useRightSidebarStore(state => state.treeVisible);
+  const [diffs, setDiffs] = useState<Set<string>>(() => new Set());
+  const [search, setSearch] = useState(false);
+  const [revision, setRevision] = useState(0);
+  const files = tabs.filter((tab): tab is SidebarFileTab => tab.kind === 'file' && workspaceScopeKey(tab.scope) === workspaceScopeKey(scope));
+  const refreshAll = useCallback(() => { setRevision(value => value + 1); }, []);
+  useEffect(() => useChatStore.subscribe((state, previous) => { if (previous.loading && !state.loading) refreshAll(); }), [refreshAll]);
+  useEffect(() => { if (activeFile?.position) setDiffs(previous => { const next = new Set(previous); next.delete(activeFile.id); return next; }); }, [activeFile?.id, activeFile?.navigation]);
+  const open = (root: WorkspaceRoot, relativePath: string, position?: WorkspaceSearchMatch) => openFile({
+    scope, rootId: root.rootId, relativePath, name: relativePath.split('/').pop() || relativePath,
+    path: `${root.path.replace(/[/\\]+$/, '')}/${relativePath}`, position,
+  });
+  if (loading) return <p role="status" className="p-4 text-sm">{t('rightSidebar.filesLoading')}</p>;
+  if (error) return <div role="alert" className="p-4 text-sm text-red-600">{error}<button onClick={refresh} className="ml-2 underline">Retry</button></div>;
+  if (!roots.length) return <RightSidebarEmptyState icon={FolderX} title={t('rightSidebar.filesNoWorkspaceTitle')} description={t('rightSidebar.filesNoWorkspaceDescription')} />;
+  return <div className="flex h-full min-h-0 flex-col">
+    <FileActionsToolbar file={activeFile} diff={!!activeFile && diffs.has(activeFile.id)} onSearch={() => setSearch(value => !value)} onDiff={() => {
+      if (activeFile) setDiffs(previous => { const next = new Set(previous); if (next.has(activeFile.id)) next.delete(activeFile.id); else next.add(activeFile.id); return next; });
+    }} />
+    {search && <FileSearch scope={scope} roots={roots} onOpen={open} onClose={() => setSearch(false)} />}
+    <div className="flex min-h-0 min-w-0 flex-1">
+      <div className="min-h-0 min-w-0 flex-1" hidden={!activeFile}>
+        {files.map(file => <div key={file.id} hidden={file.id !== activeFile?.id} className="h-full">
+          <FilePreview file={file} active={active && file.id === activeFile?.id} diff={diffs.has(file.id)} reloadKey={revision} />
+        </div>)}
       </div>
-      {openFile && <FilePreview root={root} node={openFile} reloadKey={reloadKey} onBack={closeFile} />}
-      {/* The tree stays mounted while a file is open so expansion and scroll survive Back. */}
-      <div className="min-h-0 flex-1 overflow-auto" hidden={!!openFile}>
-        {rootState?.status === 'error' ? (
-          <div className="flex flex-col items-center gap-2 px-6 py-10 text-center text-[13px]" role="alert">
-            <AlertCircle size={20} strokeWidth={1.5} className="text-red-600 dark:text-red-400" aria-hidden="true" />
-            <p className="font-medium text-claude-text">{t('rightSidebar.filesLoadError')}</p>
-            <p className="break-all text-claude-textSecondary">{rootState.message}</p>
-            <button type="button" onClick={refresh} className="mt-1 rounded-md border border-claude-border px-3 py-1 text-claude-text hover:bg-claude-hover">
-              {t('rightSidebar.filesRetry')}
-            </button>
-          </div>
-        ) : !rootState || (rootState.status === 'loading' && !rootState.entries) ? (
-          <div className="flex items-center gap-2 p-4 text-[13px] text-claude-textSecondary" role="status">
-            <Loader2 size={14} className="animate-spin" aria-hidden="true" />{t('rightSidebar.filesLoading')}
-          </div>
-        ) : rootState.entries?.length === 0 ? (
-          <p className="p-4 text-[13px] text-claude-textSecondary">{t('rightSidebar.filesEmptyFolder')}</p>
-        ) : (
-          <FileTree
-            root={root}
-            dirs={tree.dirs}
-            expanded={tree.expanded}
-            selectedPath={openFile?.path ?? null}
-            focusRequest={focusRequest}
-            onToggle={tree.toggle}
-            onSetExpanded={tree.setDirExpanded}
-            onOpenFile={setOpenFile}
-          />
-        )}
+      <div data-testid="workspace-file-tree" hidden={!visible} className={`min-h-0 overflow-auto ${activeFile ? 'w-[38%] min-w-[110px] max-w-[260px] shrink-0 border-l border-claude-border' : 'flex-1'}`}>
+        {roots.map(root => <WorkspaceTree key={`${root.rootId}:${root.path}`} scope={scope} root={root} revision={revision}
+          selected={activeFile?.rootId === root.rootId ? activeFile.relativePath : null} onOpen={relative => open(root, relative)} />)}
       </div>
+      {!activeFile && !visible && <p className="p-4 text-sm text-claude-textSecondary">File tree is hidden. Use “Show file tree” to browse files.</p>}
     </div>
-  );
+  </div>;
+}
+
+function WorkspaceTree({ scope, root, revision, selected, onOpen }: { scope: WorkspaceScope; root: WorkspaceRoot; revision: number; selected: string | null; onOpen: (path: string) => void }) {
+  const { t } = useI18n();
+  const [truncated, setTruncated] = useState(false);
+  const load = useCallback(async (path = ''): Promise<FsTreeResponse> => {
+    const relative = path === root.path ? '' : path.slice(root.path.length + 1);
+    const result = await listWorkspaceTree(scope, root.rootId, relative);
+    setTruncated(value => value || result.truncated);
+    return { success: true, path, tree: result.entries.map(entry => ({ name: entry.name, path: `${root.path}/${entry.relativePath}`, is_dir: entry.kind === 'directory', size: entry.size ?? 0 })) };
+  }, [workspaceScopeKey(scope), root.rootId, root.path]);
+  const tree = useFileTree(root.path, load);
+  useEffect(() => { if (revision) tree.refresh(); }, [revision, tree.refresh]);
+  const state = tree.dirs[root.path];
+  const open = (node: FsFileNode) => onOpen(node.path.slice(root.path.length + 1));
+  return <section>
+    <div className="flex h-9 items-center gap-2 px-2 text-xs text-claude-textSecondary">
+      <FolderOpen size={14} /><span className="min-w-0 flex-1 truncate" title={root.path}>{root.name}</span>
+      <button type="button" title={t('rightSidebar.filesRefresh')} aria-label={t('rightSidebar.filesRefresh')} onClick={tree.refresh} className="rounded p-1 hover:bg-claude-hover"><RefreshCw size={13} /></button>
+    </div>
+    {truncated && <p className="px-2 text-xs text-claude-textSecondary">Directory listing was limited.</p>}
+    {state?.status === 'error' ? <p role="alert" className="break-words p-2 text-xs text-red-600">{state.message}</p> : !state || (state.status === 'loading' && !state.entries) ? <p role="status" className="p-2 text-xs">{t('rightSidebar.filesLoading')}</p> : state.entries?.length === 0 ? <p className="p-3 text-xs text-claude-textSecondary">{t('rightSidebar.filesEmptyFolder')}</p> : <FileTree root={root.path} dirs={tree.dirs} expanded={tree.expanded} selectedPath={selected ? `${root.path}/${selected}` : null} onToggle={tree.toggle} onSetExpanded={tree.setDirExpanded} onOpenFile={open} />}
+  </section>;
+}
+
+function FileSearch({ scope, roots, onOpen, onClose }: { scope: WorkspaceScope; roots: WorkspaceRoot[]; onOpen: (root: WorkspaceRoot, path: string, position: WorkspaceSearchMatch) => void; onClose: () => void }) {
+  const [query, setQuery] = useState('');
+  const [result, setResult] = useState<WorkspaceSearch | null>(null);
+  const [error, setError] = useState('');
+  const [loading, setLoading] = useState(false);
+  useEffect(() => {
+    const controller = new AbortController();
+    setResult(null); setError(''); setLoading(!!query.trim());
+    const timer = window.setTimeout(() => {
+      if (!query.trim()) return;
+      searchWorkspaceFiles(scope, query, controller.signal).then(value => { if (!controller.signal.aborted) setResult(value); }).catch(error => { if (!controller.signal.aborted) setError(String(error.message || error)); }).finally(() => { if (!controller.signal.aborted) setLoading(false); });
+    }, 250);
+    return () => { window.clearTimeout(timer); controller.abort(); };
+  }, [query, workspaceScopeKey(scope)]);
+  return <section className="max-h-[42%] shrink-0 overflow-auto border-b border-claude-border p-2" aria-label="Search project contents">
+    <div className="flex items-center gap-1"><input autoFocus aria-label="Search In Files" placeholder="Search project contents…" maxLength={256} value={query} onChange={event => setQuery(event.target.value)} className="min-w-0 flex-1 rounded bg-claude-hover px-2 py-1.5 text-xs text-claude-text" /><button type="button" aria-label="Close file search" title="Close file search" onClick={onClose}><X size={15} /></button></div>
+    {loading && <p role="status" className="p-2 text-xs">Searching…</p>}
+    {error && <p role="alert" className="p-2 text-xs text-red-600">{error}</p>}
+    {result && <>
+      <p className="py-2 text-xs text-claude-textSecondary">{result.matches.length} matches · {result.scannedFiles} files scanned{result.skippedFiles ? ` · ${result.skippedFiles} skipped` : ''}{result.truncated ? ' · Results limited' : ''}</p>
+      {result.notice && <p className="text-xs text-claude-textSecondary">{result.notice}</p>}
+      {result.matches.map((match, index) => <button type="button" key={`${match.rootId}:${match.relativePath}:${index}`} className="block w-full rounded px-2 py-1.5 text-left text-xs hover:bg-claude-hover" onClick={() => { const root = roots.find(root => root.rootId === match.rootId); if (root) onOpen(root, match.relativePath, match); }}>
+        <span className="block truncate text-claude-text">{roots.find(root => root.rootId === match.rootId)?.name}/{match.relativePath}:{match.line}:{match.startColumn}</span>
+        <span className="block truncate font-mono text-claude-textSecondary">{match.preview}</span>
+      </button>)}
+    </>}
+  </section>;
 }

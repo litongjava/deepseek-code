@@ -425,6 +425,11 @@ impl SessionStore {
                             history.push(json!({"role":"user","content":results}));
                         }
                     }
+                    for tool in &calls {
+                        for input in crate::services::input_queue::load_delivered(conn, &tool.id)? {
+                            history.push(input.model_message());
+                        }
+                    }
                 }
                 use rusqlite::OptionalExtension;
                 let structured: Option<String> = conn.query_row("SELECT content_json FROM message_user_content WHERE message_id=?1", [&message.id], |r|r.get(0)).optional()?;

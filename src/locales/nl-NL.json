@@ -108,6 +108,8 @@
     "no": "Nee"
   },
   "sidebar": {
+    "noProject": "Geen project",
+    "noProjects": "Nog geen projecten",
     "workspaceMode": "Werkruimtemodus",
     "homeMode": "Start",
     "chatMode": "Chat",
@@ -449,6 +451,11 @@
     "usageTitle": "Gebruik"
   },
   "chat": {
+    "sessionMenu": "Sessieopties",
+    "sessionView": "Sessieweergave",
+    "copySessionId": "Sessie-ID kopiëren",
+    "sessionIdCopied": "Sessie-ID gekopieerd",
+    "sessionIdCopyFailed": "Sessie-ID kon niet worden gekopieerd. Probeer het opnieuw.",
     "selectCodeProject": "Selecteer een project voordat je berichten verstuurt in de Code-modus",
     "inputPlaceholder": "Hoe kan ik u vandaag helpen?",
     "send": "Verzenden",

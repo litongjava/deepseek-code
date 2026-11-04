@@ -108,6 +108,8 @@
     "no": "नहीं"
   },
   "sidebar": {
+    "noProject": "कोई प्रोजेक्ट नहीं",
+    "noProjects": "अभी तक कोई प्रोजेक्ट नहीं",
     "workspaceMode": "कार्यक्षेत्र मोड",
     "homeMode": "होम",
     "chatMode": "चैट",
@@ -449,6 +451,11 @@
     "usageTitle": "उपयोग"
   },
   "chat": {
+    "sessionMenu": "सत्र विकल्प",
+    "sessionView": "सत्र दृश्य",
+    "copySessionId": "सत्र ID कॉपी करें",
+    "sessionIdCopied": "सत्र ID कॉपी किया गया",
+    "sessionIdCopyFailed": "सत्र ID कॉपी नहीं हो सका। फिर से कोशिश करें।",
     "selectCodeProject": "Code मोड में संदेश भेजने से पहले प्रोजेक्ट चुनें",
     "inputPlaceholder": "आज मैं आपकी कैसे मदद कर सकता हूं?",
     "send": "भेजें",

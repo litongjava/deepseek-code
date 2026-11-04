@@ -5,12 +5,13 @@ import { useProjectStore } from '../../stores/useProjectStore';
 // Apply the selection after resetting the chat, which clears pendingProjectId.
 export function useCreatedProject(resetChat: () => void) {
   const location = useLocation();
-  const projectId = location.state?.createdProjectId;
+  const hasSelection = location.state && Object.prototype.hasOwnProperty.call(location.state, 'selectedProjectId');
+  const projectId = hasSelection ? location.state.selectedProjectId : location.state?.createdProjectId;
 
   useEffect(() => {
-    if (location.pathname !== '/' || typeof projectId !== 'string' || !projectId) return;
+    if (location.pathname !== '/' || !(typeof projectId === 'string' && projectId || hasSelection && projectId === null)) return;
     // resetChat also replaces the route state so this selection is consumed once.
     resetChat();
     useProjectStore.getState().setPendingProjectId(projectId);
-  }, [location.pathname, projectId, resetChat]);
+  }, [location.pathname, projectId, hasSelection, resetChat]);
 }

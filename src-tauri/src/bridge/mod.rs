@@ -1445,12 +1445,32 @@ pub struct TerminalCreateRequest {
     pub shell: Option<String>,
 }
 
-async fn terminal_create(State(state): State<AppState>, Json(req): Json<TerminalCreateRequest>) -> Json<serde_json::Value> {
-    let terminal_manager = state.terminal_manager.clone();
-    let manager: tokio::sync::MutexGuard<'_, PtyManager> = terminal_manager.lock().await;
+fn terminal_error(error: anyhow::Error) -> (StatusCode, Json<serde_json::Value>) {
+    use deepseek_code_core::terminal::TerminalError;
+    let status = match error.downcast_ref::<TerminalError>() {
+        Some(TerminalError::NotFound) => StatusCode::NOT_FOUND,
+        Some(TerminalError::Exited) => StatusCode::CONFLICT,
+        Some(TerminalError::Invalid(_)) => StatusCode::BAD_REQUEST,
+        None => StatusCode::INTERNAL_SERVER_ERROR,
+    };
+    (status, Json(serde_json::json!({ "error": error.to_string() })))
+}
+
+#[cfg(test)]
+#[test]
+fn terminal_errors_have_non_success_http_statuses() {
+    use deepseek_code_core::terminal::TerminalError;
+    assert_eq!(terminal_error(TerminalError::NotFound.into()).0, StatusCode::NOT_FOUND);
+    assert_eq!(terminal_error(TerminalError::Exited.into()).0, StatusCode::CONFLICT);
+    assert_eq!(terminal_error(TerminalError::Invalid("size".into()).into()).0, StatusCode::BAD_REQUEST);
+    assert_eq!(terminal_error(anyhow::anyhow!("spawn failed")).0, StatusCode::INTERNAL_SERVER_ERROR);
+}
+
+async fn terminal_create(State(state): State<AppState>, Json(req): Json<TerminalCreateRequest>) -> impl IntoResponse {
+    let manager = state.terminal_manager.lock().await.clone();
     match manager.create_session(req.cwd, req.shell).await {
-        Ok(session) => Json(serde_json::to_value(session).unwrap_or_default()),
-        Err(e) => Json(serde_json::json!({ "error": format!("{}", e) })),
+        Ok(session) => (StatusCode::OK, Json(serde_json::to_value(session).unwrap_or_default())),
+        Err(error) => terminal_error(error),
     }
 }
 
@@ -1460,12 +1480,11 @@ pub struct TerminalWriteRequest {
     pub data: String,
 }
 
-async fn terminal_write(State(state): State<AppState>, Json(req): Json<TerminalWriteRequest>) -> Json<serde_json::Value> {
-    let terminal_manager = state.terminal_manager.clone();
-    let manager: tokio::sync::MutexGuard<'_, PtyManager> = terminal_manager.lock().await;
+async fn terminal_write(State(state): State<AppState>, Json(req): Json<TerminalWriteRequest>) -> impl IntoResponse {
+    let manager = state.terminal_manager.lock().await.clone();
     match manager.write_input(&req.session_id, &req.data).await {
-        Ok(_) => Json(serde_json::json!({ "ok": true })),
-        Err(e) => Json(serde_json::json!({ "error": format!("{}", e) })),
+        Ok(()) => (StatusCode::OK, Json(serde_json::json!({ "ok": true }))),
+        Err(error) => terminal_error(error),
     }
 }
 
@@ -1476,91 +1495,61 @@ pub struct TerminalResizeRequest {
     pub rows: u16,
 }
 
-async fn terminal_resize(State(state): State<AppState>, Json(req): Json<TerminalResizeRequest>) -> Json<serde_json::Value> {
-    let terminal_manager = state.terminal_manager.clone();
-    let manager: tokio::sync::MutexGuard<'_, PtyManager> = terminal_manager.lock().await;
+async fn terminal_resize(State(state): State<AppState>, Json(req): Json<TerminalResizeRequest>) -> impl IntoResponse {
+    let manager = state.terminal_manager.lock().await.clone();
     match manager.resize(&req.session_id, req.cols, req.rows).await {
-        Ok(_) => Json(serde_json::json!({ "ok": true })),
-        Err(e) => Json(serde_json::json!({ "error": format!("{}", e) })),
+        Ok(()) => (StatusCode::OK, Json(serde_json::json!({ "ok": true }))),
+        Err(error) => terminal_error(error),
     }
 }
 
-async fn terminal_close(State(state): State<AppState>, Json(session_id): Json<String>) -> Json<serde_json::Value> {
-    let terminal_manager = state.terminal_manager.clone();
-    let manager: tokio::sync::MutexGuard<'_, PtyManager> = terminal_manager.lock().await;
+async fn terminal_close(State(state): State<AppState>, Json(session_id): Json<String>) -> impl IntoResponse {
+    let manager = state.terminal_manager.lock().await.clone();
     match manager.close_session(&session_id).await {
-        Ok(_) => Json(serde_json::json!({ "ok": true })),
-        Err(e) => Json(serde_json::json!({ "error": format!("{}", e) })),
+        Ok(()) => (StatusCode::OK, Json(serde_json::json!({ "ok": true }))),
+        Err(error) => terminal_error(error),
     }
 }
 
 async fn terminal_list(State(state): State<AppState>) -> Json<serde_json::Value> {
-    let terminal_manager = state.terminal_manager.clone();
-    let manager: tokio::sync::MutexGuard<'_, PtyManager> = terminal_manager.lock().await;
-    let sessions = manager.list_sessions().await;
-    Json(serde_json::json!({ "sessions": sessions }))
+    let manager = state.terminal_manager.lock().await.clone();
+    Json(serde_json::json!({ "sessions": manager.list_sessions().await }))
 }
 
 async fn terminal_output_stream(Path(session_id): Path<String>, State(state): State<AppState>) -> Result<impl IntoResponse, StatusCode> {
-    let terminal_manager = state.terminal_manager.clone();
-    let manager: tokio::sync::MutexGuard<'_, PtyManager> = terminal_manager.lock().await;
-
-    let receiver = manager.subscribe(&session_id)
-        .await
-        .ok_or_else(|| StatusCode::NOT_FOUND)?;
-
-    let idle_timeout = Duration::from_secs(SSE_IDLE_TIMEOUT_SECS);
-    let max_duration = Duration::from_secs(SSE_MAX_DURATION_SECS);
-    let mut last_activity = std::time::Instant::now();
-
+    let subscription = {
+        let manager = state.terminal_manager.lock().await.clone();
+        manager.subscribe(&session_id).await.ok_or(StatusCode::NOT_FOUND)?
+    };
     let stream = async_stream::stream! {
-        let mut rx = receiver;
-        let max_sleep = tokio::time::sleep(max_duration);
-        tokio::pin!(max_sleep);
-
+        let mut rx = subscription.receiver;
+        for output in subscription.replay {
+            let finished = output.kind == "exit";
+            yield Ok::<Event, Infallible>(Event::default().event(&output.kind)
+                .data(serde_json::to_string(&output).unwrap_or_default()));
+            if finished { return; }
+        }
         loop {
-            let idle_sleep = tokio::time::sleep(idle_timeout);
-            tokio::pin!(idle_sleep);
-
-            tokio::select! {
-                _ = &mut max_sleep => {
+            match rx.recv().await {
+                Ok(output) => {
+                    let finished = output.kind == "exit";
+                    yield Ok::<Event, Infallible>(Event::default().event(&output.kind)
+                        .data(serde_json::to_string(&output).unwrap_or_default()));
+                    if finished { break; }
+                }
+                Err(error) => {
+                    // Transport loss is not a process exit, and dropped bytes must not be silent.
+                    yield Ok::<Event, Infallible>(Event::default().event("error")
+                        .data(serde_json::json!({ "type": "error", "data": format!("Terminal stream interrupted: {error}") }).to_string()));
                     break;
-                }
-                _ = &mut idle_sleep => {
-                    if last_activity.elapsed() >= idle_timeout {
-                        break;
-                    }
-                }
-                result = rx.recv() => {
-                    match result {
-                        Ok(output) => {
-                            last_activity = std::time::Instant::now();
-                            let data = serde_json::to_string(&output).unwrap_or_default();
-                            yield Ok::<Event, Infallible>(Event::default()
-                                .event("data")
-                                .data(data));
-                        }
-                        Err(broadcast::error::RecvError::Lagged(n)) => {
-                            tracing::error!(module = "SSE_terminal_output", "Receiver lagged, dropped {} events", n);
-                            last_activity = std::time::Instant::now();
-                        }
-                        Err(broadcast::error::RecvError::Closed) => {
-                            yield Ok::<Event, Infallible>(Event::default()
-                                .event("exit")
-                                .data(r#"{"code":0}"#));
-                            break;
-                        }
-                    }
                 }
             }
         }
     };
-
     let mut response = Sse::new(stream).keep_alive(KeepAlive::default()).into_response();
     set_sse_content_type(&mut response);
     Ok(response)
 }
-
 #[derive(Deserialize)]
 struct ProcessSpawnRequest {
     command: String,

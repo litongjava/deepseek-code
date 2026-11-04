@@ -37,11 +37,25 @@ pub struct RepositoryChanges {
     pub files: Vec<ChangedFile>,
 }
 
-fn base(cwd: &Path) -> Result<String> {
-    match git(cwd, &["rev-parse", "--verify", "HEAD"]) {
-        Ok(head) => Ok(head),
-        Err(_) => git(cwd, &["hash-object", "-t", "tree", "--stdin"]),
+fn baseline(cwd: &Path) -> Result<(String, &'static str)> {
+    let head = command(cwd, &["rev-parse", "--verify", "HEAD^{commit}"])?;
+    if head.status.success() {
+        return Ok((String::from_utf8_lossy(&head.stdout).trim().into(), "head"));
     }
+    let branch = git(cwd, &["symbolic-ref", "HEAD"])?;
+    let exists = command(cwd, &["show-ref", "--verify", "--quiet", &branch])?;
+    ensure!(
+        exists.status.code() == Some(1),
+        "Cannot resolve repository HEAD"
+    );
+    Ok((
+        git(cwd, &["hash-object", "-t", "tree", "--stdin"])?,
+        "empty-tree",
+    ))
+}
+
+fn base(cwd: &Path) -> Result<String> {
+    Ok(baseline(cwd)?.0)
 }
 
 fn root(cwd: &Path) -> Result<PathBuf> {
@@ -242,6 +256,57 @@ pub struct FileDiff {
 }
 
 pub fn diff(cwd: &Path, path: &str) -> Result<FileDiff> {
+    diff_at(cwd, path, &base(cwd)?)
+}
+
+fn bounded_patch(cwd: &Path, args: &[&str]) -> Result<Option<String>> {
+    use std::io::Read;
+    use std::process::{Command, Stdio};
+    let errors = tempfile::tempfile()?;
+    let mut command = Command::new("git");
+    command
+        .current_dir(cwd)
+        .args(args)
+        .env("GIT_TERMINAL_PROMPT", "0")
+        .env("LC_ALL", "C")
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(errors.try_clone()?);
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        command.creation_flags(0x08000000);
+    }
+    let mut child = command.spawn()?;
+    let stdout = child.stdout.take().context("Git output is unavailable")?;
+    let (send, receive) = std::sync::mpsc::channel();
+    let reader = std::thread::spawn(move || {
+        let mut bytes = Vec::new();
+        let result = stdout
+            .take(2_000_001)
+            .read_to_end(&mut bytes)
+            .map(|_| bytes);
+        let _ = send.send(result);
+    });
+    let result = receive.recv_timeout(std::time::Duration::from_secs(10));
+    if result.as_ref().map_or(true, |result| {
+        result
+            .as_ref()
+            .map_or(true, |bytes| bytes.len() > 2_000_000)
+    }) {
+        let _ = child.kill();
+        let _ = child.wait();
+        let _ = reader.join();
+        return Ok(None);
+    }
+    let bytes = result??;
+    let status = child.wait()?;
+    let _ = reader.join();
+    ensure!(status.success(), "Git diff failed");
+    Ok(Some(String::from_utf8_lossy(&bytes).into_owned()))
+}
+
+fn diff_at(cwd: &Path, path: &str, base: &str) -> Result<FileDiff> {
     let repo = root(cwd)?;
     ensure!(
         !path.is_empty()
@@ -264,9 +329,25 @@ pub fn diff(cwd: &Path, path: &str) -> Result<FileDiff> {
     )?;
     let entry = status
         .split('\0')
-        .find(|entry| entry.get(3..) == Some(path))
-        .context("File is no longer changed; refresh the list")?;
-    if entry.starts_with("?? ") {
+        .find(|entry| entry.get(3..) == Some(path));
+    ensure!(
+        repo.join(path).exists() || entry.is_some(),
+        "File is unavailable"
+    );
+    let untracked = git_raw(
+        &repo,
+        &[
+            "--literal-pathspecs",
+            "ls-files",
+            "--others",
+            "-z",
+            "--",
+            path,
+        ],
+    )?;
+    if entry.is_some_and(|entry| entry.starts_with("?? "))
+        || untracked.split('\0').any(|name| name == path)
+    {
         let full = repo.join(path);
         let metadata = std::fs::symlink_metadata(&full)?;
         if metadata.file_type().is_symlink() || metadata.is_dir() || metadata.len() > 2_000_000 {
@@ -283,7 +364,17 @@ pub fn diff(cwd: &Path, path: &str) -> Result<FileDiff> {
             full.canonicalize()?.starts_with(repo.canonicalize()?),
             "File is outside the repository"
         );
-        let bytes = std::fs::read(full)?;
+        use std::io::Read;
+        let mut bytes = Vec::new();
+        std::fs::File::open(full)?
+            .take(2_000_001)
+            .read_to_end(&mut bytes)?;
+        if bytes.len() > 2_000_000 {
+            return Ok(FileDiff {
+                patch: String::new(),
+                notice: Some("File exceeds the 2 MB diff preview limit".into()),
+            });
+        }
         if bytes.contains(&0) || std::str::from_utf8(&bytes).is_err() {
             return Ok(FileDiff {
                 patch: String::new(),
@@ -302,8 +393,7 @@ pub fn diff(cwd: &Path, path: &str) -> Result<FileDiff> {
             notice: None,
         });
     }
-    let base = base(&repo)?;
-    let output = command(
+    let Some(patch) = bounded_patch(
         &repo,
         &[
             "--literal-pathspecs",
@@ -312,17 +402,17 @@ pub fn diff(cwd: &Path, path: &str) -> Result<FileDiff> {
             "--no-textconv",
             "--no-renames",
             "--unified=3",
-            &base,
+            base,
             "--",
             path,
         ],
-    )?;
-    ensure!(
-        output.status.success(),
-        "{}",
-        String::from_utf8_lossy(&output.stderr)
-    );
-    let patch = String::from_utf8_lossy(&output.stdout);
+    )?
+    else {
+        return Ok(FileDiff {
+            patch: String::new(),
+            notice: Some("Diff exceeded the 2 MB or 10 second preview limit".into()),
+        });
+    };
     if patch.contains("Binary files ") {
         return Ok(FileDiff {
             patch: String::new(),
@@ -336,8 +426,64 @@ pub fn diff(cwd: &Path, path: &str) -> Result<FileDiff> {
         });
     }
     Ok(FileDiff {
-        patch: patch.into_owned(),
+        patch,
         notice: None,
+    })
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ScopedFileDiff {
+    pub patch: String,
+    pub notice: Option<String>,
+    pub baseline_oid: Option<String>,
+    pub baseline: String,
+    pub status: String,
+}
+
+pub fn scoped_diff(cwd: &Path, full: &Path) -> Result<ScopedFileDiff> {
+    if !super::session::branches(cwd)?.is_repository {
+        return Ok(ScopedFileDiff {
+            patch: String::new(),
+            notice: Some("No Git baseline for this folder".into()),
+            baseline_oid: None,
+            baseline: "none".into(),
+            status: "not-git".into(),
+        });
+    }
+    let repo = root(cwd)?.canonicalize()?;
+    let relative = full
+        .strip_prefix(&repo)
+        .context("File is outside the repository")?
+        .to_string_lossy()
+        .replace('\\', "/");
+    let (oid, baseline) = baseline(&repo)?;
+    let untracked = git_raw(
+        &repo,
+        &[
+            "--literal-pathspecs",
+            "ls-files",
+            "--others",
+            "-z",
+            "--",
+            &relative,
+        ],
+    )?;
+    let untracked = untracked.split('\0').any(|path| path == relative);
+    let result = diff_at(&repo, &relative, &oid)?;
+    let status = if untracked {
+        "untracked"
+    } else if result.patch.is_empty() && result.notice.is_none() {
+        "unchanged"
+    } else {
+        "modified"
+    };
+    Ok(ScopedFileDiff {
+        patch: result.patch,
+        notice: result.notice,
+        baseline_oid: Some(oid),
+        baseline: baseline.into(),
+        status: status.into(),
     })
 }
 
@@ -399,6 +545,44 @@ mod tests {
         git(dir.path(), &["commit", "-m", "initial"]).unwrap();
         dir
     }
+    #[test]
+    fn scoped_diff_reports_baseline_unchanged_untracked_and_non_git() {
+        let dir = fixture();
+        let cwd = dir.path().canonicalize().unwrap();
+        let unchanged = scoped_diff(&cwd, &cwd.join("canceled.txt")).unwrap();
+        assert_eq!(unchanged.status, "unchanged");
+        assert_eq!(unchanged.baseline, "head");
+        assert_eq!(
+            unchanged.baseline_oid.as_deref(),
+            Some(git(&cwd, &["rev-parse", "HEAD"]).unwrap().as_str())
+        );
+        std::fs::write(cwd.join("canceled.txt"), "staged\n").unwrap();
+        git(&cwd, &["add", "canceled.txt"]).unwrap();
+        std::fs::write(cwd.join("canceled.txt"), "old\n").unwrap();
+        assert_eq!(
+            scoped_diff(&cwd, &cwd.join("canceled.txt")).unwrap().status,
+            "unchanged"
+        );
+        std::fs::write(cwd.join("new [literal].txt"), "new\n").unwrap();
+        let new = scoped_diff(&cwd, &cwd.join("new [literal].txt")).unwrap();
+        assert_eq!(new.status, "untracked");
+        assert!(new.patch.contains("+new"));
+        let plain = tempfile::tempdir().unwrap();
+        assert_eq!(
+            scoped_diff(plain.path(), &plain.path().join("file"))
+                .unwrap()
+                .status,
+            "not-git"
+        );
+        git(plain.path(), &["init"]).unwrap();
+        std::fs::write(plain.path().join("file"), "new").unwrap();
+        let path = plain.path().canonicalize().unwrap();
+        assert_eq!(
+            scoped_diff(&path, &path.join("file")).unwrap().baseline,
+            "empty-tree"
+        );
+    }
+
     #[test]
     fn lists_staged_unstaged_untracked_deleted_binary_and_canceled_changes() {
         let dir = fixture();

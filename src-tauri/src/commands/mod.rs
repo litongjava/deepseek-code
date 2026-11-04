@@ -1,5 +1,6 @@
 pub mod knowledge;
 pub mod peripheral;
+pub mod workspace_files;
 /// Data directory shared with the CLI (`~/.deepseek-code`, or the legacy
 /// directory while it still holds the only database). Resolved once so the
 /// whole process keeps using one directory.

@@ -24,6 +24,18 @@ describe('conversation branches', () => {
     expect(getLocalConversation(branch.new_conversation_id)).toMatchObject({ workspace_mode: 'code', workspace_path: 'D:/project', provider: 'provider', project_id: 'project', message_count: 2 });
     expect(getLocalMessages(original.id)).toHaveLength(4);
   });
+  it('keeps embedded images while giving copied turns independent non-running identities', async () => {
+    const original = source();
+    const content = [{ type: 'text', text: '[Image #8]' }, { type: 'image_url', image_url: { url: 'data:image/png;base64,aGVsbG8=' } }];
+    const turn = { turnId: 'running-source', startedAt: '2026-11-03T00:00:00Z', endedAt: null, elapsedMs: null, status: 'running' as const };
+    saveLocalMessages(original.id, getLocalMessages(original.id).map((message, index) => index === 0 ? { ...message, content } : index === 1 ? { ...message, turn } : message));
+    const branch = await branchConversation(original.id, 'm1');
+    const copied = getLocalMessages(branch.new_conversation_id);
+    expect(copied[0].content).toEqual(content);
+    expect(copied[1].turn).toMatchObject({ status: 'cancelled', elapsedMs: null, endedAt: null });
+    expect(copied[1].turn?.turnId).not.toBe(turn.turnId);
+    expect(getLocalMessages(original.id)[1].turn).toEqual(turn);
+  });
   it('uses the clicked position when optimistic IDs differ, and rejects missing boundaries', async () => {
     const original = source();
     const branch = await branchConversation(original.id, 'optimistic-id', 1);

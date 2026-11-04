@@ -108,6 +108,8 @@
     "no": "Không"
   },
   "sidebar": {
+    "noProject": "Không có dự án",
+    "noProjects": "Chưa có dự án nào",
     "workspaceMode": "Chế độ không gian làm việc",
     "homeMode": "Trang chủ",
     "chatMode": "Trò chuyện",
@@ -449,6 +451,11 @@
     "usageTitle": "Cách sử dụng"
   },
   "chat": {
+    "sessionMenu": "Tùy chọn phiên",
+    "sessionView": "Chế độ xem phiên",
+    "copySessionId": "Sao chép ID phiên",
+    "sessionIdCopied": "Đã sao chép ID phiên",
+    "sessionIdCopyFailed": "Không thể sao chép ID phiên. Hãy thử lại.",
     "selectCodeProject": "Chọn dự án trước khi gửi tin nhắn trong chế độ Code",
     "inputPlaceholder": "Hôm nay tôi có thể giúp gì cho bạn?",
     "send": "Gửi",

@@ -498,7 +498,7 @@ export async function sendMessageNative(
 // 流式对话（核心 - HTTP 版本）
 export async function sendMessage(
   conversationId: string,
-  message: string,
+  message: string | Record<string, any>[],
   attachments: any[] | null,
   onDelta: (delta: string, full: string) => void,
   onDone: (full: string) => void,
@@ -960,6 +960,11 @@ export async function sendMessage(
               continue;
             }
 
+            if (parsed.type === 'turn_timing') {
+              flushPending();
+              onSystem?.('turn_timing', '', parsed);
+              continue;
+            }
             if (parsed.type === 'message_start') {
               if (onSystem) {
                 try { onSystem('message_start', '', parsed); } catch (err) { console.error('[API] onSystem message_start callback error:', err); }

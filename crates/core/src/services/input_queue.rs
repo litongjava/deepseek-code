@@ -3,6 +3,49 @@
 //! queued when the turn ends becomes the next prompt.
 use crate::db::DbManager;
 use anyhow::Result;
+use serde::{Deserialize, Serialize};
+use serde_json::{json, Value};
+
+/// A consumed input retains its model content and does not become an approval note.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct DeliveredInput {
+    pub text: String,
+    pub content: Value,
+    pub origin: String,
+}
+
+impl DeliveredInput {
+    pub fn resolve(data_dir: Option<&std::path::Path>, session: &str, text: String) -> Self {
+        let notification = text.starts_with(crate::tools::background_shell::NOTIFICATION_START);
+        // Internal notifications cannot name images from the user's clipboard registry.
+        let content = if notification { None } else {
+            data_dir.and_then(|root| content_with_images(root, session, &text))
+        }.map(Value::Array).unwrap_or_else(|| json!(text));
+        Self { text, content, origin: if notification { "task_notification" } else { "user" }.into() }
+    }
+
+    pub fn model_message(&self) -> Value {
+        json!({"role":"user", "content":self.content, "origin":self.origin})
+    }
+}
+
+pub fn migrate(conn: &rusqlite::Connection) -> Result<()> {
+    conn.execute_batch("CREATE TABLE IF NOT EXISTS tool_queued_inputs (tool_call_id TEXT PRIMARY KEY REFERENCES tool_calls(id) ON DELETE CASCADE, inputs_json TEXT NOT NULL)")?;
+    Ok(())
+}
+
+pub fn save_delivered(conn: &rusqlite::Connection, tool: &str, inputs: &[DeliveredInput]) -> Result<()> {
+    conn.execute("INSERT INTO tool_queued_inputs(tool_call_id,inputs_json) VALUES(?1,?2) ON CONFLICT(tool_call_id) DO UPDATE SET inputs_json=excluded.inputs_json",
+        rusqlite::params![tool, serde_json::to_string(inputs)?])?;
+    Ok(())
+}
+
+pub fn load_delivered(conn: &rusqlite::Connection, tool: &str) -> Result<Vec<DeliveredInput>> {
+    use rusqlite::OptionalExtension;
+    let raw: Option<String> = conn.query_row("SELECT inputs_json FROM tool_queued_inputs WHERE tool_call_id=?1", [tool], |row| row.get(0)).optional()?;
+    Ok(match raw { Some(raw) => serde_json::from_str(&raw)?, None => Vec::new() })
+}
+
 
 pub fn push(db: &DbManager, session: &str, text: &str) -> Result<()> {
     db.with_conn(|conn| {

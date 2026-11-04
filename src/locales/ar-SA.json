@@ -108,6 +108,8 @@
     "no": "لا"
   },
   "sidebar": {
+    "noProject": "بدون مشروع",
+    "noProjects": "لا توجد مشاريع بعد",
     "workspaceMode": "وضع مساحة العمل",
     "homeMode": "الرئيسية",
     "chatMode": "المحادثة",
@@ -449,6 +451,11 @@
     "usageTitle": "الاستخدام"
   },
   "chat": {
+    "sessionMenu": "خيارات الجلسة",
+    "sessionView": "عرض الجلسة",
+    "copySessionId": "نسخ معرّف الجلسة",
+    "sessionIdCopied": "تم نسخ معرّف الجلسة",
+    "sessionIdCopyFailed": "تعذّر نسخ معرّف الجلسة. حاول مرة أخرى.",
     "selectCodeProject": "اختر مشروعًا قبل إرسال الرسائل في وضع Code",
     "inputPlaceholder": "كيف يمكنني مساعدتك اليوم؟",
     "send": "أرسل",

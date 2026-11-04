@@ -1,5 +1,6 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import {
+  act,
   fireEvent,
   render,
   screen,
@@ -9,6 +10,7 @@ import {
 import { MemoryRouter, useLocation } from "react-router-dom";
 import SidebarProjects from "./SidebarProjects";
 import { SidebarChat, useSidebarPreferences } from "./sidebarModel";
+import { useProjectStore } from "../../stores/useProjectStore";
 import { useWorkspaceModeStore } from "../../stores/useWorkspaceModeStore";
 import {
   createProject,
@@ -72,6 +74,7 @@ const chats: SidebarChat[] = [
 beforeEach(() => {
   vi.resetAllMocks();
   localStorage.clear();
+  useProjectStore.setState({ currentProjectId: null, pendingProjectId: "p1" });
   useWorkspaceModeStore.setState({
     mode: "code",
     recentsCollapsed: { chat: false, work: false, study: false, code: false },
@@ -107,7 +110,7 @@ function LocationState() {
 }
 const chatMenu = (title = "Project task") =>
   fireEvent.click(
-    within(screen.getByRole("region", { name: "Projects" })).getByRole("button", { name: `Chat options for ${title}` }),
+    within(screen.getByRole("region", { name: "Recent chats" })).getByRole("button", { name: `Chat options for ${title}` }),
   );
 const projectMenu = () =>
   fireEvent.click(
@@ -154,58 +157,58 @@ describe("project sidebar", () => {
     expect(screen.queryByText("Archived")).not.toBeInTheDocument();
     expect(within(recents).getByText("Current project task").closest(".project-sidebar-row")).not.toHaveClass("project-session-row");
   });
-  it.each(["chat", "work", "study"] as const)("combines Home conversations and pins while composing in %s", async mode => {
-    useWorkspaceModeStore.setState({ mode });
-    await setup([
-      { id: "chat", title: "Chat session", workspace_mode: "chat" },
-      { id: "work", title: "Work session", workspace_mode: "work", project_id: "p1" },
-      { id: "study", title: "Study session", workspace_mode: "study", project_id: "p1" },
-      { id: "legacy", title: "Legacy cowork session", workspace_mode: "cowork" },
-      { id: "pin", title: "Study pin", workspace_mode: "study", pinned: true },
-      { id: "code", title: "Code session", workspace_mode: "code" },
-      { id: "code-pin", title: "Code pin", workspace_mode: "code", pinned: true },
-    ]);
+  it("selects projects and keeps the two independently scrolling lists separate", async () => {
+    const { container, open } = await setup();
+    const projects = screen.getByRole("region", { name: "Projects" });
     const recents = screen.getByRole("region", { name: "Recent chats" });
-    for (const title of ["Chat session", "Work session", "Study session", "Legacy cowork session"]) {
-      expect(within(recents).getByText(title)).toBeInTheDocument();
-    }
-    expect(within(recents).queryByText("Code session")).not.toBeInTheDocument();
-    const pinned = screen.getByRole("region", { name: "Pinned chats" });
-    expect(within(pinned).getByText("Study pin")).toBeInTheDocument();
-    expect(within(pinned).queryByText("Code pin")).not.toBeInTheDocument();
-    fireEvent.click(within(recents).getByRole("button", { name: "Recents" }));
-    expect(useWorkspaceModeStore.getState().recentsCollapsed.chat).toBe(true);
-    expect(useWorkspaceModeStore.getState().recentsCollapsed.code).toBe(false);
-  });
-  it("expands a Code project's sessions in Chat, including pinned sessions, and opens the selected chat", async () => {
-    useWorkspaceModeStore.setState({ mode: "chat" });
-    const { open } = await setup(chats.filter(chat => chat.workspace_mode === "code"));
-    const projects = screen.getByRole("region", { name: "Projects" });
-    const projectButton = within(projects).getByRole("button", { name: "Desktop" });
-    fireEvent.click(projectButton);
     expect(within(projects).queryByText("Project task")).not.toBeInTheDocument();
-    fireEvent.click(projectButton);
-    expect(within(projects).getByText("Project task")).toBeInTheDocument();
-    expect(within(projects).getByText("Pinned task")).toBeInTheDocument();
-    fireEvent.click(within(projects).getByText("Project task"));
-    expect(open).toHaveBeenCalledWith("b");
-    expect(useWorkspaceModeStore.getState().mode).toBe("chat");
+    expect(within(recents).getByText("Project task")).toBeInTheDocument();
+    expect(within(recents).getByText("Pinned task")).toBeInTheDocument();
+    expect(within(recents).queryByText("Loose task")).not.toBeInTheDocument();
+    expect(container.querySelector('[data-sidebar-lists]')).toHaveClass('grid-rows-[minmax(0,1fr)_minmax(0,1fr)]');
+    const projectScroll = container.querySelector('[data-project-list]')!;
+    const recentScroll = container.querySelector('[data-recent-list]')!;
+    expect(projectScroll).toHaveClass('overflow-y-auto');
+    expect(recentScroll).toHaveClass('overflow-y-auto');
+    projectScroll.scrollTop = 80;
+    fireEvent.scroll(projectScroll);
+    expect(recentScroll.scrollTop).toBe(0);
+    fireEvent.click(within(recents).getByText('Project task'));
+    expect(open).toHaveBeenCalledWith('b');
+    fireEvent.click(screen.getByRole('button', { name: 'Browser' }));
+    expect(useProjectStore.getState().pendingProjectId).toBe('p2');
+    expect(screen.getByRole('button', { name: 'Browser' })).toHaveAttribute('aria-pressed', 'true');
+    expect(within(recents).getByText('No recent chats')).toBeInTheDocument();
+    expect(screen.getByTestId('location')).toHaveTextContent('"selectedProjectId":"p2"');
+    fireEvent.click(screen.getByRole('button', { name: 'No project' }));
+    expect(useProjectStore.getState().pendingProjectId).toBeNull();
+    expect(useWorkspaceModeStore.getState().lastCodeProjectId).toBeNull();
+    expect(within(recents).getByText('Loose task')).toBeInTheDocument();
   });
-  it("shows an empty project message only while that project is expanded", async () => {
-    await setup([]);
-    const projectButton = screen.getByRole("button", { name: "Desktop" });
-    const projectGroup = projectButton.closest("[data-project-id]")!.parentElement!;
-    expect(within(projectGroup).getByText("No chats in this project")).toBeInTheDocument();
-    fireEvent.click(projectButton);
-    expect(within(projectGroup).queryByText("No chats in this project")).not.toBeInTheDocument();
+  it('ignores stale project refresh responses after a newer selection and refresh', async () => {
+    let resolveOld!: (value: typeof project[]) => void;
+    vi.mocked(getProjects).mockImplementationOnce(() => new Promise(resolve => { resolveOld = resolve; }));
+    render(<MemoryRouter><SidebarProjects chats={chats} streamingIds={new Set()} onOpenChat={vi.fn()} /></MemoryRouter>);
+    act(() => window.dispatchEvent(new Event('projectsChanged')));
+    await screen.findByRole('button', { name: 'Browser' });
+    fireEvent.click(screen.getByRole('button', { name: 'Browser' }));
+    await act(async () => resolveOld([{ ...project, name: 'Stale name' }]));
+    expect(screen.queryByRole('button', { name: 'Stale name' })).not.toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Browser' })).toHaveAttribute('aria-pressed', 'true');
+    expect(useProjectStore.getState().pendingProjectId).toBe('p2');
   });
-  it("places All projects in the heading and leaves recent sessions unindented", async () => {
-    await setup();
-    const projects = screen.getByRole("region", { name: "Projects" });
-    const heading = within(projects).getByRole("button", { name: "Projects" });
-    expect(heading.parentElement).toContainElement(screen.getByRole("button", { name: "All projects" }));
-    expect(screen.getByText("Loose task").closest(".project-sidebar-row")).not.toHaveClass("project-session-row");
-    expect(within(screen.getByRole("region", { name: "Projects" })).getByText("Project task").closest(".project-sidebar-row")).toHaveClass("project-session-row");
+  it("preserves incoming recent order and Show more including pinned sessions", async () => {
+    await setup(Array.from({ length: 7 }, (_, index) => ({ id: String(index), title: `Task ${index}`, project_id: 'p1', workspace_mode: 'code', pinned: index === 3 })));
+    const recents = screen.getByRole('region', { name: 'Recent chats' });
+    expect(within(recents).queryByText('Task 5')).not.toBeInTheDocument();
+    fireEvent.click(within(recents).getByText('Show more'));
+    expect([...recents.querySelectorAll('[data-session-id]')].map(row => row.getAttribute('data-session-id'))).toEqual(['0', '1', '2', '3', '4', '5', '6']);
+  });
+  it("shows both empty states without hiding the list regions", async () => {
+    vi.mocked(getProjects).mockResolvedValue([]);
+    render(<MemoryRouter><SidebarProjects chats={[]} streamingIds={new Set()} onOpenChat={vi.fn()} /></MemoryRouter>);
+    expect(await screen.findByText('No projects yet')).toBeInTheDocument();
+    expect(screen.getByText('No recent chats')).toBeInTheDocument();
   });
   it("executes the pin shortcut for the selected menu chat and ignores it while editing", async () => {
     await setup();
@@ -218,25 +221,6 @@ describe("project sidebar", () => {
     fireEvent.keyDown(screen.getByLabelText("Chat name"), { key: "p", ctrlKey: true, altKey: true });
     expect(updateConversation).toHaveBeenCalledTimes(1);
   });
-  it("shows every mode in projects while keeping Recents mode-specific and collapses independently", async () => {
-    await setup();
-    expect(
-      within(screen.getByRole("region", { name: "Pinned chats" })).getByText(
-        "Pinned task",
-      ),
-    ).toBeInTheDocument();
-    const projects = screen.getByRole("region", { name: "Projects" });
-    expect(within(projects).getByText("Pinned task")).toBeInTheDocument();
-    expect(within(projects).getByText("Project task")).toBeInTheDocument();
-    expect(screen.queryByText("Archived task")).not.toBeInTheDocument();
-    expect(within(projects).getByText("Chat mode task")).toBeInTheDocument();
-    expect(within(screen.getByRole("region", { name: "Recent chats" })).queryByText("Chat mode task")).not.toBeInTheDocument();
-    fireEvent.click(screen.getByRole("button", { name: "Desktop" }));
-    expect(within(projects).queryByText("Project task")).not.toBeInTheDocument();
-    expect(within(screen.getByRole("region", { name: "Recent chats" })).getByText("Project task")).toBeInTheDocument();
-    expect(screen.getByText("Pinned task")).toBeInTheDocument();
-    expect(screen.getByText("Loose task")).toBeInTheDocument();
-  });
   it("saves pin changes through the API and reports failure without hiding the chat", async () => {
     await setup();
     chatMenu();
@@ -248,7 +232,7 @@ describe("project sidebar", () => {
       "Could not save pin",
     );
     expect(updateConversation).toHaveBeenCalledWith("b", { pinned: true });
-    expect(within(screen.getByRole("region", { name: "Projects" })).getByText("Project task")).toBeInTheDocument();
+    expect(within(screen.getByRole("region", { name: "Recent chats" })).getByText("Project task")).toBeInTheDocument();
   });
   it("moves a chat and can detach it without deleting it", async () => {
     await setup();
@@ -346,7 +330,7 @@ describe("project sidebar", () => {
       JSON.parse(localStorage.getItem("project-sidebar-preferences")!).state
         .unreadChats,
     ).toContain("b");
-    fireEvent.click(within(screen.getByRole("region", { name: "Projects" })).getByText("Project task"));
+    fireEvent.click(within(screen.getByRole("region", { name: "Recent chats" })).getByText("Project task"));
     expect(open).toHaveBeenCalledWith("b");
     expect(useSidebarPreferences.getState().unreadChats).not.toContain("b");
   });

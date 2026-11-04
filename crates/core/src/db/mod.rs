@@ -1,6 +1,7 @@
 pub mod schema;
 pub mod conversation_repo;
 pub mod message_repo;
+pub mod turn_repo;
 pub mod request_repo;
 pub mod project_repo;
 pub mod task_repo;
@@ -67,6 +68,7 @@ impl DbManager {
             let result: Result<()> = (|| {
                 conn.execute_batch(schema::SCHEMA_SQL)?;
                 crate::services::migrate(conn)?;
+                crate::services::input_queue::migrate(conn)?;
                 conversation_repo::migrate_workspace_mode(conn)?;
 
                 let has_col: i64 = conn

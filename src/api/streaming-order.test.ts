@@ -13,6 +13,17 @@ vi.mock('./client', () => ({
 afterEach(() => vi.unstubAllGlobals());
 
 describe.each([['desktop', sendDesktopMessage], ['modular', sendModularMessage]] as const)('%s streaming text', (_name, sendMessage) => {
+  it('forwards terminal turn timing before completion and preserves structured image history', async () => {
+    const turn = { turnId: 'turn', startedAt: '2026-11-03T00:00:00Z', endedAt: '2026-11-03T00:00:08Z', elapsedMs: 8000, status: 'completed' };
+    const body = [{ type: 'turn_timing', turn: { ...turn, endedAt: null, elapsedMs: null, status: 'running' } }, { type: 'turn_timing', turn }, { type: 'message_stop' }].map(event => `data: ${JSON.stringify(event)}\n\n`).join('');
+    const fetchMock = vi.fn().mockResolvedValue(new Response(body));
+    vi.stubGlobal('fetch', fetchMock);
+    const content = [{ type: 'image_url', image_url: { url: 'data:image/png;base64,aGVsbG8=' } }];
+    const events: string[] = [];
+    await sendMessage('test', 'image', null, vi.fn(), () => events.push('done'), vi.fn(), undefined, (type, _text, data) => { if (type === 'turn_timing') events.push(data.turn.status); }, undefined, undefined, undefined, undefined, undefined, undefined, 'model', [{ role: 'user', content }]);
+    expect(events).toEqual(['running', 'completed', 'done']);
+    expect(JSON.parse(fetchMock.mock.calls[0][1].body).messages[0].content).toEqual(content);
+  });
   it('forwards request-scoped permission completion before stream termination', async () => {
     const permission = { type: 'tool_permission', request_id: 'approval', tool_use_id: 'write', tool_name: 'Write', input: {} };
     const resolved = { type: 'tool_permission_resolved', request_id: 'approval', tool_use_id: 'write', conversation_id: 'test' };

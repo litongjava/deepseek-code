@@ -147,6 +147,8 @@
     "no": "否"
   },
   "sidebar": {
+    "noProject": "无项目",
+    "noProjects": "暂无项目",
     "workspaceMode": "工作区模式",
     "homeMode": "Home",
     "chatMode": "聊天",
@@ -506,6 +508,11 @@
     "usageTitle": "使用量"
   },
   "chat": {
+    "sessionMenu": "会话选项",
+    "sessionView": "会话视图",
+    "copySessionId": "复制会话 ID",
+    "sessionIdCopied": "已复制会话 ID",
+    "sessionIdCopyFailed": "无法复制会话 ID，请重试。",
     "selectCodeProject": "请先选择工程，再发送 Code 消息",
     "inputPlaceholder": "今天我能帮你什么？",
     "send": "发送",

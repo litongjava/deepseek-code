@@ -147,6 +147,8 @@
     "no": "否"
   },
   "sidebar": {
+    "noProject": "無專案",
+    "noProjects": "尚無專案",
     "workspaceMode": "工作區模式",
     "homeMode": "Home",
     "chatMode": "聊天",
@@ -488,6 +490,11 @@
     "usageTitle": "使用量"
   },
   "chat": {
+    "sessionMenu": "工作階段選項",
+    "sessionView": "工作階段檢視",
+    "copySessionId": "複製工作階段 ID",
+    "sessionIdCopied": "已複製工作階段 ID",
+    "sessionIdCopyFailed": "無法複製工作階段 ID，請再試一次。",
     "selectCodeProject": "在 Code 模式傳送訊息前，請先選擇專案",
     "inputPlaceholder": "我今天能幫你什麼？",
     "send": "發送",

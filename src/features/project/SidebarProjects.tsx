@@ -37,6 +37,7 @@ import {
   Project,
   updateConversation,
 } from "../../api";
+import { useProjectStore } from "../../stores/useProjectStore";
 import { useWorkspaceModeStore } from "../../stores/useWorkspaceModeStore";
 import { tauriAPI } from "../../utils/tauriAPI";
 import CreateProjectDialog from "./CreateProjectDialog";
@@ -230,10 +231,21 @@ export default function SidebarProjects({
   const busyRef = useRef(false);
   // Projects span workspace modes; Home combines Chat, Work, and Study sessions.
   const currentChats = visibleChats(chats, mode);
-  const projectChats = visibleChats(chats);
   const activeId = location.pathname.match(/^\/chat\/([^/]+)/)?.[1];
-  const pinned = currentChats.filter((chat) => chat.pinned);
-  const recent = currentChats.filter((chat) => !chat.pinned);
+  const pendingProjectId = useProjectStore(state => state.pendingProjectId);
+  const currentProjectId = useProjectStore(state => state.currentProjectId);
+  const activeChat = chats.find(chat => chat.id === decodeURIComponent(activeId || ''));
+  const selectedProjectId = activeId
+    ? activeChat ? activeChat.project_id || null : currentProjectId
+    : pendingProjectId;
+  const recent = currentChats.filter(chat => (chat.project_id || null) === (selectedProjectId || null));
+  const selectProject = (projectId: string | null) => {
+    stopHover();
+    setPopup(null);
+    useProjectStore.getState().setPendingProjectId(projectId);
+    if (mode === 'code') useWorkspaceModeStore.getState().setLastCodeProjectId(projectId);
+    navigate('/', { state: { selectedProjectId: projectId } });
+  };
   const sortedProjects = [...projects].sort(
     (a, b) =>
       Number(preferences.pinnedProjects.includes(b.id)) -
@@ -242,15 +254,18 @@ export default function SidebarProjects({
 
   useEffect(() => {
     let disposed = false;
-    const refresh = () =>
-      getProjects()
+    let request = 0;
+    const refresh = () => {
+      const version = ++request;
+      return getProjects()
         .then((list) => {
-          if (!disposed)
+          if (!disposed && version === request)
             setProjects(list.filter((project) => !project.is_archived));
         })
         .catch((error) => {
-          if (!disposed) setError(String(error));
+          if (!disposed && version === request) setError(String(error));
         });
+    };
     void refresh();
     window.addEventListener("projectsChanged", refresh);
     window.addEventListener("focus", refresh);
@@ -739,25 +754,9 @@ export default function SidebarProjects({
   const popupChat = chats.find((chat) => chat.id === popup?.id);
 
   return (
-    <div className="project-sidebar-tree" aria-busy={busy}>
-      {!!pinned.length && (
-        <section aria-label={t("sidebar.pinnedChats")} className="mb-4">
-          <button
-            type="button"
-            className="project-section-heading"
-            aria-expanded={!preferences.pinnedCollapsed}
-            onClick={() => preferences.collapse("pinnedCollapsed")}
-          >
-            {t("sidebar.pinned")}
-            <ChevronDown
-              size={13}
-              className={preferences.pinnedCollapsed ? "-rotate-90" : ""}
-            />
-          </button>
-          {!preferences.pinnedCollapsed && chatList(pinned, "pinned")}
-        </section>
-      )}
-      <section aria-label={t("sidebar.projects")}>
+    <div className="project-sidebar-tree flex min-h-0 flex-1 flex-col" aria-busy={busy}>
+      <div className="grid min-h-0 min-w-0 flex-1 grid-cols-[minmax(0,1fr)] grid-rows-[minmax(0,1fr)_minmax(0,1fr)] gap-3" data-sidebar-lists>
+      <section aria-label={t("sidebar.projects")} className="flex min-h-0 flex-col">
         <div className="flex items-center">
           <button
             type="button"
@@ -789,19 +788,16 @@ export default function SidebarProjects({
           </button>
         </div>
         {!preferences.projectsCollapsed && (
-          <div data-project-list>
+          <div data-project-list className="min-h-0 flex-1 overflow-y-auto sidebar-scroll">
+            <button type="button" aria-pressed={!selectedProjectId} onClick={() => selectProject(null)} className={`project-sidebar-row w-full text-left ${!selectedProjectId ? 'bg-claude-hover' : ''}`}>{t('sidebar.noProject')}</button>
+            {!sortedProjects.length && <p className="px-2 py-1.5 text-xs text-claude-textSecondary">{t('sidebar.noProjects')}</p>}
             {sortedProjects.map((project) => {
-              const expanded = !preferences.collapsedProjects.includes(
-                project.id,
-              );
-              const sessions = projectChats.filter(
-                (chat) => chat.project_id === project.id,
-              );
+              const selected = selectedProjectId === project.id;
               return (
                 <div key={project.id} className="mb-1">
                   <div
                     data-project-id={project.id}
-                    className={`project-sidebar-row group ${popup?.id === project.id ? "bg-claude-hover" : ""}`}
+                    className={`project-sidebar-row group ${selected || popup?.id === project.id ? "bg-claude-hover" : ""}`}
                     onMouseEnter={(event) => {
                       if (popup && popup.kind !== "details") return;
                       const element = event.currentTarget;
@@ -824,19 +820,15 @@ export default function SidebarProjects({
                   >
                     <button
                       type="button"
-                      aria-expanded={expanded}
+                      aria-pressed={selected}
                       aria-label={project.name}
                       onContextMenu={(event) =>
                         menuClick(event, "project", project.id)
                       }
-                      onClick={() => {
-                        stopHover();
-                        setPopup(null);
-                        preferences.toggle("collapsedProjects", project.id);
-                      }}
+                      onClick={() => selectProject(project.id)}
                       className="flex min-w-0 flex-1 items-center gap-2 py-1.5 text-left"
                     >
-                      {expanded ? (
+                      {selected ? (
                         <FolderOpen size={15} className="shrink-0" />
                       ) : (
                         <Folder size={15} className="shrink-0" />
@@ -873,9 +865,6 @@ export default function SidebarProjects({
                       </button>
                     </div>
                   </div>
-                  {expanded && (sessions.length ? chatList(sessions, project.id, true) : (
-                    <p className="py-1.5 pl-8 text-xs text-claude-textSecondary">{t("sidebar.noProjectChats")}</p>
-                  ))}
                 </div>
               );
             })}
@@ -884,7 +873,7 @@ export default function SidebarProjects({
       </section>
         <section
           aria-label={t("sidebar.recentChats")}
-          className="mt-4"
+          className="flex min-h-0 flex-col"
           data-recents-mode={mode === 'code' ? 'code' : 'home'}
         >
           <button
@@ -899,10 +888,13 @@ export default function SidebarProjects({
               className={recentsCollapsed ? "-rotate-90" : ""}
             />
           </button>
-          {!recentsCollapsed && (recent.length ? chatList(recent, "recents") : (
-            <p className="px-2 py-1.5 text-xs text-claude-textSecondary">{t("sidebar.noRecentChats")}</p>
-          ))}
+          {!recentsCollapsed && <div className="min-h-0 flex-1 overflow-y-auto sidebar-scroll" data-recent-list>
+            {recent.length ? chatList(recent, `recents:${selectedProjectId || ''}`) : (
+              <p className="px-2 py-1.5 text-xs text-claude-textSecondary">{t("sidebar.noRecentChats")}</p>
+            )}
+          </div>}
         </section>
+      </div>
       {error && (
         <div
           role="alert"

@@ -100,12 +100,10 @@ export default function WorkDetails({ message, index, live, onInspect }: { messa
     else items.push([step]);
   }
   const hasWork = steps.some(s => s.kind !== 'text');
-  const duration = message.processStartedAt && message.processEndedAt ? Math.max(0, (message.processEndedAt - message.processStartedAt) / 1000) : null;
   const inspect = coding ? onInspect : undefined;
-  const durationLabel = duration == null ? '' : duration < 60 ? `${Math.round(duration)}s` : `${Math.floor(duration / 60)}m ${Math.round(duration % 60)}s`;
   const finalStep = steps[steps.length - 1]?.kind === 'text' ? steps[steps.length - 1] : undefined;
   return <div className="chat-work-details">
-    {hasWork && <div className="mb-4 pb-3 text-sm tabular-nums text-claude-textSecondary">{level === 'compact' ? <button type="button" aria-expanded={!workCollapsed} onClick={() => setWorkCollapsed(!workCollapsed)} className="flex items-center gap-2">{live ? 'Working…' : durationLabel ? `Worked for ${durationLabel}` : 'Work details'}<ChevronRight size={14} className={workCollapsed ? '' : 'rotate-90'} /></button> : live ? 'Working…' : durationLabel ? `Completed in ${durationLabel}` : 'Completed'}</div>}
+    {hasWork && <div className="mb-4 pb-3 text-sm tabular-nums text-claude-textSecondary">{level === 'compact' ? <button type="button" aria-expanded={!workCollapsed} onClick={() => setWorkCollapsed(!workCollapsed)} className="flex items-center gap-2">{'Work details'}<ChevronRight size={14} className={workCollapsed ? '' : 'rotate-90'} /></button> : 'Work details'}</div>}
     {items.map(group => {
       const s = group[0];
       if (s.kind === 'tool') return <GridDisclosure key={s.id} open={level !== 'compact' || !workCollapsed}><ToolGroup key={s.id} steps={group} message={message} index={index} level={level} live={live} onInspect={inspect} /></GridDisclosure>;

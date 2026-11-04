@@ -24,6 +24,9 @@ struct Fixture {
 
 async fn respond(State(state): State<Fixture>, Json(body): Json<Value>) -> Response {
     state.requests.lock().unwrap().push(body.clone());
+    if body["stream"] == true && body["messages"].to_string().contains("TIMED_TURN_FIXTURE") {
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
     if state.fail {
         return (StatusCode::BAD_REQUEST, "fixture failure").into_response();
     }
@@ -133,7 +136,41 @@ async fn builtin_provider_and_shared_tools_run_without_node_on_path() {
     assert!(output.status.success(),"{}",String::from_utf8_lossy(&output.stderr));
     let output: Value = serde_json::from_slice(&output.stdout).unwrap();
     assert!(output["result"].as_str().unwrap().contains("native-only fixture"));
+    assert_durable_turn(&data, &output, "completed");
     assert_eq!(fixture.requests.lock().unwrap().len(),2);
+    task.abort();
+}
+
+fn assert_durable_turn(data: &Path, result: &Value, status: &str) {
+    let turn = &result["turn"];
+    assert_eq!(turn["status"], status);
+    assert!(turn["elapsedMs"].as_u64().is_some());
+    assert!(turn["startedAt"].as_str().is_some());
+    assert!(turn["endedAt"].as_str().is_some());
+    let paths = deepseek_code_core::runtime::RuntimePaths::new(data.to_owned()).unwrap();
+    let db = paths.open_database().unwrap();
+    db.with_conn(|conn| {
+        let messages = deepseek_code_core::db::message_repo::get_messages_by_conversation(conn, result["session_id"].as_str().unwrap()).unwrap();
+        let saved = messages.iter().filter_map(|message| deepseek_code_core::db::turn_repo::get_message_turn(conn, &message.id).unwrap()).find(|record| record.turn_id == turn["turnId"].as_str().unwrap()).unwrap();
+        assert_eq!(serde_json::to_value(saved).unwrap(), *turn);
+    }).unwrap();
+}
+
+#[tokio::test]
+async fn whole_turn_timing_spans_multiple_model_requests_and_tool_execution() {
+    let temp = tempfile::tempdir().unwrap();
+    let data = temp.path().join("data");
+    std::fs::write(temp.path().join("fixture.txt"), "timed tool result").unwrap();
+    let (url, fixture, task) = server(Some("Read"), false).await;
+    let mut cli = query(&data, temp.path(), &url);
+    cli.args(["--permission-mode", "accept-edits", "query", "-p", "TIMED_TURN_FIXTURE read fixture"]);
+    let output = execute(cli).await;
+    assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+    let result: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(fixture.requests.lock().unwrap().len(), 2);
+    assert!(result["result"].as_str().unwrap().contains("timed tool result"));
+    assert!(result["turn"]["elapsedMs"].as_u64().unwrap() >= 100);
+    assert_durable_turn(&data, &result, "completed");
     task.abort();
 }
 
@@ -204,6 +241,7 @@ async fn single_query_and_resume_share_sqlite_without_desktop_or_saved_credentia
     );
     let first: Value = serde_json::from_slice(&first.stdout).unwrap();
     assert_eq!(first["result"], "fixture response 中文");
+    assert_durable_turn(&data, &first, "completed");
     assert_eq!(first["is_error"], false);
     assert!(!data.join("providers.json").exists());
     assert!(!data.join("config.json").exists());
@@ -327,6 +365,7 @@ async fn noninteractive_approval_and_api_errors_fail_without_hanging() {
             assert_eq!(result["is_error"], true);
             let error = result["error"].as_str().unwrap();
             assert!(error.contains("fixture failure"), "{error}");
+            assert_durable_turn(&data, &result, "failed");
         } else {
             // With no approval host the call is denied and the model finishes the turn.
             assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));

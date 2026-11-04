@@ -1,7 +1,7 @@
 import React, { useState, useEffect, useCallback, useRef } from 'react';
 import { loginEnabled } from './utils/login';
 import { HashRouter, Routes, Route, Navigate, useLocation, useNavigate } from 'react-router-dom';
-import { BellRing, Menu, ArrowLeft, ArrowRight, GitBranch, BarChart3, Terminal, HelpCircle } from 'lucide-react';
+import { BellRing, Menu, ArrowLeft, ArrowRight, GitBranch, BarChart3, HelpCircle } from 'lucide-react';
 import Sidebar from './components/Sidebar';
 import AppTitleBar, { WindowFrame } from './components/AppTitleBar';
 import MainContent from './components/MainContent';
@@ -13,7 +13,6 @@ import SettingsPage from './components/SettingsPage';
 import AgentPanel from './components/AgentPanel';
 import { useGeneralSettingsStore } from './stores/useGeneralSettingsStore';
 import AnalyticsPanel from './components/AnalyticsPanel';
-import TerminalPanel from './components/TerminalPanel';
 import UpgradePlan from './components/UpgradePlan';
 import CodeWorkspace from './components/CodeWorkspace';
 import ArtifactsPage from './components/ArtifactsPage';
@@ -94,10 +93,6 @@ const Layout = () => {
     return () => window.removeEventListener('keydown', handler);
   }, [showCodingView, setShowAgentPanel, setShowAnalyticsPanel]);
   const showAnalyticsPanel = useUIStore(s => s.showAnalyticsPanel);
-  const showTerminal = useUIStore(s => s.showTerminalPanel);
-  const setShowTerminal = useUIStore(s => s.setShowTerminalPanel);
-  const terminalHeight = useUIStore(s => s.terminalPanelHeight);
-  const setTerminalHeight = useUIStore(s => s.setTerminalPanelHeight);
   const [needsGitBash, setNeedsGitBash] = useState(false);
 
   useEffect(() => {
@@ -365,7 +360,7 @@ const Layout = () => {
       }
       if ((e.ctrlKey || e.metaKey) && e.key === '`') {
         e.preventDefault();
-        setShowTerminal(!showTerminal);
+        window.dispatchEvent(new CustomEvent('request-open-panel', { detail: { panel: 'terminal' } }));
       }
     };
     window.addEventListener('keydown', handleKeyDown);
@@ -413,7 +408,6 @@ const Layout = () => {
             ) : (<span className="p-1.5 text-claude-navDisabled"><ArrowRight size={16} strokeWidth={1.5} /></span>)}
             {showCodingView && <Tooltip content="Agent Worktree (Ctrl+Shift+A)"><button onClick={() => { setShowAgentPanel(true); setShowAnalyticsPanel(false); }} className="p-1.5 hover:bg-black/5 dark:hover:bg-white/5 rounded-md text-claude-textSecondary hover:text-claude-text transition-colors"><GitBranch size={16} strokeWidth={1.5} /></button></Tooltip>}
             <Tooltip content="使用统计"><button onClick={() => { setShowAnalyticsPanel(true); setShowAgentPanel(false); }} className="p-1.5 hover:bg-black/5 dark:hover:bg-white/5 rounded-md text-claude-textSecondary hover:text-claude-text transition-colors"><BarChart3 size={16} strokeWidth={1.5} /></button></Tooltip>
-            <Tooltip content="终端 (Ctrl+`)"><button onClick={() => setShowTerminal(!showTerminal)} className={`p-1.5 hover:bg-black/5 dark:hover:bg-white/5 rounded-md transition-colors ${showTerminal ? 'text-[#C6613F]' : 'text-claude-textSecondary hover:text-claude-text'}`}><Terminal size={16} strokeWidth={1.5} /></button></Tooltip>
             <Tooltip content={t('common.help')}><button type="button" aria-label={t('common.help')} aria-haspopup="dialog" aria-expanded={showHelpModal} onClick={() => setShowHelpModal(true)} className="p-1.5 hover:bg-black/5 dark:hover:bg-white/5 rounded-md text-claude-textSecondary hover:text-claude-text transition-colors"><HelpCircle size={16} strokeWidth={1.5} /></button></Tooltip>
           </div>
         </AppTitleBar>
@@ -490,14 +484,6 @@ const Layout = () => {
       )}
       {showCodingView && showAgentPanel && <AgentPanel onClose={() => setShowAgentPanel(false)} />}
       {showAnalyticsPanel && <AnalyticsPanel onClose={() => setShowAnalyticsPanel(false)} />}
-      {showTerminal && (
-        <div
-          className="fixed bottom-0 left-0 right-0 z-[80] border-t border-claude-border bg-[#1e1e2e] shadow-2xl"
-          style={{ height: `${terminalHeight}px` }}
-        >
-          <TerminalPanel onClose={() => setShowTerminal(false)} />
-        </div>
-      )}
     </>
   );
 };

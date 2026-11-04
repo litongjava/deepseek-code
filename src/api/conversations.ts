@@ -182,6 +182,7 @@ export async function getConversation(id: string) {
             }
           }
           return restoreProcessMetadata({
+            turn: m.turn,
             requestSnapshots: m.requestSnapshots,
             id: m.id, role: m.role || 'assistant', content: m.content,
             thinking: m.thinking || null, created_at: m.created_at,
@@ -437,7 +438,13 @@ export async function branchConversation(
     updateLocalConversation(branch.id, {
       provider: source.provider, workspace_path: source.workspace_path, project_id: source.project_id,
     });
-    saveLocalMessages(branch.id, branchMessages.map(message => ({ ...message, id: crypto.randomUUID(), conversation_id: branch.id })));
+    const turnIds = new Map<string, string>();
+    saveLocalMessages(branch.id, branchMessages.map(message => {
+      const turn = message.turn;
+      if (turn && !turnIds.has(turn.turnId)) turnIds.set(turn.turnId, crypto.randomUUID());
+      return { ...message, id: crypto.randomUUID(), conversation_id: branch.id,
+        turn: turn ? { ...turn, turnId: turnIds.get(turn.turnId)!, ...(turn.status === 'running' ? { status: 'cancelled' as const, endedAt: null, elapsedMs: null } : {}) } : undefined };
+    }));
     return { success: true, new_conversation_id: branch.id };
   }
   const res = await request(`/conversations/${conversationId}/branch`, {
@@ -583,7 +590,7 @@ export async function reconnectStream(
             if ((parsed.type === 'tool_permission' || parsed.type === 'tool_permission_resolved') && onSystem) {
               onSystem(parsed.type, '', parsed);
             }
-            if (parsed.type === 'request_snapshot' && onSystem) onSystem('request_snapshot', '', parsed);
+            if ((parsed.type === 'request_snapshot' || parsed.type === 'turn_timing') && onSystem) onSystem(parsed.type, '', parsed);
             if (parsed.type === 'message_start' && onSystem) {
               onSystem('message_start', '', parsed);
             }

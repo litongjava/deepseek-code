@@ -7,6 +7,8 @@ import { aggregateUsage, formatTokens } from '../usage/model';
 import UsagePopover from '../usage/UsagePopover';
 import TokenUsageDetails from '../usage/TokenUsageDetails';
 
+export const responseDividerClassName = 'h-px w-full bg-claude-border';
+
 export default function ResponseFooter({ message, index, conversationId, disabled = false, onBranch }: {
   message: any;
   index: number;
@@ -24,6 +26,7 @@ export default function ResponseFooter({ message, index, conversationId, disable
   const buttonClass = 'inline-flex items-center justify-center rounded-lg p-2 text-claude-textSecondary hover:bg-claude-hover hover:text-claude-text focus-visible:ring-2 focus-visible:ring-blue-400 disabled:opacity-40 disabled:cursor-not-allowed';
 
   return <div className="mt-4 mb-2" aria-label="Response actions">
+    <div className={`${responseDividerClassName} mb-3`} />
     <div className="flex flex-wrap items-center gap-1 text-[13px] text-claude-textSecondary">
       <CopyButton text={extractTextContent(message.content)} label="Copy response" />
       <button type="button" aria-label="Good response" title="Good response" aria-pressed={rating === 'up'}

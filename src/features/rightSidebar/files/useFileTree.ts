@@ -11,7 +11,7 @@ export type DirState =
  * `depth=1` when first expanded; nothing is expanded automatically. `refresh`
  * reloads the root and every expanded directory and forgets collapsed ones.
  */
-export function useFileTree(root: string | null) {
+export function useFileTree(root: string | null, load = getFileSystemTree) {
   const [dirs, setDirs] = useState<Record<string, DirState>>({});
   const [expanded, setExpanded] = useState<ReadonlySet<string>>(() => new Set());
   const dirsRef = useRef(dirs);
@@ -28,7 +28,7 @@ export function useFileTree(root: string | null) {
       // Keep showing loaded entries while they are reloaded.
       return { ...prev, [path]: { status: 'loading', entries: current?.status === 'loaded' ? current.entries : undefined } };
     });
-    getFileSystemTree(path, 1)
+    load(path, 1)
       .then(res => {
         if (gen !== generation.current) return;
         setDirs(prev => ({ ...prev, [path]: { status: 'loaded', entries: Array.isArray(res.tree) ? res.tree : [] } }));
@@ -37,13 +37,14 @@ export function useFileTree(root: string | null) {
         if (gen !== generation.current) return;
         setDirs(prev => ({ ...prev, [path]: { status: 'error', message: error instanceof Error ? error.message : String(error) } }));
       });
-  }, []);
+  }, [load]);
 
   useEffect(() => {
     generation.current += 1;
     setDirs({});
     setExpanded(new Set());
     if (root) loadDir(root);
+    return () => { generation.current += 1; };
   }, [root, loadDir]);
 
   const setDirExpanded = useCallback((path: string, open: boolean) => {

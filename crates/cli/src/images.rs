@@ -99,6 +99,33 @@ fn placeholders(prompt: &str) -> Vec<PathBuf> {
     numbers.into_iter().map(|number| pasted[number - 1].clone()).collect()
 }
 
+/// Groups quoted path tokens without interpreting shell escapes or expansions.
+fn image_path_words(prompt: &str) -> impl Iterator<Item = &str> {
+    let mut remaining = prompt;
+    std::iter::from_fn(move || {
+        remaining = remaining.trim_start();
+        if remaining.is_empty() {
+            return None;
+        }
+        let mut end = remaining.find(char::is_whitespace).unwrap_or(remaining.len());
+        let start = remaining.trim_start_matches(|ch| matches!(ch, '@' | '('));
+        if let Some(quote @ ('"' | '\'')) = start.chars().next() {
+            let prefix = remaining.len() - start.len() + quote.len_utf8();
+            if let Some(close) = remaining[prefix..].find(quote) {
+                let quoted_end = prefix + close + quote.len_utf8();
+                let suffix = &remaining[quoted_end..];
+                let suffix_end = suffix.find(char::is_whitespace).unwrap_or(suffix.len());
+                if suffix[..suffix_end].chars().all(|ch| matches!(ch, ',' | ';' | ')' | '?' | '!')) {
+                    end = quoted_end + suffix_end;
+                }
+            }
+        }
+        let word = &remaining[..end];
+        remaining = &remaining[end..];
+        Some(word)
+    })
+}
+
 /// Image paths written in the prompt: plain, quoted or after @.
 fn image_paths(workspace: &Path, prompt: &str) -> Vec<PathBuf> {
     let mut paths: Vec<PathBuf> = Vec::new();
@@ -107,7 +134,7 @@ fn image_paths(workspace: &Path, prompt: &str) -> Vec<PathBuf> {
             paths.push(path);
         }
     }
-    for word in prompt.split_whitespace() {
+    for word in image_path_words(prompt) {
         let word = word
             .trim_start_matches(|ch| matches!(ch, '"' | '\'' | '@' | '('))
             .trim_end_matches(|ch| matches!(ch, '"' | '\'' | ',' | ';' | ')' | '?' | '!'));
@@ -251,6 +278,74 @@ mod tests {
         let absolute = dir.path().join("a.png");
         let prompt = format!("compare @a.png with '{}' and \"b.JPG\", not c.png or notes.txt", absolute.display());
         assert_eq!(image_paths(dir.path(), &prompt), [dir.path().join("a.png"), dir.path().join("b.JPG")]);
+    }
+
+    #[test]
+    fn image_paths_find_single_quoted_chinese_path_with_spaces_and_text() {
+        let dir = tempfile::tempdir().unwrap();
+        let folder = dir.path().join("中文 图片项目");
+        std::fs::create_dir(&folder).unwrap();
+        let path = folder.join("红色 red.png");
+        std::fs::write(&path, b"x").unwrap();
+        for quote in ['"', '\''] {
+            let prompt = format!("INTEROP_SINGLE 请保留这张图片。 {quote}{}{quote} 然后描述图片", path.display());
+            assert_eq!(image_paths(dir.path(), &prompt), [path.clone()]);
+            let blocks = content(dir.path(), &prompt).unwrap().unwrap();
+            let blocks = blocks.as_array().unwrap();
+            assert_eq!(blocks.len(), 2);
+            assert_eq!(blocks[0], json!({"type": "text", "text": prompt}));
+            assert_eq!(blocks[1], image_block_from_file(&path).unwrap());
+        }
+    }
+
+    #[test]
+    fn image_paths_find_multiple_quoted_mentions_in_order() {
+        let dir = tempfile::tempdir().unwrap();
+        let names = ["红色 red.png", "绿色 green.JPG", "蓝色 blue.webp"];
+        let paths: Vec<_> = names.iter().map(|name| dir.path().join(name)).collect();
+        for path in &paths {
+            std::fs::write(path, b"x").unwrap();
+        }
+        let prompt = format!("比较 @\"{}\", 与 (@'{}'); 然后 \"{}\"! 再看 @\"{}\"?", names[0], names[1], paths[2].display(), names[0]);
+        assert_eq!(image_paths(dir.path(), &prompt), paths);
+    }
+
+    #[test]
+    fn image_path_words_preserve_literal_windows_and_unix_paths() {
+        let prompt = r#"看 @"C:\中文 图片\红色 red.png" 和 '/tmp/中文 图片/green $HOME $(echo x) `id`.png'"#;
+        assert_eq!(
+            image_path_words(prompt).collect::<Vec<_>>(),
+            ["看", r#"@"C:\中文 图片\红色 red.png""#, "和", "'/tmp/中文 图片/green $HOME $(echo x) `id`.png'"]
+        );
+        assert_eq!(image_path_words("don't change ordinary text").collect::<Vec<_>>(), ["don't", "change", "ordinary", "text"]);
+    }
+
+    #[test]
+    fn image_paths_ignore_urls_and_arbitrary_quoted_text() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("a.png"), b"x").unwrap();
+        for prompt in [
+            "ordinary text without images",
+            "https://example.com/a.png http://example.com/a.png",
+            "\"https://example.com/a.png\"",
+            "say \"please describe a.png\" or 'do not attach a.png'",
+            "\"missing image.png\" and @\"notes with spaces.txt\"",
+            "prefix\"a.png\"",
+        ] {
+            assert!(image_paths(dir.path(), prompt).is_empty(), "{prompt}");
+            assert!(content(dir.path(), prompt).unwrap().is_none(), "{prompt}");
+        }
+    }
+
+    #[test]
+    fn image_paths_unmatched_quotes_fall_back_to_whitespace() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("a.png");
+        std::fs::write(&path, b"x").unwrap();
+        for prompt in ["看 \"missing image.png 然后 @a.png", "看 @'missing image.png 然后 a.png", "\"a.png", "'a.png\""] {
+            assert_eq!(image_path_words(prompt).collect::<Vec<_>>(), prompt.split_whitespace().collect::<Vec<_>>());
+            assert_eq!(image_paths(dir.path(), prompt), [path.clone()]);
+        }
     }
 
     #[test]

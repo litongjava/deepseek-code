@@ -1,144 +1,87 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { Prism as SyntaxHighlighter } from 'react-syntax-highlighter';
 import { oneLight, vscDarkPlus } from 'react-syntax-highlighter/dist/esm/styles/prism';
-import { AlertCircle, ArrowLeft, Check, Copy, FileWarning, Loader2 } from 'lucide-react';
-import { readFileContent, type FsFileNode } from '../../../api';
-import { useI18n } from '../../../hooks/useI18n';
-import { copyToClipboard } from '../../../utils/clipboard';
-import { MAX_HIGHLIGHT_CHARS, MAX_PREVIEW_BYTES, formatBytes, languageForFile, looksBinary, relativePath } from './fileUtils';
-
-type PreviewState =
-  | { status: 'loading' }
-  | { status: 'text'; content: string }
-  | { status: 'tooLarge'; size: number }
-  | { status: 'binary'; size: number }
-  | { status: 'error'; message: string };
+import { getWorkspaceFileDiff, readWorkspaceFile, type WorkspaceFile, type WorkspaceFileDiff } from '../../../api/workspaceFiles';
+import type { SidebarFileTab } from '../../../stores/useRightSidebarStore';
+import { MAX_HIGHLIGHT_CHARS, languageForFile } from './fileUtils';
 
 const MONO_FONT = 'Menlo, Monaco, "SF Mono", "Cascadia Code", "Fira Code", Consolas, "Courier New", monospace';
-
 function useIsDark() {
-  const [isDark, setIsDark] = useState(() => document.documentElement.classList.contains('dark'));
+  const [dark, setDark] = useState(() => document.documentElement.classList.contains('dark'));
   useEffect(() => {
-    const observer = new MutationObserver(() => setIsDark(document.documentElement.classList.contains('dark')));
+    const observer = new MutationObserver(() => setDark(document.documentElement.classList.contains('dark')));
     observer.observe(document.documentElement, { attributes: true, attributeFilter: ['class'] });
     return () => observer.disconnect();
   }, []);
-  return isDark;
+  return dark;
 }
 
-/** Read-only preview of one workspace file. `reloadKey` changes re-fetch the file. */
-export default function FilePreview({ root, node, reloadKey, onBack }: {
-  root: string;
-  node: FsFileNode;
-  reloadKey: number;
-  onBack: () => void;
+export default function FilePreview({ file, diff, active, reloadKey }: {
+  file: SidebarFileTab; diff: boolean; active: boolean; reloadKey: number;
 }) {
-  const { t, locale } = useI18n();
-  const isDark = useIsDark();
-  const [state, setState] = useState<PreviewState>({ status: 'loading' });
+  const [data, setData] = useState<WorkspaceFile | null>(null);
+  const [patch, setPatch] = useState<WorkspaceFileDiff | null>(null);
+  const [error, setError] = useState('');
   const [retry, setRetry] = useState(0);
-  const [copied, setCopied] = useState(false);
-  const relative = relativePath(root, node.path);
-
+  const container = useRef<HTMLDivElement>(null);
+  const dark = useIsDark();
   useEffect(() => {
-    if (node.size > MAX_PREVIEW_BYTES) {
-      setState({ status: 'tooLarge', size: node.size });
-      return;
+    const controller = new AbortController();
+    setError('');
+    if (diff) {
+      setPatch(null);
+      getWorkspaceFileDiff(file.scope, file, controller.signal).then(value => { if (!controller.signal.aborted) setPatch(value); }).catch(fail);
+    } else {
+      setData(null);
+      readWorkspaceFile(file.scope, file, controller.signal).then(value => { if (!controller.signal.aborted) setData(value); }).catch(fail);
     }
-    let cancelled = false;
-    setState(prev => (prev.status === 'text' ? prev : { status: 'loading' }));
-    readFileContent(node.path, { maxBytes: MAX_PREVIEW_BYTES })
-      .then(res => {
-        if (cancelled) return;
-        const size = typeof res.size === 'number' ? res.size : node.size;
-        const content = typeof res.content === 'string' ? res.content : '';
-        if (res.binary || looksBinary(content)) setState({ status: 'binary', size });
-        else if (res.truncated || size > MAX_PREVIEW_BYTES) setState({ status: 'tooLarge', size });
-        else setState({ status: 'text', content });
-      })
-      .catch((error: unknown) => {
-        if (!cancelled) setState({ status: 'error', message: error instanceof Error ? error.message : String(error) });
-      });
-    return () => { cancelled = true; };
-  }, [node.path, node.size, reloadKey, retry]);
-
+    function fail(error: unknown) { if (!controller.signal.aborted) setError(error instanceof Error ? error.message : String(error)); }
+    return () => controller.abort();
+  }, [file.id, diff, reloadKey, retry]);
   useEffect(() => {
-    if (!copied) return;
-    const timer = window.setTimeout(() => setCopied(false), 2000);
-    return () => window.clearTimeout(timer);
-  }, [copied]);
-
-  const handleCopy = async () => {
-    if (await copyToClipboard(node.path)) setCopied(true);
-  };
-
-  return (
-    <div className="flex min-h-0 flex-1 flex-col">
-      <div className="flex h-9 flex-shrink-0 items-center gap-1 border-b border-claude-border px-2">
-        <button type="button" onClick={onBack} aria-label={t('rightSidebar.filesBack')} title={t('rightSidebar.filesBack')}
-          className="rounded-md p-1 text-claude-textSecondary transition-colors hover:bg-claude-btn-hover hover:text-claude-text">
-          <ArrowLeft size={15} aria-hidden="true" />
-        </button>
-        <span className="min-w-0 flex-1 truncate font-mono text-[12px] text-claude-text" title={node.path} data-testid="file-preview-path">{relative}</span>
-        <button type="button" onClick={() => { void handleCopy(); }}
-          aria-label={copied ? t('rightSidebar.filesPathCopied') : t('rightSidebar.filesCopyPath')}
-          title={copied ? t('rightSidebar.filesPathCopied') : t('rightSidebar.filesCopyPath')}
-          className="rounded-md p-1 text-claude-textSecondary transition-colors hover:bg-claude-btn-hover hover:text-claude-text">
-          {copied ? <Check size={14} aria-hidden="true" /> : <Copy size={14} aria-hidden="true" />}
-        </button>
-      </div>
-      <div className="min-h-0 flex-1 overflow-auto bg-[#FAFAFA] dark:bg-[#1E1E1E]" role="region" aria-label={relative}>
-        {state.status === 'loading' && (
-          <div className="flex items-center gap-2 p-4 text-[13px] text-claude-textSecondary" role="status">
-            <Loader2 size={14} className="animate-spin" aria-hidden="true" />{t('rightSidebar.filesLoadingFile')}
-          </div>
-        )}
-        {(state.status === 'tooLarge' || state.status === 'binary') && (
-          <div className="flex flex-col items-center gap-2 px-6 py-10 text-center text-[13px] text-claude-textSecondary">
-            <FileWarning size={20} strokeWidth={1.5} aria-hidden="true" />
-            <p className="font-medium text-claude-text">{state.status === 'tooLarge' ? t('rightSidebar.filesTooLarge') : t('rightSidebar.filesBinary')}</p>
-            <p>{formatBytes(state.size, locale)}</p>
-          </div>
-        )}
-        {state.status === 'error' && (
-          <div className="flex flex-col items-center gap-2 px-6 py-10 text-center text-[13px]" role="alert">
-            <AlertCircle size={20} strokeWidth={1.5} className="text-red-600 dark:text-red-400" aria-hidden="true" />
-            <p className="font-medium text-claude-text">{t('rightSidebar.filesReadError')}</p>
-            <p className="break-all text-claude-textSecondary">{state.message}</p>
-            <button type="button" onClick={() => setRetry(n => n + 1)} className="mt-1 rounded-md border border-claude-border px-3 py-1 text-claude-text hover:bg-claude-hover">
-              {t('rightSidebar.filesRetry')}
-            </button>
-          </div>
-        )}
-        {state.status === 'text' && <FileContent content={state.content} language={languageForFile(node.name)} isDark={isDark} />}
-      </div>
-    </div>
-  );
+    if (!active || diff || !file.position || !data) return;
+    const match = container.current?.querySelector('[data-search-match]');
+    match?.scrollIntoView?.({ block: 'center', inline: 'center' });
+  }, [active, diff, data, file.navigation]);
+  return <div ref={container} role="region" aria-label={file.relativePath} className="h-full min-h-0 overflow-auto bg-claude-bg">
+    {error ? <div role="alert" className="p-4 text-sm text-red-600">{error}<button type="button" className="ml-2 underline" onClick={() => setRetry(value => value + 1)}>Retry</button></div> : diff ? patch ? <>
+      <p className="sticky top-0 z-10 bg-claude-bg px-3 py-2 text-xs text-claude-textSecondary">
+        {patch.status === 'not-git' ? 'No Git baseline' : patch.status === 'untracked' ? 'New file vs empty content' : patch.baseline === 'head' ? `Working tree vs HEAD · ${patch.baselineOid?.slice(0, 8)}` : 'Working tree vs empty tree'}
+      </p>
+      {patch.notice && <p className="px-3 py-2 text-xs text-claude-textSecondary">{patch.notice}</p>}
+      {patch.status === 'unchanged' && <p className="p-4 text-sm text-claude-textSecondary">No differences.</p>}
+      {patch.patch && <pre className="min-w-max p-3 text-xs leading-relaxed">{patch.patch.split('\n').map((line, index) => <div key={index} className={line.startsWith('+') ? 'bg-green-500/10 text-green-700 dark:text-green-300' : line.startsWith('-') ? 'bg-red-500/10 text-red-700 dark:text-red-300' : 'text-claude-text'}>{line || ' '}</div>)}</pre>}
+    </> : <p role="status" className="p-4 text-sm">Loading diff…</p> : data ? <>
+      {data.notice && <p className="p-3 text-xs text-claude-textSecondary">{data.notice}</p>}
+      {data.binary ? <p className="p-4 text-sm text-claude-textSecondary">Binary file · {data.size} bytes</p> : data.content !== null ? <FileContent content={data.content} file={file} dark={dark} /> : <p className="p-4 text-sm">File content is unavailable.</p>}
+    </> : <p role="status" className="p-4 text-sm">Loading file…</p>}
+  </div>;
 }
 
-function FileContent({ content, language, isDark }: { content: string; language: string | null; isDark: boolean }) {
-  const lineNumberStyle = { minWidth: '2.5em', paddingRight: '12px', textAlign: 'right' as const, opacity: 0.45, userSelect: 'none' as const };
-  if (language && content.length <= MAX_HIGHLIGHT_CHARS) {
-    return (
-      <SyntaxHighlighter
-        language={language}
-        style={isDark ? vscDarkPlus : oneLight}
-        showLineNumbers
-        lineNumberStyle={lineNumberStyle}
-        customStyle={{ margin: 0, padding: '8px 12px 8px 4px', background: 'transparent', fontSize: '12px', lineHeight: '1.6', fontFamily: MONO_FONT, overflow: 'visible' }}
-        codeTagProps={{ style: { fontFamily: 'inherit' } }}
-      >
-        {content}
-      </SyntaxHighlighter>
-    );
+function FileContent({ content, file, dark }: { content: string; file: SidebarFileTab; dark: boolean }) {
+  const language = languageForFile(file.name);
+  const position = file.position;
+  if (position) {
+    const lines = content.split('\n');
+    const index = position.line - 1;
+    if (index >= 0 && index < lines.length) {
+      const line = lines[index];
+      return <pre className="min-w-max p-3 text-xs leading-[1.6] text-claude-text" style={{ fontFamily: MONO_FONT }}>
+        {lines.slice(0, index).join('\n')}{index > 0 ? '\n' : ''}
+        {line.slice(0, position.startColumn - 1)}<mark data-search-match tabIndex={-1} className="bg-yellow-300/50 text-inherit">{line.slice(position.startColumn - 1, position.endColumn - 1)}</mark>{line.slice(position.endColumn - 1)}
+        {index < lines.length - 1 ? '\n' : ''}{lines.slice(index + 1).join('\n')}
+      </pre>;
+    }
   }
-  // Plain text: two aligned columns instead of one element per line, so large files stay cheap.
-  const lineCount = content.split('\n').length;
-  const numbers = Array.from({ length: lineCount }, (_, i) => i + 1).join('\n');
-  return (
-    <div className="flex min-w-max text-[12px] leading-[1.6] text-claude-text" style={{ fontFamily: MONO_FONT }}>
-      <pre aria-hidden="true" className="m-0 select-none py-2 pl-1 pr-3 text-right" style={{ minWidth: '2.5em', opacity: 0.45 }}>{numbers}</pre>
-      <pre className="m-0 py-2 pr-3" data-testid="file-preview-text">{content}</pre>
-    </div>
-  );
+  if (language && content.length <= MAX_HIGHLIGHT_CHARS) return <SyntaxHighlighter
+    language={language} style={dark ? vscDarkPlus : oneLight} showLineNumbers
+    lineNumberStyle={{ minWidth: '2.5em', paddingRight: '12px', textAlign: 'right', opacity: 0.45, userSelect: 'none' }}
+    customStyle={{ margin: 0, padding: '8px 12px 8px 4px', background: 'transparent', fontSize: '12px', lineHeight: '1.6', fontFamily: MONO_FONT, overflow: 'visible' }}
+    codeTagProps={{ style: { fontFamily: 'inherit' } }}
+  >{content}</SyntaxHighlighter>;
+  const numbers = Array.from({ length: content.split('\n').length }, (_, i) => i + 1).join('\n');
+  return <div className="flex min-w-max text-[12px] leading-[1.6] text-claude-text" style={{ fontFamily: MONO_FONT }}>
+    <pre aria-hidden="true" className="m-0 select-none py-2 pl-1 pr-3 text-right opacity-45">{numbers}</pre>
+    <pre className="m-0 py-2 pr-3" data-testid="file-preview-text">{content}</pre>
+  </div>;
 }

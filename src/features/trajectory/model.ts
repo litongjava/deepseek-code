@@ -329,7 +329,7 @@ export function buildTrace(messages: any[], loading = false): TraceRecord[] {
 }
 
 export function processMetadata(message: any) {
-  return { processSteps: message.processSteps, processStartedAt: message.processStartedAt,
+  return { turn: message.turn, processSteps: message.processSteps, processStartedAt: message.processStartedAt,
     processEndedAt: message.processEndedAt, toolTextEndOffset: message.toolTextEndOffset, requestSnapshots: message.requestSnapshots, requestError: message.requestError };
 }
 function canonical(value: any): string {
@@ -345,6 +345,6 @@ export function restoreProcessMetadata(message: any, index: number, cached: any[
   const localTools = local.toolCalls || [];
   const compatible = !serverTools.length || serverTools.length === localTools.length && serverTools.every((t: any, i: number) => t.name === localTools[i].name && canonical(toolInput(t)) === canonical(toolInput(localTools[i])));
   if (!compatible) return message;
-  return { ...message, ...processMetadata(local), requestSnapshots: message.requestSnapshots ?? local.requestSnapshots,
+  return { ...message, ...processMetadata(local), turn: message.turn, requestSnapshots: message.requestSnapshots ?? local.requestSnapshots,
     toolCalls: localTools.length ? localTools.map((t: any, i: number) => ({ ...serverTools[i], ...t })) : serverTools };
 }

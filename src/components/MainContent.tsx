@@ -1,3 +1,4 @@
+import { contentBlocks, hasUnavailableImages, replaceUserText, type UserContent } from '../utils/userContent';
 import { useComposerDrop } from '../features/chat/useComposerDrop';
 import { useCommittedCallback } from '../features/chat/useCommittedCallback';
 import React, { useState, useEffect, useRef, useMemo, useCallback } from 'react';
@@ -85,6 +86,7 @@ import { submitBusyMessage } from '../features/chat/submitBusyMessage';
 
 import { SkillInputOverlay } from '../features/input-bar/SkillInputOverlay';
 import SessionUsageBar from '../features/usage/SessionUsageBar';
+import { useConversationViewStore } from '../stores/useConversationViewStore';
 
 interface MainContentProps {
   onNewChat: () => void; // Callback to tell sidebar to refresh
@@ -107,7 +109,8 @@ const MainContent = ({ onNewChat, resetKey, tunerConfig, onOpenDocument, onArtif
   const isCodeMode = workspaceMode === 'code';
   const [modeChanging, setModeChanging] = useState(false);
   const [modeError, setModeError] = useState('');
-  const [conversationView, setConversationView] = useState<'chat' | 'trajectory'>('chat');
+  const conversationView = useConversationViewStore(s => s.view);
+  const setConversationView = useConversationViewStore(s => s.setView);
   const [inspectId, setInspectId] = useState<string | null>(null);
   const busySendBehavior = useGeneralSettingsStore(state => state.busySendBehavior);
   const queues = useBusySendStore(state => state.queues);
@@ -922,6 +925,8 @@ const MainContent = ({ onNewChat, resetKey, tunerConfig, onOpenDocument, onArtif
             // 追加新的 assistant 占位
             return [...prev, mergeDocumentsIntoMessage({
               role: 'assistant',
+              id: genStatus.assistant_id,
+              turn: genStatus.turn,
               content: genStatus.text || '',
               thinking: genStatus.thinking || '',
               thinkingSummary: genStatus.thinkingSummary,
@@ -937,11 +942,13 @@ const MainContent = ({ onNewChat, resetKey, tunerConfig, onOpenDocument, onArtif
           pollingRef.current = setInterval(async () => {
             try {
               const s = await getGenerationStatus(conversationId);
+              if (viewingIdRef.current !== conversationId) return;
               if (!s.active || s.status !== 'generating') {
                 // 生成结束，停止轮询，重新加载最终数据
                 stopPolling();
                 setLoading(false);
                 const final_ = await getConversation(conversationId);
+                if (viewingIdRef.current !== conversationId) return;
                 setMessages((final_.messages || []).map((msg: any) => sanitizeInlineArtifactMessage(msg)));
                 isAtBottomRef.current = true;
                 scheduleScrollToBottomAfterRender();
@@ -1214,7 +1221,7 @@ const MainContent = ({ onNewChat, resetKey, tunerConfig, onOpenDocument, onArtif
           reader.onerror = () => reject(new Error(`无法读取图片：${f.fileName}`));
           reader.readAsDataURL(f.file);
         });
-        return { type: 'image_url' as const, image_url: { url: dataUrl, detail: 'high' } };
+        return { type: 'image_url' as const, image_url: { url: dataUrl } };
       }));
       if (userMessageText.trim()) {
         contentBlocks.push({ type: 'text', text: userMessageText });
@@ -1438,23 +1445,33 @@ const MainContent = ({ onNewChat, resetKey, tunerConfig, onOpenDocument, onArtif
   }, [activeId, loading]);
 
   // 停止生成（双模式：SSE 直连 or 轮询模式）
-  const handleStop = () => {
-    if (abortStreamSession(activeId || undefined)) {
-      if (activeId) removeStreaming(activeId);
-      return;
-    }
-    if (pollingRef.current && activeId) {
-      // 轮询模式：调用后端停止接口
-      stopGeneration(activeId).catch(e => console.error('[Stop] error:', e));
+  const handleStop = async () => {
+    const conversationId = activeId;
+    if (!conversationId) return;
+    try {
+      // Keep the stream alive until the backend has saved its terminal timing.
+      const result = await stopGeneration(conversationId);
+      if (result.settled === false) {
+        alert('Stopping is still in progress. Please wait for the backend to finish.');
+        return;
+      }
+      abortStreamSession(conversationId);
+      removeStreaming(conversationId);
+      if (viewingIdRef.current !== conversationId) return;
       stopPolling();
+      setLoading(false);
+      isCreatingRef.current = false;
+      const final = await getConversation(conversationId);
+      if (viewingIdRef.current === conversationId) setMessages((final.messages || []).map((msg: any) => sanitizeInlineArtifactMessage(msg)));
+    } catch (error) {
+      console.error('[Stop] error:', error);
+      alert('Unable to confirm that generation stopped. Please try again.');
     }
-    if (activeId) removeStreaming(activeId);
-    setLoading(false);
-    isCreatingRef.current = false;
   };
-
   // 重新发送消息
-  const handleResendMessage = async (content: string, idx: number) => {
+  const handleResendMessage = async (content: UserContent, idx: number) => {
+    if (hasUnavailableImages(content)) { alert('Image unavailable. Attach the original image before resending.'); return; }
+    content = contentBlocks(content) || content;
     if (loading) return;
     if (activeRequestCountRef.current >= 2) {
       alert('最多同时进行 2 个对话，请等待其他对话完成');
@@ -1540,10 +1557,10 @@ const MainContent = ({ onNewChat, resetKey, tunerConfig, onOpenDocument, onArtif
     );
   };
 
-  const handleEditMessage = (content: string, idx: number) => {
+  const handleEditMessage = (content: UserContent, idx: number) => {
     if (loading) return;
     setEditingMessageIdx(idx);
-    setEditingContent(content);
+    setEditingContent(extractTextContent(content));
   };
 
   const handleBranchMessage = async (idx: number) => {
@@ -1578,7 +1595,8 @@ const MainContent = ({ onNewChat, resetKey, tunerConfig, onOpenDocument, onArtif
     }
     const idx = editingMessageIdx;
     const msg = messages[idx];
-    const newContent = editingContent.trim();
+    if (hasUnavailableImages(msg.content)) { alert('Image unavailable. Attach the original image before resending.'); return; }
+    const newContent = replaceUserText(msg.content, editingContent.trim());
     const { attachmentIds, attachmentsPayload, optimisticAttachments } = extractMessageAttachments(msg);
 
     // 退出编辑模式
@@ -2020,9 +2038,6 @@ const MainContent = ({ onNewChat, resetKey, tunerConfig, onOpenDocument, onArtif
   return (
     <div className="relative flex h-full min-h-0 min-w-0 flex-1 overflow-hidden">
     <div className="flex-1 min-h-0 min-w-0 bg-claude-bg h-full flex flex-col overflow-clip text-claude-text chat-root chat-font-scope chat-surface">
-      {showCodingView && <div className="flex shrink-0 gap-5 border-b border-claude-border px-5 text-sm" role="tablist" aria-label="会话视图">
-        {(['chat', 'trajectory'] as const).map(view => <button type="button" key={view} role="tab" aria-selected={conversationView === view} onClick={() => setConversationView(view)} className={`py-3 ${conversationView === view ? 'border-b-2 border-blue-500 text-blue-500' : 'text-claude-textSecondary'}`}>{view === 'chat' ? 'Chat' : 'Trajectory'}</button>)}
-      </div>}
       {showCodingView && conversationView === 'trajectory' && <div className="min-h-0 flex-1"><TrajectoryView messages={messages} loading={loading} focusId={inspectId} /></div>}
 
       {/* Content area - positioning container for scroll + bottom bars */}

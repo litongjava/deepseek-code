@@ -29,6 +29,8 @@ pub struct Run {
 struct Progress {
     text: String,
     thinking: String,
+    turn: Option<deepseek_code_core::db::turn_repo::TurnRecord>,
+    assistant_id: Option<String>,
 }
 
 /// Deregisters its run when the collector finishes or is dropped.
@@ -64,6 +66,12 @@ impl Run {
     pub async fn stop_requested(&self) {
         let mut stop = self.stop.subscribe();
         let _ = stop.wait_for(|requested| *requested).await;
+    }
+
+    pub fn set_turn(&self, turn: &deepseek_code_core::db::turn_repo::TurnRecord, assistant_id: &str) {
+        let mut progress = self.progress();
+        progress.turn = Some(turn.clone());
+        progress.assistant_id = Some(assistant_id.to_owned());
     }
 
     pub fn record_event(&self) {
@@ -146,6 +154,8 @@ impl GenerationRuns {
             "eventCount": run.event_count.load(Ordering::Relaxed),
             "text": progress.text,
             "thinking": progress.thinking,
+            "turn": progress.turn,
+            "assistant_id": progress.assistant_id,
             // Progress is served from this process, not re-read from SQLite.
             "crossProcess": false,
         })

@@ -108,6 +108,8 @@
     "no": "Tidak"
   },
   "sidebar": {
+    "noProject": "Tanpa proyek",
+    "noProjects": "Belum ada proyek",
     "workspaceMode": "Mode ruang kerja",
     "homeMode": "Beranda",
     "chatMode": "Percakapan",
@@ -449,6 +451,11 @@
     "usageTitle": "Penggunaan"
   },
   "chat": {
+    "sessionMenu": "Opsi sesi",
+    "sessionView": "Tampilan sesi",
+    "copySessionId": "Salin ID sesi",
+    "sessionIdCopied": "ID sesi disalin",
+    "sessionIdCopyFailed": "Tidak dapat menyalin ID sesi. Coba lagi.",
     "selectCodeProject": "Pilih proyek sebelum mengirim pesan dalam mode Code",
     "inputPlaceholder": "Apa yang bisa saya bantu hari ini?",
     "send": "Kirim",

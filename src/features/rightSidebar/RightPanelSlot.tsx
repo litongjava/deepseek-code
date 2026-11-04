@@ -32,6 +32,8 @@ export default function RightPanelSlot({
   const setSidebarWidth = useRightSidebarStore(s => s.setWidth);
   const [resizing, setResizing] = useState(false);
   const [viewportWidth, setViewportWidth] = useState(() => window.innerWidth);
+  const [mounted, setMounted] = useState(sidebarVisible);
+  useEffect(() => { if (sidebarVisible) setMounted(true); }, [sidebarVisible]);
   const showSidebar = sidebarVisible && !documentPanelDoc && !showArtifacts;
   const visible = !!documentPanelDoc || showArtifacts || showSidebar;
 
@@ -68,9 +70,8 @@ export default function RightPanelSlot({
           <CodePanel document={documentPanelDoc} onClose={onCloseDocument} />
         ) : showArtifacts ? (
           <ArtifactsPanel documents={artifacts} onClose={onCloseArtifacts} onOpenDocument={onOpenDocument} />
-        ) : showSidebar ? (
-          <RightSidebar onClose={onCloseSidebar} />
         ) : null}
+        {mounted && <div hidden={!showSidebar} className="h-full w-full min-w-0"><RightSidebar onClose={onCloseSidebar} active={showSidebar} /></div>}
       </div>
     </div>
   );

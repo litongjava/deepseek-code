@@ -1637,6 +1637,7 @@ dependencies = [
  "once_cell",
  "open",
  "pdf-extract",
+ "portable-pty",
  "prometheus",
  "qrcode",
  "r2d2",

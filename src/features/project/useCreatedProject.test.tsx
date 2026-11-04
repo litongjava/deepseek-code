@@ -41,6 +41,15 @@ it('selects the created project after reset and consumes navigation state once',
   await waitFor(() => expect(screen.getByTestId('selected')).toHaveTextContent('manual-selection'));
 });
 
+it.each(['p2', null])('consumes an explicit sidebar selection (%s) after resetting the old chat', async projectId => {
+  useWorkspaceModeStore.setState({ lastCodeProjectId: projectId });
+  useProjectStore.setState({ currentProjectId: 'old', pendingProjectId: projectId });
+  render(<MemoryRouter initialEntries={[{ pathname: '/', state: { selectedProjectId: projectId } }]}><Chat /></MemoryRouter>);
+  await waitFor(() => expect(screen.getByTestId('state')).toHaveTextContent('null'));
+  expect(useProjectStore.getState().pendingProjectId).toBe(projectId);
+  expect(useProjectStore.getState().currentProjectId).toBeNull();
+});
+
 it('does not apply creation state to an existing conversation route', async () => {
   useProjectStore.getState().setPendingProjectId('existing-selection');
   render(<MemoryRouter initialEntries={[{ pathname: '/chat/existing', state: { createdProjectId: 'new-project' } }]}><Chat /></MemoryRouter>);

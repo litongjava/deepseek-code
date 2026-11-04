@@ -22,6 +22,20 @@ function harness() {
   return { callbacks: createStreamCallbacks(ctx), context: ctx, message: () => messages[messages.length - 1] };
 }
 describe('stream process recording', () => {
+  it.each(['onSystemEvents', 'onSystemEventsLight'] as const)('%s restores authoritative timing and preserves it on failure', callback => {
+    const { callbacks, message, context } = harness();
+    const turn = { turnId: 'turn', startedAt: '2026-11-03T00:00:00Z', endedAt: null, elapsedMs: null, status: 'running' };
+    callbacks[callback]('turn_timing', '', { turn, assistant_id: 'assistant' });
+    expect(message()).toMatchObject({ id: 'assistant', turn });
+    callbacks[callback]('turn_timing', '', { conversation_id: 'other', turn: { ...turn, turnId: 'wrong' } });
+    expect(message().turn.turnId).toBe('turn');
+    const terminal = { ...turn, endedAt: '2026-11-03T00:00:08Z', elapsedMs: 8000, status: 'failed' };
+    callbacks[callback]('turn_timing', '', { turn: terminal });
+    callbacks.onError('HTTP 400 invalid image');
+    expect(message().turn).toEqual(terminal);
+    context.isStreamSessionActive = () => false;
+    expect(vi.mocked(persistMessages).mock.lastCall?.[1].slice(-1)[0].turn).toEqual(terminal);
+  });
   it('persists a 400 card without replacing partial output or tool history', () => {
     const { callbacks: c, message } = harness();
     c.onDelta('Before.', 'Before.');

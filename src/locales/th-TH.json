@@ -108,6 +108,8 @@
     "no": "เลขที่"
   },
   "sidebar": {
+    "noProject": "ไม่มีโปรเจ็กต์",
+    "noProjects": "ยังไม่มีโปรเจ็กต์",
     "workspaceMode": "โหมดพื้นที่ทำงาน",
     "homeMode": "หน้าหลัก",
     "chatMode": "แชต",
@@ -449,6 +451,11 @@
     "usageTitle": "การใช้งาน"
   },
   "chat": {
+    "sessionMenu": "ตัวเลือกเซสชัน",
+    "sessionView": "มุมมองเซสชัน",
+    "copySessionId": "คัดลอก ID เซสชัน",
+    "sessionIdCopied": "คัดลอก ID เซสชันแล้ว",
+    "sessionIdCopyFailed": "ไม่สามารถคัดลอก ID เซสชันได้ โปรดลองอีกครั้ง",
     "selectCodeProject": "เลือกโปรเจ็กต์ก่อนส่งข้อความในโหมด Code",
     "inputPlaceholder": "วันนี้ฉันจะช่วยคุณได้อย่างไร?",
     "send": "ส่ง",

@@ -108,6 +108,8 @@
     "no": "Нет"
   },
   "sidebar": {
+    "noProject": "Без проекта",
+    "noProjects": "Проектов пока нет",
     "workspaceMode": "Режим рабочей области",
     "homeMode": "Главная",
     "chatMode": "Чат",
@@ -449,6 +451,11 @@
     "usageTitle": "Использование"
   },
   "chat": {
+    "sessionMenu": "Параметры сеанса",
+    "sessionView": "Вид сеанса",
+    "copySessionId": "Копировать ID сеанса",
+    "sessionIdCopied": "ID сеанса скопирован",
+    "sessionIdCopyFailed": "Не удалось скопировать ID сеанса. Попробуйте ещё раз.",
     "selectCodeProject": "Выберите проект перед отправкой сообщений в режиме Code",
     "inputPlaceholder": "Чем я могу помочь вам сегодня?",
     "send": "Отправить",

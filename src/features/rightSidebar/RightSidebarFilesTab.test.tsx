@@ -1,271 +1,110 @@
-import { act, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
+import { act, fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { MemoryRouter, Route, Routes } from 'react-router-dom';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import type { FsFileNode } from '../../api';
 import { useChatStore } from '../../stores/useChatStore';
 import { useProjectStore } from '../../stores/useProjectStore';
 import { useUIStore } from '../../stores/useUIStore';
-import ProjectWorkspaceBar from '../project/ProjectWorkspaceBar';
+import { useRightSidebarStore } from '../../stores/useRightSidebarStore';
 import RightSidebarFilesTab from './RightSidebarFilesTab';
 
-const api = vi.hoisted(() => ({
-  getConversation: vi.fn(),
-  getProject: vi.fn(),
-  getProjects: vi.fn(),
-  getFileSystemTree: vi.fn(),
-  readFileContent: vi.fn(),
-}));
-vi.mock('../../api', () => api);
-
-const ROOT = '/work/repo';
-const file = (name: string, size = 10, dir = ROOT): FsFileNode => ({ name, path: `${dir}/${name}`, is_dir: false, size });
-const folder = (name: string, dir = ROOT): FsFileNode => ({ name, path: `${dir}/${name}`, is_dir: true, size: 4096 });
-
-const listings: Record<string, FsFileNode[]> = {
-  [ROOT]: [folder('.git'), folder('src'), file('README.md', 42), file('big.log', 5 * 1024 * 1024), file('logo.png', 300)],
-  [`${ROOT}/src`]: [file('main.ts', 20, `${ROOT}/src`)],
-};
-
+const api = vi.hoisted(() => ({ getWorkspaceRoots: vi.fn(), listWorkspaceTree: vi.fn(), readWorkspaceFile: vi.fn(), searchWorkspaceFiles: vi.fn(), getWorkspaceFileDiff: vi.fn(), getWorkspaceFileCapabilities: vi.fn(), openWorkspaceFile: vi.fn(), saveWorkspaceFileAs: vi.fn() }));
+vi.mock('../../api/workspaceFiles', () => api);
+const root = { rootId: 'root-1', name: 'repo', path: '/work/repo' };
+const entry = (relativePath: string, kind = 'file') => ({ rootId: root.rootId, relativePath, name: relativePath.split('/').pop(), kind, size: 10 });
 function renderTab(path = '/chat/c1') {
-  return render(
-    <MemoryRouter initialEntries={[path]}>
-      <Routes>
-        <Route path="/" element={<RightSidebarFilesTab />} />
-        <Route path="/chat/:id" element={<RightSidebarFilesTab />} />
-      </Routes>
-    </MemoryRouter>,
-  );
+  return render(<MemoryRouter initialEntries={[path]}><Routes><Route path="/" element={<RightSidebarFilesTab />} /><Route path="/chat/:id" element={<RightSidebarFilesTab />} /></Routes></MemoryRouter>);
 }
-
-// Shape returned by GET /api/projects/:id (folder trusted, as in the live report).
-const PROJECT = {
-  id: 'p1', name: 'dsb-test', description: '', instructions: '', workspace_path: ROOT,
-  folders: [{ path: ROOT, trusted: true }], is_archived: 0, created_at: '', updated_at: '',
-};
-
-/** Home composer: the real project picker wired the way MainContent wires it before a chat exists. */
-function renderHomeWithPicker() {
-  const ComposerPicker = () => {
-    const pendingProjectId = useProjectStore(s => s.pendingProjectId);
-    return <ProjectWorkspaceBar projectId={pendingProjectId} onSelect={project => useProjectStore.getState().setPendingProjectId(project.id)} />;
-  };
-  return render(
-    <MemoryRouter initialEntries={['/']}>
-      <Routes>
-        <Route path="/" element={<><ComposerPicker /><RightSidebarFilesTab /></>} />
-      </Routes>
-    </MemoryRouter>,
-  );
-}
-
 const item = (name: string) => screen.getByRole('treeitem', { name });
-
 beforeEach(() => {
+  vi.resetAllMocks();
   useUIStore.setState({ language: 'en' });
   useProjectStore.setState({ projectList: [], pendingProjectId: null, currentProjectId: null });
   useChatStore.setState({ loading: false });
-  api.getConversation.mockResolvedValue({ id: 'c1', workspace_path: ROOT, project_id: null });
-  api.getProjects.mockResolvedValue([PROJECT]);
-  api.getProject.mockImplementation(async (id: string) => {
-    if (id !== PROJECT.id) throw new Error('Request failed: 404');
-    return PROJECT;
-  });
-  api.getFileSystemTree.mockImplementation(async (path: string) => ({ success: true, path, tree: listings[path] ?? [] }));
-  api.readFileContent.mockImplementation(async (path: string) => {
-    if (path.endsWith('logo.png')) return { success: true, path, content: '', size: 300, truncated: false, binary: true };
-    return { success: true, path, content: 'line one\nline two', size: 17, truncated: false, binary: false };
-  });
+  useRightSidebarStore.setState({ tab: 'files', tabs: [{ id: 'files', kind: 'files' }], treeVisible: true });
+  api.getWorkspaceRoots.mockResolvedValue({ roots: [root] });
+  api.listWorkspaceTree.mockImplementation(async (_scope, _root, path) => ({ entries: path === '' ? [entry('src', 'directory'), entry('readme.txt'), entry('logo.png')] : [entry('src/main.ts')], truncated: false }));
+  api.readWorkspaceFile.mockImplementation(async (_scope, file) => ({ ...file, path: `${root.path}/${file.relativePath}`, content: 'line one\nline two', size: 17, truncated: false, binary: false, notice: null }));
+  api.getWorkspaceFileCapabilities.mockResolvedValue({ reveal: true, defaultApp: true, terminal: true, saveAs: true, wslDistributions: [], reason: 'WSL is not installed.' });
+  api.getWorkspaceFileDiff.mockResolvedValue({ patch: '', notice: null, baselineOid: 'abcdef123456', baseline: 'head', status: 'unchanged' });
+  api.searchWorkspaceFiles.mockResolvedValue({ matches: [{ rootId: root.rootId, relativePath: 'src/main.ts', line: 2, startColumn: 6, endColumn: 9, preview: 'line two' }], scannedFiles: 2, skippedFiles: 0, truncated: false, notice: null });
 });
-
 afterEach(() => vi.clearAllMocks());
 
-describe('right sidebar Files tab', () => {
-  it('loads the root one level deep and expands folders lazily', async () => {
-    renderTab();
-    expect(await screen.findByRole('tree', { name: 'Workspace files' })).toBeInTheDocument();
-    expect(api.getConversation).toHaveBeenCalledWith('c1');
-    expect(api.getFileSystemTree).toHaveBeenCalledTimes(1);
-    expect(api.getFileSystemTree).toHaveBeenCalledWith(ROOT, 1);
-    expect(screen.getByTitle(ROOT)).toHaveTextContent('repo');
-
-    // Hidden folders are listed collapsed and never expanded automatically.
-    expect(item('.git')).toHaveAttribute('aria-expanded', 'false');
-    expect(item('src')).toHaveAttribute('aria-expanded', 'false');
-    expect(screen.queryByRole('treeitem', { name: 'main.ts' })).toBeNull();
-
-    fireEvent.click(item('src'));
+describe('scoped Files workspace', () => {
+  it('uses server-resolved scope and lazy keyboard-accessible directories', async () => {
+    renderTab(); await screen.findByRole('tree');
+    expect(api.getWorkspaceRoots).toHaveBeenCalledWith({ conversationId: 'c1' }, expect.any(AbortSignal));
+    expect(api.listWorkspaceTree).toHaveBeenCalledWith({ conversationId: 'c1' }, root.rootId, '');
+    act(() => item('src').focus()); fireEvent.keyDown(item('src'), { key: 'ArrowRight' });
     expect(await screen.findByRole('treeitem', { name: 'main.ts' })).toHaveAttribute('aria-level', '2');
-    expect(item('src')).toHaveAttribute('aria-expanded', 'true');
-    expect(api.getFileSystemTree).toHaveBeenCalledTimes(2);
-    expect(api.getFileSystemTree).toHaveBeenLastCalledWith(`${ROOT}/src`, 1);
-
-    // Collapsing and re-expanding reuses the loaded listing.
-    fireEvent.click(item('src'));
-    expect(screen.queryByRole('treeitem', { name: 'main.ts' })).toBeNull();
-    fireEvent.click(item('src'));
-    expect(item('main.ts')).toBeInTheDocument();
-    expect(api.getFileSystemTree).toHaveBeenCalledTimes(2);
-  });
-
-  it('supports arrow-key navigation, expansion and Enter', async () => {
-    renderTab();
-    await screen.findByRole('tree');
-    const git = item('.git');
-    expect(git).toHaveAttribute('tabindex', '0');
-    act(() => git.focus());
-    fireEvent.keyDown(git, { key: 'ArrowDown' });
-    expect(item('src')).toHaveFocus();
-    fireEvent.keyDown(item('src'), { key: 'ArrowRight' });
-    expect(await screen.findByRole('treeitem', { name: 'main.ts' })).toBeInTheDocument();
-    fireEvent.keyDown(item('src'), { key: 'ArrowRight' });
-    expect(item('main.ts')).toHaveFocus();
-    fireEvent.keyDown(item('main.ts'), { key: 'ArrowLeft' });
-    expect(item('src')).toHaveFocus();
-    fireEvent.keyDown(item('src'), { key: 'ArrowLeft' });
-    expect(item('src')).toHaveAttribute('aria-expanded', 'false');
-    fireEvent.keyDown(item('src'), { key: 'End' });
-    expect(item('logo.png')).toHaveFocus();
-    fireEvent.keyDown(item('logo.png'), { key: 'ArrowUp' });
-    fireEvent.keyDown(item('big.log'), { key: 'ArrowUp' });
-    fireEvent.keyDown(item('README.md'), { key: 'Enter' });
-    expect(await screen.findByTestId('file-preview-path')).toHaveTextContent('README.md');
-  });
-
-  it('opens a file read-only with its relative path, copies the path and returns to the tree', async () => {
-    const writeText = vi.fn().mockResolvedValue(undefined);
-    Object.defineProperty(navigator, 'clipboard', { value: { writeText }, configurable: true });
-    renderTab();
-    await screen.findByRole('tree');
-    fireEvent.click(item('src'));
-    fireEvent.click(await screen.findByRole('treeitem', { name: 'main.ts' }));
-
-    expect(await screen.findByText(/line two/)).toBeInTheDocument();
-    expect(api.readFileContent).toHaveBeenCalledWith(`${ROOT}/src/main.ts`, { maxBytes: 1024 * 1024 });
-    expect(screen.getByTestId('file-preview-path')).toHaveTextContent('src/main.ts');
-    expect(screen.getByTestId('file-preview-path')).toHaveAttribute('title', `${ROOT}/src/main.ts`);
-    expect(screen.queryByRole('tree')).toBeNull();
-
-    fireEvent.click(screen.getByRole('button', { name: 'Copy path' }));
-    expect(await screen.findByRole('button', { name: 'Path copied' })).toBeInTheDocument();
-    expect(writeText).toHaveBeenCalledWith(`${ROOT}/src/main.ts`);
-
-    fireEvent.click(screen.getByRole('button', { name: 'Back to files' }));
-    expect(screen.getByRole('tree')).toBeInTheDocument();
-    expect(item('main.ts')).toHaveFocus();
+    fireEvent.keyDown(item('src'), { key: 'ArrowRight' }); expect(item('main.ts')).toHaveFocus();
+    fireEvent.keyDown(item('main.ts'), { key: 'Enter' });
+    await screen.findByRole('region', { name: 'src/main.ts' });
     expect(item('src')).toHaveAttribute('aria-expanded', 'true');
   });
-
-  it('does not fetch files above 1 MB and labels binary files', async () => {
-    renderTab();
-    await screen.findByRole('tree');
-    fireEvent.click(item('big.log'));
-    expect(await screen.findByText('File too large to preview')).toBeInTheDocument();
-    expect(screen.getByText('5.2 MB')).toBeInTheDocument();
-    expect(api.readFileContent).not.toHaveBeenCalled();
-
-    fireEvent.click(screen.getByRole('button', { name: 'Back to files' }));
-    fireEvent.click(item('logo.png'));
-    expect(await screen.findByText('Binary file')).toBeInTheDocument();
-    expect(screen.getByText('300 byte')).toBeInTheDocument();
+  it('opens deduplicated file tabs while preserving tree expansion and scroll', async () => {
+    renderTab(); await screen.findByRole('tree'); fireEvent.click(item('src'));
+    const main = await screen.findByRole('treeitem', { name: 'main.ts' });
+    const tree = screen.getByTestId('workspace-file-tree'); tree.scrollTop = 48;
+    fireEvent.click(main); await screen.findByText(/line two/);
+    expect(screen.getByRole('tree')).toBeVisible(); expect(tree.scrollTop).toBe(48);
+    fireEvent.click(item('readme.txt')); await screen.findByRole('region', { name: 'readme.txt' });
+    fireEvent.click(main);
+    expect(useRightSidebarStore.getState().tabs.filter(tab => tab.kind === 'file')).toHaveLength(2);
+    expect(item('src')).toHaveAttribute('aria-expanded', 'true');
+    fireEvent.click(screen.getByRole('button', { name: 'Hide file tree' })); expect(tree).not.toBeVisible();
+    fireEvent.click(screen.getByRole('button', { name: 'Show file tree' })); expect(tree).toBeVisible(); expect(tree.scrollTop).toBe(48);
   });
-
-  it('treats NUL bytes in returned text as binary', async () => {
-    api.readFileContent.mockResolvedValue({ success: true, path: `${ROOT}/README.md`, content: 'PK\0\0data' });
-    renderTab();
-    await screen.findByRole('tree');
-    fireEvent.click(item('README.md'));
-    expect(await screen.findByText('Binary file')).toBeInTheDocument();
+  it('shows binary, bounded and read-error states from the scoped backend', async () => {
+    api.readWorkspaceFile.mockResolvedValueOnce({ content: null, binary: true, size: 300, notice: null });
+    renderTab(); await screen.findByRole('tree'); fireEvent.click(item('logo.png'));
+    expect(await screen.findByText('Binary file · 300 bytes')).toBeVisible();
+    api.readWorkspaceFile.mockRejectedValueOnce(new Error('Access denied'));
+    fireEvent.click(item('readme.txt')); expect(await screen.findByRole('alert')).toHaveTextContent('Access denied');
+    api.readWorkspaceFile.mockResolvedValueOnce({ content: null, binary: false, size: 2000000, truncated: true, notice: 'File too large to preview' });
+    fireEvent.click(screen.getByRole('button', { name: 'Retry' })); expect(await screen.findByText('File too large to preview')).toBeVisible();
   });
-
-  it('shows the no-workspace state for chats without a folder and on Home without a project', async () => {
-    api.getConversation.mockResolvedValue({ id: 'c1', workspace_path: null, project_id: null });
-    const { unmount } = renderTab();
-    expect(await screen.findByText('This chat has no workspace folder')).toBeInTheDocument();
-    expect(api.getFileSystemTree).not.toHaveBeenCalled();
-    unmount();
-
-    renderTab('/');
-    expect(screen.getByText('This chat has no workspace folder')).toBeInTheDocument();
-    expect(api.getConversation).toHaveBeenCalledTimes(1);
+  it('uses selected Home project and shows an empty state without one', async () => {
+    renderTab('/'); expect(await screen.findByText('This chat has no workspace folder')).toBeVisible();
+    expect(api.getWorkspaceRoots).not.toHaveBeenCalled();
+    act(() => useProjectStore.getState().setPendingProjectId('p1'));
+    await screen.findByRole('tree'); expect(api.getWorkspaceRoots).toHaveBeenCalledWith({ projectId: 'p1' }, expect.any(AbortSignal));
   });
-
-  it('follows the project picked in the Home composer even when the store project list is empty', async () => {
-    renderHomeWithPicker();
-    expect(screen.getByText('This chat has no workspace folder')).toBeInTheDocument();
-    expect(useProjectStore.getState().projectList).toEqual([]);
-
-    fireEvent.click(screen.getByRole('button', { name: 'Select project' }));
-    fireEvent.click(await screen.findByRole('button', { name: 'dsb-test' }));
-
-    expect(await screen.findByRole('tree', { name: 'Workspace files' })).toBeInTheDocument();
-    expect(useProjectStore.getState().pendingProjectId).toBe('p1');
-    expect(screen.getByRole('button', { name: 'Select project' })).toHaveTextContent('dsb-test');
-    expect(api.getProject).toHaveBeenCalledWith('p1');
-    expect(api.getFileSystemTree).toHaveBeenCalledWith(ROOT, 1);
-    // The picker also titles its folder chip with the path; the tab header shows the folder name.
-    expect(screen.getAllByTitle(ROOT).map(el => el.textContent)).toContain('repo');
-
-    // Clearing the selection (New Chat) returns to the empty state.
-    act(() => useProjectStore.getState().setPendingProjectId(null));
-    expect(screen.getByText('This chat has no workspace folder')).toBeInTheDocument();
+  it('retries scope failures and refreshes after a turn', async () => {
+    api.getWorkspaceRoots.mockRejectedValueOnce(new Error('Untrusted project'));
+    renderTab(); expect(await screen.findByRole('alert')).toHaveTextContent('Untrusted project');
+    fireEvent.click(screen.getByRole('button', { name: 'Retry' })); await screen.findByRole('tree');
+    act(() => useChatStore.setState({ loading: true })); act(() => useChatStore.setState({ loading: false }));
+    await waitFor(() => expect(api.listWorkspaceTree).toHaveBeenCalledTimes(2));
   });
-
-  it('uses a listed project without fetching it again', async () => {
-    useProjectStore.setState({ projectList: [{ id: 'p1', name: 'Repo', workspace_path: ROOT }], pendingProjectId: 'p1' });
-    renderTab('/');
-    expect(await screen.findByRole('tree')).toBeInTheDocument();
-    expect(api.getProject).not.toHaveBeenCalled();
+  it('searches the project and opens the exact UTF-16 matching position', async () => {
+    renderTab(); await screen.findByRole('tree'); fireEvent.click(screen.getByRole('button', { name: 'Search In Files' }));
+    fireEvent.change(screen.getByRole('textbox', { name: 'Search In Files' }), { target: { value: 'two' } });
+    fireEvent.click(await screen.findByRole('button', { name: /src\/main.ts:2:6/ }));
+    await waitFor(() => expect(document.querySelector('[data-search-match]')).toHaveTextContent('two'));
+    expect(api.searchWorkspaceFiles).toHaveBeenCalledWith({ conversationId: 'c1' }, 'two', expect.any(AbortSignal));
+    expect(screen.getByRole('tree')).toBeVisible();
   });
-
-  it('shows a project chat from its own workspace_path or, without one, from its project', async () => {
-    // Bridge chats created in a project carry the project's folder.
-    api.getConversation.mockResolvedValue({ id: 'c1', workspace_path: ROOT, project_id: 'p1' });
-    const { unmount } = renderTab();
-    expect(await screen.findByRole('tree')).toBeInTheDocument();
-    expect(api.getProject).not.toHaveBeenCalled();
-    unmount();
-
-    // Only project_id, store list empty: the project is fetched.
-    api.getConversation.mockResolvedValue({ id: 'c1', workspace_path: null, project_id: 'p1' });
-    renderTab();
-    expect(await screen.findByRole('tree')).toBeInTheDocument();
-    expect(api.getProject).toHaveBeenCalledWith('p1');
-    expect(api.getFileSystemTree).toHaveBeenLastCalledWith(ROOT, 1);
+  it('labels real HEAD diff, unchanged and non-Git responses', async () => {
+    renderTab(); await screen.findByRole('tree'); fireEvent.click(item('readme.txt')); await screen.findByRole('region', { name: 'readme.txt' });
+    fireEvent.click(screen.getByRole('button', { name: 'View file diff' }));
+    expect(await screen.findByText('Working tree vs HEAD · abcdef12')).toBeVisible(); expect(screen.getByText('No differences.')).toBeVisible();
+    fireEvent.click(screen.getByRole('button', { name: 'View file diff' }));
+    api.getWorkspaceFileDiff.mockResolvedValueOnce({ patch: '', notice: 'Not a Git repository', baseline: 'none', status: 'not-git' });
+    fireEvent.click(screen.getByRole('button', { name: 'View file diff' })); expect(await screen.findByText('No Git baseline')).toBeVisible();
   });
-
-  it('picks up a chat attached to a project while open', async () => {
-    api.getConversation.mockResolvedValue({ id: 'c1', workspace_path: null, project_id: null });
-    renderTab();
-    expect(await screen.findByText('This chat has no workspace folder')).toBeInTheDocument();
-
-    api.getConversation.mockResolvedValue({ id: 'c1', workspace_path: ROOT, project_id: 'p1' });
-    act(() => useProjectStore.getState().setCurrentProjectId('p1'));
-    expect(await screen.findByRole('tree')).toBeInTheDocument();
-    expect(api.getConversation).toHaveBeenCalledTimes(2);
-  });
-
-  it('shows folder errors with a retry and refreshes after a chat turn', async () => {
-    api.getFileSystemTree.mockRejectedValueOnce(new Error('Failed to get file tree: 404'));
-    renderTab();
-    expect(await screen.findByText("Couldn't open this folder")).toBeInTheDocument();
-    expect(screen.getByText('Failed to get file tree: 404')).toBeInTheDocument();
-
-    fireEvent.click(screen.getByRole('button', { name: 'Retry' }));
-    expect(await screen.findByRole('tree')).toBeInTheDocument();
-    expect(api.getFileSystemTree).toHaveBeenCalledTimes(2);
-
-    listings[ROOT].push(file('new.txt'));
-    try {
-      act(() => useChatStore.setState({ loading: true }));
-      act(() => useChatStore.setState({ loading: false }));
-      expect(await screen.findByRole('treeitem', { name: 'new.txt' })).toBeInTheDocument();
-      expect(api.getFileSystemTree).toHaveBeenCalledTimes(3);
-
-      fireEvent.click(screen.getByRole('button', { name: 'Refresh files' }));
-      await waitFor(() => expect(api.getFileSystemTree).toHaveBeenCalledTimes(4));
-      expect(within(screen.getByRole('tree')).getAllByRole('treeitem')).toHaveLength(6);
-    } finally {
-      listings[ROOT].pop();
-    }
+  it('connects native actions, disables WSL and reports save cancellation/errors honestly', async () => {
+    renderTab(); await screen.findByRole('tree'); fireEvent.click(item('readme.txt')); await screen.findByRole('region', { name: 'readme.txt' });
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Open' })).toBeEnabled());
+    fireEvent.click(screen.getByRole('button', { name: 'Open' }));
+    expect(api.openWorkspaceFile).toHaveBeenCalledWith({ conversationId: 'c1' }, expect.objectContaining({ relativePath: 'readme.txt' }), 'reveal', undefined);
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Choose opening method' })).toBeEnabled());
+    fireEvent.click(screen.getByRole('button', { name: 'Choose opening method' })); expect(screen.getByRole('menuitem', { name: /WSL/ })).toBeDisabled();
+    api.saveWorkspaceFileAs.mockResolvedValueOnce({ status: 'cancelled' }); fireEvent.click(screen.getByRole('menuitem', { name: 'Save as…' }));
+    await waitFor(() => expect(api.saveWorkspaceFileAs).toHaveBeenCalled()); expect(screen.queryByText('File saved.')).toBeNull();
+    api.openWorkspaceFile.mockRejectedValueOnce(new Error('No default application'));
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Choose opening method' })).toBeEnabled());
+    fireEvent.click(screen.getByRole('button', { name: 'Choose opening method' })); fireEvent.click(screen.getByRole('menuitem', { name: 'Default app' }));
+    expect(await screen.findByRole('alert')).toHaveTextContent('No default application');
   });
 });

@@ -37,6 +37,7 @@ pub mod costs;
 pub mod preview;
 pub mod workflow;
 pub mod sync;
+pub mod workspace_files;
 pub mod caveman;
 
 use axum::Router;
@@ -78,5 +79,6 @@ pub fn build_all_routes() -> Router<AppState> {
         .merge(preview::routes())
         .merge(workflow::routes())
         .merge(sync::routes())
+        .merge(workspace_files::routes())
         .merge(caveman::routes())
 }

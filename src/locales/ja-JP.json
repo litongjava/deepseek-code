@@ -108,6 +108,8 @@
     "no": "いいえ"
   },
   "sidebar": {
+    "noProject": "プロジェクトなし",
+    "noProjects": "プロジェクトはまだありません",
     "workspaceMode": "ワークスペースモード",
     "homeMode": "ホーム",
     "chatMode": "チャット",
@@ -449,6 +451,11 @@
     "usageTitle": "使用法"
   },
   "chat": {
+    "sessionMenu": "セッションのオプション",
+    "sessionView": "セッション表示",
+    "copySessionId": "セッション ID をコピー",
+    "sessionIdCopied": "セッション ID をコピーしました",
+    "sessionIdCopyFailed": "セッション ID をコピーできませんでした。もう一度お試しください。",
     "selectCodeProject": "Code モードでメッセージを送る前にプロジェクトを選択してください",
     "inputPlaceholder": "今日はどのようにお手伝いできますか?",
     "send": "送信",

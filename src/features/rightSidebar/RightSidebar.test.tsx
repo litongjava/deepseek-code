@@ -1,5 +1,5 @@
 import React, { useRef, useState } from 'react';
-import { act, fireEvent, render, screen } from '@testing-library/react';
+import { act, fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { MemoryRouter } from 'react-router-dom';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import type { DocumentInfo } from '../../components/DocumentCard';
@@ -21,6 +21,13 @@ vi.mock('../../components/CodePanel', () => ({
 vi.mock('../../components/ArtifactsPanel', () => ({
   default: ({ onClose }: { onClose: () => void }) => <div>Artifacts list<button type="button" onClick={onClose}>Close artifacts</button></div>,
 }));
+
+const terminalMock = vi.hoisted(() => ({ close: vi.fn(), mounts: 0, unmounts: 0 }));
+vi.mock('../../components/TerminalPanel', () => ({ default: React.forwardRef((_props, ref) => {
+  React.useImperativeHandle(ref, () => ({ requestClose: terminalMock.close }));
+  React.useEffect(() => { terminalMock.mounts++; return () => { terminalMock.unmounts++; }; }, []);
+  return <div>Terminal output retained</div>;
+}) }));
 
 const doc = { id: 'doc-1', title: 'Report', filename: 'report.md', url: '/report.md' } as unknown as DocumentInfo;
 
@@ -66,7 +73,9 @@ const sidebar = () => screen.queryByRole('complementary', { name: 'Right sidebar
 beforeEach(() => {
   localStorage.clear();
   useUIStore.setState({ language: 'en' });
-  useRightSidebarStore.setState({ open: false, tab: 'files', width: RIGHT_SIDEBAR_DEFAULT_WIDTH, browserUrl: '', browserRequest: 0 });
+  terminalMock.close.mockReset().mockResolvedValue(true);
+  terminalMock.mounts = 0; terminalMock.unmounts = 0;
+  useRightSidebarStore.setState({ tabs: [{ id: 'files', kind: 'files' }, { id: 'browser', kind: 'browser' }], treeVisible: true, open: false, tab: 'files', width: RIGHT_SIDEBAR_DEFAULT_WIDTH, browserUrl: '', browserRequest: 0 });
 });
 
 describe('right sidebar', () => {
@@ -209,6 +218,26 @@ describe('right sidebar', () => {
     expect(screen.getByRole('tab', { name: 'Browser' })).toBeInTheDocument();
     expect(screen.getByRole('button', { name: 'Close right sidebar' })).toBeInTheDocument();
     expect(screen.getByRole('separator', { name: 'Resize right sidebar' })).toBeInTheDocument();
+  });
+
+  it('keeps browser and terminal mounted when switching and hiding, but awaits confirmed close', async () => {
+    render(<Harness />);
+    await act(async () => { await openChatLink('https://example.com/'); });
+    const frame = screen.getByTitle('Web page: https://example.com/');
+    act(() => window.dispatchEvent(new CustomEvent('request-open-panel', { detail: { panel: 'terminal' } })));
+    expect(await screen.findByText('Terminal output retained')).toBeVisible();
+    fireEvent.click(screen.getByRole('tab', { name: 'Browser' }));
+    expect(screen.getByTitle('Web page: https://example.com/')).toBe(frame);
+    fireEvent.click(screen.getByRole('button', { name: 'Close right sidebar' }));
+    fireEvent.click(toggleButton());
+    expect(terminalMock.mounts).toBe(1); expect(terminalMock.unmounts).toBe(0);
+    terminalMock.close.mockResolvedValueOnce(false);
+    fireEvent.click(screen.getByRole('button', { name: 'Close Terminal' }));
+    await waitFor(() => expect(terminalMock.close).toHaveBeenCalledTimes(1));
+    expect(screen.getByRole('tab', { name: 'Terminal' })).toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: 'Close Terminal' }));
+    await waitFor(() => expect(screen.queryByRole('tab', { name: 'Terminal' })).toBeNull());
+    expect(terminalMock.unmounts).toBe(1);
   });
 
   it('clamps width to 280px..min(900px, 70% of the viewport), including stored values', async () => {

@@ -54,6 +54,11 @@ export function useRightSidebarController({ allowed, otherPanelOpen, closeOtherP
   useEffect(() => {
     const handler = (event: Event) => {
       const detail = (event as CustomEvent<{ panel?: string; url?: unknown } | undefined>).detail;
+      if (detail?.panel === 'terminal' || detail?.panel === 'files') {
+        if (otherPanelRef.current.otherPanelOpen) otherPanelRef.current.closeOtherPanels();
+        useRightSidebarStore.getState().openTab(detail.panel);
+        return;
+      }
       if (detail?.panel !== 'browser') return;
       let url: string | undefined;
       if (typeof detail.url === 'string') {

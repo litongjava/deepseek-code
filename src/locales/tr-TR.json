@@ -108,6 +108,8 @@
     "no": "Hayır"
   },
   "sidebar": {
+    "noProject": "Proje yok",
+    "noProjects": "Henüz proje yok",
     "workspaceMode": "Çalışma alanı modu",
     "homeMode": "Ana Sayfa",
     "chatMode": "Sohbet",
@@ -449,6 +451,11 @@
     "usageTitle": "Kullanım"
   },
   "chat": {
+    "sessionMenu": "Oturum seçenekleri",
+    "sessionView": "Oturum görünümü",
+    "copySessionId": "Oturum kimliğini kopyala",
+    "sessionIdCopied": "Oturum kimliği kopyalandı",
+    "sessionIdCopyFailed": "Oturum kimliği kopyalanamadı. Tekrar deneyin.",
     "selectCodeProject": "Code modunda mesaj göndermeden önce bir proje seçin",
     "inputPlaceholder": "Bugün size nasıl yardımcı olabilirim?",
     "send": "Gönder",

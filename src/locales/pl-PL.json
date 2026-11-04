@@ -108,6 +108,8 @@
     "no": "[0033] Nie"
   },
   "sidebar": {
+    "noProject": "Bez projektu",
+    "noProjects": "Brak projektów",
     "workspaceMode": "[0034] Tryb przestrzeni roboczej",
     "homeMode": "Strona główna",
     "chatMode": "Czat",
@@ -449,6 +451,11 @@
     "usageTitle": "Zastosowanie"
   },
   "chat": {
+    "sessionMenu": "Opcje sesji",
+    "sessionView": "Widok sesji",
+    "copySessionId": "Kopiuj ID sesji",
+    "sessionIdCopied": "Skopiowano ID sesji",
+    "sessionIdCopyFailed": "Nie udało się skopiować ID sesji. Spróbuj ponownie.",
     "selectCodeProject": "Wybierz projekt przed wysłaniem wiadomości w trybie Code",
     "inputPlaceholder": "[0333] Jak mogę Ci dzisiaj pomóc?",
     "send": "Wyślij",

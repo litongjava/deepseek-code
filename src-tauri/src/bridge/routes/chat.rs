@@ -66,80 +66,62 @@ pub(super) async fn chat_handler(
     {
         let db = state.db_manager.clone();
         let conv_id_save = conv_id.clone();
-        // The request contains conversation history; only append the current user turn.
-        let user_msgs: Vec<_> = messages.iter().rev().find(|m| m.get("role").and_then(|v| v.as_str()) == Some("user")).cloned().into_iter().collect();
+        // The request contains history; only append the current user turn.
+        let user_content = messages.iter().rev()
+            .find(|m| m.get("role").and_then(|v| v.as_str()) == Some("user"))
+            .and_then(|m| m.get("content")).cloned();
+        if let Some(content) = &user_content {
+            if !content.is_string() {
+                if let Err(error) = crate::runtime::normalize_user_content(content) {
+                    return (StatusCode::BAD_REQUEST, Json(serde_json::json!({"error":error.to_string()}))).into_response();
+                }
+            }
+        }
         let model_save = model.clone();
-        let _ = tokio::task::spawn_blocking(move || {
+        let saved = tokio::task::spawn_blocking(move || {
             db.with_conn(|conn| {
-                tracing::info!(module = "BridgeDB", "Saving messages to SQLite for conv_id={}", conv_id_save);
+                let tx = deepseek_code_core::db::write_transaction(conn)?;
                 let now = chrono::Utc::now().to_rfc3339();
-
-                // Step 1: Ensure conversation exists FIRST (before inserting messages)
-                let existing = crate::db::conversation_repo::get_conversation(conn, &conv_id_save).ok();
-                if existing.flatten().is_none() {
-                    tracing::info!(module = "BridgeDB", "Conversation not found, creating new one: id={}, model={}", conv_id_save, model_save);
-                    let _ = crate::db::conversation_repo::insert_conversation(
-                        conn, &conv_id_save, None, Some(&model_save), None, None, None,
+                if crate::db::conversation_repo::get_conversation(&tx, &conv_id_save)?.is_none() {
+                    crate::db::conversation_repo::insert_conversation(
+                        &tx, &conv_id_save, None, Some(&model_save), None, None, None,
                         false, false, false, &now, &now, 0,
-                    );
-                    tracing::info!(module = "BridgeDB", "Conversation created successfully");
-                } else {
-                    tracing::info!(module = "BridgeDB", "Conversation already exists, updating timestamp");
-                    // Update the conversation's updated_at timestamp
-                    let _ = conn.execute(
-                        "UPDATE conversations SET updated_at = ?1 WHERE id = ?2",
-                        rusqlite::params![&now, &conv_id_save],
-                    );
+                    )?;
                 }
-
-                // Step 2: Insert messages
-                let mut saved_count = 0;
-                for msg in &user_msgs {
-                    if let Some(role) = msg.get("role").and_then(|v: &serde_json::Value| v.as_str()) {
-                        if role == "user" {
-                            let content = msg.get("content")
-                                .and_then(|v: &serde_json::Value| v.as_str())
-                                .unwrap_or("")
-                                .to_string();
-                            if !content.is_empty() {
-                                let msg_id = uuid::Uuid::new_v4().to_string();
-                                let sort_order = crate::db::message_repo::get_messages_by_conversation(conn, &conv_id_save)
-                                    .unwrap_or_default()
-                                    .len() as i64;
-                                tracing::info!(module = "BridgeDB", "Inserting message: id={}, role=user, content_len={}, sort_order={}", msg_id, content.len(), sort_order);
-                                let insert_result = crate::db::message_repo::insert_message(
-                                    conn, &msg_id, &conv_id_save, "user", &content, None, &now, false, sort_order,
-                                );
-                                tracing::info!(module = "BridgeDB", "Insert message result: {:?}", insert_result.is_ok());
-                                if insert_result.is_ok() {
-                                    saved_count += 1;
-                                } else {
-                                    tracing::error!(module = "BridgeDB", "Insert message FAILED: {:?}", insert_result.err());
-                                }
-                            }
-                        }
-                    }
+                if let Some(content) = user_content.filter(|c| c.as_str() != Some("")) {
+                    let sort_order: i64 = tx.query_row(
+                        "SELECT COALESCE(MAX(sort_order), -1) + 1 FROM messages WHERE conversation_id = ?1",
+                        rusqlite::params![conv_id_save], |row| row.get(0),
+                    )?;
+                    crate::db::message_repo::save_user_message(
+                        &tx, &uuid::Uuid::new_v4().to_string(), &conv_id_save, &content, &now, sort_order,
+                    )?;
                 }
-                tracing::info!(module = "BridgeDB", "Saved {} messages to SQLite", saved_count);
-
-                // Step 3: Update conversation message_count
-                let total_msgs = crate::db::message_repo::get_messages_by_conversation(conn, &conv_id_save)
-                    .unwrap_or_default()
-                    .len() as i64;
-                let _ = conn.execute(
-                    "UPDATE conversations SET message_count = ?1, updated_at = ?2 WHERE id = ?3",
-                    rusqlite::params![total_msgs, &now, &conv_id_save],
-                );
-
-                // Step 4: Verify
-                let verify_msgs = crate::db::message_repo::get_messages_by_conversation(conn, &conv_id_save);
-                tracing::info!(module = "BridgeDB", "Verification: found {} messages in DB for conv_id={}", verify_msgs.as_ref().map(|v| v.len()).unwrap_or(0), conv_id_save);
-
+                tx.execute(
+                    "UPDATE conversations SET message_count = (SELECT COUNT(*) FROM messages WHERE conversation_id = ?1), updated_at = ?2 WHERE id = ?1",
+                    rusqlite::params![conv_id_save, now],
+                )?;
+                tx.commit()?;
                 Ok::<(), anyhow::Error>(())
             })
         }).await;
+        if !matches!(saved, Ok(Ok(Ok(())))) {
+            tracing::error!("Could not persist user content: {:?}", saved);
+            return (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({"error":"Could not save user message"}))).into_response();
+        }
     }
     tracing::info!(module = "Chat", "[2/7] SQLite save COMPLETED");
+
+    let mut turn = match deepseek_code_core::db::turn_repo::TurnTimer::start(state.db_manager.clone(), &conv_id) {
+        Ok(turn) => turn,
+        Err(error) => return (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({"error":format!("Could not start turn timing: {error:#}")}))).into_response(),
+    };
+    let first_assistant_id = match turn.ensure_segment() {
+        Ok(id) => id,
+        Err(error) => return (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({"error":format!("Could not persist assistant segment: {error:#}")}))).into_response(),
+    };
+    let run = state.generation_runs.start(&conv_id);
+    run.set_turn(turn.record(), &first_assistant_id);
 
     // Sync providers from ConfigManager to NativeEngine before each request
     tracing::info!(module = "Chat", "[3/7] Syncing providers...");
@@ -182,7 +164,11 @@ pub(super) async fn chat_handler(
 
             tracing::info!(module = "Chat", "[6/7] Calling engine.send_message...");
 
-            match engine.send_message_with_history(chat_req, false).await {
+            let result = tokio::select! {
+                result = engine.send_message_with_history(chat_req, false) => result,
+                _ = run.stop_requested() => Err(anyhow::anyhow!("Turn cancelled before model request")),
+            };
+            match result {
                 Ok(rx) => {
                     tracing::info!(module = "Chat", "[6/7] send_message SUCCESS, got event receiver");
                     Some(rx)
@@ -201,7 +187,7 @@ pub(super) async fn chat_handler(
     };
     tracing::info!(module = "Chat", "[7/7] Engine guard released, building SSE stream...");
     // Registered while this collector owns the receiver; stop-generation signals it.
-    let started = rx_opt.map(|rx| (rx, state.generation_runs.start(&conv_id)));
+    let started = rx_opt;
 
     let (sse_tx, sse_rx) = tokio::sync::mpsc::channel(64);
     let transport = sse_tx.clone();
@@ -209,16 +195,24 @@ pub(super) async fn chat_handler(
     crate::metrics::ACTIVE_SSE_CONNECTIONS.inc();
     let stream = async_stream::stream! {
         let db_clone = db_for_stream;
-        let (mut rx, run) = match started {
-            Some(started) => started,
+        yield Ok::<Event, Infallible>(Event::default().data(serde_json::json!({"type":"turn_timing","turn":turn.record(),"assistant_id":first_assistant_id}).to_string()));
+        let mut rx = match started {
+            Some(rx) => rx,
             None => {
                 tracing::error!(module = "Chat", "rx_opt is None - engine failed to start");
+                let status = if start_error == "Turn cancelled before model request" { deepseek_code_core::db::turn_repo::TurnStatus::Cancelled } else { deepseek_code_core::db::turn_repo::TurnStatus::Failed };
+                match turn.finish(status) {
+                    Ok(record) => yield Ok::<Event, Infallible>(Event::default().data(serde_json::json!({"type":"turn_timing","turn":record,"assistant_id":first_assistant_id}).to_string())),
+                    Err(error) => tracing::error!("Could not finalize failed turn: {error:#}"),
+                }
+                drop(run);
+                crate::metrics::ACTIVE_SSE_CONNECTIONS.dec();
                 yield Ok::<Event, Infallible>(Event::default().data(serde_json::json!({"type": "error", "error": start_error}).to_string()));
                 return;
             }
         };
 
-        let mut assistant_id = uuid::Uuid::new_v4().to_string();
+        let mut assistant_id = first_assistant_id;
         let mut observed_plan_boundary = deepseek_code_core::services::plan_approval::latest_boundary(&db_clone, &conv_id).unwrap_or(None);
         let mut request_snapshots = Vec::<serde_json::Value>::new();
         let db_number = db_clone.clone();
@@ -276,13 +270,20 @@ pub(super) async fn chat_handler(
                             terminal_event = Some(serde_json::json!({"type":"error","error":format!("Cannot archive planning context: {error:#}")}));
                             break;
                         }
-                        assistant_id = uuid::Uuid::new_v4().to_string();
+                        assistant_id = match turn.new_segment() {
+                            Ok(id) => id,
+                            Err(error) => {
+                                terminal_event = Some(serde_json::json!({"type":"error","error":format!("Cannot create assistant segment: {error:#}")}));
+                                break;
+                            }
+                        };
                         full_text.clear(); collected_tool_calls.clear(); request_snapshots.clear();
                         run.reset_progress();
+                        run.set_turn(turn.record(), &assistant_id);
                         observed_plan_boundary = Some(boundary_id.clone());
                     }
                     let content = db_clone.with_conn(|conn| crate::db::message_repo::get_message(conn, &boundary_id)).ok().and_then(Result::ok).flatten().map(|m|m.content).unwrap_or_default();
-                    Some(serde_json::json!({"type":"context_reset","boundary_id":boundary_id,"content":content,"assistant_id":assistant_id}))
+                    Some(serde_json::json!({"type":"context_reset","boundary_id":boundary_id,"content":content,"assistant_id":assistant_id,"turn":turn.record()}))
                 }
                 crate::native_engine::tool_loop::EngineEvent::RequestSnapshot(mut snapshot) => {
                     if let Some(existing) = request_snapshots.iter_mut().find(|entry| entry["id"] == snapshot["id"]) {
@@ -313,11 +314,22 @@ pub(super) async fn chat_handler(
                 crate::native_engine::tool_loop::EngineEvent::MessageStart { model } => {
                     Some(serde_json::json!({
                         "type": "message_start",
+                        "assistant_id": assistant_id,
+                        "turn": turn.record(),
                         "model": model,
                     }))
                 }
-                crate::native_engine::tool_loop::EngineEvent::QueuedInput(text) => {
-                    Some(serde_json::json!({"type": "queued_input", "text": text}))
+                crate::native_engine::tool_loop::EngineEvent::QueuedInput(input) => {
+                    if let Some((tool_id, ..)) = collected_tool_calls.last() {
+                        let saved = db_clone.with_conn(|conn| -> anyhow::Result<()> {
+                            let call_id = format!("{assistant_id}:{tool_id}");
+                            let mut inputs = deepseek_code_core::services::input_queue::load_delivered(conn, &call_id)?;
+                            inputs.push(input.clone());
+                            deepseek_code_core::services::input_queue::save_delivered(conn, &call_id, &inputs)
+                        });
+                        if !matches!(saved, Ok(Ok(()))) { tracing::error!("Could not persist queued input: {saved:?}"); }
+                    }
+                    Some(serde_json::json!({"type": "queued_input", "text": input.text, "content": input.content, "origin": input.origin}))
                 }
                 crate::native_engine::tool_loop::EngineEvent::Text(text) => {
                     full_text.push_str(&text);
@@ -480,6 +492,16 @@ pub(super) async fn chat_handler(
 
         crate::metrics::ACTIVE_SSE_CONNECTIONS.dec();
 
+        let status = deepseek_code_core::db::turn_repo::terminal_status(
+            terminal_event.as_ref().and_then(|event| event["stop_reason"].as_str()),
+            terminal_event.as_ref().is_none_or(|event| event["type"] == "error" || event.get("error").is_some()),
+        );
+        let final_turn = match turn.finish(status) {
+            Ok(record) => Some(record),
+            Err(error) => { tracing::error!("Could not finalize turn: {error:#}"); None }
+        };
+        let final_assistant_id = assistant_id.clone();
+
         // A cancelled/crashed engine may never emit its final RequestSnapshot.
         // Persist a terminal status without inventing missing usage or timings.
         let mut pending_snapshot_updates = Vec::new();
@@ -497,7 +519,7 @@ pub(super) async fn chat_handler(
             yield Ok::<Event, Infallible>(Event::default().data(resolved.to_string()));
         }
         // Save assistant message to SQLite after stream ends
-        if !full_text.is_empty() || !request_snapshots.is_empty() || !collected_tool_calls.is_empty() {
+        {
             let db = db_clone;
             let conv_id_save = conv_id.clone();
             let assistant_text = full_text.clone();
@@ -560,6 +582,9 @@ pub(super) async fn chat_handler(
             for snapshot in pending_snapshot_updates {
                 yield Ok::<Event, Infallible>(Event::default().data(serde_json::json!({"type":"request_snapshot", "snapshot":snapshot, "persisted":persisted}).to_string()));
             }
+        }
+        if let Some(record) = final_turn {
+            yield Ok::<Event, Infallible>(Event::default().data(serde_json::json!({"type":"turn_timing","turn":record,"assistant_id":final_assistant_id}).to_string()));
         }
         // Report idle only once the trajectory above is persisted.
         drop(run);

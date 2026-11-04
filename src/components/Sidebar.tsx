@@ -6,6 +6,7 @@ import { useGeneralSettingsStore } from '../stores/useGeneralSettingsStore';
 import { useI18n } from '../hooks/useI18n';
 import { isRightSidebarRoute } from '../stores/useRightSidebarStore';
 import { OPEN_PANEL_EVENT } from '../features/rightSidebar/useRightSidebarController';
+import { useProjectStore } from '../stores/useProjectStore';
 import { IconCode } from './Icons';
 import { ChevronUp, Settings, HelpCircle, LogOut, Shield, Pin, PinOff, X, Home } from 'lucide-react';
 import { getConversations, getUser, getUserUsage, logout, getUserProfile } from '../api';
@@ -15,7 +16,6 @@ import SidebarNavigation from './SidebarNavigation';
 import SidebarProjects from '../features/project/SidebarProjects';
 import SwarmCollaboration from './SwarmCollaboration';
 import H5AccessPanel from './H5AccessPanel';
-import TerminalPanel from './TerminalPanel';
 import ComputerUsePanel from './ComputerUsePanel';
 import IMIntegrationPanel from './IMIntegrationPanel';
 import AgentExecutionView from './AgentExecutionView';
@@ -45,6 +45,7 @@ const Sidebar = ({ isCollapsed, toggleSidebar, refreshTrigger, onNewChatClick, o
   const navigate = useNavigate();
   const location = useLocation();
   const [chats, setChats] = useState<any[]>([]);
+  const chatRequest = useRef(0);
   const [userUser, setUserUser] = useState<any>(null);
   const [showUserMenu, setShowUserMenu] = useState(false);
   const [showLogoutConfirm, setShowLogoutConfirm] = useState(false);
@@ -83,7 +84,6 @@ const Sidebar = ({ isCollapsed, toggleSidebar, refreshTrigger, onNewChatClick, o
   const [showH5Panel, setShowH5Panel] = useState(false);
   const [showComputerUse, setShowComputerUse] = useState(false);
   const [showIMPanel, setShowIMPanel] = useState(false);
-  const [showTerminalPanel, setShowTerminalPanel] = useState(false);
   const [showAgentView, setShowAgentView] = useState(false);
   const [showLivePreview, setShowLivePreview] = useState(false);
   const [showKnowledgePanel, setShowKnowledgePanel] = useState(false);
@@ -94,16 +94,15 @@ const Sidebar = ({ isCollapsed, toggleSidebar, refreshTrigger, onNewChatClick, o
     setShowH5Panel(panel === 'h5' ? !showH5Panel : false);
     setShowComputerUse(panel === 'computerUse' ? !showComputerUse : false);
     setShowIMPanel(panel === 'im' ? !showIMPanel : false);
-    setShowTerminalPanel(panel === 'terminal' ? !showTerminalPanel : false);
     setShowAgentView(panel === 'agent' ? !showAgentView : false);
     setShowLivePreview(panel === 'preview' ? !showLivePreview : false);
     setShowKnowledgePanel(panel === 'knowledge' ? !showKnowledgePanel : false);
     setShowGitHubHub(panel === 'github' ? !showGitHubHub : false);
     setShowAppStudio(panel === 'appstudio' ? !showAppStudio : false);
-    if (panel === 'browser') {
+    if (panel === 'browser' || panel === 'terminal') {
       // The right sidebar only exists on chat views; go Home from full-page routes.
       if (!isRightSidebarRoute(location.pathname)) navigate('/');
-      window.dispatchEvent(new CustomEvent(OPEN_PANEL_EVENT, { detail: { panel: 'browser' } }));
+      window.dispatchEvent(new CustomEvent(OPEN_PANEL_EVENT, { detail: { panel } }));
     }
   };
 
@@ -145,7 +144,6 @@ const Sidebar = ({ isCollapsed, toggleSidebar, refreshTrigger, onNewChatClick, o
         if (showComputerUse) setShowComputerUse(false);
         if (showH5Panel) setShowH5Panel(false);
         if (showIMPanel) setShowIMPanel(false);
-        if (showTerminalPanel) setShowTerminalPanel(false);
         if (showAgentView) setShowAgentView(false);
         if (showLivePreview) setShowLivePreview(false);
         if (showKnowledgePanel) setShowKnowledgePanel(false);
@@ -155,15 +153,17 @@ const Sidebar = ({ isCollapsed, toggleSidebar, refreshTrigger, onNewChatClick, o
     };
     window.addEventListener('keydown', handleKeyDown);
     return () => window.removeEventListener('keydown', handleKeyDown);
-  }, [showComputerUse, showH5Panel, showIMPanel, showTerminalPanel, showAgentView, showLivePreview, showKnowledgePanel, showGitHubHub, showAppStudio]);
+  }, [showComputerUse, showH5Panel, showIMPanel, showAgentView, showLivePreview, showKnowledgePanel, showGitHubHub, showAppStudio]);
 
   const scrollRef = useRef<HTMLDivElement>(null);
   const userMenuRef = useRef<HTMLDivElement>(null);
   const userBtnRef = useRef<HTMLButtonElement>(null);
 
   const handleNewChat = () => {
+    const { currentProjectId, pendingProjectId } = useProjectStore.getState();
+    const projectId = location.pathname.startsWith('/chat/') ? currentProjectId : pendingProjectId;
     if (onNewChatClick) onNewChatClick();
-    navigate('/');
+    navigate('/', { state: projectId ? { createdProjectId: projectId } : null });
   };
 
   const NAV_ROUTES: Record<string, () => void> = {
@@ -238,6 +238,7 @@ const Sidebar = ({ isCollapsed, toggleSidebar, refreshTrigger, onNewChatClick, o
     window.addEventListener('focus', fetchChats);
 
     return () => {
+      chatRequest.current += 1;
       window.removeEventListener('conversationTitleUpdated', handleTitleUpdate);
       window.removeEventListener('conversationCreated', handleConversationCreated);
       window.removeEventListener('conversationDeleted', handleConversationDeleted);
@@ -248,8 +249,10 @@ const Sidebar = ({ isCollapsed, toggleSidebar, refreshTrigger, onNewChatClick, o
   }, [refreshTrigger]);
 
   const fetchChats = async () => {
+    const request = ++chatRequest.current;
     try {
       const data = await getConversations();
+      if (request !== chatRequest.current) return;
       console.log('[Sidebar] Fetched conversations:', data);
       if (Array.isArray(data)) {
         setChats(data);
@@ -293,14 +296,14 @@ const Sidebar = ({ isCollapsed, toggleSidebar, refreshTrigger, onNewChatClick, o
       document.addEventListener('click', handleClickOutside);
       // Attach scroll listener to the sidebar scroll container
       const scrollEl = scrollRef.current;
-      scrollEl?.addEventListener('scroll', handleScroll);
+      scrollEl?.addEventListener('scroll', handleScroll, true);
       window.addEventListener('resize', handleScroll);
     }
 
     return () => {
       document.removeEventListener('click', handleClickOutside);
       const scrollEl = scrollRef.current;
-      scrollEl?.removeEventListener('scroll', handleScroll);
+      scrollEl?.removeEventListener('scroll', handleScroll, true);
       window.removeEventListener('resize', handleScroll);
     };
   }, [showUserMenu]);
@@ -336,14 +339,11 @@ const Sidebar = ({ isCollapsed, toggleSidebar, refreshTrigger, onNewChatClick, o
             </div>
           </div>
         )}
-        <div ref={scrollRef} className="flex-1 overflow-y-auto sidebar-scroll min-h-0 px-2 pt-3 pb-4">
+        <div className="shrink-0 px-2 pt-3">
           <SidebarNavigation collapsed={isCollapsed} onNewChat={handleNewChat} onSearch={() => setShowSearch(true)} onPanel={panel => openPanel(panel as Parameters<typeof openPanel>[0])} onNavigate={handleNavClick} onSwarm={() => setShowSwarm(true)} />
+        </div>
+        <div ref={scrollRef} className="flex min-h-0 flex-1 flex-col overflow-hidden px-2 pb-2">
           {!isCollapsed && <SidebarProjects chats={chats} streamingIds={streamingIds} onOpenChat={id => { onCloseOverlays?.(); navigate(`/chat/${id}`); }} />}
-          {!isCollapsed && activeTab === 'work' && (
-            <div className="mt-3 border-t border-claude-border pt-3" data-sidebar-panel="work">
-              <SwarmCollaboration />
-            </div>
-          )}
         </div>
 
         {/* Update status banner */}
@@ -534,22 +534,6 @@ const Sidebar = ({ isCollapsed, toggleSidebar, refreshTrigger, onNewChatClick, o
           }}
         >
           <IMIntegrationPanel onClose={() => setShowIMPanel(false)} />
-        </div>
-      )}
-
-      {/* Terminal Panel */}
-      {showTerminalPanel && !isCollapsed && (
-        <div
-          className="fixed z-40 border-l border-claude-border bg-[#1e1e2e] flex flex-col shadow-2xl transition-all duration-300 ease-in-out"
-          style={{
-            top: `${titleBarHeight || 44}px`,
-            left: `${tunerConfig?.sidebarWidth || 280}px`,
-            width: 'min(700px, 50vw)',
-            height: `calc(100vh - ${titleBarHeight || 44}px)`,
-            borderRadius: '0 12px 12px 0'
-          }}
-        >
-          <TerminalPanel onClose={() => setShowTerminalPanel(false)} />
         </div>
       )}
 

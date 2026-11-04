@@ -22,7 +22,7 @@ mod plan_tool;
 
 use crate::native_engine::anthropic_client::{AnthropicClient, AnthropicContent, AnthropicMessage, ContentBlock};
 use crate::native_engine::engine_core::ReasoningMode;
-use crate::native_engine::openai_client::{ImageUrl, OpenAIClient, OpenAIContent, OpenAIContentPart, OpenAIMessage};
+use crate::native_engine::openai_client::{OpenAIClient, OpenAIContent, OpenAIMessage};
 use crate::native_engine::provider_manager::{ApiFormat, ResolvedProvider};
 use crate::native_engine::token_counter::TokenCounter;
 use crate::native_engine::context_compressor::{ContextCompressor, ContextWindow, CompressionLevel};
@@ -78,11 +78,17 @@ mod durable_input_tests;
 #[path = "goal_proposal_tests.rs"]
 mod goal_proposal_tests;
 
+#[path = "multimodal.rs"]
+mod multimodal;
+#[cfg(test)]
+#[path = "multimodal_tests.rs"]
+mod multimodal_tests;
+
 #[derive(Debug, Clone)]
 pub enum EngineEvent {
     /// A message the user sent while the turn ran, now given to the model
     /// after the last tool results.
-    QueuedInput(String),
+    QueuedInput(crate::services::input_queue::DeliveredInput),
     /// A durable plan boundary; hosts must finish the old assistant segment before it.
     ContextReset { session_id: String, boundary_id: String },
     /// Delegated task state without exposing the child's private model output.
@@ -1209,32 +1215,24 @@ impl ToolLoopExecutor {
 
     /// Messages queued during the turn; only read after tool results, so a
     /// final answer is never interrupted.
-    async fn deliver_queued_inputs(&self, iteration: usize) -> Vec<String> {
+    async fn deliver_queued_inputs(&self, after_tool_results: bool) -> Vec<crate::services::input_queue::DeliveredInput> {
         let (Some(db), Some(id)) = (&self.goal_db, &self.conv_id) else {
             return Vec::new();
         };
-        if iteration == 0 {
+        if !after_tool_results {
             return Vec::new();
         }
         let inputs = crate::services::input_queue::take(db, id).unwrap_or_else(|error| {
             tracing::warn!("Queued input unavailable: {error:#}");
             Vec::new()
         });
-        for text in &inputs {
-            let _ = self.event_tx.send(EngineEvent::QueuedInput(text.clone())).await;
+        let data_dir = self.search_config_path.as_deref().and_then(std::path::Path::parent).map(std::path::Path::to_path_buf)
+            .or_else(|| crate::runtime::resolve_default_data_dir().ok());
+        let inputs: Vec<_> = inputs.into_iter().map(|text| crate::services::input_queue::DeliveredInput::resolve(data_dir.as_deref(), id, text)).collect();
+        for input in &inputs {
+            let _ = self.event_tx.send(EngineEvent::QueuedInput(input.clone())).await;
         }
         inputs
-    }
-
-    /// The blocks for a queued message whose `[Image #N]` names pasted
-    /// images, regardless of cached model capability metadata.
-    fn queued_images(&self, text: &str) -> Option<Vec<Value>> {
-        if !text.contains("[Image #") {
-            return None;
-        }
-        let id = self.conv_id.as_deref()?;
-        let data_dir = crate::runtime::resolve_default_data_dir().ok()?;
-        crate::services::input_queue::content_with_images(&data_dir, id, text)
     }
 
     fn drain_approval_notes(&self) -> Vec<String> {
@@ -1261,6 +1259,25 @@ impl ToolLoopExecutor {
     }
 
     pub async fn execute(&mut self) -> Result<(String, Option<String>)> {
+        let result = self.execute_inner().await;
+        if let Err(error) = &result {
+            // Startup can fail before execute_scoped emits any events. Always
+            // report the actual failure rather than silently closing the channel.
+            let message = format!("Engine execution failed: {error:#}");
+            tracing::error!(module = "ToolLoop", "{}", message);
+            let _ = self.event_tx.send(EngineEvent::Error(message)).await;
+            let _ = self
+                .event_tx
+                .send(EngineEvent::MessageStop {
+                    full_text: String::new(),
+                    stop_reason: Some("error".to_string()),
+                })
+                .await;
+        }
+        result
+    }
+
+    async fn execute_inner(&mut self) -> Result<(String, Option<String>)> {
         let _execution_owner = if self.execution_lease.is_some() {
             self.execution_lease.take()
         } else {
@@ -1598,16 +1615,7 @@ impl ToolLoopExecutor {
                 }).await;
                 tracing::info!(module = "ToolLoop", "[E7] MessageStop sent (success)");
             }
-            Err(e) => {
-                let err_msg = format!("Engine execution failed: {}", e);
-                tracing::error!(module = "ToolLoop", "[E6] API loop FAILED: {}", err_msg);
-                let _ = self.event_tx.send(EngineEvent::Error(err_msg)).await;
-                let _ = self.event_tx.send(EngineEvent::MessageStop {
-                    full_text: String::new(),
-                    stop_reason: Some("error".to_string()),
-                }).await;
-                tracing::info!(module = "ToolLoop", "[E7] Error + MessageStop sent (failure)");
-            }
+            Err(_) => {} // execute() reports failures, including startup errors.
         }
 
         loop_result
@@ -2145,7 +2153,7 @@ impl ToolLoopExecutor {
 
     async fn execute_anthropic_loop(&mut self) -> Result<(String, Option<String>)> {
         tracing::info!(module = "AnthropicLoop", "ENTRY: building messages, msg_count={}", self.messages.len());
-        let mut conversation_messages: Vec<AnthropicMessage> = self.build_anthropic_messages();
+        let mut conversation_messages: Vec<AnthropicMessage> = self.build_anthropic_messages()?;
         tracing::info!(module = "AnthropicLoop", "Messages built, count={}", conversation_messages.len());
 
         let tools = self.tool_definitions();
@@ -2168,6 +2176,7 @@ impl ToolLoopExecutor {
         let enable_thinking = matches!(self.reasoning_mode, ReasoningMode::Deep);
         let mut output_recoveries = 0;
 
+        let mut after_tool_results = false;
         for iteration in 0usize.. {
             for context in self.drain_async_hook_messages() {
                 conversation_messages.push(AnthropicMessage {
@@ -2179,13 +2188,11 @@ impl ToolLoopExecutor {
             }
             self.ensure_permission_continuation()?;
             self.resume_pending_owned_children().await;
-            let queued = self.deliver_queued_inputs(iteration).await;
-            for content in self.drain_approval_notes().into_iter().chain(queued).chain(self.drain_peer_messages()?) {
-                // A queued message that names pasted images carries them.
-                let content = match self.queued_images(&content) {
-                    Some(blocks) => AnthropicContent::Blocks(blocks.into_iter().filter_map(|block| serde_json::from_value(block).ok()).collect()),
-                    None => AnthropicContent::Text(content),
-                };
+            let queued = self.deliver_queued_inputs(std::mem::take(&mut after_tool_results)).await;
+            for content in self.drain_approval_notes().into_iter().map(Value::String)
+                .chain(queued.into_iter().map(|input| input.content))
+                .chain(self.drain_peer_messages()?.into_iter().map(Value::String)) {
+                let content = multimodal::anthropic_content(&content)?;
                 conversation_messages.push(AnthropicMessage { role: "user".into(), content });
             }
 
@@ -2548,7 +2555,9 @@ impl ToolLoopExecutor {
                     role: "user".to_string(),
                     content: AnthropicContent::Blocks(tool_results),
                 });
+                after_tool_results = true;
                 if let Some((boundary_id, content)) = self.pending_plan_reset.take() {
+                    after_tool_results = false;
                     self.messages = vec![json!({"role":"user","content":content})];
                     conversation_messages = vec![AnthropicMessage { role: "user".into(), content: AnthropicContent::Text(content) }];
                     full_text.clear();
@@ -2589,7 +2598,7 @@ impl ToolLoopExecutor {
 
     async fn execute_openai_loop(&mut self) -> Result<(String, Option<String>)> {
         tracing::info!(module = "OpenAILoop", "ENTRY: building messages, msg_count={}", self.messages.len());
-        let mut conversation_messages: Vec<OpenAIMessage> = self.build_openai_messages();
+        let mut conversation_messages: Vec<OpenAIMessage> = self.build_openai_messages()?;
         tracing::info!(module = "OpenAILoop", "Messages built, count={}", conversation_messages.len());
 
         let tools = self.tool_definitions();
@@ -2610,6 +2619,7 @@ impl ToolLoopExecutor {
         let api_key_len = self.provider.provider.api_key.len();
         let mut output_recoveries = 0;
 
+        let mut after_tool_results = false;
         for iteration in 0usize.. {
             for context in self.drain_async_hook_messages() {
                 conversation_messages.push(OpenAIMessage {
@@ -2625,15 +2635,11 @@ impl ToolLoopExecutor {
             }
             self.ensure_permission_continuation()?;
             self.resume_pending_owned_children().await;
-            let queued = self.deliver_queued_inputs(iteration).await;
-            for content in self.drain_approval_notes().into_iter().chain(queued).chain(self.drain_peer_messages()?) {
-                let content = match self.queued_images(&content) {
-                    Some(blocks) => OpenAIContent::Multi(blocks.iter().map(|block| match block["type"].as_str() {
-                        Some("image") => OpenAIContentPart::Image { image_url: ImageUrl { url: format!("data:{};base64,{}", block["source"]["media_type"].as_str().unwrap_or("image/png"), block["source"]["data"].as_str().unwrap_or_default()) } },
-                        _ => OpenAIContentPart::Text { text: block["text"].as_str().unwrap_or_default().to_owned() },
-                    }).collect()),
-                    None => OpenAIContent::Text(content),
-                };
+            let queued = self.deliver_queued_inputs(std::mem::take(&mut after_tool_results)).await;
+            for content in self.drain_approval_notes().into_iter().map(Value::String)
+                .chain(queued.into_iter().map(|input| input.content))
+                .chain(self.drain_peer_messages()?.into_iter().map(Value::String)) {
+                let content = multimodal::openai_content(&content)?;
                 conversation_messages.push(OpenAIMessage { role: "user".into(), content, tool_calls: None, tool_call_id: None, reasoning_content: None, provider_content: None });
             }
 
@@ -2990,7 +2996,9 @@ impl ToolLoopExecutor {
                         tool_calls: None, tool_call_id: None, reasoning_content: None, provider_content: None,
                     });
                 }
+                after_tool_results = true;
                 if let Some((boundary_id, content)) = self.pending_plan_reset.take() {
+                    after_tool_results = false;
                     self.messages = vec![json!({"role":"user","content":content})];
                     conversation_messages = vec![OpenAIMessage { role: "user".into(), content: OpenAIContent::Text(content), tool_calls: None, tool_call_id: None, reasoning_content: None, provider_content: None }];
                     full_text.clear();
@@ -3029,9 +3037,10 @@ impl ToolLoopExecutor {
         Ok((full_text, stop_reason))
     }
 
-    fn build_anthropic_messages(&self) -> Vec<AnthropicMessage> {
+    fn build_anthropic_messages(&self) -> Result<Vec<AnthropicMessage>> {
         let additions = self.message_additions();
-        self.messages.iter().enumerate().filter_map(|(index, msg)| {
+        let messages = multimodal::normalize_messages(&self.messages)?;
+        Ok(messages.iter().enumerate().filter_map(|(index, msg)| {
             let role = msg.get("role")?.as_str()?;
             let content = msg.get("content")?;
 
@@ -3099,12 +3108,13 @@ impl ToolLoopExecutor {
                 role: role.to_string(),
                 content: anthropic_content,
             })
-        }).collect()
+        }).collect())
     }
 
-    fn build_openai_messages(&self) -> Vec<OpenAIMessage> {
+    fn build_openai_messages(&self) -> Result<Vec<OpenAIMessage>> {
         let additions = self.message_additions();
-        self.messages.iter().enumerate().filter_map(|(index, msg)| {
+        let messages = multimodal::normalize_messages(&self.messages)?;
+        Ok(messages.iter().enumerate().filter_map(|(index, msg)| {
             let role = msg.get("role")?.as_str()?;
             let content = msg.get("content")?;
 
@@ -3162,7 +3172,7 @@ impl ToolLoopExecutor {
                 tool_call_id,
                 reasoning_content, provider_content: msg.get("provider_content").cloned(),
             })
-        }).collect()
+        }).collect())
     }
 
     fn get_workspace_cwd(&self) -> &str {

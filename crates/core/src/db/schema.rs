@@ -49,6 +49,28 @@ CREATE TABLE IF NOT EXISTS messages (
     FOREIGN KEY (conversation_id) REFERENCES conversations(id) ON DELETE CASCADE
 );
 
+CREATE TABLE IF NOT EXISTS tool_queued_inputs (
+    tool_call_id TEXT PRIMARY KEY REFERENCES tool_calls(id) ON DELETE CASCADE,
+    inputs_json TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS execution_turns (
+    id TEXT PRIMARY KEY,
+    conversation_id TEXT NOT NULL REFERENCES conversations(id) ON DELETE CASCADE,
+    source_turn_id TEXT,
+    started_at TEXT NOT NULL,
+    ended_at TEXT,
+    elapsed_ms INTEGER CHECK(elapsed_ms IS NULL OR elapsed_ms >= 0),
+    status TEXT NOT NULL CHECK(status IN ('running','completed','failed','cancelled')),
+    UNIQUE(conversation_id, source_turn_id),
+    CHECK(status <> 'running' OR (ended_at IS NULL AND elapsed_ms IS NULL))
+);
+CREATE TABLE IF NOT EXISTS message_turns (
+    message_id TEXT PRIMARY KEY REFERENCES messages(id) ON DELETE CASCADE,
+    turn_id TEXT NOT NULL REFERENCES execution_turns(id) ON DELETE CASCADE
+);
+CREATE INDEX IF NOT EXISTS idx_message_turns_turn ON message_turns(turn_id);
+
 CREATE TABLE IF NOT EXISTS session_permission_authority (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     conversation_id TEXT NOT NULL REFERENCES conversations(id) ON DELETE CASCADE,

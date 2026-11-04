@@ -1,4 +1,5 @@
-import { useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
+import { createPortal } from 'react-dom';
 import { ChevronDown, Folder, Search, Wrench, Puzzle, MessageSquare, Terminal, Cpu, Eye, Code, Palette, Sparkles, Brain, Users, Smartphone, Globe, Network, Github, BookOpen, Monitor } from 'lucide-react';
 import { useNavigate } from 'react-router-dom';
 import { useI18n } from '../hooks/useI18n';
@@ -12,6 +13,19 @@ export default function SidebarNavigation({ collapsed, onNewChat, onSearch, onPa
   const { t } = useI18n();
   const showCodingView = useGeneralSettingsStore(state => state.showCodingView);
   const [expanded, setExpanded] = useState<string | null>(null);
+  const [position, setPosition] = useState({ left: 48, top: 96 });
+  const menuRef = useRef<HTMLDivElement>(null);
+  const triggerRef = useRef<HTMLButtonElement | null>(null);
+  useEffect(() => {
+    if (!expanded) return;
+    const outside = (event: MouseEvent) => {
+      if (!menuRef.current?.contains(event.target as Node) && !triggerRef.current?.contains(event.target as Node)) setExpanded(null);
+    };
+    const key = (event: KeyboardEvent) => { if (event.key === 'Escape') setExpanded(null); };
+    document.addEventListener('mousedown', outside);
+    window.addEventListener('keydown', key);
+    return () => { document.removeEventListener('mousedown', outside); window.removeEventListener('keydown', key); };
+  }, [expanded]);
   const tools = [
     { label: t('sidebar.terminal'), icon: Terminal, action: () => onPanel('terminal') },
     ...(showCodingView ? [{ label: t('sidebar.agent'), icon: Cpu, action: () => onPanel('agent') }] : []),
@@ -37,10 +51,10 @@ export default function SidebarNavigation({ collapsed, onNewChat, onSearch, onPa
     <button type="button" aria-label={t('sidebar.newChat')} title={collapsed ? t('sidebar.newChat') : undefined} onClick={onNewChat} className={itemClass}><MessageSquare size={17} className="shrink-0" />{!collapsed && t('sidebar.newChat')}</button>
     <button type="button" aria-label={t('sidebar.search')} title={collapsed ? t('sidebar.search') : undefined} onClick={onSearch} className={itemClass}><Search size={17} className="shrink-0" />{!collapsed && t('sidebar.search')}</button>
     {[{ id: 'tools', label: t('sidebar.tools'), icon: Wrench, items: tools }, { id: 'extensions', label: t('sidebar.extensions'), icon: Puzzle, items: extensions }].map(group => <div key={group.id}>
-      <button type="button" aria-label={group.label} aria-expanded={expanded === group.id} title={collapsed ? group.label : undefined} onClick={() => setExpanded(expanded === group.id ? null : group.id)} className={itemClass}><group.icon size={17} className="shrink-0" />{!collapsed && <><span className="flex-1">{group.label}</span><ChevronDown size={13} className={expanded === group.id ? '' : '-rotate-90'} /></>}</button>
-      {expanded === group.id && <div className={collapsed ? 'fixed left-12 top-24 z-[60] w-56 rounded-xl border border-claude-border bg-claude-sidebar p-2 shadow-xl' : 'ml-4 border-l border-claude-border pl-2'}>
-        {group.items.map(item => <button type="button" key={item.label} onClick={() => { item.action(); if (collapsed) setExpanded(null); }} className={itemClass}><item.icon size={15} className="shrink-0" />{item.label}</button>)}
-      </div>}
+      <button type="button" aria-label={group.label} aria-expanded={expanded === group.id} title={collapsed ? group.label : undefined} onClick={event => { triggerRef.current = event.currentTarget; const rect = event.currentTarget.getBoundingClientRect(); setPosition({ left: rect.right + 4, top: Math.max(8, Math.min(rect.top, window.innerHeight - 340)) }); setExpanded(expanded === group.id ? null : group.id); }} className={itemClass}><group.icon size={17} className="shrink-0" />{!collapsed && <><span className="flex-1">{group.label}</span><ChevronDown size={13} className={expanded === group.id ? '' : '-rotate-90'} /></>}</button>
+      {expanded === group.id && createPortal(<div ref={menuRef} style={position} className="fixed z-[60] max-h-[min(320px,80vh)] w-56 overflow-y-auto rounded-xl border border-claude-border bg-claude-sidebar p-2 shadow-xl">
+        {group.items.map(item => <button type="button" key={item.label} onClick={() => { item.action(); setExpanded(null); }} className={itemClass}><item.icon size={15} className="shrink-0" />{item.label}</button>)}
+      </div>, document.body)}
     </div>)}
     {collapsed && <button type="button" aria-label={t('sidebar.projects')} title={t('sidebar.projects')} onClick={() => navigate('/projects')} className={itemClass}><Folder size={17} /></button>}
   </nav>;

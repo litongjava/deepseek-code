@@ -1,10 +1,14 @@
 import { useState, useEffect, useRef } from 'react';
 import { useParams, useNavigate } from 'react-router-dom';
-import { FileText, ChevronDown, Trash, Pencil, Laptop, Terminal, Smartphone, MoreVertical, Download } from 'lucide-react';
+import { FileText, ChevronDown, Trash, Pencil, Laptop, Terminal, Copy, Download } from 'lucide-react';
 import { updateConversation, deleteConversation, exportConversation, getConversation } from '../api';
 import { tauriAPI } from '../utils/tauriAPI';
 import { useProjectStore } from '../stores/useProjectStore';
 import { useChatStore } from '../stores/useChatStore';
+import { useConversationViewStore } from '../stores/useConversationViewStore';
+import { useGeneralSettingsStore } from '../stores/useGeneralSettingsStore';
+import { useI18n } from '../hooks/useI18n';
+import { copyToClipboard } from '../utils/clipboard';
 
 interface ChatHeaderProps {
   title: string;
@@ -23,6 +27,17 @@ export default function ChatHeader({
   onTitleRename
 }: ChatHeaderProps) {
   const { id } = useParams();
+  const { t } = useI18n();
+  const view = useConversationViewStore(s => s.view);
+  const setView = useConversationViewStore(s => s.setView);
+  const showCodingView = useGeneralSettingsStore(s => s.showCodingView);
+  const [copyResult, setCopyResult] = useState<{ id: string; success: boolean } | null>(null);
+  useEffect(() => { setShowMenu(false); setIsEditing(false); setCopyResult(null); }, [id]);
+  useEffect(() => {
+    if (!copyResult) return;
+    const timer = window.setTimeout(() => setCopyResult(null), 2500);
+    return () => window.clearTimeout(timer);
+  }, [copyResult]);
   const navigate = useNavigate();
   const [isEditing, setIsEditing] = useState(false);
   const [editTitle, setEditTitle] = useState('');
@@ -42,12 +57,11 @@ export default function ChatHeader({
   }, [id, project?.id]);
   const menuRef = useRef<HTMLDivElement>(null);
   const buttonRef = useRef<HTMLButtonElement>(null);
-  const moreRef = useRef<HTMLButtonElement>(null);
 
   useEffect(() => {
     const handleClickOutside = (event: MouseEvent) => {
       if (menuRef.current && !menuRef.current.contains(event.target as Node) &&
-        buttonRef.current && !buttonRef.current.contains(event.target as Node) && !moreRef.current?.contains(event.target as Node)) {
+        buttonRef.current && !buttonRef.current.contains(event.target as Node)) {
         setShowMenu(false);
       }
     };
@@ -90,7 +104,8 @@ export default function ChatHeader({
   };
 
   return (
-    <div className="relative flex items-center justify-between gap-3 px-5 py-2 bg-claude-bg flex-shrink-0 h-[54px] z-40">
+    <div data-session-header className="relative flex min-w-0 items-center gap-3 px-5 py-2 bg-claude-bg flex-shrink-0 h-[54px] z-40">
+      <div className="flex min-w-0 flex-1 items-center gap-3">
       {isEditing ? (
         <input
           type="text" value={editTitle}
@@ -102,12 +117,12 @@ export default function ChatHeader({
           style={{ WebkitAppRegion: 'no-drag' } as React.CSSProperties}
         />
       ) : (
-        <div className="relative flex min-w-0 items-center gap-1" style={{ WebkitAppRegion: 'no-drag' } as React.CSSProperties}>
+        <div className="relative flex min-w-0 flex-1 items-center gap-1" style={{ WebkitAppRegion: 'no-drag' } as React.CSSProperties}>
           <Laptop size={18} className="mr-1 shrink-0" />
-          <button onClick={startEditing} title={displayTitle} className="block px-2 py-1.5 hover:bg-claude-btn-hover rounded-md transition-colors text-[14px] font-medium text-claude-text max-w-[280px] truncate">
+          <button onClick={startEditing} title={displayTitle} className="block min-w-0 px-2 py-1.5 hover:bg-claude-btn-hover rounded-md transition-colors text-[14px] font-medium text-claude-text max-w-[280px] truncate">
             {displayTitle}
           </button>
-          <button ref={buttonRef} onClick={() => setShowMenu(!showMenu)} className={`p-1 hover:bg-claude-btn-hover rounded-md transition-colors text-claude-textSecondary hover:text-claude-text ${showMenu ? 'bg-claude-btn-hover text-claude-text' : ''}`}>
+          <button ref={buttonRef} type="button" aria-label={t('chat.sessionMenu')} aria-expanded={showMenu} onClick={() => setShowMenu(!showMenu)} className={`shrink-0 p-1 hover:bg-claude-btn-hover rounded-md transition-colors text-claude-textSecondary hover:text-claude-text ${showMenu ? 'bg-claude-btn-hover text-claude-text' : ''}`}>
             <ChevronDown size={14} />
           </button>
           {workspaceLabel && <button type="button" title={workspacePath} onClick={() => { if (workspacePath && tauriAPI.isTauri) void tauriAPI.openFolder(workspacePath); }} className="ml-3 truncate rounded-lg bg-claude-hover px-2 py-1 text-xs text-claude-textSecondary max-w-[220px]">{workspaceLabel}</button>}
@@ -117,6 +132,13 @@ export default function ChatHeader({
                 <Pencil size={16} className="text-claude-textSecondary group-hover:text-claude-text" />
                 <span className="text-[13px] text-claude-text">Rename</span>
               </button>
+              <button disabled={!id} onClick={async () => {
+                if (!id) return;
+                const copiedId = id;
+                const success = await copyToClipboard(copiedId).catch(() => false);
+                setCopyResult({ id: copiedId, success });
+                setShowMenu(false);
+              }} className="flex items-center gap-3 px-3 py-2 hover:bg-claude-hover text-left w-full text-[13px] disabled:opacity-50"><Copy size={16} />{t('chat.copySessionId')}</button>
               <div className="h-[1px] bg-claude-border my-1 mx-3" />
               <button disabled={isExporting} onClick={async () => { if (!id) return; setIsExporting(true); try { await exportConversation(id); } catch (error) { window.alert(String(error)); } finally { setIsExporting(false); setShowMenu(false); } }} className="flex items-center gap-3 px-3 py-2 hover:bg-claude-hover text-left w-full text-[13px]"><Download size={16} />{isExporting ? '导出中…' : '导出会话'}</button>
               <button onClick={(e) => { e.stopPropagation(); handleDelete(); }} className="flex items-center gap-3 px-3 py-2 hover:bg-claude-hover text-left w-full transition-colors group">
@@ -127,15 +149,18 @@ export default function ChatHeader({
           )}
         </div>
       )}
-      <div className="flex items-center gap-1">
+      </div>
+      {showCodingView && <div className="flex min-w-0 shrink-0 max-w-[45%] gap-4 overflow-x-auto text-sm" role="tablist" aria-label={t('chat.sessionView')}>
+        {(['chat', 'trajectory'] as const).map(tab => <button type="button" key={tab} role="tab" aria-selected={view === tab} onClick={() => setView(tab)} className={`shrink-0 py-2 ${view === tab ? 'border-b-2 border-blue-500 text-blue-500' : 'text-claude-textSecondary'}`}>{tab === 'chat' ? 'Chat' : 'Trajectory'}</button>)}
+      </div>}
+      {copyResult && copyResult.id === id && <div role={copyResult.success ? 'status' : 'alert'} className="absolute right-4 top-full rounded-md border border-claude-border bg-claude-input px-3 py-2 text-xs">{t(copyResult.success ? 'chat.sessionIdCopied' : 'chat.sessionIdCopyFailed')}</div>}
+      <div className="flex shrink-0 items-center gap-1">
         {hasArtifacts && (
           <button onClick={onOpenArtifacts} className={`w-8 h-8 flex items-center justify-center text-claude-textSecondary hover:bg-claude-btn-hover rounded-md transition-colors ${showArtifacts ? 'bg-claude-btn-hover text-claude-text' : ''}`} title="View Artifacts">
             <FileText size={18} strokeWidth={1.5} />
           </button>
         )}
-        <button type="button" aria-label="Terminal" title="Terminal" onClick={() => window.dispatchEvent(new CustomEvent('chat-header-action', { detail: 'terminal' }))} className="flex h-8 w-8 items-center justify-center rounded-md text-claude-textSecondary hover:bg-claude-hover"><Terminal size={18} /></button>
-        <button type="button" aria-label="H5" title="H5" onClick={() => window.dispatchEvent(new CustomEvent('chat-header-action', { detail: 'h5' }))} className="flex h-8 w-8 items-center justify-center rounded-md text-claude-textSecondary hover:bg-claude-hover"><Smartphone size={18} /></button>
-        <button ref={moreRef} type="button" aria-label="更多操作" title="更多操作" onClick={() => setShowMenu(!showMenu)} className="flex h-8 w-8 items-center justify-center rounded-md text-claude-textSecondary hover:bg-claude-hover"><MoreVertical size={18} /></button>
+        <button type="button" aria-label="Terminal" title="Terminal" onClick={() => window.dispatchEvent(new CustomEvent('request-open-panel', { detail: { panel: 'terminal' } }))} className="flex h-8 w-8 items-center justify-center rounded-md text-claude-textSecondary hover:bg-claude-hover"><Terminal size={18} /></button>
       </div>
     </div>
   );

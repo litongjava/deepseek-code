@@ -70,38 +70,55 @@ async fn conversations_create(State(state): State<AppState>, Json(body): Json<Cr
     })))
 }
 
+fn enriched_messages(
+    conn: &rusqlite::Connection,
+    id: &str,
+) -> anyhow::Result<Vec<serde_json::Value>> {
+    let messages = crate::db::message_repo::get_messages_by_conversation(conn, id)?;
+    messages
+        .iter()
+        .map(|msg| {
+            let mut value = serde_json::to_value(msg)?;
+            value["content"] = crate::db::message_repo::user_content_for_display(conn, msg)?;
+            value["requestSnapshots"] =
+                crate::db::message_repo::get_request_snapshots(conn, &msg.id)
+                    .unwrap_or_else(|_| serde_json::json!([]));
+            if let Some(turn) = deepseek_code_core::db::turn_repo::get_message_turn(conn, &msg.id)?
+            {
+                value["turn"] = serde_json::to_value(turn)?;
+            }
+            let tool_calls = crate::db::message_repo::get_tool_calls_for_message(conn, &msg.id)?;
+            if !tool_calls.is_empty() {
+                value["tool_calls"] = serde_json::json!(tool_calls
+                    .iter()
+                    .map(|tc| {
+                        let input = tc
+                            .input
+                            .as_ref()
+                            .and_then(|s| serde_json::from_str::<serde_json::Value>(s).ok())
+                            .unwrap_or(serde_json::json!({}));
+                        serde_json::json!({
+                            "id": tc.id.strip_prefix(&format!("{}:", msg.id)).unwrap_or(&tc.id),
+                            "name": tc.name,
+                            "input": input,
+                            "result": tc.output,
+                            "status": if tc.is_error { "error" } else { "done" },
+                        })
+                    })
+                    .collect::<Vec<_>>());
+            }
+            Ok(value)
+        })
+        .collect()
+}
+
 async fn conversation_get(Path(id): Path<String>, State(state): State<AppState>) -> Json<serde_json::Value> {
     let db = state.db_manager.clone();
     let id_clone = id.clone();
     let result = tokio::task::spawn_blocking(move || {
         db.with_conn(|conn| {
             let conv = crate::db::conversation_repo::get_conversation(conn, &id_clone).ok().flatten();
-            let messages = crate::db::message_repo::get_messages_by_conversation(conn, &id_clone).unwrap_or_default();
-
-            // Enrich each message with its tool_calls from the separate table
-            let enriched_messages: Vec<serde_json::Value> = messages.iter().map(|msg| {
-                let tool_calls = crate::db::message_repo::get_tool_calls_for_message(conn, &msg.id)
-                    .unwrap_or_default();
-                let mut msg_json = serde_json::to_value(msg).unwrap_or(serde_json::json!({}));
-                msg_json["requestSnapshots"] = crate::db::message_repo::get_request_snapshots(conn, &msg.id).unwrap_or_else(|_| serde_json::json!([]));
-                if !tool_calls.is_empty() {
-                    // Format as the frontend expects: array of { name, input (parsed), result, status }
-                    let formatted_tool_calls: Vec<serde_json::Value> = tool_calls.iter().map(|tc| {
-                        let input_parsed: serde_json::Value = tc.input.as_ref()
-                            .and_then(|s| serde_json::from_str(s).ok())
-                            .unwrap_or(serde_json::json!({}));
-                        serde_json::json!({
-                            "id": tc.id.strip_prefix(&format!("{}:", msg.id)).unwrap_or(&tc.id),
-                            "name": tc.name,
-                            "input": input_parsed,
-                            "result": tc.output,
-                            "status": if tc.is_error { "error" } else { "done" },
-                        })
-                    }).collect();
-                    msg_json["tool_calls"] = serde_json::json!(formatted_tool_calls);
-                }
-                msg_json
-            }).collect();
+            let enriched_messages = enriched_messages(conn, &id_clone)?;
 
             Ok::<_, anyhow::Error>((conv, enriched_messages))
         })
@@ -178,21 +195,39 @@ async fn conversation_update(Path(id): Path<String>, State(state): State<AppStat
             }
             if let Some(messages) = body.get("messages").and_then(|v| v.as_array()) {
                 let tx = conn;
-                crate::db::message_repo::delete_messages_from(&tx, &id_clone, 0)?;
+                let existing = crate::db::message_repo::get_messages_by_conversation(tx, &id_clone)?;
+                let mut retained = std::collections::HashSet::new();
                 for (idx, msg) in messages.iter().enumerate() {
-                    // Safe: unwrap_or generates a fresh UUID when msg has no id field
-                    let msg_id = msg.get("id").and_then(|v| v.as_str()).unwrap_or(&uuid::Uuid::new_v4().to_string()).to_string();
-                    // Safe: unwrap_or defaults to "user" when role field is missing
+                    let msg_id = msg.get("id").and_then(|v| v.as_str()).map(str::to_owned)
+                        .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
+                    anyhow::ensure!(retained.insert(msg_id.clone()), "Duplicate message ID");
                     let role = msg.get("role").and_then(|v| v.as_str()).unwrap_or("user");
-                    let content = match msg.get("content") {
-                        Some(v) if v.is_string() => v.as_str().unwrap_or("").to_string(),
-                        Some(v) => serde_json::to_string(v).unwrap_or_default(),
-                        None => String::new(),
-                    };
+                    let previous = crate::db::message_repo::get_message(tx, &msg_id)?;
+                    if let Some(previous) = &previous {
+                        anyhow::ensure!(previous.conversation_id == id_clone && previous.role == role,
+                            "Message ID belongs to a different conversation or role");
+                    }
                     let now = chrono::Utc::now().to_rfc3339();
-                    crate::db::message_repo::insert_message(&tx, &msg_id, &id_clone, role, &content, None, &now, false, idx as i64)?;
+                    let content = msg.get("content").cloned().unwrap_or(serde_json::json!(""));
+                    if role == "user" {
+                        crate::db::message_repo::save_user_message(tx, &msg_id, &id_clone, &content, &now, idx as i64)?;
+                    } else {
+                        let content = content.as_str().map(str::to_owned).unwrap_or_else(|| content.to_string());
+                        if previous.is_some() {
+                            tx.execute("UPDATE messages SET content = ?1, sort_order = ?2 WHERE id = ?3",
+                                rusqlite::params![content, idx as i64, msg_id])?;
+                        } else {
+                            crate::db::message_repo::insert_message(tx, &msg_id, &id_clone, role, &content, None, &now, false, idx as i64)?;
+                        }
+                    }
                 }
-                crate::db::conversation_repo::increment_message_count(&tx, &id_clone)?;
+                for message in existing {
+                    if !retained.contains(&message.id) {
+                        crate::db::message_repo::delete_message(tx, &message.id)?;
+                    }
+                }
+                tx.execute("UPDATE conversations SET message_count = ?1, updated_at = ?2 WHERE id = ?3",
+                    rusqlite::params![messages.len() as i64, chrono::Utc::now().to_rfc3339(), id_clone])?;
             }
             transaction.commit()?;
             Ok::<(), anyhow::Error>(())
@@ -244,7 +279,7 @@ async fn conversation_delete(Path(id): Path<String>, State(state): State<AppStat
 async fn conversation_messages(Path(id): Path<String>, State(state): State<AppState>) -> Json<serde_json::Value> {
     let db = state.db_manager.clone();
     let result = tokio::task::spawn_blocking(move || {
-        db.with_conn(|conn| crate::db::message_repo::get_messages_by_conversation(conn, &id))
+        db.with_conn(|conn| enriched_messages(conn, &id))
     }).await;
     match result {
         Ok(Ok(Ok(messages))) => Json(serde_json::json!({ "messages": messages })),
@@ -263,7 +298,7 @@ async fn conversation_message_delete(
             if let Some(m) = msg {
                 crate::db::message_repo::delete_messages_from(conn, &id, m.sort_order)?;
             }
-            crate::db::message_repo::get_messages_by_conversation(conn, &id)
+            enriched_messages(conn, &id)
         })
     }).await;
     match result {
@@ -282,7 +317,7 @@ async fn conversation_messages_tail_delete(
     let result = tokio::task::spawn_blocking(move || {
         db.with_conn(|conn| {
             crate::db::message_repo::delete_messages_tail(conn, &id, count)?;
-            crate::db::message_repo::get_messages_by_conversation(conn, &id)
+            enriched_messages(conn, &id)
         })
     }).await;
     match result {

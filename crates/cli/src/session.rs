@@ -819,13 +819,34 @@ impl Session {
         initial_hook: bool,
         publish: bool,
     ) -> Result<()> {
+        let mut turn = deepseek_code_core::db::turn_repo::TurnTimer::start(self.store.db.clone(), &self.id)?;
+        let result = self.run_timed_turn(cli, prompt, input, hook_wake, initial_hook, publish, &mut turn).await;
+        if !turn.is_finished() {
+            let status = match &result {
+                Err(error) if is_turn_cancel_error(error) => deepseek_code_core::db::turn_repo::TurnStatus::Cancelled,
+                _ => deepseek_code_core::db::turn_repo::TurnStatus::Failed,
+            };
+            let record = turn.finish(status)?;
+            if cli.output_format == OutputFormat::StreamJson {
+                emit_json(&json!({"type":"turn_timing","turn":record,"assistant_id":turn.message_id()}))?;
+            }
+        }
+        result
+    }
+
+    async fn run_timed_turn(
+        &self,
+        cli: &Cli,
+        prompt: &str,
+        input: &mut Option<TerminalInput>,
+        hook_wake: bool,
+        initial_hook: bool,
+        publish: bool,
+        turn: &mut deepseek_code_core::db::turn_repo::TurnTimer,
+    ) -> Result<()> {
         deepseek_code_core::services::lifecycle_events::check_configuration(
-            &self.hook_service_context(),
-            &self.workspace,
-            &self.id,
-        )
-        .await?;
-        let started = std::time::Instant::now();
+            &self.hook_service_context(), &self.workspace, &self.id,
+        ).await?;
         let turn_goal = deepseek_code_core::services::session_goals::active(&self.store.db, &self.id)?;
         if let Err(error) = crate::ide_commands::restore(self).await {
             eprintln!("IDE connection unavailable: {error:#}");
@@ -892,6 +913,10 @@ impl Session {
                 }
             }
         };
+        let mut assistant_id = turn.ensure_segment()?;
+        if cli.output_format == OutputFormat::StreamJson {
+            emit_json(&json!({"type":"turn_timing","turn":turn.record(),"assistant_id":assistant_id}))?;
+        }
         let interactive_display = input.is_some()
             && cli.output_format == OutputFormat::Text
             && !cli.print
@@ -993,6 +1018,7 @@ impl Session {
         // Notes added to approvals reach the model after the result and are
         // saved apart from it, as the user's words.
         let mut approval_notes = std::collections::HashMap::<String, Vec<String>>::new();
+        let mut queued_inputs_by_tool = std::collections::HashMap::<String, Vec<deepseek_code_core::services::input_queue::DeliveredInput>>::new();
         // Messages typed during this turn that the model has not read yet.
         let mut pending_inputs = Vec::<String>::new();
         // The mode chosen with a plan, applied once the engine has approved it.
@@ -1107,7 +1133,9 @@ impl Session {
                     },
                     EngineEvent::MessageStart { .. } => progress.set_activity("Composing"),
                     EngineEvent::ContextReset { session_id, boundary_id } if session_id == self.id => {
-                        deepseek_code_core::services::plan_approval::archive_segment(&self.store.db, &self.id, &boundary_id, None, &text, &thinking_text, &tools, &snapshots)?;
+                        deepseek_code_core::services::plan_approval::archive_segment(&self.store.db, &self.id, &boundary_id, Some(&assistant_id), &text, &thinking_text, &tools, &snapshots)?;
+                        save_queued_turn_inputs(&self.store.db, &assistant_id, &tools, &queued_inputs_by_tool)?;
+                        assistant_id = turn.new_segment()?;
                         text.clear(); thinking_text.clear(); tools.clear(); snapshots.clear();
                         observed_plan_boundary = Some(boundary_id);
                         progress.notice("Planning context cleared. The approved plan starts a fresh context in this session; prior messages remain archived.");
@@ -1315,11 +1343,22 @@ impl Session {
                         self.engine.resume_with_answer(&request_id, answer).await?;
                         progress.set_activity("Composing");
                     },
-                    EngineEvent::QueuedInput(text) => {
-                        // Saved after the latest result, where the model read it.
+                    EngineEvent::QueuedInput(delivered) => {
+                        // Kept separate from approval notes and their authorization semantics.
                         if let Some(tool) = tools.last() {
-                            approval_notes.entry(tool.id.clone()).or_default().push(text.clone());
+                            let inputs = queued_inputs_by_tool.entry(tool.id.clone()).or_default();
+                            inputs.push(delivered.clone());
+                            self.store.db.with_conn(|conn| -> Result<()> {
+                                let tx = deepseek_code_core::db::write_transaction(conn)?;
+                                let call_id = format!("{assistant_id}:{}", tool.id);
+                                message_repo::update_message_content(&tx, &assistant_id, &text)?;
+                                message_repo::insert_tool_call(&tx, &call_id, &assistant_id, &tool.name, tool.input.as_deref(), tool.output.as_deref(), tool.is_error, tool.sort_order)?;
+                                deepseek_code_core::services::input_queue::save_delivered(&tx, &call_id, inputs)?;
+                                tx.commit()?;
+                                Ok(())
+                            })??;
                         }
+                        let text = delivered.text;
                         if let Some(index) = pending_inputs.iter().position(|pending| *pending == text) { pending_inputs.remove(index); }
                         progress.queued_delivered(&text);
                     },
@@ -1386,7 +1425,9 @@ impl Session {
             deepseek_code_core::services::plan_approval::latest_boundary(&self.store.db, &self.id)?;
         if latest_boundary != observed_plan_boundary {
             if let Some(boundary) = latest_boundary {
-                deepseek_code_core::services::plan_approval::archive_segment(&self.store.db, &self.id, &boundary, None, &text, &thinking_text, &tools, &snapshots)?;
+                deepseek_code_core::services::plan_approval::archive_segment(&self.store.db, &self.id, &boundary, Some(&assistant_id), &text, &thinking_text, &tools, &snapshots)?;
+                save_queued_turn_inputs(&self.store.db, &assistant_id, &tools, &queued_inputs_by_tool)?;
+                assistant_id = turn.new_segment()?;
                 text.clear(); thinking_text.clear(); tools.clear(); snapshots.clear();
             }
         }
@@ -1407,15 +1448,17 @@ impl Session {
                 progress.notice(&format!("Could not save code checkpoint: {error:#}"));
             }
         }
+        let transport_cancelled = turn_result.as_ref().err().is_some_and(is_turn_cancel_error);
         if let Err(failure) = turn_result {
             error = Some(failure.to_string());
         }
         if !completed && error.is_none() {
             error = Some("Incomplete response".into());
         }
-        if !text.is_empty() || !thinking_text.is_empty() || !tools.is_empty() || !snapshots.is_empty() {
-            let message_id = self.store.append(&self.id, "assistant", &text)?;
+        {
+            let message_id = assistant_id;
             self.store.db.with_conn(|conn| -> Result<()> {
+                message_repo::update_message_content(conn, &message_id, &text)?;
                 if !thinking_text.is_empty() { conn.execute("UPDATE messages SET thinking = ?1 WHERE id = ?2", [&thinking_text, &message_id])?; }
                 for tool in &tools {
                     let call_id = format!("{message_id}:{}", tool.id);
@@ -1430,6 +1473,9 @@ impl Session {
                         tool.sort_order,
                     )?;
                     if let Some(duration) = tool_durations.get(&tool.id) { message_repo::set_tool_duration(conn, &call_id, *duration)?; }
+                    if let Some(inputs) = queued_inputs_by_tool.get(&tool.id) {
+                        deepseek_code_core::services::input_queue::save_delivered(conn, &call_id, inputs)?;
+                    }
                     if let Some(notes) = approval_notes.get(&tool.id) {
                         message_repo::set_tool_call_note(conn, &call_id, &notes.join("\n\n"))?;
                     }
@@ -1450,6 +1496,15 @@ impl Session {
                 unreported,
             )?;
         }
+        let terminal_status = if transport_cancelled || error.as_deref().is_some_and(is_turn_cancellation) {
+            deepseek_code_core::db::turn_repo::TurnStatus::Cancelled
+        } else {
+            deepseek_code_core::db::turn_repo::terminal_status(stop.as_deref(), error.is_some() || !completed)
+        };
+        let turn_record = turn.finish(terminal_status)?;
+        if cli.output_format == OutputFormat::StreamJson {
+            emit_json(&json!({"type":"turn_timing","turn":turn_record,"assistant_id":turn.message_id()}))?;
+        }
         if publish || error.is_some() {
             match cli.output_format {
                 OutputFormat::Text => {
@@ -1461,10 +1516,10 @@ impl Session {
                 _ => {
                     let cost = deepseek_code_core::services::usage::session_cost(&self.store.db, &self.id, &self.paths.read_config()?)
                         .map(|cost| cost["known_subtotal_usd"].as_f64().unwrap_or(0.0)).unwrap_or(0.0);
-                    let elapsed = started.elapsed().as_millis() as u64;
+                    let elapsed = turn_record.elapsed_ms.unwrap_or(0);
                     emit_json(
                         &json!({"type":"result","subtype":crate::sdk_messages::result_subtype(error.as_deref()),"session_id":self.id,"result":text,"is_error":error.is_some(),"error":error,"usage":usage,
-                            "duration_ms":elapsed,"duration_api_ms":elapsed,"num_turns":sdk_messages.as_ref().map_or(model_rounds, |t| t.turns),"total_cost_usd":cost,
+                            "duration_ms":elapsed,"duration_api_ms":elapsed,"turn":turn_record,"num_turns":sdk_messages.as_ref().map_or(model_rounds, |t| t.turns),"total_cost_usd":cost,
                             "stop_reason":stop,"permission_denials":sdk_messages.as_ref().map_or_else(|| denials.clone(), |t| t.denials.clone()),"uuid":uuid::Uuid::new_v4().to_string(),
                             "structured_output":if error.is_none() && structured_output {serde_json::from_str::<Value>(&text).ok()} else {None}}),
                     )?
@@ -1524,6 +1579,39 @@ impl Session {
         }
         Ok(())
     }
+}
+
+fn save_queued_turn_inputs(
+    db: &deepseek_code_core::db::DbManager,
+    assistant_id: &str,
+    tools: &[message_repo::ToolCallRow],
+    inputs: &std::collections::HashMap<String, Vec<deepseek_code_core::services::input_queue::DeliveredInput>>,
+) -> Result<()> {
+    db.with_conn(|conn| -> Result<()> {
+        for tool in tools {
+            if let Some(inputs) = inputs.get(&tool.id) {
+                deepseek_code_core::services::input_queue::save_delivered(conn, &format!("{assistant_id}:{}", tool.id), inputs)?;
+            }
+        }
+        Ok(())
+    })?
+}
+
+fn is_turn_cancel_error(error: &anyhow::Error) -> bool {
+    is_turn_cancellation(&error.to_string()) || error.downcast_ref::<io::Error>().is_some_and(|error| {
+        matches!(error.kind(), io::ErrorKind::BrokenPipe | io::ErrorKind::ConnectionAborted | io::ErrorKind::ConnectionReset)
+    })
+}
+
+fn is_turn_cancellation(error: &str) -> bool {
+    error.starts_with("Interrupted")
+        || error.starts_with("Background task cancelled")
+        || error.starts_with("Tool permission interrupted")
+        || error.starts_with("Turn stopped: cancelled")
+        || error.starts_with("Turn stopped: interrupted")
+        || error == "Live terminal input closed"
+        || error == "Terminal answer cancelled"
+        || error == "Input closed"
 }
 
 /// An AskUserQuestion question as terminal text: the header, then numbered
@@ -1668,7 +1756,7 @@ pub(crate) fn event_json_with(event: &EngineEvent, summaries: bool) -> Option<Va
     Some(match event {
         EngineEvent::ContextReset { session_id, boundary_id } => json!({"type":"context_reset","session_id":session_id,"boundary_id":boundary_id}),
         EngineEvent::Text(delta) => json!({"type":"text","delta":delta}),
-        EngineEvent::QueuedInput(text) => json!({"type":"queued_input","text":text}),
+        EngineEvent::QueuedInput(input) => json!({"type":"queued_input","text":input.text,"content":input.content,"origin":input.origin}),
         EngineEvent::Thinking(delta) => json!({"type":"thinking","delta":delta}),
         EngineEvent::Usage(usage) => json!({"type":"usage","usage":usage}),
         EngineEvent::MessageStart { model } => json!({"type":"message_start","model":model}),

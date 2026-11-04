@@ -51,11 +51,11 @@ describe('ordered process events', () => {
     useGeneralSettingsStore.getState().update({ workDetailsByMode: { chat: 'compact', work: 'standard', study: 'standard', code: 'detailed' } });
     const message = sample();
     render(<WorkDetails message={message} index={0} live={false} />);
-    expect(screen.getByRole('button', { name: /Worked for/ })).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: /Work details/ })).toBeInTheDocument();
     expect(screen.queryByText('Think')).not.toBeInTheDocument();
     for (const mode of ['work', 'study'] as const) {
       act(() => useWorkspaceModeStore.getState().setMode(mode));
-      expect(screen.queryByRole('button', { name: /Worked for/ })).not.toBeInTheDocument();
+      expect(screen.queryByRole('button', { name: /Work details/ })).not.toBeInTheDocument();
       expect(screen.getByRole('button', { name: /列出文件/ })).toBeInTheDocument();
       expect(screen.queryByText('Think')).not.toBeInTheDocument();
     }

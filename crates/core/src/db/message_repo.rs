@@ -70,6 +70,87 @@ pub fn insert_message(
     Ok(())
 }
 
+/// Save display text and durable multimodal content inside the caller's transaction.
+pub fn save_user_message(
+    conn: &Connection,
+    id: &str,
+    conversation_id: &str,
+    content: &serde_json::Value,
+    created_at: &str,
+    sort_order: i64,
+) -> Result<()> {
+    // Keep ordinary text (including historical empty messages) compatible.
+    let normalized = if content.is_string() {
+        content.clone()
+    } else {
+        crate::runtime::normalize_user_content(content)?
+    };
+    let display = match normalized.as_str() {
+        Some(text) => text.to_owned(),
+        None => normalized
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|block| {
+                if block["type"] == "text" {
+                    block["text"].as_str().unwrap_or("")
+                } else {
+                    "[Image]"
+                }
+            })
+            .collect::<Vec<_>>()
+            .join("\n"),
+    };
+    let changed = conn.execute(
+        "INSERT INTO messages (id, conversation_id, role, content, created_at, sort_order) VALUES (?1, ?2, 'user', ?3, ?4, ?5) ON CONFLICT(id) DO UPDATE SET content = excluded.content, sort_order = excluded.sort_order WHERE messages.conversation_id = excluded.conversation_id AND messages.role = 'user'",
+        params![id, conversation_id, display, created_at, sort_order],
+    )?;
+    anyhow::ensure!(
+        changed == 1,
+        "Message ID belongs to a different conversation or role"
+    );
+    if normalized.is_array() {
+        conn.execute(
+            "INSERT INTO message_user_content (message_id, content_json) VALUES (?1, ?2) ON CONFLICT(message_id) DO UPDATE SET content_json = excluded.content_json",
+            params![id, serde_json::to_string(&normalized)?],
+        )?;
+    } else {
+        conn.execute(
+            "DELETE FROM message_user_content WHERE message_id = ?1",
+            params![id],
+        )?;
+    }
+    Ok(())
+}
+
+/// UI history must remain readable even if an old sidecar is corrupted.
+pub fn user_content_for_display(
+    conn: &Connection,
+    message: &MessageRow,
+) -> Result<serde_json::Value> {
+    use rusqlite::OptionalExtension;
+    if message.role != "user" {
+        return Ok(serde_json::json!(message.content));
+    }
+    let raw: Option<String> = conn
+        .query_row(
+            "SELECT content_json FROM message_user_content WHERE message_id = ?1",
+            params![message.id],
+            |row| row.get(0),
+        )
+        .optional()?;
+    let Some(raw) = raw else {
+        return Ok(serde_json::json!(message.content));
+    };
+    let normalized = serde_json::from_str::<serde_json::Value>(&raw)
+        .ok()
+        .and_then(|content| crate::runtime::normalize_user_content(&content).ok());
+    Ok(normalized.unwrap_or_else(|| serde_json::json!([
+        {"type":"text", "text":message.content},
+        {"type":"image_unavailable", "reason":"Saved image content is unavailable or corrupted."}
+    ])))
+}
+
 pub fn get_messages_by_conversation(conn: &Connection, conversation_id: &str) -> Result<Vec<MessageRow>> {
     let mut stmt = conn.prepare_cached(
         "SELECT id, conversation_id, role, content, thinking, created_at, is_compact_boundary, sort_order FROM messages WHERE conversation_id = ?1 ORDER BY sort_order ASC"
@@ -183,7 +264,7 @@ pub fn insert_tool_call(
     sort_order: i64,
 ) -> Result<()> {
     let mut stmt = conn.prepare_cached(
-        "INSERT OR REPLACE INTO tool_calls (id, message_id, name, input, output, is_error, sort_order) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)"
+        "INSERT INTO tool_calls (id, message_id, name, input, output, is_error, sort_order) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7) ON CONFLICT(id) DO UPDATE SET message_id=excluded.message_id, name=excluded.name, input=excluded.input, output=excluded.output, is_error=excluded.is_error, sort_order=excluded.sort_order"
     )?;
     stmt.execute(params![
         id,

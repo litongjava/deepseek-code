@@ -147,6 +147,8 @@
     "no": "No"
   },
   "sidebar": {
+    "noProject": "No project",
+    "noProjects": "No projects yet",
     "workspaceMode": "Workspace mode",
     "homeMode": "Home",
     "chatMode": "Chat",
@@ -506,6 +508,11 @@
     "usageTitle": "Usage"
   },
   "chat": {
+    "sessionMenu": "Session options",
+    "sessionView": "Session view",
+    "copySessionId": "Copy session ID",
+    "sessionIdCopied": "Session ID copied",
+    "sessionIdCopyFailed": "Could not copy session ID. Try again.",
     "selectCodeProject": "Select a project before sending messages in Code mode",
     "inputPlaceholder": "How can I help you today?",
     "send": "Send",

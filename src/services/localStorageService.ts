@@ -27,7 +27,8 @@ export interface LocalMessage {
   id: string;
   conversation_id: string;
   role: string;
-  content: string;
+  content: string | Record<string, any>[];
+  turn?: import('../features/message-list/turnTiming').TurnRecord;
   thinking?: string | null;
   created_at: string;
   is_compact_boundary?: number;
