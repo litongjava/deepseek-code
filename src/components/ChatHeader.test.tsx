@@ -13,7 +13,7 @@ vi.mock('../utils/tauriAPI', () => ({ tauriAPI: { isTauri: false } }));
 let navigate: ReturnType<typeof useNavigate>;
 function Header() {
   navigate = useNavigate();
-  return <ChatHeader title="Title" showArtifacts={false} documentPanelDoc={null} onOpenArtifacts={vi.fn()} hasArtifacts={false} />;
+  return <ChatHeader title="Title" showArtifacts={false} documentPanelDoc={null} onOpenArtifacts={vi.fn()} hasArtifacts />;
 }
 const setup = () => render(<MemoryRouter initialEntries={['/chat/full-session-one']}><Routes><Route path="/chat/:id" element={<Header />} /></Routes></MemoryRouter>);
 const copy = () => {
@@ -46,7 +46,7 @@ describe('session header', () => {
     expect(await screen.findByRole('alert')).toHaveTextContent('Could not copy session ID');
     expect(screen.queryByRole('status')).not.toBeInTheDocument();
   });
-  it('keeps title and view tabs on one row, preserves actions and routes Terminal to the shared panel', async () => {
+  it('keeps title and view tabs on one row and preserves the remaining actions', async () => {
     const { container } = setup();
     const header = container.querySelector('[data-session-header]')!;
     expect(header).toContainElement(screen.getByRole('tablist'));
@@ -60,9 +60,13 @@ describe('session header', () => {
     expect(screen.queryByRole('button', { name: '更多操作' })).not.toBeInTheDocument();
     const listener = vi.fn();
     window.addEventListener('request-open-panel', listener);
-    fireEvent.click(screen.getByRole('button', { name: 'Terminal' }));
-    expect(listener.mock.calls[0][0].detail).toEqual({ panel: 'terminal' });
+    for (const label of ['Terminal', 'Files', 'Browser']) {
+      fireEvent.click(screen.getByRole('button', { name: label }));
+      expect(listener.mock.calls[listener.mock.calls.length - 1][0].detail).toEqual({ panel: label.toLowerCase() });
+    }
     window.removeEventListener('request-open-panel', listener);
+    const actions = screen.getByTitle('View Artifacts').parentElement!;
+    expect([...actions.querySelectorAll('button')].map(button => button.title)).toEqual(['Terminal', 'Files', 'Browser', 'View Artifacts']);
     fireEvent.click(screen.getByRole('button', { name: 'Session options' }));
     expect(screen.getByRole('button', { name: 'Rename' })).toBeInTheDocument();
     expect(screen.getByRole('button', { name: 'Delete' })).toBeInTheDocument();

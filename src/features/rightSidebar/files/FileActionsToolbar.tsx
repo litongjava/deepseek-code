@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react';
-import { ChevronDown, Copy, FileSearch, Folders, FolderOpen, GitCompareArrows } from 'lucide-react';
+import { ChevronDown, Copy, FileSearch, Folders, FolderOpen } from 'lucide-react';
 import { copyToClipboard } from '../../../utils/clipboard';
 import { getWorkspaceFileCapabilities, openWorkspaceFile, saveWorkspaceFileAs, type WorkspaceFileCapabilities, type WorkspaceFileAction } from '../../../api/workspaceFiles';
 import { type SidebarFileTab, useRightSidebarStore } from '../../../stores/useRightSidebarStore';
@@ -43,7 +43,13 @@ export default function FileActionsToolbar({ file, diff, onDiff, onSearch }: {
     {file && <div className="flex min-w-0 items-center gap-1 px-3 pt-2"><span className="min-w-0 flex-1 truncate font-mono text-xs text-claude-textSecondary" title={file.path}>{file.relativePath}</span><button type="button" title="Copy path" aria-label="Copy path" className={button} onClick={async () => { const copied = await copyToClipboard(file.path); setFeedback({ error: !copied, text: copied ? 'Path copied.' : 'Could not copy path.' }); }}><Copy size={13} /></button></div>}
     <div className="relative flex items-center gap-1 px-2 py-1" aria-label="File actions">
       <button type="button" className={button} title="Search In Files" aria-label="Search In Files" onClick={onSearch}><FileSearch size={16} /></button>
-      <button type="button" className={button} title="View file diff" aria-label="View file diff" disabled={!file} aria-pressed={diff} onClick={onDiff}><GitCompareArrows size={16} className={diff ? 'text-green-600' : 'text-red-500'} /></button>
+      <button type="button" className={`${button} ${diff ? 'bg-claude-hover' : ''}`} title="View file diff" aria-label="View file diff" disabled={!file} aria-pressed={diff} onClick={onDiff}>
+        <svg width="16" height="16" viewBox="0 0 16 16" aria-hidden="true">
+          <rect x="1" y="1" width="14" height="6" rx="1" className="fill-red-500" />
+          <rect x="1" y="9" width="14" height="6" rx="1" className="fill-green-600" />
+          <path d="M5 4h6M5 12h6M8 10v4" stroke="white" strokeWidth="1.25" />
+        </svg>
+      </button>
       <button type="button" className={button} title={visible ? 'Hide file tree' : 'Show file tree'} aria-label={visible ? 'Hide file tree' : 'Show file tree'} aria-pressed={visible} onClick={toggleTree}><Folders size={16} /></button>
       <div className="ml-auto flex shrink-0 items-center rounded-md bg-claude-hover">
         <button type="button" disabled={busy || !caps?.reveal} title={caps?.reveal ? 'Reveal file in system file manager' : disabledReason} onClick={() => void act('reveal')} className={`${button} flex items-center gap-1 text-xs`}><FolderOpen size={15} />Open</button>

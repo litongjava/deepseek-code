@@ -374,7 +374,7 @@ const MessageList = React.memo<MessageListProps>(({
                   <ClaudeLogo autoAnimate style={{ width: '40px', height: '40px', display: 'inline-block' }} />
                 </span>
               )}
-              {!isCurrentlyStreaming && (msg.content || msg.thinking || msg.toolCalls?.length) && (
+              {!isCurrentlyStreaming && Boolean(msg.content || msg.thinking || msg.toolCalls?.length) && (
                 <ResponseFooter key={`${conversationId || 'unsaved'}:${msg.id || idx}`} message={msg} index={idx} conversationId={conversationId} disabled={loading} onBranch={onBranch} />
               )}
               {!loading && idx === messages.length - 1 && msg.content && compactStatus.state === 'compacting' && (

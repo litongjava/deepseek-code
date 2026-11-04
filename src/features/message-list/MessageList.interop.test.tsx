@@ -35,6 +35,12 @@ describe('message images', () => {
 });
 
 describe('durable turn timing', () => {
+  it('does not render a zero for an empty cancelled turn', () => {
+    list([{ role: 'assistant', content: '', thinking: '', toolCalls: [], turn: { ...turn, status: 'cancelled' } }]);
+    expect(screen.getByText('Worked for 2m 08s · Cancelled')).toBeVisible();
+    expect(screen.queryByText('0', { exact: true })).not.toBeInTheDocument();
+    expect(screen.queryByText('Response actions')).not.toBeInTheDocument();
+  });
   it.each([[0, '0s'], [59999, '59s'], [60000, '1m 00s'], [128999, '2m 08s'], [3903000, '65m 03s']])('formats %i milliseconds', (elapsedMs, label) => {
     expect(turnLabel({ ...turn, elapsedMs })).toBe(`Worked for ${label}`);
   });

@@ -4,6 +4,8 @@ import { Terminal as XTerm } from 'xterm';
 import { FitAddon } from 'xterm-addon-fit';
 import { createTerminal, writeTerminal, resizeTerminal, closeTerminal, streamTerminalOutput } from '../api/terminal';
 import type { TerminalSession } from '../api/terminal';
+import { isTauri } from '@tauri-apps/api/core';
+import { confirm } from '@tauri-apps/plugin-dialog';
 import 'xterm/css/xterm.css';
 
 export interface TerminalPanelHandle {
@@ -143,11 +145,15 @@ const TerminalPanel = forwardRef<TerminalPanelHandle, TerminalPanelProps>(({ onC
   const closeTabs = useCallback(async (ids: string[]): Promise<boolean> => {
     if (creatingRef.current || closingRef.current) return false;
     const targets = tabsRef.current.filter(tab => ids.includes(tab.id));
-    if (targets.some(tab => !tab.exited) && !window.confirm('关闭终端会结束其中正在运行的 shell 和任务。确定关闭？')) return false;
     closingRef.current = true;
     setClosing(true);
     setError(null);
     try {
+      if (targets.some(tab => !tab.exited)) {
+        const message = '关闭终端会结束其中正在运行的 shell 和任务。确定关闭？';
+        const approved = await (isTauri() ? confirm(message, { title: 'Close terminal', kind: 'warning' }) : window.confirm(message));
+        if (!approved) return false;
+      }
       for (const tab of targets) {
         await closeTerminal(tab.id);
         const remaining = tabsRef.current.filter(item => item.id !== tab.id);

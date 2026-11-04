@@ -290,18 +290,17 @@ pub async fn workspace_file_action(
             "wsl-terminal" => {
                 #[cfg(windows)]
                 {
-                    use std::os::windows::process::CommandExt;
                     let distribution = distribution.context("Select a WSL distribution")?;
                     ensure!(
                         distributions().await?.contains(&distribution),
                         "WSL distribution is unavailable"
                     );
                     let target = wsl_path(cwd, &distribution).await?;
-                    std::process::Command::new(wsl_program().context("WSL is unavailable")?)
-                        .args(["--distribution", &distribution, "--cd", &target])
-                        .current_dir(cwd)
-                        .creation_flags(0x00000010)
-                        .spawn()?;
+                    crate::worktree::changes::open_console(
+                        &display_path(cwd),
+                        &wsl_program().context("WSL is unavailable")?,
+                        &["--distribution", &distribution, "--cd", &target],
+                    )?;
                 }
                 #[cfg(not(windows))]
                 {

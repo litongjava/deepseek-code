@@ -3,6 +3,11 @@ import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-libra
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import TerminalPanel, { TerminalPanelHandle } from './TerminalPanel';
 import * as api from '../api/terminal';
+import { isTauri } from '@tauri-apps/api/core';
+import { confirm } from '@tauri-apps/plugin-dialog';
+
+vi.mock('@tauri-apps/api/core', () => ({ isTauri: vi.fn() }));
+vi.mock('@tauri-apps/plugin-dialog', () => ({ confirm: vi.fn() }));
 
 const terminalMocks = vi.hoisted(() => ({ dispose: vi.fn(), open: vi.fn(), fit: vi.fn(), streamStop: vi.fn() }));
 vi.mock('xterm', () => ({ Terminal: class {
@@ -25,6 +30,7 @@ vi.mock('../api/terminal', () => ({
 
 beforeEach(() => {
   vi.clearAllMocks();
+  vi.mocked(isTauri).mockReturnValue(false);
   vi.stubGlobal('ResizeObserver', class { observe() {} disconnect() {} });
   vi.mocked(api.createTerminal).mockResolvedValue({ id: 't1', pid: 123, shell: 'fixture-shell', cwd: '/first' });
   vi.mocked(api.closeTerminal).mockResolvedValue(undefined);
@@ -76,6 +82,46 @@ describe('TerminalPanel lifecycle', () => {
     expect(result).toBe(true);
     expect(terminalMocks.streamStop).toHaveBeenCalledOnce();
     expect(onClose).not.toHaveBeenCalled();
+  });
+
+  it('awaits the native confirmation and retains the shell when cancelled', async () => {
+    const ref = createRef<TerminalPanelHandle>();
+    render(<TerminalPanel ref={ref} onClose={vi.fn()} />);
+    await ready();
+    let answer!: (value: boolean) => void;
+    vi.mocked(isTauri).mockReturnValue(true);
+    vi.mocked(confirm).mockReturnValue(new Promise<boolean>(resolve => { answer = resolve; }));
+    let pending!: Promise<boolean>;
+    act(() => { pending = ref.current!.requestClose(); });
+    expect(api.closeTerminal).not.toHaveBeenCalled();
+    await act(async () => { expect(await ref.current!.requestClose()).toBe(false); });
+    expect(confirm).toHaveBeenCalledOnce();
+    await act(async () => { answer(false); expect(await pending).toBe(false); });
+    expect(api.closeTerminal).not.toHaveBeenCalled();
+    expect(terminalMocks.streamStop).not.toHaveBeenCalled();
+  });
+
+  it('retains the shell on a native dialog error and allows a confirmed retry', async () => {
+    const ref = createRef<TerminalPanelHandle>();
+    render(<TerminalPanel ref={ref} onClose={vi.fn()} />);
+    await ready();
+    vi.mocked(isTauri).mockReturnValue(true);
+    vi.mocked(confirm).mockRejectedValueOnce(new Error('Dialog unavailable'));
+    await act(async () => { expect(await ref.current!.requestClose()).toBe(false); });
+    expect(screen.getByRole('alert')).toHaveTextContent('Dialog unavailable');
+    expect(api.closeTerminal).not.toHaveBeenCalled();
+    expect(terminalMocks.streamStop).not.toHaveBeenCalled();
+
+    vi.mocked(confirm).mockResolvedValueOnce(true);
+    let finish!: () => void;
+    vi.mocked(api.closeTerminal).mockReturnValueOnce(new Promise<void>(resolve => { finish = resolve; }));
+    let pending!: Promise<boolean>;
+    await act(async () => { pending = ref.current!.requestClose(); });
+    expect(api.closeTerminal).toHaveBeenCalledWith('t1');
+    expect(terminalMocks.streamStop).not.toHaveBeenCalled();
+    await act(async () => { finish(); expect(await pending).toBe(true); });
+    expect(terminalMocks.streamStop).toHaveBeenCalledOnce();
+    expect(screen.queryByRole('alert')).not.toBeInTheDocument();
   });
 
   it('panel close confirms and calls onClose only after backend cleanup', async () => {

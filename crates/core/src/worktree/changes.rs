@@ -487,6 +487,69 @@ pub fn scoped_diff(cwd: &Path, full: &Path) -> Result<ScopedFileDiff> {
     })
 }
 
+#[cfg(windows)]
+fn windows_argument(value: &str) -> String {
+    let mut quoted = String::from("\"");
+    let mut slashes = 0;
+    for ch in value.chars() {
+        if ch == '\\' {
+            slashes += 1;
+            continue;
+        }
+        quoted.extend(std::iter::repeat_n(
+            '\\',
+            if ch == '"' { slashes * 2 + 1 } else { slashes },
+        ));
+        quoted.push(ch);
+        slashes = 0;
+    }
+    quoted.extend(std::iter::repeat_n('\\', slashes * 2));
+    quoted.push('"');
+    quoted
+}
+
+/// Launch a console with its own standard handles, independent of Desktop logging.
+#[cfg(windows)]
+pub fn open_console(cwd: &Path, program: &Path, args: &[&str]) -> Result<()> {
+    use std::os::windows::ffi::OsStrExt;
+    #[link(name = "shell32")]
+    extern "system" {
+        fn ShellExecuteW(
+            window: *mut std::ffi::c_void,
+            operation: *const u16,
+            file: *const u16,
+            parameters: *const u16,
+            directory: *const u16,
+            show: i32,
+        ) -> isize;
+    }
+    let wide = |value: &std::ffi::OsStr| value.encode_wide().chain(Some(0)).collect::<Vec<_>>();
+    let program = wide(program.as_os_str());
+    let cwd = wide(cwd.as_os_str());
+    let parameters = args
+        .iter()
+        .map(|arg| windows_argument(arg))
+        .collect::<Vec<_>>()
+        .join(" ");
+    let parameters = wide(std::ffi::OsStr::new(&parameters));
+    let operation = wide(std::ffi::OsStr::new("open"));
+    let result = unsafe {
+        ShellExecuteW(
+            std::ptr::null_mut(),
+            operation.as_ptr(),
+            program.as_ptr(),
+            parameters.as_ptr(),
+            cwd.as_ptr(),
+            1,
+        )
+    };
+    anyhow::ensure!(
+        result > 32,
+        "Could not open system terminal (Windows error {result})"
+    );
+    Ok(())
+}
+
 pub fn open_workspace(cwd: &Path, action: &str) -> Result<()> {
     match action {
         "explorer" => {
@@ -504,12 +567,11 @@ pub fn open_workspace(cwd: &Path, action: &str) -> Result<()> {
         "terminal" => {
             #[cfg(windows)]
             {
-                use std::os::windows::process::CommandExt;
-                std::process::Command::new("powershell.exe")
-                    .args(["-NoLogo", "-NoProfile", "-NoExit"])
-                    .current_dir(cwd)
-                    .creation_flags(0x00000010)
-                    .spawn()?;
+                open_console(
+                    cwd,
+                    Path::new("powershell.exe"),
+                    &["-NoLogo", "-NoProfile", "-NoExit"],
+                )?;
             }
             #[cfg(target_os = "macos")]
             {
@@ -533,6 +595,17 @@ pub fn open_workspace(cwd: &Path, action: &str) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(windows)]
+    #[test]
+    fn console_arguments_preserve_literal_windows_paths() {
+        assert_eq!(
+            windows_argument("中文 space & test"),
+            "\"中文 space & test\""
+        );
+        assert_eq!(windows_argument("a\\\"b\\"), "\"a\\\\\\\"b\\\\\"");
+        assert_eq!(windows_argument(""), "\"\"");
+    }
     fn fixture() -> tempfile::TempDir {
         let dir = tempfile::tempdir().unwrap();
         git(dir.path(), &["init", "-b", "main"]).unwrap();

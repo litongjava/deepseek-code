@@ -1,6 +1,6 @@
 import { useState, useEffect, useRef } from 'react';
 import { useParams, useNavigate } from 'react-router-dom';
-import { FileText, ChevronDown, Trash, Pencil, Laptop, Terminal, Copy, Download } from 'lucide-react';
+import { FileText, ChevronDown, Trash, Pencil, Laptop, Copy, Download, Terminal, Files, Globe } from 'lucide-react';
 import { updateConversation, deleteConversation, exportConversation, getConversation } from '../api';
 import { tauriAPI } from '../utils/tauriAPI';
 import { useProjectStore } from '../stores/useProjectStore';
@@ -155,12 +155,14 @@ export default function ChatHeader({
       </div>}
       {copyResult && copyResult.id === id && <div role={copyResult.success ? 'status' : 'alert'} className="absolute right-4 top-full rounded-md border border-claude-border bg-claude-input px-3 py-2 text-xs">{t(copyResult.success ? 'chat.sessionIdCopied' : 'chat.sessionIdCopyFailed')}</div>}
       <div className="flex shrink-0 items-center gap-1">
+        {([{ panel: 'terminal', label: 'Terminal', Icon: Terminal }, { panel: 'files', label: 'Files', Icon: Files }, { panel: 'browser', label: 'Browser', Icon: Globe }] as const).map(({ panel, label, Icon }) => (
+          <button key={panel} type="button" aria-label={label} title={label} onClick={() => window.dispatchEvent(new CustomEvent('request-open-panel', { detail: { panel } }))} className="flex h-8 w-8 items-center justify-center rounded-md text-claude-textSecondary hover:bg-claude-hover"><Icon size={18} /></button>
+        ))}
         {hasArtifacts && (
           <button onClick={onOpenArtifacts} className={`w-8 h-8 flex items-center justify-center text-claude-textSecondary hover:bg-claude-btn-hover rounded-md transition-colors ${showArtifacts ? 'bg-claude-btn-hover text-claude-text' : ''}`} title="View Artifacts">
             <FileText size={18} strokeWidth={1.5} />
           </button>
         )}
-        <button type="button" aria-label="Terminal" title="Terminal" onClick={() => window.dispatchEvent(new CustomEvent('request-open-panel', { detail: { panel: 'terminal' } }))} className="flex h-8 w-8 items-center justify-center rounded-md text-claude-textSecondary hover:bg-claude-hover"><Terminal size={18} /></button>
       </div>
     </div>
   );
