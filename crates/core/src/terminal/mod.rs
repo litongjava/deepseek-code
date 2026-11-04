@@ -633,10 +633,13 @@ pub async fn execute_bash_command(
         .kill_on_drop(true);
 
     if let Some(env) = env_vars {
-        let envs: Vec<(String, String)> = env.into_iter().chain([
-            ("LANG".to_string(), "en_US.UTF-8".to_string()),
-            ("TERM".to_string(), "xterm-256color".to_string()),
-        ]).collect();
+        let envs: Vec<(String, String)> = env
+            .into_iter()
+            .chain([
+                ("LANG".to_string(), "en_US.UTF-8".to_string()),
+                ("TERM".to_string(), "xterm-256color".to_string()),
+            ])
+            .collect();
         cmd.envs(envs);
     } else {
         cmd.env("LANG", "en_US.UTF-8");
@@ -644,26 +647,33 @@ pub async fn execute_bash_command(
     }
 
     let timeout = tokio::time::Duration::from_secs(timeout_secs);
-    
+
     let result = tokio::time::timeout(timeout, cmd.output()).await;
-    
+
     match result {
         Ok(Ok(output)) => {
             let stdout = String::from_utf8_lossy(&output.stdout);
             let stderr = String::from_utf8_lossy(&output.stderr);
-            
+
             let mut result = stdout.to_string();
             if !stderr.is_empty() {
                 result.push_str(&format!("\nSTDERR: {}", stderr));
             }
-            
+
             if !output.status.success() && stdout.is_empty() {
-                result = format!("Command exited with code {:?}: {}", output.status.code(), stderr);
+                result = format!(
+                    "Command exited with code {:?}: {}",
+                    output.status.code(),
+                    stderr
+                );
             }
-            
+
             Ok(result)
         }
         Ok(Err(e)) => Err(anyhow::anyhow!("Failed to execute command: {}", e)),
-        Err(_) => Err(anyhow::anyhow!("Command timed out after {} seconds", timeout_secs)),
+        Err(_) => Err(anyhow::anyhow!(
+            "Command timed out after {} seconds",
+            timeout_secs
+        )),
     }
 }
