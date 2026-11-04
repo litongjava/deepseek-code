@@ -106,6 +106,15 @@ pub struct ContextCompressor {
     config: CompressionConfig,
 }
 
+// Keep byte budgets without cutting through a UTF-8 code point.
+fn utf8_prefix(text: &str, max_bytes: usize) -> &str {
+    let mut end = max_bytes.min(text.len());
+    while !text.is_char_boundary(end) {
+        end -= 1;
+    }
+    &text[..end]
+}
+
 impl ContextCompressor {
     pub fn new(config: Option<CompressionConfig>) -> Self {
         Self {
@@ -485,7 +494,7 @@ impl ContextCompressor {
             if let Some(sys) = &system_prompt {
                 // Truncate system prompt if too long
                 let sys_content = if sys.len() > 2000 {
-                    format!("{}... [system prompt truncated]", &sys[..1000])
+                    format!("{}... [system prompt truncated]", utf8_prefix(sys, 1000))
                 } else {
                     sys.clone()
                 };
@@ -602,7 +611,7 @@ impl ContextCompressor {
                 
                 // Truncate long user messages for summary
                 let truncated = if content.len() > 500 {
-                    format!("{}...", &content[..200])
+                    format!("{}...", utf8_prefix(content, 200))
                 } else {
                     content.to_string()
                 };
@@ -625,7 +634,7 @@ impl ContextCompressor {
                     }
                 } else if !content.trim().is_empty() {
                     let truncated = if content.len() > 300 {
-                        format!("{}...", &content[..150])
+                        format!("{}...", utf8_prefix(content, 150))
                     } else {
                         content.to_string()
                     };
