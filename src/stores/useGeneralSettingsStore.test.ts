@@ -30,6 +30,13 @@ it('loads a desktop configuration, validates it, and applies language and appear
   expect(invoke).toHaveBeenCalledTimes(1);
 });
 
+it('restores the explicit serif choice and saved size from desktop configuration', async () => {
+  vi.mocked(invoke).mockResolvedValue({ chatFont: 'serif', fontSize: 16, typographyVersion: 1 });
+  await initializeGeneralSettings();
+  expect(document.documentElement.getAttribute('data-chat-font')).toBe('serif');
+  expect(document.documentElement.style.getPropertyValue('--conversation-font-size')).toBe('16px');
+});
+
 it('finishes saving before opening the desktop configuration and excludes internal state', async () => {
   vi.mocked(invoke).mockResolvedValue(null);
   useGeneralSettingsStore.getState().update({ fontSize: 18 });
@@ -46,13 +53,14 @@ it('keeps local settings usable and reports an unreadable configuration', async 
   vi.mocked(invoke).mockRejectedValue(new Error('Invalid JSON'));
   await initializeGeneralSettings();
   expect(useGeneralSettingsStore.getState().saveError).toContain('Invalid JSON');
-  expect(useGeneralSettingsStore.getState().fontSize).toBe(16);
+  expect(useGeneralSettingsStore.getState().fontSize).toBe(14);
   expect(invoke).toHaveBeenCalledTimes(1);
 });
 
-it('upgrades the old default size once while preserving later and custom choices', () => {
-  expect(normalizeGeneralSettings({}).fontSize).toBe(16);
-  expect(normalizeGeneralSettings({ fontSize: 14 })).toMatchObject({ fontSize: 16, typographyVersion: 1 });
+it('defaults to 14px while preserving saved and custom choices', () => {
+  expect(normalizeGeneralSettings({}).fontSize).toBe(14);
+  expect(normalizeGeneralSettings({ fontSize: 14 })).toMatchObject({ fontSize: 14, typographyVersion: 1 });
+  expect(normalizeGeneralSettings({ fontSize: 16, typographyVersion: 1 }).fontSize).toBe(16);
   expect(normalizeGeneralSettings({ fontSize: 18 }).fontSize).toBe(18);
   expect(normalizeGeneralSettings({ fontSize: 14, typographyVersion: 1 }).fontSize).toBe(14);
 });

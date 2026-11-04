@@ -666,7 +666,8 @@ const SettingsPage = ({ onCreateWithDeepSeek }: { onCreateWithDeepSeek?: () => v
             <div>
               <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
                 {([
-                  { value: 'default', label: 'Anthropic Serif', sample: 'Aa', font: 'font-serif-claude' },
+                  { value: 'default', label: 'Default', sample: 'Aa', font: 'font-assistant-default' },
+                  { value: 'serif', label: 'Anthropic Serif', sample: 'Aa', font: 'font-serif-claude' },
                   { value: 'sans', label: 'Anthropic Sans', sample: 'Aa', font: 'font-sans-claude' },
                   { value: 'system', label: 'System', sample: 'Aa', font: 'font-system' },
                   { value: 'dyslexic', label: 'OpenDyslexic', sample: 'Aa', font: 'font-dyslexic' },

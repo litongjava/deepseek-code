@@ -27,7 +27,7 @@ const permissions = ['ask_permissions', 'accept_edits', 'plan_mode', 'bypass_per
 const sendKeys = ['enter', 'ctrl_enter', 'cmd_enter', 'alt_enter'];
 const newlineKeys = [...sendKeys, 'shift_enter'];
 const defaults: GeneralSettings = {
-  defaultPermissionMode: 'accept_edits', theme: 'light', fontSize: 16, typographyVersion: 1,
+  defaultPermissionMode: 'accept_edits', theme: 'light', fontSize: 14, typographyVersion: 1,
   workDetailsByMode: { chat: 'compact', work: 'standard', study: 'standard', code: 'detailed' },
   showCodingView: true, chatLinks: 'sidebar',
   showUsageByMode: { chat: false, work: false, study: false, code: true }, showAiDisclaimer: true,
@@ -37,8 +37,8 @@ const defaults: GeneralSettings = {
 
 export function normalizeGeneralSettings(value: unknown): GeneralSettings {
   const v = value && typeof value === 'object' ? value as Partial<GeneralSettings> : {};
-  // Upgrade the previous default once; subsequent explicit 14px choices remain valid.
-  const fontSize = !v.typographyVersion && v.fontSize === 14 ? defaults.fontSize : v.fontSize;
+  // Preserve saved sizes, including choices made before typography versioning.
+  const fontSize = v.fontSize;
   return {
     defaultPermissionMode: permissions.includes(v.defaultPermissionMode || '') ? v.defaultPermissionMode! : v.defaultPermissionMode == null ? defaults.defaultPermissionMode : 'ask_permissions',
     theme: ['light', 'dark', 'system'].includes(v.theme || '') ? v.theme! : defaults.theme,
@@ -126,7 +126,7 @@ export async function initializeGeneralSettings() {
       if (saved) {
         useGeneralSettingsStore.setState(normalizeGeneralSettings(saved));
         if (saved.language) useUIStore.getState().setLanguage(saved.language);
-        if (saved.chatFont && ['default', 'sans', 'system', 'dyslexic'].includes(saved.chatFont)) localStorage.setItem('chat_font', saved.chatFont);
+        if (saved.chatFont && ['default', 'serif', 'sans', 'system', 'dyslexic'].includes(saved.chatFont)) localStorage.setItem('chat_font', saved.chatFont);
       }
     } catch (error) { useGeneralSettingsStore.setState({ saveError: String(error) }); }
   }

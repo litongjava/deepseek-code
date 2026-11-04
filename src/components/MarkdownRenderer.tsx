@@ -287,7 +287,7 @@ export const CodeBlock: React.FC<{ language: string; code: string; className?: s
               boxShadow: 'none',
             }}
             codeTagProps={{
-              style: { fontFamily: "Menlo, Monaco, SF Mono, Cascadia Code, Fira Code, Consolas, Courier New, monospace" }
+              style: { fontFamily: "var(--assistant-code-family, monospace)" }
             }}
           >
             {displayCode}

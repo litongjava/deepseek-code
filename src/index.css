@@ -21,7 +21,9 @@
 :root {
   --chat-serif-family: 'Anthropic Serif', 'Source Serif 4 Variable', 'Source Serif 4', Georgia, 'Times New Roman', 'Songti SC', SimSun, 'Noto Serif SC', serif;
   --chat-sans-family: 'Anthropic Sans', 'Figtree Variable', 'Figtree', system-ui, 'Segoe UI', 'Microsoft YaHei', sans-serif;
-  --conversation-font-size: 16px;
+  --assistant-default-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei", "Helvetica Neue", Helvetica, Arial, sans-serif;
+  --assistant-code-family: 'SF Mono', 'JetBrains Mono', 'Fira Code', Consolas, 'Liberation Mono', Menlo, Courier, 'PingFang SC', 'Microsoft YaHei';
+  --conversation-font-size: 14px;
   --bg-claude-main: #FCFCFB;
   --bg-claude-sidebar: #F5F5F3;
   --border-claude: #D8D8D2;
@@ -598,20 +600,33 @@ html.dark .chat-scroll::-webkit-scrollbar-thumb:hover {
 .conversation-content .conversation-text,
 .conversation-content .assistant-markdown,
 .conversation-content .assistant-markdown :where(p, ul, ol, li, blockquote, table) {
-  font-size: var(--conversation-font-size, 16px);
+  font-size: var(--conversation-font-size, 14px);
 }
 
 .conversation-content .assistant-markdown {
-  font-weight: 400;
-  line-height: 1.5;
+  --assistant-font-delta: calc(var(--conversation-font-size, 14px) - 14px);
+  font-family: var(--assistant-default-family);
+  font-weight: var(--chat-weight-body);
+  line-height: calc(24px + var(--assistant-font-delta));
   font-optical-sizing: auto;
 }
-.conversation-content .assistant-markdown p { line-height: 1.5; margin-bottom: 0.75em; }
+.conversation-content .assistant-markdown :where(p, ul, ol, li, blockquote, table) { line-height: inherit; }
+.conversation-content .assistant-markdown p { margin-bottom: 0.75em; }
+.conversation-content .assistant-markdown :is(strong, b) { font-weight: var(--chat-weight-semibold); }
 .conversation-content .assistant-markdown .inline-code { font-size: 0.875em; }
-.conversation-content .assistant-markdown h1 { font-size: calc(var(--conversation-font-size, 16px) * 1.52); }
-.conversation-content .assistant-markdown h2 { font-size: calc(var(--conversation-font-size, 16px) * 1.27); }
-.conversation-content .assistant-markdown h3 { font-size: calc(var(--conversation-font-size, 16px) * 1.09); }
-.conversation-content .assistant-markdown :where(h4, h5, h6) { font-size: var(--conversation-font-size, 16px); }
+.conversation-content .assistant-markdown :is(pre, code) { font-family: var(--assistant-code-family); }
+.conversation-content .assistant-markdown :is(h1, h2, h3) {
+  font-weight: var(--chat-weight-bold);
+  letter-spacing: normal;
+}
+.conversation-content .assistant-markdown h1 { font-size: calc(21px + var(--assistant-font-delta)); line-height: calc(30px + var(--assistant-font-delta)); }
+.conversation-content .assistant-markdown h2 { font-size: calc(19px + var(--assistant-font-delta)); line-height: calc(28px + var(--assistant-font-delta)); }
+.conversation-content .assistant-markdown h3 { font-size: calc(18px + var(--assistant-font-delta)); line-height: calc(26px + var(--assistant-font-delta)); }
+.conversation-content .assistant-markdown :is(h4, h5, h6) {
+  font-size: var(--conversation-font-size, 14px);
+  line-height: calc(24px + var(--assistant-font-delta));
+  font-weight: var(--chat-weight-semibold);
+}
 
 .general-permission-selector > button {
   padding: 12px 16px;
@@ -622,7 +637,8 @@ html.dark .chat-scroll::-webkit-scrollbar-thumb:hover {
 }
 
 /* Anthropic fonts are bundled locally, with fallbacks for unsupported glyphs. */
-html[data-chat-font="default"] .chat-font-scope {
+html[data-chat-font="default"] .chat-font-scope,
+html[data-chat-font="serif"] .chat-font-scope {
   --chat-font-family: var(--chat-serif-family);
   font-family: var(--chat-font-family);
   font-weight: 400;
@@ -649,10 +665,15 @@ html[data-chat-font="dyslexic"] .chat-font-scope {
 
 /* Ensure chat content inherits the selected font */
 html[data-chat-font] .chat-font-scope,
-html[data-chat-font] .chat-font-scope .markdown-body,
-html[data-chat-font] .chat-font-scope .markdown-body :where(p, h1, h2, h3, h4, h5, h6, ul, ol, li, blockquote, table, thead, tbody, tr, th, td, a, span, strong, em) {
+html[data-chat-font] .chat-font-scope .markdown-body {
   font-family: var(--chat-font-family, inherit);
 }
+
+/* Default assistant prose is sans-serif; explicit font choices still inherit. */
+html[data-chat-font="default"] .conversation-content .assistant-markdown {
+  font-family: var(--assistant-default-family);
+}
+.font-assistant-default { font-family: var(--assistant-default-family); }
 
 html[data-chat-font] .chat-font-scope textarea,
 html[data-chat-font] .chat-font-scope input {
