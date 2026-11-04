@@ -166,18 +166,14 @@ pub async fn handle(
             command_eprintln!("{}", terminal_setup());
         }
         "/agents" => {
-            // As in the reference CLI, subagents are chosen by asking for one;
-            // this lists what is available.
-            let context = crate::services::context(paths)?;
-            let agents = deepseek_code_core::services::agents::list(&context)?;
-            let width = agents.iter().map(|agent| agent.id.chars().count()).max().unwrap_or(0) + 2;
-            let mut text = String::from("  \u{23bf}  Ask DeepSeek Code to hand work to a subagent (e.g. \"use the explore agent to find where errors are logged\").\n     Available subagents:\n");
-            for agent in agents {
-                let description = agent.description.lines().next().unwrap_or_default().chars().take(100).collect::<String>();
-                text.push_str(&format!("       \u{2022} {:<width$}{description}\n", agent.id));
+            ensure!(matches!(argument, "" | "definitions"), "Usage: /agents [definitions]");
+            if argument == "definitions" {
+                for agent in deepseek_code_core::services::agents::list(&crate::services::context(paths)?)? {
+                    command_eprintln!("- {}: {}", agent.id, agent.description);
+                }
+            } else {
+                command_eprintln!("{}", active_agents_text(paths, &session.id)?);
             }
-            text.push_str("     /list-agents shows the sessions running now.");
-            command_eprintln!("{text}");
         }
         "/list-agents" => {
             if argument == "definitions" {
@@ -273,6 +269,75 @@ pub(crate) fn peer_sessions(
     }
     deepseek_code_core::services::teams::classify_peers(root,&context,&mut peers)?;
     Ok(peers)
+}
+
+/// Show runtime activity, not merely saved agent definitions or old session rows.
+pub(crate) fn active_agents_text(paths: &RuntimePaths, current: &str) -> Result<String> {
+    use deepseek_code_core::services::{background_sessions, session_messages};
+    let context = crate::services::context(paths)?;
+    let peers = session_messages::session_peers(&context, current)?;
+    let jobs = background_sessions::list(&paths.data_dir, None)?;
+    let mut rows = Vec::new();
+    for peer in peers {
+        let id = peer["id"].as_str().unwrap_or_default();
+        let job = jobs.iter().find(|job| {
+            job.session_id == id
+                && matches!(job.status.as_str(), "starting" | "running")
+        });
+        if peer["receiver_active"] != true && job.is_none() {
+            continue;
+        }
+        let delegation = context
+            .setting::<Value>(&format!("delegation.{id}"))?
+            .unwrap_or_default();
+        let title = delegation["description"]
+            .as_str()
+            .or_else(|| peer["title"].as_str().filter(|title| !title.is_empty() && *title != "CLI session"))
+            .or_else(|| job.map(|job| if crate::background_commands::is_notification(&job.title) {
+                "Processing task notifications"
+            } else { job.title.as_str() }))
+            .unwrap_or("Agent");
+        let title: String = title.chars().filter(|ch| !ch.is_control()).collect();
+        let status = job.map_or("running", |job| job.status.as_str());
+        rows.push(format!(
+            "- {title}{}\n  Session: {id}\n  Status: {status}",
+            if id == current { " (current)" } else { "" }
+        ));
+        if let Some(job) = job {
+            rows.last_mut()
+                .unwrap()
+                .push_str(&format!("\n  Task: {} · /tasks show {}", job.id, job.id));
+            if let Some(question) = background_sessions::pending_question(
+                &paths.data_dir,
+                &job.id,
+                &job.parent_session_id,
+            )? {
+                rows.last_mut()
+                    .unwrap()
+                    .push_str(&format!("\n  Waiting for {}", question.kind));
+            }
+        }
+        if let Some(tool) = delegation["current_tool"]
+            .as_str()
+            .filter(|tool| !tool.is_empty())
+        {
+            let tool: String = tool.chars().filter(|ch| !ch.is_control()).collect();
+            rows.last_mut()
+                .unwrap()
+                .push_str(&format!("\n  Tool: {tool}"));
+        }
+    }
+    let mut text = if rows.is_empty() {
+        "No active agents in this session family.".to_owned()
+    } else {
+        format!(
+            "Active agents in this session family: {}\n\n{}",
+            rows.len(),
+            rows.join("\n\n")
+        )
+    };
+    text.push_str("\n\n/agents definitions lists available agent types; /list-agents includes saved sessions and message delivery.");
+    Ok(text)
 }
 
 /// `/plan DESCRIPTION` enables plan mode and returns the task to submit once,
@@ -425,6 +490,41 @@ pub(crate) fn copy_text(text: &str) -> Result<()> {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn active_agents_require_live_execution_and_exclude_unrelated_sessions() {
+        use deepseek_code_core::services::session_messages::{Consumer, PresenceLease};
+        let dir = tempfile::tempdir().unwrap();
+        let paths = RuntimePaths::new(dir.path().join("data")).unwrap();
+        let store = deepseek_code_core::runtime::SessionStore::new(paths.open_database().unwrap());
+        let parent = store.create(dir.path(), "test", "cli-runtime").unwrap();
+        let child = store.create(dir.path(), "test", "cli-runtime").unwrap();
+        let unrelated = store.create(dir.path(), "test", "cli-runtime").unwrap();
+        crate::services::context(&paths).unwrap().save_setting(
+            &format!("delegation.{child}"),
+            &json!({"session_id":child,"parent_session_id":parent,"description":"Inspect resume","current_tool":"Read","status":"running"}),
+        ).unwrap();
+        // Persisted running metadata and an open terminal are not active execution.
+        let _presence = PresenceLease::acquire(&paths.data_dir, &child).unwrap();
+        let _unrelated = Consumer::attach(&paths.data_dir, &unrelated)
+            .unwrap()
+            .unwrap();
+        assert!(active_agents_text(&paths, &parent)
+            .unwrap()
+            .starts_with("No active agents"));
+        let consumer = Consumer::attach(&paths.data_dir, &child).unwrap().unwrap();
+        let report = active_agents_text(&paths, &parent).unwrap();
+        assert!(report.contains("Active agents in this session family: 1"));
+        assert!(report.contains(&child));
+        assert!(report.contains("Inspect resume") && report.contains("Tool: Read"));
+        assert!(!report.contains(&parent) && !report.contains(&unrelated));
+        let self_report = active_agents_text(&paths, &child).unwrap();
+        assert!(self_report.contains("(current)"));
+        drop(consumer);
+        assert!(active_agents_text(&paths, &parent)
+            .unwrap()
+            .starts_with("No active agents"));
+    }
 
     #[test]
     fn peer_list_scopes_projects_and_mailboxes_do_not_spoof_identity() {

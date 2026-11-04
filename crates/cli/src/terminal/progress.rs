@@ -569,7 +569,7 @@ fn footer(elapsed: Duration, error: Option<&str>, time: &str) -> String {
     format!("✻ Worked for {} · {status} {time}", human_duration(elapsed))
 }
 
-fn human_duration(elapsed: Duration) -> String {
+pub(crate) fn human_duration(elapsed: Duration) -> String {
     let seconds = elapsed.as_secs();
     if seconds >= 3600 {
         format!(
@@ -722,7 +722,10 @@ mod tests {
             (59, "59s"),
             (60, "1m 0s"),
             (368, "6m 8s"),
+            (3599, "59m 59s"),
+            (3600, "1h 0m 0s"),
             (3601, "1h 0m 1s"),
+            (64909, "18h 1m 49s"),
         ] {
             assert_eq!(human_duration(Duration::from_secs(seconds)), expected);
         }

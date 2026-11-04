@@ -50,7 +50,7 @@ pub const COMMANDS: &[(&str, &str)] = &[
     ("/config", "Show settings and commands to change them"),
     ("/copy", "Copy the latest assistant response: [N]"),
     ("/export", "Export transcript: FILE or clipboard"),
-    ("/agents", "Show the subagents DeepSeek Code can delegate to"),
+    ("/agents", "Show active agents in this session family; definitions lists available types"),
     ("/loop", "Repeat a prompt or command on an interval (e.g. /loop 5m /foo); omit the interval to let the model self-pace"),
     ("/scroll-speed", "Adjust mouse wheel scroll speed in the transcript pager: 1-10"),
     ("/subagents", "Switch between this session’s subagents"),

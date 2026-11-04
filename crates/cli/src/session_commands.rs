@@ -462,7 +462,8 @@ pub(crate) fn is_live_inspection(line: &str) -> bool {
     let line = line.trim();
     matches!(
         line,
-        "/subagents"
+        "/agents"
+            | "/subagents"
             | "/list-agents"
             | "/list-agents list"
             | "/list-agents inbox"
@@ -482,6 +483,10 @@ pub(crate) fn is_live_inspection(line: &str) -> bool {
 pub async fn live_inspection(session: &Session, prompt: &str) -> Option<String> {
     if !is_live_inspection(prompt) {
         return None;
+    }
+    if prompt.trim() == "/agents" {
+        return Some(crate::extended_commands::active_agents_text(&session.paths, &session.id)
+            .unwrap_or_else(|error| format!("Agents: {error:#}")));
     }
     if prompt.trim() == "/subagents" {
         return Some(crate::services::context(&session.paths).and_then(|context| crate::terminal::subagents::entries(&context, &session.id)).map(|entries| entries.into_iter().map(|entry| format!("- {}{}  {}", entry.label, if entry.current { " (current)" } else { "" }, entry.id)).collect::<Vec<_>>().join("\n")).unwrap_or_else(|error| format!("Subagents: {error:#}")));
@@ -925,6 +930,8 @@ mod tests {
 
     #[test]
     fn only_status_answers_while_a_turn_runs() {
+        assert!(is_live_inspection("/agents"));
+        assert!(!is_live_inspection("/agents definitions"));
         assert!(is_live_inspection("/status"));
         assert!(is_live_inspection("  /status  "));
         assert!(is_live_inspection("/status --check"));

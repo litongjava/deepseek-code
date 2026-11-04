@@ -329,12 +329,24 @@ fn safe_output(text: &str) -> String {
     text.chars().filter(|ch| !ch.is_control() || matches!(ch, '\n' | '\t')).collect()
 }
 
-/// `12s` or `3m 4s`.
+/// Shared elapsed-time format for task details and agent rows.
 fn runtime(started_ms: u64, finished_ms: Option<u64>) -> String {
     let end = finished_ms.unwrap_or_else(|| chrono::Utc::now().timestamp_millis().max(0) as u64);
     let seconds = end.saturating_sub(started_ms) / 1000;
-    if seconds < 60 { format!("{seconds}s") } else { format!("{}m {}s", seconds / 60, seconds % 60) }
+    crate::terminal::progress::human_duration(std::time::Duration::from_secs(seconds))
 }
+
+fn job_runtime(job: &background_sessions::Job) -> String {
+    if job.status == "unresponsive" {
+        format!("{} (last heartbeat; result unknown)", runtime(job.started_ms, Some(job.heartbeat_ms)))
+    } else {
+        runtime(job.started_ms, job.finished_ms)
+    }
+}
+
+#[cfg(test)]
+#[path = "agent_liveness_tests.rs"]
+mod agent_liveness_tests;
 
 /// One background task: a managed shell or a detached worker job.
 enum Task {
@@ -399,7 +411,7 @@ async fn tasks_menu(paths: &RuntimePaths, session: &Session) -> Result<()> {
                     },
                     Task::Job(job) => Entry {
                         title: safe_output(&job.title),
-                        detail: format!("session \u{b7} {} \u{b7} {}", job.status, runtime(job.started_ms, job.finished_ms)),
+                        detail: format!("session \u{b7} {} \u{b7} {}", job.status, job_runtime(job)),
                     },
                 })
                 .collect();
@@ -444,7 +456,7 @@ async fn tasks_menu(paths: &RuntimePaths, session: &Session) -> Result<()> {
             Task::Job(job) => {
                 let rows = vec![
                     format!("Status:   {}", job.status),
-                    format!("Runtime:  {}", runtime(job.started_ms, job.finished_ms)),
+                    format!("Runtime:  {}", job_runtime(job)),
                     format!("Task:     {}", safe_output(&job.title)),
                     format!("Session:  {}", job.session_id),
                 ];
@@ -529,7 +541,7 @@ pub(crate) fn running_agents(
         return Vec::new();
     };
     jobs.into_iter()
-        .filter(|job| matches!(job.status.as_str(), "starting" | "running" | "unresponsive"))
+        .filter(|job| matches!(job.status.as_str(), "starting" | "running"))
         .filter_map(|job| {
             let record = context
                 .setting::<serde_json::Value>(&format!("background-agent.{}", job.id))

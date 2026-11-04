@@ -497,6 +497,7 @@ const THINKING_PREVIEW_ROWS: usize = 2;
 
 /// Commands `submit` accepts while the model works.
 const LIVE_COMMANDS: &[&str] = &[
+    "/agents",
     "/btw",
     "/background",
     "/goal",
@@ -532,13 +533,9 @@ fn spinner_glyph(frame: usize) -> &'static str {
     SPINNER[if position < SPINNER.len() { position } else { cycle - 1 - position }]
 }
 
-/// `12s`, `4m 13s` or `1h 2m`.
+/// `12s`, `4m 13s` or `1h 2m 3s`.
 fn short_duration(seconds: u64) -> String {
-    match seconds {
-        0..=59 => format!("{seconds}s"),
-        60..=3599 => format!("{}m {}s", seconds / 60, seconds % 60),
-        _ => format!("{}h {}m", seconds / 3600, seconds % 3600 / 60),
-    }
+    super::progress::human_duration(Duration::from_secs(seconds))
 }
 
 /// `950` or `13.7k`.
@@ -3920,6 +3917,7 @@ mod tests {
         assert_eq!(
             names,
             vec![
+                "/agents",
                 "/background",
                 "/btw",
                 "/goal",
