@@ -645,11 +645,15 @@ pub async fn handle(
 ) -> Result<bool> {
     let mut words = line.split_whitespace();
     let command = words.next().unwrap_or_default();
-    // As in the reference CLI these share one dialog with Status, Config and
-    // Usage tabs; arguments keep the text forms.
+    // Status uses the same scrollable report as a running turn. Config and
+    // usage retain their settings tabs; arguments keep the text forms.
     if words.clone().next().is_none() && crate::terminal::picker::available() {
+        if command == "/status" {
+            let text = crate::status_commands::text(session, "").await?;
+            crate::terminal::live::show_inspection("Status", &text)?;
+            return Ok(true);
+        }
         let tab = match command {
-            "/status" => Some("Status"),
             "/config" => Some("Config"),
             "/cost" | "/usage" => Some("Usage"),
             _ => None,

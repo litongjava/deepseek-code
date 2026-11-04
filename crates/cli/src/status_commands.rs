@@ -149,10 +149,8 @@ pub async fn text(session: &Session, argument: &str) -> Result<String> {
                 .as_ref()
                 .is_some_and(|request| request.reported_input_tokens.is_some())
         });
-    let context = match (
-        used,
-        session.context_window().await.filter(|window| *window > 0),
-    ) {
+    let window = provider.model.context_window.filter(|window| *window > 0);
+    let context = match (used, window) {
         (Some(used), Some(window)) => format!(
             "{}% left ({} used / {}; {})",
             (u64::from(window).saturating_sub(used) * 100 / u64::from(window)),
@@ -164,7 +162,19 @@ pub async fn text(session: &Session, argument: &str) -> Result<String> {
                 "estimated last request"
             }
         ),
-        _ => "unknown (no request or configured window)".into(),
+        (Some(used), None) => format!(
+            "{} used ({}; remaining capacity unknown)",
+            token_count(used),
+            if measured {
+                "last request"
+            } else {
+                "estimated last request"
+            }
+        ),
+        (None, _) if latest.is_none() && request.is_none() => {
+            "not available (no request yet)".into()
+        }
+        (None, _) => "unknown (latest request input not reported or fully estimable)".into(),
     };
     let mut sections = vec![
         vec![
@@ -221,7 +231,14 @@ pub async fn text(session: &Session, argument: &str) -> Result<String> {
                     token_count(output)
                 ),
             ),
-            ("Context window", context),
+            (
+                "Context window",
+                window.map_or_else(
+                    || "unknown (no configured or model default window)".into(),
+                    |window| format!("{} tokens", token_count(u64::from(window))),
+                ),
+            ),
+            ("Context usage", context),
         ],
     ];
     let mut tools_section = vec![(
@@ -331,3 +348,7 @@ fn render_tools(tools: &RuntimeStatus, scope: &str) -> String {
     output.push_str(&format!("\n  Observed in: {scope}\n"));
     output
 }
+
+#[cfg(test)]
+#[path = "status_commands_tests.rs"]
+mod tests;

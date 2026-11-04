@@ -2390,21 +2390,7 @@ fn run(
                 continue;
             }
             if state.status_page.is_some() || state.agent_detail.is_some() {
-                match &event {
-                    Event::Key(key) if matches!(key.code, KeyCode::PageDown | KeyCode::Down) => {
-                        state.inspection_scroll = state.inspection_scroll.saturating_add(1);
-                    }
-                    Event::Key(key) if matches!(key.code, KeyCode::PageUp | KeyCode::Up) => {
-                        state.inspection_scroll = state.inspection_scroll.saturating_sub(1);
-                    }
-                    Event::Mouse(mouse) if mouse.kind == MouseEventKind::ScrollDown => {
-                        state.inspection_scroll = state.inspection_scroll.saturating_add(3);
-                    }
-                    Event::Mouse(mouse) if mouse.kind == MouseEventKind::ScrollUp => {
-                        state.inspection_scroll = state.inspection_scroll.saturating_sub(3);
-                    }
-                    _ => {}
-                }
+                state.inspection_scroll = inspection_scroll(state.inspection_scroll, &event);
             }
             if state.status_page.is_some() {
                 if matches!(&event, Event::Key(key) if matches!(key.code, KeyCode::Esc | KeyCode::Char('q')) || key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char('c'))
@@ -3018,6 +3004,49 @@ struct AlternateCleanup;
 impl Drop for AlternateCleanup {
     fn drop(&mut self) {
         let _ = execute!(io::stderr(), terminal::LeaveAlternateScreen);
+    }
+}
+
+fn inspection_scroll(scroll: usize, event: &Event) -> usize {
+    match event {
+        Event::Key(key) if matches!(key.code, KeyCode::PageDown | KeyCode::Down) => {
+            scroll.saturating_add(1)
+        }
+        Event::Key(key) if matches!(key.code, KeyCode::PageUp | KeyCode::Up) => {
+            scroll.saturating_sub(1)
+        }
+        Event::Mouse(mouse) if mouse.kind == MouseEventKind::ScrollDown => scroll.saturating_add(3),
+        Event::Mouse(mouse) if mouse.kind == MouseEventKind::ScrollUp => scroll.saturating_sub(3),
+        _ => scroll,
+    }
+}
+
+/// Show the running-turn inspection layout from the idle prompt as well.
+pub(crate) fn show_inspection(title: &str, text: &str) -> io::Result<()> {
+    let was_raw = terminal::is_raw_mode_enabled()?;
+    if !was_raw {
+        terminal::enable_raw_mode()?;
+    }
+    let _raw = (!was_raw).then(|| RawGuard);
+    execute!(io::stderr(), terminal::EnterAlternateScreen)?;
+    let _screen = AlternateCleanup;
+    let mut reader = super::paste_input::Reader::new()?;
+    let title = format!("{title} · ↑/↓ scroll · Esc to close");
+    let mut scroll = 0;
+    draw_inspection(&title, text, false, scroll)?;
+    loop {
+        let Some(event) = reader.next(Duration::from_millis(100))? else {
+            continue;
+        };
+        if matches!(&event, Event::Key(key) if key.kind == KeyEventKind::Release) {
+            continue;
+        }
+        if matches!(&event, Event::Key(key) if matches!(key.code, KeyCode::Esc | KeyCode::Char('q')) || key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char('c'))
+        {
+            return Ok(());
+        }
+        scroll = inspection_scroll(scroll, &event);
+        draw_inspection(&title, text, false, scroll)?;
     }
 }
 
