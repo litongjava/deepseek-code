@@ -10,6 +10,84 @@ fn provider(base: &str, anthropic: bool) -> ResolvedProvider {
 }
 
 #[tokio::test]
+async fn empty_stream_retry_keeps_completed_tool_results_without_reexecuting_tools() {
+    for anthropic in [false, true] {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("read-once.txt");
+        std::fs::write(&file, "ALREADY_EXECUTED_TOOL_RESULT").unwrap();
+        let requests = Arc::new(std::sync::Mutex::new(Vec::<Value>::new()));
+        let captured = requests.clone();
+        let app = axum::Router::new().fallback(axum::routing::post(move |axum::Json(body): axum::Json<Value>| {
+            let mut requests = captured.lock().unwrap();
+            let attempt = requests.len();
+            requests.push(body);
+            let events = match (anthropic, attempt) {
+                (true, 0) => vec![
+                    json!({"type":"content_block_start","index":0,"content_block":{"type":"tool_use","id":"read-once","name":"Read","input":{"file_path":file}}}),
+                    json!({"type":"content_block_stop","index":0}),
+                    json!({"type":"message_delta","delta":{"stop_reason":"tool_use"}}),
+                ],
+                (false, 0) => vec![json!({"choices":[{"delta":{"tool_calls":[{"index":0,"id":"read-once","function":{"name":"Read","arguments":json!({"file_path":file}).to_string()}}]},"finish_reason":"tool_calls"}]})],
+                (true, 1) => vec![json!({"type":"message_start","message":{"content":[],"usage":{"output_tokens":0}}})],
+                (false, 1) => vec![json!({"choices":[{"delta":{"role":"assistant"},"finish_reason":null}]})],
+                (true, _) => vec![
+                    json!({"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}),
+                    json!({"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"Recovered"}}),
+                    json!({"type":"message_delta","delta":{"stop_reason":"end_turn"}}),
+                ],
+                (false, _) => vec![json!({"choices":[{"delta":{"content":"Recovered"},"finish_reason":"stop"}]})],
+            };
+            async move { ([("content-type","text/event-stream")], events.iter().map(|event| format!("data: {event}\n\n")).collect::<String>()) }
+        }));
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let base = format!("http://{}", listener.local_addr().unwrap());
+        let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        let (tx, mut rx) = mpsc::channel(128);
+        let drain = tokio::spawn(async move {
+            let mut completed_tools = 0;
+            while let Some(event) = rx.recv().await {
+                if let EngineEvent::ToolUseDone {
+                    tool_use_id,
+                    is_error,
+                    ..
+                } = event
+                {
+                    assert_eq!(tool_use_id, "read-once");
+                    assert!(!is_error);
+                    completed_tools += 1;
+                }
+            }
+            completed_tools
+        });
+        let mut engine = ToolLoopExecutor::new(
+            provider(&base, anthropic),
+            vec![json!({"role":"user","content":"Read the fixture once"})],
+            None,
+            128,
+            tx,
+            dir.path().to_string_lossy().into_owned(),
+            ReasoningMode::Standard,
+        );
+        let result = if anthropic {
+            engine.execute_anthropic_loop().await
+        } else {
+            engine.execute_openai_loop().await
+        }
+        .unwrap();
+        assert_eq!(result.0, "Recovered");
+        drop(engine);
+        assert_eq!(drain.await.unwrap(), 1);
+        let requests = requests.lock().unwrap();
+        assert_eq!(requests.len(), 3);
+        assert_eq!(requests[1], requests[2]);
+        assert!(requests[2]["messages"]
+            .to_string()
+            .contains("ALREADY_EXECUTED_TOOL_RESULT"));
+        server.abort();
+    }
+}
+
+#[tokio::test]
 async fn first_request_after_resume_is_compressed_for_both_protocols() {
     for anthropic in [false, true] {
         let seen = Arc::new(std::sync::Mutex::new(Value::Null));

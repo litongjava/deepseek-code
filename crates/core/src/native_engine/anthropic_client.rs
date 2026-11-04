@@ -287,20 +287,12 @@ impl AnthropicClient {
         self.apply_options(&mut body, provider)?;
         crate::performance::apply_prompt_cache(&mut body);
         let identity = super::request_identity::RequestIdentity::new(None);
-        let response = retry_with_backoff(|| async {
-            let request = self.client
-                .post(&url)
-                .headers(identity.headers())
-                .header("anthropic-version", "2023-06-01")
-                .header("content-type", "application/json")
-                .json(&body);
-            let resp = crate::services::anthropic_auth::authorize(request, &provider.provider.api_key, base_url, provider.model.fast).await?.send().await?;
-
-            let resp = checked_response(resp).await?;
-            Ok(resp)
-        }).await?;
-
-        Ok(Box::pin(super::utf8_stream::response(response)))
+        let request = self.client.post(&url)
+            .header("anthropic-version", "2023-06-01")
+            .header("content-type", "application/json")
+            .json(&body);
+        let request = crate::services::anthropic_auth::authorize(request, &provider.provider.api_key, base_url, provider.model.fast).await?;
+        super::stream_retry::response(request, identity).await
     }
 
     pub async fn send_message_stream_with_thinking(
@@ -364,22 +356,13 @@ impl AnthropicClient {
         self.apply_options(&mut body, provider)?;
         crate::performance::apply_conversation_cache(&mut body);
         let identity = super::request_identity::RequestIdentity::new(context_capture);
-        let response = retry_with_backoff(|| async {
-            let request = self.client
-                .post(&url)
-                .headers(identity.headers())
-                .header("anthropic-version", "2023-06-01")
-                .header("content-type", "application/json")
-                .json(&body);
-            let request = crate::services::anthropic_auth::authorize(request, &provider.provider.api_key, base_url, provider.model.fast).await?;
-            if let Some(capture) = context_capture { capture.record("anthropic-messages", &body, provider.model.context_window, max_tokens).await; }
-            let resp = request.send().await?;
-
-            let resp = checked_response(resp).await?;
-            Ok(resp)
-        }).await?;
-
-        Ok(Box::pin(super::utf8_stream::response(response)))
+        let request = self.client.post(&url)
+            .header("anthropic-version", "2023-06-01")
+            .header("content-type", "application/json")
+            .json(&body);
+        let request = crate::services::anthropic_auth::authorize(request, &provider.provider.api_key, base_url, provider.model.fast).await?;
+        if let Some(capture) = context_capture { capture.record("anthropic-messages", &body, provider.model.context_window, max_tokens).await; }
+        super::stream_retry::response(request, identity).await
     }
 }
 
