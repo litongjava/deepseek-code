@@ -68,6 +68,10 @@ mod parallel_tool_tests;
 mod turn_budget_tests;
 
 #[cfg(test)]
+#[path = "resumed_stream_tests.rs"]
+mod resumed_stream_tests;
+
+#[cfg(test)]
 #[path = "durable_input_tests.rs"]
 mod durable_input_tests;
 #[cfg(test)]
@@ -2189,28 +2193,9 @@ impl ToolLoopExecutor {
             tracing::info!(module = "AnthropicLoop", "API key length={}", api_key_len);
 
             // Context compression check before each API call
-            if iteration > 0 {
+            {
                 let model_context_limit = self.provider.model.context_window.map(|n| (n as f64 * 0.90) as usize).unwrap_or_else(|| TokenCounter::get_safe_limit(&model_id, 0.90));
-                let conv_values: Vec<Value> = conversation_messages.iter().filter_map(|m| {
-                    match &m.content {
-                        AnthropicContent::Text(t) => Some(json!({"role": m.role, "content": t})),
-                        AnthropicContent::Blocks(blocks) => {
-                            let content_blocks: Vec<Value> = blocks.iter().filter_map(|b| {
-                                match b {
-                                    ContentBlock::Text { text } => Some(json!({"type": "text", "text": text})),
-                                    ContentBlock::ToolResult { tool_use_id, content, is_error } => {
-                                        Some(json!({"type": "tool_result", "tool_use_id": tool_use_id, "content": content, "is_error": is_error}))
-                                    }
-                                    ContentBlock::ToolUse { id, name, input } => {
-                                        Some(json!({"type": "tool_use", "id": id, "name": name, "input": input}))
-                                    }
-                                    _ => None,
-                                }
-                            }).collect();
-                            Some(json!({"role": m.role, "content": content_blocks}))
-                        }
-                    }
-                }).collect();
+                let conv_values: Vec<Value> = conversation_messages.iter().map(serde_json::to_value).collect::<std::result::Result<_, _>>()?;
                 let estimated = TokenCounter::estimate(&conv_values);
                 if estimated > (model_context_limit * 70 / 100) {
                     tracing::info!(module = "AnthropicLoop", "Context compression needed: {} tokens (limit: {})", estimated, model_context_limit);
@@ -2223,62 +2208,16 @@ impl ToolLoopExecutor {
                     };
                     let level = compressor.determine_compression_level(&context_window);
                     if level != CompressionLevel::None {
-                        let conv_values: Vec<Value> = conversation_messages.iter().filter_map(|m| {
-                            match &m.content {
-                                AnthropicContent::Text(t) => Some(json!({"role": m.role, "content": t})),
-                                AnthropicContent::Blocks(blocks) => {
-                                    let content_blocks: Vec<Value> = blocks.iter().filter_map(|b| {
-                                        match b {
-                                            ContentBlock::Text { text } => Some(json!({"type": "text", "text": text})),
-                                            ContentBlock::ToolResult { tool_use_id, content, is_error } => {
-                                                Some(json!({"type": "tool_result", "tool_use_id": tool_use_id, "content": content, "is_error": is_error}))
-                                            }
-                                            ContentBlock::ToolUse { id, name, input } => {
-                                                Some(json!({"type": "tool_use", "id": id, "name": name, "input": input}))
-                                            }
-                                            _ => None,
-                                        }
-                                    }).collect();
-                                    Some(json!({"role": m.role, "content": content_blocks}))
-                                }
-                            }
-                        }).collect();
+                        let conv_values: Vec<Value> = conversation_messages.iter().map(serde_json::to_value).collect::<std::result::Result<_, _>>()?;
                         let (compressed, metadata) = compressor.compress(
                             conv_values,
-                            self.system_prompt.clone(),
+                            // The client adds the base prompt separately; keep existing system messages intact.
+                            None,
                             level,
                             Some(&self.provider),
                         ).await;
                         if metadata.was_compressed {
-                            conversation_messages = compressed.iter().filter_map(|v| {
-                                let role = v.get("role")?.as_str()?.to_string();
-                                let content = v.get("content")?;
-                                let anthropic_content = if content.is_string() {
-                                    AnthropicContent::Text(content.as_str()?.to_string())
-                                } else if content.is_array() {
-                                    let blocks: Vec<ContentBlock> = content.as_array()?.iter().filter_map(|b| {
-                                        let bt = b.get("type")?.as_str()?;
-                                        match bt {
-                                            "text" => Some(ContentBlock::Text { text: b.get("text")?.as_str()?.to_string() }),
-                                            "tool_result" => Some(ContentBlock::ToolResult {
-                                                tool_use_id: b.get("tool_use_id")?.as_str()?.to_string(),
-                                                content: b.get("content")?.clone(),
-                                                is_error: b.get("is_error").and_then(|v| v.as_bool()),
-                                            }),
-                                            "tool_use" => Some(ContentBlock::ToolUse {
-                                                id: b.get("id")?.as_str()?.to_string(),
-                                                name: b.get("name")?.as_str()?.to_string(),
-                                                input: b.get("input")?.clone(),
-                                            }),
-                                            _ => None,
-                                        }
-                                    }).collect();
-                                    AnthropicContent::Blocks(blocks)
-                                } else {
-                                    return None;
-                                };
-                                Some(AnthropicMessage { role, content: anthropic_content })
-                            }).collect();
+                            conversation_messages = compressed.into_iter().map(serde_json::from_value).collect::<std::result::Result<Vec<AnthropicMessage>, _>>()?;
                             tracing::info!(module = "AnthropicLoop", "Context compressed: {} -> {} messages, saved {} tokens",
                                 metadata.original_count, metadata.compressed_count, metadata.token_reduction);
                         }
@@ -2702,32 +2641,9 @@ impl ToolLoopExecutor {
             tracing::info!(module = "OpenAILoop", "API key length={}", api_key_len);
 
             // Context compression check before each API call
-            if iteration > 0 {
+            {
                 let model_context_limit = self.provider.model.context_window.map(|n| (n as f64 * 0.90) as usize).unwrap_or_else(|| TokenCounter::get_safe_limit(&model_id, 0.90));
-                let conv_values: Vec<Value> = conversation_messages.iter().filter_map(|m| {
-                    let content_value = match &m.content {
-                        OpenAIContent::Text(t) => json!(t),
-                        OpenAIContent::Multi(parts) => {
-                            let arr: Vec<Value> = parts.iter().filter_map(|p| {
-                                match p {
-                                    crate::native_engine::openai_client::OpenAIContentPart::Text { text } => Some(json!({"type": "text", "text": text})),
-                                    crate::native_engine::openai_client::OpenAIContentPart::Image { image_url } => Some(json!({"type": "image_url", "image_url": {"url": &image_url.url}})),
-                                }
-                            }).collect();
-                            json!(arr)
-                        }
-                    };
-                    let mut obj = json!({"role": m.role, "content": content_value});
-                    if let Some(ref tc) = m.tool_calls {
-                        if let Ok(tc_val) = serde_json::to_value(tc) {
-                            obj["tool_calls"] = tc_val;
-                        }
-                    }
-                    if let Some(ref tid) = m.tool_call_id {
-                        obj["tool_call_id"] = json!(tid);
-                    }
-                    Some(obj)
-                }).collect();
+                let conv_values: Vec<Value> = conversation_messages.iter().map(serde_json::to_value).collect::<std::result::Result<_, _>>()?;
                 let estimated = TokenCounter::estimate(&conv_values);
                 if estimated > (model_context_limit * 70 / 100) {
                     tracing::info!(module = "OpenAILoop", "Context compression needed: {} tokens (limit: {})", estimated, model_context_limit);
@@ -2740,61 +2656,16 @@ impl ToolLoopExecutor {
                     };
                     let level = compressor.determine_compression_level(&context_window);
                     if level != CompressionLevel::None {
-                        let conv_values: Vec<Value> = conversation_messages.iter().filter_map(|m| {
-                            let content_value = match &m.content {
-                                OpenAIContent::Text(t) => json!(t),
-                                OpenAIContent::Multi(parts) => {
-                                    let arr: Vec<Value> = parts.iter().filter_map(|p| {
-                                        match p {
-                                            crate::native_engine::openai_client::OpenAIContentPart::Text { text } => Some(json!({"type": "text", "text": text})),
-                                            crate::native_engine::openai_client::OpenAIContentPart::Image { image_url } => Some(json!({"type": "image_url", "image_url": {"url": &image_url.url}})),
-                                        }
-                                    }).collect();
-                                    json!(arr)
-                                }
-                            };
-                            let mut obj = json!({"role": m.role, "content": content_value});
-                            if let Some(ref tc) = m.tool_calls {
-                                if let Ok(tc_val) = serde_json::to_value(tc) {
-                                    obj["tool_calls"] = tc_val;
-                                }
-                            }
-                            if let Some(ref tid) = m.tool_call_id {
-                                obj["tool_call_id"] = json!(tid);
-                            }
-                            Some(obj)
-                        }).collect();
+                        let conv_values: Vec<Value> = conversation_messages.iter().map(serde_json::to_value).collect::<std::result::Result<_, _>>()?;
                         let (compressed, metadata) = compressor.compress(
                             conv_values,
-                            self.system_prompt.clone(),
+                            // The client adds the base prompt separately; keep existing system messages intact.
+                            None,
                             level,
                             Some(&self.provider),
                         ).await;
                         if metadata.was_compressed {
-                            conversation_messages = compressed.iter().filter_map(|v| {
-                                let role = v.get("role")?.as_str()?.to_string();
-                                let content = v.get("content")?;
-                                let openai_content = if content.is_string() {
-                                    OpenAIContent::Text(content.as_str()?.to_string())
-                                } else if content.is_array() {
-                                    let parts: Vec<crate::native_engine::openai_client::OpenAIContentPart> = content.as_array()?.iter().filter_map(|p| {
-                                        let pt = p.get("type")?.as_str()?;
-                                        match pt {
-                                            "text" => Some(crate::native_engine::openai_client::OpenAIContentPart::Text { text: p.get("text")?.as_str()?.to_string() }),
-                                            "image_url" => Some(crate::native_engine::openai_client::OpenAIContentPart::Image {
-                                                image_url: crate::native_engine::openai_client::ImageUrl { url: p.get("image_url")?.get("url")?.as_str()?.to_string() },
-                                            }),
-                                            _ => None,
-                                        }
-                                    }).collect();
-                                    OpenAIContent::Multi(parts)
-                                } else {
-                                    return None;
-                                };
-                                let tool_calls = v.get("tool_calls").and_then(|tc| serde_json::from_value(tc.clone()).ok());
-                                let tool_call_id = v.get("tool_call_id").and_then(|id| id.as_str()).map(String::from);
-                                Some(OpenAIMessage { role, content: openai_content, tool_calls, tool_call_id, reasoning_content: None, provider_content: None })
-                            }).collect();
+                            conversation_messages = compressed.into_iter().map(serde_json::from_value).collect::<std::result::Result<Vec<OpenAIMessage>, _>>()?;
                             tracing::info!(module = "OpenAILoop", "Context compressed: {} -> {} messages, saved {} tokens",
                                 metadata.original_count, metadata.compressed_count, metadata.token_reduction);
                         }

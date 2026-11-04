@@ -2,6 +2,35 @@
 use anyhow::{Context, Result};
 use futures::{Stream, StreamExt};
 
+/// Surface gateway error bodies instead of silently treating JSON/HTML as SSE.
+pub(super) fn response(
+    mut response: reqwest::Response,
+) -> impl Stream<Item = Result<String>> + Send {
+    async_stream::try_stream! {
+        let content_type = response.headers().get(reqwest::header::CONTENT_TYPE)
+            .and_then(|v| v.to_str().ok()).unwrap_or_default().to_ascii_lowercase();
+        if content_type.contains("application/json") || content_type.contains("text/html") {
+            let status = response.status();
+            let mut body = Vec::new();
+            while body.len() < 8192 {
+                let Some(chunk) = response.chunk().await? else { break; };
+                let count = chunk.len().min(8192 - body.len());
+                body.extend_from_slice(&chunk[..count]);
+            }
+            let value: serde_json::Value = serde_json::from_slice(&body).unwrap_or_default();
+            let detail = value["error"]["message"].as_str()
+                .or_else(|| value["error"].as_str()).or_else(|| value["message"].as_str())
+                .map(|s| s.chars().take(1000).collect::<String>()).unwrap_or_default();
+            Err(anyhow::anyhow!("Expected an SSE model response, received HTTP {status} ({content_type}). {detail}"))?;
+        }
+        let stream = decode(response.bytes_stream());
+        futures::pin_mut!(stream);
+        while let Some(chunk) = stream.next().await {
+            yield chunk?;
+        }
+    }
+}
+
 pub(super) fn decode<S, B, E>(stream: S) -> impl Stream<Item = Result<String>> + Send
 where
     S: Stream<Item = std::result::Result<B, E>> + Send,

@@ -300,9 +300,7 @@ impl AnthropicClient {
             Ok(resp)
         }).await?;
 
-        Ok(Box::pin(super::utf8_stream::decode(
-            response.bytes_stream(),
-        )))
+        Ok(Box::pin(super::utf8_stream::response(response)))
     }
 
     pub async fn send_message_stream_with_thinking(
@@ -381,9 +379,7 @@ impl AnthropicClient {
             Ok(resp)
         }).await?;
 
-        Ok(Box::pin(super::utf8_stream::decode(
-            response.bytes_stream(),
-        )))
+        Ok(Box::pin(super::utf8_stream::response(response)))
     }
 }
 

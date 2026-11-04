@@ -66,6 +66,45 @@ async fn critical_system_prompt_preserves_utf8_at_byte_1000() {
     assert_eq!(compressed.last().unwrap()["content"], "Keep this");
 }
 
+#[tokio::test]
+async fn compression_keeps_latest_tool_calls_paired_with_their_results() {
+    for anthropic in [false, true] {
+        let mut messages = Vec::new();
+        for _ in 0..6 {
+            messages.push(json!({"role":"user","content":"old task"}));
+            messages.push(json!({"role":"assistant","content":"old answer"}));
+        }
+        let latest = if anthropic {
+            vec![
+                json!({"role":"user","content":"current task"}),
+                json!({"role":"assistant","content":[{"type":"tool_use","id":"read","name":"Read","input":{"file_path":"a.txt"}}]}),
+                json!({"role":"user","content":[{"type":"tool_result","tool_use_id":"read","content":"file result"}]}),
+            ]
+        } else {
+            vec![
+                json!({"role":"user","content":"current task"}),
+                json!({"role":"assistant","content":null,"tool_calls":[{"id":"read","type":"function","function":{"name":"Read","arguments":"{\"file_path\":\"a.txt\"}"}}]}),
+                json!({"role":"tool","tool_call_id":"read","content":"file result"}),
+            ]
+        };
+        messages.extend(latest.clone());
+        for level in [
+            CompressionLevel::Light,
+            CompressionLevel::Medium,
+            CompressionLevel::Heavy,
+            CompressionLevel::Critical,
+        ] {
+            let (compressed, _) = ContextCompressor::new(None)
+                .compress(messages.clone(), None, level.clone(), None)
+                .await;
+            assert!(
+                compressed.ends_with(&latest),
+                "{level:?}, anthropic={anthropic}: latest exchange was split"
+            );
+        }
+    }
+}
+
 /// Opt-in local replay: read history without running tools, providers, or DB migrations.
 #[tokio::test]
 #[ignore = "requires COMPRESSION_REPLAY_DB and COMPRESSION_REPLAY_SESSION"]

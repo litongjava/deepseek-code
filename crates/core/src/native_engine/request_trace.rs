@@ -240,7 +240,7 @@ impl RequestTrace {
                     );
                     self.blocks[position]["text"] = json!(combined);
                 }
-                if let Some(args) = delta["partial_json"].as_str() {
+                if let Some(args) = delta["partial_json"].as_str().filter(|args| !args.is_empty()) {
                     self.arguments.entry(position).or_default().push_str(args);
                 }
                 if let Some(signature) = delta["signature"].as_str() {
@@ -274,6 +274,7 @@ impl RequestTrace {
             error=Some(format!("Incomplete response: provider stopped at the output token limit ({}). Partial output was retained; send a follow-up to continue.",self.finish_reason.as_deref().unwrap()));
             "incomplete"
         } else if status == "completed" && !self.response_finished && self.finish_reason.is_none() {
+            error = Some("Model response ended before completion: provider stream closed without a completion marker. Partial output was retained; pending tools were not executed.".into());
             "interrupted"
         } else {
             status

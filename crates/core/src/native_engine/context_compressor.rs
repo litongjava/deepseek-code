@@ -217,8 +217,12 @@ impl ContextCompressor {
             
             // Skip empty assistant messages
             if role == "assistant" {
-                let content = msg.get("content").and_then(|c| c.as_str()).unwrap_or("");
-                if content.trim().is_empty() {
+                let empty = match msg.get("content") {
+                    Some(serde_json::Value::String(text)) => text.trim().is_empty(),
+                    Some(serde_json::Value::Array(blocks)) => blocks.is_empty(),
+                    _ => true,
+                };
+                if empty && !msg.get("tool_calls").and_then(|calls| calls.as_array()).is_some_and(|calls| !calls.is_empty()) {
                     continue;
                 }
             }
@@ -526,11 +530,12 @@ impl ContextCompressor {
             "_critical_compression": true,
         }));
 
-        // Only keep the absolute last turn
+        // Keep the last exchange intact, including paired tool calls/results.
         if let Some(last_turn) = turns.last() {
             if let Some(user_msg) = &last_turn.user_message {
                 compressed.push(user_msg.clone());
             }
+            compressed.extend(last_turn.assistant_messages.iter().cloned());
         }
 
         let compressed_tokens = Self::estimate_tokens(&compressed);
@@ -562,7 +567,10 @@ impl ContextCompressor {
         for msg in messages {
             let role = msg.get("role").and_then(|r| r.as_str()).unwrap_or("");
 
-            if role == "user" {
+            let tool_result = role == "user" && msg["content"].as_array().is_some_and(|blocks| {
+                blocks.iter().any(|block| block["type"] == "tool_result")
+            });
+            if role == "user" && !tool_result {
                 // Start a new turn
                 if let Some(turn) = current_turn.take() {
                     turns.push(turn);
@@ -575,7 +583,7 @@ impl ContextCompressor {
                     estimated_tokens: Self::estimate_message_tokens(msg),
                 });
                 turn_index += 1;
-            } else if role == "assistant" || role == "tool" || role == "function" {
+            } else if role == "assistant" || role == "tool" || role == "function" || tool_result {
                 if let Some(ref mut turn) = current_turn {
                     turn.assistant_messages.push((*msg).clone());
                     turn.estimated_tokens += Self::estimate_message_tokens(msg);

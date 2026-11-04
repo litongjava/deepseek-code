@@ -356,9 +356,7 @@ impl OpenAIClient {
             Ok(resp)
         }).await?;
 
-        Ok(Box::pin(super::utf8_stream::decode(
-            response.bytes_stream(),
-        )))
+        Ok(Box::pin(super::utf8_stream::response(response)))
     }
 }
 

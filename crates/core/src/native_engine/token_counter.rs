@@ -4,40 +4,16 @@ use std::collections::HashMap;
 pub struct TokenCounter;
 
 impl TokenCounter {
-    /// Simple estimation: English ~1 token/4 chars, Chinese ~1 token/1.5 chars
-    /// Overall average: ~1 token/3 chars
+    /// Use transport accounting, including structured tool arguments/results.
     pub fn estimate(messages: &[Value]) -> usize {
-        let total_chars: usize = messages
-            .iter()
-            .map(|m| {
-                match &m["content"] {
-                    Value::String(s) => s.len(),
-                    Value::Array(parts) => parts
-                        .iter()
-                        .filter_map(|p| p.get("text").and_then(Value::as_str))
-                        .map(|s| s.len())
-                        .sum(),
-                    _ => 0,
-                }
-            })
-            .sum();
-        
-        // Rough average: 1 token ≈ 3 chars
-        total_chars / 3
+        super::request_context::ContextUsage::from_body(
+            "openai-completions", &serde_json::json!({"messages": messages}), None, 0,
+        ).history.estimated_tokens.min(usize::MAX as u64) as usize
     }
 
     /// Estimate tokens for a single message
     pub fn estimate_message(msg: &Value) -> usize {
-        let chars = match &msg["content"] {
-            Value::String(s) => s.len(),
-            Value::Array(parts) => parts
-                .iter()
-                .filter_map(|p| p.get("text").and_then(Value::as_str))
-                .map(|s| s.len())
-                .sum(),
-            _ => 0,
-        };
-        chars / 3
+        Self::estimate(std::slice::from_ref(msg))
     }
 
     /// Check if token count exceeds threshold
