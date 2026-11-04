@@ -67,10 +67,11 @@ async fn fixture(
         async move {
             assert!(body.get("tools").is_none_or(|v| v.as_array().is_some_and(Vec::is_empty)));
             let usage = deepseek_code_core::native_engine::request_context::ContextUsage::from_body(if anthropic { "anthropic-messages" } else { "openai-completions" }, &body, Some(window), 4096);
-            assert!(usage.text_subtotal() + 4096 <= u64::from(window) * 9 / 10, "wire input {} plus output exceeds safe window {}", usage.text_subtotal(), u64::from(window) * 9 / 10);
+            assert!(usage.text_subtotal() + body["max_tokens"].as_u64().unwrap() <= u64::from(window) * 9 / 10, "wire input {} plus output exceeds safe window {}", usage.text_subtotal(), u64::from(window) * 9 / 10);
+            let merge_too_short = mode == 3 && body["messages"].to_string().contains("Merge these summaries") && body["max_tokens"].as_u64().unwrap() < 8192;
             let number = { let mut requests = captured.lock().unwrap(); requests.push(body); requests.len() };
             if mode == 2 && number == 2 { std::future::pending::<()>().await; }
-            let fail = mode == 1 && number == 2;
+            let fail = (mode == 1 && number == 2) || merge_too_short;
             let text = "Original request retained; NEEDS_TESTING: finish the remaining tests.";
             Json(if anthropic {
                 json!({"id":"r","type":"message","role":"assistant","model":"gpt-6-astra","content":[{"type":"text","text":text}],"stop_reason":if fail { "max_tokens" } else { "end_turn" },"usage":{"input_tokens":1,"output_tokens":1}})
@@ -80,7 +81,7 @@ async fn fixture(
         }
     }));
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let provider: Provider = serde_json::from_value(json!({"id":"fixture","name":"fixture","base_url":format!("http://{}",listener.local_addr().unwrap()),"api_key":"fixture","api_format":format,"enabled":true,"models":[{"id":"gpt-6-astra","name":"fixture","enabled":true,"supports_vision":false,"supports_web_search":false,"context_window":window,"max_tokens":4096}]})).unwrap();
+    let provider: Provider = serde_json::from_value(json!({"id":"fixture","name":"fixture","base_url":format!("http://{}",listener.local_addr().unwrap()),"api_key":"fixture","api_format":format,"enabled":true,"models":[{"id":"gpt-6-astra","name":"fixture","enabled":true,"supports_vision":false,"supports_web_search":false,"context_window":window,"max_tokens":if mode == 3 {8192} else {4096}}]})).unwrap();
     let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
     let engine = runtime::create_engine(
         &paths,
@@ -137,6 +138,23 @@ async fn oversized_compaction_is_bounded_and_persists_only_the_final_summary() {
 }
 
 #[tokio::test]
+async fn compaction_merge_uses_configured_8k_output_without_raising_fragment_budget() {
+    for format in ["openai", "anthropic"] {
+        let (_dir, store, id, engine, requests, server) = fixture(format, 3, false).await;
+        compaction::compact(&engine, &store.db, &id, "fixture", "gpt-6-astra", "")
+            .await
+            .unwrap();
+        let bodies = requests.lock().unwrap();
+        assert!(bodies.len() > 2);
+        assert!(bodies[..bodies.len() - 1]
+            .iter()
+            .all(|b| b["max_tokens"] == 4096));
+        assert_eq!(bodies.last().unwrap()["max_tokens"], 8192);
+        server.abort();
+    }
+}
+
+#[tokio::test]
 async fn compaction_fragment_failure_and_cancellation_keep_original_history() {
     for format in ["openai", "anthropic"] {
         for mode in [1, 2] {
@@ -165,6 +183,23 @@ async fn compaction_fragment_failure_and_cancellation_keep_original_history() {
             }
             assert_eq!(requests.lock().unwrap().len(), 2);
             assert_eq!(store.history(&id).unwrap(), before);
+            if mode == 1 {
+                let first_input = requests.lock().unwrap()[0]["messages"].clone();
+                compaction::compact(&engine, &store.db, &id, "fixture", "gpt-6-astra", "")
+                    .await
+                    .unwrap();
+                let first_replays = requests
+                    .lock()
+                    .unwrap()
+                    .iter()
+                    .filter(|body| body["messages"] == first_input)
+                    .count();
+                assert_eq!(
+                    first_replays, 1,
+                    "completed first fragment must be reused after failure"
+                );
+                assert_eq!(store.history(&id).unwrap().len(), before.len() + 1);
+            }
             server.abort();
         }
     }

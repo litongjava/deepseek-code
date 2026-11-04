@@ -1,6 +1,9 @@
 //! Bounded, tool-free generation using the same transports as interactive turns.
 use super::{anthropic_client::*, openai_client::*, provider_manager::ResolvedProvider};
+use crate::services::compaction::checkpoint::Checkpoint;
 use anyhow::{ensure, Context, Result};
+
+const MERGE: &str = "Merge these summaries of consecutive conversation fragments into one compact continuation summary. Preserve chronology; later user corrections override earlier plans. Prioritize the latest request, constraints, verified results, unresolved problems and exact next steps. Deduplicate repeated facts and omit raw tool output. Aim for 3000 tokens and stay below 28000 characters. Do not claim unfinished work is complete.\n";
 
 fn input_tokens(system: &str, input: &str) -> u64 {
     super::request_context::ContextUsage::from_body(
@@ -56,11 +59,12 @@ fn fragments<'a>(system: &str, input: &'a str, budget: u64) -> Result<Vec<&'a st
 }
 
 /// Summarize all input in bounded chronological batches, then merge the summaries.
-/// No intermediate output is committed; dropping the future cancels the active request.
-pub async fn summarize(
+/// No intermediate output becomes active history; dropping the future cancels the request.
+pub(crate) async fn summarize(
     mut provider: ResolvedProvider,
     system: &str,
     input: &str,
+    mut checkpoint: Option<&mut Checkpoint<'_>>,
 ) -> Result<String> {
     let window = provider.model.context_window.unwrap_or_else(|| {
         super::token_counter::TokenCounter::get_model_context_limit(&provider.model.id) as u32
@@ -69,23 +73,41 @@ pub async fn summarize(
     let output = provider.model.max_tokens.unwrap_or(4096).min(4096);
     // Leave room for output, protocol overhead and estimation differences.
     let budget = (u64::from(window) * 9 / 10).saturating_sub(u64::from(output) + 1024);
+    let final_output = provider.model.max_tokens.unwrap_or(8192).min(8192);
+    let final_budget = (u64::from(window) * 9 / 10).saturating_sub(u64::from(final_output) + 1024);
     let mut current = input.to_owned();
     loop {
-        if input_tokens(system, &current) <= budget {
-            return generate(provider, system, &current).await;
+        if input_tokens(system, &current) <= final_budget {
+            return summary_request(
+                provider,
+                system,
+                &current,
+                final_output,
+                checkpoint.as_deref_mut(),
+                "final summary",
+            )
+            .await
+            .context("Final compaction summary failed; completed fragments retained for retry");
         }
         let parts = fragments(system, &current, budget)?;
         let count = parts.len();
-        let mut reduced = String::from("Merge these summaries of consecutive conversation fragments into one continuation summary. Preserve chronology; later user corrections override earlier plans. Do not claim unfinished work is complete.\n");
+        let mut reduced = String::from(MERGE);
         for (index, part) in parts.into_iter().enumerate() {
-            let summary = generate(provider.clone(), system, &format!("{FRAGMENT}{part}"))
-                .await
-                .with_context(|| {
-                    format!(
-                        "Compaction fragment {}/{count} failed; original transcript retained",
-                        index + 1
-                    )
-                })?;
+            let summary = summary_request(
+                provider.clone(),
+                system,
+                &format!("{FRAGMENT}{part}"),
+                output,
+                checkpoint.as_deref_mut(),
+                &format!("fragment {}/{count}", index + 1),
+            )
+            .await
+            .with_context(|| {
+                format!(
+                    "Compaction fragment {}/{count} failed; original transcript retained",
+                    index + 1
+                )
+            })?;
             reduced.push_str(&format!("\n--- Fragment {} ---\n{summary}\n", index + 1));
         }
         ensure!(
@@ -96,12 +118,59 @@ pub async fn summarize(
     }
 }
 
+async fn summary_request(
+    provider: ResolvedProvider,
+    system: &str,
+    input: &str,
+    output: u32,
+    checkpoint: Option<&mut Checkpoint<'_>>,
+    label: &str,
+) -> Result<String> {
+    let key = Checkpoint::request_key(system, input, output);
+    if let Some(saved) = checkpoint.as_ref().and_then(|c| c.get(&key)) {
+        if let Some(cache) = checkpoint {
+            let _progress = crate::services::hook_progress::Running::start(
+                cache.session,
+                Some(&format!("Compacting: reusing saved {label}")),
+            );
+        }
+        return Ok(saved);
+    }
+    let _progress = checkpoint.as_ref().and_then(|cache| {
+        crate::services::hook_progress::Running::start(
+            cache.session,
+            Some(&format!("Compacting: {label}")),
+        )
+    });
+    // Each transport attempt already has a 300-second deadline and bounded retries.
+    // An outer 120-second deadline must not cancel a healthy retry or slower summary.
+    let summary = generate_request(provider, system, input, output, false).await?;
+    if let Some(cache) = checkpoint {
+        cache.save(key, summary.clone())?;
+    }
+    Ok(summary)
+}
+
 pub async fn generate(provider: ResolvedProvider, system: &str, input: &str) -> Result<String> {
+    generate_request(provider, system, input, 4096, true).await
+}
+
+async fn generate_request(
+    provider: ResolvedProvider,
+    system: &str,
+    input: &str,
+    output_cap: u32,
+    short_deadline: bool,
+) -> Result<String> {
     ensure!(
         provider.model.supports_text,
         "Selected model does not accept text"
     );
-    let max_tokens = provider.model.max_tokens.unwrap_or(4096).min(4096);
+    let max_tokens = provider
+        .model
+        .max_tokens
+        .unwrap_or(output_cap)
+        .min(output_cap);
     ensure!(max_tokens > 0, "Model output budget must be positive");
     if let Some(limit) = provider.model.context_window {
         ensure!(
@@ -186,9 +255,20 @@ pub async fn generate(provider: ResolvedProvider, system: &str, input: &str) -> 
         );
         Ok(text)
     };
-    tokio::time::timeout(std::time::Duration::from_secs(120), operation)
-        .await
-        .context("Generation timed out")?
+    generation_deadline(operation, short_deadline).await
+}
+
+async fn generation_deadline<T>(
+    operation: impl std::future::Future<Output = Result<T>>,
+    short_deadline: bool,
+) -> Result<T> {
+    if short_deadline {
+        tokio::time::timeout(std::time::Duration::from_secs(120), operation)
+            .await
+            .context("Generation timed out")?
+    } else {
+        operation.await
+    }
 }
 
 #[cfg(test)]
@@ -220,5 +300,45 @@ mod tests {
         let estimate = input_tokens("system", &input);
         assert!(estimate < input.len() as u64);
         assert!(input_tokens(&"system".repeat(1000), &input) > estimate);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn compaction_allows_a_slow_retry_beyond_the_short_generation_deadline() {
+        use std::{
+            sync::atomic::{AtomicUsize, Ordering},
+            time::Duration,
+        };
+        for short in [true, false] {
+            let calls = AtomicUsize::new(0);
+            let start = tokio::time::Instant::now();
+            let operation = crate::performance::retry_with_backoff(|| {
+                let attempt = calls.fetch_add(1, Ordering::SeqCst);
+                async move {
+                    tokio::time::sleep(Duration::from_secs(if attempt == 0 { 95 } else { 90 }))
+                        .await;
+                    if attempt == 0 {
+                        Err(crate::performance::ApiError {
+                            status: 502,
+                            retry_after: None,
+                            message: "fixture incomplete response".into(),
+                        }
+                        .into())
+                    } else {
+                        Ok("Completed summary")
+                    }
+                }
+            });
+            let result = generation_deadline(operation, short).await;
+            assert_eq!(calls.load(Ordering::SeqCst), 2);
+            if short {
+                assert!(result
+                    .unwrap_err()
+                    .to_string()
+                    .contains("Generation timed out"));
+            } else {
+                assert_eq!(result.unwrap(), "Completed summary");
+                assert!(start.elapsed() > Duration::from_secs(120));
+            }
+        }
     }
 }

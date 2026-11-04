@@ -140,10 +140,11 @@ impl QueryEngine {
     }
 
     /// Tool-free summarization that also accepts histories larger than the model window.
-    pub async fn generate_summary(&self, provider_id: &str, model: &str, system: &str, input: &str) -> Result<String> {
+    pub async fn generate_summary(&self, session: Option<&str>, provider_id: &str, model: &str, system: &str, input: &str) -> Result<String> {
         let provider = self.provider_manager.lock().await.resolve_selected(provider_id, model)
             .ok_or_else(|| anyhow!("Provider/model is unavailable: {provider_id}::{model}"))?;
-        super::generation::summarize(provider, system, input).await
+        let mut checkpoint = session.map(|id| crate::services::compaction::checkpoint::Checkpoint::open(&self.db_manager, id, &provider, system, input)).transpose()?;
+        super::generation::summarize(provider, system, input, checkpoint.as_mut()).await
     }
     pub fn new(
         provider_manager: Arc<Mutex<ProviderManager>>,
