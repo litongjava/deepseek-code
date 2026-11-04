@@ -439,7 +439,7 @@ fn take_read_image(
     tool_name: &str,
     value: &mut Value,
 ) -> Option<std::result::Result<(String, McpOutput), String>> {
-    if tool_name != "Read" {
+    if !matches!(tool_name, "Read" | "ImageGenerate") {
         return None;
     }
     let image = value.as_object_mut()?.remove("image")?;
@@ -472,6 +472,9 @@ async fn execute_builtin_tool(
     }
     if name == "WebFetch" && input["prompt"].as_str().is_some_and(|prompt| !prompt.trim().is_empty()) {
         return Box::pin(web_fetch_with_prompt(input, cwd, provider)).await;
+    }
+    if name == "ImageGenerate" {
+        return crate::tools::image_generation::generate(input, cwd, provider).await;
     }
     if name != "WebSearch" {
         let file = if matches!(name, "Read" | "Edit" | "Write" | "MultiEdit") { input["file_path"].as_str().map(str::to_owned) } else { None };
@@ -1438,7 +1441,7 @@ impl ToolLoopExecutor {
         // Token 计数与自动压缩 - First pass
         tracing::info!(module = "ToolLoop", "[E2] Checking token threshold...");
         let token_threshold = crate::config::OrchestrationConfig::token_threshold();
-        if TokenCounter::exceeds_threshold(&self.messages, token_threshold) {
+        if !crate::services::compaction::native::supports(&self.provider) && TokenCounter::exceeds_threshold(&self.messages, token_threshold) {
             tracing::info!(module = "ToolLoop", "[E2.1] Tokens exceed threshold, compressing with TieredCompressor...");
             let compressor = TieredCompressor::new();
             let compressed = compressor.compress(&self.messages);
@@ -1497,7 +1500,7 @@ impl ToolLoopExecutor {
 
         tracing::info!(module = "ToolLoop", "Model: {}, Estimated tokens: {}, Safe limit: {}", model_id, estimated_tokens, safe_limit);
 
-        if estimated_tokens > safe_limit {
+        if !crate::services::compaction::native::supports(&self.provider) && estimated_tokens > safe_limit {
             tracing::warn!(module = "ToolLoop", "Context still exceeds model limit! Applying progressive compression...");
             let compressor = TieredCompressor::new();
             let original_estimate = TokenCounter::estimate(&self.messages);
@@ -2647,6 +2650,16 @@ impl ToolLoopExecutor {
                 let estimated = TokenCounter::estimate(&conv_values);
                 if estimated > (model_context_limit * 70 / 100) {
                     tracing::info!(module = "OpenAILoop", "Context compression needed: {} tokens (limit: {})", estimated, model_context_limit);
+                    if crate::services::compaction::native::supports(&self.provider) {
+                        let compacted = crate::services::compaction::native::generate_messages(
+                            &self.provider, conversation_messages.clone(), self.system_prompt.as_deref().unwrap_or("")
+                        ).await?;
+                        // Only the in-flight context changes here; all original messages and tool rows remain durable.
+                        conversation_messages = vec![OpenAIMessage {
+                            role: "user".into(), content: OpenAIContent::Text(compacted.text),
+                            tool_calls: None, tool_call_id: None, reasoning_content: None, provider_content: compacted.native,
+                        }];
+                    } else {
                     let compressor = ContextCompressor::new(None);
                     let context_window = ContextWindow {
                         model_id: model_id.clone(),
@@ -2669,6 +2682,7 @@ impl ToolLoopExecutor {
                             tracing::info!(module = "OpenAILoop", "Context compressed: {} -> {} messages, saved {} tokens",
                                 metadata.original_count, metadata.compressed_count, metadata.token_reduction);
                         }
+                    }
                     }
                 }
             }
@@ -3146,7 +3160,7 @@ impl ToolLoopExecutor {
                 content: openai_content,
                 tool_calls,
                 tool_call_id,
-                reasoning_content, provider_content: None,
+                reasoning_content, provider_content: msg.get("provider_content").cloned(),
             })
         }).collect()
     }

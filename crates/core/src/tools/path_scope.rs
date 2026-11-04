@@ -32,7 +32,7 @@ pub(crate) async fn approved_auto_call<F: Future>(
     future: F,
 ) -> F::Output {
     let key = match tool {
-        "Write" | "Edit" | "MultiEdit" => Some("file_path"),
+        "Write" | "Edit" | "MultiEdit" | "ImageGenerate" => Some("file_path"),
         "NotebookEdit" => Some("notebook_path"),
         _ => None,
     };

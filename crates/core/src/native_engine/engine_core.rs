@@ -146,6 +146,16 @@ impl QueryEngine {
         let mut checkpoint = session.map(|id| crate::services::compaction::checkpoint::Checkpoint::open(&self.db_manager, id, &provider, system, input)).transpose()?;
         super::generation::summarize(provider, system, input, checkpoint.as_mut()).await
     }
+    pub async fn generate_compaction(&self, session: &str, provider_id: &str, model: &str, system: &str, input: &str, instructions: &str) -> Result<crate::services::compaction::GeneratedSummary> {
+        let provider = self.provider_manager.lock().await.resolve_selected(provider_id, model)
+            .ok_or_else(|| anyhow!("Provider/model is unavailable: {provider_id}::{model}"))?;
+        let history = crate::runtime::SessionStore::new(self.db_manager.clone()).model_history(session, &provider.provider.api_format)?;
+        crate::services::compaction::native::validate_history(&history, &provider)?;
+        if crate::services::compaction::native::supports(&provider) {
+            return crate::services::compaction::native::generate(&self.db_manager, session, &provider, instructions).await;
+        }
+        self.generate_summary(Some(session), provider_id, model, system, input).await.map(Into::into)
+    }
     pub fn new(
         provider_manager: Arc<Mutex<ProviderManager>>,
         db_manager: Arc<DbManager>,
@@ -504,6 +514,7 @@ impl QueryEngine {
             }
         }
         .ok_or_else(|| anyhow!("No provider found for model: {}", request.model))?;
+        crate::services::compaction::native::validate_history(&request.messages, &hook_provider)?;
         let hooks = crate::services::tool_hooks::HookRunner::load_with_plugins(
             &plugin_context,
             &workspace,

@@ -399,6 +399,10 @@ impl SessionStore {
             let messages = message_repo::get_messages_by_conversation(conn, id)?;
             let start = messages.iter().rposition(|m| m.is_compact_boundary).unwrap_or(0);
             for message in messages.into_iter().skip(start) {
+                if let Some(native) = crate::services::compaction::native::load(conn, &message.id)? {
+                    history.push(json!({"role":message.role,"content":message.content,"provider_content":native}));
+                    continue;
+                }
                 let calls = message_repo::get_tool_calls_for_message(conn, &message.id)?;
                 if message.role == "assistant" && !calls.is_empty() {
                     match format {

@@ -112,6 +112,7 @@ pub(super) fn request(
         return Ok(body);
     }
     let mut input = Vec::new();
+    let mut compact_prefix = 0;
     let mut names = HashMap::new();
     for message in messages {
         if let Some(calls) = &message.tool_calls {
@@ -120,12 +121,13 @@ pub(super) fn request(
             }
         }
         // Replay exact provider blocks, including encrypted reasoning/signatures, within a tool loop.
-        if message.role == "assistant" {
+        if message.role == "assistant" || message.provider_content.as_ref().is_some_and(|v| v["compaction"] == true) {
             if let Some(native) = &message.provider_content {
                 if native["api"] == api {
                     if let Some(items) = native["items"].as_array() {
                         if api == "openai-responses" {
                             input.extend(items.clone());
+                            if native["compaction"] == true { compact_prefix = input.len(); }
                         } else if api == "google-generative-ai" {
                             input.push(json!({"role":"model","parts":items}));
                         } else {
@@ -181,7 +183,9 @@ pub(super) fn request(
         }
     }
     if api == "openai-responses" {
-        super::super::tool_call_ids::normalize_responses(&mut input);
+        let mut tail = input.split_off(compact_prefix);
+        super::super::tool_call_ids::normalize_responses(&mut tail);
+        input.extend(tail);
     }
     let mut body = match api {
         "openai-responses" => {

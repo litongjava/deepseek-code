@@ -66,6 +66,8 @@ pub fn branch_conversation(conn: &Connection, source_id: &str, message_id: Optio
         }
         message_repo::save_request_snapshots(&transaction, &new_message_id, &snapshots)?;
         transaction.execute("INSERT INTO message_user_content (message_id, content_json) SELECT ?1, content_json FROM message_user_content WHERE message_id = ?2", params![new_message_id, message.id])?;
+        transaction.execute("INSERT INTO peripheral_settings(key,value) SELECT ?1,value FROM peripheral_settings WHERE key=?2",
+            params![crate::services::compaction::native::key(&new_message_id), crate::services::compaction::native::key(&message.id)])?;
         transaction.execute("INSERT INTO attachments (id, message_id, file_name, file_type, mime_type, file_size, source)
             SELECT lower(hex(randomblob(16))), ?1, file_name, file_type, mime_type, file_size, source FROM attachments WHERE message_id = ?2",
             params![new_message_id, message.id])?;

@@ -28,6 +28,11 @@ pub fn catalog_entry(id: &str) -> Option<&'static Value> {
 
 pub type ProviderStream = Pin<Box<dyn Stream<Item = Result<String>> + Send>>;
 
+pub(crate) fn compaction_request(provider: &ResolvedProvider, messages: Vec<OpenAIMessage>, instructions: &str) -> Result<Value> {
+    let body = messages::request("openai-responses", provider, &Value::Null, messages, Some(instructions), vec![], 0)?;
+    Ok(serde_json::json!({"model":provider.model.id,"input":body["input"],"instructions":body["instructions"]}))
+}
+
 pub(super) fn metadata(provider: &ResolvedProvider) -> Result<(&'static Value, &'static Value)> {
     let id = provider
         .provider

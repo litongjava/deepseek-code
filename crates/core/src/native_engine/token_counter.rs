@@ -16,9 +16,13 @@ impl TokenCounter {
 
     /// Use transport accounting, including structured tool arguments/results.
     pub fn estimate(messages: &[Value]) -> usize {
+        let opaque_tokens: u64 = messages.iter().filter_map(|message| {
+            let native = message.get("provider_content")?;
+            (native["compaction"] == true).then(|| native["usage"]["output_tokens"].as_u64().unwrap_or(0))
+        }).sum();
         super::request_context::ContextUsage::from_body(
             "openai-completions", &serde_json::json!({"messages": messages}), None, 0,
-        ).history.estimated_tokens.min(usize::MAX as u64) as usize
+        ).history.estimated_tokens.saturating_add(opaque_tokens).min(usize::MAX as u64) as usize
     }
 
     /// Estimate tokens for a single message
