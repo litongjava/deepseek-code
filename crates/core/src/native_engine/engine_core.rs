@@ -138,6 +138,13 @@ impl QueryEngine {
             .ok_or_else(|| anyhow!("Provider/model is unavailable: {provider_id}::{model}"))?;
         super::generation::generate(provider, system, input).await
     }
+
+    /// Tool-free summarization that also accepts histories larger than the model window.
+    pub async fn generate_summary(&self, provider_id: &str, model: &str, system: &str, input: &str) -> Result<String> {
+        let provider = self.provider_manager.lock().await.resolve_selected(provider_id, model)
+            .ok_or_else(|| anyhow!("Provider/model is unavailable: {provider_id}::{model}"))?;
+        super::generation::summarize(provider, system, input).await
+    }
     pub fn new(
         provider_manager: Arc<Mutex<ProviderManager>>,
         db_manager: Arc<DbManager>,

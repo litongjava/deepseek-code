@@ -147,7 +147,7 @@ pub async fn compact(
         instructions, prepared.transcript
     );
     let summary = engine
-        .generate_text(provider_id, model, PROMPT, &input)
+        .generate_summary(provider_id, model, PROMPT, &input)
         .await?;
     commit(db, prepared, &summary)
 }
@@ -233,7 +233,7 @@ pub fn commit_part(db: &DbManager, id: &str, message_id: &str, part: Part, prepa
 pub async fn summarize_part(engine: &NativeEngine, db: &DbManager, id: &str, message_id: &str, part: Part, provider_id: &str, model: &str) -> Result<(String, usize)> {
     let prepared = prepare_part(db, id, message_id, part)?;
     let input = format!("Conversation JSON:\n{}", prepared.transcript);
-    let summary = engine.generate_text(provider_id, model, PROMPT, &input).await?;
+    let summary = engine.generate_summary(provider_id, model, PROMPT, &input).await?;
     commit_part(db, id, message_id, part, prepared, &summary)
 }
 
@@ -259,7 +259,7 @@ pub async fn compact_with_hooks(
         trigger,
         |input| async move {
             engine
-                .generate_text(provider_id, model, PROMPT, &input)
+                .generate_summary(provider_id, model, PROMPT, &input)
                 .await
         },
     )
