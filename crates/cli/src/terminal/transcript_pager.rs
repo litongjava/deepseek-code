@@ -103,9 +103,23 @@ pub(super) struct HistoryView {
     cached_logged: Vec<String>,
     cached_width: usize,
     base_len: usize,
+    pinned: String,
 }
 
 impl HistoryView {
+    pub(super) fn set_pinned(&mut self, text: &str, width: usize) {
+        self.pinned = if text.is_empty() {
+            String::new()
+        } else {
+            super::pinned_prompt::PinnedPrompt::summary(text, width)
+        };
+    }
+    pub(super) fn header_rows(&self, page: usize) -> usize {
+        usize::from(!self.pinned.is_empty() && page > 1)
+    }
+    fn content_page(&self, page: usize) -> usize {
+        page.saturating_sub(self.header_rows(page))
+    }
     pub(super) fn invalidate(&mut self) {
         self.previous.clear();
     }
@@ -116,6 +130,7 @@ impl HistoryView {
         self.top.unwrap_or(0)
     }
     pub(super) fn drag_scroll(&mut self, up: bool, page: usize) {
+        let page = self.content_page(page);
         let top = self.top();
         self.top = Some(if up {
             top.saturating_sub(1)
@@ -135,15 +150,31 @@ impl HistoryView {
     }
     pub(super) fn screen_rows(&self, height: usize, composer: &[String]) -> Vec<String> {
         let page = height.saturating_sub(composer.len());
+        let header = self.header_rows(page);
         let mut result = vec![String::new(); height];
-        for (index, row) in self.all.iter().skip(self.top.unwrap_or(0)).take(page).enumerate() { result[index] = row.styled.clone(); }
-        for (index, row) in composer.iter().take(height).enumerate() { result[page + index] = row.clone(); }
+        if header > 0 {
+            result[0] = self.pinned.clone();
+        }
+        for (index, row) in self
+            .all
+            .iter()
+            .skip(self.top.unwrap_or(0))
+            .take(page - header)
+            .enumerate()
+        {
+            result[index + header] = row.styled.clone();
+        }
+        for (index, row) in composer.iter().take(height).enumerate() {
+            result[page + index] = row.clone();
+        }
         result
     }
     pub(super) fn row_index(&self, row: usize, page: usize) -> Option<usize> {
-        (row < page).then(|| self.top.unwrap_or(0) + row)
+        let index = row.checked_sub(self.header_rows(page))?;
+        (row < page).then(|| self.top.unwrap_or(0) + index)
     }
     pub(super) fn wheel(&mut self, up: bool, page: usize) -> io::Result<()> {
+        let page = self.content_page(page);
         let was_active = self.active();
         let end = self.all.len().saturating_sub(page);
         let top = self.top.unwrap_or(end);
@@ -166,7 +197,7 @@ impl HistoryView {
             self.previous.clear();
             execute!(io::stderr(), EnterAlternateScreen)?;
         }
-        self.top = Some(self.all.len().saturating_sub(page));
+        self.top = Some(self.all.len().saturating_sub(self.content_page(page)));
         Ok(())
     }
     pub(super) fn active(&self) -> bool {
@@ -216,6 +247,7 @@ impl HistoryView {
     }
 
     fn move_page(&mut self, key: KeyCode, page: usize) {
+        let page = self.content_page(page);
         let end = self.all.len().saturating_sub(page);
         match key {
             KeyCode::PageUp if !self.all.is_empty() => {
@@ -273,12 +305,18 @@ impl HistoryView {
         let dropped = viewport.start;
         let composer = &composer[viewport];
         let page = height.saturating_sub(composer.len());
-        let top = self.top.unwrap_or(0).min(self.all.len().saturating_sub(page));
+        let header = self.header_rows(page);
+        let top = self
+            .top
+            .unwrap_or(0)
+            .min(self.all.len().saturating_sub(page - header));
         self.top = Some(top);
         for row in 0..height {
             queue!(out, MoveTo(0, row as u16))?;
-            if row < page {
-                if let Some(line) = self.all.get(top + row) {
+            if row < header {
+                out.write_all(self.pinned.as_bytes())?;
+            } else if row < page {
+                if let Some(line) = self.all.get(top + row - header) {
                     out.write_all(line.styled.as_bytes())?;
                 }
             } else {
@@ -580,6 +618,41 @@ mod tests {
         assert_eq!(wheel_top(40, true), 39);
         assert_eq!(wheel_top(39, false), 40);
         assert_eq!(wheel_top(1, true), 0);
+    }
+
+    #[test]
+    fn pinned_history_reserves_a_row_without_hiding_oldest_text_or_moving_composer() {
+        let mut history = HistoryView::default();
+        history.set_pinned("LATEST QUESTION 中文", 40);
+        history.refresh(
+            &[],
+            &(0..20).map(|n| format!("row {n}")).collect::<Vec<_>>(),
+            40,
+        );
+        history.move_page(KeyCode::Home, 6);
+        let composer = ["border", "draft", "border", "footer"].map(str::to_owned);
+        let mut output = Vec::new();
+        history
+            .draw_to(&mut output, &composer, 1, 3, (40, 10))
+            .unwrap();
+        let mut terminal = vt100::Parser::new(10, 40, 0);
+        terminal.process(&output);
+        let rows = terminal.screen().rows(0, 40).collect::<Vec<_>>();
+        assert_eq!(rows[0], "❯ LATEST QUESTION 中文");
+        assert_eq!(rows[1], "row 0");
+        assert_eq!(rows[5], "row 4");
+        assert_eq!(rows[7], "draft");
+        assert_eq!(history.screen_rows(10, &composer), rows);
+        assert_eq!(history.row_index(0, 6), None);
+        assert_eq!(history.row_index(1, 6), Some(0));
+        assert_eq!(history.row_index(5, 6), Some(4));
+        history.top = Some(usize::MAX);
+        history
+            .draw_to(&mut Vec::new(), &composer, 1, 3, (40, 10))
+            .unwrap();
+        assert_eq!(history.top, Some(15));
+        assert_eq!(history.header_rows(1), 0);
+        history.top = None;
     }
 
     #[test]

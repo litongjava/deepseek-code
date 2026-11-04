@@ -11,6 +11,15 @@ pub(super) struct PinnedPrompt {
     pub height: usize,
 }
 impl PinnedPrompt {
+    pub(super) fn summary(text: &str, width: usize) -> String {
+        let label = format!("❯ {}", text.replace('\r', "").replace('\n', " "));
+        let mut rows = super::markdown::wrap_styled(&label, "", "", width.saturating_sub(2).max(1));
+        let mut first = rows.remove(0);
+        if !rows.is_empty() {
+            first.push('…');
+        }
+        first
+    }
     pub fn draw(&mut self, width: usize, height: usize, background: &[String]) -> io::Result<()> {
         let mut frame = Vec::new();
         self.draw_to(&mut frame, width, height, background)?;
@@ -25,7 +34,6 @@ impl PinnedPrompt {
         if self.text.is_empty() {
             return Ok(());
         }
-        let label = format!("❯ {}", self.text.replace('\r', "").replace('\n', " "));
         let rows = if self.expanded {
             let mut rows = Vec::new();
             for line in self.text.lines() {
@@ -35,12 +43,7 @@ impl PinnedPrompt {
             rows.push("(click to collapse)".into());
             rows
         } else {
-            let mut rows = super::markdown::wrap_styled(&label, "", "", width.saturating_sub(2));
-            let mut first = rows.remove(0);
-            if !rows.is_empty() {
-                first.push('…');
-            }
-            vec![first]
+            vec![Self::summary(&self.text, width)]
         };
         let previous_height = self.height;
         self.height = rows.len();
@@ -87,10 +90,6 @@ pub(super) fn scroll_transcript_down(end: usize, rows: usize) -> String {
     }
     format!("\x1b[{};{}r\x1b[{rows}T\x1b[r", first + 1, end + rows)
 }
-
-static LAST: std::sync::Mutex<String> = std::sync::Mutex::new(String::new());
-pub(super) fn remember(text: &str) { *LAST.lock().unwrap_or_else(|e| e.into_inner()) = text.to_owned(); }
-pub(super) fn latest() -> String { LAST.lock().unwrap_or_else(|e| e.into_inner()).clone() }
 
 #[cfg(test)]
 mod tests {

@@ -768,9 +768,6 @@ impl Screen {
                 terminal::size().map_or(79, |(cols, _)| cols.saturating_sub(1) as usize),
                 true,
             )?;
-            if !text.trim_start().starts_with('/') {
-                crate::terminal::pinned_prompt::remember(text);
-            }
         }
         out.write_all(b"\x1b[?2026l")?;
         out.flush()
@@ -975,7 +972,10 @@ impl PromptEditor {
             && !self.history.last().is_some_and(|line| line.trim_start().starts_with('/'));
         let mut command_overlay = CommandOverlay::default();
         let mut selection = crate::terminal::mouse_selection::Selection::default();
-        let mut pinned = crate::terminal::pinned_prompt::PinnedPrompt { text: { let latest = crate::terminal::pinned_prompt::latest(); if latest.is_empty() { self.history.iter().rev().find(|line| !line.trim_start().starts_with('/')).cloned().unwrap_or_default() } else { latest } }, ..Default::default() };
+        let mut pinned = crate::terminal::pinned_prompt::PinnedPrompt {
+            text: above.latest_prompt().to_owned(),
+            ..Default::default()
+        };
         let mut history_view = crate::terminal::transcript_pager::HistoryView::default();
         let mut selected = 0usize;
         let mut history_pos = self.history.len();
@@ -1275,6 +1275,7 @@ impl PromptEditor {
                 ));
             }
             let input_row = panel_height + menu_height + cursor_row - first + 1;
+            history_view.set_pinned(&pinned.text, width);
             if crate::terminal::scrollback::compact() && !history_view.active() {
                 history_view.refresh(&[], &above.presentation(), width);
                 history_view.show_compact((rows as usize).saturating_sub(lines.len()))?;
@@ -1532,8 +1533,11 @@ impl PromptEditor {
                     {
                         if !selection.document() {
                             history_view.refresh(&[], &above.presentation(), width);
-                            if let Some(top) = selection.promote(history_view.document_rows(), page)
-                            {
+                            if let Some(top) = selection.promote(
+                                history_view.document_rows(),
+                                page,
+                                history_view.header_rows(page),
+                            ) {
                                 history_view.open_at(top)?;
                             }
                         }
@@ -1543,7 +1547,12 @@ impl PromptEditor {
                                 page,
                             );
                             history_view.draw(&composer, input_row, cursor_col, (cols, rows))?;
-                            selection.scroll_to(history_view.top(), page, mouse)?;
+                            selection.scroll_to(
+                                history_view.top(),
+                                page,
+                                history_view.header_rows(page),
+                                mouse,
+                            )?;
                         }
                         continue;
                     }
@@ -1563,7 +1572,8 @@ impl PromptEditor {
                             .map(|(text, _)| text.clone())
                             .collect::<Vec<_>>();
                         let snapshot = history_view.screen_rows(rows as usize, &composer);
-                        let selected = if (mouse.row as usize) < page
+                        let selected = if (mouse.row as usize) >= history_view.header_rows(page)
+                            && (mouse.row as usize) < page
                             || selection.active() && selection.document()
                         {
                             selection.document_event(
@@ -1571,12 +1581,19 @@ impl PromptEditor {
                                 history_view.document_rows(),
                                 history_view.top(),
                                 page,
+                                history_view.header_rows(page),
                             )?
                         } else {
-                            selection.event(mouse, snapshot.clone())?
+                            selection.screen_event(mouse, snapshot.clone())?
                         };
                         if let Some(click) = selected {
                             if click.kind == MouseEventKind::Down(MouseButton::Left) {
+                                if (click.row as usize) < history_view.header_rows(page) {
+                                    let row = above.expand_prompt(&pinned.text, width);
+                                    history_view.refresh(&[], &above.presentation(), width);
+                                    history_view.open_at(row)?;
+                                    continue;
+                                }
                                 if let Some(index) = history_view.row_index(
                                     click.row as usize,
                                     (rows as usize).saturating_sub(lines.len()),
@@ -1605,7 +1622,7 @@ impl PromptEditor {
                             *row = text.clone();
                         }
                     }
-                    let Some(mouse) = selection.event(mouse, snapshot.clone())? else {
+                    let Some(mouse) = selection.screen_event(mouse, snapshot.clone())? else {
                         continue;
                     };
                     if mouse.kind == MouseEventKind::Down(MouseButton::Left)

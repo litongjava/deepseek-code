@@ -41,6 +41,7 @@ pub(super) struct Selection {
     held: bool,
     painted: std::cell::RefCell<Vec<String>>,
     viewport: Option<(usize, usize)>,
+    viewport_offset: usize,
 }
 impl Selection {
     pub fn active(&self) -> bool {
@@ -60,6 +61,7 @@ impl Selection {
         self.start = None;
         self.held = false;
         self.viewport = None;
+        self.viewport_offset = 0;
         Ok(())
     }
     /// Returns a click only after release without motion. A drag copies text.
@@ -70,7 +72,10 @@ impl Selection {
     ) -> io::Result<Option<MouseEvent>> {
         let point = (
             self.viewport.map_or(mouse.row as usize, |view| {
-                view.0 + (mouse.row as usize).min(view.1.saturating_sub(1))
+                view.0
+                    + (mouse.row as usize)
+                        .saturating_sub(self.viewport_offset)
+                        .min(view.1.saturating_sub(1))
             }),
             mouse.column as usize,
         );
@@ -80,8 +85,10 @@ impl Selection {
             MouseEventKind::Moved if self.retained() => Ok(None),
             MouseEventKind::Down(MouseButton::Left) => {
                 let viewport = self.viewport;
+                let offset = self.viewport_offset;
                 self.clear()?;
                 self.viewport = viewport;
+                self.viewport_offset = offset;
                 self.held = true;
                 self.start = Some(point);
                 self.end = point;
@@ -149,14 +156,26 @@ impl Selection {
         rows: Vec<String>,
         top: usize,
         page: usize,
+        offset: usize,
     ) -> io::Result<Option<MouseEvent>> {
-        self.viewport = Some((top, page));
+        self.viewport = Some((top, page.saturating_sub(offset)));
+        self.viewport_offset = offset;
+        self.event(mouse, rows)
+    }
+    pub fn screen_event(
+        &mut self,
+        mouse: MouseEvent,
+        rows: Vec<String>,
+    ) -> io::Result<Option<MouseEvent>> {
+        if matches!(mouse.kind, MouseEventKind::Down(_)) {
+            self.clear()?;
+        }
         self.event(mouse, rows)
     }
     pub fn document(&self) -> bool {
         self.viewport.is_some()
     }
-    pub fn promote(&mut self, rows: Vec<String>, page: usize) -> Option<usize> {
+    pub fn promote(&mut self, rows: Vec<String>, page: usize, offset: usize) -> Option<usize> {
         let start = self.start?;
         let visible: Vec<_> = self.rows.iter().map(|row|
             super::markdown::plain_rendered(row).trim_end().to_owned()).collect();
@@ -174,19 +193,34 @@ impl Selection {
                     .count()
             }).map(|(index, _)| index)?;
         let top = index
-            .saturating_sub(start.0)
-            .min(rows.len().saturating_sub(page));
+            .saturating_sub(start.0.saturating_sub(offset))
+            .min(rows.len().saturating_sub(page.saturating_sub(offset)));
         self.start = Some((index, start.1));
-        self.end.0 = top + self.end.0.min(page.saturating_sub(1));
+        self.end.0 = top
+            + self
+                .end
+                .0
+                .saturating_sub(offset)
+                .min(page.saturating_sub(offset + 1));
         self.rows = rows;
-        self.viewport = Some((top, page));
+        self.viewport = Some((top, page.saturating_sub(offset)));
+        self.viewport_offset = offset;
         self.painted.borrow_mut().clear();
         Some(top)
     }
-    pub fn scroll_to(&mut self, top: usize, page: usize, mouse: MouseEvent) -> io::Result<()> {
-        self.viewport = Some((top, page));
+    pub fn scroll_to(
+        &mut self,
+        top: usize,
+        page: usize,
+        offset: usize,
+        mouse: MouseEvent,
+    ) -> io::Result<()> {
+        self.viewport = Some((top, page.saturating_sub(offset)));
+        self.viewport_offset = offset;
         self.end = (
-            top + (mouse.row as usize).min(page.saturating_sub(1)),
+            top + (mouse.row as usize)
+                .saturating_sub(offset)
+                .min(page.saturating_sub(offset + 1)),
             mouse.column as usize,
         );
         self.dragged = true;
@@ -291,7 +325,7 @@ impl Selection {
             // support would briefly erase the retained selection on every drag.
             queue!(
                 out,
-                MoveTo(0, (row - top) as u16),
+                MoveTo(0, (row - top + self.viewport_offset) as u16),
                 Print(rendered),
                 Print("\x1b[0m\x1b[K")
             )?;
@@ -335,6 +369,26 @@ fn highlight_row(text: &str, left: usize, right: usize) -> String {
 mod tests {
     use super::*;
     #[test]
+    fn document_selection_accounts_for_pinned_header_in_hit_testing_and_painting() {
+        let mut selection = Selection::default();
+        let mouse = MouseEvent {
+            kind: MouseEventKind::Down(MouseButton::Left),
+            column: 0,
+            row: 1,
+            modifiers: crossterm::event::KeyModifiers::NONE,
+        };
+        let rows = (0..20).map(|n| format!("ROW_{n:02}")).collect::<Vec<_>>();
+        selection.document_event(mouse, rows, 5, 6, 1).unwrap();
+        assert_eq!(selection.start, Some((5, 0)));
+        selection.end = (6, 6);
+        let mut output = Vec::new();
+        selection.paint_to(&mut output, true).unwrap();
+        let output = String::from_utf8(output).unwrap();
+        assert!(output.contains("\x1b[2;1H"));
+        assert!(!output.contains("\x1b[1;1H"));
+        assert_eq!(selection.text(), "ROW_05\nROW_06");
+    }
+    #[test]
     fn promotion_uses_context_for_repeated_code_lines() {
         let mut selection = Selection {
             start: Some((1, 0)), end: (0, 0),
@@ -343,7 +397,7 @@ mod tests {
         };
         let rows = ["prefix", "first function", "}", "first result", "second function", "}", "second result"]
             .map(str::to_owned).to_vec();
-        assert_eq!(selection.promote(rows, 3), Some(1));
+        assert_eq!(selection.promote(rows, 3, 0), Some(1));
         assert_eq!(selection.start, Some((2, 0)));
     }
 
@@ -437,6 +491,7 @@ mod tests {
             held: false,
             painted: Default::default(),
             viewport: None,
+            viewport_offset: 0,
         };
         assert_eq!(selection.text(), "中文z\nxyz");
     }
@@ -450,6 +505,7 @@ mod tests {
             held: false,
             painted: Default::default(),
             viewport: None,
+            viewport_offset: 0,
         };
         let mut output = Vec::new();
         selection.paint_to(&mut output, true).unwrap();
@@ -468,6 +524,7 @@ mod tests {
             held: false,
             painted: Default::default(),
             viewport: None,
+            viewport_offset: 0,
         };
         assert!(selection.retained());
         assert!(!selection.active());
@@ -484,6 +541,7 @@ mod tests {
             held: false,
             painted: Default::default(),
             viewport: None,
+            viewport_offset: 0,
         };
         for column in [5, 20, 3] {
             assert!(selection.event(MouseEvent {

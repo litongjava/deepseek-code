@@ -40,6 +40,7 @@ struct Block {
 pub(crate) struct Scrollback {
     logged: VecDeque<Logged>,
     blocks: Vec<Block>,
+    latest_prompt: String,
 }
 
 /// The last turn's lines, handed from the live view to the prompt after it.
@@ -66,8 +67,12 @@ pub(crate) fn compact_key(key: crossterm::event::KeyEvent) -> bool {
 }
 
 impl Scrollback {
+    pub(super) fn latest_prompt(&self) -> &str {
+        &self.latest_prompt
+    }
     pub(super) fn has_turn_output(&self) -> bool {
         self.blocks.iter().any(|block| block.prompt.is_none())
+            || self.logged.iter().any(|line| line.flow.is_some())
     }
     pub(super) fn handoff() -> Handoff { Handoff(Self::take()) }
     pub(crate) fn save(self) {
@@ -380,6 +385,9 @@ impl Scrollback {
             self.blocks[id].prompt = Some(summary);
             self.blocks[id].whole = true;
             return (id, rows);
+        }
+        if !text.trim_start().starts_with('/') {
+            self.latest_prompt = text.to_owned();
         }
         let width = terminal::size().unwrap_or((80, 24)).0.saturating_sub(1) as usize;
         let clean = super::tool_view::plain_terminal_text(text);
@@ -818,6 +826,22 @@ fn screen_rows(text: &str, columns: usize) -> usize {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn latest_user_prompt_belongs_to_the_transcript_and_ignores_commands_and_notifications() {
+        let mut history = super::Scrollback::default();
+        history.record_prompt("FIRST");
+        history.record_prompt("LATEST\n中文");
+        history.record_prompt("/status");
+        history.record_prompt("<task-notification><summary>Finished</summary></task-notification>");
+        assert_eq!(history.latest_prompt(), "LATEST\n中文");
+        assert!(super::Scrollback::default().latest_prompt().is_empty());
+        assert!(!history.has_turn_output());
+        history.push_flow("A restored text-only answer", "● ", "  ", 80);
+        assert!(history.has_turn_output());
+        history.expand_prompt("FIRST", 40);
+        assert_eq!(history.latest_prompt(), "LATEST\n中文");
+    }
+
     #[test]
     fn task_notifications_render_summaries_without_user_prompt_or_xml() {
         let mut history = Scrollback::default();

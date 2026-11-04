@@ -154,7 +154,17 @@ impl LiveTurn {
             // The welcome banner is outside conversation history. On the first
             // turn, keep it in place instead of shifting the whole screen down.
             let aligned = !scrollback.has_turn_output();
-            let mut screen = Frame { scrollback, aligned, preserve_welcome: aligned, ..Frame::default() };
+            let pinned = super::pinned_prompt::PinnedPrompt {
+                text: scrollback.latest_prompt().to_owned(),
+                ..Default::default()
+            };
+            let mut screen = Frame {
+                scrollback,
+                pinned,
+                aligned,
+                preserve_welcome: aligned,
+                ..Frame::default()
+            };
             let _ = run(&mut state, &mut screen, receiver, actions);
             let _ = screen.clear();
             // The prompt that follows starts right below these lines.
@@ -548,6 +558,26 @@ fn short_count(count: u64) -> String {
 }
 
 impl State {
+    fn input_hint(&self) -> String {
+        if self.answer.is_some() && self.goal_proposal.is_none() {
+            "  ↑ Answer the question above: type your choice or reply, then press Enter.".into()
+        } else if self.goal_proposal.is_some() {
+            if self.answer.is_some() {
+                "  Goal proposal pending; finish the current question first.".into()
+            } else {
+                "  Proposed goal: Ctrl+Y approve · Ctrl+N decline. Work continues while you decide."
+                    .into()
+            }
+        } else if let Some(tip) = &self.tip {
+            format!("  Tip: {tip}")
+        } else {
+            deepseek_code_core::config::ui_language::text(
+                "Tab to queue message · Enter to steer message",
+                "Tab 排队消息 · Enter 引导当前任务",
+            )
+            .into()
+        }
+    }
     fn new(mode: String) -> Self {
         Self {
             goal_proposal: None,
@@ -1347,17 +1377,27 @@ impl Frame {
         }
         if !selection.document() {
             self.refresh_history(state, self.size.0.saturating_sub(1) as usize);
-            let Some(top) = selection.promote(self.history_view.document_rows(), page) else {
+            let Some(top) = selection.promote(
+                self.history_view.document_rows(),
+                page,
+                self.history_view.header_rows(page),
+            ) else {
                 return Ok(());
             };
             self.history_view.open_at(top)?;
         }
         self.history_view.drag_scroll(up, page);
         self.draw(state)?;
-        selection.scroll_to(self.history_view.top(), page, mouse)
+        selection.scroll_to(
+            self.history_view.top(),
+            page,
+            self.history_view.header_rows(page),
+            mouse,
+        )
     }
 
     fn refresh_history(&mut self, state: &State, width: usize) {
+        self.history_view.set_pinned(&self.pinned.text, width);
         self.history_view.refresh(&[], &self.scrollback.presentation(), width);
         if state.activity.starts_with("Running Bash") {
             self.history_view.append(&format!("\n{}", state.activity), width);
@@ -1743,17 +1783,7 @@ impl Frame {
                 crate::terminal::style::activity(),
                 status
             ),
-            clip(
-                if state.answer.is_some() && state.goal_proposal.is_none() {
-                    "  \u{2191} Answer the question above: type your choice or reply, then press Enter."
-                } else if state.goal_proposal.is_some() {
-                    if state.answer.is_some() { "  Goal proposal pending; finish the current question first." }
-                    else { "  Proposed goal: Ctrl+Y approve · Ctrl+N decline. Work continues while you decide." }
-                } else {
-                    deepseek_code_core::config::ui_language::text("Tab to queue message · Enter to steer message", "Tab 排队消息 · Enter 引导当前任务")
-                },
-                width,
-            ),
+            clip(&state.input_hint(), width),
             rule.clone(),
             if draft.is_empty() && !state.queued.is_empty() && state.answer.is_none() {
                 format!("{prompt}\x1b[2mPress up to edit queued messages\x1b[0m")
@@ -2215,7 +2245,6 @@ fn run(
                     // the user's pinned prompt with the internal model payload.
                     if !crate::background_commands::is_notification(&text) {
                         screen.pinned.text = text.clone();
-                        super::pinned_prompt::remember(&text);
                         screen.separate_block();
                         screen.log_rendered("");
                         let (block, rows) = screen.scrollback.prompt(&text);
@@ -2757,7 +2786,8 @@ fn run(
                             .history_view
                             .screen_rows(screen.size.1 as usize, &composer);
                         let page = (screen.size.1 as usize).saturating_sub(composer.len());
-                        let event = if (mouse.row as usize) < page
+                        let event = if (mouse.row as usize) >= screen.history_view.header_rows(page)
+                            && (mouse.row as usize) < page
                             || selection.active() && selection.document()
                         {
                             selection.document_event(
@@ -2765,12 +2795,22 @@ fn run(
                                 screen.history_view.document_rows(),
                                 screen.history_view.top(),
                                 page,
+                                screen.history_view.header_rows(page),
                             )?
                         } else {
-                            selection.event(mouse, snapshot.clone())?
+                            selection.screen_event(mouse, snapshot.clone())?
                         };
                         if let Some(click) = event {
                             if click.kind == MouseEventKind::Down(MouseButton::Left) {
+                                if (click.row as usize) < screen.history_view.header_rows(page) {
+                                    let width = screen.size.0.saturating_sub(1) as usize;
+                                    let row =
+                                        screen.scrollback.expand_prompt(&screen.pinned.text, width);
+                                    screen.refresh_history(state, width);
+                                    screen.history_view.open_at(row)?;
+                                    screen.draw(state)?;
+                                    continue;
+                                }
                                 if let Some(index) = screen.history_view.row_index(
                                     click.row as usize,
                                     (screen.size.1 as usize).saturating_sub(composer.len()),
@@ -2803,7 +2843,7 @@ fn run(
                             *row = text.clone();
                         }
                     }
-                    let Some(mouse) = selection.event(mouse, snapshot.clone())? else {
+                    let Some(mouse) = selection.screen_event(mouse, snapshot.clone())? else {
                         continue;
                     };
                     if mouse.kind == MouseEventKind::Down(MouseButton::Left)
@@ -3092,6 +3132,26 @@ pub(super) fn draw_inspection(
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn running_tip_is_visible_with_queue_guidance_as_fallback() {
+        let mut state = State::new("ask".into());
+        let fallback = state.input_hint();
+        state.tip = Some("Use Ctrl+O to inspect this conversation".into());
+        assert_eq!(
+            state.input_hint(),
+            "  Tip: Use Ctrl+O to inspect this conversation"
+        );
+        let (answer, _) = oneshot::channel();
+        state.answer = Some(answer);
+        assert!(state.input_hint().contains("Answer the question above"));
+        state.goal_proposal = Some(("goal".into(), "Proposal".into()));
+        assert!(state.input_hint().contains("finish the current question first"));
+        state.answer = None;
+        assert!(state.input_hint().contains("Ctrl+Y approve"));
+        state.goal_proposal = None;
+        state.tip = None;
+        assert_eq!(state.input_hint(), fallback);
+    }
     fn composer(status: &str) -> Vec<String> {
         ["", status, "hint", "", "rule", "> draft", "rule", "footer"].map(String::from).to_vec()
     }
@@ -4277,8 +4337,9 @@ impl TurnDisplay {
     }
     /// The conversation before this turn, for Ctrl+O.
     pub fn set_pinned_prompt(&self, text: &str) {
-        super::pinned_prompt::remember(text);
-        if let Some(live) = &self.live { let _ = live.updates.send(Update::PinnedPrompt(text.into())); }
+        if let Some(live) = &self.live {
+            let _ = live.updates.send(Update::PinnedPrompt(text.into()));
+        }
     }
     pub fn set_transcript(&mut self, lines: Vec<change_view::Line>) {
         if let Some(live) = &self.live {
