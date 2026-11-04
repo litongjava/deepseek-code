@@ -292,15 +292,11 @@ impl Drop for PermissionWaiterGuard {
     }
 }
 
+#[path = "model_tool_output.rs"]
+mod model_output;
+
 fn model_tool_output(tool_name: &str, output: &str) -> String {
-    if matches!(tool_name, "Write" | "Edit" | "MultiEdit") {
-        if let Ok(Value::Object(mut fields)) = serde_json::from_str::<Value>(output) {
-            if fields.remove("file_change").is_some() {
-                return serde_json::to_string(&fields).unwrap_or_else(|_| output.to_owned());
-            }
-        }
-    }
-    output.to_owned()
+    model_output::render(tool_name, output, None)
 }
 
 fn compact_tool_output(tool_name: &str, output: &str) -> String {
@@ -905,10 +901,19 @@ impl ToolLoopExecutor {
         (actual, output, failed)
     }
 
-    fn retained_tool_output(&self, tool_name: &str, output: &str) -> String {
+    fn record_tool_usage(&self, tool_name: &str) {
         if let Some(tools) = &self.learning_tools {
             if let Ok(mut tools) = tools.lock() { if tools.len() < 256 { tools.push(tool_name.to_string()); } }
         }
+    }
+
+    fn retained_tool_output(&self, tool_name: &str, output: &str) -> String {
+        self.record_tool_usage(tool_name);
+        self.preview_tool_output(tool_name, output)
+    }
+
+    fn preview_tool_output(&self, tool_name: &str, output: &str) -> String {
+        let original = output;
         let cleaned = model_tool_output(tool_name, output);
         let output = cleaned.as_str();
         // Read already selects the requested line range. This is the fresh
@@ -917,7 +922,7 @@ impl ToolLoopExecutor {
         if tool_name == "Read" {
             return output.to_string();
         }
-        let preview = compact_tool_output(tool_name, output);
+        let preview = if tool_name == "Bash" { model_output::render(tool_name, original, Some(12_000)) } else { compact_tool_output(tool_name, output) };
         if let Some(root) = self.search_config_path.as_deref().and_then(|p| p.parent()) {
             return crate::performance::retain_tool_output(root, output, &preview);
         }
@@ -932,9 +937,8 @@ impl ToolLoopExecutor {
         // Images and structured blocks must remain real provider content. Only
         // plain text can use the existing spill/preview representation.
         if !content.has_images() {
-            if let Some(text) = content.content.as_str() {
-                content.content = json!(self.retained_tool_output(name, text));
-            }
+            self.record_tool_usage(name);
+            self.retain_content(name, &mut content.content);
         }
         Ok(Some(content))
     }
@@ -3039,7 +3043,8 @@ impl ToolLoopExecutor {
 
     fn build_anthropic_messages(&self) -> Result<Vec<AnthropicMessage>> {
         let additions = self.message_additions();
-        let messages = multimodal::normalize_messages(&self.messages)?;
+        let mut messages = multimodal::normalize_messages(&self.messages)?;
+        self.prepare_history_tool_outputs(&mut messages);
         Ok(messages.iter().enumerate().filter_map(|(index, msg)| {
             let role = msg.get("role")?.as_str()?;
             let content = msg.get("content")?;
@@ -3113,7 +3118,8 @@ impl ToolLoopExecutor {
 
     fn build_openai_messages(&self) -> Result<Vec<OpenAIMessage>> {
         let additions = self.message_additions();
-        let messages = multimodal::normalize_messages(&self.messages)?;
+        let mut messages = multimodal::normalize_messages(&self.messages)?;
+        self.prepare_history_tool_outputs(&mut messages);
         Ok(messages.iter().enumerate().filter_map(|(index, msg)| {
             let role = msg.get("role")?.as_str()?;
             let content = msg.get("content")?;

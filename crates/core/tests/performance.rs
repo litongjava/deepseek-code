@@ -1,12 +1,27 @@
 use deepseek_code_core::performance;
 
 #[test]
+fn head_tail_preview_obeys_byte_budget_and_keeps_unicode_ends() {
+    let text = format!("START{}END", "中文🙂".repeat(500));
+    for limit in 0..=200 {
+        let preview = performance::head_tail_preview(&text, limit);
+        assert!(preview.len() <= limit);
+        assert!(!preview.contains('\u{fffd}'));
+        if limit >= 100 {
+            assert!(preview.starts_with("START"));
+            assert!(preview.ends_with("END"));
+            assert!(preview.contains("truncated"));
+        }
+    }
+}
+
+#[test]
 fn persisted_tool_output_is_complete_and_unicode_preview_is_bounded() {
     let dir = tempfile::tempdir().unwrap();
     let text = "中文🙂".repeat(5000);
     let preview = performance::retain_tool_output(dir.path(), &text, &text);
     assert!(preview.len() < 17_000);
-    assert!(preview.contains("Full tool output"));
+    assert!(preview.contains("Saved tool result"));
     let files: Vec<_> = std::fs::read_dir(dir.path().join("tool-outputs"))
         .unwrap()
         .collect();

@@ -243,6 +243,30 @@ pub fn apply_conversation_cache(body: &mut serde_json::Value) {
     }
 }
 
+/// A UTF-8 byte budget including the omission marker, retaining both ends.
+pub fn head_tail_preview(text: &str, limit: usize) -> String {
+    if text.len() <= limit {
+        return text.to_owned();
+    }
+    let marker = format!(
+        "\n... (output truncated; {} bytes before preview) ...\n",
+        text.len()
+    );
+    if limit < marker.len() {
+        return "...".chars().take(limit).collect();
+    }
+    let budget = limit - marker.len();
+    let mut head = budget / 2;
+    while !text.is_char_boundary(head) {
+        head -= 1;
+    }
+    let mut tail = text.len() - (budget - budget / 2);
+    while !text.is_char_boundary(tail) {
+        tail += 1;
+    }
+    format!("{}{}{}", &text[..head], marker, &text[tail..])
+}
+
 pub fn retain_tool_output(root: &std::path::Path, output: &str, preview: &str) -> String {
     const LIMIT: usize = 16_000;
     if output == preview && output.len() <= LIMIT {
@@ -252,10 +276,21 @@ pub fn retain_tool_output(root: &std::path::Path, output: &str, preview: &str) -
         use std::io::Write;
         let directory = root.join("tool-outputs");
         std::fs::create_dir_all(&directory)?;
-        let path = directory.join(format!("{}.txt", uuid::Uuid::new_v4()));
+        // Stable paths keep replayed requests identical and avoid duplicate spills.
+        let digest = ring::digest::digest(&ring::digest::SHA256, output.as_bytes());
+        let key: String = digest
+            .as_ref()
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect();
+        let path = directory.join(format!("{key}.txt"));
+        if std::fs::read(&path).is_ok_and(|bytes| bytes == output.as_bytes()) {
+            return Ok(path);
+        }
         let mut file = std::fs::OpenOptions::new()
             .write(true)
-            .create_new(true)
+            .create(true)
+            .truncate(true)
             .open(&path)?;
         file.write_all(output.as_bytes())?;
         file.sync_all()?;
@@ -263,15 +298,14 @@ pub fn retain_tool_output(root: &std::path::Path, output: &str, preview: &str) -
     };
     match persist() {
         Ok(path) => {
-            let mut end = preview.len().min(LIMIT);
-            while !preview.is_char_boundary(end) {
-                end -= 1;
-            }
-            format!(
-                "{}\nFull tool output ({} bytes) saved at: {}",
-                &preview[..end],
+            let note = format!(
+                "\nSaved tool result ({} bytes, may already be truncated by the tool): {}",
                 output.len(),
                 path.display()
+            );
+            format!(
+                "{}{note}",
+                head_tail_preview(preview, LIMIT.saturating_sub(note.len()))
             )
         }
         Err(_) => output.to_string(), // Never discard the only complete copy.

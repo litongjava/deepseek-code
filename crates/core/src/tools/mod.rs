@@ -493,18 +493,6 @@ fn tool_search(input: serde_json::Value) -> Result<serde_json::Value> {
     Ok(serde_json::json!({"tools": tools}))
 }
 
-/// UTF-8 safe truncation: finds the last valid char boundary at or before `max_bytes`.
-fn truncate_utf8(s: &str, max_bytes: usize) -> usize {
-    if s.len() <= max_bytes {
-        return s.len();
-    }
-    let mut end = max_bytes;
-    while end > 0 && !s.is_char_boundary(end) {
-        end -= 1;
-    }
-    end
-}
-
 fn max_output_bytes() -> usize { crate::config::OrchestrationConfig::max_output_bytes() }
 fn default_bash_timeout_secs() -> u64 { crate::config::OrchestrationConfig::default_bash_timeout_secs() }
 
@@ -637,15 +625,7 @@ mod command_filter_tests {
 }
 
 fn limit_output(output: &str) -> String {
-    if output.len() > max_output_bytes() {
-        format!(
-            "{}\n... (output truncated, exceeded {} bytes)",
-            &output[..truncate_utf8(output, max_output_bytes())],
-            max_output_bytes()
-        )
-    } else {
-        output.to_string()
-    }
+    crate::performance::head_tail_preview(output, max_output_bytes())
 }
 
 fn is_path_allowed(resolved_path: &Path, cwd: &str) -> bool {

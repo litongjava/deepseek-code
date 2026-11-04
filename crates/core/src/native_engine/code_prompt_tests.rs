@@ -24,7 +24,7 @@ async fn fresh_read_retains_requested_source_range_beyond_spill_limit() {
     assert!(!failed, "{output}");
     assert!(output.len() > 16_000);
     let retained = executor.retained_tool_output("Read", &output);
-    assert_eq!(retained, output);
+    assert_eq!(retained, serde_json::from_str::<Value>(&output).unwrap()["content"]);
     assert!(retained.contains("line_400"));
     assert!(!dir.path().join("tool-outputs").exists());
 
@@ -36,7 +36,7 @@ async fn fresh_read_retains_requested_source_range_beyond_spill_limit() {
         )
         .await;
     assert!(!failed, "{range}");
-    assert_eq!(executor.retained_tool_output("Read", &range), range);
+    assert_eq!(executor.retained_tool_output("Read", &range), serde_json::from_str::<Value>(&range).unwrap()["content"]);
     assert!(range.contains("line_400"));
     assert!(!range.contains("line_349"));
 

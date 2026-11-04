@@ -8,10 +8,52 @@ use tokio::{
 };
 const OUTPUT_LIMIT: usize = 1024 * 1024;
 
+#[derive(Default)]
+struct Captured {
+    head: Vec<u8>,
+    tail: std::collections::VecDeque<u8>,
+    total: usize,
+}
+impl Captured {
+    fn push(&mut self, bytes: &[u8]) {
+        self.total = self.total.saturating_add(bytes.len());
+        let head = bytes
+            .len()
+            .min((OUTPUT_LIMIT / 2).saturating_sub(self.head.len()));
+        self.head.extend_from_slice(&bytes[..head]);
+        let rest = &bytes[head..];
+        let remove = (self.tail.len() + rest.len()).saturating_sub(OUTPUT_LIMIT / 2);
+        self.tail.drain(..remove.min(self.tail.len()));
+        self.tail.extend(rest.iter().copied());
+    }
+
+    fn text(&self) -> String {
+        let mut bytes = self.head.clone();
+        let tail: Vec<_> = self.tail.iter().copied().collect();
+        let mut tail_start = 0;
+        if self.total > OUTPUT_LIMIT {
+            if let Err(error) = std::str::from_utf8(&bytes) {
+                if error.error_len().is_none() {
+                    bytes.truncate(error.valid_up_to());
+                }
+            }
+            while tail_start < tail.len() && tail[tail_start] & 0xc0 == 0x80 {
+                tail_start += 1;
+            }
+            bytes.extend_from_slice(b"\n... (capture truncated; middle omitted) ...\n");
+        }
+        bytes.extend_from_slice(&tail[tail_start..]);
+        String::from_utf8_lossy(&bytes).into_owned()
+    }
+
+    fn truncated(&self) -> bool {
+        self.total > OUTPUT_LIMIT || self.text().len() > super::max_output_bytes()
+    }
+}
+
 async fn capture(
     mut pipe: impl AsyncRead + Unpin,
-    output: &mut Vec<u8>,
-    truncated: &mut bool,
+    output: &mut Captured,
     log: Option<std::path::PathBuf>,
 ) -> std::io::Result<()> {
     let mut log = log.map(std::fs::File::create).transpose()?;
@@ -21,12 +63,11 @@ async fn capture(
         if count == 0 {
             break;
         }
-        let keep = count.min(OUTPUT_LIMIT.saturating_sub(output.len()));
-        output.extend_from_slice(&buffer[..keep]);
+        let keep = count.min(OUTPUT_LIMIT.saturating_sub(output.total));
+        output.push(&buffer[..count]);
         if let Some(log) = log.as_mut() {
             std::io::Write::write_all(log, &buffer[..keep])?;
         }
-        *truncated |= keep < count;
     }
     Ok(())
 }
@@ -54,8 +95,7 @@ pub(super) async fn run_logged(
     )?;
     let stdout = child.stdout.take().context("Shell stdout missing")?;
     let stderr = child.stderr.take().context("Shell stderr missing")?;
-    let (mut stdout_bytes, mut stderr_bytes) = (Vec::new(), Vec::new());
-    let (mut out_cut, mut err_cut) = (false, false);
+    let (mut stdout_bytes, mut stderr_bytes) = (Captured::default(), Captured::default());
     let (out_log, err_log) = logs
         .map(|(out, err)| (Some(out), Some(err)))
         .unwrap_or_default();
@@ -68,8 +108,8 @@ pub(super) async fn run_logged(
         };
         let (status, out, err) = tokio::join!(
             wait,
-            capture(stdout, &mut stdout_bytes, &mut out_cut, out_log),
-            capture(stderr, &mut stderr_bytes, &mut err_cut, err_log)
+            capture(stdout, &mut stdout_bytes, out_log),
+            capture(stderr, &mut stderr_bytes, err_log)
         );
         out?;
         err?;
@@ -81,9 +121,9 @@ pub(super) async fn run_logged(
     };
     match result {
         Ok(Ok(status)) => Ok(json!({
-            "stdout":super::limit_output(&String::from_utf8_lossy(&stdout_bytes)),
-            "stderr":super::limit_output(&String::from_utf8_lossy(&stderr_bytes)),
-            "stdout_truncated":out_cut,"stderr_truncated":err_cut,
+            "stdout":super::limit_output(&stdout_bytes.text()),
+            "stderr":super::limit_output(&stderr_bytes.text()),
+            "stdout_truncated":stdout_bytes.truncated(),"stderr_truncated":stderr_bytes.truncated(),
             "exit_code":status.code().unwrap_or(-1),"success":status.success(),"shell":shell
         })),
         Ok(Err(error)) => Err(error).context("Reading shell command output"),
@@ -91,7 +131,7 @@ pub(super) async fn run_logged(
             let _ = child.kill().await;
             let _ = child.wait().await;
             Ok(
-                json!({"error":format!("Command timed out after {} ms; descendants were terminated. For long installations or builds, set timeout explicitly (milliseconds, at most 600000), or use run_in_background.",timeout.unwrap().as_millis()),"is_error":true,"timed_out":true,"shell":shell,"stdout":super::limit_output(&String::from_utf8_lossy(&stdout_bytes)),"stderr":super::limit_output(&String::from_utf8_lossy(&stderr_bytes)),"stdout_truncated":out_cut,"stderr_truncated":err_cut}),
+                json!({"error":format!("Command timed out after {} ms; descendants were terminated. For long installations or builds, set timeout explicitly (milliseconds, at most 600000), or use run_in_background.",timeout.unwrap().as_millis()),"is_error":true,"timed_out":true,"shell":shell,"stdout":super::limit_output(&stdout_bytes.text()),"stderr":super::limit_output(&stderr_bytes.text()),"stdout_truncated":stdout_bytes.truncated(),"stderr_truncated":stderr_bytes.truncated()}),
             )
         }
     }
@@ -117,7 +157,7 @@ mod tests {
     async fn output_is_bounded_while_both_pipes_are_drained() {
         crate::config::OrchestrationConfig::init_global().unwrap();
         let mut command = Command::new("node");
-        command.args(["-e", "process.stdout.write('x'.repeat(2*1024*1024));process.stderr.write('y'.repeat(2*1024*1024))"]);
+        command.args(["-e", "process.stdout.write('START\\n'+'x'.repeat(2*1024*1024)+'\\nTEST SUMMARY');process.stderr.write('ERROR START\\n'+'y'.repeat(2*1024*1024)+'\\nFINAL ERROR')"]);
         let result = run(&mut command, Duration::from_secs(10), "node-fixture")
             .await
             .unwrap();
@@ -125,6 +165,22 @@ mod tests {
         assert_eq!(result["stdout_truncated"], true);
         assert_eq!(result["stderr_truncated"], true);
         assert!(result["stdout"].as_str().unwrap().len() <= OUTPUT_LIMIT + 200);
+        assert!(result["stdout"].as_str().unwrap().starts_with("START"));
+        assert!(result["stdout"].as_str().unwrap().ends_with("TEST SUMMARY"));
+        assert!(result["stderr"].as_str().unwrap().ends_with("FINAL ERROR"));
+    }
+
+    #[tokio::test]
+    async fn tool_limit_sets_flags_before_capture_limit() {
+        crate::config::OrchestrationConfig::init_global().unwrap();
+        let mut command = Command::new("node");
+        command.args(["-e", "process.stdout.write('x'.repeat(200*1024)+'END')"]);
+        let result = run(&mut command, Duration::from_secs(10), "node-fixture")
+            .await
+            .unwrap();
+        assert_eq!(result["stdout_truncated"], true);
+        assert_eq!(result["stderr_truncated"], false);
+        assert!(result["stdout"].as_str().unwrap().ends_with("END"));
     }
     #[tokio::test]
     async fn timeout_retains_partial_diagnostics() {
