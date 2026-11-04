@@ -1,7 +1,23 @@
 import { describe, expect, it } from 'vitest';
 import { completeModelCapabilities, inferModelCapabilities, mergeDiscoveredModel } from './modelCapabilities';
+import catalog from '../data/providerCatalog.json';
 
 describe('automatic model capabilities', () => {
+  it('uses 256K for standard Astra catalog entries and keeps explicit limits', () => {
+    let matched = 0;
+    for (const provider of catalog.providers) {
+      for (const model of provider.models) {
+        if (!/^(?:openai\/)?gpt-6-astra(?::batch)?$/.test(model.id)) continue;
+        matched += 1;
+        expect(model.contextWindow).toBe(256000);
+        expect(inferModelCapabilities(model).contextWindow).toBe(256000);
+      }
+    }
+    expect(matched).toBeGreaterThan(0);
+    expect(inferModelCapabilities({ id: 'GPT-6-Astra', name: '' }).contextWindow).toBe(256000);
+    expect(completeModelCapabilities({ id: 'gpt-6-astra', name: 'Astra', contextWindow: 128000 }).contextWindow).toBe(128000);
+  });
+
   it('recognizes catalog IDs, display names, gateway prefixes and dated thinking aliases', () => {
     for (const id of ['gpt-4o', 'openai/gpt-4o', 'gpt-4o-20240806-thinking']) {
       expect(inferModelCapabilities({ id, name: '' })).toMatchObject({ contextWindow: 128000, inputTypes: ['text', 'image'] });

@@ -3043,7 +3043,7 @@
           "id": "gpt-6-astra",
           "name": "GPT-6 Astra",
           "enabled": true,
-          "contextWindow": 272000,
+          "contextWindow": 256000,
           "maxTokens": 128000,
           "inputTypes": [
             "text",
@@ -6356,7 +6356,7 @@
           "id": "gpt-6-astra",
           "name": "GPT-6 Astra",
           "enabled": true,
-          "contextWindow": 1050000,
+          "contextWindow": 256000,
           "maxTokens": 128000,
           "inputTypes": [
             "text",
@@ -11142,7 +11142,7 @@
           "id": "gpt-6-astra",
           "name": "GPT-6 Astra",
           "enabled": true,
-          "contextWindow": 272000,
+          "contextWindow": 256000,
           "maxTokens": 128000,
           "inputTypes": [
             "text",
@@ -11518,7 +11518,7 @@
           "id": "gpt-6-astra",
           "name": "GPT-6 Astra",
           "enabled": true,
-          "contextWindow": 272000,
+          "contextWindow": 256000,
           "maxTokens": 128000,
           "inputTypes": [
             "text",
@@ -12885,7 +12885,7 @@
           "id": "gpt-6-astra",
           "name": "GPT-6 Astra",
           "enabled": true,
-          "contextWindow": 1050000,
+          "contextWindow": 256000,
           "maxTokens": 128000,
           "inputTypes": [
             "text",
@@ -18733,7 +18733,7 @@
           "id": "openai/gpt-6-astra",
           "name": "OpenAI: GPT-6 Astra",
           "enabled": true,
-          "contextWindow": 1050000,
+          "contextWindow": 256000,
           "maxTokens": 128000,
           "inputTypes": [
             "text",
@@ -18811,7 +18811,7 @@
           "id": "openai/gpt-6-astra:batch",
           "name": "OpenAI: GPT-6 Astra (batch)",
           "enabled": true,
-          "contextWindow": 1050000,
+          "contextWindow": 256000,
           "maxTokens": 128000,
           "inputTypes": [
             "text",
@@ -25872,7 +25872,7 @@
           "id": "openai/gpt-6-astra",
           "name": "GPT-6 Astra",
           "enabled": true,
-          "contextWindow": 1050000,
+          "contextWindow": 256000,
           "maxTokens": 128000,
           "inputTypes": [
             "text",

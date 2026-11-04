@@ -4,6 +4,16 @@ use std::collections::HashMap;
 pub struct TokenCounter;
 
 impl TokenCounter {
+    /// Shared defaults for optional model windows; configured values take priority.
+    pub fn default_context_window(model_id: &str) -> Option<u32> {
+        let model_id = model_id.rsplit("::").next().unwrap_or(model_id);
+        let model_id = model_id.rsplit('/').next().unwrap_or(model_id);
+        let model_id = model_id.strip_suffix(":batch").unwrap_or(model_id);
+        model_id
+            .eq_ignore_ascii_case("gpt-6-astra")
+            .then_some(256_000)
+    }
+
     /// Use transport accounting, including structured tool arguments/results.
     pub fn estimate(messages: &[Value]) -> usize {
         super::request_context::ContextUsage::from_body(
@@ -23,6 +33,9 @@ impl TokenCounter {
 
     /// Get maximum context window size for common models
     pub fn get_model_context_limit(model_id: &str) -> usize {
+        if let Some(limit) = Self::default_context_window(model_id) {
+            return limit as usize;
+        }
         let mut limits = HashMap::new();
         
         // OpenAI models
@@ -75,5 +88,36 @@ impl TokenCounter {
     pub fn get_safe_limit(model_id: &str, safety_margin: f64) -> usize {
         let model_limit = Self::get_model_context_limit(model_id);
         (model_limit as f64 * safety_margin) as usize
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn astra_context_budget_uses_256k_for_standard_model_ids() {
+        for id in [
+            "gpt-6-astra",
+            "GPT-6-Astra",
+            "openai/gpt-6-astra",
+            "proxy::gpt-6-astra",
+            "openai/gpt-6-astra:batch",
+        ] {
+            assert_eq!(TokenCounter::get_model_context_limit(id), 256_000);
+            assert_eq!(TokenCounter::get_safe_limit(id, 0.9), 230_400);
+        }
+        assert_eq!(
+            TokenCounter::default_context_window("gpt-6-astra-pro"),
+            None
+        );
+        assert_eq!(
+            TokenCounter::default_context_window("gpt-6-astra-fast"),
+            None
+        );
+        assert_eq!(
+            TokenCounter::get_model_context_limit("unknown-model"),
+            80_000
+        );
     }
 }

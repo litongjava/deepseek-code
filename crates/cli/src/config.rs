@@ -63,8 +63,13 @@ pub(crate) fn default_max_tokens(model: &str) -> u32 {
     }
 }
 
-/// Context windows reported by the providers' model APIs, when known.
+/// Known context windows for CLI model defaults.
 pub(crate) fn default_context_window(model: &str) -> Option<u32> {
+    if let Some(limit) =
+        deepseek_code_core::native_engine::token_counter::TokenCounter::default_context_window(model)
+    {
+        return Some(limit);
+    }
     let model = model.to_ascii_lowercase();
     if model.starts_with("deepseek-flash") || model.starts_with("deepseek-v4") {
         Some(1_048_576)
@@ -446,6 +451,14 @@ fn import_legacy(paths: &RuntimePaths, source: &Path) -> Result<()> {
 #[cfg(test)]
 mod budget_tests {
     use super::*;
+
+    #[test]
+    fn astra_context_template_uses_256k_without_changing_output_budget() {
+        assert_eq!(default_context_window("gpt-6-astra"), Some(256_000));
+        let provider = provider_template("gpt-6-astra");
+        assert_eq!(provider.models[0].context_window, Some(256_000));
+        assert_eq!(provider.models[0].max_tokens, Some(8192));
+    }
 
     #[test]
     fn output_budgets_follow_the_model_family() {

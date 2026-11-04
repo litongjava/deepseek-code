@@ -18,7 +18,7 @@ pub fn one_million_context_base(id: &str) -> Option<&str> {
 }
 
 pub fn resolve_model_selection(models:&[ModelConfig],id:&str)->Option<ModelConfig>{
-    if let Some(model)=models.iter().find(|m|m.enabled&&m.id==id){return Some(model.clone());}
+    if let Some(model)=models.iter().find(|m|m.enabled&&m.id==id){return Some(model.clone().with_context_default());}
     let base=one_million_context_base(id)?;
     let mut model=models.iter().find(|m|m.enabled&&m.id==base)?.clone();
     model.context_window=Some(1_000_000);
@@ -70,6 +70,15 @@ pub struct ModelConfig {
     pub effort: Option<String>,
     #[serde(default)]
     pub fast: bool,
+}
+
+impl ModelConfig {
+    fn with_context_default(mut self) -> Self {
+        self.context_window = self
+            .context_window
+            .or_else(|| super::token_counter::TokenCounter::default_context_window(&self.id));
+        self
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -258,7 +267,7 @@ impl ProviderManager {
                         if first_match.is_none() {
                             first_match = Some(ResolvedProvider {
                                 provider: provider.clone(),
-                                model: model.clone(),
+                                model: model.clone().with_context_default(),
                             });
                         } else {
                             return None;
@@ -406,6 +415,52 @@ impl ProviderManager {
 #[cfg(test)]
 mod provider_selection_tests {
     use super::*;
+
+    #[test]
+    fn astra_context_defaults_apply_to_saved_models_and_preserve_overrides() {
+        for configured in [None, Some(128_000)] {
+            let provider: Provider = serde_json::from_value(serde_json::json!({"id":"p","name":"p","base_url":"http://localhost","api_key":"","api_format":"anthropic","enabled":true,"models":[{"id":"gpt-6-astra","name":"Astra","enabled":true,"supports_web_search":false,"context_window":configured}]})).unwrap();
+            let manager = ProviderManager::in_memory(
+                vec![provider],
+                std::env::temp_dir().join("astra-context-fixture.json"),
+            );
+            let expected = configured.or(Some(256_000));
+            assert_eq!(
+                manager
+                    .resolve_selected("p", "gpt-6-astra")
+                    .unwrap()
+                    .model
+                    .context_window,
+                expected
+            );
+            assert_eq!(
+                manager
+                    .resolve_provider_internal("gpt-6-astra")
+                    .unwrap()
+                    .model
+                    .context_window,
+                expected
+            );
+            assert_eq!(
+                manager
+                    .resolve_provider_internal("p::gpt-6-astra")
+                    .unwrap()
+                    .model
+                    .context_window,
+                expected
+            );
+            assert_eq!(manager.providers[0].models[0].context_window, configured);
+            assert_eq!(
+                manager
+                    .resolve_selected("p", "gpt-6-astra[1m]")
+                    .unwrap()
+                    .model
+                    .context_window,
+                Some(1_000_000)
+            );
+        }
+    }
+
     #[test]
     fn provider_selection_is_exact_and_rejects_ambiguity() {
         let make = |id: &str| serde_json::from_value::<Provider>(serde_json::json!({"id":id,"name":id,"base_url":"http://localhost","api_key":"","api_format":"openai","enabled":true,"models":[{"id":"same","name":"Same","enabled":true,"max_tokens":32000,"supports_vision":false,"supports_web_search":false}]})).unwrap();
