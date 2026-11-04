@@ -29,6 +29,8 @@ pub fn terminal_input() -> TerminalInput {
 }
 
 pub struct Session {
+    /// Restored sessions wait for explicit input before allowing idle model work.
+    waiting_for_continue: std::sync::atomic::AtomicBool,
     /// Runtime-only options of the latest worker turn, retained for internal wakes.
     pub(crate) hook_wake_cli: std::sync::Mutex<Option<Arc<Cli>>>,
     pub(crate) sdk_permissions: Option<Arc<crate::sdk::Permissions>>,
@@ -342,6 +344,7 @@ impl Session {
             deepseek_code_core::skills::SkillsManager::with_path(paths.data_dir.join("skills")),
         )));
         Ok(Self {
+            waiting_for_continue: std::sync::atomic::AtomicBool::new(resumed_id.is_some()),
             hook_wake_cli: std::sync::Mutex::new(None),
             initial_hook_message: None,
             permissions,
@@ -466,6 +469,7 @@ impl Session {
         let lifecycle_owned = self.lifecycle_owned;
         self.end_hooks("clear").await;
         self.id = id.clone();
+        self.waiting_for_continue.store(false, std::sync::atomic::Ordering::Relaxed);
         if lifecycle_owned {
             self.start_hooks("clear").await?;
         }
@@ -490,6 +494,7 @@ impl Session {
         self.provider_id = provider_id;
         self.auto_route = false;
         self.id = id.to_owned();
+        self.waiting_for_continue.store(true, std::sync::atomic::Ordering::Relaxed);
         deepseek_code_core::services::session_permission_mode::set(&self.store.db, &self.id, &self.permissions, mode)?;
         if lifecycle_owned { self.start_hooks("resume").await?; }
         Ok(())
@@ -675,6 +680,14 @@ impl Session {
         Ok(())
     }
 
+    pub(crate) fn waiting_for_continue(&self) -> bool {
+        self.waiting_for_continue.load(std::sync::atomic::Ordering::Relaxed)
+    }
+
+    pub(crate) fn allow_automatic_wake(&self) {
+        self.waiting_for_continue.store(false, std::sync::atomic::Ordering::Relaxed);
+    }
+
     pub async fn turn(
         &self,
         cli: &Cli,
@@ -683,6 +696,8 @@ impl Session {
     ) -> Result<()> {
         use std::io::IsTerminal;
         self.apply_settings_permissions(cli)?;
+        // Idle callers must check the resume gate before submitting a turn.
+        self.allow_automatic_wake();
         // Attach @-mentioned files once, in the frontend; a worker receives the
         // expanded prompt and must not attach them again.
         let frontend = std::env::var_os(deepseek_code_core::services::background_sessions::CONTROL_ENV).is_none();

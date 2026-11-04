@@ -687,8 +687,10 @@ async fn run(cli: &Cli) -> Result<()> {
                     Err(error) => report_error(&error),
                 }
             }
-            if let Some(prompt) = remote.take_deferred() {
-                if let Err(error) = session.turn(cli, &prompt, &mut input).await { report_error(&error); }
+            if !session.waiting_for_continue() {
+                if let Some(prompt) = remote.take_deferred() {
+                    if let Err(error) = session.turn(cli, &prompt, &mut input).await { report_error(&error); }
+                }
             }
             if let Err(error) = remote.sync(&session) { command_eprintln!("Remote Control: {error:#}"); }
             if presence.as_ref().is_none_or(|(id, _)| *id != session.id) {
@@ -697,7 +699,7 @@ async fn run(cli: &Cli) -> Result<()> {
                     .ok()
                     .map(|lease| (session.id.clone(), lease));
             }
-            if prompt_suggestion::enabled(&paths.data_dir) {
+            if !session.waiting_for_continue() && prompt_suggestion::enabled(&paths.data_dir) {
                 let history = session.store.history(&session.id)?;
                 if history.len() != suggested_for {
                     suggested_for = history.len();
@@ -795,7 +797,7 @@ async fn run(cli: &Cli) -> Result<()> {
                             input.as_ref().expect("interactive reader").notice(format!("Notification hook: {error:#}"));
                         }
                     }
-                    if !composer.is_pending()
+                    if !session.waiting_for_continue() && !composer.is_pending()
                         && deepseek_code_core::services::async_hooks::has_pending_wake(&paths.data_dir, &session.id)
                         && input.as_mut().expect("interactive reader").yield_prompt().await? {
                         if let Err(error) = session.wake_hooks(cli, &mut input).await { command_eprintln!("Hook wake: {error:#}"); }
@@ -803,7 +805,7 @@ async fn run(cli: &Cli) -> Result<()> {
                     }
                     if let Err(error) = session.sync_workspace() { command_eprintln!("Worktree: {error:#}"); }
                     // A due CronCreate job runs as if typed, once the input is empty.
-                    if !composer.is_pending() {
+                    if !session.waiting_for_continue() && !composer.is_pending() {
                         let scope = deepseek_code_core::tools::cron_jobs::Scope { root: &paths.data_dir, session: &session.id, project: &session.workspace };
                         match deepseek_code_core::tools::cron_jobs::take_due(&scope, chrono::Local::now()) {
                             Ok(due) if !due.is_empty() => {
@@ -821,7 +823,7 @@ async fn run(cli: &Cli) -> Result<()> {
                         }
                     }
                     // A self-paced /loop wakes as if its input were typed again.
-                    if !composer.is_pending() && deepseek_code_core::tools::wakeup::is_due(&paths.data_dir, &session.id, chrono::Utc::now().timestamp())
+                    if !session.waiting_for_continue() && !composer.is_pending() && deepseek_code_core::tools::wakeup::is_due(&paths.data_dir, &session.id, chrono::Utc::now().timestamp())
                         && input.as_mut().expect("interactive reader").yield_prompt().await? {
                         if let Some((prompt, reason)) = deepseek_code_core::tools::wakeup::take_due(&paths.data_dir, &session.id, chrono::Utc::now().timestamp()).unwrap_or(None) {
                             command_eprintln!("\u{21bb} Loop wakeup: {reason}");
@@ -831,7 +833,7 @@ async fn run(cli: &Cli) -> Result<()> {
                     }
                     // A due /loop prompt runs as if typed, once the input is empty.
                     if let Some(index) = loops.iter().position(|(_, _, next)| *next <= std::time::Instant::now()) {
-                        if !composer.is_pending() && input.as_mut().expect("interactive reader").yield_prompt().await? {
+                        if !session.waiting_for_continue() && !composer.is_pending() && input.as_mut().expect("interactive reader").yield_prompt().await? {
                             let (every, prompt, next) = &mut loops[index];
                             *next = std::time::Instant::now() + *every;
                             command_eprintln!("\u{21bb} Loop: {prompt}");
@@ -841,7 +843,7 @@ async fn run(cli: &Cli) -> Result<()> {
                     }
                     // A background agent waiting for approval asks here, as in the
                     // reference CLI, once the input is empty.
-                    if !composer.is_pending()
+                    if !session.waiting_for_continue() && !composer.is_pending()
                         && background_commands::agent_question(&paths, &session.id).is_some()
                         && input.as_mut().expect("interactive reader").yield_prompt().await? {
                         if let Err(error) = background_commands::answer_agent_question(&paths, &session) { command_eprintln!("Agent question: {error:#}"); }
@@ -850,7 +852,7 @@ async fn run(cli: &Cli) -> Result<()> {
                     let notices = background_commands::collect_completed(&session)?;
                     // A finished background command starts a turn; its line is
                     // printed first, above that turn.
-                    if !composer.is_pending()
+                    if !session.waiting_for_continue() && !composer.is_pending()
                         && deepseek_code_core::services::input_queue::any(&session.store.db, &session.id, background_commands::is_notification).unwrap_or(false)
                         && input.as_mut().expect("interactive reader").yield_prompt().await? {
                         for notice in notices { command_eprintln!("{notice}"); }
@@ -864,6 +866,7 @@ async fn run(cli: &Cli) -> Result<()> {
                     let reader = input.as_ref().expect("interactive reader");
                     match remote.handle(update, &mut session, |line| reader.notice(line)).await {
                         Ok(remote_commands::Action::Prompt(prompt)) => {
+                            session.allow_automatic_wake();
                             if !input.as_mut().expect("interactive reader").yield_prompt().await? {
                                 command_eprintln!("Remote prompt queued until the current input is submitted.");
                                 remote.defer(prompt);

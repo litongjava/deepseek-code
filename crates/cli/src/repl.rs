@@ -38,6 +38,9 @@ pub fn show_resumed(session: &Session, clear: bool) -> Result<()> {
     for row in recorded.all() { out.push_str(&row); out.push('\n'); }
     eprint!("{out}");
     recorded.save();
+    if session.waiting_for_continue() {
+        command_eprintln!("Session restored; waiting for input. Use /continue or send a new task to start the model.");
+    }
     Ok(())
 }
 

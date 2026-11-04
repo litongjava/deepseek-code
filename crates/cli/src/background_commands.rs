@@ -22,6 +22,16 @@ pub async fn handle(
     input: &mut Option<crate::terminal::input::TerminalInput>,
 ) -> Result<Outcome> {
     match command {
+        "/continue" => {
+            ensure!(argument.trim().is_empty(), "Usage: /continue");
+            ensure!(!background_sessions::list(&paths.data_dir, None)?.iter().any(|job|
+                job.session_id == session.id && matches!(job.status.as_str(), "starting" | "running" | "unresponsive")),
+                "This session already has an active worker. Use /tasks attach ID or /tasks cancel ID before continuing.");
+            session.allow_automatic_wake();
+            if !wake_for_notifications(cli, session, input).await? {
+                session.turn(cli, "Continue the unfinished work in this conversation. Review the saved progress first and do not repeat completed operations.", input).await?;
+            }
+        }
         "/btw" => {
             ensure!(!argument.trim().is_empty(), "Usage: /btw QUESTION");
             command_eprintln!("Answering a separate, tool-free side question. Main conversation history is unchanged. You can also ask /btw while a foreground turn is running.");
@@ -1018,6 +1028,9 @@ fn shell_notifications(session: &Session) -> Result<Vec<String>> {
 /// Starts a turn for task notifications waiting at an idle prompt; the
 /// model reads them as the reference CLI's background command updates.
 pub(crate) async fn wake_for_notifications(cli: &crate::args::Cli, session: &mut Session, input: &mut Option<crate::terminal::input::TerminalInput>) -> Result<bool> {
+    if session.waiting_for_continue() {
+        return Ok(false);
+    }
     let prompts = deepseek_code_core::services::input_queue::take_where(&session.store.db, &session.id, is_notification)?;
     if prompts.is_empty() {
         return Ok(false);
@@ -1085,6 +1098,132 @@ pub fn collect_completed(session: &Session) -> Result<Vec<String>> {
 #[cfg(test)]
 mod worker_config_tests {
     use super::*;
+
+    #[tokio::test]
+    async fn resume_waits_for_continue_and_preserves_notifications() {
+        use axum::{extract::State, routing::post, Json, Router};
+        use clap::Parser;
+        use deepseek_code_core::{runtime::SessionStore, services::input_queue};
+        use std::sync::{Arc, Mutex};
+
+        let requests = Arc::new(Mutex::new(Vec::<serde_json::Value>::new()));
+        let app = Router::new().route("/v1/chat/completions", post(
+            |State(requests): State<Arc<Mutex<Vec<serde_json::Value>>>>, Json(body): Json<serde_json::Value>| async move {
+                requests.lock().unwrap().push(body);
+                ([("content-type", "text/event-stream")], "data: {\"choices\":[{\"index\":0,\"delta\":{\"content\":\"continued\"},\"finish_reason\":null}]}\n\ndata: {\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"stop\"}]}\n\ndata: [DONE]\n\n")
+            },
+        )).with_state(requests.clone());
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}", listener.local_addr().unwrap());
+        let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        let dir = tempfile::tempdir().unwrap();
+        let paths = RuntimePaths::new(dir.path().join("data")).unwrap();
+        std::fs::create_dir_all(&paths.data_dir).unwrap();
+        std::fs::write(
+            paths.data_dir.join("settings.json"),
+            r#"{"disableAllHooks":true}"#,
+        )
+        .unwrap();
+        let store = SessionStore::new(paths.open_database().unwrap());
+        let id = store
+            .create(dir.path(), "fixture-model", "fixture")
+            .unwrap();
+        store.append(&id, "user", "RESUME_ORIGINAL_TASK").unwrap();
+        let selection = || {
+            crate::config::Selection {
+            providers: vec![serde_json::from_value(serde_json::json!({"id":"fixture","name":"Fixture","base_url":url,"api_key":"fixture","api_format":"openai","enabled":true,"models":[{"id":"fixture-model","name":"Fixture","enabled":true,"supports_vision":false,"supports_tools":true,"supports_web_search":false}]})).unwrap()],
+            provider_id: "fixture".into(), model: "fixture-model".into(),
+        }
+        };
+        let cli = Cli::parse_from(["dcl", "--print", "--permission-mode", "dont-ask"]);
+        let notification = "<task-notification>RESUME_PENDING_REPORT</task-notification>";
+        input_queue::push(&store.db, &id, notification).unwrap();
+        let mut session = Session::open(&cli, &paths, selection(), Some(&id))
+            .await
+            .unwrap();
+        assert!(session.waiting_for_continue());
+        for _ in 0..2 {
+            assert!(!wake_for_notifications(&cli, &mut session, &mut None)
+                .await
+                .unwrap());
+        }
+        assert!(requests.lock().unwrap().is_empty());
+        assert!(input_queue::any(&store.db, &id, is_notification).unwrap());
+        assert!(session
+            .resume_saved(&paths, "missing-session")
+            .await
+            .is_err());
+        assert_eq!(session.id, id);
+        assert!(session.waiting_for_continue());
+        assert!(handle(
+            &cli,
+            "/continue",
+            "unexpected",
+            &paths,
+            &mut session,
+            &mut None
+        )
+        .await
+        .is_err());
+        assert!(session.waiting_for_continue());
+        session.close().await.unwrap();
+
+        // Reopening does not consume the pending report or release the gate.
+        let mut session = Session::open(&cli, &paths, selection(), Some(&id))
+            .await
+            .unwrap();
+        assert!(!wake_for_notifications(&cli, &mut session, &mut None)
+            .await
+            .unwrap());
+        handle(&cli, "/continue", "", &paths, &mut session, &mut None)
+            .await
+            .unwrap();
+        assert!(!session.waiting_for_continue());
+        assert!(!input_queue::any(&store.db, &id, is_notification).unwrap());
+        assert!(!wake_for_notifications(&cli, &mut session, &mut None)
+            .await
+            .unwrap());
+        {
+            let requests = requests.lock().unwrap();
+            assert_eq!(requests.len(), 1);
+            let messages = requests[0]["messages"].to_string();
+            assert!(messages.contains("RESUME_ORIGINAL_TASK"));
+            assert_eq!(messages.matches("RESUME_PENDING_REPORT").count(), 1);
+        }
+        session.resume_saved(&paths, &id).await.unwrap();
+        assert!(session.waiting_for_continue());
+        handle(&cli, "/continue", "", &paths, &mut session, &mut None)
+            .await
+            .unwrap();
+        assert_eq!(requests.lock().unwrap().len(), 2);
+        assert!(requests.lock().unwrap()[1]["messages"]
+            .to_string()
+            .contains("Continue the unfinished work"));
+        session.resume_saved(&paths, &id).await.unwrap();
+        session
+            .turn(&cli, "Explicit new task", &mut None)
+            .await
+            .unwrap();
+        assert!(!session.waiting_for_continue());
+        assert_eq!(requests.lock().unwrap().len(), 3);
+        session.resume_saved(&paths, &id).await.unwrap();
+        session.clear().await.unwrap();
+        assert!(!session.waiting_for_continue());
+        session.close().await.unwrap();
+        let mut fresh = Session::open(&cli, &paths, selection(), None)
+            .await
+            .unwrap();
+        assert!(!fresh.waiting_for_continue());
+        fresh.workspace = dir.path().to_owned();
+        input_queue::push(&fresh.store.db, &fresh.id, notification).unwrap();
+        assert!(wake_for_notifications(&cli, &mut fresh, &mut None)
+            .await
+            .unwrap());
+        assert_eq!(requests.lock().unwrap().len(), 4);
+        fresh.close().await.unwrap();
+        server.abort();
+    }
+
     #[tokio::test]
     async fn corrupt_shell_notification_store_does_not_fail_active_session() {
         use clap::Parser;

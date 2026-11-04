@@ -65,7 +65,8 @@ pub const COMMANDS: &[(&str, &str)] = &[
     ("/remote-control", "Continue this session from a Remote Control client: [NAME] [--server URL [--save]]|listen [--host ADDR] [--port PORT]|status|disconnect|server (alias /rc)"),
     ("/rc", "Alias for /remote-control"),
     ("/reload-skills", "Reload installed skills from disk"),
-    ("/resume", "List saved conversations or resume one: [ID]"),
+    ("/resume", "Restore a saved conversation and wait for input: [ID]"),
+    ("/continue", "Continue this conversation and enable automatic task notifications"),
     (
         "/terminal-setup",
         "Show terminal capabilities and keyboard shortcuts",

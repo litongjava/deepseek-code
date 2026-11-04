@@ -261,11 +261,13 @@ async fn single_query_and_resume_share_sqlite_without_desktop_or_saved_credentia
     );
     let requests = fixture.requests.lock().unwrap();
     assert_eq!(requests.len(), 2);
+    // Loaded user/project instructions may prefix the original prompt.
     assert!(requests[1]["messages"]
         .as_array()
         .unwrap()
         .iter()
-        .any(|m| m["content"] == "first prompt"));
+        .any(|m| m["role"] == "user" && m["content"].as_str().is_some_and(|text|
+            text == "first prompt" || text.ends_with("\n\nfirst prompt"))));
     assert!(requests[1]["messages"]
         .as_array()
         .unwrap()
