@@ -1116,7 +1116,9 @@ mod tests {
             assert!(history
                 .all()
                 .iter()
-                .any(|row| row.contains("bootstrap.yml")));
+                .map(|row| super::super::markdown::plain_rendered(row))
+                .collect::<String>()
+                .contains("bootstrap.yml"));
             assert_eq!(history.copy_logged(0).as_deref(), Some(command.as_str()));
             assert!(history.toggle_history(0));
             history.reflow(180);

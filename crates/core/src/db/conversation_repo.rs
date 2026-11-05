@@ -90,6 +90,7 @@ mod branch_tests {
     fn fixture() -> Connection {
         let conn = Connection::open_in_memory().unwrap();
         conn.execute_batch(SCHEMA_SQL).unwrap();
+        crate::services::migrate(&conn).unwrap();
         migrate_workspace_mode(&conn).unwrap();
         insert_conversation(&conn, "source", Some("Source"), Some("model"), Some("provider"), Some("D:/project"), None,
             false, false, false, "now", "now", 3).unwrap();

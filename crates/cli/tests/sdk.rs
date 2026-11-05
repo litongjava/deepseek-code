@@ -1856,7 +1856,9 @@ SKILL_SENTINEL",
             assert!(child.contains(sentinel), "missing {sentinel}: {child}");
         }
         if anthropic {
-            assert_eq!(requests[1]["thinking"]["type"], "enabled");
+            // A compatible endpoint's model keeps the selected effort, without a token budget.
+            assert_eq!(requests[1]["thinking"]["type"], "adaptive");
+            assert_eq!(requests[1]["output_config"]["effort"], "high");
         } else {
             assert_eq!(requests[1]["reasoning_effort"], "high");
         }
