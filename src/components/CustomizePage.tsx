@@ -3,8 +3,8 @@ import { useNavigate } from 'react-router-dom';
 import {
   ArrowLeft, Plus, Search, Trash2, Sparkles, LayoutGrid, FileText,
   ChevronRight, ChevronDown, Folder, File, Info, Eye, Code,
-  Settings, Check, MessageSquare, ClipboardList, Upload, Github, X, FolderPlus, Server, Puzzle
-} from 'lucide-react';
+  Settings, Check, MessageSquare, ClipboardList, Upload, Github, X, FolderPlus, Server, Puzzle, SlidersHorizontal } from 'lucide-react';
+import AgentCustomization from './AgentCustomization';
 import MarkdownRenderer, { CodeBlock } from './MarkdownRenderer';
 import { getSkills, getSkillDetail, getSkillFile, createSkill, updateSkill, deleteSkill, toggleSkill, getGithubStatus, getGithubAuthUrl, disconnectGithub } from '../api';
 import searchIconImg from '../assets/icons/search-icon.png';
@@ -199,7 +199,7 @@ const FileTreeNode: React.FC<FileTreeNodeProps> = ({
 const CustomizePage = ({ onCreateWithDeepSeek, onBack }: { onCreateWithDeepSeek?: () => void; onBack?: () => void }) => {
   const { t } = useI18n();
   const navigate = useNavigate();
-  const [tab, setTab] = useState<'overview' | 'skills' | 'mcp' | 'connectors' | 'plugins'>('overview');
+  const [tab, setTab] = useState<'overview' | 'skills' | 'mcp' | 'connectors' | 'plugins' | 'agent'>('overview');
   const [examples, setExamples] = useState<Skill[]>([]);
   const [mySkills, setMySkills] = useState<Skill[]>([]);
   const [selectedSkillId, setSelectedSkillId] = useState<string | null>(null);
@@ -214,6 +214,7 @@ const CustomizePage = ({ onCreateWithDeepSeek, onBack }: { onCreateWithDeepSeek?
     { id: 'mcp', label: 'MCP', description: t('settings.mcpServers'), icon: Server },
     { id: 'connectors', label: t('customize.connectors'), description: t('customize.integrateTools'), image: connectorsImg },
     { id: 'plugins', label: t('customize.plugins'), description: t('customize.pluginsDescription'), icon: Puzzle },
+    { id: 'agent', label: '提示词与工具', description: '修改系统提示词，启用、修改和添加工具', icon: SlidersHorizontal },
   ] as const;
 
   const [githubConnected, setGithubConnected] = useState(false);
@@ -651,6 +652,8 @@ const CustomizePage = ({ onCreateWithDeepSeek, onBack }: { onCreateWithDeepSeek?
           <div className="flex-1 min-h-0 overflow-y-auto p-6 lg:p-8"><McpSettingsPage /></div>
         ) : tab === 'plugins' ? (
           <div className="flex-1 min-h-0 overflow-y-auto p-6 lg:p-8"><PluginsPage /></div>
+        ) : tab === 'agent' ? (
+          <div className="flex-1 min-h-0 overflow-y-auto p-6 lg:p-8"><AgentCustomization /></div>
         ) : tab === 'overview' ? (
           <div className="flex flex-col items-center h-full w-full overflow-y-auto max-w-2xl mx-auto px-6 py-12">
             <div className="mb-6">

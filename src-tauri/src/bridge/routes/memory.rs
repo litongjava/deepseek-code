@@ -28,6 +28,38 @@ pub fn routes() -> Router<AppState> {
             "/api/memory/clear",
             post(super::super::memory_clear_handler),
         )
+        .route("/api/memory/items/{id}", put(update_item).delete(delete_item))
+}
+
+#[derive(serde::Deserialize)]
+struct UpdateItem {
+    content: String,
+    importance: f64,
+}
+
+fn item_result(
+    result: anyhow::Result<bool>,
+) -> Result<axum::Json<serde_json::Value>, (axum::http::StatusCode, axum::Json<serde_json::Value>)> {
+    match result {
+        Ok(true) => Ok(axum::Json(serde_json::json!({"status": "ok"}))),
+        Ok(false) => Err((axum::http::StatusCode::NOT_FOUND, axum::Json(serde_json::json!({"error": "Memory not found"})))),
+        Err(e) => Err(error(e)),
+    }
+}
+
+async fn update_item(
+    axum::extract::State(state): axum::extract::State<AppState>,
+    axum::extract::Path(id): axum::extract::Path<String>,
+    axum::Json(request): axum::Json<UpdateItem>,
+) -> Result<axum::Json<serde_json::Value>, (axum::http::StatusCode, axum::Json<serde_json::Value>)> {
+    item_result(state.memex_client.update(&id, &request.content, request.importance).await)
+}
+
+async fn delete_item(
+    axum::extract::State(state): axum::extract::State<AppState>,
+    axum::extract::Path(id): axum::extract::Path<String>,
+) -> Result<axum::Json<serde_json::Value>, (axum::http::StatusCode, axum::Json<serde_json::Value>)> {
+    item_result(state.memex_client.delete(&id).await)
 }
 
 async fn export(

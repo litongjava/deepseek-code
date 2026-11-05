@@ -187,6 +187,31 @@ impl MemExClient {
         Ok(())
     }
 
+    /// Replaces one entry. Only the local store addresses entries by ID.
+    pub async fn update(&self, id: &str, content: &str, importance: f64) -> Result<bool> {
+        let content = content.trim();
+        if content.is_empty() { return Err(anyhow!("Memory content cannot be empty")); }
+        if content.chars().count() > 32_000 { return Err(anyhow!("Memory must be at most 32000 characters")); }
+        if !importance.is_finite() || !(0.0..=1.0).contains(&importance) { return Err(anyhow!("Importance must be between 0 and 1")); }
+        let local = self.local_only("Editing").await?;
+        let (id, content) = (id.to_string(), content.to_string());
+        tokio::task::spawn_blocking(move || local.update(&id, &content, importance)).await?
+    }
+
+    /// Removes one entry. Only the local store addresses entries by ID.
+    pub async fn delete(&self, id: &str) -> Result<bool> {
+        let local = self.local_only("Deleting").await?;
+        let id = id.to_string();
+        tokio::task::spawn_blocking(move || local.delete(&id)).await?
+    }
+
+    async fn local_only(&self, action: &str) -> Result<local::LocalMemory> {
+        if self.get_config().await.backend_url != "local" {
+            return Err(anyhow!("{action} a single memory requires the local store"));
+        }
+        Ok(self.local.clone())
+    }
+
     pub async fn stats(&self) -> Result<MemoryStats> {
         let config = self.get_config().await;
         if config.backend_url == "local" {

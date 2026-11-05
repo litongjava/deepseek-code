@@ -312,6 +312,7 @@ pub async fn handle(
                     Entry { title: "Project instructions".into(), detail: describe(&paths_by_scope[1].1, "Checked in at") },
                     Entry { title: "Local instructions".into(), detail: describe(&paths_by_scope[2].1, "Not checked in:") },
                     Entry { title: "Show loaded project instructions".into(), detail: String::new() },
+                    Entry { title: "Long-term memories".into(), detail: "Facts recalled across conversations: view, add, edit, delete".into() },
                 ];
                 let picker = Picker { heading: "Memory", subtitle: Some("Instructions DeepSeek Code reads in every session"), entries: &entries, search: false, hint: "Enter to open \u{b7} Esc to cancel", selected: 0 };
                 let scope = match picker.run()? {
@@ -319,6 +320,7 @@ pub async fn handle(
                     Some(1) => "project",
                     Some(2) => "local",
                     Some(3) => "show",
+                    Some(4) => "entries",
                     _ => return Ok(true),
                 };
                 return Box::pin(handle("/memory", scope, paths, session)).await;
@@ -344,6 +346,7 @@ pub async fn handle(
                         command_println!("{instructions}");
                     }
                 }
+                "entries" => crate::memory::manage(paths).await?,
                 "user" => {
                     let (_, path) = &paths_by_scope[0];
                     edit_file(path, "# User instructions\n\n").await?;

@@ -50,6 +50,29 @@ pub fn compose_system_prompt(custom_prompt: Option<&str>, model: &str, profile: 
     compose_system_prompt_in(custom_prompt, model, profile, None)
 }
 
+/// The built-in prompt text, which the user can start editing from.
+pub fn default_system_prompt(profile: PromptProfile) -> String {
+    static_sections(profile).join("\n\n")
+}
+
+/// Like `compose_system_prompt_in`, with the user's system prompt setting applied.
+pub fn compose_customized(custom_prompt: Option<&str>, model: &str, profile: PromptProfile, workspace: Option<&Path>, user: &crate::services::customization::SystemPrompt) -> String {
+    use crate::services::customization::PromptMode;
+    let text = user.text.trim();
+    let mut sections = match user.mode {
+        PromptMode::Replace if !text.is_empty() => vec![text.to_owned()],
+        _ => static_sections(profile),
+    };
+    sections.push(environment_section(model, workspace));
+    if user.mode == PromptMode::Append && !text.is_empty() {
+        sections.push(text.to_owned());
+    }
+    if let Some(custom) = custom_prompt.map(str::trim).filter(|s| !s.is_empty()) {
+        sections.push(format!("<additional_instructions>\n{custom}\n</additional_instructions>"));
+    }
+    sections.join("\n\n")
+}
+
 /// Static sections come first and never vary within a profile, so providers can
 /// cache them; everything per-request (environment, custom instructions, and what
 /// the engine appends later) follows them.
@@ -459,6 +482,18 @@ mod tests {
         assert!(blocks[2].0.contains("custom rule") && blocks[2].0.ends_with("Project instructions follow\n"));
         // Every request in a session shares the identical cached prefix.
         let other = compose_system_prompt_in(None, "other-model", PromptProfile::Code, None);
+        {
+            use crate::services::customization::{PromptMode, SystemPrompt};
+            let compose = |mode, text: &str| compose_customized(Some("rule"), "m", PromptProfile::Code, None, &SystemPrompt { mode, text: text.into() });
+            assert_eq!(compose(PromptMode::Default, "ignored"), compose_system_prompt_in(Some("rule"), "m", PromptProfile::Code, None));
+            let appended = compose(PromptMode::Append, "EXTRA_RULE");
+            assert!(appended.contains(CODE_IDENTITY) && appended.contains("EXTRA_RULE"));
+            let replaced = compose(PromptMode::Replace, "ONLY_THIS");
+            assert!(replaced.starts_with("ONLY_THIS") && !replaced.contains(CODE_IDENTITY));
+            assert!(replaced.contains("# Environment") && replaced.contains("rule"), "the session's facts stay");
+            assert!(compose(PromptMode::Replace, "  ").contains(CODE_IDENTITY), "an empty replacement keeps the default");
+            assert!(default_system_prompt(PromptProfile::Code).starts_with(CODE_IDENTITY));
+        }
         assert_eq!(cache_blocks(&other).unwrap()[..2], blocks[..2]);
         let desktop = cache_blocks(&compose_desktop_system_prompt(None, "m")).unwrap();
         assert!(desktop[0].0.starts_with("<identity>") && desktop[1].0.contains("<desktop_behavior>"));

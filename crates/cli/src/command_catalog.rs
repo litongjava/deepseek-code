@@ -32,7 +32,7 @@ pub const COMMANDS: &[(&str, &str)] = &[
     ("/diff", "Toggle the scrollable Git diff panel: [on|off|staged]"),
     ("/usage", "Show request tokens, configured cost estimates and Anthropic plan usage"),
     ("/cost", "Show this session's token usage and cost estimate (alias for /usage)"),
-    ("/memory", "Show or edit project instructions: [show|edit|local]"),
+    ("/memory", "Manage instructions and long-term memories: [show|edit|local|entries]"),
     ("/plugin", "Manage installed plugins: list|install|enable|disable|remove"),
     ("/reload-plugins", "Reload the currently enabled plugin configuration"),
     ("/hooks", "Show lifecycle hooks, including auto-classifier PermissionDenied notifications"),

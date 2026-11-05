@@ -36,6 +36,7 @@ pub mod team;
 pub mod team_server;
 pub mod voice;
 pub mod generation;
+pub mod customization;
 pub mod dream;
 pub mod magic_docs;
 pub mod agents;

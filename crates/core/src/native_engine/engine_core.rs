@@ -472,8 +472,9 @@ impl QueryEngine {
             &conv_id,
         )
         .await?;
-        request.system_prompt = Some(crate::prompt::compose_system_prompt_in(
-            request.system_prompt.as_deref(), &request.model, prompt_profile, Some(&workspace),
+        let customization = crate::services::customization::load(&plugin_context.paths.data_dir)?;
+        request.system_prompt = Some(crate::prompt::compose_customized(
+            request.system_prompt.as_deref(), &request.model, prompt_profile, Some(&workspace), &customization.system_prompt,
         ));
         let snapshot_root = plugin_context.paths.data_dir.clone();
         let snapshot_session = conv_id.clone();

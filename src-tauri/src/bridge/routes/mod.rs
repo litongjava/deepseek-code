@@ -40,6 +40,7 @@ pub mod workflow;
 pub mod sync;
 pub mod workspace_files;
 pub mod caveman;
+pub mod customization;
 
 mod subagents;
 
@@ -48,6 +49,7 @@ use axum::Router;
 pub fn build_all_routes() -> Router<AppState> {
     Router::new()
         .merge(system::routes())
+        .merge(customization::routes())
         .merge(chat::routes())
         .merge(input_queue::routes())
         .merge(conversations::routes())

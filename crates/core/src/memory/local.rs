@@ -69,6 +69,16 @@ impl LocalMemory {
         Ok(results)
     }
 
+    /// Replaces an entry's text and importance. False when the ID is unknown.
+    pub fn update(&self, id: &str, content: &str, importance: f64) -> Result<bool> {
+        Ok(self.open()?.execute("UPDATE memories SET content = ?2, importance = ?3 WHERE id = ?1", params![id, content, importance])? > 0)
+    }
+
+    /// Removes one entry. False when the ID is unknown.
+    pub fn delete(&self, id: &str) -> Result<bool> {
+        Ok(self.open()?.execute("DELETE FROM memories WHERE id = ?1", params![id])? > 0)
+    }
+
     pub fn stats(&self) -> Result<MemoryStats> {
         let (count, chars): (usize, usize) = self.open()?.query_row("SELECT COUNT(*), COALESCE(SUM(length(content)), 0) FROM memories", [], |r| Ok((r.get(0)?, r.get(1)?)))?;
         Ok(MemoryStats { total_memories: count, total_tokens_approx: (chars + 2) / 3, backend: "Local SQLite (keyword search)".into() })

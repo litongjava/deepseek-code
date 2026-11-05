@@ -37,6 +37,8 @@ export const memoryApi = {
   config: () => json<MemoryConfig>('/config'),
   search: (query: string, top_k = 50) => json<MemoryItem[]>('/search', { method: 'POST', body: JSON.stringify({ query, top_k }) }),
   ingest: (content: string, importance: number) => json('/ingest', { method: 'POST', body: JSON.stringify({ content, importance, metadata: { type: 'manual' } }) }),
+  update: (id: string, content: string, importance: number) => json(`/items/${encodeURIComponent(id)}`, { method: 'PUT', body: JSON.stringify({ content, importance }) }),
+  remove: (id: string) => json(`/items/${encodeURIComponent(id)}`, { method: 'DELETE' }),
   saveConfig: (config: MemoryConfig) => json('/config', { method: 'PUT', body: JSON.stringify(config) }),
   clear: () => json('/clear', { method: 'POST' }),
 };

@@ -3,7 +3,7 @@ import { fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { MemoryPanel } from './MemoryPanel';
 import { memoryApi } from '../api/memory';
 
-vi.mock('../api/memory', () => ({ memoryApi: { stats: vi.fn(), config: vi.fn(), search: vi.fn(), ingest: vi.fn(), saveConfig: vi.fn(), clear: vi.fn(), exportArchive: vi.fn(), importArchive: vi.fn() } }));
+vi.mock('../api/memory', () => ({ memoryApi: { stats: vi.fn(), config: vi.fn(), search: vi.fn(), update: vi.fn(), remove: vi.fn(), ingest: vi.fn(), saveConfig: vi.fn(), clear: vi.fn(), exportArchive: vi.fn(), importArchive: vi.fn() } }));
 
 const config = { enabled: true, backend_url: 'local', auto_search: true, auto_ingest: true, search_top_k: 5, compression_threshold_tokens: 2500000, min_importance_threshold: 0.3 };
 
@@ -15,6 +15,30 @@ beforeEach(() => {
 });
 
 describe('long-term memory management', () => {
+  it('edits and deletes a single memory', async () => {
+    vi.mocked(memoryApi.update).mockResolvedValue({});
+    vi.mocked(memoryApi.remove).mockResolvedValue({});
+    vi.spyOn(window, 'confirm').mockReturnValue(true);
+    render(<MemoryPanel />);
+    await screen.findByText('Use PostgreSQL');
+    fireEvent.click(screen.getByLabelText('编辑这条记忆'));
+    fireEvent.change(screen.getByLabelText('编辑记忆内容'), { target: { value: 'Use SQLite' } });
+    fireEvent.click(screen.getByText('保存修改'));
+    await waitFor(() => expect(memoryApi.update).toHaveBeenCalledWith('one', 'Use SQLite', 0.7));
+    await screen.findByText('记忆已更新。');
+    fireEvent.click(screen.getByLabelText('删除这条记忆'));
+    await waitFor(() => expect(memoryApi.remove).toHaveBeenCalledWith('one'));
+    expect(window.confirm).toHaveBeenCalled();
+  });
+
+  it('keeps a memory when deletion is not confirmed', async () => {
+    vi.spyOn(window, 'confirm').mockReturnValue(false);
+    render(<MemoryPanel />);
+    await screen.findByText('Use PostgreSQL');
+    fireEvent.click(screen.getByLabelText('删除这条记忆'));
+    expect(memoryApi.remove).not.toHaveBeenCalled();
+  });
+
   it('requires a successful preview and invalidates it when the input changes', async () => {
     vi.mocked(memoryApi.importArchive).mockResolvedValue({ imported: 1, skipped: 0, preview: true, backup: null });
     render(<MemoryPanel />);

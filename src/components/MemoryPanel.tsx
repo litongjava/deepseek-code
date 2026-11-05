@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useState } from 'react';
-import { Brain, Search, Database, Trash2, Settings, RefreshCw, Clock, Star, X, Plus } from 'lucide-react';
+import { Brain, Search, Database, Trash2, Settings, RefreshCw, Clock, Star, X, Plus, Pencil } from 'lucide-react';
 import { memoryApi, type MemoryConfig, type MemoryItem, type MemoryStats } from '../api/memory';
 import DreamControls from './DreamControls';
 
@@ -23,6 +23,7 @@ export function MemoryPanel() {
   const [searchedQuery, setSearchedQuery] = useState('');
   const [archiveText, setArchiveText] = useState('');
   const [previewed, setPreviewed] = useState(false);
+  const [editing, setEditing] = useState<{ id: string; content: string; importance: number } | null>(null);
 
   const refresh = useCallback(async (search = '') => {
     const [nextStats, nextConfig, items] = await Promise.all([memoryApi.stats(), memoryApi.config(), memoryApi.search(search)]);
@@ -60,6 +61,19 @@ export function MemoryPanel() {
     await refresh(query);
     setNotice('设置已保存。');
   });
+
+  const saveEdit = () => run(async () => {
+    if (!editing) return;
+    await memoryApi.update(editing.id, editing.content.trim(), editing.importance);
+    setEditing(null);
+    await refresh(query);
+    setNotice('记忆已更新。');
+  });
+
+  const removeItem = (item: MemoryItem) => {
+    if (!window.confirm('确定删除这条记忆？此操作无法撤销。')) return;
+    void run(async () => { await memoryApi.remove(item.id); await refresh(query); setNotice('记忆已删除。'); });
+  };
 
   const clear = () => {
     if (!window.confirm('确定清空所有长期记忆？此操作无法撤销，对话记录会保留。')) return;
@@ -129,8 +143,19 @@ export function MemoryPanel() {
               <span className="flex items-center gap-1"><Clock size={12} />{new Date(item.created_at).toLocaleString()}</span>
               {item.similarity_score != null && <span>匹配度 {(item.similarity_score * 100).toFixed(0)}%</span>}
               <span>{item.metadata?.type === 'manual' ? '手动添加' : '对话记忆'}</span>
+              {config?.backend_url === 'local' && <span className="ml-auto flex gap-1">
+                <button aria-label="编辑这条记忆" title="编辑" disabled={busy} onClick={() => setEditing({ id: item.id, content: item.content, importance: item.importance })} className="rounded p-1 hover:bg-claude-hover"><Pencil size={14} /></button>
+                <button aria-label="删除这条记忆" title="删除" disabled={busy} onClick={() => removeItem(item)} className="rounded p-1 text-red-500 hover:bg-claude-hover"><Trash2 size={14} /></button>
+              </span>}
             </div>
-            <p className="whitespace-pre-wrap break-words text-sm">{item.content}</p>
+            {editing?.id === item.id ? <form onSubmit={e => { e.preventDefault(); void saveEdit(); }} className="space-y-3">
+              <textarea aria-label="编辑记忆内容" maxLength={32000} required rows={4} value={editing.content} onChange={e => setEditing({ ...editing, content: e.target.value })} className={inputClass} />
+              <label className="flex items-center gap-3 text-xs">重要性 {editing.importance.toFixed(1)}<input aria-label="编辑重要性" type="range" min={0} max={1} step={0.1} value={editing.importance} onChange={e => setEditing({ ...editing, importance: Number(e.target.value) })} /></label>
+              <div className="flex gap-2">
+                <button disabled={busy || !editing.content.trim()} className={buttonClass}>保存修改</button>
+                <button type="button" onClick={() => setEditing(null)} className="rounded-lg border border-claude-border px-4 py-2 text-sm">取消</button>
+              </div>
+            </form> : <p className="whitespace-pre-wrap break-words text-sm">{item.content}</p>}
           </article>)}
           {!busy && config?.enabled && results.length === 0 && <p className="py-8 text-center text-sm text-claude-textSecondary">{searchedQuery ? '未找到相关记忆，试试其他关键词。' : '还没有记忆。可以手动添加，或完成一次对话后自动保存。'}</p>}
         </div>

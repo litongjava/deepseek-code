@@ -452,6 +452,17 @@ fn take_read_image(
 }
 
 /// Provider credentials are request-scoped, including parallel tool execution.
+/// Every built-in tool as the Code profile presents it, for the tool settings.
+pub fn builtin_tool_catalog() -> Vec<crate::tools::ToolDefinition> {
+    let mut tools = get_tool_definitions();
+    tools.extend(delegation::definitions());
+    tools.push(script_workflow::definition());
+    tools = adapt_tools(tools, crate::prompt::PromptProfile::Code);
+    tools.sort_by(|a, b| a.name.cmp(&b.name));
+    tools.dedup_by(|a, b| a.name == b.name);
+    tools
+}
+
 async fn execute_builtin_tool(
     name: &str,
     input: Value,
@@ -465,6 +476,12 @@ async fn execute_builtin_tool(
         let input = crate::skills::invocation::shell_input(input["command"].as_str().ok_or_else(||anyhow!("Skill shell command missing"))?, input["shell"].as_str())?;
         let permit = crate::skills::invocation::authorize(input, PermissionResult::Granted, false)?;
         return Ok(json!({"stdout":crate::skills::invocation::execute(permit,std::path::Path::new(cwd)).await?,"success":true,"exit_code":0}));
+    }
+    if let Some(tool) = search_config_path.and_then(|path| path.parent())
+        .and_then(|root| crate::services::customization::load(root).ok())
+        .and_then(|customization| customization.custom_tool(name).cloned())
+    {
+        return crate::services::customization::run_custom_tool(&tool, &input, cwd).await;
     }
     if name == "PluginRun" {
         let root=search_config_path.and_then(|p|p.parent()).ok_or_else(||anyhow!("Plugin storage is unavailable"))?;
@@ -1129,6 +1146,16 @@ impl ToolLoopExecutor {
         self
     }
 
+    /// The user's overrides. A damaged file already failed the turn at its start;
+    /// a file damaged during a turn leaves the turn's tools as they are.
+    fn customization(&self) -> crate::services::customization::Customization {
+        self.search_config_path
+            .as_deref()
+            .and_then(std::path::Path::parent)
+            .and_then(|root| crate::services::customization::load(root).ok())
+            .unwrap_or_default()
+    }
+
     fn tool_definitions(&self) -> Vec<crate::tools::ToolDefinition> {
         let mut tools = get_tool_definitions();
         if !self.goal_proposals_available() { tools.retain(|tool| tool.name != "ProposeGoal"); }
@@ -1149,7 +1176,8 @@ impl ToolLoopExecutor {
             tools.extend(definitions);
         }
         if self.search_config_path.is_some() && self.delegation_depth == 0 { tools.push(script_workflow::definition()); }
-        adapt_tools(tools, self.prompt_profile).into_iter().filter(|tool| self.allowed_tools.as_ref().is_none_or(|names| names.contains(&tool.name))).collect()
+        let tools = adapt_tools(tools, self.prompt_profile);
+        self.customization().apply(tools).into_iter().filter(|tool| self.allowed_tools.as_ref().is_none_or(|names| names.contains(&tool.name))).collect()
     }
 
     pub fn with_prefetch_engine(mut self, engine: Arc<PrefetchEngine>) -> Self {
@@ -1657,6 +1685,7 @@ impl ToolLoopExecutor {
         _tool_use_id: &str,
     ) -> CallStep {
         if self.allowed_tools.as_ref().is_some_and(|names| !names.iter().any(|name| name == tool_name)) { return CallStep::Finished((tool_input.clone(), "Tool is not allowed by this agent definition".into(), true)); }
+        if self.customization().is_disabled(tool_name) { return CallStep::Finished((tool_input.clone(), format!("{tool_name} is turned off in the tool settings"), true)); }
         if self.is_plan_document_tool(tool_name, tool_input)
             || (self
                 .permission_manager

@@ -405,6 +405,14 @@ pub enum MemoryCommands {
         #[arg(long, default_value_t = 5)] min_memories: usize,
     },
     Status,
+    /// List memories, newest first, or search them with a query.
+    List { query: Option<String>, #[arg(long, default_value_t = 50)] limit: usize },
+    /// Save a memory.
+    Add { content: String, #[arg(long, default_value_t = 0.7)] importance: f64 },
+    /// Replace a memory's text, keeping its importance unless one is given.
+    Update { id: String, content: String, #[arg(long)] importance: Option<f64> },
+    /// Delete one memory.
+    Delete { id: String },
     /// Clear personal memory only. Requires explicit confirmation.
     Clear { #[arg(long)] yes: bool },
     /// Export all local memories; never overwrite an existing file.

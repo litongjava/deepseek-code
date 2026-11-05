@@ -339,7 +339,7 @@ fn print_parked(report: &deepseek_code_core::services::session_parking::ParkedSt
     );
 }
 
-fn safe_output(text: &str) -> String {
+pub(crate) fn safe_output(text: &str) -> String {
     text.chars().filter(|ch| !ch.is_control() || matches!(ch, '\n' | '\t')).collect()
 }
 
