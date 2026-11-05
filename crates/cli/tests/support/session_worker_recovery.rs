@@ -46,7 +46,20 @@ async fn power_loss_metadata_damage_allows_new_request_without_replay() {
     )
     .unwrap();
     std::fs::write(dir.parent().unwrap().join("current.json"), [0; 38]).unwrap();
-    assert!(worker::recover_session(&paths.data_dir, &session).unwrap());
+    // A Unix host keeps its own process group, so it outlives the supervisor
+    // until it notices the lost owner and exits by itself. Recovery stays refused
+    // until then rather than starting a second executor.
+    let recovered = tokio::time::timeout(Duration::from_secs(30), async {
+        loop {
+            match worker::recover_session(&paths.data_dir, &session) {
+                Ok(recovered) => break recovered,
+                Err(_) => tokio::time::sleep(Duration::from_millis(200)).await,
+            }
+        }
+    })
+    .await
+    .expect("the orphaned host must exit by itself");
+    assert!(recovered);
     let fresh = worker::ensure_worker(&paths.data_dir, &executable, &session, &workspace)
         .await
         .unwrap();

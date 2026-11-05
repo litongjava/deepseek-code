@@ -154,6 +154,11 @@ pub fn settle_session(root: &Path, session: &str) -> Result<SettledSession> {
     Ok(SettledSession { recovered, active })
 }
 
+/// True only when the process is positively gone; unknown counts as alive.
+pub fn process_exited(pid: u32) -> bool {
+    recovery::exited(pid)
+}
+
 pub fn current(root: &Path, session: &str) -> Result<Option<Worker>> {
     let base = worker_path(root, session)?;
     let pointer = match fs::read(base.join("current.json")) {

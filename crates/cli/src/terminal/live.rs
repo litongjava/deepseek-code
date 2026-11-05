@@ -312,6 +312,28 @@ impl Draft {
         self.cursor = 0;
         self.insert(text);
     }
+    /// The input box rows, prompt included, with the cursor's row among them and
+    /// its column. Tall text scrolls with the cursor, as at the idle prompt.
+    fn rows(&self, prompt: &str, width: usize) -> (Vec<String>, usize, usize) {
+        let prompt_width = prompt.chars().count();
+        if self.pasted {
+            let (text, cursor) = self.visible(width.saturating_sub(prompt_width + 1));
+            return (vec![format!("{prompt}{text}")], 0, prompt_width + cursor);
+        }
+        let (rows, positions) = super::prompt_display::layout(prompt, &self.characters, width.max(4));
+        let (row, cell) = positions.get(self.cursor).copied().unwrap_or((0, prompt_width));
+        let shown = super::prompt_display::viewport(rows.len().max(1), row, MAX_DRAFT_ROWS);
+        (rows.get(shown.clone()).map(<[String]>::to_vec).unwrap_or_default(), row - shown.start, cell)
+    }
+    fn move_row(&mut self, down: bool) -> bool {
+        let width = terminal::size().map_or(80, |(columns, _)| (columns as usize).saturating_sub(1).max(4));
+        let prompt = format!("{} ", crate::terminal::prompt_glyph());
+        let Some(cursor) = super::prompt_display::vertical_cursor(&prompt, &self.characters, self.cursor, width, down) else {
+            return false;
+        };
+        self.cursor = cursor;
+        true
+    }
     fn visible(&self, width: usize) -> (String, usize) {
         if self.pasted {
             if let Some(label) = super::paste_input::paste_label(&self.characters.iter().skip(self.paste_start).take(self.paste_end.saturating_sub(self.paste_start)).collect::<String>()) {
@@ -1075,6 +1097,9 @@ fn queued_rows(queued: &[String], width: usize) -> Vec<String> {
     rows
 }
 
+/// The input box grows with its text up to this height, then scrolls.
+const MAX_DRAFT_ROWS: usize = 8;
+
 fn content_budget(height: u16) -> usize {
     (height as usize).saturating_sub(10).clamp(2, 8)
 }
@@ -1345,6 +1370,8 @@ struct Frame {
     padding: usize,
     /// Whether the frame ends with the input box, rather than a menu question.
     input_box: bool,
+    /// Rows of the input text in the current frame.
+    input_rows: usize,
     /// Whether the turn's first frame has moved a short transcript down onto it.
     aligned: bool,
     preserve_welcome: bool,
@@ -1507,10 +1534,11 @@ impl Frame {
     }
     /// The hand-off output and the row the prompt continues on.
     fn hand_off_output(&mut self, rows: usize) -> Option<(String, u16)> {
-        if !self.input_box || self.lines.len() < 4 || self.top.is_none() || rows < 8 {
+        let box_height = 3 + self.input_rows.max(1);
+        if !self.input_box || self.lines.len() < box_height || self.top.is_none() || rows < box_height + 4 {
             return None;
         }
-        let input_box = self.lines[self.lines.len() - 4..].to_vec();
+        let input_box = self.lines[self.lines.len() - box_height..].to_vec();
         let mut out = std::mem::take(&mut self.pending);
         self.write_logs(&mut out, rows);
         let mut top = self.top.unwrap_or(0) as usize;
@@ -1715,7 +1743,16 @@ impl Frame {
         let color = std::env::var_os("NO_COLOR").is_none();
         let prompt = if state.answer.is_some() { "Answer \u{203a} ".to_owned() } else { format!("{} ", crate::terminal::prompt_glyph()) };
         let prompt_width = prompt.chars().count();
-        let (draft, cursor) = state.draft.visible(width.saturating_sub(prompt_width + 1));
+        let queued_placeholder = state.draft.characters.is_empty() && !state.queued.is_empty() && state.answer.is_none();
+        let (draft_rows, draft_cursor_row, draft_column) = if queued_placeholder {
+            (vec![format!("{prompt}\x1b[2mPress up to edit queued messages\x1b[0m")], 0, prompt_width)
+        } else {
+            let (rows, row, column) = state.draft.rows(&prompt, width);
+            (if rows.is_empty() { vec![prompt.clone()] } else { rows }, row, column)
+        };
+        let draft_height = draft_rows.len();
+        // Counted from the frame's end: the footer rule, the footer, then the rows below the cursor.
+        let cursor_from_end = 3 + draft_height - 1 - draft_cursor_row;
         let status = clip(&state.status_line(), width);
         let indicator = crate::terminal::style::mode_indicator(&state.mode);
         let mode = format!("{} {}", crate::terminal::style::status_mode(&state.mode), state.model_label);
@@ -1787,19 +1824,17 @@ impl Frame {
             ),
             clip(&state.input_hint(), width),
             rule.clone(),
-            if draft.is_empty() && !state.queued.is_empty() && state.answer.is_none() {
-                format!("{prompt}\x1b[2mPress up to edit queued messages\x1b[0m")
-            } else {
-                format!("{prompt}{draft}")
-            },
-            rule,
-            clip(&mode, width),
         ];
+        lines.extend(draft_rows);
+        let closing_rule = lines.len();
+        lines.push(rule);
+        let footer_row = lines.len();
+        lines.push(clip(&mode, width));
         if !color {
             lines[1] = status;
         } else {
             use crossterm::style::{ResetColor, SetForegroundColor};
-            for index in [2, 6] {
+            for index in [2, footer_row] {
                 // A pending question is the one thing the user must act on.
                 let color = if index == 2 && state.answer.is_some() {
                     crate::terminal::style::accent()
@@ -1811,7 +1846,7 @@ impl Frame {
             if let Some((label, color)) = &indicator {
                 let footer = clip(&mode, width);
                 if let Some(rest) = footer.strip_prefix(label.as_str()) {
-                    lines[6] = format!(
+                    lines[footer_row] = format!(
                         "{}{label}{}{rest}{}",
                         SetForegroundColor(*color),
                         SetForegroundColor(crate::terminal::style::muted()),
@@ -1819,7 +1854,7 @@ impl Frame {
                     );
                 }
             }
-            for index in [3, 5] {
+            for index in [3, closing_rule] {
                 lines[index] = format!(
                     "{}{}{}",
                     SetForegroundColor(crate::terminal::style::border()),
@@ -1882,6 +1917,7 @@ impl Frame {
             lines = rows;
         }
         self.input_box = choice_cursor.is_none();
+        self.input_rows = draft_height;
         self.composer_height = lines.len();
         if super::scrollback::compact() && !self.history_view.active() {
             self.refresh_history(state, width);
@@ -1891,9 +1927,8 @@ impl Frame {
             self.refresh_history(state, width);
             let input_row = lines
                 .len()
-                .saturating_sub(choice_cursor.map_or(3, |(row, _)| row));
-            let cursor_column =
-                choice_cursor.map_or((prompt_width + cursor).min(width), |(_, column)| column);
+                .saturating_sub(choice_cursor.map_or(cursor_from_end, |(row, _)| row));
+            let cursor_column = choice_cursor.map_or(draft_column.min(width), |(_, column)| column);
             self.lines = lines.clone();
             self.history_view
                 .draw(&lines, input_row, cursor_column, size)?;
@@ -1904,7 +1939,7 @@ impl Frame {
         let mut lines = content;
         let rows = (size.1 as usize).max(1);
         let limit = rows.saturating_sub(1).max(1);
-        let mut input_row = lines.len().saturating_sub(choice_cursor.map_or(3, |(row, _)| row));
+        let mut input_row = lines.len().saturating_sub(choice_cursor.map_or(cursor_from_end, |(row, _)| row));
         if lines.len() > limit {
             let viewport = super::prompt_display::viewport(lines.len(), input_row, limit);
             let removed = viewport.start;
@@ -1920,7 +1955,7 @@ impl Frame {
         }
         let cursor_column = match choice_cursor {
             Some((_, column)) => column,
-            None => (prompt_width + cursor).min(width),
+            None => draft_column.min(width),
         };
         let Some(out) = self.place(lines, content_rows, input_row, cursor_column, size, &mut || {
             crossterm::cursor::position().map_or(0, |(_, row)| row as usize)
@@ -2580,6 +2615,11 @@ fn run(
                             },
                             screen.panel_viewport,
                         );
+                    } else if matches!(key.code, KeyCode::Up | KeyCode::Down)
+                        && state.answer.is_none()
+                        && state.draft.move_row(key.code == KeyCode::Down)
+                    {
+                        // Up and Down move between the rows of a multi-line draft first.
                     } else if key.code == KeyCode::Up
                         && state.answer.is_none()
                         && state.draft.characters.is_empty()
@@ -3511,6 +3551,26 @@ mod tests {
             }
             std::thread::sleep(Duration::from_millis(100));
         }
+    }
+
+    #[test]
+    fn draft_rows_show_real_lines_and_scroll_with_the_cursor() {
+        let mut draft = Draft::default();
+        draft.insert("one\ntwo");
+        let (rows, row, column) = draft.rows("> ", 40);
+        assert_eq!(rows, ["> one", "  two"]);
+        assert_eq!((row, column), (1, 5));
+        assert!(draft.move_row(false));
+        assert_eq!(draft.rows("> ", 40).1, 0);
+        assert!(!draft.move_row(false), "the first row leaves Up to history");
+        assert!(draft.move_row(true));
+
+        let mut tall = Draft::default();
+        tall.insert(&(0..20).map(|i| format!("r{i}")).collect::<Vec<_>>().join("\n"));
+        let (rows, row, _) = tall.rows("> ", 40);
+        assert_eq!(rows.len(), MAX_DRAFT_ROWS);
+        assert!(rows.last().unwrap().contains("r19"));
+        assert_eq!(row, MAX_DRAFT_ROWS - 1);
     }
 
     #[test]

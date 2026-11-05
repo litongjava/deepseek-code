@@ -59,9 +59,20 @@ pub async fn run_from_env() -> Result<bool> {
     let fatal = Arc::new(AtomicBool::new(false));
     let mut idle = Instant::now();
     let mut tick = tokio::time::interval(Duration::from_secs(1));
+    let mut owner_pid = worker.supervisor_pid;
+    let mut orphaned_since = None::<Instant>;
     loop {
         tokio::select! {
             _=tick.tick()=>{
+                if let Some(pid) = service::read_worker(&dir).ok().and_then(|owner| owner.supervisor_pid) { owner_pid = Some(pid); }
+                // Without its supervisor no one can report this host's work, and its
+                // lifetime lock blocks recovery. Allow time to cancel, then release it.
+                if owner_pid.is_some_and(service::process_exited) {
+                    fatal.store(true,Ordering::Release);
+                    if orphaned_since.get_or_insert_with(Instant::now).elapsed() > ORPHAN_GRACE {
+                        std::process::exit(1);
+                    }
+                }
                 if service::read_worker(&dir).map_or(true, |owner| owner.status == "stopped" || chrono::Utc::now().timestamp_millis().max(0) as u64 > owner.heartbeat_ms.saturating_add(10_000)) {
                     fatal.store(true,Ordering::Release);
                     if let Ok(owner)=service::read_worker(&dir) { if let Some(id)=owner.active_job { let _=jobs::cancel(&worker.root,&id); } }
@@ -298,6 +309,8 @@ fn current_live_mode(worker: &Worker, target: &ModeTarget, job_id: &str) -> Resu
     reply.launch_rules = Some(control.manager.launch_rules(&control.session_id));
     Ok(reply)
 }
+
+const ORPHAN_GRACE: Duration = Duration::from_secs(5);
 
 fn should_expire(turn: bool, shell: bool, fatal: bool, idle: Duration) -> bool {
     !turn && (fatal || (!shell && idle > Duration::from_secs(300)))

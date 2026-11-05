@@ -152,6 +152,17 @@ async fn submit(
     model: &str,
     max_tokens: u32,
 ) -> String {
+    submit_in_mode(host, endpoint, prompt, model, max_tokens, "bypass").await
+}
+
+async fn submit_in_mode(
+    host: &worker::Worker,
+    endpoint: &str,
+    prompt: &str,
+    model: &str,
+    max_tokens: u32,
+    mode: &str,
+) -> String {
     let id = uuid::Uuid::new_v4().to_string();
     let arguments = vec![
         "--data-dir".into(),
@@ -169,7 +180,7 @@ async fn submit(
         "--max-tokens".into(),
         max_tokens.to_string(),
         "--permission-mode".into(),
-        "bypass".into(),
+        mode.into(),
         "--print".into(),
         "--output-format".into(),
         "stream-json".into(),
@@ -304,7 +315,7 @@ async fn added_directory_survives_worker_resume_without_granting_other_sessions(
             "--model",
             "fixture-one",
             "--permission-mode",
-            "bypass",
+            "accept-edits",
             "--print",
             "--",
             "setup",
@@ -329,7 +340,8 @@ async fn added_directory_survives_worker_resume_without_granting_other_sessions(
             {"name":"Write","input":{"file_path":allowed.join(if granted {"written.txt"} else {"forbidden.txt"}),"content":"persisted"}},
             {"name":"Read","input":{"file_path":denied.join("source.txt")}}
         ]);
-        let job = submit(&host, &endpoint, &calls.to_string(), "fixture-one", 128).await;
+        // Bypass may read anywhere, so the allowlist is exercised in another mode.
+        let job = submit_in_mode(&host, &endpoint, &calls.to_string(), "fixture-one", 128, "accept-edits").await;
         assert_eq!(completed(&paths.data_dir, &job).await.status, "completed");
         let observed = requests.lock().unwrap().last().unwrap().clone();
         let results: Vec<_> = observed["messages"]
@@ -382,7 +394,7 @@ async fn added_directory_survives_worker_resume_without_granting_other_sessions(
                 {"name":"Read","input":{"file_path":denied.join("source.txt")}}
             ]);
             let delegate = json!([{"name":"Agent","input":{"prompt":child_calls.to_string(),"agent_type":"general","run_in_background":false}}]);
-            let job = submit(&host, &endpoint, &delegate.to_string(), "fixture-one", 128).await;
+            let job = submit_in_mode(&host, &endpoint, &delegate.to_string(), "fixture-one", 128, "accept-edits").await;
             assert_eq!(completed(&paths.data_dir, &job).await.status, "completed");
             let requests = requests.lock().unwrap();
             let child = requests[before..]
@@ -410,6 +422,12 @@ async fn added_directory_survives_worker_resume_without_granting_other_sessions(
                 .to_string()
                 .contains("private-neighbor"));
         }
+        // Outside the allowlist, bypass mode still reads what the user pointed it at.
+        let read = json!([{"name":"Read","input":{"file_path":denied.join("source.txt")}}]);
+        let job = submit(&host, &endpoint, &read.to_string(), "fixture-one", 128).await;
+        assert_eq!(completed(&paths.data_dir, &job).await.status, "completed");
+        let observed = requests.lock().unwrap().last().unwrap().to_string();
+        assert!(observed.contains("private-neighbor"), "{observed}");
         worker::shutdown(&paths.data_dir, id).await.unwrap();
     }
     assert_eq!(

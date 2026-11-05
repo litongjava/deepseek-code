@@ -25,10 +25,7 @@ cargo check --locked -p deepseek-code-desktop --all-targets
 
 ## 已知失败
 
-下面两个测试在改动前的 `main` 上就失败，失败内容相同时不算这次引入。修好后从这里删除。
-
-- `added_directory_survives_worker_resume_without_granting_other_sessions`：测试要求未授权目录读不到，实际在 `bypass` 模式下读到了。需要决定 `bypass` 是否应该限制工作区外的读取。
-- `recovery::power_loss_metadata_damage_allows_new_request_without_replay`：在 Linux 上结束 supervisor 后，恢复时仍报告 `Worker metadata is damaged but its process is still running`。原因未查明。
+目前没有。全部测试应当通过，出现失败时先在未修改的代码上跑同一个测试，再判断是否由这次改动引入。
 
 ## 真实终端的测试方法
 
@@ -51,8 +48,9 @@ cargo check --locked -p deepseek-code-desktop --all-targets
 
 1. 空闲时输入文字，按 `Ctrl+J`，再输入文字：显示两行，没有发送。
 2. 空闲时按 `Shift+Enter`、`Alt+Enter`、行尾 `\` 加 `Enter`：都换行。
-3. 模型运行中重复以上操作：换行且不发送。运行中的输入框用 `↵` 显示换行。
-4. 普通 `Enter` 仍然发送，斜杠菜单打开时 `Enter` 仍然选择菜单项。
+3. 模型运行中重复以上操作：换行且不发送，输入框真正分行显示，内容很长时最多显示 8 行并随光标滚动。
+4. 多行内容中按 `↑`/`↓` 在行间移动光标；到第一行或最后一行时才回到历史记录。
+5. 普通 `Enter` 仍然发送，斜杠菜单打开时 `Enter` 仍然选择菜单项。
 
 ### B. 运行中排队和撤回
 
@@ -83,6 +81,7 @@ cargo check --locked -p deepseek-code-desktop --all-targets
 1. **只关前端，worker 还活着**：`--resume` 显示任务仍在运行和任务 ID；`/continue` 立刻接回同一个任务，命令不重新执行，结束后输出结果。
 2. **前端和 worker 都被杀**：`--resume` 提示已恢复中断状态；`/continue` 开始新请求。模型收到的结果说明工具没有执行完，不能把它当成成功。原来的任务记录变为 `failed`，原请求不重放。
 3. **带 `--permission-mode` 恢复已崩溃的会话**：不再报告 `active background work`。
+3a. **只有 supervisor 被杀**：worker 主进程约 5 秒内自行退出，之后可以恢复。
 4. **worker 长时间无响应但进程还在**：`/continue` 不接回，提示用 `/tasks show ID` 查看，并给出任务 ID。
 5. **会话被占用时发送普通消息**：报错包含任务 ID 和 `/continue`，消息没有提交。
 6. **没有活动任务**：显示 `Session restored; waiting for input`，`/continue` 正常继续，通知只在继续后才唤醒模型。
@@ -108,7 +107,7 @@ cargo check --locked -p deepseek-code-desktop --all-targets
 - `services/session_worker*`、`services/background_sessions.rs`：D、E4
 - `runtime.rs`、`db/message_repo.rs`（发给模型的历史）：D2、E5，以及 SDK 测试
 - `services/input_queue.rs`：B、E4
-- 权限相关：E2，以及已知失败里的 `bypass` 测试
+- 权限相关：E2，以及 `added_directory_survives_worker_resume_without_granting_other_sessions`（`bypass` 模式可以读工作区外的文件，其他模式受目录范围限制）
 - Provider、模型请求：E1、E6
 - 其他范围：至少跑 E
 

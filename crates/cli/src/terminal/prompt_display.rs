@@ -102,6 +102,19 @@ fn wrapped_lines(prompt: &str, text: &str, width: usize) -> Vec<String> {
     layout(&prompt, &chars, width.max(4)).0
 }
 
+/// The cursor position one row above or below in a wrapped prompt, keeping the
+/// column where it can. `None` at the first or last row, where the caller's own
+/// Up and Down behavior applies.
+pub(super) fn vertical_cursor(prompt: &str, chars: &[char], cursor: usize, limit: usize, down: bool) -> Option<usize> {
+    let (_, positions) = layout(prompt, chars, limit.max(4));
+    let (row, cell) = *positions.get(cursor)?;
+    let target = if down { row + 1 } else { row.checked_sub(1)? };
+    positions.iter().enumerate()
+        .filter(|(_, (candidate, _))| *candidate == target)
+        .min_by_key(|(_, (_, candidate))| candidate.abs_diff(cell))
+        .map(|(index, _)| index)
+}
+
 /// Rows of a prompt followed by its text, wrapped at the last space that fits
 /// as in the reference CLI; a word longer than a row still breaks. Continuation
 /// rows indent two cells and no row exceeds `limit` cells. A space at a break

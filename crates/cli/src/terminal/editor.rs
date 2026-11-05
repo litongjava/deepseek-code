@@ -124,6 +124,16 @@ impl Drop for RawMode {
         let _ = terminal::disable_raw_mode();
     }
 }
+/// Moves the cursor between the rows of a multi-line prompt; false at the edges.
+fn vertical_move(buffer: &mut Buffer, prompt: &str, down: bool) -> bool {
+    let width = terminal::size().map_or(80, |(columns, _)| (columns as usize).saturating_sub(1).max(4));
+    let Some(cursor) = crate::terminal::prompt_display::vertical_cursor(prompt, &buffer.chars, buffer.cursor, width, down) else {
+        return false;
+    };
+    buffer.cursor = cursor;
+    true
+}
+
 #[derive(Default)]
 struct Buffer {
     chars: Vec<char>,
@@ -2058,6 +2068,7 @@ impl PromptEditor {
                         KeyCode::Down if !items.is_empty() => {
                             selected = (selected + 1) % items.len()
                         }
+                        KeyCode::Up | KeyCode::Down if items.is_empty() && vertical_move(&mut buffer, &prompt, key.code == KeyCode::Down) => {}
                         KeyCode::Up => {
                             if history_pos == self.history.len() {
                                 draft = buffer.text();
