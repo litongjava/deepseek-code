@@ -87,6 +87,15 @@ cargo check --locked -p deepseek-code-desktop --all-targets
 6. **没有活动任务**：显示 `Session restored; waiting for input`，`/continue` 正常继续，通知只在继续后才唤醒模型。
 7. 恢复后的历史里，没有结果的工具调用显示 `No result recorded`。
 
+### F. /tasks
+
+有两个后台命令时输入 `/tasks`：
+
+1. 显示 `Background`、`2 active shells`，每个任务一行（`● 命令  running`），最新的在前。
+2. `↑`/`↓` 选择，`Enter` 看详情，详情里 `←` 回到列表并保持选中项。
+3. 列表和详情里按 `x` 停止：任务立即从列表消失；停止最后一个后列表自动关闭，不再输出其他内容。
+4. 没有任务时输出 `No background tasks.`。`/tasks completed`、`/tasks show ID`、`/tasks attach ID` 文本命令照常可用。
+
 ### E. 基础流程
 
 1. 启动到输入框，发送消息，收到回答。
@@ -102,7 +111,8 @@ cargo check --locked -p deepseek-code-desktop --all-targets
 - `terminal/editor.rs`、`terminal/live.rs` 的按键处理：A、B、E1、E2、E3
 - `terminal/live.rs`、`terminal/scrollback.rs`、`terminal/change_view.rs`、`terminal/tool_view.rs` 的显示：B、C、E1
 - `repl.rs`：C4、D1、D2、D6、D7
-- `worker_frontend.rs`、`background_commands.rs`：B、D、E3、E4
+- `worker_frontend.rs`、`background_commands.rs`：B、D、E3、E4、F
+- `terminal/picker.rs`：F，以及 `/resume`、`/rewind`、`/mcp` 等使用选择列表的命令
 - `session.rs`：B、D、E
 - `services/session_worker*`、`services/background_sessions.rs`：D、E4
 - `runtime.rs`、`db/message_repo.rs`（发给模型的历史）：D2、E5，以及 SDK 测试

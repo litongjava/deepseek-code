@@ -398,45 +398,32 @@ pub(crate) async fn live_tasks(session: &Session, prompt: &str) -> Result<String
 }
 
 async fn tasks_menu(paths: &RuntimePaths, session: &Session) -> Result<()> {
-    use crate::terminal::picker::{details, Entry, Picker};
+    use crate::terminal::picker::{details, Key, Picked, Picker};
     let mut selected = 0;
+    let mut opened = false;
     loop {
-        let mut tasks: Vec<Task> = managed_shell_records(paths, &session.id)?.into_iter().map(Task::Shell).collect();
-        tasks.extend(
-            background_sessions::list(&paths.data_dir, Some(&session.id))?
-                .into_iter()
-                .filter(|job| !job.foreground && matches!(job.status.as_str(), "starting" | "running" | "unresponsive"))
-                .map(Task::Job),
-        );
+        let mut tasks = active_tasks(paths, session)?;
+        // Newest first, as in the reference CLI.
+        tasks.sort_by_key(|task| std::cmp::Reverse(task.started_ms()));
         if tasks.is_empty() {
-            command_eprintln!("No background tasks.");
+            // Stopping the last task closes the list without another message.
+            if !opened { command_eprintln!("No background tasks."); }
             return Ok(());
         }
-        let single = tasks.len() == 1;
-        let index = if single {
-            0
-        } else {
-            let entries: Vec<Entry> = tasks
-                .iter()
-                .map(|task| match task {
-                    Task::Shell(shell) => Entry {
-                        title: safe_output(shell["metadata"]["command"].as_str().or_else(|| shell["subject"].as_str()).unwrap_or("Background shell")),
-                        detail: format!("shell \u{b7} {}", shell["status"].as_str().unwrap_or("unknown")),
-                    },
-                    Task::Job(job) => Entry {
-                        title: safe_output(&job.title),
-                        detail: format!("session \u{b7} {} \u{b7} {}", job.status, job_runtime(job)),
-                    },
-                })
-                .collect();
-            let picker = Picker { heading: "Background tasks", subtitle: None, entries: &entries, search: false, hint: "Enter to view \u{b7} Esc to close", selected };
-            match picker.run()? {
-                Some(index) => index,
-                None => return Ok(()),
+        opened = true;
+        let (subtitle, entries) = task_rows(&tasks);
+        let picker = Picker { heading: "Background", subtitle: Some(&subtitle), entries: &entries, search: false, hint: "\u{2191}/\u{2193} to select \u{b7} Enter to view \u{b7} x to stop \u{b7} Esc to close", selected };
+        let index = match picker.run_keys(&[Key::Char('x')])? {
+            Picked::Entry(index) => index,
+            Picked::Key(Key::Char('x'), Some(index)) => {
+                selected = index;
+                stop_task(paths, session, &tasks[index]).await?;
+                continue;
             }
+            _ => return Ok(()),
         };
         selected = index;
-        let back = if single { "" } else { "\u{2190} to go back \u{b7} " };
+        let back = "\u{2190} to go back \u{b7} ";
         let key = match &tasks[index] {
             Task::Shell(shell) => {
                 let id = shell["id"].as_str().unwrap_or_default().to_owned();
@@ -461,10 +448,6 @@ async fn tasks_menu(paths: &RuntimePaths, session: &Session) -> Result<()> {
                 }
                 let stop = if status == "running" { " \u{b7} x to stop" } else { "" };
                 let key = details("Shell details", &rows, &format!("{back}Esc/Enter/Space to close{stop}"), if stop.is_empty() { &[] } else { &['x'] })?;
-                if key == Some('x') {
-                    shell_control(paths, &session.id, &id, true).await?;
-                    command_eprintln!("Stopped shell {id}.");
-                }
                 key
             }
             Task::Job(job) => {
@@ -477,10 +460,6 @@ async fn tasks_menu(paths: &RuntimePaths, session: &Session) -> Result<()> {
                 // An agent's conversation can be followed, as in the reference
                 // CLI's agent view.
                 let key = details("Task details", &rows, &format!("{back}t to view transcript \u{b7} Esc/Enter/Space to close \u{b7} x to stop"), &['x', 't'])?;
-                if key == Some('x') {
-                    background_sessions::cancel(&paths.data_dir, &job.id)?;
-                    command_eprintln!("Stopping task {}.", job.id);
-                }
                 if key == Some('t') {
                     crate::terminal::transcript_pager::view(&crate::repl::transcript_of(session, &job.session_id)?)?;
                     continue;
@@ -488,10 +467,103 @@ async fn tasks_menu(paths: &RuntimePaths, session: &Session) -> Result<()> {
                 key
             }
         };
-        if single || key != Some('<') {
+        if key == Some('x') {
+            stop_task(paths, session, &tasks[index]).await?;
+        } else if key != Some('<') {
             return Ok(());
         }
     }
+}
+
+/// What the list offers: finished tasks stay reachable through `/tasks completed`.
+fn active_tasks(paths: &RuntimePaths, session: &Session) -> Result<Vec<Task>> {
+    let mut tasks: Vec<Task> = managed_shell_records(paths, &session.id)?
+        .into_iter()
+        .filter(|shell| shell["status"] == "running")
+        .map(Task::Shell)
+        .collect();
+    tasks.extend(
+        background_sessions::list(&paths.data_dir, Some(&session.id))?
+            .into_iter()
+            .filter(|job| !job.foreground && matches!(job.status.as_str(), "starting" | "running" | "unresponsive"))
+            .map(Task::Job),
+    );
+    Ok(tasks)
+}
+
+async fn stop_task(paths: &RuntimePaths, session: &Session, task: &Task) -> Result<()> {
+    let id = match task {
+        Task::Shell(shell) => {
+            let id = shell["id"].as_str().unwrap_or_default().to_owned();
+            shell_control(paths, &session.id, &id, true).await?;
+            id
+        }
+        Task::Job(job) => {
+            background_sessions::cancel(&paths.data_dir, &job.id)?;
+            job.id.clone()
+        }
+    };
+    // The list redraws only on a key press, so give the stop a moment to land.
+    for _ in 0..40 {
+        let gone = !active_tasks(paths, session)?.iter().any(|task| match task {
+            Task::Shell(shell) => shell["id"] == id.as_str(),
+            Task::Job(job) => job.id == id,
+        });
+        if gone { break; }
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    }
+    Ok(())
+}
+
+/// The list's subtitle, such as `2 active shells`, and one aligned row per task.
+fn task_rows(tasks: &[Task]) -> (String, Vec<crate::terminal::picker::Entry>) {
+    use unicode_width::UnicodeWidthStr;
+    let counted = |shells: bool| tasks.iter().filter(|task| matches!(task, Task::Shell(_)) == shells && task.status() == "running").count();
+    let plural = |count: usize, one: &str, many: &str| format!("{count} active {}", if count == 1 { one } else { many });
+    let mut parts = Vec::new();
+    if counted(true) > 0 { parts.push(plural(counted(true), "shell", "shells")); }
+    if counted(false) > 0 { parts.push(plural(counted(false), "task", "tasks")); }
+    let subtitle = if parts.is_empty() { "No active tasks".to_owned() } else { parts.join(", ") };
+    let titles: Vec<String> = tasks.iter().map(Task::title).collect();
+    let width = titles.iter().map(|title| title.width()).max().unwrap_or(0);
+    let entries = tasks.iter().zip(titles).map(|(task, title)| {
+        let padding = " ".repeat(width - title.width());
+        crate::terminal::picker::Entry { title: format!("\u{25cf} {title}{padding}   {}", task.status()), detail: String::new() }
+    }).collect();
+    (subtitle, entries)
+}
+
+impl Task {
+    fn started_ms(&self) -> u64 {
+        match self {
+            Task::Shell(shell) => shell["metadata"]["started_ms"].as_u64().unwrap_or(0),
+            Task::Job(job) => job.started_ms,
+        }
+    }
+    fn status(&self) -> &str {
+        match self {
+            Task::Shell(shell) => shell["status"].as_str().unwrap_or("unknown"),
+            Task::Job(job) => &job.status,
+        }
+    }
+    fn title(&self) -> String {
+        match self {
+            Task::Shell(shell) => safe_output(shell["metadata"]["command"].as_str().or_else(|| shell["subject"].as_str()).unwrap_or("Background shell")),
+            Task::Job(job) => safe_output(&job.title),
+        }
+    }
+}
+
+#[cfg(test)]
+#[test]
+fn task_rows_align_one_row_per_task_and_count_what_is_active() {
+    let shell = |command: &str, status: &str| Task::Shell(serde_json::json!({"status":status,"metadata":{"command":command}}));
+    let (subtitle, rows) = task_rows(&[shell("sleep 301", "running"), shell("sleep 300 && echo", "running"), shell("ls", "completed")]);
+    assert_eq!(subtitle, "2 active shells");
+    assert_eq!(rows[0].title, "\u{25cf} sleep 301           running");
+    assert_eq!(rows[2].title, "\u{25cf} ls                  completed");
+    assert!(rows.iter().all(|row| row.detail.is_empty()));
+    assert_eq!(task_rows(&[shell("ls", "completed")]).0, "No active tasks");
 }
 
 /// The session's todo list as (content, status), for ctrl+t.

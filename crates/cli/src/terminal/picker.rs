@@ -38,6 +38,8 @@ pub enum Key {
     Ctrl(char),
     Left,
     Right,
+    /// A plain letter, while the search box is empty.
+    Char(char),
 }
 
 #[derive(Debug, PartialEq)]
@@ -106,6 +108,7 @@ impl Picker<'_> {
             let extra = match key.code {
                 KeyCode::Char(' ') if query.is_empty() && !control => Some(Key::Space),
                 KeyCode::Char(ch) if control => Some(Key::Ctrl(ch)),
+                KeyCode::Char(ch) if query.is_empty() => Some(Key::Char(ch)),
                 KeyCode::Tab => Some(Key::Tab),
                 KeyCode::Left => Some(Key::Left),
                 KeyCode::Right => Some(Key::Right),
