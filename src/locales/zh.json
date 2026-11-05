@@ -509,6 +509,7 @@
   },
   "chat": {
     "sessionMenu": "会话选项",
+    "readingMode": "阅读模式",
     "sessionView": "会话视图",
     "copySessionId": "复制会话 ID",
     "sessionIdCopied": "已复制会话 ID",

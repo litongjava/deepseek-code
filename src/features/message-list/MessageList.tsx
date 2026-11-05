@@ -4,6 +4,7 @@ import UserContentBlocks from './UserContentBlocks';
 import { turnLabel } from './turnTiming';
 import { contentBlocks, hasUnavailableImages, type UserContent } from '../../utils/userContent';
 import WorkDetails from '../trajectory/WorkDetails';
+import { messageSteps } from '../trajectory/model';
 import ResponseFooter from './ResponseFooter';
 import { useGeneralSettingsStore } from '../../stores/useGeneralSettingsStore';
 import { openChatLink } from '../../utils/chatLinks';
@@ -38,6 +39,7 @@ export const draftsStore = new Map<string, { text: string; files: PendingFile[];
 
 /** Memoized message list — skips re-render when only inputText changes */
 interface MessageListProps {
+  readingMode?: boolean;
   readOnly?: boolean;
   conversationId?: string | null;
   messages: any[];
@@ -62,12 +64,17 @@ interface MessageListProps {
 }
 
 const MessageList = React.memo<MessageListProps>(({
-  readOnly = false, conversationId, messages, loading, expandedMessages, editingMessageIdx, editingContent,
+  readingMode = false, readOnly = false, conversationId, messages, loading, expandedMessages, editingMessageIdx, editingContent,
   compactStatus, onSetEditingContent, onEditCancel, onEditSave,
   onToggleExpand, onResend, onEdit, onBranch, onOpenDocument, onSetMessages,
   messageContentRefs, onOpenResearch, onInspect, t,
 }) => {
   const showCodingView = useGeneralSettingsStore(state => state.showCodingView);
+  const visibleMessages = messages.map((msg, idx) => ({ msg, idx })).filter(({ msg }) => {
+    if (!readingMode) return true;
+    if (msg.is_summary === 1 || msg.is_compact_boundary || !['user', 'assistant'].includes(msg.role)) return false;
+    return msg.role === 'user' || messageSteps(msg).some(step => step.kind === 'text' && step.text?.trim()) || normalizeMessageDocuments(msg).length > 0 || msg.codeImages?.length > 0;
+  });
   return (
     <div className="conversation-content" onClickCapture={event => {
       const anchor = (event.target as HTMLElement).closest('a');
@@ -90,12 +97,14 @@ const MessageList = React.memo<MessageListProps>(({
           animation: shimmer 4s linear infinite;
         }
       `}</style>
-      {messages.map((msg: any, idx: number) => {
+      {visibleMessages.map(({ msg, idx }, visibleIndex) => {
+        const readingDivider = readingMode && visibleIndex > 0 && visibleMessages[visibleIndex - 1].msg.role !== msg.role;
         const isCurrentlyStreaming = loading && idx === messages.length - 1;
         const timingLabel = msg.role === 'assistant' && (msg.turn?.status !== 'running' || loading) && !messages.slice(0, idx).some(previous => previous.role === 'assistant' && previous.turn?.turnId === msg.turn?.turnId) ? turnLabel(msg.turn) : null;
         const isPairStart = msg.role === 'user' && (idx === 0 || messages[idx - 1]?.role === 'assistant');
         return (
         <div key={msg.id || idx} data-message-index={idx} className="group" style={{ marginBottom: isPairStart && idx > 0 ? '28px' : 'var(--msg-gap)' }}>
+          {readingDivider && <hr className="mb-5 border-0 border-t border-claude-border" />}
           {(msg.is_summary === 1 || msg.is_compact_boundary) && (
             <div className="flex items-center gap-3 mb-5 mt-2">
               <div className="flex-1 h-px bg-claude-border" />
@@ -104,7 +113,7 @@ const MessageList = React.memo<MessageListProps>(({
             </div>
           )}
           {(msg.is_summary === 1 || msg.is_compact_boundary) ? null : msg.role === 'user' ? (
-            !readOnly && editingMessageIdx === idx ? (
+            !readingMode && !readOnly && editingMessageIdx === idx ? (
               <div className="w-full bg-[#F0EEE7] dark:bg-claude-btnHover rounded-xl p-3 border border-black/5 dark:border-white/10">
                 <div className="bg-white dark:bg-black/20 rounded-lg border border-black/10 dark:border-white/10 focus-within:ring-2 focus-within:ring-blue-500/20 focus-within:border-blue-500 transition-all p-3">
                   <textarea
@@ -209,7 +218,7 @@ const MessageList = React.memo<MessageListProps>(({
                   </div>
                 )}
                 {!contentBlocks(msg.content) && hasUnavailableImages(msg.content) && <div role="note" className="text-sm text-claude-textSecondary">Image unavailable: this historical message contains only a placeholder.</div>}
-                <div className="flex items-center gap-1.5 mt-1.5 pr-1">
+                {!readingMode && <div className="flex items-center gap-1.5 mt-1.5 pr-1">
                   {msg.created_at && (
                     <span className="text-[12px] tabular-nums text-claude-textSecondary mr-1">{formatMessageTime(msg.created_at)}</span>
                   )}
@@ -218,14 +227,14 @@ const MessageList = React.memo<MessageListProps>(({
                     {!readOnly && <button onClick={() => onEdit?.(msg.content, idx)} className="p-1 text-claude-textSecondary hover:text-claude-text hover:bg-claude-hover rounded transition-colors" title="编辑"><Pencil size={14} /></button>}
                     <CopyButton key={`${conversationId}:${idx}`} text={extractTextContent(msg.content)} />
                   </div>
-                </div>
+                </div>}
               </div>
             )
           ) : (
             <div className="text-claude-text text-[16.5px] leading-normal mt-2">
-              {timingLabel && <div className="mb-4 text-sm tabular-nums text-claude-textSecondary" aria-label="Turn duration">{timingLabel}<div className="mt-3 h-px w-full bg-claude-border" /></div>}
+              {!readingMode && timingLabel && <div className="mb-4 text-sm tabular-nums text-claude-textSecondary" aria-label="Turn duration">{timingLabel}<div className="mt-3 h-px w-full bg-claude-border" /></div>}
               {/* Research badge */}
-              {msg.research && (
+              {!readingMode && msg.research && (
                 <button
                   onClick={() => onOpenResearch && onOpenResearch(msg.id)}
                   className="mb-3 inline-flex items-center gap-2 px-3 py-2 rounded-lg bg-[#DBEAFE] dark:bg-[#1E3A5F] hover:bg-[#BFDBFE] dark:hover:bg-[#2A4A75] transition-colors"
@@ -249,8 +258,8 @@ const MessageList = React.memo<MessageListProps>(({
                   </div>
                 </button>
               )}
-              <WorkDetails conversationId={conversationId} message={msg} index={idx} live={isCurrentlyStreaming} onInspect={onInspect} />
-              {msg.searchStatus && (!msg.searchLogs || msg.searchLogs.length === 0) && (!msg.content || msg.content.length === (msg._contentLenBeforeSearch || 0)) && loading && idx === messages.length - 1 && (
+              <WorkDetails textOnly={readingMode} conversationId={conversationId} message={msg} index={idx} live={isCurrentlyStreaming} onInspect={onInspect} />
+              {!readingMode && msg.searchStatus && (!msg.searchLogs || msg.searchLogs.length === 0) && (!msg.content || msg.content.length === (msg._contentLenBeforeSearch || 0)) && loading && idx === messages.length - 1 && (
                 <div className="flex items-center justify-center gap-2 text-[15px] font-medium mb-4 w-full">
                   <Globe size={18} className="text-claude-textSecondary" />
                   <span className="animate-shimmer-text">
@@ -259,15 +268,15 @@ const MessageList = React.memo<MessageListProps>(({
                 </div>
               )}
 
-              {msg.searchLogs && msg.searchLogs.length > 0 && (
+              {!readingMode && msg.searchLogs && msg.searchLogs.length > 0 && (
                 <SearchProcess logs={msg.searchLogs} isThinking={msg.isThinking} isDone={(msg.content || '').length > (msg._contentLenBeforeSearch || 0)} />
               )}
 
-              {normalizeDocumentDrafts(msg).length > 0 && (
+              {!readingMode && normalizeDocumentDrafts(msg).length > 0 && (
                 <DocumentCreationProcess drafts={normalizeDocumentDrafts(msg)} />
               )}
 
-              {showCodingView && (msg as any).codeDiffs && (msg as any).codeDiffs.length > 0 && (
+              {!readingMode && showCodingView && (msg as any).codeDiffs && (msg as any).codeDiffs.length > 0 && (
                 <div className="mt-2 mb-1 space-y-2">
                   {(msg as any).codeDiffs.map((diff: any) => (
                     <DiffViewer
@@ -328,7 +337,7 @@ const MessageList = React.memo<MessageListProps>(({
                   ))}
                 </div>
               )}
-              {msg.codeExecution && (
+              {!readingMode && msg.codeExecution && (
                 <CodeExecution
                   code={msg.codeExecution.code}
                   status={msg.codeExecution.status}
@@ -347,21 +356,21 @@ const MessageList = React.memo<MessageListProps>(({
                   ))}
                 </div>
               )}
-              {loading && idx === messages.length - 1 && !msg.content && !msg.thinking && !msg.searchStatus && normalizeDocumentDrafts(msg).length === 0 && !(msg.toolCalls && msg.toolCalls.length > 0) && (
+              {!readingMode && loading && idx === messages.length - 1 && !msg.content && !msg.thinking && !msg.searchStatus && normalizeDocumentDrafts(msg).length === 0 && !(msg.toolCalls && msg.toolCalls.length > 0) && (
                 <div role="status" className="flex items-center gap-2 ml-1 text-[14px] text-claude-textSecondary font-sans">
                   <span aria-hidden="true" className="shrink-0"><ClaudeLogo breathe style={{ width: '40px', height: '40px' }} /></span>
                   <span>Working on it...</span>
                 </div>
               )}
-              {loading && idx === messages.length - 1 && !msg.isThinking && (msg.content || (msg.searchStatus && msg.content)) && (
+              {!readingMode && loading && idx === messages.length - 1 && !msg.isThinking && (msg.content || (msg.searchStatus && msg.content)) && (
                 <span className="inline-block ml-1 align-middle" style={{ verticalAlign: 'middle' }}>
                   <ClaudeLogo autoAnimate style={{ width: '40px', height: '40px', display: 'inline-block' }} />
                 </span>
               )}
-              {!isCurrentlyStreaming && Boolean(msg.content || msg.thinking || msg.toolCalls?.length) && (
+              {!readingMode && !isCurrentlyStreaming && Boolean(msg.content || msg.thinking || msg.toolCalls?.length) && (
                 <ResponseFooter key={`${conversationId || 'unsaved'}:${msg.id || idx}`} message={msg} index={idx} conversationId={conversationId} disabled={loading} readOnly={readOnly} onBranch={onBranch} />
               )}
-              {!loading && idx === messages.length - 1 && msg.content && compactStatus.state === 'compacting' && (
+              {!readingMode && !loading && idx === messages.length - 1 && msg.content && compactStatus.state === 'compacting' && (
                 <div className="flex items-start gap-4 mt-6 ml-1 mb-2">
                   <ClaudeLogo breathe={compactStatus.state === 'compacting'} style={{ width: '36px', height: '36px', flexShrink: 0, marginTop: '2px' }} />
                   {compactStatus.state === 'compacting' && <CompactingStatus />}

@@ -27,6 +27,17 @@ beforeEach(() => {
   useConversationViewStore.setState({ view: 'chat' });
 });
 describe('session header', () => {
+  it('offers reading mode next to Chat even when Coding View is off', async () => {
+    useGeneralSettingsStore.setState({ showCodingView: false });
+    setup();
+    expect(screen.getAllByRole('tab').map(tab => tab.textContent)).toEqual(['Chat', 'Reading mode']);
+    fireEvent.click(screen.getByRole('tab', { name: 'Reading mode' }));
+    expect(useConversationViewStore.getState().view).toBe('reading');
+    expect(screen.getByRole('tab', { name: 'Reading mode' })).toHaveAttribute('aria-selected', 'true');
+    fireEvent.click(screen.getByRole('tab', { name: 'Chat' }));
+    expect(useConversationViewStore.getState().view).toBe('chat');
+    await act(async () => {});
+  });
   it('copies the actual full route ID after navigation and reports success only on success', async () => {
     vi.mocked(copyToClipboard).mockResolvedValue(true);
     setup();

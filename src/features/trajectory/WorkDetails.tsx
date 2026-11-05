@@ -82,7 +82,7 @@ function ToolGroup({ conversationId, steps, message, index, level, live, onInspe
   </div>;
 }
 function ThinkingBlock({ step }: { step: ProcessStep }) {
-  const [open, setOpen] = useState(true);
+  const [open, setOpen] = useState(false);
   const panelId = useId();
   return <div className="my-3 text-sm text-claude-textSecondary">
     <button type="button" aria-expanded={open} aria-controls={panelId} onClick={() => setOpen(!open)} className="flex w-full min-w-0 items-center gap-2 text-left">
@@ -91,11 +91,11 @@ function ThinkingBlock({ step }: { step: ProcessStep }) {
     <GridDisclosure open={open} id={panelId}><div className="mt-2 max-h-96 overflow-auto whitespace-pre-wrap pl-4">{step.text}</div></GridDisclosure>
   </div>;
 }
-export default function WorkDetails({ conversationId, message, index, live, onInspect }: { conversationId?: string | null; message: any; index: number; live: boolean; onInspect?: (id: string) => void }) {
+export default function WorkDetails({ conversationId, message, index, live, onInspect, textOnly = false }: { conversationId?: string | null; message: any; index: number; live: boolean; onInspect?: (id: string) => void; textOnly?: boolean }) {
   const mode = useWorkspaceModeStore(s => s.mode);
   const level = useGeneralSettingsStore(s => s.workDetailsByMode[mode]);
   const coding = useGeneralSettingsStore(s => s.showCodingView);
-  const steps = messageSteps(message);
+  const steps = messageSteps(message).filter(step => !textOnly || step.kind === 'text');
   const items: ProcessStep[][] = [];
   for (const step of steps) {
     const last = items[items.length - 1];
@@ -111,6 +111,6 @@ export default function WorkDetails({ conversationId, message, index, live, onIn
       if (s.kind === 'thinking') return level === 'compact' || level === 'standard' ? null : <ThinkingBlock key={`${s.id}:${level}`} step={s} />;
       return <div key={s.id} className="my-3"><MarkdownRenderer content={s.text || ''} citations={message.citations} isStreaming={live && s === steps[steps.length - 1]} /></div>;
     })}
-    {message.requestError && <RequestErrorCard error={message.requestError} />}
+    {!textOnly && message.requestError && <RequestErrorCard error={message.requestError} />}
   </div>;
 }

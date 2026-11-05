@@ -9,7 +9,7 @@ pub(crate) fn write_recorded(
     output: &mut impl Write,
     history: &mut super::scrollback::Scrollback,
     text: &str,
-    width: usize,
+    _width: usize,
     raw: bool,
 ) -> io::Result<()> {
     let newline = if raw { "\r\n" } else { "\n" };
@@ -23,16 +23,9 @@ pub(crate) fn write_recorded(
         }
         return Ok(());
     }
-    let rule = "─".repeat(width.max(4));
-    for row in [String::new(), rule.clone()] {
-        write!(output, "{row}{newline}")?;
-        history.push(row, None);
-    }
     for row in history.record_prompt(text) {
         write!(output, "{row}{newline}")?;
     }
-    write!(output, "{rule}{newline}")?;
-    history.push(rule, None);
     Ok(())
 }
 

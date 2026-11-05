@@ -47,6 +47,26 @@ describe('WebFetch output', () => {
 });
 
 describe('ordered process events', () => {
+  it('starts Think collapsed and preserves manual expansion across streamed updates', () => {
+    useWorkspaceModeStore.getState().setMode('code');
+    useGeneralSettingsStore.getState().update({ workDetailsByMode: { chat: 'compact', work: 'standard', study: 'standard', code: 'detailed' } });
+    const message = { role: 'assistant', content: '', processSteps: [{ id: 'thought', kind: 'thinking', text: 'Initial reasoning' }] };
+    const { rerender } = render(<WorkDetails message={message} index={0} live />);
+    const button = screen.getByRole('button', { name: /Think/ });
+    const panel = () => document.getElementById(button.getAttribute('aria-controls')!)!;
+    expect(button).toHaveAttribute('aria-expanded', 'false');
+    expect(panel()).toHaveAttribute('aria-hidden', 'true');
+    fireEvent.click(button);
+    expect(button).toHaveAttribute('aria-expanded', 'true');
+    const updated = { ...message, processSteps: [{ ...message.processSteps[0], text: 'Initial reasoning with more text' }] };
+    rerender(<WorkDetails message={updated} index={0} live />);
+    expect(button).toHaveAttribute('aria-expanded', 'true');
+    expect(panel()).toHaveTextContent('Initial reasoning with more text');
+    fireEvent.click(button);
+    rerender(<WorkDetails message={updated} index={0} live={false} />);
+    expect(button).toHaveAttribute('aria-expanded', 'false');
+    expect(panel()).toHaveAttribute('aria-hidden', 'true');
+  });
   it('switches detail levels with the workspace mode without losing tool records', () => {
     useGeneralSettingsStore.getState().update({ workDetailsByMode: { chat: 'compact', work: 'standard', study: 'standard', code: 'detailed' } });
     const message = sample();

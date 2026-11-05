@@ -509,6 +509,7 @@
   },
   "chat": {
     "sessionMenu": "Session options",
+    "readingMode": "Reading mode",
     "sessionView": "Session view",
     "copySessionId": "Copy session ID",
     "sessionIdCopied": "Session ID copied",

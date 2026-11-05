@@ -93,6 +93,14 @@ pub(super) fn is_mcp_header(line: &Line) -> bool {
         && line.0.iter().any(|span| span.text.starts_with("mcp__"))
 }
 
+pub(super) fn is_shell_header(line: &Line) -> bool {
+    line.0.first().is_some_and(|span| span.text == "● ")
+        && line
+            .0
+            .iter()
+            .any(|span| span.text.starts_with("Bash(") || span.text.starts_with("PowerShell("))
+}
+
 /// Wrap literal calls without Markdown's whitespace trimming.
 pub(super) fn wrap_call(text: &str, width: usize) -> Vec<String> {
     use unicode_width::UnicodeWidthChar;
@@ -478,7 +486,9 @@ pub fn expanded(
     workspace: Option<&std::path::Path>,
 ) -> Vec<Line> {
     let header = match input["command"].as_str() {
-        Some(command) if name == "Bash" => format!("{name}({})", super::progress::single_line(command)),
+        Some(command) if matches!(name, "Bash" | "PowerShell") => {
+            format!("{name}({})", super::progress::single_line(command))
+        }
         _ => result_label(name, input, output, workspace),
     };
     let mut lines = vec![change_view::tool_call(&header, if failed { "error" } else { "" }, failed)];

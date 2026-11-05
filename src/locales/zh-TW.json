@@ -491,6 +491,7 @@
   },
   "chat": {
     "sessionMenu": "工作階段選項",
+    "readingMode": "閱讀模式",
     "sessionView": "工作階段檢視",
     "copySessionId": "複製工作階段 ID",
     "sessionIdCopied": "已複製工作階段 ID",

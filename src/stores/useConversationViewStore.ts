@@ -1,6 +1,6 @@
 import { create } from 'zustand';
 
-export type ConversationView = 'chat' | 'trajectory';
+export type ConversationView = 'chat' | 'reading' | 'trajectory';
 
 export const useConversationViewStore = create<{
   view: ConversationView;

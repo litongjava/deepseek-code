@@ -2250,12 +2250,10 @@ fn run(
                     if !crate::background_commands::is_notification(&text) {
                         screen.pinned.text = text.clone();
                         screen.separate_block();
-                        screen.log_rendered("");
                         let (block, rows) = screen.scrollback.prompt(&text);
                         for row in rows {
                             screen.log_line(row, Some(block));
                         }
-                        screen.log_rendered("");
                         screen.log_rendered("");
                     }
                     dirty = true;

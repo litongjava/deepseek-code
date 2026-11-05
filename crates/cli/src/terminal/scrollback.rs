@@ -92,7 +92,49 @@ impl Scrollback {
     }
     pub(super) fn reflow(&mut self, columns: usize) {
         let mut previous: Option<std::sync::Arc<Flow>> = None;
+        let mut previous_block = None;
         for mut line in std::mem::take(&mut self.logged) {
+            if let Some(id) = line.block.filter(|id| {
+                let entry = &self.blocks[*id];
+                entry
+                    .prompt
+                    .as_ref()
+                    .is_some_and(|text| !crate::background_commands::is_notification(text))
+                    || entry
+                        .short
+                        .first()
+                        .is_some_and(super::tool_view::is_shell_header)
+            }) {
+                if previous_block == Some(id) {
+                    continue;
+                }
+                previous_block = Some(id);
+                previous = None;
+                let entry = &mut self.blocks[id];
+                if let Some(text) = &entry.prompt {
+                    (entry.short, entry.full) = prompt_lines(text, columns.saturating_sub(1));
+                }
+                let mut rows = if entry.header_open {
+                    rendered_at_width(&entry.full[..1], columns.saturating_sub(1))
+                } else {
+                    collapsed_at_width(&entry.short[..1], columns.saturating_sub(1))
+                };
+                rows.extend(if entry.body_open {
+                    rendered_at_width(&entry.full[1..], columns.saturating_sub(1))
+                } else {
+                    collapsed_at_width(&entry.short[1..], columns.saturating_sub(1))
+                });
+                for text in rows {
+                    self.logged.push_back(Logged {
+                        rows: screen_rows(&text, columns),
+                        text,
+                        block: Some(id),
+                        flow: None,
+                    });
+                }
+                continue;
+            }
+            previous_block = None;
             if let Some(flow) = &line.flow {
                 if previous
                     .as_ref()
@@ -390,35 +432,26 @@ impl Scrollback {
             self.latest_prompt = text.to_owned();
         }
         let width = terminal::size().unwrap_or((80, 24)).0.saturating_sub(1) as usize;
-        let clean = super::tool_view::plain_terminal_text(text);
-        let rows = super::prompt_display::layout(
-            &format!("{} ", crate::terminal::prompt_glyph()),
-            &clean.chars().collect::<Vec<_>>(),
-            width.max(4),
-        )
-        .0;
-        let mut full: Vec<Line> = rows.iter()
-            .map(|row| change_view::styled(row, change_view::Style::TerminalDefault)).collect();
-        let short = if rows.len() > 3 {
-            let mut short = full[..2].to_vec();
-            short.push(change_view::muted(&format!(
-                "  +{} lines (click to expand)",
-                rows.len() - 2
-            )));
-            full.push(change_view::muted("  (click to collapse)"));
-            short
-        } else {
-            full.clone()
-        };
+        let (short, full) = prompt_lines(text, width);
         let (id, rows) = self.block(short, full);
         self.blocks[id].prompt = Some(text.to_owned());
         self.blocks[id].whole = true;
         (id, rows)
     }
     pub(crate) fn record_prompt(&mut self, text: &str) -> Vec<String> {
-        let (id, rows) = self.prompt(text);
-        for row in &rows {
+        let (id, content) = self.prompt(text);
+        let mut rows = Vec::new();
+        if self.logged.is_empty() || self.needs_separator() {
+            self.push(String::new(), None);
+            rows.push(String::new());
+        }
+        for row in &content {
             self.push(row.clone(), Some(id));
+        }
+        rows.extend(content);
+        if !crate::background_commands::is_notification(text) {
+            self.push(String::new(), None);
+            rows.push(String::new());
         }
         rows
     }
@@ -749,9 +782,48 @@ impl Scrollback {
     }
 }
 
+/// Rules belong to the prompt block so every transcript path keeps them.
+fn prompt_lines(text: &str, width: usize) -> (Vec<Line>, Vec<Line>) {
+    let clean = super::tool_view::plain_terminal_text(text);
+    let rows = super::prompt_display::layout(
+        &format!("{} ", crate::terminal::prompt_glyph()),
+        &clean.chars().collect::<Vec<_>>(),
+        width.max(4),
+    )
+    .0;
+    let mut full: Vec<Line> = rows
+        .iter()
+        .map(|row| change_view::styled(row, change_view::Style::TerminalDefault))
+        .collect();
+    let mut short = if rows.len() > 3 {
+        let mut short = full[..2].to_vec();
+        short.push(change_view::muted(&format!(
+            "  +{} lines (click to expand)",
+            rows.len() - 2
+        )));
+        full.push(change_view::muted("  (click to collapse)"));
+        short
+    } else {
+        full.clone()
+    };
+    let rule = change_view::styled(
+        &"─".repeat(width.max(4)),
+        change_view::Style::TerminalDefault,
+    );
+    for lines in [&mut short, &mut full] {
+        lines.insert(0, rule.clone());
+        lines.push(rule.clone());
+    }
+    (short, full)
+}
+
 /// A tool result's lines as written above the input box.
 fn collapsed(lines: &[Line]) -> Vec<String> {
     let width = terminal::size().unwrap_or((80, 24)).0.saturating_sub(1) as usize;
+    collapsed_at_width(lines, width)
+}
+
+fn collapsed_at_width(lines: &[Line], width: usize) -> Vec<String> {
     lines
         .iter()
         .flat_map(|line| {
@@ -761,20 +833,32 @@ fn collapsed(lines: &[Line]) -> Vec<String> {
                 return super::tool_view::wrap_call(&text, width);
             }
             let plain = change_view::plain(std::slice::from_ref(line));
-            vec![if unicode_width::UnicodeWidthStr::width(plain.trim_end()) > width {
-                format!(
-                    "{}…",
-                    change_view::render(line, width.saturating_sub(1), color)
-                )
-            } else {
-                change_view::render(line, width, color)
-            }]
+            vec![
+                if unicode_width::UnicodeWidthStr::width(plain.trim_end()) > width {
+                    if super::tool_view::is_shell_header(line) && width >= 4 {
+                        return vec![format!(
+                            "{}...)",
+                            change_view::render(line, width - 4, color)
+                        )];
+                    }
+                    format!(
+                        "{}…",
+                        change_view::render(line, width.saturating_sub(1), color)
+                    )
+                } else {
+                    change_view::render(line, width, color)
+                },
+            ]
         })
         .collect()
 }
 
 fn rendered(lines: &[Line]) -> Vec<String> {
     let width = terminal::size().unwrap_or((80, 24)).0.saturating_sub(1) as usize;
+    rendered_at_width(lines, width)
+}
+
+fn rendered_at_width(lines: &[Line], width: usize) -> Vec<String> {
     let color = std::env::var_os("NO_COLOR").is_none();
     lines
         .iter()
@@ -929,10 +1013,115 @@ mod tests {
         for level in [0, 1, 2] {
             for block in &mut history.blocks { block.compact_level = level; }
             let rows = history.compact_rows();
-            let input = rows.iter().position(|(text, _)| text.contains("NEXT INPUT")).unwrap();
-            assert!(rows[input - 1].0.is_empty(), "level {level}");
-            assert!(rows[input + 1].0.is_empty(), "level {level}");
-            assert!(rows[input - 1].1.is_none());
+            let input = rows
+                .iter()
+                .position(|(text, _)| text.contains("NEXT INPUT"))
+                .unwrap();
+            assert!(
+                super::super::markdown::plain_rendered(&rows[input - 1].0)
+                    .chars()
+                    .all(|ch| ch == '─'),
+                "level {level}"
+            );
+            assert!(
+                super::super::markdown::plain_rendered(&rows[input + 1].0)
+                    .chars()
+                    .all(|ch| ch == '─'),
+                "level {level}"
+            );
+            assert!(rows[input - 2].0.is_empty(), "level {level}");
+            assert!(rows[input + 2].0.is_empty(), "level {level}");
+            assert!(rows[input - 2].1.is_none());
+        }
+    }
+
+    #[test]
+    fn submitted_prompt_rules_survive_disclosure_and_resize_with_single_outer_spacing() {
+        let mut history = Scrollback::default();
+        history.push("Cooked for 45s".into(), None);
+        history.record_prompt("推送阶段\n  im 服务 → ws 节点\n第三行\n最后一行");
+        history.push("Thought".into(), None);
+        let assert_rules = |rows: Vec<String>| {
+            let plain: Vec<_> = rows
+                .iter()
+                .map(|row| super::super::markdown::plain_rendered(row))
+                .collect();
+            let rules: Vec<_> = plain
+                .iter()
+                .enumerate()
+                .filter(|(_, row)| !row.is_empty() && row.chars().all(|ch| ch == '─'))
+                .map(|(i, _)| i)
+                .collect();
+            assert_eq!(rules.len(), 2);
+            assert_eq!(plain[rules[0] - 1], "");
+            assert_eq!(plain[rules[0] - 2], "Cooked for 45s");
+            assert_eq!(plain[rules[1] + 1], "");
+            assert_eq!(plain[rules[1] + 2], "Thought");
+        };
+        assert_rules(history.all());
+        history.expand_prompt_id(0, 80);
+        assert!(history.all().iter().any(|row| row.contains("最后一行")));
+        for width in [24, 160] {
+            history.reflow(width);
+            assert_rules(history.all());
+            for row in history.all() {
+                assert!(
+                    unicode_width::UnicodeWidthStr::width(
+                        super::super::markdown::plain_rendered(&row).as_str()
+                    ) < width
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn shell_headers_use_available_width_and_keep_full_commands_for_wrapped_disclosure() {
+        use super::super::tool_view;
+        let command = format!(
+            "cat {}bootstrap.yml | sed -n '1,160p'",
+            "gateway-server/".repeat(15)
+        );
+        for name in ["Bash", "PowerShell"] {
+            let input = serde_json::json!({"command": command});
+            let short = tool_view::numbered(
+                tool_view::finished(name, &input, "done", false, None, None),
+                Some(393),
+            );
+            let full = tool_view::numbered(
+                tool_view::expanded(name, &input, "done", false, None),
+                Some(393),
+            );
+            assert!(change_view::plain(&short).contains(&command));
+            for width in [40, 180] {
+                let rows = collapsed_at_width(&short[..1], width);
+                assert_eq!(rows.len(), 1);
+                let line = super::super::markdown::plain_rendered(&rows[0]);
+                assert!(line.ends_with("...)"));
+                assert_eq!(unicode_width::UnicodeWidthStr::width(line.as_str()), width);
+                let rows = rendered_at_width(&full[..1], width);
+                assert!(rows.len() > 1);
+                assert!(rows
+                    .iter()
+                    .map(|line| super::super::markdown::plain_rendered(line))
+                    .collect::<String>()
+                    .contains("bootstrap.yml"));
+            }
+            let mut history = Scrollback::default();
+            let (id, rows) = history.block(short, full);
+            for row in rows {
+                history.push(row, Some(id));
+            }
+            history.bind_copy(id, command.clone(), "done".into());
+            assert!(history.toggle_history(0));
+            assert!(history
+                .all()
+                .iter()
+                .any(|row| row.contains("bootstrap.yml")));
+            assert_eq!(history.copy_logged(0).as_deref(), Some(command.as_str()));
+            assert!(history.toggle_history(0));
+            history.reflow(180);
+            assert_eq!(history.all().len(), 2);
+            assert!(super::super::markdown::plain_rendered(&history.all()[0]).ends_with("...)"));
         }
     }
     #[test]
@@ -986,7 +1175,7 @@ mod tests {
         history.expand_prompt_id(0, 80);
         assert!(history.blocks[0].body_open);
         assert!(!history.blocks[1].body_open);
-        assert!(history.all()[0].contains("stdout"));
+        assert!(history.all()[2].contains("stdout"));
     }
     #[test]
     fn user_text_retains_terminal_default_colors_after_history_reflow() {
@@ -1012,10 +1201,10 @@ mod tests {
         history.push("AFTER_PROMPT".into(), None);
         assert!(!history.all().iter().any(|row| row.contains("PROMPT_119")));
         history.reflow(18);
-        assert!(history.click_presentation(0, 18));
+        assert!(history.click_presentation(1, 18));
         assert!(history.all().iter().any(|row| row.contains("PROMPT_119")));
         assert_eq!(history.all().last().unwrap(), "AFTER_PROMPT");
-        assert!(history.click_presentation(0, 18));
+        assert!(history.click_presentation(1, 18));
         assert!(!history.all().iter().any(|row| row.contains("PROMPT_119")));
         history.expand_prompt(&text, 18);
         assert!(history.all().iter().any(|row| row.contains("PROMPT_119")));
@@ -1026,7 +1215,7 @@ mod tests {
         let mut history = super::Scrollback::default();
         history.push("01234567890123456789".into(), None);
         history.record_prompt("ONE\nTWO\nTHREE\nFOUR");
-        assert!(history.click_presentation(2, 10));
+        assert!(history.click_presentation(3, 10));
         assert!(history.all().iter().any(|row| row.contains("FOUR")));
     }
     use super::*;

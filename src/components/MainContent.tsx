@@ -241,7 +241,10 @@ const MainContent = ({ onNewChat, resetKey, tunerConfig, onOpenDocument, onArtif
     onChatModeChange?.(isChat);
   }, [activeId, messages.length, onChatModeChange]);
 
-  useEffect(() => { setConversationView('chat'); setInspectId(null); }, [activeId]);
+  useEffect(() => {
+    if (useConversationViewStore.getState().view === 'trajectory') setConversationView('chat');
+    setInspectId(null);
+  }, [activeId]);
 
   // Sync active conversation with tabs
   useEffect(() => {
@@ -2076,6 +2079,7 @@ const MainContent = ({ onNewChat, resetKey, tunerConfig, onOpenDocument, onArtif
             className="chat-transcript mx-auto px-4 py-8 pb-2"
           >
             <MessageList
+              readingMode={conversationView === 'reading'}
               conversationId={activeId}
               onInspect={messageActions.onInspect}
               messages={messages}

@@ -150,9 +150,9 @@ export default function ChatHeader({
         </div>
       )}
       </div>
-      {showCodingView && <div className="flex min-w-0 shrink-0 max-w-[45%] gap-4 overflow-x-auto text-sm" role="tablist" aria-label={t('chat.sessionView')}>
-        {(['chat', 'trajectory'] as const).map(tab => <button type="button" key={tab} role="tab" aria-selected={view === tab} onClick={() => setView(tab)} className={`shrink-0 py-2 ${view === tab ? 'border-b-2 border-blue-500 text-blue-500' : 'text-claude-textSecondary'}`}>{tab === 'chat' ? 'Chat' : 'Trajectory'}</button>)}
-      </div>}
+      <div className="flex min-w-0 shrink-0 max-w-[50%] gap-4 overflow-x-auto text-sm" role="tablist" aria-label={t('chat.sessionView')}>
+        {(['chat', 'reading', ...(showCodingView ? ['trajectory' as const] : [])] as const).map(tab => <button type="button" key={tab} role="tab" aria-selected={view === tab} onClick={() => setView(tab)} className={`shrink-0 py-2 ${view === tab ? 'border-b-2 border-blue-500 text-blue-500' : 'text-claude-textSecondary'}`}>{tab === 'chat' ? 'Chat' : tab === 'reading' ? t('chat.readingMode') : 'Trajectory'}</button>)}
+      </div>
       {copyResult && copyResult.id === id && <div role={copyResult.success ? 'status' : 'alert'} className="absolute right-4 top-full rounded-md border border-claude-border bg-claude-input px-3 py-2 text-xs">{t(copyResult.success ? 'chat.sessionIdCopied' : 'chat.sessionIdCopyFailed')}</div>}
       <div className="flex shrink-0 items-center gap-1">
         {([{ panel: 'terminal', label: 'Terminal', Icon: Terminal }, { panel: 'files', label: 'Files', Icon: Files }, { panel: 'browser', label: 'Browser', Icon: Globe }] as const).map(({ panel, label, Icon }) => (

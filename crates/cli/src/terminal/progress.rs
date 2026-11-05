@@ -481,7 +481,7 @@ pub(crate) fn tool_preview_in_workspace(name: &str, input: &Value, workspace: Op
         input["url"].as_str().map(single_line)
     } else if name == "WebSearch" {
         input["query"].as_str().map(|query| format!("\"{}\"", single_line(query)))
-    } else if name == "Bash" {
+    } else if matches!(name.as_str(), "Bash" | "PowerShell") {
         input["command"].as_str().map(|command| {
             let lower = command.to_ascii_lowercase();
             if [
@@ -515,6 +515,7 @@ pub(crate) fn tool_preview_in_workspace(name: &str, input: &Value, workspace: Op
     };
     let name = display_name(&name);
     match preview {
+        Some(preview) if matches!(name, "Bash" | "PowerShell") => format!("{name}: {preview}"),
         Some(preview) if !preview.is_empty() => format!("{name}: {}", clipped(&preview, 100)),
         _ => name.to_owned(),
     }
