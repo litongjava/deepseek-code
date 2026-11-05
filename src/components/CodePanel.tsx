@@ -83,19 +83,19 @@ const FileTree: React.FC<{
 }> = ({ tree, loading, error, expandedPaths, selectedPath, onToggle, onSelect, onRefresh }) => {
   return (
     <div className="flex flex-col h-full text-[13px]">
-      <div className="flex items-center justify-between px-3 py-2 border-b border-white/10">
-        <span className="text-[11px] font-semibold text-neutral-400 uppercase tracking-wide">Explorer</span>
-        <button onClick={onRefresh} className="text-[11px] text-neutral-400 hover:text-neutral-200 transition-colors px-2 py-0.5 rounded hover:bg-white/5">Refresh</button>
+      <div className="flex items-center justify-between px-3 py-2 border-b border-claude-border">
+        <span className="text-[11px] font-semibold text-claude-textSecondary uppercase tracking-wide">Explorer</span>
+        <button onClick={onRefresh} className="text-[11px] text-claude-textSecondary hover:text-claude-text transition-colors px-2 py-0.5 rounded hover:bg-claude-hover">Refresh</button>
       </div>
       <div className="flex-1 overflow-y-auto overflow-x-hidden py-1">
         {loading ? (
-          <div className="flex items-center justify-center py-8 text-neutral-500 text-[12px]">Loading...</div>
+          <div className="flex items-center justify-center py-8 text-claude-textSecondary text-[12px]">Loading...</div>
         ) : error ? (
-          <div className="px-3 py-4 text-red-400 text-[12px]">{error}</div>
+          <div className="px-3 py-4 text-red-600 dark:text-red-400 text-[12px]">{error}</div>
         ) : tree.length === 0 ? (
-          <div className="px-3 py-4 text-neutral-500 text-[12px]">
+          <div className="px-3 py-4 text-claude-textSecondary text-[12px]">
             <p className="mb-2">No files loaded</p>
-            <button onClick={onRefresh} className="text-blue-400 hover:underline">Load project files</button>
+            <button onClick={onRefresh} className="text-claude-text hover:underline">Load project files</button>
           </div>
         ) : (
           tree.filter(n => !n.is_dir || !IGNORED_DIRS.has(n.name)).map(node => (
@@ -115,19 +115,18 @@ const TreeNode: React.FC<{
   const isSelected = selectedPath === node.path;
   const hasChildren = node.is_dir && node.children && node.children.length > 0;
   const ext = node.name.split('.').pop()?.toLowerCase() || '';
-  const iconColor = !node.is_dir ? (ext === 'tsx' || ext === 'ts' ? 'text-[#3178C6]' : ext === 'jsx' || ext === 'js' ? 'text-[#F7DF1E]' : ext === 'rs' ? 'text-[#DEA584]' : ext === 'py' ? 'text-[#3572A5]' : ext === 'go' ? 'text-[#00ADD8]' : ext === 'json' ? 'text-[#F0DB4F]' : ext === 'css' ? 'text-[#2965F1]' : ext === 'md' ? 'text-[#42A5F5]' : 'text-neutral-400') : 'text-[#DCB67A]';
 
   return (
     <div>
       <div
-        className={`flex items-center gap-1 py-0.5 pr-2 rounded cursor-pointer select-none transition-colors ${isSelected ? 'bg-blue-500/20 text-blue-400' : 'hover:bg-white/5 text-neutral-300'}`}
+        className={`flex items-center gap-1 py-0.5 pr-2 rounded cursor-pointer select-none transition-colors text-claude-text ${isSelected ? 'bg-claude-hover' : 'hover:bg-claude-hover'}`}
         style={{ paddingLeft: `${depth * 16 + 4}px` }}
         onClick={(e) => { e.stopPropagation(); node.is_dir ? onToggle(node.path) : onSelect(node); }}
       >
         <span className="w-4 h-4 flex-shrink-0 flex items-center justify-center">
           {node.is_dir ? (hasChildren ? (isExpanded ? <ChevronDown size={12} /> : <ChevronRight size={12} />) : null) : null}
         </span>
-        <span className={`text-[11px] ${iconColor} flex-shrink-0 font-mono font-bold w-5 text-center`}>
+        <span className="text-[11px] text-claude-textSecondary flex-shrink-0 font-mono font-bold w-5 text-center">
           {node.is_dir ? '📁' : (ext === 'tsx' || ext === 'ts' ? 'TS' : ext === 'jsx' || ext === 'js' ? 'JS' : ext?.toUpperCase().slice(0, 2) || '📄')}
         </span>
         <span className="text-[12px] truncate leading-none">{node.name}</span>
@@ -216,7 +215,8 @@ interface CodePanelProps {
 const CodePanel: React.FC<CodePanelProps> = ({ document: initialDoc, onClose }) => {
   const [tabs, setTabs] = useState<DocumentInfo[]>([initialDoc]);
   const [activeTabId, setActiveTabId] = useState(initialDoc.id);
-  const [showFileTree, setShowFileTree] = useState(true);
+  const [showFileTree, setShowFileTree] = useState(false);
+  const treeRequested = useRef(false);
   const [tree, setTree] = useState<FsFileNode[]>([]);
   const [treeLoading, setTreeLoading] = useState(true);
   const [treeError, setTreeError] = useState<string | null>(null);
@@ -279,7 +279,11 @@ const CodePanel: React.FC<CodePanelProps> = ({ document: initialDoc, onClose }) 
     }
   }, []);
 
-  useEffect(() => { loadTree(); }, [loadTree]);
+  useEffect(() => {
+    if (!showFileTree || treeRequested.current) return;
+    treeRequested.current = true;
+    void loadTree();
+  }, [showFileTree, loadTree]);
 
   const handleFileSelect = async (node: FsFileNode) => {
     if (node.is_dir) return;
@@ -351,7 +355,7 @@ const CodePanel: React.FC<CodePanelProps> = ({ document: initialDoc, onClose }) 
     <div className="flex-1 h-full flex bg-claude-input border-l border-claude-border min-w-0">
       {/* File Tree Sidebar */}
       {showFileTree && (
-        <div className="w-[220px] flex-shrink-0 border-r border-claude-border bg-[#1E1E2E] flex flex-col">
+        <div role="region" aria-label="Document file tree" className="w-[220px] flex-shrink-0 border-r border-claude-border bg-claude-sidebar text-claude-text flex flex-col">
           <FileTree
             tree={tree}
             loading={treeLoading}
@@ -373,6 +377,8 @@ const CodePanel: React.FC<CodePanelProps> = ({ document: initialDoc, onClose }) 
             onClick={() => setShowFileTree(!showFileTree)}
             className="p-2 text-claude-textSecondary hover:text-claude-text hover:bg-claude-btnHover transition-colors flex-shrink-0"
             title={showFileTree ? 'Hide file tree' : 'Show file tree'}
+            aria-label={showFileTree ? 'Hide file tree' : 'Show file tree'}
+            aria-expanded={showFileTree}
           >
             {showFileTree ? <PanelLeftClose size={16} /> : <PanelLeftOpen size={16} />}
           </button>
