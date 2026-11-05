@@ -516,105 +516,17 @@ fn main() {
                 }
             };
 
-            tauri::async_runtime::spawn(async move {
-                tracing::info!(module = "Scheduler", "Task scheduler started, checking every 30 seconds");
-                loop {
-                    tokio::time::sleep(std::time::Duration::from_secs(30)).await;
-
-                    let now = chrono::Utc::now().to_rfc3339();
-                    let now_dt = chrono::Utc::now();
-                    let db = db_manager_for_scheduler.clone();
-
-                    let due_tasks = match tokio::task::spawn_blocking(move || {
-                        db.with_conn(|conn| {
-                            crate::db::task_repo::get_due_tasks(conn, &now)
-                        })
-                    })
-                    .await
-                    {
-                        Ok(Ok(Ok(tasks))) => tasks,
-                        Ok(Ok(Err(e))) | Ok(Err(e)) => {
-                            tracing::error!(module = "Scheduler", error = %e);
-                            continue;
-                        }
-                        Err(e) => {
-                            tracing::error!(module = "Scheduler", error = %e);
-                            continue;
-                        }
-                    };
-
-                    for task in &due_tasks {
-                        tracing::info!(module = "Scheduler", "Executing due task: id={}, name={}, type={}",
-                            task.id, task.name, task.task_type
-                        );
-
-                        let task_id = task.id.clone();
-                        let task_name = task.name.clone();
-                        let task_type = task.task_type.clone();
-                        let task_config = task.task_config.clone();
-                        let task_cron = task.cron_expression.clone();
-                        let now_str = chrono::Utc::now().to_rfc3339();
-                        let db2 = db_manager_for_scheduler.clone();
-
-                        let (_id1, now1, task_name1, task_type1, task_config1) = (
-                            task_id.clone(),
-                            now_str.clone(),
-                            task_name.clone(),
-                            task_type.clone(),
-                            task_config.clone(),
-                        );
-
-                        let execution_output = tokio::task::spawn_blocking(move || {
-                            std::thread::sleep(std::time::Duration::from_millis(100));
-                            format!(
-                                "Task '{}' (type: {}) executed at {}. Config: {}",
-                                task_name1, task_type1, now1, task_config1
-                            )
-                        })
-                        .await
-                        .unwrap_or_else(|e| format!("Spawn error: {}", e));
-
-                        let next_run = crate::task::cron::calc_next_run(&task_cron, &now_dt)
-                            .unwrap_or_default();
-
-                        let (id2, now2) = (task_id.clone(), now_str.clone());
-                        let next_run_opt = if next_run.is_empty() { None } else { Some(next_run.clone()) };
-
-                        match tokio::task::spawn_blocking(move || {
-                            db2.with_conn(|conn| {
-                                crate::db::task_repo::update_task_run_result(
-                                    conn,
-                                    &id2,
-                                    &now2,
-                                    "success",
-                                    Some(&execution_output),
-                                    next_run_opt.as_deref(),
-                                )
-                            })
-                        })
-                        .await
-                        {
-                            Ok(Ok(Ok(()))) => {
-                                tracing::info!(module = "Scheduler", "Task '{}' completed, next run at: {}",
-                                    task_name, next_run
-                                );
-                            }
-                            Ok(Ok(Err(e))) | Ok(Err(e)) => {
-                                tracing::error!(module = "Scheduler", "Failed to update task '{}' result: {}",
-                                    task_id, e
-                                );
-                            }
-                            Err(e) => {
-                                tracing::error!(module = "Scheduler", error = %e);
-                            }
-                        }
-                    }
-
-                    if due_tasks.is_empty() {
-                        continue;
-                    }
+            match crate::commands::app_data_dir() {
+                Ok(data_dir) => {
+                    tauri::async_runtime::spawn(async move {
+                        crate::scheduler::ScheduledTaskScheduler::new(db_manager_for_scheduler)
+                            .with_data_dir(data_dir)
+                            .start()
+                            .await;
+                    });
                 }
-            });
+                Err(error) => tracing::error!(module = "Scheduler", "Scheduler disabled: {error}"),
+            }
 
             Ok(())
         })

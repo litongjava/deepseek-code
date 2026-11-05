@@ -730,7 +730,7 @@ pub async fn create_scheduled_task(
     };
     let id = uuid::Uuid::new_v4().to_string();
     let now = chrono::Utc::now().to_rfc3339();
-    let next_run = crate::task::cron::calc_next_run(&cron_expression, &chrono::Utc::now())
+    let next_run = crate::task::cron::calc_next_run_local(&cron_expression, &chrono::Utc::now())
         .unwrap_or_default();
     let next_run_opt = if next_run.is_empty() { None } else { Some(next_run) };
 
@@ -811,7 +811,7 @@ pub async fn update_scheduled_task(
     };
     let now = chrono::Utc::now().to_rfc3339();
     let next_run_opt = if let Some(ref cron) = cron_expression {
-        let next = crate::task::cron::calc_next_run(cron, &chrono::Utc::now()).unwrap_or_default();
+        let next = crate::task::cron::calc_next_run_local(cron, &chrono::Utc::now()).unwrap_or_default();
         if next.is_empty() { None } else { Some(next) }
     } else {
         None
@@ -874,7 +874,8 @@ pub async fn execute_task_now(
     .map_err(|e| e.to_string())?;
 
     if let Some(task) = task {
-        let scheduler = crate::scheduler::ScheduledTaskScheduler::new(db_manager);
+        let mut scheduler = crate::scheduler::ScheduledTaskScheduler::new(db_manager);
+        if let Ok(data_dir) = app_data_dir() { scheduler = scheduler.with_data_dir(data_dir); }
         let result = scheduler.execute_task(&task).await;
         Ok(format!("Task executed: success={}, output={:?}, error={:?}",
             result.success, result.output, result.error))

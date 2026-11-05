@@ -22,6 +22,39 @@ pub struct ScheduledTaskScheduler {
     db_manager: Arc<DbManager>,
     running_tasks: Arc<Mutex<HashMap<String, TaskState>>>,
     should_stop: Arc<Mutex<bool>>,
+    /// Where saved providers live; prompt and report tasks need a model.
+    data_dir: Option<std::path::PathBuf>,
+}
+
+/// Longest a scheduled model request may run.
+const GENERATION_TIMEOUT: Duration = Duration::from_secs(600);
+
+/// A generation task's settings: plain text is the prompt; JSON may also name a
+/// provider and model, otherwise the first enabled model is used.
+fn generation_config(config: &str) -> (String, Option<String>, Option<String>) {
+    match serde_json::from_str::<serde_json::Value>(config) {
+        Ok(value) if value["prompt"].is_string() => {
+            let text = |key: &str| value[key].as_str().filter(|text| !text.trim().is_empty()).map(str::to_owned);
+            (value["prompt"].as_str().unwrap_or_default().trim().to_owned(), text("provider"), text("model"))
+        }
+        _ => (config.trim().to_owned(), None, None),
+    }
+}
+
+fn select_model(
+    providers: &[crate::native_engine::provider_manager::Provider],
+    provider: Option<&str>,
+    model: Option<&str>,
+) -> Result<(String, String)> {
+    providers
+        .iter()
+        .filter(|candidate| candidate.enabled && provider.is_none_or(|id| candidate.id == id))
+        .find_map(|candidate| {
+            candidate.models.iter()
+                .find(|option| option.enabled && model.is_none_or(|id| option.id == id))
+                .map(|option| (candidate.id.clone(), option.id.clone()))
+        })
+        .ok_or_else(|| anyhow::anyhow!("No enabled model is available for this task; check the model settings"))
 }
 
 struct TaskState {
@@ -35,7 +68,13 @@ impl ScheduledTaskScheduler {
             db_manager,
             running_tasks: Arc::new(Mutex::new(HashMap::new())),
             should_stop: Arc::new(Mutex::new(false)),
+            data_dir: None,
         }
+    }
+
+    pub fn with_data_dir(mut self, data_dir: std::path::PathBuf) -> Self {
+        self.data_dir = Some(data_dir);
+        self
     }
 
     pub async fn init(&self) -> Result<()> {
@@ -120,7 +159,7 @@ impl ScheduledTaskScheduler {
         let duration_ms = start_time.elapsed().as_millis() as u64;
         let finished_at = chrono::Utc::now().to_rfc3339();
 
-        let status = if execution_result.success { "completed" } else { "failed" };
+        let status = if execution_result.success { "success" } else { "failed" };
         let output = execution_result.output.clone();
         let output2 = output.clone();
         let error_msg = execution_result.error.clone();
@@ -144,7 +183,7 @@ impl ScheduledTaskScheduler {
             })
         }).await;
 
-        let next_run_at = crate::task::cron::calc_next_run(&task.cron_expression, &chrono::Utc::now())
+        let next_run_at = crate::task::cron::calc_next_run_local(&task.cron_expression, &chrono::Utc::now())
             .ok();
 
         let db3 = self.db_manager.clone();
@@ -169,16 +208,30 @@ impl ScheduledTaskScheduler {
     }
 
     async fn execute_prompt_task(&self, task: &ScheduledTaskRow) -> TaskExecutionResult {
+        self.generate(task, "Complete the scheduled user prompt. This scheduled run generates text only and cannot execute tools.").await
+    }
+
+    /// One model request with the task's prompt; the answer becomes the run's output.
+    async fn generate(&self, task: &ScheduledTaskRow, system: &str) -> TaskExecutionResult {
         let start = std::time::Instant::now();
+        let (output, error) = match self.request_generation(&task.task_config, system).await {
+            Ok(output) => (Some(output), None),
+            Err(error) => (None, Some(format!("{error:#}"))),
+        };
+        TaskExecutionResult { success: error.is_none(), output, error, duration_ms: start.elapsed().as_millis() as u64 }
+    }
 
-        let output = format!("Prompt task '{}' executed. Config: {}", task.name, task.task_config);
-
-        TaskExecutionResult {
-            success: true,
-            output: Some(output),
-            error: None,
-            duration_ms: start.elapsed().as_millis() as u64,
-        }
+    async fn request_generation(&self, config: &str, system: &str) -> Result<String> {
+        let (prompt, provider, model) = generation_config(config);
+        anyhow::ensure!(!prompt.is_empty(), "This task has no prompt");
+        let root = self.data_dir.clone().ok_or_else(|| anyhow::anyhow!("Model settings are unavailable"))?;
+        let paths = crate::runtime::RuntimePaths::new(root)?;
+        let providers = paths.providers()?;
+        let (provider, model) = select_model(&providers, provider.as_deref(), model.as_deref())?;
+        let generator = crate::services::generation::Generator::new(&paths, providers, &provider, &model)?;
+        tokio::time::timeout(GENERATION_TIMEOUT, generator.generate(system, &prompt))
+            .await
+            .map_err(|_| anyhow::anyhow!("The model did not answer within {} seconds", GENERATION_TIMEOUT.as_secs()))?
     }
 
     async fn execute_webhook_task(&self, task: &ScheduledTaskRow) -> TaskExecutionResult {
@@ -276,16 +329,7 @@ impl ScheduledTaskScheduler {
     }
 
     async fn execute_report_task(&self, task: &ScheduledTaskRow) -> TaskExecutionResult {
-        let start = std::time::Instant::now();
-
-        let output = format!("Report task '{}' completed. Config: {}", task.name, task.task_config);
-
-        TaskExecutionResult {
-            success: true,
-            output: Some(output),
-            error: None,
-            duration_ms: start.elapsed().as_millis() as u64,
-        }
+        self.generate(task, "Write a concise, well-structured report for this scheduled request. Use only what the request provides; this run cannot execute tools.").await
     }
 
     pub async fn start(&self) {
@@ -295,6 +339,7 @@ impl ScheduledTaskScheduler {
         let db = self.db_manager.clone();
         let running = self.running_tasks.clone();
         let should_stop = self.should_stop.clone();
+        let data_dir = self.data_dir.clone();
 
         tokio::spawn(async move {
             let mut ticker = interval(Duration::from_secs(30));
@@ -330,12 +375,14 @@ impl ScheduledTaskScheduler {
                     let db_clone = db.clone();
                     let running_clone = running.clone();
                     let task_clone = task.clone();
+                    let data_dir_clone = data_dir.clone();
 
                     tokio::spawn(async move {
                         let scheduler = ScheduledTaskScheduler {
                             db_manager: db_clone,
                             running_tasks: running_clone,
                             should_stop: Arc::new(Mutex::new(false)),
+                            data_dir: data_dir_clone,
                         };
                         let result = scheduler.execute_task(&task_clone).await;
                         info!(
@@ -371,5 +418,88 @@ impl ScheduledTaskScheduler {
             .ok_or_else(|| anyhow::anyhow!("No next run time found"))?;
 
         Ok(next.to_rfc3339())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    fn provider(id: &str, enabled: bool, url: &str, models: &[(&str, bool)]) -> serde_json::Value {
+        let models: Vec<_> = models.iter().map(|(id, enabled)| json!({"id":id,"name":id,"enabled":enabled,"max_tokens":4096,"supports_vision":false,"supports_web_search":false})).collect();
+        json!({"id":id,"name":id,"base_url":url,"api_key":"fixture","api_format":"openai","enabled":enabled,"models":models})
+    }
+
+    #[test]
+    fn prompt_settings_accept_plain_text_or_json() {
+        assert_eq!(generation_config(" check CI "), ("check CI".to_owned(), None, None));
+        assert_eq!(generation_config("{\"prompt\":\"x\",\"provider\":\"p\",\"model\":\"m\"}"), ("x".to_owned(), Some("p".to_owned()), Some("m".to_owned())));
+        assert_eq!(generation_config("{\"other\":1}").0, "{\"other\":1}", "JSON without a prompt is the prompt text");
+    }
+
+    #[test]
+    fn the_first_enabled_model_is_used_unless_one_is_named() {
+        let providers: Vec<crate::native_engine::provider_manager::Provider> = serde_json::from_value(json!([
+            provider("off", false, "http://x", &[("a", true)]),
+            provider("p1", true, "http://x", &[("b", false), ("c", true)]),
+            provider("p2", true, "http://x", &[("d", true)]),
+        ])).unwrap();
+        assert_eq!(select_model(&providers, None, None).unwrap(), ("p1".into(), "c".into()));
+        assert_eq!(select_model(&providers, Some("p2"), None).unwrap(), ("p2".into(), "d".into()));
+        assert_eq!(select_model(&providers, None, Some("d")).unwrap(), ("p2".into(), "d".into()));
+        assert!(select_model(&providers, Some("off"), None).is_err());
+        assert!(select_model(&[], None, None).is_err());
+    }
+
+    /// A due task runs for real, records its output and moves to its next run.
+    #[tokio::test]
+    async fn due_prompt_tasks_call_the_model_and_failures_are_recorded() {
+        use axum::{routing::post, Json, Router};
+        let dir = tempfile::tempdir().unwrap();
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}", listener.local_addr().unwrap());
+        let app = Router::new().route("/v1/chat/completions", post(|Json(body): Json<serde_json::Value>| async move {
+            let prompt = body["messages"].as_array().unwrap().last().unwrap()["content"].to_string();
+            assert!(prompt.contains("summarize the day"), "{prompt}");
+            Json(json!({"id":"r","object":"chat.completion","created":0,"model":"m","choices":[{"index":0,"message":{"role":"assistant","content":"REAL MODEL ANSWER"},"finish_reason":"stop"}],"usage":{"prompt_tokens":1,"completion_tokens":1,"total_tokens":2}}))
+        }));
+        let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        std::fs::write(dir.path().join("providers.json"), json!([provider("p", true, &format!("{url}/v1"), &[("m", true)])]).to_string()).unwrap();
+        let paths = crate::runtime::RuntimePaths::new(dir.path().to_path_buf()).unwrap();
+        let db = paths.open_database().unwrap();
+        let past = (chrono::Utc::now() - chrono::Duration::minutes(5)).to_rfc3339();
+        let insert = |id: &str, kind: &str, config: &str| {
+            db.with_conn(|conn| crate::db::task_repo::insert_scheduled_task(conn, id, id, None, "0 9 * * *", kind, config, None, true, Some(&past), &past, &past)).unwrap().unwrap();
+        };
+        insert("good", "prompt", "summarize the day");
+        insert("report", "report", "summarize the day");
+        insert("empty", "prompt", "   ");
+        let scheduler = ScheduledTaskScheduler::new(db.clone()).with_data_dir(dir.path().to_path_buf());
+        for (id, expected) in [("good", "success"), ("report", "success"), ("empty", "failed")] {
+            let task = db.with_conn(|conn| crate::db::task_repo::get_scheduled_task(conn, id)).unwrap().unwrap().unwrap();
+            let result = scheduler.execute_task(&task).await;
+            let task = db.with_conn(|conn| crate::db::task_repo::get_scheduled_task(conn, id)).unwrap().unwrap().unwrap();
+            assert_eq!(task.last_run_status.as_deref(), Some(expected), "{result:?}");
+            assert!(task.next_run_at.unwrap() > chrono::Utc::now().to_rfc3339(), "the task moved to its next run");
+            if expected == "success" {
+                assert_eq!(result.output.as_deref(), Some("REAL MODEL ANSWER"));
+                assert_eq!(task.last_run_output.as_deref(), Some("REAL MODEL ANSWER"));
+            } else {
+                assert!(result.error.unwrap().contains("no prompt"));
+            }
+        }
+        let due = db.with_conn(|conn| crate::db::task_repo::get_due_tasks(conn, &chrono::Utc::now().to_rfc3339())).unwrap().unwrap();
+        assert!(due.is_empty());
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn a_task_without_model_settings_fails_instead_of_claiming_success() {
+        let dir = tempfile::tempdir().unwrap();
+        let paths = crate::runtime::RuntimePaths::new(dir.path().to_path_buf()).unwrap();
+        let scheduler = ScheduledTaskScheduler::new(paths.open_database().unwrap()).with_data_dir(dir.path().to_path_buf());
+        let error = scheduler.request_generation("hello", "system").await.unwrap_err().to_string();
+        assert!(error.contains("No enabled model"), "{error}");
     }
 }

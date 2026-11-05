@@ -125,9 +125,35 @@ pub fn calc_next_run(cron_expr: &str, from_time: &DateTime<Utc>) -> Result<Strin
     Err("Cannot find next matching time within one year".to_string())
 }
 
+/// The next run with the expression read in the computer's time zone, so
+/// `0 9 * * *` means 9 AM where the user is. Returned in UTC for storage.
+pub fn calc_next_run_local(expression: &str, now: &DateTime<Utc>) -> Result<String, String> {
+    use chrono::{Local, TimeZone};
+    let wall_clock = Utc.from_utc_datetime(&now.with_timezone(&Local).naive_local());
+    let next = DateTime::parse_from_rfc3339(&calc_next_run(expression, &wall_clock)?)
+        .map_err(|error| error.to_string())?
+        .naive_utc();
+    // A wall-clock time skipped by daylight saving fires at the first valid minute after it.
+    (0..=180)
+        .find_map(|minutes| Local.from_local_datetime(&(next + Duration::minutes(minutes))).earliest())
+        .map(|time| time.with_timezone(&Utc).to_rfc3339())
+        .ok_or_else(|| "Cannot place the next run in the local time zone".to_string())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn local_schedules_follow_the_computers_clock() {
+        use chrono::Local;
+        let now = Utc::now();
+        let next = DateTime::parse_from_rfc3339(&calc_next_run_local("30 9 * * *", &now).unwrap()).unwrap();
+        assert!(next.with_timezone(&Utc) > now);
+        let local = next.with_timezone(&Local);
+        assert_eq!((local.hour(), local.minute()), (9, 30));
+        assert!(calc_next_run_local("not cron", &now).is_err());
+    }
 
     #[test]
     fn test_parse_every_minute() {

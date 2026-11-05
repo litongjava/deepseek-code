@@ -149,13 +149,31 @@ pub fn execute(name: &str, input: &Value, scope: &Scope) -> Result<Value> {
     }
 }
 
+fn claim(root: &Path, jobs_file: &Path) -> Result<Option<std::fs::File>> {
+    use std::hash::{Hash, Hasher};
+    let mut hash = std::collections::hash_map::DefaultHasher::new();
+    jobs_file.hash(&mut hash);
+    let directory = root.join("cron-locks");
+    std::fs::create_dir_all(&directory)?;
+    let file = std::fs::OpenOptions::new().write(true).create(true).truncate(false)
+        .open(directory.join(format!("{:016x}.lock", hash.finish())))?;
+    match file.try_lock() {
+        Ok(()) => Ok(Some(file)),
+        Err(std::fs::TryLockError::WouldBlock) => Ok(None),
+        Err(std::fs::TryLockError::Error(error)) => Err(error.into()),
+    }
+}
+
 /// Prompts whose time has come, oldest first. One-shot and expired recurring
 /// jobs are removed after firing; the others move to their next run.
 pub fn take_due(scope: &Scope, now: DateTime<Local>) -> Result<Vec<String>> {
     let mut prompts = Vec::new();
     for path in [scope.session_file(), scope.durable_file()] {
+        if !load(&path)?.iter().any(|job| job.next_run <= now.timestamp()) { continue; }
+        // Sessions of one project share durable jobs: whoever holds the lock fires
+        // them and moves them on, so the others find nothing due when they look again.
+        let Some(_claim) = claim(scope.root, &path)? else { continue };
         let mut jobs = load(&path)?;
-        if !jobs.iter().any(|job| job.next_run <= now.timestamp()) { continue; }
         let mut kept = Vec::new();
         for mut job in jobs.drain(..) {
             if job.next_run > now.timestamp() { kept.push(job); continue; }
@@ -175,6 +193,23 @@ pub fn take_due(scope: &Scope, now: DateTime<Local>) -> Result<Vec<String>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_durable_job_fires_in_only_one_session() {
+        let root = tempfile::tempdir().unwrap();
+        let project = tempfile::tempdir().unwrap();
+        let first = Scope { root: root.path(), session: "s1", project: project.path() };
+        let second = Scope { root: root.path(), session: "s2", project: project.path() };
+        execute("CronCreate", &json!({"cron":"*/5 * * * *","prompt":"shared","durable":true}), &first).unwrap();
+        let later = Local::now() + chrono::Duration::minutes(6);
+
+        let held = claim(root.path(), &first.durable_file()).unwrap().unwrap();
+        assert!(take_due(&second, later).unwrap().is_empty(), "another session is firing it");
+        drop(held);
+
+        assert_eq!(take_due(&first, later).unwrap(), ["shared"]);
+        assert!(take_due(&second, later).unwrap().is_empty(), "it already moved to its next run");
+    }
 
     #[test]
     fn create_list_fire_and_delete_session_and_durable_jobs() {
