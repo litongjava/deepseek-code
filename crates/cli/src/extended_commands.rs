@@ -18,6 +18,10 @@ pub async fn handle(
 ) -> Result<bool> {
     let argument = argument.trim();
     match command {
+        "/copy-session-id" => {
+            ensure!(argument.is_empty(), "Usage: /copy-session-id");
+            command_eprintln!("{}", copy_session_id(&session.id)?);
+        }
         "/copy" => {
             let number = if argument.is_empty() {
                 1
@@ -355,6 +359,11 @@ pub async fn plan_task(argument: &str, paths: &RuntimePaths, session: &mut Sessi
     }
     handle("/plan", "", paths, session).await?;
     Ok(Some(description.to_owned()))
+}
+
+pub(crate) fn copy_session_id(id: &str) -> Result<String> {
+    copy_text(id).context("Could not copy session ID to clipboard")?;
+    Ok(format!("Copied session ID to clipboard: {id}"))
 }
 
 fn response(history: &[Value], number: usize) -> Result<&str> {

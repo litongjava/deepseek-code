@@ -509,6 +509,7 @@ const THINKING_PREVIEW_ROWS: usize = 2;
 const LIVE_COMMANDS: &[&str] = &[
     "/agents",
     "/btw",
+    "/copy-session-id",
     "/background",
     "/goal",
     "/list-agents",
@@ -665,6 +666,8 @@ impl State {
         match key.code {
             KeyCode::Up => self.menu_selected = (selected + items.len() - 1) % items.len(),
             KeyCode::Down => self.menu_selected = (selected + 1) % items.len(),
+            KeyCode::PageUp => self.menu_selected = selected.saturating_sub(5),
+            KeyCode::PageDown => self.menu_selected = (selected + 5).min(items.len() - 1),
             KeyCode::Esc => self.menu_hidden = true,
             KeyCode::Tab => self.draft.set(&format!("{} ", items[selected].0)),
             KeyCode::Enter if text != items[selected].0 => self.draft.set(&format!("{} ", items[selected].0)),
@@ -1429,7 +1432,7 @@ impl Frame {
     }
 
     fn history_key(&mut self, state: &State, key: crossterm::event::KeyEvent) -> io::Result<bool> {
-        if state.details.expanded && matches!(key.code, KeyCode::PageUp | KeyCode::PageDown) {
+        if (state.details.expanded || !state.menu().is_empty()) && matches!(key.code, KeyCode::PageUp | KeyCode::PageDown) {
             return Ok(false);
         }
         if !super::transcript_pager::HistoryView::is_navigation(key) {
@@ -1835,7 +1838,8 @@ impl Frame {
             let selected = state.menu_selected.min(menu.len() - 1);
             let shown = menu.len().min(5);
             let name_width = menu.iter().map(|(name, _)| name.width()).max().unwrap_or(0) + 2;
-            let rows: Vec<String> = menu.iter().take(shown).enumerate().map(|(index, (name, description))| {
+            let start = selected.saturating_sub(shown - 1);
+            let rows: Vec<String> = menu.iter().enumerate().skip(start).take(shown).map(|(index, (name, description))| {
                 let prefix = if index == selected { "  \u{276f} " } else { "    " };
                 let row = clip(&format!("{prefix}{name:<name_width$}{description}"), width);
                 match (color, index == selected) {
@@ -4009,6 +4013,7 @@ mod tests {
                 "/agents",
                 "/background",
                 "/btw",
+                "/copy-session-id",
                 "/goal",
                 "/list-agents",
                 "/status",

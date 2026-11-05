@@ -119,13 +119,17 @@ pub async fn text(session: &Session, argument: &str) -> Result<String> {
     }
     let request =
         deepseek_code_core::services::context_usage::last_request(&session.store.db, &session.id)?;
-    let latest = live.last().filter(|snapshot| {
-        request
-            .as_ref()
-            .and_then(|request| request.started_at_ms)
-            .unwrap_or(0)
-            <= snapshot["startedAt"].as_i64().unwrap_or(0)
-    });
+    let latest = live
+        .iter()
+        .rev()
+        .find(|snapshot| snapshot["source"] == "native_engine" || snapshot.get("source").is_none())
+        .filter(|snapshot| {
+            request
+                .as_ref()
+                .and_then(|request| request.started_at_ms)
+                .unwrap_or(0)
+                <= snapshot["startedAt"].as_i64().unwrap_or(0)
+        });
     let used = latest
         .map(|snapshot| {
             snapshot["inputTokens"]
@@ -150,6 +154,25 @@ pub async fn text(session: &Session, argument: &str) -> Result<String> {
                 .is_some_and(|request| request.reported_input_tokens.is_some())
         });
     let window = provider.model.context_window.filter(|window| *window > 0);
+    let previous = if used.is_none() {
+        let saved = deepseek_code_core::services::context_usage::last_reported_request(
+            &session.store.db,
+            &session.id,
+            &session.model,
+        )?;
+        let reported = live.iter().rev().find(|snapshot| {
+            (snapshot["source"] == "native_engine" || snapshot.get("source").is_none())
+                && snapshot["model"] == session.model
+                && snapshot["inputTokens"].is_u64()
+                && snapshot["startedAt"].as_i64().unwrap_or(0)
+                    >= saved.as_ref().and_then(|r| r.started_at_ms).unwrap_or(0)
+        });
+        reported
+            .and_then(|s| s["inputTokens"].as_u64())
+            .or_else(|| saved.and_then(|r| r.reported_input_tokens))
+    } else {
+        None
+    };
     let context = match (used, window) {
         (Some(used), Some(window)) => format!(
             "{}% left ({} used / {}; {})",
@@ -174,7 +197,11 @@ pub async fn text(session: &Session, argument: &str) -> Result<String> {
         (None, _) if latest.is_none() && request.is_none() => {
             "not available (no request yet)".into()
         }
-        (None, _) => "unknown (latest request input not reported or fully estimable)".into(),
+        (None, _) if previous.is_some() => format!(
+            "{} used (last reported input; latest request input not yet available)",
+            token_count(previous.unwrap()),
+        ),
+        (None, _) => "pending (latest request input not reported or fully estimable)".into(),
     };
     let mut sections = vec![
         vec![

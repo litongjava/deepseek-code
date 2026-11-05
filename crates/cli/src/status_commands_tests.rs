@@ -94,7 +94,7 @@ async fn known_window_survives_missing_request_and_opaque_live_input() {
     assert_eq!(field(&live, "Context window"), "256K tokens");
     assert_eq!(
         field(&live, "Context usage"),
-        "unknown (latest request input not reported or fully estimable)"
+        "72.0K used (last reported input; latest request input not yet available)"
     );
     assert!(!field(&live, "Context usage").contains('%'));
 
@@ -158,6 +158,30 @@ async fn unconfigured_unknown_model_does_not_invent_a_window_or_percentage() {
     assert_eq!(
         field(&report, "Context usage"),
         "1.0K used (last request; remaining capacity unknown)"
+    );
+    session.close().await.unwrap();
+}
+
+#[tokio::test]
+async fn auxiliary_search_cannot_replace_live_parent_context() {
+    let (_root, session) = fixture("gpt-6-astra", None).await;
+    let parent = json!({"id":"parent", "source":"native_engine", "model":"gpt-6-astra",
+        "startedAt":1, "inputTokens":72000, "outputTokens":100});
+    let search = json!({"id":"search", "source":"web_search", "model":"gpt-6-astra",
+        "startedAt":2, "inputTokens":10, "outputTokens":5});
+    crate::session_commands::save_live_requests(&session, &[parent.clone(), search]).unwrap();
+    let report = consistent_report(&session).await;
+    assert_eq!(
+        field(&report, "Context usage"),
+        "71% left (72.0K used / 256K; last request)"
+    );
+    let pending = json!({"id":"pending", "source":"native_engine", "model":"gpt-6-astra",
+        "startedAt":3, "inputTokens":null});
+    crate::session_commands::save_live_requests(&session, &[parent, pending]).unwrap();
+    let report = consistent_report(&session).await;
+    assert_eq!(
+        field(&report, "Context usage"),
+        "72.0K used (last reported input; latest request input not yet available)"
     );
     session.close().await.unwrap();
 }

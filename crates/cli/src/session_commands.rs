@@ -107,7 +107,7 @@ pub fn save_live_requests(session: &Session, snapshots: &[Value]) -> Result<()> 
     // Store only accounting fields, never prompt bodies or credentials.
     let values: Vec<Value> = snapshots.iter().map(|snapshot| {
         let mut value = serde_json::Map::new();
-        for key in ["id", "startedAt", "inputTokens", "outputTokens", "contextUsage"] {
+        for key in ["id", "source", "model", "startedAt", "inputTokens", "outputTokens", "contextUsage"] {
             if let Some(field) = snapshot.get(key) { value.insert(key.into(), field.clone()); }
         }
         Value::Object(value)
@@ -468,6 +468,7 @@ pub(crate) fn is_live_inspection(line: &str) -> bool {
             | "/list-agents list"
             | "/list-agents inbox"
             | "/list-agents sent"
+            | "/copy-session-id"
             | "/status"
             | "/status --check"
             | "/effort +"
@@ -483,6 +484,10 @@ pub(crate) fn is_live_inspection(line: &str) -> bool {
 pub async fn live_inspection(session: &Session, prompt: &str) -> Option<String> {
     if !is_live_inspection(prompt) {
         return None;
+    }
+    if prompt.trim() == "/copy-session-id" {
+        return Some(crate::extended_commands::copy_session_id(&session.id)
+            .unwrap_or_else(|error| format!("{error:#}")));
     }
     if prompt.trim() == "/agents" {
         return Some(crate::extended_commands::active_agents_text(&session.paths, &session.id)
@@ -930,6 +935,8 @@ mod tests {
 
     #[test]
     fn only_status_answers_while_a_turn_runs() {
+        assert!(is_live_inspection("/copy-session-id"));
+        assert!(!is_live_inspection("/copy-session-id extra"));
         assert!(is_live_inspection("/agents"));
         assert!(!is_live_inspection("/agents definitions"));
         assert!(is_live_inspection("/status"));

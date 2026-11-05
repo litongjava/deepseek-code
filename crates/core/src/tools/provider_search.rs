@@ -139,7 +139,7 @@ fn credentials(provider: &ResolvedProvider) -> Result<(String, bool)> {
 fn request_body(strategy: Strategy, query: &str, model: &str) -> Value {
     let prompt = format!("Use web search to find sources for this query: {query}\nReturn a brief summary with citations. You must perform web search; do not answer from memory.");
     if strategy == Strategy::OpenAI {
-        json!({"model": model, "input": prompt, "tools": [{"type":"web_search"}],
+        json!({"model": model, "input": [{"role":"user", "content":[{"type":"input_text", "text":prompt}]}], "tools": [{"type":"web_search"}],
             "tool_choice":"required", "include":["web_search_call.action.sources"],
             "max_output_tokens":2048, "store":false, "stream":false})
     } else {
@@ -746,6 +746,9 @@ mod tests {
         let (uri, headers, body) = rx.recv().await.unwrap();
         assert_eq!(uri.path(), "/gateway/v1/responses");
         assert_eq!(headers["authorization"], "Bearer test-key");
+        assert!(body["input"].is_array(), "Codex native Responses requires a list");
+        assert_eq!(body["input"][0]["role"], "user");
+        assert!(body["input"][0]["content"][0]["text"].as_str().unwrap().contains("test search"));
         assert_eq!(body["tools"][0]["type"], "web_search");
         assert_eq!(body["model"], "test-model");
         assert_eq!(result["api_format"], "openai");

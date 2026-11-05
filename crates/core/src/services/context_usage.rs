@@ -13,6 +13,27 @@ pub struct LastRequest {
 }
 
 pub fn last_request(db: &DbManager, session: &str) -> Result<Option<LastRequest>> {
+    matching_request(db, session, |_| true)
+}
+
+/// Last measured parent input, for a clearly labelled historical status fallback.
+pub fn last_reported_request(
+    db: &DbManager,
+    session: &str,
+    model: &str,
+) -> Result<Option<LastRequest>> {
+    matching_request(db, session, |snapshot| {
+        snapshot["model"] == model
+            && (snapshot["usage"]["prompt_tokens"].is_u64()
+                || snapshot["usage"]["input_tokens"].is_u64())
+    })
+}
+
+fn matching_request(
+    db: &DbManager,
+    session: &str,
+    accept: impl Fn(&Value) -> bool,
+) -> Result<Option<LastRequest>> {
     let snapshot = db.with_conn(|conn| -> Result<Option<Value>> {
         let mut statement = conn.prepare(
             "SELECT t.requests_json FROM message_trajectory t JOIN messages m ON m.id=t.message_id WHERE m.conversation_id=?1 ORDER BY m.sort_order DESC, m.created_at DESC",
@@ -25,7 +46,7 @@ pub fn last_request(db: &DbManager, session: &str) -> Result<Option<LastRequest>
                 return Ok(None);
             };
             let Some(items) = snapshots.as_array() else { return Ok(None); };
-            if let Some(snapshot) = items.iter().rev().find(|s| s["source"] == "native_engine" || s.get("source").is_none()) {
+            if let Some(snapshot) = items.iter().rev().find(|s| (s["source"] == "native_engine" || s.get("source").is_none()) && accept(s)) {
                 // Preserve unknown metadata on this request; never replace it
                 // with an older request merely because the old one has counts.
                 return Ok(Some(snapshot.clone()));
@@ -201,6 +222,19 @@ mod tests {
         assert_eq!(result.model, "new-model");
         assert!(result.usage.is_none());
         assert!(result.reported_input_tokens.is_none());
+        assert_eq!(
+            last_reported_request(&store.db, &parent, "model")
+                .unwrap()
+                .unwrap()
+                .reported_input_tokens,
+            Some(60)
+        );
+        assert!(last_reported_request(&store.db, &parent, "child")
+            .unwrap()
+            .is_none());
+        assert!(last_reported_request(&store.db, &child, "model")
+            .unwrap()
+            .is_none());
         store
             .db
             .with_conn(|conn| {
