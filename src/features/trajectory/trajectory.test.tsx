@@ -330,6 +330,8 @@ describe('work details and inspect', () => {
     render(<WorkDetails index={0} live={true} message={message} onInspect={onInspect} />);
     expect(screen.queryByRole('button', { name: 'Inspect' })).not.toBeInTheDocument();
     fireEvent.click(screen.getByRole('button', { name: /Ran commands · 2/ }));
+    expect(screen.queryByRole('button', { name: 'Inspect' })).not.toBeInTheDocument();
+    for (const row of screen.getAllByRole('button', { name: /^运行成功 Ran command ·/ })) fireEvent.click(row);
     const buttons = screen.getAllByRole('button', { name: 'Inspect' });
     expect(buttons).toHaveLength(2);
     fireEvent.click(buttons[1]);
@@ -358,10 +360,17 @@ describe('work details and inspect', () => {
     const onInspect = vi.fn();
     const view = render(<WorkDetails message={message} index={1} live={false} onInspect={onInspect} />);
     const toolBlock = screen.getByRole('button', { name: /列出文件/ }).parentElement!;
+    const toggle = within(toolBlock).getByRole('button', { name: /列出文件/ });
+    expect(within(toolBlock).queryByRole('button', { name: 'Inspect' })).not.toBeInTheDocument();
+    fireEvent.click(toggle);
     const inspect = within(toolBlock).getByRole('button', { name: 'Inspect' });
     expect(inspect.className).toContain('opacity-0');
     fireEvent.click(inspect);
     expect(onInspect).toHaveBeenCalledWith('message:1/tool:t1');
+    inspect.focus();
+    fireEvent.click(toggle);
+    expect(within(toolBlock).queryByRole('button', { name: 'Inspect' })).not.toBeInTheDocument();
+    expect(toggle).toHaveFocus();
     view.unmount();
     render(<TrajectoryView messages={[{ role: 'user', content: '查看目录' }, message]} loading={false} focusId={onInspect.mock.calls[0][0]} />);
     const panel = screen.getByRole('tabpanel');

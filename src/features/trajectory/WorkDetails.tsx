@@ -14,7 +14,7 @@ import { commandStreams, messageSteps, recordId, toolCategory, toolCommand, tool
 
 export function InspectButton({ id, onInspect }: { id: string; onInspect?: (id: string) => void }) {
   if (!onInspect) return null;
-  return <div className="mt-1 flex h-8 items-start"><button type="button" onClick={() => onInspect(id)} className="inline-flex items-center gap-1 rounded-full border border-claude-border bg-claude-bg px-2 py-0.5 text-xs text-claude-textSecondary pointer-events-none opacity-0 transition-opacity group-hover/process:pointer-events-auto group-hover/process:opacity-100 group-focus-within/process:pointer-events-auto group-focus-within/process:opacity-100 focus-visible:pointer-events-auto focus-visible:opacity-100" aria-label="Inspect"><Code2 size={13} />Inspect</button></div>;
+  return <div className="mt-1 mb-0.5 ml-1 flex items-start"><button type="button" onClick={() => onInspect(id)} className="inline-flex items-center gap-1 rounded-full border-[0.5px] border-claude-border bg-claude-bg px-2 py-0.5 text-[11px] leading-4 text-claude-textSecondary pointer-events-none opacity-0 transition-opacity group-hover/process:pointer-events-auto group-hover/process:opacity-100 group-focus-within/process:pointer-events-auto group-focus-within/process:opacity-100 focus-visible:pointer-events-auto focus-visible:opacity-100" aria-label="Inspect"><Code2 size={13} />Inspect</button></div>;
 }
 function StatusDot({ status }: { status: string }) {
   const label = status === 'error' ? '运行失败' : status === 'done' ? '运行成功' : status === 'running' ? '运行中' : '已中断';
@@ -44,8 +44,8 @@ function ToolBlock({ conversationId, messageId, tool, level, live, id, onInspect
   const outputLabel = isCommand ? hasStdout && hasStderr ? 'output' : hasStderr ? 'stderr' : 'stdout' : 'Result';
   const outputColor = hasStdout && hasStderr ? 'text-yellow-600 dark:text-yellow-400' : hasStderr ? 'text-red-500' : 'text-claude-textSecondary';
   const description = input.description || input.file_path || input.path || input.pattern || command || tool.name;
-  return <div className="group/process relative min-w-0 py-1">
-    <button type="button" aria-controls={panelId} aria-expanded={open} onClick={() => setExpanded(!open)} className={`flex w-full min-w-0 items-center gap-2 py-1 text-left text-[13px] ${failed ? 'text-red-500' : 'text-claude-textSecondary'}`}>
+  return <div className="group/process relative min-w-0">
+    <button type="button" aria-controls={panelId} aria-expanded={open} onClick={() => setExpanded(!open)} className={`flex w-full min-w-0 items-center gap-2 text-left text-[13px] leading-6 ${failed ? 'text-red-500' : 'text-claude-textSecondary'}`}>
       <ChevronRight size={14} className={`shrink-0 transition-transform ${open ? 'rotate-90' : ''}`} /><StatusDot status={status === 'running' && !live ? 'interrupted' : status} /><Terminal size={14} className="shrink-0" />
       <span className="shrink-0">{level === 'compact' || level === 'standard' ? toolCategory(tool.name).replace('commands', 'command') : tool.name}</span>
       {level !== 'compact' && <span className="truncate">· {description}</span>}
@@ -64,9 +64,10 @@ function ToolBlock({ conversationId, messageId, tool, level, live, id, onInspect
       </div>
       {toolCategory(tool.name) !== 'Ran commands' && shouldUseDiffView(tool.name, input) && <ToolDiffView toolName={tool.name} input={input} result={tool.result} />}
       {level === 'verbose' && <div className={`border-t border-claude-border p-3 ${failed ? 'text-red-500' : 'text-claude-textSecondary'}`}>{status} · {tool.startedAt && tool.endedAt ? `${tool.endedAt - tool.startedAt} ms` : '耗时未记录'}</div>}
-    </div></GridDisclosure>
-    {/^(Agent|Task)$/i.test(tool.name) && <ViewSubagentButton conversationId={conversationId} toolId={messageId && tool.id?.startsWith(`${messageId}:`) ? tool.id.slice(messageId.length + 1) : tool.id} live={live} />}
+    </div>
     {status === 'done' && <InspectButton id={id} onInspect={onInspect} />}
+    </GridDisclosure>
+    {/^(Agent|Task)$/i.test(tool.name) && <ViewSubagentButton conversationId={conversationId} toolId={messageId && tool.id?.startsWith(`${messageId}:`) ? tool.id.slice(messageId.length + 1) : tool.id} live={live} />}
   </div>;
 }
 function ToolGroup({ conversationId, steps, message, index, level, live, onInspect }: { conversationId?: string | null; steps: ProcessStep[]; message: any; index: number; level: DetailLevel; live: boolean; onInspect?: (id: string) => void }) {
@@ -75,9 +76,9 @@ function ToolGroup({ conversationId, steps, message, index, level, live, onInspe
   const tools = steps.map(s => (message.toolCalls || []).find((t: any, i: number) => (t.id || String(i)) === s.toolId));
   const grouped = (level === 'compact' || level === 'standard') && steps.length > 1;
   const status = groupStatus(tools, live);
-  return <div className={level === 'standard' ? 'chat-tool-group my-2 rounded-xl px-3' : 'my-1'}>
+  return <div className={grouped && level === 'standard' ? 'chat-tool-group my-2 rounded-xl px-3' : 'my-1'}>
     {grouped && <div><button type="button" aria-controls={panelId} aria-expanded={open} className={`flex items-center gap-2 py-2 text-sm ${status === 'error' ? 'text-red-500' : 'text-claude-textSecondary'}`} onClick={() => setOpen(!open)}><StatusDot status={status} />{toolCategory(tools[0]?.name || 'Tools')} · {steps.length}<ChevronRight size={14} className={open ? 'rotate-90' : ''} />{live && tools.some(t => t?.status === 'running') && <span className="animate-pulse">运行中</span>}</button></div>}
-    <GridDisclosure open={!grouped || open} id={panelId}>{steps.map((s, i) => tools[i] && <ToolBlock messageId={message.id} conversationId={conversationId} key={`${s.id}:${level}`} id={recordId(index, s.id)} tool={tools[i]} level={level} live={live} onInspect={onInspect} />)}</GridDisclosure>
+    <GridDisclosure open={!grouped || open} id={panelId}><div className="space-y-1">{steps.map((s, i) => tools[i] && <ToolBlock messageId={message.id} conversationId={conversationId} key={`${s.id}:${level}`} id={recordId(index, s.id)} tool={tools[i]} level={level} live={live} onInspect={onInspect} />)}</div></GridDisclosure>
   </div>;
 }
 function ThinkingBlock({ step }: { step: ProcessStep }) {
