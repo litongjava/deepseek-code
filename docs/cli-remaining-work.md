@@ -147,12 +147,12 @@ Acceptance evidence: development record `acceptance-20261102.md` and `ux-2026110
 
 ## 2026-11-05 用户反馈的 CLI 问题（待修复）
 
-均为用户在 Windows 上使用 dcl 时反馈，尚未修复，也尚未复现。
+用户在 Windows 上使用 dcl 时反馈。修复已在 Linux 真实终端验证，Windows 尚未验证。回归场景见 `docs/cli-regression-tests.md`。
 
-- [ ] 折叠的修改行缺少展开/合并提示。`● #195 Updated temp/inspect_snapshots2.py (+38 -0)` 这类行可以点击展开，但界面上看不出来。Bash 折叠结果已有 `+N lines (click to expand)`（`tool_view.rs`），修改行（`change_view.rs` 的 `collapsed_change`）没有。提示放在现有行内，不新增一行。
-- [ ] 消息编辑框支持换行输入。主输入框已支持 `Alt+Enter`、`Shift+Enter`、行尾 `\` 加 `Enter`。待用户确认所指位置：若是编辑排队消息或历史消息的框，需要增加换行；若是主输入框，则排查快捷键在其 Windows 终端上为何不生效。
-- [ ] 撤回尚未正式发送的上一条消息。模型运行中用 `Tab` 排队或按 `Enter` 发送、模型还没收到的消息，可以撤回到输入框修改或删除。模型已收到的消息不能撤回。队列位于 `terminal/input.rs`。
-- [ ] 恢复会话后，`/continue` 被活动 worker 拦截。
+- [x] 折叠的修改行缺少展开/合并提示。`● #195 Updated temp/inspect_snapshots2.py (+38 -0)` 这类行可以点击展开，但界面上看不出来。Bash 折叠结果已有 `+N lines (click to expand)`（`tool_view.rs`），修改行（`change_view.rs` 的 `collapsed_change`）没有。提示放在现有行内，不新增一行。
+- [x] 消息编辑框支持换行输入。新增 `Ctrl+J`（空闲和运行中都可用），运行中也支持行尾 `\` 加 `Enter`。用户所指的具体位置和 Windows 终端的表现待确认。
+- [x] 撤回尚未正式发送的消息。输入框为空时按 `↑`，`Tab` 排队和 `Enter` 发送、模型还没读到的消息都回到输入框。此前 `Tab` 排队的消息撤回时不会真正取消，之后仍会发送；排两条以上时较早的消息和工具行还会被挤出显示。
+- [x] 恢复会话后，`/continue` 被活动 worker 拦截。
 
   现象：
 
@@ -163,10 +163,10 @@ Acceptance evidence: development record `acceptance-20261102.md` and `ux-2026110
   Error: This session already has an active worker. Use /tasks attach ID or /tasks cancel ID before continuing.
   ```
 
-  代码中可见的问题，是否为本次报错的实际原因待复现确认：
+  当时代码中的问题（用户那次报错的实际原因没有在其机器上确认）：
   - `repl.rs` 的 `show_resumed` 显示这条提示前，没有检查会话是否有活动 worker，提示与随后的报错相互矛盾。
   - `worker_frontend.rs` 的 `single_turn` 会先调用 `recover_session` 清理中断的 worker 状态，`background_commands.rs` 的 `/continue` 没有调用，worker 已退出时也可能被拒绝。
   - 报错要求使用 `/tasks attach ID`，但没有给出 ID。
 
-  修复方向：`/continue` 先清理中断状态；worker 确实在运行时直接接回，不再报错；恢复提示按实际状态显示。
+  修复：`/continue` 先清理中断状态；worker 确实在运行时直接接回；恢复提示按实际状态显示。修复过程中还解决了：前端被杀后几秒内接回失败、进程已退出的任务一直占用会话、崩溃后带 `--permission-mode` 无法恢复、没有结果的工具调用被模型当成成功。
 - [ ] 待用户确认是否修改：没有保存耗时记录的旧消息显示 `duration unavailable`（`repl.rs` 的 `completion_for_message`）。

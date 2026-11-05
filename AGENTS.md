@@ -6,7 +6,7 @@
 - `crates/core/`: shared Rust engine, persistence, permissions, and services. Keep business logic here, independent of Tauri.
 - `crates/cli/`: standalone `dcl` executable; it must work without Desktop or the port 30085 Bridge.
 - `src-tauri/`: Desktop adapters and Bridge routes; `src-tauri/worker/` contains the computer-operation helper.
-- `scripts/`: build orchestration; `docs/`: architecture and migration references. `legacy/claude-code-cli/` is a read-only historical snapshot, excluded from the workspace.
+- `scripts/`: build orchestration; `docs/`: architecture and migration references.
 
 ## Build, Test, and Development Commands
 
@@ -30,7 +30,7 @@ Match surrounding code: TypeScript uses two-space indentation, PascalCase compon
 
 ## Testing Guidelines
 
-Frontend tests use Vitest, jsdom, and React Testing Library; name files `*.test.ts(x)` or `*.spec.ts(x)`. Rust integration tests live in each crate's `tests/` directory. No numeric coverage threshold is configured. Test changed behavior, failures, cancellation, and persistence where applicable; use temporary directories and local mock endpoints instead of real credentials.
+Frontend tests use Vitest, jsdom, and React Testing Library; name files `*.test.ts(x)` or `*.spec.ts(x)`. Rust integration tests live in each crate's `tests/` directory. No numeric coverage threshold is configured. After changing `crates/cli` or `crates/core`, read `docs/cli-regression-tests.md` and run the checks it selects for the changed files, so other features are confirmed unaffected. Test changed behavior, failures, cancellation, and persistence where applicable; use temporary directories and local mock endpoints instead of real credentials.
 
 ## Commits & Pull Requests
 
