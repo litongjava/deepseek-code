@@ -65,7 +65,7 @@
     "busySendDescription": "Действие Enter и кнопки отправки во время работы агента",
     "queued": "Сообщения в очереди",
     "cancelQueued": "Отменить сообщение в очереди"
-},
+  },
   "languagePicker": {
     "title": "Выберите язык",
     "search": "Поиск языков",
@@ -484,7 +484,8 @@
     "retryRequest": "Запрос повторной попытки",
     "newChat": "Новый чат",
     "export": "Экспорт",
-    "promptSuggestions": "Подсказки"
+    "promptSuggestions": "Подсказки",
+    "readingMode": "Режим чтения"
   },
   "header": {
     "newChat": "Новый чат",

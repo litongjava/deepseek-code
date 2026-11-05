@@ -65,7 +65,7 @@
     "busySendDescription": "Działanie Enter i przycisku Wyślij podczas pracy agenta",
     "queued": "Wiadomości w kolejce",
     "cancelQueued": "Anuluj wiadomość w kolejce"
-},
+  },
   "languagePicker": {
     "title": "Wybierz język",
     "search": "Szukaj języków",
@@ -484,7 +484,8 @@
     "retryRequest": "[0348] Żądanie ponownej próby",
     "newChat": "Nowy czat",
     "export": "[0349] Eksport",
-    "promptSuggestions": "[0350] Szybkie sugestie"
+    "promptSuggestions": "[0350] Szybkie sugestie",
+    "readingMode": "Tryb czytania"
   },
   "header": {
     "newChat": "Nowy czat",

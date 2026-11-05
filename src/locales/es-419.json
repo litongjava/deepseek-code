@@ -65,7 +65,7 @@
     "busySendDescription": "Acción de Enter y del botón Enviar mientras se ejecuta el agente",
     "queued": "Mensajes en cola",
     "cancelQueued": "Cancelar mensaje en cola"
-},
+  },
   "languagePicker": {
     "title": "Elige tu idioma",
     "search": "Buscar idiomas",
@@ -484,7 +484,8 @@
     "retryRequest": "Solicitud de reintento",
     "newChat": "Nuevo chat",
     "export": "Exportar",
-    "promptSuggestions": "Sugerencias rápidas"
+    "promptSuggestions": "Sugerencias rápidas",
+    "readingMode": "Modo de lectura"
   },
   "header": {
     "newChat": "Nuevo chat",

@@ -65,7 +65,7 @@
     "busySendDescription": "Verhalten von Enter und Senden, während der Agent arbeitet",
     "queued": "Nachrichten in der Warteschlange",
     "cancelQueued": "Nachricht aus der Warteschlange entfernen"
-},
+  },
   "languagePicker": {
     "title": "Sprache auswählen",
     "search": "Sprachen suchen",
@@ -484,7 +484,8 @@
     "retryRequest": "Wiederholungsanforderung",
     "newChat": "Neuer Chat",
     "export": "Exportieren",
-    "promptSuggestions": "Sofortige Vorschläge"
+    "promptSuggestions": "Sofortige Vorschläge",
+    "readingMode": "Lesemodus"
   },
   "header": {
     "newChat": "Neuer Chat",

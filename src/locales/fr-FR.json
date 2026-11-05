@@ -65,7 +65,7 @@
     "busySendDescription": "Action d’Entrée et du bouton Envoyer pendant l’exécution de l’agent",
     "queued": "Messages en attente",
     "cancelQueued": "Annuler le message en attente"
-},
+  },
   "languagePicker": {
     "title": "Choisissez votre langue",
     "search": "Rechercher une langue",
@@ -484,7 +484,8 @@
     "retryRequest": "Demande de nouvelle tentative",
     "newChat": "Nouvelle conversation",
     "export": "Exporter",
-    "promptSuggestions": "Suggestions rapides"
+    "promptSuggestions": "Suggestions rapides",
+    "readingMode": "Mode lecture"
   },
   "header": {
     "newChat": "Nouvelle conversation",

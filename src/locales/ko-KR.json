@@ -65,7 +65,7 @@
     "busySendDescription": "에이전트 실행 중 Enter 및 보내기 버튼의 동작",
     "queued": "대기 중인 메시지",
     "cancelQueued": "대기 메시지 취소"
-},
+  },
   "languagePicker": {
     "title": "언어 선택",
     "search": "언어 검색",
@@ -484,7 +484,8 @@
     "retryRequest": "재시도 요청",
     "newChat": "새 채팅",
     "export": "수출",
-    "promptSuggestions": "프롬프트 제안"
+    "promptSuggestions": "프롬프트 제안",
+    "readingMode": "읽기 모드"
   },
   "header": {
     "newChat": "새 채팅",

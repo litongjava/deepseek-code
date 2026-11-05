@@ -96,6 +96,31 @@ cargo check --locked -p deepseek-code-desktop --all-targets
 3. 列表和详情里按 `x` 停止：任务立即从列表消失；停止最后一个后列表自动关闭，不再输出其他内容。
 4. 没有任务时输出 `No background tasks.`。`/tasks completed`、`/tasks show ID`、`/tasks attach ID` 文本命令照常可用。
 
+### G. 长期记忆
+
+1. `dcl memory add`、`list`、`list 关键词`、`update`、`delete` 输出 JSON；ID 不存在时报错。
+2. `/memory` 菜单有 Long-term memories；列表可以搜索，`+ Add a memory` 能添加。
+3. 详情里 `e` 编辑后列表立即更新并保留重要性，`x` 删除，`←` 返回，`Esc` 关闭。
+4. `/memory` 的说明文件选项和 `/memory show` 不受影响。
+
+### H. 提示词与工具配置
+
+在数据目录写 `customization.json` 后，用 `dcl -p` 验证：
+
+1. `custom_tools`：模型调用后得到命令的标准输出；`bypass` 下直接运行，其他模式需要授权。
+2. `disabled_tools`：模型看不到该工具，强行调用被拒绝。
+3. `tool_descriptions`：模型读到修改后的说明。
+4. `system_prompt`：`replace` 和 `append` 生效，环境信息仍然存在。
+5. 文件语法错误时这一轮报错退出；删除文件后恢复默认。
+
+### I. 定时任务
+
+1. 让模型创建每分钟运行的 `CronCreate` 任务：空闲时按时触发，显示 `⏰ Scheduled:` 并得到回答。
+2. 输入框有内容或正在运行时不打断，空闲后再触发。
+3. 恢复的会话在 `/continue` 或发送新消息前不触发。
+4. 同一项目开两个会话时，持久任务只在一个会话触发。
+5. `/loop 1m 提示词`、`/loop stop`、`ScheduleWakeup` 可用。
+
 ### E. 基础流程
 
 1. 启动到输入框，发送消息，收到回答。
@@ -112,6 +137,9 @@ cargo check --locked -p deepseek-code-desktop --all-targets
 - `terminal/live.rs`、`terminal/scrollback.rs`、`terminal/change_view.rs`、`terminal/tool_view.rs` 的显示：B、C、E1
 - `repl.rs`：C4、D1、D2、D6、D7
 - `worker_frontend.rs`、`background_commands.rs`：B、D、E3、E4、F
+- `memory.rs`、`display_commands.rs`、`crates/core/src/memory`：G
+- `services/customization.rs`、`prompt/`、`native_engine/tool_loop.rs`：H，以及 SDK 测试
+- `tools/cron_jobs.rs`、`tools/wakeup.rs`、`main.rs` 的空闲循环：I
 - `terminal/picker.rs`：F，以及 `/resume`、`/rewind`、`/mcp` 等使用选择列表的命令
 - `session.rs`：B、D、E
 - `services/session_worker*`、`services/background_sessions.rs`：D、E4

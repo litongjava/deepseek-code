@@ -24,16 +24,20 @@ rustyline = { version = "15", default-features = false }
 crossterm = "0.28"
 unicode-width = "0.2"
 pulldown-cmark = { version = "0.13", default-features = false }
-cpal = "0.15"
 axum = "0.8"
 tempfile = "3"
-rquickjs = { version = "0.14.0", features = ["futures", "macro"] }
 ring = "0.17"
 portable-pty = "0.9"
 vt100 = "0.16"
 base64 = "0.22"
 tracing = "0.1"
 vte = "0.15"
+
+[target.'cfg(not(target_os = "android"))'.dependencies]
+# The workflow script engine; the crate ships no Android bindings.
+rquickjs = { version = "0.14.0", features = ["futures", "macro"] }
+# Microphone capture; Android has no input device for a terminal program.
+cpal = "0.15"
 
 [target.'cfg(windows)'.dependencies]
 # Native clipboard access: Ctrl+V images (PNG, bitmaps and copied image

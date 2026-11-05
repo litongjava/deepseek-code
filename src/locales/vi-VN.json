@@ -65,7 +65,7 @@
     "busySendDescription": "Hành vi của Enter và nút Gửi khi tác nhân đang chạy",
     "queued": "Tin nhắn trong hàng đợi",
     "cancelQueued": "Hủy tin nhắn trong hàng đợi"
-},
+  },
   "languagePicker": {
     "title": "Chọn ngôn ngữ",
     "search": "Tìm ngôn ngữ",
@@ -484,7 +484,8 @@
     "retryRequest": "Yêu cầu thử lại",
     "newChat": "Cuộc trò chuyện mới",
     "export": "Xuất khẩu",
-    "promptSuggestions": "Gợi ý kịp thời"
+    "promptSuggestions": "Gợi ý kịp thời",
+    "readingMode": "Chế độ đọc"
   },
   "header": {
     "newChat": "Cuộc trò chuyện mới",

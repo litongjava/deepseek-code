@@ -4,6 +4,7 @@
 //! `dcl -p` with the parent's provider, model and permission mode. Results
 //! are cached per (prompt, options) so a later run can resume.
 use anyhow::{bail, Context, Result};
+#[cfg(not(target_os = "android"))]
 use rquickjs::{prelude::{Async, Func}, AsyncContext, AsyncRuntime, CatchResultExt, Promise};
 use serde_json::{json, Value};
 use std::path::{Path, PathBuf};
@@ -158,6 +159,12 @@ pub struct Run<'a> {
 }
 
 /// Runs the script and returns its result.
+#[cfg(target_os = "android")]
+pub async fn run(_: Run<'_>) -> Result<Value> {
+    anyhow::bail!("Workflow scripts are not available on Android")
+}
+
+#[cfg(not(target_os = "android"))]
 pub async fn run(run: Run<'_>) -> Result<Value> {
     let (meta, body) = split_meta(run.script)?;
     std::fs::create_dir_all(run.run_dir.join("agents"))?;

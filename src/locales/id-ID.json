@@ -65,7 +65,7 @@
     "busySendDescription": "Tindakan Enter dan tombol Kirim saat agen berjalan",
     "queued": "Pesan dalam antrean",
     "cancelQueued": "Batalkan pesan antrean"
-},
+  },
   "languagePicker": {
     "title": "Pilih bahasa Anda",
     "search": "Cari bahasa",
@@ -484,7 +484,8 @@
     "retryRequest": "Permintaan Coba Lagi",
     "newChat": "Percakapan baru",
     "export": "Ekspor",
-    "promptSuggestions": "Saran Segera"
+    "promptSuggestions": "Saran Segera",
+    "readingMode": "Mode baca"
   },
   "header": {
     "newChat": "Percakapan baru",

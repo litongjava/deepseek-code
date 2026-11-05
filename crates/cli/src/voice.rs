@@ -1,5 +1,6 @@
 //! Native device adapter. A dedicated thread owns CPAL's non-Send stream.
 use anyhow::{bail, ensure, Context, Result};
+#[cfg(not(target_os = "android"))]
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use std::sync::{
     atomic::{AtomicBool, Ordering},
@@ -12,6 +13,16 @@ pub struct Recording {
     result: oneshot::Receiver<Result<Vec<u8>>>,
     thread: Option<std::thread::JoinHandle<()>>,
 }
+#[cfg(target_os = "android")]
+impl Recording {
+    pub async fn start() -> Result<Self> {
+        bail!("Recording is not available on Android; transcribe an audio file instead")
+    }
+    pub async fn finish(self) -> Result<Vec<u8>> {
+        bail!("Recording is not available on Android")
+    }
+}
+#[cfg(not(target_os = "android"))]
 impl Recording {
     pub async fn start() -> Result<Self> {
         let stop = Arc::new(AtomicBool::new(false));

@@ -41,6 +41,13 @@ fn generation_config(config: &str) -> (String, Option<String>, Option<String>) {
     }
 }
 
+/// A system task's command: plain text, or JSON with a `command` field.
+fn system_command(config: &str) -> String {
+    serde_json::from_str::<serde_json::Value>(config).ok()
+        .and_then(|value| value["command"].as_str().map(str::to_owned))
+        .unwrap_or_else(|| config.to_owned())
+}
+
 fn select_model(
     providers: &[crate::native_engine::provider_manager::Provider],
     provider: Option<&str>,
@@ -285,8 +292,9 @@ impl ScheduledTaskScheduler {
     async fn execute_system_task(&self, task: &ScheduledTaskRow) -> TaskExecutionResult {
         let start = std::time::Instant::now();
 
+        let command = system_command(&task.task_config);
         // Validate command before execution
-        if crate::tools::is_dangerous_command(&task.task_config) {
+        if crate::tools::is_dangerous_command(&command) {
             return TaskExecutionResult {
                 success: false,
                 output: None,
@@ -297,14 +305,14 @@ impl ScheduledTaskScheduler {
 
         #[cfg(target_os = "windows")]
         let output = tokio::process::Command::new("cmd")
-            .args(["/C", &task.task_config])
+            .args(["/C", &command])
             .output()
             .await;
 
         #[cfg(not(target_os = "windows"))]
         let output = tokio::process::Command::new("sh")
             .arg("-c")
-            .arg(&task.task_config)
+            .arg(&command)
             .output()
             .await;
 
@@ -432,6 +440,13 @@ mod tests {
     }
 
     #[test]
+    fn system_commands_accept_plain_text_or_json() {
+        assert_eq!(system_command("echo hi"), "echo hi");
+        assert_eq!(system_command("{\"command\":\"echo hi\"}"), "echo hi");
+        assert_eq!(system_command("{\"other\":1}"), "{\"other\":1}");
+    }
+
+    #[test]
     fn prompt_settings_accept_plain_text_or_json() {
         assert_eq!(generation_config(" check CI "), ("check CI".to_owned(), None, None));
         assert_eq!(generation_config("{\"prompt\":\"x\",\"provider\":\"p\",\"model\":\"m\"}"), ("x".to_owned(), Some("p".to_owned()), Some("m".to_owned())));
@@ -491,6 +506,26 @@ mod tests {
         }
         let due = db.with_conn(|conn| crate::db::task_repo::get_due_tasks(conn, &chrono::Utc::now().to_rfc3339())).unwrap().unwrap();
         assert!(due.is_empty());
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn anthropic_generation_asks_for_answer_text_without_reasoning() {
+        use axum::{routing::post, Json, Router};
+        let dir = tempfile::tempdir().unwrap();
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}", listener.local_addr().unwrap());
+        let app = Router::new().route("/v1/messages", post(|Json(body): Json<serde_json::Value>| async move {
+            assert_eq!(body["thinking"]["type"], "disabled", "{body}");
+            Json(json!({"id":"m","type":"message","role":"assistant","model":"m","stop_reason":"end_turn","stop_sequence":null,"content":[{"type":"thinking","thinking":"HIDDEN","signature":"s"},{"type":"text","text":"ANSWER"}],"usage":{"input_tokens":1,"output_tokens":1}}))
+        }));
+        let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        let mut anthropic = provider("p", true, &url, &[("m", true)]);
+        anthropic["api_format"] = json!("anthropic");
+        std::fs::write(dir.path().join("providers.json"), json!([anthropic]).to_string()).unwrap();
+        let paths = crate::runtime::RuntimePaths::new(dir.path().to_path_buf()).unwrap();
+        let scheduler = ScheduledTaskScheduler::new(paths.open_database().unwrap()).with_data_dir(dir.path().to_path_buf());
+        assert_eq!(scheduler.request_generation("hello", "system").await.unwrap(), "ANSWER");
         server.abort();
     }
 

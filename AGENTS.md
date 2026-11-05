@@ -30,7 +30,7 @@ Match surrounding code: TypeScript uses two-space indentation, PascalCase compon
 
 ## Testing Guidelines
 
-Frontend tests use Vitest, jsdom, and React Testing Library; name files `*.test.ts(x)` or `*.spec.ts(x)`. Rust integration tests live in each crate's `tests/` directory. No numeric coverage threshold is configured. After changing `crates/cli` or `crates/core`, read `docs/cli-regression-tests.md` and run the checks it selects for the changed files, so other features are confirmed unaffected. Test changed behavior, failures, cancellation, and persistence where applicable; use temporary directories and local mock endpoints instead of real credentials.
+Frontend tests use Vitest, jsdom, and React Testing Library; name files `*.test.ts(x)` or `*.spec.ts(x)`. Rust integration tests live in each crate's `tests/` directory. No numeric coverage threshold is configured. After changing `crates/cli` or `crates/core`, read `docs/cli-regression-tests.md` and run the checks it selects for the changed files, so other features are confirmed unaffected. After changing `src/` or `src-tauri/`, do the same with `docs/desktop-regression-tests.md`. New features need unit tests; what code cannot test goes into those documents as test instructions. Test changed behavior, failures, cancellation, and persistence where applicable; use temporary directories and local mock endpoints instead of real credentials.
 
 ## Commits & Pull Requests
 

@@ -65,7 +65,7 @@
     "busySendDescription": "एजेंट चलने के दौरान Enter और भेजें बटन का व्यवहार",
     "queued": "कतार में संदेश",
     "cancelQueued": "कतार का संदेश रद्द करें"
-},
+  },
   "languagePicker": {
     "title": "अपनी भाषा चुनें",
     "search": "भाषाएँ खोजें",
@@ -484,7 +484,8 @@
     "retryRequest": "पुनः प्रयास का अनुरोध",
     "newChat": "नई चैट",
     "export": "निर्यात",
-    "promptSuggestions": "शीघ्र सुझाव"
+    "promptSuggestions": "शीघ्र सुझाव",
+    "readingMode": "पठन मोड"
   },
   "header": {
     "newChat": "नई चैट",

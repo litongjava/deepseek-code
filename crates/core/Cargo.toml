@@ -36,7 +36,6 @@ dirs = "5"
 rusqlite = { version = "0.31", features = ["bundled", "chrono"] }
 r2d2 = "0.8"
 r2d2_sqlite = "0.24"
-enigo = "0.2"
 base64 = "0.22"
 ring = "0.17"
 windows = { version = "0.58", features = ["Win32_Graphics_Gdi", "Win32_UI_WindowsAndMessaging", "Win32_Foundation", "Win32_System_JobObjects", "Win32_System_Threading", "Win32_Security", "Win32_Security_Cryptography", "Win32_Security_Authorization", "Win32_System_Memory"] }
@@ -57,6 +56,10 @@ globset = "0.4"
 
 [dev-dependencies]
 tokio = { version = "1", features = ["full", "test-util"] }
+
+[target.'cfg(not(target_os = "android"))'.dependencies]
+# Desktop input control; Android apps cannot drive other apps this way.
+enigo = "0.2"
 
 [target.'cfg(unix)'.dependencies]
 rustix = { version = "1", features = ["fs", "process"] }

@@ -1,4 +1,7 @@
 use anyhow::{anyhow, Result};
+#[cfg(target_os = "android")]
+#[path = "no_input.rs"]
+mod enigo;
 use enigo::{Button, Direction, Enigo, Key, Keyboard, Mouse, Settings};
 use serde::{Deserialize, Serialize};
 use std::sync::{Arc, Mutex};

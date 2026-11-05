@@ -65,7 +65,7 @@
     "busySendDescription": "وظيفة Enter وزر الإرسال أثناء تشغيل الوكيل",
     "queued": "رسائل في قائمة الانتظار",
     "cancelQueued": "إلغاء رسالة في قائمة الانتظار"
-},
+  },
   "languagePicker": {
     "title": "اختر لغتك",
     "search": "ابحث عن لغة",
@@ -484,7 +484,8 @@
     "retryRequest": "طلب إعادة المحاولة",
     "newChat": "محادثة جديدة",
     "export": "تصدير",
-    "promptSuggestions": "الاقتراحات السريعة"
+    "promptSuggestions": "الاقتراحات السريعة",
+    "readingMode": "وضع القراءة"
   },
   "header": {
     "newChat": "محادثة جديدة",

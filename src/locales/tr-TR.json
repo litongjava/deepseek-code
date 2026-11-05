@@ -65,7 +65,7 @@
     "busySendDescription": "Ajan çalışırken Enter ve Gönder düğmesinin davranışı",
     "queued": "Kuyruktaki mesajlar",
     "cancelQueued": "Kuyruktaki mesajı iptal et"
-},
+  },
   "languagePicker": {
     "title": "Dilinizi seçin",
     "search": "Dil ara",
@@ -484,7 +484,8 @@
     "retryRequest": "Yeniden Deneme İsteği",
     "newChat": "Yeni sohbet",
     "export": "İhracat",
-    "promptSuggestions": "Hızlı Öneriler"
+    "promptSuggestions": "Hızlı Öneriler",
+    "readingMode": "Okuma modu"
   },
   "header": {
     "newChat": "Yeni sohbet",

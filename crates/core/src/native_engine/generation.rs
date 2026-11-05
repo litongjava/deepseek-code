@@ -220,6 +220,7 @@ async fn generate_request(
             }
         } else {
             let response = AnthropicClient::new()
+                .plain_text()
                 .send_message(
                     &provider,
                     vec![AnthropicMessage {

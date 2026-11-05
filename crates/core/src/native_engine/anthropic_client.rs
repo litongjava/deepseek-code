@@ -144,6 +144,8 @@ pub struct StreamMessage {
 use crate::performance::{retry_with_backoff, checked_response};
 
 pub struct AnthropicClient {
+    /// Background generation has no use for reasoning unless the model asks for it.
+    plain_text: bool,
     client: Client,
     response_schema: Option<Value>,
     retry_requests: bool,
@@ -156,7 +158,7 @@ impl AnthropicClient {
             .redirect(reqwest::redirect::Policy::none())
             .build()
             .unwrap_or_else(|_| Client::new());
-        Self { client, response_schema: None, retry_requests: true }
+        Self { client, response_schema: None, retry_requests: true, plain_text: false }
     }
 
     /// Isolated classifiers use one attempt and an outer cancellation deadline.
@@ -181,6 +183,12 @@ impl AnthropicClient {
             }
         }
         Ok(())
+    }
+
+    /// Requests answer text only, for tool-free background generation.
+    pub fn plain_text(mut self) -> Self {
+        self.plain_text = true;
+        self
     }
 
     pub async fn send_message(
@@ -221,6 +229,9 @@ impl AnthropicClient {
         }
 
         if let Some(effort) = provider.model.effort.as_deref() { apply_effort(&mut body, effort, &provider.model.id, max_tokens)?; }
+        if self.plain_text && body.get("thinking").is_none() {
+            body["thinking"] = json!({"type":"disabled"});
+        }
         self.apply_options(&mut body, provider)?;
         crate::performance::apply_prompt_cache(&mut body);
         let identity = super::request_identity::RequestIdentity::new(None);

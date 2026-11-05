@@ -65,7 +65,7 @@
     "busySendDescription": "エージェントの実行中に Enter または送信ボタンを押したときの動作",
     "queued": "待機中のメッセージ",
     "cancelQueued": "待機中のメッセージを取り消す"
-},
+  },
   "languagePicker": {
     "title": "言語を選択",
     "search": "言語を検索",
@@ -484,7 +484,8 @@
     "retryRequest": "再試行リクエスト",
     "newChat": "新しいチャット",
     "export": "エクスポート",
-    "promptSuggestions": "即時の提案"
+    "promptSuggestions": "即時の提案",
+    "readingMode": "閲覧モード"
   },
   "header": {
     "newChat": "新しいチャット",

@@ -1236,6 +1236,7 @@ pub fn find_shell(shell_name: &str) -> Option<String> {
             r"C:\Git\bin\bash.exe".to_string(),
         ],
         ("bash", false) => vec![
+            format!("{}/bin/bash", std::env::var("PREFIX").unwrap_or_default()),
             "/usr/local/bin/bash".to_string(),
             "/usr/bin/bash".to_string(),
             "/bin/bash".to_string(),
@@ -1267,6 +1268,9 @@ pub fn find_shell(shell_name: &str) -> Option<String> {
             r"C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe".to_string(),
         ],
         ("sh", false) => vec![
+            // Termux keeps its tools under $PREFIX; Android itself has /system/bin/sh.
+            format!("{}/bin/sh", std::env::var("PREFIX").unwrap_or_default()),
+            "/system/bin/sh".to_string(),
             "/usr/local/bin/sh".to_string(),
             "/usr/bin/sh".to_string(),
             "/bin/sh".to_string(),

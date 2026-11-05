@@ -65,7 +65,7 @@
     "busySendDescription": "Comportamento di Invio e del pulsante Invia mentre l’agente è in esecuzione",
     "queued": "Messaggi in coda",
     "cancelQueued": "Annulla messaggio in coda"
-},
+  },
   "languagePicker": {
     "title": "Scegli la lingua",
     "search": "Cerca una lingua",
@@ -484,7 +484,8 @@
     "retryRequest": "Richiesta di nuovo tentativo",
     "newChat": "Nuova chat",
     "export": "Esportazione",
-    "promptSuggestions": "Suggerimenti rapidi"
+    "promptSuggestions": "Suggerimenti rapidi",
+    "readingMode": "Modalità lettura"
   },
   "header": {
     "newChat": "Nuova chat",

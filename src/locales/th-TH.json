@@ -65,7 +65,7 @@
     "busySendDescription": "การทำงานของ Enter และปุ่มส่งขณะที่เอเจนต์กำลังทำงาน",
     "queued": "ข้อความในคิว",
     "cancelQueued": "ยกเลิกข้อความในคิว"
-},
+  },
   "languagePicker": {
     "title": "เลือกภาษา",
     "search": "ค้นหาภาษา",
@@ -484,7 +484,8 @@
     "retryRequest": "ลองส่งคำขออีกครั้ง",
     "newChat": "แชตใหม่",
     "export": "ส่งออก",
-    "promptSuggestions": "คำแนะนำแบบทันที"
+    "promptSuggestions": "คำแนะนำแบบทันที",
+    "readingMode": "โหมดอ่าน"
   },
   "header": {
     "newChat": "แชตใหม่",

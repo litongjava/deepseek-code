@@ -65,7 +65,7 @@
     "busySendDescription": "Gedrag van Enter en Verzenden terwijl de agent werkt",
     "queued": "Berichten in de wachtrij",
     "cancelQueued": "Bericht uit de wachtrij annuleren"
-},
+  },
   "languagePicker": {
     "title": "Kies je taal",
     "search": "Talen zoeken",
@@ -484,7 +484,8 @@
     "retryRequest": "Verzoek om opnieuw proberen",
     "newChat": "Nieuwe chat",
     "export": "Exporteren",
-    "promptSuggestions": "Snelle suggesties"
+    "promptSuggestions": "Snelle suggesties",
+    "readingMode": "Leesmodus"
   },
   "header": {
     "newChat": "Nieuwe chat",
