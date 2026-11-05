@@ -136,7 +136,8 @@ fn main() {
         }
     }));
 
-    let builder = tauri::Builder::default()
+    #[cfg_attr(not(mobile), allow(unused_mut))]
+    let mut builder = tauri::Builder::default()
         .plugin(tauri_plugin_shell::init())
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_fs::init())
