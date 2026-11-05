@@ -2,6 +2,7 @@ import { fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import PlanApprovalController from './PlanApprovalController';
 import { useToolStore } from '../../stores/useToolStore';
+import { useChatStore } from '../../stores/useChatStore';
 import { request } from '../../api/client';
 
 vi.mock('../../api/client', () => ({ request: vi.fn() }));
@@ -40,7 +41,8 @@ describe('PlanApprovalController', () => {
         toolUseId: 'tool-a', planVersion: 'version-a', action: 'approve', mode: 'ask', context: 'keep',
       } }),
     }));
-    complete({ json: async () => ({ ok: true, status: 'applied' }) } as Response);
+    complete({ json: async () => ({ ok: true, status: 'applied', result: { mode: 'ask' } }) } as Response);
     await waitFor(() => expect(screen.queryByRole('dialog')).not.toBeInTheDocument());
+    expect(useChatStore.getState().permissionMode).toBe('ask_permissions');
   });
 });

@@ -6,3 +6,4 @@ pub mod commands;
 pub mod updater;
 pub mod remotion;
 pub mod secure_storage;
+pub mod launch_permissions;

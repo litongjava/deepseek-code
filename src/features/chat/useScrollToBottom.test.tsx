@@ -26,6 +26,43 @@ beforeEach(() => {
 afterEach(() => { vi.unstubAllGlobals(); vi.clearAllMocks(); });
 
 describe('useScrollToBottom', () => {
+  it('pages four fifths of the current viewport, preserves reading position and clamps boundaries', () => {
+    const view = render(<Harness />);
+    const element = view.getByTestId('scroll'); geometry(element); flush();
+    element.scrollTo = vi.fn(options => { element.scrollTop = (options as ScrollToOptions).top!; });
+    expect(fireEvent.keyDown(element, { key: 'PageUp' })).toBe(false);
+    expect(element.scrollTop).toBe(640);
+    act(() => resize());
+    expect(frames.size).toBe(0);
+    fireEvent.keyDown(element, { key: 'PageDown' });
+    expect(element.scrollTop).toBe(800);
+    expect(api.isAtBottomRef.current).toBe(true);
+    Object.defineProperty(element, 'clientHeight', { configurable: true, value: 100 });
+    fireEvent.keyDown(element, { key: 'PageUp' });
+    expect(element.scrollTop).toBe(720);
+    element.scrollTop = 20;
+    fireEvent.keyDown(element, { key: 'PageUp' });
+    expect(element.scrollTop).toBe(0);
+    fireEvent.keyDown(element, { key: 'PageUp' });
+    expect(element.scrollTop).toBe(0);
+    element.scrollTop = 880;
+    fireEvent.keyDown(element, { key: 'PageDown' });
+    expect(element.scrollTop).toBe(900);
+  });
+
+  it('leaves editing, nested scroll panes and modified page keys to their owners', () => {
+    const view = render(<Harness />);
+    const element = view.getByTestId('scroll'); geometry(element); flush();
+    vi.mocked(element.scrollTo).mockClear();
+    const input = document.createElement('textarea'); element.append(input);
+    expect(fireEvent.keyDown(input, { key: 'PageDown' })).toBe(true);
+    const pane = document.createElement('div'); pane.style.overflowY = 'auto'; element.append(pane);
+    Object.defineProperties(pane, { scrollHeight: { value: 200 }, clientHeight: { value: 100 } });
+    expect(fireEvent.keyDown(pane, { key: 'PageDown' })).toBe(true);
+    expect(fireEvent.keyDown(element, { key: 'PageDown', ctrlKey: true })).toBe(true);
+    expect(element.scrollTo).not.toHaveBeenCalled();
+  });
+
   it('binds a late container, coalesces frames and cleans up', () => {
     const view = render(<Harness visible={false} />);
     expect(frames.size).toBe(0);

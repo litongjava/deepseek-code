@@ -10,22 +10,12 @@ export async function warmEngine(conversationId: string): Promise<void> {
     userProfile = (wf || pp) ? { work_function: wf, personal_preferences: pp } : undefined;
   } catch { userProfile = undefined; }
 
-  let permissionMode: string | undefined;
-  try {
-    if (typeof window !== 'undefined' && (window as any).__chatStore) {
-      permissionMode = (window as any).__chatStore.getState().permissionMode;
-    } else {
-      permissionMode = localStorage.getItem('permission_mode') || undefined;
-    }
-  } catch {}
-
   request(`/conversations/${conversationId}/warm`, {
     method: 'POST',
     body: JSON.stringify({
       ...resolveEnvCreds(userMode),
       user_mode: userMode,
       user_profile: userProfile,
-      permission_mode: permissionMode,
     }),
   }).catch(() => {});
 }

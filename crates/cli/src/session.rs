@@ -51,7 +51,7 @@ pub struct Session {
     pub(crate) model: String,
     pub(crate) provider_id: String,
     pub(crate) auto_route: bool,
-    /// Bypass is in the Shift+Tab cycle (`--allow-dangerously-skip-permissions`).
+    /// Host authority to select ordinary bypass; enabled for normal CLI launches.
     pub(crate) bypass_available: bool,
     /// Launched with `--full-access`: bypass mode is Full Access.
     pub(crate) full_access: bool,
@@ -2031,7 +2031,10 @@ mod event_tests {
         // A worker job keeps the mode in use alongside --full-access.
         let worker = parse(&["--permission-mode", "plan", "--full-access", "--allow-dangerously-skip-permissions"]);
         assert!(matches!(worker.permission_mode, crate::args::PermissionModeArg::Plan) && worker.full_access);
-        assert!(!parse(&[]).allow_dangerously_skip_permissions);
+        let default = parse(&[]);
+        assert!(default.allow_dangerously_skip_permissions && !default.full_access);
+        assert!(matches!(default.permission_mode, crate::args::PermissionModeArg::Ask));
+        assert_eq!(next_mode("plan", default.allow_dangerously_skip_permissions), "bypass");
     }
     #[test]
     fn duplicate_pipeline_completion_does_not_hide_distinct_results() {
@@ -2107,8 +2110,10 @@ mod event_tests {
         let explicit = Cli::try_parse_with_mode_source(["dcl", "--permission-mode", "ask"]).unwrap();
         let overridden = Session::open(&explicit, &paths, selection(), Some(&saved)).await.unwrap();
         assert_eq!(overridden.permission_mode(), "ask");
-        // Bypass needs a launch that allows it.
-        assert!(overridden.set_permission_mode("bypass").await.is_err());
+        // Ordinary launches can select bypass without acquiring Full Access.
+        overridden.set_permission_mode("bypass").await.unwrap();
+        assert_eq!(overridden.permission_mode(), "bypass");
+        assert!(!overridden.full_access);
         overridden.close().await.unwrap();
         let explicit = Cli::try_parse_with_mode_source(["dcl", "--permission-mode", "ask", "--allow-dangerously-skip-permissions"]).unwrap();
         let overridden = Session::open(&explicit, &paths, selection(), Some(&saved)).await.unwrap();

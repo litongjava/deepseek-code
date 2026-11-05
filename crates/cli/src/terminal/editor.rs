@@ -1929,7 +1929,7 @@ impl PromptEditor {
                     if self.details.expanded
                         && matches!(key.code, KeyCode::PageUp | KeyCode::PageDown)
                     {
-                        let delta = panel.viewport.max(1) as isize;
+                        let delta = crate::terminal::page_step(panel.viewport) as isize;
                         self.details.scroll_by(
                             if key.code == KeyCode::PageUp {
                                 -delta

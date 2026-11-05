@@ -2,3 +2,4 @@
 # Preserve original line endings and intentional trailing blank lines on checkout.
 crates/core/assets/design-converter/** -text whitespace=cr-at-eol,-blank-at-eof
 crates/core/src/skills/bundled/resources/** -text whitespace=cr-at-eol,-blank-at-eof,-blank-at-eol
+crates/core/tests/fixtures/*.pdf binary

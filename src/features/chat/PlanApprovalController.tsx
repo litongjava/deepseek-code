@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from 'react';
 import { request as apiRequest } from '../../api/client';
 import { useToolStore } from '../../stores/useToolStore';
+import { useChatStore } from '../../stores/useChatStore';
 import PlanApprovalDialog, { PlanApprovalRequest, PlanApprovalResponse } from './PlanApprovalDialog';
 
 export default function PlanApprovalController({ sessionId }: { sessionId: string | null }) {
@@ -50,6 +51,9 @@ export default function PlanApprovalController({ sessionId }: { sessionId: strin
       });
       const result = await response.json();
       if (!result.ok || result.status !== 'applied') throw new Error('审批尚未应用，请查看最新请求后重试。');
+      const modes: Record<string, string> = { ask: 'ask_permissions', auto: 'auto', bypass: 'bypass_permissions', plan: 'plan_mode' };
+      const mode = modes[result.result?.mode];
+      if (mode) useChatStore.getState().setPermissionMode(mode);
       resolved.current.add(answer.requestId);
       setPlan(current => current?.requestId === answer.requestId ? null : current);
       const store = useToolStore.getState();

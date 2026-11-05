@@ -8,15 +8,18 @@ import './QueueDock.css';
 
 function Preview({ content }: { content: UserContent }) {
   if (typeof content === 'string') return <span className="queue-preview" title={content}>{content}</span>;
-  return <span className="queue-preview">{content.map((block, index) => {
-    if (block.type === 'text') return <span key={index}>{block.text}</span>;
+  const text = content.filter(block => block.type === 'text').map(block => block.text).join('\n');
+  const attachments = content.filter(block => block.type !== 'text');
+  return <span className="queue-preview queue-content">
+    {text && <span className="queue-preview-text" title={text}>{text}</span>}
+    {attachments.length > 0 && <span className="queue-attachments">{attachments.map((block, index) => {
     const url = embeddedImageUrl(block);
     return <span key={index} className="queue-attachment">
       {url && <img src={url} alt={block.fileName || 'Queued image'} />}
-      <span>{block.fileName || 'Image attachment'}</span>
+      <span className="queue-file-name" title={block.fileName}>{block.fileName || 'Image attachment'}</span>
       {typeof block.size === 'number' && <span className="queue-status">{block.size < 1024 ? `${block.size} B` : `${(block.size / 1024).toFixed(1)} KB`}</span>}
     </span>;
-  })}</span>;
+  })}</span>}</span>;
 }
 function QueueRow({ session, item, busy, canSteer }: { session: string; item: QueueItem; busy: boolean; canSteer: boolean }) {
   const [draft, setDraft] = useState<string | null>(null);

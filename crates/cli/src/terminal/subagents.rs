@@ -174,10 +174,10 @@ impl View {
                     KeyCode::Up if self.watching => self.scroll = self.scroll.saturating_add(1),
                     KeyCode::Down if self.watching => self.scroll = self.scroll.saturating_sub(1),
                     KeyCode::PageUp if self.watching => {
-                        self.scroll = self.scroll.saturating_add(10)
+                        self.scroll = self.scroll.saturating_add(super::page_step(self.last_size.1.saturating_sub(5) as usize))
                     }
                     KeyCode::PageDown if self.watching => {
-                        self.scroll = self.scroll.saturating_sub(10)
+                        self.scroll = self.scroll.saturating_sub(super::page_step(self.last_size.1.saturating_sub(5) as usize))
                     }
                     KeyCode::Up => {
                         self.selected =

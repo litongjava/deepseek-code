@@ -4,6 +4,7 @@ import { isSubagentRunning, type SubagentInvocation } from '../../api/subagents'
 import { useI18n } from '../../hooks/useI18n';
 import MessageList from '../message-list/MessageList';
 import { useSubagentTranscript } from './useSubagentTranscript';
+import { conversationPageTop } from '../chat/pageConversation';
 
 export default function SubagentPanel({ invocation, active }: { invocation: SubagentInvocation; active: boolean }) {
   const { snapshot, loading, error, retry } = useSubagentTranscript(invocation.parent_session_id, invocation.child_session_id, active);
@@ -21,7 +22,12 @@ export default function SubagentPanel({ invocation, active }: { invocation: Suba
       {snapshot && !snapshot.parent_exists && <p>Parent conversation unavailable.</p>}
       <p className="mt-1 text-claude-textSecondary">Read-only. Closing this view does not stop the agent.</p>
     </header>
-    <div className="min-h-0 flex-1 overflow-auto p-3">
+    <div className="min-h-0 flex-1 overflow-auto p-3" tabIndex={0} onKeyDown={event => {
+      const top = conversationPageTop(event.nativeEvent, event.currentTarget);
+      if (top === null) return;
+      event.preventDefault();
+      event.currentTarget.scrollTo({ top, behavior: 'instant' });
+    }}>
       {error && <p role="alert" className="mb-2 text-sm text-red-500">Unable to refresh transcript: {error} <button type="button" onClick={retry}>Retry</button></p>}
       {!snapshot && loading && <p role="status">Loading transcript…</p>}
       {snapshot && !snapshot.messages.length && <p role="status">{status === 'missing' ? 'Subagent conversation missing or deleted.' : isSubagentRunning(status!) ? 'Subagent is running. Waiting for messages…' : status === 'unknown' ? 'Execution status unavailable; no recorded messages.' : 'No recorded messages.'}</p>}

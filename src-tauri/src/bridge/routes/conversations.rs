@@ -418,11 +418,6 @@ async fn conversation_answer_handler(
     }
 }
 
-#[derive(Deserialize)]
-struct WarmRequest {
-    permission_mode: Option<String>,
-}
-
 async fn conversation_pending_questions(Path(id): Path<String>, State(state): State<AppState>) -> Json<serde_json::Value> {
     let pending = match state.native_engine.lock().await.as_ref() {
         Some(engine) => engine.pending_questions(&id).await,
@@ -434,16 +429,18 @@ async fn conversation_pending_questions(Path(id): Path<String>, State(state): St
 async fn conversation_warm_handler(
     Path(_id): Path<String>,
     State(state): State<AppState>,
-    Json(req): Json<WarmRequest>,
+    Json(req): Json<serde_json::Value>,
 ) -> Result<Json<serde_json::Value>, StatusCode> {
-    // Only log permission mode changes, don't spam for every request
-    if let Some(ref pm_str) = req.permission_mode {
-        let perm_mode = PermissionMode::parse(pm_str).map_err(|_| StatusCode::BAD_REQUEST)?;
-        if perm_mode == PermissionMode::Auto { return Err(StatusCode::NOT_IMPLEMENTED); }
+    // Current clients never send permissions on navigation. Legacy warm clients
+    // may initialize an idle engine, but cannot change any running conversation.
+    if let Some(mode) = req["permission_mode"].as_str() {
+        let mode = PermissionMode::parse(mode).map_err(|_| StatusCode::BAD_REQUEST)?;
+        if mode == PermissionMode::Auto { return Err(StatusCode::NOT_IMPLEMENTED); }
+        if mode == PermissionMode::BypassPermissions && !state.permission_manager.bypass_available() {
+            return Err(StatusCode::FORBIDDEN);
+        }
         if let Some(engine) = state.native_engine.lock().await.as_ref() {
-            engine.set_permission_mode(perm_mode).await;
-            // Only log once per mode change, not for every conversation
-            // tracing::error!(module = "Bridge", "Warm: permission_mode set to {:?} for conversation {}", perm_mode, id);
+            engine.warm_permission_mode(mode).await;
         }
     }
     Ok(Json(serde_json::json!({ "ok": true })))

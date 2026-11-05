@@ -397,7 +397,8 @@ impl Scrollback {
             width.max(4),
         )
         .0;
-        let mut full: Vec<Line> = rows.iter().map(|row| change_view::body(row)).collect();
+        let mut full: Vec<Line> = rows.iter()
+            .map(|row| change_view::styled(row, change_view::Style::TerminalDefault)).collect();
         let short = if rows.len() > 3 {
             let mut short = full[..2].to_vec();
             short.push(change_view::muted(&format!(
@@ -987,6 +988,19 @@ mod tests {
         assert!(!history.blocks[1].body_open);
         assert!(history.all()[0].contains("stdout"));
     }
+    #[test]
+    fn user_text_retains_terminal_default_colors_after_history_reflow() {
+        let mut history = super::Scrollback::default();
+        history.record_prompt("EINK_USER\nSECOND\nTHIRD\nLAST");
+        assert!(history.blocks[0].full.iter().take(4).all(|line|
+            line.0.iter().all(|span| matches!(span.style, change_view::Style::TerminalDefault))));
+        history.reflow(18);
+        history.expand_prompt_id(0, 18);
+        assert!(history.all().iter().any(|row| row.contains("LAST")));
+        assert!(history.blocks[0].full.iter().take(4).all(|line|
+            line.0.iter().all(|span| matches!(span.style, change_view::Style::TerminalDefault))));
+    }
+
     #[test]
     fn prompt_history_survives_reflow_and_expands_without_losing_the_tail() {
         let mut history = super::Scrollback::default();

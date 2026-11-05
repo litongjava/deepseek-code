@@ -73,6 +73,8 @@ export default function PermissionModeSelector({ className = '', value, onChange
   const setPermissionMode = useChatStore((s) => s.setPermissionMode);
   const [isOpen, setIsOpen] = useState(false);
   const [showBypassWarning, setShowBypassWarning] = useState(false);
+  const [modeError, setModeError] = useState('');
+  const [changingMode, setChangingMode] = useState(false);
   const dropdownRef = useRef<HTMLDivElement>(null);
   const buttonRef = useRef<HTMLButtonElement>(null);
   const menuRef = useRef<HTMLDivElement>(null);
@@ -81,6 +83,32 @@ export default function PermissionModeSelector({ className = '', value, onChange
   const currentMode = permissionMode === 'auto'
     ? { label: 'Auto permissions', icon: <ShieldCheck size={14} /> }
     : MODE_OPTIONS.find((m) => m.value === permissionMode) || MODE_OPTIONS[0];
+
+  useEffect(() => {
+    if (value !== undefined || !(window as any).__TAURI_INTERNALS__) return;
+    let cancelled = false;
+    invoke<string>('get_permission_mode').then(mode => {
+      if (!cancelled) setPermissionMode(mode);
+    }).catch(error => { if (!cancelled) setModeError(String(error)); });
+    return () => { cancelled = true; };
+  }, [value, setPermissionMode]);
+
+  const applyMode = async (mode: PermissionMode) => {
+    if (onChange) { onChange(mode); setIsOpen(false); setShowBypassWarning(false); return; }
+    setChangingMode(true);
+    setModeError('');
+    try {
+      await invoke('set_permission_mode', { mode });
+      setPermissionMode(mode);
+      setIsOpen(false);
+      setShowBypassWarning(false);
+      if (mode === 'bypass_permissions') localStorage.setItem('permission_bypass_confirmed', 'true');
+    } catch (error) {
+      setModeError(String(error));
+      setShowBypassWarning(false);
+      setIsOpen(true);
+    } finally { setChangingMode(false); }
+  };
 
   useEffect(() => {
     const handleClickOutside = (e: MouseEvent) => {
@@ -141,27 +169,11 @@ export default function PermissionModeSelector({ className = '', value, onChange
         return;
       }
     }
-    if (onChange) {
-      onChange(mode);
-      setIsOpen(false);
-      return;
-    }
-    setPermissionMode(mode as PermissionMode);
-    setIsOpen(false);
-    localStorage.setItem('permission_mode', mode);
-    invoke('set_permission_mode', { mode }).catch((err) => {
-      console.warn('[PermissionMode] Failed to sync mode to backend:', err);
-    });
+    void applyMode(mode);
   };
 
   const confirmBypass = () => {
-    localStorage.setItem('permission_bypass_confirmed', 'true');
-    setShowBypassWarning(false);
-    if (onChange) { onChange('bypass_permissions'); return; }
-    setPermissionMode('bypass_permissions');
-    invoke('set_permission_mode', { mode: 'bypass_permissions' }).catch((err) => {
-      console.warn('[PermissionMode] Failed to sync mode to backend:', err);
-    });
+    void applyMode('bypass_permissions');
   };
 
   const getModeBadgeColor = (mode: PermissionMode) => {
@@ -206,9 +218,11 @@ export default function PermissionModeSelector({ className = '', value, onChange
               </span>
             </div>
             <div className="p-1.5">
+              {modeError && <p role="alert" className="px-3 py-2 text-[12px] text-claude-textSecondary break-words">{modeError}</p>}
               {MODE_OPTIONS.map((option) => (
                 <button
                   key={option.value}
+                  disabled={changingMode}
                   onClick={() => handleModeChange(option.value)}
                   className={`w-full text-left px-3 py-2.5 rounded-lg transition-colors flex items-start gap-2.5 ${
                     permissionMode === option.value
@@ -278,6 +292,7 @@ export default function PermissionModeSelector({ className = '', value, onChange
               </button>
               <button
                 onClick={confirmBypass}
+                disabled={changingMode}
                 className="px-4 py-2 text-[13px] font-medium text-white bg-orange-600 hover:bg-orange-700 rounded-lg transition-colors"
               >
                 确认启用

@@ -253,6 +253,14 @@ impl QueryEngine {
         self.permission_manager.set_mode(mode);
     }
 
+    /// Legacy warm clients may initialize an idle engine, never alter a live executor.
+    pub async fn warm_permission_mode(&self, mode: crate::permissions::PermissionMode) {
+        let active = self.active_turns.lock().await;
+        if active.is_empty() {
+            self.permission_manager.set_mode(mode);
+        }
+    }
+
     pub async fn sync_providers(&self, providers: Vec<crate::native_engine::provider_manager::Provider>) {
         let mut pm = self.provider_manager.lock().await;
         let config_path = pm.config_path().clone();
@@ -1092,7 +1100,7 @@ impl QueryEngine {
             let root = owner.root.as_ref().ok_or_else(|| anyhow!("Plan storage unavailable"))?;
             let context = crate::services::session_messages::context(root)?;
             let bypass = crate::services::session_permission_mode::plan_returns_to_bypass(&context.db, session, manager)?;
-            crate::services::plan_approval::parse_response(&answer, request, bypass)?;
+            crate::services::plan_approval::parse_response(&answer, request, bypass, manager.bypass_available())?;
             anyhow::ensure!(manager.get_mode() == crate::permissions::PermissionMode::PlanMode, "Plan mode changed during review");
             anyhow::ensure!(crate::services::plans::read(root, session)?.as_deref() == Some(request.plan.as_str()), "Plan changed during review; request approval again");
         }

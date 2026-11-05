@@ -89,6 +89,13 @@ fn main() {
     if let Some(code) = deepseek_code_core::tools::sandbox::run_bridge_from_args() {
         std::process::exit(code);
     }
+    let args: Vec<String> = std::env::args().skip(1).collect();
+    if args.iter().any(|arg| matches!(arg.as_str(), "--help" | "-h")) {
+        println!("Usage: dcd [--dangerously-skip-permissions]\n\nBypass switching and plan approval choices are available without launch flags.\n  --dangerously-skip-permissions        Start in bypass mode\n  --allow-dangerously-skip-permissions  Accepted for compatibility\n\nBypass retains explicit deny rules and configured sandbox restrictions.");
+        return;
+    }
+    let launch_permissions = launch_permissions::LaunchPermissions::parse(args)
+        .unwrap_or_else(|error| { eprintln!("{error}. Use dcd --help for supported options."); std::process::exit(2) });
     init_tracing();
 
     std::panic::set_hook(Box::new(|info| {
@@ -144,7 +151,7 @@ fn main() {
         .manage(Arc::new(std::sync::Mutex::new(None::<String>)))
         .manage(Arc::new(Mutex::new(None::<SessionManager>)))
         .manage(Arc::new(Mutex::new(None::<Arc<PermissionManager>>)))
-        .setup(|app| {
+        .setup(move |app| {
             app.manage(commands::peripheral::PeripheralHost::default());
             let data_dir = commands::app_data_dir().unwrap_or_else(|_| PathBuf::from("."));
             tracing::info!(module = "App", "Data dir: {:?}", data_dir);
@@ -467,8 +474,14 @@ fn main() {
             let bridge_ready = Arc::new(tokio::sync::Notify::new());
             let bridge_ready_for_bridge = bridge_ready.clone();
 
+            let bridge = BridgeServer::new(data_dir, db_manager_for_bridge)
+                .with_launch_permissions(launch_permissions);
+            // Native mode controls and Bridge execution must use the same authority.
+            tauri::async_runtime::block_on(async {
+                *app.state::<Arc<Mutex<Option<Arc<PermissionManager>>>>>().lock().await =
+                    Some(bridge.permission_manager());
+            });
             tauri::async_runtime::spawn(async move {
-                let bridge = BridgeServer::new(data_dir, db_manager_for_bridge);
                 let api_key = bridge.get_api_key().to_string();
                 if let Ok(mut store) = api_key_store.lock() {
                     *store = Some(api_key);
@@ -734,6 +747,7 @@ fn main() {
             commands::remove_always_allow_rule,
             commands::get_always_allow_rules,
             commands::set_permission_mode,
+            commands::get_permission_mode,
             commands::general_settings::read_general_settings,
             commands::general_settings::write_general_settings,
             commands::general_settings::open_general_settings,

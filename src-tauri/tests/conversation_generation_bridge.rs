@@ -150,7 +150,7 @@ async fn conversation_status_context_size_and_stop_generation_routes() {
     for id in [conversation.clone(), "unknown-conversation".to_string()] {
         assert_eq!(
             stop(id).await,
-            json!({"ok":true, "stopped":false, "settled":true})
+            json!({"ok":true, "stopped":false, "settled":true, "paused":true})
         );
     }
 
@@ -221,7 +221,7 @@ async fn conversation_status_context_size_and_stop_generation_routes() {
 
     assert_eq!(
         stop(conversation.clone()).await,
-        json!({"ok":true, "stopped":true, "settled":true})
+        json!({"ok":true, "stopped":true, "settled":true, "paused":true})
     );
     let after: Value = get(format!("{conversation}/generation-status"))
         .await

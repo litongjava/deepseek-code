@@ -74,7 +74,7 @@ impl ApprovalRequest {
                 ["keep", "clear"].into_iter().map(move |context| ApprovalOption {
                     mode: mode.into(), context: context.into(),
                     enabled: mode != "bypass" || bypass,
-                    disabled_reason: (mode == "bypass" && !bypass).then(|| "Bypass requires an authorized launch and bypass plan origin".into()),
+                    disabled_reason: (mode == "bypass" && !bypass).then(|| "Bypass is unavailable for this execution host".into()),
                 })
             }).collect(),
         }
@@ -99,7 +99,7 @@ struct ApprovalResponse {
 
 /// Validate against the server-owned pending request, never a client-supplied request.
 /// Legacy CLI answers retain their original accept-edits and bypass semantics.
-pub fn parse_response(answer: &str, request: &ApprovalRequest, bypass: bool) -> Result<Choice> {
+pub fn parse_response(answer: &str, request: &ApprovalRequest, bypass: bool, bypass_available: bool) -> Result<Choice> {
     let value = if answer.trim_start().starts_with('{') {
         Some(serde_json::from_str::<serde_json::Value>(answer)?)
     } else {
@@ -121,7 +121,7 @@ pub fn parse_response(answer: &str, request: &ApprovalRequest, bypass: bool) -> 
     let mode = response.mode.context("Approval mode is required")?;
     let context = response.context.context("Approval context policy is required")?;
     anyhow::ensure!(request.choices.iter().any(|choice| choice.enabled && choice.mode == mode && choice.context == context), "Plan approval choice is unavailable");
-    anyhow::ensure!(mode != "bypass" || bypass, "Bypass launch authority is unavailable");
+    anyhow::ensure!(mode != "bypass" || bypass_available, "Bypass launch authority is unavailable");
     Ok(match (mode.as_str(), context.as_str()) {
         ("ask", "keep") => Choice::Manual,
         ("ask", "clear") => Choice::ClearManual,

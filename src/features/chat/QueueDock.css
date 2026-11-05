@@ -6,6 +6,12 @@
 .queue-preview { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .queue-preview img { display: inline-block; width: 28px; height: 28px; object-fit: cover; margin-right: 4px; }
 .queue-attachment { display: inline-flex; align-items: center; gap: 4px; margin-right: 8px; vertical-align: middle; }
+.queue-content { display: flex; flex-direction: column; gap: 4px; }
+.queue-preview-text { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.queue-attachments { display: flex; flex-wrap: wrap; gap: 4px 8px; }
+.queue-attachments .queue-attachment { max-width: 100%; min-width: 0; margin-right: 0; }
+.queue-file-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.queue-attachment .queue-status { flex-shrink: 0; }
 .queue-status { opacity: .7; white-space: nowrap; }
 .queue-row button { flex-shrink: 0; padding: 4px; }
 .queue-dock button:disabled { opacity: .4; cursor: not-allowed; }

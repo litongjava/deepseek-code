@@ -53,6 +53,11 @@ pub fn release_handoff() {
 /// Lines a mouse wheel notch scrolls in the transcript pager (/scroll-speed).
 pub static SCROLL_SPEED: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(1);
 
+/// Keep one fifth of the viewport visible when paging through text.
+pub(super) fn page_step(viewport: usize) -> usize {
+    (viewport.saturating_mul(4) / 5).max(1)
+}
+
 /// When this process started, for the session's wall-clock time in /cost.
 pub static STARTED: std::sync::OnceLock<std::time::Instant> = std::sync::OnceLock::new();
 

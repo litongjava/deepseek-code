@@ -30,6 +30,7 @@ fn structured_choices_versions_ownership_feedback_and_legacy() {
             parse_response(
                 &response(&request, mode, context).to_string(),
                 &request,
+                true,
                 true
             )
             .unwrap(),
@@ -48,13 +49,14 @@ fn structured_choices_versions_ownership_feedback_and_legacy() {
         let mut answer = response(&request, "ask", "keep");
         answer[field] = invalid;
         assert!(
-            parse_response(&answer.to_string(), &request, true).is_err(),
+            parse_response(&answer.to_string(), &request, true, true).is_err(),
             "{field}"
         );
     }
     assert!(parse_response(
         &response(&request, "bypass", "keep").to_string(),
         &request,
+        true,
         false
     )
     .is_err());
@@ -70,17 +72,18 @@ fn structured_choices_versions_ownership_feedback_and_legacy() {
     assert!(parse_response(
         &response(&unavailable, "bypass", "clear").to_string(),
         &unavailable,
+        true,
         true
     )
     .is_err());
     let mut feedback = response(&request, "ask", "keep");
     feedback["action"] = json!("revise");
     feedback["feedback"] = json!("Add tests");
-    assert!(parse_response(&feedback.to_string(), &request, true).is_err());
+    assert!(parse_response(&feedback.to_string(), &request, true, true).is_err());
     feedback.as_object_mut().unwrap().remove("mode");
     feedback.as_object_mut().unwrap().remove("context");
     assert_eq!(
-        parse_response(&feedback.to_string(), &request, true).unwrap(),
+        parse_response(&feedback.to_string(), &request, true, true).unwrap(),
         Choice::Revise("Add tests".into())
     );
     for bypass in [false, true] {
@@ -97,7 +100,7 @@ fn structured_choices_versions_ownership_feedback_and_legacy() {
             "{\"Review\":\"3\"}",
         ] {
             assert_eq!(
-                parse_response(answer, &request, bypass).unwrap(),
+                parse_response(answer, &request, bypass, true).unwrap(),
                 crate::services::plan_approval::parse_for_mode(answer, bypass).unwrap()
             );
         }
@@ -114,13 +117,9 @@ async fn structured_approval_commits_six_modes_and_rejects_stale_reviews() {
                     super::approval_tests::fixture();
                 let session = executor.conv_id.clone().unwrap();
                 manager.set_plan_launch_permissions(true, false);
-                modes::set(
-                    &context.db,
-                    &session,
-                    &manager,
-                    PermissionMode::BypassPermissions,
-                )
-                .unwrap();
+                // Explicit structured approval can select authorized bypass even
+                // when planning began in ask mode. Legacy numeric answers still
+                // require bypass origin, as covered by approval_tests.
                 modes::set(&context.db, &session, &manager, PermissionMode::PlanMode).unwrap();
                 let waiters = executor.answer_waiters.clone();
                 let task = tokio::spawn(async move {

@@ -2577,9 +2577,9 @@ fn run(
                     {
                         state.details.scroll_by(
                             if key.code == KeyCode::PageUp {
-                                -(screen.panel_viewport as isize)
+                                -(super::page_step(screen.panel_viewport) as isize)
                             } else {
-                                screen.panel_viewport as isize
+                                super::page_step(screen.panel_viewport) as isize
                             },
                             screen.panel_viewport,
                         );
@@ -3053,10 +3053,15 @@ impl Drop for AlternateCleanup {
 
 fn inspection_scroll(scroll: usize, event: &Event) -> usize {
     match event {
-        Event::Key(key) if matches!(key.code, KeyCode::PageDown | KeyCode::Down) => {
+        Event::Key(key) if matches!(key.code, KeyCode::PageDown | KeyCode::PageUp) => {
+            let height = terminal::size().unwrap_or((80, 24)).1.saturating_sub(2);
+            let step = super::page_step(height as usize);
+            if key.code == KeyCode::PageUp { scroll.saturating_sub(step) } else { scroll.saturating_add(step) }
+        }
+        Event::Key(key) if key.code == KeyCode::Down => {
             scroll.saturating_add(1)
         }
-        Event::Key(key) if matches!(key.code, KeyCode::PageUp | KeyCode::Up) => {
+        Event::Key(key) if key.code == KeyCode::Up => {
             scroll.saturating_sub(1)
         }
         Event::Mouse(mouse) if mouse.kind == MouseEventKind::ScrollDown => scroll.saturating_add(3),

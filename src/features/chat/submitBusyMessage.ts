@@ -21,8 +21,15 @@ export async function submitBusyMessage(
       });
       blocks.push({ type: 'image_url', image_url: { url }, fileName: file.fileName, size: file.file.size });
     } else {
-      blocks.push({ type: 'attachment', fileId: file.fileId, fileName: file.fileName, fileType: file.fileType,
-        mimeType: file.mimeType, size: file.size, source: file.source, ghRepo: file.ghRepo, ghRef: file.ghRef });
+      if (file.source === 'github') throw new Error('Repository attachments cannot be queued. Send a text instruction referencing the repository.');
+      const data = await new Promise<string>((resolve, reject) => {
+        const reader = new FileReader();
+        reader.onload = () => resolve(String(reader.result).split(',')[1]);
+        reader.onerror = () => reject(new Error(`Cannot read attachment: ${file.fileName}`));
+        reader.readAsDataURL(file.file);
+      });
+      blocks.push({ type: 'attachment', fileName: file.fileName, size: file.file.size,
+        source: { type: 'base64', media_type: file.mimeType || 'application/octet-stream', data } });
     }
   }
   const content: UserContent = files.length ? blocks : text;

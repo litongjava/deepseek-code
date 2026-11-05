@@ -15,6 +15,21 @@ fn mixed_content() -> Value {
         {"type":"image_url","image_url":{"url":format!("data:image/png;base64,{PNG}")},"fileName":"截图.png","size":base64::engine::general_purpose::STANDARD.decode(PNG).unwrap().len()}])
 }
 
+#[test]
+fn saved_attachments_become_text_in_both_provider_protocols() {
+    let text = "中文 file contents 42";
+    let content = json!([{"type":"attachment","fileName":"notes.txt","size":text.len(),
+        "source":{"type":"base64","media_type":"text/plain","data":base64::engine::general_purpose::STANDARD.encode(text)}}]);
+    for converted in [
+        serde_json::to_value(multimodal::openai_content(&content).unwrap()).unwrap(),
+        serde_json::to_value(multimodal::anthropic_content(&content).unwrap()).unwrap(),
+    ] {
+        assert_eq!(converted[0]["type"], "text");
+        assert!(converted[0]["text"].as_str().unwrap().contains(text));
+        assert!(converted[0].get("source").is_none());
+    }
+}
+
 fn provider(base: &str, format: &str) -> ResolvedProvider {
     static INIT: std::sync::Once = std::sync::Once::new();
     INIT.call_once(|| crate::config::OrchestrationConfig::init_global().unwrap());

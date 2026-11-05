@@ -273,9 +273,10 @@ pub async fn native_engine_init(
             Some(state) => state.inner().clone(),
             None => return Err("DbManager not found".to_string()),
         };
-        let permission_manager = Arc::new(crate::permissions::PermissionManager::new(
-            Arc::new(crate::permissions::AuditLogger::new(1000)),
-        ));
+        let permission_manager = app_handle
+            .state::<Arc<Mutex<Option<Arc<crate::permissions::PermissionManager>>>>>()
+            .lock().await.clone()
+            .ok_or_else(|| "PermissionManager not initialized".to_string())?;
         let engine = crate::runtime::create_engine(
             &crate::runtime::RuntimePaths { data_dir },
             db_manager,
@@ -1325,6 +1326,14 @@ pub async fn get_always_allow_rules(
 }
 
 #[tauri::command]
+pub async fn get_permission_mode(app_handle: tauri::AppHandle) -> Result<String, String> {
+    let state = app_handle.state::<Arc<Mutex<Option<Arc<crate::permissions::PermissionManager>>>>>();
+    let guard = state.lock().await;
+    guard.as_ref().map(|manager| manager.get_mode().as_str().to_string())
+        .ok_or_else(|| "PermissionManager not initialized".to_string())
+}
+
+#[tauri::command]
 pub async fn set_permission_mode(
     app_handle: tauri::AppHandle,
     mode: String,
@@ -1333,6 +1342,9 @@ pub async fn set_permission_mode(
     let permission_guard = permission_state.lock().await;
     if let Some(perm_mgr) = permission_guard.as_ref() {
         let mode_enum = PermissionMode::parse(&mode).map_err(|error| error.to_string())?;
+        if mode_enum == PermissionMode::BypassPermissions && !perm_mgr.bypass_available() {
+            return Err("Bypass is unavailable for this execution host".into());
+        }
         if mode_enum == PermissionMode::Auto { return Err("Auto permissions are currently a CLI/SDK extension; Desktop requires session-specific authority before enabling this mode".into()); }
         perm_mgr.set_mode(mode_enum);
         Ok(())

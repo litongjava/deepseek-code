@@ -120,7 +120,8 @@ async fn durable_queue_roundtrip() {
     let png = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+aY9sAAAAASUVORK5CYII=";
     let content = json!([
         {"type":"text","text":"queued"},
-        {"type":"image_url","image_url":{"url":format!("data:image/png;base64,{png}")},"fileName":"queued.png","size":68}
+        {"type":"image_url","image_url":{"url":format!("data:image/png;base64,{png}")},"fileName":"queued.png","size":68},
+        {"type":"attachment","fileName":"notes.txt","size":3,"source":{"type":"base64","media_type":"text/plain","data":"YWJj"}}
     ]);
     let payload = json!({"requestId":"one","content":content,"mode":"next_turn"});
     let first: Value = client
@@ -226,6 +227,11 @@ async fn durable_queue_roundtrip() {
     assert!(second["messages"].to_string().contains("queued"));
     assert!(second["messages"].to_string().contains(png));
     assert!(!second["messages"].to_string().contains("fileName"));
+    assert!(second["messages"]
+        .to_string()
+        .contains("Attached file: notes.txt"));
+    assert!(second["messages"].to_string().contains("abc"));
+    assert!(!second["messages"].to_string().contains("YWJj"));
     tokio::time::timeout(Duration::from_secs(10), async {
         loop {
             let status: Value = client

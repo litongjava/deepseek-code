@@ -19,6 +19,7 @@ use tokio::sync::Mutex;
 
 #[path = "runtime_user_content.rs"]
 mod user_content;
+pub(crate) use user_content::attachment_text;
 pub use user_content::{image_block_from_file, image_media_type, normalize_user_content, MAX_IMAGE_BYTES};
 
 /// Default data directory under the user's home.

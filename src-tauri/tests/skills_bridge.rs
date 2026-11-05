@@ -10,7 +10,7 @@ use std::sync::{
 };
 
 #[tokio::test]
-async fn skills_bridge_streams_with_permissions_rejects_disabled_and_cancels_disconnect() {
+async fn skills_bridge_streams_with_permissions_rejects_disabled_and_supports_explicit_stop() {
     deepseek_desktop_tauri_lib::config::OrchestrationConfig::init_global().unwrap();
     let dir = tempfile::tempdir().unwrap();
     let count = Arc::new(AtomicUsize::new(0));
@@ -174,10 +174,17 @@ async fn skills_bridge_streams_with_permissions_rejects_disabled_and_cancels_dis
     .await
     .unwrap();
     drop(response);
+    // Skills share the durable chat collector. Closing an observer is not Stop.
+    let stopped: Value = client
+        .post(format!("{base}/api/conversations/{cancel_id}/stop-generation"))
+        .header("x-api-key", &key)
+        .send().await.unwrap().error_for_status().unwrap().json().await.unwrap();
+    assert_eq!(stopped["stopped"], true);
+    assert_eq!(stopped["settled"], true);
     tokio::time::sleep(std::time::Duration::from_millis(2500)).await;
     assert!(
         !dir.path().join("late.txt").exists(),
-        "SSE disconnect left the child process running"
+        "Explicit Stop left the child process running"
     );
     let rows = db
         .with_conn(|conn| {

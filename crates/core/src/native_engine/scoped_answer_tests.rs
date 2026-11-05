@@ -1,4 +1,19 @@
 use super::*;
+
+#[tokio::test]
+async fn legacy_warm_cannot_change_a_running_plan_in_another_conversation() {
+    let (_temp, engine) = fixture();
+    engine.set_permission_mode(PermissionMode::PlanMode).await;
+    let (event_tx, _rx) = tokio::sync::mpsc::channel(1);
+    engine.active_turns.lock().await.insert("reviewing-plan".into(), ActiveTurn {
+        event_tx, executor_handle: None, cancelled: false,
+    });
+    engine.warm_permission_mode(PermissionMode::BypassPermissions).await;
+    assert_eq!(engine.permission_manager.get_mode(), PermissionMode::PlanMode);
+    engine.active_turns.lock().await.clear();
+    engine.warm_permission_mode(PermissionMode::AskPermissions).await;
+    assert_eq!(engine.permission_manager.get_mode(), PermissionMode::AskPermissions);
+}
 use crate::permissions::PermissionMode;
 use crate::native_engine::permission_response as responses;
 

@@ -36,6 +36,10 @@ pub(super) fn normalize_messages(messages: &[Value]) -> Result<Vec<Value>> {
             let mut message = message.clone();
             if let Some(blocks) = message["content"].as_array_mut() {
                 for block in blocks {
+                    if block["type"] == "attachment" {
+                        *block =
+                            json!({"type":"text","text":crate::runtime::attachment_text(block)?});
+                    }
                     if matches!(block["type"].as_str(), Some("image" | "image_url")) {
                         let normalized = crate::runtime::normalize_user_content(&json!([block]))?;
                         *block = normalized[0].clone();

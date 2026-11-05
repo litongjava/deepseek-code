@@ -84,8 +84,8 @@ pub struct Cli {
     /// Bypass interactive permission prompts; explicit deny rules still apply.
     #[arg(long, global = true, conflicts_with = "permission_mode")]
     pub dangerously_skip_permissions: bool,
-    /// Offer bypass mode in the Shift+Tab cycle without starting in it.
-    #[arg(long, global = true)]
+    /// Compatibility flag: bypass switching is available by default.
+    #[arg(long, global = true, default_value_t = true)]
     pub allow_dangerously_skip_permissions: bool,
     /// Full Access: bypass mode that also ignores deny rules and runs commands
     /// outside the sandbox. Only for disposable machines.

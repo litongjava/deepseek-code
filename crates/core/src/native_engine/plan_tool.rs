@@ -364,7 +364,7 @@ impl ToolLoopExecutor {
         let options = crate::services::plan_approval::options(bypass);
         let request_id = uuid::Uuid::new_v4().to_string();
         let approval_request = crate::services::plan_approval::ApprovalRequest::new(
-            &session, &request_id, id, &plan, &path, bypass,
+            &session, &request_id, id, &plan, &path, manager.bypass_available(),
         );
         let (tx, rx) = oneshot::channel();
         self.answer_waiters
@@ -399,7 +399,7 @@ impl ToolLoopExecutor {
         self.answer_waiters.lock().await.remove(&request_id);
         let answer = answer.context("Plan approval cancelled; planning mode retained")??;
         use crate::services::plan_approval::{self, Choice};
-        let choice = plan_approval::parse_response(&answer, &approval_request, bypass)?;
+        let choice = plan_approval::parse_response(&answer, &approval_request, bypass, manager.bypass_available())?;
         anyhow::ensure!(
             plans::read(&root, &session)?.as_deref() == Some(plan.as_str()),
             "Plan changed during review; request approval again"
@@ -416,11 +416,7 @@ impl ToolLoopExecutor {
         let returning_bypass = matches!(choice, Choice::ClearBypass | Choice::KeepBypass);
         anyhow::ensure!(
             !returning_bypass
-                || crate::services::session_permission_mode::plan_returns_to_bypass(
-                    &context.db,
-                    &session,
-                    &manager
-                )?,
+                || manager.bypass_available(),
             "Bypass launch authority changed during review"
         );
         let mode = if returning_bypass {

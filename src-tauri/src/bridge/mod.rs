@@ -250,6 +250,7 @@ impl BridgeServer {
 
         let audit_logger = Arc::new(AuditLogger::new(1000));
         let permission_manager = Arc::new(PermissionManager::new(audit_logger));
+        crate::launch_permissions::LaunchPermissions::default().apply(&permission_manager);
 
         // 注册 always_allow 检查器，使 PermissionManager 能够通过数据库检查始终允许规则
         let db_for_checker = db_manager.clone();
@@ -339,6 +340,15 @@ impl BridgeServer {
 
     pub fn get_api_key(&self) -> &str {
         &self.api_key
+    }
+
+    pub fn with_launch_permissions(self, permissions: crate::launch_permissions::LaunchPermissions) -> Self {
+        permissions.apply(&self.permission_manager);
+        self
+    }
+
+    pub fn permission_manager(&self) -> Arc<PermissionManager> {
+        self.permission_manager.clone()
     }
 
     pub async fn start(&self, port: u16) -> Result<()> {

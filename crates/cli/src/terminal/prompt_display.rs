@@ -1,6 +1,6 @@
 //! Shared rendering for typed and positional prompts. Only this renderer emits
 //! terminal controls; prompt contents cannot inject escape sequences.
-use crossterm::style::{ResetColor, SetBackgroundColor, SetForegroundColor};
+use crossterm::style::{ResetColor, SetForegroundColor};
 use std::io::{self, Write};
 use unicode_width::UnicodeWidthChar;
 
@@ -77,16 +77,8 @@ pub fn write_submitted(
     write_rule(output)?;
     for line in wrapped_lines(prompt, text, width) {
         if color {
-            let cells: usize = line.chars().map(|ch| ch.width().unwrap_or(0)).sum();
-            write!(
-                output,
-                "{}{}{}{}{}",
-                SetBackgroundColor(super::style::input_background()),
-                SetForegroundColor(super::style::input_foreground()),
-                line,
-                " ".repeat(width.max(4).saturating_sub(cells)),
-                ResetColor
-            )?;
+            // Sent text follows the terminal's contrast settings, including e-ink themes.
+            write!(output, "\x1b[0;39;49m{line}\x1b[0m")?;
         } else {
             write!(output, "{line}")?;
         }
@@ -191,6 +183,15 @@ mod tests {
         assert!(!emitted.contains("LAST_LINE"));
         history.expand_prompt(text, 40);
         assert!(history.all().iter().any(|row| row.contains("LAST_LINE")));
+    }
+
+    #[test]
+    fn submitted_text_uses_terminal_defaults_without_dim_or_fixed_background() {
+        let mut output = Vec::new();
+        write_submitted(&mut output, "> ", "EINK_USER 中文 123", 40, true, true).unwrap();
+        let output = String::from_utf8(output).unwrap();
+        let row = output.lines().find(|row| row.contains("EINK_USER")).unwrap();
+        assert_eq!(row, "\x1b[0;39;49m> EINK_USER 中文 123\x1b[0m");
     }
 
     #[test]

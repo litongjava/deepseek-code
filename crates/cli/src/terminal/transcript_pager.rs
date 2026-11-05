@@ -248,16 +248,17 @@ impl HistoryView {
 
     fn move_page(&mut self, key: KeyCode, page: usize) {
         let page = self.content_page(page);
+        let step = super::page_step(page);
         let end = self.all.len().saturating_sub(page);
         match key {
             KeyCode::PageUp if !self.all.is_empty() => {
-                self.top = Some(self.top.unwrap_or(end).saturating_sub(page));
+                self.top = Some(self.top.unwrap_or(end).saturating_sub(step));
             }
             KeyCode::Home if !self.all.is_empty() => self.top = Some(0),
             KeyCode::PageDown => {
                 self.top = self
                     .top
-                    .and_then(|top| (top < end).then_some(top.saturating_add(page).min(end)));
+                    .and_then(|top| (top < end).then_some(top.saturating_add(step).min(end)));
             }
             KeyCode::End => self.top = None,
             _ => {}
@@ -488,8 +489,10 @@ fn pager(
             (KeyCode::Down | KeyCode::Char('j'), false) => top = top.saturating_add(1),
             (KeyCode::Char('u'), true) => top = top.saturating_sub(page / 2),
             (KeyCode::Char('d'), true) => top = top.saturating_add(page / 2),
-            (KeyCode::Char(' ') | KeyCode::PageDown, false) => top = top.saturating_add(page),
-            (KeyCode::Char('b') | KeyCode::PageUp, false) => top = top.saturating_sub(page),
+            (KeyCode::PageDown, false) => top = top.saturating_add(super::page_step(page)),
+            (KeyCode::PageUp, false) => top = top.saturating_sub(super::page_step(page)),
+            (KeyCode::Char(' '), false) => top = top.saturating_add(page),
+            (KeyCode::Char('b'), false) => top = top.saturating_sub(page),
             (KeyCode::Char('g'), false) | (KeyCode::Home, _) => top = 0,
             (KeyCode::Char('G'), false) | (KeyCode::End, _) => top = usize::MAX,
             (KeyCode::Char('{'), false) => {
@@ -677,10 +680,10 @@ mod tests {
         view.move_page(KeyCode::PageUp, 5);
         let top = view.top;
         let snapshot = view.screen_rows(6, &["prompt".into()]);
-        assert_eq!(snapshot[0], "row 20");
+        assert_eq!(snapshot[0], "row 21");
         assert_eq!(snapshot[5], "prompt");
         assert_eq!(view.top, top);
-        assert_eq!(view.row_index(2, 5), Some(22));
+        assert_eq!(view.row_index(2, 5), Some(23));
     }
 
     #[test]
@@ -712,11 +715,11 @@ mod tests {
         history.move_page(KeyCode::PageDown, 10);
         assert_eq!(history.top, None);
         history.move_page(KeyCode::PageUp, 10);
-        assert_eq!(history.top, Some(80));
+        assert_eq!(history.top, Some(82));
         history.move_page(KeyCode::PageUp, 10);
-        assert_eq!(history.top, Some(70));
+        assert_eq!(history.top, Some(74));
         history.move_page(KeyCode::PageDown, 10);
-        assert_eq!(history.top, Some(80));
+        assert_eq!(history.top, Some(82));
         history.move_page(KeyCode::PageDown, 10);
         assert_eq!(history.top, Some(90));
         history.move_page(KeyCode::PageDown, 10);
@@ -725,6 +728,23 @@ mod tests {
         assert_eq!(history.top, Some(0));
         history.move_page(KeyCode::End, 10);
         assert_eq!(history.top, None);
+    }
+
+    #[test]
+    fn history_paging_uses_content_height_and_clamps_at_top() {
+        let mut history = HistoryView::default();
+        history.refresh(&[], &(0..100).map(|n| format!("row {n}")).collect::<Vec<_>>(), 80);
+        history.set_pinned("prompt", 80);
+        history.move_page(KeyCode::PageUp, 11);
+        assert_eq!(history.top, Some(82));
+        history.move_page(KeyCode::PageUp, 6);
+        assert_eq!(history.top, Some(78));
+        history.top = Some(2);
+        history.move_page(KeyCode::PageUp, 6);
+        assert_eq!(history.top, Some(0));
+        history.move_page(KeyCode::PageDown, 1);
+        assert_eq!(history.top, Some(1));
+        history.top = None;
     }
 
     #[test]

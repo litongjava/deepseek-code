@@ -20,3 +20,13 @@ it('does not admit incomplete attachments', async () => {
   await expect(submitBusyMessage('a', 'draft', [{ status: 'uploading' } as PendingFile], 'queue')).rejects.toThrow('finish uploading');
   expect(enqueue).not.toHaveBeenCalled();
 });
+
+it('persists file bytes independently of upload IDs for reload and retry', async () => {
+  const enqueue = vi.spyOn(useBusySendStore.getState(), 'enqueue').mockResolvedValue();
+  const file = new File(['queue-file-content'], 'notes.txt', { type: 'text/plain' });
+  await submitBusyMessage('a', 'read', [{ file, fileId: 'temporary-upload', fileName: file.name, mimeType: file.type, status: 'done' } as PendingFile], 'queue');
+  expect(enqueue).toHaveBeenCalledWith('a', [{ type: 'text', text: 'read' }, {
+    type: 'attachment', fileName: 'notes.txt', size: 18,
+    source: { type: 'base64', media_type: 'text/plain', data: btoa('queue-file-content') },
+  }], 'next_turn');
+});

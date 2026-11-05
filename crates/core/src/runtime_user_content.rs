@@ -121,20 +121,187 @@ pub fn normalize_user_content(content: &Value) -> Result<Value> {
                 }
                 result.push(normalized);
             }
+            Some("attachment") => {
+                attachment_text(block)?;
+                result.push(block.clone());
+            }
             other => bail!("Unsupported user content block: {other:?}"),
         }
     }
     ensure!(
-        result.iter().any(|b| b["type"] == "image_url"
-            || b["text"].as_str().is_some_and(|t| !t.trim().is_empty())),
+        result.iter().any(
+            |b| matches!(b["type"].as_str(), Some("image_url" | "attachment"))
+                || b["text"].as_str().is_some_and(|t| !t.trim().is_empty())
+        ),
         "User message is empty"
     );
     Ok(Value::Array(result))
 }
 
+/// Validate self-contained attachments and derive provider text from their saved bytes.
+/// No path or upload reference supplied by a client is opened here.
+pub(crate) fn attachment_text(block: &Value) -> Result<String> {
+    ensure!(
+        block
+            .as_object()
+            .context("Attachment must be an object")?
+            .keys()
+            .all(|key| matches!(key.as_str(), "type" | "fileName" | "size" | "source")),
+        "Unsupported attachment metadata"
+    );
+    let name = block["fileName"]
+        .as_str()
+        .context("Attachment needs fileName")?;
+    ensure!(
+        !name.is_empty() && name.len() <= 1024 && !name.chars().any(char::is_control),
+        "Invalid attachment fileName"
+    );
+    let source = &block["source"];
+    ensure!(
+        source["type"] == "base64"
+            && source
+                .as_object()
+                .context("Attachment source must be an object")?
+                .keys()
+                .all(|key| matches!(key.as_str(), "type" | "media_type" | "data")),
+        "Only embedded base64 attachments are supported"
+    );
+    let mime = source["media_type"]
+        .as_str()
+        .context("Attachment needs media_type")?;
+    ensure!(
+        mime.len() <= 255 && !mime.chars().any(char::is_control),
+        "Invalid attachment media type"
+    );
+    let data = source["data"]
+        .as_str()
+        .context("Attachment needs base64 data")?;
+    ensure!(data.len() <= 7 * 1024 * 1024, "Attachment exceeds 5 MiB");
+    let bytes = base64::engine::general_purpose::STANDARD.decode(data)?;
+    ensure!(bytes.len() <= 5 * 1024 * 1024, "Attachment exceeds 5 MiB");
+    ensure!(
+        block["size"].as_u64() == Some(bytes.len() as u64),
+        "Attachment size does not match its bytes"
+    );
+    let ext = std::path::Path::new(name)
+        .extension()
+        .and_then(|s| s.to_str())
+        .unwrap_or("")
+        .to_ascii_lowercase();
+    let text = if mime == "application/pdf" || ext == "pdf" {
+        ensure!(bytes.starts_with(b"%PDF-"), "Attachment is not a valid PDF");
+        let text = pdf_extract::extract_text_from_mem(&bytes).context("Cannot extract PDF text")?;
+        ensure!(
+            !text.trim().is_empty(),
+            "PDF has no extractable text; attach page images instead"
+        );
+        text
+    } else {
+        ensure!(
+            mime.starts_with("text/")
+                || matches!(
+                    ext.as_str(),
+                    "txt"
+                        | "md"
+                        | "csv"
+                        | "json"
+                        | "xml"
+                        | "yaml"
+                        | "yml"
+                        | "js"
+                        | "jsx"
+                        | "ts"
+                        | "tsx"
+                        | "py"
+                        | "java"
+                        | "cpp"
+                        | "c"
+                        | "h"
+                        | "cs"
+                        | "go"
+                        | "rs"
+                        | "rb"
+                        | "php"
+                        | "swift"
+                        | "kt"
+                        | "scala"
+                        | "html"
+                        | "css"
+                        | "scss"
+                        | "less"
+                        | "sql"
+                        | "sh"
+                        | "bash"
+                        | "vue"
+                        | "svelte"
+                        | "lua"
+                        | "r"
+                        | "m"
+                        | "pl"
+                        | "ex"
+                        | "exs"
+                ),
+            "Queued files support UTF-8 text/code and text PDFs; this file format is not supported"
+        );
+        let text = String::from_utf8(bytes).context("Text attachment must use UTF-8")?;
+        ensure!(!text.contains('\0'), "Text attachment contains binary data");
+        text
+    };
+    ensure!(
+        text.len() <= 1024 * 1024,
+        "Extracted attachment text exceeds 1 MiB"
+    );
+    Ok(format!("Attached file: {name}\n\n{text}"))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn attachments_retain_bytes_and_reject_invalid_or_unsupported_content() {
+        let text = "中文 notes\ncode = 42;";
+        let block = json!({"type":"attachment","fileName":"notes.txt","size":text.len(),
+            "source":{"type":"base64","media_type":"text/plain","data":base64::engine::general_purpose::STANDARD.encode(text)}});
+        assert_eq!(
+            normalize_user_content(&json!([block])).unwrap(),
+            json!([block])
+        );
+        assert_eq!(
+            attachment_text(&block).unwrap(),
+            format!("Attached file: notes.txt\n\n{text}")
+        );
+        for (field, value) in [
+            ("size", json!(1)),
+            ("fileName", json!("bad\nname")),
+            ("path", json!("local.txt")),
+        ] {
+            let mut invalid = block.clone();
+            invalid[field] = value;
+            assert!(normalize_user_content(&json!([invalid])).is_err());
+        }
+        for (name, mime, bytes) in [
+            ("bad.txt", "text/plain", vec![0xff]),
+            ("binary.txt", "text/plain", vec![0]),
+            ("bad.pdf", "application/pdf", b"not a pdf".to_vec()),
+            (
+                "office.docx",
+                "application/octet-stream",
+                b"PK binary".to_vec(),
+            ),
+        ] {
+            let invalid = json!({"type":"attachment","fileName":name,"size":bytes.len(),
+                "source":{"type":"base64","media_type":mime,"data":base64::engine::general_purpose::STANDARD.encode(bytes)}});
+            assert!(normalize_user_content(&json!([invalid])).is_err());
+        }
+    }
+    #[test]
+    fn pdf_attachment_extracts_saved_document_text() {
+        let bytes = include_bytes!("../tests/fixtures/queue-text.pdf");
+        let block = json!({"type":"attachment","fileName":"queue-text.pdf","size":bytes.len(),
+            "source":{"type":"base64","media_type":"application/pdf","data":base64::engine::general_purpose::STANDARD.encode(bytes)}});
+        assert!(attachment_text(&block).unwrap().contains("PDF_QUEUE_CODE_7391"));
+        assert_eq!(normalize_user_content(&json!([block])).unwrap(), json!([block]));
+    }
     #[test]
     fn invalid_images_and_unhandled_content_are_rejected_without_dropping_fields() {
         for value in [

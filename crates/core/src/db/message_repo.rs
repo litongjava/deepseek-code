@@ -94,6 +94,8 @@ pub fn save_user_message(
             .map(|block| {
                 if block["type"] == "text" {
                     block["text"].as_str().unwrap_or("")
+                } else if block["type"] == "attachment" {
+                    block["fileName"].as_str().unwrap_or("[File]")
                 } else {
                     "[Image]"
                 }

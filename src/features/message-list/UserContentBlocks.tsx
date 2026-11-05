@@ -29,6 +29,13 @@ export default function UserContentBlocks({ content }: { content: unknown }) {
         return <EmbeddedImage key={index} block={block} label={label} />;
       }
       if (block?.type === 'text' && block.text?.trim()) return <div key={index} className="conversation-text bg-[var(--msg-user-bg)] px-4 py-[10px] text-[15px] whitespace-pre-wrap break-words" style={{ borderRadius: 'var(--msg-user-radius)' }}>{block.text}</div>;
+      if (block?.type === 'attachment' && block.source?.type === 'base64' && typeof block.source.data === 'string') return <a
+        key={index} download={block.fileName} href={`data:application/octet-stream;base64,${block.source.data}`}
+        className="inline-flex max-w-full items-center gap-2 rounded-lg border border-claude-border px-3 py-2 text-sm"
+        aria-label={`Download ${block.fileName}`}>
+        <span className="truncate">{block.fileName}</span>
+        <span className="shrink-0 text-claude-textSecondary">{block.size < 1024 ? `${block.size} B` : `${(block.size / 1024).toFixed(1)} KB`}</span>
+      </a>;
       return <div key={index} role="note" className="text-sm text-claude-textSecondary">Image unavailable: saved content is missing or corrupted.</div>;
     })}
     {labels.slice(imageIndex).map((label, index) => <div key={`missing-${index}`} role="note" className="text-sm text-claude-textSecondary">{label} — Image unavailable: this historical message contains only a placeholder.</div>)}

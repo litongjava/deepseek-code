@@ -1,4 +1,5 @@
 import { useLayoutEffect, useCallback, useRef, useState } from 'react';
+import { conversationPageTop } from './pageConversation';
 
 export function useScrollToBottom(messages: any[], loading: boolean, inputHeight: number, sessionKey?: string | null) {
   const scrollContainerRef = useRef<HTMLDivElement>(null);
@@ -74,6 +75,16 @@ export function useScrollToBottom(messages: any[], loading: boolean, inputHeight
     };
     const wheel = (event: WheelEvent) => { if (event.deltaY < 0) stopFollowing(); };
     const keydown = (event: KeyboardEvent) => {
+      const top = conversationPageTop(event, el);
+      if (top !== null) {
+        event.preventDefault();
+        if (event.key === 'PageUp') stopFollowing();
+        else cancelScroll();
+        el.scrollTo({ top, behavior: 'instant' });
+        handleScroll();
+        return;
+      }
+      if (event.defaultPrevented || ['PageUp', 'PageDown'].includes(event.key)) return;
       const target = event.target as HTMLElement;
       if (target.closest('input, textarea, select, [contenteditable="true"]')) return;
       if (['ArrowUp', 'PageUp', 'Home'].includes(event.key) || (event.key === ' ' && event.shiftKey)) stopFollowing();
