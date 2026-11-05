@@ -41,7 +41,7 @@ const TIPS: &[Tip] = &[
     Tip { id: "test", text: "/test sends a tiny request to check the current provider and model", cooldown: 15, relevant: always },
     Tip { id: "rename", text: "Use /rename to give this session a name you can find again", cooldown: 15, relevant: always },
     Tip { id: "ctrl-r", text: "Ctrl+R searches your earlier prompts", cooldown: 12, relevant: always },
-    Tip { id: "newline", text: "Alt+Enter adds a new line to your prompt", cooldown: 12, relevant: always },
+    Tip { id: "newline", text: "Ctrl+J adds a new line to your prompt", cooldown: 12, relevant: always },
     Tip { id: "background", text: "/background detaches this task so you can keep using the terminal", cooldown: 15, relevant: always },
     Tip { id: "max-tokens", text: "If long files get cut off, start dcl with a higher --max-tokens", cooldown: 20, relevant: always },
     Tip { id: "json-schema", text: "dcl -p --json-schema returns validated JSON, handy for scripts", cooldown: 20, relevant: always },

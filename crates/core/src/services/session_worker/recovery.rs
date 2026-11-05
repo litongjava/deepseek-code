@@ -215,6 +215,22 @@ pub(super) fn repair(root: &Path, session: &str) -> Result<bool> {
     Ok(true)
 }
 
+/// Positive evidence that a job's processes are gone. An unknown supervisor,
+/// or a process that cannot be inspected, counts as possibly alive.
+pub(super) fn job_abandoned(job: &Job) -> bool {
+    job.supervisor_pid.is_some_and(exited) && job.child_pid.is_none_or(exited)
+}
+
+/// Records the unknown outcome of a job whose processes exited; never replays it.
+pub(super) fn fail_abandoned_job(root: &Path, mut job: Job) -> Result<()> {
+    let path = jobs::directory(root, &job.id)?.join("state.json");
+    job.status = "failed".into();
+    job.error = Some("Worker exited unexpectedly; previous task outcome is unknown and was not replayed".into());
+    job.finished_ms = Some(jobs::now());
+    job.heartbeat_ms = jobs::now();
+    jobs::save(&path, &job)
+}
+
 /// A stale heartbeat alone is never proof that ownership can be taken over.
 pub(super) fn recover(worker: &Worker) -> Result<()> {
     ensure!(

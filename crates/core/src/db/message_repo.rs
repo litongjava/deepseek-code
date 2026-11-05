@@ -206,6 +206,9 @@ pub fn update_message_content(conn: &Connection, id: &str, content: &str) -> Res
     Ok(())
 }
 
+/// What the model reads for a call whose process ended before it reported.
+pub const UNFINISHED_TOOL_RESULT: &str = "The tool did not finish: the session ended before a result was recorded, so its outcome is unknown. Check the current state before repeating it.";
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ToolCallRow {
     pub id: String,

@@ -1991,6 +1991,8 @@ impl PromptEditor {
                         {
                             buffer.insert("\n")
                         }
+                        // Works where the terminal keeps Alt+Enter for itself.
+                        KeyCode::Char('j') if control => buffer.insert("\n"),
                         KeyCode::Tab | KeyCode::Enter
                             if !items.is_empty()
                                 && (key.code == KeyCode::Tab

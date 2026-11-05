@@ -592,6 +592,15 @@ mod tests {
             .starts_with("\u{25cf} Updated x (+2 -0)"));
     }
     #[test]
+    fn collapsed_change_says_a_click_expands_it() {
+        let lines = vec![success("Updated a.rs (+6 -0)"), muted("note")];
+        let collapsed = collapsed_change(&lines);
+        assert!(plain(&collapsed[..1]).ends_with("Updated a.rs (+6 -0) (click to expand)"));
+        // The full form keeps its plain heading.
+        assert!(plain(&lines[..1]).ends_with("Updated a.rs (+6 -0)"));
+    }
+
+    #[test]
     fn failed_output_has_no_success_diff() {
         assert!(change(r#"{"success":false}"#, false).is_none());
         assert!(change("{}", true).is_none());
@@ -601,6 +610,9 @@ mod tests {
 /// Keep the heading and four actual diff rows in the collapsed result.
 pub fn collapsed_change(lines: &[Line]) -> Vec<Line> {
     let mut preview: Vec<Line> = lines.first().cloned().into_iter().collect();
+    if let Some(heading) = preview.first_mut() {
+        heading.0.push(span(" (click to expand)", Style::Muted));
+    }
     preview.extend(lines.iter().skip(1).filter(|line| line.0.iter().any(|span| matches!(span.style, Style::AddedGutter | Style::RemovedGutter))).take(4).cloned());
     preview
 }

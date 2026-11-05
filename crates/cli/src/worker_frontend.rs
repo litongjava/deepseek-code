@@ -25,6 +25,38 @@ pub async fn turn(
     }
 }
 
+/// A frontend that was killed cannot release its lease, which then expires
+/// within seconds. Wait that out; a frontend still heartbeating keeps the lease.
+async fn acquire_proposal_frontend(session: &Session) -> Result<deepseek_code_core::services::goal_proposals::Frontend> {
+    use deepseek_code_core::services::goal_proposals::Frontend;
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(6);
+    loop {
+        match Frontend::acquire(session.store.db.clone(), &session.id) {
+            Err(_) if std::time::Instant::now() < deadline => tokio::time::sleep(std::time::Duration::from_millis(200)).await,
+            result => return result,
+        }
+    }
+}
+
+/// Clears abandoned worker state and returns the job still occupying the session.
+pub(crate) fn settle_session(session: &Session) -> Result<Option<jobs::Job>> {
+    let settled = deepseek_code_core::services::session_worker::settle_session(&session.paths.data_dir, &session.id)?;
+    if settled.recovered {
+        eprintln!("Recovered interrupted worker state; previous work was preserved and will not be replayed.");
+    }
+    Ok(settled.active)
+}
+
+/// How to get past an occupied session, naming the task so it can be acted on.
+pub(crate) fn active_worker_message(job: &jobs::Job) -> String {
+    let id = &job.id;
+    if job.status == "unresponsive" {
+        format!("Task {id} stopped responding, but its process is still alive. Use /tasks show {id} to inspect it, or /clear to work in a new session.")
+    } else {
+        format!("Task {id} is still running in this session. Use /continue to return to it, /tasks cancel {id} to stop it, or /clear to work in a new session.")
+    }
+}
+
 async fn single_turn(
     cli: &Cli,
     session: &Session,
@@ -32,11 +64,9 @@ async fn single_turn(
     input: &mut Option<TerminalInput>,
 ) -> Result<Option<String>> {
     let root = &session.paths.data_dir;
-    if deepseek_code_core::services::session_worker::recover_session(root, &session.id)? {
-        eprintln!("Recovered interrupted worker state; previous work was preserved and will not be replayed.");
+    if let Some(job) = settle_session(session)? {
+        anyhow::bail!("{} The current prompt was not submitted.", active_worker_message(&job));
     }
-    ensure!(!jobs::list(root, Some(&session.id))?.iter().any(|job| job.session_id == session.id && matches!(job.status.as_str(), "starting" | "running" | "unresponsive")),
-        "This session already has an active worker. Use /tasks attach ID, /tasks cancel ID, or /clear to work in a new session; the current prompt was not submitted.");
     let provider = session.selected_provider().await?;
     let executable = std::env::current_exe()?;
     let arguments = crate::background_commands::arguments(
@@ -74,7 +104,7 @@ async fn single_turn(
         display.set_todos(crate::background_commands::todo_items(&session.paths, &session.id));
     }
     let proposal_frontend = if display.live.is_some() {
-        Some(deepseek_code_core::services::goal_proposals::Frontend::acquire(session.store.db.clone(), &session.id)?)
+        Some(acquire_proposal_frontend(session).await?)
     } else { None };
     let job = if std::env::var("CLAUDE_RUST_SINGLE_TURN_WORKER").as_deref() == Ok("1") {
         jobs::spawn_foreground(
@@ -146,7 +176,7 @@ pub async fn attach(cli: &Cli, session: &Session, id: &str, input: &mut Option<T
     }
     let main_execution = is_main_execution(&session.paths.data_dir, &job, &session.id)?;
     let proposal_frontend = if display.live.is_some() && main_execution {
-        Some(deepseek_code_core::services::goal_proposals::Frontend::acquire(session.store.db.clone(), &session.id)?)
+        Some(acquire_proposal_frontend(session).await?)
     } else { None };
     present(session, &job, input, &mut display, false, proposal_frontend.as_ref()).await?;
     let kickoff = if main_execution && jobs::get(&session.paths.data_dir, &job.id)?.status == "completed" { activate_goal_proposal(session, &job.id)? } else { None };
@@ -599,10 +629,15 @@ async fn observe(
                         }
                     },
                     Some(Action::EditQueued) => {
-                        let taken = deepseek_code_core::services::input_queue::take(&session.store.db, &session.id)?;
+                        let taken = crate::session::recall_queued(session, input, &queued_inputs)?;
                         queued_inputs.clear();
                         display.queued(Vec::new());
                         if !taken.is_empty() { display.set_draft(&taken.join("\n")); }
+                    },
+                    Some(Action::Queue(prompt)) => {
+                        // Tracked with steered input so a later update keeps it on screen.
+                        queued_inputs.push(prompt.clone());
+                        restore(input, Action::Queue(prompt));
                     },
                     Some(action) => restore(input, action),
                 }

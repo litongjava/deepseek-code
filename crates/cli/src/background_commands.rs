@@ -24,9 +24,13 @@ pub async fn handle(
     match command {
         "/continue" => {
             ensure!(argument.trim().is_empty(), "Usage: /continue");
-            ensure!(!background_sessions::list(&paths.data_dir, None)?.iter().any(|job|
-                job.session_id == session.id && matches!(job.status.as_str(), "starting" | "running" | "unresponsive")),
-                "This session already has an active worker. Use /tasks attach ID or /tasks cancel ID before continuing.");
+            if let Some(job) = crate::worker_frontend::settle_session(session)? {
+                ensure!(job.status != "unresponsive", "{}", crate::worker_frontend::active_worker_message(&job));
+                // The work is already running: show it instead of starting it again.
+                session.allow_automatic_wake();
+                crate::worker_frontend::attach(cli, session, &job.id, input).await?;
+                return Ok(Outcome::Handled);
+            }
             session.allow_automatic_wake();
             if !wake_for_notifications(cli, session, input).await? {
                 session.turn(cli, "Continue the unfinished work in this conversation. Review the saved progress first and do not repeat completed operations.", input).await?;

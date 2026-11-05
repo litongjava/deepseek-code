@@ -306,6 +306,18 @@ impl TerminalInput {
     pub fn queue_prompt(&mut self, prompt: String) {
         self.queued.push_back(PromptEvent::Line(prompt));
     }
+    /// Takes back waiting prompts the user can see, leaving everything else queued.
+    pub fn take_prompts(&mut self, shown: &[String]) -> Vec<String> {
+        let mut taken = Vec::new();
+        self.queued.retain(|event| match event {
+            PromptEvent::Line(text) if shown.contains(text) => {
+                taken.push(text.clone());
+                false
+            }
+            _ => true,
+        });
+        taken
+    }
     pub fn restore_draft(&self, draft: String) {
         let _ = self.requests.send(Message::Draft(draft));
     }
@@ -427,6 +439,23 @@ impl TerminalInput {
                 "Terminal reader stopped",
             ))
         })
+    }
+}
+
+#[cfg(test)]
+mod recall_tests {
+    use super::*;
+
+    #[test]
+    fn taking_prompts_back_leaves_what_the_user_cannot_see() {
+        let mut input = TerminalInput::from(mpsc::unbounded_channel().1);
+        input.queue_prompt("/compact".into());
+        input.queue_prompt("waiting".into());
+        input.queue_permission_cycle();
+        assert_eq!(input.take_prompts(&["waiting".into()]), ["waiting"]);
+        assert!(input.take_prompts(&["waiting".into()]).is_empty());
+        assert_eq!(input.queued.len(), 2);
+        assert!(matches!(input.queued.front(), Some(PromptEvent::Line(text)) if text == "/compact"));
     }
 }
 

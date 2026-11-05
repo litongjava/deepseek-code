@@ -39,9 +39,18 @@ pub fn show_resumed(session: &Session, clear: bool) -> Result<()> {
     eprint!("{out}");
     recorded.save();
     if session.waiting_for_continue() {
-        command_eprintln!("Session restored; waiting for input. Use /continue or send a new task to start the model.");
+        let active = crate::worker_frontend::settle_session(session).ok().flatten();
+        command_eprintln!("{}", resumed_notice(active.as_ref()));
     }
     Ok(())
+}
+
+/// The notice after a resume must offer only what the session can do now.
+fn resumed_notice(active: Option<&deepseek_code_core::services::background_sessions::Job>) -> String {
+    match active {
+        None => "Session restored; waiting for input. Use /continue or send a new task to start the model.".into(),
+        Some(job) => format!("Session restored. {}", crate::worker_frontend::active_worker_message(job)),
+    }
 }
 
 /// Save presentation metadata against the final message, so rewind and session
@@ -142,11 +151,24 @@ fn conversation(session: &Session, id: &str, detailed: bool, mut recorded: Optio
                 .as_deref()
                 .and_then(|input| serde_json::from_str(input).ok())
                 .unwrap_or_default();
-            let output = tool.output.as_deref().unwrap_or("");
+            // Neutral on purpose: the call may have been cut off or may still be running.
+            let output = tool.output.as_deref().unwrap_or("No result recorded");
             if let Some(recorded) = recorded.as_deref_mut() {
-                let short = tool_view::finished(&tool.name, &input, output, tool.is_error, None, Some(&session.workspace));
-                let elapsed = deepseek_code_core::db::message_repo::tool_duration(conn, &tool.id)?.map(std::time::Duration::from_millis);
-                let full = tool_view::expanded_block(&tool.name, &input, output, tool.is_error, elapsed, Some(&session.workspace));
+                // A saved edit looks as it did live: summary and diff preview, click for the rest.
+                let change = matches!(tool.name.as_str(), "Write" | "Edit" | "MultiEdit")
+                    .then(|| change_view::change_in_workspace(output, tool.is_error, Some(&session.workspace)))
+                    .flatten()
+                    .filter(|lines| lines.len() > 1);
+                let (short, full) = if let Some(lines) = change {
+                    let short = change_view::collapsed_change(&lines);
+                    let mut full = lines;
+                    full.push(change_view::muted(tool_view::COLLAPSE_HINT));
+                    (short, full)
+                } else {
+                    let elapsed = deepseek_code_core::db::message_repo::tool_duration(conn, &tool.id)?.map(std::time::Duration::from_millis);
+                    (tool_view::finished(&tool.name, &input, output, tool.is_error, None, Some(&session.workspace)),
+                     tool_view::expanded_block(&tool.name, &input, output, tool.is_error, elapsed, Some(&session.workspace)))
+                };
                 if recorded.needs_separator() { recorded.push(String::new(), None); }
                 let (id, rows) = recorded.block(tool_view::numbered(short, number), tool_view::numbered(full, number));
                 recorded.bind_copy(id, tool_view::copy_command(&tool.name, &input), tool_view::result_text(output));
@@ -401,6 +423,21 @@ fn rename(store: &SessionStore, id: &str, title: &str) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn resumed_notice_offers_only_what_the_session_can_do() {
+        assert!(resumed_notice(None).contains("Use /continue or send a new task"));
+        let job = |status: &str| serde_json::from_value::<deepseek_code_core::services::background_sessions::Job>(serde_json::json!({
+            "id": "task-1", "parent_session_id": "s", "session_id": "s", "title": "t", "status": status,
+            "supervisor_pid": null, "child_pid": null, "started_ms": 0, "heartbeat_ms": 0,
+            "finished_ms": null, "exit_code": null, "error": null,
+        })).unwrap();
+        let running = resumed_notice(Some(&job("running")));
+        assert!(running.contains("Use /continue to return") && running.contains("/tasks cancel task-1"));
+        assert!(!running.contains("send a new task"));
+        let stuck = resumed_notice(Some(&job("unresponsive")));
+        assert!(stuck.contains("/tasks show task-1") && !stuck.contains("/continue"));
+    }
 
     #[test]
     fn completion_restores_exact_status_and_never_leaks_to_another_message() {

@@ -62,6 +62,17 @@ pub struct Session {
     remote_relay: std::sync::Mutex<Option<deepseek_code_core::services::remote_control::Relay>>,
 }
 
+/// Takes back what the model has not read, steered or Tab-queued, in the order
+/// it was sent. Background task notifications are not the user's to take back.
+pub(crate) fn recall_queued(session: &Session, input: &mut Option<TerminalInput>, shown: &[String]) -> Result<Vec<String>> {
+    let mut recalled = deepseek_code_core::services::input_queue::take_where(&session.store.db, &session.id, |text| !crate::background_commands::is_notification(text))?;
+    if let Some(input) = input.as_mut() {
+        recalled.extend(input.take_prompts(shown));
+    }
+    recalled.sort_by_key(|text| shown.iter().position(|sent| sent == text).unwrap_or(usize::MAX));
+    Ok(recalled)
+}
+
 impl Session {
     /// Remote Control channel for tool approvals and interrupts during turns.
     pub(crate) fn set_remote_relay(&self, relay: Option<deepseek_code_core::services::remote_control::Relay>) {
@@ -299,7 +310,9 @@ impl Session {
             PermissionModeArg::Auto => PermissionMode::Auto,
         };
         let explicit_mode = cli.permission_mode_explicit || cli.dangerously_skip_permissions || !matches!(cli.permission_mode, PermissionModeArg::Ask);
-        let active_job = if internal_worker { None } else { deepseek_code_core::services::background_sessions::list(&paths.data_dir, None)?.into_iter().find(|job|job.session_id == id && matches!(job.status.as_str(), "starting" | "running" | "unresponsive")) };
+        // Clear what exited processes left behind, so a crash cannot block this resume.
+        let settled = if internal_worker { None } else { deepseek_code_core::services::session_worker::settle_session(&paths.data_dir, &id).ok() };
+        let active_job = if internal_worker { None } else if let Some(settled) = settled { settled.active } else { deepseek_code_core::services::background_sessions::list(&paths.data_dir, None)?.into_iter().find(|job|job.session_id == id && matches!(job.status.as_str(), "starting" | "running" | "unresponsive")) };
         if let Some(job) = &active_job {
             anyhow::ensure!(cli.allowed_tools.is_empty() && cli.disallowed_tools.is_empty(), "This session has active background work; attach without launch tool rules, or stop the worker before changing them");
             anyhow::ensure!(!explicit_mode, "This session has active background work; resume without an explicit permission mode and use /tasks attach {} to change its mode", job.id);
@@ -1079,6 +1092,8 @@ impl Session {
                             crate::terminal::live::Action::GoalDecision { .. } => progress.notice("Goal proposals require the attached session frontend."),
                             crate::terminal::live::Action::Detach => progress.notice("This turn is not owned by a background worker."),
                             crate::terminal::live::Action::Queue(prompt) => {
+                                // Tracked with steered input so a later update keeps it on screen.
+                                pending_inputs.push(prompt.clone());
                                 if let Some(reader) = input.as_mut() { reader.queue_prompt(prompt); }
                             },
                             crate::terminal::live::Action::Submit(prompt) => {
@@ -1102,7 +1117,7 @@ impl Session {
                                 deepseek_code_core::tools::background_shell::request_background(&self.paths.data_dir, &self.id)?;
                             },
                             crate::terminal::live::Action::EditQueued => {
-                                let taken = deepseek_code_core::services::input_queue::take(&self.store.db, &self.id)?;
+                                let taken = recall_queued(self, input, &pending_inputs)?;
                                 pending_inputs.clear();
                                 progress.queued(Vec::new());
                                 if !taken.is_empty() { progress.set_draft(&taken.join("\n")); }

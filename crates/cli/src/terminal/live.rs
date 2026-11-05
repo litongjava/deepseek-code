@@ -1064,6 +1064,17 @@ fn terminal_text(text: &str) -> String {
         .replace('\t', "    ")
         .replace('\n', "\r\n")
 }
+/// One row per waiting message, so several of them and the running calls fit.
+fn queued_rows(queued: &[String], width: usize) -> Vec<String> {
+    let mut rows = vec![String::new()];
+    rows.extend(queued.iter().map(|text| clip(
+        &format!("{} {}", crate::terminal::prompt_glyph(), terminal_text(text).replace('\n', " ")),
+        width,
+    )));
+    rows.push("  ctrl+x ctrl+s to send now".into());
+    rows
+}
+
 fn content_budget(height: u16) -> usize {
     (height as usize).saturating_sub(10).clamp(2, 8)
 }
@@ -1748,19 +1759,7 @@ impl Frame {
             }
             if !state.queued.is_empty() {
                 // Messages waiting for the model, below all work in progress.
-                for text in &state.queued {
-                    content.extend([String::new(), String::new()]);
-                    content.push(clip(
-                        &format!(
-                            "{} {}",
-                            crate::terminal::prompt_glyph(),
-                            terminal_text(text).replace('\n', " ")
-                        ),
-                        width,
-                    ));
-                    content.extend([String::new(), String::new()]);
-                }
-                content.push("  ctrl+x ctrl+s to send now".into());
+                content.extend(queued_rows(&state.queued, width));
             }
             content
         };
@@ -2621,6 +2620,17 @@ fn run(
                                     || key.modifiers.contains(KeyModifiers::ALT) =>
                             {
                                 state.draft.insert("\n")
+                            }
+                            KeyCode::Char('j') if control => state.draft.insert("\n"),
+                            // A trailing backslash continues on a new line, as at the idle prompt.
+                            KeyCode::Enter
+                                if state.answer.is_none()
+                                    && state.draft.cursor == state.draft.characters.len()
+                                    && state.draft.characters.last() == Some(&'\\') =>
+                            {
+                                state.draft.characters.pop();
+                                state.draft.cursor = state.draft.characters.len();
+                                state.draft.insert("\n");
                             }
                             KeyCode::Tab if state.answer.is_none() => {
                                 state.queue_message(&actions);
@@ -3504,6 +3514,15 @@ mod tests {
     }
 
     #[test]
+    fn several_queued_messages_stay_visible_with_a_running_call() {
+        let rows = queued_rows(&["first\nline".into(), "second".into(), "third".into()], 40);
+        let plain = rows.join("\n");
+        assert!(plain.contains("first line") && plain.contains("second") && plain.contains("third"));
+        // Three rows of a running shell call plus the queue fit a 32-row terminal.
+        assert!(3 + rows.len() <= content_budget(32));
+    }
+
+    #[test]
     fn tab_queue_and_enter_steer_use_distinct_actions() {
         let mut state = State::new("mode".into());
         let (send, mut receive) = async_mpsc::unbounded_channel();
@@ -4268,7 +4287,10 @@ impl TurnDisplay {
                 // Summary plus four diff rows; a click, where the terminal reports one,
                 // shows the diff. Ctrl+O has the full text regardless.
                 if display_lines.len() > 1 {
-                    live.finished(id, change_view::collapsed_change(&display_lines), Some(display_lines));
+                    let short = change_view::collapsed_change(&display_lines);
+                    let mut full = display_lines;
+                    full.push(change_view::muted(super::tool_view::COLLAPSE_HINT));
+                    live.finished(id, short, Some(full));
                 } else {
                     live.finished(id, display_lines, None);
                 }

@@ -123,6 +123,37 @@ pub fn recover_session(root: &Path, session: &str) -> Result<bool> {
     drop(lock);
     result
 }
+/// What a frontend finds after clearing abandoned ownership of a session.
+#[derive(Debug)]
+pub struct SettledSession {
+    /// Abandoned worker state was repaired; its old prompt is not replayed.
+    pub recovered: bool,
+    /// The newest job that still occupies the session.
+    pub active: Option<Job>,
+}
+
+/// Clears ownership left by exited processes, then reports the job still
+/// occupying the session. Jobs whose processes may be alive are never touched.
+pub fn settle_session(root: &Path, session: &str) -> Result<SettledSession> {
+    let recovered = recover_session(root, session)?;
+    let mut active = None;
+    for job in jobs::list(root, None)? {
+        if job.session_id != session {
+            continue;
+        }
+        if !matches!(job.status.as_str(), "starting" | "running" | "unresponsive") {
+            continue;
+        }
+        if recovery::job_abandoned(&job) {
+            recovery::fail_abandoned_job(root, job)?;
+        } else {
+            // `list` sorts by start time, so the newest active job wins.
+            active = Some(job);
+        }
+    }
+    Ok(SettledSession { recovered, active })
+}
+
 pub fn current(root: &Path, session: &str) -> Result<Option<Worker>> {
     let base = worker_path(root, session)?;
     let pointer = match fs::read(base.join("current.json")) {
@@ -882,6 +913,66 @@ mod tests {
             CloseHandle(token).unwrap();
             let _ = LocalFree(HLOCAL(descriptor.0));
         }
+    }
+}
+
+#[cfg(test)]
+mod settle_tests {
+    use super::*;
+
+    fn exited_pid() -> u32 {
+        let mut child = std::process::Command::new(std::env::current_exe().unwrap())
+            .arg("--list")
+            .stdout(std::process::Stdio::null())
+            .spawn()
+            .unwrap();
+        let pid = child.id();
+        child.wait().unwrap();
+        pid
+    }
+
+    fn job(root: &Path, session: &str, pid: u32, status: &str, heartbeat_ms: u64) -> Job {
+        let id = uuid::Uuid::new_v4().to_string();
+        let dir = jobs::directory(root, &id).unwrap();
+        fs::create_dir_all(&dir).unwrap();
+        let job = Job {
+            id, foreground: false, parent_session_id: session.into(), session_id: session.into(),
+            title: "fixture".into(), status: status.into(), supervisor_pid: Some(pid), child_pid: Some(pid),
+            started_ms: jobs::now(), heartbeat_ms, finished_ms: None, exit_code: None, error: None,
+        };
+        jobs::save(&dir.join("state.json"), &job).unwrap();
+        job
+    }
+
+    #[test]
+    fn exited_processes_release_the_session_but_live_ones_keep_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let session = uuid::Uuid::new_v4().to_string();
+
+        let dead = job(dir.path(), &session, exited_pid(), "running", 0);
+        let settled = settle_session(dir.path(), &session).unwrap();
+        assert!(settled.active.is_none());
+        let failed = jobs::get(dir.path(), &dead.id).unwrap();
+        assert_eq!(failed.status, "failed");
+        assert!(failed.finished_ms.is_some());
+
+        let alive = job(dir.path(), &session, std::process::id(), "running", 0);
+        let settled = settle_session(dir.path(), &session).unwrap();
+        let active = settled.active.unwrap();
+        assert_eq!((active.id.as_str(), active.status.as_str()), (alive.id.as_str(), "unresponsive"));
+        assert!(jobs::get(dir.path(), &alive.id).unwrap().finished_ms.is_none());
+
+        // Exited processes need no wait for the heartbeat to expire.
+        let crashed = job(dir.path(), &session, exited_pid(), "running", jobs::now());
+        settle_session(dir.path(), &session).unwrap();
+        assert_eq!(jobs::get(dir.path(), &crashed.id).unwrap().status, "failed");
+
+        let running = job(dir.path(), &session, std::process::id(), "running", jobs::now());
+        let active = settle_session(dir.path(), &session).unwrap().active.unwrap();
+        assert_eq!((active.id.as_str(), active.status.as_str()), (running.id.as_str(), "running"));
+
+        let other = uuid::Uuid::new_v4().to_string();
+        assert!(settle_session(dir.path(), &other).unwrap().active.is_none());
     }
 }
 

@@ -511,6 +511,9 @@ pub fn expanded(
     lines
 }
 
+/// The footer of a block that a click expanded.
+pub const COLLAPSE_HINT: &str = "     (click to collapse)";
+
 /// Expanded inline block, with timing and a clickable collapse footer.
 pub fn expanded_block(
     name: &str, input: &Value, output: &str, failed: bool,
@@ -520,7 +523,7 @@ pub fn expanded_block(
     if let Some(elapsed) = elapsed {
         lines.push(change_view::muted(&format!("  • {:.2}s", elapsed.as_secs_f64())));
     }
-    lines.push(change_view::muted("     − Collapse"));
+    lines.push(change_view::muted(COLLAPSE_HINT));
     lines
 }
 
@@ -872,7 +875,7 @@ mod tests {
         assert_eq!(lines.len(), 6);
         assert_eq!(lines[5], "     +1 lines (click to expand)");
         let full = text(&expanded_block("Bash", &json!({"command":"ls"}), &bash, false, Some(Duration::from_millis(2050)), None));
-        assert_eq!(&full[full.len()-2..], &["  • 2.05s", "     − Collapse"]);
+        assert_eq!(&full[full.len()-2..], &["  • 2.05s", COLLAPSE_HINT]);
 
         let read = json!({"content":"1\tx","lines":2,"truncated":false}).to_string();
         let lines = text(&finished("Read", &json!({"file_path":"README.md"}), &read, false, None, None));
