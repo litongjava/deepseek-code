@@ -16,15 +16,26 @@ export default function SidebarNavigation({ collapsed, onNewChat, onSearch, onPa
   const [position, setPosition] = useState({ left: 48, top: 96 });
   const menuRef = useRef<HTMLDivElement>(null);
   const triggerRef = useRef<HTMLButtonElement | null>(null);
+  const [toolbar, setToolbar] = useState<HTMLElement | null>(null);
+  useEffect(() => { setToolbar(document.getElementById('desktop-tool-menus')); }, []);
   useEffect(() => {
     if (!expanded) return;
     const outside = (event: MouseEvent) => {
       if (!menuRef.current?.contains(event.target as Node) && !triggerRef.current?.contains(event.target as Node)) setExpanded(null);
     };
-    const key = (event: KeyboardEvent) => { if (event.key === 'Escape') setExpanded(null); };
+    const focusOutside = (event: FocusEvent) => {
+      if (!menuRef.current?.contains(event.target as Node) && !triggerRef.current?.contains(event.target as Node)) setExpanded(null);
+    };
+    menuRef.current?.querySelector<HTMLButtonElement>('button')?.focus();
+    const key = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') { setExpanded(null); triggerRef.current?.focus(); }
+    };
+    const resize = () => setExpanded(null);
     document.addEventListener('mousedown', outside);
+    document.addEventListener('focusin', focusOutside);
     window.addEventListener('keydown', key);
-    return () => { document.removeEventListener('mousedown', outside); window.removeEventListener('keydown', key); };
+    window.addEventListener('resize', resize);
+    return () => { document.removeEventListener('mousedown', outside); document.removeEventListener('focusin', focusOutside); window.removeEventListener('keydown', key); window.removeEventListener('resize', resize); };
   }, [expanded]);
   const tools = [
     { label: t('sidebar.terminal'), icon: Terminal, action: () => onPanel('terminal') },
@@ -47,15 +58,25 @@ export default function SidebarNavigation({ collapsed, onNewChat, onSearch, onPa
     { label: 'GitHub', icon: Github, action: () => onPanel('github') },
   ];
   const itemClass = 'flex w-full items-center gap-2.5 rounded-lg px-2 py-2 text-left text-[13px] text-claude-text hover:bg-claude-hover';
+  const groups = <div className="flex items-center gap-1" aria-label="Tools and extensions">
+    {[{ id: 'tools', label: t('sidebar.tools'), icon: Wrench, items: tools }, { id: 'extensions', label: t('sidebar.extensions'), icon: Puzzle, items: extensions }].map(group => <div key={group.id}>
+      <button type="button" aria-label={group.label} aria-haspopup="menu" aria-expanded={expanded === group.id} onClick={event => { triggerRef.current = event.currentTarget; const rect = event.currentTarget.getBoundingClientRect(); setPosition({ left: Math.max(8, Math.min(rect.left, window.innerWidth - 232)), top: rect.bottom + 5 }); setExpanded(expanded === group.id ? null : group.id); }} className="flex h-8 items-center gap-1.5 rounded-md px-2 text-[13px] text-claude-text hover:bg-claude-hover"><group.icon size={15} className="shrink-0" /><span>{group.label}</span><ChevronDown size={12} /></button>
+      {expanded === group.id && createPortal(<div ref={menuRef} role="menu" aria-label={group.label} style={position} onKeyDown={event => {
+        if (!['ArrowDown', 'ArrowUp', 'Home', 'End'].includes(event.key)) return;
+        event.preventDefault();
+        const buttons = Array.from(event.currentTarget.querySelectorAll<HTMLButtonElement>('button'));
+        const current = buttons.indexOf(document.activeElement as HTMLButtonElement);
+        const index = event.key === 'Home' ? 0 : event.key === 'End' ? buttons.length - 1 : (current + (event.key === 'ArrowDown' ? 1 : buttons.length - 1)) % buttons.length;
+        buttons[index]?.focus();
+      }} className="fixed z-[10010] max-h-[min(440px,80vh)] w-56 overflow-y-auto rounded-lg border border-claude-border bg-claude-sidebar p-1 shadow-md">
+        {group.items.map(item => <button type="button" role="menuitem" key={item.label} onClick={() => { item.action(); setExpanded(null); }} className={itemClass}><item.icon size={15} className="shrink-0" />{item.label}</button>)}
+      </div>, document.body)}
+    </div>)}
+  </div>;
   return <nav aria-label={t('sidebar.mainNavigation')} className="space-y-1 mb-4">
     <button type="button" aria-label={t('sidebar.newChat')} title={collapsed ? t('sidebar.newChat') : undefined} onClick={onNewChat} className={itemClass}><MessageSquare size={17} className="shrink-0" />{!collapsed && t('sidebar.newChat')}</button>
     <button type="button" aria-label={t('sidebar.search')} title={collapsed ? t('sidebar.search') : undefined} onClick={onSearch} className={itemClass}><Search size={17} className="shrink-0" />{!collapsed && t('sidebar.search')}</button>
-    {[{ id: 'tools', label: t('sidebar.tools'), icon: Wrench, items: tools }, { id: 'extensions', label: t('sidebar.extensions'), icon: Puzzle, items: extensions }].map(group => <div key={group.id}>
-      <button type="button" aria-label={group.label} aria-expanded={expanded === group.id} title={collapsed ? group.label : undefined} onClick={event => { triggerRef.current = event.currentTarget; const rect = event.currentTarget.getBoundingClientRect(); setPosition({ left: rect.right + 4, top: Math.max(8, Math.min(rect.top, window.innerHeight - 340)) }); setExpanded(expanded === group.id ? null : group.id); }} className={itemClass}><group.icon size={17} className="shrink-0" />{!collapsed && <><span className="flex-1">{group.label}</span><ChevronDown size={13} className={expanded === group.id ? '' : '-rotate-90'} /></>}</button>
-      {expanded === group.id && createPortal(<div ref={menuRef} style={position} className="fixed z-[60] max-h-[min(320px,80vh)] w-56 overflow-y-auto rounded-xl border border-claude-border bg-claude-sidebar p-2 shadow-xl">
-        {group.items.map(item => <button type="button" key={item.label} onClick={() => { item.action(); setExpanded(null); }} className={itemClass}><item.icon size={15} className="shrink-0" />{item.label}</button>)}
-      </div>, document.body)}
-    </div>)}
+    {toolbar && createPortal(groups, toolbar)}
     {collapsed && <button type="button" aria-label={t('sidebar.projects')} title={t('sidebar.projects')} onClick={() => navigate('/projects')} className={itemClass}><Folder size={17} /></button>}
   </nav>;
 }

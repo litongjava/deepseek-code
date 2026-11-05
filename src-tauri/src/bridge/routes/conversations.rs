@@ -70,7 +70,7 @@ async fn conversations_create(State(state): State<AppState>, Json(body): Json<Cr
     })))
 }
 
-fn enriched_messages(
+pub(super) fn enriched_messages(
     conn: &rusqlite::Connection,
     id: &str,
 ) -> anyhow::Result<Vec<serde_json::Value>> {
@@ -97,15 +97,19 @@ fn enriched_messages(
                             .as_ref()
                             .and_then(|s| serde_json::from_str::<serde_json::Value>(s).ok())
                             .unwrap_or(serde_json::json!({}));
-                        serde_json::json!({
+                        let mcp_result = crate::services::subagents::typed_mcp_result(
+                            conn, id, &tc.id, tc.output.as_deref(), tc.is_error,
+                        )?;
+                        Ok::<_, anyhow::Error>(serde_json::json!({
                             "id": tc.id.strip_prefix(&format!("{}:", msg.id)).unwrap_or(&tc.id),
                             "name": tc.name,
                             "input": input,
                             "result": tc.output,
-                            "status": if tc.is_error { "error" } else { "done" },
-                        })
+                            "mcp_result": mcp_result,
+                            "status": if tc.is_error { "error" } else if tc.output.is_none() { "running" } else { "done" },
+                        }))
                     })
-                    .collect::<Vec<_>>());
+                    .collect::<anyhow::Result<Vec<_>>>()?);
             }
             Ok(value)
         })
@@ -368,6 +372,16 @@ async fn conversation_answer_handler(
     let engine_pool = state.engine_pool.clone();
     let mut pool: tokio::sync::MutexGuard<'_, EnginePool> = engine_pool.lock().await;
 
+    if let Some(engine) = state.native_engine.lock().await.as_ref() {
+        drop(pool);
+        let tool = req.tool_use_id.as_deref().ok_or(StatusCode::BAD_REQUEST)?;
+        let answer = req.answers.as_ref().ok_or(StatusCode::BAD_REQUEST)?.to_string();
+        return engine.resume_scoped_answer(&id, &req.request_id, tool, answer, false).await
+            .map(Json).map_err(|error| {
+                tracing::warn!("Question response rejected: {error:#}");
+                StatusCode::CONFLICT
+            });
+    }
     let original_input = pool.get_ask_user_pending(&id).unwrap_or(serde_json::json!({}));
 
     let answers = req.answers.unwrap_or(serde_json::json!({}));
@@ -389,7 +403,7 @@ async fn conversation_answer_handler(
             let engine_guard: tokio::sync::MutexGuard<'_, Option<NativeEngine>> = native_engine.lock().await;
             if let Some(engine) = engine_guard.as_ref() {
                 let answer_str = serde_json::to_string(&answers).unwrap_or_default();
-                match engine.resume_with_answer(&req.request_id, answer_str).await {
+                match engine.resume_scoped_answer(&id, &req.request_id, &tool_use_id, answer_str, false).await.map(|_| ()) {
                     Ok(()) => Ok(Json(serde_json::json!({ "ok": true }))),
                     Err(e) => {
                         tracing::error!(module = "AskUser", "Native engine answer failed: {}", e);
@@ -407,6 +421,14 @@ async fn conversation_answer_handler(
 #[derive(Deserialize)]
 struct WarmRequest {
     permission_mode: Option<String>,
+}
+
+async fn conversation_pending_questions(Path(id): Path<String>, State(state): State<AppState>) -> Json<serde_json::Value> {
+    let pending = match state.native_engine.lock().await.as_ref() {
+        Some(engine) => engine.pending_questions(&id).await,
+        None => Vec::new(),
+    };
+    Json(serde_json::json!({"requests":pending}))
 }
 
 async fn conversation_warm_handler(
@@ -442,6 +464,14 @@ async fn conversation_permission_handler(
     let engine_pool = state.engine_pool.clone();
     let mut pool: tokio::sync::MutexGuard<'_, EnginePool> = engine_pool.lock().await;
 
+    if let Some(engine) = state.native_engine.lock().await.as_ref() {
+        drop(pool);
+        let tool = req.tool_use_id.as_deref().ok_or(StatusCode::BAD_REQUEST)?;
+        let behavior = req.behavior.as_deref().ok_or(StatusCode::BAD_REQUEST)?;
+        if !matches!(behavior, "allow" | "deny") { return Err(StatusCode::BAD_REQUEST); }
+        return engine.resume_scoped_answer(&id, &req.request_id, tool, behavior.into(), true).await
+            .map(Json).map_err(|_| StatusCode::CONFLICT);
+    }
     let pending = pool.get_tool_permission_pending(&id);
     let tool_use_id = req.tool_use_id
         .or_else(|| pending.as_ref().and_then(|p| p.get("tool_use_id").and_then(|t| t.as_str()).map(String::from)))
@@ -464,7 +494,7 @@ async fn conversation_permission_handler(
     let engine_guard: tokio::sync::MutexGuard<'_, Option<NativeEngine>> = native_engine.lock().await;
     if let Some(engine) = engine_guard.as_ref() {
         let answer = if behavior == "allow" { "allow".to_string() } else { "deny".to_string() };
-        match engine.resume_with_answer(&req.request_id, answer).await {
+        match engine.resume_scoped_answer(&id, &req.request_id, &tool_use_id, answer, true).await.map(|_| ()) {
             Ok(()) => Ok(Json(serde_json::json!({ "ok": true }))),
             Err(e) => {
                 tracing::error!(module = "Permission", "Native engine answer failed: {}", e);
@@ -518,14 +548,9 @@ async fn conversation_stream_status(Path(id): Path<String>, State(state): State<
     Json(state.generation_runs.stream_status(&id))
 }
 
-/// Cancels the running turn like a transport disconnect; a no-op when idle.
-async fn conversation_stop_generation(Path(id): Path<String>, State(state): State<AppState>) -> Json<serde_json::Value> {
-    let outcome = state.generation_runs.stop(&id, std::time::Duration::from_secs(5)).await;
-    Json(serde_json::json!({
-        "ok": true,
-        "stopped": outcome.requested > 0,
-        "settled": outcome.settled,
-    }))
+/// Stop preserves pending input and pauses backend dispatch until explicit resume.
+async fn conversation_stop_generation(Path(id): Path<String>, State(state): State<AppState>) -> axum::response::Response {
+    super::input_queue::stop(state, id).await
 }
 
 pub fn routes() -> Router<AppState> {
@@ -540,6 +565,7 @@ pub fn routes() -> Router<AppState> {
         .route("/api/conversations/{id}/messages-tail/{count}", delete(conversation_messages_tail_delete))
         .route("/api/conversations/{id}/branch", post(conversation_branch_handler))
         .route("/api/conversations/{id}/answer", post(conversation_answer_handler))
+        .route("/api/conversations/{id}/pending-questions", get(conversation_pending_questions))
         .route("/api/conversations/{id}/permission", post(conversation_permission_handler))
         .route("/api/conversations/{id}/warm", post(conversation_warm_handler))
         .route("/api/conversations/{id}/context-size", get(conversation_context_size))

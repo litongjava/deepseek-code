@@ -65,6 +65,15 @@ it('restores conversations by model name across provider prefixes without select
   expect(result.current.resolveConversationModel('unknown')).toBeUndefined();
 });
 
+it('resolves a qualified conversation model with the latest catalog from a retained polling callback', async () => {
+  const { result } = renderHook(() => useModelCatalog({ current: 'queued-conversation' }));
+  const resolveFromPolling = result.current.resolveConversationModel;
+  await waitFor(() => expect(result.current.selectorModels).toHaveLength(4));
+  expect(resolveFromPolling('b::same')).toBe('b::same');
+  act(() => useChatStore.getState().setModelCatalog({ all: [], common: [], fallback_model: null }));
+  expect(resolveFromPolling('b::same')).toBeUndefined();
+});
+
 it('uses the shared CLI selection when Desktop has no explicit selection', async () => {
   useGeneralSettingsStore.setState(normalizeGeneralSettings({}));
   vi.mocked(getProviders).mockResolvedValue([providers[0], { ...providers[1], defaultModel: 'other' }]);

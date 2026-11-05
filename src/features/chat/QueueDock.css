@@ -1,0 +1,16 @@
+.queue-dock { width: 100%; min-width: 0; color: var(--text-claude-main); font-family: var(--assistant-default-family); font-size: 12px; background: var(--chat-raised); border: 1px solid var(--border-claude); border-radius: 12px 12px 0 0; padding: 4px 8px; }
+.queue-header { width: 100%; text-align: left; min-height: 28px; }
+.queue-rows { max-height: 180px; overflow-y: auto; }
+.queue-row { display: flex; align-items: center; gap: 8px; min-height: 36px; min-width: 0; }
+.queue-icon { flex-shrink: 0; color: var(--text-claude-secondary); }
+.queue-preview { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.queue-preview img { display: inline-block; width: 28px; height: 28px; object-fit: cover; margin-right: 4px; }
+.queue-attachment { display: inline-flex; align-items: center; gap: 4px; margin-right: 8px; vertical-align: middle; }
+.queue-status { opacity: .7; white-space: nowrap; }
+.queue-row button { flex-shrink: 0; padding: 4px; }
+.queue-dock button:disabled { opacity: .4; cursor: not-allowed; }
+.queue-dock button:focus-visible, .queue-editor textarea:focus-visible { outline: 2px solid currentColor; outline-offset: 1px; }
+.queue-editor { flex: 1; min-width: 0; }
+.queue-editor textarea { width: 100%; min-height: 36px; max-height: 110px; background: transparent; color: inherit; resize: vertical; }
+.queue-dock [role=alert] { overflow-wrap: anywhere; }
+.queue-row > [role=alert] { max-width: 35%; max-height: 60px; overflow: auto; }

@@ -269,7 +269,7 @@ async fn run(cli: &Cli) -> Result<()> {
             let listening = remote_host::Listening::bind(&remote_host::Options { host: *host, port: *port }).await?;
             let args = remote_host::launch_args(&std::env::args().skip(1).collect::<Vec<_>>());
             let workspace = cli.path.clone().unwrap_or(std::env::current_dir()?);
-            let code = remote_host::run(listening, args, &workspace).await?;
+            let code = remote_host::run(listening, args, &workspace, &paths.data_dir).await?;
             std::process::exit(code);
         },
         Some(Commands::Remote { request, yes }) => return tokio::select! { result=migration::remote(request,*yes)=>result, _=tokio::signal::ctrl_c()=>anyhow::bail!("Remote operation cancelled") },
@@ -1005,7 +1005,7 @@ async fn run(cli: &Cli) -> Result<()> {
                     // The old OS input reader must be gone before the host owns stdin.
                     drop(input.take());
                     let args = remote_host::child_args(&std::env::args().skip(1).collect::<Vec<_>>(), cli.prompt.as_deref(), &session.id, &session.workspace);
-                    let code = remote_host::run(listening, args, &session.workspace).await?;
+                    let code = remote_host::run(listening, args, &session.workspace, &paths.data_dir).await?;
                     std::process::exit(code);
                 }
                 continue;

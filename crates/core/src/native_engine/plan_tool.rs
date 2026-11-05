@@ -4,6 +4,9 @@ use anyhow::Context;
 #[cfg(test)]
 #[path = "plan_approval_tests.rs"]
 mod approval_tests;
+#[cfg(test)]
+#[path = "structured_plan_approval_tests.rs"]
+mod structured_approval_tests;
 
 /// Semantic Bash intents are recorded for review; they never become blanket rules.
 fn plan_allowed_prompts(input: &Value) -> Result<Vec<Value>> {
@@ -360,6 +363,9 @@ impl ToolLoopExecutor {
         )?;
         let options = crate::services::plan_approval::options(bypass);
         let request_id = uuid::Uuid::new_v4().to_string();
+        let approval_request = crate::services::plan_approval::ApprovalRequest::new(
+            &session, &request_id, id, &plan, &path, bypass,
+        );
         let (tx, rx) = oneshot::channel();
         self.answer_waiters
             .lock()
@@ -369,13 +375,17 @@ impl ToolLoopExecutor {
             waiters: self.answer_waiters.clone(),
             request_id: request_id.clone(),
         };
+        crate::native_engine::permission_response::register_owner(
+            &request_id, &session, id, "plan", serde_json::to_value(&approval_request)?,
+            Some(approval_request.clone()), Some(manager.clone()), Some(root.clone()),
+        );
         let question = format!("Review plan\n{}\n\n{plan}\n\nChoose 1–4, or feedback: <changes>. Clear context preserves this session and its archived transcript.", path.display());
         let sent = self
             .event_tx
             .send(EngineEvent::AskUser {
                 request_id: request_id.clone(),
                 tool_use_id: id.into(),
-                tool_input: json!({"plan":plan,"planFilePath":path,"planApproval":true,"returnToBypass":bypass,"question":question,"options":options.iter().map(|label| json!({"label":label})).collect::<Vec<_>>(),"multiSelect":false}),
+                tool_input: json!({"plan":plan,"planFilePath":path,"planApproval":true,"planApprovalRequest":approval_request,"returnToBypass":bypass,"question":question,"options":options.iter().map(|label| json!({"label":label})).collect::<Vec<_>>(),"multiSelect":false}),
                 question,
                 options: options.iter().map(|s|s.to_string()).collect(),
             })
@@ -384,11 +394,12 @@ impl ToolLoopExecutor {
             self.answer_waiters.lock().await.remove(&request_id);
             anyhow::bail!("Approval host disconnected; planning mode retained");
         }
+        let result = async {
         let answer = self.wait_for_user_answer(rx).await;
         self.answer_waiters.lock().await.remove(&request_id);
         let answer = answer.context("Plan approval cancelled; planning mode retained")??;
         use crate::services::plan_approval::{self, Choice};
-        let choice = plan_approval::parse_for_mode(&answer, bypass)?;
+        let choice = plan_approval::parse_response(&answer, &approval_request, bypass)?;
         anyhow::ensure!(
             plans::read(&root, &session)?.as_deref() == Some(plan.as_str()),
             "Plan changed during review; request approval again"
@@ -414,12 +425,14 @@ impl ToolLoopExecutor {
         );
         let mode = if returning_bypass {
             PermissionMode::BypassPermissions
-        } else if choice == Choice::Manual {
+        } else if matches!(choice, Choice::Manual | Choice::ClearManual) {
             PermissionMode::AskPermissions
+        } else if matches!(choice, Choice::KeepAuto | Choice::ClearAuto) {
+            PermissionMode::Auto
         } else {
             PermissionMode::AcceptEdits
         };
-        let clear = matches!(choice, Choice::ClearEdits | Choice::ClearBypass);
+        let clear = matches!(choice, Choice::ClearEdits | Choice::ClearBypass | Choice::ClearManual | Choice::ClearAuto);
         let context = crate::services::session_messages::context(&root)?;
         if clear {
             let message = format!("Implement the following approved plan:\n\n{plan}\n\nPrior conversation context has been cleared. Its transcript remains archived locally in session {session}. Execute under the approved {mode_name} permission mode.", mode_name = crate::services::session_permission_mode::name(mode));
@@ -460,9 +473,14 @@ impl ToolLoopExecutor {
             None
         };
         Ok(
-            json!({"approved":true,"mode":if returning_bypass {"bypass"} else if mode == PermissionMode::AskPermissions {"ask"} else {"accept_edits"},"clearContext":clear,"planFilePath":path,"plan":plan,"allowedPrompts":allowed_prompts,
+            json!({"approved":true,"mode":if returning_bypass {"bypass"} else if mode == PermissionMode::AskPermissions {"ask"} else if mode == PermissionMode::Auto {"auto"} else {"accept_edits"},"clearContext":clear,"planFilePath":path,"plan":plan,"allowedPrompts":allowed_prompts,
             "warning":legacy_warning,"message":if returning_bypass {"Plan approved. bypass mode restored."} else {"Plan approved under the selected permission mode. Existing deny and confirmation rules remain in force."}}),
         )
+        }.await;
+        crate::native_engine::permission_response::finish_answer(
+            &request_id, result.as_ref().cloned().map_err(|error: &anyhow::Error| format!("{error:#}")),
+        );
+        result
     }
 }
 

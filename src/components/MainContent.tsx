@@ -1,5 +1,6 @@
 import { contentBlocks, hasUnavailableImages, replaceUserText, type UserContent } from '../utils/userContent';
 import { useComposerDrop } from '../features/chat/useComposerDrop';
+import PlanApprovalController from '../features/chat/PlanApprovalController';
 import { useCommittedCallback } from '../features/chat/useCommittedCallback';
 import React, { useState, useEffect, useRef, useMemo, useCallback } from 'react';
 import { planModeFromTool, approvedPermissionModeFromTool } from '../features/streaming/planMode';
@@ -12,6 +13,7 @@ import PermissionDialog, { ApprovalInfo } from './PermissionDialog';
 import { permissionApprovalAPI } from '../utils/tauriAPI';
 import { useGeneralSettingsStore } from '../stores/useGeneralSettingsStore';
 import { useWorkspaceModeStore, conversationWorkspaceMode } from '../stores/useWorkspaceModeStore';
+import QueueDock from '../features/chat/QueueDock';
 import { useBusySendStore } from '../stores/useBusySendStore';
 import { useChatStore } from '../stores/useChatStore';
 import { useStreamingStore } from '../stores/useStreamingStore';
@@ -81,6 +83,7 @@ import { useTabStore } from '../stores/useTabStore';
 import { formatChatError } from '../utils/chatErrors';
 import SkillTag from '../features/chat/SkillTag';
 import { useScrollToBottom } from '../features/chat/useScrollToBottom';
+import TurnNavigator from '../features/message-list/TurnNavigator';
 import { useDraftPersistence } from '../features/chat/useDraftPersistence';
 import { submitBusyMessage } from '../features/chat/submitBusyMessage';
 
@@ -113,11 +116,9 @@ const MainContent = ({ onNewChat, resetKey, tunerConfig, onOpenDocument, onArtif
   const setConversationView = useConversationViewStore(s => s.setView);
   const [inspectId, setInspectId] = useState<string | null>(null);
   const busySendBehavior = useGeneralSettingsStore(state => state.busySendBehavior);
-  const queues = useBusySendStore(state => state.queues);
-  const queueProcessing = useRef(false);
-  const [queueVersion, setQueueVersion] = useState(0);
+
   const [readyConversationId, setReadyConversationId] = useState<string | null>(null);
-  const steering = useRef(false);
+  const queueSubmitting = useRef(false);
   const { id } = useParams(); // Get conversation ID from URL
   const location = useLocation();
   const [localId, setLocalId] = useState<string | null>(null);
@@ -190,6 +191,7 @@ const MainContent = ({ onNewChat, resetKey, tunerConfig, onOpenDocument, onArtif
   const conversationGit = useConversationGit(activeId, isCodeMode ? currentProjectId : null, loading);
   useEffect(() => { setShowGitChanges(false); }, [activeId, currentProjectId, isCodeMode]);
   const gitSetupPending = !activeId && isCodeMode && !!pendingProjectId && (sessionGit?.projectId !== pendingProjectId || !sessionGit.ready);
+  const codeProjectRequired = isCodeMode && !(activeId ? currentProjectId : pendingProjectId);
 
   useEffect(() => {
     if (!pendingProjectId) setSessionGit(null);
@@ -320,7 +322,6 @@ const MainContent = ({ onNewChat, resetKey, tunerConfig, onOpenDocument, onArtif
   }, [resetKey, user?.nickname]);
 
   // 输入栏参数
-  const inputBarWidth = 768;
   const inputBarMinHeight = 32;
   const inputBarRadius = 22;
   const inputBarBaseHeight = inputBarMinHeight + 16; // border-box: content + padding (pt-4=16px + pb-0=0px)
@@ -388,6 +389,7 @@ const MainContent = ({ onNewChat, resetKey, tunerConfig, onOpenDocument, onArtif
 
   const {
     scrollContainerRef,
+    scrollbarWidth,
     isAtBottomRef,
     scrollToBottom,
     scheduleScrollToBottomAfterRender,
@@ -939,10 +941,17 @@ const MainContent = ({ onNewChat, resetKey, tunerConfig, onOpenDocument, onArtif
           isAtBottomRef.current = true;
 
           // 启动轮询
+          let polledAssistantId = genStatus.assistant_id;
           pollingRef.current = setInterval(async () => {
             try {
               const s = await getGenerationStatus(conversationId);
               if (viewingIdRef.current !== conversationId) return;
+              if (s.active && s.assistant_id && s.assistant_id !== polledAssistantId) {
+                polledAssistantId = s.assistant_id;
+                stopPolling();
+                await loadConversation(conversationId);
+                return;
+              }
               if (!s.active || s.status !== 'generating') {
                 // 生成结束，停止轮询，重新加载最终数据
                 stopPolling();
@@ -1025,6 +1034,31 @@ const MainContent = ({ onNewChat, resetKey, tunerConfig, onOpenDocument, onArtif
     }
   };
 
+  const queueHandoffs = useBusySendStore(state => activeId
+    ? state.queues[activeId]?.items.filter(item => item.state === 'handoff').map(item => `${item.id}:${item.revision}`).join(',') || ''
+    : '');
+  const seenQueueHandoffs = useRef<Record<string, string>>({});
+  useEffect(() => {
+    if (!activeId || loading || readyConversationId !== activeId || !queueHandoffs) return;
+    let disposed = false;
+    let timer: ReturnType<typeof setTimeout>;
+    const observe = async () => {
+      try {
+        const status = await getGenerationStatus(activeId);
+        if (disposed || viewingIdRef.current !== activeId) return;
+        if (status.active || seenQueueHandoffs.current[activeId] !== queueHandoffs) {
+          seenQueueHandoffs.current[activeId] = queueHandoffs;
+          // Observe backend-owned turns; never dispatch from the browser.
+          stopPolling();
+          await loadConversation(activeId);
+        }
+      } catch { /* The next observation retries a disconnected backend. */ }
+      if (!disposed) timer = setTimeout(observe, 1500);
+    };
+    void observe();
+    return () => { disposed = true; clearTimeout(timer); };
+  }, [activeId, loading, readyConversationId, queueHandoffs]);
+
   const handleHomeModeChange = async (mode: HomeMode) => {
     if (modeChanging || loading || workspaceMode === mode || (activeId && readyConversationId !== activeId)) return;
     const conversationId = activeId;
@@ -1073,10 +1107,19 @@ const MainContent = ({ onNewChat, resetKey, tunerConfig, onOpenDocument, onArtif
     }
   };
 
-  const handleSend = async (overrideText?: string, queuedFiles?: PendingFile[], queuedMessageId?: string) => {
+  const requestCodeProject = () => {
+    if (!codeProjectRequired) return false;
+    const projectButton = document.querySelector<HTMLButtonElement>('[data-project-workspace] button[aria-label="Select project"]');
+    projectButton?.focus();
+    if (projectButton?.getAttribute('aria-expanded') !== 'true') projectButton?.click();
+    return true;
+  };
+
+  const handleSend = async (overrideText?: string) => {
+    if (requestCodeProject()) return;
     if (modeChanging || (!activeId && isCreatingRef.current) || gitSetupPending) return;
     try {
-    const files = queuedFiles ?? pendingFiles;
+    const files = pendingFiles;
     const effectiveText = (typeof overrideText === 'string') ? overrideText : inputText;
     const selectedProjectId = activeId ? currentProjectId : pendingProjectId;
     if (selectedProjectId) {
@@ -1107,20 +1150,15 @@ const MainContent = ({ onNewChat, resetKey, tunerConfig, onOpenDocument, onArtif
     }
 
     if (loading && activeId) {
-      if (steering.current) return;
-      steering.current = busySendBehavior === 'steer';
+      if (queueSubmitting.current) return;
+      queueSubmitting.current = true;
       try {
-        await submitBusyMessage(activeId, effectiveText, files, busySendBehavior, async () => {
-          await stopGeneration(activeId);
-          abortStreamSession(activeId);
-          stopPolling();
-          removeStreaming(activeId);
-          setLoading(false);
-        });
+        await submitBusyMessage(activeId, effectiveText, files, busySendBehavior);
       } catch (error) {
         alert(formatChatError(error instanceof Error ? error.message : String(error)));
         return;
-      } finally { steering.current = false; }
+      } finally { queueSubmitting.current = false; }
+      if (viewingIdRef.current !== activeId || inputRef.current?.value !== effectiveText) return;
       setInputText('');
       setPendingFiles([]);
       draftsStore.delete(activeId);
@@ -1135,7 +1173,7 @@ const MainContent = ({ onNewChat, resetKey, tunerConfig, onOpenDocument, onArtif
     const userMode = localStorage.getItem('user_mode');
     const hasGatewayKey = localStorage.getItem('ANTHROPIC_API_KEY') && localStorage.getItem('gateway_user');
     if (isTauriApp && userMode !== 'selfhosted' && !hasGatewayKey) {
-      pendingLoginSendRef.current = () => handleSend(effectiveText, queuedFiles, queuedMessageId);
+      pendingLoginSendRef.current = () => handleSend(effectiveText);
       setShowLoginRequired(true);
       return;
     }
@@ -1145,13 +1183,12 @@ const MainContent = ({ onNewChat, resetKey, tunerConfig, onOpenDocument, onArtif
     // show the modal. The modal's callbacks will re-invoke handleSend after
     // the user picks "keep cross-mode" or "switch model".
     if (crossModeWarning && crossModeWarning.convId === activeId) {
-      pendingCrossModeSendRef.current = () => handleSend(effectiveText, queuedFiles, queuedMessageId);
+      pendingCrossModeSendRef.current = () => handleSend(effectiveText);
       return;
     }
 
     const userMessageText = effectiveText;
-    if (queuedMessageId && activeId) useBusySendStore.getState().take(activeId);
-    if (!queuedFiles) setInputText(""); // Preserve a draft when draining the queue
+    setInputText("");
 
     // 收集已上传的附件
     const uploadedFiles = files.filter(f => f.status === 'done' && f.fileId);
@@ -1195,10 +1232,8 @@ const MainContent = ({ onNewChat, resetKey, tunerConfig, onOpenDocument, onArtif
 
     // 清空 pendingFiles 并释放预览 URL
     files.forEach(f => { if (f.previewUrl) URL.revokeObjectURL(f.previewUrl); });
-    if (!queuedFiles) {
-      setPendingFiles([]);
-      draftsStore.delete(activeId || '__new__');
-    }
+    setPendingFiles([]);
+    draftsStore.delete(activeId || '__new__');
 
     // 重置 textarea 高度
     textareaHeightVal.current = inputBarBaseHeight;
@@ -1384,19 +1419,6 @@ const MainContent = ({ onNewChat, resetKey, tunerConfig, onOpenDocument, onArtif
     }
   };
 
-  // Keep queued messages bound to their conversation, including across tab switches.
-  useEffect(() => {
-    if (!activeId || readyConversationId !== activeId || loading || queueProcessing.current || steering.current || activeRequestCountRef.current >= 2) return;
-    if (!queues[activeId]?.length) return;
-    queueProcessing.current = true;
-    const message = queues[activeId][0];
-    if (message) void handleSend(message.text, message.files, message.id).finally(() => {
-      queueProcessing.current = false;
-      // Retry only after a send was committed; authorization gates retain the message.
-      if (useBusySendStore.getState().queues[activeId]?.[0]?.id !== message.id) setQueueVersion(version => version + 1);
-    });
-    else queueProcessing.current = false;
-  }, [activeId, readyConversationId, loading, queues, queueVersion]);
 
   useEffect(() => {
     if (!activeId && !loading) setPermissionMode(useGeneralSettingsStore.getState().defaultPermissionMode);
@@ -1470,6 +1492,7 @@ const MainContent = ({ onNewChat, resetKey, tunerConfig, onOpenDocument, onArtif
   };
   // 重新发送消息
   const handleResendMessage = async (content: UserContent, idx: number) => {
+    if (requestCodeProject()) return;
     if (hasUnavailableImages(content)) { alert('Image unavailable. Attach the original image before resending.'); return; }
     content = contentBlocks(content) || content;
     if (loading) return;
@@ -1588,6 +1611,7 @@ const MainContent = ({ onNewChat, resetKey, tunerConfig, onOpenDocument, onArtif
 
   // 保存编辑 — 删除当前及后续消息，用新内容重新发送
   const handleEditSave = async () => {
+    if (requestCodeProject()) return;
     if (editingMessageIdx === null || !editingContent.trim() || loading) return;
     if (activeRequestCountRef.current >= 2) {
       alert('最多同时进行 2 个对话，请等待其他对话完成');
@@ -1832,13 +1856,12 @@ const MainContent = ({ onNewChat, resetKey, tunerConfig, onOpenDocument, onArtif
   // MODE 1: Landing Page (No ID)
   if (!activeId && messages.length === 0) {
     return (
-      <div ref={slashCommandBoundaryRef} className={`flex-1 min-h-0 min-w-0 bg-claude-bg h-full flex flex-col relative overflow-hidden text-claude-text chat-font-scope chat-surface ${showEntranceAnimation ? 'animate-slide-in' : ''}`}>
+      <div ref={slashCommandBoundaryRef} className={`desktop-chat-layout flex-1 min-h-0 min-w-0 bg-claude-bg h-full flex flex-col relative overflow-hidden text-claude-text chat-font-scope chat-surface ${showEntranceAnimation ? 'animate-slide-in' : ''}`} style={{ '--chat-custom-width': tunerConfig?.mainContentWidth ? `${tunerConfig.mainContentWidth}px` : undefined } as React.CSSProperties}>
 
         {/* Centered Content */}
         <div
-          className="flex flex-col items-center min-w-0 w-full mx-auto px-4 py-6 flex-1 min-h-0 overflow-y-auto"
+          className="chat-landing-column flex flex-col items-center min-w-0 w-full mx-auto px-4 py-6 flex-1 min-h-0 overflow-y-auto"
           style={{
-            maxWidth: `${tunerConfig?.mainContentWidth || 768}px`,
             paddingTop: '24px',
           }}
         >
@@ -1991,7 +2014,7 @@ const MainContent = ({ onNewChat, resetKey, tunerConfig, onOpenDocument, onArtif
                   <button
                     onMouseDown={(e) => e.preventDefault()}
                     onClick={() => handleSend()}
-                    disabled={gitSetupPending || modeChanging || (!inputText.trim() && !pendingFiles.some(f => f.status === 'done')) || pendingFiles.some(f => f.status === 'uploading')}
+                    disabled={codeProjectRequired || gitSetupPending || modeChanging || (!inputText.trim() && !pendingFiles.some(f => f.status === 'done')) || pendingFiles.some(f => f.status === 'uploading')}
                     title={t('chat.send')}
                     className="p-2 bg-[#C6613F] text-white rounded-lg hover:bg-[#D97757] transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
                   >
@@ -2037,19 +2060,19 @@ const MainContent = ({ onNewChat, resetKey, tunerConfig, onOpenDocument, onArtif
   // MODE 2: Chat Interface (Has ID or Messages)
   return (
     <div className="relative flex h-full min-h-0 min-w-0 flex-1 overflow-hidden">
-    <div className="flex-1 min-h-0 min-w-0 bg-claude-bg h-full flex flex-col overflow-clip text-claude-text chat-root chat-font-scope chat-surface">
+    <div className="desktop-chat-layout flex-1 min-h-0 min-w-0 bg-claude-bg h-full flex flex-col overflow-clip text-claude-text chat-root chat-font-scope chat-surface" style={{ '--chat-custom-width': tunerConfig?.mainContentWidth ? `${tunerConfig.mainContentWidth}px` : undefined } as React.CSSProperties}>
       {showCodingView && conversationView === 'trajectory' && <div className="min-h-0 flex-1"><TrajectoryView messages={messages} loading={loading} focusId={inspectId} /></div>}
 
       {/* Content area - positioning container for scroll + bottom bars */}
       <div className={`flex-1 min-h-0 relative ${showCodingView && conversationView === 'trajectory' ? 'hidden' : 'flex flex-col'}`}>
+        <div className="relative flex flex-1 min-h-0">
         <div
           className="flex-1 min-h-0 overflow-y-auto chat-scroll"
           ref={scrollContainerRef}
           onScroll={handleScroll}
         >
           <div
-            className="w-full mx-auto px-4 py-8 pb-2"
-            style={{ maxWidth: `${tunerConfig?.mainContentWidth || 768}px` }}
+            className="chat-transcript mx-auto px-4 py-8 pb-2"
           >
             <MessageList
               conversationId={activeId}
@@ -2076,12 +2099,13 @@ const MainContent = ({ onNewChat, resetKey, tunerConfig, onOpenDocument, onArtif
             <div ref={messagesEndRef} />
           </div>
         </div>
+        <TurnNavigator key={activeId || 'new'} messages={messages} scrollRef={scrollContainerRef} onNavigate={() => { isAtBottomRef.current = false; }} />
+        </div>
 
         {/* Keep the complete opaque composer below the message scroller. */}
-        <div className="relative shrink-0 z-20 bg-claude-bg pt-2 px-4">
+        <div className="relative shrink-0 z-20 bg-claude-bg pt-2 px-4" style={{ paddingRight: 16 + scrollbarWidth }}>
           <div
-            className="mx-auto pointer-events-auto"
-            style={{ maxWidth: `${inputBarWidth}px` }}
+            className="chat-composer-column mx-auto pointer-events-auto"
           >
             <div className="w-full relative group" ref={inputWrapperRef}>
               {activeId && isCodeMode && currentProjectId ? <ConversationWorkspaceBar key={`workspace:${activeId}`} id={activeId} projectId={currentProjectId} data={conversationGit.data} error={conversationGit.error} disabled={loading || modeChanging} onSelect={handleAttachToProject} onViewChanges={() => { setShowGitChanges(true); conversationGit.refresh(); }} onRefresh={conversationGit.refresh} /> :
@@ -2099,6 +2123,7 @@ const MainContent = ({ onNewChat, resetKey, tunerConfig, onOpenDocument, onArtif
                   e.target.value = '';
                 }}
               />
+              {activeId && <QueueDock key={activeId} session={activeId} executing={loading} />}
               <div
                 className="chat-composer border flex flex-col font-sans"
                 style={{ borderRadius: `${inputBarRadius}px` }}
@@ -2179,13 +2204,7 @@ const MainContent = ({ onNewChat, resetKey, tunerConfig, onOpenDocument, onArtif
                     {researchMode && <ResearchBadge onToggle={toggleResearchMode} />}
                   </div>
                   <div className="flex flex-wrap justify-end items-center gap-3 ml-auto">
-                    {activeId && queues[activeId]?.length > 0 && <div className="max-w-[200px] text-xs text-claude-textSecondary">
-                      <span>{t('general.queued')} ({queues[activeId].length})</span>
-                      {queues[activeId].map(message => <div key={message.id} className="flex items-center gap-1">
-                        <span className="truncate">{message.text || message.files.map(file => file.fileName).join(', ')}</span>
-                        <button aria-label={t('general.cancelQueued')} onClick={() => useBusySendStore.getState().cancel(activeId, message.id)}>&times;</button>
-                      </div>)}
-                    </div>}
+
                     {isCodeMode && <PermissionModeSelector neutral />}
                     <ModelSelector
                       currentModelString={currentModelString}
@@ -2233,7 +2252,7 @@ const MainContent = ({ onNewChat, resetKey, tunerConfig, onOpenDocument, onArtif
                         <button
                         onMouseDown={(e) => e.preventDefault()}
                         onClick={() => handleSend()}
-                        disabled={gitSetupPending || modeChanging || (!inputText.trim() && !pendingFiles.some(f => f.status === 'done')) || pendingFiles.some(f => f.status === 'uploading')}
+                        disabled={codeProjectRequired || gitSetupPending || modeChanging || (!inputText.trim() && !pendingFiles.some(f => f.status === 'done')) || pendingFiles.some(f => f.status === 'uploading')}
                         title={t('chat.send')}
                         className="p-2 bg-[#C6613F] text-white rounded-lg hover:bg-[#D97757] transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
                       >
@@ -2286,7 +2305,8 @@ const MainContent = ({ onNewChat, resetKey, tunerConfig, onOpenDocument, onArtif
       )}
 
       {/* AskUserQuestion dialog */}
-      {askUserDialog && (
+      <PlanApprovalController sessionId={activeId} />
+      {askUserDialog && !askUserDialog.planApprovalRequest && (
         <div className="fixed inset-0 z-[200] flex items-center justify-center bg-black/40">
           <div className="bg-claude-bg border border-claude-border rounded-2xl shadow-xl w-[480px] max-h-[80vh] overflow-y-auto" onClick={e => e.stopPropagation()}>
             <div className="px-5 pt-5 pb-3">

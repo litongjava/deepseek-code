@@ -1,0 +1,108 @@
+.desktop-chat-layout {
+  container-type: inline-size;
+}
+
+.chat-transcript,
+.chat-composer-column,
+.chat-landing-column {
+  --chat-reading-width: var(--chat-custom-width, clamp(680px, 64cqw, 920px));
+  width: 100%;
+  max-width: calc(var(--chat-reading-width) + 32px);
+}
+
+.chat-transcript {
+  width: calc(100% - 32px);
+}
+
+.chat-landing-column {
+  max-width: calc(var(--chat-reading-width) + 64px);
+}
+
+.turn-navigator {
+  position: absolute;
+  right: 12px;
+  top: 50%;
+  transform: translateY(-50%);
+  width: 28px;
+  height: max(0px, calc(100% - 64px));
+  max-height: 420px;
+  display: flex;
+  align-items: center;
+  z-index: 7;
+}
+
+.turn-navigator-marks {
+  position: relative;
+  overflow-y: auto;
+  max-height: 100%;
+  overscroll-behavior: contain;
+  scrollbar-width: none;
+}
+
+.turn-navigator-marks button {
+  display: block;
+  width: 28px;
+  height: 12px;
+  padding: 5px 0 5px 12px;
+  border-radius: 3px;
+}
+
+.turn-navigator-marks button::before {
+  content: '';
+  display: block;
+  height: 2px;
+  border-radius: 2px;
+  background: var(--text-claude-secondary);
+  opacity: .4;
+}
+
+.turn-navigator-marks button[aria-current],
+.turn-navigator-marks button:hover,
+.turn-navigator-marks button:focus-visible {
+  padding-left: 4px;
+}
+
+.turn-navigator-marks button[aria-current]::before,
+.turn-navigator-marks button:hover::before,
+.turn-navigator-marks button:focus-visible::before {
+  opacity: 1;
+}
+
+.turn-navigator-marks button:focus-visible {
+  outline: 1px solid var(--text-claude-secondary);
+  outline-offset: -1px;
+}
+
+.turn-navigator-preview {
+  position: absolute;
+  right: 38px;
+  top: 50%;
+  transform: translateY(-50%);
+  width: 300px;
+  padding: 12px;
+  border: 1px solid var(--border-claude);
+  border-radius: 12px;
+  background: var(--bg-claude-input);
+  box-shadow: 0 4px 18px #0002;
+  pointer-events: none;
+  font: 13px/20px var(--chat-sans-family);
+}
+
+.turn-navigator-preview strong,
+.turn-navigator-preview p {
+  display: -webkit-box;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 1;
+  overflow: hidden;
+  overflow-wrap: anywhere;
+}
+
+.turn-navigator-preview p {
+  margin-top: 4px;
+  -webkit-line-clamp: 3;
+  color: var(--text-claude-secondary);
+}
+
+@container (max-width: 900px) {
+  .turn-navigator { display: none; }
+}

@@ -12,7 +12,7 @@ fn image() -> Value {
 fn mixed_content() -> Value {
     json!([{"type":"text","text":"look [Image #7]"}, image(),
         {"type":"text","text":"then [Image #2]"},
-        {"type":"image_url","image_url":{"url":format!("data:image/png;base64,{PNG}")}}])
+        {"type":"image_url","image_url":{"url":format!("data:image/png;base64,{PNG}")},"fileName":"截图.png","size":base64::engine::general_purpose::STANDARD.decode(PNG).unwrap().len()}])
 }
 
 fn provider(base: &str, format: &str) -> ResolvedProvider {
@@ -56,6 +56,8 @@ fn assert_content(content: &Value, anthropic: bool) {
     assert_eq!(content[0]["text"], "look [Image #7]");
     assert_eq!(content[2]["text"], "then [Image #2]");
     for index in [1, 3] {
+        assert!(content[index].get("fileName").is_none());
+        assert!(content[index].get("size").is_none());
         if anthropic {
             assert_eq!(content[index]["source"]["data"], PNG);
         } else {
@@ -166,6 +168,63 @@ async fn light_compression_keeps_structured_assistant_and_tool_pair() {
         .compress(messages.clone(), None, CompressionLevel::Light, None)
         .await;
     assert_eq!(compressed, messages);
+}
+
+#[tokio::test]
+async fn durable_steer_handoff_waits_for_boundary_and_pause_preserves_next_turn() {
+    let temp = tempfile::tempdir().unwrap();
+    let paths = crate::runtime::RuntimePaths::new(temp.path().to_owned()).unwrap();
+    let store = crate::runtime::SessionStore::new(paths.open_database().unwrap());
+    let id = store
+        .create(temp.path(), "images-test", "images-test")
+        .unwrap();
+    let next = input_queue::enqueue(
+        &store.db,
+        &id,
+        "next",
+        json!("later"),
+        input_queue::QueueMode::NextTurn,
+    )
+    .unwrap();
+    let steer = input_queue::enqueue(
+        &store.db,
+        &id,
+        "steer",
+        json!("now"),
+        input_queue::QueueMode::Steer,
+    )
+    .unwrap();
+    let (mut engine, _events) = executor("http://127.0.0.1:1", "openai", json!("initial"));
+    engine.goal_db = Some(store.db.clone());
+    engine.conv_id = Some(id.clone());
+    assert!(engine.deliver_queued_inputs(false).await.is_empty());
+    input_queue::set_paused(&store.db, &id, true).unwrap();
+    assert!(engine.deliver_queued_inputs(true).await.is_empty());
+    input_queue::set_paused(&store.db, &id, false).unwrap();
+    let delivered = engine.deliver_queued_inputs(true).await;
+    assert_eq!(delivered.len(), 1);
+    assert_eq!(delivered[0].content, json!("now"));
+    assert_eq!(delivered[0].origin, format!("queue-input-{}", steer.id));
+    assert!(engine.deliver_queued_inputs(true).await.is_empty());
+    let rows = input_queue::list(&store.db, &id).unwrap();
+    assert_eq!(
+        rows.iter().find(|row| row.id == next.id).unwrap().state,
+        input_queue::QueueState::Queued
+    );
+    assert_eq!(
+        rows.iter().find(|row| row.id == steer.id).unwrap().state,
+        input_queue::QueueState::Handoff
+    );
+    assert_eq!(
+        store
+            .db
+            .with_conn(|conn| crate::db::message_repo::get_message(conn, &delivered[0].origin))
+            .unwrap()
+            .unwrap()
+            .unwrap()
+            .content,
+        "now"
+    );
 }
 
 #[tokio::test]

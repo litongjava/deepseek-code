@@ -65,6 +65,79 @@ fn fixture() -> (
     let parent = store.create(&cwd, "fixture", "fixture").unwrap();
     (temp, context, store, parent, cwd)
 }
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn foreground_agent_executes_from_parent_on_default_worker_stack() {
+    let (_temp, context, store, parent, cwd) = fixture();
+    let requests = Arc::new(Mutex::new(Vec::<Value>::new()));
+    let capture = requests.clone();
+    let app = Router::new().route(
+        "/v1/chat/completions",
+        post(move |Json(body): Json<Value>| {
+            let capture = capture.clone();
+            async move {
+                let mut requests = capture.lock().unwrap();
+                requests.push(body);
+                let call = (requests.len() == 1).then(|| {
+                    (
+                        "foreground-agent",
+                        "Agent",
+                        json!({
+                            "description":"exercise foreground child",
+                            "prompt":"CHILD_DEFAULT_STACK",
+                            "run_in_background":false
+                        }),
+                    )
+                });
+                (
+                    [("content-type", "text/event-stream")],
+                    plan_child_stream("openai", call),
+                )
+            }
+        }),
+    );
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let url = format!("http://{}", listener.local_addr().unwrap());
+    let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+    let registry: OwnedChildren = Default::default();
+    let mut executor = owner(&context, &parent, &cwd, &url, registry.clone());
+    let (tx, mut rx) = tokio::sync::mpsc::channel(500);
+    executor.event_tx = tx;
+    let events = tokio::spawn(async move { while rx.recv().await.is_some() {} });
+    // Spawn the real parent loop, rather than calling execute_delegated on the
+    // test thread: the original overflow required the nested parent poll stack.
+    let execution = tokio::spawn(async move { executor.execute().await });
+    let result = tokio::time::timeout(std::time::Duration::from_secs(30), execution)
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap();
+    assert_eq!(result.0, "CHILD_IMPLEMENTED");
+    let requests = requests.lock().unwrap();
+    assert_eq!(requests.len(), 3, "parent, child, parent continuation");
+    assert!(requests[1].to_string().contains("CHILD_DEFAULT_STACK"));
+    assert!(requests[2].to_string().contains("CHILD_IMPLEMENTED"));
+    drop(requests);
+    let retained = registry.lock().unwrap();
+    assert_eq!(retained.len(), 1);
+    let (child, entry) = retained.iter().next().unwrap();
+    assert!(entry.executor.execution_lease.is_none());
+    assert!(store.history(child).unwrap().iter().any(|m| {
+        m["role"] == "assistant"
+            && m["content"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("CHILD_IMPLEMENTED")
+    }));
+    assert!(
+        mail::ExecutionLease::acquire(&context.paths.data_dir, child)
+            .unwrap()
+            .is_some()
+    );
+    drop(retained);
+    server.abort();
+    events.abort();
+}
+
 #[tokio::test]
 async fn foreground_agent_accepts_model_effort_and_worktree_without_backgrounding() {
     let (_temp, context, _store, parent, cwd) = fixture();

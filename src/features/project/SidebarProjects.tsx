@@ -222,6 +222,7 @@ export default function SidebarProjects({
     action: () => Promise<void>;
   } | null>(null);
   const [expandedLists, setExpandedLists] = useState<string[]>([]);
+  const [expandedProjects, setExpandedProjects] = useState<string[]>([]);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
   const [notice, setNotice] = useState("");
@@ -238,14 +239,8 @@ export default function SidebarProjects({
   const selectedProjectId = activeId
     ? activeChat ? activeChat.project_id || null : currentProjectId
     : pendingProjectId;
-  const recent = currentChats.filter(chat => (chat.project_id || null) === (selectedProjectId || null));
-  const selectProject = (projectId: string | null) => {
-    stopHover();
-    setPopup(null);
-    useProjectStore.getState().setPendingProjectId(projectId);
-    if (mode === 'code') useWorkspaceModeStore.getState().setLastCodeProjectId(projectId);
-    navigate('/', { state: { selectedProjectId: projectId } });
-  };
+  const recent = currentChats;
+  const projectChats = visibleChats(chats);
   const sortedProjects = [...projects].sort(
     (a, b) =>
       Number(preferences.pinnedProjects.includes(b.id)) -
@@ -435,14 +430,14 @@ export default function SidebarProjects({
   const newChat = (project: Project) =>
     withTrust(project, async () => {
       const chat = await createProjectConversation(project.id);
+      setExpandedProjects(previous => previous.includes(project.id) ? previous : [...previous, project.id]);
       window.dispatchEvent(new Event("conversationCreated"));
       onOpenChat(chat.id);
     });
   const moveChat = (chat: SidebarChat, project: Project) =>
     withTrust(project, async () => {
       await patchChat(chat, { project_id: project.id });
-      if (preferences.collapsedProjects.includes(project.id))
-        preferences.toggle("collapsedProjects", project.id);
+      setExpandedProjects(previous => previous.includes(project.id) ? previous : [...previous, project.id]);
     });
   const markUnread = (chat: SidebarChat) => {
     preferences.toggle("unreadChats", chat.id);
@@ -789,10 +784,11 @@ export default function SidebarProjects({
         </div>
         {!preferences.projectsCollapsed && (
           <div data-project-list className="min-h-0 flex-1 overflow-y-auto sidebar-scroll">
-            <button type="button" aria-pressed={!selectedProjectId} onClick={() => selectProject(null)} className={`project-sidebar-row w-full text-left ${!selectedProjectId ? 'bg-claude-hover' : ''}`}>{t('sidebar.noProject')}</button>
             {!sortedProjects.length && <p className="px-2 py-1.5 text-xs text-claude-textSecondary">{t('sidebar.noProjects')}</p>}
             {sortedProjects.map((project) => {
               const selected = selectedProjectId === project.id;
+              const expanded = expandedProjects.includes(project.id);
+              const sessions = projectChats.filter(chat => chat.project_id === project.id);
               return (
                 <div key={project.id} className="mb-1">
                   <div
@@ -820,15 +816,21 @@ export default function SidebarProjects({
                   >
                     <button
                       type="button"
-                      aria-pressed={selected}
+                      aria-expanded={expanded}
+                      aria-controls={`project-sessions-${project.id}`}
                       aria-label={project.name}
                       onContextMenu={(event) =>
                         menuClick(event, "project", project.id)
                       }
-                      onClick={() => selectProject(project.id)}
+                      onClick={() => {
+                        stopHover();
+                        setPopup(null);
+                        setExpandedProjects(previous => previous.includes(project.id) ? previous.filter(id => id !== project.id) : [...previous, project.id]);
+                      }}
                       className="flex min-w-0 flex-1 items-center gap-2 py-1.5 text-left"
                     >
-                      {selected ? (
+                      <ChevronRight size={12} className={`shrink-0 ${expanded ? 'rotate-90' : ''}`} />
+                      {expanded ? (
                         <FolderOpen size={15} className="shrink-0" />
                       ) : (
                         <Folder size={15} className="shrink-0" />
@@ -865,6 +867,11 @@ export default function SidebarProjects({
                       </button>
                     </div>
                   </div>
+                  {expanded && <div id={`project-sessions-${project.id}`} role="group" aria-label={project.name}>
+                    {sessions.length ? chatList(sessions, `project:${project.id}`, true) : (
+                      <p className="pl-8 py-1.5 text-xs text-claude-textSecondary">{t('sidebar.noProjectChats')}</p>
+                    )}
+                  </div>}
                 </div>
               );
             })}
@@ -889,7 +896,7 @@ export default function SidebarProjects({
             />
           </button>
           {!recentsCollapsed && <div className="min-h-0 flex-1 overflow-y-auto sidebar-scroll" data-recent-list>
-            {recent.length ? chatList(recent, `recents:${selectedProjectId || ''}`) : (
+            {recent.length ? chatList(recent, `recents:${recentsMode}`) : (
               <p className="px-2 py-1.5 text-xs text-claude-textSecondary">{t("sidebar.noRecentChats")}</p>
             )}
           </div>}

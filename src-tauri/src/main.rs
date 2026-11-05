@@ -372,12 +372,15 @@ fn main() {
                                                         "source": "feishu_bridge"
                                                     }
                                                 });
-                                                let _ = reqwest::Client::new()
-                                                    .post("http://127.0.0.1:30085/api/analytics/track")
-                                                    .json(&track_body)
-                                                    .timeout(std::time::Duration::from_secs(5))
-                                                    .send()
-                                                    .await;
+                                                if let Some((port, key)) = bridge::local_endpoint() {
+                                                    let _ = reqwest::Client::new()
+                                                        .post(format!("http://127.0.0.1:{port}/api/analytics/track"))
+                                                        .bearer_auth(key)
+                                                        .json(&track_body)
+                                                        .timeout(std::time::Duration::from_secs(5))
+                                                        .send()
+                                                        .await;
+                                                }
                                             }
                                             break;
                                         }
@@ -666,6 +669,7 @@ fn main() {
             commands::mcp_toggle_server,
             commands::mcp_list_tools,
             commands::get_bridge_api_key,
+            commands::get_bridge_endpoint,
             // Diff commands
             commands::generate_diff,
             commands::apply_diff,

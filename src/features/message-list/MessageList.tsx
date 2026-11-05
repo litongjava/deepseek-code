@@ -4,7 +4,7 @@ import UserContentBlocks from './UserContentBlocks';
 import { turnLabel } from './turnTiming';
 import { contentBlocks, hasUnavailableImages, type UserContent } from '../../utils/userContent';
 import WorkDetails from '../trajectory/WorkDetails';
-import ResponseFooter, { responseDividerClassName } from './ResponseFooter';
+import ResponseFooter from './ResponseFooter';
 import { useGeneralSettingsStore } from '../../stores/useGeneralSettingsStore';
 import { openChatLink } from '../../utils/chatLinks';
 import {
@@ -38,6 +38,7 @@ export const draftsStore = new Map<string, { text: string; files: PendingFile[];
 
 /** Memoized message list — skips re-render when only inputText changes */
 interface MessageListProps {
+  readOnly?: boolean;
   conversationId?: string | null;
   messages: any[];
   loading: boolean;
@@ -45,15 +46,15 @@ interface MessageListProps {
   editingMessageIdx: number | null;
   editingContent: string;
   compactStatus: { state: string; message?: string };
-  onSetEditingContent: (v: string) => void;
-  onEditCancel: () => void;
-  onEditSave: () => void;
+  onSetEditingContent?: (v: string) => void;
+  onEditCancel?: () => void;
+  onEditSave?: () => void;
   onToggleExpand: (idx: number) => void;
-  onResend: (content: UserContent, idx: number) => void;
-  onEdit: (content: UserContent, idx: number) => void;
-  onBranch: (idx: number) => void | Promise<void>;
+  onResend?: (content: UserContent, idx: number) => void;
+  onEdit?: (content: UserContent, idx: number) => void;
+  onBranch?: (idx: number) => void | Promise<void>;
   onOpenDocument?: (doc: DocumentInfo) => void;
-  onSetMessages: (messages: any[] | ((prev: any[]) => any[])) => void;
+  onSetMessages?: (messages: any[] | ((prev: any[]) => any[])) => void;
   messageContentRefs: React.MutableRefObject<Map<number, HTMLDivElement>>;
   onOpenResearch?: (msgId: string) => void;
   onInspect?: (id: string) => void;
@@ -61,7 +62,7 @@ interface MessageListProps {
 }
 
 const MessageList = React.memo<MessageListProps>(({
-  conversationId, messages, loading, expandedMessages, editingMessageIdx, editingContent,
+  readOnly = false, conversationId, messages, loading, expandedMessages, editingMessageIdx, editingContent,
   compactStatus, onSetEditingContent, onEditCancel, onEditSave,
   onToggleExpand, onResend, onEdit, onBranch, onOpenDocument, onSetMessages,
   messageContentRefs, onOpenResearch, onInspect, t,
@@ -89,29 +90,12 @@ const MessageList = React.memo<MessageListProps>(({
           animation: shimmer 4s linear infinite;
         }
       `}</style>
-      {(() => {
-        const pairBoundaries = new Set<number>();
-        let lastRole = '';
-        for (let i = 0; i < messages.length; i++) {
-          const msgRole = messages[i].role;
-          if (msgRole === 'user' && lastRole === 'assistant') {
-            pairBoundaries.add(i);
-          }
-          lastRole = msgRole;
-        }
-        return pairBoundaries;
-      })()}
       {messages.map((msg: any, idx: number) => {
         const isCurrentlyStreaming = loading && idx === messages.length - 1;
         const timingLabel = msg.role === 'assistant' && (msg.turn?.status !== 'running' || loading) && !messages.slice(0, idx).some(previous => previous.role === 'assistant' && previous.turn?.turnId === msg.turn?.turnId) ? turnLabel(msg.turn) : null;
         const isPairStart = msg.role === 'user' && (idx === 0 || messages[idx - 1]?.role === 'assistant');
         return (
-        <div key={idx} className="group" style={{ marginBottom: isPairStart && idx > 0 ? '28px' : 'var(--msg-gap)' }}>
-          {isPairStart && idx > 0 && (
-            <div className="flex items-center gap-3 mb-5 mt-2">
-              <div className="flex-1 h-px bg-claude-border" />
-            </div>
-          )}
+        <div key={msg.id || idx} data-message-index={idx} className="group" style={{ marginBottom: isPairStart && idx > 0 ? '28px' : 'var(--msg-gap)' }}>
           {(msg.is_summary === 1 || msg.is_compact_boundary) && (
             <div className="flex items-center gap-3 mb-5 mt-2">
               <div className="flex-1 h-px bg-claude-border" />
@@ -120,18 +104,18 @@ const MessageList = React.memo<MessageListProps>(({
             </div>
           )}
           {(msg.is_summary === 1 || msg.is_compact_boundary) ? null : msg.role === 'user' ? (
-            editingMessageIdx === idx ? (
+            !readOnly && editingMessageIdx === idx ? (
               <div className="w-full bg-[#F0EEE7] dark:bg-claude-btnHover rounded-xl p-3 border border-black/5 dark:border-white/10">
                 <div className="bg-white dark:bg-black/20 rounded-lg border border-black/10 dark:border-white/10 focus-within:ring-2 focus-within:ring-blue-500/20 focus-within:border-blue-500 transition-all p-3">
                   <textarea
                     className="w-full bg-transparent text-claude-text outline-none resize-none text-[16px] leading-relaxed font-sans font-[350] block"
                     value={editingContent}
                     onChange={(e) => {
-                      onSetEditingContent(e.target.value);
+                      onSetEditingContent?.(e.target.value);
                       e.target.style.height = 'auto';
                       e.target.style.height = e.target.scrollHeight + 'px';
                     }}
-                    onKeyDown={(e) => { if (e.key === 'Escape') onEditCancel(); }}
+                    onKeyDown={(e) => { if (e.key === 'Escape') onEditCancel?.(); }}
                     ref={(el) => {
                       if (el) {
                         el.style.height = 'auto';
@@ -230,16 +214,16 @@ const MessageList = React.memo<MessageListProps>(({
                     <span className="text-[12px] tabular-nums text-claude-textSecondary mr-1">{formatMessageTime(msg.created_at)}</span>
                   )}
                   <div className="message-actions flex items-center gap-0.5 opacity-0 transition-opacity duration-150 group-hover:opacity-100 group-focus-within:opacity-100">
-                    <button onClick={() => onResend(msg.content, idx)} className="p-1 text-claude-textSecondary hover:text-claude-text hover:bg-claude-hover rounded transition-colors" title="重新发送"><RotateCcw size={14} /></button>
-                    <button onClick={() => onEdit(msg.content, idx)} className="p-1 text-claude-textSecondary hover:text-claude-text hover:bg-claude-hover rounded transition-colors" title="编辑"><Pencil size={14} /></button>
+                    {!readOnly && <button onClick={() => onResend?.(msg.content, idx)} className="p-1 text-claude-textSecondary hover:text-claude-text hover:bg-claude-hover rounded transition-colors" title="重新发送"><RotateCcw size={14} /></button>}
+                    {!readOnly && <button onClick={() => onEdit?.(msg.content, idx)} className="p-1 text-claude-textSecondary hover:text-claude-text hover:bg-claude-hover rounded transition-colors" title="编辑"><Pencil size={14} /></button>}
                     <CopyButton key={`${conversationId}:${idx}`} text={extractTextContent(msg.content)} />
                   </div>
                 </div>
               </div>
             )
           ) : (
-            <div className="px-1 text-claude-text text-[16.5px] leading-normal mt-2">
-              {timingLabel && <div className="mb-4 text-sm tabular-nums text-claude-textSecondary" aria-label="Turn duration">{timingLabel}<div className={`${responseDividerClassName} mt-3`} /></div>}
+            <div className="text-claude-text text-[16.5px] leading-normal mt-2">
+              {timingLabel && <div className="mb-4 text-sm tabular-nums text-claude-textSecondary" aria-label="Turn duration">{timingLabel}<div className="mt-3 h-px w-full bg-claude-border" /></div>}
               {/* Research badge */}
               {msg.research && (
                 <button
@@ -265,7 +249,7 @@ const MessageList = React.memo<MessageListProps>(({
                   </div>
                 </button>
               )}
-              <WorkDetails message={msg} index={idx} live={isCurrentlyStreaming} onInspect={onInspect} />
+              <WorkDetails conversationId={conversationId} message={msg} index={idx} live={isCurrentlyStreaming} onInspect={onInspect} />
               {msg.searchStatus && (!msg.searchLogs || msg.searchLogs.length === 0) && (!msg.content || msg.content.length === (msg._contentLenBeforeSearch || 0)) && loading && idx === messages.length - 1 && (
                 <div className="flex items-center justify-center gap-2 text-[15px] font-medium mb-4 w-full">
                   <Globe size={18} className="text-claude-textSecondary" />
@@ -293,14 +277,14 @@ const MessageList = React.memo<MessageListProps>(({
                       modifiedContent={diff.modified_content}
                       diffText={diff.diff_text}
                       status={diff.status || 'pending'}
-                      onApply={async () => {
+                      onApply={readOnly ? undefined : async () => {
                         try {
                           await invoke('apply_diff', { diffId: diff.id });
                           if ((msg as any).codeDiffs) {
                             const updated = (msg as any).codeDiffs.map((d: any) =>
                               d.id === diff.id ? { ...d, status: 'applied', applied_at: new Date().toISOString() } : d
                             );
-                            onSetMessages((prev: any) =>
+                            onSetMessages?.((prev: any) =>
                               prev.map((m: any, i: number) => {
                                 if (i !== idx) return m;
                                 return { ...m, codeDiffs: updated };
@@ -311,14 +295,14 @@ const MessageList = React.memo<MessageListProps>(({
                           console.error('Failed to apply diff:', e);
                         }
                       }}
-                      onReject={async () => {
+                      onReject={readOnly ? undefined : async () => {
                         try {
                           await invoke('reject_diff', { diffId: diff.id });
                           if ((msg as any).codeDiffs) {
                             const updated = (msg as any).codeDiffs.map((d: any) =>
                               d.id === diff.id ? { ...d, status: 'rejected' } : d
                             );
-                            onSetMessages((prev: any) =>
+                            onSetMessages?.((prev: any) =>
                               prev.map((m: any, i: number) => {
                                 if (i !== idx) return m;
                                 return { ...m, codeDiffs: updated };
@@ -375,7 +359,7 @@ const MessageList = React.memo<MessageListProps>(({
                 </span>
               )}
               {!isCurrentlyStreaming && Boolean(msg.content || msg.thinking || msg.toolCalls?.length) && (
-                <ResponseFooter key={`${conversationId || 'unsaved'}:${msg.id || idx}`} message={msg} index={idx} conversationId={conversationId} disabled={loading} onBranch={onBranch} />
+                <ResponseFooter key={`${conversationId || 'unsaved'}:${msg.id || idx}`} message={msg} index={idx} conversationId={conversationId} disabled={loading} readOnly={readOnly} onBranch={onBranch} />
               )}
               {!loading && idx === messages.length - 1 && msg.content && compactStatus.state === 'compacting' && (
                 <div className="flex items-start gap-4 mt-6 ml-1 mb-2">

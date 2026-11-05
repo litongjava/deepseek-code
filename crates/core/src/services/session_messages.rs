@@ -202,13 +202,21 @@ pub fn notices(context: &ServiceContext, recipient: &str) -> Result<Vec<String>>
                 "UPDATE session_inbox SET notified=1 WHERE id=?1",
                 [&message.id],
             )?;
-            let sender = super::background_sessions::list(&context.paths.data_dir, Some(recipient))?
-                .into_iter().find(|job| job.session_id == message.sender).map(|job| job.title)
-                .or(conversation_repo::get_conversation(&tx, &message.sender)?
-                .and_then(|row| row.title)
-                .filter(|title| !title.trim().is_empty() && !title.eq_ignore_ascii_case("CLI session")))
-                .unwrap_or_else(|| "Agent".into());
-            result.push(format!("Agent message from {sender} · {}\n{}", message.state, message.content));
+            let sender =
+                super::background_sessions::list(&context.paths.data_dir, Some(recipient))?
+                    .into_iter()
+                    .find(|job| job.session_id == message.sender)
+                    .map(|job| job.title)
+                    .or(conversation_repo::get_conversation(&tx, &message.sender)?
+                        .and_then(|row| row.title)
+                        .filter(|title| {
+                            !title.trim().is_empty() && !title.eq_ignore_ascii_case("CLI session")
+                        }))
+                    .unwrap_or_else(|| "Agent".into());
+            result.push(format!(
+                "Agent message from {sender} · {}\n{}",
+                message.state, message.content
+            ));
         }
         tx.commit()?;
         Ok(result)
@@ -254,7 +262,8 @@ impl PresenceLease {
             .read(true)
             .write(true)
             .open(directory.join(format!("{session}.lock")))?;
-        crate::fs::try_lock_briefly(&file).context("Session is already open in another frontend")?;
+        crate::fs::try_lock_briefly(&file)
+            .context("Session is already open in another frontend")?;
         Ok(Self { _file: file })
     }
 }
@@ -262,8 +271,14 @@ impl PresenceLease {
 /// Whether a frontend currently holds the session open.
 pub fn session_open(root: &Path, session: &str) -> Result<bool> {
     valid_id(session)?;
-    let path = root.join("session-presence").join(format!("{session}.lock"));
-    let file = match std::fs::OpenOptions::new().read(true).write(true).open(path) {
+    let path = root
+        .join("session-presence")
+        .join(format!("{session}.lock"));
+    let file = match std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(path)
+    {
         Ok(file) => file,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(false),
         Err(e) => return Err(e.into()),
@@ -272,6 +287,30 @@ pub fn session_open(root: &Path, session: &str) -> Result<bool> {
         Ok(()) => Ok(false),
         Err(std::fs::TryLockError::WouldBlock) => Ok(true),
         Err(std::fs::TryLockError::Error(e)) => Err(e.into()),
+    }
+}
+
+/// Observe execution ownership without creating a lease or trusting persisted state.
+pub fn execution_active(root: &Path, session: &str) -> Result<bool> {
+    if uuid::Uuid::parse_str(session).is_err() {
+        return Ok(false);
+    }
+    let path = root
+        .join("session-execution-locks")
+        .join(format!("{session}.lock"));
+    let file = match std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(path)
+    {
+        Ok(file) => file,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+        Err(error) => return Err(error.into()),
+    };
+    match file.try_lock() {
+        Ok(()) => Ok(false),
+        Err(std::fs::TryLockError::WouldBlock) => Ok(true),
+        Err(std::fs::TryLockError::Error(error)) => Err(error.into()),
     }
 }
 

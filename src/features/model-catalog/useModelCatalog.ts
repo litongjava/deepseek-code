@@ -18,7 +18,8 @@ export function useModelCatalog(viewingIdRef: React.MutableRefObject<string | nu
   const selectorModels = (modelCatalog?.all || []) as SelectableModel[];
   const isModelSelectable = useCallback((id: string) => selectorModels.some(m => m.id === id && Number(m.enabled) === 1), [modelCatalog]);
   const resolveConversationModel = useCallback((id: string) => {
-    const available = selectorModels.filter(model => Number(model.enabled) === 1);
+    // Polling can retain this resolver across asynchronous catalog loads.
+    const available = (useChatStore.getState().modelCatalog?.all || []).filter(model => Number(model.enabled) === 1);
     return available.find(model => model.id === id)?.id
       || available.find(model => splitModelKey(model.id).modelId === splitModelKey(id).modelId)?.id;
   }, [modelCatalog]);

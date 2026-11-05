@@ -78,7 +78,9 @@ export default function PermissionModeSelector({ className = '', value, onChange
   const menuRef = useRef<HTMLDivElement>(null);
   const [menuStyle, setMenuStyle] = useState<React.CSSProperties>({});
 
-  const currentMode = MODE_OPTIONS.find((m) => m.value === permissionMode) || MODE_OPTIONS[0];
+  const currentMode = permissionMode === 'auto'
+    ? { label: 'Auto permissions', icon: <ShieldCheck size={14} /> }
+    : MODE_OPTIONS.find((m) => m.value === permissionMode) || MODE_OPTIONS[0];
 
   useEffect(() => {
     const handleClickOutside = (e: MouseEvent) => {

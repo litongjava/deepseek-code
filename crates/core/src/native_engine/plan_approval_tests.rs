@@ -5,7 +5,7 @@ use crate::{
 };
 use axum::{routing::post, Json, Router};
 
-fn fixture() -> (
+pub(super) fn fixture() -> (
     tempfile::TempDir,
     ServiceContext,
     SessionStore,

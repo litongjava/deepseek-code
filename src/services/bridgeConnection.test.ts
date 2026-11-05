@@ -48,15 +48,34 @@ describe('backend readiness', () => {
     await expect(waitForApiReady()).resolves.toBeUndefined();
   });
 
-  it('uses the healthy fallback port and obtains the desktop token before becoming ready', async () => {
+  it('waits for the native endpoint without probing another healthy instance', async () => {
     (window as any).__TAURI_INTERNALS__ = {};
-    vi.mocked(invoke).mockResolvedValueOnce('test-bridge-key');
+    vi.mocked(invoke).mockResolvedValueOnce(null).mockResolvedValueOnce([30087, 'own-key']);
+    const fetchMock = vi.fn().mockResolvedValue(response('healthy', true));
+    vi.stubGlobal('fetch', fetchMock);
+    const bridge = await import('./bridgeConnection');
+    const pending = bridge.waitForApiReady();
+    await vi.advanceTimersByTimeAsync(0);
+    expect(fetchMock).not.toHaveBeenCalled();
+    await vi.advanceTimersByTimeAsync(1500);
+    await pending;
+    expect(bridge.API_BASE).toBe('http://127.0.0.1:30087/api');
+    expect(localStorage.getItem('bridge_api_key')).toBe('own-key');
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+
+  it('uses only its native endpoint even when another instance is healthy', async () => {
+    (window as any).__TAURI_INTERNALS__ = {};
+    vi.mocked(invoke).mockResolvedValueOnce([30086, 'test-bridge-key']);
     vi.stubGlobal('fetch', vi.fn(async (url: string) => {
-      if (url === 'http://127.0.0.1:30086/health') return response('healthy', true);
+      if (url === 'http://127.0.0.1:30086/health' || url === 'http://127.0.0.1:30085/health') return response('healthy', true);
       throw new TypeError('Failed to fetch');
     }));
     const bridge = await import('./bridgeConnection');
     await bridge.waitForApiReady();
+    expect(invoke).toHaveBeenCalledWith('get_bridge_endpoint');
+    expect(fetch).toHaveBeenCalledTimes(1);
+    expect(fetch).toHaveBeenCalledWith('http://127.0.0.1:30086/health', expect.any(Object));
     expect(await bridge.detectBridgePort()).toBe(30086);
     expect(bridge.API_BASE).toBe('http://127.0.0.1:30086/api');
     expect(localStorage.getItem('bridge_api_key')).toBe('test-bridge-key');

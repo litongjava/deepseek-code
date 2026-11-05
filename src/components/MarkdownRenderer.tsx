@@ -283,6 +283,7 @@ export const CodeBlock: React.FC<{ language: string; code: string; className?: s
               padding: '12px',
               background: 'transparent',
               fontSize: '15px',
+              fontFamily: 'var(--assistant-code-family, monospace)',
               border: 'none',
               boxShadow: 'none',
             }}

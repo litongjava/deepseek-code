@@ -41,11 +41,9 @@ pub fn normalize_user_content(content: &Value) -> Result<Value> {
                     "image_url"
                 };
                 ensure!(
-                    block
-                        .as_object()
-                        .unwrap()
-                        .keys()
-                        .all(|k| k == "type" || k == source_key),
+                    block.as_object().unwrap().keys().all(|k| k == "type"
+                        || k == source_key
+                        || matches!(k.as_str(), "fileName" | "size")),
                     "Unsupported image block metadata"
                 );
                 let (mime, data) = if block["type"] == "image" {
@@ -105,7 +103,23 @@ pub fn normalize_user_content(content: &Value) -> Result<Value> {
                     _ => false,
                 };
                 ensure!(valid, "Image bytes do not match declared media type");
-                result.push(json!({"type":"image_url","image_url":{"url":format!("data:{mime};base64,{data}")}}));
+                let mut normalized = json!({"type":"image_url","image_url":{"url":format!("data:{mime};base64,{data}")}});
+                if let Some(name) = block.get("fileName") {
+                    let name = name.as_str().context("Image fileName must be text")?;
+                    ensure!(
+                        !name.is_empty() && name.len() <= 1024,
+                        "Invalid image fileName"
+                    );
+                    normalized["fileName"] = json!(name);
+                }
+                if let Some(size) = block.get("size") {
+                    ensure!(
+                        size.as_u64() == Some(decoded.len() as u64),
+                        "Image size does not match its bytes"
+                    );
+                    normalized["size"] = json!(decoded.len());
+                }
+                result.push(normalized);
             }
             other => bail!("Unsupported user content block: {other:?}"),
         }
@@ -139,6 +153,21 @@ mod tests {
             json!("你好")
         );
     }
+
+    #[test]
+    fn image_display_metadata_survives_normalization_and_is_validated() {
+        let content = json!([{"type":"image_url","image_url":{"url":"data:image/png;base64,iVBORw0KGgo="},"fileName":"截图.png","size":8}]);
+        assert_eq!(normalize_user_content(&content).unwrap(), content);
+        for (field, value) in [
+            ("fileName", json!(12)),
+            ("size", json!(9)),
+            ("path", json!("local.png")),
+        ] {
+            let mut invalid = content.clone();
+            invalid[0][field] = value;
+            assert!(normalize_user_content(&invalid).is_err());
+        }
+    }
 }
 
 /// Largest image file attached from a path or the clipboard.
@@ -157,11 +186,18 @@ pub fn image_media_type(path: &std::path::Path) -> Option<&'static str> {
 
 /// An embedded base64 image block for a PNG, JPEG, GIF or WebP file.
 pub fn image_block_from_file(path: &std::path::Path) -> Result<Value> {
-    let media_type = image_media_type(path).context("Only PNG, JPEG, GIF and WebP images can be attached")?;
+    let media_type =
+        image_media_type(path).context("Only PNG, JPEG, GIF and WebP images can be attached")?;
     let size = std::fs::metadata(path)?.len();
-    ensure!(size <= MAX_IMAGE_BYTES, "Image {} is larger than 5 MB", path.display());
+    ensure!(
+        size <= MAX_IMAGE_BYTES,
+        "Image {} is larger than 5 MB",
+        path.display()
+    );
     let data = base64::engine::general_purpose::STANDARD.encode(std::fs::read(path)?);
-    Ok(serde_json::json!({"type":"image","source":{"type":"base64","media_type":media_type,"data":data}}))
+    Ok(
+        serde_json::json!({"type":"image","source":{"type":"base64","media_type":media_type,"data":data}}),
+    )
 }
 
 #[cfg(test)]
@@ -174,11 +210,20 @@ mod image_file_tests {
         // A real 1x1 PNG; normalization checks the image bytes.
         const PNG: &str = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+aY9sAAAAASUVORK5CYII=";
         let png = dir.path().join("shot.PNG");
-        std::fs::write(&png, base64::engine::general_purpose::STANDARD.decode(PNG).unwrap()).unwrap();
+        std::fs::write(
+            &png,
+            base64::engine::general_purpose::STANDARD
+                .decode(PNG)
+                .unwrap(),
+        )
+        .unwrap();
         let block = image_block_from_file(&png).unwrap();
         assert_eq!(block["source"]["media_type"], "image/png");
         assert_eq!(block["source"]["data"], PNG);
-        assert!(normalize_user_content(&serde_json::json!([{"type":"text","text":"see"}, block])).is_ok());
+        assert!(
+            normalize_user_content(&serde_json::json!([{"type":"text","text":"see"}, block]))
+                .is_ok()
+        );
         assert!(image_block_from_file(&dir.path().join("notes.txt")).is_err());
     }
 }

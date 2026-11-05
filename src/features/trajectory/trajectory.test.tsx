@@ -51,7 +51,8 @@ describe('ordered process events', () => {
     useGeneralSettingsStore.getState().update({ workDetailsByMode: { chat: 'compact', work: 'standard', study: 'standard', code: 'detailed' } });
     const message = sample();
     render(<WorkDetails message={message} index={0} live={false} />);
-    expect(screen.getByRole('button', { name: /Work details/ })).toBeInTheDocument();
+    expect(screen.queryByText('Work details')).not.toBeInTheDocument();
+    expect(screen.getByRole('button', { name: /Ran command/ })).toBeInTheDocument();
     expect(screen.queryByText('Think')).not.toBeInTheDocument();
     for (const mode of ['work', 'study'] as const) {
       act(() => useWorkspaceModeStore.getState().setMode(mode));

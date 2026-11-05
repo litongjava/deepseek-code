@@ -3,6 +3,7 @@ use super::AppState;
 pub mod system;
 pub mod chat;
 pub mod generation_runs;
+mod input_queue;
 mod permission_watch;
 pub mod conversations;
 pub mod tools;
@@ -40,13 +41,17 @@ pub mod sync;
 pub mod workspace_files;
 pub mod caveman;
 
+mod subagents;
+
 use axum::Router;
 
 pub fn build_all_routes() -> Router<AppState> {
     Router::new()
         .merge(system::routes())
         .merge(chat::routes())
+        .merge(input_queue::routes())
         .merge(conversations::routes())
+        .merge(subagents::routes())
         .merge(tools::routes())
         .merge(projects::routes())
         .merge(uploads::routes())

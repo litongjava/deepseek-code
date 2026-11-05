@@ -68,6 +68,7 @@ impl Options {
 pub struct Listening {
     listener: TcpListener,
     token: Token,
+    generation: uuid::Uuid,
     pub url: String,
 }
 
@@ -81,6 +82,7 @@ impl Listening {
         Ok(Self {
             listener,
             token: Token::generate()?,
+            generation: uuid::Uuid::new_v4(),
             url: SocketAddr::new(peer::reachable_ip(bound.ip()), bound.port()).to_string(),
         })
     }
@@ -599,9 +601,24 @@ impl Host {
     }
 }
 
+fn resolved_data_args(original: Vec<String>, data_dir: &Path) -> Vec<String> {
+    let mut args = Vec::new();
+    let mut rest = original.into_iter();
+    while let Some(arg) = rest.next() {
+        if arg == "--data-dir" {
+            rest.next();
+        } else if !arg.starts_with("--data-dir=") {
+            args.push(arg);
+        }
+    }
+    args.extend(["--data-dir".into(), data_dir.to_string_lossy().into_owned()]);
+    args
+}
+
 /// Runs the session in a child dcl and relays it until the child exits.
 /// Returns the child's exit code.
-pub async fn run(listening: Listening, args: Vec<String>, workspace: &Path) -> Result<i32> {
+pub async fn run(listening: Listening, args: Vec<String>, workspace: &Path, data_dir: &Path) -> Result<i32> {
+    let args = resolved_data_args(args, data_dir);
     let local = terminal_size();
     let pty = portable_pty::native_pty_system()
         .openpty(PtySize {
@@ -678,7 +695,7 @@ pub async fn run(listening: Listening, args: Vec<String>, workspace: &Path) -> R
     let _raw = RawMode;
     let mut input = spawn_local_input();
     let (requests_sender, mut requests) = mpsc::channel::<Control>(16);
-    let (authenticated, mut handshakes) = mpsc::channel::<Channel>(8);
+    let (authenticated, mut handshakes) = mpsc::channel::<(uuid::Uuid, Channel)>(8);
     let mut filter = QueryFilter::default();
     let mut stdout = std::io::stdout();
     let mut size_check = tokio::time::interval(Duration::from_millis(250));
@@ -698,18 +715,21 @@ pub async fn run(listening: Listening, args: Vec<String>, workspace: &Path) -> R
             accepted = async { host.listening.as_ref().unwrap().listener.accept().await }, if host.listening.is_some() => {
                 if let Ok((stream, address)) = accepted {
                     let token = host.listening.as_ref().unwrap().token.clone();
+                    let generation = host.listening.as_ref().unwrap().generation;
                     let authenticated = authenticated.clone();
                     tokio::spawn(async move {
                         match tokio::time::timeout(peer::HANDSHAKE_TIMEOUT, peer::handshake(stream, &token, false)).await {
-                            Ok(Ok(channel)) => { let _ = authenticated.send(channel).await; }
+                            Ok(Ok(channel)) => { let _ = authenticated.send((generation, channel)).await; }
                             Ok(Err(error)) => tracing::warn!("Remote Control rejected {address}: {error:#}"),
                             Err(_) => tracing::warn!("Remote Control handshake with {address} timed out"),
                         }
                     });
                 }
             },
-            Some(channel) = handshakes.recv() => {
-                if host.listening.is_some() { host.attach(channel); }
+            Some((generation, channel)) = handshakes.recv() => {
+                if host.listening.as_ref().is_some_and(|listener| listener.generation == generation) {
+                    host.attach(channel);
+                }
             },
             Some(event) = async { host.client.as_mut().unwrap().inbound.recv().await }, if host.client.is_some() => match event {
                 FromClient::Input(bytes) => host.write_child(&bytes),
@@ -796,6 +816,23 @@ mod tests {
     #[test]
     fn launcher_keeps_permission_and_workspace_flags() {
         assert_eq!(launch_args(&strings(&["--rc", "listen", "--port", "30087", "--dangerously-skip-permissions", "-C", "/work"])), strings(&["--dangerously-skip-permissions", "-C", "/work"]));
+    }
+
+    #[test]
+    fn data_root_is_resolved_before_child_changes_directory() {
+        for original in [strings(&["--data-dir", "relative", "--model", "m"]), strings(&["--data-dir=relative", "--model", "m"])] {
+            assert_eq!(resolved_data_args(original, Path::new("/absolute/data")), strings(&["--model", "m", "--data-dir", "/absolute/data"]));
+        }
+    }
+
+    #[tokio::test]
+    async fn relisten_changes_handshake_generation() {
+        let options = Options { host: "127.0.0.1".parse().unwrap(), port: 0 };
+        let first = Listening::bind(&options).await.unwrap();
+        let generation = first.generation;
+        drop(first);
+        let second = Listening::bind(&options).await.unwrap();
+        assert_ne!(generation, second.generation);
     }
 
     #[test]

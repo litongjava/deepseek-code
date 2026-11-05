@@ -39,6 +39,11 @@ pub(super) fn normalize_messages(messages: &[Value]) -> Result<Vec<Value>> {
                     if matches!(block["type"].as_str(), Some("image" | "image_url")) {
                         let normalized = crate::runtime::normalize_user_content(&json!([block]))?;
                         *block = normalized[0].clone();
+                        // Display metadata belongs to saved messages, not provider protocols.
+                        if let Some(object) = block.as_object_mut() {
+                            object.remove("fileName");
+                            object.remove("size");
+                        }
                     }
                 }
             }

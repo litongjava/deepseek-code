@@ -1,4 +1,6 @@
 //! Child tasks reuse ToolLoopExecutor inline: dropping a parent drops every child future.
+#[path = "child_transcript.rs"]
+mod child_transcript;
 use super::{EngineEvent, ToolLoopExecutor};
 use crate::{
     runtime::{RuntimePaths, SessionStore},
@@ -38,6 +40,75 @@ impl OwnedChild {
                 .context("Owned child permissions unavailable")?,
             self.executor.provider.clone(),
         ))
+    }
+}
+
+async fn standalone_child_executable() -> Result<std::path::PathBuf> {
+    let current = std::env::current_exe()?;
+    if matches!(
+        current.file_stem().and_then(|name| name.to_str()),
+        Some("dcl" | "deepseek-code-cli")
+    ) {
+        return Ok(current);
+    }
+    let name = if cfg!(windows) { "dcl.exe" } else { "dcl" };
+    let mut candidates = Vec::new();
+    if let Some(directory) = current.parent() {
+        candidates.push(directory.join(name));
+    }
+    if let Some(path) = std::env::var_os("PATH") {
+        candidates.extend(
+            std::env::split_paths(&path)
+                .filter(|path| path.is_absolute())
+                .map(|path| path.join(name)),
+        );
+    }
+    for candidate in candidates
+        .into_iter()
+        .filter(|path| path.is_file() && path != &current)
+    {
+        let mut command = tokio::process::Command::new(&candidate);
+        command.arg("--version").kill_on_drop(true);
+        #[cfg(windows)]
+        command.creation_flags(0x08000000);
+        if let Ok(Ok(output)) =
+            tokio::time::timeout(std::time::Duration::from_secs(3), command.output()).await
+        {
+            let version = String::from_utf8_lossy(&output.stdout);
+            if output.status.success()
+                && version.split_whitespace().next() == Some("dcl")
+                && version.split_whitespace().nth(1) == Some(env!("CARGO_PKG_VERSION"))
+            {
+                return Ok(candidate);
+            }
+        }
+    }
+    anyhow::bail!("Background agent launcher unavailable: install the matching standalone dcl CLI beside Desktop or on PATH")
+}
+
+struct InvocationGuard {
+    context: ServiceContext,
+    key: String,
+    value: Value,
+}
+
+impl InvocationGuard {
+    fn finish(&mut self, result: &Result<Value>) -> Result<()> {
+        self.value["status"] = json!(match result {
+            Ok(value) if value["backgrounded"] == true => "running",
+            Ok(_) => "completed",
+            Err(_) => "failed",
+        });
+        self.context.save_setting(&self.key, &self.value)
+    }
+}
+
+impl Drop for InvocationGuard {
+    fn drop(&mut self) {
+        if self.value["status"] == "starting" {
+            self.value["status"] = json!("cancelled");
+            let _ = self.context.save_setting(&self.key, &self.value);
+        }
     }
 }
 
@@ -565,6 +636,42 @@ impl ToolLoopExecutor {
         self.execute_delegated_typed(input, None, None).await
     }
 
+    pub(super) async fn execute_delegated_invocation(
+        &self,
+        input: &Value,
+        tool_use_id: &str,
+    ) -> Result<Value> {
+        Box::pin(self.execute_delegated_with(input, None, None, true, false, Some(tool_use_id)))
+            .await
+    }
+
+    fn record_child_invocation(
+        &self,
+        context: &ServiceContext,
+        child: &str,
+        input: &Value,
+        tool_use_id: Option<&str>,
+        mode: &str,
+    ) -> Result<Option<InvocationGuard>> {
+        let Some(tool_use_id) = tool_use_id else {
+            return Ok(None);
+        };
+        let parent = self.conv_id.as_deref().context("Child owner unavailable")?;
+        let parent_message_id = context.db.with_conn(|conn| -> Result<String> {
+            use rusqlite::OptionalExtension;
+            Ok(conn.query_row("SELECT id FROM messages WHERE conversation_id=?1 AND role='assistant' ORDER BY sort_order DESC LIMIT 1", [parent], |row| row.get(0)).optional()?.unwrap_or_default())
+        })??;
+        let attempt_id = uuid::Uuid::new_v4().to_string();
+        let key = format!("subagent_invocation:{parent}:{tool_use_id}:{attempt_id}");
+        let value = json!({"parent_session_id":parent,"parent_message_id":parent_message_id,"tool_use_id":tool_use_id,"child_session_id":child,"attempt_id":attempt_id,"mode":mode,"status":"starting","description":input["description"].as_str().unwrap_or("Agent")});
+        context.save_setting(&key, &value)?;
+        Ok(Some(InvocationGuard {
+            context: context.clone(),
+            key,
+            value,
+        }))
+    }
+
     /// Workflow children inherit authority and may only narrow their tool set.
     pub(super) async fn execute_delegated_typed(
         &self,
@@ -579,8 +686,14 @@ impl ToolLoopExecutor {
     /// A deep-research child: a typed delegation that may fetch any page
     /// without asking, since the user explicitly started web research with
     /// /deep-research. Deny and ask rules for WebFetch still apply.
-    pub(super) async fn execute_research_child(&self, input: &Value, schema: Value, tools: Vec<String>) -> Result<Value> {
-        Box::pin(self.execute_delegated_with(input, Some(schema), Some(tools), false, true)).await
+    pub(super) async fn execute_research_child(
+        &self,
+        input: &Value,
+        schema: Value,
+        tools: Vec<String>,
+    ) -> Result<Value> {
+        Box::pin(self.execute_delegated_with(input, Some(schema), Some(tools), false, true, None))
+            .await
     }
 
     pub(super) async fn execute_delegated_authorized(
@@ -591,7 +704,7 @@ impl ToolLoopExecutor {
         preapproved: bool,
     ) -> Result<Value> {
         // Boxed: the delegation future is large and nests inside tool calls.
-        Box::pin(self.execute_delegated_with(input, schema, tools, preapproved, false)).await
+        Box::pin(self.execute_delegated_with(input, schema, tools, preapproved, false, None)).await
     }
 
     async fn execute_delegated_with(
@@ -601,6 +714,7 @@ impl ToolLoopExecutor {
         tools: Option<Vec<String>>,
         preapproved: bool,
         web_research: bool,
+        tool_use_id: Option<&str>,
     ) -> Result<Value> {
         let input = if preapproved {
             input.clone()
@@ -619,19 +733,46 @@ impl ToolLoopExecutor {
             }
         };
         if let Some(id) = input["resume"].as_str() {
-            return Box::pin(self.resume_owned_child(id, input["prompt"].as_str(), false)).await;
+            let root = self
+                .search_config_path
+                .as_deref()
+                .and_then(|path| path.parent())
+                .context("Runtime unavailable")?;
+            let context = crate::services::session_messages::context(root)?;
+            let saved: Value = context
+                .setting(&format!("delegation.{id}"))?
+                .context("Child ownership record unavailable")?;
+            ensure!(
+                saved["parent_session_id"].as_str() == self.conv_id.as_deref(),
+                "Child belongs to another owner"
+            );
+            let mut invocation =
+                self.record_child_invocation(&context, id, &input, tool_use_id, "foreground")?;
+            let result =
+                Box::pin(self.resume_owned_child(id, input["prompt"].as_str(), false)).await;
+            if let Some(invocation) = &mut invocation {
+                invocation.finish(&result)?;
+            }
+            return result;
         }
         if input["run_in_background"] == true && schema.is_none() && tools.is_none() {
-            return Box::pin(self.spawn_background_agent(&input)).await;
+            return Box::pin(self.spawn_background_agent(&input, tool_use_id)).await;
         }
         let mut prepared = Box::pin(self.prepare_delegated_child(&input, schema, tools)).await?;
+        let mut invocation = self.record_child_invocation(
+            &prepared.context,
+            &prepared.id,
+            &input,
+            tool_use_id,
+            "foreground",
+        )?;
         if web_research {
             prepared.child.raw_web_fetch = true;
             if let Some(manager) = &prepared.child.permission_manager {
                 manager.allow_in_session(&prepared.id, "WebFetch");
             }
         }
-        Box::pin(self.run_owned_child(
+        let result = Box::pin(self.run_owned_child(
             prepared.context,
             prepared.id,
             prepared.agent_type,
@@ -639,12 +780,19 @@ impl ToolLoopExecutor {
             prepared.receiver,
             prepared.policy,
         ))
-        .await
+        .await;
+        if let Some(invocation) = &mut invocation {
+            invocation.finish(&result)?;
+        }
+        result
     }
 
     /// Arguments and environment that start a `dcl` child with this session's
     /// provider, model and permission mode.
-    pub(super) fn child_cli_launch(&self, root: &std::path::Path) -> Result<(Vec<String>, Vec<(String, String)>)> {
+    pub(super) fn child_cli_launch(
+        &self,
+        root: &std::path::Path,
+    ) -> Result<(Vec<String>, Vec<(String, String)>)> {
         let provider = &self.provider;
         let mode = self
             .permission_manager
@@ -659,15 +807,25 @@ impl ToolLoopExecutor {
         ];
         if provider.provider.builtin_id.is_none() {
             arguments.extend(["--base-url".into(), provider.provider.base_url.clone()]);
-            arguments.extend(["--api-format".into(), match provider.provider.api_format {
-                crate::native_engine::provider_manager::ApiFormat::Anthropic => "anthropic",
-                crate::native_engine::provider_manager::ApiFormat::OpenAI => "openai",
-            }.into()]);
+            arguments.extend([
+                "--api-format".into(),
+                match provider.provider.api_format {
+                    crate::native_engine::provider_manager::ApiFormat::Anthropic => "anthropic",
+                    crate::native_engine::provider_manager::ApiFormat::OpenAI => "openai",
+                }
+                .into(),
+            ]);
         }
-        let mut environment = vec![("CLAUDE_RUST_WORKER_MODEL".to_owned(), serde_json::to_string(&provider.model)?)];
+        let mut environment = vec![(
+            "CLAUDE_RUST_WORKER_MODEL".to_owned(),
+            serde_json::to_string(&provider.model)?,
+        )];
         if !provider.provider.api_key.is_empty() {
             arguments.extend(["--api-key-env".into(), "CLAUDE_RUST_CHILD_API_KEY".into()]);
-            environment.push(("CLAUDE_RUST_CHILD_API_KEY".into(), provider.provider.api_key.clone()));
+            environment.push((
+                "CLAUDE_RUST_CHILD_API_KEY".into(),
+                provider.provider.api_key.clone(),
+            ));
         }
         Ok((arguments, environment))
     }
@@ -676,7 +834,11 @@ impl ToolLoopExecutor {
     /// session as a background task with the same provider, model and
     /// permission mode, and this call returns at once. The host announces it
     /// and wakes this session when it finishes.
-    async fn spawn_background_agent(&self, input: &Value) -> Result<Value> {
+    async fn spawn_background_agent(
+        &self,
+        input: &Value,
+        tool_use_id: Option<&str>,
+    ) -> Result<Value> {
         ensure!(
             self.delegation_depth == 0,
             "Background agents start from the main session only"
@@ -690,21 +852,45 @@ impl ToolLoopExecutor {
             .and_then(|p| p.parent())
             .context("Runtime directory is unavailable")?
             .to_path_buf();
-        let context = ServiceContext::open(RuntimePaths::new(root.clone())?, Arc::new(EnvironmentCredentials))?;
+        let context = ServiceContext::open(
+            RuntimePaths::new(root.clone())?,
+            Arc::new(EnvironmentCredentials),
+        )?;
         let agent_type = input["agent_type"].as_str().unwrap_or("general");
         let definition = agents::resolve(&context, agent_type)?;
         let description = input["description"]
             .as_str()
             .filter(|text| !text.trim().is_empty())
             .map(str::to_owned)
-            .unwrap_or_else(|| prompt.lines().next().unwrap_or_default().chars().take(60).collect());
+            .unwrap_or_else(|| {
+                prompt
+                    .lines()
+                    .next()
+                    .unwrap_or_default()
+                    .chars()
+                    .take(60)
+                    .collect()
+            });
         let provider = &self.provider;
-        let child = SessionStore::new(context.db.clone()).create(std::path::Path::new(&self.workspace_cwd), &provider.model.id, &provider.provider.id)?;
+        let child = SessionStore::new(context.db.clone()).create(
+            std::path::Path::new(&self.workspace_cwd),
+            &provider.model.id,
+            &provider.provider.id,
+        )?;
         crate::services::permission_authority::record_user(&context.db, &child, &json!(prompt))?;
         let (mut arguments, mut environment) = self.child_cli_launch(&root)?;
-        arguments.extend(["--resume".into(), child.clone(), "--print".into(), "--output-format".into(), "stream-json".into()]);
+        arguments.extend([
+            "--resume".into(),
+            child.clone(),
+            "--print".into(),
+            "--output-format".into(),
+            "stream-json".into(),
+        ]);
         if !definition.system_prompt.trim().is_empty() {
-            arguments.extend(["--append-system-prompt".into(), definition.system_prompt.clone()]);
+            arguments.extend([
+                "--append-system-prompt".into(),
+                definition.system_prompt.clone(),
+            ]);
         }
         if let Some(model) = input["model"].as_str().filter(|model| !model.trim().is_empty()) {
             let at = arguments.iter().position(|arg| arg == "--model").context("child model argument")? + 1;
@@ -739,7 +925,9 @@ impl ToolLoopExecutor {
         };
         agents::bind(&context.db, &child, &definition)?;
         arguments.extend(["--".into(), prompt.into()]);
-        let executable = std::env::current_exe()?;
+        let executable = standalone_child_executable().await?;
+        let mut invocation =
+            self.record_child_invocation(&context, &child, input, tool_use_id, "background")?;
         let job = crate::services::background_sessions::spawn(
             &root,
             &executable,
@@ -752,11 +940,24 @@ impl ToolLoopExecutor {
             &child,
             &format!("Agent: {description}"),
             &environment,
-        )?;
+        );
+        if let Err(error) = job {
+            if let Some(invocation) = &mut invocation {
+                invocation.finish(&Err(anyhow::anyhow!(error.to_string())))?;
+            }
+            return Err(error);
+        }
+        let job = job?;
+        if let Some(invocation) = &mut invocation {
+            invocation.finish(&Ok(json!({"backgrounded":true})))?;
+        }
         context.save_setting(
             &format!("background-agent.{}", job.id),
             &json!({"agent_type":definition.id,"description":description,"parent":parent,"session_id":child,"started_at":chrono::Utc::now().to_rfc3339()}),
         )?;
+        if let Some(invocation) = &mut invocation {
+            invocation.finish(&Ok(json!({"backgrounded":true})))?;
+        }
         Ok(json!({
             "agent_id": job.id,
             "session_id": child,
@@ -882,9 +1083,10 @@ impl ToolLoopExecutor {
                             .into_iter()
                             .map(|tool| tool.name)
                             .filter(|name| {
-                                agent.mcp_servers.iter().any(|server| {
-                                    name.starts_with(&format!("mcp__{server}__"))
-                                })
+                                agent
+                                    .mcp_servers
+                                    .iter()
+                                    .any(|server| name.starts_with(&format!("mcp__{server}__")))
                             }),
                     );
                 }
@@ -989,7 +1191,10 @@ impl ToolLoopExecutor {
         } else {
             agents::bind(&context.db, &id, &definition)?;
         }
-        context.save_setting(&format!("agent-description.{id}"), &input["description"].as_str().unwrap_or(prompt))?;
+        context.save_setting(
+            &format!("agent-description.{id}"),
+            &input["description"].as_str().unwrap_or(prompt),
+        )?;
         sessions.append(&id, "user", prompt)?;
         let (events, receiver) = tokio::sync::mpsc::channel(500);
         let mut system = format!(
@@ -1107,12 +1312,15 @@ impl ToolLoopExecutor {
                 tracing::warn!("SubagentStart hook: {warning}");
             }
         }
-        child.max_tool_iterations = runtime
-            .as_ref()
-            .and_then(|agent| agent.max_turns)
-            .map_or(self.max_tool_iterations, |limit| {
-                Some(self.max_tool_iterations.map_or(limit as usize, |parent| parent.min(limit as usize)))
-            });
+        child.max_tool_iterations = runtime.as_ref().and_then(|agent| agent.max_turns).map_or(
+            self.max_tool_iterations,
+            |limit| {
+                Some(
+                    self.max_tool_iterations
+                        .map_or(limit as usize, |parent| parent.min(limit as usize)),
+                )
+            },
+        );
         child.mcp_registry = self.mcp_registry.clone();
         if let Some(memory) = &self.memex_client {
             child = child.with_memex(memory.clone());
@@ -1283,219 +1491,159 @@ impl ToolLoopExecutor {
         Ok(json!({"team_name":team_name,"members":results}))
     }
 
-    async fn run_owned_child(
+    fn run_owned_child(
         &self,
         context: ServiceContext,
         id: String,
         agent_type: String,
         mut child: ToolLoopExecutor,
-        mut receiver: tokio::sync::mpsc::Receiver<EngineEvent>,
+        receiver: tokio::sync::mpsc::Receiver<EngineEvent>,
         policy: Value,
-    ) -> Result<Value> {
-        let sessions = SessionStore::new(context.db.clone());
-        let binding = owned_binding(
-            &context,
-            self.conv_id.as_deref().context("Child owner unavailable")?,
-            &id,
-            &child.workspace_cwd,
-        )?;
-        if child.execution_lease.is_none() {
-            child.execution_lease = crate::services::session_messages::ExecutionLease::acquire(
-                &context.paths.data_dir,
+    ) -> futures::future::BoxFuture<'_, Result<Value>> {
+        Box::pin(async move {
+            let binding = owned_binding(
+                &context,
+                self.conv_id.as_deref().context("Child owner unavailable")?,
                 &id,
+                &child.workspace_cwd,
             )?;
-        }
-        let mut state = ChildState {
-            context: context.clone(),
-            key: format!("delegation.{id}"),
-            event_tx: self.event_tx.clone(),
-            value: json!({"session_id":id,"parent_session_id":self.conv_id,"agent_type":agent_type,"status":"running","started_at":chrono::Utc::now().to_rfc3339()}),
-            request_id: String::new(),
-            request_base: 0,
-            streamed_bytes: 0,
-        };
-        context.save_setting(&state.key, &state.value)?;
-        let _ = self.event_tx.send(state.progress("started", None)).await;
-        let mut last_preview = Instant::now();
-        let mut assistant_id = uuid::Uuid::new_v4().to_string();
-        let mut tool_rows: HashMap<String, crate::db::message_repo::ToolCallRow> = HashMap::new();
-        let collect_web_evidence = child.response_schema.is_some();
-        let mut web_evidence = Vec::new();
-        let mut evidence_ids = std::collections::HashSet::new();
-        let result = {
-            let execution = Box::pin(child.execute());
-            tokio::pin!(execution);
-            loop {
-                tokio::select! {
-                    biased;
-                    Some(event) = receiver.recv() => {
-                        match event {
-                            EngineEvent::ContextReset { .. } => {
-                                assistant_id = uuid::Uuid::new_v4().to_string();
-                                tool_rows.clear();
-                            }
-                            event @ (EngineEvent::AskUser {..} | EngineEvent::ToolPermission {..} | EngineEvent::AgentProgress {..}) => { let _ = self.event_tx.send(event).await; }
-                            EngineEvent::Usage(usage) => {
-                                state.usage(&usage);
-                                context.save_setting(&state.key, &state.value)?;
-                            }
-                            EngineEvent::RequestSnapshot(snapshot) => {
-                                state.snapshot(&snapshot, &assistant_id)?;
-                            }
-                            EngineEvent::ToolArgDelta { delta, .. } => {
-                                state.streamed(&delta);
-                                if last_preview.elapsed().as_millis() >= 250 {
-                                    context.save_setting(&state.key, &state.value)?;
-                                    last_preview = Instant::now();
-                                }
-                            }
-                            EngineEvent::Text(text) | EngineEvent::Thinking(text) => {
-                                state.streamed(&text);
-                                let mut preview = state.value["preview"].as_str().unwrap_or_default().to_owned();
-                                preview.push_str(&text);
-                                if preview.chars().count() > 8000 { preview = preview.chars().rev().take(8000).collect::<String>().chars().rev().collect(); }
-                                state.value["preview"] = json!(preview);
-                                if last_preview.elapsed().as_millis() >= 250 {
-                                    context.save_setting(&state.key, &state.value)?;
-                                    last_preview = Instant::now();
-                                }
-                            }
-                            EngineEvent::ToolUseStart { tool_name, .. } => {
-                                state.value["current_tool"] = json!(&tool_name);
-                                context.save_setting(&state.key, &state.value)?;
-                                let _ = self.event_tx.send(state.progress("running", Some(tool_name))).await;
-                            }
-                            EngineEvent::ToolUseDone { tool_use_id, tool_name, tool_input, output, is_error }
-                            | EngineEvent::PipelineToolResult { tool_use_id, tool_name, tool_input, output, is_error, .. } => {
-                                if collect_web_evidence && matches!(tool_name.as_str(), "WebSearch" | "WebFetch") && evidence_ids.insert(tool_use_id.clone()) {
-                                    web_evidence.push(json!({"tool_use_id":tool_use_id,"name":tool_name,"input":tool_input,"output":serde_json::from_str::<Value>(&output).unwrap_or_else(|_|Value::String(output.clone())),"is_error":is_error}));
-                                }
-                                let row_id = format!("{assistant_id}:{tool_use_id}");
-                                let previous = tool_rows.get(&row_id);
-                                let sort_order = previous.map_or(tool_rows.len() as i64, |row| row.sort_order);
-                                let row = crate::db::message_repo::ToolCallRow { id: row_id, message_id: assistant_id.clone(), name:tool_name, input:Some(tool_input.to_string()), output:Some(output), is_error, sort_order };
-                                // Parallel execution emits both ordinary and pipeline completion.
-                                // Preserve one result position and one progress notice for the pair.
-                                if previous.is_some_and(|old| old.name == row.name && old.input == row.input && old.output == row.output && old.is_error == row.is_error) {
-                                    continue;
-                                }
-                                let persisted = (|| -> Result<()> {
-                                    context.db.with_conn(|conn| crate::db::message_repo::save_stream_tool_result(conn, &id, &assistant_id, "", &row))??;
-                                    Ok(())
-                                })();
-                                if let Err(error) = persisted {
-                                    state.value["status"] = json!("failed");
-                                    let _ = self.event_tx.send(state.progress("failed", None)).await;
-                                    return Err(error);
-                                }
-                                state.value["current_tool"] = Value::Null;
-                                context.save_setting(&state.key, &state.value)?;
-                                tool_rows.insert(row.id.clone(), row.clone());
-                                let status = if is_error { "tool_failed" } else { "tool_completed" };
-                                let _ = self.event_tx.send(state.progress(status, Some(row.name.clone()))).await;
-                            }
-                            _ => {}
-                        }
-                    }
-                    result = &mut execution => break result,
-                }
+            if child.execution_lease.is_none() {
+                child.execution_lease = crate::services::session_messages::ExecutionLease::acquire(
+                    &context.paths.data_dir,
+                    &id,
+                )?;
             }
-        };
-        match result {
-            Ok((text, reason)) => {
-                // A short response may finish in the same poll that queues its events.
-                // Preserve the final preview even when no streaming tick was observed.
-                state.value["preview"] = json!(text.chars().rev().take(8000).collect::<String>().chars().rev().collect::<String>());
-                while let Ok(event) = receiver.try_recv() {
-                    match event {
-                        EngineEvent::Usage(usage) => state.usage(&usage),
-                        EngineEvent::RequestSnapshot(snapshot) => {
-                            state.snapshot(&snapshot, &assistant_id)?
+            let state = ChildState {
+                context: context.clone(),
+                key: format!("delegation.{id}"),
+                event_tx: self.event_tx.clone(),
+                value: json!({"session_id":id,"parent_session_id":self.conv_id,"agent_type":agent_type,"status":"running","started_at":chrono::Utc::now().to_rfc3339()}),
+                request_id: String::new(),
+                request_base: 0,
+                streamed_bytes: 0,
+            };
+            context.save_setting(&state.key, &state.value)?;
+            let _ = self.event_tx.send(state.progress("started", None)).await;
+            let collect_web_evidence = child.response_schema.is_some();
+            let mut transcript =
+                child_transcript::ChildTranscript::new(state, receiver, collect_web_evidence)?;
+            // Boxing alone still polls the child on the parent's deep tool-call stack.
+            // JoinSet schedules it independently and aborts it if this owner is dropped.
+            let mut execution = tokio::task::JoinSet::new();
+            execution.spawn(async move {
+                let result = child.execute().await;
+                (child, result)
+            });
+            let (mut child, result) = {
+                loop {
+                    tokio::select! {
+                        biased;
+                        Some(event) = transcript.receiver.recv() => {
+                            transcript.process(event).await?;
                         }
-                        _ => {}
-                    }
-                }
-                let failed = matches!(
-                    reason.as_deref(),
-                    Some(
-                        "stream_error"
-                            | "error"
-                            | "interrupted"
-                            | "failed"
-                            | "cancelled"
-                            | "max_iterations"
-                            | "max_tokens"
-                            | "length"
-                            | "incomplete"
-                    )
-                );
-                if let Err(error) = sessions.append(&id, "assistant", &text) {
-                    state.value["status"] = json!("failed");
-                    let _ = self.event_tx.send(state.progress("failed", None)).await;
-                    return Err(error.into());
-                }
-                let status = if failed { "failed" } else { "completed" };
-                state.value["status"] = json!(status);
-                let _ = self.event_tx.send(state.progress(status, None)).await;
-                ensure!(
-                    !failed,
-                    "Child session {id} did not complete: {}",
-                    reason.unwrap_or_default()
-                );
-                if !collect_web_evidence {
-                    // Retain configuration/capabilities, not the last turn's transcript or handles.
-                    child.messages.clear();
-                    child.messages.shrink_to_fit();
-                    child.auto_history.clear();
-                    child.auto_history.shrink_to_fit();
-                    child.streaming_tool_args.clear();
-                    child.streaming_tool_args.shrink_to_fit();
-                    child.message_inbox = None;
-                    child.execution_lease = None;
-                    child.context_manager = child
-                        .memex_client
-                        .clone()
-                        .map(|client| crate::memory::ContextManager::new(Arc::new(client)));
-                    child.answer_waiters = Arc::new(tokio::sync::Mutex::new(HashMap::new()));
-                    child.permission_mailbox = Default::default();
-                    let (events, _receiver) = tokio::sync::mpsc::channel(1);
-                    child.event_tx = events;
-                    let mut registry = self
-                        .owned_children
-                        .lock()
-                        .unwrap_or_else(|e| e.into_inner());
-                    if registry.len() >= 32 {
-                        if let Some(oldest) = registry
-                            .iter()
-                            .min_by_key(|(_, entry)| entry.retained)
-                            .map(|(id, _)| id.clone())
-                        {
-                            registry.remove(&oldest);
+                        result = execution.join_next() => {
+                            break result.context("Child execution task missing")?
+                                .context("Child execution task failed")?;
                         }
                     }
-                    registry.insert(
-                        id.clone(),
-                        OwnedChild {
-                            executor: Box::new(child),
-                            parent: self.conv_id.clone().unwrap_or_default(),
-                            owner_budget: self.child_resumes.clone(),
-                            idle_ready: false,
-                            policy,
-                            binding,
-                            retained: Instant::now(),
-                        },
+                }
+            };
+            // Completion (including errors) can queue events in the final execute poll.
+            transcript.drain().await?;
+            match result {
+                Ok((text, reason)) => {
+                    transcript.finish_text(&text)?;
+                    transcript.state.value["preview"] = json!(text
+                        .chars()
+                        .rev()
+                        .take(8000)
+                        .collect::<String>()
+                        .chars()
+                        .rev()
+                        .collect::<String>());
+                    let failed = matches!(
+                        reason.as_deref(),
+                        Some(
+                            "stream_error"
+                                | "error"
+                                | "interrupted"
+                                | "failed"
+                                | "cancelled"
+                                | "max_iterations"
+                                | "max_tokens"
+                                | "length"
+                                | "incomplete"
+                        )
                     );
+                    let status = if failed { "failed" } else { "completed" };
+                    transcript.state.value["status"] = json!(status);
+                    let _ = self
+                        .event_tx
+                        .send(transcript.state.progress(status, None))
+                        .await;
+                    ensure!(
+                        !failed,
+                        "Child session {id} did not complete: {}",
+                        reason.unwrap_or_default()
+                    );
+                    if !collect_web_evidence {
+                        // Retain configuration/capabilities, not the last turn's transcript or handles.
+                        child.messages.clear();
+                        child.messages.shrink_to_fit();
+                        child.auto_history.clear();
+                        child.auto_history.shrink_to_fit();
+                        child.streaming_tool_args.clear();
+                        child.streaming_tool_args.shrink_to_fit();
+                        child.message_inbox = None;
+                        child.execution_lease = None;
+                        child.context_manager = child
+                            .memex_client
+                            .clone()
+                            .map(|client| crate::memory::ContextManager::new(Arc::new(client)));
+                        child.answer_waiters = Arc::new(tokio::sync::Mutex::new(HashMap::new()));
+                        child.permission_mailbox = Default::default();
+                        let (events, _receiver) = tokio::sync::mpsc::channel(1);
+                        child.event_tx = events;
+                        let mut registry = self
+                            .owned_children
+                            .lock()
+                            .unwrap_or_else(|e| e.into_inner());
+                        if registry.len() >= 32 {
+                            if let Some(oldest) = registry
+                                .iter()
+                                .min_by_key(|(_, entry)| entry.retained)
+                                .map(|(id, _)| id.clone())
+                            {
+                                registry.remove(&oldest);
+                            }
+                        }
+                        registry.insert(
+                            id.clone(),
+                            OwnedChild {
+                                executor: Box::new(child),
+                                parent: self.conv_id.clone().unwrap_or_default(),
+                                owner_budget: self.child_resumes.clone(),
+                                idle_ready: false,
+                                policy,
+                                binding,
+                                retained: Instant::now(),
+                            },
+                        );
+                    }
+                    Ok(
+                        json!({"session_id":id,"status":"completed","result":text,"web_evidence":&transcript.web_evidence,"resume_available":!collect_web_evidence}),
+                    )
                 }
-                Ok(
-                    json!({"session_id":id,"status":"completed","result":text,"web_evidence":web_evidence,"resume_available":!collect_web_evidence}),
-                )
+                Err(error) => {
+                    transcript.state.value["status"] = json!("failed");
+                    let _ = self
+                        .event_tx
+                        .send(transcript.state.progress("failed", None))
+                        .await;
+                    Err(error)
+                }
             }
-            Err(error) => {
-                state.value["status"] = json!("failed");
-                let _ = self.event_tx.send(state.progress("failed", None)).await;
-                Err(error)
-            }
-        }
+        })
     }
 }
 
@@ -1518,11 +1666,23 @@ mod sdk_agent_fields_tests;
 #[cfg(test)]
 #[test]
 fn agent_input_maps_subagent_type_and_defaults_to_background_in_the_main_session() {
-    let input = normalize_agent_input(&json!({"prompt":"p","description":"d","subagent_type":"general-purpose"}), true);
+    let input = normalize_agent_input(
+        &json!({"prompt":"p","description":"d","subagent_type":"general-purpose"}),
+        true,
+    );
     assert_eq!(input["agent_type"], "general");
     assert_eq!(input["run_in_background"], true);
-    let child = normalize_agent_input(&json!({"prompt":"p","subagent_type":"reviewer","run_in_background":false}), true);
-    assert_eq!((child["agent_type"].as_str(), child["run_in_background"].as_bool()), (Some("reviewer"), Some(false)));
+    let child = normalize_agent_input(
+        &json!({"prompt":"p","subagent_type":"reviewer","run_in_background":false}),
+        true,
+    );
+    assert_eq!(
+        (
+            child["agent_type"].as_str(),
+            child["run_in_background"].as_bool()
+        ),
+        (Some("reviewer"), Some(false))
+    );
     assert!(normalize_agent_input(&json!({"prompt":"p"}), false)["run_in_background"].is_null());
 }
 

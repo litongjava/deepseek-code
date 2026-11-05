@@ -7,6 +7,17 @@ vi.mock('../../components/MarkdownRenderer', () => ({ default: ({ content }: { c
 vi.mock('../../components/ToolDiffView', () => ({ default: () => null, shouldUseDiffView: () => false }));
 
 describe('message branch controls', () => {
+  it('keeps the duration separator while removing answer-footer and inter-turn lines', () => {
+    const { container } = render(<MessageList messages={[
+      { role: 'user', content: 'First question' },
+      { role: 'assistant', content: 'Answer', turn: { turnId: 'turn', startedAt: '2026-11-05T00:00:00Z', endedAt: '2026-11-05T00:00:07Z', elapsedMs: 7000, status: 'completed' } },
+      { role: 'user', content: 'Next question' },
+    ]} loading={false} expandedMessages={new Set()} editingMessageIdx={null} editingContent="" compactStatus={{ state: 'idle' }} onToggleExpand={vi.fn()} messageContentRefs={{ current: new Map() }} t={key => key} />);
+    expect(screen.getByLabelText('Turn duration')).toHaveTextContent('Worked for 7s');
+    expect(screen.getByLabelText('Turn duration').querySelector('.h-px')).not.toBeNull();
+    expect(screen.getByLabelText('Response actions').querySelector('.h-px')).toBeNull();
+    expect(container.querySelector('[data-message-index="2"] .h-px')).toBeNull();
+  });
   it('offers branching only after assistant responses in the active conversation list', () => {
     const onBranch = vi.fn();
     render(<MessageList conversationId="session" messages={[{ role: 'user', content: 'Question' }, { role: 'assistant', content: 'Answer' }]}

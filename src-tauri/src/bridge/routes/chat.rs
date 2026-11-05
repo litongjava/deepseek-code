@@ -21,12 +21,24 @@ pub(super) async fn chat_handler(
     State(state): State<AppState>,
     Json(req): Json<ChatRequest>,
 ) -> impl IntoResponse {
+    let _gate = super::input_queue::gate(&state, &req.conversation_id).await;
+    if state.generation_runs.is_active(&req.conversation_id) {
+        return (StatusCode::CONFLICT, Json(serde_json::json!({"error":"Conversation is running; enqueue input instead"}))).into_response();
+    }
+    start_chat(state, req, None).await
+}
+
+pub(super) async fn start_chat(
+    state: AppState,
+    req: ChatRequest,
+    queued: Option<deepseek_code_core::services::input_queue::QueueItem>,
+) -> axum::response::Response {
     crate::metrics::HTTP_REQUESTS_TOTAL.inc();
     let _request_timer = crate::metrics::HTTP_REQUEST_DURATION.start_timer();
 
     let id = req.conversation_id.clone();
     let span = tracing::info_span!("chat_stream", conversation_id = %id);
-    let _enter = span.enter();
+    let _ = span;
 
     {
         let rate_limiter = &state.rate_limiter;
@@ -45,7 +57,18 @@ pub(super) async fn chat_handler(
     let db = state.db_manager.clone();
     let project_conversation_id = req.conversation_id.clone();
     let project_check = tokio::task::spawn_blocking(move || db.with_conn(|conn| {
-        crate::native_engine::workspace::conversation_project(conn, &project_conversation_id)
+        (|| -> anyhow::Result<_> {
+            let conversation =
+                crate::db::conversation_repo::get_conversation(conn, &project_conversation_id)?;
+            if let Some(conversation) = conversation {
+                anyhow::ensure!(
+                    conversation.workspace_mode != "code"
+                        || conversation.project_id.as_deref().is_some_and(|id| !id.is_empty()),
+                    "Select a project before sending messages in Code mode"
+                );
+            }
+            crate::native_engine::workspace::conversation_project(conn, &project_conversation_id)
+        })()
     })).await;
     match project_check {
         Ok(Ok(Ok(_))) => {}
@@ -53,10 +76,19 @@ pub(super) async fn chat_handler(
         _ => return (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({"error": "Could not validate conversation project"}))).into_response(),
     }
 
+    let execution_lease = match super::input_queue::execution_lease(&state.db_manager, &req.conversation_id) {
+        Ok(lease) => lease,
+        Err(error) => return (StatusCode::CONFLICT, Json(serde_json::json!({"error":error.to_string()}))).into_response(),
+    };
     let native_engine = state.native_engine.clone();
     let config_manager = state.config_manager.clone();
     let conv_id = req.conversation_id.clone();
     let model = req.model.clone();
+    if let Err(error) = super::input_queue::remember(&state, &req) {
+        return (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({"error":error.to_string()}))).into_response();
+    }
+    let lifecycle_state = state.clone();
+    let lifecycle_id = conv_id.clone();
     let messages = req.messages;
 
     tracing::info!(module = "Chat", "[1/7] Parsed request: conv_id={}, model={}, messages={}", conv_id, model, messages.len());
@@ -77,6 +109,16 @@ pub(super) async fn chat_handler(
                 }
             }
         }
+        if let Some(item) = &queued {
+            let claimed = if item.state == deepseek_code_core::services::input_queue::QueueState::Queued {
+                deepseek_code_core::services::input_queue::claim(&state.db_manager, &conv_id, item.id, item.revision)
+            } else { Ok(item.clone()) };
+            let result = claimed.and_then(|item| super::input_queue::handoff(&state.db_manager, &conv_id, &item));
+            if let Err(error) = result {
+                return (StatusCode::CONFLICT, Json(serde_json::json!({"error":error.to_string()}))).into_response();
+            }
+        }
+        let user_content = if queued.is_some() { None } else { user_content };
         let model_save = model.clone();
         let saved = tokio::task::spawn_blocking(move || {
             db.with_conn(|conn| {
@@ -165,7 +207,7 @@ pub(super) async fn chat_handler(
             tracing::info!(module = "Chat", "[6/7] Calling engine.send_message...");
 
             let result = tokio::select! {
-                result = engine.send_message_with_history(chat_req, false) => result,
+                result = engine.send_message_with_lease(chat_req, false, execution_lease) => result,
                 _ = run.stop_requested() => Err(anyhow::anyhow!("Turn cancelled before model request")),
             };
             match result {
@@ -190,7 +232,7 @@ pub(super) async fn chat_handler(
     let started = rx_opt;
 
     let (sse_tx, sse_rx) = tokio::sync::mpsc::channel(64);
-    let transport = sse_tx.clone();
+    // Execution belongs to the backend; disconnecting an observer does not stop it.
     let db_for_stream = state.db_manager.clone();
     crate::metrics::ACTIVE_SSE_CONNECTIONS.inc();
     let stream = async_stream::stream! {
@@ -205,6 +247,7 @@ pub(super) async fn chat_handler(
                     Ok(record) => yield Ok::<Event, Infallible>(Event::default().data(serde_json::json!({"type":"turn_timing","turn":record,"assistant_id":first_assistant_id}).to_string())),
                     Err(error) => tracing::error!("Could not finalize failed turn: {error:#}"),
                 }
+                let _ = deepseek_code_core::services::input_queue::set_paused(&db_clone, &conv_id, true);
                 drop(run);
                 crate::metrics::ACTIVE_SSE_CONNECTIONS.dec();
                 yield Ok::<Event, Infallible>(Event::default().data(serde_json::json!({"type": "error", "error": start_error}).to_string()));
@@ -228,10 +271,6 @@ pub(super) async fn chat_handler(
         loop {
             let next = tokio::select! {
                 biased;
-                _ = transport.closed() => {
-                    terminal_event = Some(serde_json::json!({"type":"message_stop","stop_reason":"cancelled","full_text":full_text,"error":"Response transport disconnected"}));
-                    break;
-                }
                 _ = run.stop_requested() => {
                     // Same path as a disconnect: dropping rx below cancels this turn's executor.
                     terminal_event = Some(serde_json::json!({"type":"message_stop","stop_reason":"cancelled","full_text":full_text}));
@@ -320,7 +359,10 @@ pub(super) async fn chat_handler(
                     }))
                 }
                 crate::native_engine::tool_loop::EngineEvent::QueuedInput(input) => {
-                    if let Some((tool_id, ..)) = collected_tool_calls.last() {
+                    let queue_item = input.origin.strip_prefix("queue-input-")
+                        .and_then(|id| id.parse::<i64>().ok())
+                        .and_then(|id| deepseek_code_core::services::input_queue::list(&db_clone, &conv_id).ok()?.into_iter().find(|item| item.id == id));
+                    if let Some((tool_id, ..)) = collected_tool_calls.last().filter(|_| queue_item.is_none()) {
                         let saved = db_clone.with_conn(|conn| -> anyhow::Result<()> {
                             let call_id = format!("{assistant_id}:{tool_id}");
                             let mut inputs = deepseek_code_core::services::input_queue::load_delivered(conn, &call_id)?;
@@ -329,7 +371,7 @@ pub(super) async fn chat_handler(
                         });
                         if !matches!(saved, Ok(Ok(()))) { tracing::error!("Could not persist queued input: {saved:?}"); }
                     }
-                    Some(serde_json::json!({"type": "queued_input", "text": input.text, "content": input.content, "origin": input.origin}))
+                    Some(serde_json::json!({"type": "queued_input", "text": input.text, "content": input.content, "origin": input.origin, "queueItem": queue_item}))
                 }
                 crate::native_engine::tool_loop::EngineEvent::Text(text) => {
                     full_text.push_str(&text);
@@ -415,14 +457,19 @@ pub(super) async fn chat_handler(
                         "usage": usage,
                     }))
                 }
-                crate::native_engine::tool_loop::EngineEvent::AskUser { request_id, question, options, .. } => {
+                crate::native_engine::tool_loop::EngineEvent::AskUser { request_id, tool_use_id, tool_input, question, options } => {
+                    let source = deepseek_code_core::native_engine::permission_response::request_owner(&request_id)
+                        .map(|owner| owner.session_id).unwrap_or_else(|| conv_id.clone());
                     let options_json: Vec<serde_json::Value> = options.iter()
                         .map(|o| serde_json::json!({"label": o, "description": ""}))
                         .collect();
                     Some(serde_json::json!({
                         "type": "ask_user",
                         "request_id": request_id,
-                        "tool_use_id": "ask_user_tool",
+                        "tool_use_id": tool_use_id,
+                        "session_id": source,
+                        "tool_input": tool_input,
+                        "planApprovalRequest": tool_input.get("planApprovalRequest"),
                         "questions": [{
                             "question": question,
                             "options": options_json
@@ -440,6 +487,7 @@ pub(super) async fn chat_handler(
                     }
                     Some(serde_json::json!({
                         "type": "tool_permission",
+                        "session_id": deepseek_code_core::native_engine::permission_response::request_owner(&request_id).map(|owner| owner.session_id).unwrap_or_else(|| conv_id.clone()),
                         "request_id": request_id,
                         "tool_use_id": tool_use_id,
                         "tool_name": tool_name,
@@ -578,7 +626,10 @@ pub(super) async fn chat_handler(
                 })
             }).await;
             let persisted = matches!(saved, Ok(Ok(Ok(()))));
-            if !persisted { tracing::error!("Could not persist final assistant trajectory: {:?}", saved); }
+            if !persisted {
+                tracing::error!("Could not persist final assistant trajectory: {:?}", saved);
+                let _ = deepseek_code_core::services::input_queue::set_paused(&lifecycle_state.db_manager, &lifecycle_id, true);
+            }
             for snapshot in pending_snapshot_updates {
                 yield Ok::<Event, Infallible>(Event::default().data(serde_json::json!({"type":"request_snapshot", "snapshot":snapshot, "persisted":persisted}).to_string()));
             }
@@ -586,15 +637,19 @@ pub(super) async fn chat_handler(
         if let Some(record) = final_turn {
             yield Ok::<Event, Infallible>(Event::default().data(serde_json::json!({"type":"turn_timing","turn":record,"assistant_id":final_assistant_id}).to_string()));
         }
+        if terminal_event.as_ref().is_none_or(|event| event["type"] == "error" || event["stop_reason"] == "cancelled" || event["stop_reason"] == "error" || event["stop_reason"] == "channel_closed") {
+            let _ = deepseek_code_core::services::input_queue::set_paused(&lifecycle_state.db_manager, &lifecycle_id, true);
+        }
         // Report idle only once the trajectory above is persisted.
         drop(run);
+        super::input_queue::kick(lifecycle_state, lifecycle_id);
         if let Some(event) = terminal_event {
             yield Ok::<Event, Infallible>(Event::default().data(event.to_string()));
         }
     };
 
-    // The collector observes transport closure, cancels only its executor, and
-    // finishes persisting the partial trajectory before this writer exits.
+    // Collection and durable completion continue after an observer disconnects.
+    // Explicit Stop remains the only transport-independent cancellation action.
     tokio::spawn(async move {
         use futures::StreamExt;
         futures::pin_mut!(stream);

@@ -1,3 +1,5 @@
+import ViewSubagentButton from './ViewSubagentButton';
+import TypedToolAttachments from './TypedToolAttachments';
 import { useId, useState } from 'react';
 import GridDisclosure from '../../components/ui/GridDisclosure';
 import { ChevronRight, Code2, Terminal, Brain } from 'lucide-react';
@@ -24,7 +26,7 @@ function groupStatus(tools: any[], live: boolean): string {
   if (statuses.includes('running')) return live ? 'running' : 'interrupted';
   return statuses.every(status => status === 'done') ? 'done' : 'interrupted';
 }
-function ToolBlock({ tool, level, live, id, onInspect }: { tool: any; level: DetailLevel; live: boolean; id: string; onInspect?: (id: string) => void }) {
+function ToolBlock({ conversationId, messageId, tool, level, live, id, onInspect }: { conversationId?: string | null; messageId?: string; tool: any; level: DetailLevel; live: boolean; id: string; onInspect?: (id: string) => void }) {
   const panelId = useId();
   const [expanded, setExpanded] = useState<boolean | null>(null);
   const open = expanded ?? level === 'verbose';
@@ -57,15 +59,17 @@ function ToolBlock({ tool, level, live, id, onInspect }: { tool: any; level: Det
       </div>
       {level === 'verbose' && command !== rawText(tool.input) && <div className="border-b border-claude-border p-3"><CopyButton text={rawText(tool.input)} label="复制参数" /><pre className="max-h-64 overflow-auto whitespace-pre-wrap">{rawText(tool.input)}</pre></div>}
       <div className="p-3"><div className="mb-2 flex items-center justify-between"><span className={outputColor}>{outputLabel}</span>{level !== 'compact' && <CopyButton text={output} label="复制输出" />}</div>
+        <TypedToolAttachments result={tool.mcp_result} />
         <ToolOutput name={tool.name} result={result} showLabels={hasStdout && hasStderr} empty={running ? '等待输出…' : '(无输出)'} />
       </div>
       {toolCategory(tool.name) !== 'Ran commands' && shouldUseDiffView(tool.name, input) && <ToolDiffView toolName={tool.name} input={input} result={tool.result} />}
       {level === 'verbose' && <div className={`border-t border-claude-border p-3 ${failed ? 'text-red-500' : 'text-claude-textSecondary'}`}>{status} · {tool.startedAt && tool.endedAt ? `${tool.endedAt - tool.startedAt} ms` : '耗时未记录'}</div>}
     </div></GridDisclosure>
+    {/^(Agent|Task)$/i.test(tool.name) && <ViewSubagentButton conversationId={conversationId} toolId={messageId && tool.id?.startsWith(`${messageId}:`) ? tool.id.slice(messageId.length + 1) : tool.id} live={live} />}
     {status === 'done' && <InspectButton id={id} onInspect={onInspect} />}
   </div>;
 }
-function ToolGroup({ steps, message, index, level, live, onInspect }: { steps: ProcessStep[]; message: any; index: number; level: DetailLevel; live: boolean; onInspect?: (id: string) => void }) {
+function ToolGroup({ conversationId, steps, message, index, level, live, onInspect }: { conversationId?: string | null; steps: ProcessStep[]; message: any; index: number; level: DetailLevel; live: boolean; onInspect?: (id: string) => void }) {
   const panelId = useId();
   const [open, setOpen] = useState(false);
   const tools = steps.map(s => (message.toolCalls || []).find((t: any, i: number) => (t.id || String(i)) === s.toolId));
@@ -73,7 +77,7 @@ function ToolGroup({ steps, message, index, level, live, onInspect }: { steps: P
   const status = groupStatus(tools, live);
   return <div className={level === 'standard' ? 'chat-tool-group my-2 rounded-xl px-3' : 'my-1'}>
     {grouped && <div><button type="button" aria-controls={panelId} aria-expanded={open} className={`flex items-center gap-2 py-2 text-sm ${status === 'error' ? 'text-red-500' : 'text-claude-textSecondary'}`} onClick={() => setOpen(!open)}><StatusDot status={status} />{toolCategory(tools[0]?.name || 'Tools')} · {steps.length}<ChevronRight size={14} className={open ? 'rotate-90' : ''} />{live && tools.some(t => t?.status === 'running') && <span className="animate-pulse">运行中</span>}</button></div>}
-    <GridDisclosure open={!grouped || open} id={panelId}>{steps.map((s, i) => tools[i] && <ToolBlock key={`${s.id}:${level}`} id={recordId(index, s.id)} tool={tools[i]} level={level} live={live} onInspect={onInspect} />)}</GridDisclosure>
+    <GridDisclosure open={!grouped || open} id={panelId}>{steps.map((s, i) => tools[i] && <ToolBlock messageId={message.id} conversationId={conversationId} key={`${s.id}:${level}`} id={recordId(index, s.id)} tool={tools[i]} level={level} live={live} onInspect={onInspect} />)}</GridDisclosure>
   </div>;
 }
 function ThinkingBlock({ step }: { step: ProcessStep }) {
@@ -86,8 +90,7 @@ function ThinkingBlock({ step }: { step: ProcessStep }) {
     <GridDisclosure open={open} id={panelId}><div className="mt-2 max-h-96 overflow-auto whitespace-pre-wrap pl-4">{step.text}</div></GridDisclosure>
   </div>;
 }
-export default function WorkDetails({ message, index, live, onInspect }: { message: any; index: number; live: boolean; onInspect?: (id: string) => void }) {
-  const [workCollapsed, setWorkCollapsed] = useState(false);
+export default function WorkDetails({ conversationId, message, index, live, onInspect }: { conversationId?: string | null; message: any; index: number; live: boolean; onInspect?: (id: string) => void }) {
   const mode = useWorkspaceModeStore(s => s.mode);
   const level = useGeneralSettingsStore(s => s.workDetailsByMode[mode]);
   const coding = useGeneralSettingsStore(s => s.showCodingView);
@@ -99,16 +102,13 @@ export default function WorkDetails({ message, index, live, onInspect }: { messa
     if (step.kind === 'tool' && last?.[0].kind === 'tool' && category(last[0]) === category(step)) last.push(step);
     else items.push([step]);
   }
-  const hasWork = steps.some(s => s.kind !== 'text');
   const inspect = coding ? onInspect : undefined;
-  const finalStep = steps[steps.length - 1]?.kind === 'text' ? steps[steps.length - 1] : undefined;
   return <div className="chat-work-details">
-    {hasWork && <div className="mb-4 pb-3 text-sm tabular-nums text-claude-textSecondary">{level === 'compact' ? <button type="button" aria-expanded={!workCollapsed} onClick={() => setWorkCollapsed(!workCollapsed)} className="flex items-center gap-2">{'Work details'}<ChevronRight size={14} className={workCollapsed ? '' : 'rotate-90'} /></button> : 'Work details'}</div>}
     {items.map(group => {
       const s = group[0];
-      if (s.kind === 'tool') return <GridDisclosure key={s.id} open={level !== 'compact' || !workCollapsed}><ToolGroup key={s.id} steps={group} message={message} index={index} level={level} live={live} onInspect={inspect} /></GridDisclosure>;
+      if (s.kind === 'tool') return <ToolGroup conversationId={conversationId} key={s.id} steps={group} message={message} index={index} level={level} live={live} onInspect={inspect} />;
       if (s.kind === 'thinking') return level === 'compact' || level === 'standard' ? null : <ThinkingBlock key={`${s.id}:${level}`} step={s} />;
-      return <GridDisclosure key={s.id} open={level !== 'compact' || !workCollapsed || s === finalStep}><div className="my-3"><MarkdownRenderer content={s.text || ''} citations={message.citations} isStreaming={live && s === steps[steps.length - 1]} /></div></GridDisclosure>;
+      return <div key={s.id} className="my-3"><MarkdownRenderer content={s.text || ''} citations={message.citations} isStreaming={live && s === steps[steps.length - 1]} /></div>;
     })}
     {message.requestError && <RequestErrorCard error={message.requestError} />}
   </div>;

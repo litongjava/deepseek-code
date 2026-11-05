@@ -1,0 +1,50 @@
+import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
+import { afterEach, expect, it, vi } from 'vitest';
+import ViewSubagentButton from './ViewSubagentButton';
+import WorkDetails from './WorkDetails';
+import { useGeneralSettingsStore } from '../../stores/useGeneralSettingsStore';
+import { useWorkspaceModeStore } from '../../stores/useWorkspaceModeStore';
+vi.mock('../../components/MarkdownRenderer', () => ({ default: ({ content }: { content: string }) => <p>{content}</p> }));
+import TypedToolAttachments from './TypedToolAttachments';
+import { listSubagents } from '../../api/subagents';
+import { OPEN_PANEL_EVENT } from '../rightSidebar/useRightSidebarController';
+import { useRightSidebarStore } from '../../stores/useRightSidebarStore';
+vi.mock('../../api/subagents', () => ({ listSubagents: vi.fn() }));
+afterEach(cleanup);
+const invocation = { parent_session_id: 'p', parent_message_id: 'm', tool_use_id: 'exact', child_session_id: 'child', attempt_id: 'a', mode: 'foreground', status: 'running', description: 'same name' };
+it('opens while running with exact invocation identity independently of Inspect and Result', async () => {
+  vi.mocked(listSubagents).mockResolvedValue([invocation]);
+  const opened = vi.fn(); window.addEventListener(OPEN_PANEL_EVENT, opened);
+  render(<ViewSubagentButton conversationId="p" toolId="exact" live />);
+  fireEvent.click(screen.getByRole('button', { name: 'View subagent' }));
+  await waitFor(() => expect(opened).toHaveBeenCalledTimes(1));
+  expect(listSubagents).toHaveBeenCalledWith('p', 'exact', expect.any(AbortSignal));
+  expect((opened.mock.calls[0][0] as CustomEvent).detail.invocation).toEqual(invocation);
+  window.removeEventListener(OPEN_PANEL_EVENT, opened);
+});
+it.each(['compact', 'standard', 'detailed', 'verbose'] as const)('resolves nested qualified IDs in %s mode without Coding View', async level => {
+  vi.mocked(listSubagents).mockClear().mockResolvedValue([invocation]);
+  useWorkspaceModeStore.setState({ mode: 'chat' });
+  useGeneralSettingsStore.setState({ showCodingView: false, workDetailsByMode: { chat: level, work: level, study: level, code: level } });
+  render(<WorkDetails conversationId="child-parent" message={{ id: 'segment:one', role: 'assistant', content: '', toolCalls: [{ id: 'segment:one:provider:id', name: 'Agent', input: {}, status: 'running' }] }} index={0} live />);
+  fireEvent.click(screen.getByRole('button', { name: 'View subagent' }));
+  await waitFor(() => expect(listSubagents).toHaveBeenCalledWith('child-parent', 'provider:id', expect.any(AbortSignal)));
+  expect(screen.queryByRole('button', { name: 'Inspect' })).toBeNull();
+});
+it('deduplicates by child identity rather than description or attempt', () => {
+  useRightSidebarStore.setState({ tabs: [], tab: '' });
+  useRightSidebarStore.getState().openSubagent(invocation);
+  useRightSidebarStore.getState().openSubagent({ ...invocation, attempt_id: 'b' });
+  expect(useRightSidebarStore.getState().tabs).toHaveLength(1);
+  useRightSidebarStore.getState().openSubagent({ ...invocation, child_session_id: 'other' });
+  expect(useRightSidebarStore.getState().tabs).toHaveLength(2);
+  useRightSidebarStore.getState().closeTab('subagent:other');
+  expect(useRightSidebarStore.getState().tab).toBe('subagent:child');
+});
+it('renders typed images and resource text, never paths extracted from display text', () => {
+  const { rerender } = render(<TypedToolAttachments result={{ content: 'C:/image.png' }} />);
+  expect(screen.queryByRole('img')).toBeNull();
+  rerender(<TypedToolAttachments result={{ content: [{ type: 'image', source: { type: 'base64', media_type: 'image/png', data: 'aGVsbG8=' } }, { type: 'resource', resource: { uri: 'test:one', text: 'full resource' } }] }} />);
+  expect(screen.getByRole('img').getAttribute('src')).toBe('data:image/png;base64,aGVsbG8=');
+  expect(screen.getByText('full resource')).toBeTruthy();
+});

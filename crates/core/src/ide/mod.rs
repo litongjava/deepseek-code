@@ -110,7 +110,7 @@ pub struct ExtensionConfig {
 impl Default for IdeConfig {
     fn default() -> Self {
         Self {
-            port: 9527,
+            port: 0,
             auto_connect: true,
             extensions: vec![
                 ExtensionConfig {
@@ -130,6 +130,7 @@ pub struct IdeBridge {
     #[allow(dead_code)]
     message_handlers: Arc<Mutex<HashMap<String, Box<dyn Fn(IdeMessage) -> Option<IdeMessage> + Send + Sync>>>>,
     running: Arc<Mutex<bool>>,
+    bound_port: std::sync::atomic::AtomicU16,
 }
 
 impl IdeBridge {
@@ -140,6 +141,7 @@ impl IdeBridge {
             shutdown_senders: Arc::new(Mutex::new(HashMap::new())),
             message_handlers: Arc::new(Mutex::new(HashMap::new())),
             running: Arc::new(Mutex::new(false)),
+            bound_port: std::sync::atomic::AtomicU16::new(0),
         }
     }
 
@@ -150,7 +152,7 @@ impl IdeBridge {
     pub async fn start_server(&self) -> Result<u16> {
         let mut running = self.running.lock().await;
         if *running {
-            return Ok(self.config.port);
+            return Ok(self.bound_port.load(std::sync::atomic::Ordering::Relaxed));
         }
 
         let addr = format!("127.0.0.1:{}", self.config.port);
@@ -158,6 +160,7 @@ impl IdeBridge {
             .map_err(|e| anyhow!("Failed to bind IDE bridge server: {}", e))?;
 
         let local_port = listener.local_addr()?.port();
+        self.bound_port.store(local_port, std::sync::atomic::Ordering::Relaxed);
         *running = true;
         drop(running);
 
@@ -341,7 +344,7 @@ impl IdeBridge {
         let running = self.running.lock().await;
         IdeBridgeStatus {
             server_running: *running,
-            port: self.config.port,
+            port: if *running { self.bound_port.load(std::sync::atomic::Ordering::Relaxed) } else { self.config.port },
             active_connections: conns.values().filter(|c| c.status == IdeStatus::Connected).count(),
             total_connections: conns.len(),
         }
@@ -366,4 +369,23 @@ pub struct IdeBridgeStatus {
     pub port: u16,
     pub active_connections: usize,
     pub total_connections: usize,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn dynamic_ports_are_distinct_and_reported_on_repeat_start() {
+        let first = IdeBridge::with_default();
+        let second = IdeBridge::with_default();
+        let port = first.start_server().await.unwrap();
+        let other = second.start_server().await.unwrap();
+        assert_ne!(port, 0);
+        assert_ne!(port, other);
+        assert_eq!(first.start_server().await.unwrap(), port);
+        assert_eq!(first.get_status().await.port, port);
+        let explicit = IdeBridge::new(IdeConfig { port, ..IdeConfig::default() });
+        assert!(explicit.start_server().await.is_err());
+    }
 }

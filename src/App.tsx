@@ -318,7 +318,7 @@ const Layout = () => {
   const handleTitleChange = useCallback((title: string) => { setCurrentChatTitle(title); }, []);
 
   const [tunerConfig, setTunerConfig] = useState({
-    sidebarWidth: 288, recentsMt: 24, profilePy: 10, profilePx: 12, mainContentWidth: 773, mainContentMt: -100,
+    sidebarWidth: 288, recentsMt: 24, profilePy: 10, profilePx: 12, mainContentWidth: 0, mainContentMt: -100,
     inputRadius: 24, welcomeSize: 46, welcomeMb: 34, recentsFontSize: 14, recentsItemPy: 7, recentsPl: 6,
     userAvatarSize: 36, userNameSize: 15, headerPy: 0, toggleSize: 28, toggleAbsRight: 10, toggleAbsTop: 11, toggleAbsLeft: 8,
   });
@@ -410,6 +410,7 @@ const Layout = () => {
             <Tooltip content="使用统计"><button onClick={() => { setShowAnalyticsPanel(true); setShowAgentPanel(false); }} className="p-1.5 hover:bg-black/5 dark:hover:bg-white/5 rounded-md text-claude-textSecondary hover:text-claude-text transition-colors"><BarChart3 size={16} strokeWidth={1.5} /></button></Tooltip>
             <Tooltip content={t('common.help')}><button type="button" aria-label={t('common.help')} aria-haspopup="dialog" aria-expanded={showHelpModal} onClick={() => setShowHelpModal(true)} className="p-1.5 hover:bg-black/5 dark:hover:bg-white/5 rounded-md text-claude-textSecondary hover:text-claude-text transition-colors"><HelpCircle size={16} strokeWidth={1.5} /></button></Tooltip>
           </div>
+          <div id="desktop-tool-menus" className="flex h-full shrink-0 items-center" />
         </AppTitleBar>
         <Sidebar isCollapsed={isSidebarCollapsed} toggleSidebar={() => setIsSidebarCollapsed(!isSidebarCollapsed)} refreshTrigger={refreshTrigger} onNewChatClick={handleNewChat} onOpenSettings={() => { navigate('/settings'); setShowUpgrade(false); }} onCloseOverlays={() => setShowUpgrade(false)} tunerConfig={tunerConfig} setTunerConfig={setTunerConfig} titleBarHeight={titleBarHeight} showHelpModal={showHelpModal} onHelpModalChange={setShowHelpModal} />
         <div className="flex-1 flex flex-col h-full min-w-0 overflow-hidden relative" style={{ paddingTop: `${titleBarHeight}px` }}>

@@ -1,5 +1,6 @@
 import { create } from 'zustand';
 import { persist } from 'zustand/middleware';
+import type { SubagentInvocation } from '../api/subagents';
 import type { WorkspaceScope } from '../api/workspaceFiles';
 
 export type RightSidebarTab = 'terminal' | 'files' | 'browser';
@@ -21,7 +22,8 @@ export interface SidebarFileTab {
   position?: FilePosition;
   navigation: number;
 }
-export type AuxiliaryTab = { id: RightSidebarTab; kind: RightSidebarTab } | SidebarFileTab;
+export type SidebarSubagentTab = { id: string; kind: 'subagent'; invocation: SubagentInvocation };
+export type AuxiliaryTab = SidebarSubagentTab | { id: RightSidebarTab; kind: RightSidebarTab } | SidebarFileTab;
 export const workspaceScopeKey = (scope: WorkspaceScope) => scope.conversationId ? `conversation:${scope.conversationId}` : `project:${scope.projectId ?? ''}`;
 
 function isStorableBrowserUrl(url: unknown): url is string {
@@ -50,6 +52,7 @@ interface RightSidebarState {
   setTab: (tab: string) => void;
   openTab: (tab: RightSidebarTab) => void;
   closeTab: (id: string) => void;
+  openSubagent: (invocation: SubagentInvocation) => void;
   openFile: (file: Omit<SidebarFileTab, 'id' | 'kind' | 'navigation'>) => void;
   setWidth: (width: number) => void;
   toggleTree: () => void;
@@ -75,6 +78,11 @@ export const useRightSidebarStore = create<RightSidebarState>()(persist((set) =>
     if (index < 0) return {};
     const tabs = state.tabs.filter(item => item.id !== id);
     return { tabs, tab: state.tab === id ? (tabs[Math.min(index, tabs.length - 1)]?.id ?? '') : state.tab };
+  }),
+  openSubagent: (invocation) => set(state => {
+    const id = `subagent:${invocation.child_session_id}`;
+    const value: SidebarSubagentTab = { id, kind: 'subagent', invocation };
+    return { open: true, tab: id, tabs: state.tabs.some(item => item.id === id) ? state.tabs.map(item => item.id === id ? value : item) : [...state.tabs, value] };
   }),
   openFile: (file) => set(state => {
     const relativePath = file.relativePath.replace(/\\/g, '/');

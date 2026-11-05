@@ -265,53 +265,29 @@ impl McpServerManager {
     }
 
     async fn create_default_config(&self) -> Result<()> {
-        let default_servers = default_servers();
+        use std::io::Write;
 
-        let mut servers = HashMap::new();
-        for server in default_servers {
-            let status = McpServerStatus {
-                id: server.id.clone(),
-                name: server.name.clone(),
-                command: server.command.clone(),
-                args: server.args.clone(),
-                env: if server.env.is_empty() {
-                    None
-                } else {
-                    Some(server.env.clone())
-                },
-                cwd: server.cwd.clone(),
-                enabled: server.enabled,
-                running: false,
-                pid: None,
-                tools_count: 0,
-                resources_count: 0,
-                error: None,
-                transport_type: server.transport_name().to_string(),
-                url: server.url.clone(),
-                headers: server.headers.clone(),
-            };
-
-            servers.insert(server.id.clone(), McpServerState {
-                config: server,
-                connector: None,
-                status,
-            });
-        }
-
-        *self.servers.write().await = servers;
-        self.save_config().await?;
-
-        Ok(())
-    }
-
-    async fn save_config(&self) -> Result<()> {
-        let servers_map = self.servers.read().await;
-        let configs = servers_map
-            .iter()
-            .map(|(id, state)| (id.clone(), state.config.clone()))
+        let configs: HashMap<_, _> = default_servers()
+            .into_iter()
+            .map(|server| (server.id.clone(), server))
             .collect();
-        transfer::persist(&self.config_path, &self.revision, &configs, false)?;
-        Ok(())
+        let parent = self
+            .config_path
+            .parent()
+            .unwrap_or(std::path::Path::new("."));
+        std::fs::create_dir_all(parent)?;
+        let bytes = serde_json::to_vec_pretty(&serde_json::json!({"mcpServers": configs}))?;
+        let mut file = tempfile::NamedTempFile::new_in(parent)?;
+        file.write_all(&bytes)?;
+        file.as_file().sync_all()?;
+        // Another host may have initialized or edited the file since our existence check.
+        // Publish complete defaults only if absent, then adopt the winning revision.
+        match file.persist_noclobber(&self.config_path) {
+            Ok(_) => {}
+            Err(error) if error.error.kind() == std::io::ErrorKind::AlreadyExists => {}
+            Err(error) => return Err(error.into()),
+        }
+        self.load_config().await
     }
 
     pub async fn add_server(&self, config: McpServerConfig) -> Result<()> {
@@ -1158,6 +1134,8 @@ impl McpConfigManager {
 
 #[cfg(test)]
 mod elicitation_tests;
+#[cfg(test)]
+mod startup_tests;
 
 /// The MCP server presets written, disabled, into a new configuration.
 pub fn default_servers() -> Vec<McpServerConfig> {

@@ -183,6 +183,9 @@ impl ToolLoopExecutor {
             waiters: self.answer_waiters.clone(),
             request_id: request_id.clone(),
         };
+        crate::native_engine::permission_response::register_owner(
+            &request_id, self.conv_id.as_deref().unwrap_or_default(), id, "permission", input.clone(), None, None, None,
+        );
         if let Some(hooks) = &self.hooks {
             if let Err(error) = hooks.run(crate::services::tool_hooks::HookEvent::Notification,
                 self.conv_id.as_deref().unwrap_or_default(),

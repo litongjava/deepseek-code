@@ -1,13 +1,30 @@
 import type { PendingFile } from '../../components/FileUploadPreview';
 import { useBusySendStore } from '../../stores/useBusySendStore';
+import type { UserContent } from '../../utils/userContent';
 
 export async function submitBusyMessage(
   conversationId: string,
   text: string,
   files: PendingFile[],
   behavior: 'queue' | 'steer',
-  interrupt: () => Promise<void>,
 ) {
-  if (behavior === 'steer') await interrupt();
-  useBusySendStore.getState().enqueue(conversationId, text, files, behavior === 'steer');
+  const blocks: Record<string, any>[] = [];
+  if (text) blocks.push({ type: 'text', text });
+  for (const file of files) {
+    if (file.status !== 'done') throw new Error('Wait for attachments to finish uploading.');
+    if (file.fileType === 'image' || file.mimeType.startsWith('image/')) {
+      const url = await new Promise<string>((resolve, reject) => {
+        const reader = new FileReader();
+        reader.onload = () => resolve(String(reader.result));
+        reader.onerror = () => reject(new Error(`Cannot read image: ${file.fileName}`));
+        reader.readAsDataURL(file.file);
+      });
+      blocks.push({ type: 'image_url', image_url: { url }, fileName: file.fileName, size: file.file.size });
+    } else {
+      blocks.push({ type: 'attachment', fileId: file.fileId, fileName: file.fileName, fileType: file.fileType,
+        mimeType: file.mimeType, size: file.size, source: file.source, ghRepo: file.ghRepo, ghRef: file.ghRef });
+    }
+  }
+  const content: UserContent = files.length ? blocks : text;
+  await useBusySendStore.getState().enqueue(conversationId, content, behavior === 'steer' ? 'steer' : 'next_turn');
 }

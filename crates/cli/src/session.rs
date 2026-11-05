@@ -1044,6 +1044,8 @@ impl Session {
         });
         // num_turns and permission_denials for the json result, as stream-json reports them.
         let (mut model_rounds, mut round_open, mut denials) = (0u32, false, Vec::<Value>::new());
+        let background_transcript = std::env::var_os(deepseek_code_core::services::background_sessions::CONTROL_ENV).is_some();
+        let mut live_transcript = BackgroundTranscript::default();
         let mut refresh = tokio::time::interval(std::time::Duration::from_secs(1));
         refresh.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
         let mut remote_interrupts = self.remote_interrupts();
@@ -1057,6 +1059,9 @@ impl Session {
                     _ = tokio::signal::ctrl_c() => bail!("Interrupted"),
                     _ = refresh.tick() => {
                         progress.tick();
+                        if background_transcript {
+                            live_transcript.flush(&self.store.db, &self.id, &assistant_id, &text, &thinking_text, &tools)?;
+                        }
                         if interactive_display {
                             for notice in crate::background_commands::collect_completed(self)? { progress.notice(&notice); }
                         }
@@ -1136,6 +1141,12 @@ impl Session {
                     EngineEvent::Text(_) | EngineEvent::ToolUseStart { .. } | EngineEvent::ToolUseDone { .. } | EngineEvent::MessageStop { .. } => round_open = false,
                     _ => {}
                 }
+                if background_transcript {
+                    live_transcript.observe(&event, &mut tools);
+                    if matches!(&event, EngineEvent::ToolUseStart { .. } | EngineEvent::ToolUseDone { .. } | EngineEvent::PipelineToolResult { .. } | EngineEvent::ToolPermission { .. } | EngineEvent::AskUser { .. }) {
+                        live_transcript.flush(&self.store.db, &self.id, &assistant_id, &text, &thinking_text, &tools)?;
+                    }
+                }
                 match event {
                     EngineEvent::Text(delta) => {
                         let delta = if std::mem::take(&mut separate_text) && !text.is_empty() && !text.ends_with('\n') { format!("\n\n{delta}") } else { delta };
@@ -1152,6 +1163,7 @@ impl Session {
                         save_queued_turn_inputs(&self.store.db, &assistant_id, &tools, &queued_inputs_by_tool)?;
                         assistant_id = turn.new_segment()?;
                         text.clear(); thinking_text.clear(); tools.clear(); snapshots.clear();
+                        if background_transcript { live_transcript = BackgroundTranscript::default(); separate_text = false; }
                         observed_plan_boundary = Some(boundary_id);
                         progress.notice("Planning context cleared. The approved plan starts a fresh context in this session; prior messages remain archived.");
                     },
@@ -1434,6 +1446,42 @@ impl Session {
             self.engine.finish_turn(&self.id).await;
         } else {
             self.engine.cancel_turn(&self.id).await;
+        }
+        // After joining, no producer can race the final background snapshot.
+        if background_transcript {
+            while let Ok(event) = events.try_recv() {
+                live_transcript.observe(&event, &mut tools);
+                match event {
+                    EngineEvent::Text(delta) => {
+                        if std::mem::take(&mut separate_text) && !text.is_empty() && !text.ends_with('\n') { text.push_str("\n\n"); }
+                        text.push_str(&delta);
+                    }
+                    EngineEvent::Thinking(delta) => thinking_text.push_str(&delta),
+                    EngineEvent::ToolUseStart { .. } => separate_text = true,
+                    EngineEvent::MessageStop { full_text, .. } => {
+                        if structured_output || text.is_empty() { text = full_text; }
+                    }
+                    EngineEvent::ContextReset { session_id, boundary_id } if session_id == self.id => {
+                        deepseek_code_core::services::plan_approval::archive_segment(&self.store.db, &self.id, &boundary_id, Some(&assistant_id), &text, &thinking_text, &tools, &snapshots)?;
+                        save_queued_turn_inputs(&self.store.db, &assistant_id, &tools, &queued_inputs_by_tool)?;
+                        assistant_id = turn.new_segment()?;
+                        text.clear(); thinking_text.clear(); tools.clear(); snapshots.clear();
+                        live_transcript = BackgroundTranscript::default();
+                        separate_text = false;
+                        observed_plan_boundary = Some(boundary_id);
+                    }
+                    EngineEvent::RequestSnapshot(snapshot) => {
+                        goal_requests.observe(&snapshot);
+                        if let Some(old) = snapshots.iter_mut().find(|s| s["id"] == snapshot["id"]) { *old = snapshot; } else { snapshots.push(snapshot); }
+                    }
+                    EngineEvent::QueuedInput(delivered) => {
+                        if let Some(tool) = tools.last() { queued_inputs_by_tool.entry(tool.id.clone()).or_default().push(delivered); }
+                    }
+                    _ => {}
+                }
+            }
+            live_transcript.dirty = true;
+            live_transcript.flush(&self.store.db, &self.id, &assistant_id, &text, &thinking_text, &tools)?;
         }
         // Cancellation may happen after the atomic boundary commit but before its event.
         let latest_boundary =
@@ -1730,6 +1778,107 @@ pub(crate) fn requeue_unread(session: &Session, reader: &mut TerminalInput) -> R
         reader.queue_prompt(prompt);
     }
     Ok(())
+}
+
+/// Uses the turn's existing rows and IDs; only workers publish intermediate snapshots.
+#[derive(Default)]
+struct BackgroundTranscript {
+    dirty: bool,
+    arguments: std::collections::HashMap<String, String>,
+}
+
+impl BackgroundTranscript {
+    fn observe(&mut self, event: &EngineEvent, tools: &mut Vec<message_repo::ToolCallRow>) {
+        let (id, name, input, result) = match event {
+            EngineEvent::Text(_) | EngineEvent::Thinking(_) | EngineEvent::MessageStop { .. } => {
+                self.dirty = true;
+                return;
+            }
+            EngineEvent::ToolArgDelta { tool_use_id, delta } => {
+                let input = self.arguments.entry(tool_use_id.clone()).or_default();
+                input.push_str(delta);
+                (tool_use_id, None, input.clone(), None)
+            }
+            EngineEvent::ToolUseStart { tool_use_id, tool_name, tool_input, .. } =>
+                (tool_use_id, Some(tool_name), tool_input.to_string(), None),
+            EngineEvent::ToolUseDone { tool_use_id, tool_name, tool_input, output, is_error }
+            | EngineEvent::PipelineToolResult { tool_use_id, tool_name, tool_input, output, is_error, .. } =>
+                (tool_use_id, Some(tool_name), tool_input.to_string(), Some((output, *is_error))),
+            _ => return,
+        };
+        let index = tools.iter().position(|tool| tool.id == *id).unwrap_or_else(|| {
+            tools.push(message_repo::ToolCallRow {
+                id: id.clone(), message_id: String::new(), name: String::new(),
+                input: None, output: None, is_error: false, sort_order: tools.len() as i64,
+            });
+            tools.len() - 1
+        });
+        let row = &mut tools[index];
+        if let Some(name) = name { row.name = name.clone(); }
+        // Late start/delta events must not overwrite a completed call's input.
+        if row.output.is_none() || result.is_some() { row.input = Some(input); }
+        if let Some((output, is_error)) = result {
+            row.output = Some(output.clone());
+            row.is_error = is_error;
+        }
+        self.dirty = true;
+    }
+
+    fn flush(&mut self, db: &deepseek_code_core::db::DbManager, session_id: &str, assistant_id: &str, text: &str, thinking: &str, tools: &[message_repo::ToolCallRow]) -> Result<()> {
+        if !self.dirty { return Ok(()); }
+        db.with_conn(|conn| -> Result<()> {
+            message_repo::update_message_content(conn, assistant_id, text)?;
+            conn.execute("UPDATE messages SET thinking = ?1 WHERE id = ?2", [thinking, assistant_id])?;
+            for tool in tools {
+                let mut row = tool.clone();
+                row.id = format!("{assistant_id}:{}", tool.id);
+                row.message_id = assistant_id.to_owned();
+                message_repo::save_stream_tool_result(conn, session_id, assistant_id, text, &row)?;
+            }
+            Ok(())
+        })??;
+        self.dirty = false;
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+mod background_transcript_tests {
+    use super::*;
+
+    #[test]
+    fn worker_snapshot_retains_full_text_thinking_and_updates_one_tool() {
+        let temp = tempfile::tempdir().unwrap();
+        let context = deepseek_code_core::services::session_messages::context(temp.path()).unwrap();
+        let store = deepseek_code_core::runtime::SessionStore::new(context.db.clone());
+        let session = store.create(temp.path(), "fixture", "fixture").unwrap();
+        let assistant = store.append(&session, "assistant", "").unwrap();
+        let mut live = BackgroundTranscript::default();
+        let mut tools = Vec::new();
+        let text = "full text ".repeat(2000);
+        live.observe(&EngineEvent::Text(text.clone()), &mut tools);
+        live.observe(&EngineEvent::ToolArgDelta { tool_use_id: "call".into(), delta: "{\"path\":".into() }, &mut tools);
+        live.flush(&context.db, &session, &assistant, &text, "private reasoning", &tools).unwrap();
+        context.db.with_conn(|conn| {
+            let message = message_repo::get_message(conn, &assistant).unwrap().unwrap();
+            assert_eq!(message.content, text);
+            let thinking: String = conn.query_row("SELECT thinking FROM messages WHERE id=?1", [&assistant], |row| row.get(0)).unwrap();
+            assert_eq!(thinking, "private reasoning");
+            let calls = message_repo::get_tool_calls_for_message(conn, &assistant).unwrap();
+            assert_eq!(calls[0].input.as_deref(), Some("{\"path\":"));
+        }).unwrap();
+        let done = EngineEvent::ToolUseDone { tool_use_id: "call".into(), tool_name: "Read".into(), tool_input: json!({"path":"file"}), output: "complete".into(), is_error: false };
+        live.observe(&done, &mut tools);
+        live.observe(&done, &mut tools);
+        live.flush(&context.db, &session, &assistant, &text, "private reasoning", &tools).unwrap();
+        assert!(!live.dirty);
+        context.db.with_conn(|conn| {
+            let calls = message_repo::get_tool_calls_for_message(conn, &assistant).unwrap();
+            assert_eq!(calls.len(), 1);
+            assert_eq!(calls[0].id, format!("{assistant}:call"));
+            assert_eq!(calls[0].output.as_deref(), Some("complete"));
+        }).unwrap();
+    }
 }
 
 fn duplicate_tool_result(event: &EngineEvent, tools: &[message_repo::ToolCallRow]) -> bool {

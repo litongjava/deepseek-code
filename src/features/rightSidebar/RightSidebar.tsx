@@ -1,3 +1,4 @@
+import SubagentPanel from './SubagentPanel';
 import React, { useEffect, useRef, useState } from 'react';
 import { Plus, X } from 'lucide-react';
 import { useI18n } from '../../hooks/useI18n';
@@ -56,7 +57,7 @@ export default function RightSidebar({ onClose, active = true }: { onClose: () =
       <div role="tablist" aria-label={t('rightSidebar.tabs')} className="flex min-w-0 flex-1 items-center gap-1 overflow-x-auto">
         {tabs.map(item => {
           const selected = item.id === tab;
-          const title = item.kind === 'file' ? item.relativePath : item.kind === 'terminal' ? 'Terminal' : t(`rightSidebar.${item.kind}`);
+          const title = item.kind === 'subagent' ? (item.invocation.description || 'Subagent') : item.kind === 'file' ? item.relativePath : item.kind === 'terminal' ? 'Terminal' : t(`rightSidebar.${item.kind}`);
           const duplicate = item.kind === 'file' && tabs.some(other => other.kind === 'file' && other.id !== item.id && other.name === item.name);
           return <div key={item.id} className={`flex shrink-0 items-center rounded-md ${selected ? 'bg-claude-btn-hover text-claude-text' : 'text-claude-textSecondary'}`}>
             <button type="button" role="tab" ref={node => { if (node) tabRefs.current.set(item.id, node); else tabRefs.current.delete(item.id); }}
@@ -78,6 +79,7 @@ export default function RightSidebar({ onClose, active = true }: { onClose: () =
     {error && <p role="alert" className="px-3 text-xs text-red-600">{error}</p>}
     <div role="tabpanel" id={`${RIGHT_SIDEBAR_ID}-content`} aria-labelledby={tab ? `${RIGHT_SIDEBAR_ID}-tab-${tab}` : undefined} className="min-h-0 flex-1 overflow-hidden">
       {!tabs.length && <div className="flex h-full items-center justify-center gap-2">{RIGHT_SIDEBAR_TABS.map(id => <button type="button" key={id} onClick={() => { openTab(id); }} className="rounded-md bg-claude-hover px-3 py-2 text-xs">{id === 'terminal' ? 'Terminal' : t(`rightSidebar.${id}`)}</button>)}</div>}
+      {tabs.map(item => item.kind === 'subagent' && <div key={item.id} hidden={tab !== item.id} className="h-full"><SubagentPanel invocation={item.invocation} active={active && tab === item.id} /></div>)}
       {hasFiles && <div hidden={!fileActive} className="h-full"><RightSidebarFilesTab /></div>}
       {tabs.some(item => item.kind === 'browser') && <div hidden={tab !== 'browser'} className="h-full"><RightSidebarBrowserTab /></div>}
       {hasTerminal && <div hidden={tab !== 'terminal'} className="h-full">

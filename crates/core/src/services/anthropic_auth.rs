@@ -26,7 +26,24 @@ const SCOPES: &str =
 const MARKER: &str = "anthropic-oauth:";
 const OAUTH_BETA: &str = "oauth-2025-04-20";
 pub const FAST_BETA: &str = "fast-mode-2026-02-01";
-static TOKEN_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+async fn token_lock(data_dir: &Path) -> Result<std::fs::File> {
+    std::fs::create_dir_all(data_dir)?;
+    let file = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .open(data_dir.join("anthropic-oauth.lock"))?;
+    loop {
+        match file.try_lock() {
+            Ok(()) => return Ok(file),
+            Err(std::fs::TryLockError::WouldBlock) => {
+                tokio::time::sleep(Duration::from_millis(25)).await;
+            }
+            Err(std::fs::TryLockError::Error(error)) => return Err(error.into()),
+        }
+    }
+}
 
 #[derive(Serialize, Deserialize)]
 pub(crate) struct Tokens {
@@ -97,7 +114,7 @@ impl LoginFlow {
             tokens.scopes.iter().any(|scope| scope == "user:inference"),
             "Authorization did not grant inference scope; credentials were not saved"
         );
-        let _lock = TOKEN_LOCK.lock().await;
+        let _lock = token_lock(data_dir).await?;
         save(data_dir, &tokens)?;
         status(data_dir)
     }
@@ -333,7 +350,7 @@ pub fn status(data_dir: &Path) -> Result<AuthStatus> {
 }
 
 pub async fn logout(data_dir: &Path) -> Result<()> {
-    let _lock = TOKEN_LOCK.lock().await;
+    let _lock = token_lock(data_dir).await?;
     match std::fs::remove_file(credential_path(data_dir)) {
         Ok(()) => Ok(()),
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
@@ -354,7 +371,7 @@ pub fn is_oauth_marker(key: &str) -> bool {
 }
 
 async fn access_token(data_dir: &Path, token_url: &str) -> Result<String> {
-    let _lock = TOKEN_LOCK.lock().await;
+    let _lock = token_lock(data_dir).await?;
     let mut tokens = load(data_dir)?.context("Not logged in to Anthropic; use /login")?;
     if tokens.expires_at <= chrono::Utc::now().timestamp() + 60 {
         let refresh = tokens
@@ -504,6 +521,86 @@ pub(crate) fn unprotect(data: &[u8]) -> Result<Vec<u8>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn concurrent_refresh_reads_rotated_credentials_under_lock() {
+        use axum::{routing::post, Json, Router};
+        use std::sync::{
+            atomic::{AtomicUsize, Ordering},
+            Arc,
+        };
+        let calls = Arc::new(AtomicUsize::new(0));
+        let seen = calls.clone();
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let endpoint = format!("http://{}/token", listener.local_addr().unwrap());
+        let app = Router::new().route("/token", post(move |Json(body): Json<Value>| {
+            let seen = seen.clone();
+            async move {
+                assert_eq!(body["refresh_token"], "synthetic-old-refresh");
+                seen.fetch_add(1, Ordering::SeqCst);
+                tokio::time::sleep(Duration::from_millis(50)).await;
+                Json(json!({"access_token":"synthetic-new-access","refresh_token":"synthetic-new-refresh","expires_in":3600}))
+            }
+        }));
+        let server = tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
+        let root = tempfile::tempdir().unwrap();
+        save(
+            root.path(),
+            &Tokens {
+                access_token: "synthetic-old-access".into(),
+                refresh_token: Some("synthetic-old-refresh".into()),
+                expires_at: 0,
+                scopes: vec![],
+            },
+        )
+        .unwrap();
+        let (first, second) = tokio::join!(
+            access_token(root.path(), &endpoint),
+            access_token(root.path(), &endpoint)
+        );
+        assert_eq!(first.unwrap(), "synthetic-new-access");
+        assert_eq!(second.unwrap(), "synthetic-new-access");
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+        assert_eq!(
+            load(root.path()).unwrap().unwrap().refresh_token.as_deref(),
+            Some("synthetic-new-refresh")
+        );
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn token_transactions_serialize_per_data_root() {
+        let root = tempfile::tempdir().unwrap();
+        let other = tempfile::tempdir().unwrap();
+        let held = token_lock(root.path()).await.unwrap();
+        let independent = token_lock(other.path()).await.unwrap();
+        assert!(
+            tokio::time::timeout(Duration::from_millis(75), token_lock(root.path()))
+                .await
+                .is_err()
+        );
+        assert!(
+            tokio::time::timeout(Duration::from_millis(75), logout(root.path()))
+                .await
+                .is_err()
+        );
+        save(
+            root.path(),
+            &Tokens {
+                access_token: "synthetic-access".into(),
+                refresh_token: None,
+                expires_at: chrono::Utc::now().timestamp() + 3600,
+                scopes: vec![],
+            },
+        )
+        .unwrap();
+        drop(held);
+        logout(root.path()).await.unwrap();
+        assert!(load(root.path()).unwrap().is_none());
+        drop(independent);
+    }
 
     #[test]
     fn pkce_state_and_first_party_boundaries() {

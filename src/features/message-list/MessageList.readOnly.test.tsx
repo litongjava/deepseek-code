@@ -1,0 +1,20 @@
+import { cleanup, render, screen } from '@testing-library/react';
+import { afterEach, expect, it, vi } from 'vitest';
+import MessageList from './MessageList';
+import { useGeneralSettingsStore } from '../../stores/useGeneralSettingsStore';
+vi.mock('../trajectory/WorkDetails', () => ({ default: () => <div>Tool details</div> }));
+afterEach(cleanup);
+it('retains readable output and copy but removes edit, resend, branch, feedback and diff mutations without dummy callbacks', () => {
+  useGeneralSettingsStore.setState({ showCodingView: true });
+  render(<MessageList readOnly conversationId="child" messages={[{ id: 'u', role: 'user', content: 'request' }, { id: 'a', role: 'assistant', content: 'answer', codeDiffs: [{ id: 'diff', file_path: 'test.ts', original_content: 'one', modified_content: 'two', status: 'pending' }] }]} loading={false} expandedMessages={new Set()} editingMessageIdx={0} editingContent="hidden" compactStatus={{ state: '' }} onToggleExpand={vi.fn()} messageContentRefs={{ current: new Map() }} t={key => key} />);
+  expect(screen.getByText('request')).toBeTruthy();
+  expect(screen.getByText('Tool details')).toBeTruthy();
+  expect(screen.getByRole('button', { name: 'Copy response' })).toBeTruthy();
+  expect(screen.queryByRole('textbox')).toBeNull();
+  expect(screen.queryByTitle('编辑')).toBeNull();
+  expect(screen.queryByTitle('重新发送')).toBeNull();
+  expect(screen.queryByRole('button', { name: 'Branch into a new conversation' })).toBeNull();
+  expect(screen.queryByRole('button', { name: 'Good response' })).toBeNull();
+  expect(screen.queryByRole('button', { name: 'Apply' })).toBeNull();
+  expect(screen.queryByRole('button', { name: 'Reject' })).toBeNull();
+});

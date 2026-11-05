@@ -1,9 +1,14 @@
+import type { SubagentInvocation } from '../../api/subagents';
 import { useCallback, useEffect, useRef } from 'react';
 import { useRightSidebarStore } from '../../stores/useRightSidebarStore';
 import { normalizeBrowserUrl } from './browser/browserUrl';
 
 /** Window event that asks for a panel; chat links send `{ panel: 'browser', url }`. */
 export const OPEN_PANEL_EVENT = 'request-open-panel';
+
+export function openSubagentPanel(invocation: SubagentInvocation) {
+  window.dispatchEvent(new CustomEvent(OPEN_PANEL_EVENT, { detail: { panel: 'subagent', invocation } }));
+}
 
 /** Ctrl+Alt+B (Cmd+Option+B on macOS). Matching `key` leaves AltGr layouts that type a character alone. */
 export function isRightSidebarShortcut(event: KeyboardEvent): boolean {
@@ -53,7 +58,12 @@ export function useRightSidebarController({ allowed, otherPanelOpen, closeOtherP
   otherPanelRef.current = { otherPanelOpen, closeOtherPanels };
   useEffect(() => {
     const handler = (event: Event) => {
-      const detail = (event as CustomEvent<{ panel?: string; url?: unknown } | undefined>).detail;
+      const detail = (event as CustomEvent<{ panel?: string; url?: unknown; invocation?: SubagentInvocation } | undefined>).detail;
+      if (detail?.panel === 'subagent' && detail.invocation?.child_session_id && detail.invocation.parent_session_id) {
+        if (otherPanelRef.current.otherPanelOpen) otherPanelRef.current.closeOtherPanels();
+        useRightSidebarStore.getState().openSubagent(detail.invocation);
+        return;
+      }
       if (detail?.panel === 'terminal' || detail?.panel === 'files') {
         if (otherPanelRef.current.otherPanelOpen) otherPanelRef.current.closeOtherPanels();
         useRightSidebarStore.getState().openTab(detail.panel);

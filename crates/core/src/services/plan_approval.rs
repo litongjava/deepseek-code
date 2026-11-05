@@ -15,6 +15,9 @@ pub enum Choice {
     ClearBypass,
     KeepBypass,
     Manual,
+    ClearManual,
+    ClearAuto,
+    KeepAuto,
     Revise(String),
 }
 pub const BYPASS_CLEAR: &str = "Yes, clear context and return to bypass mode";
@@ -26,6 +29,108 @@ pub fn options(bypass: bool) -> [&'static str; 4] {
     } else {
         OPTIONS
     }
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ApprovalRequest {
+    #[serde(rename = "type")]
+    pub kind: String,
+    pub version: u32,
+    pub session_id: String,
+    pub request_id: String,
+    pub tool_use_id: String,
+    pub plan_version: String,
+    pub plan: String,
+    pub plan_file_path: String,
+    pub status: String,
+    pub choices: Vec<ApprovalOption>,
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ApprovalOption {
+    pub mode: String,
+    pub context: String,
+    pub enabled: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub disabled_reason: Option<String>,
+}
+
+impl ApprovalRequest {
+    pub fn new(session: &str, request: &str, tool: &str, plan: &str, path: &std::path::Path, bypass: bool) -> Self {
+        Self {
+            kind: "plan_approval".into(),
+            version: 1,
+            session_id: session.into(),
+            request_id: request.into(),
+            tool_use_id: tool.into(),
+            // An opaque review version binds this request to this exact plan snapshot.
+            plan_version: uuid::Uuid::new_v4().to_string(),
+            plan: plan.into(),
+            plan_file_path: path.to_string_lossy().into_owned(),
+            status: "pending".into(),
+            choices: ["ask", "auto", "bypass"].into_iter().flat_map(|mode| {
+                ["keep", "clear"].into_iter().map(move |context| ApprovalOption {
+                    mode: mode.into(), context: context.into(),
+                    enabled: mode != "bypass" || bypass,
+                    disabled_reason: (mode == "bypass" && !bypass).then(|| "Bypass requires an authorized launch and bypass plan origin".into()),
+                })
+            }).collect(),
+        }
+    }
+}
+
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct ApprovalResponse {
+    #[serde(rename = "type")]
+    kind: String,
+    version: u32,
+    session_id: String,
+    request_id: String,
+    tool_use_id: String,
+    plan_version: String,
+    action: String,
+    mode: Option<String>,
+    context: Option<String>,
+    feedback: Option<String>,
+}
+
+/// Validate against the server-owned pending request, never a client-supplied request.
+/// Legacy CLI answers retain their original accept-edits and bypass semantics.
+pub fn parse_response(answer: &str, request: &ApprovalRequest, bypass: bool) -> Result<Choice> {
+    let value = if answer.trim_start().starts_with('{') {
+        Some(serde_json::from_str::<serde_json::Value>(answer)?)
+    } else {
+        None
+    };
+    let Some(value) = value.filter(|value| value.get("type").is_some() || value.get("version").is_some()) else {
+        return parse_for_mode(answer, bypass);
+    };
+    let response: ApprovalResponse = serde_json::from_value(value)?;
+    anyhow::ensure!(request.kind == "plan_approval" && request.version == 1 && request.status == "pending", "Plan approval request is not pending or supported");
+    anyhow::ensure!(response.kind == "plan_approval_response" && response.version == 1, "Unsupported plan approval response version or type");
+    anyhow::ensure!(response.session_id == request.session_id && response.request_id == request.request_id && response.tool_use_id == request.tool_use_id, "Plan approval request ownership mismatch");
+    anyhow::ensure!(response.plan_version == request.plan_version, "Plan review version is stale; request approval again");
+    if response.action == "revise" {
+        anyhow::ensure!(response.mode.is_none() && response.context.is_none(), "Feedback cannot also approve a permission mode");
+        return Ok(Choice::Revise(response.feedback.unwrap_or_default()));
+    }
+    anyhow::ensure!(response.action == "approve" && response.feedback.is_none(), "Invalid plan approval action");
+    let mode = response.mode.context("Approval mode is required")?;
+    let context = response.context.context("Approval context policy is required")?;
+    anyhow::ensure!(request.choices.iter().any(|choice| choice.enabled && choice.mode == mode && choice.context == context), "Plan approval choice is unavailable");
+    anyhow::ensure!(mode != "bypass" || bypass, "Bypass launch authority is unavailable");
+    Ok(match (mode.as_str(), context.as_str()) {
+        ("ask", "keep") => Choice::Manual,
+        ("ask", "clear") => Choice::ClearManual,
+        ("auto", "keep") => Choice::KeepAuto,
+        ("auto", "clear") => Choice::ClearAuto,
+        ("bypass", "keep") => Choice::KeepBypass,
+        ("bypass", "clear") => Choice::ClearBypass,
+        _ => bail!("Unknown plan approval choice"),
+    })
 }
 
 pub fn parse(answer: &str) -> Result<Choice> {

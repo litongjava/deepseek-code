@@ -224,7 +224,7 @@ pub struct ToolLoopExecutor {
     message_inbox: Option<crate::services::session_messages::Target>,
     require_pending_peer_message: bool,
     require_hook_wake: bool,
-    execution_lease: Option<crate::services::session_messages::ExecutionLease>,
+    pub(super) execution_lease: Option<crate::services::session_messages::ExecutionLease>,
     message_deliveries: usize,
     pending_plan_reset: Option<(String, String)>,
     allowed_directories: Vec<std::path::PathBuf>,
@@ -282,6 +282,7 @@ struct PermissionWaiterGuard {
 }
 impl Drop for PermissionWaiterGuard {
     fn drop(&mut self) {
+        crate::native_engine::permission_response::remove_owner(&self.request_id);
         if let Ok(mut waiters) = self.waiters.try_lock() {
             waiters.remove(&self.request_id);
         } else if let Ok(runtime) = tokio::runtime::Handle::try_current() {
@@ -1232,7 +1233,31 @@ impl ToolLoopExecutor {
         });
         let data_dir = self.search_config_path.as_deref().and_then(std::path::Path::parent).map(std::path::Path::to_path_buf)
             .or_else(|| crate::runtime::resolve_default_data_dir().ok());
-        let inputs: Vec<_> = inputs.into_iter().map(|text| crate::services::input_queue::DeliveredInput::resolve(data_dir.as_deref(), id, text)).collect();
+        let mut inputs: Vec<_> = inputs.into_iter().map(|text| crate::services::input_queue::DeliveredInput::resolve(data_dir.as_deref(), id, text)).collect();
+        // Next-turn input never crosses a running model's tool-result boundary.
+        use crate::services::input_queue::{self as queue, QueueMode, QueueState};
+        if !queue::is_paused(db, id).unwrap_or(true) {
+            let pending = queue::list(db, id).unwrap_or_default();
+            for item in pending.into_iter().filter(|item| item.mode == QueueMode::Steer && matches!(item.state, QueueState::Queued | QueueState::Claimed)) {
+                let result = (|| -> anyhow::Result<_> {
+                    let item = if item.state == QueueState::Queued { queue::claim(db, id, item.id, item.revision)? } else { item };
+                    queue::handoff(db, id, item.id, item.revision, |tx, item, message_id| {
+                        let paused: bool = tx.query_row("SELECT COALESCE((SELECT paused FROM session_input_queue_control WHERE session_id=?1),0)", [id], |row| row.get(0))?;
+                        anyhow::ensure!(!paused, queue::QueueError::Paused);
+                        let order: i64 = tx.query_row("SELECT COALESCE(MAX(sort_order),-1)+1 FROM messages WHERE conversation_id=?1", [id], |row| row.get(0))?;
+                        crate::db::message_repo::save_user_message(tx, message_id, id, &item.content, &chrono::Utc::now().to_rfc3339(), order)?;
+                        Ok(())
+                    })
+                })();
+                match result {
+                    Ok(item) => {
+                        let text = item.content.as_str().map(str::to_owned).unwrap_or_else(|| item.content.as_array().into_iter().flatten().filter_map(|block| block["text"].as_str()).collect::<Vec<_>>().join("\n"));
+                        inputs.push(queue::DeliveredInput { text, content: item.content, origin: item.handoff_id.unwrap_or_default() });
+                    }
+                    Err(error) => { tracing::warn!("Steer handoff retained for recovery: {error:#}"); break; }
+                }
+            }
+        }
         for input in &inputs {
             let _ = self.event_tx.send(EngineEvent::QueuedInput(input.clone())).await;
         }
@@ -1765,7 +1790,7 @@ impl ToolLoopExecutor {
         }
         if tool_name == "Agent" {
             let normalized = if tool_name == "Agent" { delegation::normalize_agent_input(tool_input, self.delegation_depth == 0 && self.conv_id.is_some()) } else { tool_input.clone() };
-            let result = Box::pin(self.execute_delegated_authorized(&normalized, None, None, true)).await;
+            let result = Box::pin(self.execute_delegated_invocation(&normalized, _tool_use_id)).await;
             let failed = result.is_err();
             let output = match result { Ok(value) => value.to_string(), Err(error) => format!("Delegation failed: {error}") };
             return CallStep::Finished((tool_input.clone(), output, failed));
@@ -1901,6 +1926,7 @@ impl ToolLoopExecutor {
                 let waiters = self.answer_waiters.clone();
                 let tool_use_id = _tool_use_id.to_owned();
                 let durable_user_input = self.durable_user_input;
+                let owner_session = self.conv_id.clone().unwrap_or_default();
                 let context = crate::mcp::elicitation::RequestContext {
                     hooks: self.hooks.clone(),
                     session: self.conv_id.clone().unwrap_or_default(),
@@ -1908,6 +1934,7 @@ impl ToolLoopExecutor {
                         let event_tx = event_tx.clone();
                         let waiters = waiters.clone();
                         let tool_use_id = tool_use_id.clone();
+                        let owner_session = owner_session.clone();
                         Box::pin(async move {
                             let request_id = uuid::Uuid::new_v4().to_string();
                             let (tx, rx) = oneshot::channel();
@@ -1918,6 +1945,7 @@ impl ToolLoopExecutor {
                             };
                             let mut input = input;
                             input["subtype"] = serde_json::json!("elicitation");
+                            crate::native_engine::permission_response::register_owner(&request_id, &owner_session, &tool_use_id, "question", input.clone(), None, None, None);
                             event_tx.send(EngineEvent::AskUser {
                                 request_id, tool_use_id, tool_input: input.clone(),
                                 question: format!("MCP {}: {}\nSchema: {}\nEnter a JSON object to accept, or decline / cancel:", input["mcp_server_name"], input["message"], input["requested_schema"]),
@@ -2067,6 +2095,7 @@ impl ToolLoopExecutor {
         let (tx, rx) = oneshot::channel::<String>();
         self.answer_waiters.lock().await.insert(request_id.clone(), tx);
         let _waiter_guard = PermissionWaiterGuard { waiters: self.answer_waiters.clone(), request_id: request_id.clone() };
+        crate::native_engine::permission_response::register_owner(&request_id, self.conv_id.as_deref().unwrap_or_default(), tool_use_id, "question", question.clone(), None, None, None);
         let _ = self.event_tx.send(EngineEvent::AskUser {
             request_id: request_id.clone(),
             tool_use_id: tool_use_id.to_owned(),

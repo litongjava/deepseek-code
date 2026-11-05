@@ -1,5 +1,6 @@
 import { applyTurnTiming } from '../message-list/turnTiming';
 import { useChatStore } from '../../stores/useChatStore';
+import { useBusySendStore } from '../../stores/useBusySendStore';
 import { getConversation, getContextSize, getAttachmentUrl } from '../../api';
 import { planModeFromTool, approvedPermissionModeFromTool } from './planMode';
 import { persistMessages } from '../../api/conversations';
@@ -283,6 +284,10 @@ export function createStreamCallbacks(ctx: StreamContext) {
 
   const onSystemEvents = (event: string, message: string, data: any) => {
     if (!isStreamSessionActive(conversationId, streamRequestId)) return;
+    if (event === 'queued_input' && data?.queueItem) {
+      useBusySendStore.getState().accept(conversationId, data.queueItem);
+      return;
+    }
     if (event === 'turn_timing') {
       if (data?.conversation_id && data.conversation_id !== conversationId) return;
       setMessagesFor(conversationId, prev => applyTurnTiming(prev, data?.turn, data?.assistant_id));
@@ -366,7 +371,7 @@ export function createStreamCallbacks(ctx: StreamContext) {
     }
     if (event?.startsWith('research_')) setMessages(prev => applyResearchEvent(prev, event, data));
     if (event === 'ask_user' && data) {
-      setAskUserDialog({ request_id: data.request_id, tool_use_id: data.tool_use_id, questions: data.questions || [], answers: {} });
+      setAskUserDialog({ request_id: data.request_id, tool_use_id: data.tool_use_id, session_id: data.session_id || conversationId, planApprovalRequest: data.planApprovalRequest || data.tool_input?.planApprovalRequest, questions: data.questions || [], answers: {} });
     }
     if (event === 'tool_permission' && data) {
       setToolPermissionDialog({ request_id: data.request_id, tool_use_id: data.tool_use_id, tool_name: data.tool_name, input: data.input });
@@ -587,6 +592,10 @@ export function createStreamCallbacks(ctx: StreamContext) {
   const onSystemEventsLight = (event: string, message: string, data: any) => {
     if (event === 'context_reset') { onSystemEvents(event, message, data); return; }
     if (!isStreamSessionActive(conversationId, streamRequestId)) return;
+    if (event === 'queued_input' && data?.queueItem) {
+      useBusySendStore.getState().accept(conversationId, data.queueItem);
+      return;
+    }
     if (event === 'turn_timing') {
       if (data?.conversation_id && data.conversation_id !== conversationId) return;
       setMessagesFor(conversationId, prev => applyTurnTiming(prev, data?.turn, data?.assistant_id));

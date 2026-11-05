@@ -1,0 +1,36 @@
+import { act, cleanup, renderHook } from '@testing-library/react';
+import { afterEach, beforeEach, expect, it, vi } from 'vitest';
+import { getSubagentSnapshot } from '../../api/subagents';
+import { useSubagentTranscript } from './useSubagentTranscript';
+vi.mock('../../api/subagents', () => ({ getSubagentSnapshot: vi.fn(), isSubagentRunning: (status: string) => status === 'running' }));
+const snapshot = { messages: [{ id: 'm' }], status: 'running', cursor: 'one' } as any;
+beforeEach(() => { vi.useFakeTimers(); vi.clearAllMocks(); });
+afterEach(() => { cleanup(); vi.useRealTimers(); });
+it('polls only an active panel, aborts hidden requests, refreshes on reopening and stops completed polling', async () => {
+  vi.mocked(getSubagentSnapshot).mockResolvedValue(snapshot);
+  const { result, rerender } = renderHook(({ active }) => useSubagentTranscript('p', 'c', active), { initialProps: { active: false } });
+  expect(getSubagentSnapshot).not.toHaveBeenCalled();
+  await act(async () => rerender({ active: true }));
+  expect(result.current.snapshot).toBe(snapshot);
+  await act(async () => vi.advanceTimersByTimeAsync(2000));
+  expect(getSubagentSnapshot).toHaveBeenCalledTimes(2);
+  const signal = vi.mocked(getSubagentSnapshot).mock.calls[1][2];
+  rerender({ active: false }); expect(signal.aborted).toBe(true);
+  await act(async () => vi.advanceTimersByTimeAsync(5000));
+  expect(getSubagentSnapshot).toHaveBeenCalledTimes(2);
+  vi.mocked(getSubagentSnapshot).mockResolvedValue({ ...snapshot, status: 'completed' });
+  await act(async () => rerender({ active: true }));
+  await act(async () => vi.advanceTimersByTimeAsync(5000));
+  expect(getSubagentSnapshot).toHaveBeenCalledTimes(3);
+});
+it('ignores late responses after scope change and retains readable history on disconnect', async () => {
+  let resolve!: (value: any) => void;
+  vi.mocked(getSubagentSnapshot).mockImplementationOnce(() => new Promise(done => { resolve = done; })).mockResolvedValueOnce({ ...snapshot, cursor: 'child-two' }).mockRejectedValueOnce(new Error('offline'));
+  const { result, rerender } = renderHook(({ child }) => useSubagentTranscript('p', child, true), { initialProps: { child: 'one' } });
+  await act(async () => rerender({ child: 'two' }));
+  await act(async () => resolve({ ...snapshot, cursor: 'stale' }));
+  expect(result.current.snapshot?.cursor).toBe('child-two');
+  await act(async () => vi.advanceTimersByTimeAsync(2000));
+  expect(result.current.error).toBe('offline');
+  expect(result.current.snapshot?.cursor).toBe('child-two');
+});

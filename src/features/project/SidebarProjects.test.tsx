@@ -157,14 +157,14 @@ describe("project sidebar", () => {
     expect(screen.queryByText("Archived")).not.toBeInTheDocument();
     expect(within(recents).getByText("Current project task").closest(".project-sidebar-row")).not.toHaveClass("project-session-row");
   });
-  it("selects projects and keeps the two independently scrolling lists separate", async () => {
+  it("expands project sessions without filtering Recents, selecting a project or navigating away", async () => {
     const { container, open } = await setup();
     const projects = screen.getByRole("region", { name: "Projects" });
     const recents = screen.getByRole("region", { name: "Recent chats" });
     expect(within(projects).queryByText("Project task")).not.toBeInTheDocument();
     expect(within(recents).getByText("Project task")).toBeInTheDocument();
     expect(within(recents).getByText("Pinned task")).toBeInTheDocument();
-    expect(within(recents).queryByText("Loose task")).not.toBeInTheDocument();
+    expect(within(recents).getByText("Loose task")).toBeInTheDocument();
     expect(container.querySelector('[data-sidebar-lists]')).toHaveClass('grid-rows-[minmax(0,1fr)_minmax(0,1fr)]');
     const projectScroll = container.querySelector('[data-project-list]')!;
     const recentScroll = container.querySelector('[data-recent-list]')!;
@@ -176,13 +176,22 @@ describe("project sidebar", () => {
     fireEvent.click(within(recents).getByText('Project task'));
     expect(open).toHaveBeenCalledWith('b');
     fireEvent.click(screen.getByRole('button', { name: 'Browser' }));
-    expect(useProjectStore.getState().pendingProjectId).toBe('p2');
-    expect(screen.getByRole('button', { name: 'Browser' })).toHaveAttribute('aria-pressed', 'true');
-    expect(within(recents).getByText('No recent chats')).toBeInTheDocument();
-    expect(screen.getByTestId('location')).toHaveTextContent('"selectedProjectId":"p2"');
-    fireEvent.click(screen.getByRole('button', { name: 'No project' }));
-    expect(useProjectStore.getState().pendingProjectId).toBeNull();
-    expect(useWorkspaceModeStore.getState().lastCodeProjectId).toBeNull();
+    expect(useProjectStore.getState().pendingProjectId).toBe('p1');
+    expect(screen.getByRole('button', { name: 'Browser' })).toHaveAttribute('aria-expanded', 'true');
+    expect(within(projects).getByText('No chats in this project')).toBeInTheDocument();
+    expect(within(recents).getByText('Project task')).toBeInTheDocument();
+    expect(screen.getByTestId('location')).not.toHaveTextContent('"selectedProjectId":"p2"');
+    fireEvent.click(screen.getByRole('button', { name: 'Desktop' }));
+    expect(within(projects).getByText('Project task')).toBeInTheDocument();
+    expect(within(projects).getByText('Chat mode task')).toBeInTheDocument();
+    expect(within(projects).queryByText('Archived task')).not.toBeInTheDocument();
+    fireEvent.click(within(projects).getByText('Project task'));
+    expect(open).toHaveBeenCalledWith('b');
+    fireEvent.click(screen.getByRole('button', { name: 'Desktop' }));
+    expect(within(projects).queryByText('Project task')).not.toBeInTheDocument();
+    expect(within(recents).getByText('Project task')).toBeInTheDocument();
+    expect(within(projects).queryByRole('button', { name: 'No project' })).not.toBeInTheDocument();
+    expect(useProjectStore.getState().pendingProjectId).toBe('p1');
     expect(within(recents).getByText('Loose task')).toBeInTheDocument();
   });
   it('ignores stale project refresh responses after a newer selection and refresh', async () => {
@@ -194,8 +203,8 @@ describe("project sidebar", () => {
     fireEvent.click(screen.getByRole('button', { name: 'Browser' }));
     await act(async () => resolveOld([{ ...project, name: 'Stale name' }]));
     expect(screen.queryByRole('button', { name: 'Stale name' })).not.toBeInTheDocument();
-    expect(screen.getByRole('button', { name: 'Browser' })).toHaveAttribute('aria-pressed', 'true');
-    expect(useProjectStore.getState().pendingProjectId).toBe('p2');
+    expect(screen.getByRole('button', { name: 'Browser' })).toHaveAttribute('aria-expanded', 'true');
+    expect(useProjectStore.getState().pendingProjectId).toBe('p1');
   });
   it("preserves incoming recent order and Show more including pinned sessions", async () => {
     await setup(Array.from({ length: 7 }, (_, index) => ({ id: String(index), title: `Task ${index}`, project_id: 'p1', workspace_mode: 'code', pinned: index === 3 })));

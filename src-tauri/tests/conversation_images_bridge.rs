@@ -238,8 +238,8 @@ async fn image_history_roundtrip() {
     assert_eq!(rejected["ok"], false);
     assert_eq!(get("").await["messages"], tail["messages"]);
 
-    // Executor startup failures must preserve their cause and durable failed timing.
-    // Holding the real execution lease fails before the model can receive a request.
+    // Execution ownership is checked before admission, persistence, or turn timing.
+    // Holding the real lease must reject the request without changing the session.
     let locked_session = store
         .create(dir.path(), "fixture-model", "fixture")
         .unwrap();
@@ -254,45 +254,18 @@ async fn image_history_roundtrip() {
         .header("x-api-key", &key)
         .json(&json!({"conversation_id":locked_session,"model":"fixture-model","provider_id":"fixture",
             "messages":[{"role":"user","content":"cannot acquire execution ownership"}]}))
-        .send().await.unwrap().error_for_status().unwrap().text().await.unwrap();
-    let events: Vec<Value> = response
-        .lines()
-        .filter_map(|line| line.strip_prefix("data: "))
-        .map(|line| serde_json::from_str(line).unwrap())
-        .collect();
-    let errors: Vec<&Value> = events
-        .iter()
-        .filter(|event| event["type"] == "error")
-        .collect();
-    assert_eq!(errors.len(), 1, "{response}");
-    assert!(
-        errors[0]["error"]
-            .as_str()
-            .unwrap()
-            .contains("Session is already executing in another owner"),
-        "{response}"
-    );
-    assert!(
-        !response.contains("Connection to engine lost"),
-        "{response}"
-    );
-    assert!(
-        !events.iter().any(|event| event["type"] == "message_start"),
-        "{response}"
+        .send().await.unwrap();
+    assert_eq!(response.status(), reqwest::StatusCode::CONFLICT);
+    let rejection: Value = response.json().await.unwrap();
+    assert_eq!(
+        rejection["error"],
+        "Session is already executing in another owner",
+        "{rejection}"
     );
     assert!(matches!(
         received.try_recv(),
         Err(tokio::sync::mpsc::error::TryRecvError::Empty)
     ));
-    let timing: Vec<&Value> = events
-        .iter()
-        .filter(|event| event["type"] == "turn_timing")
-        .collect();
-    assert_eq!(timing.len(), 2, "{response}");
-    assert_eq!(timing[0]["turn"]["status"], "running");
-    assert_eq!(timing[1]["turn"]["status"], "failed");
-    assert_eq!(timing[0]["turn"]["turnId"], timing[1]["turn"]["turnId"]);
-    assert!(timing[1]["turn"]["elapsedMs"].as_u64().is_some());
     let history: Value = client
         .get(format!(
             "{base}/api/conversations/{locked_session}/messages"
@@ -306,15 +279,13 @@ async fn image_history_roundtrip() {
         .json()
         .await
         .unwrap();
-    let assistants: Vec<&Value> = history["messages"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .filter(|message| message["role"] == "assistant")
-        .collect();
-    assert_eq!(assistants.len(), 1);
-    assert_eq!(assistants[0]["content"], "");
-    assert_eq!(assistants[0]["turn"], timing[1]["turn"]);
+    assert_eq!(history["messages"], json!([]), "{history}");
+    let status: Value = client
+        .get(format!("{base}/api/conversations/{locked_session}/generation-status"))
+        .header("x-api-key", &key)
+        .send().await.unwrap().error_for_status().unwrap()
+        .json().await.unwrap();
+    assert_eq!(status["active"], false, "{status}");
     drop(lease);
 
     // The actual /api/chat save path keeps image-only input and the model sees bytes.
@@ -479,7 +450,7 @@ async fn image_history_roundtrip() {
     })
     .unwrap();
 
-    // Held model execution proves both stop and transport loss finalize before reload.
+    // Disconnect detaches observation; explicit stop finalizes before reload.
     for disconnect in [false, true] {
         let session = store
             .create(dir.path(), "fixture-model", "fixture")
@@ -505,6 +476,13 @@ async fn image_history_roundtrip() {
             .contains("HOLD_TIMING_FIXTURE"));
         if disconnect {
             drop(response);
+            tokio::time::sleep(Duration::from_millis(100)).await;
+            let active: Value = client.get(format!("{base}/api/conversations/{session}/generation-status"))
+                .header("x-api-key", &key).send().await.unwrap().json().await.unwrap();
+            assert_eq!(active["active"], true, "disconnect must not stop backend execution");
+            let stopped: Value = client.post(format!("{base}/api/conversations/{session}/stop-generation"))
+                .header("x-api-key", &key).send().await.unwrap().json().await.unwrap();
+            assert_eq!(stopped["settled"], true);
         } else {
             let stopped: Value = client
                 .post(format!(

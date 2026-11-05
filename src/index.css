@@ -193,9 +193,13 @@ html.dark .sidebar-scroll:hover::-webkit-scrollbar-thumb:hover {
 .markdown-body ol {
   margin-bottom: 0.6em;
   padding-left: 1.5em;
-  list-style-type: disc;
   color: var(--text-claude-main);
 }
+
+.markdown-body ul { list-style-type: disc; }
+.markdown-body ol { list-style-type: decimal; }
+.markdown-body ul ul { list-style-type: circle; }
+.markdown-body ol ol { list-style-type: lower-alpha; }
 
 .markdown-body pre {
   background-color: var(--bg-claude-input);
@@ -832,10 +836,10 @@ html.dark .glass-panel {
 
 /* Chat surfaces share tonal layers without overriding user font families. */
 :root {
-  --chat-canvas: #f5f5f3;
-  --chat-surface: #fcfcfb;
-  --chat-raised: #efefed;
-  --chat-hover: #eeeee9;
+  --chat-canvas: #ffffff;
+  --chat-surface: #ffffff;
+  --chat-raised: #f5f6f7;
+  --chat-hover: #eef0f2;
   --chat-focus: #545450;
   --chat-focus-halo: #cecec7;
   --chat-weight-body: 400;
@@ -844,10 +848,10 @@ html.dark .glass-panel {
   --chat-weight-bold: 700;
 }
 .dark {
-  --chat-canvas: #0b0b0a;
-  --chat-surface: #151515;
-  --chat-raised: #1a1a19;
-  --chat-hover: #20201e;
+  --chat-canvas: #161718;
+  --chat-surface: #1f2022;
+  --chat-raised: #252628;
+  --chat-hover: #2b2d30;
   --chat-focus: #b5b5ae;
   --chat-focus-halo: #494943;
   --chat-weight-body: 360;
@@ -865,13 +869,13 @@ html.dark .glass-panel {
 }
 .chat-composer.chat-composer {
   background-color: var(--chat-surface);
-  border-color: transparent;
+  border-color: var(--border-claude);
   box-shadow: none;
   transition: background-color 150ms ease-out, box-shadow 150ms ease-out;
 }
 .chat-composer.chat-composer:focus-within {
   outline: none;
-  box-shadow: 0 0 0 1px var(--chat-focus), 0 0 0 4px var(--chat-focus-halo);
+  box-shadow: 0 0 0 1px var(--chat-focus);
 }
 .chat-composer textarea:focus { outline: none; box-shadow: none; }
 :is(.chat-surface, .conversation-content) :is(button, a, input, select, textarea, [tabindex]):focus-visible {

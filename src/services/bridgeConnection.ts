@@ -31,26 +31,26 @@ async function connect(): Promise<void> {
   if (!isTauriApp && !useDevProxy) return;
   const deadline = Date.now() + STARTUP_TIMEOUT_MS;
   while (Date.now() < deadline) {
-    let port: number | undefined;
     const timeout = Math.max(1, Math.min(3000, deadline - Date.now()));
     if (useDevProxy) {
-      if (await isHealthy('/api/health', timeout)) port = DEFAULT_BRIDGE_PORT;
-    } else {
-      // Match the five fallback ports used by BridgeServer::start.
-      const ports = Array.from({ length: 5 }, (_, index) => DEFAULT_BRIDGE_PORT + index);
-      const results = await Promise.all(ports.map(candidate => isHealthy(`http://127.0.0.1:${candidate}/health`, timeout)));
-      port = ports.find((_, index) => results[index]);
-    }
-    if (port !== undefined) {
-      if (isTauriApp) {
-        const { invoke } = await import('@tauri-apps/api/core');
-        const key = await invoke<string>('get_bridge_api_key');
-        if (!key) throw new Error('未能获取后端连接凭据，请重试。');
-        localStorage.setItem('bridge_api_key', key);
-        API_BASE = `http://127.0.0.1:${port}/api`;
+      if (await isHealthy('/api/health', timeout)) {
+        detectedBridgePort = DEFAULT_BRIDGE_PORT;
+        return;
       }
-      detectedBridgePort = port;
-      return;
+    } else {
+      // The endpoint and credential must belong to this Desktop process.
+      const { invoke } = await import('@tauri-apps/api/core');
+      const endpoint = await invoke<[number, string] | null>('get_bridge_endpoint');
+      if (endpoint) {
+        const [port, key] = endpoint;
+        if (!key) throw new Error('未能获取后端连接凭据，请重试。');
+        if (await isHealthy(`http://127.0.0.1:${port}/health`, timeout)) {
+          localStorage.setItem('bridge_api_key', key);
+          API_BASE = `http://127.0.0.1:${port}/api`;
+          detectedBridgePort = port;
+          return;
+        }
+      }
     }
     const remaining = deadline - Date.now();
     if (remaining > 0) await new Promise(resolve => setTimeout(resolve, Math.min(RETRY_INTERVAL_MS, remaining)));

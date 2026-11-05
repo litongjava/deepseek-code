@@ -200,7 +200,7 @@ const DiffViewer: React.FC<DiffViewerProps> = ({
           {statusBadge()}
         </div>
         <div className="flex items-center gap-1 flex-shrink-0 ml-4">
-          {status === 'pending' && (
+          {status === 'pending' && (onApply || onReject) && (
             <>
               <button
                 onClick={(e) => { e.stopPropagation(); onApply?.(); }}

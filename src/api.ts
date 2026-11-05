@@ -593,6 +593,30 @@ export async function createProjectConversation(projectId: string, title?: strin
 }
 
 // 对话相关
+export function mapHistoryMessage(m: any, index = 0, cachedMessages: any[] = []) {
+  let toolCalls: any[] = [];
+  if (m.tool_calls) {
+    if (typeof m.tool_calls === 'string') {
+      try { toolCalls = JSON.parse(m.tool_calls); } catch { toolCalls = []; }
+    } else if (Array.isArray(m.tool_calls)) {
+      toolCalls = m.tool_calls;
+    }
+  }
+  return restoreProcessMetadata({
+    attachments: m.attachments,
+    turn: m.turn,
+    requestSnapshots: m.requestSnapshots,
+    id: m.id,
+    role: m.role || 'assistant',
+    content: m.content,
+    thinking: m.thinking || null,
+    created_at: m.created_at,
+    is_compact_boundary: m.is_compact_boundary,
+    sort_order: m.sort_order,
+    toolCalls,
+  }, index, cachedMessages);
+}
+
 export async function getConversations() {
   console.log('[API] getConversations called, isTauriApp:', isTauriApp);
   if (isTauriApp || useDevProxy) {
@@ -766,26 +790,7 @@ export async function getConversation(id: string) {
         updated_at: data.updated_at,
         message_count: data.message_count,
         messages: (data.messages || []).map((m: any, index: number) => {
-          let toolCalls: any[] = [];
-          if (m.tool_calls) {
-            if (typeof m.tool_calls === 'string') {
-              try { toolCalls = JSON.parse(m.tool_calls); } catch { toolCalls = []; }
-            } else if (Array.isArray(m.tool_calls)) {
-              toolCalls = m.tool_calls;
-            }
-          }
-          return restoreProcessMetadata({
-            turn: m.turn,
-            requestSnapshots: m.requestSnapshots,
-            id: m.id,
-            role: m.role || 'assistant',
-            content: m.content,
-            thinking: m.thinking || null,
-            created_at: m.created_at,
-            is_compact_boundary: m.is_compact_boundary,
-            sort_order: m.sort_order,
-            toolCalls,
-          }, index, cachedMessages);
+          return mapHistoryMessage(m, index, cachedMessages);
         }),
       };
     } catch (e) {

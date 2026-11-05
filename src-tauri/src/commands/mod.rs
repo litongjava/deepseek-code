@@ -547,6 +547,11 @@ pub async fn mcp_list_tools(
 }
 
 #[tauri::command]
+pub fn get_bridge_endpoint() -> Option<(u16, String)> {
+    crate::bridge::local_endpoint()
+}
+
+#[tauri::command]
 pub fn get_bridge_api_key(app_handle: tauri::AppHandle) -> Result<String, String> {
     let api_key_store = app_handle.state::<Arc<std::sync::Mutex<Option<String>>>>();
     let guard = api_key_store.lock().map_err(|e| e.to_string())?;

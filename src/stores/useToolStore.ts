@@ -43,6 +43,8 @@ interface AskUserQuestion {
 interface AskUserDialogData {
   request_id: string;
   tool_use_id: string;
+  session_id?: string;
+  planApprovalRequest?: import('../features/chat/PlanApprovalDialog').PlanApprovalRequest;
   questions: AskUserQuestion[];
   answers: Record<string, string>;
 }

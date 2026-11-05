@@ -59,6 +59,7 @@ use serde::{de::DeserializeOwned, Serialize};
 use std::sync::Arc;
 
 pub mod workspace_files;
+pub mod subagents;
 
 pub trait Credentials: Send + Sync {
     fn get(&self, name: &str) -> Result<String>;

@@ -379,7 +379,7 @@ impl QueryEngine {
         request: ChatRequest,
         save_response: bool,
     ) -> Result<mpsc::Receiver<EngineEvent>> {
-        self.send_with_origin(request, save_response, false).await
+        self.send_with_origin(request, save_response, false, None).await
     }
 
     /// Internal hook feedback: no user prompt hooks, skill invocation or authority.
@@ -388,7 +388,17 @@ impl QueryEngine {
         request: ChatRequest,
         save_response: bool,
     ) -> Result<mpsc::Receiver<EngineEvent>> {
-        self.send_with_origin(request, save_response, true).await
+        self.send_with_origin(request, save_response, true, None).await
+    }
+
+    /// Transfer ownership acquired before a host's durable input handoff.
+    pub async fn send_message_with_lease(
+        &self,
+        request: ChatRequest,
+        save_response: bool,
+        lease: crate::services::session_messages::ExecutionLease,
+    ) -> Result<mpsc::Receiver<EngineEvent>> {
+        self.send_with_origin(request, save_response, false, Some(lease)).await
     }
 
     async fn send_with_origin(
@@ -396,6 +406,7 @@ impl QueryEngine {
         mut request: ChatRequest,
         save_response: bool,
         hook_wake: bool,
+        execution_lease: Option<crate::services::session_messages::ExecutionLease>,
     ) -> Result<mpsc::Receiver<EngineEvent>> {
         crate::services::compaction::apply_boundary(
             &self.db_manager,
@@ -745,6 +756,7 @@ impl QueryEngine {
         if let Some(ref registry) = self.mcp_registry {
             executor = executor.with_mcp_registry(registry.clone());
         }
+        executor.execution_lease = execution_lease;
         executor.share_owned_child_budget();
 
         let conv_id_clone = conv_id.clone();
@@ -1058,6 +1070,55 @@ impl QueryEngine {
         super::permission_response::completion(&self.permission_mailbox, request_id).await
     }
 
+    pub async fn pending_questions(&self, session: &str) -> Vec<Value> {
+        let waiters = self.answer_waiters.lock().await;
+        super::permission_response::pending_owners(session).into_iter()
+            .filter(|(id, _)| waiters.get(id).is_some_and(|sender| !sender.is_closed()))
+            .map(|(id, owner)| serde_json::json!({"request_id":id,"session_id":owner.session_id,
+                "tool_use_id":owner.tool_use_id,"kind":owner.kind,"tool_input":owner.input,
+                "planApprovalRequest":owner.plan})).collect()
+    }
+
+    /// Scope Desktop responses to the emitting session, including delegated children.
+    /// Validate first; malformed or stale submissions must not consume a live waiter.
+    pub async fn resume_scoped_answer(&self, session: &str, request_id: &str, tool_use_id: &str, answer: String, permission: bool) -> Result<Value> {
+        let owner = super::permission_response::request_owner(request_id)
+            .ok_or_else(|| anyhow!("Request expired or already completed"))?;
+        anyhow::ensure!(owner.session_id == session && owner.tool_use_id == tool_use_id,
+            "Request session or tool ownership mismatch");
+        anyhow::ensure!((owner.kind == "permission") == permission, "Incorrect response endpoint for request");
+        if let Some(request) = &owner.plan {
+            let manager = owner.manager.as_ref().ok_or_else(|| anyhow!("Plan authority unavailable"))?;
+            let root = owner.root.as_ref().ok_or_else(|| anyhow!("Plan storage unavailable"))?;
+            let context = crate::services::session_messages::context(root)?;
+            let bypass = crate::services::session_permission_mode::plan_returns_to_bypass(&context.db, session, manager)?;
+            crate::services::plan_approval::parse_response(&answer, request, bypass)?;
+            anyhow::ensure!(manager.get_mode() == crate::permissions::PermissionMode::PlanMode, "Plan mode changed during review");
+            anyhow::ensure!(crate::services::plans::read(root, session)?.as_deref() == Some(request.plan.as_str()), "Plan changed during review; request approval again");
+        }
+        let mut outcome = owner.outcome.subscribe();
+        if permission {
+            super::permission_response::respond(&self.permission_mailbox, request_id,
+                super::permission_response::PermissionResponse::Text(answer)).await?;
+            return Ok(serde_json::json!({"ok":true,"status":"submitted"}));
+        }
+        {
+            let mut waiters = self.answer_waiters.lock().await;
+            anyhow::ensure!(waiters.get(request_id).is_some_and(|sender| !sender.is_closed()), "Request expired or already completed");
+            waiters.remove(request_id).unwrap().send(answer).map_err(|_| anyhow!("Request cancelled before delivery"))?;
+        }
+        if owner.plan.is_some() {
+            loop {
+                if let Some(result) = outcome.borrow().clone() {
+                    let result = result.map_err(|error| anyhow!(error))?;
+                    return Ok(serde_json::json!({"ok":true,"status":"applied","result":result}));
+                }
+                outcome.changed().await.map_err(|_| anyhow!("Plan approval cancelled before commit"))?;
+            }
+        }
+        Ok(serde_json::json!({"ok":true,"status":"submitted"}))
+    }
+
     pub async fn resume_with_answer(&self, conv_id: &str, answer: String) -> Result<()> {
         if self.permission_mailbox.lock().await.contains_key(conv_id) {
             return super::permission_response::respond(&self.permission_mailbox, conv_id,
@@ -1161,6 +1222,10 @@ impl QueryEngine {
         removed_count
     }
 }
+
+#[cfg(test)]
+#[path = "scoped_answer_tests.rs"]
+mod scoped_answer_tests;
 
 pub type NativeEngine = QueryEngine;
 

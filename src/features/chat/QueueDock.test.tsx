@@ -1,0 +1,81 @@
+import { beforeEach, afterEach, expect, it, vi } from 'vitest';
+import { render, screen, fireEvent, cleanup, waitFor, act } from '@testing-library/react';
+import QueueDock from './QueueDock';
+import { useBusySendStore } from '../../stores/useBusySendStore';
+import type { QueueItem } from '../../api/queue';
+const item = (id = 1): QueueItem => ({ id, sessionId: 'a', requestId: `r${id}`, revision: 1, content: 'hello', mode: 'next_turn', state: 'queued' });
+beforeEach(() => {
+  useBusySendStore.setState({ queues: {} });
+  vi.spyOn(useBusySendStore.getState(), 'refresh').mockResolvedValue();
+});
+afterEach(() => { cleanup(); vi.restoreAllMocks(); });
+it('hides empty, omits one-row header, collapses multiple rows', () => {
+  const view = render(<QueueDock session="a" />);
+  expect(screen.queryByRole('region')).toBeNull();
+  act(() => useBusySendStore.getState().accept('a', item()));
+  view.rerender(<QueueDock session="a" />);
+  expect(screen.getByText('hello')).toBeTruthy();
+  expect(screen.queryByRole('button', { name: /Queued \(/ })).toBeNull();
+  act(() => useBusySendStore.getState().accept('a', item(2)));
+  view.rerender(<QueueDock session="a" />);
+  expect(screen.getByRole('button', { name: /Queued \(2\)/ }).getAttribute('aria-expanded')).toBe('false');
+  expect(screen.queryByText('hello')).toBeNull();
+});
+it('protects IME and shift-enter; Enter saves actual revision and Escape cancels', async () => {
+  useBusySendStore.getState().accept('a', item());
+  const mutate = vi.spyOn(useBusySendStore.getState(), 'mutate').mockResolvedValue(true);
+  render(<QueueDock session="a" />);
+  fireEvent.click(screen.getByRole('button', { name: 'Edit queued message' }));
+  const editor = screen.getByRole('textbox');
+  fireEvent.change(editor, { target: { value: 'new draft' } });
+  fireEvent.keyDown(editor, { key: 'Enter', isComposing: true });
+  fireEvent.keyDown(editor, { key: 'Enter', shiftKey: true });
+  expect(mutate).not.toHaveBeenCalled();
+  fireEvent.keyDown(editor, { key: 'Enter' });
+  await waitFor(() => expect(mutate).toHaveBeenCalledWith('a', item(), 'edit', 'new draft'));
+  await waitFor(() => expect(screen.queryByRole('textbox')).toBeNull());
+  fireEvent.click(screen.getByRole('button', { name: 'Edit queued message' }));
+  fireEvent.keyDown(screen.getByRole('textbox'), { key: 'Escape' });
+  expect(screen.queryByRole('textbox')).toBeNull();
+});
+it('retains a conflicted edit draft and the original revision after a refresh', async () => {
+  useBusySendStore.getState().accept('a', item());
+  const mutate = vi.spyOn(useBusySendStore.getState(), 'mutate').mockResolvedValue(false);
+  render(<QueueDock session="a" />);
+  fireEvent.click(screen.getByRole('button', { name: 'Edit queued message' }));
+  fireEvent.change(screen.getByRole('textbox'), { target: { value: 'my draft' } });
+  act(() => useBusySendStore.getState().accept('a', { ...item(), revision: 2, content: 'other client' }));
+  fireEvent.keyDown(screen.getByRole('textbox'), { key: 'Enter' });
+  await waitFor(() => expect(screen.getByRole('alert').textContent).toContain('draft retained'));
+  expect((screen.getByRole('textbox') as HTMLTextAreaElement).value).toBe('my draft');
+  expect(mutate.mock.calls[0][1].revision).toBe(1);
+});
+it('disables attachment editing and calls real steer/delete actions', () => {
+  useBusySendStore.getState().accept('a', { ...item(), content: [{ type: 'image_url', image_url: { url: 'data:image/png;base64,YWJj' }, fileName: '截图.png', size: 1024 }] });
+  const mutate = vi.spyOn(useBusySendStore.getState(), 'mutate').mockResolvedValue(true);
+  render(<QueueDock session="a" executing />);
+  expect((screen.getByRole('button', { name: 'Edit queued message' }) as HTMLButtonElement).disabled).toBe(true);
+  expect(screen.getByAltText('截图.png')).toBeTruthy();
+  expect(screen.getByText('截图.png')).toBeTruthy();
+  expect(screen.getByText('1.0 KB')).toBeTruthy();
+  fireEvent.click(screen.getByRole('button', { name: 'Steer' }));
+  fireEvent.click(screen.getByRole('button', { name: 'Delete queued message' }));
+  expect(mutate.mock.calls.map(call => call[2])).toEqual(['steer', 'delete']);
+});
+
+it('does not steer an idle execution or a paused queue', () => {
+  useBusySendStore.getState().accept('a', item());
+  const mutate = vi.spyOn(useBusySendStore.getState(), 'mutate').mockResolvedValue(true);
+  const view = render(<QueueDock session="a" />);
+  const steer = screen.getByRole('button', { name: 'Steer' }) as HTMLButtonElement;
+  expect(steer.disabled).toBe(true);
+  fireEvent.click(steer);
+  expect(mutate).not.toHaveBeenCalled();
+  view.rerender(<QueueDock session="a" executing />);
+  expect(steer.disabled).toBe(false);
+  act(() => useBusySendStore.setState(state => ({ queues: { ...state.queues, a: { ...state.queues.a, paused: true } } })));
+  expect(steer.disabled).toBe(true);
+  fireEvent.click(steer);
+  expect(mutate).not.toHaveBeenCalled();
+  expect((screen.getByRole('button', { name: 'Delete queued message' }) as HTMLButtonElement).disabled).toBe(false);
+});
