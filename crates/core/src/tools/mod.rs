@@ -497,75 +497,9 @@ fn tool_search(input: serde_json::Value) -> Result<serde_json::Value> {
 fn max_output_bytes() -> usize { crate::config::OrchestrationConfig::max_output_bytes() }
 fn default_bash_timeout_secs() -> u64 { crate::config::OrchestrationConfig::default_bash_timeout_secs() }
 
+mod dangerous_command;
 pub fn is_dangerous_command(command: &str) -> bool {
-    let dangerous_patterns = [
-        // ── Linux destructive ──
-        "rm -rf /",
-        "rm -rf /*",
-        "rm -rf ~",
-        "rm -rf .",
-        "dd if=",
-        "mkfs",
-        ":(){ :|:& };:",
-        "> /dev/sda",
-        "> /dev/hda",
-        "> /dev/nvme",
-        "chmod 777 /",
-        "chmod -R 777",
-        "chown -R",
-        // ── Linux priv esc / backdoor ──
-        "curl | bash",
-        "curl | sh",
-        "wget | bash",
-        "wget | sh",
-        "curl|bash",
-        "curl|sh",
-        "wget|bash",
-        "wget|sh",
-        "sudo su",
-        "sudo -i",
-        "passwd",
-        // ── Windows destructive ──
-        "format c:",
-        "format d:",
-        "del /s /q c:",
-        "del /s /q d:",
-        "rd /s /q c:",
-        "rd /s /q d:",
-        "remove-item -recurse -force c:",
-        "remove-item -recurse -force /",
-        "diskpart",
-        "bcdedit",
-        // ── Windows priv esc / backdoor ──
-        "net user administrator",
-        "net localgroup administrators",
-        "add-mppreference -exclusionpath",
-        "set-mppreference -disable",
-        "reg delete hklm\\software",
-        "reg delete hkcu\\software",
-        "sc stop",
-        "sc delete",
-        // ── Cross-platform dangerous ──
-        "eval(",
-        "fork bomb",
-        "shutdown",
-        "restart -f",
-        "docker rm -f",
-        "docker system prune",
-        // Remote shell primitives. Ordinary HTTP clients are not inherently
-        // destructive: their authorization belongs to the permission manager.
-        "nc -e",
-        "/dev/tcp/",
-    ];
-
-    let lower = command.to_lowercase();
-    let stripped = lower
-        .replace("  ", " ")
-        .replace("\\ ", " ")
-        .replace("\"", "")
-        .replace("'", "");
-
-    dangerous_patterns.iter().any(|pat| stripped.contains(pat))
+    dangerous_command::matches(command)
 }
 
 #[cfg(test)]
@@ -590,9 +524,9 @@ mod command_filter_tests {
         let manager = std::sync::Arc::new(PermissionManager::new(std::sync::Arc::new(AuditLogger::new(16))));
         let dir = tempfile::tempdir().unwrap();
         crate::config::OrchestrationConfig::init_global().unwrap();
-        // echo/Write-Output only: never execute a shutdown in the test runner.
-        let cases = if cfg!(windows) { vec![("cmd", "echo shutdown /s /t 0"), ("powershell", "Write-Output 'shutdown /s /t 0'")] }
-                    else { vec![("sh", "printf '%s' 'shutdown /s /t 0'")] };
+        // Matched evaluation primitives with harmless payloads; never shut down.
+        let cases = if cfg!(windows) { vec![("powershell", "Invoke-Expression \"Write-Output 'shutdown /s /t 0'\"")] }
+                    else { vec![("sh", "eval \"printf '%s' 'shutdown /s /t 0'\"")] };
         for (shell, command) in cases {
             let input = serde_json::json!({"shell":shell,"command":command,"__bypass_permissions":true});
             let run = || super::tool_bash_async(input.clone(), dir.path().to_str().unwrap());
