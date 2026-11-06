@@ -333,6 +333,7 @@ async fn observe(
     let mut notification_error = None;
     let mut final_mode_synced = false;
     let mut shown_proposal = None::<String>;
+    let mut proposal_lock_reported = false;
     let relay = session.remote_relay();
     let mut remote_request: Option<deepseek_code_core::services::remote_control::PermissionRequest> = None;
     let mut remote_interrupts = session.remote_interrupts();
@@ -352,7 +353,22 @@ async fn observe(
                 }
             },
             _ = tick.tick() => {
-                let proposal = proposal_frontend.map(|frontend| frontend.poll()).transpose()?.flatten();
+                let proposal = match proposal_frontend.map(|frontend| frontend.poll()).transpose() {
+                    Ok(proposal) => { proposal_lock_reported = false; proposal.flatten() },
+                    Err(error) if deepseek_code_core::db::is_contention(&error) => {
+                        if !proposal_lock_reported {
+                            let diagnostic = format!("Goal proposal status temporarily unavailable: {error:#}. Task output continues.");
+                            display.notice(&diagnostic);
+                            use std::io::Write;
+                            if let Ok(mut file) = std::fs::OpenOptions::new().create(true).append(true).open(root.join("background-tasks").join(id).join("stderr.log")) {
+                                let _ = writeln!(file, "Frontend observation deferred: {diagnostic}");
+                            }
+                            proposal_lock_reported = true;
+                        }
+                        None
+                    },
+                    Err(error) => return Err(error.context("Reading goal proposal status")),
+                };
                 let has_proposal = proposal.is_some();
                 if shown_proposal.as_deref() != proposal.as_ref().map(|p| p.id.as_str()) {
                     shown_proposal = proposal.as_ref().map(|p| p.id.clone());
