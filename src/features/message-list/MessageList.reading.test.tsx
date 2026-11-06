@@ -44,7 +44,7 @@ describe('reading mode', () => {
     const image = { type: 'image', source: { type: 'base64', media_type: 'image/png', data: 'aGVsbG8=' } };
     const initial = [{ role: 'user', content: [{ type: 'text', text: '图片问题' }, image] }, { role: 'assistant', content: '', thinking: 'Thinking' }];
     const { container, rerender } = render(<MessageList {...props} messages={initial} loading readingMode />);
-    expect(container.querySelectorAll('[data-message-index]')).toHaveLength(1);
+    expect(container.querySelectorAll('[data-message-index]')).toHaveLength(2);
     fireEvent.click(screen.getByRole('button', { name: 'Open Image #1' }));
     expect(screen.getByRole('dialog')).toBeVisible();
     fireEvent.keyDown(document, { key: 'Escape' });

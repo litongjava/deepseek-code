@@ -362,7 +362,7 @@ const MainContent = ({ onNewChat, resetKey, tunerConfig, onOpenDocument, onArtif
   const setMessagesFor = useCallback((convId: string, updater: (prev: any[]) => any[]) => {
     const ensureUpdater = (prev: any[]) => {
       if (prev.length === 0) return updater(prev); // empty conv: don't synthesize a phantom placeholder
-      const last = prev[prev.length - 1];
+      const last = prev.slice().reverse().find(message => !message.pendingSteer);
       if (last && last.role === 'assistant') return updater(prev);
       // Tail is a user message (or other non-assistant). Backfill an assistant
       // placeholder so the trailing SSE event has somewhere to land instead of
@@ -1156,7 +1156,19 @@ const MainContent = ({ onNewChat, resetKey, tunerConfig, onOpenDocument, onArtif
       if (queueSubmitting.current) return;
       queueSubmitting.current = true;
       try {
-        await submitBusyMessage(activeId, effectiveText, files, busySendBehavior);
+        const submitted = await submitBusyMessage(activeId, effectiveText, files, busySendBehavior);
+        if (submitted && busySendBehavior === 'steer') {
+          // Steer input joins the transcript immediately; the engine persists the
+          // same message as queue-input-<id> and it replaces this copy on reload.
+          setMessages(prev => {
+            // Blocks are stringified the same way the transcript stores them, and
+            // contentBlocks() parses the string back when rendering.
+            const content = typeof submitted === 'string' ? submitted : JSON.stringify(submitted);
+            const next = [...prev, { role: 'user', content, pendingSteer: true, created_at: new Date().toISOString() }];
+            messagesBufferRef.current.set(activeId, next);
+            return next;
+          });
+        }
       } catch (error) {
         alert(formatChatError(error instanceof Error ? error.message : String(error)));
         return;
@@ -1413,9 +1425,10 @@ const MainContent = ({ onNewChat, resetKey, tunerConfig, onOpenDocument, onArtif
       isCreatingRef.current = false;
       setMessages(prev => {
         const newMsgs = [...prev];
-        if (newMsgs.length > 0 && newMsgs[newMsgs.length - 1].role === 'assistant') {
-          newMsgs[newMsgs.length - 1].content = formatChatError(err?.message || String(err));
-          newMsgs[newMsgs.length - 1].isThinking = false;
+        const last = newMsgs.slice().reverse().find(message => message.role === 'assistant');
+        if (last) {
+          last.content = formatChatError(err?.message || String(err));
+          last.isThinking = false;
         }
         return newMsgs;
       });

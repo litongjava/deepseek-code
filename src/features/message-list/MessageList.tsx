@@ -70,8 +70,10 @@ const MessageList = React.memo<MessageListProps>(({
   messageContentRefs, onOpenResearch, onInspect, t,
 }) => {
   const showCodingView = useGeneralSettingsStore(state => state.showCodingView);
-  const visibleMessages = messages.map((msg, idx) => ({ msg, idx })).filter(({ msg }) => {
+  const visibleMessages = messages.map((msg, idx) => ({ msg, idx })).filter(({ msg, idx }) => {
     if (!readingMode) return true;
+    // The running answer has no text yet; keep it so its reply indicator stays visible.
+    if (loading && idx === messages.length - 1 && msg.role === 'assistant') return true;
     if (msg.is_summary === 1 || msg.is_compact_boundary || !['user', 'assistant'].includes(msg.role)) return false;
     return msg.role === 'user' || messageSteps(msg).some(step => step.kind === 'text' && step.text?.trim()) || normalizeMessageDocuments(msg).length > 0 || msg.codeImages?.length > 0;
   });
@@ -356,13 +358,13 @@ const MessageList = React.memo<MessageListProps>(({
                   ))}
                 </div>
               )}
-              {!readingMode && loading && idx === messages.length - 1 && !msg.content && !msg.thinking && !msg.searchStatus && normalizeDocumentDrafts(msg).length === 0 && !(msg.toolCalls && msg.toolCalls.length > 0) && (
+              {loading && idx === messages.length - 1 && !msg.content && !msg.searchStatus && normalizeDocumentDrafts(msg).length === 0 && !(msg.toolCalls && msg.toolCalls.length > 0) && (
                 <div role="status" className="flex items-center gap-2 ml-1 text-[14px] text-claude-textSecondary font-sans">
                   <span aria-hidden="true" className="shrink-0"><ClaudeLogo breathe style={{ width: '40px', height: '40px' }} /></span>
                   <span>Working on it...</span>
                 </div>
               )}
-              {!readingMode && loading && idx === messages.length - 1 && !msg.isThinking && (msg.content || (msg.searchStatus && msg.content)) && (
+              {loading && idx === messages.length - 1 && !msg.isThinking && (msg.content || (msg.searchStatus && msg.content)) && (
                 <span className="inline-block ml-1 align-middle" style={{ verticalAlign: 'middle' }}>
                   <ClaudeLogo autoAnimate style={{ width: '40px', height: '40px', display: 'inline-block' }} />
                 </span>

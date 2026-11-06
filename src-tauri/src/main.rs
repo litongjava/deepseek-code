@@ -500,15 +500,6 @@ fn main() {
                 }
             });
 
-            if let Some(window) = app.webview_windows().get("main") {
-                let window = window.clone();
-                tauri::async_runtime::spawn(async move {
-                    // Wait briefly for webview to initialize
-                    tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
-                    let _ = window.open_devtools();
-                });
-            }
-
             let db_manager_for_scheduler = match app.try_state::<Arc<crate::db::DbManager>>() {
                 Some(state) => state.inner().clone(),
                 None => {

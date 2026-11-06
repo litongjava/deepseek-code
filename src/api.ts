@@ -2001,34 +2001,47 @@ export async function sendMessage(
         permissionMode = (window as any).__chatStore.getState().permissionMode;
       }
     } catch {}
-    const res = await fetch(`${API_BASE}/chat`, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        'Authorization': `Bearer ${token}`,
-      },
-      body: JSON.stringify({
-        conversation_id: conversationId,
-        message,
-        model: splitModelKey(model || '').modelId,
-        provider_id: splitModelKey(model || '').providerId,
-        messages: messages && messages.length > 0 ? messages : undefined,
-        attachments: attachments || undefined,
-        ...resolveEnvCreds(getUserModeForConversation(conversationId)),
-        user_mode: getUserModeForConversation(conversationId),
-        permission_mode: permissionMode,
-        effort: ['off', 'low', 'high', 'max'].includes(reasoningMode || '') ? reasoningMode : 'off',
-        user_profile: (() => {
-          try {
-            const p = JSON.parse(localStorage.getItem('user_profile') || localStorage.getItem('user') || '{}');
-            const wf = p.work_function;
-            const pp = p.personal_preferences;
-            return (wf || pp) ? { work_function: wf, personal_preferences: pp } : undefined;
-          } catch { return undefined; }
-        })(),
-      }),
-      signal,
-    });
+    let res: Response;
+    try {
+      res = await fetch(`${API_BASE}/chat`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'Authorization': `Bearer ${token}`,
+        },
+        body: JSON.stringify({
+          conversation_id: conversationId,
+          message,
+          model: splitModelKey(model || '').modelId,
+          provider_id: splitModelKey(model || '').providerId,
+          messages: messages && messages.length > 0 ? messages : undefined,
+          attachments: attachments || undefined,
+          ...resolveEnvCreds(getUserModeForConversation(conversationId)),
+          user_mode: getUserModeForConversation(conversationId),
+          permission_mode: permissionMode,
+          effort: ['off', 'low', 'high', 'max'].includes(reasoningMode || '') ? reasoningMode : 'off',
+          user_profile: (() => {
+            try {
+              const p = JSON.parse(localStorage.getItem('user_profile') || localStorage.getItem('user') || '{}');
+              const wf = p.work_function;
+              const pp = p.personal_preferences;
+              return (wf || pp) ? { work_function: wf, personal_preferences: pp } : undefined;
+            } catch { return undefined; }
+          })(),
+        }),
+        signal,
+      });
+    } catch (error) {
+      if ((error as Error)?.name === 'AbortError') throw error;
+      // A network-level failure hides its cause in "Failed to fetch". Name the
+      // endpoint and reset detection so the next send can follow a moved bridge.
+      console.error(`[API] Chat request to ${API_BASE} failed:`, error);
+      // resetBridgePort is imported lazily to avoid a cycle with bridgeConnection.
+      const { resetBridgePort } = await import('./services/bridgeConnection');
+      resetBridgePort();
+      onError(`无法连接本地后端 ${API_BASE}（${(error as Error)?.message || String(error)}）。请确认后端已启动；重启应用后会自动连接正确的端口。`);
+      return;
+    }
 
     if (!res.ok) {
       onError(await readChatResponseError(res));

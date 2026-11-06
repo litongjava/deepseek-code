@@ -150,6 +150,12 @@ describe('ordered process events', () => {
     expect(trace.filter(r => r.role === 'system').map(r => r.text)).toEqual(['实际系统指令', 'Changed project instructions\n\n实际系统指令']);
     expect(trace.filter(r => r.role === 'assistant').map(r => r.request?.id)).toEqual(['r1', 'r2', 'r3']);
   });
+  it('ignores promptless auxiliary web search requests when merging system prompts', () => {
+    const snapshot = { id: 'r1', number: 1, startedAt: 100, model: 'test', systemPrompt: 'Project prompt', systemMessages: [], tools: [], source: 'native_engine' };
+    const search = { id: 'search', number: 2, startedAt: 150, model: 'test', systemPrompt: null, systemMessages: [], tools: [], source: 'web_search' };
+    const trace = buildTrace([{ role: 'user', content: 'test' }, { role: 'assistant', content: '', requestSnapshots: [snapshot, search, { ...snapshot, id: 'r3', number: 3 }] }]);
+    expect(trace.filter(r => r.role === 'system').map(r => r.text)).toEqual(['Project prompt']);
+  });
   it('keeps thinking, commentary, tool and final answer in stream order without repeated text', () => {
     const message = sample();
     expect(messageSteps(message).map(s => s.kind)).toEqual(['thinking', 'text', 'tool', 'text']);

@@ -296,13 +296,17 @@ export function buildTrace(messages: any[], loading = false): TraceRecord[] {
     }
     steps = steps.map(s => ({ ...s, step: ++step }));
     const headers: TraceRecord[] = snapshots.flatMap(request => {
+      // Auxiliary web searches carry no prompt; a header for them would also
+      // break the comparison below and repeat the surrounding system prompt.
+      const text = requestSystemPrompt(request);
+      if (request.source === 'web_search' || !text.trim()) return [];
       const context = canonical({ systemPrompt: request.systemPrompt, systemMessages: request.systemMessages || [] });
       if (context === previousSystemContext) return [];
       previousSystemContext = context;
       return [{
         id: `request:${request.id}`, kind: 'text' as const, turn, step: 0, role: 'system',
         title: 'System Prompt', status: request.persisted === false ? '未保存' : 'recorded',
-        text: requestSystemPrompt(request), input: request.systemMessages, result: request.tools, request,
+        text, input: request.systemMessages, result: request.tools, request,
         startedAt: request.startedAt,
       }];
     });
