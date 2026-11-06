@@ -72,6 +72,17 @@ npm run tauri -- dev
 
 真实 PTY 自动化：`cargo test --locked -p deepseek-code-core --lib configured_bash_and_wsl -- --ignored --test-threads=1`，需要 Git Bash 和已安装的 `dcl-linux-test`。
 
+## 会话 Bash 授权与工具结果
+
+1. Ask 模式触发普通 Bash 审批：只显示一份弹窗，提供 `Allow for Session`；选择后，同一会话下一条普通 Bash 不再弹窗。
+2. 用无害的 `eval 'echo test'` 命中危险规则：仍弹出单次允许/拒绝，不能选择会话授权。
+3. 权限菜单显示当前会话 Bash 授权状态；点击撤销后读回未授权。其他会话和应用冷启动不继承授权。
+4. 审批接口失败时保留弹窗并显示错误，不提前关闭，也不误写入会话授权。
+5. `git_add` 完成后展开工具详情，结果区显示成功摘要和完整路径文本，复制输出也为文本；原始工具输入仍可检查。
+6. 创建带名称的后台任务，等待 `TaskOutput` 时已显示 `TaskOutput(任务名称)`，完成后和重新打开历史后保持名称。
+
+2026-11-06 使用隔离数据目录、实际 Tauri WebView2 和本地模型 fixture 完成 Shell 路径保存/无效路径拒绝，以及上述 1、2、3、5、6 的运行中展示。文件选择器的系统对话框、历史重开和跨平台界面尚未在本轮手工验收；对应组件/回放测试不能代替这些系统界面检查。
+
 ## 按改动范围选择场景
 
 - `MemoryPanel`、`api/memory`、`routes/memory.rs`、`crates/core/src/memory`：A
