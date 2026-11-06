@@ -191,8 +191,8 @@ mod tests {
         .unwrap();
         let tool = PermissionContext {
             mcp_read_only: false,
-            tool_name: "Bash".into(),
-            tool_input: json!({"command":"echo fixture"}),
+            tool_name: "Write".into(),
+            tool_input: json!({"file_path":"fixture.txt","content":"fixture"}),
             conversation_id: parent.clone(),
             workspace_path: Some(root.path().to_string_lossy().into_owned()),
             user_id: None,

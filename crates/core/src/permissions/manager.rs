@@ -682,6 +682,12 @@ impl PermissionManager {
         if setting.as_ref().is_some_and(|p| p.requires_confirmation) {
             return decision(self.request_confirmation(context), ToolSetting);
         }
+        if shell && context.tool_input["command"].as_str().is_some_and(crate::tools::is_dangerous_command) {
+            return decision(self.request_confirmation(context), Mode);
+        }
+        if auto && shell && context.tool_input["command"].as_str().is_some() {
+            return decision(PermissionResult::Granted, Mode);
+        }
         if actions.contains(&PermissionAction::Allow) {
             return decision(PermissionResult::Granted, ExplicitRule);
         }
@@ -1446,12 +1452,41 @@ mod policy_tests {
     fn auto_filters_broad_grants_without_destroying_saved_rules() {
         let manager = manager(PermissionMode::Auto);
         manager.set_session_rules("session", HashMap::from([("Bash".into(), PermissionAction::Allow), ("Agent".into(), PermissionAction::Allow)]));
-        for tool in ["Bash", "Agent"] { assert!(manager.evaluate_permission(&context(tool)).classifier_eligible); }
+        assert!(manager.evaluate_permission(&context("Agent")).classifier_eligible);
+        let mut shell = context("Bash");
+        shell.tool_input = serde_json::json!({"command":"npm test"});
+        assert_eq!(manager.check_permission(&shell), PermissionResult::Granted);
         manager.set_mode(PermissionMode::AskPermissions);
         for tool in ["Bash", "Agent"] { assert_eq!(manager.check_permission(&context(tool)), PermissionResult::Granted); }
         manager.set_mode(PermissionMode::Auto);
         manager.set_session_rules("session", HashMap::from([("Bash".into(), PermissionAction::Deny)]));
         assert!(matches!(manager.check_permission(&context("Bash")), PermissionResult::Denied(_)));
+    }
+
+    #[test]
+    fn auto_shell_skips_classifier_but_preserves_explicit_policy_and_danger() {
+        let manager = manager(PermissionMode::Auto);
+        for command in ["cd D:/repo && grep -n 'BridgeServer|shutdown' src/main.rs | head", "npm install", "python unknown.py", "custom-script --run", "echo hi > output.txt"] {
+            let mut input = context("Bash");
+            input.tool_input = serde_json::json!({"command":command});
+            let decision = manager.evaluate_permission(&input);
+            assert_eq!(decision.result, PermissionResult::Granted, "{command}");
+            assert!(!decision.classifier_eligible);
+            manager.set_session_rules("session", HashMap::from([("Bash".into(), PermissionAction::Confirm)]));
+            assert!(matches!(manager.check_permission(&input), PermissionResult::RequiresConfirmation(_)));
+            manager.set_session_rules("session", HashMap::from([("Bash".into(), PermissionAction::Deny)]));
+            assert!(matches!(manager.check_permission(&input), PermissionResult::Denied(_)));
+            manager.set_session_rules("session", HashMap::new());
+        }
+        let mut input = context("Bash");
+        input.tool_input = serde_json::json!({"command":"shutdown /s"});
+        for mode in [PermissionMode::Auto, PermissionMode::AskPermissions, PermissionMode::AcceptEdits] {
+            manager.set_mode(mode);
+            manager.set_session_rules("session", HashMap::from([("Bash".into(), PermissionAction::Allow)]));
+            let decision = manager.evaluate_permission(&input);
+            assert!(matches!(decision.result, PermissionResult::RequiresConfirmation(_)));
+            assert!(!decision.classifier_eligible);
+        }
     }
 
     #[test]

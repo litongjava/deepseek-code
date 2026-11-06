@@ -2,6 +2,43 @@ use super::*;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 #[tokio::test]
+async fn shell_auto_needs_no_classifier_and_dangerous_calls_require_each_approval() {
+    crate::config::OrchestrationConfig::init_global().unwrap();
+    let root = tempfile::tempdir().unwrap();
+    let provider = ResolvedProvider {
+        provider: serde_json::from_value(json!({"id":"fixture","name":"fixture","base_url":"http://127.0.0.1:1","api_key":"unused","api_format":"openai","models":[],"enabled":true})).unwrap(),
+        model: serde_json::from_value(json!({"id":"fixture","name":"fixture","enabled":true,"supports_vision":false,"supports_web_search":false})).unwrap(),
+    };
+    let (tx, mut events) = mpsc::channel(16);
+    let manager = crate::runtime::default_permissions();
+    manager.set_mode(crate::permissions::PermissionMode::Auto);
+    let mut executor = ToolLoopExecutor::new(provider, vec![], None, 128, tx, root.path().to_string_lossy().into_owned(), ReasoningMode::Standard).with_permission_manager(manager.clone());
+    let normal = json!({"shell":if cfg!(windows) {"cmd"} else {"sh"},"command":"echo AUTO_WITHOUT_CLASSIFIER"});
+    let (_, output, failed) = executor.execute_tool_call("Bash", &normal, "normal").await;
+    assert!(!failed, "{output}");
+    assert!(output.contains("AUTO_WITHOUT_CLASSIFIER"));
+    let command = if cfg!(windows) { "Invoke-Expression \"Write-Output APPROVED_ONCE\"" } else { "eval 'echo APPROVED_ONCE'" };
+    let input = json!({"shell":if cfg!(windows) {"powershell"} else {"sh"},"command":command});
+    for mode in [crate::permissions::PermissionMode::Auto, crate::permissions::PermissionMode::AskPermissions] {
+        manager.set_mode(mode);
+        let mailbox = executor.permission_mailbox.clone();
+        let current = input.clone();
+        let task = tokio::spawn(async move {
+            let result = executor.execute_tool_call("Bash", &current, "danger").await;
+            (executor, result)
+        });
+        let request = loop {
+            if let EngineEvent::ToolPermission { request_id, .. } = events.recv().await.unwrap() { break request_id; }
+        };
+        crate::native_engine::permission_response::respond(&mailbox, &request, PermissionResponse::Allow { updated_input: None, commit: None, note: None }).await.unwrap();
+        let (returned, (_, output, failed)) = task.await.unwrap();
+        executor = returned;
+        assert!(!failed, "{output}");
+        assert!(output.contains("APPROVED_ONCE"));
+    }
+}
+
+#[tokio::test]
 async fn typed_approval_validates_before_committing_and_uses_effective_input() {
     crate::config::OrchestrationConfig::init_global().unwrap();
     for case in [

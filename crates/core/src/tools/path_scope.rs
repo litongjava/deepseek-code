@@ -29,6 +29,7 @@ pub(crate) async fn approved_auto_call<F: Future>(
     tool: &str,
     input: &serde_json::Value,
     cwd: &str,
+    approved_command: bool,
     future: F,
 ) -> F::Output {
     let key = match tool {
@@ -44,7 +45,7 @@ pub(crate) async fn approved_auto_call<F: Future>(
             Path::new(cwd).join(path)
         })
     });
-    let command = (tool == "Bash")
+    let command = (tool == "Bash" && approved_command)
         .then(|| input["command"].as_str().map(str::to_owned))
         .flatten();
     EXACT_COMMAND
@@ -60,8 +61,7 @@ fn canonical_target(path: &Path) -> Option<PathBuf> {
 }
 
 pub(super) fn approved_auto_command(command: &str) -> bool {
-    auto_mode()
-        && EXACT_COMMAND
+    EXACT_COMMAND
             .try_with(|approved| approved.as_deref() == Some(command))
             .unwrap_or(false)
 }
@@ -137,6 +137,20 @@ pub(super) fn allows(canonical: &Path) -> bool {
 mod tests {
     use super::*;
     #[tokio::test]
+    async fn dangerous_command_approval_is_exact_in_ask_and_does_not_leak() {
+        let input = serde_json::json!({"command":"shutdown"});
+        assert!(!approved_auto_command("shutdown"));
+        approved_auto_call("Bash", &input, ".", true, async {
+            assert!(approved_auto_command("shutdown"));
+            assert!(!approved_auto_command("shutdown /s"));
+            assert!(!tokio::spawn(async { approved_auto_command("shutdown") }).await.unwrap());
+        }).await;
+        approved_auto_call("Bash", &input, ".", false, async {
+            assert!(!approved_auto_command("shutdown"));
+        }).await;
+        assert!(!approved_auto_command("shutdown"));
+    }
+    #[tokio::test]
     async fn auto_external_paths_are_readable_but_write_grants_are_exact_and_temporary() {
         use crate::permissions::PermissionMode;
         use serde_json::json;
@@ -151,7 +165,7 @@ mod tests {
         with_permissions(Some(manager.clone()), async {
             assert!(super::super::resolve_read_path(file.to_str().unwrap(), cwd).is_ok());
             assert!(super::super::resolve_path(file.to_str().unwrap(), cwd).is_err());
-            approved_auto_call("Write", &input, cwd, async {
+            approved_auto_call("Write", &input, cwd, false, async {
                 assert!(super::super::resolve_path(file.to_str().unwrap(), cwd).is_ok());
                 assert!(super::super::resolve_path(other.to_str().unwrap(), cwd).is_err());
                 let copied = file.clone();

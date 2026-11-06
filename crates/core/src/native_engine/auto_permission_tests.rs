@@ -294,8 +294,8 @@ async fn auto_failure_fallback_asks_interactive_hosts_even_with_legacy_deny_poli
             auto_config::save(&context, &config).unwrap();
             let tool = crate::permissions::PermissionContext {
                 mcp_read_only: false,
-                tool_name: "Bash".into(),
-                tool_input: json!({"command":"echo fixture","shell":"powershell"}),
+                tool_name: "Write".into(),
+                tool_input: json!({"file_path":"fixture.txt","content":"fixture"}),
                 conversation_id: "auto-session".into(),
                 user_id: None,
                 workspace_path: Some(root.path().to_string_lossy().into_owned()),
@@ -320,7 +320,7 @@ async fn auto_failure_fallback_asks_interactive_hosts_even_with_legacy_deny_poli
             assert_eq!(calls.load(Ordering::SeqCst), attempts);
             assert_eq!(manager.auto_stats("auto-session").requests, attempts as u64);
             let mut oversized = tool.clone();
-            oversized.tool_input = json!({"command": "x".repeat(40_000)});
+            oversized.tool_input = json!({"file_path":"fixture.txt","content": "x".repeat(40_000)});
             let limited = crate::native_engine::auto_permissions::authorize(
                 &context,
                 &manager,
@@ -348,7 +348,7 @@ async fn auto_failure_fallback_asks_interactive_hosts_even_with_legacy_deny_poli
             assert_eq!(calls.load(Ordering::SeqCst), attempts);
             manager.set_session_rules(
                 "auto-session",
-                HashMap::from([("Bash".into(), PermissionAction::Confirm)]),
+                HashMap::from([("Write".into(), PermissionAction::Confirm)]),
             );
             let explicit = crate::native_engine::auto_permissions::authorize(
                 &context,
@@ -574,9 +574,9 @@ async fn auto_dangerous_shell_keyword_asks_then_executes_only_approved_command()
     let waiters = executor.answer_waiters.clone();
     // Print the keyword, never execute a destructive command.
     let input = if cfg!(windows) {
-        json!({"shell":"powershell","command":"Write-Output 'shutdown /s /t 0'"})
+        json!({"shell":"powershell","command":"Invoke-Expression \"Write-Output 'shutdown /s /t 0'\""})
     } else {
-        json!({"shell":"sh","command":"printf '%s' 'shutdown /s /t 0'"})
+        json!({"shell":"sh","command":"eval \"printf '%s' 'shutdown /s /t 0'\""})
     };
     let pending =
         tokio::spawn(async move { executor.execute_tool_call("Bash", &input, "keyword").await });

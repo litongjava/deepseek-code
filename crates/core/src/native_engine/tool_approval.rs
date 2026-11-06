@@ -421,7 +421,7 @@ impl ToolLoopExecutor {
     ) -> (Value, String, bool) {
         match self.prepare_after_confirmation(tool, input, id, message).await {
             CallStep::Finished(result) => result,
-            CallStep::Builtin(actual) => self.run_prepared_builtin(tool, &actual, id).await,
+            CallStep::Builtin(actual, approved) => self.run_prepared_builtin(tool, &actual, id, approved).await,
         }
     }
 
