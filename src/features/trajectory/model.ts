@@ -348,3 +348,98 @@ export function restoreProcessMetadata(message: any, index: number, cached: any[
   return { ...message, ...processMetadata(local), turn: message.turn, requestSnapshots: message.requestSnapshots ?? local.requestSnapshots,
     toolCalls: localTools.length ? localTools.map((t: any, i: number) => ({ ...serverTools[i], ...t })) : serverTools };
 }
+
+// ===== Collapsible tool-call groups (display only; messages are not changed) =====
+
+export type ToolCallStatus = 'pending' | 'running' | 'completed' | 'failed';
+export type ToolGroupTitle = 'Ran commands' | 'Searched files' | 'Read files' | 'Edited files' | 'Used tools';
+export interface ToolCallGroupItem {
+  step: ProcessStep;
+  /** The tool call for tool steps; thinking steps have none. */
+  tool?: any;
+  status: ToolCallStatus;
+  /** Interrupted calls count as failed but are labelled differently. */
+  interrupted?: boolean;
+}
+export interface ToolCallGroup {
+  /** Derived from the first step, so streaming updates keep the same group. */
+  id: string;
+  items: ToolCallGroupItem[];
+  status: ToolCallStatus;
+  title: ToolGroupTitle;
+  /** Running groups start expanded; finished groups start collapsed. */
+  isExpanded: boolean;
+  startTime?: number;
+  endTime?: number;
+}
+export type WorkItem = { kind: 'group'; group: ToolCallGroup } | { kind: 'step'; step: ProcessStep };
+
+const GROUP_TITLES: Record<string, ToolGroupTitle> = {
+  'Ran commands': 'Ran commands', 'Searched': 'Searched files', 'Found files': 'Searched files',
+  'Read files': 'Read files', 'Edited files': 'Edited files',
+};
+/** One kind of tool names the group; several kinds (or other tools) are "Used tools". */
+export function groupTitle(toolNames: string[]): ToolGroupTitle {
+  const titles = new Set(toolNames.map(name => GROUP_TITLES[toolCategory(name)] ?? 'Used tools'));
+  return titles.size === 1 ? [...titles][0] : 'Used tools';
+}
+export function toolCallStatus(tool: any, live: boolean): { status: ToolCallStatus; interrupted?: boolean } {
+  const status = toolStatus(tool);
+  if (status === 'error') return { status: 'failed' };
+  if (status === 'running') return live ? { status: 'running' } : { status: 'failed', interrupted: true };
+  if (status === 'done') return { status: 'completed' };
+  if (status === 'pending' || status === '未记录结果') return { status: 'pending' };
+  return { status: 'completed' };
+}
+const findTool = (message: any, step: ProcessStep) =>
+  (message.toolCalls || []).find((t: any, i: number) => (t.id || String(i)) === step.toolId);
+
+/**
+ * Groups each run of tool calls, together with the reasoning between them,
+ * until the assistant writes visible text. Order is preserved and every step
+ * stays available; only the presentation changes.
+ */
+export function groupWorkSteps(message: any, steps: ProcessStep[], live: boolean): WorkItem[] {
+  const items: WorkItem[] = [];
+  let run: ProcessStep[] = [];
+  const flush = (last: boolean) => {
+    if (!run.length) return;
+    const hasTool = run.some(step => step.kind === 'tool');
+    if (!hasTool) {
+      // Reasoning without tools keeps its own block.
+      run.forEach(step => items.push({ kind: 'step', step }));
+    } else {
+      const groupItems: ToolCallGroupItem[] = run.flatMap(step => {
+        if (step.kind === 'thinking') return [{ step, status: live && last && step === run[run.length - 1] ? 'running' : 'completed' } as ToolCallGroupItem];
+        const tool = findTool(message, step);
+        return tool ? [{ step, tool, ...toolCallStatus(tool, live) }] : [];
+      });
+      const statuses = groupItems.map(item => item.status);
+      // The agent may still be adding calls to the latest group.
+      const status: ToolCallStatus = statuses.includes('running') || (live && last) ? 'running'
+        : statuses.includes('failed') ? 'failed' : statuses.includes('pending') ? 'pending' : 'completed';
+      const times = groupItems.map(item => item.tool?.startedAt ?? item.step.startedAt).filter((t): t is number => typeof t === 'number');
+      const ends = groupItems.map(item => item.tool?.endedAt ?? item.step.endedAt).filter((t): t is number => typeof t === 'number');
+      items.push({ kind: 'group', group: {
+        id: `group:${run[0].id}`,
+        items: groupItems,
+        status,
+        title: groupTitle(groupItems.filter(item => item.tool).map(item => item.tool.name || '')),
+        isExpanded: status === 'running',
+        startTime: times.length ? Math.min(...times) : undefined,
+        endTime: status === 'running' || !ends.length ? undefined : Math.max(...ends),
+      } });
+    }
+    run = [];
+  };
+  steps.forEach((step, index) => {
+    if (step.kind === 'text') {
+      flush(false);
+      items.push({ kind: 'step', step });
+    } else {
+      run.push(step);
+    }
+    if (index === steps.length - 1) flush(true);
+  });
+  return items;
+}

@@ -1,8 +1,8 @@
 import ViewSubagentButton from './ViewSubagentButton';
 import TypedToolAttachments from './TypedToolAttachments';
-import { useId, useState } from 'react';
+import { memo, useId, useState } from 'react';
 import GridDisclosure from '../../components/ui/GridDisclosure';
-import { ChevronRight, Code2, Terminal, Brain } from 'lucide-react';
+import { ChevronRight, Code2, Brain } from 'lucide-react';
 import { useGeneralSettingsStore, type WorkDetails as DetailLevel } from '../../stores/useGeneralSettingsStore';
 import { useWorkspaceModeStore } from '../../stores/useWorkspaceModeStore';
 import MarkdownRenderer from '../../components/MarkdownRenderer';
@@ -10,7 +10,7 @@ import RequestErrorCard from '../../components/chat/RequestErrorCard';
 import ToolDiffView, { shouldUseDiffView } from '../../components/ToolDiffView';
 import CopyButton from './CopyButton';
 import ToolOutput from './ToolOutput';
-import { commandStreams, messageSteps, recordId, toolCategory, toolCommand, toolInput, toolOutput, toolStatus, rawText, type ProcessStep } from './model';
+import { commandStreams, groupWorkSteps, messageSteps, recordId, toolCategory, toolCommand, toolInput, toolOutput, toolStatus, rawText, type ProcessStep, type ToolCallGroup, type ToolCallGroupItem, type ToolCallStatus } from './model';
 
 export function InspectButton({ id, onInspect }: { id: string; onInspect?: (id: string) => void }) {
   if (!onInspect) return null;
@@ -20,13 +20,14 @@ function StatusDot({ status }: { status: string }) {
   const label = status === 'error' ? '运行失败' : status === 'done' ? '运行成功' : status === 'running' ? '运行中' : '已中断';
   return <span role="img" aria-label={label} title={label} className={`h-2 w-2 shrink-0 rounded-full ${status === 'error' ? 'bg-red-500' : status === 'done' ? 'bg-green-500' : status === 'running' ? 'animate-pulse bg-amber-500' : 'bg-claude-textSecondary'}`} />;
 }
-function groupStatus(tools: any[], live: boolean): string {
-  const statuses = tools.filter(Boolean).map(toolStatus);
-  if (statuses.includes('error')) return 'error';
-  if (statuses.includes('running')) return live ? 'running' : 'interrupted';
-  return statuses.every(status => status === 'done') ? 'done' : 'interrupted';
+const dotStatus = (status: ToolCallStatus, interrupted?: boolean) =>
+  interrupted ? 'interrupted' : status === 'failed' ? 'error' : status === 'completed' ? 'done' : status === 'running' ? 'running' : 'interrupted';
+/** Tree connector for a row inside a group. */
+function Connector({ last }: { last: boolean }) {
+  return <span aria-hidden="true" className="shrink-0 select-none font-mono text-claude-textSecondary/60">{last ? '└─' : '├─'}</span>;
 }
-function ToolBlock({ conversationId, messageId, tool, level, live, id, onInspect }: { conversationId?: string | null; messageId?: string; tool: any; level: DetailLevel; live: boolean; id: string; onInspect?: (id: string) => void }) {
+const displayName = (name: string) => name ? name.charAt(0).toUpperCase() + name.slice(1) : 'Tool';
+function ToolBlock({ conversationId, messageId, tool, level, live, id, onInspect, last = true }: { conversationId?: string | null; messageId?: string; tool: any; level: DetailLevel; live: boolean; id: string; onInspect?: (id: string) => void; last?: boolean }) {
   const panelId = useId();
   const [expanded, setExpanded] = useState<boolean | null>(null);
   const open = expanded ?? level === 'verbose';
@@ -46,9 +47,9 @@ function ToolBlock({ conversationId, messageId, tool, level, live, id, onInspect
   const description = input.description || input.file_path || input.path || input.pattern || command || tool.name;
   return <div className="group/process relative min-w-0">
     <button type="button" aria-controls={panelId} aria-expanded={open} onClick={() => setExpanded(!open)} className={`flex w-full min-w-0 items-center gap-2 text-left text-[13px] leading-6 ${failed ? 'text-red-500' : 'text-claude-textSecondary'}`}>
-      <ChevronRight size={14} className={`shrink-0 transition-transform ${open ? 'rotate-90' : ''}`} /><StatusDot status={status === 'running' && !live ? 'interrupted' : status} /><Terminal size={14} className="shrink-0" />
-      <span className="shrink-0">{level === 'compact' || level === 'standard' ? toolCategory(tool.name).replace('commands', 'command') : tool.name}</span>
-      {level !== 'compact' && <span className="truncate">· {description}</span>}
+      <Connector last={last} /><StatusDot status={status === 'running' && !live ? 'interrupted' : status} />
+      <span className="shrink-0 text-claude-text/80">{displayName(tool.name)}</span>
+      <span className="min-w-0 truncate">· {rawText(description).split('\n')[0]}</span>
       {running && <span className="ml-auto animate-pulse">运行中</span>}{failed && <span className="ml-auto">失败</span>}
       {status === 'running' && !live && <span className="ml-auto">已中断</span>}
     </button>
@@ -70,17 +71,48 @@ function ToolBlock({ conversationId, messageId, tool, level, live, id, onInspect
     {/^(Agent|Task)$/i.test(tool.name) && <ViewSubagentButton conversationId={conversationId} toolId={messageId && tool.id?.startsWith(`${messageId}:`) ? tool.id.slice(messageId.length + 1) : tool.id} live={live} />}
   </div>;
 }
-function ToolGroup({ conversationId, steps, message, index, level, live, onInspect }: { conversationId?: string | null; steps: ProcessStep[]; message: any; index: number; level: DetailLevel; live: boolean; onInspect?: (id: string) => void }) {
-  const panelId = useId();
+/** A reasoning step inside a group: one summary line, full text on demand. */
+function ThinkingRow({ step, last }: { step: ProcessStep; last: boolean }) {
   const [open, setOpen] = useState(false);
-  const tools = steps.map(s => (message.toolCalls || []).find((t: any, i: number) => (t.id || String(i)) === s.toolId));
-  const grouped = (level === 'compact' || level === 'standard') && steps.length > 1;
-  const status = groupStatus(tools, live);
-  return <div className={grouped && level === 'standard' ? 'chat-tool-group my-2 rounded-xl px-3' : 'my-1'}>
-    {grouped && <div><button type="button" aria-controls={panelId} aria-expanded={open} className={`flex items-center gap-2 py-2 text-sm ${status === 'error' ? 'text-red-500' : 'text-claude-textSecondary'}`} onClick={() => setOpen(!open)}><StatusDot status={status} />{toolCategory(tools[0]?.name || 'Tools')} · {steps.length}<ChevronRight size={14} className={open ? 'rotate-90' : ''} />{live && tools.some(t => t?.status === 'running') && <span className="animate-pulse">运行中</span>}</button></div>}
-    <GridDisclosure open={!grouped || open} id={panelId}><div className="space-y-1">{steps.map((s, i) => tools[i] && <ToolBlock messageId={message.id} conversationId={conversationId} key={`${s.id}:${level}`} id={recordId(index, s.id)} tool={tools[i]} level={level} live={live} onInspect={onInspect} />)}</div></GridDisclosure>
+  const panelId = useId();
+  return <div className="min-w-0">
+    <button type="button" aria-expanded={open} aria-controls={panelId} onClick={() => setOpen(!open)} className="flex w-full min-w-0 items-center gap-2 text-left text-[13px] leading-6 text-claude-textSecondary">
+      <Connector last={last} /><Brain size={13} className="shrink-0" /><span className="shrink-0 text-claude-text/80">Think</span><span className="min-w-0 truncate">· {(step.text || '').trim().split('\n')[0]}</span>
+    </button>
+    <GridDisclosure open={open} id={panelId}><div className="ml-8 mt-1 max-h-96 overflow-auto whitespace-pre-wrap text-xs text-claude-textSecondary">{step.text}</div></GridDisclosure>
   </div>;
 }
+
+/**
+ * One run of tool calls and reasoning, shown as a collapsible tree. Rows mount
+ * only when the group is opened, so long agent runs stay cheap to render.
+ */
+const ToolCallGroupView = memo(function ToolCallGroupView({ conversationId, group, message, index, level, live, onInspect }: { conversationId?: string | null; group: ToolCallGroup; message: any; index: number; level: DetailLevel; live: boolean; onInspect?: (id: string) => void }) {
+  const panelId = useId();
+  // null follows the group: open while it runs, collapsed once finished.
+  const [userOpen, setUserOpen] = useState<boolean | null>(null);
+  const open = userOpen ?? group.isExpanded;
+  const failed = group.status === 'failed';
+  const calls = group.items.filter(item => item.tool).length;
+  return <div className="chat-tool-run my-1.5" data-group-status={group.status}>
+    <button type="button" aria-controls={panelId} aria-expanded={open} onClick={() => setUserOpen(!open)}
+      className={`flex max-w-full items-center gap-1.5 py-1 text-left text-[13px] ${failed ? 'text-red-500' : 'text-claude-textSecondary'} hover:text-claude-text`}>
+      <ChevronRight size={14} className={`shrink-0 transition-transform ${open ? 'rotate-90' : ''}`} />
+      <span>{group.title}</span>
+      {calls > 1 && <span className="text-claude-textSecondary/70">· {calls}</span>}
+      {group.status === 'running' && <span className="animate-pulse">运行中</span>}
+      {failed && <StatusDot status="error" />}
+    </button>
+    <GridDisclosure open={open} id={panelId}><div className="ml-[7px] space-y-0.5 pl-2">
+      {group.items.map((item: ToolCallGroupItem, i: number) => {
+        const last = i === group.items.length - 1;
+        return item.tool
+          ? <ToolBlock messageId={message.id} conversationId={conversationId} key={`${item.step.id}:${level}`} id={recordId(index, item.step.id)} tool={item.tool} level={level} live={live} onInspect={onInspect} last={last} />
+          : <ThinkingRow key={item.step.id} step={item.step} last={last} />;
+      })}
+    </div></GridDisclosure>
+  </div>;
+});
 function ThinkingBlock({ step }: { step: ProcessStep }) {
   const [open, setOpen] = useState(false);
   const panelId = useId();
@@ -96,18 +128,11 @@ export default function WorkDetails({ conversationId, message, index, live, onIn
   const level = useGeneralSettingsStore(s => s.workDetailsByMode[mode]);
   const coding = useGeneralSettingsStore(s => s.showCodingView);
   const steps = messageSteps(message).filter(step => !textOnly || step.kind === 'text');
-  const items: ProcessStep[][] = [];
-  for (const step of steps) {
-    const last = items[items.length - 1];
-    const category = (s: ProcessStep) => toolCategory((message.toolCalls || []).find((t: any, i: number) => (t.id || String(i)) === s.toolId)?.name || 'Tools');
-    if (step.kind === 'tool' && last?.[0].kind === 'tool' && category(last[0]) === category(step)) last.push(step);
-    else items.push([step]);
-  }
   const inspect = coding ? onInspect : undefined;
   return <div className="chat-work-details">
-    {items.map(group => {
-      const s = group[0];
-      if (s.kind === 'tool') return <ToolGroup conversationId={conversationId} key={s.id} steps={group} message={message} index={index} level={level} live={live} onInspect={inspect} />;
+    {groupWorkSteps(message, steps, live).map(item => {
+      if (item.kind === 'group') return <ToolCallGroupView conversationId={conversationId} key={item.group.id} group={item.group} message={message} index={index} level={level} live={live} onInspect={inspect} />;
+      const s = item.step;
       if (s.kind === 'thinking') return level === 'compact' || level === 'standard' ? null : <ThinkingBlock key={`${s.id}:${level}`} step={s} />;
       return <div key={s.id} className="my-3"><MarkdownRenderer content={s.text || ''} citations={message.citations} isStreaming={live && s === steps[steps.length - 1]} /></div>;
     })}

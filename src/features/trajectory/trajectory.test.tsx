@@ -22,6 +22,10 @@ function sample() {
   finishProcess(message, 3500);
   return message;
 }
+/** Tool rows sit inside collapsible groups; open every collapsed group. */
+function openGroups() {
+  for (const button of screen.queryAllByRole('button', { name: /^(Ran commands|Searched files|Read files|Edited files|Used tools)/, expanded: false })) fireEvent.click(button);
+}
 beforeEach(() => {
   writeText.mockClear();
   Object.defineProperty(navigator, 'clipboard', { value: { writeText }, configurable: true });
@@ -72,17 +76,15 @@ describe('ordered process events', () => {
     const message = sample();
     render(<WorkDetails message={message} index={0} live={false} />);
     expect(screen.queryByText('Work details')).not.toBeInTheDocument();
-    expect(screen.getByRole('button', { name: /Ran command/ })).toBeInTheDocument();
-    expect(screen.queryByText('Think')).not.toBeInTheDocument();
-    for (const mode of ['work', 'study'] as const) {
+    // Every level groups the finished run under a collapsed header.
+    for (const mode of ['chat', 'work', 'study', 'code'] as const) {
       act(() => useWorkspaceModeStore.getState().setMode(mode));
-      expect(screen.queryByRole('button', { name: /Work details/ })).not.toBeInTheDocument();
-      expect(screen.getByRole('button', { name: /列出文件/ })).toBeInTheDocument();
-      expect(screen.queryByText('Think')).not.toBeInTheDocument();
+      const group = screen.getByRole('button', { name: /^Ran commands/ });
+      expect(group).toHaveAttribute('aria-expanded', 'false');
+      fireEvent.click(group);
+      expect(screen.getByRole('button', { name: /Pwsh · 列出文件/ })).toBeInTheDocument();
+      fireEvent.click(group);
     }
-    act(() => useWorkspaceModeStore.getState().setMode('code'));
-    expect(screen.getByText('Think')).toBeInTheDocument();
-    expect(screen.getByRole('button', { name: /pwsh.*列出文件/ })).toBeInTheDocument();
     expect(buildTrace([message]).filter(record => record.role === 'tool')).toHaveLength(1);
   });
   it('keeps auxiliary search output out of the reply while preserving its detailed request', () => {
@@ -264,6 +266,7 @@ describe('work details and inspect', () => {
     const message = sample();
     message.toolCalls[0].result = { stdout, stderr, exit_code: 0 };
     render(<WorkDetails message={message} index={1} live={false} />);
+    openGroups();
     fireEvent.click(screen.getByRole('button', { name: /列出文件/ }));
     expect(screen.getByText(label)).toHaveClass(color);
     expect(screen.queryByText('输出')).not.toBeInTheDocument();
@@ -300,6 +303,7 @@ describe('work details and inspect', () => {
   it.each(['standard', 'detailed', 'verbose'] as const)('%s copies the full command and output independently', async level => {
     useGeneralSettingsStore.getState().update({ workDetailsByMode: { ...useGeneralSettingsStore.getState().workDetailsByMode, chat: level } });
     render(<WorkDetails message={sample()} index={1} live={false} />);
+    openGroups();
     if (level !== 'verbose') fireEvent.click(screen.getByRole('button', { name: /列出文件/ }));
     const commandCopy = screen.getByRole('button', { name: '复制命令' });
     const outputCopy = screen.getByRole('button', { name: '复制输出' });
@@ -323,15 +327,18 @@ describe('work details and inspect', () => {
     const message = sample();
     message.toolCalls[0] = { ...message.toolCalls[0], status, result };
     const view = render(<WorkDetails message={message} index={1} live={false} />);
-    expect(screen.getByRole('img', { name: failed ? '运行失败' : '运行成功' })).toHaveClass(failed ? 'bg-red-500' : 'bg-green-500');
-    expect(screen.getByRole('button', { name: /列出文件/ }).classList.contains('text-red-500')).toBe(failed);
+    openGroups();
+    const row = screen.getByRole('button', { name: /列出文件/ });
+    expect(within(row).getByRole('img', { name: failed ? '运行失败' : '运行成功' })).toHaveClass(failed ? 'bg-red-500' : 'bg-green-500');
+    expect(row.classList.contains('text-red-500')).toBe(failed);
     expect(buildTrace([message]).find(r => r.role === 'tool')?.status).toBe(failed ? 'error' : 'done');
     view.unmount();
     message.toolCalls.push({ id: 't2', name: 'pwsh', status: 'done', result: { exit_code: 0 } });
     message.processSteps = undefined;
     render(<WorkDetails message={message} index={1} live={false} />);
     const group = screen.getByRole('button', { name: /Ran commands · 2/ });
-    expect(within(group).getByRole('img', { name: failed ? '运行失败' : '运行成功' })).toBeInTheDocument();
+    // The collapsed header stays quiet unless something failed.
+    expect(within(group).queryByRole('img', { name: '运行失败' }) !== null).toBe(failed);
     expect(group.classList.contains('text-red-500')).toBe(failed);
   });
   it('compact groups consecutive shell calls and keeps commentary visible', () => {
@@ -348,10 +355,10 @@ describe('work details and inspect', () => {
       { id: 'c', name: 'Write', status: 'done', result: { success: false, error: 'Failed to write' } }, { id: 'd', name: 'Read', status: 'running' },
     ] };
     render(<WorkDetails index={0} live={true} message={message} onInspect={onInspect} />);
+    // Mixed tools share one group, open while it runs.
+    expect(screen.getByRole('button', { name: /Used tools · 4/ })).toHaveAttribute('aria-expanded', 'true');
     expect(screen.queryByRole('button', { name: 'Inspect' })).not.toBeInTheDocument();
-    fireEvent.click(screen.getByRole('button', { name: /Ran commands · 2/ }));
-    expect(screen.queryByRole('button', { name: 'Inspect' })).not.toBeInTheDocument();
-    for (const row of screen.getAllByRole('button', { name: /^运行成功 Ran command ·/ })) fireEvent.click(row);
+    for (const row of screen.getAllByRole('button', { name: /^运行成功 (Pwsh|Bash) ·/ })) fireEvent.click(row);
     const buttons = screen.getAllByRole('button', { name: 'Inspect' });
     expect(buttons).toHaveLength(2);
     fireEvent.click(buttons[1]);
@@ -362,6 +369,7 @@ describe('work details and inspect', () => {
     const message = sample();
     message.toolCalls[0].result = format === 'json' ? JSON.stringify(result) : result;
     const view = render(<WorkDetails message={message} index={1} live={false} />);
+    openGroups();
     fireEvent.click(screen.getByRole('button', { name: /列出文件/ }));
     expect(screen.getByLabelText('stdout')).toHaveTextContent('名称');
     expect(screen.getByLabelText('stdout').querySelector('pre')?.textContent).toBe('名称    内存\nQQ      0.67\n');
@@ -379,6 +387,7 @@ describe('work details and inspect', () => {
     const message = sample();
     const onInspect = vi.fn();
     const view = render(<WorkDetails message={message} index={1} live={false} onInspect={onInspect} />);
+    openGroups();
     const toolBlock = screen.getByRole('button', { name: /列出文件/ }).parentElement!;
     const toggle = within(toolBlock).getByRole('button', { name: /列出文件/ });
     expect(within(toolBlock).queryByRole('button', { name: 'Inspect' })).not.toBeInTheDocument();
@@ -405,6 +414,7 @@ describe('work details and inspect', () => {
   it('keeps tool details available when coding view is disabled, hiding only Inspect', () => {
     useGeneralSettingsStore.setState({ showCodingView: false });
     render(<WorkDetails message={sample()} index={0} live={false} onInspect={vi.fn()} />);
+    openGroups();
     expect(screen.getByRole('button', { name: /列出文件/ })).toBeInTheDocument();
     expect(screen.queryByRole('button', { name: 'Inspect' })).not.toBeInTheDocument();
   });
