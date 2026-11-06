@@ -59,6 +59,7 @@ pub async fn handle(command: &str, argument: &str, session: &Session) -> Result<
                 "ANTHROPIC_API_KEY",
                 "OPENAI_API_KEY",
                 "CLAUDE_CODE_OAUTH_TOKEN",
+                "DEEPSEEK_CODE_OAUTH_TOKEN",
             ] {
                 if let Ok(value) = std::env::var(name) {
                     secrets.push(value);

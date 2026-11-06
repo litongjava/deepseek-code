@@ -339,7 +339,7 @@ async fn clear_plan_context_skips_stale_tools_and_survives_resume_on_both_protoc
 #[tokio::test]
 async fn teammate_plan_approval_routes_to_leader_and_never_self_approves() {
     use crate::services::{session_messages as live, teams};
-    std::env::set_var("CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS", "1");
+    std::env::set_var("DEEPSEEK_CODE_EXPERIMENTAL_AGENT_TEAMS", "1");
     let (_temp, context, sessions, mut executor, mut events, manager) = fixture();
     let member_session = executor.conv_id.clone().unwrap();
     let lead = sessions

@@ -257,9 +257,9 @@ fn tool_batches(calls: &[PendingToolCall]) -> Vec<&[PendingToolCall]> {
     batches
 }
 
-/// Like the reference CLI's CLAUDE_CODE_MAX_TOOL_USE_CONCURRENCY, default 10.
+/// Like the reference CLI's DEEPSEEK_CODE_MAX_TOOL_USE_CONCURRENCY, default 10.
 fn max_tool_concurrency() -> usize {
-    std::env::var("CLAUDE_CODE_MAX_TOOL_USE_CONCURRENCY").ok().and_then(|value| value.parse().ok()).filter(|value| *value > 0).unwrap_or(10)
+    std::env::var("DEEPSEEK_CODE_MAX_TOOL_USE_CONCURRENCY").ok().and_then(|value| value.parse().ok()).filter(|value| *value > 0).unwrap_or(10)
 }
 
 enum CallStep {

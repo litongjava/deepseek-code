@@ -145,7 +145,7 @@ async fn main() -> std::process::ExitCode {
     }
     let mut cli = Cli::parse_with_mode_source();
     if cli.agent_teams {
-        std::env::set_var("CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS", "1");
+        std::env::set_var("DEEPSEEK_CODE_EXPERIMENTAL_AGENT_TEAMS", "1");
     }
     cli.normalize();
     terminal::configure_accessibility(cli.ax_screen_reader);
