@@ -1,5 +1,6 @@
 import { create } from 'zustand';
 import { queueAPI, type QueueItem, type QueueSubmission, type QueueSnapshot } from '../api/queue';
+import { describeError } from '../utils/networkError';
 
 export interface PendingSubmission extends QueueSubmission { status: 'sending' | 'failed'; error?: string }
 interface SessionQueue {
@@ -23,7 +24,7 @@ function persist(queues: Record<string, SessionQueue>) {
   localStorage.setItem(storageKey, JSON.stringify(Object.fromEntries(Object.entries(queues).filter(([, q]) => q.pending.length).map(([id, q]) => [id, q.pending]))));
 }
 const versions: Record<string, number> = {};
-const errorText = (error: unknown) => error instanceof Error ? error.message : String(error);
+const errorText = describeError;
 interface QueueStore {
   queues: Record<string, SessionQueue>;
   enqueue: (session: string, content: QueueSubmission['content'], mode: QueueItem['mode']) => Promise<void>;

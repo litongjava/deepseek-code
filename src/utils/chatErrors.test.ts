@@ -19,3 +19,14 @@ describe('bad request details', () => {
       .toEqual({ status: 400, detail: '{"message":"Unsupported model"}' });
   });
 });
+
+describe('formatChatError network failures', () => {
+  it('shows a readable message instead of the browser wording', async () => {
+    const { formatChatError } = await import('./chatErrors');
+    const en = (await import('../locales/en.json')).default;
+    for (const raw of ['Failed to fetch', 'network error', 'Stream error: network error', 'TypeError: network error']) {
+      expect(formatChatError(raw)).toBe('⚠️ ' + en.network.unreachable);
+    }
+    expect(formatChatError('HTTP 500\nboom')).toBe('Error: HTTP 500\nboom');
+  });
+});

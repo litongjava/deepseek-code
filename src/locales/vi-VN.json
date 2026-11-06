@@ -873,5 +873,8 @@
     "environment": "biến môi trường",
     "settings": "cấu hình",
     "saved": "Đã lưu. Lệnh và terminal mới sẽ dùng các cài đặt này."
+  },
+  "network": {
+    "unreachable": "Không thể kết nối tới máy chủ. Hãy kiểm tra kết nối mạng hoặc máy chủ có đang chạy không, rồi thử lại."
   }
 }

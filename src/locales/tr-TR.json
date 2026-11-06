@@ -873,5 +873,8 @@
     "environment": "ortam değişkeni",
     "settings": "yapılandırma",
     "saved": "Kaydedildi. Yeni komutlar ve terminaller bu ayarları kullanır."
+  },
+  "network": {
+    "unreachable": "Sunucuya ulaşılamıyor. Ağ bağlantınızı veya sunucunun çalışıp çalışmadığını kontrol edip yeniden deneyin."
   }
 }

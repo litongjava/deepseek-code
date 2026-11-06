@@ -873,5 +873,8 @@
     "environment": "variabel lingkungan",
     "settings": "konfigurasi",
     "saved": "Tersimpan. Perintah dan terminal baru menggunakan pengaturan ini."
+  },
+  "network": {
+    "unreachable": "Tidak dapat terhubung ke server. Periksa koneksi jaringan atau apakah server sedang berjalan, lalu coba lagi."
   }
 }

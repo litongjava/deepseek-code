@@ -873,5 +873,8 @@
     "environment": "variável de ambiente",
     "settings": "configuração",
     "saved": "Salvo. Novos comandos e terminais usarão estas configurações."
+  },
+  "network": {
+    "unreachable": "Não foi possível conectar ao servidor. Verifique a conexão de rede ou se o servidor está em execução e tente novamente."
   }
 }

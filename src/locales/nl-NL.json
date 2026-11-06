@@ -873,5 +873,8 @@
     "environment": "omgevingsvariabele",
     "settings": "configuratie",
     "saved": "Opgeslagen. Nieuwe opdrachten en terminals gebruiken deze instellingen."
+  },
+  "network": {
+    "unreachable": "De server is niet bereikbaar. Controleer de netwerkverbinding of de server actief is en probeer het opnieuw."
   }
 }

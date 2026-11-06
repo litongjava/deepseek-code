@@ -873,5 +873,8 @@
     "environment": "Umgebungsvariable",
     "settings": "Konfiguration",
     "saved": "Gespeichert. Neue Befehle und Terminals verwenden diese Einstellungen."
+  },
+  "network": {
+    "unreachable": "Der Server ist nicht erreichbar. Prüfen Sie die Netzwerkverbindung oder ob der Server läuft, und versuchen Sie es erneut."
   }
 }

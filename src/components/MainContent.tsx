@@ -4,7 +4,7 @@ import PlanApprovalController from '../features/chat/PlanApprovalController';
 import { useCommittedCallback } from '../features/chat/useCommittedCallback';
 import React, { useState, useEffect, useRef, useMemo, useCallback } from 'react';
 import { planModeFromTool, approvedPermissionModeFromTool } from '../features/streaming/planMode';
-import { ChevronDown, FileText, ArrowUp, RotateCcw, Pencil, Copy, Check, Paperclip, ListCollapse, Globe, Clock, Info, Github, Plus, Loader2, Smartphone, Terminal, Monitor } from 'lucide-react';
+import { ChevronDown, FileText, ArrowUp, RotateCcw, Pencil, Copy, Check, AlertTriangle, Paperclip, ListCollapse, Globe, Clock, Info, Github, Plus, Loader2, Smartphone, Terminal, Monitor } from 'lucide-react';
 import { useParams, useNavigate, useLocation } from 'react-router-dom';
 import { IconPlus, IconVoice, IconWebSearch } from './Icons';
 import ClaudeLogo from './ClaudeLogo';
@@ -1144,6 +1144,8 @@ const MainContent = ({ onNewChat, resetKey, tunerConfig, onOpenDocument, onArtif
   const handleSend = async (overrideText?: string) => {
     if (requestCodeProject()) return;
     if (modeChanging || (!activeId && isCreatingRef.current) || gitSetupPending) return;
+    // The failure handler may only rewrite the reply placeholder this send added.
+    let placeholder: { role: string; content: string } | null = null;
     try {
     const files = pendingFiles;
     const effectiveText = (typeof overrideText === 'string') ? overrideText : inputText;
@@ -1315,7 +1317,9 @@ const MainContent = ({ onNewChat, resetKey, tunerConfig, onOpenDocument, onArtif
 
     // Prepare assistant message placeholder
     const assistantMsgIndex = messages.length + 1;
-    setMessages(prev => [...prev, { role: 'assistant', content: '' }]);
+    placeholder = { role: 'assistant', content: '' };
+    const added = placeholder;
+    setMessages(prev => [...prev, added]);
 
     let conversationId = activeId;
 
@@ -1446,14 +1450,22 @@ const MainContent = ({ onNewChat, resetKey, tunerConfig, onOpenDocument, onArtif
       setLoading(false);
       abortControllerRef.current = null;
       isCreatingRef.current = false;
+      const text = formatChatError(err?.message || String(err));
+      const own = placeholder;
+      if (!own) {
+        // Failed before the message was shown (for example offline while
+        // checking the project): keep the draft and earlier answers, and say why.
+        setProjectAddToast(text);
+        setTimeout(() => setProjectAddToast(current => current === text ? null : current), 6000);
+        return;
+      }
       setMessages(prev => {
-        const newMsgs = [...prev];
-        const last = newMsgs.slice().reverse().find(message => message.role === 'assistant');
-        if (last) {
-          last.content = formatChatError(err?.message || String(err));
-          last.isThinking = false;
-        }
-        return newMsgs;
+        const index = prev.lastIndexOf(own);
+        const target = index >= 0 ? index : prev.length - 1;
+        if (target < 0 || prev[target]?.role !== 'assistant') return prev;
+        const next = [...prev];
+        next[target] = { ...next[target], content: text, isThinking: false };
+        return next;
       });
     }
   };
@@ -1868,10 +1880,17 @@ const MainContent = ({ onNewChat, resetKey, tunerConfig, onOpenDocument, onArtif
       )}
       {projectToTrust && <TrustProjectDialog project={projectToTrust} onTrusted={async project => { await handleAttachToProject(project); setProjectToTrust(null); }} onClose={() => setProjectToTrust(null)} />}
       {projectAddToast && (
+        projectAddToast.startsWith('⚠️') ? (
+          <div role="alert" className="fixed bottom-6 left-1/2 -translate-x-1/2 z-[300] max-w-[92vw] px-4 py-2 bg-claude-input border border-claude-border rounded-lg shadow-lg text-[13px] text-claude-text flex items-center gap-2">
+            <AlertTriangle size={14} className="shrink-0 text-amber-500" />
+            {projectAddToast.replace(/^⚠️\s*/, '')}
+          </div>
+        ) : (
         <div className="fixed bottom-6 left-1/2 -translate-x-1/2 z-[300] px-4 py-2 bg-claude-input border border-claude-border rounded-lg shadow-lg text-[13px] text-claude-text flex items-center gap-2">
           <Check size={14} className="text-[#C6613F]" />
           {projectAddToast}
         </div>
+        )
       )}
       {webSearchToast && (
         <div className="fixed bottom-6 left-1/2 -translate-x-1/2 z-[300] px-4 py-2 bg-claude-input border border-claude-border rounded-lg shadow-lg text-[13px] text-claude-text flex items-center gap-2">
@@ -2346,7 +2365,7 @@ const MainContent = ({ onNewChat, resetKey, tunerConfig, onOpenDocument, onArtif
       )}
 
       {/* AskUserQuestion dialog */}
-      <PlanApprovalController sessionId={activeId} />
+      <PlanApprovalController sessionId={activeId} executing={loading} />
       {askUserDialog && !askUserDialog.planApprovalRequest && (
         <div className="fixed inset-0 z-[200] flex items-center justify-center bg-black/40">
           <div className="bg-claude-bg border border-claude-border rounded-2xl shadow-xl w-[480px] max-h-[80vh] overflow-y-auto" onClick={e => e.stopPropagation()}>

@@ -1,3 +1,5 @@
+import { isNetworkFailure, networkFailureMessage } from './networkError';
+
 export interface RequestErrorDetails {
   status: number;
   detail: string;
@@ -27,6 +29,9 @@ export function parseBadRequest(error: string): RequestErrorDetails | null {
 }
 
 export function formatChatError(err: string): string {
+  // "Failed to fetch", "network error", "Stream error: network error": the
+  // connection dropped. Say so plainly instead of the browser's wording.
+  if (isNetworkFailure((err || '').replace(/^stream error:\s*/i, ''))) return '⚠️ ' + networkFailureMessage();
   const lower = (err || '').toLowerCase();
   if (lower.includes('quota_exceeded') || lower.includes('额度已用完') || lower.includes('额度已用尽') || lower.includes('时段额度') || lower.includes('周期额度')) {
     return '⚠️ 当前额度已用完，请等待额度重置后再试。你可以在设置页查看额度详情。';

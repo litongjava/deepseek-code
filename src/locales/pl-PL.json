@@ -873,5 +873,8 @@
     "environment": "zmienna środowiskowa",
     "settings": "konfiguracja",
     "saved": "Zapisano. Nowe polecenia i terminale użyją tych ustawień."
+  },
+  "network": {
+    "unreachable": "Nie można połączyć się z serwerem. Sprawdź połączenie sieciowe lub czy serwer działa, a następnie spróbuj ponownie."
   }
 }

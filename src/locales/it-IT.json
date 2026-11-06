@@ -873,5 +873,8 @@
     "environment": "variabile d’ambiente",
     "settings": "configurazione",
     "saved": "Salvato. I nuovi comandi e terminali useranno queste impostazioni."
+  },
+  "network": {
+    "unreachable": "Impossibile raggiungere il server. Controlla la connessione di rete o che il server sia in esecuzione, quindi riprova."
   }
 }

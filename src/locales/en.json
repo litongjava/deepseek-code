@@ -892,5 +892,8 @@
     "environment": "environment variable",
     "settings": "configuration",
     "saved": "Saved. New commands and terminals use these settings."
+  },
+  "network": {
+    "unreachable": "Cannot reach the server. Check your network connection or whether the server is running, then try again."
   }
 }

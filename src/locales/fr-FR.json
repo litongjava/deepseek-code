@@ -873,5 +873,8 @@
     "environment": "variable d’environnement",
     "settings": "configuration",
     "saved": "Enregistré. Ces paramètres s’appliquent aux nouvelles commandes et aux nouveaux terminaux."
+  },
+  "network": {
+    "unreachable": "Impossible de joindre le serveur. Vérifiez votre connexion réseau ou que le serveur fonctionne, puis réessayez."
   }
 }
