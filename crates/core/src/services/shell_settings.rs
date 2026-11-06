@@ -146,6 +146,17 @@ impl ShellSettings {
             validate_bash_path(path).context("Invalid shell.bashPath")?;
             return Ok((path.clone(), "settings"));
         }
+        #[cfg(target_os = "android")]
+        return Ok((
+            if crate::tools::linux_env::active().is_some() {
+                "/bin/bash"
+            } else {
+                "/system/bin/sh"
+            }
+            .into(),
+            "detected",
+        ));
+        #[cfg(not(target_os = "android"))]
         Ok((
             crate::tools::find_shell("bash")
                 .context("Bash not found; configure shell.bashPath or install Bash")?,
@@ -250,6 +261,12 @@ impl ResolvedShell {
             return Ok((command, Some(guard)));
         }
         let mut command = tokio::process::Command::new(&self.program);
+        #[cfg(target_os = "android")]
+        if self.program == "/bin/bash" {
+            if let Some(linux) = crate::tools::linux_env::active() {
+                command = linux.bash_command(&cwd.to_string_lossy());
+            }
+        }
         #[cfg(windows)]
         command.creation_flags(0x08000000);
         match self.name.as_str() {

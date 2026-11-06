@@ -2003,7 +2003,7 @@ const MainContent = ({ onNewChat, resetKey, tunerConfig, onOpenDocument, onArtif
                   />
                 </div>
               </div>
-              <div className="px-4 pb-3 pt-1 flex flex-wrap gap-2 items-center justify-between flex-shrink-0">
+              <div className="composer-toolbar px-4 pb-3 pt-1 flex flex-wrap gap-2 items-center justify-between flex-shrink-0">
                 <div className="relative flex items-center">
                   <button
                     ref={plusBtnRef}
@@ -2030,7 +2030,7 @@ const MainContent = ({ onNewChat, resetKey, tunerConfig, onOpenDocument, onArtif
                   {!isCodeMode && <HomeModeSelector mode={workspaceMode} onChange={handleHomeModeChange} disabled={loading || modeChanging} />}
                   {researchMode && <ResearchBadge onToggle={toggleResearchMode} />}
                 </div>
-                <div className="flex flex-wrap justify-end items-center gap-2 ml-auto">
+                <div className="composer-actions flex flex-wrap justify-end items-center gap-2 ml-auto">
                   {isCodeMode && <PermissionModeSelector neutral conversationId={activeId} />}
                   <ModelSelector
                     currentModelString={currentModelString}
@@ -2213,7 +2213,7 @@ const MainContent = ({ onNewChat, resetKey, tunerConfig, onOpenDocument, onArtif
                     onPaste={handlePaste}
                   />
                 </div>
-                <div className="px-4 pb-3 pt-1 flex flex-wrap gap-2 items-center justify-between">
+                <div className="composer-toolbar px-4 pb-3 pt-1 flex flex-wrap gap-2 items-center justify-between">
                   <div className="relative flex items-center">
                     <button
                       ref={plusBtnRef}
@@ -2244,7 +2244,7 @@ const MainContent = ({ onNewChat, resetKey, tunerConfig, onOpenDocument, onArtif
                     </button>}
                     {researchMode && <ResearchBadge onToggle={toggleResearchMode} />}
                   </div>
-                  <div className="flex flex-wrap justify-end items-center gap-3 ml-auto">
+                  <div className="composer-actions flex flex-wrap justify-end items-center gap-3 ml-auto">
 
                     {isCodeMode && <PermissionModeSelector neutral conversationId={activeId} />}
                     <ModelSelector

@@ -878,6 +878,18 @@ html.dark .glass-panel {
   box-shadow: 0 0 0 1px var(--chat-focus);
 }
 .chat-composer textarea:focus { outline: none; box-shadow: none; }
+
+@media (max-width: 767px) {
+  .composer-toolbar { padding: 4px 8px 8px; gap: 4px; }
+  .composer-actions { gap: 2px; }
+  .composer-toolbar > div > button,
+  .composer-actions > button { min-width: 40px; min-height: 44px; }
+  .composer-model-selector > button { padding: 8px; min-height: 44px; }
+  .composer-model-selector > button > span { max-width: clamp(64px, calc(100vw - 260px), 140px); }
+  .composer-model-selector [role="dialog"] { max-width: calc(100vw - 112px); max-height: 60dvh; overflow-y: auto; }
+  .settings-navigation > button { min-height: 44px; }
+  .terminal-toolbar button { min-height: 44px; min-width: 36px; }
+}
 :is(.chat-surface, .conversation-content) :is(button, a, input, select, textarea, [tabindex]):focus-visible {
   outline: none;
   box-shadow: 0 0 0 1px var(--chat-focus), 0 0 0 4px var(--chat-focus-halo);

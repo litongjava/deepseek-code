@@ -5,6 +5,9 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use walkdir::WalkDir;
 
+mod file_lock;
+pub use file_lock::{lock_file, try_lock_file};
+
 /// Takes an exclusive advisory lock, retrying briefly while it is held.
 ///
 /// A child process forked by any thread inherits a copy of the descriptor
@@ -14,7 +17,7 @@ use walkdir::WalkDir;
 pub fn try_lock_briefly(file: &fs::File) -> std::result::Result<(), fs::TryLockError> {
     let deadline = std::time::Instant::now() + std::time::Duration::from_millis(500);
     loop {
-        match file.try_lock() {
+        match try_lock_file(file) {
             Err(fs::TryLockError::WouldBlock) if std::time::Instant::now() < deadline => {
                 std::thread::sleep(std::time::Duration::from_millis(10));
             }

@@ -104,8 +104,8 @@ export default function ChatHeader({
   };
 
   return (
-    <div data-session-header className="relative flex min-w-0 items-center gap-2 px-3 md:gap-3 md:px-5 py-2 bg-claude-bg flex-shrink-0 h-[54px] z-40">
-      <div className="flex min-w-0 flex-1 items-center gap-3">
+    <div data-session-header className="relative flex min-w-0 flex-wrap items-center gap-x-2 px-3 md:flex-nowrap md:gap-3 md:px-5 py-1 md:py-2 bg-claude-bg flex-shrink-0 md:h-[54px] z-40">
+      <div className="flex min-w-0 w-full md:w-auto flex-1 basis-full md:basis-auto items-center gap-3">
       {isEditing ? (
         <input
           type="text" value={editTitle}
@@ -150,7 +150,7 @@ export default function ChatHeader({
         </div>
       )}
       </div>
-      <div className="flex min-w-0 shrink-0 max-w-[50%] gap-4 overflow-x-auto text-sm" role="tablist" aria-label={t('chat.sessionView')}>
+      <div className="flex min-w-0 w-full md:w-auto shrink-0 md:max-w-[50%] gap-4 overflow-x-auto text-sm" role="tablist" aria-label={t('chat.sessionView')}>
         {(['chat', 'reading', ...(showCodingView ? ['trajectory' as const] : [])] as const).map(tab => <button type="button" key={tab} role="tab" aria-selected={view === tab} onClick={() => setView(tab)} className={`shrink-0 py-2 ${view === tab ? 'border-b-2 border-blue-500 text-blue-500' : 'text-claude-textSecondary'}`}>{tab === 'chat' ? 'Chat' : tab === 'reading' ? t('chat.readingMode') : 'Trajectory'}</button>)}
       </div>
       {copyResult && copyResult.id === id && <div role={copyResult.success ? 'status' : 'alert'} className="absolute right-4 top-full rounded-md border border-claude-border bg-claude-input px-3 py-2 text-xs">{t(copyResult.success ? 'chat.sessionIdCopied' : 'chat.sessionIdCopyFailed')}</div>}

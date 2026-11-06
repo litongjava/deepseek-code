@@ -9,7 +9,7 @@ import { confirm } from '@tauri-apps/plugin-dialog';
 vi.mock('@tauri-apps/api/core', () => ({ isTauri: vi.fn() }));
 vi.mock('@tauri-apps/plugin-dialog', () => ({ confirm: vi.fn() }));
 
-const terminalMocks = vi.hoisted(() => ({ dispose: vi.fn(), open: vi.fn(), fit: vi.fn(), streamStop: vi.fn() }));
+const terminalMocks = vi.hoisted(() => ({ dispose: vi.fn(), open: vi.fn(), fit: vi.fn(), streamStop: vi.fn(), onResize: vi.fn() }));
 vi.mock('xterm', () => ({ Terminal: class {
   options = {};
   loadAddon() {}
@@ -19,7 +19,7 @@ vi.mock('xterm', () => ({ Terminal: class {
   write() {}
   writeln() {}
   onData() { return { dispose: vi.fn() }; }
-  onResize() { return { dispose: vi.fn() }; }
+  onResize(callback: unknown) { terminalMocks.onResize(callback); return { dispose: vi.fn() }; }
 } }));
 vi.mock('xterm-addon-fit', () => ({ FitAddon: class { fit = terminalMocks.fit; } }));
 vi.mock('../api/terminal', () => ({
@@ -33,6 +33,8 @@ beforeEach(() => {
   vi.mocked(isTauri).mockReturnValue(false);
   vi.stubGlobal('ResizeObserver', class { observe() {} disconnect() {} });
   vi.mocked(api.createTerminal).mockResolvedValue({ id: 't1', pid: 123, shell: 'fixture-shell', cwd: '/first' });
+  vi.mocked(api.writeTerminal).mockResolvedValue(undefined);
+  vi.mocked(api.resizeTerminal).mockResolvedValue(undefined);
   vi.mocked(api.closeTerminal).mockResolvedValue(undefined);
   vi.mocked(api.streamTerminalOutput).mockReturnValue(terminalMocks.streamStop);
   vi.spyOn(window, 'confirm').mockReturnValue(true);
@@ -42,6 +44,36 @@ afterEach(() => { cleanup(); vi.restoreAllMocks(); });
 async function ready() { await waitFor(() => expect(api.streamTerminalOutput).toHaveBeenCalled()); }
 
 describe('TerminalPanel lifecycle', () => {
+  it('ignores late resize failures after a terminal exits and is closed', async () => {
+    render(<TerminalPanel onClose={vi.fn()} />);
+    await ready();
+    let fail!: (error: Error) => void;
+    vi.mocked(api.resizeTerminal).mockReturnValueOnce(new Promise((_resolve, reject) => { fail = reject; }));
+    const resize = terminalMocks.onResize.mock.calls[0][0];
+    act(() => { resize({ cols: 40, rows: 20 }); });
+    act(() => { vi.mocked(api.streamTerminalOutput).mock.calls[0][2](0); });
+    act(() => { resize({ cols: 80, rows: 30 }); });
+    expect(api.resizeTerminal).toHaveBeenCalledOnce();
+    fireEvent.click(screen.getByRole('button', { name: '关闭终端 1' }));
+    await waitFor(() => expect(terminalMocks.dispose).toHaveBeenCalledOnce());
+    await act(async () => { fail(new Error('Terminal session not found')); });
+    expect(screen.queryByRole('alert')).not.toBeInTheDocument();
+  });
+
+  it('sends terminal keys to the active session and disables them after exit', async () => {
+    render(<TerminalPanel onClose={vi.fn()} />);
+    await ready();
+    fireEvent.click(screen.getByRole('button', { name: 'Ctrl+C' }));
+    expect(api.writeTerminal).toHaveBeenCalledWith('t1', '\u0003');
+    vi.mocked(api.createTerminal).mockResolvedValueOnce({ id: 't2', pid: 124, shell: 'fixture-shell', cwd: '/second' });
+    fireEvent.click(screen.getByRole('button', { name: '新建终端' }));
+    await waitFor(() => expect(api.streamTerminalOutput).toHaveBeenCalledTimes(2));
+    fireEvent.click(screen.getByRole('button', { name: /^Tab$/ }));
+    expect(api.writeTerminal).toHaveBeenLastCalledWith('t2', '\t');
+    act(() => { vi.mocked(api.streamTerminalOutput).mock.calls[1][2](0); });
+    expect(screen.getByRole('button', { name: 'Ctrl+C' })).toBeDisabled();
+  });
+
   it('creates only once under StrictMode and preserves shell across hidden/cwd changes', async () => {
     const onClose = vi.fn();
     const view = render(<StrictMode><TerminalPanel cwd="/first" onClose={onClose} /></StrictMode>);

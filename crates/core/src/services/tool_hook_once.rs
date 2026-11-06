@@ -125,7 +125,7 @@ impl HookRunner {
         // this file: another process may already hold its handle.
         tokio::time::timeout(Duration::from_secs(hook.timeout), async {
             loop {
-                match file.try_lock() {
+                match crate::fs::try_lock_file(&file) {
                     Ok(()) => return Ok::<_, anyhow::Error>(()),
                     Err(std::fs::TryLockError::WouldBlock) => {
                         tokio::time::sleep(Duration::from_millis(20)).await

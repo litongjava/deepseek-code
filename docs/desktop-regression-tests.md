@@ -74,7 +74,7 @@ npm run tauri -- dev
 5. `curl -H "Origin: https://evil.example"` 带令牌请求 `/api/conversations` 返回 403；不带令牌返回 401。
 6. `--host 0.0.0.0` 不带 HTTPS 参数时拒绝启动；带自签名证书时 `https://` 可访问，登录 Cookie 带 `Secure`。用 deepseek-browser-use（Chrome 走 HTTP/2）打开 `https://<局域网 IP>:<端口>`，页面不白屏，`/assets/*` 不返回 403，登录后能对话；`curl -sk` 带同源 `Origin` 请求 `/assets/` 下的文件返回 200，带 `https://evil.example` 返回 403。`--host 0.0.0.0 --allow-http` 启动时打印明文警告；`http://<局域网 IP>:<端口>` 能登录、对话，登录 Cookie 不带 `Secure`；点击消息的复制按钮能复制；点击麦克风弹出“需要 HTTPS”说明框，不打开录音面板。
 7. Android：`npx tauri android build --apk --debug --target x86_64`，在模拟器安装。首次打开直接进入应用（本机模式），添加供应商后对话；等待 Ubuntu 环境安装完成（数据目录出现 `linux/rootfs/.deepseek-ready`），让模型用 Bash 执行 `head -2 /etc/os-release` 应显示 Ubuntu，再用 `apt-get install -y git` 安装后 `git --version` 可用；通知栏显示“正在本机运行”。顶部不被状态栏遮挡，键盘弹出时输入框可见。
-8. Android 用户菜单“连接服务器”：填写 `http://10.0.2.2:30185` 和令牌后能对话；登录页“在本机运行”切回后，原会话仍在，不出现“对话模型与当前模式不匹配”的提示。
+8. Android 用户菜单“连接服务器”：填写 `http://10.0.2.2:30185` 和令牌后能对话；从远程会话内“在本机运行”切回后进入新聊天页，原本机会话仍可从历史打开，不沿用远程会话地址，也不出现“对话模型与当前模式不匹配”的提示。换服务器同样回到新聊天页；在同一服务器重新认证时保留当前会话地址。
 9. Desktop（`npm run tauri -- dev`）仍直接进入应用，不出现登录页；在会话页刷新后不出现模型模式不匹配的提示。
 
 ## Shell 配置与终端
@@ -84,6 +84,8 @@ npm run tauri -- dev
 3. 新建终端验证 Bash 语法、中文路径、非零退出码；原有终端保持原 Shell。
 4. WSL 发行版必须手动选择；在专用测试发行版验证输入、尺寸调整、退出码和关闭终端后的 Linux 子进程清理，不使用 Docker 发行版。
 5. 与 dcl 指向同一测试数据目录，确认 `config show`、模型 Bash 工具和 `!` 使用相同保存值。普通浏览器页面不能代替原生文件选择器验证。
+6. Android 真机等待 Ubuntu 就绪后，从右侧面板新建终端：`head -2 /etc/os-release` 显示 Ubuntu，`pwd` 对应当前工作区；交互输入、多终端切换、旋转与键盘弹出后尺寸调整正常。连续快速输入长命令，字符顺序与输出一致；执行 `sleep 60` 后点击手机键盘栏的 `Ctrl+C` 能回到提示符，Tab 和方向键可用。关闭确认取消时保留进程，确认后清理进程；Ubuntu 尚未就绪时可使用 Android 系统 Shell。
+7. 手机宽度下，会话标题和视图标签分行，模型菜单与发送按钮都在屏幕内；侧边栏可通过关闭按钮或遮罩收起，设置分类横向滚动且内容独立纵向滚动。右侧终端、文件与预览面板覆盖聊天区的可用宽度，隐藏后原会话保留。返回桌面宽度后保留原横向布局。
 
 真实 PTY 自动化：`cargo test --locked -p deepseek-code-core --lib configured_bash_and_wsl -- --ignored --test-threads=1`，需要 Git Bash 和已安装的 `dcl-linux-test`。
 

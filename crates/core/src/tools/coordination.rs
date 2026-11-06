@@ -19,7 +19,7 @@ fn team_lock(cwd: &str, id: &str) -> Result<(String, std::fs::File)> {
         .create(true)
         .truncate(false)
         .open(&path)?;
-    file.try_lock()
+    crate::fs::try_lock_file(&file)
         .context("Team execution is active in another request or process")?;
     Ok((path.to_string_lossy().into_owned(), file))
 }

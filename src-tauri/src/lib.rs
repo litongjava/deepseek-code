@@ -17,6 +17,17 @@ pub mod launch_permissions;
 #[tauri::mobile_entry_point]
 pub fn mobile_main() {
     use tauri::Manager;
+    // Debug tool futures need more stack than Android's default worker stack.
+    // Keep the runtime alive for the process, including Activity recreation.
+    static RUNTIME: std::sync::OnceLock<tokio::runtime::Runtime> = std::sync::OnceLock::new();
+    let runtime = RUNTIME.get_or_init(|| {
+        tokio::runtime::Builder::new_multi_thread()
+            .enable_all()
+            .thread_stack_size(16 * 1024 * 1024)
+            .build()
+            .expect("Cannot initialize mobile runtime")
+    });
+    tauri::async_runtime::set(runtime.handle().clone());
     // stderr reaches logcat (tag RustStdoutStderr) on Android.
     let _ = tracing_subscriber::fmt()
         .with_ansi(false)

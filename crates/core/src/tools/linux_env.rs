@@ -86,6 +86,23 @@ impl LinuxEnvironment {
         command
     }
 
+    /// Uses the same environment and bind mounts for an interactive terminal.
+    pub fn pty_command(&self, cwd: &str) -> portable_pty::CommandBuilder {
+        let bash = self.bash_command(cwd);
+        let source = bash.as_std();
+        let mut command = portable_pty::CommandBuilder::new(source.get_program());
+        command.args(source.get_args());
+        command.arg("--login");
+        for (name, value) in source.get_envs() {
+            match value {
+                Some(value) => command.env(name, value),
+                None => command.env_remove(name),
+            }
+        }
+        command.cwd(cwd);
+        command
+    }
+
     fn proot_args(&self, cwd: &str) -> Vec<String> {
         let mut args = vec![
             // Fake root for apt; hard links become symlinks (Android forbids link()).
@@ -282,5 +299,25 @@ mod tests {
         assert!(args.windows(2).any(|w| w[0] == "-r" && w[1] == env.rootfs.to_string_lossy()));
         assert!(args.windows(2).any(|w| w[0] == "-b" && w[1] == dir.path().to_string_lossy()));
         assert!(args.contains(&"--link2symlink".to_string()));
+    }
+
+    #[test]
+    fn interactive_shell_keeps_ubuntu_environment_and_workspace_bindings() {
+        let dir = tempfile::tempdir().unwrap();
+        let env = LinuxEnvironment {
+            proot: dir.path().join("libproot.so"),
+            loader: Some(dir.path().join("libproot-loader.so")),
+            rootfs: dir.path().join("rootfs"),
+        };
+        let cwd = dir.path().to_str().unwrap();
+        let command = env.pty_command(cwd);
+        let args = command.get_argv();
+        assert_eq!(args[0], env.proot.as_os_str());
+        assert!(args.windows(2).any(|w| w[0] == "-b" && w[1] == cwd));
+        assert_eq!(args[args.len() - 2], "/bin/bash");
+        assert_eq!(args[args.len() - 1], "--login");
+        assert_eq!(command.get_env("HOME"), Some(std::ffi::OsStr::new("/root")));
+        assert_eq!(command.get_env("PROOT_LOADER"), env.loader.as_deref().map(Path::as_os_str));
+        assert_eq!(command.get_cwd().map(|p| p.as_os_str()), Some(std::ffi::OsStr::new(cwd)));
     }
 }

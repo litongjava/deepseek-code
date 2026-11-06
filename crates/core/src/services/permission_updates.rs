@@ -233,7 +233,7 @@ fn lock_settings(path: &Path) -> Result<std::fs::File> {
         .create(true)
         .truncate(false)
         .open(directory.join(format!(".{name}.lock")))?;
-    file.lock()?;
+    crate::fs::lock_file(&file)?;
     Ok(file)
 }
 

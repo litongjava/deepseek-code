@@ -270,7 +270,7 @@ fn config(input: &Value, cwd: &str) -> Result<Value> {
                 .truncate(false)
                 .write(true)
                 .open(lock_path)?;
-            lock.try_lock()
+            crate::fs::try_lock_file(&lock)
                 .context("Configuration is being edited by another process")?;
             if operation == "create" {
                 ensure!(!p.exists(), "Configuration already exists");

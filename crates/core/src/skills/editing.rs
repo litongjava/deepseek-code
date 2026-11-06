@@ -196,7 +196,7 @@ pub(super) fn edit(path: &Path, updates: &HashMap<String, Value>) -> Result<()> 
         .truncate(false)
         .write(true)
         .open(lock_path)?;
-    lock.try_lock()
+    crate::fs::try_lock_file(&lock)
         .context("Skill is being edited by another process")?;
     let old = std::fs::read_to_string(path)?;
     let base = updates

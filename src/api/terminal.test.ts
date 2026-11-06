@@ -32,6 +32,31 @@ function receive() {
 }
 
 describe('terminal API', () => {
+  it('orders input per terminal while other terminals remain independent', async () => {
+    let finish!: (value: Response) => void;
+    fetchMock.mockImplementationOnce(() => new Promise<Response>(resolve => { finish = resolve; }));
+    fetchMock.mockImplementation(() => Promise.resolve(Response.json({})));
+    const first = writeTerminal('ordered', 'a');
+    const second = writeTerminal('ordered', 'b');
+    const enter = writeTerminal('ordered', '\r');
+    await vi.waitFor(() => expect(fetchMock).toHaveBeenCalledOnce());
+    await writeTerminal('other', 'x');
+    expect(fetchMock.mock.calls.map(([, options]) => JSON.parse(options.body).data)).toEqual(['a', 'x']);
+    finish(Response.json({}));
+    await Promise.all([first, second, enter]);
+    expect(fetchMock.mock.calls.map(([, options]) => JSON.parse(options.body).data)).toEqual(['a', 'x', 'b', '\r']);
+  });
+
+  it('rejects queued input after a failed prefix and permits a fresh write', async () => {
+    fetchMock.mockResolvedValueOnce(Response.json({ error: 'Write failed' }, { status: 500 }));
+    const results = await Promise.allSettled([writeTerminal('failed', 'a'), writeTerminal('failed', 'b')]);
+    expect(results.map(result => result.status)).toEqual(['rejected', 'rejected']);
+    expect(fetchMock).toHaveBeenCalledOnce();
+    fetchMock.mockResolvedValueOnce(Response.json({}));
+    await writeTerminal('failed', '\u0003');
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+  });
+
   it('authenticates every request with the shared client', async () => {
     fetchMock.mockImplementation(() => Promise.resolve(Response.json({ id: 't', sessions: [] })));
     await createTerminal('/fixture');

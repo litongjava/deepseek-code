@@ -391,7 +391,7 @@ const Layout = () => {
 
   return (
     <>
-      <div className="relative flex w-full h-screen overflow-hidden bg-claude-bg font-sans antialiased" style={{ zoom: zoomLevel }}>
+      <div className="relative flex w-full h-dvh overflow-hidden bg-claude-bg font-sans antialiased" style={{ zoom: zoomLevel }}>
         {showZoomIndicator && (
           <div className="fixed bottom-6 left-1/2 -translate-x-1/2 z-[300] px-4 py-2 bg-claude-tooltipBg text-claude-tooltipText rounded-lg shadow-lg text-[13px] font-medium flex items-center gap-2 transition-opacity duration-300">
             <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/><line x1="11" y1="8" x2="11" y2="14"/><line x1="8" y1="11" x2="14" y2="11"/></svg>
@@ -406,7 +406,7 @@ const Layout = () => {
         )}>
           <div className="h-full flex items-center pr-2 gap-0.5" style={{ pointerEvents: 'auto', WebkitAppRegion: 'no-drag', paddingLeft: isMac ? '78px' : '4px' } as React.CSSProperties}>
             {!narrowScreen && <Tooltip content="Menu"><button onClick={() => { }} className="p-2 hover:bg-black/5 dark:hover:bg-white/5 rounded-md text-claude-textSecondary hover:text-claude-text transition-colors"><Menu size={18} className="opacity-80" /></button></Tooltip>}
-            <Tooltip content={isSidebarCollapsed ? "Expand sidebar" : "Collapse sidebar"}><button onClick={() => setIsSidebarCollapsed(!isSidebarCollapsed)} className="p-1.5 hover:bg-black/5 dark:hover:bg-white/5 rounded-md text-claude-textSecondary hover:text-claude-text transition-colors"><IconSidebarToggle size={26} className="dark:invert transition-[filter] duration-200" /></button></Tooltip>
+            <Tooltip content={isSidebarCollapsed ? "Expand sidebar" : "Collapse sidebar"}><button aria-label={isSidebarCollapsed ? "Expand sidebar" : "Collapse sidebar"} aria-expanded={!isSidebarCollapsed} onClick={() => setIsSidebarCollapsed(!isSidebarCollapsed)} className="p-2 md:p-1.5 hover:bg-black/5 dark:hover:bg-white/5 rounded-md text-claude-textSecondary hover:text-claude-text transition-colors"><IconSidebarToggle size={26} className="dark:invert transition-[filter] duration-200" /></button></Tooltip>
             {!narrowScreen && (<>
             {canGoBack ? (
               <Tooltip content="Back"><button onClick={handleNavBack} className="p-1.5 rounded-md transition-colors hover:bg-black/5 dark:hover:bg-white/5 text-claude-navActive"><ArrowLeft size={16} strokeWidth={1.5} /></button></Tooltip>

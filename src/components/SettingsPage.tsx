@@ -300,19 +300,20 @@ const SettingsPage = ({ onCreateWithDeepSeek }: { onCreateWithDeepSeek?: () => v
   // Font selector options
   return (
     <div className="flex-1 flex flex-col min-h-0 h-full overflow-hidden bg-claude-bg text-claude-text">
-      <div className="shrink-0 px-6 pt-8 pb-6 md:px-8">
+      <div className="flex items-center justify-between shrink-0 px-4 py-2 md:block md:px-8 md:pt-8 md:pb-6">
         <button
           onClick={() => navigate('/')}
-          className="flex items-center gap-1.5 text-[14px] text-claude-textSecondary hover:text-claude-text transition-colors"
+          className="flex min-h-11 md:min-h-0 items-center gap-1.5 text-[14px] text-claude-textSecondary hover:text-claude-text transition-colors"
         >
           <ArrowLeft size={16} />
           <span>{t('common.back')}</span>
         </button>
+        <h1 className="text-lg font-medium md:sr-only">{t('settings.title')}</h1>
       </div>
       <div className="flex flex-1 min-h-0 flex-col overflow-hidden md:flex-row">
         {/* Navigation: a scrollable tab row on phones, a sidebar on wider screens. */}
-        <div className="flex w-full flex-shrink-0 flex-row gap-1 overflow-x-auto px-4 pb-3 md:w-[200px] md:flex-col md:overflow-x-visible md:overflow-y-auto md:pb-8 md:pl-8 md:pr-0">
-          <h2
+        <div className="settings-navigation flex w-full flex-shrink-0 flex-row gap-1 overflow-x-auto px-4 pb-3 md:w-[200px] md:flex-col md:overflow-x-visible md:overflow-y-auto md:pb-8 md:pl-8 md:pr-0">
+          <div aria-hidden="true"
             className="hidden font-[Spectral] text-[28px] text-claude-text px-3 mb-6 md:block"
             style={{
               fontWeight: 500,
@@ -320,7 +321,7 @@ const SettingsPage = ({ onCreateWithDeepSeek }: { onCreateWithDeepSeek?: () => v
             }}
           >
             {t('settings.title')}
-          </h2>
+          </div>
 
           <button onClick={() => setTab('account')} className={`shrink-0 whitespace-nowrap text-left px-3 py-2 rounded-lg text-[15px] font-medium transition-colors flex items-center gap-2 ${tab === 'account' ? 'bg-claude-btn-hover text-claude-text' : 'text-claude-textSecondary hover:bg-claude-hover'}`}>
             <UserRound size={16} />{t('settings.account')}

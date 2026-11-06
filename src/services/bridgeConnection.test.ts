@@ -8,6 +8,7 @@ const response = (status: string, database: boolean, ok = true) => ({
 beforeEach(() => {
   vi.resetModules();
   vi.useFakeTimers();
+  window.history.replaceState({}, '', '/');
   delete (window as any).__TAURI_INTERNALS__;
 });
 
@@ -180,9 +181,29 @@ describe('dcd-server connection', () => {
 
     localStorage.setItem('dcd_server_url', 'https://server.example');
     expect(bridge.connectionMode()).toBe('web');
+    window.location.hash = '/chat/remote-only';
     bridge.switchToLocalEngine();
     expect(bridge.connectionMode()).toBe('local');
     expect(bridge.savedServerUrl()).toBeNull();
+    expect(window.location.hash).toBe('#/');
+    vi.restoreAllMocks();
+  });
+
+  it('clears a mobile conversation only after login to a different engine succeeds', async () => {
+    (window as any).__TAURI_INTERNALS__ = {};
+    vi.spyOn(navigator, 'userAgent', 'get').mockReturnValue('Mozilla/5.0 (Linux; Android 16) AppleWebKit');
+    const fetchMock = vi.fn().mockResolvedValue({ ok: false, status: 401 });
+    vi.stubGlobal('fetch', fetchMock);
+    const bridge = await import('./bridgeConnection');
+    window.location.hash = '/chat/local-only';
+    await expect(bridge.loginToServer('wrong', 'https://server.example')).rejects.toMatchObject({ code: 'badToken' });
+    expect(window.location.hash).toBe('#/chat/local-only');
+    fetchMock.mockResolvedValue({ ok: true, status: 200 });
+    await bridge.loginToServer('right', 'https://server.example');
+    expect(window.location.hash).toBe('#/');
+    window.location.hash = '/chat/remote-only';
+    await bridge.loginToServer('renewed', 'https://server.example');
+    expect(window.location.hash).toBe('#/chat/remote-only');
     vi.restoreAllMocks();
   });
 });

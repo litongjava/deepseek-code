@@ -35,7 +35,7 @@ async fn token_lock(data_dir: &Path) -> Result<std::fs::File> {
         .truncate(false)
         .open(data_dir.join("anthropic-oauth.lock"))?;
     loop {
-        match file.try_lock() {
+        match crate::fs::try_lock_file(&file) {
             Ok(()) => return Ok(file),
             Err(std::fs::TryLockError::WouldBlock) => {
                 tokio::time::sleep(Duration::from_millis(25)).await;

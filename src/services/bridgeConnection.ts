@@ -150,6 +150,8 @@ export function switchToLocalEngine(): void {
   localStorage.removeItem(ACCESS_TOKEN_KEY);
   localStorage.removeItem('bridge_api_key');
   resetBridgePort();
+  // Conversation IDs belong to one engine and cannot cross this boundary.
+  if (isMobileApp) window.location.hash = '/';
 }
 
 async function connectWeb(): Promise<void> {
@@ -228,6 +230,7 @@ export async function detectBridgePort(): Promise<number> {
 export async function loginToServer(token: string, serverUrl?: string): Promise<void> {
   const origin = serverUrl?.trim() ? normalizeServerUrl(serverUrl) : webOrigin();
   if (!origin) throw new ServerLoginError('needsServer');
+  const changingMobileEngine = isMobileApp && (connectionMode() === 'local' || savedServerUrl() !== origin);
   let response: Response;
   try {
     response = await fetch(`${origin}/api/auth/login`, {
@@ -245,6 +248,7 @@ export async function loginToServer(token: string, serverUrl?: string): Promise<
   localStorage.setItem(ACCESS_TOKEN_KEY, token.trim());
   localStorage.setItem('bridge_api_key', token.trim());
   resetBridgePort();
+  if (changingMobileEngine) window.location.hash = '/';
 }
 
 export async function logoutFromServer(): Promise<void> {
