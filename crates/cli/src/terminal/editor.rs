@@ -978,7 +978,7 @@ impl PromptEditor {
         // frame below redraws it in place.
         let mut screen = Screen::pinned();
         screen.top = crate::terminal::take_handoff();
-        screen.align_transcript = !above.all().is_empty()
+        screen.align_transcript = !above.has_welcome() && !above.all().is_empty()
             && !self.history.last().is_some_and(|line| line.trim_start().starts_with('/'));
         let mut command_overlay = CommandOverlay::default();
         let mut selection = crate::terminal::mouse_selection::Selection::default();
@@ -1054,7 +1054,7 @@ impl PromptEditor {
                         terminal::size().map_or(79, |(cols, _)| cols.saturating_sub(1) as usize))?;
                     io::stderr().flush()?;
                     screen = Screen::pinned();
-                    screen.align_transcript = true;
+                    screen.align_transcript = !above.has_welcome();
                 }
             }
             if let Some(suggestions) = &self.suggestions {
@@ -1320,6 +1320,7 @@ impl PromptEditor {
                     above.push(String::new(), None);
                 }
                 screen.draw(&lines, input_row, cursor_col)?;
+                above.update_welcome(screen.transcript_end.unwrap_or(0));
             }
             if !selection.retained() {
                 let composer: Vec<String> = lines.iter().map(|(text, _)| text.clone()).collect();
@@ -1344,7 +1345,7 @@ impl PromptEditor {
                     bottom,
                     &background,
                 )?;
-                if !history_view.active() && !crate::terminal::scrollback::compact() {
+                if !history_view.active() && !crate::terminal::scrollback::compact() && !above.has_welcome() {
                     pinned.draw(width, rows as usize, &background)?;
                 }
             }
@@ -1451,6 +1452,8 @@ impl PromptEditor {
                         let bottom = new_rows
                             .saturating_sub(lines.len() as u16)
                             .min(new_rows.saturating_sub(1));
+                        let bottom = above.repaint_bottom(bottom, columns);
+                        above.update_welcome(bottom as usize);
                         let mut out = io::stderr().lock();
                         write!(
                             out,
@@ -2357,6 +2360,34 @@ mod tests {
         write_notice(&mut output, &mut history, "Agent sender · queued\n中文 body\nsecond line", 80).unwrap();
         assert_eq!(history.all().join("\r\n") + "\r\n",
             "Previous answer\r\n".to_owned() + &String::from_utf8(output).unwrap());
+    }
+
+    #[test]
+    fn completed_first_turn_keeps_welcome_above_idle_composer() {
+        let mut terminal = vt100::Parser::new(30, 80, 100);
+        terminal.process(b"WELCOME\r\nMODEL\r\nWORKSPACE\r\n\r\n");
+        let mut history = crate::terminal::scrollback::Scrollback::default();
+        history.set_welcome("WELCOME\nMODEL\nWORKSPACE\n\n".into());
+        for row in history.record_prompt("FIRST") {
+            terminal.process(format!("{row}\r\n").as_bytes());
+        }
+        for row in history.push_flow("Connection failed", "", "", 79) {
+            terminal.process(format!("{row}\r\n").as_bytes());
+        }
+        let cursor = terminal.screen().cursor_position().0 as usize;
+        let mut screen = Screen::pinned();
+        screen.align_transcript = !history.has_welcome();
+        let mut output = Vec::new();
+        screen
+            .draw_pinned_to(&mut output, &frame_lines(), 1, 3, 30, cursor)
+            .unwrap();
+        terminal.process(&output);
+        history.update_welcome(screen.transcript_end.unwrap());
+        assert!(history.has_welcome());
+        let rows: Vec<_> = terminal.screen().rows(0, 80).collect();
+        assert_eq!(&rows[..3], &["WELCOME", "MODEL", "WORKSPACE"]);
+        assert_eq!(screen.transcript_end, Some(cursor));
+        assert_eq!(screen.top, Some(26));
     }
 
     #[test]

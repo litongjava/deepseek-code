@@ -596,7 +596,13 @@ async fn run(cli: &Cli) -> Result<()> {
         }
         if !single {
             if std::env::var_os(remote_host::HANDOFF_ENV).is_none() {
-                eprintln!("{}", terminal::banner(&session.model, &session.workspace));
+                let banner = terminal::banner(&session.model, &session.workspace);
+                eprintln!("{banner}");
+                if resumed.is_none() {
+                    let mut history = terminal::scrollback::Scrollback::take();
+                    history.set_welcome(format!("{banner}\n"));
+                    history.save();
+                }
             }
             // --resume and --continue show the conversation so far, as in the reference CLI.
             if resumed.is_some() && std::env::var_os(remote_host::HANDOFF_ENV).is_none() { repl::show_resumed(&session, false)?; }

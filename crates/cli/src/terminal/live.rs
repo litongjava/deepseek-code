@@ -153,7 +153,7 @@ impl LiveTurn {
             let scrollback = super::scrollback::Scrollback::take();
             // The welcome banner is outside conversation history. On the first
             // turn, keep it in place instead of shifting the whole screen down.
-            let aligned = !scrollback.has_turn_output();
+            let aligned = scrollback.has_welcome();
             let pinned = super::pinned_prompt::PinnedPrompt {
                 text: scrollback.latest_prompt().to_owned(),
                 ..Default::default()
@@ -162,7 +162,6 @@ impl LiveTurn {
                 scrollback,
                 pinned,
                 aligned,
-                preserve_welcome: aligned,
                 ..Frame::default()
             };
             let _ = run(&mut state, &mut screen, receiver, actions);
@@ -1374,7 +1373,6 @@ struct Frame {
     input_rows: usize,
     /// Whether the turn's first frame has moved a short transcript down onto it.
     aligned: bool,
-    preserve_welcome: bool,
     /// Frame rows of the running Bash call; a click shows its output.
     shell_rows: Option<std::ops::Range<usize>>,
     /// Lines logged above the frame, for clicks on tool results.
@@ -1726,6 +1724,7 @@ impl Frame {
             out.push_str(&format!("\x1b[{};1H{line}\x1b[K", top + index + 1));
         }
         self.size = size;
+        self.scrollback.update_welcome(top);
         if out.is_empty() && self.input_row == input_row && self.cursor_column == cursor_column {
             return None;
         }
@@ -1969,8 +1968,7 @@ impl Frame {
         for (index, text) in self.lines.iter().enumerate() {
             if let Some(row) = background.get_mut(origin as usize + index) { *row = text.clone(); }
         }
-        if self.preserve_welcome && top > 0 { return Ok(()); }
-        self.preserve_welcome = false;
+        if self.scrollback.has_welcome() { return Ok(()); }
         self.pinned.draw(width, size.1 as usize, &background)
     }
 }
@@ -3001,9 +2999,17 @@ fn run(
                     if screen.history_view.active() {
                         screen.refresh_history(state, columns.saturating_sub(1) as usize);
                     } else {
+                        // Padding in the old frame is free space, not transcript.
+                        let reserved = if screen.scrollback.has_welcome() {
+                            screen.composer_height
+                        } else {
+                            screen.lines.len()
+                        };
                         let bottom = rows
-                            .saturating_sub(screen.lines.len() as u16)
+                            .saturating_sub(reserved as u16)
                             .min(rows.saturating_sub(1));
+                        let bottom = screen.scrollback.repaint_bottom(bottom, columns);
+                        screen.scrollback.update_welcome(bottom as usize);
                         screen.pending = screen.scrollback.repaint(bottom, rows, columns);
                         screen.logs.clear();
                         screen.lines.clear();
@@ -3340,25 +3346,52 @@ mod tests {
     }
 
     #[test]
+    fn plan_notice_before_first_turn_keeps_welcome_at_top() {
+        let mut terminal = vt100::Parser::new(36, 100, 200);
+        terminal.process(b"WELCOME\r\nMODEL\r\nWORKSPACE\r\n\r\n");
+        let mut history = super::super::scrollback::Scrollback::default();
+        history.set_welcome("WELCOME\nMODEL\nWORKSPACE\n\n".into());
+        for row in history.record_prompt("/plan investigate") {
+            terminal.process(format!("{row}\r\n").as_bytes());
+        }
+        for row in history.push_flow("Plan mode enabled. Plan file: fixture.md.", "", "", 99) {
+            terminal.process(format!("{row}\r\n").as_bytes());
+        }
+        let cursor = terminal.screen().cursor_position().0 as usize;
+        let mut frame = Frame {
+            aligned: history.has_welcome(),
+            scrollback: history,
+            ..Frame::default()
+        };
+        place(&mut frame, &mut terminal, &["Thinking"], "working", cursor);
+        let rows = screen(&terminal);
+        assert_eq!(rows[0], "WELCOME");
+        assert_eq!(rows[1], "MODEL");
+        assert_eq!(rows[2], "WORKSPACE");
+        assert_eq!(rows[35], "footer");
+    }
+
+    #[test]
     fn first_turn_keeps_welcome_at_top_and_composer_at_bottom() {
-        for height in [20u16, 36, 50] {
+        for height in [24u16, 36, 50] {
             let mut terminal = vt100::Parser::new(height, 100, 200);
-            terminal.process(b"WELCOME\r\nMODEL\r\nWORKSPACE\r\n\r\nPROMPT\r\n");
+            terminal.process(b"WELCOME\r\nMODEL\r\nWORKSPACE\r\n\r\n");
             let mut history = super::super::scrollback::Scrollback::default();
-            history.push("────────".into(), None);
-            history.record_prompt("PROMPT");
-            history.push("────────".into(), None);
-            assert!(!history.has_turn_output());
-            let mut frame = Frame { aligned: !history.has_turn_output(), scrollback: history, ..Frame::default() };
-            place(&mut frame, &mut terminal, &["Thinking", "Reasoning"], "working", 5);
+            history.set_welcome("WELCOME\nMODEL\nWORKSPACE\n\n".into());
+            for row in history.record_prompt("PROMPT") {
+                terminal.process(format!("{row}\r\n").as_bytes());
+            }
+            let cursor = terminal.screen().cursor_position().0 as usize;
+            let mut frame = Frame { aligned: history.has_welcome(), scrollback: history, ..Frame::default() };
+            place(&mut frame, &mut terminal, &["Thinking", "Reasoning"], "working", cursor);
             let rows = screen(&terminal);
             assert_eq!(rows[0], "WELCOME");
             assert_eq!(rows[1], "MODEL");
             assert_eq!(rows[2], "WORKSPACE");
-            assert_eq!(rows[5], "Thinking");
+            assert_eq!(rows[cursor], "Thinking");
             assert_eq!(rows[height as usize - 1], "footer");
             frame.log_block(vec![change_view::body("Bash(test)")], vec![change_view::body("result")]);
-            assert!(frame.scrollback.has_turn_output());
+            assert!(frame.scrollback.has_welcome());
         }
     }
 

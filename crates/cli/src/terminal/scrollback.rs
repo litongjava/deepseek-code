@@ -41,6 +41,7 @@ pub(crate) struct Scrollback {
     logged: VecDeque<Logged>,
     blocks: Vec<Block>,
     latest_prompt: String,
+    welcome: Option<String>,
 }
 
 /// The last turn's lines, handed from the live view to the prompt after it.
@@ -70,9 +71,29 @@ impl Scrollback {
     pub(super) fn latest_prompt(&self) -> &str {
         &self.latest_prompt
     }
-    pub(super) fn has_turn_output(&self) -> bool {
-        self.blocks.iter().any(|block| block.prompt.is_none())
-            || self.logged.iter().any(|line| line.flow.is_some())
+    /// Only a freshly drawn startup banner owns these rows. Restored history
+    /// starts without them, regardless of whether it contains tools or text.
+    pub(crate) fn set_welcome(&mut self, banner: String) {
+        self.welcome = Some(banner);
+    }
+    pub(super) fn has_welcome(&self) -> bool {
+        self.welcome.is_some()
+    }
+    pub(super) fn update_welcome(&mut self, bottom: usize) {
+        if self.has_welcome() && self.logged.iter().map(|line| line.rows).sum::<usize>() >= bottom {
+            self.welcome = None;
+        }
+    }
+    pub(super) fn repaint_bottom(&self, limit: u16, width: u16) -> u16 {
+        match &self.welcome {
+            Some(banner) => (self.logged.iter().map(|line| line.rows).sum::<usize>()
+                + banner
+                    .lines()
+                    .map(|line| screen_rows(line, width as usize))
+                    .sum::<usize>())
+            .min(limit as usize) as u16,
+            None => limit,
+        }
     }
     pub(super) fn handoff() -> Handoff { Handoff(Self::take()) }
     pub(crate) fn save(self) {
@@ -708,6 +729,15 @@ impl Scrollback {
                 }
             }
         }
+        if let Some(banner) = &self.welcome {
+            let welcome: Vec<_> = banner.lines()
+                .flat_map(|line| super::markdown::wrap_styled(line, "", "", width))
+                .collect();
+            for text in welcome.into_iter().rev().take(end) {
+                end -= 1;
+                if end < rows.len() { rows[end] = text; }
+            }
+        }
         rows
     }
     /// Repaint only the current viewport, leaving the terminal scrollback intact.
@@ -920,11 +950,38 @@ mod tests {
         history.record_prompt("<task-notification><summary>Finished</summary></task-notification>");
         assert_eq!(history.latest_prompt(), "LATEST\n中文");
         assert!(super::Scrollback::default().latest_prompt().is_empty());
-        assert!(!history.has_turn_output());
+        assert!(!history.has_welcome());
         history.push_flow("A restored text-only answer", "● ", "  ", 80);
-        assert!(history.has_turn_output());
+        assert!(!history.has_welcome());
         history.expand_prompt("FIRST", 40);
         assert_eq!(history.latest_prompt(), "LATEST\n中文");
+    }
+
+    #[test]
+    fn welcome_survives_local_output_and_resize_until_it_scrolls_out() {
+        let mut history = super::Scrollback::default();
+        history.set_welcome("WELCOME\nMODEL\nWORKSPACE\n\n".into());
+        history.push_flow("Plan mode enabled", "", "", 79);
+        history.push_flow("Connection failed", "", "", 79);
+        history.update_welcome(6);
+        assert!(history.has_welcome());
+        assert_eq!(
+            history.screen_at(6, 24, 80)[..6],
+            [
+                "WELCOME",
+                "MODEL",
+                "WORKSPACE",
+                "",
+                "Plan mode enabled",
+                "Connection failed"
+            ]
+        );
+        history.reflow(40);
+        assert_eq!(history.repaint_bottom(20, 40), 6);
+        history.update_welcome(2);
+        assert!(!history.has_welcome());
+        history.reflow(80);
+        assert_eq!(history.repaint_bottom(30, 80), 30);
     }
 
     #[test]
