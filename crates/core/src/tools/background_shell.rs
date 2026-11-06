@@ -53,6 +53,14 @@ pub(super) fn session_environment() -> Result<Option<String>> {
     }
 }
 
+pub(super) fn shell_settings() -> Result<crate::services::shell_settings::ShellSettings> {
+    let root = match CONTEXT.try_with(Clone::clone).ok().flatten() {
+        Some((root, _)) => root,
+        None => crate::runtime::resolve_default_data_dir()?,
+    };
+    crate::services::shell_settings::load(&root)
+}
+
 static ACTIVE: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
 /// Only tasks owned by this process keep its persistent worker alive.
 pub fn has_active() -> bool {

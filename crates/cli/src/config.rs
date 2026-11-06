@@ -320,11 +320,16 @@ pub fn run(paths: &RuntimePaths, action: &ConfigCommands) -> Result<()> {
     paths.read_config()?; // Never overwrite a malformed Desktop config with defaults.
     match action {
         ConfigCommands::Show => {
-            let mut value = json!({"data_dir":paths.data_dir,"preferences":preferences(paths)?,"config":paths.read_config()?,"permissions.auto":deepseek_code_core::permissions::auto_config::load(&crate::services::context(paths)?)?});
+            let mut value = json!({"data_dir":paths.data_dir,"preferences":preferences(paths)?,"config":paths.read_config()?,"shell":deepseek_code_core::services::shell_settings::inspect(&paths.data_dir)?,"permissions.auto":deepseek_code_core::permissions::auto_config::load(&crate::services::context(paths)?)?});
             redact(&mut value);
             println!("{}", serde_json::to_string_pretty(&value)?);
         }
         ConfigCommands::Set { key, value } => {
+            if let Some(field) = key.strip_prefix("shell.") {
+                deepseek_code_core::services::shell_settings::set(&paths.data_dir, field, value)?;
+                eprintln!("Updated {key}; applies to the next command or new terminal");
+                return Ok(());
+            }
             if key == deepseek_code_core::permissions::auto_config::KEY {
                 let config: deepseek_code_core::permissions::auto_config::AutoConfig = serde_json::from_str(value)?;
                 deepseek_code_core::permissions::auto_config::save(&crate::services::context(paths)?, &config)?;
@@ -451,6 +456,17 @@ fn import_legacy(paths: &RuntimePaths, source: &Path) -> Result<()> {
 #[cfg(test)]
 mod budget_tests {
     use super::*;
+
+    #[test]
+    fn shell_configuration_is_shared_and_does_not_need_a_provider() {
+        let root = tempfile::tempdir().unwrap();
+        let paths = RuntimePaths::new(root.path().join("data")).unwrap();
+        run(&paths, &ConfigCommands::Set { key: "shell.toolDefault".into(), value: "pwsh".into() }).unwrap();
+        let settings = deepseek_code_core::services::shell_settings::load(&paths.data_dir).unwrap();
+        assert_eq!(settings.tool_default, "pwsh");
+        assert_eq!(settings.terminal_default, "auto");
+        assert!(run(&paths, &ConfigCommands::Set { key: "shell.bashPath".into(), value: "does-not-exist".into() }).is_err());
+    }
 
     #[test]
     fn astra_context_template_uses_256k_without_changing_output_budget() {

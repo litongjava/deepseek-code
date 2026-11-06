@@ -7,18 +7,6 @@ use anyhow::{Context, Result};
 /// Characters of each stream kept in the conversation.
 const MAX_STREAM: usize = 30_000;
 
-fn shell() -> (std::path::PathBuf, Vec<&'static str>) {
-    if cfg!(windows) {
-        let program = deepseek_code_core::tools::lsp_servers::find_on_path("pwsh")
-            .or_else(|| deepseek_code_core::tools::lsp_servers::find_on_path("powershell"))
-            .unwrap_or_else(|| "powershell".into());
-        (program, vec!["-NoProfile", "-Command"])
-    } else {
-        let program = deepseek_code_core::tools::lsp_servers::find_on_path("bash").unwrap_or_else(|| "sh".into());
-        (program, vec!["-c"])
-    }
-}
-
 fn clip(text: &str) -> String {
     let trimmed = text.trim_end();
     match trimmed.char_indices().nth(MAX_STREAM) {
@@ -39,17 +27,16 @@ pub fn transcript(command: &str, stdout: &str, stderr: &str) -> String {
 pub async fn run(session: &Session, command: &str) -> Result<()> {
     let command = command.trim();
     anyhow::ensure!(!command.is_empty(), "Type a command after !, e.g. !git status");
-    let (program, args) = shell();
-    let mut child = tokio::process::Command::new(&program);
+    let settings = deepseek_code_core::services::shell_settings::load(&session.paths.data_dir)?;
+    let shell = settings.resolve(None, true)?;
+    let mut child = shell.command(command);
     child
-        .args(&args)
-        .arg(command)
         .current_dir(&session.workspace)
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped())
         .kill_on_drop(true);
-    let child = child.spawn().with_context(|| format!("Cannot start {}", program.display()))?;
+    let child = child.spawn().with_context(|| format!("Cannot start {}", shell.program))?;
     let output = tokio::select! {
         output = child.wait_with_output() => output?,
         _ = tokio::signal::ctrl_c() => anyhow::bail!("Command interrupted"),

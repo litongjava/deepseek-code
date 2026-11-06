@@ -25,6 +25,7 @@ pub mod async_hooks;
 pub mod hook_callbacks;
 pub mod session_hooks;
 pub mod session_environment;
+pub mod shell_settings;
 pub mod teams;
 pub mod lifecycle_events;
 pub mod anthropic_auth;

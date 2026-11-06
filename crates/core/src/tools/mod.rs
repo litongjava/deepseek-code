@@ -37,7 +37,7 @@ pub mod wakeup;
 pub mod sandbox;
 mod findings;
 mod content_compat;
-mod utf8;
+pub(crate) mod utf8;
 mod shell_discovery;
 mod bash_process;
 pub mod background_shell;
@@ -130,7 +130,7 @@ pub fn get_tool_definitions() -> Vec<ToolDefinition> {
         },
         ToolDefinition {
             name: "Bash".to_string(),
-            description: "Executes a shell command and returns its output.\n\nThe default shell is bash (Git Bash on Windows): use Unix shell syntax there — `/dev/null` not `NUL`, forward slashes, `$VAR` not `%VAR%` or `$env:VAR`. Pass `shell` (powershell, pwsh, cmd, sh, zsh, fish) to use another shell's syntax; PowerShell input/output is UTF-8.\n\n- With bash, sh or zsh the working directory persists between calls, but prefer absolute paths; leaving the project resets it to the project directory. Shell state (env vars, functions) does not persist. Other shells start in the project directory each call.\n- Command output is displayed to you, not reliably to the user.\n- `timeout` is in milliseconds: default 120000, max 600000 for a foreground command.\n- `run_in_background` runs the command detached as a managed task: it keeps running across turns and returns a task_id. No `&` or Start-Process needed. Use TaskOutput to read its output and TaskStop to stop it.\n\n# Git\n- Interactive flags (`-i`, e.g. `git rebase -i`, `git add -i`) are not supported in this environment.\n- Use the `gh` CLI for GitHub operations (PRs, issues, API).\n- Commit or push only when the user asks. If on the default branch, branch first.".to_string(),
+            description: "Executes a shell command and returns its output.\n\nThe shell defaults to shell.toolDefault in settings.json (bash / Git Bash on Windows when unset): use Unix shell syntax there — `/dev/null` not `NUL`, forward slashes, `$VAR` not `%VAR%` or `$env:VAR`. Pass `shell` (powershell, pwsh, cmd, sh, zsh, fish) to use another shell's syntax; PowerShell input/output is UTF-8.\n\n- With bash, sh or zsh the working directory persists between calls, but prefer absolute paths; leaving the project resets it to the project directory. Shell state (env vars, functions) does not persist. Other shells start in the project directory each call.\n- Command output is displayed to you, not reliably to the user.\n- `timeout` is in milliseconds: default 120000, max 600000 for a foreground command.\n- `run_in_background` runs the command detached as a managed task: it keeps running across turns and returns a task_id. No `&` or Start-Process needed. Use TaskOutput to read its output and TaskStop to stop it.\n\n# Git\n- Interactive flags (`-i`, e.g. `git rebase -i`, `git add -i`) are not supported in this environment.\n- Use the `gh` CLI for GitHub operations (PRs, issues, API).\n- Commit or push only when the user asks. If on the default branch, branch first.".to_string(),
             input_schema: serde_json::json!({
                 "type": "object",
                 "properties": {
@@ -139,7 +139,7 @@ pub fn get_tool_definitions() -> Vec<ToolDefinition> {
                     "description": { "description": "Clear, concise description of what this command does in active voice. Never use words like \"complex\" or \"risk\" in the description - just describe what it does.\n\nSay what the command does in plain words: do not echo the command's text, its flags, or file paths - the user reads this description, often without seeing the command.\n\nFor simple commands (git, npm, standard CLI tools), keep it brief (5-10 words):\n- ls → \"List files in current directory\"\n- git status → \"Show working tree status\"\n- npm install → \"Install package dependencies\"\n\nFor commands that are harder to parse at a glance (piped commands, obscure flags, etc.), add enough context to clarify what it does:\n- find . -name \"*.tmp\" -exec rm {} \\; → \"Find and delete all .tmp files recursively\"\n- git reset --hard origin/main → \"Discard all local changes and match remote main\"\n- curl -s url | jq '.data[]' → \"Fetch JSON from URL and extract data array elements\"", "type": "string" },
                     "run_in_background": { "description": "Set to true to run this command in the background.", "type": "boolean" },
                     "dangerouslyDisableSandbox": { "description": "Set this to true to dangerously override sandbox mode and run commands without sandboxing.", "type": "boolean" },
-                    "shell": { "description": "Shell to use: bash, zsh, fish, sh, cmd, powershell, pwsh (default: bash)", "type": "string" }
+                    "shell": { "description": "Shell to use: bash, zsh, fish, sh, cmd, powershell, pwsh (default: shell.toolDefault, otherwise bash)", "type": "string" }
                 },
                 "required": ["command"],
                 "additionalProperties": false
@@ -983,7 +983,9 @@ async fn tool_bash_async(input: serde_json::Value, cwd: &str) -> Result<serde_js
     let max_ms = if background { 86_400_000 } else { 600_000 };
     anyhow::ensure!(timeout_ms <= max_ms, "Bash timeout must be at most {max_ms} milliseconds");
     let timeout = std::time::Duration::from_millis(timeout_ms);
-    let shell_type = input["shell"].as_str().unwrap_or("bash");
+    let settings = background_shell::shell_settings()?;
+    let resolved = settings.resolve(input["shell"].as_str(), false)?;
+    let shell_type = resolved.name.as_str();
 
     if !path_scope::bypass_permissions() && !path_scope::approved_auto_command(command) && is_dangerous_command(command) {
         return Ok(serde_json::json!({
@@ -993,63 +995,8 @@ async fn tool_bash_async(input: serde_json::Value, cwd: &str) -> Result<serde_js
         }));
     }
 
-    let (shell, flag) = match shell_type.to_lowercase().as_str() {
-        "zsh" => {
-            if let Some(zsh_path) = find_shell("zsh") {
-                (zsh_path, "-c".to_string())
-            } else {
-                return Ok(serde_json::json!({
-                    "error": "zsh shell not found",
-                    "is_error": true
-                }));
-            }
-        }
-        "fish" => {
-            if let Some(fish_path) = find_shell("fish") {
-                (fish_path, "-c".to_string())
-            } else {
-                return Ok(serde_json::json!({
-                    "error": "fish shell not found",
-                    "is_error": true
-                }));
-            }
-        }
-        "sh" => {
-            if let Some(sh_path) = find_shell("sh") {
-                (sh_path, "-c".to_string())
-            } else {
-                return Ok(serde_json::json!({
-                    "error": "sh shell not found",
-                    "is_error": true
-                }));
-            }
-        }
-        "cmd" => {
-            if cfg!(target_os = "windows") {
-                ("cmd".to_string(), "/C".to_string())
-            } else {
-                return Ok(serde_json::json!({
-                    "error": "cmd shell only available on Windows",
-                    "is_error": true
-                }));
-            }
-        }
-        "powershell" | "pwsh" => {
-            if let Some(pwsh_path) = find_shell(&shell_type.to_lowercase()) {
-                (pwsh_path, "-Command".to_string())
-            } else {
-                return Ok(serde_json::json!({
-                    "error": "PowerShell not found",
-                    "is_error": true
-                }));
-            }
-        }
-        "bash" => {
-            let path = find_shell("bash").ok_or_else(|| anyhow!("Bash shell not found; install Git for Windows or configure shell.bashPath"))?;
-            (path, "-c".to_string())
-        }
-        _ => return Err(anyhow!("Unsupported shell: {shell_type}")),
-    };
+    let shell = resolved.program;
+    let flag = resolved.command_flag.to_string();
 
     let actual_shell = Path::new(&shell).file_stem().and_then(|name| name.to_str()).unwrap_or(shell_type);
     let mut cmd = match input.get("__sandbox").filter(|policy| policy.is_object()) {

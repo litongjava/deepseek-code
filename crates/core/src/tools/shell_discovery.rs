@@ -71,6 +71,41 @@ mod tests {
 
     #[cfg(windows)]
     #[tokio::test]
+    async fn tool_uses_owning_data_directory_settings_and_explicit_shell_wins() {
+        crate::config::OrchestrationConfig::init_global().unwrap();
+        let root = tempfile::tempdir().unwrap();
+        crate::services::shell_settings::set(root.path(), "toolDefault", "cmd").unwrap();
+        super::super::background_shell::scope(
+            Some((root.path().into(), uuid::Uuid::new_v4().to_string())),
+            async {
+                let cwd = root.path().to_str().unwrap();
+                let result = super::super::tool_bash_async(
+                    serde_json::json!({"command":"echo %COMSPEC%"}),
+                    cwd,
+                )
+                .await
+                .unwrap();
+                assert_eq!(result["shell"], "cmd");
+                assert!(result["stdout"]
+                    .as_str()
+                    .unwrap()
+                    .to_ascii_lowercase()
+                    .contains("cmd.exe"));
+                let explicit = super::super::tool_bash_async(
+                    serde_json::json!({"command":"printf configured-bash","shell":"bash"}),
+                    cwd,
+                )
+                .await
+                .unwrap();
+                assert_eq!(explicit["shell"], "bash");
+                assert_eq!(explicit["stdout"], "configured-bash");
+            },
+        )
+        .await;
+    }
+
+    #[cfg(windows)]
+    #[tokio::test]
     async fn windows_shells_preserve_failures_and_directory_state() {
         crate::config::OrchestrationConfig::init_global().unwrap();
         let temp = tempfile::tempdir().unwrap();

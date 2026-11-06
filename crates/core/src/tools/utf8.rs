@@ -18,11 +18,11 @@ pub(super) fn write_utf8(path: &Path, content: &str) -> io::Result<usize> {
 }
 
 /// File cmdlets and redirected console output must agree on UTF-8.
-pub(super) fn powershell_command(command: &str) -> String {
+pub(crate) fn powershell_command(command: &str) -> String {
     format!("$OutputEncoding = [System.Text.UTF8Encoding]::new($false); [Console]::InputEncoding = $OutputEncoding; [Console]::OutputEncoding = $OutputEncoding; $PSDefaultParameterValues['*:Encoding'] = 'utf8';\n{command}")
 }
 
-pub(super) fn cmd_command(command: &str) -> String {
+pub(crate) fn cmd_command(command: &str) -> String {
     format!("chcp 65001 >nul & {command}")
 }
 
