@@ -820,5 +820,25 @@
     "browserFrameTitle": "Halaman web: {url}",
     "browserLoading": "Memuat halaman…",
     "shortcut": "Ctrl+Alt+B (⌘⌥B di macOS): tampilkan atau sembunyikan bilah sisi kanan"
+  },
+  "shellSettings": {
+    "title": "Shell",
+    "description": "Pengaturan shell dibagikan dengan dcl. Perubahan berlaku untuk perintah berikutnya dan terminal baru.",
+    "toolDefault": "Shell perintah model",
+    "terminalDefault": "Shell terminal manual",
+    "auto": "Otomatis (pertahankan bawaan saat ini)",
+    "bashPath": "Jalur berkas eksekusi Bash",
+    "detected": "Deteksi otomatis",
+    "browse": "Pilih berkas eksekusi",
+    "precedence": "DEEPSEEK_CODE_BASH_PATH diprioritaskan. Mulai ulang aplikasi dan Worker setelah mengubah variabel lingkungan.",
+    "distribution": "Distribusi WSL",
+    "detectWsl": "Cari distribusi WSL",
+    "noDistributions": "Tidak ada distribusi WSL ditemukan.",
+    "wslBash": "Jalur Bash di dalam WSL",
+    "tool": "Shell perintah model tersimpan",
+    "terminal": "Shell terminal manual tersimpan",
+    "environment": "variabel lingkungan",
+    "settings": "konfigurasi",
+    "saved": "Tersimpan. Perintah dan terminal baru menggunakan pengaturan ini."
   }
 }

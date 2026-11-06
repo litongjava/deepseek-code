@@ -820,5 +820,25 @@
     "browserFrameTitle": "Página web: {url}",
     "browserLoading": "Cargando página…",
     "shortcut": "Ctrl+Alt+B (⌘⌥B en macOS): mostrar u ocultar la barra lateral derecha"
+  },
+  "shellSettings": {
+    "title": "Shell",
+    "description": "Comparte la configuración del shell con dcl. Los cambios se aplican al siguiente comando y a los nuevos terminales.",
+    "toolDefault": "Shell de comandos del modelo",
+    "terminalDefault": "Shell del terminal manual",
+    "auto": "Automático (mantener el valor predeterminado)",
+    "bashPath": "Ruta del ejecutable Bash",
+    "detected": "Detección automática",
+    "browse": "Elegir ejecutable",
+    "precedence": "DEEPSEEK_CODE_BASH_PATH tiene prioridad. Reinicia la aplicación y el Worker tras cambiar las variables de entorno.",
+    "distribution": "Distribución WSL",
+    "detectWsl": "Buscar distribuciones WSL",
+    "noDistributions": "No se encontraron distribuciones WSL.",
+    "wslBash": "Ruta de Bash dentro de WSL",
+    "tool": "Shell guardado para el modelo",
+    "terminal": "Shell guardado para el terminal manual",
+    "environment": "variable de entorno",
+    "settings": "configuración",
+    "saved": "Guardado. Los nuevos comandos y terminales usarán esta configuración."
   }
 }

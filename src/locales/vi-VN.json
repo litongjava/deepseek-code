@@ -820,5 +820,25 @@
     "browserFrameTitle": "Trang web: {url}",
     "browserLoading": "Đang tải trang…",
     "shortcut": "Ctrl+Alt+B (⌘⌥B trên macOS): hiện hoặc ẩn thanh bên phải"
+  },
+  "shellSettings": {
+    "title": "Shell",
+    "description": "Chia sẻ cài đặt shell với dcl. Thay đổi áp dụng cho lệnh tiếp theo và các terminal mới.",
+    "toolDefault": "Shell lệnh của mô hình",
+    "terminalDefault": "Shell terminal thủ công",
+    "auto": "Tự động (giữ mặc định hiện tại)",
+    "bashPath": "Đường dẫn tệp thực thi Bash",
+    "detected": "Tự động phát hiện",
+    "browse": "Chọn tệp thực thi",
+    "precedence": "DEEPSEEK_CODE_BASH_PATH được ưu tiên. Khởi động lại ứng dụng và Worker sau khi thay đổi biến môi trường.",
+    "distribution": "Bản phân phối WSL",
+    "detectWsl": "Tìm bản phân phối WSL",
+    "noDistributions": "Không tìm thấy bản phân phối WSL.",
+    "wslBash": "Đường dẫn Bash trong WSL",
+    "tool": "Shell lệnh mô hình đã lưu",
+    "terminal": "Shell terminal thủ công đã lưu",
+    "environment": "biến môi trường",
+    "settings": "cấu hình",
+    "saved": "Đã lưu. Lệnh và terminal mới sẽ dùng các cài đặt này."
   }
 }

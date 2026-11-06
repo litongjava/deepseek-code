@@ -820,5 +820,25 @@
     "browserFrameTitle": "Web sayfası: {url}",
     "browserLoading": "Sayfa yükleniyor…",
     "shortcut": "Ctrl+Alt+B (macOS'ta ⌘⌥B): sağ kenar çubuğunu göster veya gizle"
+  },
+  "shellSettings": {
+    "title": "Kabuk",
+    "description": "Kabuk ayarları dcl ile paylaşılır. Değişiklikler sonraki komuta ve yeni terminallere uygulanır.",
+    "toolDefault": "Model komut kabuğu",
+    "terminalDefault": "Manuel terminal kabuğu",
+    "auto": "Otomatik (mevcut varsayılanı koru)",
+    "bashPath": "Bash çalıştırılabilir dosya yolu",
+    "detected": "Otomatik algılama",
+    "browse": "Çalıştırılabilir dosya seç",
+    "precedence": "DEEPSEEK_CODE_BASH_PATH önceliklidir. Ortam değişkenlerini değiştirdikten sonra uygulamayı ve Worker’ı yeniden başlatın.",
+    "distribution": "WSL dağıtımı",
+    "detectWsl": "WSL dağıtımlarını bul",
+    "noDistributions": "WSL dağıtımı bulunamadı.",
+    "wslBash": "WSL içindeki Bash yolu",
+    "tool": "Kaydedilen model komut kabuğu",
+    "terminal": "Kaydedilen manuel terminal kabuğu",
+    "environment": "ortam değişkeni",
+    "settings": "yapılandırma",
+    "saved": "Kaydedildi. Yeni komutlar ve terminaller bu ayarları kullanır."
   }
 }

@@ -820,5 +820,25 @@
     "browserFrameTitle": "網頁：{url}",
     "browserLoading": "正在載入頁面…",
     "shortcut": "Ctrl+Alt+B（macOS 上為 ⌘⌥B）：顯示或隱藏右側邊欄"
+  },
+  "shellSettings": {
+    "title": "Shell",
+    "description": "與 dcl 共用命令 Shell 設定。變更適用於下一個命令和新終端。",
+    "toolDefault": "模型命令 Shell",
+    "terminalDefault": "手動終端 Shell",
+    "auto": "自動（保留目前預設值）",
+    "bashPath": "Bash 執行檔路徑",
+    "detected": "自動偵測",
+    "browse": "選擇執行檔",
+    "precedence": "DEEPSEEK_CODE_BASH_PATH 優先於此路徑。變更環境變數後請重新啟動應用程式和 Worker。",
+    "distribution": "WSL 發行版",
+    "detectWsl": "尋找 WSL 發行版",
+    "noDistributions": "找不到 WSL 發行版。",
+    "wslBash": "WSL 內的 Bash 路徑",
+    "tool": "已儲存的模型命令 Shell",
+    "terminal": "已儲存的手動終端 Shell",
+    "environment": "環境變數",
+    "settings": "設定",
+    "saved": "已儲存。新命令和終端將使用這些設定。"
   }
 }

@@ -820,5 +820,25 @@
     "browserFrameTitle": "Strona internetowa: {url}",
     "browserLoading": "Ładowanie strony…",
     "shortcut": "Ctrl+Alt+B (⌘⌥B w macOS): pokaż lub ukryj prawy panel boczny"
+  },
+  "shellSettings": {
+    "title": "Powłoka",
+    "description": "Ustawienia powłoki są wspólne z dcl. Zmiany dotyczą następnego polecenia i nowych terminali.",
+    "toolDefault": "Powłoka poleceń modelu",
+    "terminalDefault": "Powłoka terminala ręcznego",
+    "auto": "Automatycznie (zachowaj ustawienie domyślne)",
+    "bashPath": "Ścieżka pliku wykonywalnego Bash",
+    "detected": "Wykrywanie automatyczne",
+    "browse": "Wybierz plik wykonywalny",
+    "precedence": "DEEPSEEK_CODE_BASH_PATH ma pierwszeństwo. Po zmianie zmiennych środowiskowych uruchom ponownie aplikację i Worker.",
+    "distribution": "Dystrybucja WSL",
+    "detectWsl": "Znajdź dystrybucje WSL",
+    "noDistributions": "Nie znaleziono dystrybucji WSL.",
+    "wslBash": "Ścieżka Bash w WSL",
+    "tool": "Zapisana powłoka modelu",
+    "terminal": "Zapisana powłoka terminala ręcznego",
+    "environment": "zmienna środowiskowa",
+    "settings": "konfiguracja",
+    "saved": "Zapisano. Nowe polecenia i terminale użyją tych ustawień."
   }
 }

@@ -820,5 +820,25 @@
     "browserFrameTitle": "वेब पेज: {url}",
     "browserLoading": "पेज लोड हो रहा है…",
     "shortcut": "Ctrl+Alt+B (macOS पर ⌘⌥B): दायाँ साइडबार दिखाएँ या छिपाएँ"
+  },
+  "shellSettings": {
+    "title": "शेल",
+    "description": "शेल सेटिंग dcl के साथ साझा होती हैं। बदलाव अगले कमांड और नए टर्मिनल पर लागू होते हैं।",
+    "toolDefault": "मॉडल कमांड शेल",
+    "terminalDefault": "मैन्युअल टर्मिनल शेल",
+    "auto": "स्वचालित (वर्तमान डिफ़ॉल्ट बनाए रखें)",
+    "bashPath": "Bash निष्पादन योग्य फ़ाइल का पथ",
+    "detected": "स्वचालित पहचान",
+    "browse": "निष्पादन योग्य फ़ाइल चुनें",
+    "precedence": "DEEPSEEK_CODE_BASH_PATH को प्राथमिकता मिलती है। पर्यावरण चर बदलने के बाद ऐप और Worker फिर से शुरू करें।",
+    "distribution": "WSL वितरण",
+    "detectWsl": "WSL वितरण खोजें",
+    "noDistributions": "कोई WSL वितरण नहीं मिला।",
+    "wslBash": "WSL के अंदर Bash पथ",
+    "tool": "सहेजा गया मॉडल कमांड शेल",
+    "terminal": "सहेजा गया मैन्युअल टर्मिनल शेल",
+    "environment": "पर्यावरण चर",
+    "settings": "कॉन्फ़िगरेशन",
+    "saved": "सहेजा गया। नए कमांड और टर्मिनल इन सेटिंग का उपयोग करेंगे।"
   }
 }
