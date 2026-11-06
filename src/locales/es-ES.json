@@ -853,5 +853,25 @@
     "clipboard": "El navegador solo permite usar el portapapeles en páginas HTTPS. No se pudo copiar en esta página HTTP.",
     "microphone": "El navegador solo permite usar el micrófono en páginas HTTPS, por lo que la entrada de voz no está disponible en esta página HTTP.",
     "hint": "Abre DeepSeek Code mediante HTTPS, por ejemplo a través de un proxy inverso, para usar esta función."
+  },
+  "shellSettings": {
+    "title": "Shell",
+    "description": "Comparte la configuración del shell con dcl. Los cambios se aplican al siguiente comando y a los nuevos terminales.",
+    "toolDefault": "Shell de comandos del modelo",
+    "terminalDefault": "Shell del terminal manual",
+    "auto": "Automático (mantener el valor predeterminado)",
+    "bashPath": "Ruta del ejecutable Bash",
+    "detected": "Detección automática",
+    "browse": "Elegir ejecutable",
+    "precedence": "DEEPSEEK_CODE_BASH_PATH tiene prioridad. Reinicia la aplicación y el Worker tras cambiar las variables de entorno.",
+    "distribution": "Distribución WSL",
+    "detectWsl": "Buscar distribuciones WSL",
+    "noDistributions": "No se encontraron distribuciones WSL.",
+    "wslBash": "Ruta de Bash dentro de WSL",
+    "tool": "Shell guardado para el modelo",
+    "terminal": "Shell guardado para el terminal manual",
+    "environment": "variable de entorno",
+    "settings": "configuración",
+    "saved": "Guardado. Los nuevos comandos y terminales usarán esta configuración."
   }
 }

@@ -153,6 +153,22 @@ pub fn label(name: &str, input: &Value, workspace: Option<&std::path::Path>) -> 
     }
 }
 
+pub fn display_label(name: &str, input: &Value, workspace: Option<&std::path::Path>, title: Option<&str>) -> String {
+    if let Some(title) = title.filter(|title| !title.trim().is_empty() && matches!(name, "TaskOutput" | "TaskGet" | "TaskStop")) {
+        return format!("{name}({})", printable(&plain_terminal_text(title)));
+    }
+    label(name, input, workspace)
+}
+
+pub fn titled(mut lines: Vec<Line>, name: &str, title: Option<&str>, failed: bool) -> Vec<Line> {
+    if title.is_some() && matches!(name, "TaskOutput" | "TaskGet" | "TaskStop") {
+        if let Some(header) = lines.first_mut() {
+            *header = change_view::tool_call(&display_label(name, &Value::Null, None, title), "", failed);
+        }
+    }
+    lines
+}
+
 /// Read-only calls the reference CLI folds into one summary line.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Gathering {
@@ -215,6 +231,27 @@ pub fn gathering_summary(kinds: &[Gathering], running: bool) -> String {
 /// Human-readable text of a tool output; JSON envelopes are unwrapped.
 pub fn result_text(output: &str) -> String {
     plain_terminal_text(&raw_result_text(output))
+}
+
+/// Tool-specific presentation; stored history and model results stay structured.
+pub fn named_result_text(name: &str, output: &str) -> String {
+    if name == "git_add" {
+        if let Ok(value) = serde_json::from_str::<Value>(output.strip_prefix("Error: ").unwrap_or(output)) {
+            if value["success"] == true && value["is_error"] != true && value["error"].is_null() && !output.starts_with("Error: ") {
+                if let Some(files) = value["files"].as_array().filter(|files| files.iter().all(Value::is_string)) {
+                    let count = files.len();
+                    let mut text = format!("Git add completed — {count} requested {}", if count == 1 { "path" } else { "paths" });
+                    for file in files { text.push('\n'); text.push_str(file.as_str().unwrap()); }
+                    if let Some(details) = value["output"].as_str().filter(|text| !text.trim().is_empty()) { text.push('\n'); text.push_str(details.trim_end()); }
+                    return plain_terminal_text(&text);
+                }
+            }
+            if let Some(code) = value["exit_code"].as_i64().filter(|code| *code != 0) {
+                return format!("{}\nExit code {code}", result_text(output));
+            }
+        }
+    }
+    result_text(output)
 }
 
 pub(crate) fn copy_command(name: &str, input: &Value) -> String {
@@ -419,9 +456,9 @@ pub fn summary(name: &str, output: &str, failed: bool) -> (Vec<String>, usize) {
         serde_json::from_str::<Value>(output)
             .ok()
             .and_then(|value| value["message"].as_str().map(str::to_owned))
-            .unwrap_or_else(|| result_text(output))
+            .unwrap_or_else(|| named_result_text(name, output))
     } else {
-        result_text(output)
+        named_result_text(name, output)
     };
     let lines: Vec<&str> = text.lines().collect();
     if lines.is_empty() {
@@ -493,7 +530,7 @@ pub fn expanded(
     };
     let mut lines = vec![change_view::tool_call(&header, if failed { "error" } else { "" }, failed)];
     let diff = change_view::details(name, output, failed);
-    let text = diff.unwrap_or_else(|| result_text(output));
+    let text = diff.unwrap_or_else(|| named_result_text(name, output));
     let rows: Vec<&str> = text.lines().collect();
     if rows.is_empty() {
         lines.push(change_view::tool_output("(No output)", true, false));
@@ -532,6 +569,8 @@ pub fn expanded_block(
 pub enum Remember {
     /// Switch the session to accept-edits mode.
     AcceptEdits,
+    BashSession,
+    EditsSession,
     /// Add a session allow rule such as `Bash(npm test)`.
     Rule(String),
     /// Switch the session to auto mode.
@@ -584,7 +623,11 @@ impl Approval {
         }
         let mut hints = vec!["1/y yes".to_owned()];
         if self.remember.is_some() {
-            hints.push("2 yes for this session".into());
+            if self.remember == Some(Remember::AcceptEdits) {
+                hints.push("2 switch to accept-edits, 3 allow edits for this session".into());
+            } else {
+                hints.push("2 yes for this session".into());
+            }
         }
         if self.auto {
             hints.push(format!("{} switch to auto mode", self.options.len() - 1));
@@ -606,6 +649,7 @@ impl Approval {
         };
         let grant = match index {
             2 if self.remember.is_some() => self.remember.clone(),
+            3 if self.remember == Some(Remember::AcceptEdits) => Some(Remember::EditsSession),
             index if self.auto && index == last - 1 => Some(Remember::Auto),
             _ => None,
         };
@@ -619,54 +663,9 @@ fn file_name(path: &str) -> String {
         .map_or_else(|| path.to_owned(), |name| name.to_string_lossy().into_owned())
 }
 
-/// Programs that delete, overwrite, run code or reach the network are only
-/// ever remembered as the exact command.
-const EXACT_ONLY: &[&str] = &[
-    "rm", "rmdir", "mv", "cp", "dd", "ln", "chmod", "chown", "chgrp", "truncate", "shred", "tee",
-    "sudo", "su", "doas", "kill", "pkill", "killall", "curl", "wget", "ssh", "scp", "rsync", "nc",
-    "sh", "bash", "zsh", "fish", "env", "eval", "exec", "xargs", "find", "python", "python3",
-    "node", "deno", "perl", "ruby", "php", "osascript", "powershell", "pwsh",
-];
-
-/// The prefix the reference CLI offers to remember: the program and its
-/// subcommand (`npm run` for `npm run build --silent`), or the program alone
-/// when options come first (`git` for `git -C src log`). A program called
-/// only with arguments, such as `touch notes.txt`, keeps the whole command.
-fn command_prefix(command: &str) -> Option<String> {
-    let words: Vec<&str> = command.split_whitespace().collect();
-    let plain = |word: &str| {
-        word.starts_with(|c: char| c.is_ascii_lowercase())
-            && word.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | ':'))
-    };
-    if words.len() < 2 || !plain(words[0]) || EXACT_ONLY.contains(&words[0]) {
-        return None;
-    }
-    if plain(words[1]) {
-        Some(words[..2].join(" "))
-    } else if words[1].starts_with('-') {
-        Some(words[0].to_owned())
-    } else {
-        None
-    }
-}
-
 /// A rule that allows this call again, when one can be written safely.
 fn session_rule(name: &str, input: &Value) -> Option<String> {
     let rule = match (name, input["command"].as_str()) {
-        ("Bash", Some(command)) => {
-            let command = command.trim();
-            // Allow rules never match chained or substituted commands, so
-            // remembering one would not stop the next prompt.
-            if command.is_empty()
-                || command.contains(['\n', '\r', '*', '(', ')', ';', '&', '|', '`', '$', '<', '>'])
-            {
-                return None;
-            }
-            match command_prefix(command) {
-                Some(prefix) => format!("Bash({prefix} *)"),
-                None => format!("Bash({command})"),
-            }
-        }
         ("Bash" | "PowerShell", _) => return None,
         // As in the reference CLI: don't ask again for this host.
         ("WebFetch", _) => format!("WebFetch(domain:{})", fetch_host(input)?),
@@ -695,7 +694,17 @@ fn remember_option(rule: &str) -> String {
 
 /// The approval prompt for one tool call. File edits preview the diff they
 /// would make; other calls show the command or their input.
-pub fn approval(name: &str, input: &Value, workspace: Option<&std::path::Path>, auto: bool) -> Approval {
+pub fn approval(
+    name: &str,
+    input: &Value,
+    workspace: Option<&std::path::Path>,
+    auto: bool,
+) -> Approval {
+    let local_fetch = name == "WebFetch"
+        && deepseek_code_core::permissions::web_fetch::requires_local_approval(
+            input["url"].as_str().unwrap_or_default(),
+        );
+    let auto = auto && !local_fetch;
     let edits = matches!(name, "Write" | "Edit" | "MultiEdit" | "NotebookEdit");
     let preview = workspace
         .and_then(|workspace| deepseek_code_core::tools::file_change::preview(name, input, workspace));
@@ -768,12 +777,30 @@ pub fn approval(name: &str, input: &Value, workspace: Option<&std::path::Path>, 
             }
         }
     };
-    let remember = if edits { Some(Remember::AcceptEdits) } else { session_rule(name, input).map(Remember::Rule) };
+    if local_fetch {
+        lines.push(change_view::muted(
+            "  Local or private address: approval applies to this request only.",
+        ));
+    }
+    let remember = if local_fetch {
+        None
+    } else if name == "Bash" {
+        deepseek_code_core::native_engine::permission_response::can_allow_bash_session(name, input)
+            .then_some(Remember::BashSession)
+    } else if edits {
+        Some(Remember::AcceptEdits)
+    } else {
+        session_rule(name, input).map(Remember::Rule)
+    };
     let mut options = vec!["Yes".to_owned()];
     match &remember {
         Some(Remember::AcceptEdits) => options.push("Yes, allow all edits during this session (shift+tab)".into()),
         Some(Remember::Rule(rule)) => options.push(remember_option(rule)),
+        Some(Remember::BashSession) => options.push("Allow for Session".into()),
         _ => {}
+    }
+    if edits && deepseek_code_core::permissions::PermissionManager::is_file_edit_tool(name) {
+        options.push("Allow for this session".into());
     }
     if auto {
         options.push("Yes, do not ask again \u{b7} enable and switch to auto mode".into());
@@ -784,6 +811,22 @@ pub fn approval(name: &str, input: &Value, workspace: Option<&std::path::Path>, 
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn git_add_text_collapses_by_actual_hidden_lines_and_keeps_failures() {
+        let files: Vec<_> = (0..12).map(|index| format!("src/file-{index}.rs")).collect();
+        let output = serde_json::json!({"success":true,"files":files,"output":""}).to_string();
+        let (shown, hidden) = super::summary("git_add", &output, false);
+        assert_eq!(shown, ["Git add completed — 12 requested paths", "src/file-0.rs", "src/file-1.rs", "src/file-2.rs"]);
+        assert_eq!(hidden, 9);
+        let expanded = super::named_result_text("git_add", &output);
+        assert!(expanded.ends_with("src/file-11.rs"));
+        assert!(!expanded.contains("\"files\""));
+        assert!(super::named_result_text("other", &output).contains("\"files\""));
+        let single = r#"{"success":true,"files":["."],"output":""}"#;
+        assert_eq!(super::named_result_text("git_add", single), "Git add completed — 1 requested path\n.");
+        let failed = r#"{"success":false,"error":"pathspec missing","exit_code":128}"#;
+        assert_eq!(super::named_result_text("git_add", failed), "pathspec missing\nExit code 128");
+    }
     use super::*;
     use serde_json::json;
 
@@ -819,13 +862,13 @@ mod tests {
             None,
             true,
         );
-        assert_eq!(menu.options.len(), 3);
-        assert!(menu.options[1].contains("do not ask again"));
-        assert_eq!(menu.remember, None);
-        assert_eq!(menu.decide("2").grant, Some(Remember::Auto));
-        assert!(!menu.decide("3").allowed);
+        assert_eq!(menu.options.len(), 4);
+        assert_eq!(menu.options[1], "Allow for Session");
+        assert_eq!(menu.remember, Some(Remember::BashSession));
+        assert_eq!(menu.decide("3").grant, Some(Remember::Auto));
+        assert!(!menu.decide("4").allowed);
         assert!(!menu.decide("n").allowed);
-        assert!(menu.text().contains("2 switch to auto mode"));
+        assert!(menu.text().contains("3 switch to auto mode"));
     }
 
     #[test]
@@ -838,6 +881,22 @@ mod tests {
             assert!(text.contains("src"));
             assert!(!text.contains("Searched for"));
         }
+    }
+
+    #[test]
+    fn local_fetch_menu_offers_only_single_call_approval() {
+        let menu = approval(
+            "WebFetch",
+            &json!({"url":"http://localhost:8080/page"}),
+            None,
+            true,
+        );
+        assert_eq!(menu.options, ["Yes", "No"]);
+        assert!(menu
+            .text()
+            .contains("approval applies to this request only"));
+        assert!(menu.decide("1").allowed);
+        assert!(!menu.decide("2").allowed);
     }
 
     #[test]
@@ -946,8 +1005,8 @@ mod tests {
         let text = bash.text();
         assert!(text.starts_with("Bash command\nList files\n\u{254c}"), "{text}");
         assert!(text.contains("\nls -la\n\u{254c}"), "{text}");
-        assert!(text.ends_with("This command requires approval\nDo you want to proceed?\n  1. Yes\n  2. Yes, and don\u{2019}t ask again for: ls *\n  3. No\n(1/y yes, 2 yes for this session, 3/n no)"), "{text}");
-        let rule = Some(Remember::Rule("Bash(ls *)".into()));
+        assert!(text.ends_with("This command requires approval\nDo you want to proceed?\n  1. Yes\n  2. Allow for Session\n  3. No\n(1/y yes, 2 yes for this session, 3/n no)"), "{text}");
+        let rule = Some(Remember::BashSession);
         assert_eq!(bash.decide("2"), Decision { allowed: true, grant: rule, note: None });
         assert_eq!(bash.decide("y"), Decision { allowed: true, grant: None, note: None });
         assert_eq!(bash.decide("3"), Decision { allowed: false, grant: None, note: None });
@@ -963,25 +1022,24 @@ mod tests {
         assert_eq!(auto.decide("3").grant, Some(Remember::Auto));
         assert!(!auto.decide("4").allowed);
         assert!(auto.text().ends_with("(1/y yes, 2 yes for this session, 3 switch to auto mode, 4/n no)"));
-        let prefix = approval("Bash", &json!({"command":"npm run build --silent"}), None, false);
-        assert_eq!(prefix.remember, Some(Remember::Rule("Bash(npm run *)".into())));
-        assert_eq!(prefix.options[1], "Yes, and don\u{2019}t ask again for: npm run *");
-        assert_eq!(session_rule("Bash", &json!({"command":"git status --short"})).as_deref(), Some("Bash(git status *)"));
-        // Options first: the program alone, as the reference CLI offers `git *`.
-        assert_eq!(session_rule("Bash", &json!({"command":"git -C src log --oneline -3"})).as_deref(), Some("Bash(git *)"));
-        // A program with only arguments, or one that can destroy data or run
-        // code, is remembered exactly.
-        assert_eq!(session_rule("Bash", &json!({"command":"touch notes.txt"})).as_deref(), Some("Bash(touch notes.txt)"));
-        assert_eq!(session_rule("Bash", &json!({"command":"rm -rf build"})).as_deref(), Some("Bash(rm -rf build)"));
-        assert_eq!(session_rule("Bash", &json!({"command":"python3 -m pytest"})).as_deref(), Some("Bash(python3 -m pytest)"));
-        // Allow rules never match chained commands, so none is offered.
-        assert_eq!(approval("Bash", &json!({"command":"npm test && npm run lint"}), None, false).options, ["Yes", "No"]);
-        let wildcard = approval("Bash", &json!({"command":"rm -rf *"}), None, false);
-        assert_eq!(wildcard.options, ["Yes", "No"]);
-        assert!(!wildcard.decide("2").allowed);
+        for command in ["npm run build --silent", "npm test && npm run lint", "python3 -m pytest", "rm -rf build"] {
+            let menu = approval("Bash", &json!({"command":command}), None, false);
+            assert_eq!(menu.remember, Some(Remember::BashSession));
+            assert_eq!(menu.options, ["Yes", "Allow for Session", "No"]);
+        }
+        let danger = approval("Bash", &json!({"command":"rm -rf /"}), None, false);
+        assert_eq!(danger.options, ["Yes", "No"]);
+        assert!(!danger.decide("2").allowed);
         let write = approval("Write", &json!({"file_path":"a.txt","content":"x"}), None, false);
         assert!(write.text().starts_with("Write(a.txt)\n  {"), "{}", write.text());
         assert_eq!(write.remember, Some(Remember::AcceptEdits));
+        assert_eq!(write.options[2], "Allow for this session");
+        assert_eq!(write.decide("3").grant, Some(Remember::EditsSession));
+        assert!(!write.decide("4").allowed);
+        let auto_write = approval("Edit", &json!({"file_path":"a.txt"}), None, true);
+        assert_eq!(auto_write.decide("3").grant, Some(Remember::EditsSession));
+        assert_eq!(auto_write.decide("4").grant, Some(Remember::Auto));
+        assert!(!auto_write.decide("5").allowed);
     }
 
     #[test]
@@ -1022,7 +1080,7 @@ mod tests {
         let text = edit.text();
         assert!(text.starts_with("Edit file\ncalc.py\n"), "{text}");
         assert!(text.contains("    2 +    if b == 0:"), "{text}");
-        assert!(text.contains("Do you want to make this edit to calc.py?\n  1. Yes\n  2. Yes, allow all edits during this session (shift+tab)\n  3. No"), "{text}");
+        assert!(text.contains("Do you want to make this edit to calc.py?\n  1. Yes\n  2. Yes, allow all edits during this session (shift+tab)\n  3. Allow for this session\n  4. No"), "{text}");
         let created = approval("Write", &json!({"file_path":"new.txt","content":"hi\n"}), Some(temp.path()), false);
         assert_eq!(created.question, "Do you want to create new.txt?");
     }

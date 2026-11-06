@@ -17,6 +17,7 @@ vi.mock('../api', () => ({
   getGithubStatus: vi.fn(async () => ({ connected: false })),
 }));
 vi.mock('./ProviderSettings', () => ({ default: () => null }));
+vi.mock('./ShellSettings', () => ({ default: () => null }));
 vi.mock('./McpSettingsPage', () => ({ default: () => <h2>MCP Servers</h2> }));
 vi.mock('./TaskList', () => ({ default: () => null }));
 vi.mock('./NewTaskModal', () => ({ default: () => null }));

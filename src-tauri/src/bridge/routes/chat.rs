@@ -395,7 +395,7 @@ pub(super) async fn start_chat(
                         "thinking": thinking,
                     }))
                 }
-                crate::native_engine::tool_loop::EngineEvent::ToolUseStart { tool_use_id, tool_name, tool_input, text_before } => {
+                crate::native_engine::tool_loop::EngineEvent::ToolUseStart { tool_use_id, tool_name, tool_input, text_before, display_title } => {
                     tracing::info!(module = "Chat", "Tool use started: {} ({})", tool_name, tool_use_id);
                     Some(serde_json::json!({
                         "type": "tool_use_start",
@@ -403,6 +403,7 @@ pub(super) async fn start_chat(
                         "tool_name": tool_name,
                         "tool_input": tool_input,
                         "textBefore": text_before,
+                        "display_title": display_title,
                     }))
                 }
                 crate::native_engine::tool_loop::EngineEvent::ToolArgDelta { tool_use_id, delta } => {
@@ -497,6 +498,7 @@ pub(super) async fn start_chat(
                         "session_id": deepseek_code_core::native_engine::permission_response::request_owner(&request_id).map(|owner| owner.session_id).unwrap_or_else(|| conv_id.clone()),
                         "request_id": request_id,
                         "tool_use_id": tool_use_id,
+                        "allow_session": deepseek_code_core::native_engine::permission_response::can_allow_bash_session(&tool_name, &input),
                         "tool_name": tool_name,
                         "input": input,
                     }))

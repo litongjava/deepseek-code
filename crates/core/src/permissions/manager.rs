@@ -76,6 +76,8 @@ pub struct PermissionManager {
     bypass_available: std::sync::atomic::AtomicBool,
     full_access_available: std::sync::atomic::AtomicBool,
     policy_revision: Mutex<u64>,
+    bash_sessions: Mutex<std::collections::HashSet<String>>,
+    edit_sessions: Mutex<std::collections::HashSet<String>>,
     auto_stats: Mutex<HashMap<String, super::auto_config::AutoStats>>,
     ruleset: Mutex<PermissionRuleset>,
     tool_permissions: Mutex<HashMap<String, ToolPermission>>,
@@ -186,6 +188,36 @@ impl PermissionManager {
         *revision = revision.wrapping_add(1);
         self.session_rules.lock().unwrap_or_else(|e| e.into_inner()).entry(conversation.to_owned()).or_default().insert(rule.to_owned(), PermissionAction::Allow);
     }
+    pub fn bash_session_allowed(&self, session: &str) -> bool {
+        self.bash_sessions.lock().unwrap_or_else(|e| e.into_inner()).contains(session)
+    }
+    pub fn edit_session_allowed(&self, session: &str) -> bool {
+        self.edit_sessions
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .contains(session)
+    }
+    pub fn set_edit_session_allowed(&self, session: &str, allowed: bool) {
+        let mut revision = self
+            .policy_revision
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let mut sessions = self.edit_sessions.lock().unwrap_or_else(|e| e.into_inner());
+        let changed = if allowed {
+            sessions.insert(session.into())
+        } else {
+            sessions.remove(session)
+        };
+        if changed {
+            *revision = revision.wrapping_add(1);
+        }
+    }
+    pub fn set_bash_session_allowed(&self, session: &str, allowed: bool) {
+        let mut revision = self.policy_revision.lock().unwrap_or_else(|e| e.into_inner());
+        let mut sessions = self.bash_sessions.lock().unwrap_or_else(|e| e.into_inner());
+        let changed = if allowed { sessions.insert(session.into()) } else { sessions.remove(session) };
+        if changed { *revision = revision.wrapping_add(1); }
+    }
     pub fn session_directories(&self, conversation: &str) -> Vec<PathBuf> {
         self.session_directories
             .lock()
@@ -243,6 +275,8 @@ impl PermissionManager {
             bypass_available: std::sync::atomic::AtomicBool::new(false),
             full_access_available: std::sync::atomic::AtomicBool::new(false),
             policy_revision: Mutex::new(0),
+            bash_sessions: Mutex::new(Default::default()),
+            edit_sessions: Mutex::new(Default::default()),
             auto_stats: Mutex::new(HashMap::new()),
             ruleset: Mutex::new(
                 self.ruleset
@@ -301,6 +335,8 @@ impl PermissionManager {
             bypass_available: std::sync::atomic::AtomicBool::new(false),
             full_access_available: std::sync::atomic::AtomicBool::new(false),
             policy_revision: Mutex::new(0),
+            bash_sessions: Mutex::new(Default::default()),
+            edit_sessions: Mutex::new(Default::default()),
             auto_stats: Mutex::new(HashMap::new()),
             ruleset: Mutex::new(PermissionRuleset::new()),
             tool_permissions: Mutex::new(HashMap::new()),
@@ -488,11 +524,34 @@ impl PermissionManager {
         matches!(tool_name, "memory_ingest" | "TodoWrite" | "TaskCreate" | "TaskUpdate")
     }
 
+    pub fn is_file_edit_tool(tool_name: &str) -> bool {
+        matches!(tool_name, "Write" | "Edit" | "MultiEdit" | "NotebookEdit")
+    }
+
     fn is_edit_tool(tool_name: &str) -> bool {
         matches!(
             tool_name,
-            "Write" | "Edit" | "SearchReplace" | "GlobReplace" | "Delete"
-                | "memory_ingest" | "SkillCreate" | "SkillUpdate" | "NotebookEdit" | "TaskCreate" | "TaskUpdate" | "TaskStop" | "TodoWrite" | "SendMessage" | "team" | "cron" | "CronCreate" | "CronDelete" | "ScheduleWakeup" | "Config"
+            "Write"
+                | "Edit"
+                | "MultiEdit"
+                | "SearchReplace"
+                | "GlobReplace"
+                | "Delete"
+                | "memory_ingest"
+                | "SkillCreate"
+                | "SkillUpdate"
+                | "NotebookEdit"
+                | "TaskCreate"
+                | "TaskUpdate"
+                | "TaskStop"
+                | "TodoWrite"
+                | "SendMessage"
+                | "team"
+                | "cron"
+                | "CronCreate"
+                | "CronDelete"
+                | "ScheduleWakeup"
+                | "Config"
         )
     }
 
@@ -554,8 +613,12 @@ impl PermissionManager {
     ) -> PermissionDecision {
         use DecisionOrigin::*;
         let decision = PermissionDecision::new;
+        let local_fetch = context.tool_name == "WebFetch"
+            && super::web_fetch::requires_local_approval(
+                context.tool_input["url"].as_str().unwrap_or_default(),
+            );
         // Full Access grants everything bypass mode would, deny rules included.
-        if mode == PermissionMode::BypassPermissions && super::full_access() {
+        if mode == PermissionMode::BypassPermissions && super::full_access() && !local_fetch {
             return decision(PermissionResult::Granted, Mode);
         }
         let auto = mode == PermissionMode::Auto;
@@ -621,6 +684,9 @@ impl PermissionManager {
                 ToolSetting,
             );
         }
+        if local_fetch {
+            return decision(self.request_confirmation(context), NetworkBoundary);
+        }
         if mode == PermissionMode::BypassPermissions {
             return decision(PermissionResult::Granted, Mode);
         }
@@ -682,13 +748,26 @@ impl PermissionManager {
         if setting.as_ref().is_some_and(|p| p.requires_confirmation) {
             return decision(self.request_confirmation(context), ToolSetting);
         }
+        if shell && context.tool_input["command"].as_str().is_some_and(crate::tools::is_dangerous_command) {
+            return decision(self.request_confirmation(context), Mode);
+        }
+        if context.tool_name == "Bash" && self.bash_session_allowed(&context.conversation_id)
+            && context.tool_input["command"].as_str().is_some() {
+            return decision(PermissionResult::Granted, SavedApproval);
+        }
+        if auto && shell && context.tool_input["command"].as_str().is_some() {
+            return decision(PermissionResult::Granted, Mode);
+        }
         if actions.contains(&PermissionAction::Allow) {
             return decision(PermissionResult::Granted, ExplicitRule);
         }
         // As in the reference CLI, WebFetch asks once per host outside its
         // documentation list; "don't ask again" saves a WebFetch(domain:) rule.
         if context.tool_name == "WebFetch"
-            && mode != PermissionMode::BypassPermissions
+            && !matches!(
+                mode,
+                PermissionMode::BypassPermissions | PermissionMode::PlanMode
+            )
             && !setting.as_ref().is_some_and(|p| p.allowed)
             && !super::web_fetch::preapproved(context.tool_input["url"].as_str().unwrap_or_default())
         {
@@ -716,6 +795,7 @@ impl PermissionManager {
         if mode != PermissionMode::BypassPermissions && Self::is_edit_tool(&context.tool_name) {
             if let Some(path) = context.tool_input["file_path"]
                 .as_str()
+                .or_else(|| context.tool_input["notebook_path"].as_str())
                 .or_else(|| context.tool_input["path"].as_str())
             {
                 let cwd = std::path::Path::new(context.workspace_path.as_deref().unwrap_or("."));
@@ -727,6 +807,11 @@ impl PermissionManager {
                     return decision(self.request_confirmation(context), DefaultPrompt);
                 }
             }
+        }
+        if Self::is_file_edit_tool(&context.tool_name)
+            && (auto || self.edit_session_allowed(&context.conversation_id))
+        {
+            return decision(PermissionResult::Granted, Mode);
         }
         if Self::is_own_state_tool(&context.tool_name) {
             return decision(PermissionResult::Granted, DefaultOwnState);
@@ -1232,9 +1317,135 @@ mod policy_tests {
         assert!(matches!(manager(PermissionMode::DontAsk).check_permission(&shell("ls")), PermissionResult::Denied(_)));
     }
     #[test]
+    fn local_fetch_requires_explicit_review_in_every_mode() {
+        for mode in [
+            PermissionMode::PlanMode,
+            PermissionMode::Auto,
+            PermissionMode::AskPermissions,
+            PermissionMode::AcceptEdits,
+            PermissionMode::BypassPermissions,
+        ] {
+            let manager = manager(mode);
+            manager.set_session_rules(
+                "session",
+                HashMap::from([("WebFetch".into(), PermissionAction::Allow)]),
+            );
+            for url in [
+                "http://localhost:8080/",
+                "http://127.0.0.1/",
+                "http://192.168.1.2/",
+                "http://[::1]/",
+                "http://[::ffff:127.0.0.1]/",
+                "http://intranet/",
+            ] {
+                let call = PermissionContext {
+                    tool_input: serde_json::json!({"url":url}),
+                    ..context("WebFetch")
+                };
+                let decision = manager.evaluate_permission(&call);
+                assert!(
+                    matches!(decision.result, PermissionResult::RequiresConfirmation(_)),
+                    "{mode:?}: {url}"
+                );
+                assert!(!decision.classifier_eligible);
+            }
+            manager.set_session_rules(
+                "session",
+                HashMap::from([("WebFetch".into(), PermissionAction::Deny)]),
+            );
+            let call = PermissionContext {
+                tool_input: serde_json::json!({"url":"http://localhost/"}),
+                ..context("WebFetch")
+            };
+            assert!(matches!(
+                manager.check_permission(&call),
+                PermissionResult::Denied(_)
+            ));
+        }
+    }
+
+    #[test]
+    fn plan_fetch_skips_host_prompt_but_keeps_explicit_policy() {
+        let manager = manager(PermissionMode::PlanMode);
+        let call = PermissionContext {
+            tool_input: serde_json::json!({"url":"https://ifnotnil.com/topic"}),
+            ..context("WebFetch")
+        };
+        assert_eq!(manager.check_permission(&call), PermissionResult::Granted);
+        for action in [PermissionAction::Confirm, PermissionAction::Deny] {
+            manager.set_session_rules(
+                "session",
+                HashMap::from([("WebFetch".into(), action.clone())]),
+            );
+            match action {
+                PermissionAction::Confirm => assert!(matches!(
+                    manager.check_permission(&call),
+                    PermissionResult::RequiresConfirmation(_)
+                )),
+                _ => assert!(matches!(
+                    manager.check_permission(&call),
+                    PermissionResult::Denied(_)
+                )),
+            }
+        }
+    }
+
+    #[test]
+    fn auto_and_session_file_edits_preserve_boundaries_and_isolation() {
+        for auto in [false, true] {
+            let manager = manager(if auto {
+                PermissionMode::Auto
+            } else {
+                PermissionMode::AskPermissions
+            });
+            if !auto {
+                manager.set_edit_session_allowed("session", true);
+            }
+            for tool in ["Write", "Edit", "MultiEdit", "NotebookEdit"] {
+                let mut call = context(tool);
+                call.tool_input =
+                    serde_json::json!({"file_path":"normal.txt", "notebook_path":"normal.ipynb"});
+                let decision = manager.evaluate_permission(&call);
+                assert_eq!(decision.result, PermissionResult::Granted);
+                assert!(!decision.classifier_eligible);
+                call.tool_input =
+                    serde_json::json!({"file_path":".bashrc", "notebook_path":".bashrc"});
+                assert!(matches!(
+                    manager.check_permission(&call),
+                    PermissionResult::RequiresConfirmation(_)
+                ));
+                for action in [PermissionAction::Confirm, PermissionAction::Deny] {
+                    manager.set_session_rules("session", HashMap::from([(tool.into(), action)]));
+                    assert_ne!(
+                        manager.check_permission(&context(tool)),
+                        PermissionResult::Granted
+                    );
+                }
+                manager.set_session_rules("session", HashMap::new());
+            }
+            assert!(!manager.edit_session_allowed("other"));
+            assert!(!manager
+                .fork_session("session", "child")
+                .edit_session_allowed("child"));
+            assert!(!crate::runtime::default_permissions().edit_session_allowed("session"));
+            manager.set_mode(PermissionMode::PlanMode);
+            assert!(matches!(
+                manager.check_permission(&context("Write")),
+                PermissionResult::Denied(_)
+            ));
+            manager.set_mode(PermissionMode::AskPermissions);
+            manager.set_edit_session_allowed("session", false);
+            assert!(matches!(
+                manager.check_permission(&context("Write")),
+                PermissionResult::RequiresConfirmation(_)
+            ));
+        }
+    }
+
+    #[test]
     fn web_fetch_asks_for_new_hosts_unless_preapproved_or_allowed() {
         let fetch = |url: &str| PermissionContext { tool_input: serde_json::json!({"url": url, "prompt": "p"}), ..context("WebFetch") };
-        for mode in [PermissionMode::AskPermissions, PermissionMode::AcceptEdits, PermissionMode::PlanMode] {
+        for mode in [PermissionMode::AskPermissions, PermissionMode::AcceptEdits] {
             let manager = manager(mode);
             assert_eq!(manager.check_permission(&fetch("https://docs.python.org/3/")), PermissionResult::Granted, "{mode:?}");
             assert!(matches!(manager.check_permission(&fetch("https://example.com/")), PermissionResult::RequiresConfirmation(_)), "{mode:?}");
@@ -1446,12 +1657,67 @@ mod policy_tests {
     fn auto_filters_broad_grants_without_destroying_saved_rules() {
         let manager = manager(PermissionMode::Auto);
         manager.set_session_rules("session", HashMap::from([("Bash".into(), PermissionAction::Allow), ("Agent".into(), PermissionAction::Allow)]));
-        for tool in ["Bash", "Agent"] { assert!(manager.evaluate_permission(&context(tool)).classifier_eligible); }
+        assert!(manager.evaluate_permission(&context("Agent")).classifier_eligible);
+        let mut shell = context("Bash");
+        shell.tool_input = serde_json::json!({"command":"npm test"});
+        assert_eq!(manager.check_permission(&shell), PermissionResult::Granted);
         manager.set_mode(PermissionMode::AskPermissions);
         for tool in ["Bash", "Agent"] { assert_eq!(manager.check_permission(&context(tool)), PermissionResult::Granted); }
         manager.set_mode(PermissionMode::Auto);
         manager.set_session_rules("session", HashMap::from([("Bash".into(), PermissionAction::Deny)]));
         assert!(matches!(manager.check_permission(&context("Bash")), PermissionResult::Denied(_)));
+    }
+
+    #[test]
+    fn auto_shell_skips_classifier_but_preserves_explicit_policy_and_danger() {
+        let manager = manager(PermissionMode::Auto);
+        for command in ["cd D:/repo && grep -n 'BridgeServer|shutdown' src/main.rs | head", "npm install", "python unknown.py", "custom-script --run", "echo hi > output.txt"] {
+            let mut input = context("Bash");
+            input.tool_input = serde_json::json!({"command":command});
+            let decision = manager.evaluate_permission(&input);
+            assert_eq!(decision.result, PermissionResult::Granted, "{command}");
+            assert!(!decision.classifier_eligible);
+            manager.set_session_rules("session", HashMap::from([("Bash".into(), PermissionAction::Confirm)]));
+            assert!(matches!(manager.check_permission(&input), PermissionResult::RequiresConfirmation(_)));
+            manager.set_session_rules("session", HashMap::from([("Bash".into(), PermissionAction::Deny)]));
+            assert!(matches!(manager.check_permission(&input), PermissionResult::Denied(_)));
+            manager.set_session_rules("session", HashMap::new());
+        }
+        let mut input = context("Bash");
+        input.tool_input = serde_json::json!({"command":"shutdown /s"});
+        for mode in [PermissionMode::Auto, PermissionMode::AskPermissions, PermissionMode::AcceptEdits] {
+            manager.set_mode(mode);
+            manager.set_session_rules("session", HashMap::from([("Bash".into(), PermissionAction::Allow)]));
+            let decision = manager.evaluate_permission(&input);
+            assert!(matches!(decision.result, PermissionResult::RequiresConfirmation(_)));
+            assert!(!decision.classifier_eligible);
+        }
+    }
+
+    #[test]
+    fn bash_session_grant_is_runtime_only_scoped_revocable_and_excludes_danger() {
+        let manager = manager(PermissionMode::AskPermissions);
+        let mut input = context("Bash");
+        input.tool_input = serde_json::json!({"command":"custom-script && npm test"});
+        manager.set_bash_session_allowed("session", true);
+        assert_eq!(manager.check_permission(&input), PermissionResult::Granted);
+        assert!(matches!(manager.check_permission(&context("Write")), PermissionResult::RequiresConfirmation(_)));
+        let child = manager.fork_session("session", "child");
+        assert!(!child.bash_session_allowed("child"));
+        assert!(!manager.bash_session_allowed("other"));
+        manager.inherit_session_rules("session", "inherited");
+        assert!(!manager.bash_session_allowed("inherited"));
+        assert!(!crate::runtime::default_permissions().bash_session_allowed("session"));
+        input.tool_input = serde_json::json!({"command":"shutdown"});
+        assert!(matches!(manager.check_permission(&input), PermissionResult::RequiresConfirmation(_)));
+        input.tool_input = serde_json::json!({"command":"custom-script && npm test"});
+        for action in [PermissionAction::Deny, PermissionAction::Confirm] {
+            manager.set_session_rules("session", HashMap::from([("Bash".into(), action)]));
+            assert_ne!(manager.check_permission(&input), PermissionResult::Granted);
+        }
+        manager.set_session_rules("session", HashMap::new());
+        manager.set_bash_session_allowed("session", false);
+        assert!(matches!(manager.check_permission(&input), PermissionResult::RequiresConfirmation(_)));
     }
 
     #[test]

@@ -806,19 +806,30 @@ mod tests {
         .with_user_skill(Some(
             json!({"skill":"deep-research","args":"What does the local fixture establish?"}),
         ));
-        if mode == "hook_permission" {
-            let output = r#"{"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"ask"}}"#;
-            let (shell, command) = if cfg!(windows) {
-                ("powershell", format!("Write-Output '{output}'"))
+        // The fixture host explicitly approves each local fetch; research grants
+        // alone no longer authorize access to loopback services.
+        let shell = if cfg!(windows) { "powershell" } else { "sh" };
+        let emit = |output: &str| {
+            if cfg!(windows) {
+                format!("Write-Output '{output}'")
             } else {
-                ("sh", format!("printf '%s' '{output}'"))
-            };
-            std::fs::write(paths.data_dir.join("settings.json"),serde_json::to_vec(&json!({"hooks":{"PreToolUse":[{"matcher":"WebSearch","hooks":[{"type":"command","shell":shell,"command":command}]}]}})).unwrap()).unwrap();
-            executor = executor.with_hooks(
-                crate::services::tool_hooks::HookRunner::load(&paths.data_dir, temp.path())
-                    .unwrap(),
-            );
+                format!("printf '%s' '{output}'")
+            }
+        };
+        let allow = r#"{"hookSpecificOutput":{"hookEventName":"PermissionRequest","decision":{"behavior":"allow"}}}"#;
+        let mut hooks = json!({"PermissionRequest":[{"matcher":"WebFetch","hooks":[{"type":"command","shell":shell,"command":emit(allow)}]}]});
+        if mode == "hook_permission" {
+            let ask = r#"{"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"ask"}}"#;
+            hooks["PreToolUse"] = json!([{"matcher":"WebSearch","hooks":[{"type":"command","shell":shell,"command":emit(ask)}]}]);
         }
+        std::fs::write(
+            paths.data_dir.join("settings.json"),
+            serde_json::to_vec(&json!({"hooks":hooks})).unwrap(),
+        )
+        .unwrap();
+        executor = executor.with_hooks(
+            crate::services::tool_hooks::HookRunner::load(&paths.data_dir, temp.path()).unwrap(),
+        );
         TestRun {
             _temp: temp,
             context,

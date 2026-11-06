@@ -13,7 +13,7 @@ use std::{
 
 fn enable_teams() {
     static ONCE: Once = Once::new();
-    ONCE.call_once(|| std::env::set_var("CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS", "1"));
+    ONCE.call_once(|| std::env::set_var("DEEPSEEK_CODE_EXPERIMENTAL_AGENT_TEAMS", "1"));
 }
 
 #[derive(Default)]

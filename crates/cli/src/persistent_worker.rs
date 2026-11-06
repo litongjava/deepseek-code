@@ -32,6 +32,7 @@ struct ModeControl {
     full_access: bool,
 }
 type ModeTarget = Arc<std::sync::Mutex<Option<ModeControl>>>;
+type BashTarget = Arc<std::sync::Mutex<Option<Arc<deepseek_code_core::permissions::PermissionManager>>>>;
 
 #[path = "persistent_child.rs"]
 mod child;
@@ -54,6 +55,7 @@ pub async fn run_from_env() -> Result<bool> {
     let session = Arc::new(tokio::sync::Mutex::new(None::<Session>));
     let mode_target: ModeTarget = Arc::new(std::sync::Mutex::new(None));
     let status_target: StatusTarget = Arc::new(std::sync::Mutex::new(None));
+    let bash_target: BashTarget = Arc::new(std::sync::Mutex::new(None));
     let active = Arc::new(AtomicBool::new(false));
     let idle_child_active = Arc::new(AtomicBool::new(false));
     let fatal = Arc::new(AtomicBool::new(false));
@@ -104,6 +106,22 @@ pub async fn run_from_env() -> Result<bool> {
                         }
                 }
                 match request {
+                    Request::BashSession { revoke } => {
+                        let manager = bash_target.lock().unwrap_or_else(|e| e.into_inner()).clone();
+                        if revoke { if let Some(manager) = &manager { manager.set_bash_session_allowed(&worker.session_id, false); } }
+                        let mut response = Reply::ok(None);
+                        response.permission_session_id = Some(worker.session_id.clone());
+                        response.bash_session = Some(manager.is_some_and(|manager| manager.bash_session_allowed(&worker.session_id)));
+                        let _ = service::reply(stream, &response).await;
+                    },
+                    Request::EditSession { revoke } => {
+                        let manager = bash_target.lock().unwrap_or_else(|e| e.into_inner()).clone();
+                        if revoke { if let Some(manager) = &manager { manager.set_edit_session_allowed(&worker.session_id, false); } }
+                        let mut response = Reply::ok(None);
+                        response.permission_session_id = Some(worker.session_id.clone());
+                        response.edit_session = Some(manager.is_some_and(|manager| manager.edit_session_allowed(&worker.session_id)));
+                        let _ = service::reply(stream, &response).await;
+                    },
                     Request::RuntimeStatus => {
                         let source = status_target.lock().unwrap_or_else(|error|error.into_inner()).clone().unwrap_or_else(||deepseek_code_core::services::runtime_status::RuntimeSource {
                             mcp: Arc::new(deepseek_code_core::mcp::McpServerManager::new(worker.root.join("mcp-servers.json"))),
@@ -139,10 +157,10 @@ pub async fn run_from_env() -> Result<bool> {
                         if let Err(error)=service::begin_job(&worker,&id,&prompt) {
                             active.store(false,Ordering::Release);let _=service::reply(stream,&Reply::error(error)).await;continue;
                         }
-                        let worker=worker.clone();let sessions=session.clone();let active=active.clone();let fatal=fatal.clone();let turn_id=id.clone();let mode_target=mode_target.clone();let status_target=status_target.clone();
+                        let worker=worker.clone();let sessions=session.clone();let active=active.clone();let fatal=fatal.clone();let turn_id=id.clone();let mode_target=mode_target.clone();let status_target=status_target.clone();let bash_target=bash_target.clone();
                         tokio::spawn(async move {
                             let task_worker=worker.clone();let task_id=turn_id.clone();let task_mode_target=mode_target.clone();
-                            let result=tokio::spawn(async move {execute(&task_worker,&task_id,arguments,environment,sessions,task_mode_target,status_target).await}).await;
+                            let result=tokio::spawn(async move {execute(&task_worker,&task_id,arguments,environment,sessions,task_mode_target,status_target,bash_target).await}).await;
                             let error=match result {Ok(result)=>result.err().map(|error|format!("{error:#}")),Err(error)=>{fatal.store(true,Ordering::Release);Some(format!("Session turn panicked: {error}"))}};
                             if let Some(error)=&error {let _=service::emit_event(&serde_json::json!({"type":"error","error":error}));}
                             if service::finish_job(&worker,&turn_id,error).await.is_err() {fatal.store(true,Ordering::Release);}
@@ -173,6 +191,7 @@ async fn execute(
     sessions: Arc<tokio::sync::Mutex<Option<Session>>>,
     mode_target: ModeTarget,
     status_target: StatusTarget,
+    bash_target: BashTarget,
 ) -> Result<()> {
     let dir = worker.root.join("background-tasks").join(id);
     service::set_event_sink(Some(dir.join("output.jsonl")));
@@ -247,6 +266,7 @@ async fn execute(
     }
     let prompt = cli.prompt.as_deref().context("Worker prompt missing")?;
     let session = current.as_ref().unwrap();
+    *bash_target.lock().unwrap_or_else(|e| e.into_inner()) = Some(session.permissions.clone());
     session.engine.set_owned_child_idle_ready(&session.id, false);
     *status_target.lock().unwrap_or_else(|error|error.into_inner()) = Some(session.runtime_status_source());
     let current_provider = session.selected_provider().await?;

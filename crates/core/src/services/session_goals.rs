@@ -259,7 +259,7 @@ pub fn verdict(db: &DbManager, session: &str, id: &str, state: &str, reason: &st
 }
 
 pub fn stop_cap() -> u64 {
-    std::env::var("CLAUDE_CODE_STOP_HOOK_BLOCK_CAP")
+    std::env::var("DEEPSEEK_CODE_STOP_HOOK_BLOCK_CAP")
         .ok()
         .and_then(|s| s.parse().ok())
         .unwrap_or(8)

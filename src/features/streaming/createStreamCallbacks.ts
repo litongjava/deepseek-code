@@ -73,9 +73,9 @@ function isSearchStatusMessage(message: string) {
 
 function applyResearchEvent(prev: any[], event: string, data: any): any[] {
   const newMsgs = [...prev];
-  const lastIdx = newMsgs.length - 1;
+  const lastIdx = newMsgs.indexOf(trailingAssistant(newMsgs));
   const lastMsg = newMsgs[lastIdx];
-  if (!lastMsg || lastMsg.role !== 'assistant') return prev;
+  if (lastIdx < 0 || !lastMsg) return prev;
   const research = { ...(lastMsg.research || { sub_agents: [], sources: [], phase: null, plan: null, report: null, completed: false }) };
   research.sub_agents = [...(research.sub_agents || [])];
   research.sources = [...(research.sources || [])];
@@ -123,6 +123,26 @@ function applyResearchEvent(prev: any[], event: string, data: any): any[] {
   return newMsgs;
 }
 
+/** Stream updates always target the running assistant. A message steered during
+ *  the turn is appended after it, so the array tail is not the answer. Returns
+ *  null while the turn has not opened its answer, so a late event cannot write
+ *  into the previous turn's assistant message. */
+function trailingAssistant(messages: any[]): any | null {
+  for (let i = messages.length - 1; i >= 0; i--) {
+    if (messages[i]?.pendingSteer) continue;
+    return messages[i]?.role === 'assistant' ? messages[i] : null;
+  }
+  return null;
+}
+
+/** Index of the turn's own user message, ignoring steered follow-ups. */
+function pendingUserIndex(messages: any[]): number {
+  for (let i = messages.length - 1; i >= 0; i--) {
+    if (messages[i]?.role === 'user' && !messages[i].pendingSteer) return i;
+  }
+  return -1;
+}
+
 export function createStreamCallbacks(ctx: StreamContext) {
   const {
     conversationId, streamRequestId, isStreamSessionActive,
@@ -159,7 +179,7 @@ export function createStreamCallbacks(ctx: StreamContext) {
     }
     setMessagesFor(conversationId, prev => {
       const newMsgs = [...prev];
-      const lastMsg = newMsgs[newMsgs.length - 1];
+      const lastMsg = trailingAssistant(newMsgs);
       if (lastMsg && lastMsg.role === 'assistant') {
         recordText(lastMsg, 'text', full);
         lastMsg.content = full;
@@ -179,8 +199,8 @@ export function createStreamCallbacks(ctx: StreamContext) {
     clearStreamSession(conversationId, streamRequestId);
     setMessagesFor(conversationId, prev => {
       const newMsgs = [...prev];
-      if (newMsgs[newMsgs.length - 1] && newMsgs[newMsgs.length - 1].role === 'assistant') {
-        const lastMsg = newMsgs[newMsgs.length - 1];
+      const lastMsg = trailingAssistant(newMsgs);
+      if (lastMsg) {
         lastMsg.requestError = parseBadRequest(err);
         if (!lastMsg.requestError) {
           const content = `${lastMsg.content || ''}\n\nError: ${err}`.trim();
@@ -205,7 +225,7 @@ export function createStreamCallbacks(ctx: StreamContext) {
     clearStreamSession(conversationId, streamRequestId);
     setMessagesFor(conversationId, prev => {
       const newMsgs = [...prev];
-      const lastMsg = newMsgs[newMsgs.length - 1];
+      const lastMsg = trailingAssistant(newMsgs);
       if (lastMsg && lastMsg.role === 'assistant') {
         recordText(lastMsg, 'text', full);
         finishProcess(lastMsg);
@@ -248,7 +268,7 @@ export function createStreamCallbacks(ctx: StreamContext) {
     dispatchAgentActivity({ type: 'thinking', content: thinkingFull.slice(-300), status: 'running' });
     setMessagesFor(conversationId, prev => {
       const newMsgs = [...prev];
-      const lastMsg = newMsgs[newMsgs.length - 1];
+      const lastMsg = trailingAssistant(newMsgs);
       if (lastMsg && lastMsg.role === 'assistant') {
         recordText(lastMsg, 'thinking', thinkingFull, Date.now(), _thinkingDelta);
         lastMsg.thinking = thinkingFull;
@@ -263,8 +283,8 @@ export function createStreamCallbacks(ctx: StreamContext) {
     if (!data?.snapshot?.id) return;
     setMessagesFor(conversationId, prev => {
       const next = [...prev];
-      const last = next[next.length - 1];
-      if (!last || last.role !== 'assistant') return prev;
+      const last = trailingAssistant(next);
+      if (!last) return prev;
       const steps = last.processSteps || [];
       const tail = steps[steps.length - 1];
       const snapshots = [...(last.requestSnapshots || [])];
@@ -304,8 +324,8 @@ export function createStreamCallbacks(ctx: StreamContext) {
     if (event === 'metadata' && data?.user_message_id) {
       setMessages(prev => {
         const newMsgs = [...prev];
-        const userIdx = newMsgs.length - 2;
-        if (userIdx >= 0 && newMsgs[userIdx].role === 'user') {
+        const userIdx = pendingUserIndex(newMsgs);
+        if (userIdx >= 0) {
           newMsgs[userIdx] = { ...newMsgs[userIdx], id: data.user_message_id };
         }
         return newMsgs;
@@ -315,7 +335,7 @@ export function createStreamCallbacks(ctx: StreamContext) {
       dispatchAgentActivity({ type: 'search', content: message, status: 'running' });
       setMessagesFor(conversationId, prev => {
         const newMsgs = [...prev];
-        const lastMsg = newMsgs[newMsgs.length - 1];
+        const lastMsg = trailingAssistant(newMsgs);
         if (lastMsg && lastMsg.role === 'assistant') {
           lastMsg.searchStatus = message;
           lastMsg._contentLenBeforeSearch = (lastMsg.content || '').length;
@@ -326,7 +346,7 @@ export function createStreamCallbacks(ctx: StreamContext) {
     if (event === 'thinking_summary' && message) {
       setMessages(prev => {
         const newMsgs = [...prev];
-        const lastMsg = newMsgs[newMsgs.length - 1];
+        const lastMsg = trailingAssistant(newMsgs);
         if (lastMsg && lastMsg.role === 'assistant') lastMsg.thinking_summary = message;
         return newMsgs;
       });
@@ -364,7 +384,7 @@ export function createStreamCallbacks(ctx: StreamContext) {
     if (event === 'tool_text_offset' && data?.offset != null) {
       setMessages(prev => {
         const newMsgs = [...prev];
-        const lastMsg = newMsgs[newMsgs.length - 1];
+        const lastMsg = trailingAssistant(newMsgs);
         if (lastMsg && lastMsg.role === 'assistant') lastMsg.toolTextEndOffset = data.offset;
         return newMsgs;
       });
@@ -374,12 +394,7 @@ export function createStreamCallbacks(ctx: StreamContext) {
       setAskUserDialog({ request_id: data.request_id, tool_use_id: data.tool_use_id, session_id: data.session_id || conversationId, planApprovalRequest: data.planApprovalRequest || data.tool_input?.planApprovalRequest, questions: data.questions || [], answers: {} });
     }
     if (event === 'tool_permission' && data) {
-      setToolPermissionDialog({ request_id: data.request_id, tool_use_id: data.tool_use_id, tool_name: data.tool_name, input: data.input });
-      setPermissionApproval({
-        id: data.request_id, tool_name: data.tool_name,
-        action: data.action || data.tool_name, risk_level: data.risk_level || 'medium',
-        description: data.description || `Tool "${data.tool_name}" requires permission to execute.`,
-      });
+      setToolPermissionDialog({ request_id: data.request_id, tool_use_id: data.tool_use_id, tool_name: data.tool_name, input: data.input, session_id: data.session_id || conversationId, allow_session: data.allow_session });
     }
     if (event === 'message_start' && data?.usage) {
       const u = data.usage;
@@ -413,7 +428,7 @@ export function createStreamCallbacks(ctx: StreamContext) {
     if (!isStreamSessionActive(conversationId, streamRequestId)) return;
     setMessagesFor(conversationId, prev => {
       const newMsgs = [...prev];
-      const lastMsg = newMsgs[newMsgs.length - 1];
+      const lastMsg = trailingAssistant(newMsgs);
       if (lastMsg && lastMsg.role === 'assistant') {
         const existing = lastMsg.citations || [];
         const existingUrls = new Set(existing.map((s: any) => s.url));
@@ -442,8 +457,8 @@ export function createStreamCallbacks(ctx: StreamContext) {
     if (!isStreamSessionActive(conversationId, streamRequestId)) return;
     setMessagesFor(conversationId, prev => {
       const newMsgs = [...prev];
-      const lastIdx = newMsgs.length - 1;
-      if (newMsgs[lastIdx] && newMsgs[lastIdx].role === 'assistant') {
+      const lastIdx = newMsgs.indexOf(trailingAssistant(newMsgs));
+      if (lastIdx >= 0) {
         newMsgs[lastIdx] = mergeDocumentsIntoMessage(newMsgs[lastIdx], doc);
       }
       return newMsgs;
@@ -454,8 +469,8 @@ export function createStreamCallbacks(ctx: StreamContext) {
     if (!isStreamSessionActive(conversationId, streamRequestId)) return;
     setMessagesFor(conversationId, prev => {
       const newMsgs = [...prev];
-      const lastIdx = newMsgs.length - 1;
-      if (newMsgs[lastIdx] && newMsgs[lastIdx].role === 'assistant') {
+      const lastIdx = newMsgs.indexOf(trailingAssistant(newMsgs));
+      if (lastIdx >= 0) {
         newMsgs[lastIdx] = mergeDocumentDraftIntoMessage(newMsgs[lastIdx], draft);
       }
       return newMsgs;
@@ -467,7 +482,7 @@ export function createStreamCallbacks(ctx: StreamContext) {
     if (data.type === 'code_execution') {
       setMessages(prev => {
         const newMsgs = [...prev];
-        const lastMsg = newMsgs[newMsgs.length - 1];
+        const lastMsg = trailingAssistant(newMsgs);
         if (lastMsg && lastMsg.role === 'assistant') {
           lastMsg.codeExecution = {
             language: data.language || 'python', code: data.code || '',
@@ -495,7 +510,7 @@ export function createStreamCallbacks(ctx: StreamContext) {
     if (data.type === 'code_result') {
       setMessages(prev => {
         const newMsgs = [...prev];
-        const lastMsg = newMsgs[newMsgs.length - 1];
+        const lastMsg = trailingAssistant(newMsgs);
         if (lastMsg && lastMsg.role === 'assistant' && lastMsg.codeExecution) {
           lastMsg.codeExecution = {
             ...lastMsg.codeExecution,
@@ -530,7 +545,7 @@ export function createStreamCallbacks(ctx: StreamContext) {
 
     setMessagesFor(conversationId, prev => {
       const newMsgs = [...prev];
-      const lastMsg = newMsgs[newMsgs.length - 1];
+      const lastMsg = trailingAssistant(newMsgs);
       if (!lastMsg || lastMsg.role !== 'assistant') return prev;
       const toolCalls = lastMsg.toolCalls || [];
       if (toolEvent.type === 'start') {
@@ -539,8 +554,9 @@ export function createStreamCallbacks(ctx: StreamContext) {
           existing.name = toolEvent.tool_name || existing.name;
           if (toolEvent.tool_input && Object.keys(toolEvent.tool_input).length > 0) existing.input = toolEvent.tool_input;
           if (toolEvent.textBefore) existing.textBefore = toolEvent.textBefore;
+          if (toolEvent.display_title) existing.displayTitle = toolEvent.display_title;
         } else {
-          toolCalls.push({ id: toolEvent.tool_use_id, name: toolEvent.tool_name || 'unknown', input: toolEvent.tool_input || {}, status: 'running' as const, textBefore: toolEvent.textBefore || '', startedAt: Date.now(), schema: toolEvent.schema });
+          toolCalls.push({ id: toolEvent.tool_use_id, name: toolEvent.tool_name || 'unknown', input: toolEvent.tool_input || {}, status: 'running' as const, textBefore: toolEvent.textBefore || '', displayTitle: toolEvent.display_title, startedAt: Date.now(), schema: toolEvent.schema });
         }
         recordTool(lastMsg, toolCalls.find((t: any) => t.id === toolEvent.tool_use_id));
       } else if (toolEvent.type === 'input') {
@@ -577,7 +593,7 @@ export function createStreamCallbacks(ctx: StreamContext) {
     clearStreamSession(conversationId, streamRequestId);
     setMessagesFor(conversationId, prev => {
       const newMsgs = [...prev];
-      const lastMsg = newMsgs[newMsgs.length - 1];
+      const lastMsg = trailingAssistant(newMsgs);
       if (lastMsg && lastMsg.role === 'assistant') {
         recordText(lastMsg, 'text', full);
         finishProcess(lastMsg);
@@ -611,8 +627,8 @@ export function createStreamCallbacks(ctx: StreamContext) {
     if (event === 'metadata' && data?.user_message_id) {
       setMessagesFor(conversationId, prev => {
         const newMsgs = [...prev];
-        const userIdx = newMsgs.length - 2;
-        if (userIdx >= 0 && newMsgs[userIdx].role === 'user') {
+        const userIdx = pendingUserIndex(newMsgs);
+        if (userIdx >= 0) {
           newMsgs[userIdx] = { ...newMsgs[userIdx], id: data.user_message_id };
         }
         return newMsgs;
@@ -621,7 +637,7 @@ export function createStreamCallbacks(ctx: StreamContext) {
     if (event === 'thinking_summary' && message) {
       setMessagesFor(conversationId, prev => {
         const newMsgs = [...prev];
-        const lastMsg = newMsgs[newMsgs.length - 1];
+        const lastMsg = trailingAssistant(newMsgs);
         if (lastMsg && lastMsg.role === 'assistant') lastMsg.thinking_summary = message;
         return newMsgs;
       });
@@ -630,7 +646,7 @@ export function createStreamCallbacks(ctx: StreamContext) {
     if (event === 'tool_text_offset' && data?.offset != null) {
       setMessages(prev => {
         const newMsgs = [...prev];
-        const lastMsg = newMsgs[newMsgs.length - 1];
+        const lastMsg = trailingAssistant(newMsgs);
         if (lastMsg && lastMsg.role === 'assistant') lastMsg.toolTextEndOffset = data.offset;
         return newMsgs;
       });

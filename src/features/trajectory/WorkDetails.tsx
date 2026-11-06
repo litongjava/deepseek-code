@@ -10,7 +10,7 @@ import RequestErrorCard from '../../components/chat/RequestErrorCard';
 import ToolDiffView, { shouldUseDiffView } from '../../components/ToolDiffView';
 import CopyButton from './CopyButton';
 import ToolOutput from './ToolOutput';
-import { commandStreams, groupWorkSteps, messageSteps, recordId, toolCategory, toolCommand, toolInput, toolOutput, toolStatus, rawText, type ProcessStep, type ToolCallGroup, type ToolCallGroupItem, type ToolCallStatus } from './model';
+import { commandStreams, groupWorkSteps, messageSteps, recordId, toolCategory, toolCommand, toolInput, toolOutput, toolStatus, toolDisplayTitle, rawText, type ProcessStep, type ToolCallGroup, type ToolCallGroupItem, type ToolCallStatus } from './model';
 
 export function InspectButton({ id, onInspect }: { id: string; onInspect?: (id: string) => void }) {
   if (!onInspect) return null;
@@ -44,12 +44,13 @@ function ToolBlock({ conversationId, messageId, tool, level, live, id, onInspect
   const hasStderr = !!streams?.stderr;
   const outputLabel = isCommand ? hasStdout && hasStderr ? 'output' : hasStderr ? 'stderr' : 'stdout' : 'Result';
   const outputColor = hasStdout && hasStderr ? 'text-yellow-600 dark:text-yellow-400' : hasStderr ? 'text-red-500' : 'text-claude-textSecondary';
-  const description = input.description || input.file_path || input.path || input.pattern || command || tool.name;
+  const title = toolDisplayTitle(tool);
+  const description = title !== tool.name ? '' : input.description || input.file_path || input.path || input.pattern || command || tool.name;
   return <div className="group/process relative min-w-0">
     <button type="button" aria-controls={panelId} aria-expanded={open} onClick={() => setExpanded(!open)} className={`flex w-full min-w-0 items-center gap-2 text-left text-[13px] leading-6 ${failed ? 'text-red-500' : 'text-claude-textSecondary'}`}>
       <Connector last={last} /><StatusDot status={status === 'running' && !live ? 'interrupted' : status} />
-      <span className="shrink-0 text-claude-text/80">{displayName(tool.name)}</span>
-      <span className="min-w-0 truncate">· {rawText(description).split('\n')[0]}</span>
+      <span className="shrink-0 text-claude-text/80">{title !== tool.name ? title : displayName(tool.name)}</span>
+      {description && <span className="min-w-0 truncate">· {rawText(description).split('\n')[0]}</span>}
       {running && <span className="ml-auto animate-pulse">运行中</span>}{failed && <span className="ml-auto">失败</span>}
       {status === 'running' && !live && <span className="ml-auto">已中断</span>}
     </button>

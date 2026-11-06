@@ -285,15 +285,28 @@ mod windows {
         previous_vt: bool,
     }
     impl RawReader {
+        /// Win32 key records keep the modifier state, so Shift+Enter and
+        /// Ctrl+Enter stay distinguishable. With VT input enabled the console
+        /// re-encodes keys as characters and flattens Shift+Enter to a bare
+        /// carriage return, which submits instead of adding a line.
+        unsafe fn force_record_input(handle: Handle) -> io::Result<()> {
+            let mut mode = 0;
+            if GetConsoleMode(handle, &mut mode) == 0 {
+                return Err(io::Error::last_os_error());
+            }
+            if mode & 0x200 != 0 && SetConsoleMode(handle, mode & !0x200) == 0 {
+                return Err(io::Error::last_os_error());
+            }
+            Ok(())
+        }
         pub fn new() -> io::Result<Self> {
             unsafe {
                 let handle = GetStdHandle(-10i32 as u32);
                 let mut mode = 0;
-                if GetConsoleMode(handle, &mut mode) == 0
-                    || SetConsoleMode(handle, mode | 0x200) == 0
-                {
+                if GetConsoleMode(handle, &mut mode) == 0 {
                     return Err(io::Error::last_os_error());
                 }
+                Self::force_record_input(handle)?;
                 Ok(Self {
                     handle,
                     previous_vt: mode & 0x200 != 0,
@@ -301,13 +314,10 @@ mod windows {
             }
         }
         pub fn next(&mut self, timeout: Duration) -> io::Result<Option<Event>> {
-            // Crossterm mouse capture replaces the Windows input flags. Restore VT
-            // before reading so ConPTY preserves bracketed-paste delimiters.
+            // Crossterm mouse capture replaces the Windows input flags. Keep the
+            // record mode it clears, so a modified Enter still carries it.
             unsafe {
-                let mut mode = 0;
-                if GetConsoleMode(self.handle, &mut mode) == 0 || SetConsoleMode(self.handle, mode | 0x200) == 0 {
-                    return Err(io::Error::last_os_error());
-                }
+                Self::force_record_input(self.handle)?;
             }
             let deadline = Instant::now() + timeout;
             let mut shared = STATE.lock().unwrap_or_else(|e| e.into_inner());
@@ -361,8 +371,14 @@ mod windows {
                     let modifier = key.is_some_and(|key| {
                         matches!(key.virtual_key, 0x10 | 0x11 | 0x12) && key.unicode == 0
                     });
-                    let raw =
-                        key.is_some_and(|key| key.virtual_key == 0 || state.decoder.capturing());
+                    // ConPTY reports a pasted line feed as Ctrl+Enter: VK_RETURN with
+                    // U+000A and the control state pressed. Read as a key it would
+                    // submit in the middle of the paste, so it stays text here. A real
+                    // Enter key always carries '\r'.
+                    let pasted_line_feed =
+                        key.is_some_and(|key| key.virtual_key == 0x0d && key.unicode == 0x0a);
+                    let raw = pasted_line_feed
+                        || key.is_some_and(|key| key.virtual_key == 0 || state.decoder.capturing());
                     let ignored = !matches!(record.kind, 1 | 2 | 4 | 16);
                     if raw || modifier || ignored {
                         if ReadConsoleInputW(self.handle, &mut record, 1, &mut count) == 0 {
@@ -386,7 +402,12 @@ mod windows {
                                         char::from_u32(key.unicode as u32)
                                     };
                                     if let Some(ch) = ch {
-                                        state.decoder.push(ch);
+                                        if pasted_line_feed && !state.decoder.capturing() {
+                                            let line_feed = Event::Paste("\n".into());
+                                            state.decoder.ready.push_back(line_feed);
+                                        } else {
+                                            state.decoder.push(ch);
+                                        }
                                         state.escape_since = if state.decoder.prefix == "\x1b" {
                                             Some(Instant::now())
                                         } else {
@@ -497,38 +518,96 @@ mod tests {
 
 
 /// Coalesce unbracketed terminal paste bursts before any embedded Enter can submit.
-pub struct Reader {
-    raw: RawReader,
+pub struct Reader<S = RawReader> {
+    raw: S,
     pending: std::collections::VecDeque<Event>,
 }
-impl Reader {
-    pub fn new() -> io::Result<Self> { Ok(Self { raw: RawReader::new()?, pending: Default::default() }) }
+/// Terminal events for one read call; separate from the console so bursts can
+/// be exercised without one.
+pub trait Source {
+    fn next(&mut self, timeout: Duration) -> io::Result<Option<Event>>;
+}
+impl Source for RawReader {
+    fn next(&mut self, timeout: Duration) -> io::Result<Option<Event>> {
+        RawReader::next(self, timeout)
+    }
+}
+impl Reader<RawReader> {
+    pub fn new() -> io::Result<Self> {
+        Ok(Self {
+            raw: RawReader::new()?,
+            pending: Default::default(),
+        })
+    }
+}
+impl<S: Source> Reader<S> {
     pub fn next(&mut self, timeout: Duration) -> io::Result<Option<Event>> {
-        if let Some(event) = self.pending.pop_front() { return Ok(Some(event)); }
-        let Some(first) = self.raw.next(timeout)? else { return Ok(None); };
-        if paste_character(&first).is_none() { return Ok(Some(first)); }
-        let mut events = vec![first];
-        while let Some(event) = self.raw.next(Duration::from_millis(8))? {
-            if matches!(&event, Event::Key(key) if key.kind == crossterm::event::KeyEventKind::Release) { continue; }
-            if paste_character(&event).is_none() { self.pending.push_back(event); break; }
-            events.push(event);
-            if events.len() >= 1_000_000 { break; }
+        if let Some(event) = self.pending.pop_front() {
+            return Ok(Some(event));
         }
-        let multiline = events.iter().any(|event| paste_character(event) == Some('\n'));
-        if events.len() >= 8 || (events.len() >= 2 && multiline) {
-            Ok(Some(Event::Paste(events.iter().filter_map(paste_character).collect())))
+        let Some(first) = self.raw.next(timeout)? else {
+            return Ok(None);
+        };
+        let Some(piece) = paste_text(&first) else {
+            return Ok(Some(first));
+        };
+        let mut events = vec![first];
+        let mut text = piece;
+        // Once a burst is confirmed, a long paste may pause between console
+        // batches; keep reading across that jitter. A lone keystroke still
+        // returns without waiting for one.
+        let mut quiet = BURST_START;
+        while let Some(event) = self.raw.next(quiet)? {
+            if matches!(&event, Event::Key(key) if key.kind == crossterm::event::KeyEventKind::Release) {
+                continue;
+            }
+            let Some(piece) = paste_text(&event) else {
+                self.pending.push_back(event);
+                break;
+            };
+            text.push_str(&piece);
+            events.push(event);
+            quiet = BURST_CONTINUE;
+            if events.len() >= 1_000_000 {
+                break;
+            }
+        }
+        let count = text.chars().count();
+        if count >= 8 || (count >= 2 && text.contains('\n')) {
+            Ok(Some(Event::Paste(text)))
         } else {
             let first = events.remove(0);
-            for event in events.into_iter().rev() { self.pending.push_front(event); }
+            for event in events.into_iter().rev() {
+                self.pending.push_front(event);
+            }
             Ok(Some(first))
         }
     }
 }
-fn paste_character(event: &Event) -> Option<char> {
+const BURST_START: Duration = Duration::from_millis(8);
+const BURST_CONTINUE: Duration = Duration::from_millis(30);
+
+fn paste_text(event: &Event) -> Option<String> {
     use crossterm::event::{KeyCode, KeyEventKind, KeyModifiers};
-    let Event::Key(key) = event else { return None; };
-    if key.kind == KeyEventKind::Release || key.modifiers.intersects(KeyModifiers::CONTROL | KeyModifiers::ALT) { return None; }
-    match key.code { KeyCode::Char(ch) => Some(ch), KeyCode::Enter => Some('\n'), KeyCode::Tab => Some('\t'), _ => None }
+    match event {
+        // A pasted line feed is already text, so it cannot submit even when it
+        // opens a burst on its own.
+        Event::Paste(text) => Some(text.clone()),
+        Event::Key(key) => {
+            if key.kind == KeyEventKind::Release
+                || key.modifiers.intersects(KeyModifiers::CONTROL | KeyModifiers::ALT)
+            {
+                return None;
+            }
+            match key.code {
+                KeyCode::Char(ch) => Some(ch.to_string()),
+                KeyCode::Enter => Some("\n".into()),
+                KeyCode::Tab => Some("\t".into()),
+                _ => None,
+            }
+        }
+        _ => None,
+    }
 }
 
 pub fn paste_label(text: &str) -> Option<String> {
@@ -541,12 +620,120 @@ pub fn paste_label(text: &str) -> Option<String> {
 mod burst_tests {
     use super::*;
     use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+
+    /// Scripted events; an inner `None` is a pause with no input.
+    struct Fake(std::collections::VecDeque<Option<Event>>);
+    impl Source for Fake {
+        fn next(&mut self, _timeout: Duration) -> io::Result<Option<Event>> {
+            Ok(self.0.pop_front().flatten())
+        }
+    }
+    fn script(events: Vec<Option<Event>>) -> Reader<Fake> {
+        Reader {
+            raw: Fake(events.into()),
+            pending: Default::default(),
+        }
+    }
+    fn key(code: KeyCode) -> Option<Event> {
+        Some(Event::Key(KeyEvent::new(code, KeyModifiers::NONE)))
+    }
+
     #[test]
     fn burst_enter_remains_text_and_unicode_count_is_not_bytes() {
-        let events = [Event::Key(KeyEvent::new(KeyCode::Char('中'), KeyModifiers::NONE)), Event::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))];
-        assert_eq!(events.iter().filter_map(paste_character).collect::<String>(), "中\n");
-        assert_eq!(paste_label(&"中".repeat(200)).as_deref(), Some("[Pasted Content 200 chars]"));
+        let events = [
+            Event::Key(KeyEvent::new(KeyCode::Char('中'), KeyModifiers::NONE)),
+            Event::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)),
+        ];
+        assert_eq!(
+            events.iter().filter_map(paste_text).collect::<String>(),
+            "中\n"
+        );
+        assert_eq!(
+            paste_label(&"中".repeat(200)).as_deref(),
+            Some("[Pasted Content 200 chars]")
+        );
         assert!(paste_label("hello").is_none());
-        assert_eq!(paste_label("a\nb\nc").as_deref(), Some("[Pasted Content 5 chars]"));
+        assert_eq!(
+            paste_label("a\nb\nc").as_deref(),
+            Some("[Pasted Content 5 chars]")
+        );
+    }
+
+    #[test]
+    fn pasted_line_feed_keeps_a_burst_together_instead_of_submitting() {
+        let mut reader = script(vec![
+            key(KeyCode::Char('a')),
+            Some(Event::Paste("\n".into())),
+            key(KeyCode::Char('b')),
+            None,
+        ]);
+        assert_eq!(
+            reader.next(Duration::from_secs(1)).unwrap(),
+            Some(Event::Paste("a\nb".into()))
+        );
+    }
+
+    #[test]
+    fn a_pasted_line_feed_alone_is_text_not_a_submit() {
+        let mut reader = script(vec![Some(Event::Paste("\n".into())), None]);
+        assert_eq!(
+            reader.next(Duration::from_secs(1)).unwrap(),
+            Some(Event::Paste("\n".into()))
+        );
+    }
+
+    #[test]
+    fn a_newline_after_a_pause_is_never_a_submit() {
+        let mut reader = script(vec![
+            key(KeyCode::Char('p')),
+            None,
+            Some(Event::Paste("\n".into())),
+            None,
+        ]);
+        assert!(
+            matches!(reader.next(Duration::from_secs(1)).unwrap(), Some(Event::Key(key)) if key.code == KeyCode::Char('p'))
+        );
+        assert_eq!(
+            reader.next(Duration::from_secs(1)).unwrap(),
+            Some(Event::Paste("\n".into()))
+        );
+    }
+
+    #[test]
+    fn ordinary_keys_still_arrive_one_at_a_time() {
+        let mut reader = script(vec![key(KeyCode::Char('x')), None]);
+        assert!(
+            matches!(reader.next(Duration::from_secs(1)).unwrap(), Some(Event::Key(key)) if key.code == KeyCode::Char('x'))
+        );
+    }
+
+    #[test]
+    fn a_typed_control_enter_is_not_absorbed_into_paste_text() {
+        let mut reader = script(vec![
+            key(KeyCode::Char('a')),
+            Some(Event::Key(KeyEvent::new(
+                KeyCode::Enter,
+                KeyModifiers::CONTROL,
+            ))),
+            None,
+        ]);
+        assert!(
+            matches!(reader.next(Duration::from_secs(1)).unwrap(), Some(Event::Key(key)) if key.code == KeyCode::Char('a'))
+        );
+        assert!(matches!(
+            reader.next(Duration::from_secs(1)).unwrap(),
+            Some(Event::Key(key)) if key.code == KeyCode::Enter && key.modifiers == KeyModifiers::CONTROL
+        ));
+    }
+
+    #[test]
+    fn a_long_burst_becomes_one_paste_event() {
+        let mut events = vec![key(KeyCode::Char('p')); 12];
+        events.push(None);
+        let mut reader = script(events);
+        assert_eq!(
+            reader.next(Duration::from_secs(1)).unwrap(),
+            Some(Event::Paste("p".repeat(12)))
+        );
     }
 }

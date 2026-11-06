@@ -62,6 +62,7 @@ export interface TraceRecord extends ProcessStep {
   step: number;
   role: string;
   title: string;
+  displayTitle?: string;
   status: string;
   input?: unknown;
   result?: unknown;
@@ -79,6 +80,13 @@ export function toolCommand(tool: any): string {
   const input = toolInput(tool);
   return rawText(input.command ?? input.cmd ?? input.script ?? input.code ?? tool.input);
 }
+export function toolDisplayTitle(tool: any): string {
+  if (!['TaskOutput', 'TaskGet', 'TaskStop'].includes(tool.name)) return tool.name || '';
+  let result = tool.result ?? tool.output;
+  if (typeof result === 'string') { try { result = JSON.parse(result); } catch { result = null; } }
+  const title = tool.displayTitle || result?.subject;
+  return typeof title === 'string' && title.trim() ? `${tool.name}(${title.replace(/[\u0000-\u001f\u007f]/g, '').slice(0, 160)})` : tool.name;
+}
 export function commandStreams(value: unknown): { stdout: string; stderr: string } | null {
   let result: any = value;
   if (typeof result === 'string') {
@@ -91,10 +99,28 @@ export function commandStreams(value: unknown): { stdout: string; stderr: string
 }
 export function toolOutput(tool: any): string {
   const result = tool.result ?? tool.output ?? tool.error;
+  const git = gitAddContent(tool.name || '', result);
+  if (git !== null) return git;
   const webContent = webFetchContent(tool.name || '', result);
   if (webContent !== null) return webContent;
   const streams = toolCategory(tool.name || '') === 'Ran commands' ? commandStreams(result) : null;
   return streams ? [streams.stdout, streams.stderr].filter(Boolean).join('\n') : rawText(result);
+}
+/** Readable Git output without changing the structured result in history. */
+export function gitAddContent(name: string, value: unknown): string | null {
+  if (name !== 'git_add') return null;
+  let result: any = value;
+  if (typeof result === 'string') {
+    try { result = JSON.parse(result.replace(/^Error: /, '')); } catch { return null; }
+  }
+  if (!result || typeof result !== 'object') return null;
+  if (result.success !== true || result.is_error || result.error || (typeof value === 'string' && value.startsWith('Error: '))) {
+    if (!result.error) return null;
+    return [rawText(result.error), result.exit_code != null && result.exit_code !== 0 ? `Exit code ${result.exit_code}` : ''].filter(Boolean).join('\n');
+  }
+  if (!Array.isArray(result.files) || !result.files.every((file: unknown) => typeof file === 'string')) return null;
+  return [`Git add completed — ${result.files.length} requested ${result.files.length === 1 ? 'path' : 'paths'}`, ...result.files,
+    typeof result.output === 'string' ? result.output.trimEnd() : ''].filter((line, index, all) => index !== all.length - 1 || line !== '').join('\n');
 }
 /** Successful fetches display/copy the readable page, not transport metadata. */
 export function webFetchContent(name: string, value: unknown): string | null {
@@ -247,6 +273,7 @@ export function buildTrace(messages: any[], loading = false): TraceRecord[] {
       return {
         ...s, id: recordId(i, s.id), turn, step: 0, role: tool ? 'tool' : 'assistant', request,
         title: tool?.name || (s.kind === 'thinking' ? 'Think' : 'Assistant'),
+        displayTitle: tool ? toolDisplayTitle(tool) : undefined,
         status: status ? status === 'running' && !running ? 'interrupted' : status : running && !s.endedAt ? 'running' : 'done',
         startedAt: tool?.startedAt ?? s.startedAt, endedAt: tool?.endedAt ?? s.endedAt,
         input: tool?.input, result: tool?.result ?? tool?.output, schema: tool?.schema ?? request?.tools.find(t => t.name === tool?.name)?.input_schema,
@@ -296,13 +323,17 @@ export function buildTrace(messages: any[], loading = false): TraceRecord[] {
     }
     steps = steps.map(s => ({ ...s, step: ++step }));
     const headers: TraceRecord[] = snapshots.flatMap(request => {
+      // Auxiliary web searches carry no prompt; a header for them would also
+      // break the comparison below and repeat the surrounding system prompt.
+      const text = requestSystemPrompt(request);
+      if (request.source === 'web_search' || !text.trim()) return [];
       const context = canonical({ systemPrompt: request.systemPrompt, systemMessages: request.systemMessages || [] });
       if (context === previousSystemContext) return [];
       previousSystemContext = context;
       return [{
         id: `request:${request.id}`, kind: 'text' as const, turn, step: 0, role: 'system',
         title: 'System Prompt', status: request.persisted === false ? '未保存' : 'recorded',
-        text: requestSystemPrompt(request), input: request.systemMessages, result: request.tools, request,
+        text, input: request.systemMessages, result: request.tools, request,
         startedAt: request.startedAt,
       }];
     });

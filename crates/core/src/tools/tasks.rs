@@ -35,6 +35,25 @@ fn readonly(name: &str) -> bool {
     matches!(name, "TaskGet" | "TaskList" | "TodoRead" | "TaskOutput")
 }
 
+/// Read only the owning session's title; never open logs or create task storage.
+pub fn display_title(root: &Path, session: &str, input: &Value) -> Option<String> {
+    let session = uuid::Uuid::parse_str(session).ok()?.to_string();
+    let id = input["task_id"].as_str().or_else(|| input["taskId"].as_str()).or_else(|| input["id"].as_str()).or_else(|| input["shell_id"].as_str())?;
+    let title = if uuid::Uuid::parse_str(id).is_ok() && root.join("background-tasks").join(id).join("state.json").is_file() {
+        let job = crate::services::background_sessions::get(root, id).ok()?;
+        if job.parent_session_id != session { return None; }
+        job.title
+    } else {
+        let db = rusqlite::Connection::open_with_flags(root.join("tasks").join(format!("{session}.sqlite3")), rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY).ok()?;
+        db.busy_timeout(std::time::Duration::from_millis(25)).ok()?;
+        let body: String = db.query_row("SELECT body FROM tasks WHERE id=?1", [id], |row| row.get(0)).ok()?;
+        let task: Value = serde_json::from_str(&body).ok()?;
+        task["subject"].as_str()?.to_owned()
+    };
+    let title: String = title.chars().filter(|ch| !ch.is_control()).take(160).collect();
+    (!title.trim().is_empty()).then(|| title.trim().into())
+}
+
 pub fn execute_for_session(name: &str, input: Value, root: &Path, session: &str) -> Result<Value> {
     let session = uuid::Uuid::parse_str(session).context("Invalid task session ID")?;
     if let Some(output) = super::background_shell::control(name, &input, root, &session.to_string())? { return Ok(output); }
@@ -434,6 +453,8 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         let job = json!({"id":id,"parent_session_id":parent,"session_id":uuid::Uuid::new_v4().to_string(),"title":"Review changes","status":"completed","supervisor_pid":null,"child_pid":null,"started_ms":0,"heartbeat_ms":0,"finished_ms":1,"exit_code":0,"error":null});
         std::fs::write(dir.join("state.json"), job.to_string()).unwrap();
+        assert_eq!(display_title(root.path(), &parent, &json!({"task_id":id})).as_deref(), Some("Review changes"));
+        assert!(display_title(root.path(), &uuid::Uuid::new_v4().to_string(), &json!({"task_id":id})).is_none());
         std::fs::write(dir.join("output.jsonl"), "{\"type\":\"result\",\"result\":\"Review report\"}\n").unwrap();
         for name in ["TaskGet", "TaskOutput"] {
             let output = execute_for_session_async(name, json!({"task_id":id,"block":false}), root.path(), &parent).await.unwrap();
@@ -444,6 +465,21 @@ mod tests {
     }
     fn execute(name: &str, input: Value, cwd: &str) -> Result<Value> {
         execute_at(name, input, &Path::new(cwd).join("test-data/tasks.sqlite3"))
+    }
+
+    #[test]
+    fn task_display_title_is_scoped_and_does_not_create_storage() {
+        let root = tempfile::tempdir().unwrap();
+        let session = uuid::Uuid::new_v4().to_string();
+        assert!(display_title(root.path(), &session, &json!({"id":"1"})).is_none());
+        assert!(!root.path().join("tasks").exists());
+        let task = execute_for_session("TaskCreate", json!({"subject":"Build\n项目"}), root.path(), &session).unwrap();
+        for key in ["id", "task_id", "taskId", "shell_id"] {
+            let input = json!({key: task["id"]});
+            assert_eq!(display_title(root.path(), &session, &input).as_deref(), Some("Build项目"));
+            assert!(display_title(root.path(), &uuid::Uuid::new_v4().to_string(), &input).is_none());
+        }
+        assert!(display_title(root.path(), "../invalid", &json!({"id":"1"})).is_none());
     }
 
     #[test]

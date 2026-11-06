@@ -853,5 +853,25 @@
     "clipboard": "ブラウザーは HTTPS ページでのみクリップボードを利用できます。この HTTP ページではコピーできませんでした。",
     "microphone": "ブラウザーは HTTPS ページでのみマイクを利用できるため、この HTTP ページでは音声入力を使えません。",
     "hint": "この機能を使うには、リバースプロキシなどを通じて HTTPS で DeepSeek Code を開いてください。"
+  },
+  "shellSettings": {
+    "title": "シェル",
+    "description": "コマンドシェル設定を dcl と共有します。変更は次のコマンドと新しいターミナルに適用されます。",
+    "toolDefault": "モデルのコマンドシェル",
+    "terminalDefault": "手動ターミナルのシェル",
+    "auto": "自動（現在の既定値を維持）",
+    "bashPath": "Bash 実行ファイルのパス",
+    "detected": "自動検出",
+    "browse": "実行ファイルを選択",
+    "precedence": "DEEPSEEK_CODE_BASH_PATH はこのパスより優先されます。環境変数の変更後はアプリと Worker を再起動してください。",
+    "distribution": "WSL ディストリビューション",
+    "detectWsl": "WSL ディストリビューションを検索",
+    "noDistributions": "WSL ディストリビューションが見つかりません。",
+    "wslBash": "WSL 内の Bash パス",
+    "tool": "保存済みのモデルコマンドシェル",
+    "terminal": "保存済みの手動ターミナルシェル",
+    "environment": "環境変数",
+    "settings": "設定",
+    "saved": "保存しました。新しいコマンドとターミナルに適用されます。"
   }
 }

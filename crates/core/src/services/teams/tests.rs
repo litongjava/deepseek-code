@@ -5,7 +5,7 @@ static ENV: Mutex<()> = Mutex::new(());
 
 fn enabled_guard() -> std::sync::MutexGuard<'static, ()> {
     let guard = ENV.lock().unwrap_or_else(|error| error.into_inner());
-    std::env::set_var("CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS", "1");
+    std::env::set_var("DEEPSEEK_CODE_EXPERIMENTAL_AGENT_TEAMS", "1");
     guard
 }
 

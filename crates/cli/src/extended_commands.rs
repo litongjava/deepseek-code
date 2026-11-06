@@ -150,14 +150,14 @@ pub async fn handle(
             if argument.is_empty() && session.permission_mode() != "plan" {
                 session.set_permission_mode("plan").await?;
                 let path = deepseek_code_core::services::plans::path(&paths.data_dir, &session.id)?;
-                command_eprintln!("Plan mode enabled. Plan file: {}. Claude will submit it for approval before implementation.", path.display());
+                command_eprintln!("Plan mode enabled. Plan file: {}. DeepSeek Code will submit it for approval before implementation.", path.display());
             } else {
                 let path = deepseek_code_core::services::plans::path(&paths.data_dir, &session.id)?;
                 let plan = deepseek_code_core::services::plans::read(&paths.data_dir, &session.id)?;
                 if argument == "open" {
                     ensure!(plan.is_some(), "No plan written yet. Describe the task in plan mode first.");
                     crate::display_commands::edit_file(&path, "").await?;
-                    command_eprintln!("Edited plan: {}. Claude must request approval of the updated document.", path.display());
+                    command_eprintln!("Edited plan: {}. DeepSeek Code must request approval of the updated document.", path.display());
                 } else if let Some(plan) = plan {
                     command_println!("Current Plan\n{}\n\n{plan}", path.display());
                 } else {

@@ -9,7 +9,7 @@ const preview = (r: TraceRecord) => {
   if (r.text) return r.text;
   const calls = r.blocks?.filter(block => block.type === 'tool_call');
   if (calls?.length) return `${calls.length} tool calls · ${calls.map(call => call.name || 'Tool').join(', ')}`;
-  return [r.title, rawText(r.input)].filter(Boolean).join(' · ');
+  return [r.displayTitle || r.title, rawText(r.input)].filter(Boolean).join(' · ');
 };
 export default function TrajectoryView({ messages, loading, focusId }: { messages: any[]; loading: boolean; focusId: string | null }) {
   const records = buildTrace(messages, loading);
@@ -54,7 +54,7 @@ export default function TrajectoryView({ messages, loading, focusId }: { message
           if (lane(r) !== name || duration && r.startedAt == null) return null;
           const left = duration ? (r.startedAt! - start) / span * 100 : i / Math.max(1, records.length) * 100;
           const width = duration ? Math.max(.3, ((r.endedAt ?? (r.status === 'running' ? Date.now() : r.startedAt!)) - r.startedAt!) / span * 100) : 100 / Math.max(1, records.length) - .15;
-          return <button type="button" key={r.id} aria-label={`定位 ${r.title} Turn ${r.turn} Step ${r.step}`} title={`${r.title} · Turn ${r.turn} · Step ${r.step}`} onClick={() => select(r.id)} className={`absolute top-1 h-2 min-w-[3px] rounded-sm ${colors[name]} ${r.id === resolvedId ? 'ring-2 ring-blue-500 ring-offset-1' : ''}`} style={{ left: `${left}%`, width: `${Math.min(width, 100 - left)}%` }} />;
+          return <button type="button" key={r.id} aria-label={`定位 ${r.displayTitle || r.title} Turn ${r.turn} Step ${r.step}`} title={`${r.displayTitle || r.title} · Turn ${r.turn} · Step ${r.step}`} onClick={() => select(r.id)} className={`absolute top-1 h-2 min-w-[3px] rounded-sm ${colors[name]} ${r.id === resolvedId ? 'ring-2 ring-blue-500 ring-offset-1' : ''}`} style={{ left: `${left}%`, width: `${Math.min(width, 100 - left)}%` }} />;
         })}
       </div></div>)}
       {duration && timed.length < records.length && <p className="mt-1 text-xs text-claude-textSecondary">部分历史步骤未记录时间；关闭 Duration 可查看全部步骤。</p>}

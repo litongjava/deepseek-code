@@ -17,6 +17,27 @@ async fn legacy_warm_cannot_change_a_running_plan_in_another_conversation() {
 use crate::permissions::PermissionMode;
 use crate::native_engine::permission_response as responses;
 
+#[tokio::test]
+async fn session_bash_answers_validate_owner_and_danger_before_claiming() {
+    let (_temp, engine) = fixture();
+    for command in ["npm test && npm run lint", "shutdown"] {
+        let id = uuid::Uuid::new_v4().to_string();
+        responses::register_owner(&id, "session", "tool", "permission", serde_json::json!({"command":command}), None, None, None);
+        responses::set_owner_tool(&id, "Bash");
+        let receiver = responses::register(&engine.permission_mailbox, &id).await;
+        assert!(engine.resume_scoped_answer("other", &id, "tool", "allow_session".into(), true).await.is_err());
+        let result = engine.resume_scoped_answer("session", &id, "tool", "allow_session".into(), true).await;
+        if command == "shutdown" {
+            assert!(result.is_err());
+            responses::respond(&engine.permission_mailbox, &id, responses::PermissionResponse::Text("no".into())).await.unwrap();
+        } else {
+            assert!(result.is_ok());
+            assert!(matches!(receiver.await.unwrap(), responses::PermissionResponse::AllowBashForSession { .. }));
+        }
+        responses::remove_owner(&id);
+    }
+}
+
 fn fixture() -> (tempfile::TempDir, QueryEngine) {
     let temp = tempfile::tempdir().unwrap();
     let context = crate::services::session_messages::context(temp.path()).unwrap();

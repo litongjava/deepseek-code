@@ -12,6 +12,70 @@ use anyhow::{ensure, Result};
 use deepseek_code_core::services::background_sessions::{self as jobs, Launch};
 use serde_json::Value;
 
+#[derive(Default)]
+struct ProposalRetry {
+    since: Option<std::time::Instant>,
+    next: Option<std::time::Instant>,
+    delay_ms: u64,
+    reported: bool,
+}
+
+impl ProposalRetry {
+    fn due(&self, now: std::time::Instant) -> bool {
+        self.next.is_none_or(|next| now >= next)
+    }
+    fn failed(&mut self, now: std::time::Instant) -> bool {
+        let since = *self.since.get_or_insert(now);
+        self.delay_ms = if self.delay_ms == 0 {
+            100
+        } else {
+            (self.delay_ms * 2).min(500)
+        };
+        self.next = Some(now + std::time::Duration::from_millis(self.delay_ms));
+        if !self.reported && now.duration_since(since) >= std::time::Duration::from_secs(5) {
+            self.reported = true;
+            return true;
+        }
+        false
+    }
+    fn recovered(&mut self, now: std::time::Instant) -> Option<std::time::Duration> {
+        let elapsed = self.since.map(|since| now.duration_since(since));
+        *self = Self::default();
+        elapsed
+    }
+}
+
+fn log_proposal_observation(root: &std::path::Path, id: &str, message: &str) {
+    use std::io::Write;
+    if let Ok(mut file) = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(root.join("background-tasks").join(id).join("stderr.log"))
+    {
+        let _ = writeln!(file, "{} {message}", chrono::Utc::now().to_rfc3339());
+    }
+}
+
+#[test]
+fn proposal_contention_retries_without_blocking_and_reports_only_sustained_failures() {
+    let start = std::time::Instant::now();
+    let mut retry = ProposalRetry::default();
+    let mut now = start;
+    for delay in [100, 200, 400, 500, 500] {
+        assert!(retry.due(now));
+        assert!(!retry.failed(now));
+        assert!(!retry.due(now));
+        assert_eq!(retry.delay_ms, delay);
+        now += std::time::Duration::from_millis(delay);
+    }
+    now = start + std::time::Duration::from_secs(5);
+    assert!(retry.failed(now));
+    assert!(!retry.failed(now));
+    assert_eq!(retry.recovered(now).unwrap().as_secs(), 5);
+    assert!(retry.due(now));
+    assert!(!retry.failed(now));
+}
+
 pub async fn turn(
     cli: &Cli,
     session: &Session,
@@ -333,6 +397,8 @@ async fn observe(
     let mut notification_error = None;
     let mut final_mode_synced = false;
     let mut shown_proposal = None::<String>;
+    let mut proposal_retry = ProposalRetry::default();
+    let mut current_proposal = None;
     let relay = session.remote_relay();
     let mut remote_request: Option<deepseek_code_core::services::remote_control::PermissionRequest> = None;
     let mut remote_interrupts = session.remote_interrupts();
@@ -352,7 +418,27 @@ async fn observe(
                 }
             },
             _ = tick.tick() => {
-                let proposal = proposal_frontend.map(|frontend| frontend.poll()).transpose()?.flatten();
+                if proposal_retry.due(std::time::Instant::now()) {
+                  match proposal_frontend.map(|frontend| frontend.poll()).transpose() {
+                    Ok(proposal) => {
+                        if let Some(elapsed) = proposal_retry.recovered(std::time::Instant::now()) {
+                            log_proposal_observation(root, id, &format!("Goal proposal observation recovered after {} ms", elapsed.as_millis()));
+                        }
+                        current_proposal = proposal.flatten();
+                    },
+                    Err(error) if deepseek_code_core::db::is_contention(&error) => {
+                        if proposal_retry.since.is_none() {
+                            log_proposal_observation(root, id, &format!("Goal proposal observation deferred: {error:#}"));
+                        }
+                        if proposal_retry.failed(std::time::Instant::now()) {
+                            display.notice("Goal proposal status is delayed by database contention. Task output continues.");
+                            log_proposal_observation(root, id, "Goal proposal observation still deferred after 5000 ms");
+                        }
+                    },
+                    Err(error) => return Err(error.context("Reading goal proposal status")),
+                  }
+                }
+                let proposal = current_proposal.clone();
                 let has_proposal = proposal.is_some();
                 if shown_proposal.as_deref() != proposal.as_ref().map(|p| p.id.as_str()) {
                     shown_proposal = proposal.as_ref().map(|p| p.id.clone());
@@ -548,6 +634,8 @@ async fn observe(
                                 Err(error) => display.notice(&format!("Goal proposal not approved: {error:#}")),
                             }
                             shown_proposal = None;
+                            current_proposal = None;
+                            if let Some(live) = &display.live { live.goal_proposal(None); }
                         }
                     },
                     Some(Action::CyclePermission) => {
@@ -843,7 +931,7 @@ fn render(display: &mut TurnDisplay, event: &Value) {
         }
         "usage" => display.reported_usage(&event["usage"]),
         "message_start" => display.set_activity("Composing"),
-        "tool_start" => display.tool_started(text("id"), text("name"), &event["input"]),
+        "tool_start" => display.tool_started_named(text("id"), text("name"), &event["input"], event["display_title"].as_str()),
         "tool_result" => display.tool_finished(
             text("id"),
             text("name"),

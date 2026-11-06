@@ -853,5 +853,25 @@
     "clipboard": "브라우저는 HTTPS 페이지에서만 클립보드를 허용합니다. 이 HTTP 페이지에서는 복사하지 못했습니다.",
     "microphone": "브라우저는 HTTPS 페이지에서만 마이크를 허용하므로 이 HTTP 페이지에서는 음성 입력을 사용할 수 없습니다.",
     "hint": "이 기능을 사용하려면 리버스 프록시 등을 통해 HTTPS로 DeepSeek Code를 여세요."
+  },
+  "shellSettings": {
+    "title": "셸",
+    "description": "명령 셸 설정을 dcl과 공유합니다. 변경 사항은 다음 명령과 새 터미널에 적용됩니다.",
+    "toolDefault": "모델 명령 셸",
+    "terminalDefault": "수동 터미널 셸",
+    "auto": "자동 (현재 기본값 유지)",
+    "bashPath": "Bash 실행 파일 경로",
+    "detected": "자동 감지",
+    "browse": "실행 파일 선택",
+    "precedence": "DEEPSEEK_CODE_BASH_PATH가 이 경로보다 우선합니다. 환경 변수 변경 후 앱과 Worker를 다시 시작하세요.",
+    "distribution": "WSL 배포판",
+    "detectWsl": "WSL 배포판 찾기",
+    "noDistributions": "WSL 배포판을 찾을 수 없습니다.",
+    "wslBash": "WSL 내부 Bash 경로",
+    "tool": "저장된 모델 명령 셸",
+    "terminal": "저장된 수동 터미널 셸",
+    "environment": "환경 변수",
+    "settings": "설정",
+    "saved": "저장되었습니다. 새 명령과 터미널에 적용됩니다."
   }
 }

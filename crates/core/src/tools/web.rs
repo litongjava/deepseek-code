@@ -20,25 +20,16 @@ fn http_url(url: &str) -> Result<reqwest::Url> {
     Ok(parsed)
 }
 
-/// URLs the model fetches, as in the reference CLI: HTTP is upgraded to
-/// HTTPS, and localhost, private addresses and hostnames without a dot are
-/// refused (use curl via Bash for a local server).
-/// `allow_loopback` is only for this crate's tests, whose fixture servers
-/// listen on 127.0.0.1.
-pub(super) fn model_url(url: &str, allow_loopback: bool) -> Result<String> {
+/// Public HTTP URLs are upgraded to HTTPS. Local HTTP(S) URLs retain their
+/// scheme and require a capability issued for the reviewed call.
+pub(super) fn model_url(url: &str, local_approved: bool) -> Result<String> {
     let mut parsed = http_url(url)?;
-    let test_fixture = allow_loopback && parsed.host_str().and_then(|host| host.parse::<std::net::Ipv4Addr>().ok()).is_some_and(|ip| ip.is_loopback());
-    if parsed.scheme() == "http" && !test_fixture {
-        parsed.set_scheme("https").map_err(|_| anyhow!("Cannot upgrade {url} to HTTPS"))?;
+    let local = crate::permissions::web_fetch::requires_local_approval(url);
+    if local && !local_approved {
+        bail!("WebFetch requires approval to access this local or private address");
     }
-    let host = parsed.host_str().unwrap_or_default().trim_end_matches('.').to_ascii_lowercase();
-    let private = match host.trim_matches(|c| c == '[' || c == ']').parse::<std::net::IpAddr>() {
-        Ok(std::net::IpAddr::V4(ip)) => (ip.is_loopback() && !allow_loopback) || ip.is_private() || ip.is_link_local() || ip.is_unspecified(),
-        Ok(std::net::IpAddr::V6(ip)) => ip.is_loopback() || ip.is_unspecified() || (ip.segments()[0] & 0xfe00) == 0xfc00 || (ip.segments()[0] & 0xffc0) == 0xfe80,
-        Err(_) => host == "localhost" || host.ends_with(".localhost") || !host.contains('.'),
-    };
-    if private {
-        bail!("WebFetch cannot open localhost, private addresses or hostnames without a dot ({host}); for a local server, use curl via Bash");
+    if parsed.scheme() == "http" && !local {
+        parsed.set_scheme("https").map_err(|_| anyhow!("Cannot upgrade {url} to HTTPS"))?;
     }
     Ok(parsed.to_string())
 }
@@ -614,12 +605,32 @@ mod tests {
     }
 
     #[test]
-    fn model_urls_upgrade_to_https_and_refuse_local_hosts() {
-        assert_eq!(model_url("http://example.com/a?b=1", false).unwrap(), "https://example.com/a?b=1");
-        assert_eq!(model_url("https://docs.rs/", false).unwrap(), "https://docs.rs/");
-        assert_eq!(model_url("http://127.0.0.1:8080/", true).unwrap(), "http://127.0.0.1:8080/");
-        assert!(model_url("http://localhost/", true).is_err());
-        for url in ["http://localhost:3000/", "https://intranet/", "http://127.0.0.1/", "http://192.168.1.2/", "http://[::1]/", "http://app.localhost/", "ftp://example.com/"] {
+    fn model_urls_upgrade_public_http_and_require_local_approval() {
+        assert_eq!(
+            model_url("http://example.com/a?b=1", false).unwrap(),
+            "https://example.com/a?b=1"
+        );
+        assert_eq!(
+            model_url("https://docs.rs/", false).unwrap(),
+            "https://docs.rs/"
+        );
+        assert_eq!(
+            model_url("http://127.0.0.1:8080/", true).unwrap(),
+            "http://127.0.0.1:8080/"
+        );
+        assert_eq!(
+            model_url("http://localhost/", true).unwrap(),
+            "http://localhost/"
+        );
+        for url in [
+            "http://localhost:3000/",
+            "https://intranet/",
+            "http://127.0.0.1/",
+            "http://192.168.1.2/",
+            "http://[::1]/",
+            "http://app.localhost/",
+            "ftp://example.com/",
+        ] {
             assert!(model_url(url, false).is_err(), "{url}");
         }
     }

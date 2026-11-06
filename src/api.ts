@@ -1005,12 +1005,17 @@ export async function respondToolPermission(
   conversationId: string,
   requestId: string,
   toolUseId: string,
-  behavior: 'allow' | 'deny'
+  behavior: 'allow' | 'deny' | 'allow_session'
 ): Promise<{ ok: boolean }> {
   const res = await request(`/conversations/${conversationId}/permission`, {
     method: 'POST',
     body: JSON.stringify({ request_id: requestId, tool_use_id: toolUseId, behavior }),
   });
+  return res.json();
+}
+
+export async function sessionBashPermission(conversationId: string, revoke = false): Promise<{ allowed: boolean }> {
+  const res = await request(`/conversations/${conversationId}/bash-session`, { method: revoke ? 'DELETE' : 'GET' });
   return res.json();
 }
 
@@ -1084,6 +1089,27 @@ export interface SearchSettings {
   baseUrl: string;
   model: string;
   hasApiKey: boolean;
+}
+
+export interface ShellConfiguration {
+  toolDefault: string;
+  terminalDefault: string;
+  bashPath: string | null;
+  wsl: { distribution: string | null; bashPath: string };
+}
+export interface ShellSettingsStatus {
+  settings: ShellConfiguration;
+  tool: { program?: string; source?: string; error?: string };
+  terminal: { program?: string; source?: string; error?: string };
+}
+export function getShellSettings(): Promise<ShellSettingsStatus> {
+  return providerRequest('/shell-settings');
+}
+export function saveShellSettings(settings: ShellConfiguration): Promise<ShellSettingsStatus> {
+  return providerRequest('/shell-settings', 'PUT', settings);
+}
+export async function getWslDistributions(): Promise<string[]> {
+  return (await providerRequest('/shell-settings/distributions')).distributions;
 }
 export interface SearchSettingsUpdate {
   baseUrl: string;
@@ -1172,7 +1198,7 @@ export function reconnectStream(
   onError: (err: string) => void,
   onThinking?: (thinking: string, full: string) => void,
   onSystem?: (event: string, message: string, data: any) => void,
-  onToolUse?: (event: { type: 'start' | 'input' | 'done'; tool_use_id: string; tool_name?: string; tool_input?: any; content?: string; is_error?: boolean; textBefore?: string }) => void,
+  onToolUse?: (event: { type: 'start' | 'input' | 'done'; tool_use_id: string; tool_name?: string; tool_input?: any; content?: string; is_error?: boolean; textBefore?: string; display_title?: string }) => void,
   signal?: AbortSignal
 ): void {
   let fullText = '';
@@ -1211,7 +1237,7 @@ export function reconnectStream(
               }
             }
             if (parsed.type === 'tool_use_start' && onToolUse) {
-              onToolUse({ type: 'start', tool_use_id: parsed.tool_use_id, tool_name: parsed.tool_name, tool_input: parsed.tool_input, textBefore: parsed.textBefore || '' });
+              onToolUse({ type: 'start', tool_use_id: parsed.tool_use_id, tool_name: parsed.tool_name, tool_input: parsed.tool_input, textBefore: parsed.textBefore || '', display_title: parsed.display_title });
             }
             if (parsed.type === 'tool_use_input' && onToolUse) {
               onToolUse({ type: 'input', tool_use_id: parsed.tool_use_id, tool_input: parsed.tool_input });
@@ -1496,7 +1522,7 @@ async function sendMessageViaProxy(
   onError: (err: string) => void,
   onThinking?: (thinking: string, full: string) => void,
   onSystem?: (event: string, message: string, data: any) => void,
-  onToolUse?: (event: { type: 'start' | 'input' | 'done'; tool_use_id: string; tool_name?: string; tool_input?: any; content?: string; is_error?: boolean; textBefore?: string }) => void,
+  onToolUse?: (event: { type: 'start' | 'input' | 'done'; tool_use_id: string; tool_name?: string; tool_input?: any; content?: string; is_error?: boolean; textBefore?: string; display_title?: string }) => void,
 ): Promise<() => void> {
   const { apiProxy, resolveProviderForModel } = await import('./utils/apiProxy');
   const providers = await getProviders();
@@ -1700,7 +1726,7 @@ export async function sendMessageNative(
   onError: (err: string) => void,
   onThinking?: (thinking: string, full: string) => void,
   onSystem?: (event: string, message: string, data: any) => void,
-  onToolUse?: (event: { type: 'start' | 'input' | 'done'; tool_use_id: string; tool_name?: string; tool_input?: any; content?: string; is_error?: boolean; textBefore?: string }) => void,
+  onToolUse?: (event: { type: 'start' | 'input' | 'done'; tool_use_id: string; tool_name?: string; tool_input?: any; content?: string; is_error?: boolean; textBefore?: string; display_title?: string }) => void,
   reasoningMode?: string | null,
 ): Promise<() => void> {
   const token = getToken();
@@ -1801,6 +1827,7 @@ export async function sendMessageNative(
                   tool_use_id: event.content_block.id || '',
                   tool_name: event.content_block.name || '',
                   tool_input: event.content_block.input || {},
+                  display_title: event.content_block.display_title,
                   content: '',
                   is_error: false,
                 });
@@ -1820,6 +1847,7 @@ export async function sendMessageNative(
                 tool_use_id: event.tool_use_id || '',
                 tool_name: event.tool_name || '',
                 tool_input: event.tool_input || {},
+                display_title: event.display_title,
                 content: '',
                 is_error: false,
               });
@@ -1830,6 +1858,7 @@ export async function sendMessageNative(
                 tool_use_id: event.tool_use_id || '',
                 tool_name: event.tool_name || 'unknown',
                 tool_input: event.tool_input || {},
+                display_title: event.display_title,
                 content: event.output || event.content || '',
                 is_error: event.is_error === true,
               });
@@ -1921,7 +1950,7 @@ export async function sendMessage(
   onDocument?: (document: { id: string; title: string; filename: string; url: string; content?: string; format?: 'markdown' | 'docx' | 'pptx'; slides?: Array<{ title: string; content: string; notes?: string }> }) => void,
   onDocumentDraft?: (draft: { draft_id: string; title?: string; format?: string; preview?: string; preview_available?: boolean; done?: boolean; document?: any }) => void,
   onCodeExecution?: (data: { type: string; executionId: string; code?: string; language?: string; files?: Array<{ id: string; name: string }>; stdout?: string; stderr?: string; images?: string[]; error?: string | null }) => void,
-  onToolUse?: (event: { type: 'start' | 'input' | 'done'; tool_use_id: string; tool_name?: string; tool_input?: any; content?: string; is_error?: boolean; textBefore?: string }) => void,
+  onToolUse?: (event: { type: 'start' | 'input' | 'done'; tool_use_id: string; tool_name?: string; tool_input?: any; content?: string; is_error?: boolean; textBefore?: string; display_title?: string }) => void,
   signal?: AbortSignal,
   model?: string,
   messages?: any[],
@@ -1944,34 +1973,47 @@ export async function sendMessage(
         permissionMode = (window as any).__chatStore.getState().permissionMode;
       }
     } catch {}
-    const res = await fetch(`${API_BASE}/chat`, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        'Authorization': `Bearer ${token}`,
-      },
-      body: JSON.stringify({
-        conversation_id: conversationId,
-        message,
-        model: splitModelKey(model || '').modelId,
-        provider_id: splitModelKey(model || '').providerId,
-        messages: messages && messages.length > 0 ? messages : undefined,
-        attachments: attachments || undefined,
-        ...resolveEnvCreds(getUserModeForConversation(conversationId)),
-        user_mode: getUserModeForConversation(conversationId),
-        permission_mode: permissionMode,
-        effort: ['off', 'low', 'high', 'max'].includes(reasoningMode || '') ? reasoningMode : 'off',
-        user_profile: (() => {
-          try {
-            const p = JSON.parse(localStorage.getItem('user_profile') || localStorage.getItem('user') || '{}');
-            const wf = p.work_function;
-            const pp = p.personal_preferences;
-            return (wf || pp) ? { work_function: wf, personal_preferences: pp } : undefined;
-          } catch { return undefined; }
-        })(),
-      }),
-      signal,
-    });
+    let res: Response;
+    try {
+      res = await fetch(`${API_BASE}/chat`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'Authorization': `Bearer ${token}`,
+        },
+        body: JSON.stringify({
+          conversation_id: conversationId,
+          message,
+          model: splitModelKey(model || '').modelId,
+          provider_id: splitModelKey(model || '').providerId,
+          messages: messages && messages.length > 0 ? messages : undefined,
+          attachments: attachments || undefined,
+          ...resolveEnvCreds(getUserModeForConversation(conversationId)),
+          user_mode: getUserModeForConversation(conversationId),
+          permission_mode: permissionMode,
+          effort: ['off', 'low', 'high', 'max'].includes(reasoningMode || '') ? reasoningMode : 'off',
+          user_profile: (() => {
+            try {
+              const p = JSON.parse(localStorage.getItem('user_profile') || localStorage.getItem('user') || '{}');
+              const wf = p.work_function;
+              const pp = p.personal_preferences;
+              return (wf || pp) ? { work_function: wf, personal_preferences: pp } : undefined;
+            } catch { return undefined; }
+          })(),
+        }),
+        signal,
+      });
+    } catch (error) {
+      if ((error as Error)?.name === 'AbortError') throw error;
+      // A network-level failure hides its cause in "Failed to fetch". Name the
+      // endpoint and reset detection so the next send can follow a moved bridge.
+      console.error(`[API] Chat request to ${API_BASE} failed:`, error);
+      // resetBridgePort is imported lazily to avoid a cycle with bridgeConnection.
+      const { resetBridgePort } = await import('./services/bridgeConnection');
+      resetBridgePort();
+      onError(`无法连接本地后端 ${API_BASE}（${(error as Error)?.message || String(error)}）。请确认后端已启动；重启应用后会自动连接正确的端口。`);
+      return;
+    }
 
     if (!res.ok) {
       onError(await readChatResponseError(res));
@@ -2363,7 +2405,7 @@ export async function sendMessage(
           if (parsed.type === 'tool_use_start' && onToolUse) {
             if (!activeInlineArtifact) processInlineArtifactText('', true);
             flushPending();
-            try { onToolUse({ type: 'start', tool_use_id: parsed.tool_use_id, tool_name: parsed.tool_name, tool_input: parsed.tool_input, textBefore: parsed.textBefore || '' }); } catch (err) { console.error('[API] onToolUse start callback error:', err); }
+            try { onToolUse({ type: 'start', tool_use_id: parsed.tool_use_id, tool_name: parsed.tool_name, tool_input: parsed.tool_input, textBefore: parsed.textBefore || '', display_title: parsed.display_title }); } catch (err) { console.error('[API] onToolUse start callback error:', err); }
           }
           if (parsed.type === 'tool_use_input' && onToolUse) {
             try { onToolUse({ type: 'input', tool_use_id: parsed.tool_use_id, tool_input: parsed.tool_input }); } catch (err) { console.error('[API] onToolUse input callback error:', err); }

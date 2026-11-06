@@ -22,6 +22,12 @@ function harness() {
   return { callbacks: createStreamCallbacks(ctx), context: ctx, message: () => messages[messages.length - 1] };
 }
 describe('stream process recording', () => {
+  it('routes native approvals to one session-scoped prompt', () => {
+    const { callbacks, context } = harness();
+    callbacks.onSystemEvents('tool_permission', '', { request_id: 'r', tool_use_id: 't', tool_name: 'Bash', input: { command: 'npm test' }, session_id: 'child', allow_session: true });
+    expect(context.setToolPermissionDialog).toHaveBeenCalledWith(expect.objectContaining({ session_id: 'child', allow_session: true }));
+    expect(context.setPermissionApproval).not.toHaveBeenCalled();
+  });
   it.each(['onSystemEvents', 'onSystemEventsLight'] as const)('%s restores authoritative timing and preserves it on failure', callback => {
     const { callbacks, message, context } = harness();
     const turn = { turnId: 'turn', startedAt: '2026-11-03T00:00:00Z', endedAt: null, elapsedMs: null, status: 'running' };

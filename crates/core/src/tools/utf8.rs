@@ -24,7 +24,7 @@ pub fn powershell_command(command: &str) -> String {
     format!("$OutputEncoding = [System.Text.UTF8Encoding]::new($false); [Console]::InputEncoding = $OutputEncoding; [Console]::OutputEncoding = $OutputEncoding; $PSDefaultParameterValues['*:Encoding'] = 'utf8';\n{command}")
 }
 
-pub(super) fn cmd_command(command: &str) -> String {
+pub(crate) fn cmd_command(command: &str) -> String {
     format!("chcp 65001 >nul & {command}")
 }
 

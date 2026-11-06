@@ -50,7 +50,38 @@ describe('WebFetch output', () => {
   });
 });
 
+describe('Git add output', () => {
+  it.each(['object', 'json'])('renders and copies requested paths as text for %s results', format => {
+    const value = { success: true, files: ['src/main.rs', '目录/文件.ts'], output: '' };
+    const result = format === 'json' ? JSON.stringify(value) : value;
+    const expected = 'Git add completed — 2 requested paths\nsrc/main.rs\n目录/文件.ts';
+    const { container } = render(<ToolOutput name="git_add" result={result} />);
+    expect(container.textContent).toBe(expected);
+    expect(toolOutput({ name: 'git_add', result })).toBe(expected);
+    expect(value.files).toEqual(['src/main.rs', '目录/文件.ts']);
+  });
+  it('shows the failure and exit status', () => {
+    const result = { success: false, is_error: true, error: 'pathspec missing did not match', exit_code: 128 };
+    const { container } = render(<ToolOutput name="git_add" result={result} />);
+    expect(container.textContent).toBe('pathspec missing did not match\nExit code 128');
+    expect(container.textContent).not.toContain('completed');
+  });
+});
+
 describe('ordered process events', () => {
+  it('shows task names while running and after results without changing arguments', () => {
+    const input = { task_id: 'task-123', block: true };
+    const tool = { id: 'task-output', name: 'TaskOutput', displayTitle: '运行检查', input, status: 'running' };
+    const message: any = { role: 'assistant', content: '', toolCalls: [tool] };
+    recordTool(message, tool, 1000);
+    const { rerender } = render(<WorkDetails message={message} index={0} live />);
+    expect(screen.getByText('TaskOutput(运行检查)')).toBeInTheDocument();
+    expect(buildTrace([message], true).find(r => r.role === 'tool')?.input).toEqual(input);
+    message.toolCalls[0] = { ...tool, displayTitle: undefined, status: 'done', result: JSON.stringify({ subject: '运行检查', stdout: 'done' }) };
+    rerender(<WorkDetails message={message} index={0} live={false} />);
+    expect(screen.getByText('TaskOutput(运行检查)')).toBeInTheDocument();
+    expect(buildTrace([message], false).find(r => r.role === 'tool')?.displayTitle).toBe('TaskOutput(运行检查)');
+  });
   it('starts Think collapsed and preserves manual expansion across streamed updates', () => {
     useWorkspaceModeStore.getState().setMode('code');
     useGeneralSettingsStore.getState().update({ workDetailsByMode: { chat: 'compact', work: 'standard', study: 'standard', code: 'detailed' } });
@@ -151,6 +182,12 @@ describe('ordered process events', () => {
       processSteps: snapshots.map(request => ({ id: request.id, kind: 'text', text: request.id, requestId: request.id })) }]);
     expect(trace.filter(r => r.role === 'system').map(r => r.text)).toEqual(['实际系统指令', 'Changed project instructions\n\n实际系统指令']);
     expect(trace.filter(r => r.role === 'assistant').map(r => r.request?.id)).toEqual(['r1', 'r2', 'r3']);
+  });
+  it('ignores promptless auxiliary web search requests when merging system prompts', () => {
+    const snapshot = { id: 'r1', number: 1, startedAt: 100, model: 'test', systemPrompt: 'Project prompt', systemMessages: [], tools: [], source: 'native_engine' };
+    const search = { id: 'search', number: 2, startedAt: 150, model: 'test', systemPrompt: null, systemMessages: [], tools: [], source: 'web_search' };
+    const trace = buildTrace([{ role: 'user', content: 'test' }, { role: 'assistant', content: '', requestSnapshots: [snapshot, search, { ...snapshot, id: 'r3', number: 3 }] }]);
+    expect(trace.filter(r => r.role === 'system').map(r => r.text)).toEqual(['Project prompt']);
   });
   it('keeps thinking, commentary, tool and final answer in stream order without repeated text', () => {
     const message = sample();

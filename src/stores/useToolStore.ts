@@ -50,6 +50,8 @@ interface AskUserDialogData {
 }
 
 interface ToolPermissionDialogData {
+  session_id?: string;
+  allow_session?: boolean;
   request_id: string;
   tool_use_id: string;
   tool_name: string;

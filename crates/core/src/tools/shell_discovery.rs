@@ -1,0 +1,206 @@
+use std::path::{Path, PathBuf};
+
+/// Prefer the Git launcher over Windows' unrelated WSL bash aliases.
+pub(super) fn git_shell(name: &str, paths: impl IntoIterator<Item = PathBuf>) -> Option<PathBuf> {
+    for path in paths {
+        for root in path.ancestors().take(4) {
+            if !root.join("git-bash.exe").is_file() {
+                continue;
+            }
+            for relative in [format!("bin/{name}.exe"), format!("usr/bin/{name}.exe")] {
+                let executable = root.join(relative);
+                if executable.is_file() {
+                    return Some(executable);
+                }
+            }
+        }
+    }
+    None
+}
+
+pub(super) fn windows_git_shell(name: &str) -> Option<PathBuf> {
+    let mut paths = Vec::new();
+    for variable in ["ProgramFiles", "ProgramFiles(x86)", "LOCALAPPDATA"] {
+        if let Some(base) = std::env::var_os(variable) {
+            let base = PathBuf::from(base);
+            paths.push(base.join("Git"));
+            paths.push(base.join("Programs/Git"));
+        }
+    }
+    if let Some(path) = std::env::var_os("PATH") {
+        paths.extend(std::env::split_paths(&path));
+    }
+    paths.extend([
+        Path::new(r"C:\Program Files\Git").into(),
+        Path::new(r"C:\Git").into(),
+    ]);
+    git_shell(name, paths)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[cfg(windows)]
+    #[tokio::test]
+    #[ignore = "requires the explicitly selected dcl-linux-test WSL distribution"]
+    async fn wsl_tool_preserves_cwd_and_cancels_linux_descendants() {
+        use serde_json::json;
+        crate::config::OrchestrationConfig::init_global().unwrap();
+        let root = tempfile::tempdir().unwrap();
+        let cwd = root.path().to_str().unwrap();
+        std::fs::create_dir(root.path().join("sub space")).unwrap();
+        let settings = crate::services::shell_settings::ShellSettings {
+            tool_default: "wsl".into(),
+            wsl: crate::services::shell_settings::WslSettings {
+                distribution: Some("dcl-linux-test".into()),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        crate::services::shell_settings::save(root.path(), &settings).unwrap();
+        super::super::background_shell::scope(Some((root.path().into(), uuid::Uuid::new_v4().to_string())), async {
+            let state = root.path().join("cwd");
+            let run = |command: &str| json!({"command":command,"__cwd_state":state});
+            let changed = super::super::tool_bash_async(run("cd 'sub space'"), cwd).await.unwrap();
+            assert_eq!(changed["success"], true, "{changed}");
+            let located = super::super::tool_bash_async(run("pwd"), cwd).await.unwrap();
+            assert!(located["stdout"].as_str().unwrap().trim().ends_with("sub space"), "{located}");
+            assert_eq!(located["shell"], "wsl");
+            let ordinary = super::super::tool_bash_async(json!({"command":"pwd -W","shell":"bash","__cwd_state":state}), cwd).await.unwrap();
+            assert!(!ordinary["stdout"].as_str().unwrap().contains("sub space"), "WSL cwd leaked to Git Bash");
+            let error = super::super::tool_bash_async(json!({"command":"echo sentinel","__sandbox":{}}), cwd).await.unwrap_err();
+            assert!(error.to_string().contains("cannot isolate WSL"));
+            let timed = super::super::tool_bash_async(json!({"command":"(sleep 2; printf leaked > leaked) & printf ready; wait", "timeout":400}), cwd).await.unwrap();
+            assert_eq!(timed["timed_out"], true, "{timed}");
+            tokio::time::sleep(std::time::Duration::from_secs(3)).await;
+            assert!(!root.path().join("leaked").exists(), "Timed-out WSL descendant survived");
+            let started = super::super::tool_bash_async(json!({"command":"(sleep 2; printf leaked > leaked-background) & printf ready; wait", "run_in_background":true}), cwd).await.unwrap();
+            let id = started["task_id"].as_str().unwrap();
+            // Observe actual Linux execution before requesting cancellation.
+            let session = started["stdout_file"].as_str().unwrap();
+            tokio::time::timeout(std::time::Duration::from_secs(8), async {
+                while !std::fs::read_to_string(session).unwrap_or_default().contains("ready") {
+                    tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+                }
+            }).await.unwrap();
+            let directory = Path::new(session).parent().unwrap();
+            assert_eq!(directory.file_name().unwrap().to_str().unwrap(), id);
+            std::fs::write(directory.join("cancel"), "cancel").unwrap();
+            tokio::time::sleep(std::time::Duration::from_secs(3)).await;
+            assert!(!root.path().join("leaked-background").exists(), "Cancelled background WSL descendant survived");
+        }).await;
+    }
+
+    #[test]
+    fn discovers_nonstandard_git_install_and_skips_wsl_aliases() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("other drive/Program Files/Git");
+        let system = temp.path().join("Windows/System32");
+        let apps = temp.path().join("WindowsApps");
+        for dir in [
+            &system,
+            &apps,
+            &root.join("cmd"),
+            &root.join("bin"),
+            &root.join("usr/bin"),
+        ] {
+            std::fs::create_dir_all(dir).unwrap();
+            std::fs::write(dir.join("bash.exe"), "").unwrap();
+        }
+        std::fs::write(root.join("git-bash.exe"), "").unwrap();
+        assert_eq!(
+            git_shell("bash", [system.clone(), apps.clone(), root.join("cmd")]),
+            Some(root.join("bin/bash.exe"))
+        );
+        assert_eq!(git_shell("bash", [system, apps]), None);
+        assert_eq!(
+            git_shell("bash", [root.join("usr/bin")]),
+            Some(root.join("bin/bash.exe"))
+        );
+    }
+
+    #[cfg(windows)]
+    #[tokio::test]
+    async fn tool_uses_owning_data_directory_settings_and_explicit_shell_wins() {
+        crate::config::OrchestrationConfig::init_global().unwrap();
+        let root = tempfile::tempdir().unwrap();
+        crate::services::shell_settings::set(root.path(), "toolDefault", "cmd").unwrap();
+        super::super::background_shell::scope(
+            Some((root.path().into(), uuid::Uuid::new_v4().to_string())),
+            async {
+                let cwd = root.path().to_str().unwrap();
+                let result = super::super::tool_bash_async(
+                    serde_json::json!({"command":"echo %COMSPEC%"}),
+                    cwd,
+                )
+                .await
+                .unwrap();
+                assert_eq!(result["shell"], "cmd");
+                assert!(result["stdout"]
+                    .as_str()
+                    .unwrap()
+                    .to_ascii_lowercase()
+                    .contains("cmd.exe"));
+                let explicit = super::super::tool_bash_async(
+                    serde_json::json!({"command":"printf configured-bash","shell":"bash"}),
+                    cwd,
+                )
+                .await
+                .unwrap();
+                assert_eq!(explicit["shell"], "bash");
+                assert_eq!(explicit["stdout"], "configured-bash");
+            },
+        )
+        .await;
+    }
+
+    #[cfg(windows)]
+    #[tokio::test]
+    async fn windows_shells_preserve_failures_and_directory_state() {
+        crate::config::OrchestrationConfig::init_global().unwrap();
+        let temp = tempfile::tempdir().unwrap();
+        let cwd = temp.path().to_str().unwrap();
+        std::fs::create_dir(temp.path().join("sub space")).unwrap();
+        for (shell, change, inspect, fail) in [
+            ("cmd", "cd /d \"sub space\"", "cd", "cmd /d /c exit 7"),
+            (
+                "bash",
+                "cd 'sub space'",
+                "pwd -W",
+                "printf '%s\\n' 'warning' >&2; (exit 7)",
+            ),
+        ] {
+            let state = temp.path().join(format!("{shell}-cwd"));
+            let run = |command: &str| serde_json::json!({"shell":shell,"command":command,"__cwd_state":state});
+            let changed = super::super::tool_bash_async(run(change), cwd)
+                .await
+                .unwrap();
+            assert_eq!(changed["exit_code"], 0, "{changed}");
+            let located = super::super::tool_bash_async(run(inspect), cwd)
+                .await
+                .unwrap();
+            assert!(
+                located["stdout"].as_str().unwrap().contains("sub space"),
+                "{located}"
+            );
+            let failed = super::super::tool_bash_async(run(fail), cwd).await.unwrap();
+            assert_eq!(failed["exit_code"], 7, "{failed}");
+            assert_eq!(failed["success"], false, "{failed}");
+            assert_eq!(failed["shell"], shell);
+            assert!(failed["shell_path"].as_str().is_some());
+        }
+        let syntax = super::super::tool_bash_async(serde_json::json!({"shell":"bash","command":"if then","__cwd_state":temp.path().join("syntax-cwd")}), cwd).await.unwrap();
+        assert_eq!(syntax["success"], false, "{syntax}");
+        assert_ne!(syntax["exit_code"], 0, "{syntax}");
+        let unknown = super::super::tool_bash_async(
+            serde_json::json!({"shell":"not-a-shell","command":"echo sentinel"}),
+            cwd,
+        )
+        .await;
+        assert!(unknown
+            .unwrap_err()
+            .to_string()
+            .contains("Unsupported shell"));
+    }
+}

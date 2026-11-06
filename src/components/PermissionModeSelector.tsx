@@ -4,6 +4,7 @@ import { useChatStore } from '../stores/useChatStore';
 import { useI18n } from '../hooks/useI18n';
 import { Shield, ShieldCheck, ShieldOff, Eye } from 'lucide-react';
 import { invokeDesktop as invoke } from '../platform/native';
+import { sessionBashPermission } from '../api';
 
 import type { PermissionMode } from '../stores/useGeneralSettingsStore';
 import { hasNativeDesktop } from '../services/bridgeConnection';
@@ -61,13 +62,14 @@ const MODE_OPTIONS: PermissionModeOption[] = [
 ];
 
 interface PermissionModeSelectorProps {
+  conversationId?: string | null;
   neutral?: boolean;
   className?: string;
   value?: PermissionMode;
   onChange?: (mode: PermissionMode) => void;
 }
 
-export default function PermissionModeSelector({ className = '', value, onChange, neutral = false }: PermissionModeSelectorProps) {
+export default function PermissionModeSelector({ className = '', value, onChange, neutral = false, conversationId }: PermissionModeSelectorProps) {
   const { t } = useI18n();
   const activePermissionMode = useChatStore((s) => s.permissionMode);
   const permissionMode = value ?? activePermissionMode;
@@ -76,6 +78,14 @@ export default function PermissionModeSelector({ className = '', value, onChange
   const [showBypassWarning, setShowBypassWarning] = useState(false);
   const [modeError, setModeError] = useState('');
   const [changingMode, setChangingMode] = useState(false);
+  const [bashAllowed, setBashAllowed] = useState<boolean | null>(null);
+  useEffect(() => {
+    if (!isOpen || !conversationId) return;
+    let active = true;
+    setBashAllowed(null);
+    sessionBashPermission(conversationId).then(result => { if (active) setBashAllowed(result.allowed); }).catch(error => { if (active) setModeError(String(error)); });
+    return () => { active = false; };
+  }, [isOpen, conversationId]);
   const dropdownRef = useRef<HTMLDivElement>(null);
   const buttonRef = useRef<HTMLButtonElement>(null);
   const menuRef = useRef<HTMLDivElement>(null);
@@ -251,6 +261,15 @@ export default function PermissionModeSelector({ className = '', value, onChange
                   )}
                 </button>
               ))}
+              {conversationId && <div className="border-t border-claude-border px-3 py-2 text-xs text-claude-textSecondary">
+                <p>Session Bash: {bashAllowed == null ? 'Loading…' : bashAllowed ? 'Allowed · dangerous commands excluded' : 'Not granted'}</p>
+                {bashAllowed && <button className="mt-2 underline" disabled={changingMode} onClick={async () => {
+                  setChangingMode(true);
+                  try { setBashAllowed((await sessionBashPermission(conversationId, true)).allowed); }
+                  catch (error) { setModeError(String(error)); }
+                  finally { setChangingMode(false); }
+                }}>Revoke session Bash permission</button>}
+              </div>}
             </div>
           </div>,
           document.body

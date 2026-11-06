@@ -57,14 +57,15 @@ fn update<T>(
     session: &str,
     f: impl FnOnce(&Connection, &mut State) -> Result<T>,
 ) -> Result<T> {
-    db.with_conn(|conn| -> Result<T> {
-        let tx = rusqlite::Transaction::new_unchecked(conn, rusqlite::TransactionBehavior::Immediate)?;
-        let mut state = read(&tx, session)?;
-        let result = f(&tx, &mut state)?;
-        tx.execute("INSERT INTO peripheral_settings(key,value) VALUES(?1,?2) ON CONFLICT(key) DO UPDATE SET value=excluded.value", [format!("session.goal-proposals.{session}"), serde_json::to_string(&state)?])?;
-        tx.commit()?;
-        Ok(result)
-    })?
+    db.with_conn(|conn| update_conn(conn, session, f))?
+}
+fn update_conn<T>(conn: &Connection, session: &str, f: impl FnOnce(&Connection, &mut State) -> Result<T>) -> Result<T> {
+    let tx = crate::db::write_transaction(conn)?;
+    let mut state = read(&tx, session)?;
+    let result = f(&tx, &mut state)?;
+    tx.execute("INSERT INTO peripheral_settings(key,value) VALUES(?1,?2) ON CONFLICT(key) DO UPDATE SET value=excluded.value", [format!("session.goal-proposals.{session}"), serde_json::to_string(&state)?])?;
+    tx.commit()?;
+    Ok(result)
 }
 fn live(frontend: &Presence) -> bool {
     now().saturating_sub(frontend.touched_ms) < 5_000
@@ -138,17 +139,26 @@ impl Frontend {
                 )
             })?;
         }
-        self.heartbeat.store(current, Ordering::Relaxed);
-        update(&self.db, &self.session, |conn, state| {
-            let frontend = state
-                .frontend
-                .as_mut()
-                .filter(|f| f.id == self.id)
-                .context("Goal proposal frontend ownership changed")?;
-            frontend.touched_ms = now();
-            prune(conn, &self.session, state)?;
-            Ok(state.pending.as_ref().filter(|p| !p.approved).cloned())
-        })
+        let proposal = self.db.with_conn(|conn| -> Result<_> {
+            // A view heartbeat must not block event rendering for the normal write timeout.
+            let timeout: u64 = conn.query_row("PRAGMA busy_timeout", [], |row| row.get(0))?;
+            conn.busy_timeout(std::time::Duration::from_millis(25))?;
+            let result = update_conn(conn, &self.session, |conn, state| {
+                // Expired consent must not be revived by a recovered heartbeat.
+                prune(conn, &self.session, state)?;
+                let frontend = state.frontend.as_mut().filter(|f| f.id == self.id)
+                    .context("Goal proposal frontend ownership changed")?;
+                frontend.touched_ms = now();
+                Ok(state.pending.as_ref().filter(|p| !p.approved).cloned())
+            });
+            let restored = conn.busy_timeout(std::time::Duration::from_millis(timeout));
+            let value = result?;
+            restored?;
+            Ok(value)
+        })??;
+        // Failed heartbeats remain due, including after the previous lease expires.
+        self.heartbeat.store(now(), Ordering::Relaxed);
+        Ok(proposal)
     }
     pub fn decide(
         &self,
@@ -563,6 +573,68 @@ mod tests {
         session: String,
         permissions: PermissionManager,
     }
+    #[test]
+    fn heartbeat_contention_is_bounded_and_recovers_without_replaying_consent() {
+        let f = Fixture::new();
+        let frontend = Frontend::acquire(f.db.clone(), &f.session).unwrap();
+        f.propose("Verify contention recovery", true).unwrap();
+        let original = frontend.poll().unwrap().unwrap();
+        frontend.heartbeat.store(0, Ordering::Relaxed);
+        let blocker = Connection::open(f.root.path().join("state.db")).unwrap();
+        blocker.execute_batch("BEGIN IMMEDIATE").unwrap();
+        let started = std::time::Instant::now();
+        let error = frontend.poll().unwrap_err();
+        assert!(crate::db::is_contention(&error), "{error:#}");
+        assert!(started.elapsed() < std::time::Duration::from_secs(1));
+        assert_eq!(frontend.heartbeat.load(Ordering::Relaxed), 0);
+        blocker.execute_batch("ROLLBACK").unwrap();
+        let recovered = frontend.poll().unwrap().unwrap();
+        assert_eq!(recovered.id, original.id);
+        assert!(!recovered.approved);
+        assert!(frontend.heartbeat.load(Ordering::Relaxed) > 0);
+        assert!(f.activate().unwrap().is_none());
+        let timeout: u64 = f.db.with_conn(|conn| conn.query_row("PRAGMA busy_timeout", [], |row| row.get(0))).unwrap().unwrap();
+        assert_eq!(timeout, 5000);
+        assert!(!crate::db::is_contention(&anyhow::anyhow!("database is locked")));
+    }
+    #[test]
+    fn recovered_heartbeat_cannot_revive_expired_consent() {
+        let f = Fixture::new();
+        let frontend = Frontend::acquire(f.db.clone(), &f.session).unwrap();
+        f.propose("Verify expired consent", true).unwrap();
+        let original = frontend.poll().unwrap().unwrap();
+        update(&f.db, &f.session, |_, state| {
+            state.frontend.as_mut().unwrap().touched_ms = now() - 6_000;
+            Ok(())
+        })
+        .unwrap();
+        frontend.heartbeat.store(0, Ordering::Relaxed);
+        assert!(frontend.poll().unwrap().is_none());
+        assert!(!frontend
+            .decide(
+                &original.id,
+                true,
+                f.root.path(),
+                f.root.path(),
+                &f.permissions
+            )
+            .unwrap());
+        assert!(f.activate().unwrap().is_none());
+        // Losing ownership restores the pooled connection timeout too.
+        update(&f.db, &f.session, |_, state| {
+            state.frontend.as_mut().unwrap().id = "another-owner".into();
+            Ok(())
+        })
+        .unwrap();
+        frontend.heartbeat.store(0, Ordering::Relaxed);
+        assert!(frontend.poll().is_err());
+        let timeout: u64 =
+            f.db.with_conn(|conn| conn.query_row("PRAGMA busy_timeout", [], |row| row.get(0)))
+                .unwrap()
+                .unwrap();
+        assert_eq!(timeout, 5000);
+    }
+
     impl Fixture {
         fn new() -> Self {
             let root = tempfile::tempdir().unwrap();

@@ -1247,6 +1247,16 @@ impl Session {
                                 Some(approval) => approval.decide(&answer),
                                 None => Decision { allowed: ["y", "yes", "1", "\u{662f}", "\u{5141}\u{8bb8}"].contains(&answer.trim().to_lowercase().as_str()), grant: None, note: None },
                             };
+                            if matches!(decision.grant, Some(Remember::BashSession | Remember::EditsSession)) {
+                                let response = if decision.grant == Some(Remember::EditsSession) {
+                                    PermissionResponse::AllowEditsForSession { updated_input: None, note: decision.note.clone() }
+                                } else {
+                                    PermissionResponse::AllowBashForSession { updated_input: None, note: decision.note.clone() }
+                                };
+                                let _ = self.engine.resume_with_permission(&request_id, response).await;
+                                progress.set_activity("Working");
+                                continue;
+                            }
                             let commit = match decision.grant.as_ref() {
                                 Some(grant) => match crate::permission_commands::remember_commit(self, grant).await {
                                     Ok(commit) => Some((commit, grant.clone())),
@@ -1270,7 +1280,7 @@ impl Session {
                                             progress.notice(&format!("Allowed for this session; saving the rule to .claude/settings.local.json failed: {error:#}"));
                                         }
                                     }
-                                    None => {}
+                                    None | Some(Remember::BashSession | Remember::EditsSession) => {}
                                 }
                             } else if !decision.allowed && !remote_decided && approval.is_some() {
                                 // As in the reference CLI: a bare No stops the turn; No with
@@ -1404,12 +1414,12 @@ impl Session {
                         if let Some(index) = pending_inputs.iter().position(|pending| *pending == text) { pending_inputs.remove(index); }
                         progress.queued_delivered(&text);
                     },
-                    EngineEvent::ToolUseStart { tool_use_id, tool_name, tool_input, .. } => {
+                    EngineEvent::ToolUseStart { tool_use_id, tool_name, tool_input, display_title, .. } => {
                         tool_started.entry(tool_use_id.clone()).or_insert_with(std::time::Instant::now);
                         separate_text = true;
                         progress.clear();
                         if cli.verbose && !progress.is_live() { eprintln!("\n[{tool_name}]"); }
-                        progress.tool_started(&tool_use_id, &tool_name, &tool_input);
+                        progress.tool_started_named(&tool_use_id, &tool_name, &tool_input, display_title.as_deref());
                     },
                     EngineEvent::ToolUseDone { tool_use_id, tool_name, tool_input, output, is_error }
                     | EngineEvent::PipelineToolResult { tool_use_id, tool_name, tool_input, output, is_error, .. } => {
@@ -1954,8 +1964,9 @@ pub(crate) fn event_json_with(event: &EngineEvent, summaries: bool) -> Option<Va
             tool_use_id,
             tool_name,
             tool_input,
+            display_title,
             ..
-        } => json!({"type":"tool_start","id":tool_use_id,"name":tool_name,"input":tool_input}),
+        } => json!({"type":"tool_start","id":tool_use_id,"name":tool_name,"input":tool_input,"display_title":display_title}),
         EngineEvent::ToolUseDone {
             tool_use_id,
             tool_name,

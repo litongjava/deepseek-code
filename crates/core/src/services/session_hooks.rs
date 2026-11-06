@@ -95,7 +95,7 @@ async fn collect_output(
 
 pub fn end_timeout() -> Duration {
     Duration::from_millis(
-        std::env::var("CLAUDE_CODE_SESSIONEND_HOOKS_TIMEOUT_MS")
+        std::env::var("DEEPSEEK_CODE_SESSIONEND_HOOKS_TIMEOUT_MS")
             .ok()
             .and_then(|value| value.parse::<u64>().ok())
             .filter(|value| *value > 0)

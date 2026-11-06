@@ -145,7 +145,7 @@ async fn main() -> std::process::ExitCode {
     }
     let mut cli = Cli::parse_with_mode_source();
     if cli.agent_teams {
-        std::env::set_var("CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS", "1");
+        std::env::set_var("DEEPSEEK_CODE_EXPERIMENTAL_AGENT_TEAMS", "1");
     }
     cli.normalize();
     terminal::configure_accessibility(cli.ax_screen_reader);
@@ -596,7 +596,13 @@ async fn run(cli: &Cli) -> Result<()> {
         }
         if !single {
             if std::env::var_os(remote_host::HANDOFF_ENV).is_none() {
-                eprintln!("{}", terminal::banner(&session.model, &session.workspace));
+                let banner = terminal::banner(&session.model, &session.workspace);
+                eprintln!("{banner}");
+                if resumed.is_none() {
+                    let mut history = terminal::scrollback::Scrollback::take();
+                    history.set_welcome(format!("{banner}\n"));
+                    history.save();
+                }
             }
             // --resume and --continue show the conversation so far, as in the reference CLI.
             if resumed.is_some() && std::env::var_os(remote_host::HANDOFF_ENV).is_none() { repl::show_resumed(&session, false)?; }

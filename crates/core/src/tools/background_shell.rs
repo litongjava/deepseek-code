@@ -53,6 +53,14 @@ pub(super) fn session_environment() -> Result<Option<String>> {
     }
 }
 
+pub(super) fn shell_settings() -> Result<crate::services::shell_settings::ShellSettings> {
+    let root = match CONTEXT.try_with(Clone::clone).ok().flatten() {
+        Some((root, _)) => root,
+        None => crate::runtime::resolve_default_data_dir()?,
+    };
+    crate::services::shell_settings::load(&root)
+}
+
 static ACTIVE: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
 /// Only tasks owned by this process keep its persistent worker alive.
 pub fn has_active() -> bool {
@@ -94,6 +102,7 @@ pub(crate) fn start(
     shell: &str,
     description: &str,
     command_text: &str,
+    guard: Option<crate::services::wsl::Guard>,
 ) -> Result<Value> {
     let (root, session) = CONTEXT
         .try_with(Clone::clone)
@@ -129,6 +138,7 @@ pub(crate) fn start(
         done: false,
     };
     tokio::spawn(async move {
+        let _guard = guard;
         let result = tokio::select! {
             result = super::bash_process::run_logged(&mut command, timeout, &shell, Some(logs)) => result,
             _ = async { let mut heartbeat = std::time::Instant::now(); loop { if directory.join("cancel").exists() { break; } if heartbeat.elapsed() >= Duration::from_secs(1) { let _ = std::fs::write(directory.join("heartbeat"), b"running"); heartbeat = std::time::Instant::now(); } tokio::time::sleep(Duration::from_millis(50)).await; } } => {
@@ -206,6 +216,7 @@ pub(super) async fn run_foreground(
     shell: &str,
     description: &str,
     command_text: &str,
+    guard: Option<crate::services::wsl::Guard>,
 ) -> Result<Value> {
     // Managed shells belong to a UUID session; anything else runs as before.
     let Some((root, session, id)) = CONTEXT
@@ -214,6 +225,7 @@ pub(super) async fn run_foreground(
         .flatten()
         .and_then(|(root, session)| uuid::Uuid::parse_str(&session).ok().map(|id| (root, session, id)))
     else {
+        let _guard = guard;
         return super::bash_process::run(&mut command, timeout, shell).await;
     };
     let session_directory = root.join("shell-tasks").join(id.to_string());
@@ -230,6 +242,7 @@ pub(super) async fn run_foreground(
     let logs = (directory.join("stdout.log"), directory.join("stderr.log"));
     let shell_name = shell.to_owned();
     let mut running = AbortOnDrop(Some(tokio::spawn(async move {
+        let _guard = guard;
         super::bash_process::run_logged(&mut command, Some(timeout), &shell_name, Some(logs)).await
     })));
     loop {
@@ -655,7 +668,7 @@ mod tests {
         // Without a request the call finishes in the foreground as before.
         let mut quick = Command::new("node");
         quick.arg("-e").arg("console.log('quick')");
-        let done = scope(Some((root.path().into(), session.clone())), run_foreground(quick, Duration::from_secs(30), "node", "quick", "node quick")).await.unwrap();
+        let done = scope(Some((root.path().into(), session.clone())), run_foreground(quick, Duration::from_secs(30), "node", "quick", "node quick", None)).await.unwrap();
         assert!(done["stdout"].as_str().unwrap().contains("quick"));
         let mut command = Command::new("node");
         command.arg("-e").arg(script);
@@ -665,7 +678,7 @@ mod tests {
                 tokio::time::sleep(Duration::from_millis(400)).await;
                 request_background(&root_path, &id).unwrap();
             };
-            let (result, ()) = tokio::join!(run_foreground(command, Duration::from_secs(30), "node", "slow", "node slow"), request);
+            let (result, ()) = tokio::join!(run_foreground(command, Duration::from_secs(30), "node", "slow", "node slow", None), request);
             result
         })
         .await
@@ -679,7 +692,7 @@ mod tests {
         // A request made before a call starts does not move it.
         let mut later = Command::new("node");
         later.arg("-e").arg("setTimeout(()=>console.log('kept'),300)");
-        let kept = scope(Some((root.path().into(), session.clone())), run_foreground(later, Duration::from_secs(30), "node", "later", "node later")).await.unwrap();
+        let kept = scope(Some((root.path().into(), session.clone())), run_foreground(later, Duration::from_secs(30), "node", "later", "node later", None)).await.unwrap();
         assert!(kept["stdout"].as_str().unwrap().contains("kept"));
     }
 
@@ -692,7 +705,7 @@ mod tests {
         let mut command = Command::new("node");
         command.arg("-e").arg("require('child_process').spawn(process.execPath,['-e',`setTimeout(()=>require('fs').writeFileSync(process.argv[1],'leaked'),1800)`,process.argv[1]],{stdio:'inherit'});console.log('ready');console.error('diagnostic');setInterval(()=>{},10000)").arg(&leaked);
         let task = scope(Some((root.path().into(), session.clone())), async {
-            start(command, None, "node", "test managed shell", "node fixture").unwrap()
+            start(command, None, "node", "test managed shell", "node fixture", None).unwrap()
         })
         .await;
         let id = task["task_id"].as_str().unwrap();
@@ -744,7 +757,7 @@ mod tests {
             let mut command = Command::new("node");
             command.args(["-e", code]);
             let task = scope(Some((root.path().into(), session.clone())), async {
-                start(command, Some(Duration::from_millis(600)), "node", "fixture", "node fixture").unwrap()
+                start(command, Some(Duration::from_millis(600)), "node", "fixture", "node fixture", None).unwrap()
             })
             .await;
             let observed = output(

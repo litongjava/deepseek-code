@@ -153,7 +153,7 @@ impl LiveTurn {
             let scrollback = super::scrollback::Scrollback::take();
             // The welcome banner is outside conversation history. On the first
             // turn, keep it in place instead of shifting the whole screen down.
-            let aligned = !scrollback.has_turn_output();
+            let aligned = scrollback.has_welcome();
             let pinned = super::pinned_prompt::PinnedPrompt {
                 text: scrollback.latest_prompt().to_owned(),
                 ..Default::default()
@@ -162,7 +162,6 @@ impl LiveTurn {
                 scrollback,
                 pinned,
                 aligned,
-                preserve_welcome: aligned,
                 ..Frame::default()
             };
             let _ = run(&mut state, &mut screen, receiver, actions);
@@ -1374,7 +1373,6 @@ struct Frame {
     input_rows: usize,
     /// Whether the turn's first frame has moved a short transcript down onto it.
     aligned: bool,
-    preserve_welcome: bool,
     /// Frame rows of the running Bash call; a click shows its output.
     shell_rows: Option<std::ops::Range<usize>>,
     /// Lines logged above the frame, for clicks on tool results.
@@ -1726,6 +1724,7 @@ impl Frame {
             out.push_str(&format!("\x1b[{};1H{line}\x1b[K", top + index + 1));
         }
         self.size = size;
+        self.scrollback.update_welcome(top);
         if out.is_empty() && self.input_row == input_row && self.cursor_column == cursor_column {
             return None;
         }
@@ -1969,8 +1968,7 @@ impl Frame {
         for (index, text) in self.lines.iter().enumerate() {
             if let Some(row) = background.get_mut(origin as usize + index) { *row = text.clone(); }
         }
-        if self.preserve_welcome && top > 0 { return Ok(()); }
-        self.preserve_welcome = false;
+        if self.scrollback.has_welcome() { return Ok(()); }
         self.pinned.draw(width, size.1 as usize, &background)
     }
 }
@@ -3001,9 +2999,17 @@ fn run(
                     if screen.history_view.active() {
                         screen.refresh_history(state, columns.saturating_sub(1) as usize);
                     } else {
+                        // Padding in the old frame is free space, not transcript.
+                        let reserved = if screen.scrollback.has_welcome() {
+                            screen.composer_height
+                        } else {
+                            screen.lines.len()
+                        };
                         let bottom = rows
-                            .saturating_sub(screen.lines.len() as u16)
+                            .saturating_sub(reserved as u16)
                             .min(rows.saturating_sub(1));
+                        let bottom = screen.scrollback.repaint_bottom(bottom, columns);
+                        screen.scrollback.update_welcome(bottom as usize);
                         screen.pending = screen.scrollback.repaint(bottom, rows, columns);
                         screen.logs.clear();
                         screen.lines.clear();
@@ -3340,25 +3346,52 @@ mod tests {
     }
 
     #[test]
+    fn plan_notice_before_first_turn_keeps_welcome_at_top() {
+        let mut terminal = vt100::Parser::new(36, 100, 200);
+        terminal.process(b"WELCOME\r\nMODEL\r\nWORKSPACE\r\n\r\n");
+        let mut history = super::super::scrollback::Scrollback::default();
+        history.set_welcome("WELCOME\nMODEL\nWORKSPACE\n\n".into());
+        for row in history.record_prompt("/plan investigate") {
+            terminal.process(format!("{row}\r\n").as_bytes());
+        }
+        for row in history.push_flow("Plan mode enabled. Plan file: fixture.md.", "", "", 99) {
+            terminal.process(format!("{row}\r\n").as_bytes());
+        }
+        let cursor = terminal.screen().cursor_position().0 as usize;
+        let mut frame = Frame {
+            aligned: history.has_welcome(),
+            scrollback: history,
+            ..Frame::default()
+        };
+        place(&mut frame, &mut terminal, &["Thinking"], "working", cursor);
+        let rows = screen(&terminal);
+        assert_eq!(rows[0], "WELCOME");
+        assert_eq!(rows[1], "MODEL");
+        assert_eq!(rows[2], "WORKSPACE");
+        assert_eq!(rows[35], "footer");
+    }
+
+    #[test]
     fn first_turn_keeps_welcome_at_top_and_composer_at_bottom() {
-        for height in [20u16, 36, 50] {
+        for height in [24u16, 36, 50] {
             let mut terminal = vt100::Parser::new(height, 100, 200);
-            terminal.process(b"WELCOME\r\nMODEL\r\nWORKSPACE\r\n\r\nPROMPT\r\n");
+            terminal.process(b"WELCOME\r\nMODEL\r\nWORKSPACE\r\n\r\n");
             let mut history = super::super::scrollback::Scrollback::default();
-            history.push("────────".into(), None);
-            history.record_prompt("PROMPT");
-            history.push("────────".into(), None);
-            assert!(!history.has_turn_output());
-            let mut frame = Frame { aligned: !history.has_turn_output(), scrollback: history, ..Frame::default() };
-            place(&mut frame, &mut terminal, &["Thinking", "Reasoning"], "working", 5);
+            history.set_welcome("WELCOME\nMODEL\nWORKSPACE\n\n".into());
+            for row in history.record_prompt("PROMPT") {
+                terminal.process(format!("{row}\r\n").as_bytes());
+            }
+            let cursor = terminal.screen().cursor_position().0 as usize;
+            let mut frame = Frame { aligned: history.has_welcome(), scrollback: history, ..Frame::default() };
+            place(&mut frame, &mut terminal, &["Thinking", "Reasoning"], "working", cursor);
             let rows = screen(&terminal);
             assert_eq!(rows[0], "WELCOME");
             assert_eq!(rows[1], "MODEL");
             assert_eq!(rows[2], "WORKSPACE");
-            assert_eq!(rows[5], "Thinking");
+            assert_eq!(rows[cursor], "Thinking");
             assert_eq!(rows[height as usize - 1], "footer");
             frame.log_block(vec![change_view::body("Bash(test)")], vec![change_view::body("result")]);
-            assert!(frame.scrollback.has_turn_output());
+            assert!(frame.scrollback.has_welcome());
         }
     }
 
@@ -4134,6 +4167,7 @@ pub struct TurnDisplay {
     hooks: std::collections::BTreeMap<String, String>,
     fallback: super::progress::TurnProgress,
     tools: std::collections::HashMap<String, (Instant, Value)>,
+    tool_titles: std::collections::HashMap<String, String>,
     finished: std::collections::HashMap<String, (String, Value, String, bool)>,
     /// Lines added and removed per file this turn, for the closing summary.
     changes: std::collections::BTreeMap<String, (u64, u64)>,
@@ -4167,6 +4201,7 @@ impl TurnDisplay {
             hooks: Default::default(),
             fallback,
             tools: Default::default(),
+            tool_titles: Default::default(),
             finished: Default::default(),
             changes: Default::default(),
             change_details: Default::default(),
@@ -4258,6 +4293,10 @@ impl TurnDisplay {
         }
     }
     pub fn tool_started(&mut self, id: &str, name: &str, input: &Value) {
+        self.tool_started_named(id, name, input, None);
+    }
+    pub fn tool_started_named(&mut self, id: &str, name: &str, input: &Value, title: Option<&str>) {
+        if let Some(title) = title { self.tool_titles.insert(id.into(), title.into()); }
         if let Some(live) = &self.live {
             if self.tools.contains_key(id) || self.finished.contains_key(id) {
                 return;
@@ -4266,7 +4305,7 @@ impl TurnDisplay {
             live.detail(id, name, &format!("Input:\n{}", input));
             // The call is printed once, with its result, when it finishes; the
             // status line names what is running meanwhile.
-            let label = super::tool_view::label(name, input, self.workspace.as_deref());
+            let label = super::tool_view::display_label(name, input, self.workspace.as_deref(), title);
             let next = self.numbers.values().copied().max().unwrap_or(0) + 1;
             let number = Some(*self.numbers.entry(id.to_owned()).or_insert(next));
             let header = super::tool_view::numbered(vec![change_view::tool_call(&label, "", false)], number);
@@ -4276,7 +4315,7 @@ impl TurnDisplay {
                 .unwrap_or_else(|| format!("Running {label}"));
             live.activity(&activity);
         } else {
-            self.fallback.tool_started(id, name, input);
+            self.fallback.tool_started_named(id, name, input, title);
         }
     }
     pub fn tool_finished(
@@ -4363,16 +4402,17 @@ impl TurnDisplay {
                     _ => input,
                 };
                 let number = self.numbers.get(id).copied();
-                let short = super::tool_view::numbered(super::tool_view::finished(
+                let title = self.tool_titles.get(id).map(String::as_str);
+                let short = super::tool_view::numbered(super::tool_view::titled(super::tool_view::finished(
                     name,
                     label_input,
                     output,
                     failed,
                     elapsed,
                     self.workspace.as_deref(),
-                ), number);
+                ), name, title, failed), number);
                 if name != "TodoWrite" {
-                    let full = super::tool_view::numbered(super::tool_view::expanded_block(name, label_input, output, failed, elapsed, self.workspace.as_deref()), number);
+                    let full = super::tool_view::numbered(super::tool_view::titled(super::tool_view::expanded_block(name, label_input, output, failed, elapsed, self.workspace.as_deref()), name, title, failed), number);
                     if let Some(task) = super::tool_view::background_shell_id(name, output, failed) {
                         let _ = live.updates.send(Update::BackgroundFinished(id.into(), short, full, task));
                     } else {
@@ -4385,7 +4425,7 @@ impl TurnDisplay {
             let _ = live.updates.send(Update::Copy(
                 self.numbers[id],
                 super::tool_view::copy_command(name, input),
-                super::tool_view::result_text(output),
+                super::tool_view::named_result_text(name, output),
             ));
             if name == "ExitPlanMode" && !failed {
                 if let Ok(value) = serde_json::from_str::<Value>(output) {

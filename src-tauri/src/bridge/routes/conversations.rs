@@ -453,6 +453,15 @@ struct PermissionRequest {
     behavior: Option<String>,
 }
 
+async fn conversation_bash_session(Path(id): Path<String>, State(state): State<AppState>) -> Json<serde_json::Value> {
+    Json(serde_json::json!({"allowed": state.permission_manager.bash_session_allowed(&id)}))
+}
+
+async fn conversation_bash_session_revoke(Path(id): Path<String>, State(state): State<AppState>) -> Json<serde_json::Value> {
+    state.permission_manager.set_bash_session_allowed(&id, false);
+    Json(serde_json::json!({"allowed": false}))
+}
+
 async fn conversation_permission_handler(
     Path(id): Path<String>,
     State(state): State<AppState>,
@@ -465,7 +474,7 @@ async fn conversation_permission_handler(
         drop(pool);
         let tool = req.tool_use_id.as_deref().ok_or(StatusCode::BAD_REQUEST)?;
         let behavior = req.behavior.as_deref().ok_or(StatusCode::BAD_REQUEST)?;
-        if !matches!(behavior, "allow" | "deny") { return Err(StatusCode::BAD_REQUEST); }
+        if !matches!(behavior, "allow" | "deny" | "allow_session") { return Err(StatusCode::BAD_REQUEST); }
         return engine.resume_scoped_answer(&id, &req.request_id, tool, behavior.into(), true).await
             .map(Json).map_err(|_| StatusCode::CONFLICT);
     }
@@ -475,6 +484,7 @@ async fn conversation_permission_handler(
         .unwrap_or_default();
 
     let behavior = req.behavior.unwrap_or_else(|| "allow".to_string());
+    if behavior == "allow_session" { return Err(StatusCode::NOT_IMPLEMENTED); }
 
     let updated_input = pending.and_then(|p| p.get("input").cloned());
 
@@ -564,6 +574,7 @@ pub fn routes() -> Router<AppState> {
         .route("/api/conversations/{id}/answer", post(conversation_answer_handler))
         .route("/api/conversations/{id}/pending-questions", get(conversation_pending_questions))
         .route("/api/conversations/{id}/permission", post(conversation_permission_handler))
+        .route("/api/conversations/{id}/bash-session", get(conversation_bash_session).delete(conversation_bash_session_revoke))
         .route("/api/conversations/{id}/warm", post(conversation_warm_handler))
         .route("/api/conversations/{id}/context-size", get(conversation_context_size))
         .route("/api/conversations/{id}/generation-status", get(conversation_generation_status))

@@ -38,6 +38,8 @@ export interface ChatMessage {
   id?: string;
   role?: string;
   content?: string;
+  /** Optimistic copy of a message steered into the running turn. */
+  pendingSteer?: boolean;
   thinking?: string;
   created_at?: string;
   files?: Array<{ id: string; name: string; url: string }>;

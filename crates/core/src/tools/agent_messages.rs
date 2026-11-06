@@ -478,7 +478,7 @@ mod tests {
     #[test]
     fn team_names_broadcast_requests_and_timeouts_use_live_inbox() {
         use crate::{runtime::SessionStore, services::session_messages as live, services::teams};
-        std::env::set_var("CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS", "1");
+        std::env::set_var("DEEPSEEK_CODE_EXPERIMENTAL_AGENT_TEAMS", "1");
         let temp = tempfile::tempdir().unwrap();
         let data = temp.path().join("data");
         let workspace = temp.path().join("project");

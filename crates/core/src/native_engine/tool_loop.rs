@@ -106,6 +106,7 @@ pub enum EngineEvent {
         tool_name: String,
         tool_input: Value,
         text_before: String,
+        display_title: Option<String>,
     },
     ToolArgDelta {
         tool_use_id: String,
@@ -257,16 +258,16 @@ fn tool_batches(calls: &[PendingToolCall]) -> Vec<&[PendingToolCall]> {
     batches
 }
 
-/// Like the reference CLI's CLAUDE_CODE_MAX_TOOL_USE_CONCURRENCY, default 10.
+/// Like the reference CLI's DEEPSEEK_CODE_MAX_TOOL_USE_CONCURRENCY, default 10.
 fn max_tool_concurrency() -> usize {
-    std::env::var("CLAUDE_CODE_MAX_TOOL_USE_CONCURRENCY").ok().and_then(|value| value.parse().ok()).filter(|value| *value > 0).unwrap_or(10)
+    std::env::var("DEEPSEEK_CODE_MAX_TOOL_USE_CONCURRENCY").ok().and_then(|value| value.parse().ok()).filter(|value| *value > 0).unwrap_or(10)
 }
 
 enum CallStep {
     /// The call ended during its checks, or was a tool that runs inside them.
     Finished((Value, String, bool)),
     /// A builtin that passed every check and only has to run, with these arguments.
-    Builtin(Value),
+    Builtin(Value, bool),
 }
 
 struct PreparedCall {
@@ -739,7 +740,7 @@ impl ToolLoopExecutor {
         let prepared = Box::pin(self.prepare_tool_call(name, input, id)).await;
         let ran = match prepared.step {
             CallStep::Finished(result) => result,
-            CallStep::Builtin(input) => self.run_prepared_builtin(name, &input, id).await,
+            CallStep::Builtin(input, approved) => self.run_prepared_builtin(name, &input, id, approved).await,
         };
         self.complete_tool_call(name, id, prepared.pre_contexts, ran).await
     }
@@ -760,7 +761,7 @@ impl ToolLoopExecutor {
         let mut pending: Vec<std::pin::Pin<Box<dyn std::future::Future<Output = Option<Result<Value>>> + Send + '_>>> = Vec::new();
         for (call, prepared) in calls.iter().zip(&prepared) {
             pending.push(match &prepared.step {
-                CallStep::Builtin(input) => Box::pin(async { Some(self.run_builtin(&call.name, input, &cwd).await) }),
+                CallStep::Builtin(input, approved) => Box::pin(async { Some(self.run_builtin(&call.name, input, &cwd, *approved).await) }),
                 CallStep::Finished(_) => Box::pin(async { None }),
             });
         }
@@ -769,20 +770,20 @@ impl ToolLoopExecutor {
         for ((call, prepared), run) in calls.iter().zip(prepared).zip(runs) {
             let ran = match (prepared.step, run) {
                 (CallStep::Finished(result), _) => result,
-                (CallStep::Builtin(input), Some(result)) => {
+                (CallStep::Builtin(input, _), Some(result)) => {
                     let (output, failed) = self.finish_builtin(&call.name, &input, &call.id, result);
                     (input, output, failed)
                 }
-                (CallStep::Builtin(_), None) => unreachable!("every prepared builtin ran"),
+                (CallStep::Builtin(_, _), None) => unreachable!("every prepared builtin ran"),
             };
             results.push(self.complete_tool_call(&call.name, &call.id, prepared.pre_contexts, ran).await);
         }
         results
     }
 
-    async fn run_prepared_builtin(&mut self, name: &str, input: &Value, id: &str) -> (Value, String, bool) {
+    async fn run_prepared_builtin(&mut self, name: &str, input: &Value, id: &str, approved: bool) -> (Value, String, bool) {
         let cwd = self.get_workspace_cwd().to_owned();
-        let result = self.run_builtin(name, input, &cwd).await;
+        let result = self.run_builtin(name, input, &cwd, approved).await;
         let (output, failed) = self.finish_builtin(name, input, id, result);
         (input.clone(), output, failed)
     }
@@ -1018,7 +1019,7 @@ impl ToolLoopExecutor {
     /// Runs a built-in tool. While a sandboxed command with a domain
     /// allowlist runs, hosts outside the list are put to the user, as in the
     /// reference CLI; "don't ask again" saves a SandboxNetwork(domain:) rule.
-    async fn run_builtin(&self, tool_name: &str, tool_input: &Value, cwd: &str) -> Result<Value> {
+    async fn run_builtin(&self, tool_name: &str, tool_input: &Value, cwd: &str, approved: bool) -> Result<Value> {
         let input = shell_state_input(
             tool_name,
             &self.tool_run_input(tool_name, tool_input),
@@ -1035,24 +1036,33 @@ impl ToolLoopExecutor {
             .filter(|_| tool_input["dangerouslyDisableSandbox"] != true)
             .and_then(crate::tools::sandbox::register_asker);
         // Boxed: tool futures are large and this runs nested inside delegated children.
-        let mut run = Box::pin(crate::tools::path_scope::with_permissions(
-            self.permission_manager.clone(),
-            crate::tools::path_scope::approved_auto_call(
-                tool_name,
-                &input,
-                cwd,
-                execute_builtin_tool(
+        let edit_session = crate::permissions::PermissionManager::is_file_edit_tool(tool_name)
+            .then(|| self.conv_id.clone())
+            .flatten();
+        let mut run = Box::pin(crate::tools::path_scope::with_edit_session(
+            edit_session,
+            crate::tools::path_scope::with_permissions(
+                self.permission_manager.clone(),
+                crate::tools::path_scope::approved_auto_call(
                     tool_name,
-                    input.clone(),
+                    &input,
                     cwd,
-                    &self.provider,
-                    &self.event_tx,
-                    self.search_config_path.as_deref(),
-                    self.skill_shell_active,
+                    approved,
+                    execute_builtin_tool(
+                        tool_name,
+                        input.clone(),
+                        cwd,
+                        &self.provider,
+                        &self.event_tx,
+                        self.search_config_path.as_deref(),
+                        self.skill_shell_active,
+                    ),
                 ),
             ),
         ));
-        let Some((_guard, mut questions)) = asker else { return run.await };
+        let Some((_guard, mut questions)) = asker else {
+            return run.await;
+        };
         loop {
             tokio::select! {
                 result = &mut run => return result,
@@ -1062,6 +1072,16 @@ impl ToolLoopExecutor {
                 }
             }
         }
+    }
+
+    async fn task_display_title(&self, name: &str, input: &Value) -> Option<String> {
+        if !matches!(name, "TaskOutput" | "TaskGet" | "TaskStop") { return None; }
+        let root = self.search_config_path.as_ref()?.parent()?.to_owned();
+        let session = self.conv_id.clone()?;
+        let input = input.clone();
+        tokio::time::timeout(std::time::Duration::from_millis(100), tokio::task::spawn_blocking(move || {
+            crate::tools::tasks::display_title(&root, &session, &input)
+        })).await.ok()?.ok()?
     }
 
     /// The input a tool runs with: research children fetch pages as text.
@@ -1229,9 +1249,6 @@ impl ToolLoopExecutor {
             } else if pm.get_mode() == crate::permissions::PermissionMode::Auto {
                 let decision = pm.evaluate_permission(&context);
                 if !decision.classifier_eligible { return decision.result; }
-                if tool_name == "Bash" && tool_input["command"].as_str().is_some_and(crate::tools::is_dangerous_command) {
-                    return super::auto_permissions::manual_fallback(self.auto_manual_interactive, "Potentially dangerous shell command requires manual approval");
-                }
                 let Some(root) = self.search_config_path.as_deref().and_then(std::path::Path::parent) else { return super::auto_permissions::manual_fallback(self.auto_manual_interactive, "Auto classifier requires a configured data directory"); };
                 let service = match crate::services::session_messages::context(root) { Ok(service) => service, Err(_) => return super::auto_permissions::manual_fallback(self.auto_manual_interactive, "Auto classifier settings unavailable") };
                 let authorization = super::auto_permissions::authorize(&service, pm, &context, &self.provider, &self.auto_history, self.auto_manual_interactive).await
@@ -2022,7 +2039,7 @@ impl ToolLoopExecutor {
         if let Some(error) = self.unread_file_error(tool_name, tool_input) {
             return CallStep::Finished((tool_input.clone(), format!("Error: {error}"), true));
         }
-        CallStep::Builtin(tool_input.clone())
+        CallStep::Builtin(tool_input.clone(), self.approved_call.as_ref().is_some_and(|call| !call.pre_tool_hook && call.tool == tool_name && call.input == *tool_input && call.id == _tool_use_id))
     }
 
     fn file_key(&self, file_path: &str) -> std::path::PathBuf {
@@ -2489,6 +2506,7 @@ impl ToolLoopExecutor {
                                     tool_name: name.clone(),
                                     tool_input: input.clone(),
                                     text_before: full_text.clone(),
+                                    display_title: self.task_display_title(&name, &input).await,
                                 }).await;
 
                                 let concurrent = self.is_concurrency_safe(&name, &input);
@@ -2985,6 +3003,7 @@ impl ToolLoopExecutor {
                         tool_name: name.clone(),
                         tool_input: input.clone(),
                         text_before: full_text.clone(),
+                        display_title: self.task_display_title(name, &input).await,
                     }).await;
 
                     let concurrent = self.is_concurrency_safe(name, &input);

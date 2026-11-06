@@ -34,4 +34,5 @@ export async function submitBusyMessage(
   }
   const content: UserContent = files.length ? blocks : text;
   await useBusySendStore.getState().enqueue(conversationId, content, behavior === 'steer' ? 'steer' : 'next_turn');
+  return content;
 }

@@ -28,6 +28,12 @@ pub fn write_transaction(conn: &Connection) -> rusqlite::Result<rusqlite::Transa
     rusqlite::Transaction::new_unchecked(conn, rusqlite::TransactionBehavior::Immediate)
 }
 
+pub fn is_contention(error: &anyhow::Error) -> bool {
+    error.chain().any(|cause| matches!(cause.downcast_ref::<rusqlite::Error>(),
+        Some(rusqlite::Error::SqliteFailure(code, _)) if matches!(code.code,
+            rusqlite::ErrorCode::DatabaseBusy | rusqlite::ErrorCode::DatabaseLocked)))
+}
+
 pub struct DbManager {
     pool: Pool<SqliteConnectionManager>,
 }

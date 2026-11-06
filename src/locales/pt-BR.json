@@ -853,5 +853,25 @@
     "clipboard": "O navegador só permite usar a área de transferência em páginas HTTPS. Não foi possível copiar nesta página HTTP.",
     "microphone": "O navegador só permite usar o microfone em páginas HTTPS, então a entrada de voz não está disponível nesta página HTTP.",
     "hint": "Abra o DeepSeek Code via HTTPS, por exemplo por meio de um proxy reverso, para usar este recurso."
+  },
+  "shellSettings": {
+    "title": "Shell",
+    "description": "Compartilha as configurações do shell com o dcl. Alterações valem para o próximo comando e novos terminais.",
+    "toolDefault": "Shell de comandos do modelo",
+    "terminalDefault": "Shell do terminal manual",
+    "auto": "Automático (manter padrão atual)",
+    "bashPath": "Caminho do executável Bash",
+    "detected": "Detecção automática",
+    "browse": "Escolher executável",
+    "precedence": "DEEPSEEK_CODE_BASH_PATH tem prioridade. Reinicie o aplicativo e o Worker após alterar as variáveis de ambiente.",
+    "distribution": "Distribuição WSL",
+    "detectWsl": "Buscar distribuições WSL",
+    "noDistributions": "Nenhuma distribuição WSL encontrada.",
+    "wslBash": "Caminho do Bash no WSL",
+    "tool": "Shell salvo para o modelo",
+    "terminal": "Shell salvo para o terminal manual",
+    "environment": "variável de ambiente",
+    "settings": "configuração",
+    "saved": "Salvo. Novos comandos e terminais usarão estas configurações."
   }
 }

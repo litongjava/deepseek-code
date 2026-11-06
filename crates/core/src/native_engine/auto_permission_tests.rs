@@ -95,15 +95,12 @@ async fn auto_executes_only_authorized_actual_writes_and_never_creates_unresolve
         let (_, output, failed) = executor
             .execute_tool_call(
                 "Write",
-                &json!({"file_path":"approved.txt","content":"ACTUAL_INPUT"}),
+                &json!({"file_path":".bashrc","content":"ACTUAL_INPUT"}),
                 "write",
             )
             .await;
         assert_eq!(failed, decision == "deny", "{output}");
-        assert_eq!(
-            root.path().join("approved.txt").exists(),
-            decision == "allow"
-        );
+        assert_eq!(root.path().join(".bashrc").exists(), decision == "allow");
         assert_eq!(calls.load(Ordering::SeqCst), 1);
         manager.set_session_rules(
             "auto-session",
@@ -195,7 +192,7 @@ async fn auto_discards_allow_after_rule_mode_or_config_changes_and_cancellation(
             executor
                 .execute_tool_call(
                     "Write",
-                    &json!({"file_path":"must-not-exist.txt","content":"ACTUAL_INPUT"}),
+                    &json!({"file_path":".bashrc","content":"ACTUAL_INPUT"}),
                     "write",
                 )
                 .await
@@ -249,7 +246,7 @@ async fn auto_discards_allow_after_rule_mode_or_config_changes_and_cancellation(
             assert!(failed, "{output}");
             assert!(output.contains("policy changed"), "{output}");
         }
-        assert!(!root.path().join("must-not-exist.txt").exists());
+        assert!(!root.path().join(".bashrc").exists());
         assert!(waiters.lock().await.is_empty());
         server.abort();
     }
@@ -294,8 +291,8 @@ async fn auto_failure_fallback_asks_interactive_hosts_even_with_legacy_deny_poli
             auto_config::save(&context, &config).unwrap();
             let tool = crate::permissions::PermissionContext {
                 mcp_read_only: false,
-                tool_name: "Bash".into(),
-                tool_input: json!({"command":"echo fixture","shell":"powershell"}),
+                tool_name: "Write".into(),
+                tool_input: json!({"file_path":".bashrc","content":"fixture"}),
                 conversation_id: "auto-session".into(),
                 user_id: None,
                 workspace_path: Some(root.path().to_string_lossy().into_owned()),
@@ -320,7 +317,7 @@ async fn auto_failure_fallback_asks_interactive_hosts_even_with_legacy_deny_poli
             assert_eq!(calls.load(Ordering::SeqCst), attempts);
             assert_eq!(manager.auto_stats("auto-session").requests, attempts as u64);
             let mut oversized = tool.clone();
-            oversized.tool_input = json!({"command": "x".repeat(40_000)});
+            oversized.tool_input = json!({"file_path":".bashrc","content": "x".repeat(40_000)});
             let limited = crate::native_engine::auto_permissions::authorize(
                 &context,
                 &manager,
@@ -348,7 +345,7 @@ async fn auto_failure_fallback_asks_interactive_hosts_even_with_legacy_deny_poli
             assert_eq!(calls.load(Ordering::SeqCst), attempts);
             manager.set_session_rules(
                 "auto-session",
-                HashMap::from([("Bash".into(), PermissionAction::Confirm)]),
+                HashMap::from([("Write".into(), PermissionAction::Confirm)]),
             );
             let explicit = crate::native_engine::auto_permissions::authorize(
                 &context,
@@ -399,7 +396,7 @@ async fn auto_denials_do_not_limit_requests_and_success_resets_only_consecutive_
         let (_, _, failed) = executor
             .execute_tool_call(
                 "Write",
-                &json!({"file_path":"denied.txt","content":"denied"}),
+                &json!({"file_path":".bashrc","content":"denied"}),
                 &format!("write-{n}"),
             )
             .await;
@@ -407,16 +404,16 @@ async fn auto_denials_do_not_limit_requests_and_success_resets_only_consecutive_
     }
     assert_eq!(calls.load(Ordering::SeqCst), 21);
     assert_eq!(manager.auto_stats("auto-session").denied_consecutive, 21);
-    assert!(!root.path().join("denied.txt").exists());
+    assert!(!root.path().join(".bashrc").exists());
     let (_, output, failed) = executor
         .execute_tool_call(
             "Write",
-            &json!({"file_path":"approved-after-denials.txt","content":"approved"}),
+            &json!({"file_path":".profile","content":"approved"}),
             "approved-after-denials",
         )
         .await;
     assert!(!failed, "{output}");
-    assert!(root.path().join("approved-after-denials.txt").exists());
+    assert!(root.path().join(".profile").exists());
     assert_eq!(calls.load(Ordering::SeqCst), 22);
     // The outer execution loop records successful tools after dispatch.
     manager.record_tool_success("auto-session");
@@ -438,7 +435,7 @@ async fn auto_input_limit_never_counts_a_network_attempt() {
     let (_, output, failed) = executor
         .execute_tool_call(
             "Write",
-            &json!({"file_path":"too-large.txt","content":"X".repeat(8192)}),
+            &json!({"file_path":".bashrc","content":"X".repeat(8192)}),
             "write",
         )
         .await;
@@ -447,7 +444,7 @@ async fn auto_input_limit_never_counts_a_network_attempt() {
     assert_eq!(stats.requests, 0);
     assert_eq!(stats.unknown_usage_requests, 0);
     assert_eq!(stats.denied_total, 0);
-    assert!(!root.path().join("too-large.txt").exists());
+    assert!(!root.path().join(".bashrc").exists());
 }
 
 #[tokio::test]
@@ -455,7 +452,7 @@ async fn auto_rejected_classification_asks_host_and_respects_answer_for_external
     for approve in [false, true] {
         let root = tempfile::tempdir().unwrap();
         let outside = tempfile::tempdir().unwrap();
-        let file = outside.path().join("approved.txt");
+        let file = outside.path().join(".bashrc");
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let endpoint = format!("http://{}", listener.local_addr().unwrap());
         let app = Router::new().route(
@@ -536,7 +533,7 @@ async fn auto_missing_authority_and_configuration_fall_back_without_weakening_de
         let (executor, _events, manager) = executor(root.path(), "http://127.0.0.1:1");
         let mut executor = executor.with_auto_manual_interactive(interactive);
         executor.conv_id = Some("no-verified-history".into());
-        let input = json!({"file_path":"file.txt","content":"test"});
+        let input = json!({"file_path":".bashrc","content":"test"});
         let result = executor
             .check_permission("Write", &input, "no-history")
             .await;
@@ -574,9 +571,9 @@ async fn auto_dangerous_shell_keyword_asks_then_executes_only_approved_command()
     let waiters = executor.answer_waiters.clone();
     // Print the keyword, never execute a destructive command.
     let input = if cfg!(windows) {
-        json!({"shell":"powershell","command":"Write-Output 'shutdown /s /t 0'"})
+        json!({"shell":"powershell","command":"Invoke-Expression \"Write-Output 'shutdown /s /t 0'\""})
     } else {
-        json!({"shell":"sh","command":"printf '%s' 'shutdown /s /t 0'"})
+        json!({"shell":"sh","command":"eval \"printf '%s' 'shutdown /s /t 0'\""})
     };
     let pending =
         tokio::spawn(async move { executor.execute_tool_call("Bash", &input, "keyword").await });
@@ -593,4 +590,48 @@ async fn auto_dangerous_shell_keyword_asks_then_executes_only_approved_command()
     let (_, output, failed) = pending.await.unwrap();
     assert!(!failed, "{output}");
     assert!(output.contains("shutdown /s /t 0"));
+}
+
+#[tokio::test]
+async fn ordinary_auto_edits_need_neither_classifier_nor_manual_host() {
+    let root = tempfile::tempdir().unwrap();
+    let outside = tempfile::tempdir().unwrap();
+    let (mut executor, mut events, manager) = executor(root.path(), "http://127.0.0.1:1");
+    executor.search_config_path = None;
+    let notebook = outside.path().join("normal.ipynb");
+    std::fs::write(
+        &notebook,
+        json!({"nbformat":4,"nbformat_minor":5,"metadata":{},"cells":[]}).to_string(),
+    )
+    .unwrap();
+    for (tool, input) in [
+        (
+            "Write",
+            json!({"file_path":outside.path().join("normal.txt"),"content":"before"}),
+        ),
+        (
+            "Edit",
+            json!({"file_path":outside.path().join("normal.txt"),"old_string":"before","new_string":"after"}),
+        ),
+        (
+            "MultiEdit",
+            json!({"file_path":outside.path().join("normal.txt"),"edits":[{"old_string":"after","new_string":"final"}]}),
+        ),
+        ("Read", json!({"file_path":notebook})),
+        (
+            "NotebookEdit",
+            json!({"notebook_path":notebook,"edit_mode":"insert","cell_type":"markdown","new_source":"cell"}),
+        ),
+    ] {
+        let (_, output, failed) = executor.execute_tool_call(tool, &input, tool).await;
+        assert!(!failed, "{output}");
+    }
+    assert_eq!(
+        std::fs::read_to_string(outside.path().join("normal.txt")).unwrap(),
+        "final"
+    );
+    assert_eq!(manager.auto_stats("auto-session").requests, 0);
+    while let Ok(event) = events.try_recv() {
+        assert!(!matches!(event, EngineEvent::ToolPermission { .. }));
+    }
 }

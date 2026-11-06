@@ -101,7 +101,7 @@ impl ToolLoopExecutor {
         // every child agent refuse to start ("does not own this session").
         command.env_remove(crate::services::background_sessions::CONTROL_ENV).env_remove(crate::services::background_sessions::WORKER_ENV);
         let label = format!("Workflow {name}");
-        let started = crate::tools::background_shell::start(command, None, "workflow", &label, &label)?;
+        let started = crate::tools::background_shell::start(command, None, "workflow", &label, &label, None)?;
         let task_id = started["task_id"].clone();
         if task_id.is_null() { bail!("The workflow did not start: {started}"); }
         // What /workflows lists for this run.

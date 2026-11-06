@@ -41,7 +41,7 @@ pub fn is_live(session: &str) -> bool {
 /// CLI flag sets this environment variable; there is no remote gate here.
 pub fn enabled() -> bool {
     enabled_with(
-        std::env::var("CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS")
+        std::env::var("DEEPSEEK_CODE_EXPERIMENTAL_AGENT_TEAMS")
             .ok()
             .as_deref(),
     )
@@ -60,7 +60,7 @@ pub fn ensure_enabled() -> Result<()> {
     if enabled() {
         Ok(())
     } else {
-        bail!("Agent teams are disabled; set CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS=1 or pass --agent-teams")
+        bail!("Agent teams are disabled; set DEEPSEEK_CODE_EXPERIMENTAL_AGENT_TEAMS=1 or pass --agent-teams")
     }
 }
 

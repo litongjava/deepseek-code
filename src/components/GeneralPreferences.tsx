@@ -4,6 +4,7 @@ import { useI18n } from '../hooks/useI18n';
 import { openGeneralConfiguration, useGeneralSettingsStore } from '../stores/useGeneralSettingsStore';
 import PermissionModeSelector from './PermissionModeSelector';
 import LanguagePicker from './LanguagePicker';
+import ShellSettings from './ShellSettings';
 import { getErrorMessage } from '../utils/errorHelpers';
 import { hasNativeDesktop } from '../services/bridgeConnection';
 
@@ -52,6 +53,7 @@ export default function GeneralPreferences({ chatFont }: { chatFont?: React.Reac
       {(openError || settings.saveError) && <p role="alert" className="mt-2 text-sm text-red-500">{openError || settings.saveError}</p>}
       {row('permission', 'permissionDescription', <PermissionModeSelector value={settings.defaultPermissionMode} onChange={mode => settings.update({ defaultPermissionMode: mode })} className="general-permission-selector" />)}
       {row('language', null, <LanguagePicker />)}
+      <ShellSettings />
       <div className="border-b border-claude-border py-6">
         <div className="mb-4 text-[16px]">{t('settings.appearance')}</div>
         <div className="grid grid-cols-3 gap-3">

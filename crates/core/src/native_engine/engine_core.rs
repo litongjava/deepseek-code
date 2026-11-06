@@ -1107,8 +1107,11 @@ impl QueryEngine {
         }
         let mut outcome = owner.outcome.subscribe();
         if permission {
-            super::permission_response::respond(&self.permission_mailbox, request_id,
-                super::permission_response::PermissionResponse::Text(answer)).await?;
+            let response = if answer == "allow_session" {
+                anyhow::ensure!(super::permission_response::can_allow_bash_session(owner.tool_name.as_deref().unwrap_or_default(), &owner.input), "Session Bash approval is unavailable for this request");
+                super::permission_response::PermissionResponse::AllowBashForSession { updated_input: None, note: None }
+            } else { super::permission_response::PermissionResponse::Text(answer) };
+            super::permission_response::respond(&self.permission_mailbox, request_id, response).await?;
             return Ok(serde_json::json!({"ok":true,"status":"submitted"}));
         }
         {

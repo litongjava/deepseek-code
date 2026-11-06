@@ -853,5 +853,25 @@
     "clipboard": "Le navigateur n'autorise l'accès au presse-papiers que sur les pages HTTPS. La copie a échoué sur cette page HTTP.",
     "microphone": "Le navigateur n'autorise l'accès au micro que sur les pages HTTPS : la saisie vocale est indisponible sur cette page HTTP.",
     "hint": "Ouvrez DeepSeek Code en HTTPS, par exemple via un proxy inverse, pour utiliser cette fonction."
+  },
+  "shellSettings": {
+    "title": "Shell",
+    "description": "Paramètres du shell partagés avec dcl. Les changements concernent la prochaine commande et les nouveaux terminaux.",
+    "toolDefault": "Shell des commandes du modèle",
+    "terminalDefault": "Shell du terminal manuel",
+    "auto": "Automatique (conserver la valeur par défaut)",
+    "bashPath": "Chemin de l’exécutable Bash",
+    "detected": "Détection automatique",
+    "browse": "Choisir un exécutable",
+    "precedence": "DEEPSEEK_CODE_BASH_PATH est prioritaire. Redémarrez l’application et le Worker après toute modification des variables d’environnement.",
+    "distribution": "Distribution WSL",
+    "detectWsl": "Rechercher les distributions WSL",
+    "noDistributions": "Aucune distribution WSL trouvée.",
+    "wslBash": "Chemin de Bash dans WSL",
+    "tool": "Shell enregistré pour le modèle",
+    "terminal": "Shell enregistré pour le terminal manuel",
+    "environment": "variable d’environnement",
+    "settings": "configuration",
+    "saved": "Enregistré. Ces paramètres s’appliquent aux nouvelles commandes et aux nouveaux terminaux."
   }
 }

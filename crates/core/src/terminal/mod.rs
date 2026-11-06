@@ -75,12 +75,14 @@ struct ManagedSession {
     writer: Mutex<Box<dyn Write + Send>>,
     child: PtyChild,
     output: Arc<Mutex<OutputState>>,
+    wsl_guard: Option<crate::services::wsl::Guard>,
     #[cfg(windows)]
     job: TerminalJob,
 }
 
 impl ManagedSession {
     fn stop(&self) -> Result<()> {
+        if let Some(guard) = &self.wsl_guard { guard.cancel(); }
         let mut child = self.child.lock().unwrap();
         #[cfg(windows)]
         {
@@ -224,6 +226,46 @@ impl PtyManager {
         cwd: Option<String>,
         shell: Option<String>,
     ) -> Result<PtySession> {
+        let shell = shell.unwrap_or_else(|| {
+            if cfg!(windows) { "powershell.exe".into() }
+            else { std::env::var("SHELL").unwrap_or_else(|_| "/bin/bash".into()) }
+        });
+        self.create_launch(cwd, shell, Vec::new(), None).await
+    }
+
+    pub async fn create_configured_session(
+        &self,
+        cwd: Option<String>,
+        shell: Option<String>,
+        data_dir: &std::path::Path,
+    ) -> Result<PtySession> {
+        let settings = crate::services::shell_settings::load(data_dir)?;
+        if shell.is_none() && settings.terminal_default == "auto" {
+            return self.create_session(cwd, None).await;
+        }
+        // Explicit executable paths retain the terminal API's existing behavior.
+        if shell.as_deref().is_some_and(|name| name.contains(['/', '\\'])) {
+            return self.create_session(cwd, shell).await;
+        }
+        let requested = shell.as_deref().map(|name| name.strip_suffix(".exe").unwrap_or(name));
+        let resolved = settings.resolve(requested, true)?;
+        if let Some(wsl) = &resolved.wsl {
+            let cwd_path = cwd.as_ref().map(std::path::PathBuf::from).unwrap_or(std::env::current_dir()?);
+            anyhow::ensure!(cwd_path.is_dir(), "Terminal working directory does not exist");
+            let launch = crate::services::wsl::launch(wsl, &cwd_path, None).await?;
+            self.create_launch(cwd, launch.program, launch.args, Some(launch.guard)).await
+        } else {
+            self.create_launch(cwd, resolved.program, Vec::new(), None).await
+        }
+    }
+
+    async fn create_launch(
+        &self,
+        cwd: Option<String>,
+        shell: String,
+        args: Vec<String>,
+        wsl_guard: Option<crate::services::wsl::Guard>,
+    ) -> Result<PtySession> {
         let session = tokio::task::spawn_blocking(move || -> Result<ManagedSession> {
             let cwd = cwd
                 .map(std::path::PathBuf::from)
@@ -246,13 +288,6 @@ impl PtyManager {
                         .unwrap_or_else(|| path.strip_prefix(r"\\?\").unwrap_or(&path).to_owned()),
                 )
             };
-            let shell = shell.unwrap_or_else(|| {
-                if cfg!(windows) {
-                    "powershell.exe".into()
-                } else {
-                    std::env::var("SHELL").unwrap_or_else(|_| "/bin/bash".into())
-                }
-            });
             if shell.trim().is_empty() {
                 return Err(TerminalError::Invalid("Terminal shell cannot be empty".into()).into());
             }
@@ -260,6 +295,7 @@ impl PtyManager {
             let mut reader = pair.master.try_clone_reader()?;
             let writer = pair.master.take_writer()?;
             let mut command = CommandBuilder::new(&shell);
+            command.args(args);
             command.cwd(&cwd);
             command.env("TERM", "xterm-256color");
             let mut child = pair.slave.spawn_command(command)?;
@@ -344,6 +380,7 @@ impl PtyManager {
                 writer: Mutex::new(writer),
                 child,
                 output: state,
+                wsl_guard,
                 #[cfg(windows)]
                 job,
             })
@@ -529,6 +566,61 @@ mod tests {
         manager.close_session(&session.id).await.unwrap();
         assert!(manager.list_sessions().await.is_empty());
         assert!(manager.subscribe(&session.id).await.is_none());
+    }
+
+    #[cfg(windows)]
+    #[tokio::test]
+    #[ignore = "requires Git Bash and the explicitly selected dcl-linux-test WSL distribution"]
+    async fn configured_bash_and_wsl_use_real_terminals() {
+        let root = tempfile::tempdir().unwrap();
+        let directory = root.path().join("目录 space");
+        std::fs::create_dir(&directory).unwrap();
+        let manager = PtyManager::new();
+        for name in ["bash", "wsl"] {
+            let settings = crate::services::shell_settings::ShellSettings {
+                terminal_default: name.into(),
+                wsl: crate::services::shell_settings::WslSettings { distribution: Some("dcl-linux-test".into()), ..Default::default() },
+                ..Default::default()
+            };
+            crate::services::shell_settings::save(root.path(), &settings).unwrap();
+            let session = manager.create_configured_session(Some(directory.to_string_lossy().into_owned()), None, root.path()).await.unwrap();
+            manager.resize(&session.id, 100, 30).await.unwrap();
+            manager.write_input(&session.id, "printf 'CONFIGURED_%s\\n' SHELL_OK; exit 7\r").await.unwrap();
+            let subscription = manager.subscribe(&session.id).await.unwrap();
+            let mut events = subscription.replay;
+            let mut receiver = subscription.receiver;
+            let result = tokio::time::timeout(std::time::Duration::from_secs(20), async {
+                while !events.iter().any(|event| event.kind == "exit") { events.push(receiver.recv().await.unwrap()); }
+            }).await;
+            manager.close_session(&session.id).await.unwrap();
+            let text: String = events.iter().map(|event| event.data.as_str()).collect();
+            assert!(result.is_ok(), "{name} did not exit: {text}");
+            assert!(text.contains("CONFIGURED_SHELL_OK"), "{name}: {text}");
+            assert_eq!(events.last().unwrap().code, Some(7), "{name}: {text}");
+        }
+    }
+
+    #[cfg(windows)]
+    #[tokio::test]
+    #[ignore = "requires the explicitly selected dcl-linux-test WSL distribution"]
+    async fn configured_wsl_terminal_close_cancels_linux_children() {
+        let root = tempfile::tempdir().unwrap();
+        let settings = crate::services::shell_settings::ShellSettings {
+            terminal_default: "wsl".into(),
+            wsl: crate::services::shell_settings::WslSettings { distribution: Some("dcl-linux-test".into()), ..Default::default() },
+            ..Default::default()
+        };
+        crate::services::shell_settings::save(root.path(), &settings).unwrap();
+        let manager = PtyManager::new();
+        let session = manager.create_configured_session(Some(root.path().to_string_lossy().into_owned()), None, root.path()).await.unwrap();
+        manager.write_input(&session.id, "(sleep 3; printf leaked > leaked) & printf ready > ready; wait\r").await.unwrap();
+        let observed = tokio::time::timeout(std::time::Duration::from_secs(20), async {
+            while !root.path().join("ready").exists() { tokio::time::sleep(std::time::Duration::from_millis(25)).await; }
+        }).await;
+        manager.close_session(&session.id).await.unwrap();
+        assert!(observed.is_ok(), "WSL terminal command did not execute");
+        tokio::time::sleep(std::time::Duration::from_secs(4)).await;
+        assert!(!root.path().join("leaked").exists(), "Linux child survived terminal close");
     }
 
     #[cfg(windows)]

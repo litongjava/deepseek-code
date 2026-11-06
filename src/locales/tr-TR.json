@@ -853,5 +853,25 @@
     "clipboard": "Tarayıcı panoya yalnızca HTTPS sayfalarında erişime izin verir. Bu HTTP sayfasında kopyalama başarısız oldu.",
     "microphone": "Tarayıcı mikrofona yalnızca HTTPS sayfalarında erişime izin verir; bu nedenle bu HTTP sayfasında sesli giriş kullanılamaz.",
     "hint": "Bu özelliği kullanmak için DeepSeek Code'u HTTPS üzerinden, örneğin bir ters proxy aracılığıyla açın."
+  },
+  "shellSettings": {
+    "title": "Kabuk",
+    "description": "Kabuk ayarları dcl ile paylaşılır. Değişiklikler sonraki komuta ve yeni terminallere uygulanır.",
+    "toolDefault": "Model komut kabuğu",
+    "terminalDefault": "Manuel terminal kabuğu",
+    "auto": "Otomatik (mevcut varsayılanı koru)",
+    "bashPath": "Bash çalıştırılabilir dosya yolu",
+    "detected": "Otomatik algılama",
+    "browse": "Çalıştırılabilir dosya seç",
+    "precedence": "DEEPSEEK_CODE_BASH_PATH önceliklidir. Ortam değişkenlerini değiştirdikten sonra uygulamayı ve Worker’ı yeniden başlatın.",
+    "distribution": "WSL dağıtımı",
+    "detectWsl": "WSL dağıtımlarını bul",
+    "noDistributions": "WSL dağıtımı bulunamadı.",
+    "wslBash": "WSL içindeki Bash yolu",
+    "tool": "Kaydedilen model komut kabuğu",
+    "terminal": "Kaydedilen manuel terminal kabuğu",
+    "environment": "ortam değişkeni",
+    "settings": "yapılandırma",
+    "saved": "Kaydedildi. Yeni komutlar ve terminaller bu ayarları kullanır."
   }
 }

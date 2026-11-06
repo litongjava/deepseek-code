@@ -853,5 +853,25 @@
     "clipboard": "Der Browser erlaubt den Zugriff auf die Zwischenablage nur auf HTTPS-Seiten. Das Kopieren ist auf dieser HTTP-Seite fehlgeschlagen.",
     "microphone": "Der Browser erlaubt den Mikrofonzugriff nur auf HTTPS-Seiten, daher ist die Spracheingabe auf dieser HTTP-Seite nicht verfügbar.",
     "hint": "Öffnen Sie DeepSeek Code über HTTPS, zum Beispiel über einen Reverse-Proxy, um diese Funktion zu nutzen."
+  },
+  "shellSettings": {
+    "title": "Shell",
+    "description": "Shell-Einstellungen mit dcl teilen. Änderungen gelten für den nächsten Befehl und neue Terminals.",
+    "toolDefault": "Shell für Modellbefehle",
+    "terminalDefault": "Shell für manuelle Terminals",
+    "auto": "Automatisch (aktuellen Standard beibehalten)",
+    "bashPath": "Pfad zur Bash-Datei",
+    "detected": "Automatisch erkannt",
+    "browse": "Programm auswählen",
+    "precedence": "DEEPSEEK_CODE_BASH_PATH hat Vorrang. Nach Änderungen an Umgebungsvariablen App und Worker neu starten.",
+    "distribution": "WSL-Distribution",
+    "detectWsl": "WSL-Distributionen suchen",
+    "noDistributions": "Keine WSL-Distributionen gefunden.",
+    "wslBash": "Bash-Pfad innerhalb von WSL",
+    "tool": "Gespeicherte Shell für Modellbefehle",
+    "terminal": "Gespeicherte Shell für manuelle Terminals",
+    "environment": "Umgebungsvariable",
+    "settings": "Konfiguration",
+    "saved": "Gespeichert. Neue Befehle und Terminals verwenden diese Einstellungen."
   }
 }

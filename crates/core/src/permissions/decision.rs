@@ -6,6 +6,7 @@ pub enum DecisionOrigin {
     ExplicitRule,
     ToolSetting,
     PlanBoundary,
+    NetworkBoundary,
     SavedApproval,
     Mode,
     DefaultRead,

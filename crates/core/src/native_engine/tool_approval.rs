@@ -83,6 +83,17 @@ impl ToolLoopExecutor {
         input: &Value,
         pre_tool_hook: bool,
     ) -> Result<()> {
+        self.validate_approved_input_with_edit_grant(tool, input, pre_tool_hook, false)
+            .await
+    }
+
+    async fn validate_approved_input_with_edit_grant(
+        &self,
+        tool: &str,
+        input: &Value,
+        pre_tool_hook: bool,
+        edit_grant: bool,
+    ) -> Result<()> {
         anyhow::ensure!(input.is_object(), "Approved tool input must be an object");
         let mut schema = self
             .tool_definitions()
@@ -119,10 +130,19 @@ impl ToolLoopExecutor {
         };
         for key in path_keys {
             if let Some(path) = input.get(*key).and_then(Value::as_str) {
+                if edit_grant && crate::permissions::PermissionManager::is_file_edit_tool(tool) {
+                    continue;
+                }
                 // The exact session plan document has a separate checked runtime-data scope.
                 if self.is_plan_document_tool(tool, input)
                     || self.permission_manager.as_ref().is_some_and(|manager| {
                         manager.get_mode() == crate::permissions::PermissionMode::BypassPermissions
+                            || (manager.get_mode() != crate::permissions::PermissionMode::PlanMode
+                                && crate::permissions::PermissionManager::is_file_edit_tool(tool)
+                                && self
+                                    .conv_id
+                                    .as_deref()
+                                    .is_some_and(|session| manager.edit_session_allowed(session)))
                             || (manager.get_mode() == crate::permissions::PermissionMode::Auto
                                 && matches!(tool, "Read" | "Glob" | "Grep" | "ListDir" | "Write" | "Edit" | "MultiEdit" | "NotebookEdit"))
                             || (manager.get_mode() == crate::permissions::PermissionMode::PlanMode
@@ -186,6 +206,7 @@ impl ToolLoopExecutor {
         crate::native_engine::permission_response::register_owner(
             &request_id, self.conv_id.as_deref().unwrap_or_default(), id, "permission", input.clone(), None, None, None,
         );
+        crate::native_engine::permission_response::set_owner_tool(&request_id, tool);
         if let Some(hooks) = &self.hooks {
             if let Err(error) = hooks.run(crate::services::tool_hooks::HookEvent::Notification,
                 self.conv_id.as_deref().unwrap_or_default(),
@@ -254,6 +275,10 @@ impl ToolLoopExecutor {
                 }
             }
         };
+        let local_fetch = tool == "WebFetch"
+            && crate::permissions::web_fetch::requires_local_approval(
+                input["url"].as_str().unwrap_or_default(),
+            );
         let mut granted_by_mode = false;
         let response = async {
             tokio::pin!(hook);
@@ -271,9 +296,11 @@ impl ToolLoopExecutor {
                         } else if !self.permission_host_available {
                             // Headless runs have nobody to ask. Deny the call like an unanswered
                             // prompt so the model can continue, instead of aborting the turn.
-                            let message = format!(
+                            let message = if local_fetch {
+                                "Local WebFetch was not granted: no approval host is available in this session.".into()
+                            } else { format!(
                                 "Permission to use {tool} was not granted: no approval host is available in this session. Grant it with --allowed-tools or a permission mode."
-                            );
+                            ) };
                             let _ = crate::native_engine::permission_response::respond(
                                 &self.permission_mailbox,
                                 &request_id,
@@ -284,7 +311,7 @@ impl ToolLoopExecutor {
                     },
                     _ = tokio::time::sleep(Duration::from_millis(250)) => {
                         self.sync_parent_permission_mode();
-                        if self.permission_manager.as_ref().is_some_and(|manager| manager.get_mode() == crate::permissions::PermissionMode::BypassPermissions) {
+                        if !local_fetch && self.permission_manager.as_ref().is_some_and(|manager| manager.get_mode() == crate::permissions::PermissionMode::BypassPermissions) {
                             granted_by_mode = true;
                             break Ok(PermissionResponse::Allow { updated_input: None, commit: None, note: None });
                         }
@@ -359,8 +386,46 @@ impl ToolLoopExecutor {
         } else {
             response
         };
+        let edit_grant = matches!(&response, PermissionResponse::AllowEditsForSession { .. });
+        let response = match response {
+            PermissionResponse::AllowEditsForSession {
+                updated_input,
+                note,
+            } => {
+                anyhow::ensure!(
+                    crate::permissions::PermissionManager::is_file_edit_tool(tool),
+                    "Session edit approval is unavailable for this tool"
+                );
+                let manager = self
+                    .permission_manager
+                    .clone()
+                    .ok_or_else(|| anyhow!("Session permission manager unavailable"))?;
+                let session = self
+                    .conv_id
+                    .clone()
+                    .ok_or_else(|| anyhow!("Session identity unavailable"))?;
+                PermissionResponse::Allow {
+                    updated_input,
+                    note,
+                    commit: Some(Box::new(move || {
+                        manager.set_edit_session_allowed(&session, true);
+                        Ok(())
+                    })),
+                }
+            }
+            PermissionResponse::AllowBashForSession { updated_input, note } => {
+                let actual = updated_input.as_ref().filter(|value| !value.as_object().is_some_and(|fields| fields.is_empty())).unwrap_or(input);
+                anyhow::ensure!(crate::native_engine::permission_response::can_allow_bash_session(tool, actual), "Session Bash approval excludes dangerous or invalid commands");
+                let manager = self.permission_manager.clone().ok_or_else(|| anyhow!("Session permission manager unavailable"))?;
+                let session = self.conv_id.clone().ok_or_else(|| anyhow!("Session identity unavailable"))?;
+                PermissionResponse::Allow { updated_input, note, commit: Some(Box::new(move || { manager.set_bash_session_allowed(&session, true); Ok(()) })) }
+            }
+            other => other,
+        };
         match response {
-            PermissionResponse::Text(_) => unreachable!("text answer normalized"),
+            PermissionResponse::Text(_)
+            | PermissionResponse::AllowBashForSession { .. }
+            | PermissionResponse::AllowEditsForSession { .. } => unreachable!("answer normalized"),
             PermissionResponse::Deny { message, interrupt } => {
                 if interrupt {
                     *self
@@ -383,7 +448,12 @@ impl ToolLoopExecutor {
                 if matches!(tool, "EnterPlanMode" | "ExitPlanMode" | "plan_mode") {
                     anyhow::ensure!(actual == *input, "Plan transitions require their original reviewed input and dedicated plan choice");
                 }
-                self.validate_approved_input(tool, &actual).await?;
+                if edit_grant {
+                    self.validate_approved_input_with_edit_grant(tool, &actual, false, true)
+                        .await?;
+                } else {
+                    self.validate_approved_input(tool, &actual).await?;
+                }
                 anyhow::ensure!(
                     self.permission_manager
                         .as_ref()
@@ -421,7 +491,7 @@ impl ToolLoopExecutor {
     ) -> (Value, String, bool) {
         match self.prepare_after_confirmation(tool, input, id, message).await {
             CallStep::Finished(result) => result,
-            CallStep::Builtin(actual) => self.run_prepared_builtin(tool, &actual, id).await,
+            CallStep::Builtin(actual, approved) => self.run_prepared_builtin(tool, &actual, id, approved).await,
         }
     }
 

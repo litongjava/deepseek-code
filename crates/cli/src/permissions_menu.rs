@@ -57,6 +57,8 @@ pub async fn run(session: &mut Session) -> Result<()> {
     let mut tab = 1;
     let mut selected = 0;
     loop {
+        let edits_allowed = crate::permission_commands::edit_session(session, false).await?;
+        let bash_allowed = crate::permission_commands::bash_session(session, false).await?;
         let mut rules = crate::permission_commands::load(session)?;
         let launch = session.permissions.launch_rules(&session.id);
         let (subtitle, entries, editable): (String, Vec<Entry>, Vec<Option<String>>) = match tab {
@@ -69,6 +71,23 @@ pub async fn run(session: &mut Session) -> Result<()> {
                 let wanted = action(tab).unwrap();
                 let mut entries = vec![Entry { title: "Add a new rule\u{2026}".into(), detail: String::new() }];
                 let mut editable = vec![None];
+                if tab == 1 {
+                    entries.push(Entry { title: format!("Session Bash: {}", if bash_allowed { "allowed" } else { "not granted" }), detail: "Dangerous commands excluded; select to revoke".into() });
+                    editable.push(None);
+                    entries.push(Entry {
+                        title: format!(
+                            "Session edits: {}",
+                            if edits_allowed {
+                                "allowed"
+                            } else {
+                                "not granted"
+                            }
+                        ),
+                        detail: "Protected paths and explicit rules still apply; select to revoke"
+                            .into(),
+                    });
+                    editable.push(None);
+                }
                 let mut session_rules: Vec<_> = rules.iter().filter(|(_, action)| **action == wanted).map(|(rule, _)| rule.clone()).collect();
                 session_rules.sort();
                 for rule in session_rules {
@@ -135,6 +154,10 @@ pub async fn run(session: &mut Session) -> Result<()> {
                         }
                         Err(error) => eprintln!("Invalid rule: {error:#}"),
                     }
+                } else if tab == 1 && index == 1 {
+                    crate::permission_commands::bash_session(session, true).await?;
+                } else if tab == 1 && index == 2 {
+                    crate::permission_commands::edit_session(session, true).await?;
                 } else if tab == 5 && index == 0 {
                     if let Some(path) = text_input("Add directory:", "")?.filter(|path| !path.is_empty()) {
                         if let Err(error) = crate::session_commands::handle("/add-dir", &path, &session.paths.clone(), session).await {

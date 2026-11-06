@@ -82,6 +82,7 @@ enum Mode {
     Text,
     RuntimeAgent,
     Approval,
+    ProtectedApproval,
     DelayedApproval,
     Question,
     Plan,
@@ -138,7 +139,10 @@ async fn respond(State(state): State<Fixture>, Json(body): Json<Value>) -> Respo
         || matches!(state.mode, Mode::Tool | Mode::TruncatedTool)
         || matches!(state.mode, Mode::ReadThenTruncated) && count == 1
         || matches!(state.mode, Mode::ReadThenText) && count == 1
-        || matches!(state.mode, Mode::Approval | Mode::DelayedApproval | Mode::Question) && count % 2 == 1;
+        || matches!(
+            state.mode,
+            Mode::Approval | Mode::ProtectedApproval | Mode::DelayedApproval | Mode::Question
+        ) && count % 2 == 1;
     let stream = if state.anthropic {
         let mut frames = vec![
             json!({"type":"message_start","message":{"id":"fixture","type":"message","role":"assistant","content":[],"model":"fixture","usage":{"input_tokens":10,"output_tokens":0}}}),
@@ -170,11 +174,14 @@ async fn respond(State(state): State<Fixture>, Json(body): Json<Value>) -> Respo
                     "ExitPlanMode",
                     json!({"plan":"APPROVED_PLAN_SENTINEL"}),
                 )
-            } else if matches!(state.mode, Mode::Approval | Mode::DelayedApproval) {
+            } else if matches!(
+                state.mode,
+                Mode::Approval | Mode::ProtectedApproval | Mode::DelayedApproval
+            ) {
                 (
                     "write-1",
                     "Write",
-                    json!({"file_path":"approval.txt","content":"ACTUAL_APPROVED_WRITE"}),
+                    json!({"file_path":if matches!(state.mode, Mode::ProtectedApproval) {".bashrc"} else {"approval.txt"},"content":"ACTUAL_APPROVED_WRITE"}),
                 )
             } else {
                 ("read-1", "Read", json!({"file_path":"fixture.txt"}))
@@ -214,8 +221,11 @@ async fn respond(State(state): State<Fixture>, Json(body): Json<Value>) -> Respo
                 json!({"tool_calls":[{"index":0,"id":"question-1","type":"function","function":{"name":"AskUserQuestion","arguments":json!({"question":"Which language?","description":"Choose the implementation language","multiSelect":true,"options":[{"label":"Rust","description":"Memory safety"},{"label":"Go","description":"Fast compilation"}]}).to_string()}}]})
             } else if matches!(state.mode, Mode::Plan) {
                 json!({"tool_calls":[{"index":0,"id":"plan-1","type":"function","function":{"name":"ExitPlanMode","arguments":json!({"plan":"APPROVED_PLAN_SENTINEL"}).to_string()}}]})
-            } else if matches!(state.mode, Mode::Approval | Mode::DelayedApproval) {
-                json!({"tool_calls":[{"index":0,"id":"write-1","type":"function","function":{"name":"Write","arguments":json!({"file_path":"approval.txt","content":"ACTUAL_APPROVED_WRITE"}).to_string()}}]})
+            } else if matches!(
+                state.mode,
+                Mode::Approval | Mode::ProtectedApproval | Mode::DelayedApproval
+            ) {
+                json!({"tool_calls":[{"index":0,"id":"write-1","type":"function","function":{"name":"Write","arguments":json!({"file_path":if matches!(state.mode, Mode::ProtectedApproval) {".bashrc"} else {"approval.txt"},"content":"ACTUAL_APPROVED_WRITE"}).to_string()}}]})
             } else {
                 json!({"tool_calls":[{"index":0,"id":"read-1","type":"function","function":{"name":"Read","arguments":"{\"file_path\":\"fixture.txt\"}"}}]})
             }
@@ -1087,7 +1097,7 @@ async fn sdk_plan_clear_boundary_survives_actual_cli_process() {
 #[tokio::test]
 async fn auto_extension_uses_explicit_classifier_and_requests_host_on_failure() {
     for outcome in ["allow", "deny", "malformed", "unavailable", "timeout"] {
-        let server = Server::start(false, Mode::Approval).await;
+        let server = Server::start(false, Mode::ProtectedApproval).await;
         let root = tempfile::tempdir().unwrap();
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let endpoint = format!("http://{}", listener.local_addr().unwrap());
@@ -1156,10 +1166,7 @@ async fn auto_extension_uses_explicit_classifier_and_requests_host_on_failure() 
                 break;
             }
         }
-        assert_eq!(
-            root.path().join("approval.txt").exists(),
-            outcome == "allow"
-        );
+        assert_eq!(root.path().join(".bashrc").exists(), outcome == "allow");
         assert_eq!(requests.lock().unwrap().len(), 1);
         assert_eq!(host_requests, usize::from(outcome != "allow"));
         assert!(client.finish().await.0.success());

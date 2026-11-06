@@ -26,7 +26,7 @@ fn hooks(root: &std::path::Path, retry: Value) -> HookRunner {
     };
     let output = json!({"hookSpecificOutput":{"hookEventName":"PermissionDenied","retry":retry}})
         .to_string();
-    let updated = json!({"hookSpecificOutput":{"hookEventName":"PreToolUse","updatedInput":{"file_path":"actual.txt","content":"EXACT_FINAL_INPUT"}}}).to_string();
+    let updated = json!({"hookSpecificOutput":{"hookEventName":"PreToolUse","updatedInput":{"file_path":".bashrc","content":"EXACT_FINAL_INPUT"}}}).to_string();
     std::fs::write(root.join("settings.json"), json!({"hooks":{
         "PreToolUse":[{"matcher":"^Write$","hooks":[{"type":"command","command":emit(&updated),"shell":if cfg!(windows){"powershell"}else{"sh"}}]}],
         "PermissionDenied":[{"matcher":"^Write$","hooks":[{"type":"command","command":capture+&emit(&output),"shell":if cfg!(windows){"powershell"}else{"sh"}}]}]
@@ -137,7 +137,7 @@ async fn permission_denied_retry_on_both_protocols_and_owned_children_reclassifi
                         let index = requests.len();
                         if index == 1 {
                             assert!(
-                                !workspace.join("actual.txt").exists(),
+                                !workspace.join(".bashrc").exists(),
                                 "hook retry must not execute the denied call"
                             );
                         }
@@ -238,7 +238,7 @@ async fn permission_denied_retry_on_both_protocols_and_owned_children_reclassifi
             );
             assert!(!root.path().join("original.txt").exists());
             assert_eq!(
-                std::fs::read_to_string(root.path().join("actual.txt")).unwrap(),
+                std::fs::read_to_string(root.path().join(".bashrc")).unwrap(),
                 "EXACT_FINAL_INPUT"
             );
             let records = std::fs::read_to_string(root.path().join("denials.jsonl")).unwrap();
@@ -368,7 +368,7 @@ async fn permission_denied_provenance_excludes_static_asks_failures_and_stale_re
         let tool = PermissionContext {
             mcp_read_only: false,
             tool_name: "Write".into(),
-            tool_input: json!({"file_path":"never-executed.txt","content":"EXACT_FINAL_INPUT"}),
+            tool_input: json!({"file_path":".profile","content":"EXACT_FINAL_INPUT"}),
             conversation_id: "fixture".into(),
             workspace_path: Some(root.path().to_string_lossy().into_owned()),
             user_id: None,
@@ -405,7 +405,7 @@ async fn permission_denied_provenance_excludes_static_asks_failures_and_stale_re
                 1
             }
         );
-        assert!(!root.path().join("never-executed.txt").exists());
+        assert!(!root.path().join(".profile").exists());
         server.abort();
     }
 }

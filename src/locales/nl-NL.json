@@ -853,5 +853,25 @@
     "clipboard": "De browser staat klembordtoegang alleen toe op HTTPS-pagina's. Kopiëren is mislukt op deze HTTP-pagina.",
     "microphone": "De browser staat microfoontoegang alleen toe op HTTPS-pagina's, dus spraakinvoer is niet beschikbaar op deze HTTP-pagina.",
     "hint": "Open DeepSeek Code via HTTPS, bijvoorbeeld via een reverse proxy, om deze functie te gebruiken."
+  },
+  "shellSettings": {
+    "title": "Shell",
+    "description": "Deel shellinstellingen met dcl. Wijzigingen gelden voor de volgende opdracht en nieuwe terminals.",
+    "toolDefault": "Shell voor modelopdrachten",
+    "terminalDefault": "Shell voor handmatige terminals",
+    "auto": "Automatisch (huidige standaard behouden)",
+    "bashPath": "Pad naar Bash-programma",
+    "detected": "Automatisch gedetecteerd",
+    "browse": "Programma kiezen",
+    "precedence": "DEEPSEEK_CODE_BASH_PATH heeft voorrang. Herstart de app en Worker na wijzigingen aan omgevingsvariabelen.",
+    "distribution": "WSL-distributie",
+    "detectWsl": "WSL-distributies zoeken",
+    "noDistributions": "Geen WSL-distributies gevonden.",
+    "wslBash": "Bash-pad binnen WSL",
+    "tool": "Opgeslagen shell voor modelopdrachten",
+    "terminal": "Opgeslagen shell voor handmatige terminals",
+    "environment": "omgevingsvariabele",
+    "settings": "configuratie",
+    "saved": "Opgeslagen. Nieuwe opdrachten en terminals gebruiken deze instellingen."
   }
 }
