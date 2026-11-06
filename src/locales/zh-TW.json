@@ -847,5 +847,11 @@
     "tokenHint": "在 GitHub 的 Settings > Developer settings > Personal access tokens 中建立具 repo 權限的權杖。",
     "connect": "連線",
     "tokenFailed": "GitHub 拒絕了這個權杖。"
+  },
+  "secureContext": {
+    "title": "需要 HTTPS",
+    "clipboard": "瀏覽器只允許 HTTPS 頁面使用剪貼簿，目前的 HTTP 頁面複製失敗。",
+    "microphone": "瀏覽器只允許 HTTPS 頁面使用麥克風，目前的 HTTP 頁面無法語音輸入。",
+    "hint": "透過 HTTPS 存取 DeepSeek Code（例如經由反向代理）即可使用此功能。"
   }
 }

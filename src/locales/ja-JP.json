@@ -847,5 +847,11 @@
     "tokenHint": "GitHub の Settings > Developer settings > Personal access tokens で repo スコープのトークンを作成してください。",
     "connect": "接続",
     "tokenFailed": "GitHub がこのトークンを拒否しました。"
+  },
+  "secureContext": {
+    "title": "HTTPS が必要です",
+    "clipboard": "ブラウザーは HTTPS ページでのみクリップボードを利用できます。この HTTP ページではコピーできませんでした。",
+    "microphone": "ブラウザーは HTTPS ページでのみマイクを利用できるため、この HTTP ページでは音声入力を使えません。",
+    "hint": "この機能を使うには、リバースプロキシなどを通じて HTTPS で DeepSeek Code を開いてください。"
   }
 }

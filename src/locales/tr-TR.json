@@ -847,5 +847,11 @@
     "tokenHint": "GitHub Settings > Developer settings > Personal access tokens bölümünde repo kapsamlı bir belirteç oluşturun.",
     "connect": "Bağlan",
     "tokenFailed": "GitHub bu belirteci reddetti."
+  },
+  "secureContext": {
+    "title": "HTTPS gerekli",
+    "clipboard": "Tarayıcı panoya yalnızca HTTPS sayfalarında erişime izin verir. Bu HTTP sayfasında kopyalama başarısız oldu.",
+    "microphone": "Tarayıcı mikrofona yalnızca HTTPS sayfalarında erişime izin verir; bu nedenle bu HTTP sayfasında sesli giriş kullanılamaz.",
+    "hint": "Bu özelliği kullanmak için DeepSeek Code'u HTTPS üzerinden, örneğin bir ters proxy aracılığıyla açın."
   }
 }

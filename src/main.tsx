@@ -1,9 +1,11 @@
+import './platform/randomUUID';
 import React from 'react';
 import ReactDOM from 'react-dom/client';
 import App from './App';
 import { loginEnabled } from './utils/login';
 import BackendStartup from './components/BackendStartup';
 import ServerGate from './features/server/ServerGate';
+import SecureContextDialog from './components/SecureContextDialog';
 import './index.css';
 import { initializeGeneralSettings, useGeneralSettingsStore } from './stores/useGeneralSettingsStore';
 import { useChatStore } from './stores/useChatStore';
@@ -156,6 +158,7 @@ try {
           <App />
         </BackendStartup>
       </ServerGate>
+      <SecureContextDialog />
     </ErrorBoundary>,
   );
   console.log('[Main] App rendered successfully');

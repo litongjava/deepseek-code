@@ -847,5 +847,11 @@
     "tokenHint": "Buat token dengan cakupan repo di GitHub Settings > Developer settings > Personal access tokens.",
     "connect": "Hubungkan",
     "tokenFailed": "GitHub menolak token ini."
+  },
+  "secureContext": {
+    "title": "Memerlukan HTTPS",
+    "clipboard": "Browser hanya mengizinkan akses papan klip di halaman HTTPS. Gagal menyalin di halaman HTTP ini.",
+    "microphone": "Browser hanya mengizinkan akses mikrofon di halaman HTTPS, sehingga input suara tidak tersedia di halaman HTTP ini.",
+    "hint": "Buka DeepSeek Code melalui HTTPS, misalnya lewat reverse proxy, untuk menggunakan fitur ini."
   }
 }

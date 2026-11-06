@@ -847,5 +847,11 @@
     "tokenHint": "GitHub Settings > Developer settings > Personal access tokens में repo स्कोप वाला टोकन बनाएँ।",
     "connect": "कनेक्ट करें",
     "tokenFailed": "GitHub ने यह टोकन अस्वीकार कर दिया।"
+  },
+  "secureContext": {
+    "title": "HTTPS आवश्यक है",
+    "clipboard": "ब्राउज़र केवल HTTPS पेजों पर क्लिपबोर्ड की अनुमति देता है। इस HTTP पेज पर कॉपी नहीं हो सका।",
+    "microphone": "ब्राउज़र केवल HTTPS पेजों पर माइक्रोफ़ोन की अनुमति देता है, इसलिए इस HTTP पेज पर वॉइस इनपुट उपलब्ध नहीं है।",
+    "hint": "इस सुविधा का उपयोग करने के लिए DeepSeek Code को HTTPS पर खोलें, उदाहरण के लिए रिवर्स प्रॉक्सी के माध्यम से।"
   }
 }

@@ -847,5 +847,11 @@
     "tokenHint": "Utwórz token z zakresem repo w GitHub Settings > Developer settings > Personal access tokens.",
     "connect": "Połącz",
     "tokenFailed": "GitHub odrzucił ten token."
+  },
+  "secureContext": {
+    "title": "Wymagany HTTPS",
+    "clipboard": "Przeglądarka zezwala na dostęp do schowka tylko na stronach HTTPS. Kopiowanie na tej stronie HTTP nie powiodło się.",
+    "microphone": "Przeglądarka zezwala na dostęp do mikrofonu tylko na stronach HTTPS, więc wprowadzanie głosowe jest niedostępne na tej stronie HTTP.",
+    "hint": "Otwórz DeepSeek Code przez HTTPS, na przykład za pomocą odwrotnego proxy, aby korzystać z tej funkcji."
   }
 }

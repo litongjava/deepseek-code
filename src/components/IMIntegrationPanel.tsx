@@ -6,6 +6,7 @@ import {
   UserCheck, UserX, Unlock
 } from 'lucide-react';
 import { useI18n } from '../hooks/useI18n';
+import { copyToClipboard as copyText } from '../utils/clipboard';
 import {
   imAPI, bridgeAPI, ImConnectionInfo, ImPlatformConfig, ImConnectionStatus,
   ImMessageStats, ImPermissionMode, ImPairingRequest, ImErrorLog,
@@ -553,12 +554,9 @@ const IMIntegrationPanel: React.FC<IMIntegrationPanelProps> = ({ onClose }) => {
   };
 
   const copyToClipboard = async (text: string, key: string) => {
-    try {
-      await navigator.clipboard.writeText(text);
+    if (await copyText(text)) {
       setCopied(prev => ({ ...prev, [key]: true }));
       setTimeout(() => setCopied(prev => ({ ...prev, [key]: false })), 2000);
-    } catch (e) {
-      console.error('Copy failed:', e);
     }
   };
 

@@ -2,6 +2,7 @@ import React, { useCallback, useEffect, useRef, useState } from 'react';
 import { invokeDesktop as invoke } from '../platform/native';
 import { Mic, X, Loader2 } from 'lucide-react';
 import { useI18n } from '../hooks/useI18n';
+import { requireSecureContext } from '../platform/secureContext';
 
 export type VoiceInputStatus = 'idle' | 'listening' | 'processing' | 'done' | 'error';
 interface VoiceInputProps { onResult: (text: string) => void; onClose: () => void; isOpen: boolean }
@@ -40,6 +41,7 @@ const VoiceInput: React.FC<VoiceInputProps> = ({ onResult, onClose, isOpen }) =>
   }, [isOpen, cancel]);
 
   const start = async () => {
+    if (!requireSecureContext('microphone')) return;
     cancel();
     const current = generation.current;
     setError(''); setSeconds(0); setStatus('processing');

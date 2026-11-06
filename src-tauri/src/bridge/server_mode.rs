@@ -34,6 +34,9 @@ pub struct ServeOptions {
     pub tls: Option<TlsFiles>,
     /// TLS is terminated by a reverse proxy in front of this server.
     pub behind_https_proxy: bool,
+    /// The operator accepts plain HTTP on a network address. The access token and
+    /// session cookie then cross the network unencrypted.
+    pub allow_http: bool,
 }
 
 impl ServeOptions {
@@ -48,6 +51,7 @@ impl ServeOptions {
             allowed_origins: Vec::new(),
             tls: None,
             behind_https_proxy: false,
+            allow_http: false,
         }
     }
 
@@ -60,7 +64,13 @@ impl ServeOptions {
         self.tls.is_some() || self.behind_https_proxy
     }
 
-    /// Exposing command execution to a network requires a token and HTTPS.
+    /// Whether a network address is served over plain HTTP by explicit choice.
+    pub fn is_plain_http_on_network(&self) -> bool {
+        !self.host.is_loopback() && !self.is_https()
+    }
+
+    /// Exposing command execution to a network requires a token and HTTPS,
+    /// unless plain HTTP was explicitly allowed.
     pub fn validate(&self) -> anyhow::Result<()> {
         if self.host.is_loopback() {
             return Ok(());
@@ -68,10 +78,11 @@ impl ServeOptions {
         if self.access_token.is_none() {
             anyhow::bail!("Listening on {} requires an access token", self.host);
         }
-        if !self.is_https() {
+        if !self.is_https() && !self.allow_http {
             anyhow::bail!(
                 "Listening on {} requires HTTPS: pass --tls-cert and --tls-key, \
-                 or --behind-https-proxy when a reverse proxy terminates TLS",
+                 --behind-https-proxy when a reverse proxy terminates TLS, \
+                 or --allow-http to accept plain HTTP",
                 self.host
             );
         }
@@ -157,6 +168,21 @@ impl AccessPolicy {
         let host = headers.get(header::HOST).and_then(|v| v.to_str().ok()).unwrap_or("");
         let origin_host = origin.split_once("://").map(|(_, rest)| rest).unwrap_or("");
         !host.is_empty() && origin_host.eq_ignore_ascii_case(host)
+    }
+}
+
+/// HTTP/2 carries the host in the `:authority` pseudo-header, which hyper exposes as
+/// the URI authority rather than a `Host` header. Copy it into `Host` so the origin
+/// check and handlers that build URLs see the same value over HTTP/1.1 and HTTP/2.
+pub fn fill_host_from_authority(headers: &mut HeaderMap, uri: &axum::http::Uri) {
+    if headers.contains_key(header::HOST) {
+        return;
+    }
+    if let Some(value) = uri
+        .authority()
+        .and_then(|authority| header::HeaderValue::from_str(authority.as_str()).ok())
+    {
+        headers.insert(header::HOST, value);
     }
 }
 
@@ -337,6 +363,24 @@ mod tests {
     }
 
     #[test]
+    fn http2_authority_counts_as_host_for_same_origin() {
+        let p = policy(true);
+        let uri: axum::http::Uri = "https://dev.example:8443/assets/index.js".parse().unwrap();
+        let mut h2 = headers(&[("origin", "https://dev.example:8443")]);
+        assert!(matches!(p.check(&Method::GET, "/assets/index.js", &h2), Access::Deny(StatusCode::FORBIDDEN, _)));
+        fill_host_from_authority(&mut h2, &uri);
+        assert_eq!(p.check(&Method::GET, "/assets/index.js", &h2), Access::Allow);
+        // An explicit Host header is kept as sent.
+        let mut h1 = headers(&[("host", "other.example"), ("origin", "https://dev.example:8443")]);
+        fill_host_from_authority(&mut h1, &uri);
+        assert!(matches!(p.check(&Method::GET, "/assets/index.js", &h1), Access::Deny(StatusCode::FORBIDDEN, _)));
+        // Origin-form URIs (HTTP/1.1 without Host) add nothing.
+        let mut bare = HeaderMap::new();
+        fill_host_from_authority(&mut bare, &"/".parse().unwrap());
+        assert!(bare.get(header::HOST).is_none());
+    }
+
+    #[test]
     fn desktop_mode_keeps_loopback_rules() {
         let p = policy(false);
         let none = HeaderMap::new();
@@ -355,6 +399,14 @@ mod tests {
         assert!(options.validate().is_err());
         options.behind_https_proxy = true;
         assert!(options.validate().is_ok());
+        assert!(!options.is_plain_http_on_network());
+        options.behind_https_proxy = false;
+        options.allow_http = true;
+        assert!(options.validate().is_ok());
+        assert!(options.is_plain_http_on_network());
+        // Plain HTTP never waives the access token.
+        options.access_token = None;
+        assert!(options.validate().is_err());
     }
 
     #[test]

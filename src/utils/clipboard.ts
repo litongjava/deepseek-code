@@ -1,6 +1,9 @@
+import { reportInsecureContext } from '../platform/secureContext';
+
 /**
  * Copies text to clipboard, compatible with HTTP and HTTPS environments.
  * Uses navigator.clipboard if available, otherwise falls back to document.execCommand.
+ * When both fail on a page served over plain HTTP, shows the HTTPS dialog.
  */
 export async function copyToClipboard(text: string): Promise<boolean> {
     if (!text) return false;
@@ -32,9 +35,11 @@ export async function copyToClipboard(text: string): Promise<boolean> {
 
         const successful = document.execCommand('copy');
         document.body.removeChild(textArea);
+        if (!successful) reportInsecureContext('clipboard');
         return successful;
     } catch (err) {
         console.error('Fallback clipboard copy failed', err);
+        reportInsecureContext('clipboard');
         return false;
     }
 }

@@ -1,7 +1,8 @@
 //! Standalone Bridge server: the Desktop backend and its web UI without a window.
 //!
 //! Browsers, the mobile apps and other clients connect over HTTP(S). It listens on
-//! loopback by default; listening on a network address requires HTTPS, and every
+//! loopback by default; listening on a network address requires HTTPS (or an
+//! explicit `--allow-http`), and every
 //! API request needs the access token stored in `<data dir>/server-token`.
 
 use deepseek_desktop_tauri_lib::bridge::server_mode::{self, ServeOptions, TlsFiles};
@@ -24,6 +25,8 @@ Serves the DeepSeek Code web UI and API.
   --tls-cert <file>          PEM certificate chain for HTTPS
   --tls-key <file>           PEM private key for HTTPS
   --behind-https-proxy       A reverse proxy terminates HTTPS in front of this server
+  --allow-http               Allow plain HTTP on a network address (the token is
+                             sent unencrypted; clipboard and microphone need HTTPS)
   --allow-origin <origin>    Also accept API calls from this origin (repeatable)
   --dangerously-skip-permissions
                              Start in bypass mode
@@ -67,6 +70,7 @@ fn parse_args(args: Vec<String>) -> anyhow::Result<Args> {
             "--tls-cert" => cert = Some(PathBuf::from(value("--tls-cert")?)),
             "--tls-key" => key = Some(PathBuf::from(value("--tls-key")?)),
             "--behind-https-proxy" => parsed.options.behind_https_proxy = true,
+            "--allow-http" => parsed.options.allow_http = true,
             "--allow-origin" => parsed.options.allowed_origins.push(value("--allow-origin")?),
             "--dangerously-skip-permissions" | "--allow-dangerously-skip-permissions" => {
                 parsed.permissions.push(arg)
@@ -156,6 +160,12 @@ fn run(mut args: Args) -> anyhow::Result<()> {
             ip => ip.to_string(),
         };
         println!("DeepSeek Code server: {scheme}://{host}:{}", args.options.port);
+        if args.options.is_plain_http_on_network() {
+            eprintln!(
+                "Warning: serving plain HTTP on a network address. The access token and session \
+                 cookie are sent unencrypted; use HTTPS outside trusted networks."
+            );
+        }
         if created {
             println!("Access token (saved in {}): {token}", token_file.display());
         } else {
@@ -190,6 +200,17 @@ mod tests {
         assert_eq!(args.options.port, 8443);
         assert!(args.options.is_https());
         assert!(args.options.allowed_origins.contains(&"https://app.example".to_string()));
+    }
+
+    #[test]
+    fn allow_http_permits_plain_http_on_a_network_address() {
+        let mut args = parse(&["--host", "0.0.0.0", "--allow-http"]).unwrap();
+        args.options.access_token = Some("access-token-0123456789".into());
+        assert!(!args.options.is_https());
+        assert!(args.options.validate().is_ok());
+        let mut args = parse(&["--host", "0.0.0.0"]).unwrap();
+        args.options.access_token = Some("access-token-0123456789".into());
+        assert!(args.options.validate().is_err());
     }
 
     #[test]

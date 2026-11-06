@@ -6,6 +6,7 @@ import {
   type MouseEvent,
 } from "react";
 import { createPortal } from "react-dom";
+import { copyToClipboard } from "../../utils/clipboard";
 import { useLocation, useNavigate } from "react-router-dom";
 import {
   Archive,
@@ -369,7 +370,7 @@ export default function SidebarProjects({
         "@tauri-apps/plugin-clipboard-manager"
       );
       await writeText(text);
-    } else await navigator.clipboard.writeText(text);
+    } else if (!(await copyToClipboard(text))) return;
     setNotice(t("sidebar.copied"));
   };
   const copyLink = (chat: SidebarChat) =>

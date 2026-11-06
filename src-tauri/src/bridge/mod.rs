@@ -457,9 +457,11 @@ impl BridgeServer {
             allowed_origins: allowed_origin_strings.clone(),
         });
         let policy_for_middleware = policy.clone();
-        let auth_middleware = middleware::from_fn(move |req: Request<axum::body::Body>, next: Next| {
+        let auth_middleware = middleware::from_fn(move |mut req: Request<axum::body::Body>, next: Next| {
             let policy = policy_for_middleware.clone();
             async move {
+                let uri = req.uri().clone();
+                server_mode::fill_host_from_authority(req.headers_mut(), &uri);
                 match policy.check(req.method(), req.uri().path(), req.headers()) {
                     server_mode::Access::Allow => next.run(req).await,
                     server_mode::Access::Deny(status, message) => {

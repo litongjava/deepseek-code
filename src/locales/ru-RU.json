@@ -847,5 +847,11 @@
     "tokenHint": "Создайте токен с областью repo в GitHub Settings > Developer settings > Personal access tokens.",
     "connect": "Подключить",
     "tokenFailed": "GitHub отклонил этот токен."
+  },
+  "secureContext": {
+    "title": "Требуется HTTPS",
+    "clipboard": "Браузер разрешает доступ к буферу обмена только на страницах HTTPS. Не удалось скопировать на этой HTTP-странице.",
+    "microphone": "Браузер разрешает доступ к микрофону только на страницах HTTPS, поэтому голосовой ввод на этой HTTP-странице недоступен.",
+    "hint": "Откройте DeepSeek Code по HTTPS, например через обратный прокси, чтобы использовать эту функцию."
   }
 }

@@ -847,5 +847,11 @@
     "tokenHint": "Erstellen Sie unter GitHub Settings > Developer settings > Personal access tokens ein Token mit dem Bereich repo.",
     "connect": "Verbinden",
     "tokenFailed": "GitHub hat dieses Token abgelehnt."
+  },
+  "secureContext": {
+    "title": "HTTPS erforderlich",
+    "clipboard": "Der Browser erlaubt den Zugriff auf die Zwischenablage nur auf HTTPS-Seiten. Das Kopieren ist auf dieser HTTP-Seite fehlgeschlagen.",
+    "microphone": "Der Browser erlaubt den Mikrofonzugriff nur auf HTTPS-Seiten, daher ist die Spracheingabe auf dieser HTTP-Seite nicht verfügbar.",
+    "hint": "Öffnen Sie DeepSeek Code über HTTPS, zum Beispiel über einen Reverse-Proxy, um diese Funktion zu nutzen."
   }
 }

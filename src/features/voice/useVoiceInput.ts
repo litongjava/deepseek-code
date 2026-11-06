@@ -1,5 +1,6 @@
 import { useState, useCallback } from 'react';
 import { useChatStore } from '../../stores/useChatStore';
+import { requireSecureContext } from '../../platform/secureContext';
 export function useVoiceInput(adjustTextareaHeight: () => void) {
   const setInputText = useChatStore(s => s.setInputText);
   const [showVoicePanel, setShowVoicePanel] = useState(false);
@@ -7,7 +8,9 @@ export function useVoiceInput(adjustTextareaHeight: () => void) {
     setInputText(previous => previous ? `${previous} ${text}` : text);
     adjustTextareaHeight();
   }, [setInputText, adjustTextareaHeight]);
-  const openVoicePanel = useCallback(() => setShowVoicePanel(true), []);
+  const openVoicePanel = useCallback(() => {
+    if (requireSecureContext('microphone')) setShowVoicePanel(true);
+  }, []);
   const closeVoicePanel = useCallback(() => setShowVoicePanel(false), []);
   return { isListening: false, speechSupported: true, showVoicePanel, toggleVoiceInput: openVoicePanel,
     handleVoiceResult, openVoicePanel, closeVoicePanel };

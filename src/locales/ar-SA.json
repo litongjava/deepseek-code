@@ -847,5 +847,11 @@
     "tokenHint": "أنشئ رمزًا بنطاق repo من GitHub Settings > Developer settings > Personal access tokens.",
     "connect": "اتصال",
     "tokenFailed": "رفض GitHub هذا الرمز."
+  },
+  "secureContext": {
+    "title": "يلزم HTTPS",
+    "clipboard": "يسمح المتصفح باستخدام الحافظة في صفحات HTTPS فقط. تعذّر النسخ في صفحة HTTP هذه.",
+    "microphone": "يسمح المتصفح باستخدام الميكروفون في صفحات HTTPS فقط، لذا لا يتوفر الإدخال الصوتي في صفحة HTTP هذه.",
+    "hint": "افتح DeepSeek Code عبر HTTPS، مثلًا من خلال وكيل عكسي، لاستخدام هذه الميزة."
   }
 }

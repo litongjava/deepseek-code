@@ -847,5 +847,11 @@
     "tokenHint": "Créez un jeton avec la portée repo dans GitHub Settings > Developer settings > Personal access tokens.",
     "connect": "Connecter",
     "tokenFailed": "GitHub a refusé ce jeton."
+  },
+  "secureContext": {
+    "title": "HTTPS requis",
+    "clipboard": "Le navigateur n'autorise l'accès au presse-papiers que sur les pages HTTPS. La copie a échoué sur cette page HTTP.",
+    "microphone": "Le navigateur n'autorise l'accès au micro que sur les pages HTTPS : la saisie vocale est indisponible sur cette page HTTP.",
+    "hint": "Ouvrez DeepSeek Code en HTTPS, par exemple via un proxy inverse, pour utiliser cette fonction."
   }
 }

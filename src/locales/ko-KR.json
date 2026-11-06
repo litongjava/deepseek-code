@@ -847,5 +847,11 @@
     "tokenHint": "GitHub의 Settings > Developer settings > Personal access tokens에서 repo 범위의 토큰을 만드세요.",
     "connect": "연결",
     "tokenFailed": "GitHub에서 이 토큰을 거부했습니다."
+  },
+  "secureContext": {
+    "title": "HTTPS 필요",
+    "clipboard": "브라우저는 HTTPS 페이지에서만 클립보드를 허용합니다. 이 HTTP 페이지에서는 복사하지 못했습니다.",
+    "microphone": "브라우저는 HTTPS 페이지에서만 마이크를 허용하므로 이 HTTP 페이지에서는 음성 입력을 사용할 수 없습니다.",
+    "hint": "이 기능을 사용하려면 리버스 프록시 등을 통해 HTTPS로 DeepSeek Code를 여세요."
   }
 }

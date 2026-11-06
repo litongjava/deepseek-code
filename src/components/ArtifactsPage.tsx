@@ -1,6 +1,7 @@
 import React, { useState, useMemo, useEffect, useRef } from 'react';
 import { ArrowLeft, Copy, Check, ExternalLink, RefreshCw, Loader2, FileCode, MessageSquare } from 'lucide-react';
 import inspirationsData from '../data/inspirations.json';
+import { copyToClipboard } from '../utils/clipboard';
 import { buildArtifactHtml, loadArtifactCode } from '../utils/artifactRenderer';
 import { getUserArtifacts, getArtifactContent } from '../api';
 import { useI18n } from '../hooks/useI18n';
@@ -112,7 +113,7 @@ const ArtifactsPage: React.FC<ArtifactsPageProps> = ({ onTryPrompt }) => {
   }, [items, activeFilter]);
 
   const handleCopyPrompt = async (prompt: string) => {
-    await navigator.clipboard.writeText(prompt);
+    if (!(await copyToClipboard(prompt))) return;
     setCopied(true);
     setTimeout(() => setCopied(false), 2000);
   };

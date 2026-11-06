@@ -847,5 +847,11 @@
     "tokenHint": "สร้างโทเค็นที่มีขอบเขต repo ใน GitHub Settings > Developer settings > Personal access tokens",
     "connect": "เชื่อมต่อ",
     "tokenFailed": "GitHub ปฏิเสธโทเค็นนี้"
+  },
+  "secureContext": {
+    "title": "ต้องใช้ HTTPS",
+    "clipboard": "เบราว์เซอร์อนุญาตให้ใช้คลิปบอร์ดเฉพาะในหน้า HTTPS เท่านั้น คัดลอกในหน้า HTTP นี้ไม่สำเร็จ",
+    "microphone": "เบราว์เซอร์อนุญาตให้ใช้ไมโครโฟนเฉพาะในหน้า HTTPS เท่านั้น จึงใช้การป้อนด้วยเสียงในหน้า HTTP นี้ไม่ได้",
+    "hint": "เปิด DeepSeek Code ผ่าน HTTPS เช่น ผ่านพร็อกซีย้อนกลับ เพื่อใช้ฟีเจอร์นี้"
   }
 }

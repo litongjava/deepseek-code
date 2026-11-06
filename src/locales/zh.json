@@ -866,5 +866,11 @@
     "tokenHint": "在 GitHub 的 Settings > Developer settings > Personal access tokens 中创建带 repo 权限的令牌。",
     "connect": "连接",
     "tokenFailed": "GitHub 拒绝了这个令牌。"
+  },
+  "secureContext": {
+    "title": "需要 HTTPS",
+    "clipboard": "浏览器只允许 HTTPS 页面使用剪贴板，当前 HTTP 页面复制失败。",
+    "microphone": "浏览器只允许 HTTPS 页面使用麦克风，当前 HTTP 页面无法语音输入。",
+    "hint": "通过 HTTPS 访问 DeepSeek Code（例如经反向代理）即可使用此功能。"
   }
 }

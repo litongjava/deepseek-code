@@ -1,5 +1,6 @@
 import React, { useState, useEffect } from 'react';
 import { X, Copy, Check, ExternalLink } from 'lucide-react';
+import { copyToClipboard as copyText } from '../utils/clipboard';
 
 interface CodeLoginModalProps {
   isOpen: boolean;
@@ -24,8 +25,8 @@ export const CodeLoginModal: React.FC<CodeLoginModalProps> = ({
     }
   }, [isOpen]);
 
-  const copyToClipboard = (text: string, field: string) => {
-    navigator.clipboard.writeText(text);
+  const copyToClipboard = async (text: string, field: string) => {
+    if (!(await copyText(text))) return;
     setCopiedField(field);
     setTimeout(() => setCopiedField(null), 2000);
   };

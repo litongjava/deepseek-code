@@ -847,5 +847,11 @@
     "tokenHint": "Maak een token met het bereik repo via GitHub Settings > Developer settings > Personal access tokens.",
     "connect": "Verbinden",
     "tokenFailed": "GitHub heeft dit token geweigerd."
+  },
+  "secureContext": {
+    "title": "HTTPS vereist",
+    "clipboard": "De browser staat klembordtoegang alleen toe op HTTPS-pagina's. Kopiëren is mislukt op deze HTTP-pagina.",
+    "microphone": "De browser staat microfoontoegang alleen toe op HTTPS-pagina's, dus spraakinvoer is niet beschikbaar op deze HTTP-pagina.",
+    "hint": "Open DeepSeek Code via HTTPS, bijvoorbeeld via een reverse proxy, om deze functie te gebruiken."
   }
 }

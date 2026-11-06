@@ -1,5 +1,6 @@
 import { useEffect, useId, useRef, useState } from 'react';
 import MarkdownRenderer from '../../components/MarkdownRenderer';
+import { copyToClipboard } from '../../utils/clipboard';
 import './PlanApprovalDialog.css';
 
 export interface PlanApprovalRequest {
@@ -79,12 +80,8 @@ export default function PlanApprovalDialog({ request, active = true, onSubmit, o
   }
 
   async function copy(text: string) {
-    try {
-      await navigator.clipboard.writeText(text);
-      setNotice('已复制');
-    } catch {
-      setError('复制失败，请重试。');
-    }
+    if (await copyToClipboard(text)) setNotice('已复制');
+    else setError('复制失败，请重试。');
   }
 
   return <div className="plan-review-backdrop">

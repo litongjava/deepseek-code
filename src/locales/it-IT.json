@@ -847,5 +847,11 @@
     "tokenHint": "Crea un token con l'ambito repo in GitHub Settings > Developer settings > Personal access tokens.",
     "connect": "Connetti",
     "tokenFailed": "GitHub ha rifiutato questo token."
+  },
+  "secureContext": {
+    "title": "HTTPS richiesto",
+    "clipboard": "Il browser consente l'accesso agli appunti solo sulle pagine HTTPS. La copia non è riuscita su questa pagina HTTP.",
+    "microphone": "Il browser consente l'accesso al microfono solo sulle pagine HTTPS, quindi l'input vocale non è disponibile su questa pagina HTTP.",
+    "hint": "Apri DeepSeek Code tramite HTTPS, ad esempio con un reverse proxy, per usare questa funzione."
   }
 }

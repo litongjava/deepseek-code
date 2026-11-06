@@ -5,6 +5,7 @@ import {
   RotateCcw
 } from 'lucide-react';
 import type { DesignCanvasRef } from './DesignCanvas';
+import { copyToClipboard } from '../../utils/clipboard';
 
 interface DesignPanelProps {
   canvasRef: React.RefObject<DesignCanvasRef | null>;
@@ -163,10 +164,10 @@ const DesignPanel: React.FC<DesignPanelProps> = ({
     });
   };
 
-  const handleCopyState = () => {
+  const handleCopyState = async () => {
     if (canvasRef.current) {
       const content = canvasRef.current.getPreviewContent();
-      navigator.clipboard.writeText(JSON.stringify({ styleConfig, content }));
+      if (!(await copyToClipboard(JSON.stringify({ styleConfig, content })))) return;
       setCopied(true);
       setTimeout(() => setCopied(false), 2000);
     }

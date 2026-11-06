@@ -847,5 +847,11 @@
     "tokenHint": "Tạo mã có quyền repo trong GitHub Settings > Developer settings > Personal access tokens.",
     "connect": "Kết nối",
     "tokenFailed": "GitHub đã từ chối mã này."
+  },
+  "secureContext": {
+    "title": "Cần HTTPS",
+    "clipboard": "Trình duyệt chỉ cho phép dùng bộ nhớ tạm trên trang HTTPS. Không thể sao chép trên trang HTTP này.",
+    "microphone": "Trình duyệt chỉ cho phép dùng micrô trên trang HTTPS, vì vậy không thể nhập bằng giọng nói trên trang HTTP này.",
+    "hint": "Hãy mở DeepSeek Code qua HTTPS, ví dụ thông qua reverse proxy, để dùng tính năng này."
   }
 }

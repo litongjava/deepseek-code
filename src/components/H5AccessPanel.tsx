@@ -1,6 +1,7 @@
 import React, { useState, useEffect, useCallback } from 'react';
 import { h5API, H5TokenInfo } from '../utils/tauriAPI';
 import QRCode from './QRCode';
+import { copyToClipboard } from '../utils/clipboard';
 import { useI18n } from '../hooks/useI18n';
 import { detectBridgePort } from '../api';
 import { bridgeOrigin } from '../services/bridgeConnection';
@@ -137,12 +138,9 @@ const H5AccessPanel: React.FC<H5AccessPanelProps> = ({ conversationId, onOpenCha
   };
 
   const handleCopyUrl = async (url: string) => {
-    try {
-      await navigator.clipboard.writeText(url);
+    if (await copyToClipboard(url)) {
       setCopiedUrl(true);
       setTimeout(() => setCopiedUrl(false), 2000);
-    } catch {
-      // fallback not needed
     }
   };
 

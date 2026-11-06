@@ -866,5 +866,11 @@
     "tokenHint": "Create a token with the repo scope in GitHub Settings > Developer settings > Personal access tokens.",
     "connect": "Connect",
     "tokenFailed": "GitHub rejected this token."
+  },
+  "secureContext": {
+    "title": "HTTPS required",
+    "clipboard": "The browser only allows clipboard access on HTTPS pages. Copying failed on this HTTP page.",
+    "microphone": "The browser only allows microphone access on HTTPS pages, so voice input is unavailable on this HTTP page.",
+    "hint": "Open DeepSeek Code over HTTPS, for example through a reverse proxy, to use this feature."
   }
 }
