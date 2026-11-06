@@ -38,6 +38,7 @@ pub mod sandbox;
 mod findings;
 mod content_compat;
 mod utf8;
+mod shell_discovery;
 mod bash_process;
 pub mod background_shell;
 pub(crate) mod path_scope;
@@ -681,19 +682,9 @@ async fn bash_keeps_its_directory_and_resets_outside_the_project() {
     assert_eq!(tool_bash_async(serde_json::json!({"command":"pwd -P"}), cwd).await.unwrap()["stdout"].as_str().unwrap().trim(), cwd);
 }
 
-/// cmd: appends the directory bookkeeping with `&`, the weakest operator, so
-/// the command parses as before. `%^errorlevel%` survives the command line's
-/// first expansion and `call` expands it after the command ran, which keeps
-/// the command's exit code.
+/// A batch file captures errorlevel on a separate parsed line before bookkeeping.
 fn cmd_cwd_footer(command: &str, state: &str) -> String {
-    format!("{command} & call set \"__dcl_rc=%^errorlevel%\" & cd > \"{state}\" & call exit /b %^__dcl_rc%")
-}
-
-#[cfg(test)]
-#[test]
-fn cmd_footer_appends_without_regrouping_the_command() {
-    let footer = cmd_cwd_footer("chcp 65001 >nul & cd sub && dir || echo no", r"C:\data\shell-cwd\s");
-    assert_eq!(footer, r#"chcp 65001 >nul & cd sub && dir || echo no & call set "__dcl_rc=%^errorlevel%" & cd > "C:\data\shell-cwd\s" & call exit /b %^__dcl_rc%"#);
+    format!("@echo off\r\n{command}\r\nset \"__dcl_rc=%errorlevel%\"\r\ncd > \"{state}\"\r\nexit /b %__dcl_rc%\r\n")
 }
 
 /// PowerShell keeps its directory too; runs where pwsh is installed.
@@ -1053,17 +1044,14 @@ async fn tool_bash_async(input: serde_json::Value, cwd: &str) -> Result<serde_js
                 }));
             }
         }
-        _ => { // bash (default)
-            if let Some(bash_path) = find_shell("bash") {
-                (bash_path, "-c".to_string())
-            } else if cfg!(target_os = "windows") {
-                ("cmd".to_string(), "/C".to_string())
-            } else {
-                ("sh".to_string(), "-c".to_string())
-            }
+        "bash" => {
+            let path = find_shell("bash").ok_or_else(|| anyhow!("Bash shell not found; install Git for Windows or configure shell.bashPath"))?;
+            (path, "-c".to_string())
         }
+        _ => return Err(anyhow!("Unsupported shell: {shell_type}")),
     };
 
+    let actual_shell = Path::new(&shell).file_stem().and_then(|name| name.to_str()).unwrap_or(shell_type);
     let mut cmd = match input.get("__sandbox").filter(|policy| policy.is_object()) {
         Some(policy) if input["dangerouslyDisableSandbox"] == true => {
             anyhow::ensure!(policy["allow_unsandboxed"] != false, "Running commands outside the sandbox is disabled by sandbox.allowUnsandboxedCommands");
@@ -1152,11 +1140,20 @@ async fn tool_bash_async(input: serde_json::Value, cwd: &str) -> Result<serde_js
         ),
         None => command,
     };
+    // Keep the batch file alive until the foreground command finishes.
+    let mut cmd_script = None;
+    if cmd_shell && cwd_state.is_some() {
+        use std::io::Write;
+        let mut script = tempfile::Builder::new().suffix(".cmd").tempfile()?;
+        script.write_all(command.as_bytes())?;
+        cmd_script = Some(script);
+    }
     #[cfg(windows)]
     if flag == "/C" {
         // cmd uses its own quoting rules; normal Windows argument escaping adds
         // literal backslashes before quotes in nested PowerShell file paths.
-        cmd.args(["/D", "/S", "/C"]).raw_arg(format!("\"{command}\""));
+        let argument = cmd_script.as_ref().map(|file| format!("\"{}\"", file.path().display())).unwrap_or_else(|| command.clone());
+        cmd.args(["/D", "/S", "/C"]).raw_arg(format!("\"{argument}\""));
     } else {
         cmd.arg(&flag).arg(&command);
     }
@@ -1169,12 +1166,15 @@ async fn tool_bash_async(input: serde_json::Value, cwd: &str) -> Result<serde_js
     // Background commands are named by their description, or the command.
     let description = input["description"].as_str().filter(|text| !text.trim().is_empty()).unwrap_or(&command).to_owned();
     if background {
-        background_shell::start(cmd, input.get("timeout").filter(|value| !value.is_null()).map(|_| timeout), shell_type, &description, &command)
+        let mut result = background_shell::start(cmd, input.get("timeout").filter(|value| !value.is_null()).map(|_| timeout), actual_shell, &description, &command)?;
+        result["shell_path"] = serde_json::json!(shell);
+        Ok(result)
     } else {
         // Ctrl+B can move it to the background while it runs.
         let filtered = input.get("__sandbox").filter(|policy| policy["network_rules"].is_object() && input["dangerouslyDisableSandbox"] != true);
         let mark = filtered.map(sandbox::blocked_mark);
-        let mut result = background_shell::run_foreground(cmd, timeout, shell_type, &description, &command).await?;
+        let mut result = background_shell::run_foreground(cmd, timeout, actual_shell, &description, &command).await?;
+        result["shell_path"] = serde_json::json!(shell);
         // Name refused hosts: an HTTPS client often reports only a reset.
         if let (Some(policy), Some(mark)) = (filtered, mark) {
             let hosts = sandbox::blocked_since(policy, mark);
@@ -1215,6 +1215,9 @@ fn windows_powershell_candidates(shell: &str, system_root: Option<&std::ffi::OsS
 }
 
 pub fn find_shell(shell_name: &str) -> Option<String> {
+    if cfg!(windows) && matches!(shell_name, "bash" | "sh") {
+        return shell_discovery::windows_git_shell(shell_name).map(|path| path.to_string_lossy().into_owned());
+    }
     #[cfg(windows)]
     if matches!(shell_name, "powershell" | "pwsh") {
         // PE lives on X:, and a Windows installation can use another drive.
