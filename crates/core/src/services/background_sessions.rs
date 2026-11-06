@@ -462,11 +462,23 @@ pub fn pending_question(root: &Path, id: &str, parent: &str) -> Result<Option<Pe
         return Ok(None);
     }
     let path = directory(root, id)?.join("pending-question.json");
-    match fs::read(path) {
-        Ok(bytes) => Ok(Some(serde_json::from_slice(&bytes)?)),
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
-        Err(error) => Err(error.into()),
+    for attempt in 0..=5 {
+        match fs::read(&path) {
+            Ok(bytes) => return Ok(Some(serde_json::from_slice(&bytes)?)),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+            // Windows can report access denied while a resolved question is being removed.
+            Err(error)
+                if cfg!(windows) && matches!(error.raw_os_error(), Some(5 | 32)) && attempt < 5 =>
+            {
+                std::thread::sleep(Duration::from_millis(10));
+            }
+            Err(error) => {
+                return Err(error)
+                    .with_context(|| format!("Reading pending question {}", path.display()));
+            }
+        }
     }
+    unreachable!()
 }
 
 pub fn answer_question(
@@ -722,7 +734,8 @@ pub fn events_since(
     if !path.exists() {
         return Ok((job, cursor, vec![]));
     }
-    let mut file = fs::File::open(path)?;
+    let mut file = fs::File::open(&path)
+        .with_context(|| format!("Opening task output {}", path.display()))?;
     ensure!(
         cursor <= file.metadata()?.len(),
         "Task output was truncated; attach again from the start"
@@ -904,6 +917,59 @@ mod tests {
         .unwrap();
         (root, dir, id)
     }
+    #[cfg(windows)]
+    #[test]
+    fn pending_question_survives_short_file_lock_but_reports_persistent_failure() {
+        use std::os::windows::fs::OpenOptionsExt;
+        let (root, dir, id) = fixture("");
+        let path = dir.join("pending-question.json");
+        save(
+            &path,
+            &PendingQuestion {
+                request_id: "request-1".into(),
+                question: "Allow test?".into(),
+                kind: "permission".into(),
+                tool: None,
+            },
+        )
+        .unwrap();
+        let lock = fs::OpenOptions::new()
+            .read(true)
+            .share_mode(0)
+            .open(&path)
+            .unwrap();
+        let release = std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(20));
+            drop(lock);
+        });
+        let question = pending_question(root.path(), &id, "parent")
+            .unwrap()
+            .unwrap();
+        release.join().unwrap();
+        assert_eq!(question.request_id, "request-1");
+
+        let lock = fs::OpenOptions::new()
+            .read(true)
+            .share_mode(0)
+            .open(&path)
+            .unwrap();
+        let started = std::time::Instant::now();
+        let error = pending_question(root.path(), &id, "parent").unwrap_err();
+        assert!(error.to_string().contains("Reading pending question"));
+        assert!(error.to_string().contains(path.to_str().unwrap()));
+        assert!(started.elapsed() < Duration::from_secs(1));
+        assert!(pending_question(root.path(), &id, "foreign")
+            .unwrap_err()
+            .to_string()
+            .contains("another session"));
+        drop(lock);
+        fs::remove_file(&path).unwrap();
+        assert!(pending_question(root.path(), &id, "parent")
+            .unwrap()
+            .is_none());
+        assert!(!dir.join("cancel").exists());
+    }
+
     #[test]
     fn discovery_tolerates_concurrent_unpublished_jobs_and_bad_state() {
         let (root, dir, id) = fixture("");
