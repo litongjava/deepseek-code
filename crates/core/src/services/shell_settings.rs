@@ -190,7 +190,13 @@ impl ShellSettings {
                 "detected",
             ),
             "cmd" => bail!("cmd shell only available on Windows"),
-            "wsl" => bail!("WSL execution requires an explicitly configured distribution"),
+            "wsl" => {
+                ensure!(
+                    self.wsl.distribution.is_some(),
+                    "Select a WSL distribution explicitly"
+                );
+                (super::wsl::executable()?, "settings")
+            }
             name => (
                 crate::tools::find_shell(name)
                     .with_context(|| format!("{name} shell not found"))?,
@@ -216,6 +222,7 @@ impl ShellSettings {
             program,
             command_flag: flag,
             source,
+            wsl: (selected == "wsl").then(|| self.wsl.clone()),
         })
     }
 }
@@ -227,10 +234,21 @@ pub struct ResolvedShell {
     pub program: String,
     pub command_flag: &'static str,
     pub source: &'static str,
+    pub wsl: Option<WslSettings>,
 }
 
 impl ResolvedShell {
-    pub fn command(&self, text: &str) -> tokio::process::Command {
+    pub async fn command(
+        &self,
+        text: &str,
+        cwd: &Path,
+    ) -> Result<(tokio::process::Command, Option<super::wsl::Guard>)> {
+        if let Some(settings) = &self.wsl {
+            let (command, guard) = super::wsl::launch(settings, cwd, Some(text))
+                .await?
+                .command();
+            return Ok((command, Some(guard)));
+        }
         let mut command = tokio::process::Command::new(&self.program);
         #[cfg(windows)]
         command.creation_flags(0x08000000);
@@ -251,7 +269,7 @@ impl ResolvedShell {
             }
         }
         command.kill_on_drop(true);
-        command
+        Ok((command, None))
     }
 }
 

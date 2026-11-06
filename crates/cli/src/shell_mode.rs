@@ -29,7 +29,7 @@ pub async fn run(session: &Session, command: &str) -> Result<()> {
     anyhow::ensure!(!command.is_empty(), "Type a command after !, e.g. !git status");
     let settings = deepseek_code_core::services::shell_settings::load(&session.paths.data_dir)?;
     let shell = settings.resolve(None, true)?;
-    let mut child = shell.command(command);
+    let (mut child, _guard) = shell.command(command, &session.workspace).await?;
     child
         .current_dir(&session.workspace)
         .stdin(std::process::Stdio::null())

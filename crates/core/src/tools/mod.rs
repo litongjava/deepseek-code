@@ -130,7 +130,7 @@ pub fn get_tool_definitions() -> Vec<ToolDefinition> {
         },
         ToolDefinition {
             name: "Bash".to_string(),
-            description: "Executes a shell command and returns its output.\n\nThe shell defaults to shell.toolDefault in settings.json (bash / Git Bash on Windows when unset): use Unix shell syntax there — `/dev/null` not `NUL`, forward slashes, `$VAR` not `%VAR%` or `$env:VAR`. Pass `shell` (powershell, pwsh, cmd, sh, zsh, fish) to use another shell's syntax; PowerShell input/output is UTF-8.\n\n- With bash, sh or zsh the working directory persists between calls, but prefer absolute paths; leaving the project resets it to the project directory. Shell state (env vars, functions) does not persist. Other shells start in the project directory each call.\n- Command output is displayed to you, not reliably to the user.\n- `timeout` is in milliseconds: default 120000, max 600000 for a foreground command.\n- `run_in_background` runs the command detached as a managed task: it keeps running across turns and returns a task_id. No `&` or Start-Process needed. Use TaskOutput to read its output and TaskStop to stop it.\n\n# Git\n- Interactive flags (`-i`, e.g. `git rebase -i`, `git add -i`) are not supported in this environment.\n- Use the `gh` CLI for GitHub operations (PRs, issues, API).\n- Commit or push only when the user asks. If on the default branch, branch first.".to_string(),
+            description: "Executes a shell command and returns its output.\n\nThe shell defaults to shell.toolDefault in settings.json (bash / Git Bash on Windows when unset): use Unix shell syntax there — `/dev/null` not `NUL`, forward slashes, `$VAR` not `%VAR%` or `$env:VAR`. Pass `shell` (powershell, pwsh, cmd, sh, zsh, fish, wsl) to use another shell's syntax; PowerShell input/output is UTF-8.\n\n- With bash, sh or zsh the working directory persists between calls, but prefer absolute paths; leaving the project resets it to the project directory. Shell state (env vars, functions) does not persist. Other shells start in the project directory each call.\n- Command output is displayed to you, not reliably to the user.\n- `timeout` is in milliseconds: default 120000, max 600000 for a foreground command.\n- `run_in_background` runs the command detached as a managed task: it keeps running across turns and returns a task_id. No `&` or Start-Process needed. Use TaskOutput to read its output and TaskStop to stop it.\n\n# Git\n- Interactive flags (`-i`, e.g. `git rebase -i`, `git add -i`) are not supported in this environment.\n- Use the `gh` CLI for GitHub operations (PRs, issues, API).\n- Commit or push only when the user asks. If on the default branch, branch first.".to_string(),
             input_schema: serde_json::json!({
                 "type": "object",
                 "properties": {
@@ -139,7 +139,7 @@ pub fn get_tool_definitions() -> Vec<ToolDefinition> {
                     "description": { "description": "Clear, concise description of what this command does in active voice. Never use words like \"complex\" or \"risk\" in the description - just describe what it does.\n\nSay what the command does in plain words: do not echo the command's text, its flags, or file paths - the user reads this description, often without seeing the command.\n\nFor simple commands (git, npm, standard CLI tools), keep it brief (5-10 words):\n- ls → \"List files in current directory\"\n- git status → \"Show working tree status\"\n- npm install → \"Install package dependencies\"\n\nFor commands that are harder to parse at a glance (piped commands, obscure flags, etc.), add enough context to clarify what it does:\n- find . -name \"*.tmp\" -exec rm {} \\; → \"Find and delete all .tmp files recursively\"\n- git reset --hard origin/main → \"Discard all local changes and match remote main\"\n- curl -s url | jq '.data[]' → \"Fetch JSON from URL and extract data array elements\"", "type": "string" },
                     "run_in_background": { "description": "Set to true to run this command in the background.", "type": "boolean" },
                     "dangerouslyDisableSandbox": { "description": "Set this to true to dangerously override sandbox mode and run commands without sandboxing.", "type": "boolean" },
-                    "shell": { "description": "Shell to use: bash, zsh, fish, sh, cmd, powershell, pwsh (default: shell.toolDefault, otherwise bash)", "type": "string" }
+                    "shell": { "description": "Shell to use: bash, zsh, fish, sh, cmd, powershell, pwsh, wsl (explicit configured WSL distribution; default: shell.toolDefault, otherwise bash)", "type": "string" }
                 },
                 "required": ["command"],
                 "additionalProperties": false
@@ -998,7 +998,10 @@ async fn tool_bash_async(input: serde_json::Value, cwd: &str) -> Result<serde_js
     let shell = resolved.program;
     let flag = resolved.command_flag.to_string();
 
-    let actual_shell = Path::new(&shell).file_stem().and_then(|name| name.to_str()).unwrap_or(shell_type);
+    let actual_shell = shell_type;
+    if resolved.wsl.is_some() && input.get("__sandbox").is_some_and(|policy| policy.is_object()) {
+        return Err(anyhow!("The configured sandbox cannot isolate WSL commands; select a supported shell or change the sandbox configuration explicitly"));
+    }
     let mut cmd = match input.get("__sandbox").filter(|policy| policy.is_object()) {
         Some(policy) if input["dangerouslyDisableSandbox"] == true => {
             anyhow::ensure!(policy["allow_unsandboxed"] != false, "Running commands outside the sandbox is disabled by sandbox.allowUnsandboxedCommands");
@@ -1018,22 +1021,22 @@ async fn tool_bash_async(input: serde_json::Value, cwd: &str) -> Result<serde_js
     #[cfg(windows)]
     cmd.creation_flags(CREATE_NO_WINDOW);
 
-    let safe_cwd = if cfg!(target_os = "windows") {
-        if std::path::Path::new(cwd).exists() {
-            cwd.to_string()
-        } else {
-            std::env::var("USERPROFILE").unwrap_or_else(|_| "C:\\".to_string())
-        }
-    } else {
-        cwd.to_string()
-    };
+    anyhow::ensure!(Path::new(cwd).is_dir(), "Shell working directory does not exist: {cwd}");
+    let safe_cwd = cwd.to_owned();
     // Like the reference CLI, a foreground shell keeps its working directory
     // between calls; the engine passes a per-session state file.
     let shell_name = shell_type.to_lowercase();
     let powershell = flag == "-Command";
     let cmd_shell = flag == "/C" && cfg!(windows);
-    let cwd_state = input["__cwd_state"].as_str().map(PathBuf::from)
-        .filter(|_| !background && (powershell || cmd_shell || (flag == "-c" && matches!(shell_name.as_str(), "bash" | "sh" | "zsh"))));
+    let cwd_state = input["__cwd_state"].as_str().map(PathBuf::from).map(|state| {
+        if let Some(wsl) = &resolved.wsl {
+            use std::hash::{Hash, Hasher};
+            let mut hash = std::collections::hash_map::DefaultHasher::new();
+            wsl.distribution.hash(&mut hash);
+            state.with_extension(format!("wsl-{:016x}", hash.finish()))
+        } else { state }
+    })
+        .filter(|_| !background && (powershell || cmd_shell || (flag == "-c" && matches!(shell_name.as_str(), "bash" | "sh" | "zsh" | "wsl"))));
     let saved_cwd = |state: &PathBuf| fs::read_to_string(state).ok().map(|text| text.trim_start_matches('\u{feff}').trim().to_owned());
     let safe_cwd = match cwd_state.as_ref().and_then(saved_cwd) {
         Some(saved) if Path::new(&saved).is_dir() && is_path_allowed(Path::new(&saved), cwd) => saved,
@@ -1048,10 +1051,10 @@ async fn tool_bash_async(input: serde_json::Value, cwd: &str) -> Result<serde_js
     } else {
         command.to_string()
     };
-    let command = if !cfg!(windows) {
+    let command = if !cfg!(windows) || resolved.wsl.is_some() {
         match background_shell::session_environment()? {
             Some(script)
-                if matches!(shell_type.to_lowercase().as_str(), "bash" | "sh" | "zsh") =>
+                if matches!(shell_type.to_lowercase().as_str(), "bash" | "sh" | "zsh" | "wsl") =>
             {
                 format!(
                     "{{\n{script}\n}} && eval '{}'",
@@ -1074,6 +1077,10 @@ async fn tool_bash_async(input: serde_json::Value, cwd: &str) -> Result<serde_js
     };
     let command = match &cwd_state {
         // A command that exits early keeps the previous directory.
+        Some(state) if resolved.wsl.is_some() => {
+            let path = crate::services::wsl::linux_path(resolved.wsl.as_ref().unwrap(), state).await?;
+            format!("{command}\n__dcl_status=$?\nwslpath -w \"$PWD\" > '{}' 2>/dev/null\nexit $__dcl_status", path.replace('\'', "'\"'\"'"))
+        }
         Some(state) if powershell => format!(
             "{command}\n$__dcl_ok = $?; $__dcl_code = $global:LASTEXITCODE\ntry {{ [System.IO.File]::WriteAllText('{}', (Get-Location).ProviderPath) }} catch {{}}\nif (-not $__dcl_ok) {{ if ($__dcl_code) {{ exit $__dcl_code }} else {{ exit 1 }} }}",
             state.to_string_lossy().replace('\'', "''")
@@ -1095,8 +1102,16 @@ async fn tool_bash_async(input: serde_json::Value, cwd: &str) -> Result<serde_js
         script.write_all(command.as_bytes())?;
         cmd_script = Some(script);
     }
+    let mut wsl_guard = None;
+    if let Some(settings) = &resolved.wsl {
+        let (launched, guard) = crate::services::wsl::launch(settings, Path::new(&safe_cwd), Some(&command)).await?.command();
+        cmd = launched;
+        wsl_guard = Some(guard);
+    }
     #[cfg(windows)]
-    if flag == "/C" {
+    if resolved.wsl.is_some() {
+        // The WSL launcher already contains the command and explicit distribution.
+    } else if flag == "/C" {
         // cmd uses its own quoting rules; normal Windows argument escaping adds
         // literal backslashes before quotes in nested PowerShell file paths.
         let argument = cmd_script.as_ref().map(|file| format!("\"{}\"", file.path().display())).unwrap_or_else(|| command.clone());
@@ -1113,14 +1128,14 @@ async fn tool_bash_async(input: serde_json::Value, cwd: &str) -> Result<serde_js
     // Background commands are named by their description, or the command.
     let description = input["description"].as_str().filter(|text| !text.trim().is_empty()).unwrap_or(&command).to_owned();
     if background {
-        let mut result = background_shell::start(cmd, input.get("timeout").filter(|value| !value.is_null()).map(|_| timeout), actual_shell, &description, &command)?;
+        let mut result = background_shell::start(cmd, input.get("timeout").filter(|value| !value.is_null()).map(|_| timeout), actual_shell, &description, &command, wsl_guard)?;
         result["shell_path"] = serde_json::json!(shell);
         Ok(result)
     } else {
         // Ctrl+B can move it to the background while it runs.
         let filtered = input.get("__sandbox").filter(|policy| policy["network_rules"].is_object() && input["dangerouslyDisableSandbox"] != true);
         let mark = filtered.map(sandbox::blocked_mark);
-        let mut result = background_shell::run_foreground(cmd, timeout, actual_shell, &description, &command).await?;
+        let mut result = background_shell::run_foreground(cmd, timeout, actual_shell, &description, &command, wsl_guard).await?;
         result["shell_path"] = serde_json::json!(shell);
         // Name refused hosts: an HTTPS client often reports only a reset.
         if let (Some(policy), Some(mark)) = (filtered, mark) {

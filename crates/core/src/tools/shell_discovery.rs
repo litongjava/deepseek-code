@@ -41,6 +41,57 @@ pub(super) fn windows_git_shell(name: &str) -> Option<PathBuf> {
 mod tests {
     use super::*;
 
+    #[cfg(windows)]
+    #[tokio::test]
+    #[ignore = "requires the explicitly selected dcl-linux-test WSL distribution"]
+    async fn wsl_tool_preserves_cwd_and_cancels_linux_descendants() {
+        use serde_json::json;
+        crate::config::OrchestrationConfig::init_global().unwrap();
+        let root = tempfile::tempdir().unwrap();
+        let cwd = root.path().to_str().unwrap();
+        std::fs::create_dir(root.path().join("sub space")).unwrap();
+        let settings = crate::services::shell_settings::ShellSettings {
+            tool_default: "wsl".into(),
+            wsl: crate::services::shell_settings::WslSettings {
+                distribution: Some("dcl-linux-test".into()),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        crate::services::shell_settings::save(root.path(), &settings).unwrap();
+        super::super::background_shell::scope(Some((root.path().into(), uuid::Uuid::new_v4().to_string())), async {
+            let state = root.path().join("cwd");
+            let run = |command: &str| json!({"command":command,"__cwd_state":state});
+            let changed = super::super::tool_bash_async(run("cd 'sub space'"), cwd).await.unwrap();
+            assert_eq!(changed["success"], true, "{changed}");
+            let located = super::super::tool_bash_async(run("pwd"), cwd).await.unwrap();
+            assert!(located["stdout"].as_str().unwrap().trim().ends_with("sub space"), "{located}");
+            assert_eq!(located["shell"], "wsl");
+            let ordinary = super::super::tool_bash_async(json!({"command":"pwd -W","shell":"bash","__cwd_state":state}), cwd).await.unwrap();
+            assert!(!ordinary["stdout"].as_str().unwrap().contains("sub space"), "WSL cwd leaked to Git Bash");
+            let error = super::super::tool_bash_async(json!({"command":"echo sentinel","__sandbox":{}}), cwd).await.unwrap_err();
+            assert!(error.to_string().contains("cannot isolate WSL"));
+            let timed = super::super::tool_bash_async(json!({"command":"(sleep 2; printf leaked > leaked) & printf ready; wait", "timeout":400}), cwd).await.unwrap();
+            assert_eq!(timed["timed_out"], true, "{timed}");
+            tokio::time::sleep(std::time::Duration::from_secs(3)).await;
+            assert!(!root.path().join("leaked").exists(), "Timed-out WSL descendant survived");
+            let started = super::super::tool_bash_async(json!({"command":"(sleep 2; printf leaked > leaked-background) & printf ready; wait", "run_in_background":true}), cwd).await.unwrap();
+            let id = started["task_id"].as_str().unwrap();
+            // Observe actual Linux execution before requesting cancellation.
+            let session = started["stdout_file"].as_str().unwrap();
+            tokio::time::timeout(std::time::Duration::from_secs(8), async {
+                while !std::fs::read_to_string(session).unwrap_or_default().contains("ready") {
+                    tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+                }
+            }).await.unwrap();
+            let directory = Path::new(session).parent().unwrap();
+            assert_eq!(directory.file_name().unwrap().to_str().unwrap(), id);
+            std::fs::write(directory.join("cancel"), "cancel").unwrap();
+            tokio::time::sleep(std::time::Duration::from_secs(3)).await;
+            assert!(!root.path().join("leaked-background").exists(), "Cancelled background WSL descendant survived");
+        }).await;
+    }
+
     #[test]
     fn discovers_nonstandard_git_install_and_skips_wsl_aliases() {
         let temp = tempfile::tempdir().unwrap();
