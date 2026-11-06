@@ -195,6 +195,99 @@ async fn bash_session_grant_survives_live_reconnect_but_not_revoke_or_cold_resta
     server.abort();
 }
 
+#[tokio::test]
+async fn edit_session_grant_survives_live_reconnect_but_not_revoke_or_cold_restart() {
+    let temp = tempfile::tempdir().unwrap();
+    let workspace = temp.path().join("workspace");
+    std::fs::create_dir(&workspace).unwrap();
+    let paths = RuntimePaths::new(temp.path().join("data")).unwrap();
+    let store = SessionStore::new(paths.open_database().unwrap());
+    let session = store.create(&workspace, "fixture", "cli-runtime").unwrap();
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let endpoint = format!("http://{}", listener.local_addr().unwrap());
+    let app = Router::new()
+        .route("/v1/chat/completions", post(scope_respond))
+        .with_state(Arc::new(Mutex::new(Vec::new())));
+    let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+    let executable = temp.path().join(if cfg!(windows) {
+        "session-grant.exe"
+    } else {
+        "session-grant"
+    });
+    std::fs::copy(test_cli_executable(), &executable).unwrap();
+    let mut host = worker::ensure_worker(&paths.data_dir, &executable, &session, &workspace)
+        .await
+        .unwrap();
+    let mut cleanup = Cleanup(vec![host.supervisor_pid.unwrap()]);
+    for (name, approve, expected_before) in [
+        ("first", Some("3"), false),
+        ("second", None, true),
+        ("revoked", Some("3"), false),
+        ("cold", Some("1"), false),
+    ] {
+        if name == "revoked" {
+            assert_eq!(
+                worker::edit_session(&paths.data_dir, &session, true)
+                    .await
+                    .unwrap(),
+                Some(false)
+            );
+        }
+        if name == "cold" {
+            worker::shutdown(&paths.data_dir, &session).await.unwrap();
+            host = worker::ensure_worker(&paths.data_dir, &executable, &session, &workspace)
+                .await
+                .unwrap();
+            cleanup.0.push(host.supervisor_pid.unwrap());
+        }
+        assert_eq!(
+            worker::edit_session(&paths.data_dir, &session, false)
+                .await
+                .unwrap(),
+            Some(expected_before)
+        );
+        let input = json!({"file_path":format!("{name}.txt"),"content":name});
+        let prompt = json!([{"name":"Write","input":input}]).to_string();
+        let id = submit_in_mode(&host, &endpoint, &prompt, "fixture", 256, "ask").await;
+        if let Some(answer) = approve {
+            let question = tokio::time::timeout(Duration::from_secs(15), async {
+                loop {
+                    if let Some(question) =
+                        jobs::pending_question(&paths.data_dir, &id, &session).unwrap()
+                    {
+                        break question;
+                    }
+                    assert!(
+                        jobs::get(&paths.data_dir, &id)
+                            .unwrap()
+                            .finished_ms
+                            .is_none(),
+                        "Expected permission for {name}"
+                    );
+                    tokio::time::sleep(Duration::from_millis(40)).await;
+                }
+            })
+            .await
+            .unwrap();
+            assert!(question.question.contains("Allow for this session"));
+            jobs::answer_question(&paths.data_dir, &id, &session, &question.request_id, answer)
+                .unwrap();
+        }
+        let job = completed(&paths.data_dir, &id).await;
+        assert_eq!(job.status, "completed", "{name}: {:?}", job.error);
+        assert!(workspace.join(format!("{name}.txt")).exists(), "{name}");
+    }
+    assert_eq!(
+        worker::edit_session(&paths.data_dir, &session, false)
+            .await
+            .unwrap(),
+        Some(false)
+    );
+    assert!(!workspace.join(".claude/settings.local.json").exists());
+    worker::shutdown(&paths.data_dir, &session).await.unwrap();
+    server.abort();
+}
+
 async fn submit(
     host: &worker::Worker,
     endpoint: &str,

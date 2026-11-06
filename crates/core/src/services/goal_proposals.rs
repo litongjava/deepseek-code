@@ -144,10 +144,11 @@ impl Frontend {
             let timeout: u64 = conn.query_row("PRAGMA busy_timeout", [], |row| row.get(0))?;
             conn.busy_timeout(std::time::Duration::from_millis(25))?;
             let result = update_conn(conn, &self.session, |conn, state| {
+                // Expired consent must not be revived by a recovered heartbeat.
+                prune(conn, &self.session, state)?;
                 let frontend = state.frontend.as_mut().filter(|f| f.id == self.id)
                     .context("Goal proposal frontend ownership changed")?;
                 frontend.touched_ms = now();
-                prune(conn, &self.session, state)?;
                 Ok(state.pending.as_ref().filter(|p| !p.approved).cloned())
             });
             let restored = conn.busy_timeout(std::time::Duration::from_millis(timeout));
@@ -596,6 +597,44 @@ mod tests {
         assert_eq!(timeout, 5000);
         assert!(!crate::db::is_contention(&anyhow::anyhow!("database is locked")));
     }
+    #[test]
+    fn recovered_heartbeat_cannot_revive_expired_consent() {
+        let f = Fixture::new();
+        let frontend = Frontend::acquire(f.db.clone(), &f.session).unwrap();
+        f.propose("Verify expired consent", true).unwrap();
+        let original = frontend.poll().unwrap().unwrap();
+        update(&f.db, &f.session, |_, state| {
+            state.frontend.as_mut().unwrap().touched_ms = now() - 6_000;
+            Ok(())
+        })
+        .unwrap();
+        frontend.heartbeat.store(0, Ordering::Relaxed);
+        assert!(frontend.poll().unwrap().is_none());
+        assert!(!frontend
+            .decide(
+                &original.id,
+                true,
+                f.root.path(),
+                f.root.path(),
+                &f.permissions
+            )
+            .unwrap());
+        assert!(f.activate().unwrap().is_none());
+        // Losing ownership restores the pooled connection timeout too.
+        update(&f.db, &f.session, |_, state| {
+            state.frontend.as_mut().unwrap().id = "another-owner".into();
+            Ok(())
+        })
+        .unwrap();
+        frontend.heartbeat.store(0, Ordering::Relaxed);
+        assert!(frontend.poll().is_err());
+        let timeout: u64 =
+            f.db.with_conn(|conn| conn.query_row("PRAGMA busy_timeout", [], |row| row.get(0)))
+                .unwrap()
+                .unwrap();
+        assert_eq!(timeout, 5000);
+    }
+
     impl Fixture {
         fn new() -> Self {
             let root = tempfile::tempdir().unwrap();

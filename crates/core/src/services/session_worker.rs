@@ -38,9 +38,19 @@ pub struct Worker {
 pub enum Request {
     Ping,
     RuntimeStatus,
-    SetPermissionMode { job_id: String, mode: String },
-    GetPermissionMode { job_id: String },
-    BashSession { revoke: bool },
+    SetPermissionMode {
+        job_id: String,
+        mode: String,
+    },
+    GetPermissionMode {
+        job_id: String,
+    },
+    BashSession {
+        revoke: bool,
+    },
+    EditSession {
+        revoke: bool,
+    },
     Submit {
         id: String,
         prompt: String,
@@ -61,6 +71,8 @@ pub struct Reply {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub bash_session: Option<bool>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub edit_session: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub launch_rules: Option<std::collections::HashMap<String, crate::permissions::rules::PermissionAction>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub runtime_status: Option<super::runtime_status::RuntimeStatus>,
@@ -74,6 +86,7 @@ impl Reply {
             permission_mode: None,
             permission_session_id: None,
             bash_session: None,
+            edit_session: None,
             launch_rules: None,
             runtime_status: None,
         }
@@ -86,6 +99,7 @@ impl Reply {
             permission_mode: None,
             permission_session_id: None,
             bash_session: None,
+            edit_session: None,
             launch_rules: None,
             runtime_status: None,
         }
@@ -653,6 +667,31 @@ pub async fn bash_session(root: &Path, session: &str, revoke: bool) -> Result<Op
     let reply = tokio::time::timeout(Duration::from_millis(1200), call(&worker, &Request::BashSession { revoke })).await??;
     ensure!(reply.permission_session_id.as_deref() == Some(session), "Permission response targets another session");
     Ok(Some(reply.bash_session.context("Worker does not support session Bash permissions")?))
+}
+
+pub async fn edit_session(root: &Path, session: &str, revoke: bool) -> Result<Option<bool>> {
+    let Some(worker) = current(root, session)? else {
+        return Ok(None);
+    };
+    if worker.status == "stopped" || worker.child_pid.is_some_and(process_exited) {
+        return Ok(None);
+    }
+    ensure!(
+        worker.session_id == session && worker.root == root,
+        "Permission owner mismatch"
+    );
+    let reply = tokio::time::timeout(
+        Duration::from_millis(1200),
+        call(&worker, &Request::EditSession { revoke }),
+    )
+    .await??;
+    ensure!(
+        reply.permission_session_id.as_deref() == Some(session),
+        "Permission response targets another session"
+    );
+    Ok(Some(reply.edit_session.context(
+        "Worker does not support session edit permissions",
+    )?))
 }
 
 pub async fn permission_mode_target(

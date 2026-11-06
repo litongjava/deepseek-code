@@ -570,6 +570,7 @@ pub enum Remember {
     /// Switch the session to accept-edits mode.
     AcceptEdits,
     BashSession,
+    EditsSession,
     /// Add a session allow rule such as `Bash(npm test)`.
     Rule(String),
     /// Switch the session to auto mode.
@@ -622,7 +623,11 @@ impl Approval {
         }
         let mut hints = vec!["1/y yes".to_owned()];
         if self.remember.is_some() {
-            hints.push("2 yes for this session".into());
+            if self.remember == Some(Remember::AcceptEdits) {
+                hints.push("2 switch to accept-edits, 3 allow edits for this session".into());
+            } else {
+                hints.push("2 yes for this session".into());
+            }
         }
         if self.auto {
             hints.push(format!("{} switch to auto mode", self.options.len() - 1));
@@ -644,6 +649,7 @@ impl Approval {
         };
         let grant = match index {
             2 if self.remember.is_some() => self.remember.clone(),
+            3 if self.remember == Some(Remember::AcceptEdits) => Some(Remember::EditsSession),
             index if self.auto && index == last - 1 => Some(Remember::Auto),
             _ => None,
         };
@@ -688,7 +694,17 @@ fn remember_option(rule: &str) -> String {
 
 /// The approval prompt for one tool call. File edits preview the diff they
 /// would make; other calls show the command or their input.
-pub fn approval(name: &str, input: &Value, workspace: Option<&std::path::Path>, auto: bool) -> Approval {
+pub fn approval(
+    name: &str,
+    input: &Value,
+    workspace: Option<&std::path::Path>,
+    auto: bool,
+) -> Approval {
+    let local_fetch = name == "WebFetch"
+        && deepseek_code_core::permissions::web_fetch::requires_local_approval(
+            input["url"].as_str().unwrap_or_default(),
+        );
+    let auto = auto && !local_fetch;
     let edits = matches!(name, "Write" | "Edit" | "MultiEdit" | "NotebookEdit");
     let preview = workspace
         .and_then(|workspace| deepseek_code_core::tools::file_change::preview(name, input, workspace));
@@ -761,13 +777,30 @@ pub fn approval(name: &str, input: &Value, workspace: Option<&std::path::Path>, 
             }
         }
     };
-    let remember = if name == "Bash" { deepseek_code_core::native_engine::permission_response::can_allow_bash_session(name, input).then_some(Remember::BashSession) } else if edits { Some(Remember::AcceptEdits) } else { session_rule(name, input).map(Remember::Rule) };
+    if local_fetch {
+        lines.push(change_view::muted(
+            "  Local or private address: approval applies to this request only.",
+        ));
+    }
+    let remember = if local_fetch {
+        None
+    } else if name == "Bash" {
+        deepseek_code_core::native_engine::permission_response::can_allow_bash_session(name, input)
+            .then_some(Remember::BashSession)
+    } else if edits {
+        Some(Remember::AcceptEdits)
+    } else {
+        session_rule(name, input).map(Remember::Rule)
+    };
     let mut options = vec!["Yes".to_owned()];
     match &remember {
         Some(Remember::AcceptEdits) => options.push("Yes, allow all edits during this session (shift+tab)".into()),
         Some(Remember::Rule(rule)) => options.push(remember_option(rule)),
         Some(Remember::BashSession) => options.push("Allow for Session".into()),
         _ => {}
+    }
+    if edits && deepseek_code_core::permissions::PermissionManager::is_file_edit_tool(name) {
+        options.push("Allow for this session".into());
     }
     if auto {
         options.push("Yes, do not ask again \u{b7} enable and switch to auto mode".into());
@@ -848,6 +881,22 @@ mod tests {
             assert!(text.contains("src"));
             assert!(!text.contains("Searched for"));
         }
+    }
+
+    #[test]
+    fn local_fetch_menu_offers_only_single_call_approval() {
+        let menu = approval(
+            "WebFetch",
+            &json!({"url":"http://localhost:8080/page"}),
+            None,
+            true,
+        );
+        assert_eq!(menu.options, ["Yes", "No"]);
+        assert!(menu
+            .text()
+            .contains("approval applies to this request only"));
+        assert!(menu.decide("1").allowed);
+        assert!(!menu.decide("2").allowed);
     }
 
     #[test]
@@ -984,6 +1033,13 @@ mod tests {
         let write = approval("Write", &json!({"file_path":"a.txt","content":"x"}), None, false);
         assert!(write.text().starts_with("Write(a.txt)\n  {"), "{}", write.text());
         assert_eq!(write.remember, Some(Remember::AcceptEdits));
+        assert_eq!(write.options[2], "Allow for this session");
+        assert_eq!(write.decide("3").grant, Some(Remember::EditsSession));
+        assert!(!write.decide("4").allowed);
+        let auto_write = approval("Edit", &json!({"file_path":"a.txt"}), None, true);
+        assert_eq!(auto_write.decide("3").grant, Some(Remember::EditsSession));
+        assert_eq!(auto_write.decide("4").grant, Some(Remember::Auto));
+        assert!(!auto_write.decide("5").allowed);
     }
 
     #[test]
@@ -1024,7 +1080,7 @@ mod tests {
         let text = edit.text();
         assert!(text.starts_with("Edit file\ncalc.py\n"), "{text}");
         assert!(text.contains("    2 +    if b == 0:"), "{text}");
-        assert!(text.contains("Do you want to make this edit to calc.py?\n  1. Yes\n  2. Yes, allow all edits during this session (shift+tab)\n  3. No"), "{text}");
+        assert!(text.contains("Do you want to make this edit to calc.py?\n  1. Yes\n  2. Yes, allow all edits during this session (shift+tab)\n  3. Allow for this session\n  4. No"), "{text}");
         let created = approval("Write", &json!({"file_path":"new.txt","content":"hi\n"}), Some(temp.path()), false);
         assert_eq!(created.question, "Do you want to create new.txt?");
     }

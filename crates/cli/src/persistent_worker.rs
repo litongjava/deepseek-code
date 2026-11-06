@@ -114,6 +114,14 @@ pub async fn run_from_env() -> Result<bool> {
                         response.bash_session = Some(manager.is_some_and(|manager| manager.bash_session_allowed(&worker.session_id)));
                         let _ = service::reply(stream, &response).await;
                     },
+                    Request::EditSession { revoke } => {
+                        let manager = bash_target.lock().unwrap_or_else(|e| e.into_inner()).clone();
+                        if revoke { if let Some(manager) = &manager { manager.set_edit_session_allowed(&worker.session_id, false); } }
+                        let mut response = Reply::ok(None);
+                        response.permission_session_id = Some(worker.session_id.clone());
+                        response.edit_session = Some(manager.is_some_and(|manager| manager.edit_session_allowed(&worker.session_id)));
+                        let _ = service::reply(stream, &response).await;
+                    },
                     Request::RuntimeStatus => {
                         let source = status_target.lock().unwrap_or_else(|error|error.into_inner()).clone().unwrap_or_else(||deepseek_code_core::services::runtime_status::RuntimeSource {
                             mcp: Arc::new(deepseek_code_core::mcp::McpServerManager::new(worker.root.join("mcp-servers.json"))),

@@ -1195,8 +1195,13 @@ pub fn filter_search_domains(result: &mut serde_json::Value, input: &serde_json:
 
 /// The model's WebFetch: the URL policy applies before any request is made.
 fn model_fetch_input(mut input: serde_json::Value) -> Result<serde_json::Value> {
-    let url = input["url"].as_str().ok_or_else(|| anyhow!("url required"))?;
-    input["url"] = serde_json::json!(web::model_url(url, cfg!(test))?);
+    let url = input["url"]
+        .as_str()
+        .ok_or_else(|| anyhow!("url required"))?;
+    input["url"] = serde_json::json!(web::model_url(
+        url,
+        cfg!(test) || path_scope::approved_local_fetch(url)
+    )?);
     Ok(input)
 }
 fn tool_web_fetch_blocking(input: serde_json::Value) -> Result<serde_json::Value> { web::fetch_blocking(model_fetch_input(input)?) }

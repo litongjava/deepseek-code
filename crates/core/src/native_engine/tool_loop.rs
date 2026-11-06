@@ -1036,25 +1036,33 @@ impl ToolLoopExecutor {
             .filter(|_| tool_input["dangerouslyDisableSandbox"] != true)
             .and_then(crate::tools::sandbox::register_asker);
         // Boxed: tool futures are large and this runs nested inside delegated children.
-        let mut run = Box::pin(crate::tools::path_scope::with_permissions(
-            self.permission_manager.clone(),
-            crate::tools::path_scope::approved_auto_call(
-                tool_name,
-                &input,
-                cwd,
-                approved,
-                execute_builtin_tool(
+        let edit_session = crate::permissions::PermissionManager::is_file_edit_tool(tool_name)
+            .then(|| self.conv_id.clone())
+            .flatten();
+        let mut run = Box::pin(crate::tools::path_scope::with_edit_session(
+            edit_session,
+            crate::tools::path_scope::with_permissions(
+                self.permission_manager.clone(),
+                crate::tools::path_scope::approved_auto_call(
                     tool_name,
-                    input.clone(),
+                    &input,
                     cwd,
-                    &self.provider,
-                    &self.event_tx,
-                    self.search_config_path.as_deref(),
-                    self.skill_shell_active,
+                    approved,
+                    execute_builtin_tool(
+                        tool_name,
+                        input.clone(),
+                        cwd,
+                        &self.provider,
+                        &self.event_tx,
+                        self.search_config_path.as_deref(),
+                        self.skill_shell_active,
+                    ),
                 ),
             ),
         ));
-        let Some((_guard, mut questions)) = asker else { return run.await };
+        let Some((_guard, mut questions)) = asker else {
+            return run.await;
+        };
         loop {
             tokio::select! {
                 result = &mut run => return result,

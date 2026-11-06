@@ -78,6 +78,10 @@ pub enum PermissionResponse {
         updated_input: Option<Value>,
         note: Option<String>,
     },
+    AllowEditsForSession {
+        updated_input: Option<Value>,
+        note: Option<String>,
+    },
     Deny {
         message: String,
         interrupt: bool,

@@ -192,7 +192,7 @@ mod tests {
         let tool = PermissionContext {
             mcp_read_only: false,
             tool_name: "Write".into(),
-            tool_input: json!({"file_path":"fixture.txt","content":"fixture"}),
+            tool_input: json!({"file_path":".bashrc","content":"fixture"}),
             conversation_id: parent.clone(),
             workspace_path: Some(root.path().to_string_lossy().into_owned()),
             user_id: None,

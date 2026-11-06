@@ -2,6 +2,97 @@ use super::*;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 #[tokio::test]
+async fn local_fetch_asks_each_time_and_only_approved_calls_reach_server() {
+    use axum::{routing::get, Router};
+    let hits = Arc::new(AtomicUsize::new(0));
+    let captured = hits.clone();
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let url = format!("http://{}/page", listener.local_addr().unwrap());
+    let server = tokio::spawn(async move {
+        axum::serve(
+            listener,
+            Router::new().route(
+                "/page",
+                get(move || {
+                    captured.fetch_add(1, Ordering::SeqCst);
+                    async { "LOCAL_FETCH_OK" }
+                }),
+            ),
+        )
+        .await
+        .unwrap();
+    });
+    let root = tempfile::tempdir().unwrap();
+    let (mut executor, mut events, manager) = hook_executor(root.path(), "PreToolUse", vec![]);
+    executor.permission_host_available = true;
+    executor.raw_web_fetch = true;
+    for (index, (mode, allow)) in [
+        (crate::permissions::PermissionMode::PlanMode, false),
+        (crate::permissions::PermissionMode::PlanMode, true),
+        (crate::permissions::PermissionMode::Auto, false),
+        (crate::permissions::PermissionMode::BypassPermissions, true),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        manager.set_mode(mode);
+        let mailbox = executor.permission_mailbox.clone();
+        let input = json!({"url":format!("{url}?call={index}"),"prompt":"Read local page"});
+        let task = tokio::spawn(async move {
+            let result = executor
+                .execute_tool_call("WebFetch", &input, "local")
+                .await;
+            (executor, result)
+        });
+        let request = tokio::time::timeout(Duration::from_secs(3), async {
+            loop {
+                if let EngineEvent::ToolPermission { request_id, .. } = events.recv().await.unwrap()
+                {
+                    break request_id;
+                }
+            }
+        })
+        .await
+        .unwrap();
+        if mode == crate::permissions::PermissionMode::BypassPermissions {
+            tokio::time::sleep(Duration::from_millis(350)).await;
+            assert!(
+                !task.is_finished(),
+                "Bypass must not auto-answer a local address request"
+            );
+        }
+        let response = if allow {
+            PermissionResponse::Allow {
+                updated_input: None,
+                commit: None,
+                note: None,
+            }
+        } else {
+            PermissionResponse::Deny {
+                message: "local denied".into(),
+                interrupt: false,
+            }
+        };
+        crate::native_engine::permission_response::respond(&mailbox, &request, response)
+            .await
+            .unwrap();
+        let (returned, (_, output, failed)) = task.await.unwrap();
+        executor = returned;
+        assert_eq!(failed, !allow, "{output}");
+        if allow {
+            assert!(output.contains("LOCAL_FETCH_OK"), "{output}");
+        }
+    }
+    executor.permission_host_available = false;
+    let (_, output, failed) = executor
+        .execute_tool_call("WebFetch", &json!({"url":url,"prompt":"Read"}), "no-host")
+        .await;
+    assert!(failed && output.contains("no approval host"), "{output}");
+    assert_eq!(hits.load(Ordering::SeqCst), 2);
+    server.abort();
+}
+
+#[tokio::test]
 async fn bash_session_grant_commits_only_after_effective_input_and_policy_validation() {
     crate::config::OrchestrationConfig::init_global().unwrap();
     for case in ["valid", "replacement", "danger", "invalid", "denied", "other-tool"] {
@@ -34,6 +125,115 @@ async fn bash_session_grant_commits_only_after_effective_input_and_policy_valida
         assert_eq!(result.is_ok(), allowed, "{case}: {result:?}");
         assert_eq!(manager.bash_session_allowed("grant-session"), allowed, "{case}");
         assert!(!manager.bash_session_allowed("other"));
+    }
+}
+
+#[tokio::test]
+async fn edit_session_grant_commits_only_after_effective_input_and_policy_validation() {
+    crate::config::OrchestrationConfig::init_global().unwrap();
+    for case in [
+        "valid",
+        "replacement",
+        "invalid",
+        "denied",
+        "other-tool",
+        "cancel",
+        "reject",
+        "plan",
+    ] {
+        let root = tempfile::tempdir().unwrap();
+        let provider = ResolvedProvider {
+            provider: serde_json::from_value(json!({"id":"fixture","name":"fixture","base_url":"http://127.0.0.1:1","api_key":"unused","api_format":"openai","models":[],"enabled":true})).unwrap(),
+            model: serde_json::from_value(json!({"id":"fixture","name":"fixture","enabled":true,"supports_vision":false,"supports_web_search":false})).unwrap(),
+        };
+        let (tx, mut events) = mpsc::channel(16);
+        let manager = crate::runtime::default_permissions();
+        manager.set_mode(crate::permissions::PermissionMode::AskPermissions);
+        let mut executor = ToolLoopExecutor::new(
+            provider,
+            vec![],
+            None,
+            128,
+            tx,
+            root.path().to_string_lossy().into_owned(),
+            ReasoningMode::Standard,
+        )
+        .with_permission_manager(manager.clone());
+        executor.conv_id = Some("grant-session".into());
+        let mailbox = executor.permission_mailbox.clone();
+        let tool = if case == "other-tool" {
+            "Bash"
+        } else {
+            "Write"
+        };
+        let task = tokio::spawn(async move {
+            executor
+                .request_tool_approval(
+                    tool,
+                    &json!({"file_path":"first.txt","content":"first"}),
+                    "grant",
+                )
+                .await
+        });
+        let EngineEvent::ToolPermission { request_id, .. } = events.recv().await.unwrap() else {
+            panic!()
+        };
+        if case == "denied" {
+            manager.set_session_rules(
+                "grant-session",
+                std::collections::HashMap::from([(
+                    "Write".into(),
+                    crate::permissions::rules::PermissionAction::Deny,
+                )]),
+            );
+        }
+        if case == "plan" {
+            manager.set_mode(crate::permissions::PermissionMode::PlanMode);
+        }
+        if case == "cancel" {
+            task.abort();
+            assert!(task.await.unwrap_err().is_cancelled());
+            assert!(!manager.edit_session_allowed("grant-session"));
+            continue;
+        }
+        let updated_input = match case {
+            "replacement" => Some(json!({"file_path":"second.txt","content":"second"})),
+            "invalid" => Some(json!({"file_path":"first.txt","content":123})),
+            _ => None,
+        };
+        let response = if case == "reject" {
+            PermissionResponse::Deny {
+                message: "rejected".into(),
+                interrupt: false,
+            }
+        } else {
+            PermissionResponse::AllowEditsForSession {
+                updated_input,
+                note: None,
+            }
+        };
+        crate::native_engine::permission_response::respond(&mailbox, &request_id, response)
+            .await
+            .unwrap();
+        let result = task.await.unwrap();
+        let allowed = matches!(case, "valid" | "replacement");
+        assert_eq!(result.is_ok(), allowed, "{case}: {result:?}");
+        assert_eq!(
+            manager.edit_session_allowed("grant-session"),
+            allowed,
+            "{case}"
+        );
+        assert!(!manager.edit_session_allowed("other"));
+        assert!(crate::native_engine::permission_response::respond(
+            &mailbox,
+            &request_id,
+            PermissionResponse::AllowEditsForSession {
+                updated_input: None,
+                note: None
+            }
+        )
+        .await
+        .is_err());
     }
 }
 

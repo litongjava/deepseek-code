@@ -3,7 +3,40 @@
 //! WebFetch(domain:...) rule. The reference CLI's extra rules for its own
 //! GitHub repositories are left out.
 
-/// Hosts, or host/path prefixes, from the reference CLI's list.
+/// Local and private HTTP(S) addresses require a reviewed one-call grant.
+pub fn requires_local_approval(url: &str) -> bool {
+    let Ok(parsed) = reqwest::Url::parse(url) else {
+        return false;
+    };
+    if !matches!(parsed.scheme(), "http" | "https") {
+        return false;
+    }
+    let host = parsed
+        .host_str()
+        .unwrap_or_default()
+        .trim_end_matches('.')
+        .to_ascii_lowercase();
+    match host
+        .trim_matches(|c| c == '[' || c == ']')
+        .parse::<std::net::IpAddr>()
+    {
+        Ok(std::net::IpAddr::V4(ip)) => {
+            ip.is_loopback() || ip.is_private() || ip.is_link_local() || ip.is_unspecified()
+        }
+        Ok(std::net::IpAddr::V6(ip)) => {
+            ip.is_loopback()
+                || ip.is_unspecified()
+                || (ip.segments()[0] & 0xfe00) == 0xfc00
+                || (ip.segments()[0] & 0xffc0) == 0xfe80
+                || ip.to_ipv4_mapped().is_some_and(|ip| {
+                    ip.is_loopback() || ip.is_private() || ip.is_link_local() || ip.is_unspecified()
+                })
+        }
+        Err(_) => host == "localhost" || host.ends_with(".localhost") || !host.contains('.'),
+    }
+}
+
+/// Public documentation hosts or host/path prefixes.
 const PREAPPROVED: &[&str] = &[
     "agentskills.io",
     "angular.io",

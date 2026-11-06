@@ -1247,8 +1247,13 @@ impl Session {
                                 Some(approval) => approval.decide(&answer),
                                 None => Decision { allowed: ["y", "yes", "1", "\u{662f}", "\u{5141}\u{8bb8}"].contains(&answer.trim().to_lowercase().as_str()), grant: None, note: None },
                             };
-                            if decision.grant == Some(Remember::BashSession) {
-                                let _ = self.engine.resume_with_permission(&request_id, PermissionResponse::AllowBashForSession { updated_input: None, note: decision.note.clone() }).await;
+                            if matches!(decision.grant, Some(Remember::BashSession | Remember::EditsSession)) {
+                                let response = if decision.grant == Some(Remember::EditsSession) {
+                                    PermissionResponse::AllowEditsForSession { updated_input: None, note: decision.note.clone() }
+                                } else {
+                                    PermissionResponse::AllowBashForSession { updated_input: None, note: decision.note.clone() }
+                                };
+                                let _ = self.engine.resume_with_permission(&request_id, response).await;
                                 progress.set_activity("Working");
                                 continue;
                             }
@@ -1275,7 +1280,7 @@ impl Session {
                                             progress.notice(&format!("Allowed for this session; saving the rule to .claude/settings.local.json failed: {error:#}"));
                                         }
                                     }
-                                    None | Some(Remember::BashSession) => {}
+                                    None | Some(Remember::BashSession | Remember::EditsSession) => {}
                                 }
                             } else if !decision.allowed && !remote_decided && approval.is_some() {
                                 // As in the reference CLI: a bare No stops the turn; No with
