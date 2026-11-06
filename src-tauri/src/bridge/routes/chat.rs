@@ -272,6 +272,13 @@ pub(super) async fn start_chat(
             let next = tokio::select! {
                 biased;
                 _ = run.stop_requested() => {
+                    // Text the engine already produced is part of the partial answer,
+                    // even if this loop had not consumed it when Stop arrived.
+                    while let Ok(pending) = rx.try_recv() {
+                        if let crate::native_engine::tool_loop::EngineEvent::Text(text) = pending {
+                            full_text.push_str(&text);
+                        }
+                    }
                     // Same path as a disconnect: dropping rx below cancels this turn's executor.
                     terminal_event = Some(serde_json::json!({"type":"message_stop","stop_reason":"cancelled","full_text":full_text}));
                     break;

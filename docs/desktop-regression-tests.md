@@ -79,9 +79,9 @@ npm run tauri -- dev
 
 ## 按改动范围选择场景
 
-- `MemoryPanel`、`api/memory`、`routes/memory.rs`、`crates/core/src/memory`：A
+- `MemoryPanel`、`api/memory`、Bridge 的 memory 路由、core 的 memory 模块：A
 - `AgentCustomization`、`api/customization`、`routes/customization.rs`、`services/customization.rs`、`prompt/`：B
-- `scheduler/`、`task/cron.rs`、`TaskList`、`NewTaskModal`、`src-tauri/src/main.rs` 的调度部分：C
+- `scheduler/`、`task/cron.rs`、`TaskList`、`NewTaskModal`、Desktop 入口 `main.rs` 的调度部分：C
 - `CustomizePage`：B、D5
 - `services/bridgeConnection.ts`、`features/server/`、`platform/native.ts`、`bridge/server_mode.rs`、`bin/dcd-server.rs`、`lib.rs` 的移动端入口、`gen/android/`：E、D1
 - `features/trajectory/`（工具调用分组）：D6

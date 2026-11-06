@@ -309,11 +309,11 @@ const SettingsPage = ({ onCreateWithDeepSeek }: { onCreateWithDeepSeek?: () => v
           <span>{t('common.back')}</span>
         </button>
       </div>
-      <div className="flex flex-1 min-h-0 overflow-hidden">
-        {/* Left Sidebar Navigation */}
-        <div className="w-[180px] md:w-[200px] flex-shrink-0 pl-4 md:pl-8 pb-8 overflow-y-auto flex flex-col gap-1">
+      <div className="flex flex-1 min-h-0 flex-col overflow-hidden md:flex-row">
+        {/* Navigation: a scrollable tab row on phones, a sidebar on wider screens. */}
+        <div className="flex w-full flex-shrink-0 flex-row gap-1 overflow-x-auto px-4 pb-3 md:w-[200px] md:flex-col md:overflow-x-visible md:overflow-y-auto md:pb-8 md:pl-8 md:pr-0">
           <h2
-            className="font-[Spectral] text-[28px] text-claude-text px-3 mb-6"
+            className="hidden font-[Spectral] text-[28px] text-claude-text px-3 mb-6 md:block"
             style={{
               fontWeight: 500,
               WebkitTextStroke: '0.5px currentColor'
@@ -322,12 +322,12 @@ const SettingsPage = ({ onCreateWithDeepSeek }: { onCreateWithDeepSeek?: () => v
             {t('settings.title')}
           </h2>
 
-          <button onClick={() => setTab('account')} className={`text-left px-3 py-2 rounded-lg text-[15px] font-medium transition-colors flex items-center gap-2 ${tab === 'account' ? 'bg-claude-btn-hover text-claude-text' : 'text-claude-textSecondary hover:bg-claude-hover'}`}>
+          <button onClick={() => setTab('account')} className={`shrink-0 whitespace-nowrap text-left px-3 py-2 rounded-lg text-[15px] font-medium transition-colors flex items-center gap-2 ${tab === 'account' ? 'bg-claude-btn-hover text-claude-text' : 'text-claude-textSecondary hover:bg-claude-hover'}`}>
             <UserRound size={16} />{t('settings.account')}
           </button>
           <button
             onClick={() => setTab('general')}
-            className={`text-left px-3 py-2 rounded-lg text-[15px] font-medium transition-colors flex items-center gap-2 ${tab === 'general' ? 'bg-claude-btn-hover text-claude-text' : 'text-claude-textSecondary hover:bg-claude-hover'
+            className={`shrink-0 whitespace-nowrap text-left px-3 py-2 rounded-lg text-[15px] font-medium transition-colors flex items-center gap-2 ${tab === 'general' ? 'bg-claude-btn-hover text-claude-text' : 'text-claude-textSecondary hover:bg-claude-hover'
               }`}
           >
             <Settings size={16} />
@@ -336,20 +336,20 @@ const SettingsPage = ({ onCreateWithDeepSeek }: { onCreateWithDeepSeek?: () => v
           {localStorage.getItem('user_mode') === 'selfhosted' && (
             <button
               onClick={() => setTab('models')}
-              className={`text-left px-3 py-2 rounded-lg text-[15px] font-medium transition-colors flex items-center gap-2 ${tab === 'models' ? 'bg-claude-btn-hover text-claude-text' : 'text-claude-textSecondary hover:bg-claude-hover'
+              className={`shrink-0 whitespace-nowrap text-left px-3 py-2 rounded-lg text-[15px] font-medium transition-colors flex items-center gap-2 ${tab === 'models' ? 'bg-claude-btn-hover text-claude-text' : 'text-claude-textSecondary hover:bg-claude-hover'
                 }`}
             >
               <Cpu size={16} />
               {t('settings.models')}
             </button>
           )}
-          <button onClick={() => setTab('search')} className={`text-left px-3 py-2 rounded-lg text-[15px] font-medium transition-colors flex items-center gap-2 ${tab === 'search' ? 'bg-claude-btn-hover text-claude-text' : 'text-claude-textSecondary hover:bg-claude-hover'}`}>
+          <button onClick={() => setTab('search')} className={`shrink-0 whitespace-nowrap text-left px-3 py-2 rounded-lg text-[15px] font-medium transition-colors flex items-center gap-2 ${tab === 'search' ? 'bg-claude-btn-hover text-claude-text' : 'text-claude-textSecondary hover:bg-claude-hover'}`}>
             <Globe size={16} />{t('searchSettings.nav')}
           </button>
           {localStorage.getItem('user_mode') !== 'selfhosted' && (
             <button
               onClick={() => setTab('usage')}
-              className={`text-left px-3 py-2 rounded-lg text-[15px] font-medium transition-colors flex items-center gap-2 ${tab === 'usage' ? 'bg-claude-btn-hover text-claude-text' : 'text-claude-textSecondary hover:bg-claude-hover'
+              className={`shrink-0 whitespace-nowrap text-left px-3 py-2 rounded-lg text-[15px] font-medium transition-colors flex items-center gap-2 ${tab === 'usage' ? 'bg-claude-btn-hover text-claude-text' : 'text-claude-textSecondary hover:bg-claude-hover'
                 }`}
             >
               <BarChart3 size={16} />
@@ -359,7 +359,7 @@ const SettingsPage = ({ onCreateWithDeepSeek }: { onCreateWithDeepSeek?: () => v
           <button
             onClick={() => setTab('customize')}
             aria-current={tab === 'customize' ? 'page' : undefined}
-            className={`text-left px-3 py-2 rounded-lg text-[15px] font-medium transition-colors flex items-center gap-2 ${tab === 'customize' ? 'bg-claude-btn-hover text-claude-text' : 'text-claude-textSecondary hover:bg-claude-hover'
+            className={`shrink-0 whitespace-nowrap text-left px-3 py-2 rounded-lg text-[15px] font-medium transition-colors flex items-center gap-2 ${tab === 'customize' ? 'bg-claude-btn-hover text-claude-text' : 'text-claude-textSecondary hover:bg-claude-hover'
               }`}
           >
             <Puzzle size={16} />
@@ -367,20 +367,20 @@ const SettingsPage = ({ onCreateWithDeepSeek }: { onCreateWithDeepSeek?: () => v
           </button>
           <button
             onClick={() => setTab('tasks')}
-            className={`text-left px-3 py-2 rounded-lg text-[15px] font-medium transition-colors flex items-center gap-2 ${tab === 'tasks' ? 'bg-claude-btn-hover text-claude-text' : 'text-claude-textSecondary hover:bg-claude-hover'
+            className={`shrink-0 whitespace-nowrap text-left px-3 py-2 rounded-lg text-[15px] font-medium transition-colors flex items-center gap-2 ${tab === 'tasks' ? 'bg-claude-btn-hover text-claude-text' : 'text-claude-textSecondary hover:bg-claude-hover'
               }`}
           >
             <Clock size={16} />
             {t('tasks.title')}
           </button>
-          <button onClick={() => setTab('about')} className={`text-left px-3 py-2 rounded-lg text-[15px] font-medium transition-colors flex items-center gap-2 ${tab === 'about' ? 'bg-claude-btn-hover text-claude-text' : 'text-claude-textSecondary hover:bg-claude-hover'}`}>
+          <button onClick={() => setTab('about')} className={`shrink-0 whitespace-nowrap text-left px-3 py-2 rounded-lg text-[15px] font-medium transition-colors flex items-center gap-2 ${tab === 'about' ? 'bg-claude-btn-hover text-claude-text' : 'text-claude-textSecondary hover:bg-claude-hover'}`}>
             <Info size={16} />{t('settings.about')}
           </button>
         </div>
 
         {/* Right Content Area */}
         <div className={`flex-1 min-w-0 ${tab === 'customize' ? 'overflow-hidden' : 'overflow-y-auto'}`}>
-          {tab === 'customize' ? <CustomizePage onBack={() => setTab('general')} onCreateWithDeepSeek={onCreateWithDeepSeek} /> : <div className="max-w-6xl px-6 lg:px-12 pb-32">
+          {tab === 'customize' ? <CustomizePage onBack={() => setTab('general')} onCreateWithDeepSeek={onCreateWithDeepSeek} /> : <div className="max-w-6xl px-4 md:px-6 lg:px-12 pb-32">
             {tab === 'general' && renderGeneral()}
             {tab === 'about' && renderAbout()}
             {tab === 'models' && <ProviderSettings />}

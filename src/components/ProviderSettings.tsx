@@ -87,8 +87,9 @@ export default function ProviderSettings() {
   return <div>
     <ModeModelDefaults providers={providers} />
     {error && <div role="alert" className="mb-4 rounded-lg bg-red-500/10 text-red-500 p-3 text-sm">{error}</div>}
-    <div className="flex gap-6 min-h-[400px] animate-fade-in">
-      <div className="w-[240px] shrink-0 flex flex-col gap-2">
+    <div className="flex flex-col gap-6 min-h-[400px] animate-fade-in md:flex-row">
+      {/* Phones stack the provider list above the editor. */}
+      <div className="w-full shrink-0 flex flex-col gap-2 md:w-[240px]">
         <div className="flex items-center justify-between mb-3"><span className="text-[13px] text-claude-textSecondary">供应商</span><button title="Add provider" aria-label="添加供应商" onClick={beginAdd} className="p-1 hover:bg-claude-hover rounded"><Plus size={16} /></button></div>
         {providers.map(p => <button key={p.id} onClick={() => select(p)} className={`w-full flex items-center gap-3 p-3 rounded-xl border text-left ${selectedId === p.id ? 'bg-claude-input border-claude-border shadow-sm' : 'border-transparent hover:bg-claude-hover'}`}>
           <span className="w-8 h-8 rounded-lg bg-gray-500 text-white grid place-items-center font-bold">{p.name.charAt(0).toUpperCase()}</span>
