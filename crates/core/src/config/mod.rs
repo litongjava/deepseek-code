@@ -193,9 +193,16 @@ impl OrchestrationConfig {
         Ok(())
     }
 
-    /// Borrow the global config. Panics if not yet initialised.
+    /// Borrow the global config, loading it on first use so every embedder
+    /// (Desktop, dcd-server, tests) works without an explicit `init_global()`.
+    /// An unreadable configuration file falls back to built-in defaults.
     pub fn get() -> &'static Self {
-        CONFIG.get().expect("OrchestrationConfig not initialised — call init_global() first")
+        CONFIG.get_or_init(|| {
+            Self::load().unwrap_or_else(|error| {
+                tracing::warn!("Failed to load orchestration.toml, using defaults: {error}");
+                Self::default()
+            })
+        })
     }
 
     // ---- Convenience accessors (avoids deep .tool_loop.xxx chains everywhere) ----
@@ -383,6 +390,13 @@ mod tests {
         std::fs::write(root.path().join("config.json"), "invalid").unwrap();
         assert!(desktop.reload().is_err());
         assert_eq!(desktop.get_config().default_provider_id.as_deref(), Some("shared"));
+    }
+
+    #[test]
+    fn global_config_loads_on_first_use_without_explicit_init() {
+        // Accessors used by the engine must not panic in embedders that skip init_global().
+        assert!(OrchestrationConfig::default_max_tokens() > 0);
+        assert!(OrchestrationConfig::init_global().is_ok());
     }
 
     #[test]

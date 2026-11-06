@@ -1,5 +1,5 @@
 import {useEffect,useState} from 'react';
-import {invoke} from '@tauri-apps/api/core';
+import { invokeDesktop as invoke } from '../platform/native';
 import {listProjects,type Project} from '../api/projects';
 export default function LegacySessionImport() {
  const [projects,setProjects]=useState<Project[]>([]);const [project,setProject]=useState('');const [source,setSource]=useState('');const [busy,setBusy]=useState(false);const [result,setResult]=useState('');const [error,setError]=useState('');

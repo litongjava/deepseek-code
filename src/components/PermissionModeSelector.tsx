@@ -3,9 +3,10 @@ import { createPortal } from 'react-dom';
 import { useChatStore } from '../stores/useChatStore';
 import { useI18n } from '../hooks/useI18n';
 import { Shield, ShieldCheck, ShieldOff, Eye } from 'lucide-react';
-import { invoke } from '@tauri-apps/api/core';
+import { invokeDesktop as invoke } from '../platform/native';
 
 import type { PermissionMode } from '../stores/useGeneralSettingsStore';
+import { hasNativeDesktop } from '../services/bridgeConnection';
 
 interface PermissionModeOption {
   value: PermissionMode;
@@ -85,7 +86,7 @@ export default function PermissionModeSelector({ className = '', value, onChange
     : MODE_OPTIONS.find((m) => m.value === permissionMode) || MODE_OPTIONS[0];
 
   useEffect(() => {
-    if (value !== undefined || !(window as any).__TAURI_INTERNALS__) return;
+    if (value !== undefined || !hasNativeDesktop()) return;
     let cancelled = false;
     invoke<string>('get_permission_mode').then(mode => {
       if (!cancelled) setPermissionMode(mode);

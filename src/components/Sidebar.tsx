@@ -8,7 +8,7 @@ import { isRightSidebarRoute } from '../stores/useRightSidebarStore';
 import { OPEN_PANEL_EVENT } from '../features/rightSidebar/useRightSidebarController';
 import { useProjectStore } from '../stores/useProjectStore';
 import { IconCode } from './Icons';
-import { ChevronUp, Settings, HelpCircle, LogOut, Shield, Pin, PinOff, X, Home } from 'lucide-react';
+import { ChevronUp, Settings, HelpCircle, LogOut, Shield, Pin, PinOff, X, Home, Server } from 'lucide-react';
 import { getConversations, getUser, getUserUsage, logout, getUserProfile } from '../api';
 
 import SearchModal from './SearchModal';
@@ -23,9 +23,12 @@ import KnowledgePanel from './KnowledgePanel';
 import AppStudioPanel from './AppStudioPanel';
 import GitHubHubPanel from './GitHubHubPanel';
 import LivePreviewRenderer from './LivePreviewRenderer';
+import { bridgeOrigin, connectionMode, isMobileApp, requestServerLogin, switchToLocalEngine } from '../services/bridgeConnection';
 
 interface SidebarProps {
   isCollapsed: boolean;
+  /** Phones: a drawer over the content that disappears when collapsed. */
+  overlay?: boolean;
   toggleSidebar: () => void;
   refreshTrigger: number;
   onNewChatClick?: () => void;
@@ -39,7 +42,7 @@ interface SidebarProps {
   onHelpModalChange: (open: boolean) => void;
 }
 
-const Sidebar = ({ isCollapsed, toggleSidebar, refreshTrigger, onNewChatClick, onOpenSettings, onCloseOverlays, tunerConfig, setTunerConfig, titleBarHeight, activeConversationId, showHelpModal, onHelpModalChange: setShowHelpModal }: SidebarProps) => {
+const Sidebar = ({ overlay = false, isCollapsed, toggleSidebar, refreshTrigger, onNewChatClick, onOpenSettings, onCloseOverlays, tunerConfig, setTunerConfig, titleBarHeight, activeConversationId, showHelpModal, onHelpModalChange: setShowHelpModal }: SidebarProps) => {
   const { t } = useI18n();
   const showCodingView = useGeneralSettingsStore(state => state.showCodingView);
   const navigate = useNavigate();
@@ -75,7 +78,7 @@ const Sidebar = ({ isCollapsed, toggleSidebar, refreshTrigger, onNewChatClick, o
     import('../api').then(({ detectBridgePort }) => {
       detectBridgePort().then(port => {
         setBridgePort(port);
-        fetch(`http://127.0.0.1:${port}/health`).then(r => setBridgeHealthy(r.ok)).catch(() => setBridgeHealthy(false));
+        fetch(`${bridgeOrigin()}/health`).then(r => setBridgeHealthy(r.ok)).catch(() => setBridgeHealthy(false));
       });
     });
   }, []);
@@ -312,11 +315,14 @@ const Sidebar = ({ isCollapsed, toggleSidebar, refreshTrigger, onNewChatClick, o
     <>
       <div
         className={`
-          h-screen bg-claude-sidebar border-r border-claude-border flex-shrink-0 text-claude-text antialiased flex flex-col transition-all duration-200 ease-in-out overflow-hidden relative
+          h-screen bg-claude-sidebar border-r border-claude-border flex-shrink-0 text-claude-text antialiased flex flex-col transition-all duration-200 ease-in-out overflow-hidden ${overlay ? 'fixed left-0 top-0 z-50 shadow-xl' : 'relative'}
         `}
         style={{
           paddingTop: `${titleBarHeight || 44}px`,
-          width: isCollapsed ? '46px' : `${tunerConfig?.sidebarWidth || 280}px`
+          width: overlay
+            ? (isCollapsed ? '0px' : `min(${tunerConfig?.sidebarWidth || 280}px, 85vw)`)
+            : (isCollapsed ? '46px' : `${tunerConfig?.sidebarWidth || 280}px`),
+          borderRightWidth: overlay && isCollapsed ? 0 : undefined,
         }}
       >
         {!isCollapsed && (
@@ -474,6 +480,19 @@ const Sidebar = ({ isCollapsed, toggleSidebar, refreshTrigger, onNewChatClick, o
                   >
                     <Shield size={16} className="text-claude-textSecondary" />
                     {t('sidebar.adminPanel')}
+                  </button>
+                )}
+                {isMobileApp && (
+                  <button
+                    onClick={() => {
+                      setShowUserMenu(false);
+                      if (connectionMode() === 'web') { switchToLocalEngine(); window.location.reload(); }
+                      else requestServerLogin();
+                    }}
+                    className="w-full flex items-center gap-3 px-4 py-2 text-[13px] text-claude-text hover:bg-claude-hover transition-colors"
+                  >
+                    <Server size={16} className="text-claude-textSecondary" />
+                    {connectionMode() === 'web' ? t('serverLogin.useThisPhone') : t('serverLogin.connectServer')}
                   </button>
                 )}
                 <button

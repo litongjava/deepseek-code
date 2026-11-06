@@ -1,5 +1,5 @@
 import { useState } from 'react';
-import { invoke } from '@tauri-apps/api/core';
+import { invokeDesktop as invoke } from '../platform/native';
 
 interface Report { imported: string[]; skipped: string[]; preview: boolean; backup: string | null }
 export default function McpLegacyImport({ onImported }: { onImported: () => Promise<void> }) {

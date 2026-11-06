@@ -820,5 +820,32 @@
     "browserFrameTitle": "Page web : {url}",
     "browserLoading": "Chargement de la page…",
     "shortcut": "Ctrl+Alt+B (⌘⌥B sur macOS) : afficher ou masquer la barre latérale droite"
+  },
+  "serverLogin": {
+    "title": "Se connecter à DeepSeek Code",
+    "description": "Saisissez le jeton d'accès de votre serveur DeepSeek Code.",
+    "serverUrl": "Adresse du serveur",
+    "token": "Jeton d'accès",
+    "tokenHint": "Exécutez dcd-server --print-token sur le serveur pour l'afficher.",
+    "submit": "Se connecter",
+    "connecting": "Connexion...",
+    "otherServer": "Utiliser un autre serveur",
+    "connectServer": "Se connecter à un serveur",
+    "useThisPhone": "Exécuter sur ce téléphone",
+    "errors": {
+      "needsServer": "Saisissez une adresse de serveur.",
+      "unreachable": "Impossible de joindre le serveur.",
+      "needsToken": "Saisissez le jeton d'accès.",
+      "expired": "Votre session a expiré. Saisissez à nouveau le jeton d'accès.",
+      "invalidUrl": "L'adresse doit commencer par http:// ou https://.",
+      "badToken": "Le jeton d'accès est incorrect.",
+      "failed": "Échec de la connexion. Réessayez."
+    }
+  },
+  "githubToken": {
+    "tokenLabel": "Jeton d'accès personnel",
+    "tokenHint": "Créez un jeton avec la portée repo dans GitHub Settings > Developer settings > Personal access tokens.",
+    "connect": "Connecter",
+    "tokenFailed": "GitHub a refusé ce jeton."
   }
 }

@@ -3,7 +3,7 @@ import ProjectRemotePanel from './ProjectRemotePanel';
 import ScheduledPromptsPanel from './ScheduledPromptsPanel';
 import SkillImportPanel from './SkillImportPanel';
 import React, { useCallback, useEffect, useState } from 'react';
-import { invoke } from '@tauri-apps/api/core';
+import { invokeDesktop as invoke } from '../platform/native';
 import MagicDocsPanel from './MagicDocsPanel';
 import LegacySessionImport from './LegacySessionImport';
 import TeamContextSharing from './TeamContextSharing';

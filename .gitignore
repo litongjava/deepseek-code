@@ -29,7 +29,9 @@ dist-runtime
 # Tauri
 src-tauri/target*/
 src-tauri/target-stage/
-src-tauri/gen/
+src-tauri/gen/*
+# The Android project holds hand-written code (MainActivity insets); keep it.
+!src-tauri/gen/android/
 
 # Build artifacts
 *.msi

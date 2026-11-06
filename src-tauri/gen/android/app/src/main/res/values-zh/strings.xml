@@ -1,0 +1,4 @@
+<resources>
+    <string name="engine_channel_name">引擎</string>
+    <string name="engine_running">正在本机运行</string>
+</resources>

@@ -3,6 +3,11 @@ import { sendMessage as sendDesktopMessage, reconnectStream as reconnectDesktop 
 import { reconnectStream as reconnectModular } from './conversations';
 import { sendMessage as sendModularMessage } from './chat';
 
+vi.mock('../services/bridgeConnection', async importOriginal => ({
+  ...await importOriginal<typeof import('../services/bridgeConnection')>(),
+  API_BASE: '/api', hasBridge: true, waitForApiReady: vi.fn().mockResolvedValue(undefined),
+  detectBridgePort: vi.fn().mockResolvedValue(30085),
+}));
 vi.mock('./client', () => ({
   API_BASE: '/api', isTauriApp: true, getToken: () => null,
   detectBridgePort: vi.fn().mockResolvedValue(30085),

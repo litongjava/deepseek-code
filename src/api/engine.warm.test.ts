@@ -1,6 +1,6 @@
 import { afterEach, expect, it, vi } from 'vitest';
 
-vi.mock('../services/bridgeConnection', () => ({ isTauriApp: false, useDevProxy: true, waitForApiReady: vi.fn().mockResolvedValue(undefined), API_BASE: '/api', detectBridgePort: vi.fn(), resetBridgePort: vi.fn() }));
+vi.mock('../services/bridgeConnection', () => ({ isTauriApp: false, hasBridge: false, hasNativeDesktop: () => false, bridgeOrigin: () => 'http://localhost', useDevProxy: true, waitForApiReady: vi.fn().mockResolvedValue(undefined), API_BASE: '/api', detectBridgePort: vi.fn(), resetBridgePort: vi.fn() }));
 
 afterEach(() => { localStorage.clear(); vi.unstubAllGlobals(); });
 it.each(['desktop', 'modular'])('%s navigation does not submit stale saved permission authority', async implementation => {

@@ -1,5 +1,6 @@
-import { invoke } from '@tauri-apps/api/core';
-import { isTauriApp, request } from './client';
+import { invokeDesktop as invoke } from '../platform/native';
+import { request } from './client';
+import { hasNativeDesktop } from '../services/bridgeConnection';
 
 export interface WorkspaceScope { conversationId?: string; projectId?: string }
 export interface WorkspaceFileRef { rootId: string; relativePath: string }
@@ -36,14 +37,14 @@ export function getWorkspaceFileDiff(scope: WorkspaceScope, file: WorkspaceFileR
   return workspaceRequest('diff', { scope, ...fileReference(file) }, signal);
 }
 export async function getWorkspaceFileCapabilities(scope: WorkspaceScope, file: WorkspaceFileRef): Promise<WorkspaceFileCapabilities> {
-  if (!isTauriApp) return { reveal: false, defaultApp: false, terminal: false, saveAs: false, wslDistributions: [], reason: 'Native file actions require the Desktop application.' };
+  if (!hasNativeDesktop()) return { reveal: false, defaultApp: false, terminal: false, saveAs: false, wslDistributions: [], reason: 'Native file actions require the Desktop application.' };
   return invoke('workspace_file_capabilities', { scope, file: fileReference(file) });
 }
 export async function openWorkspaceFile(scope: WorkspaceScope, file: WorkspaceFileRef, action: WorkspaceFileAction, distribution?: string): Promise<void> {
-  if (!isTauriApp) throw new Error('Native file actions require the Desktop application.');
+  if (!hasNativeDesktop()) throw new Error('Native file actions require the Desktop application.');
   await invoke('workspace_file_action', { scope, file: fileReference(file), action, distribution });
 }
 export async function saveWorkspaceFileAs(scope: WorkspaceScope, file: WorkspaceFileRef): Promise<WorkspaceSaveResult> {
-  if (!isTauriApp) throw new Error('Save as requires the Desktop application.');
+  if (!hasNativeDesktop()) throw new Error('Save as requires the Desktop application.');
   return invoke('workspace_file_save_as', { scope, file: fileReference(file) });
 }

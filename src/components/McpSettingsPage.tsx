@@ -1,7 +1,7 @@
 import McpLegacyImport from './McpLegacyImport';
 import React, { useState, useEffect } from 'react';
 import { Plus, Play, Square, RotateCw, Trash2, Edit2, ChevronDown, ChevronRight, Wrench, Globe, Server } from 'lucide-react';
-import { invoke } from '@tauri-apps/api/core';
+import { invokeDesktop as invoke } from '../platform/native';
 
 interface McpServer {
   id: string;

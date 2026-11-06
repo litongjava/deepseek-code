@@ -36,12 +36,14 @@ import ChatHeader from './components/ChatHeader';
 import Tooltip from './components/ui/Tooltip';
 import { useUIStore } from './stores';
 import { useI18n } from './hooks/useI18n';
+import { useNarrowScreen } from './hooks/useNarrowScreen';
 import RightPanelSlot from './features/rightSidebar/RightPanelSlot';
 import RightSidebarToggle from './features/rightSidebar/RightSidebarToggle';
 import { useRightSidebarController } from './features/rightSidebar/useRightSidebarController';
 import { isRightSidebarRoute } from './stores/useRightSidebarStore';
+import { hasNativeDesktop } from './services/bridgeConnection';
 
-const isTauri = typeof window !== 'undefined' && !!(window as any).__TAURI_INTERNALS__;
+const isTauri = hasNativeDesktop();
 
 const Layout = () => {
   const { t } = useI18n();
@@ -133,6 +135,11 @@ const Layout = () => {
 
   const location = useLocation();
   const navigate = useNavigate();
+  // On phones the sidebar is an overlay drawer: start closed and close it after navigating.
+  const narrowScreen = useNarrowScreen();
+  useEffect(() => {
+    if (narrowScreen) setIsSidebarCollapsed(true);
+  }, [narrowScreen, location.pathname, setIsSidebarCollapsed]);
 
   const [navHistory, setNavHistory] = useState<string[]>([location.pathname + location.search + location.hash]);
   const [navIndex, setNavIndex] = useState(0);
@@ -398,8 +405,9 @@ const Layout = () => {
           </div>
         )}>
           <div className="h-full flex items-center pr-2 gap-0.5" style={{ pointerEvents: 'auto', WebkitAppRegion: 'no-drag', paddingLeft: isMac ? '78px' : '4px' } as React.CSSProperties}>
-            <Tooltip content="Menu"><button onClick={() => { }} className="p-2 hover:bg-black/5 dark:hover:bg-white/5 rounded-md text-claude-textSecondary hover:text-claude-text transition-colors"><Menu size={18} className="opacity-80" /></button></Tooltip>
+            {!narrowScreen && <Tooltip content="Menu"><button onClick={() => { }} className="p-2 hover:bg-black/5 dark:hover:bg-white/5 rounded-md text-claude-textSecondary hover:text-claude-text transition-colors"><Menu size={18} className="opacity-80" /></button></Tooltip>}
             <Tooltip content={isSidebarCollapsed ? "Expand sidebar" : "Collapse sidebar"}><button onClick={() => setIsSidebarCollapsed(!isSidebarCollapsed)} className="p-1.5 hover:bg-black/5 dark:hover:bg-white/5 rounded-md text-claude-textSecondary hover:text-claude-text transition-colors"><IconSidebarToggle size={26} className="dark:invert transition-[filter] duration-200" /></button></Tooltip>
+            {!narrowScreen && (<>
             {canGoBack ? (
               <Tooltip content="Back"><button onClick={handleNavBack} className="p-1.5 rounded-md transition-colors hover:bg-black/5 dark:hover:bg-white/5 text-claude-navActive"><ArrowLeft size={16} strokeWidth={1.5} /></button></Tooltip>
             ) : (<span className="p-1.5 text-claude-navDisabled"><ArrowLeft size={16} strokeWidth={1.5} /></span>)}
@@ -409,10 +417,14 @@ const Layout = () => {
             {showCodingView && <Tooltip content="Agent Worktree (Ctrl+Shift+A)"><button onClick={() => { setShowAgentPanel(true); setShowAnalyticsPanel(false); }} className="p-1.5 hover:bg-black/5 dark:hover:bg-white/5 rounded-md text-claude-textSecondary hover:text-claude-text transition-colors"><GitBranch size={16} strokeWidth={1.5} /></button></Tooltip>}
             <Tooltip content="使用统计"><button onClick={() => { setShowAnalyticsPanel(true); setShowAgentPanel(false); }} className="p-1.5 hover:bg-black/5 dark:hover:bg-white/5 rounded-md text-claude-textSecondary hover:text-claude-text transition-colors"><BarChart3 size={16} strokeWidth={1.5} /></button></Tooltip>
             <Tooltip content={t('common.help')}><button type="button" aria-label={t('common.help')} aria-haspopup="dialog" aria-expanded={showHelpModal} onClick={() => setShowHelpModal(true)} className="p-1.5 hover:bg-black/5 dark:hover:bg-white/5 rounded-md text-claude-textSecondary hover:text-claude-text transition-colors"><HelpCircle size={16} strokeWidth={1.5} /></button></Tooltip>
+            </>)}
           </div>
           <div id="desktop-tool-menus" className="flex h-full shrink-0 items-center" />
         </AppTitleBar>
-        <Sidebar isCollapsed={isSidebarCollapsed} toggleSidebar={() => setIsSidebarCollapsed(!isSidebarCollapsed)} refreshTrigger={refreshTrigger} onNewChatClick={handleNewChat} onOpenSettings={() => { navigate('/settings'); setShowUpgrade(false); }} onCloseOverlays={() => setShowUpgrade(false)} tunerConfig={tunerConfig} setTunerConfig={setTunerConfig} titleBarHeight={titleBarHeight} showHelpModal={showHelpModal} onHelpModalChange={setShowHelpModal} />
+        {narrowScreen && !isSidebarCollapsed && (
+          <div className="fixed inset-0 z-40 bg-black/30" aria-hidden="true" onClick={() => setIsSidebarCollapsed(true)} />
+        )}
+        <Sidebar overlay={narrowScreen} isCollapsed={isSidebarCollapsed} toggleSidebar={() => setIsSidebarCollapsed(!isSidebarCollapsed)} refreshTrigger={refreshTrigger} onNewChatClick={handleNewChat} onOpenSettings={() => { navigate('/settings'); setShowUpgrade(false); }} onCloseOverlays={() => setShowUpgrade(false)} tunerConfig={tunerConfig} setTunerConfig={setTunerConfig} titleBarHeight={titleBarHeight} showHelpModal={showHelpModal} onHelpModalChange={setShowHelpModal} />
         <div className="flex-1 flex flex-col h-full min-w-0 overflow-hidden relative" style={{ paddingTop: `${titleBarHeight}px` }}>
           {isChatMode && !showUpgrade && (location.pathname === '/' || location.pathname.startsWith('/chat/')) && (
             <ChatHeader title={currentChatTitle} showArtifacts={showArtifacts} documentPanelDoc={documentPanelDoc} onOpenArtifacts={handleOpenArtifacts} hasArtifacts={artifacts.length > 0} onTitleRename={handleTitleChange} />

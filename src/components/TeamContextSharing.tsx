@@ -1,5 +1,5 @@
 import {useEffect,useState} from 'react';
-import {invoke} from '@tauri-apps/api/core';
+import { invokeDesktop as invoke } from '../platform/native';
 import {listProjects,type Project} from '../api/projects';
 interface Sharing {team:string;endpoint:string;enabled:boolean}
 export default function TeamContextSharing() {

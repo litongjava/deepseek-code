@@ -1,5 +1,5 @@
 import React, { useCallback, useEffect, useRef, useState } from 'react';
-import { invoke } from '@tauri-apps/api/core';
+import { invokeDesktop as invoke } from '../platform/native';
 import { Mic, X, Loader2 } from 'lucide-react';
 import { useI18n } from '../hooks/useI18n';
 

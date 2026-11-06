@@ -57,10 +57,25 @@ npm run tauri -- dev
 ### D. 基础流程
 
 1. 启动、新建会话、发送消息、流式显示回答。
-2. 工具审批、中断、恢复会话。
+2. 工具审批、中断、恢复会话。审批时只出现一个对话框；在浏览器和手机上点击“允许”后工具照常执行。
 3. 项目和工作区切换、文件面板。
 4. 模型设置和供应商设置保存。
 5. Skills、MCP、插件页面可以打开和切换。
+6. 让模型连续执行 3 条命令、写一句话、再执行 2 条命令：显示 `Ran commands · 3`、正文、`Ran commands · 2`，完成后都收起；执行中的分组展开并实时更新；展开后按顺序列出每次调用，点击行可看输出；深色主题同样清晰。
+
+### E. 浏览器和手机（dcd-server）
+
+用独立数据目录启动：`DEEPSEEK_CODE_DATA_DIR=<测试目录>/data target/debug/dcd-server --port 30185 --web-dir dist`（先 `npm run build`）。
+
+1. 用 deepseek-browser-use 打开 `http://127.0.0.1:30185`：出现令牌登录页；错误令牌提示不正确；正确令牌进入应用，刷新后仍保持登录。
+2. 发送消息，回答逐步显示；让模型调用 Bash，审批后显示结果。
+3. 新建项目：填写服务器上的目录路径，信任后出现在项目列表。
+4. 视口 390×844：侧边栏默认收起，打开后点选会话自动收起；会话头部不挤压标题。
+5. `curl -H "Origin: https://evil.example"` 带令牌请求 `/api/conversations` 返回 403；不带令牌返回 401。
+6. `--host 0.0.0.0` 不带 HTTPS 参数时拒绝启动；带自签名证书时 `https://` 可访问，登录 Cookie 带 `Secure`。
+7. Android：`npx tauri android build --apk --debug --target x86_64`，在模拟器安装。首次打开直接进入应用（本机模式），添加供应商后对话；等待 Ubuntu 环境安装完成（数据目录出现 `linux/rootfs/.deepseek-ready`），让模型用 Bash 执行 `head -2 /etc/os-release` 应显示 Ubuntu，再用 `apt-get install -y git` 安装后 `git --version` 可用；通知栏显示“正在本机运行”。顶部不被状态栏遮挡，键盘弹出时输入框可见。
+8. Android 用户菜单“连接服务器”：填写 `http://10.0.2.2:30185` 和令牌后能对话；登录页“在本机运行”切回后，原会话仍在，不出现“对话模型与当前模式不匹配”的提示。
+9. Desktop（`npm run tauri -- dev`）仍直接进入应用，不出现登录页；在会话页刷新后不出现模型模式不匹配的提示。
 
 ## 按改动范围选择场景
 
@@ -68,4 +83,6 @@ npm run tauri -- dev
 - `AgentCustomization`、`api/customization`、`routes/customization.rs`、`services/customization.rs`、`prompt/`：B
 - `scheduler/`、`task/cron.rs`、`TaskList`、`NewTaskModal`、`src-tauri/src/main.rs` 的调度部分：C
 - `CustomizePage`：B、D5
+- `services/bridgeConnection.ts`、`features/server/`、`platform/native.ts`、`bridge/server_mode.rs`、`bin/dcd-server.rs`、`lib.rs` 的移动端入口、`gen/android/`：E、D1
+- `features/trajectory/`（工具调用分组）：D6
 - 其他范围：至少跑 D1

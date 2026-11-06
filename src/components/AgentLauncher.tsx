@@ -1,6 +1,6 @@
 import AgentLegacyImport from './AgentLegacyImport';
 import { useEffect, useState } from 'react';
-import { invoke } from '@tauri-apps/api/core';
+import { invokeDesktop as invoke } from '../platform/native';
 import { listProjects, type Project } from '../api/projects';
 
 interface Definition { id:string; description:string; system_prompt:string; tools:string[]|null }

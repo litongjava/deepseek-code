@@ -1,5 +1,5 @@
 import { useState } from 'react';
-import { invoke } from '@tauri-apps/api/core';
+import { invokeDesktop as invoke } from '../platform/native';
 interface Host {id:string;pid:number;servers:string[]}
 export default function McpHosts() {
   const [hosts,setHosts]=useState<Host[]>([]); const [busy,setBusy]=useState(false); const [message,setMessage]=useState('');

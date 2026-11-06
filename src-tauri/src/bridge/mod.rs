@@ -1,4 +1,5 @@
 pub mod routes;
+pub mod server_mode;
 
 use crate::clipboard::ClipboardManager;
 use crate::config::{AppConfig, ConfigManager};
@@ -208,6 +209,7 @@ pub struct BridgeServer {
     preview_engine: Arc<PreviewEngine>,
     analytics_store: Arc<AnalyticsStore>,
     context_manager: Arc<Mutex<ContextManager>>,
+    data_dir: Arc<PathBuf>,
 }
 
 impl BridgeServer {
@@ -335,6 +337,7 @@ impl BridgeServer {
             preview_engine,
             analytics_store,
             context_manager,
+            data_dir: Arc::new(data_dir),
         }
     }
 
@@ -352,6 +355,12 @@ impl BridgeServer {
     }
 
     pub async fn start(&self, port: u16) -> Result<()> {
+        self.serve(server_mode::ServeOptions::local(port)).await
+    }
+
+    /// Serves the Bridge with explicit network options (see `server_mode`).
+    pub async fn serve(&self, options: server_mode::ServeOptions) -> Result<()> {
+        options.validate()?;
         if let Err(e) = self.mcp_server_manager.initialize().await {
             tracing::error!(module = "Bridge", "Failed to initialize MCP server manager: {}", e);
         }
@@ -386,10 +395,15 @@ impl BridgeServer {
             )),
             permission_manager: self.permission_manager.clone(),
             generation_runs: Arc::default(),
+            peripheral_host: Arc::default(),
+            data_dir: self.data_dir.clone(),
+            github: Arc::new(deepseek_code_core::services::github_connector::GithubConnector::new(
+                self.data_dir.as_ref().clone(),
+            )),
         };
         tracing::info!(module = "Bridge", "Database manager ready");
 
-        let allowed_origins: Vec<axum::http::HeaderValue> = [
+        let allowed_origins: Vec<String> = [
             "tauri://localhost",
             "https://tauri.localhost",
             "http://tauri.localhost",
@@ -408,8 +422,20 @@ impl BridgeServer {
             "null",
         ]
         .iter()
-        .filter_map(|s| s.parse::<axum::http::HeaderValue>().ok())
-        .collect();
+        .map(|s| s.to_string())
+        .chain(options.allowed_origins.iter().cloned())
+        .collect::<Vec<_>>();
+        // Desktop accepts its development origins; a server only trusts its own
+        // origin (checked per request) and the app origins it was given.
+        let allowed_origin_strings: Vec<String> = if options.is_server_mode() {
+            options.allowed_origins.clone()
+        } else {
+            allowed_origins.clone()
+        };
+        let allowed_origins: Vec<axum::http::HeaderValue> = allowed_origin_strings
+            .iter()
+            .filter_map(|s| s.parse::<axum::http::HeaderValue>().ok())
+            .collect();
 
         let cors = CorsLayer::new()
             .allow_origin(AllowOrigin::list(allowed_origins))
@@ -423,61 +449,48 @@ impl BridgeServer {
                 HeaderName::from_static("x-api-key"),
             ]);
 
-        let api_key_for_middleware = self.api_key.clone();
+        let mut access_keys = vec![self.api_key.clone()];
+        access_keys.extend(options.access_token.clone());
+        let policy = Arc::new(server_mode::AccessPolicy {
+            keys: access_keys,
+            server_mode: options.is_server_mode(),
+            allowed_origins: allowed_origin_strings.clone(),
+        });
+        let policy_for_middleware = policy.clone();
         let auth_middleware = middleware::from_fn(move |req: Request<axum::body::Body>, next: Next| {
-            let key = api_key_for_middleware.clone();
+            let policy = policy_for_middleware.clone();
             async move {
-                let path = req.uri().path();
-                let method = req.method().as_str();
-
-                // CORS preflight — always pass
-                if method == "OPTIONS" {
-                    return next.run(req).await;
-                }
-
-                // Public endpoints (no auth required)
-                if path == "/health" || path == "/metrics" || path.starts_with("/api/im/webhook/") {
-                    return next.run(req).await;
-                }
-
-                // Workspace config and system status — public read
-                if (path == "/api/system-status" || path == "/api/workspace-config") && method == "GET" {
-                    return next.run(req).await;
-                }
-
-                // Validate x-api-key header
-                if let Some(val) = req.headers().get(HeaderName::from_static("x-api-key")) {
-                    if let Ok(val) = val.to_str() {
-                        if val == key {
-                            return next.run(req).await;
-                        }
+                match policy.check(req.method(), req.uri().path(), req.headers()) {
+                    server_mode::Access::Allow => next.run(req).await,
+                    server_mode::Access::Deny(status, message) => {
+                        (status, axum::Json(json!({"error": message}))).into_response()
                     }
                 }
-
-                // Validate Authorization: Bearer <token>
-                if let Some(val) = req.headers().get(AUTHORIZATION) {
-                    if let Ok(val) = val.to_str() {
-                        if let Some(token) = val.strip_prefix("Bearer ") {
-                            if token == key {
-                                return next.run(req).await;
-                            }
-                        }
-                    }
-                }
-
-                let body = axum::Json(json!({"error": "Invalid or missing API key"}));
-                (StatusCode::UNAUTHORIZED, body).into_response()
             }
         });
 
-        let app = routes::build_all_routes()
+        let mut app = routes::build_all_routes()
+            .merge(server_mode_routes(policy.clone(), options.is_https()))
+            .merge(routes::github::routes(options.is_https()));
+        if let Some(static_dir) = &options.static_dir {
+            app = app.fallback_service(
+                tower_http::services::ServeDir::new(static_dir)
+                    .fallback(tower_http::services::ServeFile::new(static_dir.join("index.html"))),
+            );
+        }
+        let app = app
             .layer(auth_middleware)
             .layer(cors)
             .with_state(state);
 
+        let ports: Vec<u16> = if options.try_next_ports {
+            (0..5).filter_map(|offset| options.port.checked_add(offset)).collect()
+        } else {
+            vec![options.port]
+        };
         let mut bound_port = None;
-        for attempt_port in [port, port + 1, port + 2, port + 3, port + 4] {
-            match tokio::net::TcpListener::bind(format!("127.0.0.1:{}", attempt_port)).await {
+        for attempt_port in ports.iter().copied() {
+            match tokio::net::TcpListener::bind((options.host, attempt_port)).await {
                 Ok(l) => {
                     bound_port = Some((l, attempt_port));
                     break;
@@ -487,15 +500,61 @@ impl BridgeServer {
                 }
             }
         }
-        let (listener, actual_port) = bound_port.ok_or_else(|| anyhow::anyhow!("Failed to bind any port in range {}-{}", port, port + 4))?;
-        if actual_port != port {
-            tracing::warn!(module = "Bridge", "Original port {} unavailable, using port {} instead", port, actual_port);
+        let (listener, actual_port) = bound_port.ok_or_else(|| {
+            anyhow::anyhow!("Failed to bind {} on port(s) {:?}", options.host, ports)
+        })?;
+        if actual_port != options.port {
+            tracing::warn!(module = "Bridge", "Original port {} unavailable, using port {} instead", options.port, actual_port);
         }
-        tracing::info!(module = "Bridge", "Server running on http://127.0.0.1:{}", actual_port);
+        let scheme = if options.tls.is_some() { "https" } else { "http" };
+        tracing::info!(module = "Bridge", "Server running on {}://{}:{}", scheme, options.host, actual_port);
         *LOCAL_ENDPOINT.write().unwrap_or_else(|e| e.into_inner()) = Some((actual_port, self.api_key.clone()));
-        axum::serve(listener, app).await?;
+        match &options.tls {
+            Some(tls) => server_mode::serve_tls(listener, app, tls).await?,
+            None => axum::serve(listener, app).await?,
+        }
         Ok(())
     }
+}
+
+/// Login endpoints for browsers. The access token is exchanged for an HttpOnly
+/// cookie so streams and media requests are authenticated without exposing it
+/// in URLs; API clients may keep sending it as a Bearer token.
+fn server_mode_routes(policy: Arc<server_mode::AccessPolicy>, https: bool) -> axum::Router<AppState> {
+    use axum::routing::{get, post};
+    #[derive(Deserialize)]
+    struct Login {
+        token: String,
+    }
+    let login_policy = policy.clone();
+    let status_policy = policy;
+    axum::Router::new()
+        .route("/api/auth/login", post(move |Json(body): Json<Login>| {
+            let policy = login_policy.clone();
+            async move {
+                if !policy.accepts(body.token.trim()) {
+                    // Slow down guessing; tokens are long random strings.
+                    tokio::time::sleep(Duration::from_millis(800)).await;
+                    return (StatusCode::UNAUTHORIZED, Json(json!({"error": "Invalid access token"}))).into_response();
+                }
+                let cookie = server_mode::session_cookie(body.token.trim(), https);
+                ([(axum::http::header::SET_COOKIE, cookie)], Json(json!({"ok": true}))).into_response()
+            }
+        }))
+        .route("/api/auth/logout", post(move || async move {
+            let cookie = server_mode::clear_session_cookie(https);
+            ([(axum::http::header::SET_COOKIE, cookie)], Json(json!({"ok": true}))).into_response()
+        }))
+        .route("/api/auth/status", get(move |headers: axum::http::HeaderMap| {
+            let policy = status_policy.clone();
+            async move {
+                let authenticated = policy.authenticated(&headers);
+                Json(json!({
+                    "authenticated": authenticated,
+                    "server_mode": policy.server_mode,
+                }))
+            }
+        }))
 }
 
 async fn system_status() -> Json<SystemStatus> {

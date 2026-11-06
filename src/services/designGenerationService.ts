@@ -1,5 +1,6 @@
 import { detectBridgePort } from '../api';
 import { v4 as uuidv4 } from 'uuid';
+import { bridgeOrigin } from './bridgeConnection';
 
 // ━━━━━━━━━━━━━━━━━ Types ━━━━━━━━━━━━━━━━━
 
@@ -104,7 +105,7 @@ export async function generateDesignCode(
 ): Promise<DesignGenerateResult> {
   try {
     const port = await detectBridgePort();
-    const apiBase = `http://127.0.0.1:${port}/api`;
+    const apiBase = `${bridgeOrigin()}/api`;
     const convId = 'design_' + uuidv4();
     const token = localStorage.getItem('bridge_api_key') || localStorage.getItem('auth_token') || '';
 

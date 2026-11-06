@@ -820,5 +820,32 @@
     "browserFrameTitle": "網頁：{url}",
     "browserLoading": "正在載入頁面…",
     "shortcut": "Ctrl+Alt+B（macOS 上為 ⌘⌥B）：顯示或隱藏右側邊欄"
+  },
+  "serverLogin": {
+    "title": "連線 DeepSeek Code",
+    "description": "請輸入 DeepSeek Code 伺服器的存取權杖。",
+    "serverUrl": "伺服器位址",
+    "token": "存取權杖",
+    "tokenHint": "在伺服器上執行 dcd-server --print-token 查看。",
+    "submit": "登入",
+    "connecting": "正在連線...",
+    "otherServer": "使用其他伺服器",
+    "connectServer": "連線伺服器",
+    "useThisPhone": "在本機執行",
+    "errors": {
+      "needsServer": "請填寫伺服器位址。",
+      "unreachable": "無法連線伺服器。",
+      "needsToken": "請輸入存取權杖。",
+      "expired": "登入已失效，請重新輸入存取權杖。",
+      "invalidUrl": "位址需以 http:// 或 https:// 開頭。",
+      "badToken": "存取權杖不正確。",
+      "failed": "登入失敗，請重試。"
+    }
+  },
+  "githubToken": {
+    "tokenLabel": "個人存取權杖",
+    "tokenHint": "在 GitHub 的 Settings > Developer settings > Personal access tokens 中建立具 repo 權限的權杖。",
+    "connect": "連線",
+    "tokenFailed": "GitHub 拒絕了這個權杖。"
   }
 }

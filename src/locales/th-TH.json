@@ -820,5 +820,32 @@
     "browserFrameTitle": "หน้าเว็บ: {url}",
     "browserLoading": "กำลังโหลดหน้า…",
     "shortcut": "Ctrl+Alt+B (⌘⌥B บน macOS): แสดงหรือซ่อนแถบด้านข้างขวา"
+  },
+  "serverLogin": {
+    "title": "เชื่อมต่อกับ DeepSeek Code",
+    "description": "ป้อนโทเค็นการเข้าถึงของเซิร์ฟเวอร์ DeepSeek Code",
+    "serverUrl": "ที่อยู่เซิร์ฟเวอร์",
+    "token": "โทเค็นการเข้าถึง",
+    "tokenHint": "เรียกใช้ dcd-server --print-token บนเซิร์ฟเวอร์เพื่อดูโทเค็น",
+    "submit": "เข้าสู่ระบบ",
+    "connecting": "กำลังเชื่อมต่อ...",
+    "otherServer": "ใช้เซิร์ฟเวอร์อื่น",
+    "connectServer": "เชื่อมต่อกับเซิร์ฟเวอร์",
+    "useThisPhone": "เรียกใช้บนโทรศัพท์เครื่องนี้",
+    "errors": {
+      "needsServer": "ป้อนที่อยู่เซิร์ฟเวอร์",
+      "unreachable": "ไม่สามารถเชื่อมต่อเซิร์ฟเวอร์ได้",
+      "needsToken": "ป้อนโทเค็นการเข้าถึง",
+      "expired": "เซสชันหมดอายุแล้ว โปรดป้อนโทเค็นการเข้าถึงอีกครั้ง",
+      "invalidUrl": "ที่อยู่ต้องขึ้นต้นด้วย http:// หรือ https://",
+      "badToken": "โทเค็นการเข้าถึงไม่ถูกต้อง",
+      "failed": "เข้าสู่ระบบไม่สำเร็จ โปรดลองอีกครั้ง"
+    }
+  },
+  "githubToken": {
+    "tokenLabel": "โทเค็นการเข้าถึงส่วนบุคคล",
+    "tokenHint": "สร้างโทเค็นที่มีขอบเขต repo ใน GitHub Settings > Developer settings > Personal access tokens",
+    "connect": "เชื่อมต่อ",
+    "tokenFailed": "GitHub ปฏิเสธโทเค็นนี้"
   }
 }

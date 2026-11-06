@@ -14,7 +14,9 @@
     "build:all": "node scripts/build-all.mjs",
     "build:cli": "node scripts/build-all.mjs --cli-only",
     "build:desktop": "node scripts/build-all.mjs --desktop-only",
-    "check:rust": "node scripts/build-all.mjs --check"
+    "check:rust": "node scripts/build-all.mjs --check",
+    "android:proot": "bash scripts/fetch-android-proot.sh",
+    "build:android": "bash scripts/fetch-android-proot.sh && tauri android build --apk"
   },
   "dependencies": {
     "@fontsource-variable/figtree": "^5.2.10",

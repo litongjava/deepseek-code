@@ -1,5 +1,5 @@
 import { useState } from 'react';
-import { invoke } from '@tauri-apps/api/core';
+import { invokeDesktop as invoke } from '../platform/native';
 
 export default function SkillImportPanel() {
   const [source, setSource] = useState(''); const [previewed, setPreviewed] = useState(false);

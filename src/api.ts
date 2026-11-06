@@ -24,15 +24,16 @@ import {
 } from './services/localStorageService';
 import type { LocalConversation } from './services/localStorageService';
 import { trackProviderDeletion, trackConversationDeletion } from './services/syncService';
-import { API_BASE, isTauriApp, useDevProxy, detectBridgePort, waitForApiReady } from './services/bridgeConnection';
+import { API_BASE, hasBridge, hasNativeDesktop, useDevProxy, detectBridgePort, waitForApiReady, bridgeOrigin } from './services/bridgeConnection';
+// True whenever a Bridge serves this page; see services/bridgeConnection.
+const isTauriApp = hasBridge;
 export { detectBridgePort, resetBridgePort, waitForApiReady } from './services/bridgeConnection';
-const GATEWAY_BASE = 'http://127.0.0.1:30090';
-const CHENGDU_API = 'http://127.0.0.1:30090/api';
+import { ACCOUNT_SERVICE_URL, accountUrl, isAccountRoute } from './services/accountService';
 
 let nativeEngineInitialized = false;
 
 async function ensureNativeEngine() {
-  if (isTauriApp && !nativeEngineInitialized) {
+  if (hasNativeDesktop() && !nativeEngineInitialized) {
     try {
       const { nativeEngineAPI } = await import('./utils/tauriAPI');
       await nativeEngineAPI.init();
@@ -110,16 +111,6 @@ function resolveEnvCreds(mode: string): { env_token?: string; env_base_url?: str
   };
 }
 
-// 路由到后端网关的路径前缀（这些路由在 Chengdu gateway 上，不在 bridge 上）
-const GATEWAY_ROUTES = [
-  '/auth/', '/user/', '/payment/', '/redemption/',
-  '/github/', '/artifacts/', '/code/', '/multiagent/',
-  '/conversations/export', '/conversations/sso',
-];
-
-function isGatewayRoute(path: string): boolean {
-  return GATEWAY_ROUTES.some(prefix => path.startsWith(prefix));
-}
 
 // 通用请求方法
 async function request(path: string, options: RequestInit = {}) {
@@ -132,8 +123,8 @@ async function request(path: string, options: RequestInit = {}) {
   if (token) {
     (headers as any)['Authorization'] = `Bearer ${token}`;
   }
-  const base = isGatewayRoute(path) ? CHENGDU_API : API_BASE;
-  const res = await fetch(`${base}${path}`, { ...options, headers });
+  const url = isAccountRoute(path) ? accountUrl(path) : `${API_BASE}${path}`;
+  const res = await fetch(url, { ...options, headers });
   if (res.status === 401) {
     handleUnauthorized();
     throw new Error('认证失效');
@@ -183,7 +174,7 @@ export async function login(email: string, password: string) {
 
 // Gateway login for Electron app — authenticates via local API proxy, returns API key for Claude Code SDK
 export async function gatewayLogin(email: string, password: string) {
-  const res = await fetch(`${GATEWAY_BASE}/api/auth/login`, {
+  const res = await fetch(accountUrl('/auth/login'), {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ email, password }),
@@ -195,7 +186,7 @@ export async function gatewayLogin(email: string, password: string) {
   const data = await res.json();
   if (data.token) {
     await setSecure('ANTHROPIC_API_KEY', data.token);
-    localStorage.setItem('ANTHROPIC_BASE_URL', GATEWAY_BASE);
+    localStorage.setItem('ANTHROPIC_BASE_URL', ACCOUNT_SERVICE_URL);
     await setSecure('gateway_user', JSON.stringify(data.user || {}));
     if (data.apiKey) {
       await setSecure('CUSTOM_API_KEY', data.apiKey);
@@ -234,7 +225,8 @@ export async function gatewayLogout() {
 export async function getGatewayUsage() {
   const key = _cachedApiKey || localStorage.getItem('ANTHROPIC_API_KEY');
   if (!key) return null;
-  const res = await fetch(`${GATEWAY_BASE}/gateway/usage`, {
+  if (!ACCOUNT_SERVICE_URL) return null;
+  const res = await fetch(`${ACCOUNT_SERVICE_URL}/gateway/usage`, {
     headers: { 'x-api-key': key },
   });
   if (!res.ok) return null;
@@ -279,7 +271,7 @@ async function chengduRequest(path: string, options?: RequestInit) {
   const headers: Record<string, string> = {};
   if (token) headers['Authorization'] = `Bearer ${token}`;
   if (options?.method && options.method !== 'GET') headers['Content-Type'] = 'application/json';
-  const url = `${CHENGDU_API}${path}`;
+  const url = accountUrl(path);
   console.log('[chengduRequest]', url);
   const res = await fetch(url, { ...options, headers: { ...headers, ...(options?.headers as Record<string, string> || {}) } });
   if (!res.ok) {
@@ -313,7 +305,7 @@ export async function getUserProfile() {
 export async function updateUserProfile(data: Record<string, any>) {
   if (isTauriApp && localStorage.getItem('auth_token')) {
     const token = localStorage.getItem('auth_token');
-    const res = await fetch(`${CHENGDU_API}/user/profile`, {
+    const res = await fetch(accountUrl('/user/profile'), {
       method: 'PATCH',
       headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${token}` },
       body: JSON.stringify(data),
@@ -448,7 +440,7 @@ export async function getPlans() {
 export async function createPaymentOrder(planId: number, paymentMethod: string) {
   if (isTauriApp && localStorage.getItem('auth_token')) {
     const token = localStorage.getItem('auth_token');
-    const res = await fetch(`${CHENGDU_API}/payment/create`, {
+    const res = await fetch(accountUrl('/payment/create'), {
       method: 'POST',
       headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${token}` },
       body: JSON.stringify({ plan_id: planId, payment_method: paymentMethod }),
@@ -474,7 +466,7 @@ export async function getPaymentStatus(orderId: string) {
 export async function redeemCode(code: string) {
   if (isTauriApp && localStorage.getItem('auth_token')) {
     const token = localStorage.getItem('auth_token');
-    const res = await fetch(`${CHENGDU_API}/redemption/redeem`, {
+    const res = await fetch(accountUrl('/redemption/redeem'), {
       method: 'POST',
       headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${token}` },
       body: JSON.stringify({ code }),
@@ -1340,7 +1332,7 @@ export async function uploadFile(
   conversationId?: string
 ): Promise<UploadResult> {
   const port = await detectBridgePort();
-  const uploadUrl = `http://127.0.0.1:${port}/api/upload`;
+  const uploadUrl = `${bridgeOrigin()}/api/upload`;
 
   return new Promise((resolve, reject) => {
     const token = getToken();
@@ -1410,6 +1402,23 @@ export function getAttachmentUrl(fileId: string): string {
   return `${API_BASE}/uploads/${fileId}/raw`;
 }
 
+/**
+ * Loads an attachment with the Bridge credential and returns a blob URL for
+ * `<img>`. Plain URLs cannot carry the Authorization header, and the session
+ * cookie only reaches the same origin; Desktop and the mobile app are
+ * cross-origin and use the Bearer token. Revoke when done.
+ */
+export async function fetchAttachmentObjectUrl(fileId: string, signal?: AbortSignal): Promise<string> {
+  await waitForApiReady();
+  const token = getToken();
+  const response = await fetch(getAttachmentUrl(fileId), {
+    headers: token ? { Authorization: `Bearer ${token}` } : {},
+    signal,
+  });
+  if (!response.ok) throw new Error(`Attachment request failed: ${response.status}`);
+  return URL.createObjectURL(await response.blob());
+}
+
 // Skills 相关
 export async function getSkills() {
   const res = await request('/skills');
@@ -1456,74 +1465,8 @@ export async function toggleSkill(id: string, enabled: boolean) {
 }
 
 // GitHub Connector
-export async function getGithubStatus() {
-  await waitForApiReady();
-  const res = await fetch(`${API_BASE}/github/status`);
-  return res.json();
-}
-
-export async function getGithubAuthUrl() {
-  await waitForApiReady();
-  const res = await fetch(`${API_BASE}/github/auth-url`);
-  return res.json();
-}
-
-export async function disconnectGithub() {
-  await waitForApiReady();
-  const res = await fetch(`${API_BASE}/github/disconnect`, { method: 'POST' });
-  return res.json();
-}
-
-export async function getGithubRepos(page = 1) {
-  await waitForApiReady();
-  const res = await fetch(`${API_BASE}/github/repos?page=${page}`);
-  return res.json();
-}
-
-export async function getGithubTree(owner: string, repo: string, ref = '') {
-  await waitForApiReady();
-  const qs = ref ? `?ref=${encodeURIComponent(ref)}` : '';
-  const res = await fetch(`${API_BASE}/github/repos/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}/tree${qs}`);
-  if (!res.ok) {
-    const err = await res.json().catch(() => ({ error: 'Failed to fetch tree' }));
-    throw new Error(err.error || 'Failed to fetch tree');
-  }
-  return res.json();
-}
-
-export async function getGithubContents(owner: string, repo: string, path = '', ref = '') {
-  await waitForApiReady();
-  const params = new URLSearchParams();
-  if (path) params.set('path', path);
-  if (ref) params.set('ref', ref);
-  const qs = params.toString();
-  const url = `${API_BASE}/github/repos/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}/contents${qs ? '?' + qs : ''}`;
-  const res = await fetch(url);
-  if (!res.ok) {
-    const err = await res.json().catch(() => ({ error: 'Failed to fetch contents' }));
-    throw new Error(err.error || 'Failed to fetch contents');
-  }
-  return res.json();
-}
-
-export async function materializeGithub(
-  conversationId: string,
-  repoFullName: string,
-  ref: string,
-  selections: Array<{ path: string; isFolder: boolean }>
-): Promise<{ ok: boolean; repoFullName: string; ref: string; rootDir: string; fileCount: number; skipped: number }> {
-  await waitForApiReady();
-  const res = await fetch(`${API_BASE}/github/materialize`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ conversationId, repoFullName, ref, selections }),
-  });
-  if (!res.ok) {
-    const err = await res.json().catch(() => ({ error: 'Materialize failed' }));
-    throw new Error(err.error || 'Materialize failed');
-  }
-  return res.json();
-}
+// GitHub connector routes are served by the Bridge; see api/github.
+export { getGithubStatus, getGithubAuthUrl, connectGithubToken, disconnectGithub, getGithubRepos, getGithubTree, getGithubContents, materializeGithub } from './api/github';
 
 // 检查模型是否需要使用前端代理（当 Provider 使用 OpenAI 格式时）
 async function checkUseProxyForModel(model: string): Promise<boolean> {

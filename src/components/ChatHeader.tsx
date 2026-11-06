@@ -104,7 +104,7 @@ export default function ChatHeader({
   };
 
   return (
-    <div data-session-header className="relative flex min-w-0 items-center gap-3 px-5 py-2 bg-claude-bg flex-shrink-0 h-[54px] z-40">
+    <div data-session-header className="relative flex min-w-0 items-center gap-2 px-3 md:gap-3 md:px-5 py-2 bg-claude-bg flex-shrink-0 h-[54px] z-40">
       <div className="flex min-w-0 flex-1 items-center gap-3">
       {isEditing ? (
         <input
@@ -125,7 +125,7 @@ export default function ChatHeader({
           <button ref={buttonRef} type="button" aria-label={t('chat.sessionMenu')} aria-expanded={showMenu} onClick={() => setShowMenu(!showMenu)} className={`shrink-0 p-1 hover:bg-claude-btn-hover rounded-md transition-colors text-claude-textSecondary hover:text-claude-text ${showMenu ? 'bg-claude-btn-hover text-claude-text' : ''}`}>
             <ChevronDown size={14} />
           </button>
-          {workspaceLabel && <button type="button" title={workspacePath} onClick={() => { if (workspacePath && tauriAPI.isTauri) void tauriAPI.openFolder(workspacePath); }} className="ml-3 truncate rounded-lg bg-claude-hover px-2 py-1 text-xs text-claude-textSecondary max-w-[220px]">{workspaceLabel}</button>}
+          {workspaceLabel && <button type="button" title={workspacePath} onClick={() => { if (workspacePath && tauriAPI.isTauri) void tauriAPI.openFolder(workspacePath); }} className="ml-3 hidden truncate rounded-lg bg-claude-hover px-2 py-1 text-xs text-claude-textSecondary max-w-[220px] md:block">{workspaceLabel}</button>}
           {showMenu && (
             <div ref={menuRef} className="absolute top-full left-0 mt-1 z-50 bg-claude-input border border-claude-border rounded-xl shadow-[0_4px_12px_rgba(0,0,0,0.08)] py-1.5 flex flex-col w-[200px]">
               <button onClick={(e) => { e.stopPropagation(); startEditing(); }} className="flex items-center gap-3 px-3 py-2 hover:bg-claude-hover text-left w-full transition-colors group">
@@ -154,7 +154,8 @@ export default function ChatHeader({
         {(['chat', 'reading', ...(showCodingView ? ['trajectory' as const] : [])] as const).map(tab => <button type="button" key={tab} role="tab" aria-selected={view === tab} onClick={() => setView(tab)} className={`shrink-0 py-2 ${view === tab ? 'border-b-2 border-blue-500 text-blue-500' : 'text-claude-textSecondary'}`}>{tab === 'chat' ? 'Chat' : tab === 'reading' ? t('chat.readingMode') : 'Trajectory'}</button>)}
       </div>
       {copyResult && copyResult.id === id && <div role={copyResult.success ? 'status' : 'alert'} className="absolute right-4 top-full rounded-md border border-claude-border bg-claude-input px-3 py-2 text-xs">{t(copyResult.success ? 'chat.sessionIdCopied' : 'chat.sessionIdCopyFailed')}</div>}
-      <div className="flex shrink-0 items-center gap-1">
+      {/* Phones reach these panels from the right sidebar toggle in the title bar. */}
+      <div className="hidden shrink-0 items-center gap-1 md:flex">
         {([{ panel: 'terminal', label: 'Terminal', Icon: Terminal }, { panel: 'files', label: 'Files', Icon: Files }, { panel: 'browser', label: 'Browser', Icon: Globe }] as const).map(({ panel, label, Icon }) => (
           <button key={panel} type="button" aria-label={label} title={label} onClick={() => window.dispatchEvent(new CustomEvent('request-open-panel', { detail: { panel } }))} className="flex h-8 w-8 items-center justify-center rounded-md text-claude-textSecondary hover:bg-claude-hover"><Icon size={18} /></button>
         ))}

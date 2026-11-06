@@ -1,6 +1,10 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { createLocalConversation, updateLocalConversation } from '../services/localStorageService';
 
+vi.mock('../services/bridgeConnection', async importOriginal => ({
+  ...await importOriginal<typeof import('../services/bridgeConnection')>(),
+  hasBridge: false, useDevProxy: false,
+}));
 vi.mock('./client', () => ({
   isTauriApp: false, API_BASE: '', getToken: () => '', waitForApiReady: async () => {},
   request: vi.fn(), getUserModeForConversation: vi.fn(), resolveEnvCreds: vi.fn(),

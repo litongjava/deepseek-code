@@ -3,6 +3,7 @@ import ReactDOM from 'react-dom/client';
 import App from './App';
 import { loginEnabled } from './utils/login';
 import BackendStartup from './components/BackendStartup';
+import ServerGate from './features/server/ServerGate';
 import './index.css';
 import { initializeGeneralSettings, useGeneralSettingsStore } from './stores/useGeneralSettingsStore';
 import { useChatStore } from './stores/useChatStore';
@@ -150,9 +151,11 @@ console.log('[Main] Root element found, waiting for backend...');
 try {
   ReactDOM.createRoot(rootElement).render(
     <ErrorBoundary>
-      <BackendStartup initialize={initializeApp}>
-        <App />
-      </BackendStartup>
+      <ServerGate>
+        <BackendStartup initialize={initializeApp}>
+          <App />
+        </BackendStartup>
+      </ServerGate>
     </ErrorBoundary>,
   );
   console.log('[Main] App rendered successfully');

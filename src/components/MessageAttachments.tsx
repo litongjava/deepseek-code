@@ -1,7 +1,7 @@
 import React, { useState, useEffect } from 'react';
 import ImageLightbox from './ImageLightbox';
 import { FileText, File, Code2, Download, FolderOpen, Github, Image as ImageIcon } from 'lucide-react';
-import { getAttachmentUrl } from '../api';
+import { getAttachmentUrl, fetchAttachmentObjectUrl } from '../api';
 
 interface Attachment {
   id: string;
@@ -16,13 +16,14 @@ interface Attachment {
 }
 
 import { DocumentInfo } from './DocumentCard';
+import { hasNativeDesktop } from '../services/bridgeConnection';
 
 interface MessageAttachmentsProps {
   attachments: Attachment[];
   onOpenDocument?: (doc: DocumentInfo) => void;
 }
 
-const isTauri = typeof window !== 'undefined' && !!(window as any).__TAURI_INTERNALS__;
+const isTauri = hasNativeDesktop();
 
 // 获取文件扩展名
 function getFileExtension(fileName: string | undefined | null): string {
@@ -100,11 +101,13 @@ const AttachmentCard: React.FC<{ attachment: Attachment; onClick: () => void }> 
 
   useEffect(() => {
     if (isImage) {
-      const url = getAttachmentUrl(attachment.id);
-      const token = localStorage.getItem('auth_token');
-      setThumbnailUrl(`${url}${url.includes('?') ? '&' : '?'}token=${token}`);
-      setLoading(false);
-      return;
+      const controller = new AbortController();
+      let objectUrl: string | null = null;
+      fetchAttachmentObjectUrl(attachment.id, controller.signal)
+        .then(url => { objectUrl = url; setThumbnailUrl(url); })
+        .catch(error => { if (!controller.signal.aborted) console.warn('[Attachment] Failed to load image:', error); })
+        .finally(() => setLoading(false));
+      return () => { controller.abort(); if (objectUrl) URL.revokeObjectURL(objectUrl); };
     }
 
     setLoading(false);
@@ -184,11 +187,14 @@ const MessageAttachments: React.FC<MessageAttachmentsProps> = ({ attachments, on
     }
 
     const url = getAttachmentUrl(att.id);
-    const token = localStorage.getItem('auth_token');
 
     // 图片：打开灯箱
     if (att.file_type === 'image' || (att.mime_type?.startsWith('image/') ?? false)) {
-      setLightboxUrl(`${url}${url.includes('?') ? '&' : '?'}token=${token}`);
+      try {
+        setLightboxUrl(await fetchAttachmentObjectUrl(att.id));
+      } catch (error) {
+        console.warn('[Attachment] Failed to load image:', error);
+      }
       return;
     }
 
@@ -198,8 +204,9 @@ const MessageAttachments: React.FC<MessageAttachmentsProps> = ({ attachments, on
 
     if (onOpenDocument && (textExtensions.includes(ext) || (att.mime_type?.startsWith('text/') ?? false))) {
       try {
-        const fetchUrl = `${url}${url.includes('?') ? '&' : '?'}token=${token}`;
-        const res = await fetch(fetchUrl);
+        const objectUrl = await fetchAttachmentObjectUrl(att.id);
+        const res = await fetch(objectUrl);
+        URL.revokeObjectURL(objectUrl);
         if (res.ok) {
           const content = await res.text();
           onOpenDocument({
@@ -219,7 +226,16 @@ const MessageAttachments: React.FC<MessageAttachmentsProps> = ({ attachments, on
 
     // 默认：下载文件
     if (!isTauri) {
-      window.open(url, '_blank');
+      try {
+        const objectUrl = await fetchAttachmentObjectUrl(att.id);
+        const link = document.createElement('a');
+        link.href = objectUrl;
+        link.download = att.file_name || att.id;
+        link.click();
+        setTimeout(() => URL.revokeObjectURL(objectUrl), 60_000);
+      } catch (error) {
+        console.warn('[Attachment] Failed to download:', error);
+      }
     }
   };
 
@@ -235,7 +251,7 @@ const MessageAttachments: React.FC<MessageAttachmentsProps> = ({ attachments, on
         ))}
       </div>
 
-      {lightboxUrl && <ImageLightbox src={lightboxUrl} onClose={() => setLightboxUrl(null)} />}
+      {lightboxUrl && <ImageLightbox src={lightboxUrl} onClose={() => { URL.revokeObjectURL(lightboxUrl); setLightboxUrl(null); }} />}
     </>
   );
 };

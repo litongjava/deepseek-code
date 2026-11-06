@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useCallback } from 'react';
-import { invoke } from '@tauri-apps/api/core';
+import { invokeDesktop as invoke } from '../platform/native';
 import { Search, Star, GitFork, ExternalLink, TrendingUp, Bookmark, Plus, X, RefreshCw, Loader2, Globe, Lock, User, Bell, Zap, Database, Puzzle, Cpu, Share2, Layers, ArrowRight, Download, Code } from 'lucide-react';
 
 interface GitHubRepo {

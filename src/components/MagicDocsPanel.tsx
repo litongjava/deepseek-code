@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react';
-import { invoke } from '@tauri-apps/api/core';
+import { invokeDesktop as invoke } from '../platform/native';
 import { listProjects, type Project } from '../api/projects';
 
 interface Document { id:string; path:string; title:string; auto_update:boolean; update_count:number }

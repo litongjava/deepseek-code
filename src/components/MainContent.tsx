@@ -90,6 +90,7 @@ import { submitBusyMessage } from '../features/chat/submitBusyMessage';
 import { SkillInputOverlay } from '../features/input-bar/SkillInputOverlay';
 import SessionUsageBar from '../features/usage/SessionUsageBar';
 import { useConversationViewStore } from '../stores/useConversationViewStore';
+import { hasNativeDesktop } from '../services/bridgeConnection';
 
 interface MainContentProps {
   onNewChat: () => void; // Callback to tell sidebar to refresh
@@ -302,6 +303,34 @@ const MainContent = ({ onNewChat, resetKey, tunerConfig, onOpenDocument, onArtif
   } = useModelCatalog(viewingIdRef);
 
   const pendingCrossModeSendRef = useRef<(() => void) | null>(null);
+
+  /**
+   * Answers the engine's pending tool permission over the Bridge. This is what
+   * lets the tool run; the Desktop approval record is optional bookkeeping.
+   */
+  const answerToolPermission = async (behavior: 'allow' | 'deny') => {
+    const pending = toolPermissionDialog;
+    setToolPermissionDialog(null);
+    if (!pending || !activeId) return;
+    try {
+      await respondToolPermission(activeId, pending.request_id, pending.tool_use_id, behavior);
+    } catch (err) {
+      console.error('Failed to answer tool permission:', err);
+    }
+  };
+
+  // A conversation can load before the model catalog (slow Bridge start, page
+  // reload on a chat): re-check the warning once the catalog arrives, so an
+  // available model is not reported as belonging to another mode.
+  const loadedModelCatalog = useChatStore(state => state.modelCatalog);
+  useEffect(() => {
+    if (!crossModeWarning) return;
+    const match = resolveConversationModel(crossModeWarning.originalModel);
+    if (match) {
+      setCurrentModelString(match);
+      setCrossModeWarning(null);
+    }
+  }, [loadedModelCatalog, crossModeWarning, resolveConversationModel]);
   const pendingLoginSendRef = useRef<(() => void) | null>(null);
 
   useEffect(() => {
@@ -1172,7 +1201,7 @@ const MainContent = ({ onNewChat, resetKey, tunerConfig, onOpenDocument, onArtif
     // gateway API key get prompted to login on first send. Replaces the old
     // hard redirect to /login at app start — users can now explore the app
     // freely before deciding to login or switch modes.
-    const isTauriApp = typeof window !== 'undefined' && !!(window as any).__TAURI_INTERNALS__;
+    const isTauriApp = hasNativeDesktop();
     const userMode = localStorage.getItem('user_mode');
     const hasGatewayKey = localStorage.getItem('ANTHROPIC_API_KEY') && localStorage.getItem('gateway_user');
     if (isTauriApp && userMode !== 'selfhosted' && !hasGatewayKey) {
@@ -2381,7 +2410,8 @@ const MainContent = ({ onNewChat, resetKey, tunerConfig, onOpenDocument, onArtif
         </div>
       )}
 
-      {toolPermissionDialog && (
+      {/* The approval dialog below handles the same request when it is open. */}
+      {toolPermissionDialog && !permissionApproval && (
         <div className="fixed inset-0 z-[200] flex items-center justify-center bg-black/40">
           <div className="bg-claude-bg border border-claude-border rounded-2xl shadow-xl w-[480px] max-h-[80vh] overflow-y-auto" onClick={e => e.stopPropagation()}>
             <div className="px-5 pt-5 pb-3">
@@ -2444,50 +2474,31 @@ const MainContent = ({ onNewChat, resetKey, tunerConfig, onOpenDocument, onArtif
             if (!permissionApproval) return;
             const approval = permissionApproval;
             setPermissionApproval(null);
-            try {
-              await permissionApprovalAPI.approvePermission(approval.id, decision, reason || undefined);
-              if (toolPermissionDialog && activeId) {
-                const { request_id, tool_use_id } = toolPermissionDialog;
-                setToolPermissionDialog(null);
-                await respondToolPermission(activeId, request_id, tool_use_id, 'allow');
-              }
-            } catch (err) {
-              console.error('Failed to approve permission:', err);
+            if (hasNativeDesktop()) {
+              await permissionApprovalAPI.approvePermission(approval.id, decision, reason || undefined)
+                .catch(err => console.error('Failed to record approval:', err));
             }
+            await answerToolPermission('allow');
           }}
           onReject={async (reason) => {
             if (!permissionApproval) return;
             const approval = permissionApproval;
             setPermissionApproval(null);
-            try {
-              await permissionApprovalAPI.rejectPermission(approval.id, reason || undefined);
-              if (toolPermissionDialog && activeId) {
-                const { request_id, tool_use_id } = toolPermissionDialog;
-                setToolPermissionDialog(null);
-                await respondToolPermission(activeId, request_id, tool_use_id, 'deny');
-              }
-            } catch (err) {
-              console.error('Failed to reject permission:', err);
+            if (hasNativeDesktop()) {
+              await permissionApprovalAPI.rejectPermission(approval.id, reason || undefined)
+                .catch(err => console.error('Failed to record rejection:', err));
             }
+            await answerToolPermission('deny');
           }}
           onAlwaysAllow={async () => {
             if (!permissionApproval) return;
             const approval = permissionApproval;
             setPermissionApproval(null);
-            try {
-              await permissionApprovalAPI.alwaysAllowPermission(
-                approval.id,
-                approval.tool_name,
-                approval.action
-              );
-              if (toolPermissionDialog && activeId) {
-                const { request_id, tool_use_id } = toolPermissionDialog;
-                setToolPermissionDialog(null);
-                await respondToolPermission(activeId, request_id, tool_use_id, 'allow');
-              }
-            } catch (err) {
-              console.error('Failed to set always allow:', err);
+            if (hasNativeDesktop()) {
+              await permissionApprovalAPI.alwaysAllowPermission(approval.id, approval.tool_name, approval.action)
+                .catch(err => console.error('Failed to save always-allow rule:', err));
             }
+            await answerToolPermission('allow');
           }}
           onClose={() => setPermissionApproval(null)}
         />

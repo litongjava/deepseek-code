@@ -18,7 +18,9 @@ pub(super) fn write_utf8(path: &Path, content: &str) -> io::Result<usize> {
 }
 
 /// File cmdlets and redirected console output must agree on UTF-8.
-pub(super) fn powershell_command(command: &str) -> String {
+/// Prefixes a PowerShell command so it reads and writes UTF-8 explicitly.
+/// Windows PowerShell 5.1 otherwise reads files and pipes in the ANSI code page.
+pub fn powershell_command(command: &str) -> String {
     format!("$OutputEncoding = [System.Text.UTF8Encoding]::new($false); [Console]::InputEncoding = $OutputEncoding; [Console]::OutputEncoding = $OutputEncoding; $PSDefaultParameterValues['*:Encoding'] = 'utf8';\n{command}")
 }
 
@@ -31,6 +33,24 @@ mod tests {
     use super::*;
     #[cfg(windows)]
     use std::os::windows::process::CommandExt;
+
+    #[test]
+    fn powershell_prefix_reads_utf8_files_without_a_bom() {
+        // Runs wherever PowerShell 7 is installed; Windows PowerShell has its own test below.
+        let Some(pwsh) = crate::tools::lsp_servers::find_on_path("pwsh") else { return };
+        let path = std::env::temp_dir().join(format!("claude-ps-utf8-{}.txt", std::process::id()));
+        fs::write(&path, "物理内存\n").unwrap();
+        let script = powershell_command(&format!("Get-Content -LiteralPath '{}'", path.display()));
+        assert!(script.contains("$PSDefaultParameterValues['*:Encoding'] = 'utf8'"));
+        let output = std::process::Command::new(pwsh)
+            .args(["-NoProfile", "-NonInteractive", "-Command", &script])
+            .env("DOTNET_SYSTEM_GLOBALIZATION_INVARIANT", "1")
+            .output()
+            .unwrap();
+        fs::remove_file(&path).ok();
+        assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+        assert_eq!(String::from_utf8(output.stdout).unwrap().trim(), "物理内存");
+    }
 
     #[test]
     fn ordinary_files_remain_utf8_without_a_bom() {

@@ -1,5 +1,5 @@
 import React, { useEffect, useState } from 'react';
-import { invoke } from '@tauri-apps/api/core';
+import { invokeDesktop as invoke } from '../platform/native';
 
 interface Suggestion { id: string; intent: string; tools: string[]; occurrences: number; success_rate: number; score: number; accepted: boolean; skill_markdown: string }
 interface Experience { id: string; success: boolean; tools_used: string[]; feedback: number | null }

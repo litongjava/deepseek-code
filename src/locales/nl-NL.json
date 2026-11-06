@@ -820,5 +820,32 @@
     "browserFrameTitle": "Webpagina: {url}",
     "browserLoading": "Pagina laden…",
     "shortcut": "Ctrl+Alt+B (⌘⌥B op macOS): rechterzijbalk tonen of verbergen"
+  },
+  "serverLogin": {
+    "title": "Verbinden met DeepSeek Code",
+    "description": "Voer het toegangstoken van je DeepSeek Code-server in.",
+    "serverUrl": "Serveradres",
+    "token": "Toegangstoken",
+    "tokenHint": "Voer dcd-server --print-token uit op de server om het te tonen.",
+    "submit": "Aanmelden",
+    "connecting": "Verbinden...",
+    "otherServer": "Een andere server gebruiken",
+    "connectServer": "Verbinden met een server",
+    "useThisPhone": "Uitvoeren op deze telefoon",
+    "errors": {
+      "needsServer": "Voer een serveradres in.",
+      "unreachable": "De server is niet bereikbaar.",
+      "needsToken": "Voer het toegangstoken in.",
+      "expired": "Je sessie is verlopen. Voer het toegangstoken opnieuw in.",
+      "invalidUrl": "Het adres moet beginnen met http:// of https://.",
+      "badToken": "Het toegangstoken is onjuist.",
+      "failed": "Aanmelden mislukt. Probeer het opnieuw."
+    }
+  },
+  "githubToken": {
+    "tokenLabel": "Persoonlijk toegangstoken",
+    "tokenHint": "Maak een token met het bereik repo via GitHub Settings > Developer settings > Personal access tokens.",
+    "connect": "Verbinden",
+    "tokenFailed": "GitHub heeft dit token geweigerd."
   }
 }

@@ -12,7 +12,7 @@ import {
   deleteLocalProvider,
 } from './localStorageService';
 
-const CHENGDU_API = 'http://127.0.0.1:30090/api';
+import { bridgeOrigin, waitForApiReady } from './bridgeConnection';
 
 const SYNC_KEYS = {
   lastPushAt: 'sync_lastPushAt',
@@ -207,8 +207,10 @@ function buildSyncPayload(): SyncPayload {
   return payload;
 }
 
+/** Sync runs against the Bridge (`/data/sync/*`) with its credential. */
 async function chengduAuthFetch(path: string, options: RequestInit = {}): Promise<Response> {
-  const token = getAuthToken();
+  await waitForApiReady();
+  const token = localStorage.getItem('bridge_api_key');
   const headers: Record<string, string> = {
     'Content-Type': 'application/json',
     ...(options.headers as Record<string, string> || {}),
@@ -216,7 +218,7 @@ async function chengduAuthFetch(path: string, options: RequestInit = {}): Promis
   if (token) {
     headers['Authorization'] = `Bearer ${token}`;
   }
-  const url = `${CHENGDU_API}${path}`;
+  const url = `${bridgeOrigin()}${path}`;
   const res = await fetch(url, { ...options, headers });
   if (res.status === 401) {
     throw new Error('认证已过期，请重新登录');

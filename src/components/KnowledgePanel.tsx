@@ -1,6 +1,6 @@
 import React, { useState, useEffect, useCallback, useRef } from 'react';
 import { Search, Plus, Trash2, FileText, GitBranch, Upload, X, Loader2, Eye, Edit3, Network, List } from 'lucide-react';
-import { invoke } from '@tauri-apps/api/core';
+import { invokeDesktop as invoke } from '../platform/native';
 
 /* ── Types ── */
 interface KnowledgeNode {

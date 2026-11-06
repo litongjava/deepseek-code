@@ -2,16 +2,21 @@ import { handleUnauthorized } from '../utils/login';
 import { getErrorMessage } from '../utils/errorHelpers';
 import { getSecure, setSecure, removeSecure } from '../services/secureStorage';
 
-import { API_BASE, isTauriApp, useDevProxy, detectBridgePort, waitForApiReady } from '../services/bridgeConnection';
+import { API_BASE, hasBridge, hasNativeDesktop, useDevProxy, detectBridgePort, waitForApiReady, bridgeOrigin } from '../services/bridgeConnection';
 export { detectBridgePort, resetBridgePort, waitForApiReady } from '../services/bridgeConnection';
-export { API_BASE, isTauriApp } from '../services/bridgeConnection';
-export const GATEWAY_BASE = 'http://127.0.0.1:30090';
-export const CHENGDU_API = 'http://127.0.0.1:30090/api';
+export { API_BASE } from '../services/bridgeConnection';
+// Historical name kept for the API modules: true whenever a Bridge serves this
+// page (Desktop, the development proxy, or a dcd-server in a browser or mobile app).
+export const isTauriApp = hasBridge;
+import { ACCOUNT_API, ACCOUNT_ROUTES, ACCOUNT_SERVICE_URL, accountUrl, isAccountRoute } from '../services/accountService';
+// Optional hosted account service; local features are all served by the Bridge.
+export const GATEWAY_BASE = ACCOUNT_SERVICE_URL;
+export const CHENGDU_API = ACCOUNT_API;
 
 let nativeEngineInitialized = false;
 
 async function ensureNativeEngine() {
-  if (isTauriApp && !nativeEngineInitialized) {
+  if (hasNativeDesktop() && !nativeEngineInitialized) {
     try {
       const { nativeEngineAPI } = await import('../utils/tauriAPI');
       await nativeEngineAPI.init();
@@ -81,16 +86,8 @@ export function resolveEnvCreds(mode: string): { env_token?: string; env_base_ur
   };
 }
 
-// 路由到后端网关的路径前缀（这些路由在 Chengdu gateway 上，不在 bridge 上）
-export const GATEWAY_ROUTES = [
-  '/auth/', '/user/', '/payment/', '/redemption/',
-  '/github/', '/artifacts/', '/code/', '/multiagent/',
-  '/conversations/export', '/conversations/sso',
-];
-
-function isGatewayRoute(path: string): boolean {
-  return GATEWAY_ROUTES.some(prefix => path.startsWith(prefix));
-}
+// Paths served by the optional account service; everything else goes to the Bridge.
+export const GATEWAY_ROUTES = ACCOUNT_ROUTES;
 
 // 通用请求方法
 export async function request(path: string, options: RequestInit = {}) {
@@ -103,8 +100,8 @@ export async function request(path: string, options: RequestInit = {}) {
   if (token) {
     (headers as any)['Authorization'] = `Bearer ${token}`;
   }
-  const base = isGatewayRoute(path) ? CHENGDU_API : API_BASE;
-  const res = await fetch(`${base}${path}`, { ...options, headers });
+  const url = isAccountRoute(path) ? accountUrl(path) : `${API_BASE}${path}`;
+  const res = await fetch(url, { ...options, headers });
   if (res.status === 401) {
     handleUnauthorized();
     throw new Error('认证失效');
@@ -142,7 +139,7 @@ export async function isBridgeReachable(): Promise<boolean> {
   if (bridgeReachableCache !== null) return bridgeReachableCache;
   try {
     const port = await detectBridgePort();
-    const res = await fetch(`http://127.0.0.1:${port}/api/system-status`, { signal: AbortSignal.timeout(2000) });
+    const res = await fetch(`${bridgeOrigin()}/api/system-status`, { signal: AbortSignal.timeout(2000) });
     bridgeReachableCache = res.ok;
   } catch {
     bridgeReachableCache = false;
@@ -177,7 +174,8 @@ export async function gatewayLogout() {
 export async function getGatewayUsage() {
   const key = _cachedApiKey || localStorage.getItem('ANTHROPIC_API_KEY');
   if (!key) return null;
-  const res = await fetch(`${GATEWAY_BASE}/gateway/usage`, {
+  if (!ACCOUNT_SERVICE_URL) return null;
+  const res = await fetch(`${ACCOUNT_SERVICE_URL}/gateway/usage`, {
     headers: { 'x-api-key': key },
   });
   if (!res.ok) return null;

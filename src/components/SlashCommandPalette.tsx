@@ -1,6 +1,6 @@
 import React, { useState, useEffect, useRef, useCallback } from 'react';
 import { Search, Terminal, BarChart3, Settings, GitBranch, Layers, Zap, HelpCircle, ChevronRight } from 'lucide-react';
-import { invoke } from '@tauri-apps/api/core';
+import { invokeDesktop as invoke } from '../platform/native';
 
 interface SlashCommand {
   name: string;

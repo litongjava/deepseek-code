@@ -820,5 +820,32 @@
     "browserFrameTitle": "Trang web: {url}",
     "browserLoading": "Đang tải trang…",
     "shortcut": "Ctrl+Alt+B (⌘⌥B trên macOS): hiện hoặc ẩn thanh bên phải"
+  },
+  "serverLogin": {
+    "title": "Kết nối với DeepSeek Code",
+    "description": "Nhập mã truy cập của máy chủ DeepSeek Code.",
+    "serverUrl": "Địa chỉ máy chủ",
+    "token": "Mã truy cập",
+    "tokenHint": "Chạy dcd-server --print-token trên máy chủ để xem mã.",
+    "submit": "Đăng nhập",
+    "connecting": "Đang kết nối...",
+    "otherServer": "Dùng máy chủ khác",
+    "connectServer": "Kết nối với máy chủ",
+    "useThisPhone": "Chạy trên điện thoại này",
+    "errors": {
+      "needsServer": "Nhập địa chỉ máy chủ.",
+      "unreachable": "Không thể kết nối máy chủ.",
+      "needsToken": "Nhập mã truy cập.",
+      "expired": "Phiên đã hết hạn. Hãy nhập lại mã truy cập.",
+      "invalidUrl": "Địa chỉ phải bắt đầu bằng http:// hoặc https://.",
+      "badToken": "Mã truy cập không đúng.",
+      "failed": "Đăng nhập thất bại. Hãy thử lại."
+    }
+  },
+  "githubToken": {
+    "tokenLabel": "Mã truy cập cá nhân",
+    "tokenHint": "Tạo mã có quyền repo trong GitHub Settings > Developer settings > Personal access tokens.",
+    "connect": "Kết nối",
+    "tokenFailed": "GitHub đã từ chối mã này."
   }
 }

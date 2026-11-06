@@ -148,7 +148,8 @@ pub async fn run_custom_tool(tool: &CustomTool, input: &Value, cwd: &str) -> Res
     let payload = input.to_string();
     let mut command = if cfg!(windows) {
         let mut command = tokio::process::Command::new("powershell");
-        command.args(["-NoProfile", "-Command", &tool.command]);
+        // Read the JSON payload and files as UTF-8, not the ANSI code page.
+        command.args(["-NoProfile", "-Command", &crate::tools::powershell_command(&tool.command)]);
         command
     } else {
         let mut command = tokio::process::Command::new("sh");

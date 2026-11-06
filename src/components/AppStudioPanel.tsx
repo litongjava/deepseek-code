@@ -1,5 +1,5 @@
 import React, { useState, useRef, useCallback, useEffect } from 'react';
-import { invoke } from '@tauri-apps/api/core';
+import { invokeDesktop as invoke } from '../platform/native';
 import { Smartphone, Tablet, Monitor, Code, Database, Server, Globe, QrCode, Play, Share2, Download, X, ChevronRight, ChevronDown, Layers, Palette, Terminal, Loader2, CheckCircle2, ArrowRight, Sparkles, FileCode, Cpu, RefreshCw, FolderOpen, FileText } from 'lucide-react';
 
 type DeviceType = 'iphone14' | 'pixel7' | 'harmony' | 'tablet';

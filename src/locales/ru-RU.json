@@ -820,5 +820,32 @@
     "browserFrameTitle": "Веб-страница: {url}",
     "browserLoading": "Загрузка страницы…",
     "shortcut": "Ctrl+Alt+B (⌘⌥B в macOS): показать или скрыть правую боковую панель"
+  },
+  "serverLogin": {
+    "title": "Подключение к DeepSeek Code",
+    "description": "Введите токен доступа вашего сервера DeepSeek Code.",
+    "serverUrl": "Адрес сервера",
+    "token": "Токен доступа",
+    "tokenHint": "Чтобы увидеть его, выполните на сервере dcd-server --print-token.",
+    "submit": "Войти",
+    "connecting": "Подключение...",
+    "otherServer": "Другой сервер",
+    "connectServer": "Подключиться к серверу",
+    "useThisPhone": "Запускать на этом телефоне",
+    "errors": {
+      "needsServer": "Введите адрес сервера.",
+      "unreachable": "Не удаётся подключиться к серверу.",
+      "needsToken": "Введите токен доступа.",
+      "expired": "Сеанс истёк. Введите токен доступа ещё раз.",
+      "invalidUrl": "Адрес должен начинаться с http:// или https://.",
+      "badToken": "Неверный токен доступа.",
+      "failed": "Не удалось войти. Повторите попытку."
+    }
+  },
+  "githubToken": {
+    "tokenLabel": "Персональный токен доступа",
+    "tokenHint": "Создайте токен с областью repo в GitHub Settings > Developer settings > Personal access tokens.",
+    "connect": "Подключить",
+    "tokenFailed": "GitHub отклонил этот токен."
   }
 }

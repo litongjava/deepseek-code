@@ -43,7 +43,12 @@ pub async fn run(session: &Session, command: &str) -> Result<()> {
     let mut child = tokio::process::Command::new(&program);
     child
         .args(&args)
-        .arg(command)
+        .arg(if cfg!(windows) {
+            // Windows PowerShell reads files in the ANSI code page unless told otherwise.
+            deepseek_code_core::tools::powershell_command(command)
+        } else {
+            command.to_string()
+        })
         .current_dir(&session.workspace)
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::piped())

@@ -15,7 +15,7 @@ import {
   Info,
   Loader2,
 } from 'lucide-react';
-import { invoke } from '@tauri-apps/api/core';
+import { invokeDesktop as invoke } from '../../platform/native';
 import ClaudeLogo from '../../components/ClaudeLogo';
 import CodeExecution from '../../components/CodeExecution';
 import SearchProcess from '../../components/SearchProcess';

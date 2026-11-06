@@ -1,7 +1,9 @@
-import { invoke } from '@tauri-apps/api/core';
+import { invokeDesktop as invoke } from '../platform/native';
 import { listen, UnlistenFn } from '@tauri-apps/api/event';
+import { hasNativeDesktop } from '../services/bridgeConnection';
 
-const isTauri = typeof window !== 'undefined' && '__TAURI_INTERNALS__' in window;
+// Desktop-only commands; the browser and the mobile app connect to a server instead.
+const isTauri = hasNativeDesktop();
 
 export interface EngineTextEvent {
   conversation_id: string;

@@ -1,0 +1,12 @@
+{
+  "name": "DeepSeek Code",
+  "short_name": "DeepSeek Code",
+  "start_url": "./",
+  "scope": "./",
+  "display": "standalone",
+  "background_color": "#ffffff",
+  "theme_color": "#ffffff",
+  "icons": [
+    { "src": "favicon.png", "sizes": "1280x1280", "type": "image/png", "purpose": "any" }
+  ]
+}

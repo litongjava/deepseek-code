@@ -14,6 +14,7 @@ import { useI18n } from '../hooks/useI18n';
 import GeneralPreferences from './GeneralPreferences';
 import { version as appVersion } from '../../package.json';
 import { useGeneralSettingsStore } from '../stores/useGeneralSettingsStore';
+import { hasNativeDesktop } from '../services/bridgeConnection';
 
 const WORK_OPTIONS = [
   { value: '软件工程', key: 'software' }, { value: '产品管理', key: 'product' },
@@ -90,7 +91,8 @@ const SettingsPage = ({ onCreateWithDeepSeek }: { onCreateWithDeepSeek?: () => v
       }).catch(() => { });
     }
     getUserUsage().then(setUsage).catch(() => { });
-    getSessions().then(data => {
+    // Account sessions live on the optional account gateway.
+    if (loginEnabled) getSessions().then(data => {
       setSessions(data.sessions || []);
       setCurrentSessionId(data.currentSessionId || '');
     }).catch(() => { });
@@ -1026,7 +1028,7 @@ const SettingsPage = ({ onCreateWithDeepSeek }: { onCreateWithDeepSeek?: () => v
             )}
 
             {/* Storage Usage — only show on web, not in Electron (app files are local) */}
-            {!(typeof window !== 'undefined' && !!(window as any).__TAURI_INTERNALS__) && (
+            {!hasNativeDesktop() && (
               <div>
                 <div className="flex items-center justify-between mb-2">
                   <span className="text-[13px] font-medium text-claude-text">{t('settings.storageLabel')}</span>

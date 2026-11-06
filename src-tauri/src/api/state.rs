@@ -61,6 +61,11 @@ pub struct AppState {
     pub git_integration: Arc<GitIntegration>,
     pub permission_manager: Arc<PermissionManager>,
     pub generation_runs: Arc<crate::bridge::routes::generation_runs::GenerationRuns>,
+    /// Background hosts started by peripheral requests (scheduled prompts, team sync).
+    pub peripheral_host: Arc<crate::commands::peripheral::PeripheralHost>,
+    /// Data directory this Bridge was created with.
+    pub data_dir: Arc<std::path::PathBuf>,
+    pub github: Arc<deepseek_code_core::services::github_connector::GithubConnector>,
 }
 
 impl AppState {
@@ -100,6 +105,11 @@ impl AppState {
                 Arc::new(crate::permissions::AuditLogger::new(1000)),
             )),
             generation_runs: Arc::default(),
+            peripheral_host: Arc::default(),
+            data_dir: Arc::new(crate::commands::app_data_dir().unwrap_or_default()),
+            github: Arc::new(deepseek_code_core::services::github_connector::GithubConnector::new(
+                crate::commands::app_data_dir().unwrap_or_default(),
+            )),
         }
     }
 }

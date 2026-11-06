@@ -1,4 +1,5 @@
-import { request, isTauriApp, CHENGDU_API, getGatewayUsage } from './client';
+import { request, isTauriApp, getGatewayUsage } from './client';
+import { accountUrl } from '../services/accountService';
 import { getSecure } from '../services/secureStorage';
 import { clearSyncState } from '../services/syncService';
 
@@ -23,12 +24,11 @@ export async function getUserProfile() {
 }
 
 async function chengduRequest(path: string, options?: RequestInit) {
-  const { CHENGDU_API } = await import('./client');
   const token = localStorage.getItem('auth_token');
   const headers: Record<string, string> = {};
   if (token) headers['Authorization'] = `Bearer ${token}`;
   if (options?.method && options.method !== 'GET') headers['Content-Type'] = 'application/json';
-  const url = `${CHENGDU_API}${path}`;
+  const url = accountUrl(path);
   console.log('[chengduRequest]', url);
   const res = await fetch(url, { ...options, headers: { ...headers, ...(options?.headers as Record<string, string> || {}) } });
   if (!res.ok) {
@@ -42,7 +42,7 @@ async function chengduRequest(path: string, options?: RequestInit) {
 export async function updateUserProfile(data: Record<string, any>) {
   if (isTauriApp && localStorage.getItem('auth_token')) {
     const token = localStorage.getItem('auth_token');
-    const res = await fetch(`${CHENGDU_API}/user/profile`, {
+    const res = await fetch(accountUrl('/user/profile'), {
       method: 'PATCH',
       headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${token}` },
       body: JSON.stringify(data),
@@ -191,7 +191,7 @@ export async function getPlans() {
 export async function createPaymentOrder(planId: number, paymentMethod: string) {
   if (isTauriApp && localStorage.getItem('auth_token')) {
     const token = localStorage.getItem('auth_token');
-    const res = await fetch(`${CHENGDU_API}/payment/create`, {
+    const res = await fetch(accountUrl('/payment/create'), {
       method: 'POST',
       headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${token}` },
       body: JSON.stringify({ plan_id: planId, payment_method: paymentMethod }),
@@ -216,7 +216,7 @@ export async function getPaymentStatus(orderId: string) {
 export async function redeemCode(code: string) {
   if (isTauriApp && localStorage.getItem('auth_token')) {
     const token = localStorage.getItem('auth_token');
-    const res = await fetch(`${CHENGDU_API}/redemption/redeem`, {
+    const res = await fetch(accountUrl('/redemption/redeem'), {
       method: 'POST',
       headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${token}` },
       body: JSON.stringify({ code }),

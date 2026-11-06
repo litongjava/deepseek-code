@@ -288,10 +288,9 @@ mod tests {
             .await
             .unwrap_err();
         assert_eq!(status, StatusCode::BAD_REQUEST);
-        assert!(error["error"]
-            .as_str()
-            .unwrap()
-            .contains("系统设置 → 联网搜索"));
+        // The message follows the UI language; both name the settings page.
+        let message = error["error"].as_str().unwrap();
+        assert!(message.contains("联网搜索") || message.contains("Web Search"), "{message}");
         assert!(!dir.path().join("config.json").exists());
     }
 }

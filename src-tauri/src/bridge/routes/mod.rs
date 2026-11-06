@@ -41,6 +41,8 @@ pub mod sync;
 pub mod workspace_files;
 pub mod caveman;
 pub mod customization;
+pub mod peripheral;
+pub mod github;
 
 mod subagents;
 
@@ -88,4 +90,5 @@ pub fn build_all_routes() -> Router<AppState> {
         .merge(sync::routes())
         .merge(workspace_files::routes())
         .merge(caveman::routes())
+        .merge(peripheral::routes())
 }

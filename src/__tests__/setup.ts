@@ -31,6 +31,14 @@ vi.mock('@tauri-apps/api/core', () => ({
   }),
 }));
 
+// Component tests exercise Desktop behaviour: route the native adapter to the
+// mocked Tauri invoke above. src/platform/native.test.ts tests the real adapter.
+vi.mock('../platform/native', async importOriginal => {
+  const actual = await importOriginal<typeof import('../platform/native')>();
+  const { invoke } = await import('@tauri-apps/api/core');
+  return { ...actual, invokeDesktop: (command: string, args?: Record<string, unknown>) => invoke(command, args) };
+});
+
 // Mock window.__TAURI__ for secureStorage fallback detection
 Object.defineProperty(window, '__TAURI__', {
   value: undefined,

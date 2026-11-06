@@ -3,6 +3,7 @@ import { h5API, H5TokenInfo } from '../utils/tauriAPI';
 import QRCode from './QRCode';
 import { useI18n } from '../hooks/useI18n';
 import { detectBridgePort } from '../api';
+import { bridgeOrigin } from '../services/bridgeConnection';
 
 interface H5AccessPanelProps {
   conversationId: string;
@@ -113,7 +114,7 @@ const H5AccessPanel: React.FC<H5AccessPanelProps> = ({ conversationId, onOpenCha
   };
 
   const getAccessUrl = (token: string) =>
-    `http://127.0.0.1:${bridgePort}/api/h5/access/${token}`;
+    `${bridgeOrigin()}/api/h5/access/${token}`;
 
   const formatTimeLeft = (expiresAt: string): string => {
     const expires = new Date(expiresAt).getTime();

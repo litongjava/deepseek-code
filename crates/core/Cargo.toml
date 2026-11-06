@@ -37,6 +37,9 @@ rusqlite = { version = "0.31", features = ["bundled", "chrono"] }
 r2d2 = "0.8"
 r2d2_sqlite = "0.24"
 base64 = "0.22"
+sha2 = "0.10"
+flate2 = "1"
+tar = { version = "0.4", default-features = false }
 ring = "0.17"
 windows = { version = "0.58", features = ["Win32_Graphics_Gdi", "Win32_UI_WindowsAndMessaging", "Win32_Foundation", "Win32_System_JobObjects", "Win32_System_Threading", "Win32_Security", "Win32_Security_Cryptography", "Win32_Security_Authorization", "Win32_System_Memory"] }
 cron = "0.12"

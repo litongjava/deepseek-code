@@ -8,6 +8,36 @@
 - **Android：可行。** dcl 引擎已在 Android 14 模拟器上实测通过，dcd 的 Rust 代码已能通过 Android 编译检查。完整 App 难度中高，约 4 到 8 周。
 - **iOS：只建议做远程客户端，约 2 到 3 周。** App Store 应用不能启动子进程，本地跑不了 Bash 这类工具。本机没有 Mac，这部分未实测。
 
+## 改造进展（2026-11-05）
+
+浏览器 + 桌面的第 1 到 4 步已完成；Android 第 2、3 阶段已完成（远程模式、进程内引擎、PRoot + Ubuntu、前台服务、APK 构建），发布签名与分发渠道需要维护者的签名密钥；iOS 可用手机浏览器添加到主屏幕，或用同一移动端入口构建（未在 iOS 上验证）。用户说明见文档站“在浏览器和手机上使用”。
+
+- **服务程序**：`dcd-server` 运行 Bridge 并托管 `dist`，单页应用的路由回退到 `index.html`。默认只监听本机且不换端口；监听网络地址时必须 `--tls-cert/--tls-key` 或 `--behind-https-proxy`，否则拒绝启动。
+- **认证**：访问令牌保存在数据目录的 `server-token`（0600）。接口接受 `x-api-key`、Bearer 和登录后的 HttpOnly、SameSite=Strict Cookie，任一有效即通过。服务器模式下 `/metrics`、`/api/workspace-config`、`/api/system-status` 也需要令牌。规则集中在 Bridge 的 `server_mode` 模块，有单元测试和真实服务器的集成测试。
+- **来源校验**：带 `Origin` 的请求必须与 `Host` 同源，或在允许列表中（默认含 Tauri 应用来源，可用 `--allow-origin` 追加）。登录接口同样校验，其他网站不能借用户浏览器猜令牌。
+- **前端连接**：连接模块（`bridgeConnection`）分三种模式：桌面（本进程 Bridge）、开发代理、web（页面所在服务器或保存的服务器地址）。web 模式由 `ServerGate` 组件显示登录页；401 时回到登录页。
+- **原生调用**：适配层 `invokeDesktop` 统一处理。桌面调用 Tauri；浏览器和手机对已登记的命令走 HTTP（`peripheral_command` → `/api/peripheral`，覆盖 18 处调用），其余抛出“需要桌面版”。`peripheral_command` 拆出不依赖 Tauri 的 `run()`，服务器上的服务凭据来自环境变量。
+- **附件**：图片和文件用带凭据的 `fetch` 取得 blob URL，不再拼接 URL 令牌；桌面和手机应用（跨源）也因此能显示附件图片。
+- **窄屏**：宽度小于 768px 时侧边栏改为抽屉，导航后自动收起；标题栏和会话头部隐藏次要按钮。加入 `manifest.webmanifest`，可添加到主屏幕。
+- **取消 30090 网关**：原 Node 网关 `api-proxy` 已删除，能力并入 Bridge：GitHub 连接（OAuth 与个人访问令牌、仓库浏览、复制文件到会话工作区）在 `/api/github/*`；数据同步走 Bridge 的 `/data/sync/*`；模型代理由 Bridge 的供应商配置直接连接。可选的托管账号服务通过构建变量 `VITE_ACCOUNT_SERVICE_URL` 指定，未配置时相关调用立即报错，不再请求本机端口。
+- **底层修复**：`OrchestrationConfig::get()` 首次使用时自动加载，未调用 `init_global()` 的程序（如 `dcd-server`）不再在聊天时崩溃。
+
+- **Android 应用**：移动端入口在应用进程内启动 Bridge 和引擎，数据放在应用私有目录，页面按桌面的方式通过 `get_bridge_endpoint` 连接，默认在本机运行，不需要服务器。用户菜单的“连接服务器”切换到远程模式，登录页的“在本机运行”切回。Android 与 iOS 的配置放宽 CSP 的 `connect-src`，允许连接任意服务器。Android 工程已纳入仓库，`MainActivity` 按状态栏、导航栏、刘海和键盘设置内边距（Android 15 起强制全面屏）。跨源客户端只用 Bearer，服务器不需要允许带凭据的跨源请求。
+- **Ubuntu 环境（PRoot）**：APK 以 `lib*.so` 形式在 jniLibs 中附带 Termux 构建的 PRoot、loader、talloc 和 android-shmem（`npm run android:proot` 下载并按 SHA-256 校验，再修正库名和搜索路径，许可证随 assets 附带）。首次启动时后台下载 Ubuntu 24.04.5 base（约 30 MB，校验发布方签名清单中的 SHA-256）并解压到私有目录；硬链接改为复制，设备文件跳过，写入 DNS 和 apt 免降权配置。就绪后 Bash 工具通过 PRoot（`-0 --link2symlink`，绑定数据目录和工作区，路径一致）在 Ubuntu 中执行；就绪前使用系统 `sh`。
+- **前台服务**：`EngineService` 以 specialUse 类型的前台服务保持应用进程，任务在后台继续；从最近任务划掉应用时停止。Android 13 起请求通知权限，未授权时服务照常运行。
+- **网络安全配置**：发布版只允许对 127.0.0.1 使用明文 HTTP（应用内引擎），远程服务器必须 HTTPS；调试版允许局域网 HTTP。
+- **会话模型误报**：页面刷新后会话可能先于模型列表加载，以前会误报“对话模型与当前模式不匹配”。现在模型列表到达后重新判断，可用时自动消除提示。桌面同样受益。
+
+实测 Android（Docker 中的 Android 14 x86_64 模拟器，调试 APK）：
+- 本机模式：首次打开直接进入应用，配置供应商后真实模型对话成功。Ubuntu 环境自动安装完成，Bash 工具在其中执行 `head -2 /etc/os-release`（Ubuntu 24.04.5 LTS）；模型用 `apt-get install git python3` 安装后得到 `git version 2.43.0`、`Python 3.12.3`。前台服务处于前台状态（`isForeground=true`）。
+- 远程模式：连接主机上的 `dcd-server`（`http://10.0.2.2:<端口>`），登录、对话成功。
+- 两种模式通过用户菜单和登录页来回切换，切换后会话保留，不出现误报提示；界面不被状态栏和键盘遮挡。
+- 测试注意：宿主机 `adb` 与容器共用 5037 端口（host 网络），构建会启动宿主机 adb 抢走设备，测试前先 `adb kill-server`；容器重启会因 `/dev/kvm` 权限失败，需要删除后重建。
+
+没有验证：真实手机、arm64（arm64 的 PRoot 组件已打包，未在 arm64 设备上运行）、发布版签名与分发渠道、iOS（没有 Mac，iOS 只完成了相同入口和配置；App Store 应用不能启动子进程，iOS 本机模式只能对话和读写沙箱文件）。
+
+实测（Linux，Chrome 无头，deepseek-browser-use）：令牌登录、真实模型对话、Bash 工具审批与执行、新建项目（填写服务器路径）、390×844 手机视口的布局与抽屉；`curl` 验证 HTTPS（HTTP/2、Secure Cookie）和跨源拒绝。
+
 ## 实测结果
 
 本次验证的内容：

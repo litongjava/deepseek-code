@@ -11,7 +11,7 @@ import CodeExecution from '../CodeExecution';
 import DocumentCard, { DocumentInfo } from '../DocumentCard';
 import MessageAttachments from '../MessageAttachments';
 import { extractTextContent, normalizeMessageDocuments, normalizeDocumentDrafts, withAuthToken } from '../../utils/messageHelpers';
-import { invoke } from '@tauri-apps/api/core';
+import { invokeDesktop as invoke } from '../../platform/native';
 
 export interface AssistantMessageProps {
   msg: any;

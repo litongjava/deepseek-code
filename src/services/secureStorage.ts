@@ -1,3 +1,4 @@
+import { hasNativeDesktop } from './bridgeConnection';
 // services/secureStorage.ts
 //
 // Secure storage abstraction for Tauri's secure-storage plugin.
@@ -33,9 +34,9 @@ type SecureKey = (typeof SECURE_KEYS)[number];
  */
 export function isSecureAvailable(): boolean {
   try {
+    // The secure-storage plugin is registered by Desktop only.
     return (
-      typeof window !== 'undefined' &&
-      '__TAURI_INTERNALS__' in window &&
+      hasNativeDesktop() &&
       typeof (window as any).__TAURI_INTERNALS__?.invoke === 'function'
     );
   } catch {

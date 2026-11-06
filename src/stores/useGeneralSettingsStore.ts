@@ -1,7 +1,8 @@
 import { create } from 'zustand';
-import { invoke } from '@tauri-apps/api/core';
+import { invokeDesktop as invoke } from '../platform/native';
 import { useUIStore } from './useUIStore';
 import type { WorkspaceMode } from './useWorkspaceModeStore';
+import { hasNativeDesktop } from '../services/bridgeConnection';
 
 export type WorkDetails = 'compact' | 'standard' | 'detailed' | 'verbose';
 export type PermissionMode = 'ask_permissions' | 'accept_edits' | 'plan_mode' | 'bypass_permissions' | 'dont_ask';
@@ -97,7 +98,7 @@ export function applyGeneralSettings(settings: GeneralSettings) {
 let fileWrites = Promise.resolve();
 let loadingFile = false;
 function saveFile(settings: GeneralSettings) {
-  if (loadingFile || !(window as any).__TAURI_INTERNALS__) return;
+  if (loadingFile || !hasNativeDesktop()) return;
   const snapshot = { ...normalizeGeneralSettings(settings), language: useUIStore.getState().language, chatFont: localStorage.getItem('chat_font') || 'default' };
   fileWrites = fileWrites.then(async () => {
     await invoke('write_general_settings', { settings: snapshot });
@@ -120,7 +121,7 @@ export const useGeneralSettingsStore = create<GeneralSettings & {
 
 export async function initializeGeneralSettings() {
   loadingFile = true;
-  if ((window as any).__TAURI_INTERNALS__) {
+  if (hasNativeDesktop()) {
     try {
       const saved = await invoke<GeneralSettings & { language?: string; chatFont?: string } | null>('read_general_settings');
       if (saved) {
@@ -135,7 +136,7 @@ export async function initializeGeneralSettings() {
 }
 
 export async function openGeneralConfiguration() {
-  if (!(window as any).__TAURI_INTERNALS__) throw new Error('Configuration files are available in the desktop app.');
+  if (!hasNativeDesktop()) throw new Error('Configuration files are available in the desktop app.');
   saveFile(useGeneralSettingsStore.getState());
   await fileWrites;
   if (useGeneralSettingsStore.getState().saveError) throw new Error(useGeneralSettingsStore.getState().saveError);

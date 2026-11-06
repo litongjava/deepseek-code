@@ -15,6 +15,7 @@ import customizeMainImg from '../assets/icons/customize-main.png';
 import { useI18n } from '../hooks/useI18n';
 import McpSettingsPage from './McpSettingsPage';
 import PluginsPage from './PluginsPage';
+import GithubTokenForm from '../features/github/GithubTokenForm';
 
 interface Skill {
   id: string;
@@ -218,12 +219,15 @@ const CustomizePage = ({ onCreateWithDeepSeek, onBack }: { onCreateWithDeepSeek?
   ] as const;
 
   const [githubConnected, setGithubConnected] = useState(false);
+  // Without an OAuth client secret on the Bridge, connect with a token instead.
+  const [githubOauth, setGithubOauth] = useState(true);
   const [githubUser, setGithubUser] = useState<{ login: string; avatar_url: string; name?: string } | null>(null);
   const [selectedConnector, setSelectedConnector] = useState<'github' | 'gdrive'>('github');
 
   useEffect(() => {
     getGithubStatus().then(data => {
       setGithubConnected(data.connected);
+      setGithubOauth(data.oauthAvailable !== false);
       if (data.user) setGithubUser(data.user);
     }).catch(() => { });
     const poll = setInterval(() => {
@@ -719,12 +723,16 @@ const CustomizePage = ({ onCreateWithDeepSeek, onBack }: { onCreateWithDeepSeek?
                     <Github size={36} className="text-claude-text fill-current stroke-none" />
                   </div>
                   <p className="text-[14px] text-claude-textSecondary mb-6 font-normal">{t('customize.notConnectedGithub')}</p>
-                  <button
-                    onClick={handleGithubConnect}
-                    className="px-6 py-2.5 text-[14px] font-medium text-claude-bg bg-claude-text hover:opacity-90 rounded-[10px] transition-colors shadow-sm"
-                  >
-                    {t('customize.connect')}
-                  </button>
+                  {githubOauth ? (
+                    <button
+                      onClick={handleGithubConnect}
+                      className="px-6 py-2.5 text-[14px] font-medium text-claude-bg bg-claude-text hover:opacity-90 rounded-[10px] transition-colors shadow-sm"
+                    >
+                      {t('customize.connect')}
+                    </button>
+                  ) : (
+                    <GithubTokenForm onConnected={user => { setGithubConnected(true); setGithubUser(user); }} />
+                  )}
                 </div>
               )
             ) : (

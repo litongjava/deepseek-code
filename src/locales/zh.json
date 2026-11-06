@@ -839,5 +839,32 @@
     "browserFrameTitle": "网页：{url}",
     "browserLoading": "正在加载页面…",
     "shortcut": "Ctrl+Alt+B（macOS 上为 ⌘⌥B）：显示或隐藏右侧边栏"
+  },
+  "serverLogin": {
+    "title": "连接 DeepSeek Code",
+    "description": "请输入 DeepSeek Code 服务器的访问令牌。",
+    "serverUrl": "服务器地址",
+    "token": "访问令牌",
+    "tokenHint": "在服务器上运行 dcd-server --print-token 查看。",
+    "submit": "登录",
+    "connecting": "正在连接...",
+    "otherServer": "使用其他服务器",
+    "connectServer": "连接服务器",
+    "useThisPhone": "在本机运行",
+    "errors": {
+      "needsServer": "请填写服务器地址。",
+      "unreachable": "无法连接服务器。",
+      "needsToken": "请输入访问令牌。",
+      "expired": "登录已失效，请重新输入访问令牌。",
+      "invalidUrl": "地址需以 http:// 或 https:// 开头。",
+      "badToken": "访问令牌不正确。",
+      "failed": "登录失败，请重试。"
+    }
+  },
+  "githubToken": {
+    "tokenLabel": "个人访问令牌",
+    "tokenHint": "在 GitHub 的 Settings > Developer settings > Personal access tokens 中创建带 repo 权限的令牌。",
+    "connect": "连接",
+    "tokenFailed": "GitHub 拒绝了这个令牌。"
   }
 }

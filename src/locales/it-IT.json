@@ -820,5 +820,32 @@
     "browserFrameTitle": "Pagina web: {url}",
     "browserLoading": "Caricamento pagina…",
     "shortcut": "Ctrl+Alt+B (⌘⌥B su macOS): mostra o nascondi la barra laterale destra"
+  },
+  "serverLogin": {
+    "title": "Connetti a DeepSeek Code",
+    "description": "Inserisci il token di accesso del tuo server DeepSeek Code.",
+    "serverUrl": "Indirizzo del server",
+    "token": "Token di accesso",
+    "tokenHint": "Esegui dcd-server --print-token sul server per visualizzarlo.",
+    "submit": "Accedi",
+    "connecting": "Connessione in corso...",
+    "otherServer": "Usa un altro server",
+    "connectServer": "Connetti a un server",
+    "useThisPhone": "Esegui su questo telefono",
+    "errors": {
+      "needsServer": "Inserisci un indirizzo del server.",
+      "unreachable": "Impossibile raggiungere il server.",
+      "needsToken": "Inserisci il token di accesso.",
+      "expired": "La sessione è scaduta. Inserisci di nuovo il token di accesso.",
+      "invalidUrl": "L'indirizzo deve iniziare con http:// o https://.",
+      "badToken": "Il token di accesso non è corretto.",
+      "failed": "Accesso non riuscito. Riprova."
+    }
+  },
+  "githubToken": {
+    "tokenLabel": "Token di accesso personale",
+    "tokenHint": "Crea un token con l'ambito repo in GitHub Settings > Developer settings > Personal access tokens.",
+    "connect": "Connetti",
+    "tokenFailed": "GitHub ha rifiutato questo token."
   }
 }

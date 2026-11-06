@@ -1,4 +1,5 @@
-import { request, GATEWAY_BASE, setCachedCredentials } from './client';
+import { request, setCachedCredentials } from './client';
+import { ACCOUNT_SERVICE_URL, accountUrl } from '../services/accountService';
 import { setSecure, removeSecure } from '../services/secureStorage';
 
 export async function sendCode(email: string) {
@@ -27,7 +28,7 @@ export async function login(email: string, password: string) {
 
 // Gateway login for Electron app — authenticates via local API proxy, returns API key for Claude Code SDK
 export async function gatewayLogin(email: string, password: string) {
-  const res = await fetch(`${GATEWAY_BASE}/api/auth/login`, {
+  const res = await fetch(accountUrl('/auth/login'), {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ email, password }),
@@ -39,7 +40,7 @@ export async function gatewayLogin(email: string, password: string) {
   const data = await res.json();
   if (data.token) {
     await setSecure('ANTHROPIC_API_KEY', data.token);
-    localStorage.setItem('ANTHROPIC_BASE_URL', GATEWAY_BASE);
+    localStorage.setItem('ANTHROPIC_BASE_URL', ACCOUNT_SERVICE_URL);
     await setSecure('gateway_user', JSON.stringify(data.user || {}));
     if (data.apiKey) {
       await setSecure('CUSTOM_API_KEY', data.apiKey);

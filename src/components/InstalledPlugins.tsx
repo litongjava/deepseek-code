@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react';
-import { invoke } from '@tauri-apps/api/core';
+import { invokeDesktop as invoke } from '../platform/native';
 import { listProjects, type Project } from '../api/projects';
 interface Plugin { id:string; version:string; description:string; enabled:boolean; commands:string[] }
 const command = <T,>(request:Record<string,unknown>) => invoke<T>('peripheral_command',{request});

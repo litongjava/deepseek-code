@@ -163,8 +163,12 @@ pub async fn peripheral_command(
     host: tauri::State<'_, PeripheralHost>,
     request: Request,
 ) -> Result<Value, String> {
-    async {
-        let context=context(&app)?;
+    let context = context(&app).map_err(|e| e.to_string())?;
+    run(context, &host, request).await.map_err(|e| e.to_string())
+}
+
+/// Runs a peripheral request without Tauri, so the Bridge (dcd-server) can serve it too.
+pub async fn run(context: ServiceContext, host: &PeripheralHost, request: Request) -> Result<Value> {
         match request {
             Request::SkillImportLegacy {source,preview} => Ok(json!(deepseek_code_core::skills::import::import_legacy(&source,&context.paths.data_dir.join("skills"),preview)?)),
             Request::Cron {project_id,operation} => {
@@ -355,7 +359,6 @@ pub async fn peripheral_command(
                 let task=host.task.lock().unwrap().take();if let Some(task)=task {task.await??;}
                 Ok(json!({"stopped":true}))}
         }
-    }.await.map_err(|e:anyhow::Error|e.to_string())
 }
 #[tauri::command]
 pub fn peripheral_credential(

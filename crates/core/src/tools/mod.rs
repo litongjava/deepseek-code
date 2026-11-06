@@ -38,6 +38,8 @@ pub mod sandbox;
 mod findings;
 mod content_compat;
 mod utf8;
+pub mod linux_env;
+pub use utf8::powershell_command;
 mod bash_process;
 pub mod background_shell;
 pub(crate) mod path_scope;
@@ -1074,6 +1076,13 @@ async fn tool_bash_async(input: serde_json::Value, cwd: &str) -> Result<serde_js
             let mut cmd = Command::new(program);
             cmd.args(args);
             cmd
+        }
+        // Android: run the shell inside the installed Ubuntu environment.
+        None if !cfg!(windows) && matches!(shell_type.to_lowercase().as_str(), "bash" | "sh") => {
+            match linux_env::active() {
+                Some(env) => env.bash_command(cwd),
+                None => Command::new(&shell),
+            }
         }
         None => Command::new(&shell),
     };

@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from 'react';
-import { invoke } from '@tauri-apps/api/core';
+import { invokeDesktop as invoke } from '../platform/native';
 
 interface Config { enabled: boolean; provider: string; model: string; min_hours: number; min_memories: number }
 interface Snapshot {

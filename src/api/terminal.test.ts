@@ -2,7 +2,7 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { createTerminal, writeTerminal, resizeTerminal, closeTerminal, listTerminals, streamTerminalOutput } from './terminal';
 
 vi.mock('../services/bridgeConnection', () => ({
-  API_BASE: 'http://localhost/api', isTauriApp: false, useDevProxy: false,
+  API_BASE: 'http://localhost/api', isTauriApp: false, hasBridge: false, hasNativeDesktop: () => false, bridgeOrigin: () => 'http://localhost', useDevProxy: false,
   waitForApiReady: vi.fn().mockResolvedValue(undefined), detectBridgePort: vi.fn(),
 }));
 

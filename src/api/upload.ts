@@ -1,5 +1,6 @@
 import { handleUnauthorized } from '../utils/login';
 import { API_BASE, getToken, detectBridgePort, request } from './client';
+import { bridgeOrigin } from '../services/bridgeConnection';
 
 export interface UploadResult {
   fileId: string;
@@ -15,7 +16,7 @@ export async function uploadFile(
   conversationId?: string
 ): Promise<UploadResult> {
   const port = await detectBridgePort();
-  const uploadUrl = `http://127.0.0.1:${port}/api/upload`;
+  const uploadUrl = `${bridgeOrigin()}/api/upload`;
 
   return new Promise((resolve, reject) => {
     const token = getToken();

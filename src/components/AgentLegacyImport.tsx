@@ -1,5 +1,5 @@
 import { useState } from 'react';
-import { invoke } from '@tauri-apps/api/core';
+import { invokeDesktop as invoke } from '../platform/native';
 
 interface Report {
   definition: { id: string; tools: string[]; legacy: { name: string; when_to_use: string; model: string; base_dir: string } };

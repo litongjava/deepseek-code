@@ -820,5 +820,32 @@
     "browserFrameTitle": "Web sayfası: {url}",
     "browserLoading": "Sayfa yükleniyor…",
     "shortcut": "Ctrl+Alt+B (macOS'ta ⌘⌥B): sağ kenar çubuğunu göster veya gizle"
+  },
+  "serverLogin": {
+    "title": "DeepSeek Code'a bağlan",
+    "description": "DeepSeek Code sunucunuzun erişim belirtecini girin.",
+    "serverUrl": "Sunucu adresi",
+    "token": "Erişim belirteci",
+    "tokenHint": "Görmek için sunucuda dcd-server --print-token komutunu çalıştırın.",
+    "submit": "Oturum aç",
+    "connecting": "Bağlanıyor...",
+    "otherServer": "Başka bir sunucu kullan",
+    "connectServer": "Bir sunucuya bağlan",
+    "useThisPhone": "Bu telefonda çalıştır",
+    "errors": {
+      "needsServer": "Bir sunucu adresi girin.",
+      "unreachable": "Sunucuya ulaşılamıyor.",
+      "needsToken": "Erişim belirtecini girin.",
+      "expired": "Oturumunuzun süresi doldu. Erişim belirtecini yeniden girin.",
+      "invalidUrl": "Adres http:// veya https:// ile başlamalıdır.",
+      "badToken": "Erişim belirteci yanlış.",
+      "failed": "Oturum açılamadı. Yeniden deneyin."
+    }
+  },
+  "githubToken": {
+    "tokenLabel": "Kişisel erişim belirteci",
+    "tokenHint": "GitHub Settings > Developer settings > Personal access tokens bölümünde repo kapsamlı bir belirteç oluşturun.",
+    "connect": "Bağlan",
+    "tokenFailed": "GitHub bu belirteci reddetti."
   }
 }

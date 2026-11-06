@@ -3,6 +3,8 @@ import { useNavigate } from 'react-router-dom';
 import { ArrowLeft } from 'lucide-react';
 import { login, register, sendCode, forgotPassword, resetPassword, gatewayLogin } from '../api';
 import { useSyncStore } from '../stores/useSyncStore';
+import { ACCOUNT_SERVICE_URL } from '../services/accountService';
+import { hasNativeDesktop } from '../services/bridgeConnection';
 
 type View = 'login' | 'register' | 'verify' | 'forgot' | 'reset';
 
@@ -39,7 +41,7 @@ const Auth = () => {
   const showStrength = (view === 'register' || view === 'reset') && password;
   const strength = showStrength ? getPasswordStrength(password) : null;
 
-  const isTauri = typeof window !== 'undefined' && !!(window as any).__TAURI_INTERNALS__;
+  const isTauri = hasNativeDesktop();
 
   const handleLogin = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -196,7 +198,9 @@ const Auth = () => {
   };
 
   const openClawparrot = () => {
-    try { import('../utils/tauriAPI').then(m => m.tauriAPI.openExternal('http://127.0.0.1:30090/register')); } catch {}
+    // Registration lives on the hosted account service, when one is configured.
+    if (!ACCOUNT_SERVICE_URL) return;
+    try { import('../utils/tauriAPI').then(m => m.tauriAPI.openExternal(`${ACCOUNT_SERVICE_URL}/register`)); } catch {}
   };
 
   return (

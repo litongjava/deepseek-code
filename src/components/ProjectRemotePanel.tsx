@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from 'react';
-import { invoke } from '@tauri-apps/api/core';
+import { invokeDesktop as invoke } from '../platform/native';
 
 const field = 'w-full rounded border p-2 bg-claude-bg';
 const command = <T,>(request: Record<string, unknown>) => invoke<T>('peripheral_command', { request });

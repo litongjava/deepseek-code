@@ -2,6 +2,7 @@ import { getErrorMessage } from '../utils/errorHelpers';
 import React, { useState, useEffect, useRef, useCallback } from 'react';
 import { X, Github, ChevronDown, Link2, Folder, FileText, ChevronLeft, Check, Loader2 } from 'lucide-react';
 import { getGithubStatus, getGithubAuthUrl, getGithubRepos, getGithubContents, getGithubTree } from '../api';
+import GithubTokenForm from '../features/github/GithubTokenForm';
 
 interface Repo {
   id: number;
@@ -83,6 +84,8 @@ function writeCache(key: string, data: any) {
 
 const AddFromGithubModal: React.FC<Props> = ({ isOpen, onClose, onConfirm, currentContextTokens = 0, contextLimit = 200000 }) => {
   const [connected, setConnected] = useState<boolean | null>(null);
+  // Without an OAuth client secret on the Bridge, connect with a token instead.
+  const [oauthAvailable, setOauthAvailable] = useState(true);
   const [connectingPoll, setConnectingPoll] = useState(false);
   const [repos, setRepos] = useState<Repo[]>([]);
   const [reposLoading, setReposLoading] = useState(false);
@@ -125,6 +128,7 @@ const AddFromGithubModal: React.FC<Props> = ({ isOpen, onClose, onConfirm, curre
     getGithubStatus().then(data => {
       if (cancelled) return;
       setConnected(!!data?.connected);
+      setOauthAvailable(data?.oauthAvailable !== false);
     }).catch(() => {
       if (!cancelled) setConnected(false);
     });
@@ -457,12 +461,16 @@ const AddFromGithubModal: React.FC<Props> = ({ isOpen, onClose, onConfirm, curre
             <div className="flex-1 flex flex-col items-center justify-center gap-3 p-6 text-center">
               <Github size={36} className="text-claude-textSecondary" />
               <p className="text-[13px] text-claude-textSecondary">Connect your GitHub account to browse repositories.</p>
-              <button
-                onClick={handleConnect}
-                className="px-4 py-1.5 bg-black text-white dark:bg-white dark:text-black rounded-lg text-[13px] hover:opacity-90 transition-opacity"
-              >
-                {connectingPoll ? 'Waiting for GitHub...' : 'Connect GitHub'}
-              </button>
+              {oauthAvailable ? (
+                <button
+                  onClick={handleConnect}
+                  className="px-4 py-1.5 bg-black text-white dark:bg-white dark:text-black rounded-lg text-[13px] hover:opacity-90 transition-opacity"
+                >
+                  {connectingPoll ? 'Waiting for GitHub...' : 'Connect GitHub'}
+                </button>
+              ) : (
+                <GithubTokenForm onConnected={() => setConnected(true)} />
+              )}
             </div>
           )}
 

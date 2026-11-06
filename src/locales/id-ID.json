@@ -820,5 +820,32 @@
     "browserFrameTitle": "Halaman web: {url}",
     "browserLoading": "Memuat halaman…",
     "shortcut": "Ctrl+Alt+B (⌘⌥B di macOS): tampilkan atau sembunyikan bilah sisi kanan"
+  },
+  "serverLogin": {
+    "title": "Hubungkan ke DeepSeek Code",
+    "description": "Masukkan token akses server DeepSeek Code Anda.",
+    "serverUrl": "Alamat server",
+    "token": "Token akses",
+    "tokenHint": "Jalankan dcd-server --print-token di server untuk menampilkannya.",
+    "submit": "Masuk",
+    "connecting": "Menghubungkan...",
+    "otherServer": "Gunakan server lain",
+    "connectServer": "Hubungkan ke server",
+    "useThisPhone": "Jalankan di ponsel ini",
+    "errors": {
+      "needsServer": "Masukkan alamat server.",
+      "unreachable": "Server tidak dapat dijangkau.",
+      "needsToken": "Masukkan token akses.",
+      "expired": "Sesi Anda telah berakhir. Masukkan token akses lagi.",
+      "invalidUrl": "Alamat harus diawali http:// atau https://.",
+      "badToken": "Token akses salah.",
+      "failed": "Gagal masuk. Coba lagi."
+    }
+  },
+  "githubToken": {
+    "tokenLabel": "Token akses pribadi",
+    "tokenHint": "Buat token dengan cakupan repo di GitHub Settings > Developer settings > Personal access tokens.",
+    "connect": "Hubungkan",
+    "tokenFailed": "GitHub menolak token ini."
   }
 }

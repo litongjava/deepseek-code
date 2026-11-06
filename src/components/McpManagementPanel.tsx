@@ -1,6 +1,7 @@
 import React, { useState, useEffect } from 'react';
 import { Server, Plus, Trash2, Power, PowerOff, Settings, Check, X, Loader2, Terminal } from 'lucide-react';
 import { detectBridgePort } from '../api';
+import { bridgeOrigin, hasNativeDesktop } from '../services/bridgeConnection';
 
 interface McpServer {
   name: string;
@@ -47,7 +48,7 @@ export default function McpManagementPanel({ onClose }: { onClose: () => void })
     setLoading(true);
     try {
       const port = await detectBridgePort();
-      const response = await fetch(`http://127.0.0.1:${port}/api/mcp/servers`, {
+      const response = await fetch(`${bridgeOrigin()}/api/mcp/servers`, {
         headers: { 'Authorization': `Bearer ${localStorage.getItem('auth_token')}` },
       });
       if (response.ok) {
@@ -62,7 +63,7 @@ export default function McpManagementPanel({ onClose }: { onClose: () => void })
   };
 
   const getConfigPath = async (): Promise<string> => {
-    const appData = await (window as any).__TAURI_INTERNALS__?.invoke('plugin:dialog|open') || '';
+    const appData = hasNativeDesktop() ? await (window as any).__TAURI_INTERNALS__?.invoke('plugin:dialog|open') || '' : '';
     return appData;
   };
 
@@ -79,7 +80,7 @@ export default function McpManagementPanel({ onClose }: { onClose: () => void })
 
     try {
       const port = await detectBridgePort();
-      await fetch(`http://127.0.0.1:${port}/api/mcp/servers`, {
+      await fetch(`${bridgeOrigin()}/api/mcp/servers`, {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
@@ -101,7 +102,7 @@ export default function McpManagementPanel({ onClose }: { onClose: () => void })
   const handleRemoveServer = async (name: string) => {
     try {
       const port = await detectBridgePort();
-      await fetch(`http://127.0.0.1:${port}/api/mcp/servers/${encodeURIComponent(name)}`, {
+      await fetch(`${bridgeOrigin()}/api/mcp/servers/${encodeURIComponent(name)}`, {
         method: 'DELETE',
         headers: { 'Authorization': `Bearer ${localStorage.getItem('auth_token')}` },
       });
@@ -114,7 +115,7 @@ export default function McpManagementPanel({ onClose }: { onClose: () => void })
   const handleToggleServer = async (name: string, enabled: boolean) => {
     try {
       const port = await detectBridgePort();
-      await fetch(`http://127.0.0.1:${port}/api/mcp/servers/${encodeURIComponent(name)}/toggle`, {
+      await fetch(`${bridgeOrigin()}/api/mcp/servers/${encodeURIComponent(name)}/toggle`, {
         method: 'PATCH',
         headers: {
           'Content-Type': 'application/json',

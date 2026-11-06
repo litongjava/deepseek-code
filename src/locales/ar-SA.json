@@ -820,5 +820,32 @@
     "browserFrameTitle": "صفحة ويب: {url}",
     "browserLoading": "جارٍ تحميل الصفحة…",
     "shortcut": "Ctrl+Alt+B (⌘⌥B على macOS): إظهار الشريط الجانبي الأيمن أو إخفاؤه"
+  },
+  "serverLogin": {
+    "title": "الاتصال بـ DeepSeek Code",
+    "description": "أدخل رمز الوصول الخاص بخادم DeepSeek Code.",
+    "serverUrl": "عنوان الخادم",
+    "token": "رمز الوصول",
+    "tokenHint": "شغّل dcd-server --print-token على الخادم لعرضه.",
+    "submit": "تسجيل الدخول",
+    "connecting": "جارٍ الاتصال...",
+    "otherServer": "استخدام خادم آخر",
+    "connectServer": "الاتصال بخادم",
+    "useThisPhone": "التشغيل على هذا الهاتف",
+    "errors": {
+      "needsServer": "أدخل عنوان الخادم.",
+      "unreachable": "تعذّر الوصول إلى الخادم.",
+      "needsToken": "أدخل رمز الوصول.",
+      "expired": "انتهت صلاحية الجلسة. أدخل رمز الوصول مرة أخرى.",
+      "invalidUrl": "يجب أن يبدأ العنوان بـ http:// أو https://.",
+      "badToken": "رمز الوصول غير صحيح.",
+      "failed": "تعذّر تسجيل الدخول. حاول مرة أخرى."
+    }
+  },
+  "githubToken": {
+    "tokenLabel": "رمز الوصول الشخصي",
+    "tokenHint": "أنشئ رمزًا بنطاق repo من GitHub Settings > Developer settings > Personal access tokens.",
+    "connect": "اتصال",
+    "tokenFailed": "رفض GitHub هذا الرمز."
   }
 }

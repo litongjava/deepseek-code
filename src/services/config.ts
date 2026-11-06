@@ -1,3 +1,5 @@
+import { bridgeOrigin } from './bridgeConnection';
+
 const DEFAULT_PORT = 30085;
 
 let _bridgePort: number | null = null;
@@ -16,8 +18,7 @@ export async function ensureBridgePort(): Promise<number> {
 }
 
 function getBridgeBaseUrl(): string {
-  const port = _bridgePort || DEFAULT_PORT;
-  return `http://127.0.0.1:${port}`;
+  return bridgeOrigin();
 }
 
 export const config = {

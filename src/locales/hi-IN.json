@@ -820,5 +820,32 @@
     "browserFrameTitle": "वेब पेज: {url}",
     "browserLoading": "पेज लोड हो रहा है…",
     "shortcut": "Ctrl+Alt+B (macOS पर ⌘⌥B): दायाँ साइडबार दिखाएँ या छिपाएँ"
+  },
+  "serverLogin": {
+    "title": "DeepSeek Code से कनेक्ट करें",
+    "description": "अपने DeepSeek Code सर्वर का एक्सेस टोकन दर्ज करें।",
+    "serverUrl": "सर्वर पता",
+    "token": "एक्सेस टोकन",
+    "tokenHint": "इसे देखने के लिए सर्वर पर dcd-server --print-token चलाएँ।",
+    "submit": "साइन इन करें",
+    "connecting": "कनेक्ट हो रहा है...",
+    "otherServer": "दूसरा सर्वर इस्तेमाल करें",
+    "connectServer": "सर्वर से कनेक्ट करें",
+    "useThisPhone": "इस फ़ोन पर चलाएँ",
+    "errors": {
+      "needsServer": "सर्वर पता दर्ज करें।",
+      "unreachable": "सर्वर तक नहीं पहुँचा जा सका।",
+      "needsToken": "एक्सेस टोकन दर्ज करें।",
+      "expired": "आपका सत्र समाप्त हो गया है। एक्सेस टोकन फिर से दर्ज करें।",
+      "invalidUrl": "पता http:// या https:// से शुरू होना चाहिए।",
+      "badToken": "एक्सेस टोकन गलत है।",
+      "failed": "साइन इन नहीं हो सका। फिर से कोशिश करें।"
+    }
+  },
+  "githubToken": {
+    "tokenLabel": "व्यक्तिगत एक्सेस टोकन",
+    "tokenHint": "GitHub Settings > Developer settings > Personal access tokens में repo स्कोप वाला टोकन बनाएँ।",
+    "connect": "कनेक्ट करें",
+    "tokenFailed": "GitHub ने यह टोकन अस्वीकार कर दिया।"
   }
 }

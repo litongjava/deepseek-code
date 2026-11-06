@@ -10,6 +10,10 @@ edition = "2021"
 name = "dcd"
 path = "src/main.rs"
 
+[[bin]]
+name = "dcd-server"
+path = "src/bin/dcd-server.rs"
+
 [lib]
 name = "deepseek_desktop_tauri_lib"
 crate-type = ["staticlib", "cdylib", "rlib"]
@@ -35,7 +39,10 @@ serde_json = "1"
 tokio = { version = "1", features = ["full"] }
 reqwest = { version = "0.12", features = ["json", "stream", "rustls-tls", "blocking"], default-features = false }
 axum = { version = "0.8", features = ["macros", "multipart"] }
-tower-http = { version = "0.6", features = ["cors"] }
+tower-http = { version = "0.6", features = ["cors", "fs"] }
+tokio-rustls = { version = "0.26", default-features = false, features = ["ring", "logging", "tls12"] }
+rustls-pki-types = { version = "1", features = ["std"] }
+hyper-util = { version = "0.1", features = ["server-auto", "service", "tokio"] }
 uuid = { version = "1", features = ["v4"] }
 chrono = { version = "0.4", features = ["serde"] }
 toml = "0.8"

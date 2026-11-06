@@ -81,3 +81,108 @@ describe('backend readiness', () => {
     expect(localStorage.getItem('bridge_api_key')).toBe('test-bridge-key');
   });
 });
+
+describe('dcd-server connection', () => {
+  const json = (body: unknown, ok = true, status = 200) => ({ ok, status, json: async () => body });
+
+  beforeEach(() => {
+    vi.useRealTimers();
+    vi.stubEnv('DEV', false);
+    localStorage.clear();
+  });
+  afterEach(() => vi.unstubAllEnvs());
+
+  it('connects to the serving origin and drops a stale Desktop key when the cookie session is valid', async () => {
+    localStorage.setItem('bridge_api_key', 'stale-desktop-key');
+    const fetchMock = vi.fn(async (url: string) => url.endsWith('/health')
+      ? json({ status: 'healthy', database: true })
+      : json({ authenticated: true, server_mode: true }));
+    vi.stubGlobal('fetch', fetchMock);
+    const bridge = await import('./bridgeConnection');
+    expect(bridge.connectionMode()).toBe('web');
+    await bridge.waitForApiReady();
+    expect(bridge.API_BASE).toBe(`${location.origin}/api`);
+    expect(bridge.bridgeOrigin()).toBe(location.origin);
+    expect(localStorage.getItem('bridge_api_key')).toBeNull();
+    expect(fetchMock).toHaveBeenCalledWith(`${location.origin}/api/auth/status`, expect.not.objectContaining({ credentials: 'include' }));
+  });
+
+  it('asks for the access token, logs in, and keeps it for Bearer requests', async () => {
+    let authenticated = false;
+    const fetchMock = vi.fn(async (url: string, init?: RequestInit) => {
+      if (url.endsWith('/health')) return json({ status: 'healthy', database: true });
+      if (url.endsWith('/api/auth/login')) {
+        const ok = JSON.parse(String(init?.body)).token === 'right-token';
+        authenticated = ok;
+        return json(ok ? { ok } : { error: 'Invalid access token' }, ok, ok ? 200 : 401);
+      }
+      return json({ authenticated, server_mode: true });
+    });
+    vi.stubGlobal('fetch', fetchMock);
+    const bridge = await import('./bridgeConnection');
+    const required = vi.fn();
+    bridge.onLoginRequired(required);
+    await expect(bridge.waitForApiReady()).rejects.toMatchObject({ code: 'needsToken' });
+    expect(required).toHaveBeenCalledOnce();
+    await expect(bridge.loginToServer('wrong')).rejects.toMatchObject({ code: 'badToken' });
+    await bridge.loginToServer(' right-token ');
+    expect(localStorage.getItem('bridge_api_key')).toBe('right-token');
+    await expect(bridge.waitForApiReady()).resolves.toBeUndefined();
+  });
+
+  it('remembers another server, validates its address, and reports an unreachable one', async () => {
+    const fetchMock = vi.fn(async (url: string) => {
+      if (url.startsWith('https://down.example')) throw new TypeError('Failed to fetch');
+      if (url.endsWith('/health')) return json({ status: 'healthy', database: true });
+      if (url.endsWith('/api/auth/login')) return json({ ok: true });
+      return json({ authenticated: true, server_mode: true });
+    });
+    vi.stubGlobal('fetch', fetchMock);
+    const bridge = await import('./bridgeConnection');
+    await expect(bridge.loginToServer('t', 'ftp://bad')).rejects.toMatchObject({ code: 'invalidUrl' });
+    await expect(bridge.loginToServer('t', 'https://down.example')).rejects.toMatchObject({ code: 'unreachable' });
+    await bridge.loginToServer('token', 'https://dev.example:8443/');
+    expect(bridge.savedServerUrl()).toBe('https://dev.example:8443');
+    await bridge.waitForApiReady();
+    expect(bridge.API_BASE).toBe('https://dev.example:8443/api');
+    expect(await bridge.detectBridgePort()).toBe(8443);
+  });
+
+  it('returns to the login screen when the server rejects the token', async () => {
+    vi.stubGlobal('fetch', vi.fn());
+    const bridge = await import('./bridgeConnection');
+    localStorage.setItem('dcd_access_token', 'expired');
+    const required = vi.fn();
+    bridge.onLoginRequired(required);
+    bridge.notifyUnauthorized();
+    expect(required).toHaveBeenCalledWith(expect.objectContaining({ code: 'expired' }));
+    expect(localStorage.getItem('dcd_access_token')).toBeNull();
+  });
+
+  it('runs the mobile app on its own engine until a server is chosen', async () => {
+    (window as any).__TAURI_INTERNALS__ = {};
+    vi.spyOn(navigator, 'userAgent', 'get').mockReturnValue('Mozilla/5.0 (Linux; Android 14) AppleWebKit');
+    vi.mocked(invoke).mockResolvedValueOnce([30085, 'phone-key']);
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue({ ok: true, json: async () => ({ status: 'healthy', database: true }) }));
+    const bridge = await import('./bridgeConnection');
+    expect(bridge.isMobileApp).toBe(true);
+    expect(bridge.connectionMode()).toBe('local');
+    expect(bridge.hasNativeDesktop()).toBe(false);
+    await bridge.waitForApiReady();
+    expect(invoke).toHaveBeenCalledWith('get_bridge_endpoint');
+    expect(bridge.API_BASE).toBe('http://127.0.0.1:30085/api');
+    expect(localStorage.getItem('bridge_api_key')).toBe('phone-key');
+
+    const required = vi.fn();
+    bridge.onLoginRequired(required);
+    bridge.requestServerLogin();
+    expect(required).toHaveBeenCalledWith(expect.objectContaining({ code: 'needsServer', needsServerUrl: true }));
+
+    localStorage.setItem('dcd_server_url', 'https://server.example');
+    expect(bridge.connectionMode()).toBe('web');
+    bridge.switchToLocalEngine();
+    expect(bridge.connectionMode()).toBe('local');
+    expect(bridge.savedServerUrl()).toBeNull();
+    vi.restoreAllMocks();
+  });
+});

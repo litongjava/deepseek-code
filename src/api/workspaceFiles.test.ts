@@ -1,6 +1,7 @@
 import { beforeEach, expect, it, vi } from 'vitest';
 const mocks = vi.hoisted(() => ({ request: vi.fn(), invoke: vi.fn() }));
-vi.mock('./client', () => ({ isTauriApp: true, request: mocks.request }));
+vi.mock('./client', () => ({ request: mocks.request }));
+vi.mock('../services/bridgeConnection', () => ({ hasNativeDesktop: () => true }));
 vi.mock('@tauri-apps/api/core', () => ({ invoke: mocks.invoke }));
 import { getWorkspaceFileCapabilities, getWorkspaceFileDiff, openWorkspaceFile, readWorkspaceFile, saveWorkspaceFileAs } from './workspaceFiles';
 beforeEach(() => { vi.clearAllMocks(); mocks.request.mockResolvedValue({ json: async () => ({}) }); });

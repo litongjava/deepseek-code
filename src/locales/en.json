@@ -839,5 +839,32 @@
     "browserFrameTitle": "Web page: {url}",
     "browserLoading": "Loading page…",
     "shortcut": "Ctrl+Alt+B (⌘⌥B on macOS): show or hide the right sidebar"
+  },
+  "serverLogin": {
+    "title": "Connect to DeepSeek Code",
+    "description": "Enter the access token of your DeepSeek Code server.",
+    "serverUrl": "Server address",
+    "token": "Access token",
+    "tokenHint": "Run dcd-server --print-token on the server to show it.",
+    "submit": "Sign in",
+    "connecting": "Connecting...",
+    "otherServer": "Use another server",
+    "connectServer": "Connect to a server",
+    "useThisPhone": "Run on this phone",
+    "errors": {
+      "needsServer": "Enter a server address.",
+      "unreachable": "Cannot reach the server.",
+      "needsToken": "Enter the access token.",
+      "expired": "Your session has expired. Enter the access token again.",
+      "invalidUrl": "The address must start with http:// or https://.",
+      "badToken": "The access token is incorrect.",
+      "failed": "Sign-in failed. Try again."
+    }
+  },
+  "githubToken": {
+    "tokenLabel": "Personal access token",
+    "tokenHint": "Create a token with the repo scope in GitHub Settings > Developer settings > Personal access tokens.",
+    "connect": "Connect",
+    "tokenFailed": "GitHub rejected this token."
   }
 }

@@ -26,7 +26,7 @@ const CSP_VALUE: &str =
      style-src 'self' 'nonce-${nonce}' https://fonts.googleapis.com; \
      img-src 'self' asset: https: data: blob:; \
      font-src 'self' https://fonts.gstatic.com; \
-     connect-src 'self' http://127.0.0.1:30085 http://127.0.0.1:30090; \
+     connect-src 'self' http://127.0.0.1:30085; \
      frame-src 'self' blob: data:; \
      media-src 'self' blob:; \
      worker-src 'self' blob:;";
