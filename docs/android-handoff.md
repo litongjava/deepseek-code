@@ -18,6 +18,8 @@
 
 手机的 Ubuntu 中已通过国内镜像安装 Node.js、npm、Python、Git 和 curl，并实际运行 Node/Python 脚本及 curl HTTPS 请求。软件安装在应用数据中，不包含在基础 APK 内，更新 APK 后保留。APT 保留仓库签名校验；基础环境没有 CA 证书时，先通过已签名的 HTTP 软件源安装 `ca-certificates`，之后再切换 HTTPS 镜像。
 
+常用网络、文件处理和开发工具已补齐，安装清单见文档站“在手机上使用”。真机验证 curl、wget 的 HTTPS 请求、dig DNS 查询、jq 解析、pip 和 Python venv 正常。`ip addr show lo` 可读取回环地址；Ubuntu 中 ping 的权限调用、ss 的 netlink 访问和 ifconfig 的部分网络信息读取受到 Android 权限限制。BusyBox ping 同样受限，Android 原生 ping 在应用身份下成功；验收时应记录实际权限结果，不能仅凭命令已安装判定网络诊断全部可用。
+
 真机尚未覆盖：release 构建、16 KB 页大小设备、正式签名和分发，以及公网 HTTPS 服务器连接。
 
 ## 拿到 APK
@@ -88,7 +90,7 @@ apksigner sign --ks <你的密钥库> --out app-release.apk aligned.apk
 
 ## 后续工作
 
-本轮共用引擎已统一 Android 文件锁入口，并让默认 Shell 识别 Ubuntu 与安装前的系统 Shell；交互终端沿用相同的环境变量和目录绑定。移动端使用具有充足线程栈的运行时来执行工具，终端输入按会话顺序发送，保证长命令字符顺序。手机界面优化位于 `feat/android-mobile-ui` 分支。
+本轮共用引擎已统一 Android 文件锁入口，并让默认 Shell 识别 Ubuntu 与安装前的系统 Shell；交互终端沿用相同的环境变量和目录绑定。移动端使用具有充足线程栈的共用运行时来执行工具，终端输入按会话顺序发送，保证长命令字符顺序。手机界面优化已合并到 `main`；合并后的 Android 编译与调试包构建已通过。
 
 - Ubuntu 环境安装进度和状态的界面提示。
 - 正式签名密钥、版本号和分发渠道。
