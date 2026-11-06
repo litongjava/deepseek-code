@@ -876,5 +876,16 @@
   },
   "network": {
     "unreachable": "Não foi possível conectar ao servidor. Verifique a conexão de rede ou se o servidor está em execução e tente novamente."
+  },
+  "folderPicker": {
+    "title": "Escolher uma pasta",
+    "up": "Pasta superior",
+    "home": "Pasta pessoal",
+    "open": "Abrir",
+    "select": "Usar esta pasta",
+    "empty": "Nenhuma subpasta",
+    "more": "Mais {count} pastas não exibidas",
+    "hidden": "Mostrar pastas ocultas",
+    "loading": "Carregando…"
   }
 }

@@ -895,5 +895,16 @@
   },
   "network": {
     "unreachable": "无法连接服务器。请检查网络连接或服务器是否在运行，然后重试。"
+  },
+  "folderPicker": {
+    "title": "选择文件夹",
+    "up": "上一级",
+    "home": "主目录",
+    "open": "打开",
+    "select": "使用此文件夹",
+    "empty": "没有子文件夹",
+    "more": "还有 {count} 个文件夹未显示",
+    "hidden": "显示隐藏文件夹",
+    "loading": "正在加载…"
   }
 }

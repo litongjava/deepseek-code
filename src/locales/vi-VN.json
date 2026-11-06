@@ -876,5 +876,16 @@
   },
   "network": {
     "unreachable": "Không thể kết nối tới máy chủ. Hãy kiểm tra kết nối mạng hoặc máy chủ có đang chạy không, rồi thử lại."
+  },
+  "folderPicker": {
+    "title": "Chọn thư mục",
+    "up": "Thư mục cha",
+    "home": "Thư mục chính",
+    "open": "Mở",
+    "select": "Dùng thư mục này",
+    "empty": "Không có thư mục con",
+    "more": "Còn {count} thư mục chưa hiển thị",
+    "hidden": "Hiện thư mục ẩn",
+    "loading": "Đang tải…"
   }
 }

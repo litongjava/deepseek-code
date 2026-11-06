@@ -11,6 +11,8 @@ export interface ModalProps {
   size?: 'sm' | 'md' | 'lg' | 'xl';
   closeOnOverlayClick?: boolean;
   showCloseButton?: boolean;
+  /** Stacking class of the overlay; raise it for a modal opened from another dialog. */
+  layerClassName?: string;
 }
 
 const sizeStyles: Record<string, string> = {
@@ -29,6 +31,7 @@ const Modal: React.FC<ModalProps> = ({
   size = 'md',
   closeOnOverlayClick = true,
   showCloseButton = true,
+  layerClassName = 'z-[100]',
 }) => {
   const handleEscape = useCallback((e: KeyboardEvent) => {
     if (e.key === 'Escape') {
@@ -52,8 +55,12 @@ const Modal: React.FC<ModalProps> = ({
 
   return createPortal(
     <div
-      className="fixed inset-0 z-[100] flex items-center justify-center bg-black/40 animate-fade-in"
+      className={`fixed inset-0 ${layerClassName} flex items-center justify-center bg-black/40 animate-fade-in`}
+      data-modal-layer=""
       onClick={closeOnOverlayClick ? onClose : undefined}
+      // React events bubble through the portal to the opener's handlers; Escape
+      // closes only this modal, not a dialog underneath.
+      onKeyDown={(e) => { if (e.key === 'Escape') { e.stopPropagation(); onClose(); } }}
     >
       <div
         className={`bg-claude-input rounded-2xl shadow-xl ${sizeStyles[size]} max-h-[85vh] flex flex-col animate-fade-in ${className}`}

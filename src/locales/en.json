@@ -895,5 +895,16 @@
   },
   "network": {
     "unreachable": "Cannot reach the server. Check your network connection or whether the server is running, then try again."
+  },
+  "folderPicker": {
+    "title": "Choose a folder",
+    "up": "Parent folder",
+    "home": "Home folder",
+    "open": "Open",
+    "select": "Use this folder",
+    "empty": "No subfolders",
+    "more": "{count} more folders not shown",
+    "hidden": "Show hidden folders",
+    "loading": "Loading..."
   }
 }

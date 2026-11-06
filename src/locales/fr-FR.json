@@ -876,5 +876,16 @@
   },
   "network": {
     "unreachable": "Impossible de joindre le serveur. Vérifiez votre connexion réseau ou que le serveur fonctionne, puis réessayez."
+  },
+  "folderPicker": {
+    "title": "Choisir un dossier",
+    "up": "Dossier parent",
+    "home": "Dossier personnel",
+    "open": "Ouvrir",
+    "select": "Utiliser ce dossier",
+    "empty": "Aucun sous-dossier",
+    "more": "{count} autres dossiers non affichés",
+    "hidden": "Afficher les dossiers masqués",
+    "loading": "Chargement…"
   }
 }

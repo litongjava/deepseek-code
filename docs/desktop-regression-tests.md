@@ -69,13 +69,17 @@ npm run tauri -- dev
 
 1. 用 deepseek-browser-use 打开 `http://127.0.0.1:30185`：出现令牌登录页；错误令牌提示不正确；正确令牌进入应用，刷新后仍保持登录。
 2. 发送消息，回答逐步显示；让模型调用 Bash，审批后显示结果。
-3. 新建项目：填写服务器上的目录路径，信任后出现在项目列表。
+3. 新建项目：点击“浏览文件夹”，在选择框中逐级进入服务器上的目录（也可输入路径后点“打开”），点“使用此文件夹”后路径出现在列表中；选择框显示在创建对话框之上，在选择框内按 Esc 只关闭选择框。信任后出现在项目列表。在侧边栏编辑项目时同样添加文件夹，编辑面板不被关闭。
 4. 视口 390×844：侧边栏默认收起，打开后点选会话自动收起；会话头部不挤压标题。
 5. `curl -H "Origin: https://evil.example"` 带令牌请求 `/api/conversations` 返回 403；不带令牌返回 401。
 6. `--host 0.0.0.0` 不带 HTTPS 参数时拒绝启动；带自签名证书时 `https://` 可访问，登录 Cookie 带 `Secure`。用 deepseek-browser-use（Chrome 走 HTTP/2）打开 `https://<局域网 IP>:<端口>`，页面不白屏，`/assets/*` 不返回 403，登录后能对话；`curl -sk` 带同源 `Origin` 请求 `/assets/` 下的文件返回 200，带 `https://evil.example` 返回 403。`--host 0.0.0.0 --allow-http` 启动时打印明文警告；`http://<局域网 IP>:<端口>` 能登录、对话，登录 Cookie 不带 `Secure`；点击消息的复制按钮能复制；点击麦克风弹出“需要 HTTPS”说明框，不打开录音面板。
 7. Android：`npx tauri android build --apk --debug --target x86_64`，在模拟器安装。首次打开直接进入应用（本机模式），添加供应商后对话；等待 Ubuntu 环境安装完成（数据目录出现 `linux/rootfs/.deepseek-ready`），让模型用 Bash 执行 `head -2 /etc/os-release` 应显示 Ubuntu，再用 `apt-get install -y git` 安装后 `git --version` 可用；通知栏显示“正在本机运行”。顶部不被状态栏遮挡，键盘弹出时输入框可见。
 8. Android 用户菜单“连接服务器”：填写 `http://10.0.2.2:30185` 和令牌后能对话；登录页“在本机运行”切回后，原会话仍在，不出现“对话模型与当前模式不匹配”的提示。
 9. Desktop（`npm run tauri -- dev`）仍直接进入应用，不出现登录页；在会话页刷新后不出现模型模式不匹配的提示。
+10. 直接运行构建产物（不经过 Cargo，环境中没有 `RUST_MIN_STACK`）：`env -u RUST_MIN_STACK target/debug/dcd-server ...`，让模型调用 Bash 工具。服务器不崩溃，回答正常显示。
+11. 请求数量（弱网）：在页面中用 `performance.getEntriesByType('resource')` 统计。首页加载后空闲 60 秒内没有新请求；会话页空闲 60 秒内 `queue` 和 `pending-questions` 各不超过 3 次，会话详情只请求 1 次；页面切到后台后停止轮询。`curl -H 'Accept-Encoding: gzip'` 请求 `/assets/` 下的 JS，返回 `Content-Encoding: gzip` 和 `Cache-Control: public, max-age=31536000, immutable`；首页返回 `no-cache`。没有对 `fonts.googleapis.com` 的请求。
+12. 断网提示：dsb `set_offline` 断网后发送消息，底部提示“无法连接服务器……”（警告图标），输入框保留原文，上一轮回答不变；恢复网络后点发送，正常回答。运行中断网时，回答区显示同样的提示，不出现 `Failed to fetch` 或 `network error`。
+13. 带 `?snapshot_parts=1` 请求会话详情，响应含 `snapshotParts`，快照中的 `systemPrompt`、`tools` 换成 `systemPromptRef`、`toolsRef`；页面的轨迹视图与不带参数时一致。
 
 ## Shell 配置与终端
 
@@ -105,5 +109,10 @@ npm run tauri -- dev
 - `scheduler/`、`task/cron.rs`、`TaskList`、`NewTaskModal`、Desktop 入口 `main.rs` 的调度部分：C
 - `CustomizePage`：B、D5
 - `services/bridgeConnection.ts`、`features/server/`、`platform/native.ts`、`bridge/server_mode.rs`、`bin/dcd-server.rs`、`lib.rs` 的移动端入口、`gen/android/`：E、D1
+- `features/project/FolderPicker.tsx`、`FolderFields.tsx`、`routes/filesystem.rs`、core 的 `fs/directories.rs`、`components/ui/Modal.tsx`：E3、D3
+- 轮询与请求合并（`QueueDock`、`PlanApprovalController`、`useVisiblePolling`、`utils/inflight.ts`）、压缩与缓存（`bridge/mod.rs` 的静态文件）、`routes/conversations.rs` 的快照共享：E11、E13、D1、D2
+- `utils/networkError.ts`、`utils/chatErrors.ts`、`MainContent` 的发送失败处理：E12、D1
+- `lib.rs` 的运行时（`build_runtime`）、Desktop 和 dcd-server 入口：E10、D1、D2
+- 语音输入（`VoiceInput`、`peripheral.rs` 的 `voice_transcribe`）：Desktop 中配置音频转写后端，录音 5 秒后停止并转写，文本正确；录音以二进制传给后端（无 JSON 数字数组）。浏览器的 HTTP 页面点击麦克风弹出“需要 HTTPS”。
 - `features/trajectory/`（工具调用分组）：D6
 - 其他范围：至少跑 D1

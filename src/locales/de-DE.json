@@ -876,5 +876,16 @@
   },
   "network": {
     "unreachable": "Der Server ist nicht erreichbar. Prüfen Sie die Netzwerkverbindung oder ob der Server läuft, und versuchen Sie es erneut."
+  },
+  "folderPicker": {
+    "title": "Ordner auswählen",
+    "up": "Übergeordneter Ordner",
+    "home": "Persönlicher Ordner",
+    "open": "Öffnen",
+    "select": "Diesen Ordner verwenden",
+    "empty": "Keine Unterordner",
+    "more": "{count} weitere Ordner nicht angezeigt",
+    "hidden": "Versteckte Ordner anzeigen",
+    "loading": "Wird geladen…"
   }
 }

@@ -876,5 +876,16 @@
   },
   "network": {
     "unreachable": "Nie można połączyć się z serwerem. Sprawdź połączenie sieciowe lub czy serwer działa, a następnie spróbuj ponownie."
+  },
+  "folderPicker": {
+    "title": "Wybierz folder",
+    "up": "Folder nadrzędny",
+    "home": "Folder domowy",
+    "open": "Otwórz",
+    "select": "Użyj tego folderu",
+    "empty": "Brak podfolderów",
+    "more": "Nie pokazano jeszcze {count} folderów",
+    "hidden": "Pokaż ukryte foldery",
+    "loading": "Wczytywanie…"
   }
 }

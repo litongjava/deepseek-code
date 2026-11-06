@@ -876,5 +876,16 @@
   },
   "network": {
     "unreachable": "No se puede conectar con el servidor. Revisa la conexión de red o si el servidor está en ejecución y vuelve a intentarlo."
+  },
+  "folderPicker": {
+    "title": "Elegir una carpeta",
+    "up": "Carpeta superior",
+    "home": "Carpeta personal",
+    "open": "Abrir",
+    "select": "Usar esta carpeta",
+    "empty": "No hay subcarpetas",
+    "more": "{count} carpetas más no se muestran",
+    "hidden": "Mostrar carpetas ocultas",
+    "loading": "Cargando…"
   }
 }

@@ -282,11 +282,16 @@ export default function SidebarProjects({
   }, [notice]);
   useEffect(() => {
     if (!popup) return;
+    // A modal opened from the popup (such as the folder picker) sits outside
+    // it in the DOM; its clicks and Escape belong to the modal.
+    const inModal = (target: EventTarget | null) =>
+      target instanceof Element && !!target.closest("[data-modal-layer]");
     const outside = (event: Event) => {
+      if (inModal(event.target)) return;
       if (!popupRef.current?.contains(event.target as Node)) setPopup(null);
     };
     const key = (event: KeyboardEvent) => {
-      if (event.key === "Escape") setPopup(null);
+      if (event.key === "Escape" && !document.querySelector("[data-modal-layer]")) setPopup(null);
     };
     const resize = () => setPopup(null);
     document.addEventListener("pointerdown", outside);

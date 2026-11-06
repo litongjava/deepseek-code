@@ -876,5 +876,16 @@
   },
   "network": {
     "unreachable": "Sunucuya ulaşılamıyor. Ağ bağlantınızı veya sunucunun çalışıp çalışmadığını kontrol edip yeniden deneyin."
+  },
+  "folderPicker": {
+    "title": "Klasör seçin",
+    "up": "Üst klasör",
+    "home": "Ana klasör",
+    "open": "Aç",
+    "select": "Bu klasörü kullan",
+    "empty": "Alt klasör yok",
+    "more": "{count} klasör daha gösterilmiyor",
+    "hidden": "Gizli klasörleri göster",
+    "loading": "Yükleniyor…"
   }
 }

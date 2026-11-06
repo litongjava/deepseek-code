@@ -876,5 +876,16 @@
   },
   "network": {
     "unreachable": "無法連線到伺服器。請檢查網路連線或伺服器是否正在執行，然後重試。"
+  },
+  "folderPicker": {
+    "title": "選擇資料夾",
+    "up": "上一層",
+    "home": "主目錄",
+    "open": "開啟",
+    "select": "使用此資料夾",
+    "empty": "沒有子資料夾",
+    "more": "還有 {count} 個資料夾未顯示",
+    "hidden": "顯示隱藏資料夾",
+    "loading": "正在載入…"
   }
 }

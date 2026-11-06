@@ -22,6 +22,11 @@ import {
   updateProject,
 } from "../../api";
 
+vi.mock("../../api/directories", () => ({
+  listDirectories: vi.fn(async (path?: string) => ({
+    path: path || "C:\\Users\\dev", parent: null, home: "C:\\Users\\dev", roots: ["C:\\"], directories: [], truncated: 0,
+  })),
+}));
 vi.mock("../../api", () => ({
   getProjects: vi.fn(),
   updateConversation: vi.fn(),
@@ -298,10 +303,14 @@ describe("project sidebar", () => {
       target: { value: "Renamed" },
     });
     fireEvent.click(screen.getByRole("button", { name: "Add folder" }));
-    fireEvent.change(screen.getByLabelText("Folder path"), {
-      target: { value: "C:\\work\\second" },
-    });
-    fireEvent.click(screen.getByRole("button", { name: "Add" }));
+    // Browsers pick folders on the server; typing a path and opening it works too.
+    const path = await screen.findByLabelText("Folder path");
+    fireEvent.change(path, { target: { value: "C:\\work\\second" } });
+    fireEvent.click(screen.getByRole("button", { name: "Open" }));
+    const use = await screen.findByRole("button", { name: "Use this folder" });
+    // Pointer and Escape handling of the popup must ignore the picker above it.
+    fireEvent.pointerDown(use);
+    fireEvent.click(use);
     fireEvent.click(screen.getByRole("button", { name: "Save" }));
     await waitFor(() =>
       expect(updateProject).toHaveBeenCalledWith("p1", {

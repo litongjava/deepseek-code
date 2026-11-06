@@ -5,6 +5,8 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use walkdir::WalkDir;
 
+pub mod directories;
+
 /// Takes an exclusive advisory lock, retrying briefly while it is held.
 ///
 /// A child process forked by any thread inherits a copy of the descriptor

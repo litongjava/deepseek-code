@@ -876,5 +876,16 @@
   },
   "network": {
     "unreachable": "Tidak dapat terhubung ke server. Periksa koneksi jaringan atau apakah server sedang berjalan, lalu coba lagi."
+  },
+  "folderPicker": {
+    "title": "Pilih folder",
+    "up": "Folder induk",
+    "home": "Folder beranda",
+    "open": "Buka",
+    "select": "Gunakan folder ini",
+    "empty": "Tidak ada subfolder",
+    "more": "{count} folder lainnya tidak ditampilkan",
+    "hidden": "Tampilkan folder tersembunyi",
+    "loading": "Memuat…"
   }
 }

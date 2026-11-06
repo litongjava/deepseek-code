@@ -876,5 +876,16 @@
   },
   "network": {
     "unreachable": "De server is niet bereikbaar. Controleer de netwerkverbinding of de server actief is en probeer het opnieuw."
+  },
+  "folderPicker": {
+    "title": "Map kiezen",
+    "up": "Bovenliggende map",
+    "home": "Thuismap",
+    "open": "Openen",
+    "select": "Deze map gebruiken",
+    "empty": "Geen submappen",
+    "more": "Nog {count} mappen niet weergegeven",
+    "hidden": "Verborgen mappen tonen",
+    "loading": "Laden…"
   }
 }

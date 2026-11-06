@@ -876,5 +876,16 @@
   },
   "network": {
     "unreachable": "Impossibile raggiungere il server. Controlla la connessione di rete o che il server sia in esecuzione, quindi riprova."
+  },
+  "folderPicker": {
+    "title": "Scegli una cartella",
+    "up": "Cartella superiore",
+    "home": "Cartella home",
+    "open": "Apri",
+    "select": "Usa questa cartella",
+    "empty": "Nessuna sottocartella",
+    "more": "Altre {count} cartelle non mostrate",
+    "hidden": "Mostra cartelle nascoste",
+    "loading": "Caricamento…"
   }
 }
