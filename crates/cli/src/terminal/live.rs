@@ -4385,7 +4385,7 @@ impl TurnDisplay {
             let _ = live.updates.send(Update::Copy(
                 self.numbers[id],
                 super::tool_view::copy_command(name, input),
-                super::tool_view::result_text(output),
+                super::tool_view::named_result_text(name, output),
             ));
             if name == "ExitPlanMode" && !failed {
                 if let Ok(value) = serde_json::from_str::<Value>(output) {

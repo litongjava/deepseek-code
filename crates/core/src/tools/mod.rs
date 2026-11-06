@@ -1532,6 +1532,7 @@ impl ToolExecutionManager {
 fn tool_git_add(input: serde_json::Value) -> Result<serde_json::Value> {
     let path = input["path"].as_str().ok_or_else(|| anyhow!("path required"))?;
     let files = input["files"].as_array().ok_or_else(|| anyhow!("files array required"))?;
+    anyhow::ensure!(files.iter().all(serde_json::Value::is_string), "Every requested Git path must be a string");
 
     let file_strs: Vec<String> = files.iter()
         .filter_map(|f| f.as_str().map(String::from))
@@ -1544,7 +1545,7 @@ fn tool_git_add(input: serde_json::Value) -> Result<serde_json::Value> {
         }));
     }
 
-    let mut args: Vec<String> = vec!["add".to_string()];
+    let mut args: Vec<String> = vec!["add".to_string(), "--".to_string()];
     args.extend(file_strs.clone());
     let arg_refs: Vec<&str> = args.iter().map(|s| s.as_str()).collect();
 
@@ -1553,9 +1554,11 @@ fn tool_git_add(input: serde_json::Value) -> Result<serde_json::Value> {
     let stdout = String::from_utf8_lossy(&output.stdout).to_string();
     let stderr = String::from_utf8_lossy(&output.stderr).to_string();
 
-    if !output.status.success() && !stderr.is_empty() {
+    if !output.status.success() {
         return Ok(serde_json::json!({
-            "error": stderr.trim(),
+            "error": if !stderr.trim().is_empty() { stderr.trim() } else if !stdout.trim().is_empty() { stdout.trim() } else { "git add failed without output" },
+            "success": false,
+            "exit_code": output.status.code().unwrap_or(-1),
             "is_error": true
         }));
     }
@@ -1575,6 +1578,24 @@ pub(crate) async fn execute_public_web_search(input: serde_json::Value) -> Resul
 mod directory_edit_regressions {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn git_add_reports_requested_paths_and_real_failures() {
+        let root = tempfile::tempdir().unwrap();
+        let cwd = root.path().to_str().unwrap();
+        assert!(run_git_command(&["init"], cwd).unwrap().status.success());
+        fs::write(root.path().join("--force"), "requested file").unwrap();
+        fs::write(root.path().join("untouched.txt"), "keep unstaged").unwrap();
+        let result = tool_git_add(json!({"path":cwd,"files":["--force"]})).unwrap();
+        assert_eq!(result["success"], true, "{result}");
+        assert_eq!(result["files"], json!(["--force"]));
+        let staged = run_git_command(&["diff", "--cached", "--name-only"], cwd).unwrap();
+        assert_eq!(String::from_utf8_lossy(&staged.stdout).trim(), "--force");
+        let failed = tool_git_add(json!({"path":cwd,"files":["missing.txt"]})).unwrap();
+        assert_eq!(failed["success"], false);
+        assert_ne!(failed["exit_code"], 0);
+        assert!(tool_git_add(json!({"path":cwd,"files":[7]})).is_err());
+    }
 
     #[tokio::test]
     async fn omitted_directory_uses_session_workspace() {

@@ -46,6 +46,24 @@ describe('WebFetch output', () => {
   });
 });
 
+describe('Git add output', () => {
+  it.each(['object', 'json'])('renders and copies requested paths as text for %s results', format => {
+    const value = { success: true, files: ['src/main.rs', '目录/文件.ts'], output: '' };
+    const result = format === 'json' ? JSON.stringify(value) : value;
+    const expected = 'Git add completed — 2 requested paths\nsrc/main.rs\n目录/文件.ts';
+    const { container } = render(<ToolOutput name="git_add" result={result} />);
+    expect(container.textContent).toBe(expected);
+    expect(toolOutput({ name: 'git_add', result })).toBe(expected);
+    expect(value.files).toEqual(['src/main.rs', '目录/文件.ts']);
+  });
+  it('shows the failure and exit status', () => {
+    const result = { success: false, is_error: true, error: 'pathspec missing did not match', exit_code: 128 };
+    const { container } = render(<ToolOutput name="git_add" result={result} />);
+    expect(container.textContent).toBe('pathspec missing did not match\nExit code 128');
+    expect(container.textContent).not.toContain('completed');
+  });
+});
+
 describe('ordered process events', () => {
   it('starts Think collapsed and preserves manual expansion across streamed updates', () => {
     useWorkspaceModeStore.getState().setMode('code');

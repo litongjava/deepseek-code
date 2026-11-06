@@ -217,6 +217,27 @@ pub fn result_text(output: &str) -> String {
     plain_terminal_text(&raw_result_text(output))
 }
 
+/// Tool-specific presentation; stored history and model results stay structured.
+pub fn named_result_text(name: &str, output: &str) -> String {
+    if name == "git_add" {
+        if let Ok(value) = serde_json::from_str::<Value>(output.strip_prefix("Error: ").unwrap_or(output)) {
+            if value["success"] == true && value["is_error"] != true && value["error"].is_null() && !output.starts_with("Error: ") {
+                if let Some(files) = value["files"].as_array().filter(|files| files.iter().all(Value::is_string)) {
+                    let count = files.len();
+                    let mut text = format!("Git add completed — {count} requested {}", if count == 1 { "path" } else { "paths" });
+                    for file in files { text.push('\n'); text.push_str(file.as_str().unwrap()); }
+                    if let Some(details) = value["output"].as_str().filter(|text| !text.trim().is_empty()) { text.push('\n'); text.push_str(details.trim_end()); }
+                    return plain_terminal_text(&text);
+                }
+            }
+            if let Some(code) = value["exit_code"].as_i64().filter(|code| *code != 0) {
+                return format!("{}\nExit code {code}", result_text(output));
+            }
+        }
+    }
+    result_text(output)
+}
+
 pub(crate) fn copy_command(name: &str, input: &Value) -> String {
     input["command"]
         .as_str()
@@ -419,9 +440,9 @@ pub fn summary(name: &str, output: &str, failed: bool) -> (Vec<String>, usize) {
         serde_json::from_str::<Value>(output)
             .ok()
             .and_then(|value| value["message"].as_str().map(str::to_owned))
-            .unwrap_or_else(|| result_text(output))
+            .unwrap_or_else(|| named_result_text(name, output))
     } else {
-        result_text(output)
+        named_result_text(name, output)
     };
     let lines: Vec<&str> = text.lines().collect();
     if lines.is_empty() {
@@ -493,7 +514,7 @@ pub fn expanded(
     };
     let mut lines = vec![change_view::tool_call(&header, if failed { "error" } else { "" }, failed)];
     let diff = change_view::details(name, output, failed);
-    let text = diff.unwrap_or_else(|| result_text(output));
+    let text = diff.unwrap_or_else(|| named_result_text(name, output));
     let rows: Vec<&str> = text.lines().collect();
     if rows.is_empty() {
         lines.push(change_view::tool_output("(No output)", true, false));
@@ -784,6 +805,22 @@ pub fn approval(name: &str, input: &Value, workspace: Option<&std::path::Path>, 
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn git_add_text_collapses_by_actual_hidden_lines_and_keeps_failures() {
+        let files: Vec<_> = (0..12).map(|index| format!("src/file-{index}.rs")).collect();
+        let output = serde_json::json!({"success":true,"files":files,"output":""}).to_string();
+        let (shown, hidden) = super::summary("git_add", &output, false);
+        assert_eq!(shown, ["Git add completed — 12 requested paths", "src/file-0.rs", "src/file-1.rs", "src/file-2.rs"]);
+        assert_eq!(hidden, 9);
+        let expanded = super::named_result_text("git_add", &output);
+        assert!(expanded.ends_with("src/file-11.rs"));
+        assert!(!expanded.contains("\"files\""));
+        assert!(super::named_result_text("other", &output).contains("\"files\""));
+        let single = r#"{"success":true,"files":["."],"output":""}"#;
+        assert_eq!(super::named_result_text("git_add", single), "Git add completed — 1 requested path\n.");
+        let failed = r#"{"success":false,"error":"pathspec missing","exit_code":128}"#;
+        assert_eq!(super::named_result_text("git_add", failed), "pathspec missing\nExit code 128");
+    }
     use super::*;
     use serde_json::json;
 

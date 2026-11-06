@@ -91,10 +91,28 @@ export function commandStreams(value: unknown): { stdout: string; stderr: string
 }
 export function toolOutput(tool: any): string {
   const result = tool.result ?? tool.output ?? tool.error;
+  const git = gitAddContent(tool.name || '', result);
+  if (git !== null) return git;
   const webContent = webFetchContent(tool.name || '', result);
   if (webContent !== null) return webContent;
   const streams = toolCategory(tool.name || '') === 'Ran commands' ? commandStreams(result) : null;
   return streams ? [streams.stdout, streams.stderr].filter(Boolean).join('\n') : rawText(result);
+}
+/** Readable Git output without changing the structured result in history. */
+export function gitAddContent(name: string, value: unknown): string | null {
+  if (name !== 'git_add') return null;
+  let result: any = value;
+  if (typeof result === 'string') {
+    try { result = JSON.parse(result.replace(/^Error: /, '')); } catch { return null; }
+  }
+  if (!result || typeof result !== 'object') return null;
+  if (result.success !== true || result.is_error || result.error || (typeof value === 'string' && value.startsWith('Error: '))) {
+    if (!result.error) return null;
+    return [rawText(result.error), result.exit_code != null && result.exit_code !== 0 ? `Exit code ${result.exit_code}` : ''].filter(Boolean).join('\n');
+  }
+  if (!Array.isArray(result.files) || !result.files.every((file: unknown) => typeof file === 'string')) return null;
+  return [`Git add completed — ${result.files.length} requested ${result.files.length === 1 ? 'path' : 'paths'}`, ...result.files,
+    typeof result.output === 'string' ? result.output.trimEnd() : ''].filter((line, index, all) => index !== all.length - 1 || line !== '').join('\n');
 }
 /** Successful fetches display/copy the readable page, not transport metadata. */
 export function webFetchContent(name: string, value: unknown): string | null {
