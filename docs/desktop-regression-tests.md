@@ -62,6 +62,16 @@ npm run tauri -- dev
 4. 模型设置和供应商设置保存。
 5. Skills、MCP、插件页面可以打开和切换。
 
+## Shell 配置与终端
+
+1. 用独立数据目录启动 Desktop，通过 dsb 连接真实 WebView2；在通用设置保存 Bash 绝对路径，关闭设置后重新打开确认读回；取消文件选择不清空原路径。
+2. 输入无效路径，保存失败且原配置不变。环境变量覆盖时检查页面来源提示。
+3. 新建终端验证 Bash 语法、中文路径、非零退出码；原有终端保持原 Shell。
+4. WSL 发行版必须手动选择；在专用测试发行版验证输入、尺寸调整、退出码和关闭终端后的 Linux 子进程清理，不使用 Docker 发行版。
+5. 与 dcl 指向同一测试数据目录，确认 `config show`、模型 Bash 工具和 `!` 使用相同保存值。普通浏览器页面不能代替原生文件选择器验证。
+
+真实 PTY 自动化：`cargo test --locked -p deepseek-code-core --lib configured_bash_and_wsl -- --ignored --test-threads=1`，需要 Git Bash 和已安装的 `dcl-linux-test`。
+
 ## 按改动范围选择场景
 
 - `MemoryPanel`、`api/memory`、`routes/memory.rs`、`crates/core/src/memory`：A

@@ -1478,7 +1478,11 @@ fn terminal_errors_have_non_success_http_statuses() {
 
 async fn terminal_create(State(state): State<AppState>, Json(req): Json<TerminalCreateRequest>) -> impl IntoResponse {
     let manager = state.terminal_manager.lock().await.clone();
-    match manager.create_session(req.cwd, req.shell).await {
+    let root = match crate::commands::app_data_dir() {
+        Ok(root) => root,
+        Err(error) => return terminal_error(anyhow::anyhow!(error)),
+    };
+    match manager.create_configured_session(req.cwd, req.shell, &root).await {
         Ok(session) => (StatusCode::OK, Json(serde_json::to_value(session).unwrap_or_default())),
         Err(error) => terminal_error(error),
     }

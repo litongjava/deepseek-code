@@ -1093,6 +1093,27 @@ export interface SearchSettings {
   model: string;
   hasApiKey: boolean;
 }
+
+export interface ShellConfiguration {
+  toolDefault: string;
+  terminalDefault: string;
+  bashPath: string | null;
+  wsl: { distribution: string | null; bashPath: string };
+}
+export interface ShellSettingsStatus {
+  settings: ShellConfiguration;
+  tool: { program?: string; source?: string; error?: string };
+  terminal: { program?: string; source?: string; error?: string };
+}
+export function getShellSettings(): Promise<ShellSettingsStatus> {
+  return providerRequest('/shell-settings');
+}
+export function saveShellSettings(settings: ShellConfiguration): Promise<ShellSettingsStatus> {
+  return providerRequest('/shell-settings', 'PUT', settings);
+}
+export async function getWslDistributions(): Promise<string[]> {
+  return (await providerRequest('/shell-settings/distributions')).distributions;
+}
 export interface SearchSettingsUpdate {
   baseUrl: string;
   model: string;

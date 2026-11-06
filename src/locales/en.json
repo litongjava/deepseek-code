@@ -839,5 +839,25 @@
     "browserFrameTitle": "Web page: {url}",
     "browserLoading": "Loading page…",
     "shortcut": "Ctrl+Alt+B (⌘⌥B on macOS): show or hide the right sidebar"
+  },
+  "shellSettings": {
+    "title": "Shell",
+    "description": "Share command shell settings with dcl. Changes apply to the next command and new terminals.",
+    "toolDefault": "Model command shell",
+    "terminalDefault": "Manual terminal shell",
+    "auto": "Automatic (keep current default)",
+    "bashPath": "Bash executable path",
+    "detected": "Automatically detected",
+    "browse": "Choose executable",
+    "precedence": "DEEPSEEK_CODE_BASH_PATH overrides this path. Restart the app and worker after changing environment variables.",
+    "distribution": "WSL distribution",
+    "detectWsl": "Find WSL distributions",
+    "noDistributions": "No WSL distributions found.",
+    "wslBash": "Bash path inside WSL",
+    "tool": "Saved model command shell",
+    "terminal": "Saved manual terminal shell",
+    "environment": "environment variable",
+    "settings": "configuration",
+    "saved": "Saved. New commands and terminals use these settings."
   }
 }

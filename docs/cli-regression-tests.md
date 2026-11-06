@@ -158,6 +158,12 @@ cargo check --locked -p deepseek-code-desktop --all-targets
 - Provider、模型请求：E1、E6
 - 其他范围：至少跑 E
 
+## Shell 配置回归
+
+- 使用独立数据目录验证 `config set shell.*`、`config show`、`!` 和模型工具；环境变量优先于文件，显式工具 Shell 优先于默认值，无效配置不能静默回退。
+- Windows Git Bash、CMD、PowerShell 验证非零退出、语法错误、中文与空格路径、跨调用工作目录。真实 WSL 验证命令超时和后台取消后 Linux 子进程不再运行。
+- `cargo test --locked -p deepseek-code-core --lib wsl -- --include-ignored --test-threads=1` 使用明确选择的 `dcl-linux-test` 发行版，不依赖系统默认发行版。
+
 ## 尚未验证
 
 - Windows 和 macOS 上还没有跑过这份清单。`Ctrl+J`、鼠标点击和进程退出判断都和平台有关，改动相关逻辑后要在 Windows 终端确认。
