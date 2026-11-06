@@ -124,11 +124,7 @@ pub fn preview(name: &str, input: &Value, cwd: &Path) -> Option<Value> {
     };
     let before = capture(&path)?;
     let replace = |content: &str, old: &str, new: &str, all: bool| -> Option<String> {
-        let count = content.matches(old).count();
-        if old.is_empty() || count == 0 || (!all && count > 1) {
-            return None;
-        }
-        Some(if all { content.replace(old, new) } else { content.replacen(old, new, 1) })
+        super::text_edit::replace(content, old, new, all).ok().map(|(text, _)| text)
     };
     let after = match name {
         "Write" => input["content"].as_str()?.to_owned(),
@@ -141,7 +137,7 @@ pub fn preview(name: &str, input: &Value, cwd: &Path) -> Option<Value> {
         "MultiEdit" => {
             let mut content = before.clone();
             for edit in input["edits"].as_array()? {
-                content = replace(&content, edit["old_string"].as_str()?, edit["new_string"].as_str()?, true)?;
+                content = replace(&content, edit["old_string"].as_str()?, edit["new_string"].as_str()?, edit["replace_all"].as_bool().unwrap_or(false))?;
             }
             content
         }

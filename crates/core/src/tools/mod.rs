@@ -115,7 +115,7 @@ pub fn get_tool_definitions() -> Vec<ToolDefinition> {
         },
         ToolDefinition {
             name: "Edit".to_string(),
-            description: "Performs exact string replacement in a file.\n\n- You must Read the file in this conversation before editing, or the call will fail.\n- `old_string` must match the file exactly, including indentation, and be unique — the edit fails otherwise. Strip the Read line prefix (line number + tab) before matching.\n- `replace_all: true` replaces every occurrence instead.".to_string(),
+            description: "Performs exact string replacement in a file.\n\n- You must Read the file in this conversation before editing, or the call will fail.\n- `old_string` must match the file including indentation and be unique (LF and CRLF are equivalent) — the edit fails otherwise. Strip the Read line prefix (line number + tab) before matching.\n- `replace_all: true` replaces every occurrence instead.".to_string(),
             input_schema: serde_json::json!({
                 "type": "object",
                 "properties": {
@@ -197,7 +197,8 @@ pub fn get_tool_definitions() -> Vec<ToolDefinition> {
                             "type": "object",
                             "properties": {
                                 "old_string": { "type": "string" },
-                                "new_string": { "type": "string" }
+                                "new_string": { "type": "string" },
+                                "replace_all": { "type": "boolean", "default": false }
                             }
                         }
                     }
@@ -498,6 +499,7 @@ fn max_output_bytes() -> usize { crate::config::OrchestrationConfig::max_output_
 fn default_bash_timeout_secs() -> u64 { crate::config::OrchestrationConfig::default_bash_timeout_secs() }
 
 mod dangerous_command;
+mod text_edit;
 pub fn is_dangerous_command(command: &str) -> bool {
     dangerous_command::matches(command)
 }
@@ -707,27 +709,11 @@ fn tool_edit(input: serde_json::Value, cwd: &str) -> Result<serde_json::Value> {
     let content = fs::read_to_string(&path)?;
     let before = file_change::snapshot(&content);
 
-    let (new_content, replacements) = if replace_all {
-        let count = content.matches(old_string).count();
-        (content.replace(old_string, new_string), count)
-    } else {
-        let count = content.matches(old_string).count();
-        if count == 0 {
-            return Ok(serde_json::json!({
-                "success": false,
-                "error": "old_string not found in file"
-            }));
-        }
-        if count > 1 {
-            return Ok(serde_json::json!({
-                "success": false,
-                "error": format!("old_string found {} times, use replace_all=true", count)
-            }));
-        }
-        (content.replacen(old_string, new_string, 1), 1)
+    let (new_content, replacements) = match text_edit::replace(&content, old_string, new_string, replace_all) {
+        Ok(result) => result,
+        Err(error) => return Ok(serde_json::json!({"success":false,"error":error.to_string(),"replacements":0})),
     };
-
-    utf8::write_utf8(Path::new(&path), &new_content)?;
+    fs::write(&path, new_content.as_bytes())?;
 
     Ok(serde_json::json!({
         "success": true,
@@ -744,37 +730,17 @@ fn tool_multi_edit(input: serde_json::Value, cwd: &str) -> Result<serde_json::Va
 
     let content = fs::read_to_string(&path)?;
     let before = file_change::snapshot(&content);
-    let crlf = content.contains("\r\n");
-    let mut new_content = content.replace("\r\n", "\n");
+    let mut new_content = content.clone();
     let mut total_replacements = 0;
-    let mut failed_edits: Vec<String> = Vec::new();
-
-    for edit in edits {
-        let old_string = edit.get("old_string").and_then(|s| s.as_str());
-        let new_string = edit.get("new_string").and_then(|s| s.as_str());
-
-        if let (Some(old), Some(new)) = (old_string, new_string) {
-            let old = old.replace("\r\n", "\n");
-            let new = new.replace("\r\n", "\n");
-            if !old.is_empty() && new_content.contains(&old) {
-                new_content = new_content.replace(&old, &new);
-                total_replacements += 1;
-            } else {
-                failed_edits.push(old.to_string());
-            }
+    for (index, edit) in edits.iter().enumerate() {
+        let old = edit["old_string"].as_str().ok_or_else(|| anyhow!("edit {} old_string required", index + 1))?;
+        let new = edit["new_string"].as_str().ok_or_else(|| anyhow!("edit {} new_string required", index + 1))?;
+        match text_edit::replace(&new_content, old, new, edit["replace_all"].as_bool().unwrap_or(false)) {
+            Ok((updated, count)) => { new_content = updated; total_replacements += count; }
+            Err(error) => return Ok(serde_json::json!({"success":false,"error":format!("Edit {}: {error}", index + 1),"replacements":0})),
         }
     }
-
-    if !failed_edits.is_empty() {
-        return Ok(serde_json::json!({
-            "success": false,
-            "error": format!("Some edits failed: {:?}", failed_edits),
-            "replacements": 0
-        }));
-    }
-
-    let new_content = if crlf { new_content.replace('\n', "\r\n") } else { new_content };
-    utf8::write_utf8(Path::new(&path), &new_content)?;
+    fs::write(&path, new_content.as_bytes())?;
 
     Ok(serde_json::json!({
         "success": true,
