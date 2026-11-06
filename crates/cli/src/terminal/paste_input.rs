@@ -285,15 +285,28 @@ mod windows {
         previous_vt: bool,
     }
     impl RawReader {
+        /// Win32 key records keep the modifier state, so Shift+Enter and
+        /// Ctrl+Enter stay distinguishable. With VT input enabled the console
+        /// re-encodes keys as characters and flattens Shift+Enter to a bare
+        /// carriage return, which submits instead of adding a line.
+        unsafe fn force_record_input(handle: Handle) -> io::Result<()> {
+            let mut mode = 0;
+            if GetConsoleMode(handle, &mut mode) == 0 {
+                return Err(io::Error::last_os_error());
+            }
+            if mode & 0x200 != 0 && SetConsoleMode(handle, mode & !0x200) == 0 {
+                return Err(io::Error::last_os_error());
+            }
+            Ok(())
+        }
         pub fn new() -> io::Result<Self> {
             unsafe {
                 let handle = GetStdHandle(-10i32 as u32);
                 let mut mode = 0;
-                if GetConsoleMode(handle, &mut mode) == 0
-                    || SetConsoleMode(handle, mode | 0x200) == 0
-                {
+                if GetConsoleMode(handle, &mut mode) == 0 {
                     return Err(io::Error::last_os_error());
                 }
+                Self::force_record_input(handle)?;
                 Ok(Self {
                     handle,
                     previous_vt: mode & 0x200 != 0,
@@ -301,13 +314,10 @@ mod windows {
             }
         }
         pub fn next(&mut self, timeout: Duration) -> io::Result<Option<Event>> {
-            // Crossterm mouse capture replaces the Windows input flags. Restore VT
-            // before reading so ConPTY preserves bracketed-paste delimiters.
+            // Crossterm mouse capture replaces the Windows input flags. Keep the
+            // record mode it clears, so a modified Enter still carries it.
             unsafe {
-                let mut mode = 0;
-                if GetConsoleMode(self.handle, &mut mode) == 0 || SetConsoleMode(self.handle, mode | 0x200) == 0 {
-                    return Err(io::Error::last_os_error());
-                }
+                Self::force_record_input(self.handle)?;
             }
             let deadline = Instant::now() + timeout;
             let mut shared = STATE.lock().unwrap_or_else(|e| e.into_inner());
