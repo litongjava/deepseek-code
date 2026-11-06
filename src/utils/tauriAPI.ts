@@ -15,7 +15,7 @@ export interface EngineThinkingEvent {
 
 export interface EngineToolUseStartEvent {
   conversation_id: string;
-  event: { type: 'tool_use_start'; tool_use_id: string; tool_name: string; tool_input: Record<string, unknown> };
+  event: { type: 'tool_use_start'; tool_use_id: string; tool_name: string; tool_input: Record<string, unknown>; display_title?: string };
 }
 
 export interface EngineToolUseDoneEvent {

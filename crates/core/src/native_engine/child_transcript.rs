@@ -281,6 +281,7 @@ mod tests {
             tool_name: "Read".into(),
             tool_input: json!({}),
             text_before: String::new(),
+            display_title: None,
         })
         .unwrap();
         tx.try_send(EngineEvent::ToolArgDelta {
@@ -362,6 +363,7 @@ mod tests {
             tool_name: "Read".into(),
             tool_input: json!({}),
             text_before: String::new(),
+            display_title: None,
         })
         .unwrap();
         tx.try_send(EngineEvent::ToolArgDelta {

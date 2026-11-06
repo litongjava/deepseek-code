@@ -106,6 +106,7 @@ pub enum EngineEvent {
         tool_name: String,
         tool_input: Value,
         text_before: String,
+        display_title: Option<String>,
     },
     ToolArgDelta {
         tool_use_id: String,
@@ -1062,6 +1063,16 @@ impl ToolLoopExecutor {
                 }
             }
         }
+    }
+
+    async fn task_display_title(&self, name: &str, input: &Value) -> Option<String> {
+        if !matches!(name, "TaskOutput" | "TaskGet" | "TaskStop") { return None; }
+        let root = self.search_config_path.as_ref()?.parent()?.to_owned();
+        let session = self.conv_id.clone()?;
+        let input = input.clone();
+        tokio::time::timeout(std::time::Duration::from_millis(100), tokio::task::spawn_blocking(move || {
+            crate::tools::tasks::display_title(&root, &session, &input)
+        })).await.ok()?.ok()?
     }
 
     /// The input a tool runs with: research children fetch pages as text.
@@ -2489,6 +2500,7 @@ impl ToolLoopExecutor {
                                     tool_name: name.clone(),
                                     tool_input: input.clone(),
                                     text_before: full_text.clone(),
+                                    display_title: self.task_display_title(&name, &input).await,
                                 }).await;
 
                                 let concurrent = self.is_concurrency_safe(&name, &input);
@@ -2985,6 +2997,7 @@ impl ToolLoopExecutor {
                         tool_name: name.clone(),
                         tool_input: input.clone(),
                         text_before: full_text.clone(),
+                        display_title: self.task_display_title(name, &input).await,
                     }).await;
 
                     let concurrent = self.is_concurrency_safe(name, &input);

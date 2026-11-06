@@ -153,6 +153,22 @@ pub fn label(name: &str, input: &Value, workspace: Option<&std::path::Path>) -> 
     }
 }
 
+pub fn display_label(name: &str, input: &Value, workspace: Option<&std::path::Path>, title: Option<&str>) -> String {
+    if let Some(title) = title.filter(|title| !title.trim().is_empty() && matches!(name, "TaskOutput" | "TaskGet" | "TaskStop")) {
+        return format!("{name}({})", printable(&plain_terminal_text(title)));
+    }
+    label(name, input, workspace)
+}
+
+pub fn titled(mut lines: Vec<Line>, name: &str, title: Option<&str>, failed: bool) -> Vec<Line> {
+    if title.is_some() && matches!(name, "TaskOutput" | "TaskGet" | "TaskStop") {
+        if let Some(header) = lines.first_mut() {
+            *header = change_view::tool_call(&display_label(name, &Value::Null, None, title), "", failed);
+        }
+    }
+    lines
+}
+
 /// Read-only calls the reference CLI folds into one summary line.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Gathering {

@@ -25,6 +25,7 @@ impl ToolLoopExecutor {
                 tool_name: "Skill".into(),
                 tool_input: input.clone(),
                 text_before: String::new(),
+                display_title: None,
             })
             .await;
         self.manual_skill_active = true;
@@ -148,6 +149,7 @@ impl ToolLoopExecutor {
                             tool_name: "Bash".into(),
                             tool_input: shell.clone(),
                             text_before: String::new(),
+                            display_title: None,
                         })
                         .await;
                     self.skill_shell_active = true;

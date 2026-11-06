@@ -559,8 +559,9 @@ export function createStreamCallbacks(ctx: StreamContext) {
           existing.name = toolEvent.tool_name || existing.name;
           if (toolEvent.tool_input && Object.keys(toolEvent.tool_input).length > 0) existing.input = toolEvent.tool_input;
           if (toolEvent.textBefore) existing.textBefore = toolEvent.textBefore;
+          if (toolEvent.display_title) existing.displayTitle = toolEvent.display_title;
         } else {
-          toolCalls.push({ id: toolEvent.tool_use_id, name: toolEvent.tool_name || 'unknown', input: toolEvent.tool_input || {}, status: 'running' as const, textBefore: toolEvent.textBefore || '', startedAt: Date.now(), schema: toolEvent.schema });
+          toolCalls.push({ id: toolEvent.tool_use_id, name: toolEvent.tool_name || 'unknown', input: toolEvent.tool_input || {}, status: 'running' as const, textBefore: toolEvent.textBefore || '', displayTitle: toolEvent.display_title, startedAt: Date.now(), schema: toolEvent.schema });
         }
         recordTool(lastMsg, toolCalls.find((t: any) => t.id === toolEvent.tool_use_id));
       } else if (toolEvent.type === 'input') {

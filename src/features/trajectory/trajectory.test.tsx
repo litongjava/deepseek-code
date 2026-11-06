@@ -65,6 +65,19 @@ describe('Git add output', () => {
 });
 
 describe('ordered process events', () => {
+  it('shows task names while running and after results without changing arguments', () => {
+    const input = { task_id: 'task-123', block: true };
+    const tool = { id: 'task-output', name: 'TaskOutput', displayTitle: '运行检查', input, status: 'running' };
+    const message: any = { role: 'assistant', content: '', toolCalls: [tool] };
+    recordTool(message, tool, 1000);
+    const { rerender } = render(<WorkDetails message={message} index={0} live />);
+    expect(screen.getByText('TaskOutput(运行检查)')).toBeInTheDocument();
+    expect(buildTrace([message], true).find(r => r.role === 'tool')?.input).toEqual(input);
+    message.toolCalls[0] = { ...tool, displayTitle: undefined, status: 'done', result: JSON.stringify({ subject: '运行检查', stdout: 'done' }) };
+    rerender(<WorkDetails message={message} index={0} live={false} />);
+    expect(screen.getByText('TaskOutput(运行检查)')).toBeInTheDocument();
+    expect(buildTrace([message], false).find(r => r.role === 'tool')?.displayTitle).toBe('TaskOutput(运行检查)');
+  });
   it('starts Think collapsed and preserves manual expansion across streamed updates', () => {
     useWorkspaceModeStore.getState().setMode('code');
     useGeneralSettingsStore.getState().update({ workDetailsByMode: { chat: 'compact', work: 'standard', study: 'standard', code: 'detailed' } });

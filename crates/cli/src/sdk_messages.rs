@@ -177,17 +177,20 @@ impl Translator {
                 tool_use_id,
                 tool_name,
                 tool_input,
+                display_title,
                 ..
             } => {
                 self.ensure_message()?;
                 self.close_block()?;
-                self.stream(json!({"type":"content_block_start","index":self.index,
-                    "content_block":{"type":"tool_use","id":tool_use_id,"name":tool_name,"input":{}}}))?;
+                let mut block = json!({"type":"tool_use","id":tool_use_id,"name":tool_name,"input":{}});
+                if let Some(title) = display_title { block["display_title"] = json!(title); }
+                self.stream(json!({"type":"content_block_start","index":self.index,"content_block":block}))?;
                 self.stream(json!({"type":"content_block_delta","index":self.index,
                     "delta":{"type":"input_json_delta","partial_json":tool_input.to_string()}}))?;
                 self.stream(json!({"type":"content_block_stop","index":self.index}))?;
                 self.index += 1;
-                self.assistant(json!({"type":"tool_use","id":tool_use_id,"name":tool_name,"input":tool_input}))
+                block["input"] = tool_input.clone();
+                self.assistant(block)
             }
             EngineEvent::ToolUseDone {
                 tool_use_id,

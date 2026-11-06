@@ -30,7 +30,7 @@ export default function TraceInspector({ record: r, onClose, onSelectRequest }: 
     <div className="min-h-0 flex-1 overflow-auto p-3 text-sm" role="tabpanel">
       {tab === 'Summary' && <>
         {r.request && r.role === 'assistant' ? <RequestMetrics request={r.request} status={r.status} summaryOnly onSelectRequest={onSelectRequest} /> : <dl className="mb-4 grid grid-cols-[auto_1fr] gap-x-4 gap-y-2 text-xs"><dt>Status</dt><dd>{r.status}</dd><dt>Source</dt><dd>{r.request ? `Request #${r.request.number} · ${r.request.model}` : '未记录'}</dd></dl>}
-        {r.role === 'tool' ? <>{details('Payload', r.input)}{output}</> : <><h4 className="mb-2 text-xs font-medium">Preview</h4>{preview}<div className="my-4 border-t border-claude-border" />{r.request ? <RequestMetrics request={r.request} status={r.status} timingOnly /> : timing}</>}
+        {r.role === 'tool' ? <><h4 className="mb-2 text-xs font-medium">{r.displayTitle || r.title}</h4>{details('Payload', r.input)}{output}</> : <><h4 className="mb-2 text-xs font-medium">Preview</h4>{preview}<div className="my-4 border-t border-claude-border" />{r.request ? <RequestMetrics request={r.request} status={r.status} timingOnly /> : timing}</>}
       </>}
       {tab === 'Preview' && preview}
       {tab === 'Raw' && (r.blocks ? <AssistantResponse blocks={r.blocks} raw /> : details('Raw', r.text))}

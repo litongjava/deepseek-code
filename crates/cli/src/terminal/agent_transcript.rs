@@ -7,7 +7,7 @@ use std::collections::{HashMap, HashSet};
 pub(crate) struct Transcript {
     pub history: Scrollback,
     number: usize,
-    calls: HashMap<String, (usize, String, Value)>,
+    calls: HashMap<String, (usize, String, Value, Option<String>)>,
     completed: HashSet<String>,
     text: String,
 }
@@ -53,24 +53,24 @@ impl Transcript {
 
     pub fn tool(&mut self, name: &str, input: &Value, output: &str, failed: bool) {
         self.number += 1;
-        self.finished(self.number, name, input, output, failed);
+        self.finished(self.number, name, input, output, failed, None);
     }
 
-    fn finished(&mut self, number: usize, name: &str, input: &Value, output: &str, failed: bool) {
+    fn finished(&mut self, number: usize, name: &str, input: &Value, output: &str, failed: bool, title: Option<&str>) {
         self.separate();
         let short = tool_view::numbered(
-            tool_view::finished(name, input, output, failed, None, None),
+            tool_view::titled(tool_view::finished(name, input, output, failed, None, None), name, title, failed),
             Some(number),
         );
         let full = tool_view::numbered(
-            tool_view::expanded_block(name, input, output, failed, None, None),
+            tool_view::titled(tool_view::expanded_block(name, input, output, failed, None, None), name, title, failed),
             Some(number),
         );
         let (id, rows) = self.history.block(short, full);
         self.history.bind_copy(
             id,
             tool_view::copy_command(name, input),
-            tool_view::result_text(output),
+            tool_view::named_result_text(name, output),
         );
         for row in rows {
             self.history.push(row, Some(id));
@@ -82,14 +82,14 @@ impl Transcript {
         self.assistant(&text);
     }
 
-    fn start(&mut self, id: &str, name: &str, input: &Value) {
+    fn start(&mut self, id: &str, name: &str, input: &Value, title: Option<&str>) {
         self.flush_text();
         if self.calls.contains_key(id) || self.completed.contains(id) {
             return;
         }
         self.number += 1;
         self.calls
-            .insert(id.into(), (self.number, name.into(), input.clone()));
+            .insert(id.into(), (self.number, name.into(), input.clone(), title.map(str::to_owned)));
     }
 
     fn result(&mut self, id: &str, output: &str, failed: bool) {
@@ -97,8 +97,8 @@ impl Transcript {
             return;
         }
         self.flush_text();
-        if let Some((number, name, input)) = self.calls.remove(id) {
-            self.finished(number, &name, &input, output, failed);
+        if let Some((number, name, input, title)) = self.calls.remove(id) {
+            self.finished(number, &name, &input, output, failed, title.as_deref());
         } else {
             self.note(&format!("  ⎿  {}", tool_view::result_text(output)));
         }
@@ -128,6 +128,7 @@ impl Transcript {
                     value["id"].as_str().unwrap_or_default(),
                     value["name"].as_str().unwrap_or("Tool"),
                     &value["input"],
+                    value["display_title"].as_str(),
                 ),
                 Some("tool_result") => self.result(
                     value["id"].as_str().unwrap_or_default(),
@@ -144,6 +145,7 @@ impl Transcript {
                                 block["id"].as_str().unwrap_or_default(),
                                 block["name"].as_str().unwrap_or("Tool"),
                                 &block["input"],
+                                block["display_title"].as_str(),
                             ),
                             _ => {}
                         }
@@ -170,10 +172,10 @@ impl Transcript {
         self.flush_text();
         let mut pending = self.calls.drain().map(|(_, call)| call).collect::<Vec<_>>();
         pending.sort_by_key(|call| call.0);
-        for (number, name, input) in pending {
+        for (number, name, input, title) in pending {
             self.note(&format!(
                 "● #{number} {} · running",
-                tool_view::label(&name, &input, None)
+                tool_view::display_label(&name, &input, None, title.as_deref())
             ));
         }
     }
@@ -183,6 +185,19 @@ impl Transcript {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn task_title_survives_worker_replay_and_error_results() {
+        for completed in [false, true] {
+            let mut events = json!({"type":"tool_start","id":"t1","name":"TaskOutput","input":{"task_id":"123"},"display_title":"Run tests"}).to_string();
+            if completed { events.push_str(&format!("\n{}", json!({"type":"tool_result","id":"t1","output":"Task failed","is_error":true}))); }
+            let mut transcript = Transcript::default();
+            transcript.events(&events, "session");
+            let body = markdown::plain_rendered(&transcript.history.all().join("\n"));
+            assert!(body.contains("#1 TaskOutput(Run tests)"), "{body}");
+            assert!(!body.contains("123"), "{body}");
+        }
+    }
 
     #[test]
     fn worker_events_share_tool_blocks_merge_text_and_ignore_sdk_duplicates() {

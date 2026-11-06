@@ -843,7 +843,7 @@ fn render(display: &mut TurnDisplay, event: &Value) {
         }
         "usage" => display.reported_usage(&event["usage"]),
         "message_start" => display.set_activity("Composing"),
-        "tool_start" => display.tool_started(text("id"), text("name"), &event["input"]),
+        "tool_start" => display.tool_started_named(text("id"), text("name"), &event["input"], event["display_title"].as_str()),
         "tool_result" => display.tool_finished(
             text("id"),
             text("name"),

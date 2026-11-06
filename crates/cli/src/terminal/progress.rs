@@ -30,6 +30,7 @@ pub struct TurnProgress {
     line_open: bool,
     usage: ReportedUsage,
     tools: HashMap<String, Instant>,
+    tool_titles: HashMap<String, String>,
     numbers: HashMap<String, usize>,
     finished_tools: HashMap<String, (String, Value, String, bool)>,
     agents: HashMap<String, Instant>,
@@ -69,6 +70,7 @@ impl TurnProgress {
             line_open: false,
             usage: ReportedUsage::default(),
             tools: HashMap::new(),
+            tool_titles: HashMap::new(),
             numbers: HashMap::new(),
             finished_tools: HashMap::new(),
             agents: HashMap::new(),
@@ -109,13 +111,17 @@ impl TurnProgress {
     pub fn restore_numbers(&mut self, numbers: HashMap<String, usize>) { self.numbers = numbers; }
 
     pub fn tool_started(&mut self, id: &str, name: &str, input: &Value) {
+        self.tool_started_named(id, name, input, None);
+    }
+    pub fn tool_started_named(&mut self, id: &str, name: &str, input: &Value, title: Option<&str>) {
         if self.tools.contains_key(id) || self.finished_tools.contains_key(id) {
             return;
         }
         self.tools.insert(id.into(), Instant::now());
         let next = self.numbers.values().copied().max().unwrap_or(0) + 1;
         let number = *self.numbers.entry(id.to_owned()).or_insert(next);
-        let preview = format!("• #{number} {}", tool_preview_in_workspace(name, input, self.workspace.as_deref()));
+        if let Some(title) = title { self.tool_titles.insert(id.into(), title.into()); }
+        let preview = format!("• #{number} {}", if title.is_some() { super::tool_view::display_label(name, input, self.workspace.as_deref(), title) } else { tool_preview_in_workspace(name, input, self.workspace.as_deref()) });
         self.notice_with_wrap(&preview, super::tool_view::mcp_call(name, input).is_some());
         let label = if let Some(activity) = super::tool_view::task_output_activity(name, input) {
             activity.to_owned()
@@ -155,7 +161,8 @@ impl TurnProgress {
         if let Some(call) = super::tool_view::mcp_call(name, input) {
             self.notice_with_wrap(&format!("  {number}{call}"), true);
         }
-        self.notice(&format!("  {number}{}", tool_result_summary(name, output, failed, elapsed).trim_start()));
+        let label = self.tool_titles.get(id).map(|title| super::tool_view::display_label(name, input, self.workspace.as_deref(), Some(title)));
+        self.notice(&format!("  {number}{}", tool_result_summary(label.as_deref().unwrap_or(name), output, failed, elapsed).trim_start()));
         self.set_activity("Working");
     }
     pub fn agent_progress(&mut self, id: &str, agent_type: &str, status: &str, tool: Option<&str>) {

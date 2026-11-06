@@ -62,6 +62,7 @@ export interface TraceRecord extends ProcessStep {
   step: number;
   role: string;
   title: string;
+  displayTitle?: string;
   status: string;
   input?: unknown;
   result?: unknown;
@@ -78,6 +79,13 @@ export function toolInput(tool: any): any {
 export function toolCommand(tool: any): string {
   const input = toolInput(tool);
   return rawText(input.command ?? input.cmd ?? input.script ?? input.code ?? tool.input);
+}
+export function toolDisplayTitle(tool: any): string {
+  if (!['TaskOutput', 'TaskGet', 'TaskStop'].includes(tool.name)) return tool.name || '';
+  let result = tool.result ?? tool.output;
+  if (typeof result === 'string') { try { result = JSON.parse(result); } catch { result = null; } }
+  const title = tool.displayTitle || result?.subject;
+  return typeof title === 'string' && title.trim() ? `${tool.name}(${title.replace(/[\u0000-\u001f\u007f]/g, '').slice(0, 160)})` : tool.name;
 }
 export function commandStreams(value: unknown): { stdout: string; stderr: string } | null {
   let result: any = value;
@@ -265,6 +273,7 @@ export function buildTrace(messages: any[], loading = false): TraceRecord[] {
       return {
         ...s, id: recordId(i, s.id), turn, step: 0, role: tool ? 'tool' : 'assistant', request,
         title: tool?.name || (s.kind === 'thinking' ? 'Think' : 'Assistant'),
+        displayTitle: tool ? toolDisplayTitle(tool) : undefined,
         status: status ? status === 'running' && !running ? 'interrupted' : status : running && !s.endedAt ? 'running' : 'done',
         startedAt: tool?.startedAt ?? s.startedAt, endedAt: tool?.endedAt ?? s.endedAt,
         input: tool?.input, result: tool?.result ?? tool?.output, schema: tool?.schema ?? request?.tools.find(t => t.name === tool?.name)?.input_schema,

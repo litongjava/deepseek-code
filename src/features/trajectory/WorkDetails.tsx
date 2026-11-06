@@ -10,7 +10,7 @@ import RequestErrorCard from '../../components/chat/RequestErrorCard';
 import ToolDiffView, { shouldUseDiffView } from '../../components/ToolDiffView';
 import CopyButton from './CopyButton';
 import ToolOutput from './ToolOutput';
-import { commandStreams, messageSteps, recordId, toolCategory, toolCommand, toolInput, toolOutput, toolStatus, rawText, type ProcessStep } from './model';
+import { commandStreams, messageSteps, recordId, toolCategory, toolCommand, toolInput, toolOutput, toolStatus, toolDisplayTitle, rawText, type ProcessStep } from './model';
 
 export function InspectButton({ id, onInspect }: { id: string; onInspect?: (id: string) => void }) {
   if (!onInspect) return null;
@@ -43,12 +43,13 @@ function ToolBlock({ conversationId, messageId, tool, level, live, id, onInspect
   const hasStderr = !!streams?.stderr;
   const outputLabel = isCommand ? hasStdout && hasStderr ? 'output' : hasStderr ? 'stderr' : 'stdout' : 'Result';
   const outputColor = hasStdout && hasStderr ? 'text-yellow-600 dark:text-yellow-400' : hasStderr ? 'text-red-500' : 'text-claude-textSecondary';
-  const description = input.description || input.file_path || input.path || input.pattern || command || tool.name;
+  const title = toolDisplayTitle(tool);
+  const description = title !== tool.name ? '' : input.description || input.file_path || input.path || input.pattern || command || tool.name;
   return <div className="group/process relative min-w-0">
     <button type="button" aria-controls={panelId} aria-expanded={open} onClick={() => setExpanded(!open)} className={`flex w-full min-w-0 items-center gap-2 text-left text-[13px] leading-6 ${failed ? 'text-red-500' : 'text-claude-textSecondary'}`}>
       <ChevronRight size={14} className={`shrink-0 transition-transform ${open ? 'rotate-90' : ''}`} /><StatusDot status={status === 'running' && !live ? 'interrupted' : status} /><Terminal size={14} className="shrink-0" />
-      <span className="shrink-0">{level === 'compact' || level === 'standard' ? toolCategory(tool.name).replace('commands', 'command') : tool.name}</span>
-      {level !== 'compact' && <span className="truncate">· {description}</span>}
+      <span className="min-w-0 truncate">{title !== tool.name ? title : level === 'compact' || level === 'standard' ? toolCategory(tool.name).replace('commands', 'command') : tool.name}</span>
+      {level !== 'compact' && description && <span className="truncate">· {description}</span>}
       {running && <span className="ml-auto animate-pulse">运行中</span>}{failed && <span className="ml-auto">失败</span>}
       {status === 'running' && !live && <span className="ml-auto">已中断</span>}
     </button>

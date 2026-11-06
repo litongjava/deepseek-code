@@ -1201,7 +1201,7 @@ export function reconnectStream(
   onError: (err: string) => void,
   onThinking?: (thinking: string, full: string) => void,
   onSystem?: (event: string, message: string, data: any) => void,
-  onToolUse?: (event: { type: 'start' | 'input' | 'done'; tool_use_id: string; tool_name?: string; tool_input?: any; content?: string; is_error?: boolean; textBefore?: string }) => void,
+  onToolUse?: (event: { type: 'start' | 'input' | 'done'; tool_use_id: string; tool_name?: string; tool_input?: any; content?: string; is_error?: boolean; textBefore?: string; display_title?: string }) => void,
   signal?: AbortSignal
 ): void {
   let fullText = '';
@@ -1240,7 +1240,7 @@ export function reconnectStream(
               }
             }
             if (parsed.type === 'tool_use_start' && onToolUse) {
-              onToolUse({ type: 'start', tool_use_id: parsed.tool_use_id, tool_name: parsed.tool_name, tool_input: parsed.tool_input, textBefore: parsed.textBefore || '' });
+              onToolUse({ type: 'start', tool_use_id: parsed.tool_use_id, tool_name: parsed.tool_name, tool_input: parsed.tool_input, textBefore: parsed.textBefore || '', display_title: parsed.display_title });
             }
             if (parsed.type === 'tool_use_input' && onToolUse) {
               onToolUse({ type: 'input', tool_use_id: parsed.tool_use_id, tool_input: parsed.tool_input });
@@ -1574,7 +1574,7 @@ async function sendMessageViaProxy(
   onError: (err: string) => void,
   onThinking?: (thinking: string, full: string) => void,
   onSystem?: (event: string, message: string, data: any) => void,
-  onToolUse?: (event: { type: 'start' | 'input' | 'done'; tool_use_id: string; tool_name?: string; tool_input?: any; content?: string; is_error?: boolean; textBefore?: string }) => void,
+  onToolUse?: (event: { type: 'start' | 'input' | 'done'; tool_use_id: string; tool_name?: string; tool_input?: any; content?: string; is_error?: boolean; textBefore?: string; display_title?: string }) => void,
 ): Promise<() => void> {
   const { apiProxy, resolveProviderForModel } = await import('./utils/apiProxy');
   const providers = await getProviders();
@@ -1778,7 +1778,7 @@ export async function sendMessageNative(
   onError: (err: string) => void,
   onThinking?: (thinking: string, full: string) => void,
   onSystem?: (event: string, message: string, data: any) => void,
-  onToolUse?: (event: { type: 'start' | 'input' | 'done'; tool_use_id: string; tool_name?: string; tool_input?: any; content?: string; is_error?: boolean; textBefore?: string }) => void,
+  onToolUse?: (event: { type: 'start' | 'input' | 'done'; tool_use_id: string; tool_name?: string; tool_input?: any; content?: string; is_error?: boolean; textBefore?: string; display_title?: string }) => void,
   reasoningMode?: string | null,
 ): Promise<() => void> {
   const token = getToken();
@@ -1879,6 +1879,7 @@ export async function sendMessageNative(
                   tool_use_id: event.content_block.id || '',
                   tool_name: event.content_block.name || '',
                   tool_input: event.content_block.input || {},
+                  display_title: event.content_block.display_title,
                   content: '',
                   is_error: false,
                 });
@@ -1898,6 +1899,7 @@ export async function sendMessageNative(
                 tool_use_id: event.tool_use_id || '',
                 tool_name: event.tool_name || '',
                 tool_input: event.tool_input || {},
+                display_title: event.display_title,
                 content: '',
                 is_error: false,
               });
@@ -1908,6 +1910,7 @@ export async function sendMessageNative(
                 tool_use_id: event.tool_use_id || '',
                 tool_name: event.tool_name || 'unknown',
                 tool_input: event.tool_input || {},
+                display_title: event.display_title,
                 content: event.output || event.content || '',
                 is_error: event.is_error === true,
               });
@@ -1999,7 +2002,7 @@ export async function sendMessage(
   onDocument?: (document: { id: string; title: string; filename: string; url: string; content?: string; format?: 'markdown' | 'docx' | 'pptx'; slides?: Array<{ title: string; content: string; notes?: string }> }) => void,
   onDocumentDraft?: (draft: { draft_id: string; title?: string; format?: string; preview?: string; preview_available?: boolean; done?: boolean; document?: any }) => void,
   onCodeExecution?: (data: { type: string; executionId: string; code?: string; language?: string; files?: Array<{ id: string; name: string }>; stdout?: string; stderr?: string; images?: string[]; error?: string | null }) => void,
-  onToolUse?: (event: { type: 'start' | 'input' | 'done'; tool_use_id: string; tool_name?: string; tool_input?: any; content?: string; is_error?: boolean; textBefore?: string }) => void,
+  onToolUse?: (event: { type: 'start' | 'input' | 'done'; tool_use_id: string; tool_name?: string; tool_input?: any; content?: string; is_error?: boolean; textBefore?: string; display_title?: string }) => void,
   signal?: AbortSignal,
   model?: string,
   messages?: any[],
@@ -2454,7 +2457,7 @@ export async function sendMessage(
           if (parsed.type === 'tool_use_start' && onToolUse) {
             if (!activeInlineArtifact) processInlineArtifactText('', true);
             flushPending();
-            try { onToolUse({ type: 'start', tool_use_id: parsed.tool_use_id, tool_name: parsed.tool_name, tool_input: parsed.tool_input, textBefore: parsed.textBefore || '' }); } catch (err) { console.error('[API] onToolUse start callback error:', err); }
+            try { onToolUse({ type: 'start', tool_use_id: parsed.tool_use_id, tool_name: parsed.tool_name, tool_input: parsed.tool_input, textBefore: parsed.textBefore || '', display_title: parsed.display_title }); } catch (err) { console.error('[API] onToolUse start callback error:', err); }
           }
           if (parsed.type === 'tool_use_input' && onToolUse) {
             try { onToolUse({ type: 'input', tool_use_id: parsed.tool_use_id, tool_input: parsed.tool_input }); } catch (err) { console.error('[API] onToolUse input callback error:', err); }

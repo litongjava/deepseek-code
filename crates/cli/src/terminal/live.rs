@@ -4134,6 +4134,7 @@ pub struct TurnDisplay {
     hooks: std::collections::BTreeMap<String, String>,
     fallback: super::progress::TurnProgress,
     tools: std::collections::HashMap<String, (Instant, Value)>,
+    tool_titles: std::collections::HashMap<String, String>,
     finished: std::collections::HashMap<String, (String, Value, String, bool)>,
     /// Lines added and removed per file this turn, for the closing summary.
     changes: std::collections::BTreeMap<String, (u64, u64)>,
@@ -4167,6 +4168,7 @@ impl TurnDisplay {
             hooks: Default::default(),
             fallback,
             tools: Default::default(),
+            tool_titles: Default::default(),
             finished: Default::default(),
             changes: Default::default(),
             change_details: Default::default(),
@@ -4258,6 +4260,10 @@ impl TurnDisplay {
         }
     }
     pub fn tool_started(&mut self, id: &str, name: &str, input: &Value) {
+        self.tool_started_named(id, name, input, None);
+    }
+    pub fn tool_started_named(&mut self, id: &str, name: &str, input: &Value, title: Option<&str>) {
+        if let Some(title) = title { self.tool_titles.insert(id.into(), title.into()); }
         if let Some(live) = &self.live {
             if self.tools.contains_key(id) || self.finished.contains_key(id) {
                 return;
@@ -4266,7 +4272,7 @@ impl TurnDisplay {
             live.detail(id, name, &format!("Input:\n{}", input));
             // The call is printed once, with its result, when it finishes; the
             // status line names what is running meanwhile.
-            let label = super::tool_view::label(name, input, self.workspace.as_deref());
+            let label = super::tool_view::display_label(name, input, self.workspace.as_deref(), title);
             let next = self.numbers.values().copied().max().unwrap_or(0) + 1;
             let number = Some(*self.numbers.entry(id.to_owned()).or_insert(next));
             let header = super::tool_view::numbered(vec![change_view::tool_call(&label, "", false)], number);
@@ -4276,7 +4282,7 @@ impl TurnDisplay {
                 .unwrap_or_else(|| format!("Running {label}"));
             live.activity(&activity);
         } else {
-            self.fallback.tool_started(id, name, input);
+            self.fallback.tool_started_named(id, name, input, title);
         }
     }
     pub fn tool_finished(
@@ -4363,16 +4369,17 @@ impl TurnDisplay {
                     _ => input,
                 };
                 let number = self.numbers.get(id).copied();
-                let short = super::tool_view::numbered(super::tool_view::finished(
+                let title = self.tool_titles.get(id).map(String::as_str);
+                let short = super::tool_view::numbered(super::tool_view::titled(super::tool_view::finished(
                     name,
                     label_input,
                     output,
                     failed,
                     elapsed,
                     self.workspace.as_deref(),
-                ), number);
+                ), name, title, failed), number);
                 if name != "TodoWrite" {
-                    let full = super::tool_view::numbered(super::tool_view::expanded_block(name, label_input, output, failed, elapsed, self.workspace.as_deref()), number);
+                    let full = super::tool_view::numbered(super::tool_view::titled(super::tool_view::expanded_block(name, label_input, output, failed, elapsed, self.workspace.as_deref()), name, title, failed), number);
                     if let Some(task) = super::tool_view::background_shell_id(name, output, failed) {
                         let _ = live.updates.send(Update::BackgroundFinished(id.into(), short, full, task));
                     } else {

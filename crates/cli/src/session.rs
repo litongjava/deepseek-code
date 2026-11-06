@@ -1404,12 +1404,12 @@ impl Session {
                         if let Some(index) = pending_inputs.iter().position(|pending| *pending == text) { pending_inputs.remove(index); }
                         progress.queued_delivered(&text);
                     },
-                    EngineEvent::ToolUseStart { tool_use_id, tool_name, tool_input, .. } => {
+                    EngineEvent::ToolUseStart { tool_use_id, tool_name, tool_input, display_title, .. } => {
                         tool_started.entry(tool_use_id.clone()).or_insert_with(std::time::Instant::now);
                         separate_text = true;
                         progress.clear();
                         if cli.verbose && !progress.is_live() { eprintln!("\n[{tool_name}]"); }
-                        progress.tool_started(&tool_use_id, &tool_name, &tool_input);
+                        progress.tool_started_named(&tool_use_id, &tool_name, &tool_input, display_title.as_deref());
                     },
                     EngineEvent::ToolUseDone { tool_use_id, tool_name, tool_input, output, is_error }
                     | EngineEvent::PipelineToolResult { tool_use_id, tool_name, tool_input, output, is_error, .. } => {
@@ -1954,8 +1954,9 @@ pub(crate) fn event_json_with(event: &EngineEvent, summaries: bool) -> Option<Va
             tool_use_id,
             tool_name,
             tool_input,
+            display_title,
             ..
-        } => json!({"type":"tool_start","id":tool_use_id,"name":tool_name,"input":tool_input}),
+        } => json!({"type":"tool_start","id":tool_use_id,"name":tool_name,"input":tool_input,"display_title":display_title}),
         EngineEvent::ToolUseDone {
             tool_use_id,
             tool_name,
