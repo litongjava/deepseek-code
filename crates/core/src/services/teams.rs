@@ -146,7 +146,7 @@ fn global_lock(root: &Path) -> Result<std::fs::File> {
         .create(true)
         .truncate(false)
         .open(directory.join(".lock"))?;
-    file.lock()?;
+    crate::fs::lock_file(&file)?;
     Ok(file)
 }
 
@@ -158,7 +158,7 @@ fn lock(root: &Path, name: &str) -> Result<std::fs::File> {
         .create(true)
         .truncate(false)
         .open(directory.join("config.lock"))?;
-    file.lock()?;
+    crate::fs::lock_file(&file)?;
     Ok(file)
 }
 

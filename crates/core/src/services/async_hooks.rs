@@ -55,7 +55,7 @@ pub(crate) fn register(
         .read(true)
         .write(true)
         .open(directory.join("owner"))?;
-    lease.lock()?;
+    crate::fs::lock_file(&lease)?;
     let delivery = std::sync::Arc::new(Delivery {
         directory,
         lease: Some(lease),
@@ -126,7 +126,7 @@ fn drain_directory(directory: &std::path::Path, wake_only: bool) -> Vec<String> 
         else {
             continue;
         };
-        if !matches!(owner.try_lock(), Err(std::fs::TryLockError::WouldBlock)) {
+        if !matches!(crate::fs::try_lock_file(&owner), Err(std::fs::TryLockError::WouldBlock)) {
             continue;
         }
         let claimed = task.join(format!("claimed-{}", uuid::Uuid::new_v4()));
@@ -234,7 +234,7 @@ pub fn has_pending_wake(root: &std::path::Path, session: &str) -> bool {
             .read(true)
             .write(true)
             .open(task.join("owner"))
-            .is_ok_and(|owner| matches!(owner.try_lock(), Err(std::fs::TryLockError::WouldBlock)))
+            .is_ok_and(|owner| matches!(crate::fs::try_lock_file(&owner), Err(std::fs::TryLockError::WouldBlock)))
     })
 }
 

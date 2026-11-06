@@ -35,6 +35,11 @@ function TerminalBody({ tab, active, onExit, onError }: {
 
   useEffect(() => {
     const element = container.current!;
+    let disposed = false;
+    let exited = tab.exited;
+    const reportActiveError = (error: unknown) => {
+      if (!disposed && !exited) onError(String(error));
+    };
     const xterm = new XTerm({
       cursorBlink: true,
       fontSize: 13,
@@ -45,15 +50,16 @@ function TerminalBody({ tab, active, onExit, onError }: {
     xterm.loadAddon(fit);
     xterm.open(element);
     terminal.current = { xterm, fit };
-    const input = xterm.onData(data => { void writeTerminal(tab.id, data).catch(error => onError(String(error))); });
+    const input = xterm.onData(data => { if (!exited) void writeTerminal(tab.id, data).catch(reportActiveError); });
     const resize = xterm.onResize(({ cols, rows }) => {
-      void resizeTerminal(tab.id, cols, rows).catch(error => onError(String(error)));
+      if (!exited) void resizeTerminal(tab.id, cols, rows).catch(reportActiveError);
     });
     const stop = streamTerminalOutput(tab.id, data => xterm.write(data), code => {
+      exited = true;
       onExit(tab.id);
       xterm.options.disableStdin = true;
       xterm.writeln(`\r\n[Process exited${code === null ? '; exit code unavailable' : ` with code ${code}`} ]`);
-    }, onError);
+    }, reportActiveError);
     const fitVisible = () => {
       if (activeRef.current && element.clientWidth > 0 && element.clientHeight > 0) fit.fit();
     };
@@ -61,6 +67,7 @@ function TerminalBody({ tab, active, onExit, onError }: {
     observer.observe(element);
     fitVisible();
     return () => {
+      disposed = true;
       observer.disconnect();
       stop();
       input.dispose();
@@ -175,7 +182,7 @@ const TerminalPanel = forwardRef<TerminalPanelHandle, TerminalPanelProps>(({ onC
 
   return (
     <div className="flex flex-col h-full min-h-0 bg-[#1e1e2e]">
-      <div className="flex items-center bg-[#181825] border-b border-[#313244] px-2 min-h-[36px] shrink-0">
+      <div className="terminal-toolbar flex items-center bg-[#181825] border-b border-[#313244] px-2 min-h-[36px] shrink-0">
         <div className="flex items-center gap-1 flex-1 overflow-x-auto">
           {tabs.map((tab, index) => (
             <div key={tab.id} className={`flex items-center shrink-0 rounded-md ${tab.id === activeId ? 'bg-[#313244]' : ''}`}>
@@ -200,6 +207,14 @@ const TerminalPanel = forwardRef<TerminalPanelHandle, TerminalPanelProps>(({ onC
       <div className="flex-1 min-h-0 overflow-hidden relative">
         {tabs.map(tab => <TerminalBody key={tab.id} tab={tab} active={active && tab.id === activeId}
           onExit={markExited} onError={reportError} />)}
+      </div>
+      <div role="toolbar" aria-label="Terminal keys" className="flex md:hidden shrink-0 gap-1 overflow-x-auto border-t border-[#313244] bg-[#181825] p-1">
+        {([['Esc', '\u001b'], ['Tab', '\t'], ['Ctrl+C', '\u0003'], ['↑', '\u001b[A'], ['↓', '\u001b[B'], ['←', '\u001b[D'], ['→', '\u001b[C']] as const).map(([label, data]) => (
+          <button key={label} type="button" disabled={!tabs.some(tab => tab.id === activeId && !tab.exited)}
+            onMouseDown={event => event.preventDefault()}
+            onClick={() => { if (activeId) void writeTerminal(activeId, data).catch(reason => reportError(String(reason))); }}
+            className="min-h-11 min-w-10 flex-1 shrink-0 rounded text-xs text-[#cdd6f4] hover:bg-[#313244] disabled:opacity-40">{label}</button>
+        ))}
       </div>
     </div>
   );

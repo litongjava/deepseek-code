@@ -226,8 +226,14 @@ impl PtyManager {
         cwd: Option<String>,
         shell: Option<String>,
     ) -> Result<PtySession> {
+        #[cfg(target_os = "android")]
+        let cwd = cwd.or_else(|| std::env::var("HOME").ok());
         let shell = shell.unwrap_or_else(|| {
             if cfg!(windows) { "powershell.exe".into() }
+            else if cfg!(target_os = "android") {
+                if crate::tools::linux_env::active().is_some() { "/bin/bash".into() }
+                else { "/system/bin/sh".into() }
+            }
             else { std::env::var("SHELL").unwrap_or_else(|_| "/bin/bash".into()) }
         });
         self.create_launch(cwd, shell, Vec::new(), None).await
@@ -295,6 +301,12 @@ impl PtyManager {
             let mut reader = pair.master.try_clone_reader()?;
             let writer = pair.master.take_writer()?;
             let mut command = CommandBuilder::new(&shell);
+            #[cfg(target_os = "android")]
+            if shell == "/bin/bash" {
+                if let Some(linux) = crate::tools::linux_env::active() {
+                    command = linux.pty_command(&cwd.to_string_lossy());
+                }
+            }
             command.args(args);
             command.cwd(&cwd);
             command.env("TERM", "xterm-256color");

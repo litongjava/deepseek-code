@@ -157,7 +157,7 @@ fn claim(root: &Path, jobs_file: &Path) -> Result<Option<std::fs::File>> {
     std::fs::create_dir_all(&directory)?;
     let file = std::fs::OpenOptions::new().write(true).create(true).truncate(false)
         .open(directory.join(format!("{:016x}.lock", hash.finish())))?;
-    match file.try_lock() {
+    match crate::fs::try_lock_file(&file) {
         Ok(()) => Ok(Some(file)),
         Err(std::fs::TryLockError::WouldBlock) => Ok(None),
         Err(std::fs::TryLockError::Error(error)) => Err(error.into()),

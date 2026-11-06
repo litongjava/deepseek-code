@@ -239,7 +239,7 @@ pub fn receiver_active(root: &Path, session: &str) -> Result<bool> {
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(false),
         Err(e) => return Err(e.into()),
     };
-    match file.try_lock() {
+    match crate::fs::try_lock_file(&file) {
         Ok(()) => Ok(false),
         Err(std::fs::TryLockError::WouldBlock) => Ok(true),
         Err(std::fs::TryLockError::Error(e)) => Err(e.into()),
@@ -283,7 +283,7 @@ pub fn session_open(root: &Path, session: &str) -> Result<bool> {
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(false),
         Err(e) => return Err(e.into()),
     };
-    match file.try_lock() {
+    match crate::fs::try_lock_file(&file) {
         Ok(()) => Ok(false),
         Err(std::fs::TryLockError::WouldBlock) => Ok(true),
         Err(std::fs::TryLockError::Error(e)) => Err(e.into()),
@@ -307,7 +307,7 @@ pub fn execution_active(root: &Path, session: &str) -> Result<bool> {
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(false),
         Err(error) => return Err(error.into()),
     };
-    match file.try_lock() {
+    match crate::fs::try_lock_file(&file) {
         Ok(()) => Ok(false),
         Err(std::fs::TryLockError::WouldBlock) => Ok(true),
         Err(std::fs::TryLockError::Error(error)) => Err(error.into()),
@@ -333,7 +333,7 @@ impl ExecutionLease {
             .read(true)
             .write(true)
             .open(directory.join(format!("{session}.lock")))?;
-        file.try_lock()
+        crate::fs::try_lock_file(&file)
             .context("Session is already executing in another owner")?;
         Ok(Some(Self { _file: file }))
     }
@@ -382,7 +382,7 @@ impl Consumer {
             .read(true)
             .write(true)
             .open(path)?;
-        file.try_lock().context(
+        crate::fs::try_lock_file(&file).context(
             "This session already has an active message consumer; finish its existing turn first",
         )?;
         let generation = uuid::Uuid::new_v4().to_string();

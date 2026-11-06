@@ -3,3 +3,6 @@
 crates/core/assets/design-converter/** -text whitespace=cr-at-eol,-blank-at-eof
 crates/core/src/skills/bundled/resources/** -text whitespace=cr-at-eol,-blank-at-eof,-blank-at-eol
 crates/core/tests/fixtures/*.pdf binary
+# Android preparation runs in Linux/WSL even when checked out on Windows.
+scripts/fetch-android-proot.sh text eol=lf
+src-tauri/gen/android/gradlew text eol=lf

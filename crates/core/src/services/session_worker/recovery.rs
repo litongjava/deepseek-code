@@ -7,7 +7,7 @@ pub(super) fn startup_lock(base: &Path) -> Result<fs::File> {
         .read(true)
         .write(true)
         .open(base.join("startup.lock"))?;
-    lock.try_lock()
+    crate::fs::try_lock_file(&lock)
         .context("Session worker startup or recovery is already in progress; retry shortly")?;
     Ok(lock)
 }
@@ -24,7 +24,7 @@ pub(super) fn lifetime_lock(dir: &Path, name: &str) -> Result<fs::File> {
         .read(true)
         .write(true)
         .open(dir.join(name))?;
-    lock.try_lock()
+    crate::fs::try_lock_file(&lock)
         .context("Session worker process is already running")?;
     ensure!(
         !dir.join("retired.json").exists(),
@@ -140,7 +140,7 @@ pub(super) fn repair(root: &Path, session: &str) -> Result<bool> {
                     .read(true)
                     .write(true)
                     .open(dir.join(name))?;
-                match lock.try_lock() {
+                match crate::fs::try_lock_file(&lock) {
                     Ok(()) => guards.push(lock),
                     Err(std::fs::TryLockError::WouldBlock) => {
                         ensure!(worker.is_some(), "Worker metadata is damaged but its process is still running; retry after it exits");
@@ -541,7 +541,7 @@ mod tests {
                 .join("startup.lock"),
         )
         .unwrap();
-        lock.lock().unwrap();
+        crate::fs::lock_file(&lock).unwrap();
         let error = ensure_worker(
             root.path(),
             &worker.executable,

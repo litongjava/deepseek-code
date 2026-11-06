@@ -315,7 +315,7 @@ const Sidebar = ({ overlay = false, isCollapsed, toggleSidebar, refreshTrigger, 
     <>
       <div
         className={`
-          h-screen bg-claude-sidebar border-r border-claude-border flex-shrink-0 text-claude-text antialiased flex flex-col transition-all duration-200 ease-in-out overflow-hidden ${overlay ? 'fixed left-0 top-0 z-50 shadow-xl' : 'relative'}
+          h-dvh bg-claude-sidebar border-r border-claude-border flex-shrink-0 text-claude-text antialiased flex flex-col transition-all duration-200 ease-in-out overflow-hidden ${overlay ? 'fixed left-0 top-0 z-50 shadow-xl' : 'relative'}
         `}
         style={{
           paddingTop: `${titleBarHeight || 44}px`,
@@ -325,6 +325,10 @@ const Sidebar = ({ overlay = false, isCollapsed, toggleSidebar, refreshTrigger, 
           borderRightWidth: overlay && isCollapsed ? 0 : undefined,
         }}
       >
+        {overlay && !isCollapsed && <div className="flex shrink-0 items-center justify-between px-4 py-1 border-b border-claude-border">
+          <span className="text-sm font-medium">DeepSeek Code</span>
+          <button type="button" aria-label={t('common.close')} onClick={toggleSidebar} className="flex h-11 w-11 items-center justify-center rounded-lg hover:bg-claude-hover"><X size={20} /></button>
+        </div>}
         {!isCollapsed && (
           <div className="flex-shrink-0 border-b border-claude-border px-2 py-2 mt-1.5">
             <div className="flex rounded-lg bg-[var(--bg-mode-tabs)] p-0.5" role="group" aria-label={t('sidebar.workspaceMode')}>

@@ -6,6 +6,8 @@ use std::path::{Path, PathBuf};
 use walkdir::WalkDir;
 
 pub mod directories;
+mod file_lock;
+pub use file_lock::{lock_file, try_lock_file};
 
 /// Takes an exclusive advisory lock, retrying briefly while it is held.
 ///
@@ -16,7 +18,7 @@ pub mod directories;
 pub fn try_lock_briefly(file: &fs::File) -> std::result::Result<(), fs::TryLockError> {
     let deadline = std::time::Instant::now() + std::time::Duration::from_millis(500);
     loop {
-        match file.try_lock() {
+        match try_lock_file(file) {
             Err(fs::TryLockError::WouldBlock) if std::time::Instant::now() < deadline => {
                 std::thread::sleep(std::time::Duration::from_millis(10));
             }

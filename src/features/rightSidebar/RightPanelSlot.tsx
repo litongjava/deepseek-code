@@ -4,6 +4,7 @@ import ArtifactsPanel from '../../components/ArtifactsPanel';
 import DraggableDivider from '../../components/DraggableDivider';
 import type { DocumentInfo } from '../../components/DocumentCard';
 import { useI18n } from '../../hooks/useI18n';
+import { useNarrowScreen } from '../../hooks/useNarrowScreen';
 import { clampRightSidebarWidth, useRightSidebarStore } from '../../stores/useRightSidebarStore';
 import RightSidebar from './RightSidebar';
 
@@ -28,6 +29,7 @@ export default function RightPanelSlot({
   showArtifacts, artifacts, onCloseArtifacts, onOpenDocument, sidebarVisible, onCloseSidebar,
 }: RightPanelSlotProps) {
   const { t } = useI18n();
+  const narrowScreen = useNarrowScreen();
   const storedWidth = useRightSidebarStore(s => s.width);
   const setSidebarWidth = useRightSidebarStore(s => s.setWidth);
   const [resizing, setResizing] = useState(false);
@@ -44,7 +46,7 @@ export default function RightPanelSlot({
     return () => window.removeEventListener('resize', handleResize);
   }, [showSidebar]);
 
-  const width = documentPanelDoc ? `${documentPanelWidth}%`
+  const width = narrowScreen ? (visible ? '100%' : '0px') : documentPanelDoc ? `${documentPanelWidth}%`
     : showArtifacts ? '360px'
       : showSidebar ? `${clampRightSidebarWidth(storedWidth, viewportWidth)}px`
         : '0px';
@@ -52,15 +54,15 @@ export default function RightPanelSlot({
   return (
     <div
       data-testid="right-panel-slot"
-      className={`h-full bg-claude-bg ${resizing ? '' : 'transition-all duration-300 ease-out'} flex z-20 relative ${visible ? 'border-l border-claude-border' : 'pointer-events-none'}`}
+      className={`h-full bg-claude-bg ${resizing ? '' : 'transition-all duration-300 ease-out'} flex z-20 ${narrowScreen ? 'absolute inset-y-0 right-0' : 'relative'} ${visible ? 'border-l border-claude-border' : 'pointer-events-none'}`}
       style={{ width, opacity: visible ? 1 : 0, overflow: 'hidden' }}
     >
-      {documentPanelDoc && (
+      {documentPanelDoc && !narrowScreen && (
         <div className="absolute left-0 top-0 bottom-0 h-full z-50">
           <DraggableDivider onResize={onDocumentPanelResize} containerRef={containerRef} />
         </div>
       )}
-      {showSidebar && (
+      {showSidebar && !narrowScreen && (
         <div className="absolute left-0 top-0 bottom-0 h-full z-50">
           <DraggableDivider unit="px" onResize={setSidebarWidth} containerRef={containerRef} ariaLabel={t('rightSidebar.resize')} onDraggingChange={setResizing} />
         </div>

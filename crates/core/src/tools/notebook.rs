@@ -65,7 +65,7 @@ pub(super) fn execute(input: Value, cwd: &str) -> Result<Value> {
         // until it execs, so a just-released lock can still look taken.
         let mut attempts = 0;
         loop {
-            match file.try_lock() {
+            match crate::fs::try_lock_file(&file) {
                 Ok(()) => break,
                 Err(std::fs::TryLockError::WouldBlock) if attempts < 100 => {
                     attempts += 1;

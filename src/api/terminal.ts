@@ -14,10 +14,19 @@ export async function createTerminal(cwd?: string, shell?: string): Promise<Term
   return res.json();
 }
 
-export async function writeTerminal(terminalId: string, data: string): Promise<void> {
-  await request('/terminal/write', {
-    method: 'POST', body: JSON.stringify({ session_id: terminalId, data }),
+const pendingWrites = new Map<string, Promise<void>>();
+
+export function writeTerminal(terminalId: string, data: string): Promise<void> {
+  // HTTP requests may arrive out of order; preserve the terminal's keystream.
+  const pending = (pendingWrites.get(terminalId) ?? Promise.resolve()).then(async () => {
+    await request('/terminal/write', {
+      method: 'POST', body: JSON.stringify({ session_id: terminalId, data }),
+    });
   });
+  pendingWrites.set(terminalId, pending);
+  const clear = () => { if (pendingWrites.get(terminalId) === pending) pendingWrites.delete(terminalId); };
+  void pending.then(clear, clear);
+  return pending;
 }
 
 export async function resizeTerminal(terminalId: string, cols: number, rows: number): Promise<void> {
