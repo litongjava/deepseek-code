@@ -1,5 +1,5 @@
 $file = "src-tauri/src/tools/mod.rs"
-$content = Get-Content $file -Raw
+$content = Get-Content $file -Raw -Encoding UTF8
 
 $old = "fn resolve_path(file_path: &str, cwd: &str) -> String {" + "`r`n" +
 "    if Path::new(file_path).is_absolute() {" + "`r`n" +
@@ -46,7 +46,7 @@ $new = "fn is_path_allowed(resolved_path: &Path, cwd: &str) -> bool {" + "`r`n" 
 
 if ($content.Contains($old)) {
     $content = $content.Replace($old, $new)
-    Set-Content $file $content -NoNewline
+    Set-Content $file $content -NoNewline -Encoding UTF8
     Write-Host "OK"
 } else {
     Write-Host "NOT FOUND"

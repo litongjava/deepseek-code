@@ -12,7 +12,7 @@ $pkgPath = "package.json"
 $cargoPath = "src-tauri/Cargo.toml"
 $tauriPath = "src-tauri/tauri.conf.json"
 
-$pkg = Get-Content $pkgPath -Raw | ConvertFrom-Json
+$pkg = Get-Content $pkgPath -Raw -Encoding UTF8 | ConvertFrom-Json
 $currentVersion = $pkg.version
 Write-Host "[version] Current version: $currentVersion" -ForegroundColor Cyan
 
@@ -33,16 +33,16 @@ Write-Host "[version] New version: $newVersion ($Bump bump)" -ForegroundColor Gr
 $pkg.version = $newVersion
 $pkg | ConvertTo-Json -Depth 100 | Set-Content $pkgPath -Encoding UTF8
 
-$cargo = Get-Content $cargoPath -Raw
+$cargo = Get-Content $cargoPath -Raw -Encoding UTF8
 $cargo = $cargo -replace "version = `"$currentVersion`"", "version = `"$newVersion`""
 Set-Content $cargoPath $cargo -Encoding UTF8NoBOM
 
 # Shared core and CLI inherit the workspace version.
-$workspaceCargo = Get-Content "Cargo.toml" -Raw
+$workspaceCargo = Get-Content "Cargo.toml" -Raw -Encoding UTF8
 $workspaceCargo = $workspaceCargo -replace "version = `"$currentVersion`"", "version = `"$newVersion`""
 [IO.File]::WriteAllText((Join-Path (Get-Location) "Cargo.toml"), $workspaceCargo, [Text.UTF8Encoding]::new($false))
 
-$tauri = Get-Content $tauriPath -Raw | ConvertFrom-Json
+$tauri = Get-Content $tauriPath -Raw -Encoding UTF8 | ConvertFrom-Json
 $tauri.version = $newVersion
 $tauri | ConvertTo-Json -Depth 100 | Set-Content $tauriPath -Encoding UTF8
 
