@@ -8,6 +8,32 @@ pub mod remotion;
 pub mod secure_storage;
 pub mod launch_permissions;
 
+/// Stack size for async worker threads. Tool calls nest deep futures; the 2 MiB
+/// default overflows (debug builds first), aborting the whole process mid-chat.
+/// Set in code because `RUST_MIN_STACK` from `.cargo/config.toml` only reaches
+/// processes started through Cargo.
+pub const WORKER_STACK_SIZE: usize = 16 * 1024 * 1024;
+
+/// The multi-threaded runtime used by Desktop, the mobile app and dcd-server.
+pub fn build_runtime() -> std::io::Result<tokio::runtime::Runtime> {
+    tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .thread_stack_size(WORKER_STACK_SIZE)
+        .build()
+}
+
+/// Makes Tauri run its async work on `build_runtime()`. Call before the Tauri
+/// builder starts; the runtime lives for the rest of the process.
+pub fn use_large_stack_runtime() {
+    match build_runtime() {
+        Ok(runtime) => {
+            let runtime: &'static tokio::runtime::Runtime = Box::leak(Box::new(runtime));
+            tauri::async_runtime::set(runtime.handle().clone());
+        }
+        Err(error) => tracing::error!(module = "Runtime", "Using the default runtime: {error}"),
+    }
+}
+
 /// Android and iOS entry point.
 ///
 /// The app runs the engine in-process: the Bridge listens on loopback with a
@@ -22,6 +48,7 @@ pub fn mobile_main() {
         .with_ansi(false)
         .with_env_filter(tracing_subscriber::EnvFilter::new("warn,LinuxEnv=info,Bridge=info"))
         .try_init();
+    use_large_stack_runtime();
     let result = tauri::Builder::default()
         .plugin(tauri_plugin_shell::init())
         .plugin(tauri_plugin_dialog::init())
@@ -103,4 +130,24 @@ fn prepare_linux_environment(data_dir: &std::path::Path) {
             Err(error) => tracing::error!(module = "LinuxEnv", "Install failed: {error:#}"),
         }
     });
+}
+
+#[cfg(test)]
+mod runtime_tests {
+    /// Uses about `depth` KiB of stack.
+    #[inline(never)]
+    fn deep(depth: usize) -> u8 {
+        let frame = std::hint::black_box([1u8; 1024]);
+        if depth == 0 { frame[0] } else { deep(depth - 1).wrapping_add(frame[depth % 1024]) }
+    }
+
+    #[test]
+    fn worker_threads_have_room_for_deep_tool_futures() {
+        let runtime = super::build_runtime().unwrap();
+        // Several MiB in debug builds: more than the 2 MiB tokio default that crashed dcd-server.
+        let value = runtime.block_on(async { tokio::spawn(async { deep(4 * 1024) }).await.unwrap() });
+        assert!(value > 0);
+        let blocking = runtime.block_on(async { tokio::task::spawn_blocking(|| deep(4 * 1024)).await.unwrap() });
+        assert!(blocking > 0);
+    }
 }

@@ -142,7 +142,7 @@ fn run(mut args: Args) -> anyhow::Result<()> {
     let db = Arc::new(deepseek_desktop_tauri_lib::db::DbManager::new(db_path)?);
     db.init()?;
 
-    let runtime = tokio::runtime::Runtime::new()?;
+    let runtime = deepseek_desktop_tauri_lib::build_runtime()?;
     runtime.block_on(async move {
         let scheduler_db = db.clone();
         let scheduler_dir = data_dir.clone();

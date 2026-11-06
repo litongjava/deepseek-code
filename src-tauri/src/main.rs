@@ -97,6 +97,7 @@ fn main() {
     let launch_permissions = launch_permissions::LaunchPermissions::parse(args)
         .unwrap_or_else(|error| { eprintln!("{error}. Use dcd --help for supported options."); std::process::exit(2) });
     init_tracing();
+    use_large_stack_runtime();
 
     std::panic::set_hook(Box::new(|info| {
         let location = info.location().map(|l| format!("{}:{}:{}", l.file(), l.line(), l.column())).unwrap_or_else(|| "unknown".to_string());
