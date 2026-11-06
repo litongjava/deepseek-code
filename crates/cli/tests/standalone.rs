@@ -445,8 +445,10 @@ async fn empty_stdin_and_malformed_config_fail_without_overwriting() {
     let data = temp.path().join("data");
     let output = execute(command(&data, temp.path())).await;
     assert!(!output.status.success());
-    assert!(!data.exists());
-    std::fs::create_dir(&data).unwrap();
+    // Startup diagnostics may create logs, but no session or configuration is saved.
+    assert!(!data.join("deepseek_code.db").exists());
+    assert!(!data.join("config.json").exists());
+    std::fs::create_dir_all(&data).unwrap();
     std::fs::write(data.join("config.json"), "not json").unwrap();
     let mut cli = command(&data, temp.path());
     cli.args(["config", "set", "model", "sonnet"]);

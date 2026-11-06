@@ -23,6 +23,8 @@ cargo check --locked -p deepseek-code-desktop --all-targets
 
 加 `--no-fail-fast`，否则第一个失败的测试程序之后的测试都不会运行，结果会被漏掉。
 
+Windows 调试构建需要 `RUST_MIN_STACK=16777216`；Cargo 已通过 `.cargo/config.toml` 设置，直接启动构建产物或 ConPTY 测试时也要传入。集成测试的临时工作区应放在没有祖先项目说明文件的独立目录，避免用户目录中的配置或说明污染本地 fixture；只在测试进程中设置 `TEMP` / `TMP`，不要修改系统环境变量。
+
 ## 已知失败
 
 目前没有。全部测试应当通过，出现失败时先在未修改的代码上跑同一个测试，再判断是否由这次改动引入。
@@ -166,4 +168,14 @@ cargo check --locked -p deepseek-code-desktop --all-targets
 
 ## 尚未验证
 
-- Windows 和 macOS 上还没有跑过这份清单。`Ctrl+J`、鼠标点击和进程退出判断都和平台有关，改动相关逻辑后要在 Windows 终端确认。
+- 本次 Windows ConPTY 已验证下列审批、工具展示和数据库争用场景；不代表这份清单的所有场景都已完成。macOS 尚未验证。`Ctrl+J`、鼠标点击和进程退出判断都和平台有关，改动相关逻辑后仍要在对应终端确认。
+
+## Shell 审批与工具展示回归
+
+1. Auto 模式执行普通 Bash 和复合读取命令时不弹审批，也不请求分类器；PreToolUse 修改命令后，以最终输入执行并传给 PostToolUse，工具调用 ID 保持一致。
+2. Ask 模式为普通 Bash 选择 `Allow for Session`，同一会话下一条普通 Bash 直接执行；危险规则命中的命令仍单独审批，菜单不提供会话授权。
+3. `/permissions bash-session show` 显示已授权，`revoke` 后显示未授权；Worker 重连保留授权，冷启动、其他会话不继承授权。显式拒绝规则保持优先。
+4. `git_add` 请求 12 个路径时，折叠结果显示成功摘要、3 个路径和 `+9 lines (click to expand)`；实际点击后能看到第 12 个路径，复制内容为完整文本。
+5. 后台任务运行时，`TaskOutput(任务名称)` 在等待结果前出现；恢复历史后仍显示名称。
+6. 工具运行期间用独立 SQLite 连接持有写事务 3 秒：前台提示 `Task output continues`，继续显示工具结果，释放锁后正常结束；任务目录中没有新增 `cancel` 文件。
+7. 空标准输入失败后允许保留诊断日志，但不能创建会话数据库或配置；损坏的配置文件不能被覆盖。

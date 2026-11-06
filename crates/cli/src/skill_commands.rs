@@ -478,47 +478,38 @@ mod tests {
         session.close().await.unwrap();
     }
     #[tokio::test]
-    async fn permission_denied_skill_shell_keeps_exact_id_and_never_runs_retry() {
+    async fn ordinary_skill_shell_in_auto_uses_final_hook_input_without_classifier() {
         use crate::{args::Cli, config::Selection, session::Session};
-        use axum::{routing::post, Json, Router};
         let temp = tempfile::tempdir().unwrap();
         let paths = RuntimePaths::new(temp.path().join("data")).unwrap();
         let context = crate::services::context(&paths).unwrap();
         deepseek_code_core::permissions::auto_config::save(&context, &deepseek_code_core::permissions::auto_config::AutoConfig { enabled:true, classifier:Some(deepseek_code_core::permissions::auto_config::ClassifierSelection::Current), ..Default::default() }).unwrap();
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let endpoint = format!("http://{}", listener.local_addr().unwrap());
-        let app = Router::new().route("/v1/chat/completions",post(|Json(body):Json<serde_json::Value>| async move {
-            assert!(body.to_string().contains("FINAL_SKILL_INPUT"));
-            assert!(body.get("tools").is_none());
-            Json(serde_json::json!({"id":"classifier","object":"chat.completion","created":0,"model":"fixture","choices":[{"index":0,"finish_reason":"stop","message":{"role":"assistant","content":"{\"decision\":\"deny\",\"reason_code\":\"outside_scope\"}"}}],"usage":{"prompt_tokens":3,"completion_tokens":3,"total_tokens":6}}))
-        }));
-        let server = tokio::spawn(async move{axum::serve(listener,app).await.unwrap();});
-        let selection=Selection{providers:vec![serde_json::from_value(serde_json::json!({"id":"fixture","name":"Fixture","base_url":endpoint,"api_key":"unused","api_format":"openai","enabled":true,"models":[{"id":"fixture","name":"Fixture","enabled":true,"supports_vision":false,"supports_web_search":false}]})).unwrap()],provider_id:"fixture".into(),model:"fixture".into()};
+        // No model endpoint exists: ordinary Bash must never contact a classifier.
+        let selection=Selection{providers:vec![serde_json::from_value(serde_json::json!({"id":"fixture","name":"Fixture","base_url":"http://127.0.0.1:1/v1","api_key":"unused","api_format":"openai","enabled":true,"models":[{"id":"fixture","name":"Fixture","enabled":true,"supports_vision":false,"supports_web_search":false}]})).unwrap()],provider_id:"fixture".into(),model:"fixture".into()};
         let cli = Cli::try_parse_with_mode_source(["dcl","--path",temp.path().to_str().unwrap(),"--permission-mode","auto"]).unwrap();
         let store = deepseek_code_core::runtime::SessionStore::new(paths.open_database().unwrap());
         let session_id = store.create(temp.path(), "fixture", "fixture").unwrap();
         let session = Session::open(&cli, &paths, selection, Some(&session_id)).await.unwrap();
         let skill_dir = temp.path().join(".claude/skills/permission-fixture");
         std::fs::create_dir_all(&skill_dir).unwrap();
-        std::fs::write(skill_dir.join("SKILL.md"),"---\nname: permission-fixture\ndescription: fixture\n---\n!`echo should-not-run > forbidden.txt`\n").unwrap();
-        let pre_output=serde_json::json!({"hookSpecificOutput":{"hookEventName":"PreToolUse","updatedInput":{"command":"echo FINAL_SKILL_INPUT > forbidden.txt"}}}).to_string();
-        let denied_output=serde_json::json!({"hookSpecificOutput":{"hookEventName":"PermissionDenied","retry":true}}).to_string();
+        std::fs::write(skill_dir.join("SKILL.md"),"---\nname: permission-fixture\ndescription: fixture\n---\n!`echo original > forbidden.txt`\n").unwrap();
+        let shell = if cfg!(windows) { "powershell" } else { "sh" };
+        let pre_output=serde_json::json!({"hookSpecificOutput":{"hookEventName":"PreToolUse","updatedInput":{"command":"echo FINAL_SKILL_INPUT > allowed.txt","shell":shell,"timeout":30000}}}).to_string();
         let command=|file:&str,output:&str| if cfg!(windows) { format!("[IO.File]::WriteAllText('{file}',[Console]::In.ReadToEnd(),[Text.UTF8Encoding]::new($false)); [Console]::Out.Write('{}')",output.replace('\'',"''")) } else {format!("cat > '{file}'; printf '%s' '{}'",output.replace('\'',"'\"'\"'"))};
         std::fs::write(temp.path().join(".claude/settings.json"),serde_json::json!({"hooks":{
-            "PreToolUse":[{"matcher":"^Bash$","hooks":[{"type":"command","shell":if cfg!(windows){"powershell"}else{"sh"},"command":command("pre.json",&pre_output)}]}],
-            "PermissionDenied":[{"matcher":"^Bash$","hooks":[{"type":"command","shell":if cfg!(windows){"powershell"}else{"sh"},"command":command("denied.json",&denied_output)}]}]
+            "PreToolUse":[{"matcher":"^Bash$","hooks":[{"type":"command","shell":shell,"command":command("pre.json",&pre_output)}]}],
+            "PostToolUse":[{"matcher":"^Bash$","hooks":[{"type":"command","shell":shell,"command":command("post.json","{}") }]}]
         }}).to_string()).unwrap();
-        let result=session.turn(&cli,"/permission-fixture",&mut None).await;
-        let authority=deepseek_code_core::services::permission_authority::history(&session.store.db,&session.id,8192).unwrap();
-        assert_eq!(authority,vec![serde_json::json!({"role":"user","content":"/permission-fixture"})]);
-        let error=match result {Err(error)=>error.to_string(),Ok(_)=>panic!("classifier denied shell must not run")};
-        assert!(error.contains("PermissionDenied hook suggests"),"{error}");
+        assert!(matches!(prepare_invocation(&cli,&session,"/permission-fixture",&mut None).await.unwrap(), PreparedInvocation::Inline(_)));
         let read=|name:&str|serde_json::from_str::<serde_json::Value>(&std::fs::read_to_string(temp.path().join(name)).unwrap()).unwrap();
-        let pre=read("pre.json");let denied=read("denied.json");
-        assert_eq!(pre["tool_use_id"],denied["tool_use_id"]);assert!(!denied["tool_use_id"].as_str().unwrap().is_empty());
-        assert_eq!(denied["tool_input"]["command"],"echo FINAL_SKILL_INPUT > forbidden.txt");assert_eq!(denied["session_id"],session_id);
+        let pre=read("pre.json");let post=read("post.json");
+        assert_eq!(pre["tool_use_id"],post["tool_use_id"]);
+        assert!(!post["tool_use_id"].as_str().unwrap().is_empty());
+        assert_eq!(post["tool_input"]["command"],"echo FINAL_SKILL_INPUT > allowed.txt");
+        assert_eq!(post["session_id"],session_id);
+        assert!(temp.path().join("allowed.txt").exists());
         assert!(!temp.path().join("forbidden.txt").exists());
-        session.close().await.unwrap();server.abort();
+        session.close().await.unwrap();
     }
 
     #[test]
