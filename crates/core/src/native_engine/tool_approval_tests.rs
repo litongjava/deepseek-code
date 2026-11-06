@@ -2,6 +2,42 @@ use super::*;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 #[tokio::test]
+async fn bash_session_grant_commits_only_after_effective_input_and_policy_validation() {
+    crate::config::OrchestrationConfig::init_global().unwrap();
+    for case in ["valid", "replacement", "danger", "invalid", "denied", "other-tool"] {
+        let root = tempfile::tempdir().unwrap();
+        let provider = ResolvedProvider {
+            provider: serde_json::from_value(json!({"id":"fixture","name":"fixture","base_url":"http://127.0.0.1:1","api_key":"unused","api_format":"openai","models":[],"enabled":true})).unwrap(),
+            model: serde_json::from_value(json!({"id":"fixture","name":"fixture","enabled":true,"supports_vision":false,"supports_web_search":false})).unwrap(),
+        };
+        let (tx, mut events) = mpsc::channel(16);
+        let manager = crate::runtime::default_permissions();
+        manager.set_mode(crate::permissions::PermissionMode::AskPermissions);
+        let mut executor = ToolLoopExecutor::new(provider, vec![], None, 128, tx, root.path().to_string_lossy().into_owned(), ReasoningMode::Standard).with_permission_manager(manager.clone());
+        executor.conv_id = Some("grant-session".into());
+        let mailbox = executor.permission_mailbox.clone();
+        let tool = if case == "other-tool" { "Write" } else { "Bash" };
+        let task = tokio::spawn(async move {
+            executor.request_tool_approval(tool, &json!({"command":"npm test"}), "grant").await
+        });
+        let EngineEvent::ToolPermission { request_id, .. } = events.recv().await.unwrap() else { panic!() };
+        if case == "denied" { manager.set_session_rules("grant-session", std::collections::HashMap::from([("Bash".into(), crate::permissions::rules::PermissionAction::Deny)])); }
+        let updated_input = match case {
+            "replacement" => Some(json!({"command":"python custom.py"})),
+            "danger" => Some(json!({"command":"shutdown"})),
+            "invalid" => Some(json!({"command":"npm test","timeout":"invalid"})),
+            _ => None,
+        };
+        crate::native_engine::permission_response::respond(&mailbox, &request_id, PermissionResponse::AllowBashForSession { updated_input, note: None }).await.unwrap();
+        let result = task.await.unwrap();
+        let allowed = matches!(case, "valid" | "replacement");
+        assert_eq!(result.is_ok(), allowed, "{case}: {result:?}");
+        assert_eq!(manager.bash_session_allowed("grant-session"), allowed, "{case}");
+        assert!(!manager.bash_session_allowed("other"));
+    }
+}
+
+#[tokio::test]
 async fn shell_auto_needs_no_classifier_and_dangerous_calls_require_each_approval() {
     crate::config::OrchestrationConfig::init_global().unwrap();
     let root = tempfile::tempdir().unwrap();

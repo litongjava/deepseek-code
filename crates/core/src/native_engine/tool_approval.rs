@@ -186,6 +186,7 @@ impl ToolLoopExecutor {
         crate::native_engine::permission_response::register_owner(
             &request_id, self.conv_id.as_deref().unwrap_or_default(), id, "permission", input.clone(), None, None, None,
         );
+        crate::native_engine::permission_response::set_owner_tool(&request_id, tool);
         if let Some(hooks) = &self.hooks {
             if let Err(error) = hooks.run(crate::services::tool_hooks::HookEvent::Notification,
                 self.conv_id.as_deref().unwrap_or_default(),
@@ -359,8 +360,18 @@ impl ToolLoopExecutor {
         } else {
             response
         };
+        let response = match response {
+            PermissionResponse::AllowBashForSession { updated_input, note } => {
+                let actual = updated_input.as_ref().filter(|value| !value.as_object().is_some_and(|fields| fields.is_empty())).unwrap_or(input);
+                anyhow::ensure!(crate::native_engine::permission_response::can_allow_bash_session(tool, actual), "Session Bash approval excludes dangerous or invalid commands");
+                let manager = self.permission_manager.clone().ok_or_else(|| anyhow!("Session permission manager unavailable"))?;
+                let session = self.conv_id.clone().ok_or_else(|| anyhow!("Session identity unavailable"))?;
+                PermissionResponse::Allow { updated_input, note, commit: Some(Box::new(move || { manager.set_bash_session_allowed(&session, true); Ok(()) })) }
+            }
+            other => other,
+        };
         match response {
-            PermissionResponse::Text(_) => unreachable!("text answer normalized"),
+            PermissionResponse::Text(_) | PermissionResponse::AllowBashForSession { .. } => unreachable!("answer normalized"),
             PermissionResponse::Deny { message, interrupt } => {
                 if interrupt {
                     *self

@@ -1247,6 +1247,11 @@ impl Session {
                                 Some(approval) => approval.decide(&answer),
                                 None => Decision { allowed: ["y", "yes", "1", "\u{662f}", "\u{5141}\u{8bb8}"].contains(&answer.trim().to_lowercase().as_str()), grant: None, note: None },
                             };
+                            if decision.grant == Some(Remember::BashSession) {
+                                let _ = self.engine.resume_with_permission(&request_id, PermissionResponse::AllowBashForSession { updated_input: None, note: decision.note.clone() }).await;
+                                progress.set_activity("Working");
+                                continue;
+                            }
                             let commit = match decision.grant.as_ref() {
                                 Some(grant) => match crate::permission_commands::remember_commit(self, grant).await {
                                     Ok(commit) => Some((commit, grant.clone())),
@@ -1270,7 +1275,7 @@ impl Session {
                                             progress.notice(&format!("Allowed for this session; saving the rule to .claude/settings.local.json failed: {error:#}"));
                                         }
                                     }
-                                    None => {}
+                                    None | Some(Remember::BashSession) => {}
                                 }
                             } else if !decision.allowed && !remote_decided && approval.is_some() {
                                 // As in the reference CLI: a bare No stops the turn; No with

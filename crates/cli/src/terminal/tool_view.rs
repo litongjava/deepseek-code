@@ -569,6 +569,7 @@ pub fn expanded_block(
 pub enum Remember {
     /// Switch the session to accept-edits mode.
     AcceptEdits,
+    BashSession,
     /// Add a session allow rule such as `Bash(npm test)`.
     Rule(String),
     /// Switch the session to auto mode.
@@ -656,54 +657,9 @@ fn file_name(path: &str) -> String {
         .map_or_else(|| path.to_owned(), |name| name.to_string_lossy().into_owned())
 }
 
-/// Programs that delete, overwrite, run code or reach the network are only
-/// ever remembered as the exact command.
-const EXACT_ONLY: &[&str] = &[
-    "rm", "rmdir", "mv", "cp", "dd", "ln", "chmod", "chown", "chgrp", "truncate", "shred", "tee",
-    "sudo", "su", "doas", "kill", "pkill", "killall", "curl", "wget", "ssh", "scp", "rsync", "nc",
-    "sh", "bash", "zsh", "fish", "env", "eval", "exec", "xargs", "find", "python", "python3",
-    "node", "deno", "perl", "ruby", "php", "osascript", "powershell", "pwsh",
-];
-
-/// The prefix the reference CLI offers to remember: the program and its
-/// subcommand (`npm run` for `npm run build --silent`), or the program alone
-/// when options come first (`git` for `git -C src log`). A program called
-/// only with arguments, such as `touch notes.txt`, keeps the whole command.
-fn command_prefix(command: &str) -> Option<String> {
-    let words: Vec<&str> = command.split_whitespace().collect();
-    let plain = |word: &str| {
-        word.starts_with(|c: char| c.is_ascii_lowercase())
-            && word.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | ':'))
-    };
-    if words.len() < 2 || !plain(words[0]) || EXACT_ONLY.contains(&words[0]) {
-        return None;
-    }
-    if plain(words[1]) {
-        Some(words[..2].join(" "))
-    } else if words[1].starts_with('-') {
-        Some(words[0].to_owned())
-    } else {
-        None
-    }
-}
-
 /// A rule that allows this call again, when one can be written safely.
 fn session_rule(name: &str, input: &Value) -> Option<String> {
     let rule = match (name, input["command"].as_str()) {
-        ("Bash", Some(command)) => {
-            let command = command.trim();
-            // Allow rules never match chained or substituted commands, so
-            // remembering one would not stop the next prompt.
-            if command.is_empty()
-                || command.contains(['\n', '\r', '*', '(', ')', ';', '&', '|', '`', '$', '<', '>'])
-            {
-                return None;
-            }
-            match command_prefix(command) {
-                Some(prefix) => format!("Bash({prefix} *)"),
-                None => format!("Bash({command})"),
-            }
-        }
         ("Bash" | "PowerShell", _) => return None,
         // As in the reference CLI: don't ask again for this host.
         ("WebFetch", _) => format!("WebFetch(domain:{})", fetch_host(input)?),
@@ -805,11 +761,12 @@ pub fn approval(name: &str, input: &Value, workspace: Option<&std::path::Path>, 
             }
         }
     };
-    let remember = if edits { Some(Remember::AcceptEdits) } else { session_rule(name, input).map(Remember::Rule) };
+    let remember = if name == "Bash" { deepseek_code_core::native_engine::permission_response::can_allow_bash_session(name, input).then_some(Remember::BashSession) } else if edits { Some(Remember::AcceptEdits) } else { session_rule(name, input).map(Remember::Rule) };
     let mut options = vec!["Yes".to_owned()];
     match &remember {
         Some(Remember::AcceptEdits) => options.push("Yes, allow all edits during this session (shift+tab)".into()),
         Some(Remember::Rule(rule)) => options.push(remember_option(rule)),
+        Some(Remember::BashSession) => options.push("Allow for Session".into()),
         _ => {}
     }
     if auto {
@@ -872,13 +829,13 @@ mod tests {
             None,
             true,
         );
-        assert_eq!(menu.options.len(), 3);
-        assert!(menu.options[1].contains("do not ask again"));
-        assert_eq!(menu.remember, None);
-        assert_eq!(menu.decide("2").grant, Some(Remember::Auto));
-        assert!(!menu.decide("3").allowed);
+        assert_eq!(menu.options.len(), 4);
+        assert_eq!(menu.options[1], "Allow for Session");
+        assert_eq!(menu.remember, Some(Remember::BashSession));
+        assert_eq!(menu.decide("3").grant, Some(Remember::Auto));
+        assert!(!menu.decide("4").allowed);
         assert!(!menu.decide("n").allowed);
-        assert!(menu.text().contains("2 switch to auto mode"));
+        assert!(menu.text().contains("3 switch to auto mode"));
     }
 
     #[test]
@@ -999,8 +956,8 @@ mod tests {
         let text = bash.text();
         assert!(text.starts_with("Bash command\nList files\n\u{254c}"), "{text}");
         assert!(text.contains("\nls -la\n\u{254c}"), "{text}");
-        assert!(text.ends_with("This command requires approval\nDo you want to proceed?\n  1. Yes\n  2. Yes, and don\u{2019}t ask again for: ls *\n  3. No\n(1/y yes, 2 yes for this session, 3/n no)"), "{text}");
-        let rule = Some(Remember::Rule("Bash(ls *)".into()));
+        assert!(text.ends_with("This command requires approval\nDo you want to proceed?\n  1. Yes\n  2. Allow for Session\n  3. No\n(1/y yes, 2 yes for this session, 3/n no)"), "{text}");
+        let rule = Some(Remember::BashSession);
         assert_eq!(bash.decide("2"), Decision { allowed: true, grant: rule, note: None });
         assert_eq!(bash.decide("y"), Decision { allowed: true, grant: None, note: None });
         assert_eq!(bash.decide("3"), Decision { allowed: false, grant: None, note: None });
@@ -1016,22 +973,14 @@ mod tests {
         assert_eq!(auto.decide("3").grant, Some(Remember::Auto));
         assert!(!auto.decide("4").allowed);
         assert!(auto.text().ends_with("(1/y yes, 2 yes for this session, 3 switch to auto mode, 4/n no)"));
-        let prefix = approval("Bash", &json!({"command":"npm run build --silent"}), None, false);
-        assert_eq!(prefix.remember, Some(Remember::Rule("Bash(npm run *)".into())));
-        assert_eq!(prefix.options[1], "Yes, and don\u{2019}t ask again for: npm run *");
-        assert_eq!(session_rule("Bash", &json!({"command":"git status --short"})).as_deref(), Some("Bash(git status *)"));
-        // Options first: the program alone, as the reference CLI offers `git *`.
-        assert_eq!(session_rule("Bash", &json!({"command":"git -C src log --oneline -3"})).as_deref(), Some("Bash(git *)"));
-        // A program with only arguments, or one that can destroy data or run
-        // code, is remembered exactly.
-        assert_eq!(session_rule("Bash", &json!({"command":"touch notes.txt"})).as_deref(), Some("Bash(touch notes.txt)"));
-        assert_eq!(session_rule("Bash", &json!({"command":"rm -rf build"})).as_deref(), Some("Bash(rm -rf build)"));
-        assert_eq!(session_rule("Bash", &json!({"command":"python3 -m pytest"})).as_deref(), Some("Bash(python3 -m pytest)"));
-        // Allow rules never match chained commands, so none is offered.
-        assert_eq!(approval("Bash", &json!({"command":"npm test && npm run lint"}), None, false).options, ["Yes", "No"]);
-        let wildcard = approval("Bash", &json!({"command":"rm -rf *"}), None, false);
-        assert_eq!(wildcard.options, ["Yes", "No"]);
-        assert!(!wildcard.decide("2").allowed);
+        for command in ["npm run build --silent", "npm test && npm run lint", "python3 -m pytest", "rm -rf build"] {
+            let menu = approval("Bash", &json!({"command":command}), None, false);
+            assert_eq!(menu.remember, Some(Remember::BashSession));
+            assert_eq!(menu.options, ["Yes", "Allow for Session", "No"]);
+        }
+        let danger = approval("Bash", &json!({"command":"rm -rf /"}), None, false);
+        assert_eq!(danger.options, ["Yes", "No"]);
+        assert!(!danger.decide("2").allowed);
         let write = approval("Write", &json!({"file_path":"a.txt","content":"x"}), None, false);
         assert!(write.text().starts_with("Write(a.txt)\n  {"), "{}", write.text());
         assert_eq!(write.remember, Some(Remember::AcceptEdits));

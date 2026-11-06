@@ -76,6 +76,7 @@ pub struct PermissionManager {
     bypass_available: std::sync::atomic::AtomicBool,
     full_access_available: std::sync::atomic::AtomicBool,
     policy_revision: Mutex<u64>,
+    bash_sessions: Mutex<std::collections::HashSet<String>>,
     auto_stats: Mutex<HashMap<String, super::auto_config::AutoStats>>,
     ruleset: Mutex<PermissionRuleset>,
     tool_permissions: Mutex<HashMap<String, ToolPermission>>,
@@ -186,6 +187,15 @@ impl PermissionManager {
         *revision = revision.wrapping_add(1);
         self.session_rules.lock().unwrap_or_else(|e| e.into_inner()).entry(conversation.to_owned()).or_default().insert(rule.to_owned(), PermissionAction::Allow);
     }
+    pub fn bash_session_allowed(&self, session: &str) -> bool {
+        self.bash_sessions.lock().unwrap_or_else(|e| e.into_inner()).contains(session)
+    }
+    pub fn set_bash_session_allowed(&self, session: &str, allowed: bool) {
+        let mut revision = self.policy_revision.lock().unwrap_or_else(|e| e.into_inner());
+        let mut sessions = self.bash_sessions.lock().unwrap_or_else(|e| e.into_inner());
+        let changed = if allowed { sessions.insert(session.into()) } else { sessions.remove(session) };
+        if changed { *revision = revision.wrapping_add(1); }
+    }
     pub fn session_directories(&self, conversation: &str) -> Vec<PathBuf> {
         self.session_directories
             .lock()
@@ -243,6 +253,7 @@ impl PermissionManager {
             bypass_available: std::sync::atomic::AtomicBool::new(false),
             full_access_available: std::sync::atomic::AtomicBool::new(false),
             policy_revision: Mutex::new(0),
+            bash_sessions: Mutex::new(Default::default()),
             auto_stats: Mutex::new(HashMap::new()),
             ruleset: Mutex::new(
                 self.ruleset
@@ -301,6 +312,7 @@ impl PermissionManager {
             bypass_available: std::sync::atomic::AtomicBool::new(false),
             full_access_available: std::sync::atomic::AtomicBool::new(false),
             policy_revision: Mutex::new(0),
+            bash_sessions: Mutex::new(Default::default()),
             auto_stats: Mutex::new(HashMap::new()),
             ruleset: Mutex::new(PermissionRuleset::new()),
             tool_permissions: Mutex::new(HashMap::new()),
@@ -684,6 +696,10 @@ impl PermissionManager {
         }
         if shell && context.tool_input["command"].as_str().is_some_and(crate::tools::is_dangerous_command) {
             return decision(self.request_confirmation(context), Mode);
+        }
+        if context.tool_name == "Bash" && self.bash_session_allowed(&context.conversation_id)
+            && context.tool_input["command"].as_str().is_some() {
+            return decision(PermissionResult::Granted, SavedApproval);
         }
         if auto && shell && context.tool_input["command"].as_str().is_some() {
             return decision(PermissionResult::Granted, Mode);
@@ -1487,6 +1503,32 @@ mod policy_tests {
             assert!(matches!(decision.result, PermissionResult::RequiresConfirmation(_)));
             assert!(!decision.classifier_eligible);
         }
+    }
+
+    #[test]
+    fn bash_session_grant_is_runtime_only_scoped_revocable_and_excludes_danger() {
+        let manager = manager(PermissionMode::AskPermissions);
+        let mut input = context("Bash");
+        input.tool_input = serde_json::json!({"command":"custom-script && npm test"});
+        manager.set_bash_session_allowed("session", true);
+        assert_eq!(manager.check_permission(&input), PermissionResult::Granted);
+        assert!(matches!(manager.check_permission(&context("Write")), PermissionResult::RequiresConfirmation(_)));
+        let child = manager.fork_session("session", "child");
+        assert!(!child.bash_session_allowed("child"));
+        assert!(!manager.bash_session_allowed("other"));
+        manager.inherit_session_rules("session", "inherited");
+        assert!(!manager.bash_session_allowed("inherited"));
+        assert!(!crate::runtime::default_permissions().bash_session_allowed("session"));
+        input.tool_input = serde_json::json!({"command":"shutdown"});
+        assert!(matches!(manager.check_permission(&input), PermissionResult::RequiresConfirmation(_)));
+        input.tool_input = serde_json::json!({"command":"custom-script && npm test"});
+        for action in [PermissionAction::Deny, PermissionAction::Confirm] {
+            manager.set_session_rules("session", HashMap::from([("Bash".into(), action)]));
+            assert_ne!(manager.check_permission(&input), PermissionResult::Granted);
+        }
+        manager.set_session_rules("session", HashMap::new());
+        manager.set_bash_session_allowed("session", false);
+        assert!(matches!(manager.check_permission(&input), PermissionResult::RequiresConfirmation(_)));
     }
 
     #[test]

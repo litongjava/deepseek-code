@@ -3,13 +3,24 @@ import { beforeEach, expect, it, vi } from 'vitest';
 import { invoke } from '@tauri-apps/api/core';
 import PermissionModeSelector from './PermissionModeSelector';
 import { useChatStore } from '../stores/useChatStore';
+import { sessionBashPermission } from '../api';
 
 vi.mock('@tauri-apps/api/core', () => ({ invoke: vi.fn() }));
+vi.mock('../api', () => ({ sessionBashPermission: vi.fn() }));
 
 beforeEach(() => {
   vi.resetAllMocks();
   localStorage.clear();
   useChatStore.getState().setPermissionMode('ask_permissions');
+});
+
+it('reads and revokes Bash permission for the selected conversation', async () => {
+  vi.mocked(sessionBashPermission).mockResolvedValueOnce({ allowed: true }).mockResolvedValueOnce({ allowed: false });
+  render(<PermissionModeSelector conversationId="current-session" />);
+  fireEvent.click(screen.getByRole('button', { name: 'Ask permissions' }));
+  fireEvent.click(await screen.findByRole('button', { name: 'Revoke session Bash permission' }));
+  await waitFor(() => expect(screen.getByText('Session Bash: Not granted')).toBeInTheDocument());
+  expect(sessionBashPermission).toHaveBeenCalledWith('current-session', true);
 });
 
 it('keeps the current mode when the backend rejects bypass and displays the reason', async () => {

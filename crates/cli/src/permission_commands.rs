@@ -43,6 +43,7 @@ pub async fn remember_commit(session: &Session, remember: &Remember) -> Result<C
         session.permissions.clone(),
     );
     Ok(match remember.clone() {
+        Remember::BashSession => anyhow::bail!("Session Bash approval requires the typed engine response"),
         Remember::Auto => {
             let config = session.approval_auto_config().await?;
             let context = crate::services::context(&session.paths)?;
@@ -125,6 +126,12 @@ fn words(argument: &str) -> Vec<&str> {
 }
 
 pub async fn handle(argument: &str, session: &mut Session) -> Result<()> {
+    if let Some(action) = argument.trim().strip_prefix("bash-session").filter(|rest| rest.is_empty() || rest.starts_with(char::is_whitespace)) {
+        anyhow::ensure!(matches!(action.trim(), "" | "show" | "revoke"), "Usage: /permissions bash-session [show|revoke]");
+        let allowed = bash_session(session, action.trim() == "revoke").await?;
+        command_eprintln!("Session Bash: {} (dangerous commands still require approval)", if allowed { "allowed" } else { "not granted" });
+        return Ok(());
+    }
     if argument.trim().is_empty() && crate::terminal::picker::available() {
         // As in the reference CLI: tabs of rules instead of a printed list.
         return crate::permissions_menu::run(session).await;
@@ -204,6 +211,7 @@ async fn launch_rule_display(session: &Session) -> Result<String> {
             session.permissions.launch_rules(&session.id),
         )
     };
+    writeln!(display, "Session Bash: {} · revoke with /permissions bash-session revoke", if bash_session(session, false).await? { "allowed; dangerous commands excluded" } else { "not granted" })?;
     display.push_str("Launch rules (command-line options):\n");
     if !launch.is_empty() {
         for (pattern, action) in launch
@@ -217,6 +225,12 @@ async fn launch_rule_display(session: &Session) -> Result<String> {
     }
     write!(display, "Saved session rules ({}):", session.id)?;
     Ok(display)
+}
+
+pub async fn bash_session(session: &Session, revoke: bool) -> Result<bool> {
+    let worker = deepseek_code_core::services::session_worker::bash_session(&session.paths.data_dir, &session.id, revoke).await?;
+    if revoke { session.permissions.set_bash_session_allowed(&session.id, false); }
+    Ok(worker.unwrap_or_else(|| session.permissions.bash_session_allowed(&session.id)))
 }
 
 fn active_launch_snapshot(

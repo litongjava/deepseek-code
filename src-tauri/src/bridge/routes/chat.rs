@@ -491,6 +491,7 @@ pub(super) async fn start_chat(
                         "session_id": deepseek_code_core::native_engine::permission_response::request_owner(&request_id).map(|owner| owner.session_id).unwrap_or_else(|| conv_id.clone()),
                         "request_id": request_id,
                         "tool_use_id": tool_use_id,
+                        "allow_session": deepseek_code_core::native_engine::permission_response::can_allow_bash_session(&tool_name, &input),
                         "tool_name": tool_name,
                         "input": input,
                     }))

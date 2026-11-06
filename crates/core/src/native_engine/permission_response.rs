@@ -11,6 +11,7 @@ pub struct RequestOwner {
     pub session_id: String,
     pub tool_use_id: String,
     pub kind: String,
+    pub tool_name: Option<String>,
     pub input: Value,
     pub plan: Option<crate::services::plan_approval::ApprovalRequest>,
     pub manager: Option<Arc<crate::permissions::PermissionManager>>,
@@ -27,9 +28,17 @@ pub fn register_owner(id: &str, session: &str, tool: &str, kind: &str, input: Va
     plan: Option<crate::services::plan_approval::ApprovalRequest>,
     manager: Option<Arc<crate::permissions::PermissionManager>>, root: Option<std::path::PathBuf>) {
     owners().lock().unwrap_or_else(|e| e.into_inner()).insert(id.into(), RequestOwner {
-        session_id: session.into(), tool_use_id: tool.into(), kind: kind.into(), input, plan, manager, root,
+        session_id: session.into(), tool_use_id: tool.into(), kind: kind.into(), tool_name: None, input, plan, manager, root,
         outcome: watch::channel(None).0,
     });
+}
+
+pub(crate) fn set_owner_tool(id: &str, tool: &str) {
+    if let Some(owner) = owners().lock().unwrap_or_else(|e| e.into_inner()).get_mut(id) { owner.tool_name = Some(tool.into()); }
+}
+
+pub fn can_allow_bash_session(tool: &str, input: &Value) -> bool {
+    tool == "Bash" && input["command"].as_str().is_some_and(|command| !command.trim().is_empty() && !crate::tools::is_dangerous_command(command))
 }
 
 pub fn request_owner(id: &str) -> Option<RequestOwner> {
@@ -63,6 +72,10 @@ pub enum PermissionResponse {
         commit: Option<Commit>,
         /// What the user added when approving ("Yes, use -5 instead"); sent
         /// to the model as a user message after the tool result.
+        note: Option<String>,
+    },
+    AllowBashForSession {
+        updated_input: Option<Value>,
         note: Option<String>,
     },
     Deny {

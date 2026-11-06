@@ -9,6 +9,7 @@ import { useParams, useNavigate, useLocation } from 'react-router-dom';
 import { IconPlus, IconVoice, IconWebSearch } from './Icons';
 import ClaudeLogo from './ClaudeLogo';
 import { getConversation, sendMessage, createConversation, getUser, updateConversation, deleteMessagesFrom, deleteMessagesTail, branchConversation, compactConversation, answerUserQuestion, respondToolPermission, getUserUsage, getGenerationStatus, stopGeneration, getContextSize, getStreamStatus, reconnectStream, getSkills, warmEngine, getProjects, getProject, createProjectConversation, attachConversationToProject, Project, getProviders } from '../api';
+import ToolPermissionPrompt from './ToolPermissionPrompt';
 import PermissionDialog, { ApprovalInfo } from './PermissionDialog';
 import { permissionApprovalAPI } from '../utils/tauriAPI';
 import { useGeneralSettingsStore } from '../stores/useGeneralSettingsStore';
@@ -727,14 +728,7 @@ const MainContent = ({ onNewChat, resetKey, tunerConfig, onOpenDocument, onArtif
                   setPermissionApproval(current => current?.id === data.request_id ? null : current);
                 }
                 if (event === 'tool_permission' && data) {
-                  setToolPermissionDialog({ request_id: data.request_id, tool_use_id: data.tool_use_id, tool_name: data.tool_name, input: data.input });
-                  setPermissionApproval({
-                    id: data.request_id,
-                    tool_name: data.tool_name,
-                    action: data.action || data.tool_name,
-                    risk_level: data.risk_level || 'medium',
-                    description: data.description || `Tool "${data.tool_name}" requires permission to execute.`,
-                  });
+                  setToolPermissionDialog({ request_id: data.request_id, tool_use_id: data.tool_use_id, tool_name: data.tool_name, input: data.input, session_id: data.session_id || convId, allow_session: data.allow_session });
                 }
                 if (event === 'message_start' && data?.usage) {
                   setTokenUsage((prev: any) => {
@@ -2008,7 +2002,7 @@ const MainContent = ({ onNewChat, resetKey, tunerConfig, onOpenDocument, onArtif
                   {researchMode && <ResearchBadge onToggle={toggleResearchMode} />}
                 </div>
                 <div className="flex flex-wrap justify-end items-center gap-2 ml-auto">
-                  {isCodeMode && <PermissionModeSelector neutral />}
+                  {isCodeMode && <PermissionModeSelector neutral conversationId={activeId} />}
                   <ModelSelector
                     currentModelString={currentModelString}
                     models={selectorModels}
@@ -2223,7 +2217,7 @@ const MainContent = ({ onNewChat, resetKey, tunerConfig, onOpenDocument, onArtif
                   </div>
                   <div className="flex flex-wrap justify-end items-center gap-3 ml-auto">
 
-                    {isCodeMode && <PermissionModeSelector neutral />}
+                    {isCodeMode && <PermissionModeSelector neutral conversationId={activeId} />}
                     <ModelSelector
                       currentModelString={currentModelString}
                       models={selectorModels}
@@ -2394,60 +2388,13 @@ const MainContent = ({ onNewChat, resetKey, tunerConfig, onOpenDocument, onArtif
         </div>
       )}
 
-      {toolPermissionDialog && (
-        <div className="fixed inset-0 z-[200] flex items-center justify-center bg-black/40">
-          <div className="bg-claude-bg border border-claude-border rounded-2xl shadow-xl w-[480px] max-h-[80vh] overflow-y-auto" onClick={e => e.stopPropagation()}>
-            <div className="px-5 pt-5 pb-3">
-              <h3 className="text-[15px] font-semibold text-claude-text mb-1 flex items-center gap-2">
-                <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/></svg>
-                Tool Permission Request
-              </h3>
-              <p className="text-[13px] text-claude-textSecondary mt-1">
-                Claude wants to use the <span className="font-mono font-semibold text-claude-text">{toolPermissionDialog.tool_name}</span> tool.
-              </p>
-            </div>
-            {toolPermissionDialog.input && Object.keys(toolPermissionDialog.input).length > 0 && (
-              <div className="px-5 pb-3">
-                <pre className="text-[12px] text-claude-textSecondary bg-claude-input border border-claude-border rounded-lg p-3 overflow-x-auto max-h-[200px] overflow-y-auto">
-                  {typeof toolPermissionDialog.input === 'string' ? toolPermissionDialog.input : JSON.stringify(toolPermissionDialog.input, null, 2)}
-                </pre>
-              </div>
-            )}
-            <div className="flex items-center justify-end gap-2 px-5 pb-4">
-              <button
-                onClick={async () => {
-                  if (!toolPermissionDialog || !activeId) return;
-                  const { request_id, tool_use_id } = toolPermissionDialog;
-                  setToolPermissionDialog(null);
-                  try {
-                    await respondToolPermission(activeId, request_id, tool_use_id, 'deny');
-                  } catch (err) {
-                    console.error('Failed to deny permission:', err);
-                  }
-                }}
-                className="px-4 py-1.5 text-[13px] text-claude-text border border-claude-border hover:bg-claude-hover rounded-lg transition-colors font-medium"
-              >
-                Deny
-              </button>
-              <button
-                onClick={async () => {
-                  if (!toolPermissionDialog || !activeId) return;
-                  const { request_id, tool_use_id } = toolPermissionDialog;
-                  setToolPermissionDialog(null);
-                  try {
-                    await respondToolPermission(activeId, request_id, tool_use_id, 'allow');
-                  } catch (err) {
-                    console.error('Failed to allow permission:', err);
-                  }
-                }}
-                className="px-4 py-1.5 text-[13px] text-white bg-[#C6613F] hover:bg-[#D97757] rounded-lg transition-colors font-medium"
-              >
-                Allow
-              </button>
-            </div>
-          </div>
-        </div>
-      )}
+      {toolPermissionDialog && <ToolPermissionPrompt key={toolPermissionDialog.request_id} request={toolPermissionDialog} onRespond={async choice => {
+        const current = toolPermissionDialog;
+        const target = current.session_id || activeId;
+        if (!target) throw new Error('Permission session unavailable');
+        await respondToolPermission(target, current.request_id, current.tool_use_id, choice);
+        setToolPermissionDialog(pending => pending?.request_id === current.request_id ? null : pending);
+      }} />}
 
       {permissionApproval && (
         <PermissionDialog

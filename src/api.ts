@@ -1013,12 +1013,17 @@ export async function respondToolPermission(
   conversationId: string,
   requestId: string,
   toolUseId: string,
-  behavior: 'allow' | 'deny'
+  behavior: 'allow' | 'deny' | 'allow_session'
 ): Promise<{ ok: boolean }> {
   const res = await request(`/conversations/${conversationId}/permission`, {
     method: 'POST',
     body: JSON.stringify({ request_id: requestId, tool_use_id: toolUseId, behavior }),
   });
+  return res.json();
+}
+
+export async function sessionBashPermission(conversationId: string, revoke = false): Promise<{ allowed: boolean }> {
+  const res = await request(`/conversations/${conversationId}/bash-session`, { method: revoke ? 'DELETE' : 'GET' });
   return res.json();
 }
 
