@@ -186,6 +186,33 @@ pub fn fill_host_from_authority(headers: &mut HeaderMap, uri: &axum::http::Uri) 
     }
 }
 
+/// Cache policy for the served web UI. Vite names files under `/assets/` by their
+/// content hash, so browsers may keep them forever and skip revalidation; every
+/// other path (index.html and the SPA fallback) is revalidated so a new build loads.
+pub fn static_cache_control(path: &str) -> &'static str {
+    if path.starts_with("/assets/") {
+        "public, max-age=31536000, immutable"
+    } else {
+        "no-cache"
+    }
+}
+
+/// Adds `static_cache_control` to successful static responses.
+pub async fn static_cache_headers(
+    request: axum::extract::Request,
+    next: axum::middleware::Next,
+) -> axum::response::Response {
+    let policy = static_cache_control(request.uri().path());
+    let mut response = next.run(request).await;
+    let status = response.status();
+    if status.is_success() || status == StatusCode::NOT_MODIFIED {
+        response
+            .headers_mut()
+            .insert(header::CACHE_CONTROL, header::HeaderValue::from_static(policy));
+    }
+    response
+}
+
 /// Credentials from `x-api-key`, `Authorization: Bearer`, and the session cookie.
 /// A request passes when any of them is valid, so a stale header left by another
 /// mode does not hide a valid cookie.
@@ -378,6 +405,15 @@ mod tests {
         let mut bare = HeaderMap::new();
         fill_host_from_authority(&mut bare, &"/".parse().unwrap());
         assert!(bare.get(header::HOST).is_none());
+    }
+
+    #[test]
+    fn hashed_assets_are_immutable_and_the_shell_is_revalidated() {
+        assert_eq!(static_cache_control("/assets/index-DeEXW22c.js"), "public, max-age=31536000, immutable");
+        assert_eq!(static_cache_control("/"), "no-cache");
+        assert_eq!(static_cache_control("/index.html"), "no-cache");
+        assert_eq!(static_cache_control("/chat/123"), "no-cache");
+        assert_eq!(static_cache_control("/manifest.webmanifest"), "no-cache");
     }
 
     #[test]

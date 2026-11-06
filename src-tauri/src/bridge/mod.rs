@@ -475,15 +475,23 @@ impl BridgeServer {
             .merge(server_mode_routes(policy.clone(), options.is_https()))
             .merge(routes::github::routes(options.is_https()));
         if let Some(static_dir) = &options.static_dir {
+            let files = tower_http::services::ServeDir::new(static_dir)
+                .fallback(tower_http::services::ServeFile::new(static_dir.join("index.html")));
             app = app.fallback_service(
-                tower_http::services::ServeDir::new(static_dir)
-                    .fallback(tower_http::services::ServeFile::new(static_dir.join("index.html"))),
+                axum::Router::new()
+                    .fallback_service(files)
+                    .layer(middleware::from_fn(server_mode::static_cache_headers)),
             );
         }
-        let app = app
+        let mut app = app
             .layer(auth_middleware)
             .layer(cors)
             .with_state(state);
+        if options.is_server_mode() {
+            // Remote clients may be on slow links. The default predicate skips
+            // event streams, images and tiny bodies, so chat streaming is unchanged.
+            app = app.layer(tower_http::compression::CompressionLayer::new());
+        }
 
         let ports: Vec<u16> = if options.try_next_ports {
             (0..5).filter_map(|offset| options.port.checked_add(offset)).collect()

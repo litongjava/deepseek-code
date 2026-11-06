@@ -1,6 +1,6 @@
-import { fireEvent, render, screen, waitFor } from '@testing-library/react';
+import { act, fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import PlanApprovalController from './PlanApprovalController';
+import PlanApprovalController, { PLAN_ACTIVE_POLL_MS, PLAN_IDLE_POLL_MS } from './PlanApprovalController';
 import { useToolStore } from '../../stores/useToolStore';
 import { useChatStore } from '../../stores/useChatStore';
 import { request } from '../../api/client';
@@ -44,5 +44,26 @@ describe('PlanApprovalController', () => {
     complete({ json: async () => ({ ok: true, status: 'applied', result: { mode: 'ask' } }) } as Response);
     await waitFor(() => expect(screen.queryByRole('dialog')).not.toBeInTheDocument());
     expect(useChatStore.getState().permissionMode).toBe('ask_permissions');
+  });
+
+  it('checks for approvals slowly between turns and quickly during one', async () => {
+    vi.useFakeTimers();
+    try {
+      vi.mocked(request).mockResolvedValue({ json: async () => ({ requests: [] }) } as Response);
+      const view = render(<PlanApprovalController sessionId="session-a" />);
+      await act(async () => {});
+      expect(request).toHaveBeenCalledTimes(1);
+      await act(async () => { vi.advanceTimersByTime(PLAN_ACTIVE_POLL_MS * 3); });
+      expect(request).toHaveBeenCalledTimes(1);
+      await act(async () => { vi.advanceTimersByTime(PLAN_IDLE_POLL_MS); });
+      expect(request).toHaveBeenCalledTimes(2);
+      view.rerender(<PlanApprovalController sessionId="session-a" executing />);
+      await act(async () => {});
+      expect(request).toHaveBeenCalledTimes(3);
+      await act(async () => { vi.advanceTimersByTime(PLAN_ACTIVE_POLL_MS); });
+      expect(request).toHaveBeenCalledTimes(4);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });

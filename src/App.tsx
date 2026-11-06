@@ -99,19 +99,21 @@ const Layout = () => {
 
   useEffect(() => {
     let cancelled = false;
-    const check = async () => {
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    // Only the request is retried, with backoff: a server whose status has no
+    // `gitBash` (Linux, macOS) needs no check, and a slow link is not flooded.
+    const check = async (attempt: number) => {
+      let status: Awaited<ReturnType<typeof getSystemStatus>>;
       try {
-        const status = await getSystemStatus();
-        if (cancelled) return;
-        if (status.gitBash.required && !status.gitBash.found) {
-          setNeedsGitBash(true);
-        }
+        status = await getSystemStatus();
       } catch {
-        if (!cancelled) setTimeout(check, 1500);
+        if (!cancelled && attempt < 5) timer = setTimeout(() => check(attempt + 1), 1500 * 2 ** attempt);
+        return;
       }
+      if (!cancelled && status.gitBash?.required && !status.gitBash.found) setNeedsGitBash(true);
     };
-    check();
-    return () => { cancelled = true; };
+    void check(0);
+    return () => { cancelled = true; if (timer) clearTimeout(timer); };
   }, []);
 
   const [documentPanelDoc, setDocumentPanelDoc] = useState<DocumentInfo | null>(null);

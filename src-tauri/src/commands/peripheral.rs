@@ -410,14 +410,30 @@ pub fn voice_cancel(host: tauri::State<'_, PeripheralHost>, id: String) {
         let _ = sender.send(true);
     }
 }
+/// Reads a raw-body voice upload: bytes plus `x-voice-id` and `x-voice-mime`.
+fn voice_upload(request: &tauri::ipc::Request<'_>) -> Result<(String, Vec<u8>, String), String> {
+    let tauri::ipc::InvokeBody::Raw(audio) = request.body() else {
+        return Err("Expected the recording as raw bytes".into());
+    };
+    let header = |name: &str| {
+        request
+            .headers()
+            .get(name)
+            .and_then(|value| value.to_str().ok())
+            .map(str::to_owned)
+            .ok_or_else(|| format!("Missing {name} header"))
+    };
+    Ok((header("x-voice-id")?, audio.clone(), header("x-voice-mime")?))
+}
+
 #[tauri::command]
 pub async fn voice_transcribe(
     app: tauri::AppHandle,
     host: tauri::State<'_, PeripheralHost>,
-    id: String,
-    audio: Vec<u8>,
-    mime: String,
+    request: tauri::ipc::Request<'_>,
 ) -> Result<String, String> {
+    // The recording arrives as a raw IPC body; its job id and type ride in headers.
+    let (id, audio, mime) = voice_upload(&request)?;
     let receiver = host
         .voice_jobs
         .lock()

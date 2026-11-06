@@ -4,7 +4,14 @@ import { useToolStore } from '../../stores/useToolStore';
 import { useChatStore } from '../../stores/useChatStore';
 import PlanApprovalDialog, { PlanApprovalRequest, PlanApprovalResponse } from './PlanApprovalDialog';
 
-export default function PlanApprovalController({ sessionId }: { sessionId: string | null }) {
+/** Plan approvals arrive during a turn; between turns a slow check is enough. */
+export const PLAN_ACTIVE_POLL_MS = 2000;
+export const PLAN_IDLE_POLL_MS = 30000;
+
+export default function PlanApprovalController({ sessionId, executing = false }: { sessionId: string | null; executing?: boolean }) {
+  const executingRef = useRef(executing);
+  executingRef.current = executing;
+  const wake = useRef<() => void>(() => {});
   const incoming = useToolStore(state => state.askUserDialog?.planApprovalRequest);
   const [plan, setPlan] = useState<PlanApprovalRequest | null>(null);
   const [hidden, setHidden] = useState(false);
@@ -18,8 +25,9 @@ export default function PlanApprovalController({ sessionId }: { sessionId: strin
     setOpened(false);
     if (!sessionId) return;
     const abort = new AbortController();
-    let timer: ReturnType<typeof setTimeout>;
+    let timer: ReturnType<typeof setTimeout> | undefined;
     async function refresh() {
+      clearTimeout(timer);
       try {
         const response = await apiRequest(`/conversations/${encodeURIComponent(sessionId!)}/pending-questions`, { signal: abort.signal });
         const data = await response.json();
@@ -31,12 +39,19 @@ export default function PlanApprovalController({ sessionId }: { sessionId: strin
         });
       } catch { /* A disconnected read does not resolve a pending approval. */ }
       finally {
-        if (!abort.signal.aborted) timer = setTimeout(refresh, 2000);
+        clearTimeout(timer);
+        if (!abort.signal.aborted && !document.hidden) {
+          timer = setTimeout(refresh, executingRef.current ? PLAN_ACTIVE_POLL_MS : PLAN_IDLE_POLL_MS);
+        }
       }
     }
+    wake.current = () => { void refresh(); };
     void refresh();
-    return () => { abort.abort(); clearTimeout(timer); };
+    const onVisible = () => { if (!document.hidden) void refresh(); };
+    document.addEventListener('visibilitychange', onVisible);
+    return () => { abort.abort(); clearTimeout(timer); document.removeEventListener('visibilitychange', onVisible); };
   }, [sessionId]);
+  useEffect(() => { if (executing) wake.current(); }, [executing]);
 
   useEffect(() => {
     if (incoming?.sessionId === sessionId && !resolved.current.has(incoming.requestId)) setPlan(incoming);

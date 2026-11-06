@@ -34,12 +34,17 @@ export function hasWebFallback(command: string): boolean {
  * fallback when one exists and otherwise rejects with `DesktopOnlyError`, so
  * callers can show a clear message instead of failing on a missing Tauri runtime.
  */
-export async function invokeDesktop<T = unknown>(command: string, args?: Args): Promise<T> {
+export async function invokeDesktop<T = unknown>(
+  command: string,
+  args?: Args | Uint8Array | ArrayBuffer,
+  options?: { headers: Record<string, string> },
+): Promise<T> {
   if (hasNativeDesktop()) {
     const { invoke } = await import('@tauri-apps/api/core');
-    return invoke<T>(command, args);
+    // Byte payloads cross IPC as raw binary instead of a JSON number array.
+    return invoke<T>(command, args as never, options);
   }
   const fallback = webFallbacks[command];
-  if (fallback) return (await fallback(args ?? {})) as T;
+  if (fallback && !(args instanceof Uint8Array) && !(args instanceof ArrayBuffer)) return (await fallback(args ?? {})) as T;
   throw new DesktopOnlyError(command);
 }

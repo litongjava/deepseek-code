@@ -24,7 +24,7 @@ const GitBashRequiredModal: React.FC<Props> = ({ onResolved }) => {
     setError(null);
     try {
       const status = await getSystemStatus();
-      if (status.gitBash.found) {
+      if (status.gitBash?.found !== false) {
         onResolved();
       } else {
         setError('仍未检测到 git-bash。请确认安装完成，或重启应用后再试。');

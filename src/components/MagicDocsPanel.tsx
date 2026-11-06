@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react';
 import { invokeDesktop as invoke } from '../platform/native';
 import { listProjects, type Project } from '../api/projects';
+import { startVisiblePolling } from '../hooks/useVisiblePolling';
 
 interface Document { id:string; path:string; title:string; auto_update:boolean; update_count:number }
 interface Preview { id:string; document_id:string; original:string; proposed:string; diff?:string }
@@ -26,8 +27,8 @@ export default function MagicDocsPanel() {
     setSnapshot(null); if (!project) return;
     let active = true;
     const refresh = () => invoke<Snapshot>('peripheral_command', {request:{action:'magic',project_id:project,operation:{action:'list'}}}).then(data => {if(active)setSnapshot(data);}).catch(e=>{if(active)setError(String(e));});
-    void refresh(); const timer = setInterval(() => void refresh(), 2000);
-    return () => { active=false; clearInterval(timer); };
+    const stop = startVisiblePolling(refresh, 2000);
+    return () => { active=false; stop(); };
   }, [project]);
   const run = async (operation:Record<string,unknown>, message:string) => {
     setBusy(true); setError(''); setNotice('');

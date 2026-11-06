@@ -13,7 +13,7 @@ it('calls the Tauri command in the Desktop app', async () => {
   vi.mocked(invoke).mockResolvedValueOnce('native');
   const { invokeDesktop } = await import('./native');
   await expect(invokeDesktop('list_slash_commands')).resolves.toBe('native');
-  expect(invoke).toHaveBeenCalledWith('list_slash_commands', undefined);
+  expect(invoke).toHaveBeenCalledWith('list_slash_commands', undefined, undefined);
 });
 
 it('serves peripheral requests through the Bridge in a browser', async () => {
@@ -36,4 +36,20 @@ it('opens external links in a new tab without Tauri', async () => {
   const { invokeDesktop } = await import('./native');
   await invokeDesktop('open_external_url', { url: 'https://example.com' });
   expect(open).toHaveBeenCalledWith('https://example.com', '_blank', 'noopener,noreferrer');
+});
+
+it('sends byte payloads to Desktop as raw IPC bodies with headers', async () => {
+  (window as any).__TAURI_INTERNALS__ = {};
+  vi.mocked(invoke).mockResolvedValueOnce('text');
+  const { invokeDesktop } = await import('./native');
+  const audio = new Uint8Array([1, 2, 3]);
+  const options = { headers: { 'x-voice-id': 'job', 'x-voice-mime': 'audio/webm' } };
+  await expect(invokeDesktop('voice_transcribe', audio, options)).resolves.toBe('text');
+  expect(invoke).toHaveBeenCalledWith('voice_transcribe', audio, options);
+});
+
+it('never passes byte payloads to a JSON web fallback', async () => {
+  const { invokeDesktop, DesktopOnlyError } = await import('./native');
+  await expect(invokeDesktop('peripheral_command', new Uint8Array([1]))).rejects.toBeInstanceOf(DesktopOnlyError);
+  expect(request).not.toHaveBeenCalled();
 });

@@ -45,7 +45,7 @@ describe('audio recording lifecycle', () => {
     await screen.findByText('停止并转写');
     fireEvent.click(screen.getByText('停止并转写'));
     await waitFor(() => expect(screen.getByLabelText('转写文本')).toHaveValue('Recognized speech'));
-    expect(invoke).toHaveBeenCalledWith('voice_transcribe', {id:'recording-id',audio:[1,2,3,4],mime:'audio/webm'});
+    expect(invoke).toHaveBeenCalledWith('voice_transcribe', new Uint8Array([1,2,3,4]), {headers:{'x-voice-id':'recording-id','x-voice-mime':'audio/webm'}});
     expect(stopTrack).toHaveBeenCalledTimes(1);
     fireEvent.click(screen.getByText('使用文本'));
     expect(result).toHaveBeenCalledExactlyOnceWith('Recognized speech'); expect(close).toHaveBeenCalledTimes(1);

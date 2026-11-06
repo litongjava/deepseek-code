@@ -10,6 +10,7 @@ import TeamContextSharing from './TeamContextSharing';
 import McpHosts from './McpHosts';
 import InstalledPlugins from './InstalledPlugins';
 import PeripheralDiagnostics from './PeripheralDiagnostics';
+import { startVisiblePolling } from '../hooks/useVisiblePolling';
 
 interface Memory { id: string; title: string; content: string; tags: string[]; revision: number; deleted: boolean }
 interface Snapshot {
@@ -57,8 +58,7 @@ export default function ServicesSettings() {
       if (data.voice) {setVoiceUrl(data.voice.endpoint); setVoiceModel(data.voice.model);}
       if (data.team) {setTeamUrl(data.team.endpoint); setTeamId(data.team.team);}
     }).catch(failure => setError(String(failure)));
-    const timer = setInterval(() => {refresh().catch(failure => setError(String(failure)));}, 3000);
-    return () => clearInterval(timer);
+    return startVisiblePolling(() => refresh().catch(failure => setError(String(failure))), 3000, { immediate: false });
   }, [refresh]);
   const run = async (operation: () => Promise<unknown>, success: string) => {
     setBusy(true); setError(''); setMessage('');

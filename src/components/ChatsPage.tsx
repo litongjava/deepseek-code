@@ -101,12 +101,7 @@ const ChatsPage = () => {
   const [pickerPos, setPickerPos] = useState<{ top: number; left: number } | null>(null);
 
   useEffect(() => {
-    // Inject Spectral font for the title
-    const link = document.createElement('link');
-    link.href = 'https://fonts.googleapis.com/css2?family=Spectral:ital,wght@0,300;0,400;0,500;0,600;0,700;0,800;1,300&display=swap';
-    link.rel = 'stylesheet';
-    document.head.appendChild(link);
-
+    // Spectral for the title is bundled locally (index.css), so no font request leaves the server.
     fetchChats();
 
     const handleClickOutside = (event: MouseEvent) => {
@@ -117,7 +112,6 @@ const ChatsPage = () => {
     document.addEventListener('mousedown', handleClickOutside);
 
     return () => {
-      document.head.removeChild(link);
       document.removeEventListener('mousedown', handleClickOutside);
     };
   }, []);

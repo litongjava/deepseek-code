@@ -1,3 +1,5 @@
+import { expandSnapshotParts, SNAPSHOT_PARTS_QUERY } from '../utils/snapshotParts';
+import { shareInFlight } from '../utils/inflight';
 import { handleUnauthorized } from '../utils/login';
 import { formatChatStreamError } from '../utils/chatErrors';
 import { processMetadata, restoreProcessMetadata } from '../features/trajectory/model';
@@ -134,12 +136,17 @@ export async function createConversation(title?: string, model?: string, extras?
 
 // ============ getConversation ============
 
-export async function getConversation(id: string) {
+/** Concurrent readers of one conversation (main view, header) share a request. */
+export function getConversation(id: string): ReturnType<typeof fetchConversation> {
+  return shareInFlight(`conversation:${id}`, () => fetchConversation(id));
+}
+
+async function fetchConversation(id: string) {
   console.log('[API] getConversation called for id:', id);
   if (isTauriApp) {
     try {
       await waitForApiReady();
-      const res = await fetch(`${API_BASE}/conversations/${id}`, {
+      const res = await fetch(`${API_BASE}/conversations/${id}?${SNAPSHOT_PARTS_QUERY}`, {
         headers: { ...(getToken() ? { 'Authorization': `Bearer ${getToken()}` } : {}) },
       });
       if (!res.ok) {
@@ -163,7 +170,7 @@ export async function getConversation(id: string) {
         }
         throw new Error('Conversation not found');
       }
-      const data = await res.json();
+      const data = expandSnapshotParts(await res.json());
       const cachedMessages = getLocalMessages(id);
       console.log('[API] getConversation from SQLite, messages:', data.messages?.length || 0);
       return {

@@ -36,7 +36,8 @@ vi.mock('@tauri-apps/api/core', () => ({
 vi.mock('../platform/native', async importOriginal => {
   const actual = await importOriginal<typeof import('../platform/native')>();
   const { invoke } = await import('@tauri-apps/api/core');
-  return { ...actual, invokeDesktop: (command: string, args?: Record<string, unknown>) => invoke(command, args) };
+  return { ...actual, invokeDesktop: (command: string, args?: unknown, options?: unknown) =>
+    options === undefined ? invoke(command, args as never) : invoke(command, args as never, options as never) };
 });
 
 // Mock window.__TAURI__ for secureStorage fallback detection

@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { MessageSquare } from 'lucide-react';
 import { useBusySendStore } from '../../stores/useBusySendStore';
 import type { QueueItem } from '../../api/queue';
@@ -50,25 +50,48 @@ function QueueRow({ session, item, busy, canSteer }: { session: string; item: Qu
     <button disabled={!editable} aria-label="Delete queued message" onClick={() => void useBusySendStore.getState().mutate(session, item, 'delete')}>×</button>
   </div>;
 }
+/** Queue polling: fast while a turn runs or messages wait, slow when idle. */
+export const QUEUE_ACTIVE_POLL_MS = 1500;
+export const QUEUE_IDLE_POLL_MS = 30000;
+
 export default function QueueDock({ session, executing = false }: { session: string; executing?: boolean }) {
   const queue = useBusySendStore(state => state.queues[session]);
   const [expanded, setExpanded] = useState(false);
-  useEffect(() => {
-    let disposed = false;
-    let timer: ReturnType<typeof setTimeout>;
-    const refresh = async () => {
-      await useBusySendStore.getState().refresh(session);
-      if (!disposed) timer = setTimeout(refresh, 1500);
-    };
-    void refresh();
-    const onFocus = () => { void useBusySendStore.getState().refresh(session); };
-    window.addEventListener('focus', onFocus);
-    return () => { disposed = true; clearTimeout(timer); window.removeEventListener('focus', onFocus); };
-  }, [session]);
   const items = queue?.items.filter(item => item.state === 'queued' || item.state === 'claimed') || [];
   const pending = queue?.pending || [];
   const count = items.length + pending.length;
-  if (!count && !queue?.error) return null;
+  const active = executing || count > 0;
+  const activeRef = useRef(active);
+  activeRef.current = active;
+  const wake = useRef<() => void>(() => {});
+  useEffect(() => {
+    let disposed = false;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const schedule = () => {
+      clearTimeout(timer);
+      // A hidden tab waits for visibilitychange instead of polling.
+      if (!disposed && !document.hidden) timer = setTimeout(refresh, activeRef.current ? QUEUE_ACTIVE_POLL_MS : QUEUE_IDLE_POLL_MS);
+    };
+    const refresh = async () => {
+      clearTimeout(timer);
+      await useBusySendStore.getState().refresh(session);
+      schedule();
+    };
+    wake.current = () => { void refresh(); };
+    void refresh();
+    const onVisible = () => { if (!document.hidden) void refresh(); };
+    window.addEventListener('focus', onVisible);
+    document.addEventListener('visibilitychange', onVisible);
+    return () => {
+      disposed = true; clearTimeout(timer);
+      window.removeEventListener('focus', onVisible);
+      document.removeEventListener('visibilitychange', onVisible);
+    };
+  }, [session]);
+  // A turn starting may queue or claim messages: check now, then poll fast.
+  useEffect(() => { if (executing) wake.current(); }, [executing]);
+  // Without queued messages a failed read changes nothing for the user.
+  if (!count) return null;
   return <section className="queue-dock" aria-label="Queued messages">
     {count > 1 && <button className="queue-header" aria-expanded={expanded} onClick={() => setExpanded(value => !value)}>{expanded ? '▾' : '▸'} Queued ({count})</button>}
     {queue?.paused && count > 0 && <button onClick={() => void useBusySendStore.getState().resume(session)}>Queue paused · Resume</button>}

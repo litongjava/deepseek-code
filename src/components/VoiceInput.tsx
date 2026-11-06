@@ -71,9 +71,12 @@ const VoiceInput: React.FC<VoiceInputProps> = ({ onResult, onClose, isOpen }) =>
         setStatus('processing');
         try {
           const blob = new Blob(chunks, { type: recording.mimeType });
-          const audio = Array.from(new Uint8Array(await blob.arrayBuffer()));
+          const audio = new Uint8Array(await blob.arrayBuffer());
           if (current !== generation.current) return;
-          const transcript = await invoke<string>('voice_transcribe', { id, audio, mime: recording.mimeType.split(';')[0] });
+          // Raw bytes over IPC; the JSON number array this replaces was 3-4x larger.
+          const transcript = await invoke<string>('voice_transcribe', audio, {
+            headers: { 'x-voice-id': id, 'x-voice-mime': recording.mimeType.split(';')[0] },
+          });
           if (current !== generation.current) return;
           job.current = null;
           setText(previous => previous ? `${previous} ${transcript}` : transcript); setStatus('done');

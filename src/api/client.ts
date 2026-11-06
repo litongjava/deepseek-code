@@ -116,7 +116,7 @@ export async function request(path: string, options: RequestInit = {}) {
 // 系统状态（检测 git-bash 等运行时依赖）
 export async function getSystemStatus(): Promise<{
   platform: string;
-  gitBash: { required: boolean; found: boolean; path: string | null };
+  gitBash?: { required: boolean; found: boolean; path: string | null };
 }> {
   await waitForApiReady();
   const res = await fetch(`${API_BASE}/system-status`);

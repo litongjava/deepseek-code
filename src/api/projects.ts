@@ -1,5 +1,6 @@
 import { useWorkspaceModeStore } from '../stores/useWorkspaceModeStore';
 import { request } from './client';
+import { shareInFlight } from '../utils/inflight';
 
 export interface Project {
   id: string;
@@ -25,10 +26,12 @@ export interface ProjectFile {
   created_at: string;
 }
 
-export async function listProjects(): Promise<Project[]> {
-  const res = await request('/projects');
-  const data = await res.json();
-  return Array.isArray(data) ? data : (Array.isArray(data?.projects) ? data.projects : []);
+export function listProjects(): Promise<Project[]> {
+  return shareInFlight('projects', async () => {
+    const res = await request('/projects');
+    const data = await res.json();
+    return Array.isArray(data) ? data : (Array.isArray(data?.projects) ? data.projects : []);
+  });
 }
 
 export async function getProjects(): Promise<Project[]> {

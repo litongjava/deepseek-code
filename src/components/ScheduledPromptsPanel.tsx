@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react';
 import { invokeDesktop as invoke } from '../platform/native';
 import { listProjects, type Project } from '../api/projects';
+import { startVisiblePolling } from '../hooks/useVisiblePolling';
 
 interface Task { cron_id: string; description: string; prompt: string; schedule: string; state: string; output: string | null; error: string | null }
 interface Service { name: string; state: string; error: string | null }
@@ -25,8 +26,8 @@ export default function ScheduledPromptsPanel() {
         }
       } catch (e) { if (active) setError(String(e)); }
     };
-    void refresh(); const timer = setInterval(() => void refresh(), 2000);
-    return () => { active = false; clearInterval(timer); };
+    const stop = startVisiblePolling(refresh, 2000);
+    return () => { active = false; stop(); };
   }, [project]);
   const run = async (request: Record<string, unknown>) => {
     setBusy(true); setError('');

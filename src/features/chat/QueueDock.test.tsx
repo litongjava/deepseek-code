@@ -1,6 +1,6 @@
 import { beforeEach, afterEach, expect, it, vi } from 'vitest';
 import { render, screen, fireEvent, cleanup, waitFor, act } from '@testing-library/react';
-import QueueDock from './QueueDock';
+import QueueDock, { QUEUE_ACTIVE_POLL_MS, QUEUE_IDLE_POLL_MS } from './QueueDock';
 import { useBusySendStore } from '../../stores/useBusySendStore';
 import type { QueueItem } from '../../api/queue';
 const item = (id = 1): QueueItem => ({ id, sessionId: 'a', requestId: `r${id}`, revision: 1, content: 'hello', mode: 'next_turn', state: 'queued' });
@@ -78,4 +78,38 @@ it('does not steer an idle execution or a paused queue', () => {
   fireEvent.click(steer);
   expect(mutate).not.toHaveBeenCalled();
   expect((screen.getByRole('button', { name: 'Delete queued message' }) as HTMLButtonElement).disabled).toBe(false);
+});
+it('polls fast only while a turn runs and pauses in a hidden tab', async () => {
+  vi.useFakeTimers();
+  try {
+    const refresh = vi.mocked(useBusySendStore.getState().refresh);
+    const view = render(<QueueDock session="a" />);
+    await act(async () => {});
+    expect(refresh).toHaveBeenCalledTimes(1);
+    await act(async () => { vi.advanceTimersByTime(QUEUE_ACTIVE_POLL_MS * 3); });
+    expect(refresh).toHaveBeenCalledTimes(1);
+    await act(async () => { vi.advanceTimersByTime(QUEUE_IDLE_POLL_MS); });
+    expect(refresh).toHaveBeenCalledTimes(2);
+    view.rerender(<QueueDock session="a" executing />);
+    await act(async () => {});
+    expect(refresh).toHaveBeenCalledTimes(3);
+    await act(async () => { vi.advanceTimersByTime(QUEUE_ACTIVE_POLL_MS); });
+    expect(refresh).toHaveBeenCalledTimes(4);
+    Object.defineProperty(document, 'hidden', { configurable: true, value: true });
+    await act(async () => { vi.advanceTimersByTime(QUEUE_ACTIVE_POLL_MS); });
+    const hiddenCalls = refresh.mock.calls.length;
+    await act(async () => { vi.advanceTimersByTime(QUEUE_IDLE_POLL_MS * 2); });
+    expect(refresh).toHaveBeenCalledTimes(hiddenCalls);
+    Object.defineProperty(document, 'hidden', { configurable: true, value: false });
+    await act(async () => { document.dispatchEvent(new Event('visibilitychange')); });
+    expect(refresh).toHaveBeenCalledTimes(hiddenCalls + 1);
+  } finally {
+    delete (document as { hidden?: boolean }).hidden;
+    vi.useRealTimers();
+  }
+});
+it('does not show a failed read when nothing is queued', () => {
+  useBusySendStore.setState({ queues: { a: { items: [], pending: [], paused: false, busy: [], error: 'Cannot reach the server.' } as never } });
+  render(<QueueDock session="a" />);
+  expect(screen.queryByRole('alert')).toBeNull();
 });

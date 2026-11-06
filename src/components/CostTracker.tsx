@@ -1,5 +1,6 @@
 import React, { useState, useEffect, useCallback } from 'react';
 import { Coins, TrendingUp, BarChart3, ChevronDown, ChevronUp, AlertTriangle, Settings, Save } from 'lucide-react';
+import { startVisiblePolling } from '../hooks/useVisiblePolling';
 
 interface CostSummary {
   total_input_tokens: number;
@@ -91,8 +92,7 @@ export default function CostTracker({ conversationId, compact = false, apiBase =
 
   useEffect(() => {
     fetchDashboard();
-    const interval = setInterval(fetchUsage, 30000);
-    return () => clearInterval(interval);
+    return startVisiblePolling(fetchUsage, 30000, { immediate: false });
   }, [fetchDashboard, fetchUsage]);
 
   useEffect(() => {

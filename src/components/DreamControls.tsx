@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from 'react';
 import { invokeDesktop as invoke } from '../platform/native';
+import { startVisiblePolling } from '../hooks/useVisiblePolling';
 
 interface Config { enabled: boolean; provider: string; model: string; min_hours: number; min_memories: number }
 interface Snapshot {
@@ -32,9 +33,8 @@ export default function DreamControls({ onComplete }: { onComplete: () => void }
         runs = next.memory.runs;
       } catch (failure) { if (active) setError(String(failure)); }
     };
-    void refresh();
-    const timer = setInterval(() => void refresh(), 1500);
-    return () => { active = false; clearInterval(timer); };
+    const stop = startVisiblePolling(refresh, 1500);
+    return () => { active = false; stop(); };
   }, []);
   const run = async (request: Record<string, unknown>, message: string) => {
     setBusy(true); setError(''); setNotice('');

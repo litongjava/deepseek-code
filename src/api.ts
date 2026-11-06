@@ -1,3 +1,4 @@
+import { expandSnapshotParts, SNAPSHOT_PARTS_QUERY } from './utils/snapshotParts';
 import { handleUnauthorized } from './utils/login';
 import { readChatResponseError, formatChatStreamError } from './utils/chatErrors';
 import { pendingMarkerLength } from './utils/streamMarkers';
@@ -24,6 +25,7 @@ import {
 } from './services/localStorageService';
 import type { LocalConversation } from './services/localStorageService';
 import { trackProviderDeletion, trackConversationDeletion } from './services/syncService';
+import { shareInFlight } from './utils/inflight';
 import { API_BASE, hasBridge, hasNativeDesktop, useDevProxy, detectBridgePort, waitForApiReady, bridgeOrigin } from './services/bridgeConnection';
 // True whenever a Bridge serves this page; see services/bridgeConnection.
 const isTauriApp = hasBridge;
@@ -139,7 +141,7 @@ async function request(path: string, options: RequestInit = {}) {
 // 系统状态（检测 git-bash 等运行时依赖）
 export async function getSystemStatus(): Promise<{
   platform: string;
-  gitBash: { required: boolean; found: boolean; path: string | null };
+  gitBash?: { required: boolean; found: boolean; path: string | null };
 }> {
   await waitForApiReady();
   const res = await fetch(`${API_BASE}/system-status`);
@@ -506,10 +508,12 @@ export interface ProjectFile {
   created_at: string;
 }
 
-export async function getProjects(): Promise<Project[]> {
-  const res = await request('/projects');
-  const data = await res.json();
-  return Array.isArray(data) ? data : (Array.isArray(data?.projects) ? data.projects : []);
+export function getProjects(): Promise<Project[]> {
+  return shareInFlight('projects', async () => {
+    const res = await request('/projects');
+    const data = await res.json();
+    return Array.isArray(data) ? data : (Array.isArray(data?.projects) ? data.projects : []);
+  });
 }
 
 export async function createProject(name: string, description: string = "", folders: string[] = []): Promise<Project> {
@@ -752,19 +756,24 @@ export async function createConversation(title?: string, model?: string, extras?
   };
 }
 
-export async function getConversation(id: string) {
+/** Concurrent readers of one conversation (main view, header) share a request. */
+export function getConversation(id: string): ReturnType<typeof fetchConversation> {
+  return shareInFlight(`conversation:${id}`, () => fetchConversation(id));
+}
+
+async function fetchConversation(id: string) {
   console.log('[API] getConversation called for id:', id);
   if (isTauriApp || useDevProxy) {
     try {
       await waitForApiReady();
-      const res = await fetch(`${API_BASE}/conversations/${id}`, {
+      const res = await fetch(`${API_BASE}/conversations/${id}?${SNAPSHOT_PARTS_QUERY}`, {
         headers: { ...(getToken() ? { 'Authorization': `Bearer ${getToken()}` } : {}) },
       });
       if (!res.ok) {
         console.error('[API] getConversation HTTP error:', res.status);
         throw new Error('Conversation not found');
       }
-      const data = await res.json();
+      const data = expandSnapshotParts(await res.json());
       const cachedMessages = getLocalMessages(id);
       console.log('[API] getConversation from SQLite, messages:', data.messages?.length || 0);
       return {
@@ -1145,6 +1154,11 @@ export async function testSearchSettings(settings: SearchSettingsUpdate): Promis
 let providerMigration: Promise<void> | undefined;
 async function migrateLegacyProviders() {
   if (localStorage.getItem('providers_file_migrated_v1')) return;
+  // Nothing to migrate on a new browser: skip the extra read.
+  if (getLocalProviders().length === 0) {
+    localStorage.setItem('providers_file_migrated_v1', '1');
+    return;
+  }
   if (!providerMigration) providerMigration = (async () => {
     const data = await providerRequest('/providers');
     const existing: Provider[] = Array.isArray(data) ? data : data.providers || [];
@@ -1157,10 +1171,12 @@ async function migrateLegacyProviders() {
   })().catch(error => { providerMigration = undefined; throw error; });
   await providerMigration;
 }
-export async function getProviders(): Promise<Provider[]> {
-  await migrateLegacyProviders();
-  const data = await providerRequest('/providers');
-  return Array.isArray(data) ? data : data.providers || [];
+export function getProviders(): Promise<Provider[]> {
+  return shareInFlight('providers', async () => {
+    await migrateLegacyProviders();
+    const data = await providerRequest('/providers');
+    return Array.isArray(data) ? data : data.providers || [];
+  });
 }
 function providersChanged() { window.dispatchEvent(new Event('providers-changed')); }
 export async function createProvider(p: Partial<Provider>): Promise<Provider> {

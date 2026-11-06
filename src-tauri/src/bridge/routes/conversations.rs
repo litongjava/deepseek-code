@@ -1,5 +1,5 @@
 use axum::{
-    extract::{Path, State},
+    extract::{Path, Query, State},
     http::StatusCode,
     routing::{delete, get, post},
     Json, Router,
@@ -116,7 +116,48 @@ pub(super) fn enriched_messages(
         .collect()
 }
 
-async fn conversation_get(Path(id): Path<String>, State(state): State<AppState>) -> Json<serde_json::Value> {
+/// Request snapshot fields that repeat across model requests: the system prompt
+/// and tool schemas are usually identical for every request in a session.
+const SHARED_SNAPSHOT_FIELDS: [&str; 3] = ["systemPrompt", "systemMessages", "tools"];
+/// Smaller values are cheaper inline than as a reference.
+const SHARED_PART_MIN_BYTES: usize = 256;
+
+/// Moves repeated large snapshot fields into one table, so a long session sends
+/// each distinct system prompt and tool list once instead of once per request.
+/// A moved field is removed and `<field>Ref` names its entry in the returned map.
+pub(super) fn share_snapshot_parts(messages: &mut [serde_json::Value]) -> serde_json::Map<String, serde_json::Value> {
+    let mut parts = serde_json::Map::new();
+    let mut ids = std::collections::HashMap::<String, String>::new();
+    for message in messages.iter_mut() {
+        let Some(snapshots) = message.get_mut("requestSnapshots").and_then(|v| v.as_array_mut()) else { continue };
+        for snapshot in snapshots.iter_mut().filter_map(|v| v.as_object_mut()) {
+            for field in SHARED_SNAPSHOT_FIELDS {
+                let Some(value) = snapshot.get(field) else { continue };
+                let key = value.to_string();
+                if key.len() < SHARED_PART_MIN_BYTES {
+                    continue;
+                }
+                let next = format!("p{}", ids.len());
+                let id = ids.entry(key).or_insert(next).clone();
+                if let Some(value) = snapshot.remove(field) {
+                    parts.entry(id.clone()).or_insert(value);
+                }
+                snapshot.insert(format!("{field}Ref"), serde_json::Value::String(id));
+            }
+        }
+    }
+    parts
+}
+
+#[derive(Deserialize, Default)]
+struct ConversationQuery {
+    /// Set by clients that expand `snapshotParts` (see `share_snapshot_parts`).
+    #[serde(default)]
+    snapshot_parts: Option<String>,
+}
+
+async fn conversation_get(Path(id): Path<String>, Query(query): Query<ConversationQuery>, State(state): State<AppState>) -> Json<serde_json::Value> {
+    let share_parts = query.snapshot_parts.as_deref() == Some("1");
     let db = state.db_manager.clone();
     let id_clone = id.clone();
     let result = tokio::task::spawn_blocking(move || {
@@ -127,8 +168,18 @@ async fn conversation_get(Path(id): Path<String>, State(state): State<AppState>)
             Ok::<_, anyhow::Error>((conv, enriched_messages))
         })
     }).await;
+    let result = result.map(|inner| inner.map(|inner| inner.map(|(conv, mut messages)| {
+        let parts = share_parts.then(|| share_snapshot_parts(&mut messages));
+        (conv, messages, parts)
+    })));
+    let with_parts = |mut value: serde_json::Value, parts: Option<serde_json::Map<String, serde_json::Value>>| {
+        if let Some(parts) = parts {
+            value["snapshotParts"] = serde_json::Value::Object(parts);
+        }
+        Json(value)
+    };
     match result {
-        Ok(Ok(Ok((Some(conv), messages)))) => Json(serde_json::json!({
+        Ok(Ok(Ok((Some(conv), messages, parts)))) => with_parts(serde_json::json!({
             "id": conv.id,
             "title": conv.title,
             "model": conv.model,
@@ -142,8 +193,8 @@ async fn conversation_get(Path(id): Path<String>, State(state): State<AppState>)
             "updated_at": conv.updated_at,
             "message_count": conv.message_count,
             "messages": messages,
-        })),
-        Ok(Ok(Ok((None, messages)))) => Json(serde_json::json!({ "id": id, "messages": messages })),
+        }), parts),
+        Ok(Ok(Ok((None, messages, parts)))) => with_parts(serde_json::json!({ "id": id, "messages": messages }), parts),
         _ => Json(serde_json::json!({ "id": id, "messages": [] })),
     }
 }
@@ -580,4 +631,37 @@ pub fn routes() -> Router<AppState> {
         .route("/api/conversations/{id}/generation-status", get(conversation_generation_status))
         .route("/api/conversations/{id}/stream-status", get(conversation_stream_status))
         .route("/api/conversations/{id}/stop-generation", post(conversation_stop_generation))
+}
+
+#[cfg(test)]
+mod snapshot_part_tests {
+    use super::share_snapshot_parts;
+    use serde_json::json;
+
+    #[test]
+    fn repeated_prompts_and_tools_are_sent_once() {
+        let prompt = "system ".repeat(100);
+        let tools = json!([{"name": "Bash", "description": "run ".repeat(100), "input_schema": {}}]);
+        let snapshot = |id: &str, prompt: &str| json!({"id": id, "systemPrompt": prompt, "tools": tools, "systemMessages": [], "model": "m"});
+        let mut messages = vec![
+            json!({"role": "user"}),
+            json!({"role": "assistant", "requestSnapshots": [snapshot("a", &prompt), snapshot("b", &prompt)]}),
+            json!({"role": "assistant", "requestSnapshots": [snapshot("c", &format!("{prompt} changed"))]}),
+        ];
+        let parts = share_snapshot_parts(&mut messages);
+        // One tool list and two distinct prompts.
+        assert_eq!(parts.len(), 3);
+        let a = &messages[1]["requestSnapshots"][0];
+        let b = &messages[1]["requestSnapshots"][1];
+        let c = &messages[2]["requestSnapshots"][0];
+        assert!(a.get("systemPrompt").is_none() && a.get("tools").is_none());
+        assert_eq!(a["systemPromptRef"], b["systemPromptRef"]);
+        assert_ne!(a["systemPromptRef"], c["systemPromptRef"]);
+        assert_eq!(a["toolsRef"], c["toolsRef"]);
+        assert_eq!(parts[a["systemPromptRef"].as_str().unwrap()], json!(prompt));
+        assert_eq!(parts[c["toolsRef"].as_str().unwrap()], tools);
+        // Small values stay inline.
+        assert_eq!(a["systemMessages"], json!([]));
+        assert_eq!(a["model"], "m");
+    }
 }
