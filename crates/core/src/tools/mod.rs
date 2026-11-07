@@ -132,7 +132,9 @@ pub fn get_tool_definitions() -> Vec<ToolDefinition> {
         },
         ToolDefinition {
             name: "Bash".to_string(),
-            description: "Executes a shell command and returns its output.\n\nThe shell defaults to shell.toolDefault in settings.json (bash / Git Bash on Windows when unset): use Unix shell syntax there — `/dev/null` not `NUL`, forward slashes, `$VAR` not `%VAR%` or `$env:VAR`. Pass `shell` (powershell, pwsh, cmd, sh, zsh, fish, wsl) to use another shell's syntax; PowerShell input/output is UTF-8.\n\n- With bash, sh or zsh the working directory persists between calls, but prefer absolute paths; leaving the project resets it to the project directory. Shell state (env vars, functions) does not persist. Other shells start in the project directory each call.\n- Command output is displayed to you, not reliably to the user.\n- `timeout` is in milliseconds: default 120000, max 600000 for a foreground command.\n- `run_in_background` runs the command detached as a managed task: it keeps running across turns and returns a task_id. No `&` or Start-Process needed. Use TaskOutput to read its output and TaskStop to stop it.\n\n# Git\n- Interactive flags (`-i`, e.g. `git rebase -i`, `git add -i`) are not supported in this environment.\n- Use the `gh` CLI for GitHub operations (PRs, issues, API).\n- Commit or push only when the user asks. If on the default branch, branch first.".to_string(),
+            description: "Executes a shell command and returns its output.\n\nThe shell defaults to shell.toolDefault in settings.json (bash / Git Bash on Windows when unset): use Unix shell syntax there — `/dev/null` not `NUL`, forward slashes, `$VAR` not `%VAR%` or `$env:VAR`. Pass `shell` (powershell, pwsh, cmd, sh, zsh, fish, wsl) to use another shell's syntax; PowerShell input/output is UTF-8.\n\n- With bash, sh or zsh the working directory persists between calls, but prefer absolute paths; leaving the project resets it to the project directory. Shell state (env vars, functions) does not persist. Other shells start in the project directory each call.\n- Command output is displayed to you, not reliably to the user.\n- `timeout` is in milliseconds: default 120000, max 600000 for a foreground command.\n- `run_in_background` runs the command as a managed task: it keeps running across turns and returns a task_id. No `&` or Start-Process needed. Use TaskOutput to read its output and TaskStop to stop it.
+- When a call finishes it cleans up the command's whole process tree, including children the command started. A service that must outlive the call (a local server, a daemon) needs `detach: true`, which starts it outside that tree and returns its pid and log files.
+- With bash and zsh a pipeline reports an earlier command's failure, so `failing | head` is not reported as success. `pipeline_sigpipe: true` means the output was only cut short by a reader such as `head`.\n\n# Git\n- Interactive flags (`-i`, e.g. `git rebase -i`, `git add -i`) are not supported in this environment.\n- Use the `gh` CLI for GitHub operations (PRs, issues, API).\n- Commit or push only when the user asks. If on the default branch, branch first.".to_string(),
             input_schema: serde_json::json!({
                 "type": "object",
                 "properties": {
@@ -140,6 +142,7 @@ pub fn get_tool_definitions() -> Vec<ToolDefinition> {
                     "timeout": { "description": "Positive timeout in milliseconds: 1..600000 foreground, 1..86400000 background. Omit for no background runtime limit; zero is invalid.", "type": "number", "minimum": 1, "maximum": 86400000 },
                     "description": { "description": "Clear, concise description of what this command does in active voice. Never use words like \"complex\" or \"risk\" in the description - just describe what it does.\n\nSay what the command does in plain words: do not echo the command's text, its flags, or file paths - the user reads this description, often without seeing the command.\n\nFor simple commands (git, npm, standard CLI tools), keep it brief (5-10 words):\n- ls → \"List files in current directory\"\n- git status → \"Show working tree status\"\n- npm install → \"Install package dependencies\"\n\nFor commands that are harder to parse at a glance (piped commands, obscure flags, etc.), add enough context to clarify what it does:\n- find . -name \"*.tmp\" -exec rm {} \\; → \"Find and delete all .tmp files recursively\"\n- git reset --hard origin/main → \"Discard all local changes and match remote main\"\n- curl -s url | jq '.data[]' → \"Fetch JSON from URL and extract data array elements\"", "type": "string" },
                     "run_in_background": { "description": "Set to true to run this command in the background.", "type": "boolean" },
+                    "detach": { "description": "Start an unmanaged service that must outlive this call, such as a local server or daemon. The command is not waited for and is not added to the process tree that a normal call cleans up, so it keeps running after this call, using `detach` with `run_in_background` or `timeout` is an error. Use it only when the process must survive; otherwise run the command normally or use `run_in_background`.", "type": "boolean" },
                     "dangerouslyDisableSandbox": { "description": "Set this to true to dangerously override sandbox mode and run commands without sandboxing.", "type": "boolean" },
                     "shell": { "description": "Shell to use: bash, zsh, fish, sh, cmd, powershell, pwsh, wsl (explicit configured WSL distribution; default: shell.toolDefault, otherwise bash)", "type": "string" }
                 },
@@ -874,10 +877,20 @@ async fn tool_computer_use_async(input: serde_json::Value) -> Result<serde_json:
     }))
 }
 
+/// bash and zsh can make a pipeline report an earlier command's failure, so
+/// `failing | head` no longer looks successful. `sh` (dash) has no pipefail.
+fn pipeline_failure_flag(flag: &str, shell: &str, wsl: bool) -> bool {
+    flag == "-c" && !wsl && matches!(shell, "bash" | "zsh")
+}
+
 async fn tool_bash_async(input: serde_json::Value, cwd: &str) -> Result<serde_json::Value> {
     let command = input["command"].as_str().ok_or_else(|| anyhow!("command required"))?;
     // Milliseconds, like the reference CLI. Background tasks may run longer.
     let background = input["run_in_background"].as_bool().unwrap_or(false);
+    // A detached command is an unmanaged service: it must outlive this call.
+    let detach = input["detach"].as_bool().unwrap_or(false);
+    anyhow::ensure!(!(detach && background), "detach and run_in_background are mutually exclusive: run_in_background is a managed task, detach is an unmanaged service");
+    anyhow::ensure!(!(detach && input["timeout"].is_number()), "A detached command is not waited for, so timeout has no effect; remove it");
     let timeout_ms = match input.get("timeout").filter(|value| !value.is_null()) {
         Some(value) => value.as_f64().filter(|ms| ms.is_finite() && *ms >= 1.0).ok_or_else(|| anyhow!("Bash timeout must be a positive number of milliseconds"))? as u64,
         None => default_bash_timeout_secs() * 1000,
@@ -1026,17 +1039,35 @@ async fn tool_bash_async(input: serde_json::Value, cwd: &str) -> Result<serde_js
         let argument = cmd_script.as_ref().map(|file| format!("\"{}\"", file.path().display())).unwrap_or_else(|| command.clone());
         cmd.args(["/D", "/S", "/C"]).raw_arg(format!("\"{argument}\""));
     } else {
+        // Without this, `failing | head` reports head's success.
+        if pipeline_failure_flag(&flag, &shell_name, resolved.wsl.is_some()) {
+            cmd.args(["-o", "pipefail"]);
+        }
         cmd.arg(&flag).arg(&command);
     }
     #[cfg(not(windows))]
-    cmd.arg(&flag).arg(&command);
+    {
+        if pipeline_failure_flag(&flag, &shell_name, resolved.wsl.is_some()) {
+            cmd.args(["-o", "pipefail"]);
+        }
+        cmd.arg(&flag).arg(&command);
+    }
     cmd.current_dir(&safe_cwd)
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
 
     // Background commands are named by their description, or the command.
     let description = input["description"].as_str().filter(|text| !text.trim().is_empty()).unwrap_or(&command).to_owned();
-    if background {
+    if detach {
+        let directory = crate::runtime::resolve_default_data_dir()?
+            .join("detached-shells")
+            .join(uuid::Uuid::new_v4().to_string());
+        let mut result = bash_process::start_detached(cmd, &directory, actual_shell)?;
+        std::fs::write(directory.join("command.txt"), command.as_bytes())?;
+        result["directory"] = serde_json::json!(directory);
+        result["shell_path"] = serde_json::json!(shell);
+        Ok(result)
+    } else if background {
         let mut result = background_shell::start(cmd, input.get("timeout").filter(|value| !value.is_null()).map(|_| timeout), actual_shell, &description, &command, wsl_guard)?;
         result["shell_path"] = serde_json::json!(shell);
         Ok(result)
@@ -1537,5 +1568,34 @@ mod directory_edit_regressions {
         let input = json!({"file_path":"file.txt","edits":[{"old_string":"three","new_string":"changed"},{"old_string":"missing","new_string":"bad"}]});
         assert_eq!(tool_multi_edit(input, root.path().to_str().unwrap()).unwrap()["replacements"], 0);
         assert_eq!(fs::read_to_string(path).unwrap(), "three\r\nfour\r\n");
+    }
+
+    #[test]
+    fn pipelines_report_earlier_failures_only_where_the_shell_supports_it() {
+        assert!(pipeline_failure_flag("-c", "bash", false));
+        assert!(pipeline_failure_flag("-c", "zsh", false));
+        // dash, cmd and PowerShell have no -o pipefail, and WSL builds its own command line.
+        assert!(!pipeline_failure_flag("-c", "sh", false));
+        assert!(!pipeline_failure_flag("-Command", "powershell", false));
+        assert!(!pipeline_failure_flag("/C", "cmd", false));
+        assert!(!pipeline_failure_flag("-c", "bash", true));
+    }
+
+    #[tokio::test]
+    async fn a_failing_upstream_is_not_hidden_by_a_later_reader() {
+        crate::config::OrchestrationConfig::init_global().unwrap();
+        let root = tempfile::tempdir().unwrap();
+        let cwd = root.path().to_str().unwrap();
+        let failed = execute_tool_async("Bash", json!({"command":"false | head -1","shell":"bash"}), cwd)
+            .await
+            .unwrap();
+        assert_eq!(failed["success"], false, "{failed}");
+        assert_ne!(failed["exit_code"], 0, "{failed}");
+
+        let passed = execute_tool_async("Bash", json!({"command":"printf 'a\\nb\\n' | head -1","shell":"bash"}), cwd)
+            .await
+            .unwrap();
+        assert_eq!(passed["success"], true, "{passed}");
+        assert_eq!(passed["stdout"].as_str().unwrap().trim(), "a");
     }
 }

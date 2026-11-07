@@ -1,12 +1,19 @@
 //! Bounded shell output and descendant lifetime management.
 use anyhow::{Context, Result};
 use serde_json::{json, Value};
-use std::{process::Stdio, time::Duration};
+use std::{path::Path, process::Stdio, time::Duration};
 use tokio::{
     io::{AsyncRead, AsyncReadExt},
     process::Command,
 };
 const OUTPUT_LIMIT: usize = 1024 * 1024;
+
+/// bash reports a stage killed by SIGPIPE as 128 + 13. With `-o pipefail` that
+/// only reaches us when a reader such as `head` closed the pipe early, and it is
+/// the same number for Git Bash on Windows; other shells do not use it.
+fn cut_short_by_reader(shell: &str, code: Option<i32>) -> bool {
+    code == Some(128 + 13) && matches!(shell, "bash" | "zsh" | "sh" | "wsl")
+}
 
 #[derive(Default)]
 struct Captured {
@@ -120,12 +127,21 @@ pub(super) async fn run_logged(
         None => Ok(execution.await),
     };
     match result {
-        Ok(Ok(status)) => Ok(json!({
-            "stdout":super::limit_output(&stdout_bytes.text()),
-            "stderr":super::limit_output(&stderr_bytes.text()),
-            "stdout_truncated":stdout_bytes.truncated(),"stderr_truncated":stderr_bytes.truncated(),
-            "exit_code":status.code().unwrap_or(-1),"success":status.success(),"shell":shell
-        })),
+        Ok(Ok(status)) => {
+            let code = status.code();
+            // A pipeline cut short by `head` still produced the output the caller
+            // asked for. The exit code and the flag keep it visible.
+            let cut_short = cut_short_by_reader(shell, code);
+            Ok(json!({
+                "stdout":super::limit_output(&stdout_bytes.text()),
+                "stderr":super::limit_output(&stderr_bytes.text()),
+                "stdout_truncated":stdout_bytes.truncated(),"stderr_truncated":stderr_bytes.truncated(),
+                "exit_code":code.unwrap_or(-1),
+                "success":status.success() || cut_short,
+                "pipeline_sigpipe":cut_short,
+                "shell":shell
+            }))
+        }
         Ok(Err(error)) => Err(error).context("Reading shell command output"),
         Err(_) => {
             let _ = child.kill().await;
@@ -135,6 +151,90 @@ pub(super) async fn run_logged(
             )
         }
     }
+}
+
+/// Starts a long-lived service that must outlive this call. It is deliberately
+/// outside the Job Object that `run_logged` relies on: the trade for surviving
+/// our exit is that it also survives cancellation, so the caller owns cleanup.
+pub(super) fn start_detached(mut command: Command, directory: &Path, shell: &str) -> Result<Value> {
+    std::fs::create_dir_all(directory)?;
+    let stdout = directory.join("stdout.log");
+    let stderr = directory.join("stderr.log");
+
+    #[cfg(windows)]
+    let (pid, breakaway) = {
+        configure_detached(&mut command, &stdout, &stderr)?;
+        command.creation_flags(detached_flags(true));
+        match command.spawn() {
+            Ok(child) => (child.id().unwrap_or(0), true),
+            // A Job without JOB_OBJECT_LIMIT_BREAKAWAY_OK refuses the flag. Start
+            // anyway and report the weaker guarantee rather than failing outright.
+            Err(error) if error.raw_os_error() == Some(5) => {
+                configure_detached(&mut command, &stdout, &stderr)?;
+                command.creation_flags(detached_flags(false));
+                let child = command.spawn().context("Starting the detached command")?;
+                (child.id().unwrap_or(0), false)
+            }
+            Err(error) => return Err(error).context("Starting the detached command"),
+        }
+    };
+
+    #[cfg(unix)]
+    let (pid, breakaway) = {
+        configure_detached(&mut command, &stdout, &stderr)?;
+        unsafe {
+            command.pre_exec(|| {
+                // Its own session, so closing our terminal cannot signal it.
+                rustix::process::setsid()
+                    .map_err(|error| std::io::Error::from_raw_os_error(error.raw_os_error()))?;
+                Ok(())
+            });
+        }
+        let child = command.spawn().context("Starting the detached command")?;
+        (child.id().unwrap_or(0), true)
+    };
+
+    #[cfg(not(any(windows, unix)))]
+    let (pid, breakaway) = {
+        configure_detached(&mut command, &stdout, &stderr)?;
+        let child = command.spawn().context("Starting the detached command")?;
+        (child.id().unwrap_or(0), false)
+    };
+
+    // Only a real breakaway starts outside the caller's Job Object. Saying the
+    // service survives when it does not would be worse than not starting it.
+    let message = if breakaway {
+        "Started as an unmanaged service: it outlives this call and is not tracked as a task. Stop it explicitly when it is no longer needed."
+    } else {
+        "Started, but the host refused to detach it from its process group (the enclosing Job Object does not allow breakaway). It may be terminated together with this call's process tree; run it from a terminal outside that Job Object if it must keep running."
+    };
+    Ok(json!({
+        "detached": true,
+        "pid": pid,
+        "stdout_file": stdout,
+        "stderr_file": stderr,
+        "isolated": breakaway,
+        "shell": shell,
+        "message": message
+    }))
+}
+
+fn configure_detached(command: &mut Command, stdout: &Path, stderr: &Path) -> Result<()> {
+    command
+        .stdin(Stdio::null())
+        .stdout(Stdio::from(std::fs::File::create(stdout)?))
+        .stderr(Stdio::from(std::fs::File::create(stderr)?))
+        // Dropping the handle must not kill the service.
+        .kill_on_drop(false);
+    Ok(())
+}
+
+#[cfg(windows)]
+fn detached_flags(breakaway: bool) -> u32 {
+    const DETACHED_PROCESS: u32 = 0x0000_0008;
+    const CREATE_NEW_PROCESS_GROUP: u32 = 0x0000_0200;
+    const CREATE_BREAKAWAY_FROM_JOB: u32 = 0x0100_0000;
+    DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP | if breakaway { CREATE_BREAKAWAY_FROM_JOB } else { 0 }
 }
 
 #[cfg(test)]
@@ -239,5 +339,52 @@ mod tests {
     #[tokio::test]
     async fn cancellation_terminates_grandchildren() {
         descendants(true).await;
+    }
+
+    #[test]
+    fn sigpipe_is_recognized_only_for_bash_like_shells() {
+        assert!(cut_short_by_reader("bash", Some(141)));
+        assert!(cut_short_by_reader("zsh", Some(141)));
+        assert!(cut_short_by_reader("sh", Some(141)));
+        assert!(!cut_short_by_reader("powershell", Some(141)));
+        assert!(!cut_short_by_reader("cmd", Some(141)));
+        assert!(!cut_short_by_reader("bash", Some(1)));
+        assert!(!cut_short_by_reader("bash", None));
+    }
+
+    /// A detached start must hand back a running process whose output is in the
+    /// log files, and must not claim a stronger lifetime guarantee than it got.
+    #[tokio::test]
+    async fn detached_start_reports_a_live_service_and_its_real_isolation() {
+        crate::config::OrchestrationConfig::init_global().unwrap();
+        let temp = tempfile::tempdir().unwrap();
+        let marker = temp.path().join("alive");
+        let mut command = Command::new("node");
+        command.arg("-e").arg(format!(
+            "console.log('started');setTimeout(()=>require('fs').writeFileSync({:?},'alive'),600);setInterval(()=>{{}},10000)",
+            marker.to_string_lossy()
+        ));
+        let result = start_detached(command, temp.path(), "node-fixture").unwrap();
+        let pid = result["pid"].as_u64().unwrap();
+        assert_eq!(result["detached"], true);
+        assert!(pid > 0, "{result}");
+
+        tokio::time::sleep(Duration::from_millis(1500)).await;
+        assert!(marker.exists(), "Detached service did not keep running: {result}");
+        let log = std::fs::read_to_string(temp.path().join("stdout.log")).unwrap();
+        assert!(log.contains("started"), "Detached stdout was not captured: {log:?}");
+        let isolated = result["isolated"].as_bool().unwrap();
+        let message = result["message"].as_str().unwrap();
+        assert_eq!(message.contains("outlives this call"), isolated, "{result}");
+        stop_test_service(pid as u32);
+    }
+
+    fn stop_test_service(pid: u32) {
+        #[cfg(windows)]
+        let _ = std::process::Command::new("taskkill")
+            .args(["/PID", &pid.to_string(), "/T", "/F"])
+            .status();
+        #[cfg(unix)]
+        let _ = std::process::Command::new("kill").args(["-9", &format!("-{pid}")]).status();
     }
 }
