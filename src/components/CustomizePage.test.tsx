@@ -3,6 +3,7 @@ import { MemoryRouter } from 'react-router-dom';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import CustomizePage from './CustomizePage';
 import * as api from '../api';
+import { customizationApi } from '../api/customization';
 import { useUIStore } from '../stores/useUIStore';
 import en from '../locales/en.json';
 
@@ -11,6 +12,7 @@ vi.mock('../api', () => ({
   createSkill: vi.fn(), updateSkill: vi.fn(), deleteSkill: vi.fn(), toggleSkill: vi.fn(),
   getGithubStatus: vi.fn(async () => ({ connected: false })),
 }));
+vi.mock('../api/customization', () => ({ customizationApi: { load: vi.fn(), save: vi.fn() } }));
 vi.mock('./MarkdownRenderer', () => ({ default: ({ content }: { content: string }) => <p>{content}</p>, CodeBlock: () => null }));
 vi.mock('./McpSettingsPage', () => ({ default: () => <h2>MCP management</h2> }));
 vi.mock('./PluginsPage', () => ({ default: () => <h2>Plugin management</h2> }));
@@ -26,12 +28,52 @@ beforeEach(() => {
   useUIStore.getState().setLanguage('en');
   vi.mocked(api.getSkills).mockResolvedValue({ skills: [skill] });
   vi.mocked(api.getSkillDetail).mockResolvedValue(skill);
+  vi.mocked(customizationApi.load).mockResolvedValue({
+    customization: { system_prompt: { mode: 'default', text: '' }, disabled_tools: [], tool_descriptions: {}, custom_tools: [] },
+    default_system_prompt: 'BUILT IN',
+    builtin_tools: [{ name: 'Write', description: 'Writes files' }],
+  } as never);
+  vi.mocked(customizationApi.save).mockResolvedValue();
 });
 
 describe('Customize management', () => {
+  // Both entries reuse one component instance, so a draft left on the other entry
+  // must never be committed by this entry's save.
+  it('keeps an unsaved prompt out of a later tool save', async () => {
+    await act(async () => { render(<MemoryRouter><CustomizePage /></MemoryRouter>); });
+    await act(async () => fireEvent.click(nav().getByRole('button', { name: 'Prompts' })));
+    fireEvent.change(await screen.findByLabelText(en.agentSettings.modeLabel), { target: { value: 'append' } });
+    fireEvent.change(screen.getByLabelText(en.agentSettings.promptText), { target: { value: 'UNSAVED PROMPT' } });
+    expect(screen.getByText(en.agentSettings.save)).not.toBeDisabled();
+
+    await act(async () => fireEvent.click(nav().getByRole('button', { name: 'Tools' })));
+    fireEvent.click(await screen.findByLabelText(en.agentSettings.enableTool.replace('{name}', 'Write')));
+    await act(async () => fireEvent.click(screen.getByText(en.agentSettings.save)));
+
+    expect(customizationApi.save).toHaveBeenCalledTimes(1);
+    const sent = vi.mocked(customizationApi.save).mock.calls[0][0];
+    expect(sent.system_prompt).toEqual({ mode: 'default', text: '' });
+    expect(sent.disabled_tools).toEqual(['Write']);
+  });
+
+  it('keeps an empty replacement prompt on the prompt entry from blocking a tool save', async () => {
+    await act(async () => { render(<MemoryRouter><CustomizePage /></MemoryRouter>); });
+    await act(async () => fireEvent.click(nav().getByRole('button', { name: 'Prompts' })));
+    fireEvent.change(await screen.findByLabelText(en.agentSettings.modeLabel), { target: { value: 'replace' } });
+    fireEvent.change(screen.getByLabelText(en.agentSettings.promptText), { target: { value: '  ' } });
+    expect(screen.getByText(en.agentSettings.save)).toBeDisabled();
+
+    await act(async () => fireEvent.click(nav().getByRole('button', { name: 'Tools' })));
+    fireEvent.click(await screen.findByLabelText(en.agentSettings.enableTool.replace('{name}', 'Write')));
+    const save = screen.getByText(en.agentSettings.save);
+    expect(save).not.toBeDisabled();
+    await act(async () => fireEvent.click(save));
+    expect(vi.mocked(customizationApi.save).mock.calls[0][0].system_prompt).toEqual({ mode: 'default', text: '' });
+  });
+
   it('shares ordered entries and card styles, and opens management rather than creation', async () => {
     await act(async () => { render(<MemoryRouter><CustomizePage /></MemoryRouter>); });
-    const names = ['Skills', 'MCP', 'Connectors', 'Plugins', '提示词与工具'];
+    const names = ['Skills', 'MCP', 'Connectors', 'Plugins', 'Prompts', 'Tools'];
     expect(nav().getAllByRole('button').map(button => button.textContent)).toEqual(names);
     const cards = within(screen.getByLabelText(en.customize.manageContext)).getAllByRole('button');
     expect(cards.map(button => button.querySelector('.font-medium')?.textContent)).toEqual(names);
