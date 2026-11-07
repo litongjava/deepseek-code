@@ -26,12 +26,15 @@ pub(super) fn normalize_responses(items: &mut [Value]) {
 }
 
 pub(super) fn normalize_chat(body: &mut Value) {
-    if let Some(messages) = body["messages"].as_array_mut() {
+    // `get_mut`, not `body[key]`: mutable indexing inserts a null for a missing
+    // key, which would grow every message and diverge from the size the caller
+    // estimated before sending.
+    if let Some(messages) = body.get_mut("messages").and_then(Value::as_array_mut) {
         for message in messages {
             if let Some(id) = message.get_mut("tool_call_id") {
                 normalize(id);
             }
-            if let Some(calls) = message["tool_calls"].as_array_mut() {
+            if let Some(calls) = message.get_mut("tool_calls").and_then(Value::as_array_mut) {
                 for call in calls {
                     if let Some(id) = call.get_mut("id") {
                         normalize(id);
@@ -44,9 +47,9 @@ pub(super) fn normalize_chat(body: &mut Value) {
 
 /// Keep Anthropic calls paired across gateways with stricter upstream ID limits.
 pub(super) fn normalize_anthropic(body: &mut Value) {
-    if let Some(messages) = body["messages"].as_array_mut() {
+    if let Some(messages) = body.get_mut("messages").and_then(Value::as_array_mut) {
         for message in messages {
-            if let Some(blocks) = message["content"].as_array_mut() {
+            if let Some(blocks) = message.get_mut("content").and_then(Value::as_array_mut) {
                 for block in blocks {
                     let key = match block["type"].as_str() {
                         Some("tool_use") => "id",
@@ -126,5 +129,15 @@ mod tests {
         let original = chat.clone();
         normalize_chat(&mut chat);
         assert_eq!(chat, original);
+        // Normalizing must not add keys the sender omitted.
+        let mut plain = json!({"messages":[{"role":"user","content":"x"}]});
+        normalize_chat(&mut plain);
+        assert!(plain["messages"][0].get("tool_calls").is_none());
+        let mut text_blocks = json!({"messages":[{"role":"user","content":"x"}]});
+        normalize_anthropic(&mut text_blocks);
+        assert_eq!(text_blocks["messages"][0]["content"], "x");
+        let mut no_content = json!({"messages":[{"role":"assistant"}]});
+        normalize_anthropic(&mut no_content);
+        assert!(no_content["messages"][0].get("content").is_none());
     }
 }

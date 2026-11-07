@@ -25,6 +25,10 @@ cargo check --locked -p deepseek-code-desktop --all-targets
 
 Windows 调试构建需要 `RUST_MIN_STACK=16777216`；Cargo 已通过 `.cargo/config.toml` 设置，直接启动构建产物或 ConPTY 测试时也要传入。集成测试的临时工作区应放在没有祖先项目说明文件的独立目录，避免用户目录中的配置或说明污染本地 fixture；只在测试进程中设置 `TEMP` / `TMP`，不要修改系统环境变量。
 
+在 dcl 的后台任务或 Worker 内部执行测试时，测试进程会继承 `DEEPSEEK_CODE_BACKGROUND_CONTROL` 和 `DEEPSEEK_CODE_BACKGROUND_JOB`。这两个变量会让新建的临时会话被判定为“不属于该控制通道”，大量与会话、委派、目标相关的测试因此失败并报 `Background control channel does not own this session`。只在这条测试命令的子进程中清除它们，例如 `env -u DEEPSEEK_CODE_BACKGROUND_CONTROL -u DEEPSEEK_CODE_BACKGROUND_JOB cargo test ...`，不要修改系统环境或正在运行的任务。出现这个错误时先按本段处理，再判断是否真的有回归。
+
+同一宿主环境还会带出 `DEEPSEEK_CODE_WORKER_MODEL`、`DEEPSEEK_CODE_WORKER_AUTO_ROUTE` 和 `DEEPSEEK_CODE_CHILD_API_KEY`。`batch` 用例启动的 Worker 会继承这些变量，宿主的模型快照与用例自己指定的 `--model` 不一致，Worker 直接报 `Worker model snapshot does not match the selected model` 退出，表现为 `status: "failed"` 而不是 `cancelled`/`completed`。跑测试时连同这三个变量一起清除：`env -u DEEPSEEK_CODE_WORKER_MODEL -u DEEPSEEK_CODE_WORKER_AUTO_ROUTE -u DEEPSEEK_CODE_CHILD_API_KEY ...`。
+
 ## 已知失败
 
 Windows 上，`tools::linux_env::tests::unpack_copies_hard_links_keeps_symlinks_and_skips_devices` 的 `read_link` 断言失败：根文件系统解包只在 Unix 创建符号链接，该测试却在所有平台检查链接。2026-11-06 合并检查从合并前的 `main` 提取原始模块，单独编译并重跑同一测试，复现相同的文件不存在错误。记录位于相邻开发支持目录的 `merge-desktop-main-20261106/core-baseline-test.log`。
@@ -182,6 +186,20 @@ Windows 上，`tools::linux_env::tests::unpack_copies_hard_links_keeps_symlinks_
 
 同一目录的 `desktop/fixture.py` 配合真实 Desktop 窗口核对错误卡片上的阶段、次数与脱敏结果。
 
+### L. 摘要截断后的有限恢复
+
+全部使用本地模拟接口和临时数据库，不发真实请求。
+
+1. `cargo test --locked -p deepseek-code-core --test compaction_truncation`（17 项）：两个协议下的首段与最终摘要提额、模型上限下按 token 二分并合并、合并再次截断后提额成功、合并持续截断停在深度上限、12 次恢复上限、额度耗尽时报告未发送的提额预算、恢复结果在失败和重启后复用、合并超出安全输入预算（含子摘要提额后合并输入无法容纳）、最后实际预算与拟请求预算分开报告、窗口过小与分段规划失败的完整诊断、非截断立即停止、截断文本不进入缓存、并发修改历史拒绝提交、局部摘要截断。
+2. `cargo test --locked -p deepseek-code-core --test compaction_overflow`：原有分段、取消、失败与最终摘要预算不变。
+3. OpenAI 的 `length` 与 Anthropic 的 `max_tokens` 都按结构化结束原因识别，不依赖错误文字；其他结束原因仍按普通失败处理，不进入拆分，且不新增请求。
+4. 首次返回截断时请求预算从 4096 提升到 8192 并成功，提示词篇幅目标同时从 2048 变为 4096；最终摘要从 8192 提升到 16384，目标从 4096 变为 8192。测试直接断言请求体中的目标文字。模型上限为 4096 时跳过提额，拆成两段后合并，内容顺序、中文、emoji 与超长工具结果完整。
+5. 所有摘要请求持续截断时在规定次数内停止，错误说明失败阶段、拟请求预算、最后一次实际请求的输出预算、恢复次数与原因，`/history` 中的原始记录不变；缓存中没有截断文本。恢复额度在提额之前用尽时，错误给出的是本次本应发出的提额预算（4096 提到 8192），而不是刚被截断的那次请求的预算，并且该提额请求确实没有发出。
+6. 合并所需输入超出 90% 安全预算（介于安全线与窗口之间，以及超出窗口两种情况）时，不发送该请求；错误保留 `merge` 阶段名，并分别给出拟请求预算与子摘要实际使用的预算。
+7. 恢复过程中关闭并重新打开数据库与引擎后重试，或中途取消后重试，已完成的子摘要都直接复用；恢复期间历史发生变化时拒绝提交，原有记录与新增记录都保留。
+8. 手动 `/compact` 与自动压缩显示同一套逐段进度。
+9. 真实 ConPTY：相邻开发支持目录的 `compaction-recovery-20261107/compaction_truncation_acceptance.py` 用隔离数据目录和本地模拟接口构造“超大历史、两段摘要、首段截断”。脚本按阶段记录请求，断言原始分段恰为 2、恢复子段恰为 2、合并在子段之后，并核对终端出现 `fragment 1/2` 与 `fragment 2/2` 两个标签；自动压缩场景还检查 `Auto-compacting conversation`、拆分或提额进度、压缩后原请求继续且只执行一次并携带摘要，手动场景检查 `/compact` 的进度与 `Compacted (ctrl+o to see full summary)`。`safe_budget_respected` 使用与引擎相同口径的完整请求体估算（含系统指令、按消息分组向上取整），只检查摘要路径的请求。
+
 ## 按改动范围选择场景
 
 - `terminal/editor.rs`、`terminal/live.rs` 的按键处理：A、B、E1、E2、E3
@@ -199,6 +217,8 @@ Windows 上，`tools::linux_env::tests::unpack_copies_hard_links_keeps_symlinks_
 - `services/input_queue.rs`：B、E4
 - 权限相关：E2，以及 `added_directory_survives_worker_resume_without_granting_other_sessions`（`bypass` 模式可以读工作区外的文件，其他模式受目录范围限制）
 - Provider、模型请求：E1、E6
+- `native_engine/generation.rs`、`services/compaction.rs`、`services/compaction/`：L，以及 E5
+- `native_engine/tool_call_ids.rs`（发给模型的请求体）：E1、E6；确认只改写超长调用 ID，未提供 `tool_calls`、`content` 等字段的消息不会被补成 `null`
 - 其他范围：至少跑 E
 
 ## Shell 配置回归

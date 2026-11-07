@@ -71,12 +71,13 @@ async fn fixture(
             let merge_too_short = mode == 3 && body["messages"].to_string().contains("Merge these summaries") && body["max_tokens"].as_u64().unwrap() < 8192;
             let number = { let mut requests = captured.lock().unwrap(); requests.push(body); requests.len() };
             if mode == 2 && number == 2 { std::future::pending::<()>().await; }
-            let fail = (mode == 1 && number == 2) || merge_too_short;
+            let fail = mode == 1 && number == 2;
+            let truncated = mode == 3 && merge_too_short;
             let text = "Original request retained; NEEDS_TESTING: finish the remaining tests.";
             Json(if anthropic {
-                json!({"id":"r","type":"message","role":"assistant","model":"gpt-6-astra","content":[{"type":"text","text":text}],"stop_reason":if fail { "max_tokens" } else { "end_turn" },"usage":{"input_tokens":1,"output_tokens":1}})
+                json!({"id":"r","type":"message","role":"assistant","model":"gpt-6-astra","content":[{"type":"text","text":text}],"stop_reason":if truncated { "max_tokens" } else if fail { "refusal" } else { "end_turn" },"usage":{"input_tokens":1,"output_tokens":1}})
             } else {
-                json!({"id":"r","object":"chat.completion","created":0,"model":"gpt-6-astra","choices":[{"index":0,"message":{"role":"assistant","content":text},"finish_reason":if fail { "length" } else { "stop" }}]})
+                json!({"id":"r","object":"chat.completion","created":0,"model":"gpt-6-astra","choices":[{"index":0,"message":{"role":"assistant","content":text},"finish_reason":if truncated { "length" } else if fail { "content_filter" } else { "stop" }}]})
             })
         }
     }));

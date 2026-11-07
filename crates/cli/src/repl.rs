@@ -297,10 +297,11 @@ async fn all_tools_keep_numbers_in_resume_and_detailed_transcript() {
 pub async fn compact(paths: &RuntimePaths, session: &mut Session, instructions: &str) -> Result<usize> {
     let context = crate::services::context(paths)?;
     let report = tokio::select! {
-        report = deepseek_code_core::services::compaction::compact_with_hooks(
+        // Manual compaction shows the same per-fragment progress as autocompact.
+        report = crate::hook_progress::during(&session.id, true, deepseek_code_core::services::compaction::compact_with_hooks(
             &session.engine, &context, &session.workspace, &session.id,
             &session.provider_id, &session.model, instructions.trim(), "manual",
-        ) => report?,
+        )) => report?,
         _ = tokio::signal::ctrl_c() => anyhow::bail!("Compaction interrupted; check /history for a completed summary. Original transcript retained"),
     };
     for warning in &report.warnings { command_eprintln!("Hook: {warning}"); }
