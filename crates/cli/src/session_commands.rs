@@ -28,10 +28,10 @@ impl Settings {
     }
 }
 
-/// As in the reference CLI: the window less the reserved output (at most
-/// 20k tokens) and a 13k buffer, e.g. 167k of a 200k window.
+/// Compacts at 80% of the window by default, leaving a fifth for the next
+/// response and for summarization, e.g. 160k of a 200k window.
 fn default_autocompact_tokens(window: u64) -> Option<u64> {
-    window.checked_sub(20_000 + 13_000).filter(|tokens| *tokens > 0)
+    Some(window * 4 / 5).filter(|tokens| *tokens > 0)
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -352,7 +352,7 @@ pub async fn handle(
                 (Some(percent), _) => format!("{percent}% of configured context window (estimated history size, checked before each turn)"),
                 (None, true) => "off".into(),
                 (None, false) => match session.context_window().await.and_then(|window| default_autocompact_tokens(window as u64)) {
-                    Some(tokens) => format!("on at {tokens} tokens (default: the context window less 33k, as in Claude Code)"),
+                    Some(tokens) => format!("on at {tokens} tokens (default: 80% of the context window)"),
                     None => "on by default once the model has a configured context window".into(),
                 },
             };
@@ -972,10 +972,10 @@ mod tests {
     }
 
     #[test]
-    fn autocompact_defaults_to_the_reference_threshold_until_turned_off() {
+    fn autocompact_defaults_to_eighty_percent_until_turned_off() {
         let mut settings = Settings::default();
-        assert_eq!(settings.autocompact_tokens(200_000), Some(167_000));
-        assert_eq!(settings.autocompact_tokens(20_000), None);
+        assert_eq!(settings.autocompact_tokens(200_000), Some(160_000));
+        assert_eq!(settings.autocompact_tokens(1_000_000), Some(800_000));
         settings.autocompact_percent = Some(50);
         assert_eq!(settings.autocompact_tokens(200_000), Some(100_000));
         settings.autocompact_percent = None;
