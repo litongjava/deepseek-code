@@ -838,7 +838,7 @@ impl QueryEngine {
                     }
                 }
                 Err(e) => {
-                    tracing::error!(module = "QueryEngine", "Error in turn for {}: {}", conv_id_clone, e);
+                    tracing::error!(module = "QueryEngine", "Error in turn for {}: {}", conv_id_clone, crate::performance::request_diagnostic(&e));
                     // Note: execute() already sends EngineEvent::Error + MessageStop to event_tx,
                     // so the frontend will receive a proper error message instead of channel closed.
                     let mut states = conversation_states_clone.lock().await;

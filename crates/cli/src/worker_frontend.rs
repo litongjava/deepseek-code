@@ -923,6 +923,7 @@ fn render(display: &mut TurnDisplay, event: &Value) {
     match text("type") {
         "hook_progress" => display.hook_progress(text("hook_id"), event["status_message"].as_str()),
         "notice" => display.notice(text("message")),
+        "request_attempt" => { if let Some(message) = event["message"].as_str() { display.notice(message); } },
         "text" => display.before_text(text("delta")),
         "queued_input" => display.queued_delivered(text("text")),
         "thinking" => {
@@ -970,23 +971,22 @@ fn failure_message(id: &str, status: &str, diagnostic: &str) -> String {
         return "Interrupted".into();
     }
     let lower = diagnostic.to_ascii_lowercase();
-    let reason = if lower.contains("max tool iterations") {
-        "Stopped at the --max-turns limit; send a follow-up to continue".to_owned()
-    } else if lower.contains("timed out") || lower.contains("timeout") {
+    if lower.contains("max tool iterations") {
+        return format!(
+            "Stopped at the --max-turns limit; send a follow-up to continue. Details: /tasks show {id}"
+        );
+    }
+    // Host-generated structured diagnostics carry the stage, class and the
+    // number of HTTP attempts actually made. Never infer these from provider text.
+    if let Some(failure) = deepseek_code_core::performance::parse_failure_summary(diagnostic) {
+        return structured_failure_message(id, &failure, diagnostic);
+    }
+    let reason = if lower.contains("timed out") || lower.contains("timeout") {
         "Request timed out".to_owned()
     } else if lower.contains("error sending request") || lower.contains("connection") {
         "Connection failed".to_owned()
     } else {
-        let http = lower
-            .split(|c: char| !c.is_ascii_alphanumeric())
-            .collect::<Vec<_>>()
-            .windows(2)
-            .find_map(|pair| {
-                ((pair[0] == "http" || pair[0] == "status" || pair[0] == "error") && pair[1].len() == 3)
-                    .then(|| pair[1].parse::<u16>().ok())
-                    .flatten()
-                    .filter(|code| (400..600).contains(code))
-            });
+        let http = parsed_http_status(&lower);
         if http.is_none()
             && (lower.contains("output token limit")
                 || (lower.contains("max_tokens")
@@ -1006,8 +1006,76 @@ fn failure_message(id: &str, status: &str, diagnostic: &str) -> String {
         http.map(|code| format!("HTTP {code}"))
             .unwrap_or_else(|| "Request failed".into())
     };
-    // Only expose a parsed endpoint authority: credentials, path and query are discarded.
-    let endpoint = diagnostic.split_whitespace().find_map(|word| {
+    let detail = endpoint_authority(diagnostic)
+        .map(|host| format!("{reason} ({host})"))
+        .unwrap_or(reason);
+    format!("{detail}. Details: /tasks show {id}")
+        .chars()
+        .take(160)
+        .collect()
+}
+
+fn parsed_http_status(lower: &str) -> Option<u16> {
+    lower
+        .split(|c: char| !c.is_ascii_alphanumeric())
+        .collect::<Vec<_>>()
+        .windows(2)
+        .find_map(|pair| {
+            ((pair[0] == "http" || pair[0] == "status" || pair[0] == "error") && pair[1].len() == 3)
+                .then(|| pair[1].parse::<u16>().ok())
+                .flatten()
+                .filter(|code| (400..600).contains(code))
+        })
+}
+
+/// The user-facing line for a host-generated `RequestFailure` diagnostic.
+fn structured_failure_message(
+    id: &str,
+    failure: &deepseek_code_core::performance::FailureSummary,
+    diagnostic: &str,
+) -> String {
+    let attempts = match (failure.attempts, failure.retries) {
+        (Some(attempts), Some(retries)) if attempts > 1 => format!(
+            " after {attempts} attempts ({retries} {})",
+            if retries == 1 { "retry" } else { "retries" }
+        ),
+        (Some(1), _) => String::new(),
+        (Some(attempts), _) => format!(" after {attempts} attempts"),
+        _ => " (attempts unknown)".to_owned(),
+    };
+    let reason = match failure.stage.as_str() {
+        "connect" => format!("Could not connect to the model service{attempts}"),
+        "send" => format!("Connection failed while sending the request{attempts}"),
+        "body" => format!("The response body transfer failed{attempts}"),
+        "stream" => match failure.content_started {
+            Some(true) => format!(
+                "Response stream interrupted after partial output{attempts}; the partial output was kept and not replayed"
+            ),
+            Some(false) => format!("Response stream ended before any content{attempts}"),
+            None => format!("Response stream interrupted{attempts}"),
+        },
+        "setup" => format!("The model request could not be prepared{attempts}"),
+        _ => match failure.http {
+            Some(code @ (401 | 403)) => format!("HTTP {code}: authentication failed"),
+            Some(402) => "HTTP 402: billing error".to_owned(),
+            Some(429) => format!("HTTP 429: rate limited{attempts}"),
+            Some(code) if (500..=599).contains(&code) => {
+                format!("HTTP {code}: server error{attempts}")
+            }
+            Some(code) => format!("HTTP {code}{attempts}"),
+            None if failure.class == "context_limit" => "Context window exceeded".to_owned(),
+            None => format!("The model service returned no usable response{attempts}"),
+        },
+    };
+    let detail = endpoint_authority(diagnostic)
+        .map(|host| format!("{reason} ({host})"))
+        .unwrap_or(reason);
+    format!("{detail}. Details: /tasks show {id}")
+}
+
+/// Only expose a parsed endpoint authority: credentials, path and query are discarded.
+fn endpoint_authority(diagnostic: &str) -> Option<String> {
+    diagnostic.split_whitespace().find_map(|word| {
         let value = word.trim_matches(|c: char| "()[]\"',".contains(c));
         let scheme = value.find("http://").or_else(|| value.find("https://"))?;
         let value = &value[scheme..];
@@ -1022,15 +1090,8 @@ fn failure_message(id: &str, status: &str, diagnostic: &str) -> String {
             && authority
                 .chars()
                 .all(|c| c.is_ascii_alphanumeric() || ".:-[]".contains(c)))
-        .then_some(authority)
-    });
-    let detail = endpoint
-        .map(|host| format!("{reason} ({host})"))
-        .unwrap_or(reason);
-    format!("{detail}. Details: /tasks show {id}")
-        .chars()
-        .take(160)
-        .collect()
+        .then(|| authority.to_owned())
+    })
 }
 
 fn result_text(event: &Value, streamed: bool) -> Option<&str> {
@@ -1405,6 +1466,47 @@ mod failure_tests {
         let diagnostic = "Model API error 400: Invalid input[1].call_id: string too long secret";
         assert_eq!(failure_message("task", "failed", diagnostic), "HTTP 400: tool call ID exceeds the provider length limit. Details: /tasks show task");
         assert_eq!(failure_message("task", "failed", "Model API error 401: secret"), "HTTP 401. Details: /tasks show task");
+    }
+
+    #[test]
+    fn structured_request_failures_report_stage_attempts_and_sanitized_endpoint() {
+        for (diagnostic, expected) in [
+            (
+                "Engine execution failed: Model request failed: error sending request[stage=send; class=transient; http=unknown; attempts=4; retries=3; content_started=unknown] (session s)",
+                "Connection failed while sending the request after 4 attempts (3 retries). Details: /tasks show task",
+            ),
+            (
+                "Model request failed: request or response body error[stage=stream; class=transient; http=unknown; attempts=1; retries=0; content_started=true]",
+                "Response stream interrupted after partial output; the partial output was kept and not replayed. Details: /tasks show task",
+            ),
+            (
+                "Model API error 503: unavailable[stage=response; class=transient; http=503; attempts=4; retries=3; content_started=unknown]",
+                "HTTP 503: server error after 4 attempts (3 retries). Details: /tasks show task",
+            ),
+            (
+                "Model API error 401: denied[stage=response; class=authentication; http=401; attempts=1; retries=0; content_started=unknown]",
+                "HTTP 401: authentication failed. Details: /tasks show task",
+            ),
+            (
+                "Model request failed: error sending request for url (http://user:pw@api.example.com:8443/v1?key=secret)[stage=connect; class=transient; http=unknown; attempts=2; retries=1; content_started=unknown]",
+                "Could not connect to the model service after 2 attempts (1 retry) (api.example.com:8443). Details: /tasks show task",
+            ),
+        ] {
+            let message = failure_message("task", "failed", diagnostic);
+            assert_eq!(message, expected, "{diagnostic}");
+            for secret in ["user:pw", "key=secret", "/v1"] {
+                assert!(!message.contains(secret), "{message}");
+            }
+        }
+        // A provider body cannot inject retry counts into a failure line.
+        assert_eq!(
+            failure_message(
+                "task",
+                "failed",
+                "Model request failed: echo [stage=stream; class=transient] tail"
+            ),
+            "Request failed. Details: /tasks show task"
+        );
     }
 
     #[test]

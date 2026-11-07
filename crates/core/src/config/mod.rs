@@ -115,8 +115,8 @@ fn default_importance_threshold() -> f64 { 0.5 }
 fn default_true() -> bool { true }
 fn default_bridge_port() -> u16 { 30085 }
 fn default_request_timeout_secs() -> u64 { 300 }
-fn default_max_retries() -> u32 { 3 }
-fn default_retry_base_backoff_ms() -> u64 { 500 }
+fn default_max_retries() -> u32 { 7 }
+fn default_retry_base_backoff_ms() -> u64 { 2000 }
 fn default_log_level() -> String { "info".to_string() }
 
 impl Default for OrchestrationConfig {
@@ -429,8 +429,8 @@ mod tests {
 
         // HttpConfig
         assert_eq!(config.http.request_timeout_secs, 300);
-        assert_eq!(config.http.max_retries, 3);
-        assert_eq!(config.http.retry_base_backoff_ms, 500);
+        assert_eq!(config.http.max_retries, 7);
+        assert_eq!(config.http.retry_base_backoff_ms, 2000);
 
         // LoggingConfig
         assert_eq!(config.logging.level, "info");

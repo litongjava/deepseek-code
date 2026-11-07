@@ -99,6 +99,7 @@ pub enum EngineEvent {
         tool_name: Option<String>,
     },
     RequestSnapshot(Value),
+    RequestAttempt(Value),
     Text(String),
     Thinking(String),
     ToolUseStart {
@@ -1337,7 +1338,12 @@ impl ToolLoopExecutor {
         if let Err(error) = &result {
             // Startup can fail before execute_scoped emits any events. Always
             // report the actual failure rather than silently closing the channel.
-            let message = format!("Engine execution failed: {error:#}");
+            // `{:#}` would print every raw source, including provider URLs; use
+            // the sanitized diagnostic instead.
+            let message = format!(
+                "Engine execution failed: {}",
+                crate::performance::request_diagnostic(error)
+            );
             tracing::error!(module = "ToolLoop", "{}", message);
             let _ = self.event_tx.send(EngineEvent::Error(message)).await;
             let _ = self
@@ -1438,10 +1444,10 @@ impl ToolLoopExecutor {
             .map(|root| (root.to_path_buf(), self.conv_id.clone().unwrap_or_default()));
         let parent_session = self.request_parent_session();
         let identity = super::request_identity::TurnIdentity::new(self.conv_id.clone(), parent_session);
-        let result = identity.scope(crate::tools::background_shell::scope(
+        let result = identity.scope(crate::performance::retry_events::scope(self.event_tx.clone(), crate::tools::background_shell::scope(
             context,
             crate::tools::path_scope::with_permissions(self.permission_manager.clone(), crate::tools::path_scope::scope(directories, self.execute_scoped())),
-        ))
+        )))
         .await;
         if result.is_ok() {
             async_hook_guard.0 = None;
@@ -1634,7 +1640,7 @@ impl ToolLoopExecutor {
 
         if api_request {
             let failure = match &loop_result {
-                Err(error) => Some(error.to_string()),
+                Err(error) => Some(crate::performance::request_diagnostic(error)),
                 Ok((text, reason))
                     if matches!(reason.as_deref(), Some("stream_error" | "error" | "failed")) =>
                 {
@@ -2333,9 +2339,12 @@ impl ToolLoopExecutor {
                 "source": "native_engine"
             }));
             let _ = self.event_tx.send(EngineEvent::RequestSnapshot(request_trace.started())).await;
+            // Real HTTP attempts observed by the send layer, so a clean
+            // end-of-stream still reports a count instead of "unknown".
+            let http_attempts: crate::performance::AttemptCounter;
             let context_capture = request_trace.capture_context(self.event_tx.clone());
             let stream = self.anthropic_client
-                .send_message_stream_with_thinking_observed(
+                .send_message_stream_with_thinking_counted(
                     &self.provider,
                     conversation_messages.clone(),
                     self.system_prompt.as_deref(),
@@ -2347,16 +2356,27 @@ impl ToolLoopExecutor {
                 .await;
 
             let mut stream = match stream {
-                Ok(s) => {
+                Ok((s, attempts)) => {
                     tracing::info!(module = "AnthropicLoop", "Stream created successfully");
+                    http_attempts = attempts;
                     s
                 }
                 Err(e) => {
-                    let err_msg = format!("API request failed: {}", e);
-                    tracing::error!(module = "AnthropicLoop", "Stream creation FAILED: {}", err_msg);
-                    let _ = self.event_tx.send(EngineEvent::RequestSnapshot(request_trace.finish("error", Some(&err_msg)))).await;
-                    let _ = self.event_tx.send(EngineEvent::Error(err_msg.clone())).await;
-                    return Err(anyhow!(err_msg));
+                    // Keep the typed cause for classification; only sanitized
+                    // text reaches events, snapshots and session records.
+                    let diagnostic = crate::performance::request_diagnostic(&e);
+                    tracing::error!(
+                        module = "AnthropicLoop",
+                        "Stream creation FAILED: {}",
+                        diagnostic
+                    );
+                    let mut snapshot = request_trace.finish("error", Some(&diagnostic));
+                    if let Some(failure) = crate::performance::find_failure(&e) {
+                        snapshot["failure"] = failure.as_json();
+                    }
+                    let _ = self.event_tx.send(EngineEvent::RequestSnapshot(snapshot)).await;
+                    let _ = self.event_tx.send(EngineEvent::Error(diagnostic)).await;
+                    return Err(e.context("API request failed"));
                 }
             };
 
@@ -2383,10 +2403,19 @@ impl ToolLoopExecutor {
                 let chunk = match chunk_result {
                     Ok(c) => c,
                     Err(e) => {
-                        let err_msg = format!("Stream error: {}", e);
-                        tracing::error!(module = "AnthropicLoop", "Stream chunk error: {}", err_msg);
-                        let _ = self.event_tx.send(EngineEvent::RequestSnapshot(request_trace.finish("error", Some(&err_msg)))).await;
-                        let _ = self.event_tx.send(EngineEvent::Error(err_msg)).await;
+                        // No replay after exposed content; keep partial output and
+                        // report the stage, attempts and sanitized cause.
+                        let failure = crate::performance::RequestFailure::stream(
+                            &e,
+                            http_attempts.attempts(),
+                            !full_text.is_empty() || !assistant_blocks.is_empty(),
+                        );
+                        let diagnostic = failure.diagnostic();
+                        tracing::error!(module = "AnthropicLoop", "Stream chunk error: {}", diagnostic);
+                        let mut snapshot = request_trace.finish("error", Some(&diagnostic));
+                        snapshot["failure"] = failure.as_json();
+                        let _ = self.event_tx.send(EngineEvent::RequestSnapshot(snapshot)).await;
+                        let _ = self.event_tx.send(EngineEvent::Error(diagnostic)).await;
                         let _ = self.event_tx.send(EngineEvent::MessageStop {
                             full_text: full_text.clone(),
                             stop_reason: Some("stream_error".to_string()),
@@ -2552,7 +2581,19 @@ impl ToolLoopExecutor {
             }
 
             let interrupted = self.event_tx.is_closed();
-            let snapshot = request_trace.finish(if interrupted { "interrupted" } else { "completed" }, None);
+            let mut snapshot = request_trace.finish(if interrupted { "interrupted" } else { "completed" }, None);
+            // A stream that stopped without a completion marker is a stream
+            // failure. The send layer knows the real HTTP attempt count.
+            let stream_failure = (!interrupted && snapshot["status"] == "interrupted").then(|| {
+                crate::performance::RequestFailure::stream_incomplete(
+                    http_attempts.attempts(),
+                    !full_text.is_empty() || !assistant_blocks.is_empty(),
+                )
+            });
+            if let Some(failure) = &stream_failure {
+                snapshot["failure"] = failure.as_json();
+                snapshot["error"] = json!(failure.diagnostic());
+            }
             let response_status = snapshot["status"].as_str().unwrap_or("interrupted").to_string();
             let response_error = snapshot["error"].as_str().unwrap_or("Model response ended before completion").to_string();
             let _ = self.event_tx.send(EngineEvent::RequestSnapshot(snapshot)).await;
@@ -2792,9 +2833,12 @@ impl ToolLoopExecutor {
                 "source": "native_engine"
             }));
             let _ = self.event_tx.send(EngineEvent::RequestSnapshot(request_trace.started())).await;
+            // Real HTTP attempts observed by the send layer, so a clean
+            // end-of-stream still reports a count instead of "unknown".
+            let http_attempts: crate::performance::AttemptCounter;
             let context_capture = request_trace.capture_context(self.event_tx.clone());
             let stream = self.openai_client
-                .send_message_stream_observed(
+                .send_message_stream_counted(
                     &self.provider,
                     conversation_messages.clone(),
                     self.system_prompt.as_deref(),
@@ -2805,16 +2849,27 @@ impl ToolLoopExecutor {
                 .await;
 
             let mut stream = match stream {
-                Ok(s) => {
+                Ok((s, attempts)) => {
                     tracing::info!(module = "OpenAILoop", "Stream created successfully");
+                    http_attempts = attempts;
                     s
                 }
                 Err(e) => {
-                    let err_msg = format!("API request failed: {}", e);
-                    tracing::error!(module = "OpenAILoop", "Stream creation FAILED: {}", err_msg);
-                    let _ = self.event_tx.send(EngineEvent::RequestSnapshot(request_trace.finish("error", Some(&err_msg)))).await;
-                    let _ = self.event_tx.send(EngineEvent::Error(err_msg.clone())).await;
-                    return Err(anyhow!(err_msg));
+                    // Keep the typed cause for classification; only sanitized
+                    // text reaches events, snapshots and session records.
+                    let diagnostic = crate::performance::request_diagnostic(&e);
+                    tracing::error!(
+                        module = "OpenAILoop",
+                        "Stream creation FAILED: {}",
+                        diagnostic
+                    );
+                    let mut snapshot = request_trace.finish("error", Some(&diagnostic));
+                    if let Some(failure) = crate::performance::find_failure(&e) {
+                        snapshot["failure"] = failure.as_json();
+                    }
+                    let _ = self.event_tx.send(EngineEvent::RequestSnapshot(snapshot)).await;
+                    let _ = self.event_tx.send(EngineEvent::Error(diagnostic)).await;
+                    return Err(e.context("API request failed"));
                 }
             };
 
@@ -2839,10 +2894,21 @@ impl ToolLoopExecutor {
                 let chunk = match chunk_result {
                     Ok(c) => c,
                     Err(e) => {
-                        let err_msg = format!("Stream error: {}", e);
-                        tracing::error!(module = "OpenAILoop", "Stream chunk error: {}", err_msg);
-                        let _ = self.event_tx.send(EngineEvent::RequestSnapshot(request_trace.finish("error", Some(&err_msg)))).await;
-                        let _ = self.event_tx.send(EngineEvent::Error(err_msg)).await;
+                        // No replay after exposed content; keep partial output and
+                        // report the stage, attempts and sanitized cause.
+                        let failure = crate::performance::RequestFailure::stream(
+                            &e,
+                            http_attempts.attempts(),
+                            !full_text.is_empty()
+                                || assistant_content.is_some()
+                                || !assistant_tool_calls.is_empty(),
+                        );
+                        let diagnostic = failure.diagnostic();
+                        tracing::error!(module = "OpenAILoop", "Stream chunk error: {}", diagnostic);
+                        let mut snapshot = request_trace.finish("error", Some(&diagnostic));
+                        snapshot["failure"] = failure.as_json();
+                        let _ = self.event_tx.send(EngineEvent::RequestSnapshot(snapshot)).await;
+                        let _ = self.event_tx.send(EngineEvent::Error(diagnostic)).await;
                         let _ = self.event_tx.send(EngineEvent::MessageStop {
                             full_text: full_text.clone(),
                             stop_reason: Some("stream_error".to_string()),
@@ -2958,7 +3024,21 @@ impl ToolLoopExecutor {
             }
 
             let interrupted = self.event_tx.is_closed();
-            let snapshot = request_trace.finish(if interrupted { "interrupted" } else { "completed" }, None);
+            let mut snapshot = request_trace.finish(if interrupted { "interrupted" } else { "completed" }, None);
+            // A stream that stopped without a completion marker is a stream
+            // failure. The send layer knows the real HTTP attempt count.
+            let stream_failure = (!interrupted && snapshot["status"] == "interrupted").then(|| {
+                crate::performance::RequestFailure::stream_incomplete(
+                    http_attempts.attempts(),
+                    !full_text.is_empty()
+                        || assistant_content.is_some()
+                        || !assistant_tool_calls.is_empty(),
+                )
+            });
+            if let Some(failure) = &stream_failure {
+                snapshot["failure"] = failure.as_json();
+                snapshot["error"] = json!(failure.diagnostic());
+            }
             let response_status = snapshot["status"].as_str().unwrap_or("interrupted").to_string();
             let response_error = snapshot["error"].as_str().unwrap_or("Model response ended before completion").to_string();
             let _ = self.event_tx.send(EngineEvent::RequestSnapshot(snapshot)).await;

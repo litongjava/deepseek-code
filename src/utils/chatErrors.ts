@@ -42,7 +42,9 @@ export function formatChatError(err: string): string {
   if (lower.includes('invalid api key') || lower.includes('authentication')) {
     return '⚠️ API 认证失败，请重新登录。';
   }
-  if (lower.includes('overloaded') || lower.includes('rate limit') || lower.includes('529')) {
+  // Structured diagnostics carry the class verbatim (`class=rate_limit`), so
+  // match it as well as the older loose wording.
+  if (lower.includes('overloaded') || lower.includes('rate limit') || lower.includes('rate_limit') || lower.includes('529')) {
     return '⚠️ 服务暂时繁忙，请稍后再试。';
   }
   return 'Error: ' + err;

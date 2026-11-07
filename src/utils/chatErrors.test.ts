@@ -20,6 +20,27 @@ describe('bad request details', () => {
   });
 });
 
+describe('formatChatError structured diagnostics', () => {
+  it('classifies host-generated failures without exposing secrets', async () => {
+    const { formatChatError } = await import('./chatErrors');
+    const auth =
+      'Model API error 401: invalid credential Bearer [REDACTED][stage=response; class=authentication; http=401; attempts=1; retries=0; content_started=unknown]';
+    expect(formatChatError(auth)).toContain('API 认证失败');
+
+    const busy =
+      'Model request failed: slow down[stage=response; class=rate_limit; http=429; attempts=4; retries=3; content_started=unknown]';
+    expect(formatChatError(busy)).toContain('服务暂时繁忙');
+
+    // A transport failure keeps the stage and attempt count for diagnosis.
+    const transport =
+      'Model request failed: reset by peer[stage=send; class=transient; http=unknown; attempts=4; retries=3; content_started=unknown]';
+    const shown = formatChatError(transport);
+    expect(shown).toContain('stage=send');
+    expect(shown).toContain('attempts=4');
+    expect(shown).not.toContain('fixture-');
+  });
+});
+
 describe('formatChatError network failures', () => {
   it('shows a readable message instead of the browser wording', async () => {
     const { formatChatError } = await import('./chatErrors');

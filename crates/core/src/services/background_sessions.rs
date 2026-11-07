@@ -326,6 +326,16 @@ fn supervise(dir: &Path, job: &mut Job) -> Result<()> {
                 "failed"
             }
             .into();
+            if job.status == "failed" {
+                // The worker records its own sanitized failure. Fall back to the
+                // exit status only; stdout/stderr may contain user content.
+                job.error = Some(read_worker_failure(dir).unwrap_or_else(|| {
+                    match job.exit_code {
+                        Some(code) => format!("Worker exited with code {code}"),
+                        None => "Worker exited without an exit code".to_owned(),
+                    }
+                }));
+            }
             break;
         }
         if dir.join("cancel").exists()
@@ -421,6 +431,64 @@ pub fn cancel(root: &Path, id: &str) -> Result<Job> {
     fs::write(dir.join("cancel"), b"cancel")?;
     Ok(job)
 }
+/// File a worker writes with its own sanitized failure, read by `/tasks` and
+/// by hosts that only inspect task state.
+pub const FAILURE_FILE: &str = "failure.json";
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct WorkerFailure {
+    /// One-line, already sanitized diagnostic.
+    pub summary: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stage: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub class: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub http: Option<u16>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub attempts: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub retries: Option<u32>,
+}
+
+impl WorkerFailure {
+    /// Build from the typed failure when one survived the turn.
+    pub fn from_error(error: &anyhow::Error) -> Self {
+        match crate::performance::find_failure(error) {
+            Some(failure) => Self {
+                summary: failure.diagnostic(),
+                stage: Some(failure.stage().as_str().to_owned()),
+                class: Some(failure.class().as_str().to_owned()),
+                http: failure.status(),
+                attempts: failure.attempts(),
+                retries: failure.retries(),
+            },
+            None => Self {
+                // Already sanitized: credentials, URLs and nested causes.
+                summary: crate::performance::sanitized_chain(error),
+                stage: None,
+                class: None,
+                http: None,
+                attempts: None,
+                retries: None,
+            },
+        }
+    }
+}
+
+/// A worker in a background task records the failure for its supervisor.
+/// Only this task's own directory is written; nothing is copied from output.
+pub fn record_worker_failure(directory: &Path, error: &anyhow::Error) -> Result<()> {
+    let failure = WorkerFailure::from_error(error);
+    save(&directory.join(FAILURE_FILE), &failure)
+}
+
+fn read_worker_failure(dir: &Path) -> Option<String> {
+    let bytes = std::fs::read(dir.join(FAILURE_FILE)).ok()?;
+    let failure: WorkerFailure = serde_json::from_slice(&bytes).ok()?;
+    (!failure.summary.trim().is_empty()).then_some(failure.summary)
+}
+
 pub fn output(root: &Path, id: &str) -> Result<(String, String)> {
     let dir = directory(root, id)?;
     read_job(&dir)?;

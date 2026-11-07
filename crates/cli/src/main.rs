@@ -1,3 +1,4 @@
+mod request_attempts;
 // Local command output shares the terminal's display-only history.
 macro_rules! command_eprintln {
     ($($arg:tt)*) => {{

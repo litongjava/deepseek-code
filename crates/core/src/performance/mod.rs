@@ -1,8 +1,16 @@
 //! Shared transport policy. Retries end before a response stream is exposed.
+mod request_failure;
+
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
 use std::time::Duration;
 
+pub mod retry_events;
+
+pub use request_failure::{
+    find_failure, parse_failure_summary, sanitize_message, sanitize_remote_text, sanitized_chain,
+    AttemptBudget, FailureSummary, RequestFailure, RequestStage,
+};
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ErrorClass {
     Authentication,
@@ -10,6 +18,18 @@ pub enum ErrorClass {
     ContextLimit,
     Transient,
     Permanent,
+}
+
+impl ErrorClass {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Authentication => "authentication",
+            Self::RateLimit => "rate_limit",
+            Self::ContextLimit => "context_limit",
+            Self::Transient => "transient",
+            Self::Permanent => "permanent",
+        }
+    }
 }
 
 #[derive(Debug)]
@@ -26,7 +46,16 @@ impl std::fmt::Display for ApiError {
 impl std::error::Error for ApiError {}
 
 pub fn classify(error: &anyhow::Error) -> ErrorClass {
-    if let Some(api) = error.downcast_ref::<ApiError>() {
+    // A structured failure already carries the classification computed while
+    // the typed transport error was still available.
+    if let Some(failure) = find_failure(error) {
+        return failure.class();
+    }
+    classify_raw(error)
+}
+
+pub(crate) fn classify_raw(error: &anyhow::Error) -> ErrorClass {
+    if let Some(api) = request_failure::find_in_chain::<ApiError>(error) {
         return match api.status {
             401 | 403 => ErrorClass::Authentication,
             429 => ErrorClass::RateLimit,
@@ -37,15 +66,68 @@ pub fn classify(error: &anyhow::Error) -> ErrorClass {
             _ => ErrorClass::Permanent,
         };
     }
-    if let Some(http) = error.downcast_ref::<reqwest::Error>() {
-        if http.is_timeout() || http.is_connect() {
+    if let Some(http) = request_failure::find_in_chain::<reqwest::Error>(error) {
+        if is_transient_transport(http) {
             return ErrorClass::Transient;
         }
     }
     ErrorClass::Permanent
 }
 
-pub async fn checked_response(response: reqwest::Response) -> Result<reqwest::Response> {
+/// Only connection and transfer failures before any response content are
+/// retried. Authentication, billing, request parameters, redirects, builder
+/// errors and unparseable JSON responses stay permanent.
+fn is_transient_transport(error: &reqwest::Error) -> bool {
+    if error.is_timeout() || error.is_connect() {
+        return true;
+    }
+    if error.is_builder() || error.is_redirect() || error.status().is_some() {
+        return false;
+    }
+    if !error.is_request() {
+        return false;
+    }
+    source_is_recoverable(error)
+}
+
+/// Hyper and IO causes that mean the exchange was interrupted, not rejected.
+fn source_is_recoverable(error: &reqwest::Error) -> bool {
+    let mut source = std::error::Error::source(error);
+    while let Some(cause) = source {
+        if let Some(hyper) = cause.downcast_ref::<hyper::Error>() {
+            // These raise when a pooled connection closes, a peer resets the
+            // stream, or the request body write was aborted; a fresh attempt is safe.
+            if hyper.is_incomplete_message()
+                || hyper.is_canceled()
+                || hyper.is_closed()
+                || hyper.is_body_write_aborted()
+            {
+                return true;
+            }
+        }
+        if let Some(io) = cause.downcast_ref::<std::io::Error>() {
+            use std::io::ErrorKind::*;
+            if matches!(
+                io.kind(),
+                ConnectionReset | ConnectionAborted | BrokenPipe | UnexpectedEof | NotConnected
+            ) {
+                return true;
+            }
+        }
+        source = cause.source();
+    }
+    false
+}
+
+/// A host-facing, sanitized diagnostic for any model-request failure.
+pub fn request_diagnostic(error: &anyhow::Error) -> String {
+    match find_failure(error) {
+        Some(failure) => failure.diagnostic(),
+        None => sanitized_chain(error),
+    }
+}
+
+pub async fn checked_response(mut response: reqwest::Response) -> Result<reqwest::Response> {
     observe_rate_limits(&response);
     if response.status().is_success() {
         return Ok(response);
@@ -57,13 +139,160 @@ pub async fn checked_response(response: reqwest::Response) -> Result<reqwest::Re
         .and_then(|v| v.to_str().ok())
         .and_then(|v| v.parse::<u64>().ok())
         .map(|seconds| Duration::from_secs(seconds.min(300)));
-    let message = response.text().await.unwrap_or_default();
+    let content_type = response
+        .headers()
+        .get(reqwest::header::CONTENT_TYPE)
+        .and_then(|value| value.to_str().ok())
+        .unwrap_or_default()
+        .to_owned();
+    let body = read_bounded(&mut response).await;
     Err(ApiError {
         status,
         retry_after,
-        message,
+        message: safe_remote_error(&body, &content_type),
     }
     .into())
+}
+
+/// A remote error body may echo the request, including prompt text. Only a small
+/// set of recognizable error fields is kept; anything else is summarized.
+pub fn safe_remote_error(body: &[u8], content_type: &str) -> String {
+    let text = match std::str::from_utf8(body) {
+        Ok(text) => text.trim(),
+        Err(_) => {
+            return format!(
+                "service returned HTTP error with a non-UTF-8 body ({content_type}, {} bytes)",
+                body.len()
+            )
+        }
+    };
+    if text.is_empty() {
+        return "service returned an HTTP error without a body".to_owned();
+    }
+    let Ok(value) = serde_json::from_str::<serde_json::Value>(text) else {
+        // A plain-text body is free text: it could be the prompt the server
+        // rejected, so it is never reproduced. Only a recognized error category
+        // is kept, which preserves authentication, billing, rate-limit and
+        // parameter meaning without carrying any of the body.
+        let plain = content_type.is_empty() || content_type.starts_with("text/plain");
+        if plain {
+            return plain_text_error(text);
+        }
+        return format!(
+            "service returned an HTTP error with a non-JSON body ({content_type}, {} bytes); content omitted",
+            body.len()
+        );
+    };
+    let mut parts: Vec<String> = Vec::new();
+    for path in [
+        &["error", "message"][..],
+        &["error", "type"][..],
+        &["error", "code"][..],
+        &["message"][..],
+        &["detail"][..],
+        &["error_description"][..],
+        &["code"][..],
+    ] {
+        let mut current = &value;
+        let mut found = true;
+        for key in path {
+            match current.get(*key) {
+                Some(next) => current = next,
+                None => {
+                    found = false;
+                    break;
+                }
+            }
+        }
+        if !found {
+            continue;
+        }
+        if let Some(text) = current.as_str() {
+            let text = text.trim();
+            if !text.is_empty() && !parts.iter().any(|part| part == text) {
+                parts.push(text.to_owned());
+            }
+        }
+    }
+    if let Some(text) = value.get("error").and_then(|error| error.as_str()) {
+        let text = text.trim();
+        if !text.is_empty() && !parts.iter().any(|part| part == text) {
+            parts.push(text.to_owned());
+        }
+    }
+    if parts.is_empty() {
+        return format!(
+            "service returned an HTTP error without a recognized error field ({content_type})"
+        );
+    }
+    request_failure::sanitize_remote_text(&parts.join(": "))
+}
+
+/// Classify a plain-text error body without reproducing it.
+///
+/// Values such as `Unauthorized` or `rate limit exceeded` are common and worth
+/// keeping as meaning, but the same channel can echo the request. The response
+/// therefore reports only a category derived from recognized wording plus the
+/// body length; the body itself never reaches a diagnostic.
+fn plain_text_error(text: &str) -> String {
+    let lower = text.to_ascii_lowercase();
+    let category = if ["unauthorized", "authentication", "forbidden", "api key", "credential"]
+        .iter()
+        .any(|word| lower.contains(word))
+    {
+        "authentication failed"
+    } else if ["rate limit", "too many requests", "slow down", "overloaded"]
+        .iter()
+        .any(|word| lower.contains(word))
+    {
+        "rate limited"
+    } else if ["quota", "billing", "insufficient", "payment", "balance"]
+        .iter()
+        .any(|word| lower.contains(word))
+    {
+        "billing or quota error"
+    } else if ["timeout", "timed out", "unavailable", "temporarily", "retry later"]
+        .iter()
+        .any(|word| lower.contains(word))
+    {
+        "temporarily unavailable"
+    } else if ["invalid", "bad request", "malformed", "unsupported", "missing"]
+        .iter()
+        .any(|word| lower.contains(word))
+    {
+        "invalid request"
+    } else {
+        return format!(
+            "service returned an HTTP error with a plain-text body ({} bytes); content omitted",
+            text.len()
+        );
+    };
+    format!(
+        "service reported an error: {category} (plain-text body, {} bytes; content omitted)",
+        text.len()
+    )
+}
+
+/// Read only as much of an error body as a diagnostic could ever use.
+async fn read_bounded(response: &mut reqwest::Response) -> Vec<u8> {
+    const LIMIT: usize = 64 * 1024;
+    let mut body = Vec::new();
+    loop {
+        match response.chunk().await {
+            Ok(Some(chunk)) => {
+                let room = LIMIT.saturating_sub(body.len());
+                if room == 0 {
+                    break;
+                }
+                body.extend_from_slice(&chunk[..chunk.len().min(room)]);
+                if chunk.len() >= room {
+                    break;
+                }
+            }
+            Ok(None) | Err(_) => break,
+        }
+    }
+    body
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -132,41 +361,81 @@ pub fn rate_limits() -> Vec<RateLimitState> {
         .unwrap_or_default()
 }
 
-pub async fn retry_with_backoff<F, Fut, T>(mut f: F) -> Result<T>
+/// Shared count of HTTP attempts for one model request.
+///
+/// The adapter records every attempt it really makes; the tool loop reads the
+/// value when a stream ends so a clean end-of-stream does not report `unknown`
+/// for data the send layer already had. A value of zero means nothing was
+/// observed (for example a built-in adapter with its own transport) and stays
+/// unknown — it is never defaulted to one.
+#[derive(Debug, Clone, Default)]
+pub struct AttemptCounter(std::sync::Arc<std::sync::atomic::AtomicU32>);
+
+impl AttemptCounter {
+    pub fn set(&self, attempts: u32) {
+        self.0.store(attempts, std::sync::atomic::Ordering::Release);
+    }
+
+    pub fn attempts(&self) -> Option<u32> {
+        match self.0.load(std::sync::atomic::Ordering::Acquire) {
+            0 => None,
+            attempts => Some(attempts),
+        }
+    }
+}
+
+pub async fn retry_with_backoff<F, Fut, T>(f: F) -> Result<T>
 where
     F: FnMut() -> Fut,
     Fut: std::future::Future<Output = Result<T>>,
 {
     crate::config::OrchestrationConfig::init_global()?;
-    let max = crate::config::OrchestrationConfig::max_retries();
-    let base = crate::config::OrchestrationConfig::retry_base_backoff_ms();
-    for attempt in 0..=max {
+    let budget = AttemptBudget::configured();
+    retry_with_backoff_budget(f, &budget).await
+}
+
+/// Retry one HTTP attempt at a time under a shared budget, so the send layer
+/// and the pre-content stream layer cannot multiply the configured maximum.
+/// Every failed attempt is wrapped in a sanitized [`RequestFailure`] that keeps
+/// the classification and the number of attempts actually made.
+pub async fn retry_with_backoff_budget<F, Fut, T>(mut f: F, budget: &AttemptBudget) -> Result<T>
+where
+    F: FnMut() -> Fut,
+    Fut: std::future::Future<Output = Result<T>>,
+{
+    loop {
+        let Some(_) = budget.take() else {
+            return Err(anyhow::Error::new(RequestFailure::budget_exhausted(
+                budget.used(),
+            )));
+        };
+        let started = std::time::Instant::now();
         match f().await {
-            Ok(value) => return Ok(value),
+            Ok(value) => {
+                retry_events::emit(budget, "response_received", None, None, false, Some(started.elapsed().as_millis() as u64)).await;
+                return Ok(value);
+            },
             Err(error) => {
-                if attempt == max
-                    || !matches!(
-                        classify(&error),
-                        ErrorClass::RateLimit | ErrorClass::Transient
-                    )
-                {
-                    return Err(error);
+                let attempts = budget.used();
+                let retryable = matches!(
+                    classify(&error),
+                    ErrorClass::RateLimit | ErrorClass::Transient
+                );
+                let failure = retry_events::safe_failure(&error, attempts);
+                if !retryable || budget.remaining() == 0 {
+                    retry_events::emit(budget, "failed", Some(failure), None, false, Some(started.elapsed().as_millis() as u64)).await;
+                    return Err(anyhow::Error::new(RequestFailure::from_error(
+                        &error, attempts,
+                    )));
                 }
-                let delay = error
-                    .downcast_ref::<ApiError>()
-                    .and_then(|e| e.retry_after)
-                    .unwrap_or_else(|| {
-                        Duration::from_millis(
-                            base.saturating_mul(1u64 << attempt.min(16)).min(300_000),
-                        )
-                    });
-                // Do not log remote bodies: they can echo prompt or credential data.
-                tracing::warn!(attempt, ?delay, "Retrying transient model request");
+                let retry_after = request_failure::find_in_chain::<ApiError>(&error).and_then(|e| e.retry_after);
+                let delay = retry_events::delay(attempts, retry_after);
+                retry_events::emit(budget, "retry_wait", Some(failure), Some(delay), retry_after.is_some(), Some(started.elapsed().as_millis() as u64)).await;
+                // Dropping the caller cancels this delay and prevents another attempt.
                 tokio::time::sleep(delay).await;
             }
         }
     }
-    unreachable!()
 }
 
 /// Endpoints known to take a system-role message after the first user

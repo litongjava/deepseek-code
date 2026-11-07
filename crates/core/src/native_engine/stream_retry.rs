@@ -1,33 +1,52 @@
 //! Retry a disconnected model stream only before any content is exposed.
 use super::request_identity::RequestIdentity;
+use crate::performance::{AttemptBudget, AttemptCounter, RequestFailure};
 use anyhow::Result;
 use futures::{Stream, StreamExt};
 use serde_json::Value;
-use std::{pin::Pin, time::Duration};
+use std::pin::Pin;
+#[cfg(test)]
+use std::time::Duration;
 
 async fn send(
     request: &reqwest::RequestBuilder,
     identity: &RequestIdentity,
+    budget: &AttemptBudget,
+    attempts: &AttemptCounter,
 ) -> Result<reqwest::Response> {
-    crate::performance::retry_with_backoff(|| async {
-        let request = request
-            .try_clone()
-            .ok_or_else(|| anyhow::anyhow!("Model request cannot be replayed"))?;
-        crate::performance::checked_response(request.headers(identity.headers()).send().await?)
+    let result = crate::performance::retry_with_backoff_budget(
+        || async {
+            let request = request
+                .try_clone()
+                .ok_or_else(|| anyhow::anyhow!("Model request cannot be replayed"))?;
+            crate::performance::checked_response(
+                request.headers(identity.headers()).send().await?,
+            )
             .await
-    })
-    .await
+        },
+        budget,
+    )
+    .await;
+    // Record what the server really saw, including the failing attempt.
+    attempts.set(budget.used());
+    result
 }
 
 /// Empty handshakes are withheld so a retry cannot duplicate observable content.
+///
+/// Send retries and pre-content stream retries share one attempt budget, so a
+/// model request never exceeds `1 + http.max_retries` HTTP attempts in total.
 pub(super) async fn response(
     request: reqwest::RequestBuilder,
     identity: RequestIdentity,
-) -> Result<Pin<Box<dyn Stream<Item = Result<String>> + Send>>> {
-    let first = send(&request, &identity).await?;
-    let retries = crate::config::OrchestrationConfig::max_retries().min(2);
-    let backoff = crate::config::OrchestrationConfig::retry_base_backoff_ms();
-    Ok(Box::pin(async_stream::try_stream! {
+) -> Result<(Pin<Box<dyn Stream<Item = Result<String>> + Send>>, AttemptCounter)> {
+    let mut budget = AttemptBudget::configured();
+    budget.id = identity.id().to_owned();
+    let attempts = AttemptCounter::default();
+    let first = send(&request, &identity, &budget, &attempts).await?;
+    let counter = attempts.clone();
+    let retries = crate::config::OrchestrationConfig::max_retries();
+    let stream = Box::pin(async_stream::try_stream! {
         let mut next = Some(first);
         for attempt in 0..=retries {
             let stream = super::utf8_stream::response(next.take().unwrap());
@@ -62,20 +81,34 @@ pub(super) async fn response(
             // A partial event is not proof of an empty response; preserve it unmodified.
             if exposed || !unparsed.trim().is_empty() || !transport_failure {
                 if !pending.is_empty() { yield pending; }
-                if let Some(error) = failure { Err(error)?; }
+                if let Some(ref error) = failure {
+                    let detail = RequestFailure::stream(error, Some(budget.used()), exposed);
+                    crate::performance::retry_events::emit(&budget, "stream_failed", Some(detail.as_json()), None, false, None).await;
+                    Err(anyhow::Error::new(detail))?;
+                }
                 break;
             }
-            if attempt == retries {
+            if attempt == retries || budget.remaining() == 0 {
                 if !pending.is_empty() { yield pending; }
-                if let Some(error) = failure { Err(error)?; }
-                Err(anyhow::anyhow!("Model response ended before completion: stream closed before any content or completion marker after {} attempts", attempt + 1))?;
+                let detail = match &failure {
+                    Some(error) => RequestFailure::stream(error, Some(budget.used()), false),
+                    None => RequestFailure::stream_exhausted(budget.used()),
+                };
+                crate::performance::retry_events::emit(&budget, "stream_failed", Some(detail.as_json()), None, false, None).await;
+                Err(anyhow::Error::new(detail))?;
             }
-            let delay = Duration::from_millis(backoff.saturating_mul(1u64 << attempt).min(300_000));
-            tracing::warn!(attempt = attempt + 1, ?delay, "Retrying model stream closed before content");
+            let delay = crate::performance::retry_events::delay(budget.used(), None);
+            let detail = match &failure {
+                Some(error) => RequestFailure::stream(error, Some(budget.used()), false),
+                None => RequestFailure::stream_exhausted(budget.used()),
+            };
+            crate::performance::retry_events::emit(&budget, "retry_wait", Some(detail.as_json()), Some(delay), false, None).await;
+            // Dropping the consumer cancels this delay and the next attempt.
             tokio::time::sleep(delay).await;
-            next = Some(send(&request, &identity).await?);
+            next = Some(send(&request, &identity, &budget, &attempts).await?);
         }
-    }))
+    });
+    Ok((stream, counter))
 }
 
 fn empty_prelude(payload: &str) -> bool {

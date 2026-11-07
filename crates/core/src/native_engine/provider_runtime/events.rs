@@ -234,11 +234,21 @@ impl State {
                     );
                 }
             }
-            "response.failed" => bail!("Responses request failed: {}", event["response"]["error"]),
+            "response.failed" => bail!(
+                "Responses request failed: {}",
+                crate::performance::sanitize_remote_text(
+                    &event["response"]["error"].to_string()
+                )
+            ),
             "response.completed" | "response.incomplete" => {
                 let response = &event["response"];
                 if response["status"] == "failed" {
-                    bail!("Responses request failed: {}", response["error"]);
+                    bail!(
+                        "Responses request failed: {}",
+                        crate::performance::sanitize_remote_text(
+                            &response["error"].to_string()
+                        )
+                    );
                 }
                 if let Some(items) = response["output"].as_array() {
                     for item in items.iter().filter(|i| i["type"] == "function_call") {

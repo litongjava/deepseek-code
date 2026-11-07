@@ -116,9 +116,9 @@ async fn empty_disconnect_recovers_without_duplicate_events_or_changed_identity(
 async fn empty_disconnect_is_bounded_and_can_be_cancelled_during_backoff() {
     let (provider, requests, server) = fixture(vec![(ANTHROPIC_EMPTY.into(), false)]).await;
     let (text, error) = collect(client(&provider, 2).await).await;
-    assert_eq!(requests.lock().unwrap().len(), 3);
+    assert_eq!(requests.lock().unwrap().len(), 8);
     assert_eq!(text, ANTHROPIC_EMPTY);
-    assert!(error.unwrap().contains("after 3 attempts"));
+    assert!(error.unwrap().contains("attempts=8"));
     server.abort();
 
     let (provider, requests, server) = fixture(vec![(ANTHROPIC_EMPTY.into(), false)]).await;

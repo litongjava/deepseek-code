@@ -259,7 +259,11 @@ impl OpenAIClient {
             }
             let response = checked_response(response).await?;
 
-            response.json().await.map_err(|e| anyhow::anyhow!("{:#}", e))
+            // Keep the reqwest error typed so the retry layer can classify it.
+            response
+                .json()
+                .await
+                .map_err(|error| anyhow::Error::new(error).context("Model response was not valid JSON"))
         };
         let data: OpenAIResponse = if self.retry_requests { retry_with_backoff(request).await? } else { request().await? };
 
@@ -286,9 +290,39 @@ impl OpenAIClient {
         max_tokens: u32,
         context_capture: Option<&super::request_context::ContextCapture>,
     ) -> Result<Pin<Box<dyn Stream<Item = Result<String>> + Send>>> {
+        Ok(self
+            .send_message_stream_counted(
+                provider,
+                messages,
+                system_prompt,
+                tools,
+                max_tokens,
+                context_capture,
+            )
+            .await?
+            .0)
+    }
+
+    /// Same request, but also returns how many HTTP attempts produced it, so a
+    /// stream that ends without a completion marker can still report the count.
+    pub async fn send_message_stream_counted(
+        &self,
+        provider: &ResolvedProvider,
+        messages: Vec<OpenAIMessage>,
+        system_prompt: Option<&str>,
+        tools: Vec<ToolDefinition>,
+        max_tokens: u32,
+        context_capture: Option<&super::request_context::ContextCapture>,
+    ) -> Result<(
+        Pin<Box<dyn Stream<Item = Result<String>> + Send>>,
+        crate::performance::AttemptCounter,
+    )> {
         anyhow::ensure!(!crate::services::anthropic_auth::is_oauth_marker(&provider.provider.api_key), "Anthropic OAuth credentials require Anthropic messages API");
         if provider.provider.builtin_id.is_some() {
-            return super::provider_runtime::stream_with_schema_observed(provider, messages, system_prompt, tools, max_tokens, self.response_schema.as_ref(), context_capture).await;
+            // Built-in adapters use their own transport, so the attempt count is
+            // not observable here and stays unknown rather than being invented.
+            let stream = super::provider_runtime::stream_with_schema_observed(provider, messages, system_prompt, tools, max_tokens, self.response_schema.as_ref(), context_capture).await?;
+            return Ok((stream, crate::performance::AttemptCounter::default()));
         }
         let base_url = crate::native_engine::provider_manager::ProviderManager::normalize_base_url(&provider.provider.base_url);
         let url = format!("{}/v1/chat/completions", base_url.trim_end_matches('/'));

@@ -84,6 +84,7 @@ async fn model_500_emits_one_stop_failure_and_loaded_instructions() {
         axum::routing::post(|| async {
             (
                 axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+                [("retry-after", "0")],
                 axum::Json(json!({"error":{"message":"lifecycle fixture","type":"server_error"}})),
             )
         }),

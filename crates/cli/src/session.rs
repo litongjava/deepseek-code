@@ -798,6 +798,17 @@ impl Session {
                             crate::session_commands::goal_notice("Goal paused. Send a message to continue, or /goal clear to remove it.");
                         }
                     }
+                    // A background worker hands its supervisor a sanitized
+                    // failure so task state can explain the exit. The summary is
+                    // built from the typed error, never from stdout/stderr.
+                    if let Some(directory) = std::env::var_os(
+                        deepseek_code_core::services::background_sessions::CONTROL_ENV,
+                    ) {
+                        let _ = deepseek_code_core::services::background_sessions::record_worker_failure(
+                            std::path::Path::new(&directory),
+                            &error,
+                        );
+                    }
                     return Err(error);
                 }
             }
@@ -1458,6 +1469,13 @@ impl Session {
                         if let Some(old) = snapshots.iter_mut().find(|s| s["id"] == snapshot["id"]) { *old = snapshot; } else { snapshots.push(snapshot); }
                         crate::session_commands::save_live_requests(self, &snapshots)?;
                     },
+                    EngineEvent::RequestAttempt(event) => {
+                        if let Err(error) = crate::request_attempts::record(&self.paths.data_dir, &self.id, &event) {
+                            progress.notice(&format!("Could not save request attempt log: {error}"));
+                        }
+                        if cli.output_format == OutputFormat::StreamJson { emit_json(&event)?; }
+                        if let Some(message) = event["message"].as_str() { progress.notice(message); }
+                    },
                     EngineEvent::BudgetWarning { message, .. } => { progress.notice(&message); },
                     _ => {},
                 }
@@ -1590,6 +1608,11 @@ impl Session {
             deepseek_code_core::db::turn_repo::terminal_status(stop.as_deref(), error.is_some() || !completed)
         };
         let turn_record = turn.finish(terminal_status)?;
+        let terminal_event = json!({"type":"request_turn_end", "turnId":turn_record.turn_id,
+            "outcome":terminal_status, "timestampMs":chrono::Utc::now().timestamp_millis()});
+        if let Err(error) = crate::request_attempts::record(&self.paths.data_dir, &self.id, &terminal_event) {
+            progress.notice(&format!("Could not save request outcome: {error}"));
+        }
         if cli.output_format == OutputFormat::StreamJson {
             emit_json(&json!({"type":"turn_timing","turn":turn_record,"assistant_id":turn.message_id()}))?;
         }

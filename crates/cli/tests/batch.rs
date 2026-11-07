@@ -257,6 +257,7 @@ async fn worker_failures_are_reported_and_the_batch_fails() {
         post(|| async {
             (
                 axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+                [("retry-after", "0")],
                 "fixture model failure",
             )
         }),

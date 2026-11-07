@@ -28,7 +28,13 @@ async fn respond(State(state): State<Fixture>, Json(body): Json<Value>) -> Respo
         tokio::time::sleep(Duration::from_millis(50)).await;
     }
     if state.fail {
-        return (StatusCode::BAD_REQUEST, "fixture failure").into_response();
+        // A recognized JSON error field, because arbitrary plain text is no
+        // longer reproduced in diagnostics: the body could echo the request.
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(json!({"error": {"message": "fixture failure"}})),
+        )
+            .into_response();
     }
     if body["stream"] != true {
         return Json(json!({"id":"summary", "object":"chat.completion", "created":0,

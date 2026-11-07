@@ -46,6 +46,9 @@ pub(super) struct RequestIdentity {
 }
 
 impl RequestIdentity {
+    pub(super) fn id(&self) -> &str {
+        self.headers["x-request-id"].to_str().expect("generated request ID")
+    }
     pub(super) fn new(capture: Option<&super::request_context::ContextCapture>) -> Self {
         let mut headers = HeaderMap::new();
         let mut set = |name: &'static str, value: &str| {

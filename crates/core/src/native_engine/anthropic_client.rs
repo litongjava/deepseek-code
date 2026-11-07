@@ -249,7 +249,11 @@ impl AnthropicClient {
             }
             let response = checked_response(response).await?;
 
-            response.json().await.map_err(|e| anyhow::anyhow!("{:#}", e))
+            // Keep the reqwest error typed so the retry layer can classify it.
+            response
+                .json()
+                .await
+                .map_err(|error| anyhow::Error::new(error).context("Model response was not valid JSON"))
         };
         let data: AnthropicResponse = if self.retry_requests { retry_with_backoff(request).await? } else { request().await? };
 
@@ -303,7 +307,7 @@ impl AnthropicClient {
             .header("content-type", "application/json")
             .json(&body);
         let request = crate::services::anthropic_auth::authorize(request, &provider.provider.api_key, base_url, provider.model.fast).await?;
-        super::stream_retry::response(request, identity).await
+        Ok(super::stream_retry::response(request, identity).await?.0)
     }
 
     pub async fn send_message_stream_with_thinking(
@@ -328,6 +332,35 @@ impl AnthropicClient {
         enable_thinking: bool,
         context_capture: Option<&super::request_context::ContextCapture>,
     ) -> Result<Pin<Box<dyn Stream<Item = Result<String>> + Send>>> {
+        Ok(self
+            .send_message_stream_with_thinking_counted(
+                provider,
+                messages,
+                system_prompt,
+                tools,
+                max_tokens,
+                enable_thinking,
+                context_capture,
+            )
+            .await?
+            .0)
+    }
+
+    /// Same request, but also returns how many HTTP attempts produced it, so a
+    /// stream that ends without a completion marker can still report the count.
+    pub async fn send_message_stream_with_thinking_counted(
+        &self,
+        provider: &ResolvedProvider,
+        messages: Vec<AnthropicMessage>,
+        system_prompt: Option<&str>,
+        tools: Vec<ToolDefinition>,
+        max_tokens: u32,
+        enable_thinking: bool,
+        context_capture: Option<&super::request_context::ContextCapture>,
+    ) -> Result<(
+        Pin<Box<dyn Stream<Item = Result<String>> + Send>>,
+        crate::performance::AttemptCounter,
+    )> {
         let base_url = provider.provider.base_url.trim_end_matches('/');
         let url = if base_url.contains("/v1") {
             format!("{}/messages", base_url)

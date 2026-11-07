@@ -267,6 +267,7 @@ async fn h5_chat_handler(
                         "tool_name": tool_name,
                     }))
                 }
+                crate::native_engine::tool_loop::EngineEvent::RequestAttempt(event) => Some(event),
                 crate::native_engine::tool_loop::EngineEvent::BudgetWarning { message, usage, limit } => {
                     Some(serde_json::json!({
                         "type": "budget_warning",
