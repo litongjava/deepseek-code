@@ -186,19 +186,23 @@ Windows 上，`tools::linux_env::tests::unpack_copies_hard_links_keeps_symlinks_
 
 同一目录的 `desktop/fixture.py` 配合真实 Desktop 窗口核对错误卡片上的阶段、次数与脱敏结果。
 
-### L. 摘要截断后的有限恢复
+### L. 超长历史的摘要分段、每段恢复与分层合并
 
 全部使用本地模拟接口和临时数据库，不发真实请求。
 
-1. `cargo test --locked -p deepseek-code-core --test compaction_truncation`（17 项）：两个协议下的首段与最终摘要提额、模型上限下按 token 二分并合并、合并再次截断后提额成功、合并持续截断停在深度上限、12 次恢复上限、额度耗尽时报告未发送的提额预算、恢复结果在失败和重启后复用、合并超出安全输入预算（含子摘要提额后合并输入无法容纳）、最后实际预算与拟请求预算分开报告、窗口过小与分段规划失败的完整诊断、非截断立即停止、截断文本不进入缓存、并发修改历史拒绝提交、局部摘要截断。
-2. `cargo test --locked -p deepseek-code-core --test compaction_overflow`：原有分段、取消、失败与最终摘要预算不变。
+1. `cargo test --locked -p deepseek-code-core --test compaction_truncation`（23 项）：两个协议下分段与最终摘要提额且篇幅目标不变、模型上限下按 token 二分并合并、合并再次截断后提额、合并持续截断停在深度上限并复用已完成分段、单段额度耗尽时其它分段继续完成、恢复合并超过 64K 时拒绝发送、恢复结果在失败和重启后复用、合并超出安全输入预算、最后实际预算与拟请求预算分开报告、窗口过小与分段规划失败的完整诊断、非截断立即停止、截断文本不进入缓存、缓存写入失败不提交、并发修改历史拒绝提交、局部摘要截断、约 85 万 tokens 历史的分段与分层合并、约 80 万 tokens 的单段失败隔离与缓存复用、长摘要形成小于 8 份的分组并单项传递。
+2. `cargo test --locked -p deepseek-code-core --test compaction_overflow`：原有分段、取消、失败与最终摘要预算不变；合并首次用 4096、截断后按模型配置提高到 8192。
 3. OpenAI 的 `length` 与 Anthropic 的 `max_tokens` 都按结构化结束原因识别，不依赖错误文字；其他结束原因仍按普通失败处理，不进入拆分，且不新增请求。
-4. 首次返回截断时请求预算从 4096 提升到 8192 并成功，提示词篇幅目标同时从 2048 变为 4096；最终摘要从 8192 提升到 16384，目标从 4096 变为 8192。测试直接断言请求体中的目标文字。模型上限为 4096 时跳过提额，拆成两段后合并，内容顺序、中文、emoji 与超长工具结果完整。
-5. 所有摘要请求持续截断时在规定次数内停止，错误说明失败阶段、拟请求预算、最后一次实际请求的输出预算、恢复次数与原因，`/history` 中的原始记录不变；缓存中没有截断文本。恢复额度在提额之前用尽时，错误给出的是本次本应发出的提额预算（4096 提到 8192），而不是刚被截断的那次请求的预算，并且该提额请求确实没有发出。
-6. 合并所需输入超出 90% 安全预算（介于安全线与窗口之间，以及超出窗口两种情况）时，不发送该请求；错误保留 `merge` 阶段名，并分别给出拟请求预算与子摘要实际使用的预算。
-7. 恢复过程中关闭并重新打开数据库与引擎后重试，或中途取消后重试，已完成的子摘要都直接复用；恢复期间历史发生变化时拒绝提交，原有记录与新增记录都保留。
-8. 手动 `/compact` 与自动压缩显示同一套逐段进度。
-9. 真实 ConPTY：相邻开发支持目录的 `compaction-recovery-20261107/compaction_truncation_acceptance.py` 用隔离数据目录和本地模拟接口构造“超大历史、两段摘要、首段截断”。脚本按阶段记录请求，断言原始分段恰为 2、恢复子段恰为 2、合并在子段之后，并核对终端出现 `fragment 1/2` 与 `fragment 2/2` 两个标签；自动压缩场景还检查 `Auto-compacting conversation`、拆分或提额进度、压缩后原请求继续且只执行一次并携带摘要，手动场景检查 `/compact` 的进度与 `Compacted (ctrl+o to see full summary)`。`safe_budget_respected` 使用与引擎相同口径的完整请求体估算（含系统指令、按消息分组向上取整），只检查摘要路径的请求。
+4. 单次摘要请求的完整输入（系统指令、阶段提示词和历史）不超过 64,000 tokens，即使模型窗口能装下整段历史也先分段。该上限覆盖恢复合并：两份子摘要拼起来超过 64K 时，即使 1M 窗口仍装得下，也拒绝发送并只让该分段失败。约 85 万 tokens 的合成历史产生 14 个左右的分段，每个请求都在上限内，随后经 3 次分层合并得到最终摘要。
+5. 提额只增加输出预算，不改变篇幅目标：分段与合并始终约为 2048 tokens，最终摘要始终约为 4096 tokens。测试直接断言请求体中的目标文字。模型上限为 4096 时跳过提额，拆成两段后合并，内容顺序、中文、emoji 与超长工具结果完整。
+6. 每个初始分段有独立恢复额度（通常 8 次），成功分段的剩余额度转入合并池；合并池初始 16 次，每个中间合并或最终摘要节点最多使用 8 次。某段额度或拆分深度耗尽时，错误列出失败分段的数量与索引、该段拟请求与最后实际发送的预算、已用次数与原因；其它分段继续完成并写入缓存，`/history` 中的原始记录不变，缓存中没有截断文本。
+7. 合并按时间顺序分层，每组最多 8 份摘要且不超过单次输入上限；单剩余项直接进入下一层；摘要数量无法减少、或连两份摘要都放不进合并输入预算时明确失败，不发送超限请求、不循环。
+8. 恢复过程中关闭并重新打开数据库与引擎后重试，或中途取消后重试，已完成的分段与子摘要都直接复用；恢复期间历史发生变化时拒绝提交，原有记录与新增记录都保留。
+9. 手动 `/compact` 与自动压缩显示同一套逐段进度。
+10. 真实 ConPTY：相邻开发支持目录的 `compaction-recovery-20261107/compaction_truncation_acceptance.py` 用隔离数据目录和本地模拟接口。每次运行写入独立目录（`--out`，或 `runs/<时间>-<随机>`），目录内保存 `run.json`（二进制路径、SHA256、源码 revision 与是否有未提交改动、场景参数、起止时间）和 `results.json`；非空目录直接拒绝，不会覆盖旧证据。场景：
+    - `auto`、`manual`（窗口 14,000）：超大历史、两段摘要、首段截断。断言原始分段恰为 2、恢复子段恰为 2、合并在子段之后，核对终端 `fragment 1/2` 与 `fragment 2/2`；自动场景还检查 `Auto-compacting conversation`、压缩后原请求继续且只执行一次并携带摘要，手动场景检查 `/compact` 的进度与 `Compacted (ctrl+o to see full summary)`。
+    - `large`、`large-manual`（窗口 100,000）：历史约 86k tokens，整段能放进 90% 安全线但超过 64K 单次上限，因此仍拆成两段；其中 64K 分段连续两次触顶（首请求与提额后），拆分出的 32K 子段正常完成。断言所有摘要请求不超过 64K、至少两次截断被恢复、进度可见；自动场景还验证原请求只继续一次并携带摘要。
+    `safe_budget_respected` 使用与引擎相同口径的完整请求体估算（含系统指令、按消息分组向上取整），只检查摘要路径的请求。
 
 ## 按改动范围选择场景
 
@@ -212,7 +216,8 @@ Windows 上，`tools::linux_env::tests::unpack_copies_hard_links_keeps_symlinks_
 - `terminal/picker.rs`：F，以及 `/resume`、`/rewind`、`/mcp` 等使用选择列表的命令
 - 欢迎区生命周期、输入框与运行帧交接、`/plan` 提示：J，以及 B、C、E1、E3
 - `session.rs`：B、D、E
-- `services/session_worker*`、`services/background_sessions.rs`：D、E4
+- `services/session_worker*`、`services/background_sessions.rs`：D、E4，以及 `cargo test --locked -p deepseek-code-core --test worker_environment`（普通子进程不继承 worker 的控制变量）
+- `tools/mod.rs` 的 shell 启动、`services/tool_hooks.rs`、`mcp/mod.rs` 的 stdio 启动：`worker_environment`，并按 E4 复核后台与分离命令
 - `runtime.rs`、`db/message_repo.rs`（发给模型的历史）：D2、E5，以及 SDK 测试
 - `services/input_queue.rs`：B、E4
 - 权限相关：E2，以及 `added_directory_survives_worker_resume_without_granting_other_sessions`（`bypass` 模式可以读工作区外的文件，其他模式受目录范围限制）

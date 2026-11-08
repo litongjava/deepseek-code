@@ -1,5 +1,5 @@
 //! Bounded recovery when a summary hits its output limit, against local fixtures.
-use axum::{routing::post, Json, Router};
+use axum::{extract::DefaultBodyLimit, routing::post, Json, Router};
 use deepseek_code_core::{
     cache::FileCache,
     native_engine::{
@@ -34,20 +34,26 @@ enum Behavior {
     TruncateAbove(u64),
     /// Truncate like `TruncateAbove`, answering with a 32k-character summary.
     LongSummaryAbove(u64),
+    /// Truncate like `TruncateAbove`, answering with the widest summary the
+    /// character limit accepts, so merging two of them can exceed the
+    /// single-request input ceiling even inside a very large window.
+    WideSummaryAbove(u64),
     /// Truncate requests below this output budget whose input is larger than
     /// this many tokens, so the raised retry of a smaller input finishes.
     SmallInputBelowBudget { tokens: u64, budget: u64 },
     /// Always report the output limit.
     AlwaysTruncate,
-    /// Split a large original fragment, then truncate the merge once at its
-    /// initial budget; the raised merge finishes.
-    SplitThenMergeRaise,
-    /// Split a large original fragment and truncate every merge request until
-    /// the flag is cleared, so a retry can reuse the completed sub-summaries.
-    SplitThenMergeSwitch,
-    /// Split every large original fragment and truncate only the fourth merge
-    /// at its initial budget, so its raise meets an already spent allowance.
-    SplitThenMergeLastAllowance,
+    /// Truncate every request carrying this marker, including the children a
+    /// split produces, so one fragment spends its own allowance and fails.
+    TruncateContaining(&'static str),
+    /// Truncate every merge at its initial budget; the raised merge finishes.
+    TruncateMergeOnce,
+    /// Truncate every merge until the flag is cleared, so a retry can reuse
+    /// the completed fragment summaries.
+    TruncateMergeSwitch,
+    /// Never truncate; answer every request with a wide summary, so merge
+    /// groups are bounded by the input limit instead of by the group size.
+    LongSummaryAlways,
 }
 
 /// The stage a request body belongs to, from the prompt it carries.
@@ -73,6 +79,9 @@ enum History {
     Evidence(usize),
     /// Distinct lines, so equal-sized fragments never share a cache key.
     Unique(usize),
+    /// One identifiable block that fills the first planned fragment, followed
+    /// by distinct notes, so a fixture can fail exactly that fragment.
+    Poisoned { poison: usize, rest: usize },
 }
 
 struct Config {
@@ -107,12 +116,25 @@ impl Config {
     }
 }
 
+/// One request the fixture answered, with the facts the new policy asserts on.
+#[derive(Clone, Debug, PartialEq)]
+struct Sent {
+    stage: &'static str,
+    /// `original` for a planned fragment, `recovery-child` for a half a
+    /// truncation produced, empty for other stages.
+    origin: &'static str,
+    tokens: u64,
+    budget: u64,
+    truncated: bool,
+}
+
 struct Fixture {
     dir: tempfile::TempDir,
     store: SessionStore,
     id: String,
     engine: Option<NativeEngine>,
     requests: Arc<Mutex<Vec<Value>>>,
+    sent: Arc<Mutex<Vec<Sent>>>,
     stop_at: Arc<AtomicUsize>,
     hang_at: Arc<AtomicUsize>,
     /// 1 while `SplitThenMergeSwitch` still truncates merges.
@@ -190,7 +212,22 @@ fn history(history: History) -> String {
         ),
         History::Evidence(count) => "evidence ".repeat(count),
         History::Unique(count) => (0..count).map(|index| format!("note{index} ")).collect(),
+        History::Poisoned { poison, rest } => {
+            let mut text = "ALPHA ".repeat(poison);
+            text.extend((0..rest).map(|index| format!("note{index} ")));
+            text
+        }
     }
+}
+
+/// The widest summary the engine's 32,000-character result limit accepts,
+/// mixing ASCII, Chinese and emoji. Two of them exceed the 64k request
+/// ceiling while each one alone still fits it.
+fn wide_summary() -> String {
+    let mut text = "🙂".repeat(27_000);
+    text.push_str(&"中".repeat(2_500));
+    text.push_str(&"abc ".repeat(625));
+    text
 }
 
 async fn start(config: Config) -> Fixture {
@@ -209,25 +246,31 @@ async fn start(config: Config) -> Fixture {
         .unwrap();
 
     let requests = Arc::new(Mutex::new(Vec::new()));
+    let sent = Arc::new(Mutex::new(Vec::new()));
+    let parent = Arc::new(Mutex::new(None));
+    let children = Arc::new(AtomicUsize::new(0));
+    let model_cap = u64::from(config.max_tokens);
     let stop_at = Arc::new(AtomicUsize::new(config.stop_at));
     let hang_at = Arc::new(AtomicUsize::new(0));
     let merge_truncate = Arc::new(AtomicUsize::new(1));
-    // Which merge request this is, so one case can truncate a chosen merge.
-    let merges = Arc::new(AtomicUsize::new(0));
     let captured = requests.clone();
+    let captured_sent = sent.clone();
+    let captured_parent = parent.clone();
+    let captured_children = children.clone();
     let captured_stop = stop_at.clone();
     let captured_hang = hang_at.clone();
     let captured_merge = merge_truncate.clone();
-    let captured_merges = merges.clone();
     let anthropic = config.format == "anthropic";
     let window = u64::from(config.window);
     let (behavior, delay) = (config.behavior, config.delay);
     let handler = move |Json(body): Json<Value>| {
         let captured = captured.clone();
+        let captured_sent = captured_sent.clone();
+        let captured_parent = captured_parent.clone();
+        let captured_children = captured_children.clone();
         let captured_stop = captured_stop.clone();
         let captured_hang = captured_hang.clone();
         let captured_merge = captured_merge.clone();
-        let captured_merges = captured_merges.clone();
         async move {
             assert!(body
                 .get("tools")
@@ -266,38 +309,63 @@ async fn start(config: Config) -> Fixture {
             }
             let sent = body.to_string();
             let stage = stage_of(&sent);
-            let merge_flag = captured_merge.load(Ordering::SeqCst) == 1;
-            let merge_index = if stage == "merge" {
-                captured_merges.fetch_add(1, Ordering::SeqCst) + 1
+            // A fragment request belongs to the recovery of the last truncated
+            // fragment when it repeats that input at a higher budget (a raise)
+            // or is one of the two halves a split produces.
+            let parent = *captured_parent.lock().unwrap();
+            let raise_possible = budget.saturating_mul(2).min(16_384).min(model_cap) > budget;
+            let origin = if stage != "fragment" {
+                ""
+            } else if matches!(parent, Some((size, limit)) if tokens == size && budget > limit) {
+                "raise"
+            } else if matches!(parent, Some((size, _)) if tokens > size) {
+                // Larger than the fragment it is compared with: a new planned
+                // fragment, and any pending halves belong to a finished branch.
+                captured_children.store(0, Ordering::SeqCst);
+                "original"
+            } else if captured_children.load(Ordering::SeqCst) > 0 {
+                captured_children.fetch_sub(1, Ordering::SeqCst);
+                "recovery-child"
             } else {
-                0
+                "original"
             };
+            let merge_flag = captured_merge.load(Ordering::SeqCst) == 1;
             let truncate = match behavior {
                 Behavior::RaiseToCeiling => budget < 16_384,
                 Behavior::RaiseFragment => stage == "fragment" && budget < 8_192,
                 Behavior::TruncateAbove(limit) => tokens > limit,
                 Behavior::LongSummaryAbove(limit) => tokens > limit,
+                Behavior::WideSummaryAbove(limit) => tokens > limit,
                 Behavior::SmallInputBelowBudget {
                     tokens: limit,
                     budget: ceiling,
                 } => tokens > limit && budget < ceiling,
                 Behavior::AlwaysTruncate => true,
-                // The large original fragment is the one the planner fills; its
-                // recovered children are far smaller and must finish.
-                Behavior::SplitThenMergeRaise => {
-                    (stage == "fragment" && tokens > 80_000) || (stage == "merge" && budget < 8_192)
-                }
-                Behavior::SplitThenMergeSwitch => {
-                    (stage == "fragment" && tokens > 80_000) || (stage == "merge" && merge_flag)
-                }
-                // Three merges spend the allowance; the fourth is truncated at
-                // its initial budget, where raising would need a thirteenth
-                // recovery.
-                Behavior::SplitThenMergeLastAllowance => {
-                    (stage == "fragment" && tokens > 80_000)
-                        || (stage == "merge" && merge_index == 4)
-                }
+                Behavior::TruncateContaining(marker) => sent.contains(marker),
+                Behavior::TruncateMergeOnce => stage == "merge" && budget < 8_192,
+                Behavior::TruncateMergeSwitch => stage == "merge" && merge_flag,
+                Behavior::LongSummaryAlways => false,
             };
+            if truncate && stage == "fragment" {
+                // The two halves follow only when the raise is impossible or
+                // itself truncated.
+                if origin == "raise" || !raise_possible {
+                    captured_children.store(2, Ordering::SeqCst);
+                }
+                *captured_parent.lock().unwrap() = Some((tokens, budget));
+            } else if stage == "fragment" {
+                *captured_parent.lock().unwrap() = None;
+            }
+            {
+                let mut log = captured_sent.lock().unwrap();
+                log.push(Sent {
+                    stage,
+                    origin,
+                    tokens,
+                    budget,
+                    truncated: truncate,
+                });
+            }
             let finish = if captured_stop.load(Ordering::SeqCst) == number {
                 2
             } else if truncate {
@@ -316,9 +384,18 @@ async fn start(config: Config) -> Fixture {
                 (_, Behavior::LongSummaryAbove(_) | Behavior::SmallInputBelowBudget { .. }) => {
                     "s".repeat(32_000)
                 }
+                // The widest text the character limit accepts: about 39k tokens
+                // each, so merging two exceeds the 64k request ceiling while a
+                // vast model window would still accept it.
+                (_, Behavior::WideSummaryAbove(_)) => wide_summary(),
+                // Distinguishable, near the character limit: about 10.7k tokens,
+                // so only five fit one merge request next to its prompt.
+                (_, Behavior::LongSummaryAlways) => {
+                    format!("summary{number} {}", "s".repeat(31_980))
+                }
                 // Long enough that merging the two children is a real input
                 // which can itself be split after another truncation.
-                (_, Behavior::SplitThenMergeSwitch) if stage == "fragment" => {
+                (_, Behavior::TruncateMergeSwitch) if stage == "fragment" => {
                     format!("{label} #{number} {}", "s".repeat(1_400))
                 }
                 _ => format!("{label} #{number}"),
@@ -330,14 +407,18 @@ async fn start(config: Config) -> Fixture {
             })
         }
     };
-    let app = Router::new().route(
-        if anthropic {
-            "/v1/messages"
-        } else {
-            "/v1/chat/completions"
-        },
-        post(handler),
-    );
+    let app = Router::new()
+        .route(
+            if anthropic {
+                "/v1/messages"
+            } else {
+                "/v1/chat/completions"
+            },
+            post(handler),
+        )
+        // A whole-transcript request can reach a few megabytes; the default 2 MB
+        // limit would answer 413 before the fixture could record it.
+        .layer(DefaultBodyLimit::max(64 * 1024 * 1024));
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let base_url = format!("http://{}", listener.local_addr().unwrap());
     let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
@@ -362,6 +443,7 @@ async fn start(config: Config) -> Fixture {
         id,
         engine: Some(engine),
         requests,
+        sent,
         stop_at,
         hang_at,
         merge_truncate,
@@ -373,6 +455,11 @@ async fn start(config: Config) -> Fixture {
 
 fn bodies(fixture: &Fixture) -> Vec<Value> {
     fixture.requests.lock().unwrap().clone()
+}
+
+/// Every request the fixture answered, with its stage, origin and sizes.
+fn sent_log(fixture: &Fixture) -> Vec<Sent> {
+    fixture.sent.lock().unwrap().clone()
 }
 
 fn prompt_of(body: &Value) -> String {
@@ -420,9 +507,8 @@ fn attach_tool_result(fixture: &Fixture, name: &str, output: &str) {
         .unwrap()
         .unwrap();
 }
-
 #[tokio::test]
-async fn truncated_final_summary_raises_its_budget_and_its_length_target() {
+async fn truncated_final_summary_raises_its_budget_and_keeps_its_length_target() {
     for format in ["openai", "anthropic"] {
         let fixture = start(Config::new(
             format,
@@ -453,9 +539,9 @@ async fn truncated_final_summary_raises_its_budget_and_its_length_target() {
         );
         assert_eq!(sent[1]["max_tokens"], 16_384);
         assert!(prompt_of(&sent[1]).contains(FINAL_PROMPT));
-        // The prompt follows the budget it is actually sent with.
+        // The raise adds room for the same target instead of enlarging it.
         assert!(
-            prompt_of(&sent[1]).contains("Aim for about 8192 tokens"),
+            prompt_of(&sent[1]).contains("Aim for about 4096 tokens"),
             "{format}"
         );
         assert_eq!(
@@ -466,7 +552,7 @@ async fn truncated_final_summary_raises_its_budget_and_its_length_target() {
 }
 
 #[tokio::test]
-async fn truncated_fragment_raises_its_budget_and_its_length_target() {
+async fn truncated_fragment_raises_its_budget_and_keeps_its_length_target() {
     for format in ["openai", "anthropic"] {
         let fixture = start(Config::new(
             format,
@@ -488,23 +574,24 @@ async fn truncated_fragment_raises_its_budget_and_its_length_target() {
         .await
         .unwrap();
         let sent = bodies(&fixture);
-        let fragment = |budget: u64| {
-            sent.iter()
-                .find(|body| {
-                    body["max_tokens"] == budget && prompt_of(body).contains(FRAGMENT_PROMPT)
-                })
+        let log = sent_log(&fixture);
+        let fragment_at = |budget: u64| {
+            log.iter()
+                .position(|entry| entry.stage == "fragment" && entry.budget == budget)
+                .map(|index| &sent[index])
                 .unwrap_or_else(|| panic!("{format}: no {budget}-token fragment request"))
         };
         assert!(
-            prompt_of(fragment(4096)).contains("Aim for about 2048 tokens"),
+            prompt_of(fragment_at(4096)).contains("Aim for about 2048 tokens"),
+            "{format}"
+        );
+        // The raised request carries the same fixed target.
+        assert!(
+            prompt_of(fragment_at(8192)).contains("Aim for about 2048 tokens"),
             "{format}"
         );
         assert!(
-            prompt_of(fragment(8192)).contains("Aim for about 4096 tokens"),
-            "{format}"
-        );
-        assert!(
-            sent.iter().all(|body| body["max_tokens"] != 16_384),
+            log.iter().all(|entry| entry.budget != 16_384),
             "{format}: a fragment should raise once"
         );
         assert_eq!(
@@ -543,41 +630,42 @@ async fn truncation_at_the_model_cap_splits_by_tokens_and_merges_in_order() {
         .await
         .unwrap();
         let sent = bodies(&fixture);
-        assert!(sent.len() > 3, "{format}");
+        let log = sent_log(&fixture);
+        assert!(log.len() > 3, "{format}");
         assert!(
-            sent.iter().all(|body| body["max_tokens"] == 4096),
+            log.iter().all(|entry| entry.budget == 4096),
             "{format}: the model cap must not be raised"
         );
-        // The truncated fragment is summarized as two smaller, ordered halves.
-        let halves: Vec<&Value> = sent
-            .iter()
-            .filter(|body| {
-                let tokens = ContextUsage::from_body(
-                    if format == "anthropic" {
-                        "anthropic-messages"
-                    } else {
-                        "openai-completions"
-                    },
-                    body,
-                    Some(128_000),
-                    4096,
-                )
-                .text_subtotal();
-                (30_000..=60_000).contains(&tokens)
-            })
-            .collect();
-        assert_eq!(halves.len(), 2, "{format}");
-        let merge = sent
-            .iter()
-            .find(|body| prompt_of(body).contains(MERGE_PROMPT))
-            .expect("a merge request follows the split halves");
-        let merged = prompt_of(merge);
-        assert!(merged.contains("summary-first"), "{format}");
-        assert!(merged.contains("summary-second"), "{format}");
         assert!(
-            merged.find("summary-first") < merged.find("summary-second"),
-            "{format}"
+            log.iter().all(|entry| entry.tokens <= 64_000),
+            "{format}: every request stays inside the single-request ceiling"
         );
+        // The truncated fragment is summarized as two smaller, ordered halves.
+        let children: Vec<usize> = log
+            .iter()
+            .enumerate()
+            .filter(|(_, entry)| entry.origin == "recovery-child")
+            .map(|(index, _)| index)
+            .collect();
+        let truncated: Vec<usize> = log
+            .iter()
+            .enumerate()
+            .filter(|(_, entry)| entry.origin == "original" && entry.truncated)
+            .map(|(index, _)| index)
+            .collect();
+        assert!(!truncated.is_empty(), "{format}: {log:?}");
+        // Every truncated fragment is summarized as two smaller halves, and
+        // the merge of those halves follows them.
+        assert_eq!(children.len(), truncated.len() * 2, "{format}: {log:?}");
+        let merge = log
+            .iter()
+            .position(|entry| entry.stage == "merge")
+            .expect("a merge request follows the split halves");
+        assert!(merge > children[1], "{format}: {log:?}");
+        let merged = prompt_of(&sent[merge]);
+        let first = merged.find("summary-first").expect("first half summary");
+        let second = merged.find("summary-second").expect("second half summary");
+        assert!(first < second, "{format}: the merge keeps the half order");
         // Seeded Unicode and the oversized tool result cross the wire intact,
         // never as a replacement character.
         assert!(
@@ -609,8 +697,8 @@ async fn a_truncated_merge_raises_again_and_reports_its_own_stage() {
             format,
             128_000,
             16_384,
-            Behavior::SplitThenMergeRaise,
-            History::Evidence(60_000),
+            Behavior::TruncateMergeOnce,
+            History::Unique(30_000),
         ))
         .await;
         let before = fixture.store.history(&fixture.id).unwrap();
@@ -625,36 +713,33 @@ async fn a_truncated_merge_raises_again_and_reports_its_own_stage() {
         .await
         .unwrap();
         let sent = bodies(&fixture);
-        assert_eq!(sent.len(), 7, "{format}");
-        // The original fragment is truncated first, then its two children, then
-        // the merge of those children, then the remaining fragment and the
-        // final summary.
+        let log = sent_log(&fixture);
+        assert_eq!(log.len(), 5, "{format}: {log:?}");
+        // Two planned fragments, the merge of their summaries, the raised
+        // merge and the final summary.
         assert_eq!(
             stages(&sent),
-            ["fragment", "fragment", "fragment", "merge", "merge", "fragment", "final"],
+            ["fragment", "fragment", "merge", "merge", "final"],
             "{format}"
         );
-        assert_eq!(sent[0]["max_tokens"], 4096, "{format}");
-        // The merge is truncated at its own initial budget and finishes after
-        // one raise, with the prompt rebuilt for the larger target.
-        assert_eq!(sent[3]["max_tokens"], 4096, "{format}");
+        assert_eq!(sent[2]["max_tokens"], 4096, "{format}");
+        assert!(
+            prompt_of(&sent[2]).contains("Aim for about 2048 tokens"),
+            "{format}"
+        );
+        assert_eq!(sent[3]["max_tokens"], 8192, "{format}");
+        // The raised merge keeps the fixed length target of its stage.
         assert!(
             prompt_of(&sent[3]).contains("Aim for about 2048 tokens"),
             "{format}"
         );
-        assert_eq!(sent[4]["max_tokens"], 8192, "{format}");
+        let merged = prompt_of(&sent[2]);
+        let first = merged.find("summary-first #1").expect("first summary");
+        let second = merged.find("summary-first #2").expect("second summary");
         assert!(
-            prompt_of(&sent[4]).contains("Aim for about 4096 tokens"),
-            "{format}"
+            first < second,
+            "{format}: the merge keeps the summary order"
         );
-        let merged = prompt_of(&sent[3]);
-        let first = merged
-            .find("summary-first #2")
-            .expect("first child summary");
-        let second = merged
-            .find("summary-first #3")
-            .expect("second child summary");
-        assert!(first < second, "{format}: the merge keeps the child order");
         assert_eq!(
             fixture.store.history(&fixture.id).unwrap().len(),
             before.len() + 1
@@ -663,14 +748,14 @@ async fn a_truncated_merge_raises_again_and_reports_its_own_stage() {
 }
 
 #[tokio::test]
-async fn a_persistently_truncated_merge_stops_at_the_depth_limit_and_reuses_children() {
+async fn a_persistently_truncated_merge_stops_at_the_depth_limit_and_reuses_fragments() {
     for format in ["openai", "anthropic"] {
         let fixture = start(Config::new(
             format,
             128_000,
             16_384,
-            Behavior::SplitThenMergeSwitch,
-            History::Evidence(60_000),
+            Behavior::TruncateMergeSwitch,
+            History::Unique(30_000),
         ))
         .await;
         let before = fixture.store.history(&fixture.id).unwrap();
@@ -685,11 +770,11 @@ async fn a_persistently_truncated_merge_stops_at_the_depth_limit_and_reuses_chil
         .await
         .unwrap_err();
         let text = format!("{error:#}");
-        // The merge itself hits the depth limit; the report keeps the merge stage,
-        // the planned budget and the last budget actually sent.
+        // The merge itself hits the depth limit; the report keeps the merge
+        // stage, its own node allowance and the last budget actually sent.
         assert!(text.contains(" merge "), "{text}");
         assert!(text.contains("depth limit"), "{text}");
-        assert!(text.contains("6 of 12 recovery generations"), "{text}");
+        assert!(text.contains("5 of 8 recovery generations"), "{text}");
         assert!(
             text.contains("still exceeded its 4096-token output limit"),
             "{text}"
@@ -700,16 +785,19 @@ async fn a_persistently_truncated_merge_stops_at_the_depth_limit_and_reuses_chil
         );
         assert!(text.contains("original history retained"), "{text}");
         assert_eq!(fixture.store.history(&fixture.id).unwrap(), before);
-        let first_run = bodies(&fixture);
-        assert_eq!(first_run.len(), 7, "{first_run:?}");
-        assert_eq!(
-            stages(&first_run),
-            ["fragment", "fragment", "fragment", "merge", "merge", "merge", "merge"]
-        );
+        let first_run = sent_log(&fixture);
+        let planned = first_run
+            .iter()
+            .filter(|entry| entry.origin == "original" && entry.stage == "fragment")
+            .count();
+        assert_eq!(planned, 2, "{first_run:?}");
+        assert!(first_run
+            .iter()
+            .any(|entry| entry.stage == "merge" && entry.truncated));
 
-        // Once merges finish again, the completed child summaries come from the
-        // checkpoint instead of the model, and the original history is replaced by
-        // one summary only after the whole compaction succeeds.
+        // Once merges finish again, the completed fragment summaries come from
+        // the checkpoint instead of the model, and the original history is
+        // replaced by one summary only after the whole compaction succeeds.
         fixture.merge_truncate.store(0, Ordering::SeqCst);
         compaction::compact(
             &fixture.engine(),
@@ -721,14 +809,14 @@ async fn a_persistently_truncated_merge_stops_at_the_depth_limit_and_reuses_chil
         )
         .await
         .unwrap();
-        let sent = fixture.requests.lock().unwrap();
-        let replay = sent[first_run.len()..]
+        let after = sent_log(&fixture);
+        let replays = after[first_run.len()..]
             .iter()
-            .filter(|body| **body == first_run[1] || **body == first_run[2])
+            .filter(|entry| entry.stage == "fragment")
             .count();
         assert_eq!(
-            replay, 0,
-            "{format}: the completed child summaries must be reused"
+            replays, 0,
+            "{format}: the completed fragment summaries must be reused"
         );
         assert_eq!(
             fixture.store.history(&fixture.id).unwrap().len(),
@@ -739,7 +827,8 @@ async fn a_persistently_truncated_merge_stops_at_the_depth_limit_and_reuses_chil
 }
 
 #[tokio::test]
-async fn persistent_truncation_stops_within_the_allowance_and_never_caches_truncated_text() {
+async fn persistent_truncation_stops_within_each_fragment_allowance_and_never_caches_truncated_text(
+) {
     let fixture = start(Config::new(
         "openai",
         64_000,
@@ -764,9 +853,10 @@ async fn persistent_truncation_stops_within_the_allowance_and_never_caches_trunc
     assert!(text.contains("recovery generations"), "{text}");
     assert!(text.contains("original history retained"), "{text}");
     assert_eq!(fixture.store.history(&fixture.id).unwrap(), before);
+    // Two fragments, each bounded by its own eight recovery generations.
     assert!(
-        bodies(&fixture).len() <= 1 + 12,
-        "the recovery allowance must bound every request"
+        bodies(&fixture).len() <= 2 + 2 * 8,
+        "the per-fragment allowance must bound every request"
     );
     // Truncated output never reaches the summary cache.
     let cached = fixture
@@ -790,7 +880,10 @@ async fn persistent_truncation_stops_within_the_allowance_and_never_caches_trunc
 }
 
 #[tokio::test]
-async fn recovery_allowance_caps_a_compaction_at_twelve_extra_generations() {
+async fn each_fragment_allowance_caps_its_own_recovery_requests() {
+    // Nine planned fragments, eight of which need one split each. Every
+    // fragment's recovery stays inside its own eight generations, so the
+    // compaction finishes and the total number of requests stays bounded.
     let fixture = start(Config::new(
         "openai",
         64_000,
@@ -800,7 +893,7 @@ async fn recovery_allowance_caps_a_compaction_at_twelve_extra_generations() {
     ))
     .await;
     let before = fixture.store.history(&fixture.id).unwrap();
-    let error = compaction::compact(
+    compaction::compact(
         &fixture.engine(),
         &fixture.store.db,
         &fixture.id,
@@ -809,72 +902,130 @@ async fn recovery_allowance_caps_a_compaction_at_twelve_extra_generations() {
         "",
     )
     .await
-    .unwrap_err();
-    let text = format!("{error:#}");
-    assert!(text.contains("12 of 12 recovery generations"), "{text}");
-    assert!(text.contains("original history retained"), "{text}");
-    assert_eq!(fixture.store.history(&fixture.id).unwrap(), before);
-    // Four fragments recover with three generations each; the fifth is
-    // rejected before its split, so no fifth recovery generation is sent.
-    assert_eq!(bodies(&fixture).len(), 4 + 12 + 1);
+    .unwrap();
+    let log = sent_log(&fixture);
+    let planned = log
+        .iter()
+        .filter(|entry| entry.origin == "original" && entry.stage == "fragment")
+        .count();
+    assert_eq!(planned, 9, "{log:?}");
+    // A fragment adds at most two halves and their merge to its own request.
+    assert!(
+        log.len() <= planned * 4 + 2,
+        "{} requests for {planned} fragments",
+        log.len()
+    );
+    assert_eq!(
+        fixture.store.history(&fixture.id).unwrap().len(),
+        before.len() + 1
+    );
 }
 
 #[tokio::test]
-async fn a_spent_allowance_names_the_raised_budget_it_did_not_send() {
-    // Three fragments spend the allowance on their children and merges. The
-    // fourth fragment's merge is truncated at its initial budget, where the
-    // recovery rule would raise to 8192 instead of splitting; that raise needs
-    // a thirteenth generation, so it must never be sent.
-    let fixture = start(Config::new(
-        "openai",
-        128_000,
-        16_384,
-        Behavior::SplitThenMergeLastAllowance,
-        History::Unique(200_000),
-    ))
-    .await;
-    let before = fixture.store.history(&fixture.id).unwrap();
-    let error = compaction::compact(
-        &fixture.engine(),
-        &fixture.store.db,
-        &fixture.id,
-        "fixture",
-        "gpt-6-astra",
-        "",
-    )
-    .await
-    .unwrap_err();
-    let text = format!("{error:#}");
-    assert!(text.contains(" merge "), "{text}");
-    assert!(
-        text.contains("stopped after 12 of 12 recovery generations"),
-        "{text}"
-    );
-    // The next request would have been the raised merge, not another 4096 one.
-    assert!(
-        text.contains("its next 8192-token request was not sent"),
-        "{text}"
-    );
-    assert!(
-        text.contains("last request actually sent used a 4096-token output budget"),
-        "{text}"
-    );
-    assert!(text.contains("original history retained"), "{text}");
-    assert_eq!(fixture.store.history(&fixture.id).unwrap(), before);
-    let sent = bodies(&fixture);
-    assert_eq!(
-        stages(&sent)
+async fn a_failing_fragment_keeps_the_others_and_spends_only_its_own_allowance() {
+    for format in ["openai", "anthropic"] {
+        // The first planned fragment carries a block that truncates at every
+        // depth, so it exhausts its own allowance; the notes behind it finish.
+        let fixture = start(Config::new(
+            format,
+            128_000,
+            8192,
+            Behavior::TruncateContaining("ALPHA"),
+            History::Poisoned {
+                poison: 30_000,
+                rest: 40_000,
+            },
+        ))
+        .await;
+        let before = fixture.store.history(&fixture.id).unwrap();
+        let error = compaction::compact(
+            &fixture.engine(),
+            &fixture.store.db,
+            &fixture.id,
+            "fixture",
+            "gpt-6-astra",
+            "",
+        )
+        .await
+        .unwrap_err();
+        let text = format!("{error:#}");
+        // Only the poisoned fragment failed, and the report names it with its
+        // own recovery usage instead of a compaction-wide allowance.
+        assert!(
+            text.contains("1 of 3 compaction fragments failed"),
+            "{format}: {text}"
+        );
+        assert!(text.contains("fragment 1:"), "{format}: {text}");
+        assert!(
+            text.contains("of 8 recovery generations"),
+            "{format}: {text}"
+        );
+        assert!(
+            text.contains("original history retained"),
+            "{format}: {text}"
+        );
+        assert_eq!(
+            fixture.store.history(&fixture.id).unwrap(),
+            before,
+            "{format}"
+        );
+
+        let first_run = sent_log(&fixture);
+        let bodies_before = bodies(&fixture);
+        let planned = first_run
             .iter()
-            .filter(|stage| **stage == "merge")
-            .count(),
-        4,
-        "{:?}",
-        stages(&sent)
-    );
-    assert!(
-        sent.iter().all(|body| body["max_tokens"] == 4096),
-        "the raised merge must not be sent"
-    );
+            .filter(|entry| entry.origin == "original" && entry.stage == "fragment")
+            .count();
+        assert_eq!(planned, 3, "{format}: {first_run:?}");
+        // Both remaining planned fragments completed and were cached.
+        let completed: Vec<Value> = first_run
+            .iter()
+            .zip(bodies_before.iter())
+            .filter(|(entry, _)| {
+                entry.origin == "original" && entry.stage == "fragment" && !entry.truncated
+            })
+            .map(|(_, body)| body.clone())
+            .collect();
+        assert_eq!(completed.len(), 2, "{format}");
+        let cache = fixture
+            .store
+            .db
+            .with_conn(|conn| {
+                Ok::<Option<String>, anyhow::Error>(conn
+                    .query_row(
+                        "SELECT value FROM peripheral_settings WHERE key LIKE 'compaction.checkpoint.%'",
+                        [],
+                        |row| row.get::<_, String>(0),
+                    )
+                    .ok())
+            })
+            .unwrap()
+            .unwrap();
+        assert!(
+            !cache.as_deref().unwrap_or_default().contains("TRUNCATED"),
+            "{format}: {cache:?}"
+        );
+
+        // The retry of the same compaction reuses those completed fragments.
+        compaction::compact(
+            &fixture.engine(),
+            &fixture.store.db,
+            &fixture.id,
+            "fixture",
+            "gpt-6-astra",
+            "",
+        )
+        .await
+        .unwrap_err();
+        let replay = bodies(&fixture)[bodies_before.len()..]
+            .iter()
+            .filter(|body| completed.contains(body))
+            .count();
+        assert_eq!(
+            replay, 0,
+            "{format}: a completed fragment must not be requested again"
+        );
+    }
 }
 
 #[tokio::test]
@@ -910,7 +1061,7 @@ async fn exhausted_recovery_reports_the_last_actual_budget() {
         "{text}"
     );
     assert!(text.contains("depth limit"), "{text}");
-    assert!(text.contains("of 12 recovery generations"), "{text}");
+    assert!(text.contains("of 8 recovery generations"), "{text}");
     assert!(text.contains("original history retained"), "{text}");
     assert_eq!(fixture.store.history(&fixture.id).unwrap(), before);
 }
@@ -1006,7 +1157,7 @@ async fn a_non_truncating_stop_reports_stage_budget_and_does_not_split() {
         text.contains("failed at its 4096-token output budget"),
         "{text}"
     );
-    assert!(text.contains("of 12 recovery generations"), "{text}");
+    assert!(text.contains("of 8 recovery generations"), "{text}");
     assert!(text.contains("original history retained"), "{text}");
     // A non-truncation stop never launches another split.
     assert_eq!(bodies(&fixture).len(), 2, "{text}");
@@ -1015,39 +1166,18 @@ async fn a_non_truncating_stop_reports_stage_budget_and_does_not_split() {
 
 #[tokio::test]
 async fn a_merge_above_the_safe_budget_fails_before_it_is_sent() {
-    // The summaries are long enough that merging them no longer fits the same
-    // 90% line every other summary request obeys, at or below the window. The
-    // third case raises a child budget first, so the merge report must not pass
-    // that raised budget off as its own planned one.
-    for (window, max_tokens, behavior, history, last_budget) in [
-        (
-            29_000,
+    // The child summaries are 32k characters each, so merging two of them no
+    // longer fits the safe line every other summary request obeys. The failure
+    // names the merge stage and the request is never sent.
+    for window in [29_000, 20_000] {
+        let fixture = start(Config::new(
+            "openai",
+            window,
             4096,
             Behavior::LongSummaryAbove(11_000),
             History::Evidence(60_000),
-            None,
-        ),
-        (
-            20_000,
-            4096,
-            Behavior::LongSummaryAbove(11_000),
-            History::Evidence(60_000),
-            None,
-        ),
-        (
-            29_000,
-            16_384,
-            Behavior::SmallInputBelowBudget {
-                tokens: 9_000,
-                budget: 8_192,
-            },
-            // One fragment, so the merge is the first recovery request that
-            // runs out of input budget instead of the allowance running out.
-            History::Evidence(6_400),
-            Some(8192),
-        ),
-    ] {
-        let fixture = start(Config::new("openai", window, max_tokens, behavior, history)).await;
+        ))
+        .await;
         let before = fixture.store.history(&fixture.id).unwrap();
         let error = compaction::compact(
             &fixture.engine(),
@@ -1060,40 +1190,19 @@ async fn a_merge_above_the_safe_budget_fails_before_it_is_sent() {
         .await
         .unwrap_err();
         let text = format!("{error:#}");
-        assert!(
-            text.contains("safe context budget"),
-            "window {window}: {text}"
-        );
-        // The failing stage is the merge, not the fragment that needed it.
         assert!(text.contains(" merge "), "window {window}: {text}");
-        assert!(
-            text.contains("planned for its 4096-token output"),
-            "window {window}: {text}"
-        );
         assert!(
             text.contains("no request was sent for this input"),
             "window {window}: {text}"
         );
-        match last_budget {
-            Some(budget) => assert!(
-                text.contains(&format!(
-                    "last request actually sent used a {budget}-token output budget"
-                )),
-                "window {window}: {text}"
-            ),
-            None => assert!(
-                !text.contains("last request actually sent"),
-                "window {window}: {text}"
-            ),
-        }
         assert!(
             text.contains("original history retained"),
             "window {window}: {text}"
         );
         assert!(
-            bodies(&fixture)
+            sent_log(&fixture)
                 .iter()
-                .all(|body| !prompt_of(body).contains(MERGE_PROMPT)),
+                .all(|entry| entry.stage != "merge"),
             "window {window}: an over-budget merge must not be sent"
         );
         assert_eq!(
@@ -1102,6 +1211,41 @@ async fn a_merge_above_the_safe_budget_fails_before_it_is_sent() {
             "window {window}"
         );
     }
+}
+
+#[tokio::test]
+async fn summaries_that_cannot_be_combined_fail_without_a_loop() {
+    // Two 32k-character summaries cannot be merged inside the small window at
+    // all, so no layer can converge. The failure says so instead of looping.
+    let fixture = start(Config::new(
+        "openai",
+        29_000,
+        16_384,
+        Behavior::SmallInputBelowBudget {
+            tokens: 9_000,
+            budget: 8_192,
+        },
+        History::Evidence(6_400),
+    ))
+    .await;
+    let before = fixture.store.history(&fixture.id).unwrap();
+    let error = compaction::compact(
+        &fixture.engine(),
+        &fixture.store.db,
+        &fixture.id,
+        "fixture",
+        "gpt-6-astra",
+        "",
+    )
+    .await
+    .unwrap_err();
+    let text = format!("{error:#}");
+    assert!(text.contains("merge input budget"), "{text}");
+    assert!(text.contains("original history retained"), "{text}");
+    assert_eq!(fixture.store.history(&fixture.id).unwrap(), before);
+    assert!(sent_log(&fixture)
+        .iter()
+        .all(|entry| entry.stage != "merge"));
 }
 
 #[tokio::test]
@@ -1136,7 +1280,7 @@ async fn a_window_too_small_for_the_prompt_fails_without_a_request() {
         text.contains("safe context budget for its 4096-token output"),
         "{text}"
     );
-    assert!(text.contains("0 of 12 recovery generations"), "{text}");
+    assert!(text.contains("0 of 8 recovery generations"), "{text}");
     assert!(
         text.contains("no request was sent for the remaining input"),
         "{text}"
@@ -1345,4 +1489,300 @@ async fn local_summary_recovery_handles_truncation() {
         summary.contains("[Summary of the later conversation"),
         "{summary}"
     );
+}
+
+#[tokio::test]
+async fn a_very_long_history_is_split_at_the_single_request_ceiling() {
+    // About 850k tokens of history: the earlier planner sent this as one
+    // request whose length target the model could not reach. Every request now
+    // stays within the 64K single-request ceiling and the compaction finishes.
+    let fixture = start(Config::new(
+        "openai",
+        1_000_000,
+        16_384,
+        Behavior::TruncateAbove(100_000),
+        History::Unique(250_000),
+    ))
+    .await;
+    let before = fixture.store.history(&fixture.id).unwrap();
+    compaction::compact(
+        &fixture.engine(),
+        &fixture.store.db,
+        &fixture.id,
+        "fixture",
+        "gpt-6-astra",
+        "",
+    )
+    .await
+    .unwrap();
+    let log = sent_log(&fixture);
+    let largest = log.iter().map(|entry| entry.tokens).max().unwrap_or(0);
+    assert!(
+        largest <= 64_000,
+        "every request stays at or below the 64K ceiling, saw {largest}"
+    );
+    // Nothing is truncated: a request above 100k tokens is never sent.
+    assert!(log.iter().all(|entry| !entry.truncated), "{log:?}");
+    let fragments = log.iter().filter(|entry| entry.stage == "fragment").count();
+    assert!(
+        fragments >= 13,
+        "the history is split into {fragments} fragments"
+    );
+    // Merging is layered, so the earlier summaries are combined before the
+    // final summary.
+    let merges = log.iter().filter(|entry| entry.stage == "merge").count();
+    assert!(merges >= 3, "{merges} merge requests");
+    assert_eq!(log.last().unwrap().stage, "final");
+    assert_eq!(
+        fixture.store.history(&fixture.id).unwrap().len(),
+        before.len() + 1
+    );
+}
+
+#[tokio::test]
+async fn a_recovery_merge_above_the_single_request_ceiling_is_never_sent() {
+    for format in ["openai", "anthropic"] {
+        // The 1M window accepts a ~79k-token merge, but the single-request
+        // ceiling does not: the two child summaries are the widest the result
+        // limit accepts. The merge must be refused before it is sent.
+        let fixture = start(Config::new(
+            format,
+            1_000_000,
+            16_384,
+            Behavior::WideSummaryAbove(40_000),
+            History::Poisoned {
+                poison: 20_000,
+                rest: 10_000,
+            },
+        ))
+        .await;
+        let before = fixture.store.history(&fixture.id).unwrap();
+        let error = compaction::compact(
+            &fixture.engine(),
+            &fixture.store.db,
+            &fixture.id,
+            "fixture",
+            "gpt-6-astra",
+            "",
+        )
+        .await
+        .unwrap_err();
+        let text = format!("{error:#}");
+        assert!(
+            text.contains("1 of 2 compaction fragments failed"),
+            "{format}: {text}"
+        );
+        assert!(text.contains("merge"), "{format}: {text}");
+        assert!(
+            text.contains("safe context budget planned for its 4096-token output"),
+            "{format}: {text}"
+        );
+        assert!(
+            text.contains("no request was sent for this input"),
+            "{format}: {text}"
+        );
+        assert!(
+            text.contains("original history retained"),
+            "{format}: {text}"
+        );
+
+        let log = sent_log(&fixture);
+        let largest = log.iter().map(|entry| entry.tokens).max().unwrap_or(0);
+        assert!(
+            largest <= 64_000,
+            "{format}: every request stays at or below 64k, saw {largest}: {log:?}"
+        );
+        assert!(
+            log.iter().all(|entry| entry.stage != "merge"),
+            "{format}: the over-ceiling merge must not be sent: {log:?}"
+        );
+        // Both halves were summarized before their merge was refused, so a
+        // retry can reuse them.
+        assert_eq!(
+            log.iter()
+                .filter(|entry| entry.origin == "recovery-child")
+                .count(),
+            2,
+            "{format}: {log:?}"
+        );
+        assert_eq!(
+            fixture.store.history(&fixture.id).unwrap(),
+            before,
+            "{format}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn a_large_history_isolates_one_failed_fragment_and_reuses_the_rest() {
+    // About 800k tokens in thirteen fragments: the first carries a block that
+    // truncates at every depth and spends only its own allowance, while the
+    // other twelve complete and are cached.
+    let fixture = start(Config::new(
+        "openai",
+        128_000,
+        8192,
+        Behavior::TruncateContaining("ALPHA"),
+        History::Poisoned {
+            poison: 20_000,
+            rest: 250_000,
+        },
+    ))
+    .await;
+    let before = fixture.store.history(&fixture.id).unwrap();
+    let error = compaction::compact(
+        &fixture.engine(),
+        &fixture.store.db,
+        &fixture.id,
+        "fixture",
+        "gpt-6-astra",
+        "",
+    )
+    .await
+    .unwrap_err();
+    let text = format!("{error:#}");
+    assert!(text.contains("1 of "), "{text}");
+    assert!(text.contains("compaction fragments failed"), "{text}");
+    assert!(text.contains("original history retained"), "{text}");
+    assert_eq!(fixture.store.history(&fixture.id).unwrap(), before);
+
+    let first_run = sent_log(&fixture);
+    let bodies_before = bodies(&fixture);
+    let planned: Vec<usize> = first_run
+        .iter()
+        .enumerate()
+        .filter(|(_, entry)| entry.origin == "original" && entry.stage == "fragment")
+        .map(|(index, _)| index)
+        .collect();
+    assert!(planned.len() > 6, "expected a large plan: {planned:?}");
+    assert!(
+        first_run.iter().all(|entry| entry.tokens <= 64_000),
+        "every request stays at or below 64k"
+    );
+    // Everything the failing branch sent carried the poisoned block; every
+    // other planned fragment completed.
+    let completed: Vec<Value> = planned
+        .iter()
+        .filter(|&&index| !first_run[index].truncated)
+        .map(|&index| bodies_before[index].clone())
+        .collect();
+    assert_eq!(completed.len(), planned.len() - 1, "{first_run:?}");
+
+    // The retry of the same compaction reuses all of them.
+    compaction::compact(
+        &fixture.engine(),
+        &fixture.store.db,
+        &fixture.id,
+        "fixture",
+        "gpt-6-astra",
+        "",
+    )
+    .await
+    .unwrap_err();
+    let replay = bodies(&fixture)[bodies_before.len()..]
+        .iter()
+        .filter(|body| completed.contains(body))
+        .count();
+    assert_eq!(
+        replay, 0,
+        "completed fragments must come from the checkpoint"
+    );
+}
+
+#[tokio::test]
+async fn long_summaries_form_smaller_groups_and_pass_a_single_one_through() {
+    // Six fragments answer with ~10.7k-token summaries, so only five fit one
+    // merge request. The sixth is passed to the next layer instead of being
+    // merged alone, which would waste a request.
+    let fixture = start(Config::new(
+        "openai",
+        1_000_000,
+        16_384,
+        Behavior::LongSummaryAlways,
+        History::Unique(110_000),
+    ))
+    .await;
+    compaction::compact(
+        &fixture.engine(),
+        &fixture.store.db,
+        &fixture.id,
+        "fixture",
+        "gpt-6-astra",
+        "",
+    )
+    .await
+    .unwrap();
+    let log = sent_log(&fixture);
+    let fragments = log.iter().filter(|entry| entry.stage == "fragment").count();
+    assert_eq!(fragments, 6, "{log:?}");
+    let merges: Vec<usize> = log
+        .iter()
+        .enumerate()
+        .filter(|(_, entry)| entry.stage == "merge")
+        .map(|(index, _)| index)
+        .collect();
+    // One merge of five, then one merge of the passed-through sixth summary and
+    // the merged result: two requests, never a merge of a single summary.
+    assert_eq!(merges.len(), 2, "{log:?}");
+    let bodies = bodies(&fixture);
+    let text = |index: usize| bodies[index].to_string();
+    let first = text(merges[0]);
+    for number in 1..=5 {
+        assert!(
+            first.contains(&format!("summary{number} s")),
+            "merge 1 is missing summary {number}: {log:?}"
+        );
+    }
+    assert!(
+        !first.contains("summary6 s"),
+        "the sixth summary must be passed on, not merged alone: {log:?}"
+    );
+    let second = text(merges[1]);
+    assert!(
+        second.contains("summary6 s") && second.contains("summary7 s"),
+        "the last layer merges the passed-through summary with the earlier merge: {log:?}"
+    );
+    assert_eq!(log.last().unwrap().stage, "final");
+}
+
+#[tokio::test]
+async fn a_checkpoint_write_failure_stops_before_the_boundary_is_installed() {
+    let fixture = start(Config::new(
+        "openai",
+        128_000,
+        8192,
+        Behavior::TruncateAbove(60_000),
+        History::Marked,
+    ))
+    .await;
+    // The first summary succeeds but cannot be stored: the compaction must end
+    // instead of continuing without a reusable checkpoint.
+    fixture
+        .store
+        .db
+        .with_conn(|conn| {
+            conn.execute_batch(
+                "CREATE TRIGGER fail_checkpoint BEFORE INSERT ON peripheral_settings \
+                 WHEN NEW.key LIKE 'compaction.checkpoint.%' \
+                 BEGIN SELECT RAISE(ABORT, 'simulated checkpoint failure'); END;",
+            )
+        })
+        .unwrap()
+        .unwrap();
+    let before = fixture.store.history(&fixture.id).unwrap();
+    let error = compaction::compact(
+        &fixture.engine(),
+        &fixture.store.db,
+        &fixture.id,
+        "fixture",
+        "gpt-6-astra",
+        "",
+    )
+    .await
+    .unwrap_err();
+    let text = format!("{error:#}");
+    assert!(text.contains("simulated checkpoint failure"), "{text}");
+    assert!(text.contains("original history retained"), "{text}");
+    assert_eq!(fixture.store.history(&fixture.id).unwrap(), before);
+    assert!(!sent_log(&fixture).is_empty());
 }

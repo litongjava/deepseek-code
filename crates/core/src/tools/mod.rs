@@ -939,6 +939,9 @@ async fn tool_bash_async(input: serde_json::Value, cwd: &str) -> Result<serde_js
     };
     // Dropping a cancelled/expired turn must also stop its shell command.
     cmd.kill_on_drop(true);
+    // A shell is a separate session: the worker's host-private variables must
+    // not reach it, nor the nested CLI or test runner it may start.
+    crate::services::background_sessions::strip_internal_env(&mut cmd);
 
     #[cfg(windows)]
     cmd.creation_flags(CREATE_NO_WINDOW);

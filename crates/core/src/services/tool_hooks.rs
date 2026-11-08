@@ -1169,6 +1169,8 @@ fn prepare_command(
         .unwrap_or(if cfg!(windows) { "cmd" } else { "sh" });
     let mut command = Command::new(shell);
     command.env_remove("CLAUDE_ENV_FILE");
+    // A hook is a separate session, not part of the supervising worker.
+    crate::services::background_sessions::strip_internal_env(&mut command);
     if !matches!(shell, "powershell" | "pwsh") {
         if let Some(path) = env_file {
             command.env("CLAUDE_ENV_FILE", path);

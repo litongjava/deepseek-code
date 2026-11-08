@@ -73,6 +73,15 @@ npm run tauri -- dev
 5. Skills、MCP、插件页面可以打开和切换。
 6. 让模型连续执行 3 条命令、写一句话、再执行 2 条命令：显示 `Ran commands · 3`、正文、`Ran commands · 2`，完成后都收起；执行中的分组展开并实时更新；展开后按顺序列出每次调用，点击行可看输出；深色主题同样清晰。
 
+### D3. 共享压缩逻辑（与 CLI 相同的 core 路径）
+
+Desktop 的自动压缩、手动压缩和局部摘要都调用 `crates/core` 的同一套摘要实现，不需要单独一套断言。改动 `native_engine/generation.rs`、`services/compaction*` 时，先按 `cli-regression-tests.md` 的 L 节跑完整回归，再在桌面窗口确认：
+
+1. 超长会话在轮次开始前自动压缩，界面的进度行依次显示分段、合并层和最终摘要；压缩完成后原请求只继续一次，回答基于摘要而不是整段原文。
+2. 手动压缩（输入框上方的压缩入口）显示同一套进度；压缩完成后历史记录仍可回看。
+3. 摘要失败时不写入压缩边界：会话保持原样，界面显示失败阶段、预算和“原始历史保留”，重新发送不会重复执行已完成的工具调用。
+4. 恢复期间取消（停止当前回复）后历史不变；再次压缩时已完成的分段直接复用，进度显示复用计数。
+
 ### E. 浏览器和手机（dcd-server）
 
 用独立数据目录启动：`DEEPSEEK_CODE_DATA_DIR=<测试目录>/data target/debug/dcd-server --port 30185 --web-dir dist`（先 `npm run build`）。
@@ -125,6 +134,7 @@ npm run tauri -- dev
 - 轮询与请求合并（`QueueDock`、`PlanApprovalController`、`useVisiblePolling`、`utils/inflight.ts`）、压缩与缓存（`bridge/mod.rs` 的静态文件）、`routes/conversations.rs` 的快照共享：E11、E13、D1、D2
 - `utils/networkError.ts`、`utils/chatErrors.ts`、`MainContent` 的发送失败处理：E12、D1
 - `lib.rs` 的运行时（`build_runtime`）、Desktop 和 dcd-server 入口：E10、D1、D2
+- `crates/core` 的摘要实现（`native_engine/generation.rs`、`services/compaction*`）：D3，以及 `cli-regression-tests.md` 的 L 节
 - 语音输入（`VoiceInput`、`peripheral.rs` 的 `voice_transcribe`）：Desktop 中配置音频转写后端，录音 5 秒后停止并转写，文本正确；录音以二进制传给后端（无 JSON 数字数组）。浏览器的 HTTP 页面点击麦克风弹出“需要 HTTPS”。
 - `features/trajectory/`（工具调用分组）：D6
 - 其他范围：至少跑 D1

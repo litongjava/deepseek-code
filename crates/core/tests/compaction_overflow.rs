@@ -147,9 +147,26 @@ async fn compaction_merge_uses_configured_8k_output_without_raising_fragment_bud
             .unwrap();
         let bodies = requests.lock().unwrap();
         assert!(bodies.len() > 2);
-        assert!(bodies[..bodies.len() - 1]
+        // Fragments keep their own 4096 output budget; the truncated merge
+        // raises to the configured 8192, and the final summary uses 8192.
+        assert!(bodies.iter().all(|body| {
+            !body
+                .to_string()
+                .contains("Summarize this consecutive fragment")
+                || body["max_tokens"] == 4096
+        }));
+        let merges: Vec<_> = bodies
             .iter()
-            .all(|b| b["max_tokens"] == 4096));
+            .filter(|body| body.to_string().contains("Merge these summaries"))
+            .collect();
+        assert!(
+            merges.iter().any(|body| body["max_tokens"] == 4096),
+            "{format}: a merge is sent at its initial budget first"
+        );
+        assert!(
+            merges.iter().any(|body| body["max_tokens"] == 8192),
+            "{format}: a truncated merge raises to the configured 8k output"
+        );
         assert_eq!(bodies.last().unwrap()["max_tokens"], 8192);
         server.abort();
     }

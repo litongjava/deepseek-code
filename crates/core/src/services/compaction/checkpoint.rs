@@ -39,8 +39,10 @@ impl<'a> Checkpoint<'a> {
         input: &str,
     ) -> Result<Self> {
         // Hash credentials/configuration without persisting either as plaintext cache metadata.
+        // Version 2 marks the 64K fragment planning and per-fragment recovery
+        // policy, so results planned by the earlier strategy are not reused.
         let fingerprint = digest(
-            &json!({"version":1,"provider":provider.provider,"model":provider.model,"effort":provider.model.effort,"system":system,"input":input}),
+            &json!({"version":2,"provider":provider.provider,"model":provider.model,"effort":provider.model.effort,"system":system,"input":input}),
         );
         let value: Option<String> = db.with_conn(|conn| {
             conn.query_row(
@@ -142,6 +144,78 @@ mod tests {
             .unwrap()
             .unwrap();
         assert!(!value.contains("secret-fixture-key"));
+    }
+
+    #[test]
+    fn a_checkpoint_from_the_previous_planning_strategy_is_not_reused() {
+        let dir = tempfile::tempdir().unwrap();
+        let paths = RuntimePaths::new(dir.path().join("data")).unwrap();
+        let db = paths.open_database().unwrap();
+        let provider = crate::native_engine::provider_manager::ProviderManager::in_memory(vec![serde_json::from_value(json!({"id":"p","name":"p","base_url":"http://localhost","api_key":"secret-fixture-key","api_format":"openai","enabled":true,"models":[{"id":"gpt-6-astra","name":"m","enabled":true,"max_tokens":8192,"supports_web_search":false}]})).unwrap()], dir.path().join("providers.json")).resolve_selected("p", "gpt-6-astra").unwrap();
+        let request = Checkpoint::request_key("system", "fragment", 4096);
+        // A version 1 fingerprint is what the earlier strategy stored.
+        let fingerprint = digest(
+            &json!({"version":1,"provider":provider.provider,"model":provider.model,"effort":provider.model.effort,"system":"system","input":"history"}),
+        );
+        let stale =
+            json!({"fingerprint":fingerprint,"completed":{ request.clone(): "Stale summary" }});
+        db.with_conn(|conn| {
+            conn.execute(
+                "INSERT INTO peripheral_settings(key,value) VALUES(?1,?2)",
+                [key("session"), stale.to_string()],
+            )
+        })
+        .unwrap()
+        .unwrap();
+        assert!(
+            Checkpoint::open(&db, "session", &provider, "system", "history")
+                .unwrap()
+                .get(&request)
+                .is_none(),
+            "a previous strategy's fragment must not be reused"
+        );
+    }
+
+    #[test]
+    fn request_keys_separate_the_fixed_target_and_the_output_budget() {
+        let key = Checkpoint::request_key("system", "fragment at 2048 tokens", 4096);
+        // The same fixed target sent with a raised budget is a different request.
+        assert_ne!(
+            key,
+            Checkpoint::request_key("system", "fragment at 2048 tokens", 8192)
+        );
+        // A different target is a different request at the same budget.
+        assert_ne!(
+            key,
+            Checkpoint::request_key("system", "fragment at 4096 tokens", 4096)
+        );
+        assert_ne!(
+            key,
+            Checkpoint::request_key("other system", "fragment at 2048 tokens", 4096)
+        );
+        assert_eq!(
+            key,
+            Checkpoint::request_key("system", "fragment at 2048 tokens", 4096)
+        );
+    }
+
+    #[test]
+    fn empty_saved_summaries_are_never_returned() {
+        let dir = tempfile::tempdir().unwrap();
+        let paths = RuntimePaths::new(dir.path().join("data")).unwrap();
+        let db = paths.open_database().unwrap();
+        let provider = crate::native_engine::provider_manager::ProviderManager::in_memory(vec![serde_json::from_value(json!({"id":"p","name":"p","base_url":"http://localhost","api_key":"fixture","api_format":"openai","enabled":true,"models":[{"id":"gpt-6-astra","name":"m","enabled":true,"max_tokens":8192,"supports_web_search":false}]})).unwrap()], dir.path().join("providers.json")).resolve_selected("p", "gpt-6-astra").unwrap();
+        let request = Checkpoint::request_key("system", "fragment", 4096);
+        Checkpoint::open(&db, "session", &provider, "system", "history")
+            .unwrap()
+            .save(request.clone(), "   \n".into())
+            .unwrap();
+        assert!(
+            Checkpoint::open(&db, "session", &provider, "system", "history")
+                .unwrap()
+                .get(&request)
+                .is_none()
+        );
     }
 
     #[test]

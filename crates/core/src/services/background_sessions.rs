@@ -10,8 +10,40 @@ use std::{
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
-pub const WORKER_ENV: &str = "CLAUDE_RUST_BACKGROUND_JOB";
-pub const CONTROL_ENV: &str = "CLAUDE_RUST_BACKGROUND_CONTROL";
+pub const WORKER_ENV: &str = "DEEPSEEK_CODE_BACKGROUND_JOB";
+pub const CONTROL_ENV: &str = "DEEPSEEK_CODE_BACKGROUND_CONTROL";
+
+/// Host-private variables of the supervising worker. An ordinary child process
+/// (shell command, hook, MCP server, nested CLI) is a separate session:
+/// inheriting these would make it claim the worker's control directory and be
+/// rejected by its own ownership check, or silently join the parent's job.
+pub const INTERNAL_ENV: [&str; 2] = [WORKER_ENV, CONTROL_ENV];
+
+/// A command type whose environment can be pruned before it starts.
+pub trait EnvScrub {
+    fn scrub_env(&mut self, name: &str);
+}
+
+impl EnvScrub for std::process::Command {
+    fn scrub_env(&mut self, name: &str) {
+        self.env_remove(name);
+    }
+}
+
+impl EnvScrub for tokio::process::Command {
+    fn scrub_env(&mut self, name: &str) {
+        self.env_remove(name);
+    }
+}
+
+/// Remove the host-private variables from a command about to start an ordinary
+/// child process. The supervisor that starts a managed worker passes its own
+/// control directory explicitly, so it is unaffected.
+pub fn strip_internal_env<C: EnvScrub>(command: &mut C) {
+    for name in INTERNAL_ENV {
+        command.scrub_env(name);
+    }
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Job {
@@ -953,6 +985,27 @@ pub fn collect_completed(
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn ordinary_children_never_receive_the_worker_control_variables() {
+        let mut command = Command::new("fixture");
+        command
+            .env(CONTROL_ENV, "fixture-control")
+            .env(WORKER_ENV, "fixture-job")
+            .env("DCL_KEEP_ME", "kept");
+        strip_internal_env(&mut command);
+        let removed: Vec<_> = command.get_envs().collect();
+        assert!(removed
+            .iter()
+            .any(|(name, value)| *name == CONTROL_ENV && value.is_none()));
+        assert!(removed
+            .iter()
+            .any(|(name, value)| *name == WORKER_ENV && value.is_none()));
+        // Ordinary user variables keep their value.
+        assert!(removed
+            .iter()
+            .any(|(name, value)| *name == "DCL_KEEP_ME"
+                && *value == Some(std::ffi::OsStr::new("kept"))));
+    }
     fn fixture(script: &str) -> (tempfile::TempDir, PathBuf, String) {
         let root = tempfile::tempdir().unwrap();
         let id = uuid::Uuid::new_v4().to_string();
