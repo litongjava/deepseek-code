@@ -44,6 +44,8 @@ mod interactive_config;
 mod args;
 mod migration;
 mod config;
+mod tool_settings;
+mod tools_menu;
 #[allow(dead_code)]
 mod legacy_api_config;
 mod session;
@@ -1093,7 +1095,14 @@ async fn run(cli: &Cli) -> Result<()> {
                 },
                 "status" | ".status" => { if let Err(error) = status_commands::run(&session, "").await { command_eprintln!("Status: {error:#}"); } },
                 "/history" | "history" | ".history" => command_println!("{}", serde_json::to_string_pretty(&session.store.history(&session.id)?)?),
-                "/tools" | "tools" | ".tools" => for tool in deepseek_code_core::tools::get_tool_definitions() { command_eprintln!("{}: {}", tool.name, tool.description); },
+                "/tools" | "tools" | ".tools" => {
+                    let result = if terminal::picker::available() {
+                        tools_menu::run(&session.paths)
+                    } else {
+                        tool_settings::print(&session.paths)
+                    };
+                    if let Err(error) = result { command_eprintln!("Tools: {error:#}"); }
+                },
                 command if skills.contains_key(command.split_whitespace().next().unwrap_or(command)) => {
                     if let Err(error) = session.turn(cli, &line, &mut input).await { report_error(&error); }
                 },
