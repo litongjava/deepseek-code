@@ -41,6 +41,22 @@ Windows 上，`tools::linux_env::tests::unpack_copies_hard_links_keeps_symlinks_
 
 出现其他失败时，先在未修改的代码上跑同一个测试，再判断是否由本次改动引入。不要将有已知失败的整套测试报告为通过。
 
+## 测试进程不应操作控制终端
+
+`cargo test -p deepseek-code-cli` 会运行 `--bin dcl` 的单元测试。这些用例不能查询光标位置，也不能切换 raw mode：`crossterm::cursor::position` 会自己把 `/dev/tty` 切到 raw mode，进程处在后台进程组时内核发送 `SIGTTOU`，整个进程组停止，cargo 会一直等到被强杀；在开发者终端里直接跑 `cargo test` 时，无参 `/config` 还会进入真实 picker 等待按键。因此：
+
+- 光标查询统一走 `crate::terminal::cursor_position()`，未处于 raw mode 时返回 `NotConnected`，调用方保留原有的回退行号。
+- `TerminalInput` 由测试夹具提供答案（`is_fixture()`）时，无参 `/config`、`/cost`、`/status` 走文本路径，不进入 picker。
+
+验证方式：
+
+```bash
+cargo test --locked -p deepseek-code-cli --bin dcl
+script -qec "cargo test --locked -p deepseek-code-cli --bin dcl" /dev/null
+```
+
+2026-11-09：修复前第一条命令会停住（进程状态 `Tl`，`wchan=do_signal_stop`），第二条停在 Settings 菜单等待输入；修复后两者都在数秒内完成，`terminal::cursor_tests::cursor_position_is_unavailable_without_raw_mode` 与 `terminal::input::tests::fixture_answers_are_non_interactive` 通过。在 pty 下仍有 29 个用例失败，同一个用例集合在未修改的代码上同样失败（它们假定标准流不是终端），不属于本次改动。
+
 ## 真实终端的测试方法
 
 真实终端指在伪终端里启动 `dcl`，发送按键，再检查屏幕内容。Linux 上使用开发目录的工具：

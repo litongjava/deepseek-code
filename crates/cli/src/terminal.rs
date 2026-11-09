@@ -50,6 +50,22 @@ pub fn release_handoff() {
     }
 }
 
+/// The cursor position reported by the terminal, or `NotConnected` when this
+/// process is not driving it in raw mode. `crossterm::cursor::position` switches
+/// `/dev/tty` into raw mode itself: from a background process group the kernel
+/// answers with `SIGTTOU` and stops the process, which leaves a test runner
+/// waiting forever, and without a terminal it waits for a report that never
+/// arrives. Callers keep their own fallbacks for the missing row.
+pub(crate) fn cursor_position() -> std::io::Result<(u16, u16)> {
+    if !crossterm::terminal::is_raw_mode_enabled()? {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::NotConnected,
+            "the cursor position needs the terminal in raw mode",
+        ));
+    }
+    crossterm::cursor::position()
+}
+
 /// Lines a mouse wheel notch scrolls in the transcript pager (/scroll-speed).
 pub static SCROLL_SPEED: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(1);
 
@@ -381,6 +397,20 @@ fn writeln_recorded(out: &mut impl std::io::Write, history: &mut scrollback::Scr
     write!(out, "{row}{newline}")?;
     history.push(row.to_owned(), None);
     Ok(())
+}
+
+#[cfg(test)]
+mod cursor_tests {
+    /// Tests never enable raw mode; a cursor query now fails instead of
+    /// switching the controlling terminal into raw mode and stopping the
+    /// process from a background process group with `SIGTTOU`.
+    #[test]
+    fn cursor_position_is_unavailable_without_raw_mode() {
+        assert_eq!(
+            super::cursor_position().unwrap_err().kind(),
+            std::io::ErrorKind::NotConnected
+        );
+    }
 }
 
 #[cfg(test)]

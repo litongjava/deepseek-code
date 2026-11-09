@@ -1,7 +1,7 @@
 //! Inline terminal editor. The normal screen preserves transcript scrollback;
 //! clicks toggle tool results; dragging selects and copies visible text. No alternate screen is used; all modes are restored on exit.
 use crossterm::{
-    cursor::{position, MoveDown, MoveTo, MoveToColumn, MoveUp},
+    cursor::{MoveDown, MoveTo, MoveToColumn, MoveUp},
     event::{
         DisableBracketedPaste, DisableMouseCapture, EnableBracketedPaste, EnableMouseCapture,
         Event, KeyCode, KeyEventKind, KeyModifiers, MouseButton, MouseEventKind,
@@ -550,7 +550,7 @@ impl Screen {
         }
     }
     pub(crate) fn resized(&mut self, rows: u16) -> io::Result<()> {
-        let (_, cursor_y) = position()?;
+        let (_, cursor_y) = crate::terminal::cursor_position()?;
         self.cursor_row = self.cursor_row.min(cursor_y as usize);
         self.height = self.height.min(rows.max(1) as usize);
         self.invalidated = true;
@@ -587,7 +587,7 @@ impl Screen {
 
     fn draw_pinned(&mut self, lines: &[DisplayLine], row: usize, col: usize) -> io::Result<()> {
         let rows = terminal::size().map(|(_, rows)| rows).unwrap_or(24).max(1);
-        let (_, cursor_y) = position()?;
+        let (_, cursor_y) = crate::terminal::cursor_position()?;
         self.cursor_col = col;
         let mut out = io::stderr().lock();
         out.write_all(b"\x1b[?2026h")?;
@@ -796,7 +796,7 @@ impl Screen {
         let (cols, rows) = terminal::size().unwrap_or((80, 24));
         // A terminal that does not answer the cursor query still gets the popup.
         let top = self.top.unwrap_or_else(|| {
-            position()
+            crate::terminal::cursor_position()
                 .map_or(0, |(_, row)| row)
                 .saturating_sub(self.cursor_row as u16)
         });
@@ -1859,7 +1859,7 @@ impl PromptEditor {
                         }
                         continue;
                     }
-                    let (_, cursor_y) = position()?;
+                    let (_, cursor_y) = crate::terminal::cursor_position()?;
                     let origin = cursor_y.saturating_sub(screen.cursor_row as u16);
                     let transcript_bottom = screen.transcript_end.unwrap_or(origin as usize) as u16;
                     let mut snapshot = above.screen(transcript_bottom, rows);

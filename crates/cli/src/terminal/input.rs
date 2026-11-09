@@ -445,6 +445,12 @@ impl TerminalInput {
         let _ = self.requests.send(Message::PermissionMode(mode.into()));
     }
 
+    /// True when answers come from a caller-supplied channel instead of the
+    /// terminal; interactive pickers must then keep their text forms.
+    pub fn is_fixture(&self) -> bool {
+        self.fixture.is_some()
+    }
+
     /// Arms Esc/Ctrl+C cancellation for a synchronous command that runs outside
     /// the prompt loop. `None` when no key can arrive (piped or minimalist input).
     pub fn watch_cancel(&mut self) -> io::Result<Option<CancelWatch>> {
@@ -655,6 +661,13 @@ fn read_plain(reader: &mut impl BufRead, prompt: &str) -> io::Result<Option<Stri
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn fixture_answers_are_non_interactive() {
+        let (_, fixture) = mpsc::unbounded_channel();
+        assert!(TerminalInput::from(fixture).is_fixture());
+        assert!(!TerminalInput::new().is_fixture());
+    }
 
     #[tokio::test]
     async fn effort_shortcuts_keep_the_same_pending_editor_read() {
