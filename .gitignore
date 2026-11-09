@@ -56,6 +56,9 @@ src-tauri/sessions.json
 # Debug/temp files
 debug-*.md
 *.tmp
+/.claude/
+/base_rule.txt
+/temp/
 
 # Tauri bridge API key (auto-generated at runtime)
 src-tauri/bridge_api_key.txt
