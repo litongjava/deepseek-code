@@ -390,6 +390,8 @@ mod tests {
 
         let conn = Connection::open_in_memory().unwrap();
         conn.execute_batch(crate::db::schema::SCHEMA_SQL).unwrap();
+        // Branching writes the per-session compaction counter, as DbManager migrates it.
+        crate::services::migrate(&conn).unwrap();
         use crate::db::{conversation_repo, project_repo};
         project_repo::insert_project(
             &conn, "project", "Project", None, None, None, false, "now", "now",

@@ -1337,6 +1337,22 @@ impl ToolLoopExecutor {
             .clone()
             .unwrap_or_else(|| self.loaded_tools.iter().cloned().collect());
         let needle = query.to_lowercase();
+        // `select:A,B` names tools exactly; otherwise every keyword must match
+        // the name or description, with `_` and `-` read as word separators so
+        // "git diff" finds git_diff.
+        let normalize = |text: &str| text.to_lowercase().replace(['_', '-'], " ");
+        let selected: Option<Vec<String>> = needle.strip_prefix("select:").map(|names| {
+            names
+                .split(',')
+                .map(|name| name.trim().to_owned())
+                .filter(|name| !name.is_empty())
+                .collect()
+        });
+        let keywords: Vec<String> = normalize(&needle)
+            .split(|ch: char| ch.is_whitespace() || ch == ',')
+            .filter(|word| !word.is_empty())
+            .map(str::to_owned)
+            .collect();
         let mut hits: Vec<(u8, crate::tools::ToolDefinition)> = catalog
             .iter()
             .filter(|tool| {
@@ -1351,12 +1367,32 @@ impl ToolLoopExecutor {
             })
             .filter_map(|tool| {
                 let name = tool.name.to_lowercase();
-                let score = if name == needle {
+                if let Some(selected) = &selected {
+                    return selected
+                        .iter()
+                        .position(|wanted| *wanted == name)
+                        .map(|index| (index.min(u8::MAX as usize) as u8, tool.clone()));
+                }
+                let spaced_name = normalize(&tool.name);
+                let description = normalize(&tool.description);
+                let score = if name == needle || spaced_name == normalize(&needle) {
                     0
                 } else if name.contains(&needle) {
                     1
                 } else if tool.description.to_lowercase().contains(&needle) {
                     2
+                } else if !keywords.is_empty()
+                    && keywords
+                        .iter()
+                        .all(|word| spaced_name.contains(word.as_str()))
+                {
+                    3
+                } else if !keywords.is_empty()
+                    && keywords.iter().all(|word| {
+                        spaced_name.contains(word.as_str()) || description.contains(word.as_str())
+                    })
+                {
+                    4
                 } else {
                     return None;
                 };

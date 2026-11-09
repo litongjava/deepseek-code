@@ -1599,3 +1599,42 @@ async fn a_settings_change_while_a_loaded_tool_is_called_follows_the_current_swi
         }
     }
 }
+
+#[tokio::test]
+async fn search_matches_separate_keywords_and_exact_selections() {
+    let temp = tempfile::tempdir().unwrap();
+    let mut executor = executor(temp.path());
+    executor.exposed_tools = Some(names(&executor).into_iter().collect());
+    let loaded = |output: &str| -> Vec<String> {
+        let value: Value = serde_json::from_str(output).unwrap();
+        value["loaded_tools"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter_map(|name| name.as_str().map(str::to_owned))
+            .collect()
+    };
+    // Words in a different form than the snake_case name still find it first.
+    let (_, output, _) = executor
+        .execute_tool_call("ToolSearch", &json!({"query":"git diff"}), "words")
+        .await;
+    assert_eq!(
+        loaded(&output).first().map(String::as_str),
+        Some("git_diff"),
+        "{output}"
+    );
+    // An exact selection loads only the named tools, in the requested order.
+    let (_, output, _) = executor
+        .execute_tool_call(
+            "ToolSearch",
+            &json!({"query":"select:git_status, ListDir"}),
+            "select",
+        )
+        .await;
+    assert_eq!(loaded(&output), vec!["git_status", "ListDir"], "{output}");
+    // A word that matches nothing keeps the whole query from matching.
+    let (_, output, _) = executor
+        .execute_tool_call("ToolSearch", &json!({"query":"git zzqx"}), "miss")
+        .await;
+    assert!(loaded(&output).is_empty(), "{output}");
+}
