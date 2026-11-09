@@ -157,7 +157,7 @@ Windows 上，`tools::linux_env::tests::unpack_copies_hard_links_keeps_symlinks_
 17. Responses 真实进程重启：用隔离数据目录 `config.json` 配置 Responses 适配供应商（模型 `api` 为 `openai-responses`，内置供应商 ID 为 `openai`），真实 `dcl` 进程搜索加载后退出，`--resume` 新进程的首个 Responses 请求应包含此前加载的工具。不要用 `--base-url` 覆盖，它会清除内置供应商 ID。
 18. 命令改开关：在隔离数据目录执行 `dcl config set tools.<name>.enabled|on_demand true|false`，`dcl config show` 的 `tools` 项与文件内容一致；下一次模型请求的工具集合按新开关变化（两个都关的工具不出现也搜不到，只开启用的工具直接出现在请求里）。同一次写入把 `disabled_tools` 里的内置名折算成开关，非内置名保留。交互终端执行 `/tools`，用 `Space` 改“启用”、`Tab` 改“按需加载”，关闭面板后文件与面板一致；非终端下 `/tools` 打印文本清单。`crates/cli/src/tool_settings.rs` 的单元测试覆盖只改一个开关、双关、迁移保留非内置名和非法输入。
 
-19. 搜索匹配：多个关键词分开匹配，`_`、`-` 视为空格，例如 `git diff` 首先加载 `git_diff`；任一关键词都匹配不到时不加载；`select:git_status,ListDir` 只按名称精确加载，并保持给出的顺序。
+19. 搜索匹配：多个关键词分开匹配，`_`、`-` 视为空格，例如 `git diff` 首先加载 `git_diff`；任一关键词都匹配不到时不加载；`select:git_status,ListDir` 只按名称精确加载，并保持给出的顺序。 完整工具名支持逗号、空白和混合分隔（例如 `WebSearch WebFetch`、`WebSearch,WebFetch`），忽略大小写、去重并保持顺序；`select:` 同样支持两种分隔。名称识别基于完整目录，禁用、已暴露及代理未允许的工具仍不加载。
 
 自动回归：`cargo test --locked -p deepseek-code-core --lib tool_loading_tests`。
 provider mock 直接驱动公开 executor，覆盖 Anthropic、Chat Completions、Responses：

@@ -841,7 +841,7 @@ async fn every_transport_adds_a_searched_tool_to_the_next_request() {
                             format,
                             "search-1",
                             "ToolSearch",
-                            json!({"query":"ListDir"}),
+                            json!({"query":"ListDir WebFetch"}),
                         ),
                         1 => tool_call_events(format, "list-1", "ListDir", json!({"path":"."})),
                         _ => text_events(format, "done"),
@@ -922,7 +922,7 @@ async fn every_transport_adds_a_searched_tool_to_the_next_request() {
             "{format}: {second:?}"
         );
         assert!(
-            !second.contains(&"WebFetch".to_owned()),
+            second.contains(&"WebFetch".to_owned()),
             "{format}: {second:?}"
         );
         assert!(
@@ -1637,4 +1637,65 @@ async fn search_matches_separate_keywords_and_exact_selections() {
         .execute_tool_call("ToolSearch", &json!({"query":"git zzqx"}), "miss")
         .await;
     assert!(loaded(&output).is_empty(), "{output}");
+}
+
+#[tokio::test]
+async fn search_selects_complete_names_with_commas_and_whitespace() {
+    for query in [
+        "WebSearch WebFetch",
+        "WebSearch,WebFetch",
+        "  WebSearch, \tWebFetch  ",
+        "websearch WEBFETCH WebSearch",
+        "select:WebSearch WebFetch",
+        "select:WebSearch, WebFetch,WebSearch",
+    ] {
+        let temp = tempfile::tempdir().unwrap();
+        let mut executor = executor(temp.path());
+        executor.exposed_tools = Some(names(&executor).into_iter().collect());
+        let (_, output, error) = executor
+            .execute_tool_call("ToolSearch", &json!({"query":query}), "names")
+            .await;
+        let value: Value = serde_json::from_str(&output).unwrap();
+        assert!(!error, "{query}: {output}");
+        assert_eq!(
+            value["loaded_tools"],
+            json!(["WebSearch", "WebFetch"]),
+            "{query}"
+        );
+        for name in ["WebSearch", "WebFetch"] {
+            assert!(
+                names(&executor).contains(&name.to_owned()),
+                "{query}: {name}"
+            );
+        }
+    }
+}
+
+#[tokio::test]
+async fn complete_name_selection_preserves_loading_restrictions() {
+    for restriction in ["disabled", "exposed", "not_allowed"] {
+        let temp = tempfile::tempdir().unwrap();
+        let mut executor = executor(temp.path());
+        if restriction == "disabled" {
+            write_switches(temp.path(), &[("WebSearch", false, false)]);
+        }
+        let mut exposed: std::collections::HashSet<String> = names(&executor).into_iter().collect();
+        if restriction == "exposed" {
+            exposed.insert("WebSearch".into());
+        }
+        executor.exposed_tools = Some(exposed);
+        if restriction == "not_allowed" {
+            executor.allowed_tools = Some(vec!["ToolSearch".into(), "WebFetch".into()]);
+        }
+        let (_, output, error) = executor
+            .execute_tool_call(
+                "ToolSearch",
+                &json!({"query":"WebSearch WebFetch"}),
+                "limited",
+            )
+            .await;
+        let value: Value = serde_json::from_str(&output).unwrap();
+        assert!(!error, "{restriction}: {output}");
+        assert_eq!(value["loaded_tools"], json!(["WebFetch"]), "{restriction}");
+    }
 }

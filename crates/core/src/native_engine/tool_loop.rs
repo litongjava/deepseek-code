@@ -1337,17 +1337,24 @@ impl ToolLoopExecutor {
             .clone()
             .unwrap_or_else(|| self.loaded_tools.iter().cloned().collect());
         let needle = query.to_lowercase();
-        // `select:A,B` names tools exactly; otherwise every keyword must match
-        // the name or description, with `_` and `-` read as word separators so
-        // "git diff" finds git_diff.
+        // Complete tool names separated by commas or whitespace select tools.
+        // Other queries retain keyword matching, so "git diff" finds git_diff.
         let normalize = |text: &str| text.to_lowercase().replace(['_', '-'], " ");
-        let selected: Option<Vec<String>> = needle.strip_prefix("select:").map(|names| {
-            names
-                .split(',')
-                .map(|name| name.trim().to_owned())
-                .filter(|name| !name.is_empty())
-                .collect()
-        });
+        let selections: Vec<String> = needle
+            .strip_prefix("select:")
+            .unwrap_or(&needle)
+            .split(|ch: char| ch.is_whitespace() || ch == ',')
+            .filter(|name| !name.is_empty())
+            .map(str::to_owned)
+            .collect();
+        let selected = (needle.starts_with("select:")
+            || (!selections.is_empty()
+                && selections.iter().all(|name| {
+                    catalog
+                        .iter()
+                        .any(|tool| tool.name.eq_ignore_ascii_case(name))
+                })))
+        .then_some(selections);
         let keywords: Vec<String> = normalize(&needle)
             .split(|ch: char| ch.is_whitespace() || ch == ',')
             .filter(|word| !word.is_empty())
