@@ -143,6 +143,8 @@ provider mock 直接驱动公开 executor，覆盖 Anthropic、Chat Completions�
 首请求不带按需工具，ToolSearch 成功后下一 HTTP 请求包含真实 schema 并执行 ListDir；
 在途时双关和重新启用更新后续请求、拒绝失效调用；损坏配置阻止下一 HTTP 请求；
 同一逻辑请求的 HTTP 重试固定工具定义，快照与实际请求工具集合一致。
+恢复回归另从关闭后重新打开的 SQLite 读取成功 ToolSearch 工具行，传入只有显示文本的历史；
+验证首个真实请求恢复工具、当前开关及代理限制仍生效，错误/非助手/其他会话/压缩边界前记录不授予加载资格。
 这些 core 结果不能代替终端 `/tools` 同会话联动或 Desktop 原生界面验收。
 
 ### I. 定时任务

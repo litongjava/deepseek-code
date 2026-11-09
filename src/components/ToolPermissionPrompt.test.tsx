@@ -22,4 +22,24 @@ describe('tool permission prompt', () => {
     expect(screen.getByRole('dialog')).toBeInTheDocument();
     expect(screen.getByRole('button', { name: 'Allow' })).toBeEnabled();
   });
+  it('cancels the turn without granting or denying the tool while cancellation settles', async () => {
+    const respond = vi.fn();
+    let finish!: () => void;
+    const cancel = vi.fn(() => new Promise<void>(resolve => { finish = resolve; }));
+    render(<ToolPermissionPrompt request={request} onRespond={respond} onCancel={cancel} />);
+    fireEvent.click(screen.getByRole('button', { name: 'Cancel turn' }));
+    expect(cancel).toHaveBeenCalledOnce();
+    expect(respond).not.toHaveBeenCalled();
+    expect(screen.getByRole('button', { name: 'Allow' })).toBeDisabled();
+    expect(screen.getByRole('button', { name: 'Deny' })).toBeDisabled();
+    finish();
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Cancel turn' })).toBeEnabled());
+  });
+  it('retains the pending prompt if turn cancellation fails', async () => {
+    render(<ToolPermissionPrompt request={request} onRespond={vi.fn()} onCancel={vi.fn().mockRejectedValue(new Error('Stop failed'))} />);
+    fireEvent.click(screen.getByRole('button', { name: 'Cancel turn' }));
+    expect(await screen.findByRole('alert')).toHaveTextContent('Stop failed');
+    expect(screen.getByRole('dialog')).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Allow' })).toBeEnabled();
+  });
 });

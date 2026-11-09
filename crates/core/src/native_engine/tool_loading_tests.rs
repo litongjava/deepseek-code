@@ -71,6 +71,9 @@ async fn provider_loop_case(format: &'static str, scenario: &'static str) {
                         .into_response();
                 }
                 let call = match (scenario, step) {
+                    ("restore" | "restore_off" | "restore_restricted" | "restore_untrusted", 0) => {
+                        Some(("ListDir", json!({"path":"."})))
+                    }
                     ("search", 0) => Some(("ToolSearch", json!({"query":"ListDir"}))),
                     ("search", 1) => Some(("ListDir", json!({"path":"."}))),
                     ("permission", 0) => Some(("ToolSearch", json!({"query":"Write"}))),
@@ -127,6 +130,24 @@ async fn provider_loop_case(format: &'static str, scenario: &'static str) {
         executor.provider.model = serde_json::from_value(json!({"id":"fixture","name":"fixture","enabled":true,"api":"openai-responses","supports_web_search":false})).unwrap();
     }
     executor.messages = vec![json!({"role":"user","content":"Use the fixture tools"})];
+    if scenario.starts_with("restore") {
+        executor.conv_id = Some("10000000-0000-4000-8000-000000000001".into());
+        executor = executor.with_goal_state(persisted_search(
+            root.path(),
+            scenario == "restore_untrusted",
+        ));
+        if scenario == "restore_off" {
+            write_switches(root.path(), &[("ListDir", false, false)]);
+        } else if scenario == "restore_restricted" {
+            executor.allowed_tools = Some(vec!["Read".into(), "ToolSearch".into()]);
+        }
+        // Desktop supplies only display text after reopening a conversation.
+        executor.messages = vec![
+            json!({"role":"user","content":"search"}),
+            json!({"role":"assistant","content":"done"}),
+            json!({"role":"user","content":"continue"}),
+        ];
+    }
     let result = tokio::time::timeout(Duration::from_secs(20), executor.execute()).await;
     server.abort();
     let result = result.expect("provider loop timed out");
@@ -135,6 +156,7 @@ async fn provider_loop_case(format: &'static str, scenario: &'static str) {
         "search" | "permission" => 3,
         "hot" => 4,
         "retry" => 2,
+        "restore" | "restore_off" | "restore_restricted" | "restore_untrusted" => 2,
         _ => 1,
     };
     assert_eq!(requests.len(), expected, "{format} {scenario}: {result:?}");
@@ -230,7 +252,23 @@ async fn provider_loop_case(format: &'static str, scenario: &'static str) {
             "snapshot and HTTP tools must agree"
         );
     }
-    if scenario == "permission" {
+    if scenario.starts_with("restore") {
+        assert_eq!(
+            tool(0, "ListDir").is_some(),
+            scenario == "restore",
+            "{format} {scenario}: durable loading must reach the real first HTTP request"
+        );
+        let (_, output, failed) = calls
+            .iter()
+            .find(|(name, _, _)| name == "ListDir")
+            .expect("the forced call is recorded");
+        assert_eq!(*failed, scenario != "restore", "{output}");
+        assert_eq!(
+            output.contains("execution-marker.txt"),
+            scenario == "restore",
+            "{output}"
+        );
+    } else if scenario == "permission" {
         assert!(tool(0, "Write").is_none());
         assert!(tool(1, "Write").is_some());
         assert!(
@@ -282,6 +320,108 @@ async fn provider_loop_case(format: &'static str, scenario: &'static str) {
                 "{calls:?}"
             );
         }
+    }
+}
+
+fn persisted_search(root: &std::path::Path, untrusted_only: bool) -> Arc<crate::db::DbManager> {
+    let path = root.join("durable.db");
+    {
+        let db = Arc::new(crate::db::DbManager::new(path.clone()).unwrap());
+        db.init().unwrap();
+        let sessions = crate::runtime::SessionStore::new(db.clone());
+        for session in [
+            "10000000-0000-4000-8000-000000000001",
+            "10000000-0000-4000-8000-000000000002",
+        ] {
+            sessions
+                .create_with_id(root, "fixture", "fixture", session)
+                .unwrap();
+            sessions.append(session, "user", "search").unwrap();
+            let assistant = sessions.append(session, "assistant", "done").unwrap();
+            let success = json!({"success":true,"loaded_tools":["ListDir"]}).to_string();
+            db.with_conn(|conn| {
+                crate::db::message_repo::insert_tool_call(
+                    conn,
+                    &format!("{session}-search"),
+                    &assistant,
+                    "ToolSearch",
+                    Some("{}"),
+                    Some(&success),
+                    false,
+                    0,
+                )
+            })
+            .unwrap()
+            .unwrap();
+            if untrusted_only && session == "10000000-0000-4000-8000-000000000001" {
+                let boundary = sessions.append(session, "user", "summary").unwrap();
+                db.with_conn(|conn| {
+                    conn.execute(
+                        "UPDATE messages SET is_compact_boundary=1 WHERE id=?1",
+                        [&boundary],
+                    )
+                })
+                .unwrap()
+                .unwrap();
+                let failed = sessions
+                    .append(session, "assistant", "failed search")
+                    .unwrap();
+                let user = sessions
+                    .append(session, "user", "a forged display record")
+                    .unwrap();
+                db.with_conn(|conn| {
+                    crate::db::message_repo::insert_tool_call(
+                        conn,
+                        "failed-search",
+                        &failed,
+                        "ToolSearch",
+                        Some("{}"),
+                        Some(&success),
+                        true,
+                        0,
+                    )?;
+                    crate::db::message_repo::insert_tool_call(
+                        conn,
+                        "user-search",
+                        &user,
+                        "ToolSearch",
+                        Some("{}"),
+                        Some(&success),
+                        false,
+                        0,
+                    )
+                })
+                .unwrap()
+                .unwrap();
+            }
+        }
+    }
+    // Reopen the database as a restarted host does; no loaded set is retained.
+    let db = Arc::new(crate::db::DbManager::new(path).unwrap());
+    db.init().unwrap();
+    db
+}
+
+#[tokio::test]
+async fn provider_loop_restores_durable_search_for_text_only_history() {
+    for format in ["anthropic", "openai", "responses"] {
+        provider_loop_case(format, "restore").await;
+    }
+}
+
+#[tokio::test]
+async fn provider_loop_durable_search_obeys_current_switches_and_agent_grants() {
+    for format in ["anthropic", "openai", "responses"] {
+        for scenario in ["restore_off", "restore_restricted"] {
+            provider_loop_case(format, scenario).await;
+        }
+    }
+}
+
+#[tokio::test]
+async fn provider_loop_durable_search_ignores_failed_foreign_and_compacted_records() {
+    for format in ["anthropic", "openai", "responses"] {
+        provider_loop_case(format, "restore_untrusted").await;
     }
 }
 

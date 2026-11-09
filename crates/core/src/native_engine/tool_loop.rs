@@ -1335,6 +1335,31 @@ impl ToolLoopExecutor {
         self.loaded_tools.extend(loaded);
     }
 
+    /// Desktop may submit display-only history. The durable tool row binds an
+    /// assistant call to its result, independently of that display history.
+    fn restore_persisted_loaded_tools(&mut self) -> Result<()> {
+        let (Some(db), Some(session)) = (&self.goal_db, self.conv_id.as_deref()) else {
+            return Ok(());
+        };
+        let loaded = db.with_conn(|conn| -> Result<_> {
+            let mut query = conn.prepare(
+                "SELECT t.output FROM tool_calls t JOIN messages m ON m.id=t.message_id
+                 WHERE m.conversation_id=?1 AND m.role='assistant'
+                   AND t.name='ToolSearch' AND t.is_error=0 AND t.output IS NOT NULL
+                   AND m.sort_order >= COALESCE((SELECT MAX(sort_order) FROM messages
+                       WHERE conversation_id=?1 AND is_compact_boundary=1), -1)"
+            )?;
+            let results = query.query_map([session], |row| row.get::<_, String>(0))?;
+            let mut loaded = std::collections::BTreeSet::new();
+            for result in results {
+                Self::absorb_loaded(&result?, &mut loaded);
+            }
+            Ok(loaded)
+        })??;
+        self.loaded_tools.extend(loaded);
+        Ok(())
+    }
+
     /// Reads a stored ToolSearch result. Only the structured marker of a
     /// successful search is accepted.
     fn absorb_loaded(text: &str, loaded: &mut std::collections::BTreeSet<String>) {
@@ -1688,6 +1713,7 @@ impl ToolLoopExecutor {
         Box::pin(self.refresh_mcp_tools()).await?;
         // A tool loaded earlier in this session stays available; the current
         // settings still decide whether it may come back.
+        self.restore_persisted_loaded_tools()?;
         self.restore_loaded_tools();
         self.exposed_tools = None;
         let mut directories = self.allowed_directories.clone();

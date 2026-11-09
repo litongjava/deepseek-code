@@ -1520,25 +1520,27 @@ const MainContent = ({ onNewChat, resetKey, tunerConfig, onOpenDocument, onArtif
   // 停止生成（双模式：SSE 直连 or 轮询模式）
   const handleStop = async () => {
     const conversationId = activeId;
-    if (!conversationId) return;
+    if (!conversationId) return false;
     try {
       // Keep the stream alive until the backend has saved its terminal timing.
       const result = await stopGeneration(conversationId);
       if (result.settled === false) {
         alert('Stopping is still in progress. Please wait for the backend to finish.');
-        return;
+        return false;
       }
       abortStreamSession(conversationId);
       removeStreaming(conversationId);
-      if (viewingIdRef.current !== conversationId) return;
+      if (viewingIdRef.current !== conversationId) return true;
       stopPolling();
       setLoading(false);
       isCreatingRef.current = false;
       const final = await getConversation(conversationId);
       if (viewingIdRef.current === conversationId) setMessages((final.messages || []).map((msg: any) => sanitizeInlineArtifactMessage(msg)));
+      return true;
     } catch (error) {
       console.error('[Stop] error:', error);
       alert('Unable to confirm that generation stopped. Please try again.');
+      return false;
     }
   };
   // 重新发送消息
@@ -2436,7 +2438,11 @@ const MainContent = ({ onNewChat, resetKey, tunerConfig, onOpenDocument, onArtif
         </div>
       )}
 
-      {toolPermissionDialog && !permissionApproval && <ToolPermissionPrompt key={toolPermissionDialog.request_id} request={toolPermissionDialog} onRespond={async choice => {
+      {toolPermissionDialog && !permissionApproval && <ToolPermissionPrompt key={toolPermissionDialog.request_id} request={toolPermissionDialog} onCancel={async () => {
+        const current = toolPermissionDialog;
+        if (!await handleStop()) throw new Error('Turn cancellation could not be confirmed');
+        setToolPermissionDialog(pending => pending?.request_id === current.request_id ? null : pending);
+      }} onRespond={async choice => {
         const current = toolPermissionDialog;
         const target = current.session_id || activeId;
         if (!target) throw new Error('Permission session unavailable');

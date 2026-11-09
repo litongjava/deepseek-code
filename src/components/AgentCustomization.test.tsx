@@ -1,6 +1,6 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { useState } from 'react';
-import { fireEvent, render, screen, waitFor } from '@testing-library/react';
+import { act, fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { AgentCustomization } from './AgentCustomization';
 import { customizationApi } from '../api/customization';
 import { useUIStore } from '../stores/useUIStore';
@@ -9,7 +9,11 @@ import zh from '../locales/zh.json';
 
 vi.mock('../api/customization', () => ({ customizationApi: { load: vi.fn(), save: vi.fn() } }));
 
-const empty = { system_prompt: { mode: 'default', text: '' }, disabled_tools: [], tool_descriptions: {}, custom_tools: [] };
+const empty = { system_prompt: { mode: 'default', text: '' }, disabled_tools: [], tool_descriptions: {}, custom_tools: [], tool_loading: {} };
+
+const builtin = (name: string, description: string, core: boolean, enabled: boolean, onDemand = true) => ({
+  name, description, core, default_enabled: core, default_on_demand: true, enabled, on_demand: onDemand,
+});
 
 beforeEach(() => {
   vi.resetAllMocks();
@@ -17,12 +21,23 @@ beforeEach(() => {
   vi.mocked(customizationApi.load).mockResolvedValue({
     customization: JSON.parse(JSON.stringify(empty)),
     default_system_prompt: 'BUILT IN PROMPT',
-    builtin_tools: [{ name: 'Read', description: 'Reads a file' }, { name: 'Write', description: 'Writes a file' }],
+    builtin_tools: [
+      builtin('Read', 'Reads a file', true, true),
+      builtin('ToolSearch', 'Finds tools', true, true),
+      builtin('Write', 'Writes a file', false, false),
+    ],
   } as never);
-  vi.mocked(customizationApi.save).mockResolvedValue();
+  vi.mocked(customizationApi.save).mockImplementation(async customization => customization);
 });
 
 const saved = () => vi.mocked(customizationApi.save).mock.calls[0][0];
+const savedSection = () => vi.mocked(customizationApi.save).mock.calls[0][1];
+const lastCall = () => {
+  const calls = vi.mocked(customizationApi.save).mock.calls;
+  return calls[calls.length - 1];
+};
+const lastSaved = () => lastCall()[0];
+const lastSection = () => lastCall()[1];
 const named = (template: string, name: string) => template.replace('{name}', name);
 
 describe('prompt settings page', () => {
@@ -52,7 +67,7 @@ describe('prompt settings page', () => {
 });
 
 describe('tool settings page', () => {
-  it('turns built-in tools off and edits and restores their descriptions', async () => {
+  it('turns a built-in tool on and edits and restores its description', async () => {
     render(<AgentCustomization section="tools" />);
     fireEvent.click(await screen.findByLabelText(named(zh.agentSettings.enableTool, 'Write')));
     fireEvent.click(screen.getByLabelText(named(zh.agentSettings.editToolDescription, 'Read')));
@@ -61,10 +76,48 @@ describe('tool settings page', () => {
     fireEvent.change(description, { target: { value: 'Edited' } });
     expect(screen.getByText(zh.agentSettings.modified)).toBeInTheDocument();
     fireEvent.click(screen.getByText(zh.agentSettings.save));
-    await waitFor(() => expect(saved()).toMatchObject({ disabled_tools: ['Write'], tool_descriptions: { Read: 'Edited' } }));
+    await waitFor(() => expect(saved()).toMatchObject({
+      tool_loading: { Write: { enabled: true, on_demand: true } },
+      tool_descriptions: { Read: 'Edited' },
+      disabled_tools: [],
+    }));
     fireEvent.click(screen.getByText(zh.agentSettings.restoreDescription));
     expect(screen.getByLabelText(named(zh.agentSettings.descriptionLabel, 'Read'))).toHaveValue('Reads a file');
     expect(screen.queryByText(zh.agentSettings.modified)).not.toBeInTheDocument();
+  });
+
+  it('keeps the two switches independent and marks the core defaults', async () => {
+    render(<AgentCustomization section="tools" />);
+    const enabled = await screen.findByLabelText(named(zh.agentSettings.enableTool, 'Write'));
+    const onDemand = screen.getByLabelText(named(zh.agentSettings.onDemandTool, 'Write'));
+    expect(enabled).not.toBeChecked();
+    expect(onDemand).toBeChecked();
+    expect(screen.getAllByText(zh.agentSettings.coreDefault)).toHaveLength(2);
+    // Turning discovery off leaves the default-load switch alone.
+    fireEvent.click(onDemand);
+    expect(enabled).not.toBeChecked();
+    expect(onDemand).not.toBeChecked();
+    fireEvent.click(screen.getByText(zh.agentSettings.save));
+    await waitFor(() => expect(saved().tool_loading).toEqual({ Write: { enabled: false, on_demand: false } }));
+  });
+
+  it('warns when ToolSearch can no longer discover tools', async () => {
+    render(<AgentCustomization section="tools" />);
+    expect(screen.queryByText(zh.agentSettings.toolSearchDisabledHint)).not.toBeInTheDocument();
+    fireEvent.click(await screen.findByLabelText(named(zh.agentSettings.enableTool, 'ToolSearch')));
+    expect(screen.getByText(zh.agentSettings.toolSearchDisabledHint)).toBeInTheDocument();
+  });
+
+  it('shows the saved state of a legacy disabled tool', async () => {
+    vi.mocked(customizationApi.load).mockResolvedValue({
+      customization: { ...JSON.parse(JSON.stringify(empty)), disabled_tools: ['Write'] },
+      default_system_prompt: 'BUILT IN PROMPT',
+      builtin_tools: [builtin('Write', 'Writes a file', false, false)],
+    } as never);
+    render(<AgentCustomization section="tools" />);
+    expect(await screen.findByLabelText(named(zh.agentSettings.enableTool, 'Write'))).not.toBeChecked();
+    // Discovery stays on, so the tool is reachable through ToolSearch.
+    expect(screen.getByLabelText(named(zh.agentSettings.onDemandTool, 'Write'))).toBeChecked();
   });
 
   it('adds, edits, disables and removes a custom tool', async () => {
@@ -126,6 +179,67 @@ function Entries() {
 }
 
 describe('shared draft between entries', () => {
+  it.each(['tools', 'prompts'].flatMap(section =>
+    ['success', 'failure'].flatMap(result =>
+      [false, true].map(returned => ({ section, result, returned }))))
+  )('ignores late $section save feedback ($result, returned=$returned)', async ({ section, result, returned }) => {
+    type Saved = Parameters<typeof customizationApi.save>[0];
+    let resolve!: (saved: Saved) => void;
+    let reject!: (error: Error) => void;
+    vi.mocked(customizationApi.save).mockImplementationOnce(() => new Promise<Saved>((yes, no) => {
+      resolve = yes;
+      reject = no;
+    }));
+    render(<Entries />);
+    fireEvent.change(await screen.findByLabelText(zh.agentSettings.modeLabel), { target: { value: 'append' } });
+    fireEvent.change(screen.getByLabelText(zh.agentSettings.promptText), { target: { value: 'PROMPT DRAFT' } });
+    if (section === 'tools') {
+      fireEvent.click(screen.getByText('to-tools'));
+      fireEvent.click(await screen.findByLabelText(named(zh.agentSettings.enableTool, 'Write')));
+    }
+    fireEvent.click(screen.getByText(zh.agentSettings.save));
+    expect(customizationApi.save).toHaveBeenCalledOnce();
+    fireEvent.click(screen.getByText(section === 'tools' ? 'to-prompts' : 'to-tools'));
+    if (section === 'prompts') {
+      fireEvent.click(await screen.findByLabelText(named(zh.agentSettings.enableTool, 'Write')));
+    }
+    if (returned) fireEvent.click(screen.getByText(section === 'tools' ? 'to-tools' : 'to-prompts'));
+
+    await act(async () => {
+      if (result === 'success') resolve(saved());
+      else reject(new Error('LATE SAVE FAILURE'));
+    });
+    expect(screen.queryByRole('alert')).toBeNull();
+    expect(screen.queryByText(zh.agentSettings.saved)).toBeNull();
+    fireEvent.click(screen.getByText(section === 'tools' ? 'to-tools' : 'to-prompts'));
+    if (result === 'success') expect(screen.getByText(zh.agentSettings.save)).toBeDisabled();
+    else expect(screen.getByText(zh.agentSettings.save)).toBeEnabled();
+    if (section === 'tools') {
+      fireEvent.click(screen.getByText('to-prompts'));
+      expect(await screen.findByLabelText(zh.agentSettings.promptText)).toHaveValue('PROMPT DRAFT');
+    } else {
+      fireEvent.click(screen.getByText('to-tools'));
+      expect(await screen.findByLabelText(named(zh.agentSettings.enableTool, 'Write'))).toBeChecked();
+    }
+  });
+  it.each(['tools', 'prompts'] as const)('keeps a failed %s save error on its own entry', async section => {
+    vi.mocked(customizationApi.save).mockRejectedValueOnce(new Error('Save failed here'));
+    render(<Entries />);
+    await screen.findByLabelText(zh.agentSettings.modeLabel);
+    if (section === 'tools') {
+      fireEvent.click(screen.getByText('to-tools'));
+      fireEvent.click(await screen.findByLabelText(named(zh.agentSettings.enableTool, 'Write')));
+    } else {
+      fireEvent.change(screen.getByLabelText(zh.agentSettings.modeLabel), { target: { value: 'append' } });
+      fireEvent.change(screen.getByLabelText(zh.agentSettings.promptText), { target: { value: 'UNSAVED' } });
+    }
+    fireEvent.click(screen.getByText(zh.agentSettings.save));
+    expect(await screen.findByRole('alert')).toHaveTextContent('Save failed here');
+    fireEvent.click(screen.getByText(section === 'tools' ? 'to-prompts' : 'to-tools'));
+    expect(screen.queryByRole('alert')).toBeNull();
+    fireEvent.click(screen.getByText(section === 'tools' ? 'to-tools' : 'to-prompts'));
+    expect(screen.getByText(zh.agentSettings.save)).not.toBeDisabled();
+  });
   it('keeps an unsaved prompt after the tool entry saves', async () => {
     render(<Entries />);
     fireEvent.change(await screen.findByLabelText(zh.agentSettings.modeLabel), { target: { value: 'append' } });
@@ -133,7 +247,7 @@ describe('shared draft between entries', () => {
     fireEvent.click(screen.getByText('to-tools'));
     fireEvent.click(await screen.findByLabelText(named(zh.agentSettings.enableTool, 'Write')));
     fireEvent.click(screen.getByText(zh.agentSettings.save));
-    await waitFor(() => expect(saved()).toMatchObject({ disabled_tools: ['Write'], system_prompt: { mode: 'default', text: '' } }));
+    await waitFor(() => expect(saved()).toMatchObject({ tool_loading: { Write: { enabled: true, on_demand: true } }, system_prompt: { mode: 'default', text: '' } }));
 
     fireEvent.click(screen.getByText('to-prompts'));
     expect(await screen.findByLabelText(zh.agentSettings.promptText)).toHaveValue('DRAFT PROMPT');
@@ -149,6 +263,43 @@ describe('shared draft between entries', () => {
     fireEvent.change(screen.getByLabelText(zh.agentSettings.promptText), { target: { value: 'MY PROMPT' } });
     fireEvent.click(screen.getByText(zh.agentSettings.save));
     await waitFor(() => expect(saved().system_prompt).toEqual({ mode: 'append', text: 'MY PROMPT' }));
-    expect(saved().disabled_tools).toEqual([]);
+    expect(saved().tool_loading).toEqual({});
+    expect(savedSection()).toBe('prompts');
+  });
+
+  // A save on one entry must not adopt the other entry's half over an unsaved draft.
+  it('keeps both unsaved tool switches after the prompt entry saves', async () => {
+    render(<Entries />);
+    fireEvent.click(await screen.findByText('to-tools'));
+    fireEvent.click(await screen.findByLabelText(named(zh.agentSettings.enableTool, 'Write')));
+    fireEvent.click(screen.getByLabelText(named(zh.agentSettings.onDemandTool, 'Write')));
+    fireEvent.click(screen.getByText('to-prompts'));
+    fireEvent.change(await screen.findByLabelText(zh.agentSettings.modeLabel), { target: { value: 'append' } });
+    fireEvent.change(screen.getByLabelText(zh.agentSettings.promptText), { target: { value: 'SAVED PROMPT' } });
+    fireEvent.click(screen.getByText(zh.agentSettings.save));
+    await waitFor(() => expect(savedSection()).toBe('prompts'));
+
+    fireEvent.click(screen.getByText('to-tools'));
+    // The server only wrote the prompt half, so the draft keeps both switches
+    // and the page is still dirty.
+    expect(await screen.findByLabelText(named(zh.agentSettings.enableTool, 'Write'))).toBeChecked();
+    expect(screen.getByLabelText(named(zh.agentSettings.onDemandTool, 'Write'))).not.toBeChecked();
+    expect(screen.getByText(zh.agentSettings.save)).not.toBeDisabled();
+    fireEvent.click(screen.getByText(zh.agentSettings.save));
+    await waitFor(() => expect(lastSaved().tool_loading).toEqual({ Write: { enabled: true, on_demand: false } }));
+    expect(lastSection()).toBe('tools');
+  });
+
+  it('keeps the prompt draft after the tool entry saves, and writes only the tool half', async () => {
+    render(<Entries />);
+    fireEvent.change(await screen.findByLabelText(zh.agentSettings.modeLabel), { target: { value: 'append' } });
+    fireEvent.change(screen.getByLabelText(zh.agentSettings.promptText), { target: { value: 'UNSAVED PROMPT' } });
+    fireEvent.click(screen.getByText('to-tools'));
+    fireEvent.click(await screen.findByLabelText(named(zh.agentSettings.enableTool, 'Write')));
+    fireEvent.click(screen.getByText(zh.agentSettings.save));
+    await waitFor(() => expect(savedSection()).toBe('tools'));
+    fireEvent.click(screen.getByText('to-prompts'));
+    expect(await screen.findByLabelText(zh.agentSettings.promptText)).toHaveValue('UNSAVED PROMPT');
+    expect(screen.getByText(zh.agentSettings.save)).not.toBeDisabled();
   });
 });

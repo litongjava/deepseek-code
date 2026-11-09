@@ -29,11 +29,11 @@ beforeEach(() => {
   vi.mocked(api.getSkills).mockResolvedValue({ skills: [skill] });
   vi.mocked(api.getSkillDetail).mockResolvedValue(skill);
   vi.mocked(customizationApi.load).mockResolvedValue({
-    customization: { system_prompt: { mode: 'default', text: '' }, disabled_tools: [], tool_descriptions: {}, custom_tools: [] },
+    customization: { system_prompt: { mode: 'default', text: '' }, disabled_tools: [], tool_descriptions: {}, custom_tools: [], tool_loading: {} },
     default_system_prompt: 'BUILT IN',
-    builtin_tools: [{ name: 'Write', description: 'Writes files' }],
+    builtin_tools: [{ name: 'Write', description: 'Writes files', core: false, default_enabled: false, default_on_demand: true, enabled: false, on_demand: true }],
   } as never);
-  vi.mocked(customizationApi.save).mockResolvedValue();
+  vi.mocked(customizationApi.save).mockImplementation(async customization => customization);
 });
 
 describe('Customize management', () => {
@@ -53,7 +53,7 @@ describe('Customize management', () => {
     expect(customizationApi.save).toHaveBeenCalledTimes(1);
     const sent = vi.mocked(customizationApi.save).mock.calls[0][0];
     expect(sent.system_prompt).toEqual({ mode: 'default', text: '' });
-    expect(sent.disabled_tools).toEqual(['Write']);
+    expect(sent.tool_loading).toEqual({ Write: { enabled: true, on_demand: true } });
   });
 
   it('keeps an empty replacement prompt on the prompt entry from blocking a tool save', async () => {
