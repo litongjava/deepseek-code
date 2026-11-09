@@ -77,6 +77,9 @@ mod durable_input_tests;
 #[cfg(test)]
 #[path = "goal_proposal_tests.rs"]
 mod goal_proposal_tests;
+#[cfg(test)]
+#[path = "tool_loading_tests.rs"]
+mod tool_loading_tests;
 
 #[path = "multimodal.rs"]
 mod multimodal;
@@ -230,6 +233,12 @@ pub struct ToolLoopExecutor {
     message_deliveries: usize,
     pending_plan_reset: Option<(String, String)>,
     allowed_directories: Vec<std::path::PathBuf>,
+    /// Built-in tools the model loaded with ToolSearch in this session. Only a
+    /// successful search that belongs to its own assistant call adds a name.
+    loaded_tools: std::collections::BTreeSet<String>,
+    /// The built-in names the request being answered carried. A call outside
+    /// this set waits for the next request, even when it is enabled now.
+    exposed_tools: Option<std::collections::HashSet<String>>,
 }
 
 #[derive(Debug, Clone)]
@@ -672,6 +681,8 @@ impl ToolLoopExecutor {
             message_deliveries: 0,
             pending_plan_reset: None,
             allowed_directories: Vec::new(),
+            loaded_tools: Default::default(),
+            exposed_tools: None,
         }
     }
 
@@ -792,7 +803,7 @@ impl ToolLoopExecutor {
     /// Whether a call only reads, so it may run alongside neighbouring calls.
     fn is_concurrency_safe(&self, name: &str, input: &Value) -> bool {
         match name {
-            "Read" | "Glob" | "Grep" | "ListDir" | "WebFetch" | "WebSearch" | "ToolSearch" | "git_status" | "git_diff" | "git_log" => true,
+            "Read" | "Glob" | "Grep" | "ListDir" | "WebFetch" | "WebSearch" | "git_status" | "git_diff" | "git_log" => true,
             "Bash" => !self.skill_shell_active
                 && input["run_in_background"] != true
                 && input["command"].as_str().is_some_and(crate::permissions::shell_read_only::is_read_only)
@@ -1167,20 +1178,20 @@ impl ToolLoopExecutor {
         self
     }
 
-    /// The user's overrides. A damaged file already failed the turn at its start;
-    /// a file damaged during a turn leaves the turn's tools as they are.
-    fn customization(&self) -> crate::services::customization::Customization {
-        self.search_config_path
-            .as_deref()
-            .and_then(std::path::Path::parent)
-            .and_then(|root| crate::services::customization::load(root).ok())
-            .unwrap_or_default()
+    /// The user's overrides, reporting a damaged file instead of falling back
+    /// to the defaults, so a broken switch can never quietly re-open a tool.
+    fn customization_result(&self) -> Result<crate::services::customization::Customization> {
+        match self.search_config_path.as_deref().and_then(std::path::Path::parent) {
+            Some(root) => crate::services::customization::load(root),
+            None => Ok(crate::services::customization::Customization::default()),
+        }
     }
 
-    fn tool_definitions(&self) -> Vec<crate::tools::ToolDefinition> {
+    /// Every built-in tool as this executor presents it, before the switches
+    /// and the agent allow list decide which ones a request carries.
+    fn builtin_catalog(&self) -> Vec<crate::tools::ToolDefinition> {
         let mut tools = get_tool_definitions();
         if !self.goal_proposals_available() { tools.retain(|tool| tool.name != "ProposeGoal"); }
-        tools.extend(self.mcp_tools.clone());
         if self.search_config_path.is_some() && self.delegation_depth < 2 {
             let mut definitions = delegation::definitions();
             if !self.runtime_agents.is_empty() {
@@ -1197,8 +1208,250 @@ impl ToolLoopExecutor {
             tools.extend(definitions);
         }
         if self.search_config_path.is_some() && self.delegation_depth == 0 { tools.push(script_workflow::definition()); }
-        let tools = adapt_tools(tools, self.prompt_profile);
-        self.customization().apply(tools).into_iter().filter(|tool| self.allowed_tools.as_ref().is_none_or(|names| names.contains(&tool.name))).collect()
+        adapt_tools(tools, self.prompt_profile)
+    }
+
+    fn builtin_names(&self) -> std::collections::HashSet<String> {
+        self.builtin_catalog().into_iter().map(|tool| tool.name).collect()
+    }
+
+    /// A restricted agent with no discovery entry reaches its granted tools
+    /// directly. The allow list itself is never widened.
+    fn restricted_without_discovery(&self) -> bool {
+        self.allowed_tools.as_ref().is_some_and(|names| !names.iter().any(|name| name == "ToolSearch"))
+    }
+
+    /// What the next request carries: the built-ins the switches expose, then
+    /// MCP and the user's own tools. A name outside the built-in catalog keeps
+    /// the old rule, where only a legacy entry turns it off.
+    fn tool_definitions(&self) -> Result<Vec<crate::tools::ToolDefinition>> {
+        let customization = self.customization_result()?;
+        let restricted = self.restricted_without_discovery();
+        let allowed = |name: &str| self.allowed_tools.as_ref().is_none_or(|names| names.iter().any(|granted| granted == name));
+        let mut tools: Vec<_> = self
+            .builtin_catalog()
+            .into_iter()
+            .filter(|tool| {
+                customization.exposes(&tool.name, &self.loaded_tools)
+                    || (restricted && customization.loading(&tool.name).on_demand && allowed(&tool.name))
+            })
+            .collect();
+        // A legacy entry outside the catalog keeps its "off" meaning; built-ins
+        // are already handled by the switches above.
+        tools.extend(self.mcp_tools.iter().filter(|tool| !customization.is_disabled(&tool.name)).cloned());
+        let mut tools = customization.described(tools);
+        tools.extend(customization.custom_tools.iter().filter(|tool| tool.enabled).map(|tool| crate::tools::ToolDefinition {
+            name: tool.name.clone(),
+            description: tool.description.clone(),
+            input_schema: tool.input_schema.clone(),
+        }));
+        tools.retain(|tool| allowed(&tool.name));
+        Ok(tools)
+    }
+
+    /// A successful ToolSearch keeps a tool loaded for the rest of the session.
+    /// Only the result of an actual assistant ToolSearch call counts, when that
+    /// result belongs to that same call: one ordered pass binds each call id
+    /// once, so a prompt, a summary, a non-assistant tool_use, an orphan
+    /// result, a result before its call, a repeated call id or a second result
+    /// for one id can never grant a tool.
+    fn restore_loaded_tools(&mut self) {
+        /// Where one call id stands while the history is read in order.
+        #[derive(Clone, Copy)]
+        enum Call {
+            /// Registered by an assistant call, waiting for its own result.
+            /// The flag is whether that call was ToolSearch.
+            Pending(bool),
+            /// Its result was already read, so the id may not come back.
+            Consumed,
+            /// The id was registered twice, so nothing about it is trusted.
+            Conflict,
+        }
+        fn register(calls: &mut HashMap<String, Call>, id: &str, is_search: bool) {
+            let state = match calls.get(id) {
+                None => Call::Pending(is_search),
+                Some(_) => Call::Conflict,
+            };
+            calls.insert(id.to_owned(), state);
+        }
+        fn take(calls: &mut HashMap<String, Call>, id: &str) -> Option<bool> {
+            let Call::Pending(is_search) = *calls.get(id)? else { return None };
+            calls.insert(id.to_owned(), Call::Consumed);
+            Some(is_search)
+        }
+
+        let mut loaded = std::collections::BTreeSet::new();
+        let mut calls: HashMap<String, Call> = HashMap::new();
+        for message in &self.messages {
+            match message["role"].as_str().unwrap_or_default() {
+                "assistant" => {
+                    for call in message["tool_calls"].as_array().into_iter().flatten() {
+                        if let Some(id) = call["id"].as_str() {
+                            register(&mut calls, id, call["function"]["name"].as_str() == Some("ToolSearch"));
+                        }
+                    }
+                    for block in message["content"].as_array().into_iter().flatten() {
+                        if block["type"] == "tool_use" {
+                            if let Some(id) = block["id"].as_str() {
+                                register(&mut calls, id, block["name"].as_str() == Some("ToolSearch"));
+                            }
+                        }
+                    }
+                }
+                // OpenAI tool results live in their own tool messages.
+                "tool" => {
+                    let Some(id) = message["tool_call_id"].as_str() else { continue };
+                    if take(&mut calls, id) != Some(true) { continue; }
+                    if let Some(text) = message["content"].as_str() {
+                        Self::absorb_loaded(text, &mut loaded);
+                    } else if let Some(parts) = message["content"].as_array() {
+                        for part in parts {
+                            if let Some(text) = part["text"].as_str() { Self::absorb_loaded(text, &mut loaded); }
+                        }
+                    }
+                }
+                // Anthropic results arrive as tool_result blocks in a user turn.
+                "user" => {
+                    for block in message["content"].as_array().into_iter().flatten() {
+                        if block["type"] != "tool_result" { continue; }
+                        let Some(id) = block["tool_use_id"].as_str() else { continue };
+                        let was_search = take(&mut calls, id) == Some(true);
+                        // An errored call is finished; it never grants a tool.
+                        if !was_search || block["is_error"] == true { continue; }
+                        if let Some(text) = block["content"].as_str() {
+                            Self::absorb_loaded(text, &mut loaded);
+                        } else if let Some(parts) = block["content"].as_array() {
+                            for part in parts {
+                                if let Some(text) = part["text"].as_str() { Self::absorb_loaded(text, &mut loaded); }
+                            }
+                        }
+                    }
+                }
+                _ => {}
+            }
+        }
+        // Added, not replaced: a later turn on this executor keeps what it
+        // already learned, and the settings still decide what is reachable.
+        self.loaded_tools.extend(loaded);
+    }
+
+    /// Reads a stored ToolSearch result. Only the structured marker of a
+    /// successful search is accepted.
+    fn absorb_loaded(text: &str, loaded: &mut std::collections::BTreeSet<String>) {
+        let Ok(value) = serde_json::from_str::<Value>(text) else { return };
+        if value["success"] != true { return; }
+        if let Some(names) = value["loaded_tools"].as_array() {
+            loaded.extend(names.iter().filter_map(|name| name.as_str().map(str::to_owned)));
+        }
+    }
+
+    /// The loading gate for a call that is about to run. The saved switches and
+    /// the request being answered must both allow it: a resident tool the user
+    /// turns into on-demand loses that exposure even though the older request
+    /// still listed it, so it has to be searched again.
+    fn loading_violation(&self, name: &str) -> Option<String> {
+        // An agent allow list is a hard restriction, not a deferred tool: name
+        // that instead of promising the tool on a later request.
+        if self.allowed_tools.as_ref().is_some_and(|names| !names.iter().any(|granted| granted == name)) {
+            return Some(format!("{name} is not allowed for this agent."));
+        }
+        let customization = match self.customization_result() {
+            Ok(customization) => customization,
+            Err(error) => return Some(format!("Tool settings could not be read: {error:#}")),
+        };
+        if !self.builtin_names().contains(name) {
+            // MCP and host names were never part of the switches, but a legacy
+            // entry that turned one off still does.
+            return customization.is_disabled(name).then(|| format!("{name} is turned off in the tool settings."));
+        }
+        let loading = customization.loading(name);
+        if !loading.enabled && !loading.on_demand {
+            return Some(format!("{name} is turned off in the tool settings."));
+        }
+        let in_request = self.exposed_tools.as_ref().is_none_or(|names| names.contains(name));
+        if loading.enabled {
+            // A resident tool can only be called if this response carried it;
+            // one enabled after the request started waits for the next.
+            return (!in_request).then(|| format!("{name} is not part of this response; it becomes available from the next model request."));
+        }
+        // On demand. A restricted agent with no discovery entry receives its
+        // granted tools directly, which is the one case that needs no search.
+        let granted_directly = self.restricted_without_discovery()
+            && self.allowed_tools.as_ref().is_some_and(|names| names.iter().any(|granted| granted == name));
+        if in_request && (granted_directly || self.loaded_tools.contains(name)) {
+            return None;
+        }
+        Some(if self.loaded_tools.contains(name) {
+            format!("{name} becomes callable from the next model request.")
+        } else {
+            format!("{name} is not loaded. Call ToolSearch for it and use it in the next request.")
+        })
+    }
+
+    /// ToolSearch loads real definitions instead of only printing them: the
+    /// tools in the result can be called from the next request on. Matching and
+    /// the returned schemas use the same description overrides as the request.
+    async fn execute_tool_search(&mut self, tool_input: &Value) -> (Value, String, bool) {
+        let query = tool_input["query"].as_str().map(str::trim).unwrap_or_default();
+        if query.is_empty() {
+            let result = json!({"success":false,"loaded_tools":[],"tools":[],
+                "content":"ToolSearch needs a query: a tool name or a few keywords."});
+            return (tool_input.clone(), result.to_string(), false);
+        }
+        let customization = match self.customization_result() {
+            Ok(customization) => customization,
+            Err(error) => return (tool_input.clone(), format!("Tool settings could not be read: {error:#}"), true),
+        };
+        let catalog = customization.described(self.builtin_catalog());
+        let exposed = self.exposed_tools.clone().unwrap_or_else(|| self.loaded_tools.iter().cloned().collect());
+        let needle = query.to_lowercase();
+        let mut hits: Vec<(u8, crate::tools::ToolDefinition)> = catalog
+            .iter()
+            .filter(|tool| {
+                let loading = customization.loading(&tool.name);
+                loading.on_demand
+                    && !loading.enabled
+                    && !exposed.contains(&tool.name)
+                    && self.allowed_tools.as_ref().is_none_or(|names| names.iter().any(|granted| granted == &tool.name))
+            })
+            .filter_map(|tool| {
+                let name = tool.name.to_lowercase();
+                let score = if name == needle {
+                    0
+                } else if name.contains(&needle) {
+                    1
+                } else if tool.description.to_lowercase().contains(&needle) {
+                    2
+                } else {
+                    return None;
+                };
+                Some((score, tool.clone()))
+            })
+            .collect();
+        // Stable, so tools of equal rank keep the catalog order.
+        hits.sort_by_key(|(score, _)| *score);
+        let loaded: Vec<crate::tools::ToolDefinition> = hits.into_iter().take(5).map(|(_, tool)| tool).collect();
+        if loaded.is_empty() {
+            let already = catalog.iter().any(|tool| tool.name.to_lowercase() == needle && exposed.contains(&tool.name));
+            let content = if already {
+                format!("{query} is already available in this request.")
+            } else {
+                format!("No tool available on demand matches \"{query}\". Search with a tool name or other keywords.")
+            };
+            let result = json!({"success":false,"loaded_tools":[],"tools":[],"content":content});
+            return (tool_input.clone(), result.to_string(), false);
+        }
+        for tool in &loaded {
+            self.loaded_tools.insert(tool.name.clone());
+        }
+        let names: Vec<&str> = loaded.iter().map(|tool| tool.name.as_str()).collect();
+        let result = json!({
+            "success": true,
+            "loaded_tools": names,
+            "tools": loaded,
+            "content": format!("Loaded {}. These tools become callable from the next model request.", names.join(", ")),
+        });
+        (tool_input.clone(), result.to_string(), false)
     }
 
     pub fn with_prefetch_engine(mut self, engine: Arc<PrefetchEngine>) -> Self {
@@ -1433,6 +1686,10 @@ impl ToolLoopExecutor {
             db.with_conn(|conn|super::mcp_output::restore_history(&mut self.messages, conn, session))??;
         }
         Box::pin(self.refresh_mcp_tools()).await?;
+        // A tool loaded earlier in this session stays available; the current
+        // settings still decide whether it may come back.
+        self.restore_loaded_tools();
+        self.exposed_tools = None;
         let mut directories = self.allowed_directories.clone();
         if let (Some(manager), Some(conv)) = (&self.permission_manager, self.conv_id.as_deref()) {
             directories.extend(manager.session_directories(conv));
@@ -1708,7 +1965,8 @@ impl ToolLoopExecutor {
         _tool_use_id: &str,
     ) -> CallStep {
         if self.allowed_tools.as_ref().is_some_and(|names| !names.iter().any(|name| name == tool_name)) { return CallStep::Finished((tool_input.clone(), "Tool is not allowed by this agent definition".into(), true)); }
-        if self.customization().is_disabled(tool_name) { return CallStep::Finished((tool_input.clone(), format!("{tool_name} is turned off in the tool settings"), true)); }
+        if let Some(violation) = self.loading_violation(tool_name) { return CallStep::Finished((tool_input.clone(), violation, true)); }
+        if tool_name == "ToolSearch" { return CallStep::Finished(self.execute_tool_search(tool_input).await); }
         if self.is_plan_document_tool(tool_name, tool_input)
             || (self
                 .permission_manager
@@ -2241,9 +2499,6 @@ impl ToolLoopExecutor {
         let mut conversation_messages: Vec<AnthropicMessage> = self.build_anthropic_messages()?;
         tracing::info!(module = "AnthropicLoop", "Messages built, count={}", conversation_messages.len());
 
-        let tools = self.tool_definitions();
-        tracing::info!(module = "AnthropicLoop", "Tool definitions loaded, count={}, mode={:?}", tools.len(), self.reasoning_mode);
-
         if matches!(self.reasoning_mode, ReasoningMode::Deep) {
             if let Some(ref sp) = self.system_prompt {
                 self.system_prompt = Some(format!("{}\n\nYou are in deep reasoning mode. For any destructive operations, you MUST ask for user confirmation before proceeding.", sp));
@@ -2319,6 +2574,13 @@ impl ToolLoopExecutor {
                     }
                 }
             }
+
+            // Freeze one tool list for this logical request: searches and
+            // settings changes affect the next request, while HTTP retries,
+            // snapshots and token estimates use this same list.
+            let tools = self.tool_definitions()?;
+            self.exposed_tools = Some(tools.iter().map(|tool| tool.name.clone()).collect());
+            tracing::info!(module = "AnthropicLoop", "Tool definitions loaded, count={}, mode={:?}", tools.len(), self.reasoning_mode);
 
             self.streaming_tool_args.clear();
             let mut request_trace = RequestTrace::new(json!({
@@ -2722,9 +2984,6 @@ impl ToolLoopExecutor {
         let mut conversation_messages: Vec<OpenAIMessage> = self.build_openai_messages()?;
         tracing::info!(module = "OpenAILoop", "Messages built, count={}", conversation_messages.len());
 
-        let tools = self.tool_definitions();
-        tracing::info!(module = "OpenAILoop", "Tool definitions loaded, count={}, mode={:?}", tools.len(), self.reasoning_mode);
-
         if matches!(self.reasoning_mode, ReasoningMode::Deep) {
             if let Some(ref sp) = self.system_prompt {
                 self.system_prompt = Some(format!("{}\n\nYou are in deep reasoning mode. For any destructive operations, you MUST ask for user confirmation before proceeding.", sp));
@@ -2813,6 +3072,13 @@ impl ToolLoopExecutor {
                     }
                 }
             }
+
+            // Freeze one tool list for this logical request: searches and
+            // settings changes affect the next request, while HTTP retries,
+            // snapshots and token estimates use this same list.
+            let tools = self.tool_definitions()?;
+            self.exposed_tools = Some(tools.iter().map(|tool| tool.name.clone()).collect());
+            tracing::info!(module = "OpenAILoop", "Tool definitions loaded, count={}, mode={:?}", tools.len(), self.reasoning_mode);
 
             self.streaming_tool_args.clear();
             let mut request_trace = RequestTrace::new(json!({

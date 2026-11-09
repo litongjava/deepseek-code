@@ -30,9 +30,16 @@ async fn goal_proposals_are_local_main_session_only_and_return_without_waiting()
     .with_conv_id(session.clone())
     .with_search_config_path(root.path().join("config.json"))
     .with_permission_manager(permissions.clone());
+    // This test exercises frontend availability, independently of discovery.
+    std::fs::write(
+        root.path().join("customization.json"),
+        json!({"tool_loading":{"ProposeGoal":{"enabled":true,"on_demand":false}}}).to_string(),
+    )
+    .unwrap();
     let input = json!({"condition":"Run the tests"});
     assert!(!executor
         .tool_definitions()
+        .unwrap()
         .iter()
         .any(|tool| tool.name == "ProposeGoal"));
     assert!(
@@ -47,11 +54,13 @@ async fn goal_proposals_are_local_main_session_only_and_return_without_waiting()
     // connects it to the actual local terminal worker.
     assert!(!executor
         .tool_definitions()
+        .unwrap()
         .iter()
         .any(|tool| tool.name == "ProposeGoal"));
     executor.local_goal_frontend = true;
     assert!(executor
         .tool_definitions()
+        .unwrap()
         .iter()
         .any(|tool| tool.name == "ProposeGoal"));
     let (_, output, failed) = tokio::time::timeout(
@@ -74,6 +83,7 @@ async fn goal_proposals_are_local_main_session_only_and_return_without_waiting()
     executor.delegation_depth = 1;
     assert!(!executor
         .tool_definitions()
+        .unwrap()
         .iter()
         .any(|tool| tool.name == "ProposeGoal"));
     assert!(
@@ -86,6 +96,7 @@ async fn goal_proposals_are_local_main_session_only_and_return_without_waiting()
     permissions.set_mode(crate::permissions::PermissionMode::PlanMode);
     assert!(!executor
         .tool_definitions()
+        .unwrap()
         .iter()
         .any(|tool| tool.name == "ProposeGoal"));
     assert!(
@@ -104,6 +115,7 @@ async fn goal_proposals_are_local_main_session_only_and_return_without_waiting()
     );
     assert!(!executor
         .tool_definitions()
+        .unwrap()
         .iter()
         .any(|tool| tool.name == "ProposeGoal"));
     assert!(

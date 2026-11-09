@@ -1043,7 +1043,7 @@ impl ToolLoopExecutor {
                     Some(tools) => tools,
                     None => {
                         let mut tools = self
-                            .tool_definitions()
+                            .tool_definitions()?
                             .into_iter()
                             .map(|tool| tool.name)
                             .collect::<Vec<_>>();
@@ -1070,7 +1070,7 @@ impl ToolLoopExecutor {
         if let Some(agent) = &runtime {
             if !agent.mcp_servers.is_empty() {
                 let mut available: Vec<String> = self
-                    .tool_definitions()
+                    .tool_definitions()?
                     .into_iter()
                     .map(|tool| tool.name)
                     .filter(|name| !name.starts_with("mcp__"))

@@ -133,10 +133,17 @@ Windows 上，`tools::linux_env::tests::unpack_copies_hard_links_keeps_symlinks_
 在数据目录写 `customization.json` 后，用 `dcl -p` 验证：
 
 1. `custom_tools`：模型调用后得到命令的标准输出；`bypass` 下直接运行，其他模式需要授权。
-2. `disabled_tools`：模型看不到该工具，强行调用被拒绝。
+2. 内置工具双关时模型看不到该工具，强行调用被拒绝；旧 `disabled_tools` 内置条目按“启用关、按需开”迁移，非内置条目保持禁用。
 3. `tool_descriptions`：模型读到修改后的说明。
 4. `system_prompt`：`replace` 和 `append` 生效，环境信息仍然存在。
 5. 文件语法错误时这一轮报错退出；删除文件后恢复默认。
+
+自动回归：`cargo test --locked -p deepseek-code-core --lib tool_loading_tests`。
+provider mock 直接驱动公开 executor，覆盖 Anthropic、Chat Completions、Responses：
+首请求不带按需工具，ToolSearch 成功后下一 HTTP 请求包含真实 schema 并执行 ListDir；
+在途时双关和重新启用更新后续请求、拒绝失效调用；损坏配置阻止下一 HTTP 请求；
+同一逻辑请求的 HTTP 重试固定工具定义，快照与实际请求工具集合一致。
+这些 core 结果不能代替终端 `/tools` 同会话联动或 Desktop 原生界面验收。
 
 ### I. 定时任务
 

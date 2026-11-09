@@ -24,6 +24,13 @@ async fn local_fetch_asks_each_time_and_only_approved_calls_reach_server() {
     });
     let root = tempfile::tempdir().unwrap();
     let (mut executor, mut events, manager) = hook_executor(root.path(), "PreToolUse", vec![]);
+    executor = executor.with_search_config_path(root.path().join("config.json"));
+    // Isolate local-address approval from the separate discovery gate.
+    std::fs::write(
+        root.path().join("customization.json"),
+        json!({"tool_loading":{"WebFetch":{"enabled":true,"on_demand":false}}}).to_string(),
+    )
+    .unwrap();
     executor.permission_host_available = true;
     executor.raw_web_fetch = true;
     for (index, (mode, allow)) in [

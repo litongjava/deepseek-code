@@ -308,6 +308,9 @@ impl Client {
         .unwrap()
     }
     fn start(root: &Path, server: &Server, extra: &[&str]) -> Self {
+        if matches!(server.fixture.mode, Mode::RuntimeAgent) {
+            enable_fixture_agent(root);
+        }
         std::fs::write(root.join("fixture.txt"), "SDK_READ_SENTINEL").unwrap();
         let mut command = Command::new(std::env::var_os("CLAUDE_SDK_TEST_EXE").unwrap_or_else(|| env!("CARGO_BIN_EXE_dcl").into()));
         command
@@ -412,6 +415,17 @@ impl Client {
         .await
         .expect("CLI failed to exit after stdin EOF")
     }
+}
+
+// Delegation fixtures call Agent directly to test SDK agent semantics. Make
+// that tool resident explicitly; discovery is covered by provider-loop tests.
+fn enable_fixture_agent(root: &Path) {
+    std::fs::create_dir_all(root.join("data")).unwrap();
+    std::fs::write(
+        root.join("data/customization.json"),
+        json!({"tool_loading":{"Agent":{"enabled":true,"on_demand":false}}}).to_string(),
+    )
+    .unwrap();
 }
 
 fn user(text: &str) -> Value {

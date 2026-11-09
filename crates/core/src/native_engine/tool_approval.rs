@@ -96,7 +96,7 @@ impl ToolLoopExecutor {
     ) -> Result<()> {
         anyhow::ensure!(input.is_object(), "Approved tool input must be an object");
         let mut schema = self
-            .tool_definitions()
+            .tool_definitions()?
             .into_iter()
             .find(|definition| definition.name == tool)
             .map(|definition| definition.input_schema);
