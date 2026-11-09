@@ -26,6 +26,12 @@ async fn eight_attempts_have_seven_exponential_waits_and_safe_distinct_errors() 
                         status: if n % 2 == 0 { 500 } else { 502 },
                         retry_after: None,
                         message: "internal_error request_id: 11111111-2222-4333-8444-555555555555 PRIVATE_PROMPT Cookie: secret".into(),
+                        // The response boundary captures both values from the
+                        // structured provider document; free text is never parsed.
+                        server_request_id: Some(
+                            "11111111-2222-4333-8444-555555555555".into(),
+                        ),
+                        remote_code: Some("internal_error".into()),
                     }
                     ).context("Authorization: Bearer nested-secret"))
                 }
@@ -87,6 +93,8 @@ async fn retry_after_is_capped_and_cancellation_prevents_another_attempt() {
                             status: 503,
                             retry_after: Some(Duration::from_secs(300)),
                             message: "unavailable".into(),
+                            server_request_id: None,
+                            remote_code: None,
                         }
                         .into(),
                     )

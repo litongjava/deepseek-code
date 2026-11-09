@@ -135,7 +135,10 @@ async fn bypass_plan_requires_origin_and_explicit_approval_and_survives_worker_h
             )
             .unwrap();
         let result = future.await;
-        assert_eq!(crate::permissions::full_access(), matches!(answer, "bypass_keep" | "1"));
+        assert_eq!(
+            crate::permissions::full_access(),
+            matches!(answer, "bypass_keep" | "1")
+        );
         crate::permissions::set_full_access(false);
         assert_eq!(
             result.is_err(),

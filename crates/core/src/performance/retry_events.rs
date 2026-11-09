@@ -49,34 +49,11 @@ pub fn notice(retry: u32, wait: Duration, server: bool) -> String {
 pub(super) fn safe_failure(error: &anyhow::Error, attempts: u32) -> Value {
     let mut failure = RequestFailure::from_error(error, attempts).as_json();
     if let Some(api) = super::request_failure::find_in_chain::<ApiError>(error) {
-        // Remote free text may echo a prompt. Keep only the status and a validated
-        // UUID correlation ID, never arbitrary message/code/header values.
-        let id = api
-            .message
-            .split("request_id:")
-            .nth(1)
-            .and_then(|tail| {
-                tail.split(|c: char| !(c.is_ascii_hexdigit() || c == '-'))
-                    .find(|s| !s.is_empty())
-            })
-            .and_then(|id| uuid::Uuid::parse_str(id).ok());
+        // The correlation ID and provider code were validated at the response
+        // boundary, before the free text was reduced, so they survive here.
         failure["cause"] = json!(format!("HTTP {}; remote text omitted", api.status));
-        failure["serverRequestId"] = json!(id.map(|id| id.to_string()));
-        let lower = api.message.to_ascii_lowercase();
-        let code = lower
-            .split(|c: char| !(c.is_ascii_alphanumeric() || c == '_'))
-            .find(|word| {
-                matches!(
-                    *word,
-                    "internal_error"
-                        | "invalid_request_error"
-                        | "authentication_error"
-                        | "rate_limit_error"
-                        | "insufficient_balance"
-                        | "insufficient_quota"
-                )
-            });
-        failure["remoteCode"] = json!(code);
+        failure["serverRequestId"] = json!(api.server_request_id);
+        failure["remoteCode"] = json!(api.remote_code);
     }
     failure
 }

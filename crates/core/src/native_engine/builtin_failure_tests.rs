@@ -31,8 +31,16 @@ async fn builtin_errors_are_failures_in_serial_and_parallel_paths() {
             cwd.clone(),
             ReasoningMode::Standard,
         );
-        let call = PendingToolCall { id: "fixture-call".into(), name: name.into(), input, concurrent: false };
-        let result = executor.execute_tool_batch(std::slice::from_ref(&call)).await.remove(0);
+        let call = PendingToolCall {
+            id: "fixture-call".into(),
+            name: name.into(),
+            input,
+            concurrent: false,
+        };
+        let result = executor
+            .execute_tool_batch(std::slice::from_ref(&call))
+            .await
+            .remove(0);
         assert_eq!(result.2, failure, "{name}: {result:?}");
         if name == "Bash" && failure {
             assert!(result.1.contains("exit_code"));
@@ -69,7 +77,11 @@ async fn ui_file_change_stays_in_events_but_not_model_results() {
         ReasoningMode::Standard,
     );
     let (_, output, failed) = executor
-        .execute_tool_call("Write", &json!({"file_path":"new.txt","content":"hello"}), "write")
+        .execute_tool_call(
+            "Write",
+            &json!({"file_path":"new.txt","content":"hello"}),
+            "write",
+        )
         .await;
     let result = (failed, output);
     assert!(!result.0, "{}", result.1);

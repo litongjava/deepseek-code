@@ -128,10 +128,18 @@ fn validate_web_evidence(
             // Drop URLs the child added from memory; keep the ones it found.
             let proposed = output["results"].as_array().map_or(0, Vec::len);
             if let Some(hits) = output["results"].as_array_mut() {
-                hits.retain(|hit| hit["url"].as_str().and_then(|url| canonical_url(url).ok()).is_some_and(|key| urls.contains(&key)));
+                hits.retain(|hit| {
+                    hit["url"]
+                        .as_str()
+                        .and_then(|url| canonical_url(url).ok())
+                        .is_some_and(|key| urls.contains(&key))
+                });
             }
             ensure!(
-                proposed == 0 || output["results"].as_array().is_some_and(|hits| !hits.is_empty()),
+                proposed == 0
+                    || output["results"]
+                        .as_array()
+                        .is_some_and(|hits| !hits.is_empty()),
                 "Search proposed only URLs absent from actual WebSearch results"
             );
         }

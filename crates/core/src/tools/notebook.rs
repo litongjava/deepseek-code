@@ -19,26 +19,52 @@ pub(super) fn definition() -> super::ToolDefinition {
 /// The reference shape addresses cells by the id Read shows (`cell-N` when a
 /// cell has none) and maps onto the index-based operations below.
 fn reference_edit(input: &Value, cwd: &str) -> Result<Value> {
-    let notebook_path = input["notebook_path"].as_str().context("notebook_path is required")?;
+    let notebook_path = input["notebook_path"]
+        .as_str()
+        .context("notebook_path is required")?;
     let path = PathBuf::from(super::resolve_path(notebook_path, cwd)?);
-    let notebook: Value = serde_json::from_slice(&std::fs::read(&path)?).context("Invalid notebook JSON")?;
-    let cells = notebook["cells"].as_array().context("Notebook cells must be an array")?;
-    let position = |id: &str| cells.iter().enumerate().position(|(index, cell)| cell["id"].as_str().map(str::to_owned).unwrap_or_else(|| format!("cell-{index}")) == id);
+    let notebook: Value =
+        serde_json::from_slice(&std::fs::read(&path)?).context("Invalid notebook JSON")?;
+    let cells = notebook["cells"]
+        .as_array()
+        .context("Notebook cells must be an array")?;
+    let position = |id: &str| {
+        cells.iter().enumerate().position(|(index, cell)| {
+            cell["id"]
+                .as_str()
+                .map(str::to_owned)
+                .unwrap_or_else(|| format!("cell-{index}"))
+                == id
+        })
+    };
     let cell_id = input["cell_id"].as_str().filter(|id| !id.is_empty());
     let index = match cell_id {
         Some(id) => Some(position(id).with_context(|| format!("Cell {id} not found"))?),
         None => None,
     };
-    let lines: Vec<Value> = input["new_source"].as_str().unwrap_or_default().split_inclusive('\n').map(|line| json!(line)).collect();
+    let lines: Vec<Value> = input["new_source"]
+        .as_str()
+        .unwrap_or_default()
+        .split_inclusive('\n')
+        .map(|line| json!(line))
+        .collect();
     let mode = input["edit_mode"].as_str().unwrap_or("replace");
     let legacy = match mode {
-        "replace" => json!({"path":notebook_path,"operation":"edit_cell","cell_index":index.context("cell_id is required for replace")?,"source":lines,"cell_type":input["cell_type"]}),
-        "insert" => json!({"path":notebook_path,"operation":"add_cell","cell_index":index.map_or(0, |at| at + 1),"source":lines,"cell_type":input["cell_type"].as_str().context("cell_type is required when inserting")?}),
-        "delete" => json!({"path":notebook_path,"operation":"delete_cell","cell_index":index.context("cell_id is required for delete")?}),
+        "replace" => {
+            json!({"path":notebook_path,"operation":"edit_cell","cell_index":index.context("cell_id is required for replace")?,"source":lines,"cell_type":input["cell_type"]})
+        }
+        "insert" => {
+            json!({"path":notebook_path,"operation":"add_cell","cell_index":index.map_or(0, |at| at + 1),"source":lines,"cell_type":input["cell_type"].as_str().context("cell_type is required when inserting")?})
+        }
+        "delete" => {
+            json!({"path":notebook_path,"operation":"delete_cell","cell_index":index.context("cell_id is required for delete")?})
+        }
         other => bail!("Unknown edit_mode: {other}"),
     };
     execute(legacy, cwd)?;
-    Ok(json!({"notebook_path":path,"cell_id":cell_id,"edit_mode":mode,"content":format!("Notebook {mode} succeeded for {}", cell_id.unwrap_or("the first position"))}))
+    Ok(
+        json!({"notebook_path":path,"cell_id":cell_id,"edit_mode":mode,"content":format!("Notebook {mode} succeeded for {}", cell_id.unwrap_or("the first position"))}),
+    )
 }
 
 pub(super) fn execute(input: Value, cwd: &str) -> Result<Value> {
@@ -71,7 +97,10 @@ pub(super) fn execute(input: Value, cwd: &str) -> Result<Value> {
                     attempts += 1;
                     std::thread::sleep(std::time::Duration::from_millis(20));
                 }
-                Err(error) => return Err(anyhow::Error::from(error).context("Notebook is being edited by another process")),
+                Err(error) => {
+                    return Err(anyhow::Error::from(error)
+                        .context("Notebook is being edited by another process"))
+                }
             }
         }
         Some(file)
@@ -150,8 +179,13 @@ pub(super) fn execute(input: Value, cwd: &str) -> Result<Value> {
                 if cell["cell_type"] != kind {
                     cell["cell_type"] = json!(kind);
                     if let Some(object) = cell.as_object_mut() {
-                        if kind == "code" { object.insert("outputs".into(), json!([])); object.insert("execution_count".into(), Value::Null); }
-                        else { object.remove("outputs"); object.remove("execution_count"); }
+                        if kind == "code" {
+                            object.insert("outputs".into(), json!([]));
+                            object.insert("execution_count".into(), Value::Null);
+                        } else {
+                            object.remove("outputs");
+                            object.remove("execution_count");
+                        }
                     }
                 }
             }
@@ -235,16 +269,29 @@ mod tests {
         edit(serde_json::json!({"notebook_path":"n.ipynb","cell_id":"a","new_source":"x = 2\ny = 3"})).unwrap();
         edit(serde_json::json!({"notebook_path":"n.ipynb","cell_id":"cell-1","new_source":"print(1)","cell_type":"code"})).unwrap();
         edit(serde_json::json!({"notebook_path":"n.ipynb","new_source":"intro","cell_type":"markdown","edit_mode":"insert"})).unwrap();
-        assert!(edit(serde_json::json!({"notebook_path":"n.ipynb","new_source":"x","edit_mode":"insert"})).is_err());
-        assert!(edit(serde_json::json!({"notebook_path":"n.ipynb","cell_id":"zzz","new_source":""})).is_err());
-        let notebook: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(dir.path().join("n.ipynb")).unwrap()).unwrap();
+        assert!(edit(
+            serde_json::json!({"notebook_path":"n.ipynb","new_source":"x","edit_mode":"insert"})
+        )
+        .is_err());
+        assert!(edit(
+            serde_json::json!({"notebook_path":"n.ipynb","cell_id":"zzz","new_source":""})
+        )
+        .is_err());
+        let notebook: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(dir.path().join("n.ipynb")).unwrap())
+                .unwrap();
         let cells = notebook["cells"].as_array().unwrap();
         assert_eq!(cells[0]["source"], serde_json::json!(["intro"]));
         assert_eq!(cells[1]["source"], serde_json::json!(["x = 2\n", "y = 3"]));
         assert_eq!(cells[1]["outputs"], serde_json::json!([]));
-        assert_eq!((cells[2]["cell_type"].as_str(), cells[2]["outputs"].clone()), (Some("code"), serde_json::json!([])));
+        assert_eq!(
+            (cells[2]["cell_type"].as_str(), cells[2]["outputs"].clone()),
+            (Some("code"), serde_json::json!([]))
+        );
         edit(serde_json::json!({"notebook_path":"n.ipynb","cell_id":"a","new_source":"","edit_mode":"delete"})).unwrap();
-        let notebook: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(dir.path().join("n.ipynb")).unwrap()).unwrap();
+        let notebook: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(dir.path().join("n.ipynb")).unwrap())
+                .unwrap();
         assert_eq!(notebook["cells"].as_array().unwrap().len(), 2);
     }
 

@@ -818,17 +818,17 @@ pub(crate) fn worker_environment(
 ) -> Result<Vec<(String, String)>> {
     let mut environment = vec![
         (
-            "CLAUDE_RUST_WORKER_AUTO_ROUTE".into(),
+            "DEEPSEEK_CODE_WORKER_AUTO_ROUTE".into(),
             auto_route.to_string(),
         ),
         (
-            "CLAUDE_RUST_WORKER_MODEL".into(),
+            "DEEPSEEK_CODE_WORKER_MODEL".into(),
             serde_json::to_string(&provider.model)?,
         ),
     ];
     if !provider.provider.api_key.is_empty() {
         environment.push((
-            "CLAUDE_RUST_CHILD_API_KEY".into(),
+            "DEEPSEEK_CODE_CHILD_API_KEY".into(),
             provider.provider.api_key.clone(),
         ));
     }
@@ -876,7 +876,7 @@ pub(crate) fn arguments(
         ]);
     }
     if !provider.provider.api_key.is_empty() {
-        args.extend(["--api-key-env".into(), "CLAUDE_RUST_CHILD_API_KEY".into()]);
+        args.extend(["--api-key-env".into(), "DEEPSEEK_CODE_CHILD_API_KEY".into()]);
     }
     if let Some(value) = cli.effort.as_ref().or(provider.model.effort.as_ref()) {
         args.extend(["--effort".into(), value.clone()]);
@@ -1383,14 +1383,14 @@ mod worker_config_tests {
                 .unwrap()
                 .into_iter()
                 .collect();
-        assert_eq!(values["CLAUDE_RUST_WORKER_AUTO_ROUTE"], "true");
-        assert_eq!(values["CLAUDE_RUST_CHILD_API_KEY"], "test-secret");
+        assert_eq!(values["DEEPSEEK_CODE_WORKER_AUTO_ROUTE"], "true");
+        assert_eq!(values["DEEPSEEK_CODE_CHILD_API_KEY"], "test-secret");
         let snapshot: ModelConfig =
-            serde_json::from_str(&values["CLAUDE_RUST_WORKER_MODEL"]).unwrap();
+            serde_json::from_str(&values["DEEPSEEK_CODE_WORKER_MODEL"]).unwrap();
         assert!(snapshot.fast);
         assert_eq!(snapshot.context_window, Some(12345));
         assert_eq!(snapshot.max_tokens, Some(321));
-        assert!(!values["CLAUDE_RUST_WORKER_MODEL"].contains("test-secret"));
+        assert!(!values["DEEPSEEK_CODE_WORKER_MODEL"].contains("test-secret"));
     }
 }
 

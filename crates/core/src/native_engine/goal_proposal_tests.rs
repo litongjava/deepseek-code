@@ -13,6 +13,19 @@ async fn goal_proposals_are_local_main_session_only_and_return_without_waiting()
         crate::permissions::AuditLogger::new(128),
     )));
     let (events, _receive) = mpsc::channel(64);
+    // ProposeGoal is not a default core tool; this test is about when the
+    // proposal is offered, so it loads it explicitly.
+    let customization = crate::services::customization::Customization {
+        tool_loading: std::collections::BTreeMap::from([(
+            "ProposeGoal".to_owned(),
+            crate::services::customization::ToolLoading {
+                enabled: true,
+                on_demand: true,
+            },
+        )]),
+        ..Default::default()
+    };
+    crate::services::customization::save(root.path(), &customization, &[]).unwrap();
     let provider = ResolvedProvider {
         provider: serde_json::from_value(json!({"id":"fixture","name":"fixture","base_url":"http://127.0.0.1:1","api_key":"unused","api_format":"openai","models":[],"enabled":true})).unwrap(),
         model: serde_json::from_value(json!({"id":"fixture","name":"fixture","enabled":true,"supports_vision":false,"supports_web_search":false})).unwrap(),

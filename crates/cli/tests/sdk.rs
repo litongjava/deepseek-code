@@ -1,4 +1,8 @@
 //! End-to-end SDK tests run the actual CLI process against local model servers.
+#[path = "sdk/interrupt_usage.rs"]
+mod interrupt_usage;
+#[path = "sdk/recovery_interrupt.rs"]
+mod recovery_interrupt;
 use axum::{
     extract::State,
     http::StatusCode,
@@ -96,6 +100,7 @@ enum Mode {
     SchemaGood,
     SchemaBad,
     SchemaRejected,
+    ToolSearch,
 }
 #[derive(Clone)]
 struct Fixture {
@@ -135,6 +140,7 @@ async fn respond(State(state): State<Fixture>, Json(body): Json<Value>) -> Respo
         Mode::Truncated | Mode::TruncatedTool | Mode::TruncatedThinking
     ) || matches!(state.mode, Mode::ReadThenTruncated) && count > 1;
     let tool = matches!(state.mode, Mode::RuntimeAgent) && count <= 2
+        || matches!(state.mode, Mode::ToolSearch) && count <= 2
         || matches!(state.mode, Mode::Plan) && count == 1
         || matches!(state.mode, Mode::Tool | Mode::TruncatedTool)
         || matches!(state.mode, Mode::ReadThenTruncated) && count == 1
@@ -161,6 +167,12 @@ async fn respond(State(state): State<Fixture>, Json(body): Json<Value>) -> Respo
                         "Write",
                         json!({"file_path":"child.txt","content":"CHILD_WRITE"}),
                     )
+                }
+            } else if matches!(state.mode, Mode::ToolSearch) {
+                if count == 1 {
+                    ("search-1", "ToolSearch", json!({"query":"ListDir"}))
+                } else {
+                    ("list-1", "ListDir", json!({"path":"."}))
                 }
             } else if matches!(state.mode, Mode::Question) {
                 (
@@ -217,6 +229,13 @@ async fn respond(State(state): State<Fixture>, Json(body): Json<Value>) -> Respo
                     )
                 };
                 json!({"tool_calls":[{"index":0,"id":if count==1 {"agent-1"}else{"write-1"},"type":"function","function":{"name":name,"arguments":args.to_string()}}]})
+            } else if matches!(state.mode, Mode::ToolSearch) {
+                let (id, name, args) = if count == 1 {
+                    ("search-1", "ToolSearch", json!({"query":"ListDir"}))
+                } else {
+                    ("list-1", "ListDir", json!({"path":"."}))
+                };
+                json!({"tool_calls":[{"index":0,"id":id,"type":"function","function":{"name":name,"arguments":args.to_string()}}]})
             } else if matches!(state.mode, Mode::Question) {
                 json!({"tool_calls":[{"index":0,"id":"question-1","type":"function","function":{"name":"AskUserQuestion","arguments":json!({"question":"Which language?","description":"Choose the implementation language","multiSelect":true,"options":[{"label":"Rust","description":"Memory safety"},{"label":"Go","description":"Fast compilation"}]}).to_string()}}]})
             } else if matches!(state.mode, Mode::Plan) {
@@ -279,6 +298,114 @@ impl Server {
     }
 }
 
+/// A Responses-protocol server: a search, the loaded tool call, then text.
+struct ResponsesServer {
+    url: String,
+    requests: Arc<Mutex<Vec<Value>>>,
+    task: tokio::task::JoinHandle<()>,
+}
+impl Drop for ResponsesServer {
+    fn drop(&mut self) {
+        self.task.abort();
+    }
+}
+impl ResponsesServer {
+    async fn start() -> Self {
+        let requests = Arc::new(Mutex::new(Vec::<Value>::new()));
+        let seen = requests.clone();
+        let app = Router::new().route(
+            "/responses",
+            post(move |Json(body): Json<Value>| {
+                let seen = seen.clone();
+                async move {
+                    if body["stream"].as_bool() != Some(true) {
+                        return Json(json!({"id":"r","object":"response","status":"completed","model":"fixture-model","output":[{"type":"message","role":"assistant","content":[{"type":"output_text","text":"suggested-next"}]}],"usage":{"input_tokens":1,"output_tokens":1,"total_tokens":2}})).into_response();
+                    }
+                    let step = {
+                        let mut seen = seen.lock().unwrap();
+                        seen.push(body);
+                        seen.len()
+                    };
+                    let stream = match step {
+                        1 => responses_tool_call("search-1", "ToolSearch", json!({"query":"ListDir"})),
+                        2 => responses_tool_call("list-1", "ListDir", json!({"path":"."})),
+                        _ => responses_text(&format!("reply-{step}")),
+                    };
+                    ([("content-type", "text/event-stream")], stream).into_response()
+                }
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}", listener.local_addr().unwrap());
+        let task = tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
+        Self { url, requests, task }
+    }
+}
+
+fn responses_frame(event: Value) -> String {
+    format!(
+        "event: {}\ndata: {event}\n\n",
+        event["type"].as_str().unwrap_or_default()
+    )
+}
+
+fn responses_tool_call(id: &str, name: &str, arguments: Value) -> String {
+    let item = json!({"type":"function_call","id":format!("fc-{id}"),"call_id":id,"name":name,"arguments":arguments.to_string()});
+    [
+        json!({"type":"response.output_item.done","item":item}),
+        json!({"type":"response.completed","response":{"id":"r","model":"fixture-model","status":"completed","output":[item],"usage":{"input_tokens":20,"output_tokens":10,"total_tokens":30}}}),
+    ]
+    .into_iter()
+    .map(responses_frame)
+    .collect()
+}
+
+fn responses_text(text: &str) -> String {
+    [
+        json!({"type":"response.output_text.delta","delta":text}),
+        json!({"type":"response.completed","response":{"id":"r2","model":"fixture-model","status":"completed","output":[{"type":"message","role":"assistant","content":[{"type":"output_text","text":text}]}],"usage":{"input_tokens":20,"output_tokens":10,"total_tokens":30}}}),
+    ]
+    .into_iter()
+    .map(responses_frame)
+    .collect()
+}
+
+fn responses_tool_names(body: &Value) -> Vec<String> {
+    body["tools"]
+        .as_array()
+        .map(|tools| {
+            tools
+                .iter()
+                .filter_map(|tool| tool["name"].as_str().map(str::to_owned))
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// The provider is declared in `config.json` because the `--base-url` override
+/// clears its built-in id, which the Responses transport needs.
+fn write_responses_provider(root: &Path, url: &str) {
+    let paths = deepseek_code_core::runtime::RuntimePaths::new(root.join("data")).unwrap();
+    std::fs::create_dir_all(&paths.data_dir).unwrap();
+    let mut config = deepseek_code_core::config::AppConfig::default();
+    config.providers.push(
+        serde_json::from_value(json!({
+            "id":"responses-fixture","name":"Responses fixture","provider_type":"openai",
+            "api_key":"fixture-only","base_url":url,"enabled":true,"is_default":true,
+            "settings":{"builtinId":"openai"},"supports_web_search":false,
+            "models":[{"id":"fixture-model","name":"fixture-model","enabled":true,"api":"openai-responses","supports_vision":false,"supports_tools":true,"supports_text":true,"supports_streaming":true}]
+        }))
+        .unwrap(),
+    );
+    std::fs::write(
+        paths.data_dir.join("config.json"),
+        serde_json::to_vec(&config).unwrap(),
+    )
+    .unwrap();
+}
+
 struct Client {
     child: Child,
     input: Option<ChildStdin>,
@@ -311,35 +438,54 @@ impl Client {
         if matches!(server.fixture.mode, Mode::RuntimeAgent) {
             enable_fixture_agent(root);
         }
-        std::fs::write(root.join("fixture.txt"), "SDK_READ_SENTINEL").unwrap();
-        let mut command = Command::new(std::env::var_os("CLAUDE_SDK_TEST_EXE").unwrap_or_else(|| env!("CARGO_BIN_EXE_dcl").into()));
-        command
-            .args([
-                "--data-dir",
-                root.join("data").to_str().unwrap(),
-                "--path",
-                root.to_str().unwrap(),
-                "--base-url",
+        Self::launch(
+            root,
+            Some((
                 &server.url,
-                "--api-format",
                 if server.fixture.anthropic {
                     "anthropic"
                 } else {
                     "openai"
                 },
+            )),
+            extra,
+        )
+    }
+    /// Start against a provider declared in the data directory's `config.json`
+    /// instead of `--base-url`/`--api-format`, which clear the provider's
+    /// built-in id and so cannot reach the Responses transport.
+    fn start_configured(root: &Path, extra: &[&str]) -> Self {
+        Self::launch(root, None, extra)
+    }
+    fn launch(root: &Path, provider: Option<(&str, &str)>, extra: &[&str]) -> Self {
+        std::fs::write(root.join("fixture.txt"), "SDK_READ_SENTINEL").unwrap();
+        let mut command = Command::new(std::env::var_os("CLAUDE_SDK_TEST_EXE").unwrap_or_else(|| env!("CARGO_BIN_EXE_dcl").into()));
+        command.args([
+            "--data-dir",
+            root.join("data").to_str().unwrap(),
+            "--path",
+            root.to_str().unwrap(),
+            "--output-format",
+            "stream-json",
+            "--permission-mode",
+            "accept-edits",
+            "--print",
+            "--input-format",
+            "stream-json",
+        ]);
+        if let Some((url, format)) = provider {
+            command.args([
+                "--base-url",
+                url,
+                "--api-format",
+                format,
                 "--api-key-env",
                 "CLAUDE_SDK_FIXTURE_KEY",
                 "--model",
                 "fixture-model",
-                "--output-format",
-                "stream-json",
-                "--permission-mode",
-                "accept-edits",
-                "--print",
-                "--input-format",
-                "stream-json",
-            ])
-            .args(extra);
+            ]);
+        }
+        command.args(extra);
         command
             .env("CLAUDE_SDK_FIXTURE_KEY", "fixture-only")
             .stdin(Stdio::piped())
@@ -1077,18 +1223,40 @@ async fn sdk_plan_clear_boundary_survives_actual_cli_process() {
             .as_str()
             .unwrap()
             .to_owned();
-        assert_eq!(choice, deepseek_code_core::services::plan_approval::OPTIONS[0]);
+        assert_eq!(
+            choice,
+            deepseek_code_core::services::plan_approval::OPTIONS[0]
+        );
         updated["answers"] = json!({question: choice});
         client.send(json!({"type":"control_response","response":{"subtype":"success","request_id":request["request_id"],"response":{"behavior":"allow","updatedInput":updated}}})).await;
         let result = client.result().await;
         assert_eq!(result["is_error"], false, "{result}");
+        // Both requests belong to this turn even though approval cleared the
+        // first transcript segment before the second request was assembled.
+        assert_eq!(
+            result["usage"][if anthropic {
+                "input_tokens"
+            } else {
+                "prompt_tokens"
+            }],
+            20
+        );
+        assert_eq!(
+            result["usage"][if anthropic {
+                "output_tokens"
+            } else {
+                "completion_tokens"
+            }],
+            8
+        );
         assert!(client.finish().await.0.success());
         let requests = server.fixture.requests.lock().unwrap();
         assert_eq!(requests.len(), 2);
         let resumed = requests[1]["messages"].to_string();
         assert!(resumed.contains("APPROVED_PLAN_SENTINEL"));
         assert!(!resumed.contains("OLD_HISTORY_SENTINEL"));
-        let paths = deepseek_code_core::runtime::RuntimePaths::new(root.path().join("data")).unwrap();
+        let paths =
+            deepseek_code_core::runtime::RuntimePaths::new(root.path().join("data")).unwrap();
         let store = deepseek_code_core::runtime::SessionStore::new(paths.open_database().unwrap());
         let session = result["session_id"].as_str().unwrap();
         assert!(
@@ -1191,6 +1359,30 @@ async fn auto_extension_uses_explicit_classifier_and_requests_host_on_failure() 
 fn initialize_request(id: &str, mut fields: Value) -> Value {
     fields["subtype"] = json!("initialize");
     json!({"type":"control_request","request_id":id,"request":fields})
+}
+
+/// Agent is not a default core tool, so delegation fixtures load it explicitly.
+fn enable_delegation_tools(data: &std::path::Path) {
+    deepseek_code_core::services::customization::save(
+        data,
+        &deepseek_code_core::services::customization::Customization {
+            tool_loading: ["Agent", "SendMessage"]
+                .into_iter()
+                .map(|name| {
+                    (
+                        name.to_owned(),
+                        deepseek_code_core::services::customization::ToolLoading {
+                            enabled: true,
+                            on_demand: true,
+                        },
+                    )
+                })
+                .collect(),
+            ..Default::default()
+        },
+        &[],
+    )
+    .unwrap();
 }
 
 #[tokio::test]
@@ -1640,6 +1832,7 @@ async fn sdk_initialize_agents_execute_with_bounded_tools_and_run_local_catalog(
                 serde_json::to_vec(&config).unwrap(),
             )
             .unwrap();
+            enable_delegation_tools(&paths.data_dir);
             let parent_session = if parent_limited {
                 let definition: deepseek_code_core::services::agents::Definition = serde_json::from_value(json!({"id":"limited-parent","description":"Read-only parent","system_prompt":"Parent scope","tools":["Agent","Read"]})).unwrap();
                 deepseek_code_core::services::agents::install(&context, definition.clone()).unwrap();
@@ -1843,6 +2036,7 @@ SKILL_SENTINEL",
             "MEMORY_SENTINEL",
         )
         .unwrap();
+        enable_delegation_tools(&data);
         let mut client = Client::start(root.path(), &server, &[]);
         client
             .send(initialize_request(
@@ -1949,6 +2143,209 @@ async fn sdk_agent_definition_unsupported_fields_are_explicit_errors() {
         );
     }
     assert!(client.finish().await.0.success());
+}
+
+fn request_tool_names(body: &Value, anthropic: bool) -> Vec<String> {
+    body["tools"]
+        .as_array()
+        .map(|tools| {
+            tools
+                .iter()
+                .map(|tool| {
+                    let name = if anthropic { &tool["name"] } else { &tool["function"]["name"] };
+                    name.as_str().unwrap_or_default().to_owned()
+                })
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// The real binary: the first request carries the default core tools only, and a
+/// successful ToolSearch adds an on-demand tool to the next request.
+#[tokio::test]
+async fn sdk_cli_requests_default_core_tools_and_loads_an_on_demand_one() {
+    for anthropic in [false, true] {
+        let server = Server::start(anthropic, Mode::ToolSearch).await;
+        let root = tempfile::tempdir().unwrap();
+        let mut client = Client::start(root.path(), &server, &["--permission-mode", "bypass"]);
+        client.send(initialize_request("init", json!({}))).await;
+        assert_eq!(
+            client.frame("control_response").await["response"]["subtype"],
+            "success"
+        );
+        client.send(user("List the fixture files")).await;
+        let result = client.result().await;
+        assert_eq!(result["is_error"], false, "{result}");
+        let requests = server.fixture.requests.lock().unwrap();
+        assert_eq!(requests.len(), 3);
+        let first = request_tool_names(&requests[0], anthropic);
+        // Exactly the 14 built-in defaults, each once. MCP tools keep their own
+        // loading rules and are not part of the switches.
+        let mut core = vec![
+            "Bash", "Read", "Write", "Edit", "Grep", "Glob", "Skill", "ToolSearch",
+            "AskUserQuestion", "EnterPlanMode", "ExitPlanMode", "plan_mode", "TaskOutput", "TaskStop",
+        ];
+        let mut seen: Vec<String> = first
+            .iter()
+            .filter(|name| !name.starts_with("mcp__") && !matches!(name.as_str(), "ListMcpResources" | "ReadMcpResource"))
+            .cloned()
+            .collect();
+        for name in &seen {
+            assert!(core.contains(&name.as_str()), "unexpected built-in {name}: {first:?}");
+        }
+        core.sort_unstable();
+        seen.sort_unstable();
+        assert_eq!(seen, core, "{first:?}");
+        let mut unique = first.clone();
+        unique.sort_unstable();
+        unique.dedup();
+        assert_eq!(unique.len(), first.len(), "duplicate tool: {first:?}");
+        for name in ["ListDir", "WebFetch", "Agent", "Workflow"] {
+            assert!(!first.contains(&name.to_owned()), "{name}: {first:?}");
+        }
+        let second = request_tool_names(&requests[1], anthropic);
+        assert!(second.contains(&"ListDir".to_owned()), "{second:?}");
+        // The loaded tool really ran on the fixture directory.
+        assert!(requests[2].to_string().contains("fixture.txt"));
+        drop(requests);
+        assert!(client.finish().await.0.success());
+    }
+}
+
+/// A real process exit and restart: the same session still carries the tool it
+/// searched earlier, and a new session in the same data directory does not.
+#[tokio::test]
+async fn sdk_cli_resumes_a_searched_tool_after_the_process_restarts() {
+    for anthropic in [false, true] {
+        let root = tempfile::tempdir().unwrap();
+        let server = Server::start(anthropic, Mode::ToolSearch).await;
+        let mut client = Client::start(root.path(), &server, &["--permission-mode", "bypass"]);
+        client.send(initialize_request("init", json!({}))).await;
+        assert_eq!(
+            client.frame("control_response").await["response"]["subtype"],
+            "success"
+        );
+        client.send(user("List the fixture files")).await;
+        let result = client.result().await;
+        assert_eq!(result["is_error"], false, "{result}");
+        let session = result["session_id"].as_str().unwrap().to_owned();
+        assert!(client.finish().await.0.success());
+        server.task.abort();
+
+        // A brand-new process on the same data directory, resuming the session.
+        let resumed = Server::start(anthropic, Mode::ToolSearch).await;
+        let mut client = Client::start(root.path(), &resumed, &["--permission-mode", "bypass", "--resume", &session]);
+        client.send(user("Continue from the earlier search")).await;
+        let result = client.result().await;
+        assert_eq!(result["is_error"], false, "{result}");
+        let requests = resumed.fixture.requests.lock().unwrap();
+        let names = request_tool_names(&requests[0], anthropic);
+        assert!(names.contains(&"ListDir".to_owned()), "restored: {names:?}");
+        drop(requests);
+        assert!(client.finish().await.0.success());
+        resumed.task.abort();
+
+        // A new session in the same data directory starts from the defaults.
+        let fresh = Server::start(anthropic, Mode::ToolSearch).await;
+        let mut client = Client::start(root.path(), &fresh, &["--permission-mode", "bypass"]);
+        client.send(user("List the fixture files")).await;
+        let result = client.result().await;
+        assert_eq!(result["is_error"], false, "{result}");
+        let requests = fresh.fixture.requests.lock().unwrap();
+        let names = request_tool_names(&requests[0], anthropic);
+        assert!(!names.contains(&"ListDir".to_owned()), "isolated: {names:?}");
+        drop(requests);
+        assert!(client.finish().await.0.success());
+        fresh.task.abort();
+    }
+}
+
+/// The same restart chain in the Responses protocol: the search is persisted,
+/// the process exits, and the resumed process's very first request carries the
+/// tool the earlier process searched.
+#[tokio::test]
+async fn sdk_cli_resumes_a_searched_tool_in_the_responses_protocol() {
+    let root = tempfile::tempdir().unwrap();
+    let server = ResponsesServer::start().await;
+    write_responses_provider(root.path(), &server.url);
+    let args = [
+        "--permission-mode",
+        "bypass",
+        "--provider",
+        "responses-fixture",
+        "--model",
+        "fixture-model",
+    ];
+    let mut client = Client::start_configured(root.path(), &args);
+    client.send(initialize_request("init", json!({}))).await;
+    assert_eq!(
+        client.frame("control_response").await["response"]["subtype"],
+        "success"
+    );
+    client.send(user("List the fixture files")).await;
+    let result = client.result().await;
+    assert_eq!(result["is_error"], false, "{result}");
+    let session = result["session_id"].as_str().unwrap().to_owned();
+    assert!(client.finish().await.0.success());
+    {
+        let requests = server.requests.lock().unwrap();
+        assert_eq!(requests.len(), 3, "{requests:#?}");
+        assert!(!responses_tool_names(&requests[0]).contains(&"ListDir".to_owned()));
+        assert!(responses_tool_names(&requests[1]).contains(&"ListDir".to_owned()));
+    }
+    server.task.abort();
+
+    let resumed = ResponsesServer::start().await;
+    write_responses_provider(root.path(), &resumed.url);
+    let mut extra = args.to_vec();
+    extra.extend(["--resume", session.as_str()]);
+    let mut client = Client::start_configured(root.path(), &extra);
+    client.send(user("Continue from the earlier search")).await;
+    let result = client.result().await;
+    assert_eq!(result["is_error"], false, "{result}");
+    let requests = resumed.requests.lock().unwrap();
+    assert!(!requests.is_empty(), "the resumed process sent no request");
+    let names = responses_tool_names(&requests[0]);
+    assert!(names.contains(&"ListDir".to_owned()), "restored: {names:?}");
+    drop(requests);
+    assert!(client.finish().await.0.success());
+}
+
+/// With both switches off the tool is neither discoverable nor callable.
+#[tokio::test]
+async fn sdk_cli_rejects_a_tool_with_both_switches_off() {
+    for anthropic in [false, true] {
+        let server = Server::start(anthropic, Mode::ToolSearch).await;
+        let root = tempfile::tempdir().unwrap();
+        let data = root.path().join("data");
+        std::fs::create_dir_all(&data).unwrap();
+        deepseek_code_core::services::customization::save(
+            &data,
+            &deepseek_code_core::services::customization::Customization {
+                tool_loading: [("ListDir".to_owned(), deepseek_code_core::services::customization::ToolLoading { enabled: false, on_demand: false })]
+                    .into_iter()
+                    .collect(),
+                ..Default::default()
+            },
+            &[],
+        )
+        .unwrap();
+        let mut client = Client::start(root.path(), &server, &["--permission-mode", "bypass"]);
+        client.send(initialize_request("init", json!({}))).await;
+        assert_eq!(
+            client.frame("control_response").await["response"]["subtype"],
+            "success"
+        );
+        client.send(user("List the fixture files")).await;
+        let result = client.result().await;
+        assert_eq!(result["is_error"], false, "{result}");
+        let requests = server.fixture.requests.lock().unwrap();
+        assert!(!request_tool_names(&requests[1], anthropic).contains(&"ListDir".to_owned()));
+        assert!(requests[1].to_string().contains("No tool available on demand"), "{:?}", requests[1]);
+        assert!(requests[2].to_string().contains("turned off"), "{:?}", requests[2]);
+        drop(requests);
+        assert!(client.finish().await.0.success());
+    }
 }
 
 #[path = "sdk/hook_callbacks.rs"]

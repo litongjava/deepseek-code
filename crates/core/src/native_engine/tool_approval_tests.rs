@@ -102,7 +102,14 @@ async fn local_fetch_asks_each_time_and_only_approved_calls_reach_server() {
 #[tokio::test]
 async fn bash_session_grant_commits_only_after_effective_input_and_policy_validation() {
     crate::config::OrchestrationConfig::init_global().unwrap();
-    for case in ["valid", "replacement", "danger", "invalid", "denied", "other-tool"] {
+    for case in [
+        "valid",
+        "replacement",
+        "danger",
+        "invalid",
+        "denied",
+        "other-tool",
+    ] {
         let root = tempfile::tempdir().unwrap();
         let provider = ResolvedProvider {
             provider: serde_json::from_value(json!({"id":"fixture","name":"fixture","base_url":"http://127.0.0.1:1","api_key":"unused","api_format":"openai","models":[],"enabled":true})).unwrap(),
@@ -111,26 +118,64 @@ async fn bash_session_grant_commits_only_after_effective_input_and_policy_valida
         let (tx, mut events) = mpsc::channel(16);
         let manager = crate::runtime::default_permissions();
         manager.set_mode(crate::permissions::PermissionMode::AskPermissions);
-        let mut executor = ToolLoopExecutor::new(provider, vec![], None, 128, tx, root.path().to_string_lossy().into_owned(), ReasoningMode::Standard).with_permission_manager(manager.clone());
+        let mut executor = ToolLoopExecutor::new(
+            provider,
+            vec![],
+            None,
+            128,
+            tx,
+            root.path().to_string_lossy().into_owned(),
+            ReasoningMode::Standard,
+        )
+        .with_permission_manager(manager.clone());
         executor.conv_id = Some("grant-session".into());
         let mailbox = executor.permission_mailbox.clone();
-        let tool = if case == "other-tool" { "Write" } else { "Bash" };
+        let tool = if case == "other-tool" {
+            "Write"
+        } else {
+            "Bash"
+        };
         let task = tokio::spawn(async move {
-            executor.request_tool_approval(tool, &json!({"command":"npm test"}), "grant").await
+            executor
+                .request_tool_approval(tool, &json!({"command":"npm test"}), "grant")
+                .await
         });
-        let EngineEvent::ToolPermission { request_id, .. } = events.recv().await.unwrap() else { panic!() };
-        if case == "denied" { manager.set_session_rules("grant-session", std::collections::HashMap::from([("Bash".into(), crate::permissions::rules::PermissionAction::Deny)])); }
+        let EngineEvent::ToolPermission { request_id, .. } = events.recv().await.unwrap() else {
+            panic!()
+        };
+        if case == "denied" {
+            manager.set_session_rules(
+                "grant-session",
+                std::collections::HashMap::from([(
+                    "Bash".into(),
+                    crate::permissions::rules::PermissionAction::Deny,
+                )]),
+            );
+        }
         let updated_input = match case {
             "replacement" => Some(json!({"command":"python custom.py"})),
             "danger" => Some(json!({"command":"shutdown"})),
             "invalid" => Some(json!({"command":"npm test","timeout":"invalid"})),
             _ => None,
         };
-        crate::native_engine::permission_response::respond(&mailbox, &request_id, PermissionResponse::AllowBashForSession { updated_input, note: None }).await.unwrap();
+        crate::native_engine::permission_response::respond(
+            &mailbox,
+            &request_id,
+            PermissionResponse::AllowBashForSession {
+                updated_input,
+                note: None,
+            },
+        )
+        .await
+        .unwrap();
         let result = task.await.unwrap();
         let allowed = matches!(case, "valid" | "replacement");
         assert_eq!(result.is_ok(), allowed, "{case}: {result:?}");
-        assert_eq!(manager.bash_session_allowed("grant-session"), allowed, "{case}");
+        assert_eq!(
+            manager.bash_session_allowed("grant-session"),
+            allowed,
+            "{case}"
+        );
         assert!(!manager.bash_session_allowed("other"));
     }
 }
@@ -255,14 +300,30 @@ async fn shell_auto_needs_no_classifier_and_dangerous_calls_require_each_approva
     let (tx, mut events) = mpsc::channel(16);
     let manager = crate::runtime::default_permissions();
     manager.set_mode(crate::permissions::PermissionMode::Auto);
-    let mut executor = ToolLoopExecutor::new(provider, vec![], None, 128, tx, root.path().to_string_lossy().into_owned(), ReasoningMode::Standard).with_permission_manager(manager.clone());
+    let mut executor = ToolLoopExecutor::new(
+        provider,
+        vec![],
+        None,
+        128,
+        tx,
+        root.path().to_string_lossy().into_owned(),
+        ReasoningMode::Standard,
+    )
+    .with_permission_manager(manager.clone());
     let normal = json!({"shell":if cfg!(windows) {"cmd"} else {"sh"},"command":"echo AUTO_WITHOUT_CLASSIFIER"});
     let (_, output, failed) = executor.execute_tool_call("Bash", &normal, "normal").await;
     assert!(!failed, "{output}");
     assert!(output.contains("AUTO_WITHOUT_CLASSIFIER"));
-    let command = if cfg!(windows) { "Invoke-Expression \"Write-Output APPROVED_ONCE\"" } else { "eval 'echo APPROVED_ONCE'" };
+    let command = if cfg!(windows) {
+        "Invoke-Expression \"Write-Output APPROVED_ONCE\""
+    } else {
+        "eval 'echo APPROVED_ONCE'"
+    };
     let input = json!({"shell":if cfg!(windows) {"powershell"} else {"sh"},"command":command});
-    for mode in [crate::permissions::PermissionMode::Auto, crate::permissions::PermissionMode::AskPermissions] {
+    for mode in [
+        crate::permissions::PermissionMode::Auto,
+        crate::permissions::PermissionMode::AskPermissions,
+    ] {
         manager.set_mode(mode);
         let mailbox = executor.permission_mailbox.clone();
         let current = input.clone();
@@ -271,9 +332,21 @@ async fn shell_auto_needs_no_classifier_and_dangerous_calls_require_each_approva
             (executor, result)
         });
         let request = loop {
-            if let EngineEvent::ToolPermission { request_id, .. } = events.recv().await.unwrap() { break request_id; }
+            if let EngineEvent::ToolPermission { request_id, .. } = events.recv().await.unwrap() {
+                break request_id;
+            }
         };
-        crate::native_engine::permission_response::respond(&mailbox, &request, PermissionResponse::Allow { updated_input: None, commit: None, note: None }).await.unwrap();
+        crate::native_engine::permission_response::respond(
+            &mailbox,
+            &request,
+            PermissionResponse::Allow {
+                updated_input: None,
+                commit: None,
+                note: None,
+            },
+        )
+        .await
+        .unwrap();
         let (returned, (_, output, failed)) = task.await.unwrap();
         executor = returned;
         assert!(!failed, "{output}");
@@ -468,6 +541,27 @@ fn hook_executor(
     crate::config::OrchestrationConfig::init_global().unwrap();
     let data = root.join("data");
     std::fs::create_dir_all(&data).unwrap();
+    // WebFetch loads on demand by default; these tests drive it directly.
+    crate::services::customization::save(
+        &data,
+        &crate::services::customization::Customization {
+            tool_loading: ["WebFetch".to_owned()]
+                .into_iter()
+                .map(|name| {
+                    (
+                        name,
+                        crate::services::customization::ToolLoading {
+                            enabled: true,
+                            on_demand: true,
+                        },
+                    )
+                })
+                .collect(),
+            ..Default::default()
+        },
+        &[],
+    )
+    .unwrap();
     let hooks: Vec<_> = responses.into_iter().map(|response| {
         let command = if cfg!(windows) { format!("[IO.File]::WriteAllText('hook-ran','yes'); [Console]::Out.Write('{}')", response.to_string().replace('\'', "''")) }
             else { format!("printf yes > hook-ran; printf '%s' '{}'", response.to_string().replace('\'', "'\\''")) };
@@ -498,6 +592,7 @@ fn hook_executor(
     )
     .with_permission_manager(manager.clone())
     .with_permission_host(false)
+    .with_search_config_path(data.join("config.json"))
     .with_hooks(crate::services::tool_hooks::HookRunner::load(&data, root).unwrap());
     (executor, rx, manager)
 }

@@ -36,7 +36,14 @@ impl ErrorClass {
 pub struct ApiError {
     pub status: u16,
     pub retry_after: Option<Duration>,
+    /// Already reduced to a category and a recognized identifier; never remote
+    /// free text.
     pub message: String,
+    /// Validated correlation ID taken from the response before it was reduced,
+    /// so per-attempt logs can be matched to server-side records.
+    pub server_request_id: Option<String>,
+    /// Recognized provider error identifier, used for retry decisions.
+    pub remote_code: Option<String>,
 }
 impl std::fmt::Display for ApiError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -56,6 +63,11 @@ pub fn classify(error: &anyhow::Error) -> ErrorClass {
 
 pub(crate) fn classify_raw(error: &anyhow::Error) -> ErrorClass {
     if let Some(api) = request_failure::find_in_chain::<ApiError>(error) {
+        // A recognized permanent quota/billing error is not a temporary limit:
+        // repeating the request cannot succeed and would multiply the load.
+        if is_permanent_quota_error(api.remote_code.as_deref()) {
+            return ErrorClass::Permanent;
+        }
         return match api.status {
             401 | 403 => ErrorClass::Authentication,
             429 => ErrorClass::RateLimit,
@@ -72,6 +84,16 @@ pub(crate) fn classify_raw(error: &anyhow::Error) -> ErrorClass {
         }
     }
     ErrorClass::Permanent
+}
+
+/// Error identifiers that mean the account cannot succeed until it is topped up
+/// or its plan changes. Only identifiers are trusted: wording in a message may be
+/// arbitrary remote text.
+fn is_permanent_quota_error(code: Option<&str>) -> bool {
+    matches!(
+        code,
+        Some("insufficient_quota" | "quota_exceeded" | "billing_hard_limit_reached")
+    )
 }
 
 /// Only connection and transfer failures before any response content are
@@ -139,29 +161,149 @@ pub async fn checked_response(mut response: reqwest::Response) -> Result<reqwest
         .and_then(|v| v.to_str().ok())
         .and_then(|v| v.parse::<u64>().ok())
         .map(|seconds| Duration::from_secs(seconds.min(300)));
-    let content_type = response
-        .headers()
-        .get(reqwest::header::CONTENT_TYPE)
-        .and_then(|value| value.to_str().ok())
-        .unwrap_or_default()
-        .to_owned();
+    // Remote headers are untrusted too: reduce the media type before it can be
+    // echoed into a diagnostic, a snapshot or a stored error.
+    let content_type = safe_media_type(
+        response
+            .headers()
+            .get(reqwest::header::CONTENT_TYPE)
+            .and_then(|value| value.to_str().ok())
+            .unwrap_or_default(),
+    );
+    // Correlation IDs are read here, while the structured document still exists,
+    // because the summary that follows deliberately drops every free-text field.
+    let server_request_id = response_request_id(&response);
     let body = read_bounded(&mut response).await;
+    let parsed = serde_json::from_slice::<serde_json::Value>(&body).ok();
+    let server_request_id = server_request_id.or_else(|| {
+        parsed
+            .as_ref()
+            .and_then(|value| body_request_id(value))
+    });
+    let remote_code = parsed.as_ref().and_then(remote_error_code);
     Err(ApiError {
         status,
         retry_after,
         message: safe_remote_error(&body, &content_type),
+        server_request_id,
+        remote_code,
     }
     .into())
 }
 
-/// A remote error body may echo the request, including prompt text. Only a small
-/// set of recognizable error fields is kept; anything else is summarized.
+/// Only a recognized media type may leave this function; parameters and any
+/// custom text are dropped, and anything unknown becomes `unknown`.
+pub fn safe_media_type(raw: &str) -> String {
+    let essence = raw
+        .split(';')
+        .next()
+        .unwrap_or_default()
+        .trim()
+        .to_ascii_lowercase();
+    match essence.as_str() {
+        "application/json"
+        | "text/plain"
+        | "text/event-stream"
+        | "text/html"
+        | "application/xml"
+        | "text/xml"
+        | "application/octet-stream"
+        | "application/problem+json" => essence,
+        "" => "unspecified".to_owned(),
+        _ => "unknown".to_owned(),
+    }
+}
+
+/// Correlation headers used by the major providers. The value must be a UUID.
+fn response_request_id(response: &reqwest::Response) -> Option<String> {
+    [
+        "x-request-id",
+        "request-id",
+        "x-amzn-requestid",
+        "x-goog-request-id",
+        "openai-request-id",
+    ]
+    .iter()
+    .find_map(|name| {
+        let value = response.headers().get(*name)?.to_str().ok()?;
+        validated_request_id(value)
+    })
+}
+
+fn body_request_id(value: &serde_json::Value) -> Option<String> {
+    ["request_id", "requestId", "id"]
+        .iter()
+        .find_map(|key| value.get(*key).and_then(|id| id.as_str()))
+        .and_then(validated_request_id)
+        .or_else(|| {
+            value
+                .get("error")
+                .and_then(|error| error.get("request_id"))
+                .and_then(|id| id.as_str())
+                .and_then(validated_request_id)
+        })
+}
+
+/// A correlation ID is only useful if it is exactly a UUID; anything longer or
+/// otherwise shaped could carry arbitrary remote text.
+fn validated_request_id(raw: &str) -> Option<String> {
+    let trimmed = raw.trim();
+    (trimmed.len() <= 64)
+        .then(|| uuid::Uuid::parse_str(trimmed).ok())
+        .flatten()
+        .map(|id| id.to_string())
+}
+
+/// Classify a recognized provider error identifier. Unknown identifiers stay
+/// permanent: an unrecognized mid-stream error is not evidence of a transient
+/// transport fault, so it must not trigger blind repetition.
+pub(crate) fn classify_remote_code(code: Option<&str>) -> ErrorClass {
+    match code {
+        Some(
+            "authentication_error" | "invalid_api_key" | "unauthenticated" | "permission_error"
+            | "permission_denied",
+        ) => ErrorClass::Authentication,
+        Some("rate_limit_error" | "rate_limit_exceeded") => ErrorClass::RateLimit,
+        Some("context_length_exceeded" | "request_too_large") => ErrorClass::ContextLimit,
+        Some(
+            "overloaded_error" | "api_error" | "server_error" | "internal_error"
+            | "deadline_exceeded" | "unavailable" | "resource_exhausted",
+        ) => ErrorClass::Transient,
+        _ => ErrorClass::Permanent,
+    }
+}
+
+/// A validated correlation ID carried by a stream error event.
+pub(crate) fn remote_event_request_id(value: &serde_json::Value) -> Option<String> {
+    body_request_id(value)
+}
+
+/// The recognized provider error identifier, when the value is on the known list.
+pub fn remote_error_code(value: &serde_json::Value) -> Option<String> {
+    [
+        &["error", "code"][..],
+        &["error", "type"][..],
+        &["code"][..],
+        &["type"][..],
+    ]
+    .iter()
+    .find_map(|path| lookup(value, path))
+    .and_then(known_error_identifier)
+    .map(str::to_owned)
+}
+
+/// A remote error body may echo the request, including prompt text, and no rule
+/// over free text can prove that it does not. Only a fixed vocabulary leaves this
+/// function: a category derived from recognized wording, and a known error
+/// identifier such as `invalid_request_error`. The body itself never reaches a
+/// diagnostic, log line, event or stored error.
 pub fn safe_remote_error(body: &[u8], content_type: &str) -> String {
     let text = match std::str::from_utf8(body) {
         Ok(text) => text.trim(),
         Err(_) => {
             return format!(
-                "service returned HTTP error with a non-UTF-8 body ({content_type}, {} bytes)",
+                "service returned HTTP error with a non-UTF-8 body ({}, {} bytes)",
+                safe_media_type(content_type),
                 body.len()
             )
         }
@@ -169,108 +311,184 @@ pub fn safe_remote_error(body: &[u8], content_type: &str) -> String {
     if text.is_empty() {
         return "service returned an HTTP error without a body".to_owned();
     }
-    let Ok(value) = serde_json::from_str::<serde_json::Value>(text) else {
-        // A plain-text body is free text: it could be the prompt the server
-        // rejected, so it is never reproduced. Only a recognized error category
-        // is kept, which preserves authentication, billing, rate-limit and
-        // parameter meaning without carrying any of the body.
-        let plain = content_type.is_empty() || content_type.starts_with("text/plain");
-        if plain {
-            return plain_text_error(text);
-        }
-        return format!(
-            "service returned an HTTP error with a non-JSON body ({content_type}, {} bytes); content omitted",
-            body.len()
-        );
-    };
-    let mut parts: Vec<String> = Vec::new();
-    for path in [
-        &["error", "message"][..],
-        &["error", "type"][..],
-        &["error", "code"][..],
-        &["message"][..],
-        &["detail"][..],
-        &["error_description"][..],
-        &["code"][..],
-    ] {
-        let mut current = &value;
-        let mut found = true;
-        for key in path {
-            match current.get(*key) {
-                Some(next) => current = next,
-                None => {
-                    found = false;
-                    break;
-                }
-            }
-        }
-        if !found {
-            continue;
-        }
-        if let Some(text) = current.as_str() {
-            let text = text.trim();
-            if !text.is_empty() && !parts.iter().any(|part| part == text) {
-                parts.push(text.to_owned());
-            }
-        }
+    match serde_json::from_str::<serde_json::Value>(text) {
+        Ok(value) => summarize_remote_error(&value, content_type, body.len()),
+        Err(_) => remote_error_summary(remote_error_category(text), None, content_type, body.len()),
     }
-    if let Some(text) = value.get("error").and_then(|error| error.as_str()) {
-        let text = text.trim();
-        if !text.is_empty() && !parts.iter().any(|part| part == text) {
-            parts.push(text.to_owned());
-        }
-    }
-    if parts.is_empty() {
-        return format!(
-            "service returned an HTTP error without a recognized error field ({content_type})"
-        );
-    }
-    request_failure::sanitize_remote_text(&parts.join(": "))
 }
 
-/// Classify a plain-text error body without reproducing it.
-///
-/// Values such as `Unauthorized` or `rate limit exceeded` are common and worth
-/// keeping as meaning, but the same channel can echo the request. The response
-/// therefore reports only a category derived from recognized wording plus the
-/// body length; the body itself never reaches a diagnostic.
-fn plain_text_error(text: &str) -> String {
+/// The same policy for a remote value that is already parsed, such as a stream
+/// event reporting an upstream failure.
+pub fn safe_remote_value(value: &serde_json::Value) -> String {
+    summarize_remote_error(value, "application/json", 0)
+}
+
+/// Read the recognizable error fields, then reduce them to fixed vocabulary.
+fn summarize_remote_error(value: &serde_json::Value, content_type: &str, bytes: usize) -> String {
+    let mut candidates: Vec<String> = Vec::new();
+    for path in [
+        &["error", "message"][..],
+        &["error", "detail"][..],
+        &["error_description"][..],
+        &["message"][..],
+        &["detail"][..],
+    ] {
+        if let Some(text) = lookup(value, path).filter(|text| !text.is_empty()) {
+            let text = text.to_owned();
+            if !candidates.contains(&text) {
+                candidates.push(text);
+            }
+        }
+    }
+    // Identifiers come from a closed vocabulary, so reproducing one cannot carry
+    // a request echo even where the same field would otherwise hold free text.
+    let identifier = [
+        &["error", "code"][..],
+        &["error", "type"][..],
+        &["code"][..],
+        &["type"][..],
+    ]
+    .iter()
+    .find_map(|path| lookup(value, path))
+    .and_then(known_error_identifier);
+    let mut category = remote_error_category(&candidates.join(" "));
+    if category.is_none() && identifier.is_none() {
+        // A bare `error` string is still a candidate for recognized wording.
+        if let Some(text) = value.get("error").and_then(|error| error.as_str()) {
+            category = remote_error_category(text);
+        }
+    }
+    remote_error_summary(category, identifier, content_type, bytes)
+}
+
+fn lookup<'a>(value: &'a serde_json::Value, path: &[&str]) -> Option<&'a str> {
+    let mut current = value;
+    for key in path {
+        current = current.get(*key)?;
+    }
+    current.as_str().map(str::trim)
+}
+
+/// Project error identifiers, shared by the major providers. A value that is not
+/// on this list is treated as free text and never reproduced.
+const KNOWN_ERROR_IDENTIFIERS: [&str; 26] = [
+    "invalid_request_error",
+    "invalid_request",
+    "authentication_error",
+    "invalid_api_key",
+    "unauthenticated",
+    "permission_error",
+    "permission_denied",
+    "not_found_error",
+    "model_not_found",
+    "not_found",
+    "rate_limit_error",
+    "rate_limit_exceeded",
+    "insufficient_quota",
+    "quota_exceeded",
+    "billing_hard_limit_reached",
+    "context_length_exceeded",
+    "request_too_large",
+    "content_filter",
+    "api_error",
+    "server_error",
+    "internal_error",
+    "overloaded_error",
+    "deadline_exceeded",
+    "unavailable",
+    "resource_exhausted",
+    "failed_precondition",
+];
+
+fn known_error_identifier(text: &str) -> Option<&'static str> {
+    let lower = text.trim().to_ascii_lowercase();
+    KNOWN_ERROR_IDENTIFIERS
+        .iter()
+        .copied()
+        .find(|known| *known == lower)
+}
+
+/// Map recognized wording to a category. Detection and reproduction are separate
+/// steps: only the category can leave the function.
+fn remote_error_category(text: &str) -> Option<&'static str> {
+    if text.is_empty() {
+        return None;
+    }
     let lower = text.to_ascii_lowercase();
-    let category = if ["unauthorized", "authentication", "forbidden", "api key", "credential"]
-        .iter()
-        .any(|word| lower.contains(word))
-    {
-        "authentication failed"
-    } else if ["rate limit", "too many requests", "slow down", "overloaded"]
-        .iter()
-        .any(|word| lower.contains(word))
-    {
-        "rate limited"
-    } else if ["quota", "billing", "insufficient", "payment", "balance"]
-        .iter()
-        .any(|word| lower.contains(word))
-    {
-        "billing or quota error"
-    } else if ["timeout", "timed out", "unavailable", "temporarily", "retry later"]
-        .iter()
-        .any(|word| lower.contains(word))
-    {
-        "temporarily unavailable"
-    } else if ["invalid", "bad request", "malformed", "unsupported", "missing"]
-        .iter()
-        .any(|word| lower.contains(word))
-    {
-        "invalid request"
+    let has = |words: &[&str]| words.iter().any(|word| lower.contains(word));
+    if has(&[
+        "context length",
+        "context_length",
+        "context window",
+        "maximum context",
+        "too many tokens",
+    ]) {
+        Some("context window exceeded")
+    } else if has(&[
+        "unauthorized",
+        "authentication",
+        "forbidden",
+        "api key",
+        "api_key",
+        "credential",
+        "permission",
+        "unauthenticated",
+    ]) {
+        Some("authentication failed")
+    } else if has(&["rate limit", "rate_limit", "too many requests", "slow down"]) {
+        Some("rate limited")
+    } else if has(&[
+        "overloaded",
+        "timeout",
+        "timed out",
+        "unavailable",
+        "temporarily",
+        "retry later",
+        "deadline",
+    ]) {
+        Some("temporarily unavailable")
+    } else if has(&["quota", "billing", "insufficient", "payment", "balance"]) {
+        Some("billing or quota error")
+    } else if has(&[
+        "invalid",
+        "bad request",
+        "malformed",
+        "unsupported",
+        "missing",
+        "required",
+        "not found",
+        "not_found",
+        "too large",
+    ]) {
+        Some("invalid request")
     } else {
-        return format!(
-            "service returned an HTTP error with a plain-text body ({} bytes); content omitted",
-            text.len()
-        );
-    };
-    format!(
-        "service reported an error: {category} (plain-text body, {} bytes; content omitted)",
-        text.len()
-    )
+        None
+    }
+}
+
+/// Everything here is built from this crate's own vocabulary; `content_type` and
+/// a byte count are the only data taken from the response.
+fn remote_error_summary(
+    category: Option<&str>,
+    identifier: Option<&str>,
+    content_type: &str,
+    bytes: usize,
+) -> String {
+    match (category, identifier) {
+        (Some(category), Some(identifier)) => {
+            format!("service reported an error: {category} ({identifier}); content omitted")
+        }
+        (Some(category), None) => {
+            format!("service reported an error: {category}; content omitted")
+        }
+        (None, Some(identifier)) => {
+            format!("service reported an error ({identifier}); content omitted")
+        }
+        (None, None) => format!(
+            "service returned an HTTP error with no recognized error classification ({}, {bytes} bytes); content omitted",
+            safe_media_type(content_type)
+        ),
+    }
 }
 
 /// Read only as much of an error body as a diagnostic could ever use.
@@ -369,17 +587,34 @@ pub fn rate_limits() -> Vec<RateLimitState> {
 /// observed (for example a built-in adapter with its own transport) and stays
 /// unknown — it is never defaulted to one.
 #[derive(Debug, Clone, Default)]
-pub struct AttemptCounter(std::sync::Arc<std::sync::atomic::AtomicU32>);
+pub struct AttemptCounter {
+    attempts: std::sync::Arc<std::sync::atomic::AtomicU32>,
+    status: std::sync::Arc<std::sync::atomic::AtomicU16>,
+}
 
 impl AttemptCounter {
-    pub fn set(&self, attempts: u32) {
-        self.0.store(attempts, std::sync::atomic::Ordering::Release);
+    pub fn set_attempts(&self, attempts: u32) {
+        self.attempts
+            .store(attempts, std::sync::atomic::Ordering::Release);
     }
 
     pub fn attempts(&self) -> Option<u32> {
-        match self.0.load(std::sync::atomic::Ordering::Acquire) {
+        match self.attempts.load(std::sync::atomic::Ordering::Acquire) {
             0 => None,
             attempts => Some(attempts),
+        }
+    }
+
+    /// The HTTP status of the attempt that produced the response being read.
+    pub fn set_status(&self, status: u16) {
+        self.status
+            .store(status, std::sync::atomic::Ordering::Release);
+    }
+
+    pub fn status(&self) -> Option<u16> {
+        match self.status.load(std::sync::atomic::Ordering::Acquire) {
+            0 => None,
+            status => Some(status),
         }
     }
 }
@@ -661,6 +896,8 @@ mod tests {
                 status,
                 retry_after: None,
                 message: "model 5 rejected input 500".into(),
+                server_request_id: None,
+                remote_code: None,
             }
             .into();
             assert!(!matches!(
@@ -673,8 +910,10 @@ mod tests {
                 &ApiError {
                     status: 503,
                     retry_after: None,
-                    message: String::new()
-                }
+                    message: String::new(),
+                server_request_id: None,
+                remote_code: None,
+            }
                 .into()
             ),
             ErrorClass::Transient

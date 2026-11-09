@@ -9,7 +9,9 @@ use std::{
 use tokio::process::Command;
 #[path = "shell_notifications.rs"]
 mod notifications;
-pub use notifications::{collect_completed, collect_finished, notification_summary, Finished, NOTIFICATION_START};
+pub use notifications::{
+    collect_completed, collect_finished, notification_summary, Finished, NOTIFICATION_START,
+};
 tokio::task_local! { static CONTEXT: Option<(PathBuf, String)>; }
 
 /// A shell task's log directory: its task ID, or the directory of a
@@ -164,7 +166,9 @@ pub(crate) fn start(
 /// background, as Ctrl+B does in the reference CLI. Calls started later
 /// ignore the request.
 pub fn request_background(root: &Path, session: &str) -> Result<()> {
-    let directory = root.join("shell-tasks").join(uuid::Uuid::parse_str(session)?.to_string());
+    let directory = root
+        .join("shell-tasks")
+        .join(uuid::Uuid::parse_str(session)?.to_string());
     std::fs::create_dir_all(&directory)?;
     std::fs::write(directory.join("background-now"), b"1")?;
     Ok(())
@@ -183,12 +187,18 @@ impl Drop for AbortOnDrop {
 /// Read bounded output from foreground calls owned by this session.
 /// Background calls are excluded by their absent active marker.
 pub fn foreground_output(root: &Path, session: &str) -> Result<String> {
-    let base = root.join("shell-tasks").join(uuid::Uuid::parse_str(session)?.to_string());
+    let base = root
+        .join("shell-tasks")
+        .join(uuid::Uuid::parse_str(session)?.to_string());
     let mut output = String::new();
-    let Ok(entries) = std::fs::read_dir(base) else { return Ok(output); };
+    let Ok(entries) = std::fs::read_dir(base) else {
+        return Ok(output);
+    };
     for entry in entries.flatten() {
         let directory = entry.path();
-        if !directory.join("foreground-active").exists() { continue; }
+        if !directory.join("foreground-active").exists() {
+            continue;
+        }
         if let Ok(command) = std::fs::read_to_string(directory.join("command.txt")) {
             output.push_str(&format!("{command}\n"));
         }
@@ -199,7 +209,12 @@ pub fn foreground_output(root: &Path, session: &str) -> Result<String> {
                 file.seek(SeekFrom::Start(length.saturating_sub(32768)))?;
                 let mut bytes = Vec::new();
                 file.take(32768).read_to_end(&mut bytes)?;
-                if !bytes.is_empty() { output.push_str(&format!("[{stream}]\n{}\n", String::from_utf8_lossy(&bytes))); }
+                if !bytes.is_empty() {
+                    output.push_str(&format!(
+                        "[{stream}]\n{}\n",
+                        String::from_utf8_lossy(&bytes)
+                    ));
+                }
             }
         }
     }
@@ -207,7 +222,9 @@ pub fn foreground_output(root: &Path, session: &str) -> Result<String> {
 }
 struct ForegroundMarker(PathBuf);
 impl Drop for ForegroundMarker {
-    fn drop(&mut self) { let _ = std::fs::remove_file(&self.0); }
+    fn drop(&mut self) {
+        let _ = std::fs::remove_file(&self.0);
+    }
 }
 
 pub(super) async fn run_foreground(
@@ -219,11 +236,16 @@ pub(super) async fn run_foreground(
     guard: Option<crate::services::wsl::Guard>,
 ) -> Result<Value> {
     // Managed shells belong to a UUID session; anything else runs as before.
-    let Some((root, session, id)) = CONTEXT
-        .try_with(Clone::clone)
-        .ok()
-        .flatten()
-        .and_then(|(root, session)| uuid::Uuid::parse_str(&session).ok().map(|id| (root, session, id)))
+    let Some((root, session, id)) =
+        CONTEXT
+            .try_with(Clone::clone)
+            .ok()
+            .flatten()
+            .and_then(|(root, session)| {
+                uuid::Uuid::parse_str(&session)
+                    .ok()
+                    .map(|id| (root, session, id))
+            })
     else {
         let _guard = guard;
         return super::bash_process::run(&mut command, timeout, shell).await;
@@ -273,10 +295,20 @@ pub(super) async fn run_foreground(
     // The task ID directory marks a managed shell for blocking TaskOutput
     // waits; the logs stay where the call started.
     std::fs::create_dir_all(session_directory.join(&id))?;
-    super::tasks::execute_for_shell_owner("TaskUpdate", json!({"id":id,"status":"running"}), &root, &session)?;
+    super::tasks::execute_for_shell_owner(
+        "TaskUpdate",
+        json!({"id":id,"status":"running"}),
+        &root,
+        &session,
+    )?;
     std::fs::write(directory.join("heartbeat"), b"running")?;
     ACTIVE.fetch_add(1, std::sync::atomic::Ordering::AcqRel);
-    let mut completion = Completion { root, session, id: id.clone(), done: false };
+    let mut completion = Completion {
+        root,
+        session,
+        id: id.clone(),
+        done: false,
+    };
     let mut handle = running.0.take().context("Shell task missing")?;
     tokio::spawn(async move {
         let result = tokio::select! {
@@ -292,10 +324,16 @@ pub(super) async fn run_foreground(
             Ok(Err(error)) => json!({"is_error":true,"error":format!("{error:#}")}),
             Err(error) => json!({"is_error":true,"error":format!("{error}")}),
         };
-        let status = if output["success"] == true { "completed" } else { "failed" };
+        let status = if output["success"] == true {
+            "completed"
+        } else {
+            "failed"
+        };
         completion.finish(status, output);
     });
-    Ok(json!({"task_id":id,"status":"running","backgrounded":true,"message":"The user moved this command to the background; it keeps running. Use TaskOutput with task_id for its output and TaskStop to stop it."}))
+    Ok(
+        json!({"task_id":id,"status":"running","backgrounded":true,"message":"The user moved this command to the background; it keeps running. Use TaskOutput with task_id for its output and TaskStop to stop it."}),
+    )
 }
 
 pub(super) fn control(
@@ -668,7 +706,19 @@ mod tests {
         // Without a request the call finishes in the foreground as before.
         let mut quick = Command::new("node");
         quick.arg("-e").arg("console.log('quick')");
-        let done = scope(Some((root.path().into(), session.clone())), run_foreground(quick, Duration::from_secs(30), "node", "quick", "node quick", None)).await.unwrap();
+        let done = scope(
+            Some((root.path().into(), session.clone())),
+            run_foreground(
+                quick,
+                Duration::from_secs(30),
+                "node",
+                "quick",
+                "node quick",
+                None,
+            ),
+        )
+        .await
+        .unwrap();
         assert!(done["stdout"].as_str().unwrap().contains("quick"));
         let mut command = Command::new("node");
         command.arg("-e").arg(script);
@@ -678,7 +728,17 @@ mod tests {
                 tokio::time::sleep(Duration::from_millis(400)).await;
                 request_background(&root_path, &id).unwrap();
             };
-            let (result, ()) = tokio::join!(run_foreground(command, Duration::from_secs(30), "node", "slow", "node slow", None), request);
+            let (result, ()) = tokio::join!(
+                run_foreground(
+                    command,
+                    Duration::from_secs(30),
+                    "node",
+                    "slow",
+                    "node slow",
+                    None
+                ),
+                request
+            );
             result
         })
         .await
@@ -688,11 +748,28 @@ mod tests {
         let finished = output(root.path(), &session, id, true).await;
         assert_eq!(finished["status"], "completed");
         let stdout = finished["stdout"].as_str().unwrap();
-        assert!(stdout.contains("early") && stdout.contains("late"), "{stdout}");
+        assert!(
+            stdout.contains("early") && stdout.contains("late"),
+            "{stdout}"
+        );
         // A request made before a call starts does not move it.
         let mut later = Command::new("node");
-        later.arg("-e").arg("setTimeout(()=>console.log('kept'),300)");
-        let kept = scope(Some((root.path().into(), session.clone())), run_foreground(later, Duration::from_secs(30), "node", "later", "node later", None)).await.unwrap();
+        later
+            .arg("-e")
+            .arg("setTimeout(()=>console.log('kept'),300)");
+        let kept = scope(
+            Some((root.path().into(), session.clone())),
+            run_foreground(
+                later,
+                Duration::from_secs(30),
+                "node",
+                "later",
+                "node later",
+                None,
+            ),
+        )
+        .await
+        .unwrap();
         assert!(kept["stdout"].as_str().unwrap().contains("kept"));
     }
 
@@ -705,21 +782,54 @@ mod tests {
         let mut command = Command::new("node");
         command.arg("-e").arg("require('child_process').spawn(process.execPath,['-e',`setTimeout(()=>require('fs').writeFileSync(process.argv[1],'leaked'),1800)`,process.argv[1]],{stdio:'inherit'});console.log('ready');console.error('diagnostic');setInterval(()=>{},10000)").arg(&leaked);
         let task = scope(Some((root.path().into(), session.clone())), async {
-            start(command, None, "node", "test managed shell", "node fixture", None).unwrap()
+            start(
+                command,
+                None,
+                "node",
+                "test managed shell",
+                "node fixture",
+                None,
+            )
+            .unwrap()
         })
         .await;
         let id = task["task_id"].as_str().unwrap();
         let running = output(root.path(), &session, id, false).await;
         assert_eq!(running["status"], "running");
         assert!(running["stderr"].as_str().unwrap().contains("diagnostic"));
-        for change in [json!({"status":"completed"}),json!({"status":"deleted"}),json!({"output":"fabricated"}),json!({"metadata":{"managed_shell":false}}),json!({"metadata":{"managed_shell":null}})] {
-            let mut change=change;change["id"]=json!(id);
-            assert!(super::super::tasks::execute_for_session("TaskUpdate",change,root.path(),&session).is_err());
+        for change in [
+            json!({"status":"completed"}),
+            json!({"status":"deleted"}),
+            json!({"output":"fabricated"}),
+            json!({"metadata":{"managed_shell":false}}),
+            json!({"metadata":{"managed_shell":null}}),
+        ] {
+            let mut change = change;
+            change["id"] = json!(id);
+            assert!(super::super::tasks::execute_for_session(
+                "TaskUpdate",
+                change,
+                root.path(),
+                &session
+            )
+            .is_err());
         }
-        super::super::tasks::execute_for_session("TaskUpdate",json!({"id":id,"subject":"renamed server","metadata":{"note":"safe user annotation"}}),root.path(),&session).unwrap();
-        let still_running=output(root.path(),&session,id,false).await;
-        assert_eq!(still_running["status"],"running");
-        assert!(super::super::tasks::execute_for_session("TaskCreate",json!({"subject":"fake managed task","metadata":{"managed_shell":true}}),root.path(),&session).is_err());
+        super::super::tasks::execute_for_session(
+            "TaskUpdate",
+            json!({"id":id,"subject":"renamed server","metadata":{"note":"safe user annotation"}}),
+            root.path(),
+            &session,
+        )
+        .unwrap();
+        let still_running = output(root.path(), &session, id, false).await;
+        assert_eq!(still_running["status"], "running");
+        assert!(super::super::tasks::execute_for_session(
+            "TaskCreate",
+            json!({"subject":"fake managed task","metadata":{"managed_shell":true}}),
+            root.path(),
+            &session
+        )
+        .is_err());
         assert!(super::super::tasks::execute_for_session(
             "TaskStop",
             json!({"task_id":id}),
@@ -757,7 +867,15 @@ mod tests {
             let mut command = Command::new("node");
             command.args(["-e", code]);
             let task = scope(Some((root.path().into(), session.clone())), async {
-                start(command, Some(Duration::from_millis(600)), "node", "fixture", "node fixture", None).unwrap()
+                start(
+                    command,
+                    Some(Duration::from_millis(600)),
+                    "node",
+                    "fixture",
+                    "node fixture",
+                    None,
+                )
+                .unwrap()
             })
             .await;
             let observed = output(
@@ -783,14 +901,26 @@ mod foreground_output_tests {
     fn output_tracks_appends_and_excludes_other_sessions_and_background_tasks() {
         let root = tempfile::tempdir().unwrap();
         let session = uuid::Uuid::new_v4().to_string();
-        let path = root.path().join("shell-tasks").join(&session).join("fg-test");
+        let path = root
+            .path()
+            .join("shell-tasks")
+            .join(&session)
+            .join("fg-test");
         std::fs::create_dir_all(&path).unwrap();
         std::fs::write(path.join("foreground-active"), b"running").unwrap();
         std::fs::write(path.join("stdout.log"), b"first").unwrap();
-        assert!(foreground_output(root.path(), &session).unwrap().contains("first"));
+        assert!(foreground_output(root.path(), &session)
+            .unwrap()
+            .contains("first"));
         std::fs::write(path.join("stdout.log"), b"first\nsecond").unwrap();
-        assert!(foreground_output(root.path(), &session).unwrap().contains("second"));
-        assert!(foreground_output(root.path(), &uuid::Uuid::new_v4().to_string()).unwrap().is_empty());
+        assert!(foreground_output(root.path(), &session)
+            .unwrap()
+            .contains("second"));
+        assert!(
+            foreground_output(root.path(), &uuid::Uuid::new_v4().to_string())
+                .unwrap()
+                .is_empty()
+        );
         std::fs::remove_file(path.join("foreground-active")).unwrap();
         assert!(foreground_output(root.path(), &session).unwrap().is_empty());
         assert!(foreground_output(root.path(), "../invalid").is_err());

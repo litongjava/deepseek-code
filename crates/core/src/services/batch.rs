@@ -11,7 +11,7 @@ use std::{
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
-const WORKER_ENV: &str = "CLAUDE_RUST_BATCH_SUPERVISOR";
+const WORKER_ENV: &str = "DEEPSEEK_CODE_BATCH_SUPERVISOR";
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]

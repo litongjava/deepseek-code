@@ -274,6 +274,7 @@ fn main() {
                             response_schema: None,
                 provider_id: None, effort: None,
                             conversation_id: cid.clone(),
+                            context_boundary: None,
                             messages: vec![serde_json::json!({
                                 "role": "user",
                                 "content": msg.content.clone()

@@ -395,10 +395,25 @@ impl SessionStore {
 
     /// Rebuild protocol-valid tool history from the shared SQLite tool rows.
     pub fn model_history(&self, id: &str, format: &ApiFormat) -> Result<Vec<Value>> {
+        Ok(self.model_history_with_boundary(id, format)?.0)
+    }
+
+    /// The history and the compaction boundary it was built from, read in one
+    /// store view. The id describes the returned messages, so a request cannot
+    /// claim a boundary that was committed after this snapshot was taken.
+    pub fn model_history_with_boundary(
+        &self,
+        id: &str,
+        format: &ApiFormat,
+    ) -> Result<(Vec<Value>, Option<String>)> {
         self.db.with_conn(|conn| -> Result<_> {
             let mut history = Vec::new();
             let messages = message_repo::get_messages_by_conversation(conn, id)?;
             let start = messages.iter().rposition(|m| m.is_compact_boundary).unwrap_or(0);
+            let boundary = messages
+                .get(start)
+                .filter(|m| m.is_compact_boundary)
+                .map(|m| m.id.clone());
             for message in messages.into_iter().skip(start) {
                 if let Some(native) = crate::services::compaction::native::load(conn, &message.id)? {
                     history.push(json!({"role":message.role,"content":message.content,"provider_content":native}));
@@ -438,7 +453,7 @@ impl SessionStore {
                 else if !message.content.is_empty() { history.push(json!({"role":message.role,"content":message.content})); }
             }
             crate::native_engine::mcp_output::restore_history(&mut history, conn, id)?;
-            Ok(history)
+            Ok((history, boundary))
         })?
     }
 

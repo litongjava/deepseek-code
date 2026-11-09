@@ -574,9 +574,17 @@ async fn conversation_context_size(
     let id_clone = id.clone();
     let measured = tokio::task::spawn_blocking(move || {
         let conversation = db.with_conn(|conn| crate::db::conversation_repo::get_conversation(conn, &id_clone))??;
+        let Some(conversation) = conversation else { return Ok(None) };
         let store = crate::runtime::SessionStore::new(db);
-        let tokens = crate::services::context_usage::estimated_tokens(&store, &id_clone)?;
-        Ok::<_, anyhow::Error>(conversation.zip(tokens))
+        // The prompt and tool overhead is only measurable for the
+        // conversation's own model and provider.
+        let tokens = crate::services::context_usage::estimated_tokens(
+            &store,
+            &id_clone,
+            conversation.model.as_deref().unwrap_or_default(),
+            conversation.provider.as_deref(),
+        )?;
+        Ok::<_, anyhow::Error>(Some((conversation, tokens)))
     }).await;
     let (conversation, tokens) = match measured {
         Ok(Ok(Some(found))) => found,

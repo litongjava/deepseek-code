@@ -108,9 +108,22 @@ impl Project {
         let temp = tempfile::tempdir().unwrap();
         std::fs::create_dir_all(temp.path().join("data")).unwrap();
         std::fs::create_dir_all(temp.path().join("project")).unwrap();
+        // Keep the configured retry limit, but shorten the waits so the suite
+        // finishes; the limit and the reported counts are what these assert.
         std::fs::create_dir_all(temp.path().join("project/config")).unwrap();
-        std::fs::write(temp.path().join("project/config/orchestration.toml"),
-            include_str!("../../../src-tauri/config/orchestration.toml").replace("retry_base_backoff_ms = 2000", "retry_base_backoff_ms = 10")).unwrap();
+        std::fs::write(
+            temp.path().join("project/config/orchestration.toml"),
+            include_str!("../../../src-tauri/config/orchestration.toml")
+                .replace("retry_base_backoff_ms = 2000", "retry_base_backoff_ms = 10"),
+        )
+        .unwrap();
+        std::fs::create_dir_all(temp.path().join("project/config")).unwrap();
+        std::fs::write(
+            temp.path().join("project/config/orchestration.toml"),
+            include_str!("../../../src-tauri/config/orchestration.toml")
+                .replace("retry_base_backoff_ms = 2000", "retry_base_backoff_ms = 10"),
+        )
+        .unwrap();
         let project = Self { temp };
         std::fs::write(
             project.data().join("providers.json"),
@@ -179,12 +192,23 @@ impl Project {
             cwd: self.workspace(),
         };
         // The supervisor runs this executable again; it must not inherit the
-        // developer's session ownership, only this task's.
+        // developer's session ownership, only this task's. A real launch always
+        // passes the model snapshot, so an inherited one cannot be compared
+        // against this fixture's model.
+        let model = json!({
+            "id": "fixture-model", "name": "Fixture", "enabled": true,
+            "supports_vision": false, "supports_web_search": false, "max_tokens": 512
+        });
         let environment = vec![
             (
                 "DEEPSEEK_CODE_DATA_DIR".to_owned(),
                 self.data().to_string_lossy().into_owned(),
             ),
+            (
+                "DEEPSEEK_CODE_WORKER_AUTO_ROUTE".to_owned(),
+                "false".to_owned(),
+            ),
+            ("DEEPSEEK_CODE_WORKER_MODEL".to_owned(), model.to_string()),
             (CONTROL_ENV.to_owned(), String::new()),
         ];
         background_sessions::spawn(
@@ -251,7 +275,10 @@ async fn a_background_worker_reports_the_same_attempts_as_its_session() {
     let limit = deepseek_code_core::config::OrchestrationConfig::max_retries() + 1;
     assert_eq!(job.status, "failed", "{job:?}");
     // Task state itself carries the safe diagnostic, without copying output.
-    let error = job.error.as_deref().expect("task state explains the failure");
+    let error = job
+        .error
+        .as_deref()
+        .expect("task state explains the failure");
     for expected in [
         "stage=send",
         "class=transient",
@@ -312,14 +339,18 @@ async fn a_background_worker_does_not_retry_an_authentication_failure() {
 
     assert_eq!(job.status, "failed", "{job:?}");
     assert_eq!(fixture.requests.load(Ordering::SeqCst), 1);
-    let error = job.error.as_deref().expect("task state explains the failure");
+    let error = job
+        .error
+        .as_deref()
+        .expect("task state explains the failure");
     assert!(error.contains("http=401"), "{error}");
     assert!(error.contains("class=authentication"), "{error}");
     assert!(error.contains("attempts=1"), "{error}");
     let (stdout, stderr) = background_sessions::output(&project.data(), &job.id).unwrap();
     let transcript = format!("{stdout}{stderr}");
     assert!(transcript.contains("attempts=1"), "{transcript}");
-    assert!(transcript.contains("invalid api key"), "{transcript}");
+    assert!(transcript.contains("authentication failed"), "{transcript}");
+    assert!(!transcript.contains("invalid api key"), "{transcript}");
 
     let failure = persisted_snapshot(&project.data(), SESSION);
     assert_eq!(failure["attempts"], 1, "{failure}");

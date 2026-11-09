@@ -17,19 +17,43 @@ pub struct Language {
 }
 
 pub const LANGUAGES: &[Language] = &[
-    Language { id: "rust", name: "Rust", extensions: &[("rs", "rust")], command: "rust-analyzer", args: &[] },
-    Language { id: "python", name: "Python", extensions: &[("py", "python")], command: "pylsp", args: &[] },
+    Language {
+        id: "rust",
+        name: "Rust",
+        extensions: &[("rs", "rust")],
+        command: "rust-analyzer",
+        args: &[],
+    },
+    Language {
+        id: "python",
+        name: "Python",
+        extensions: &[("py", "python")],
+        command: "pylsp",
+        args: &[],
+    },
     Language {
         id: "typescript",
         name: "TypeScript/JavaScript",
         extensions: &[
-            ("ts", "typescript"), ("mts", "typescript"), ("cts", "typescript"), ("tsx", "typescriptreact"),
-            ("js", "javascript"), ("mjs", "javascript"), ("cjs", "javascript"), ("jsx", "javascriptreact"),
+            ("ts", "typescript"),
+            ("mts", "typescript"),
+            ("cts", "typescript"),
+            ("tsx", "typescriptreact"),
+            ("js", "javascript"),
+            ("mjs", "javascript"),
+            ("cjs", "javascript"),
+            ("jsx", "javascriptreact"),
         ],
         command: "typescript-language-server",
         args: &["--stdio"],
     },
-    Language { id: "html", name: "HTML", extensions: &[("html", "html"), ("htm", "html")], command: "vscode-html-language-server", args: &["--stdio"] },
+    Language {
+        id: "html",
+        name: "HTML",
+        extensions: &[("html", "html"), ("htm", "html")],
+        command: "vscode-html-language-server",
+        args: &["--stdio"],
+    },
     Language {
         id: "css",
         name: "CSS/SCSS/Less",
@@ -37,17 +61,49 @@ pub const LANGUAGES: &[Language] = &[
         command: "vscode-css-language-server",
         args: &["--stdio"],
     },
-    Language { id: "vue", name: "Vue", extensions: &[("vue", "vue")], command: "vue-language-server", args: &["--stdio"] },
-    Language { id: "go", name: "Go", extensions: &[("go", "go")], command: "gopls", args: &[] },
+    Language {
+        id: "vue",
+        name: "Vue",
+        extensions: &[("vue", "vue")],
+        command: "vue-language-server",
+        args: &["--stdio"],
+    },
+    Language {
+        id: "go",
+        name: "Go",
+        extensions: &[("go", "go")],
+        command: "gopls",
+        args: &[],
+    },
     Language {
         id: "cpp",
         name: "C/C++",
-        extensions: &[("c", "c"), ("h", "c"), ("cpp", "cpp"), ("cc", "cpp"), ("cxx", "cpp"), ("hpp", "cpp"), ("hh", "cpp")],
+        extensions: &[
+            ("c", "c"),
+            ("h", "c"),
+            ("cpp", "cpp"),
+            ("cc", "cpp"),
+            ("cxx", "cpp"),
+            ("hpp", "cpp"),
+            ("hh", "cpp"),
+        ],
         command: "clangd",
         args: &[],
     },
-    Language { id: "java", name: "Java", extensions: &[("java", "java")], command: "jdtls", args: &[] },
-    Language { id: "csharp", name: "C#", extensions: &[("cs", "csharp")], command: "csharp-ls", args: &[] },
+    Language {
+        id: "java",
+        name: "Java",
+        extensions: &[("java", "java")],
+        command: "jdtls",
+        args: &[],
+    },
+    Language {
+        id: "csharp",
+        name: "C#",
+        extensions: &[("cs", "csharp")],
+        command: "csharp-ls",
+        args: &[],
+    },
 ];
 
 /// Red Hat's Java extension on Open VSX ships jdtls with a matching Java
@@ -89,13 +145,19 @@ pub fn install_dir() -> Result<PathBuf> {
 /// An executable on PATH, including Windows command shims.
 pub fn find_on_path(name: &str) -> Option<PathBuf> {
     let candidates: Vec<String> = if cfg!(windows) && Path::new(name).extension().is_none() {
-        ["exe", "cmd", "bat"].iter().map(|ext| format!("{name}.{ext}")).collect()
+        ["exe", "cmd", "bat"]
+            .iter()
+            .map(|ext| format!("{name}.{ext}"))
+            .collect()
     } else {
         vec![name.to_owned()]
     };
     let path = std::env::var_os("PATH")?;
     std::env::split_paths(&path).find_map(|dir| {
-        candidates.iter().map(|candidate| dir.join(candidate)).find(|path| path.is_file())
+        candidates
+            .iter()
+            .map(|candidate| dir.join(candidate))
+            .find(|path| path.is_file())
     })
 }
 
@@ -113,37 +175,64 @@ fn managed_executable(root: &Path, language: &Language) -> Option<PathBuf> {
         } else {
             vec![name.to_owned()]
         };
-        names.into_iter().map(|name| dir.join(name)).find(|path| path.is_file())
+        names
+            .into_iter()
+            .map(|name| dir.join(name))
+            .find(|path| path.is_file())
     };
     match language.id {
-        "python" => bin(root.join("python").join(if cfg!(windows) { "Scripts" } else { "bin" }), "pylsp"),
-        "typescript" | "html" | "css" | "vue" => bin(root.join("node").join("node_modules").join(".bin"), language.command),
+        "python" => bin(
+            root.join("python")
+                .join(if cfg!(windows) { "Scripts" } else { "bin" }),
+            "pylsp",
+        ),
+        "typescript" | "html" | "css" | "vue" => bin(
+            root.join("node").join("node_modules").join(".bin"),
+            language.command,
+        ),
         _ => bin(root.join("bin"), language.command),
     }
 }
 
 fn jdtls_launch(root: &Path, workspace: &Path) -> Option<Launch> {
     let home = root.join("jdtls");
-    let launcher = std::fs::read_dir(home.join("plugins")).ok()?.flatten().map(|entry| entry.path()).find(|path| {
-        path.file_name()
-            .and_then(|name| name.to_str())
-            .is_some_and(|name| name.starts_with("org.eclipse.equinox.launcher_") && name.ends_with(".jar"))
-    })?;
+    let launcher = std::fs::read_dir(home.join("plugins"))
+        .ok()?
+        .flatten()
+        .map(|entry| entry.path())
+        .find(|path| {
+            path.file_name()
+                .and_then(|name| name.to_str())
+                .is_some_and(|name| {
+                    name.starts_with("org.eclipse.equinox.launcher_") && name.ends_with(".jar")
+                })
+        })?;
     let configuration = if cfg!(windows) {
         "config_win"
     } else if cfg!(target_os = "macos") {
-        if cfg!(target_arch = "aarch64") && home.join("config_mac_arm").is_dir() { "config_mac_arm" } else { "config_mac" }
+        if cfg!(target_arch = "aarch64") && home.join("config_mac_arm").is_dir() {
+            "config_mac_arm"
+        } else {
+            "config_mac"
+        }
     } else if cfg!(target_arch = "aarch64") && home.join("config_linux_arm").is_dir() {
         "config_linux_arm"
     } else {
         "config_linux"
     };
-    let bundled = root.join("jre").join("bin").join(if cfg!(windows) { "java.exe" } else { "java" });
-    let java = Some(bundled).filter(|path| path.is_file()).or_else(java_executable)?;
+    let bundled =
+        root.join("jre")
+            .join("bin")
+            .join(if cfg!(windows) { "java.exe" } else { "java" });
+    let java = Some(bundled)
+        .filter(|path| path.is_file())
+        .or_else(java_executable)?;
     // jdtls keeps per-project index data; one directory per workspace path.
     let mut hasher = std::collections::hash_map::DefaultHasher::new();
     std::hash::Hash::hash(&workspace, &mut hasher);
-    let data = root.join("jdtls-data").join(format!("{:016x}", std::hash::Hasher::finish(&hasher)));
+    let data = root
+        .join("jdtls-data")
+        .join(format!("{:016x}", std::hash::Hasher::finish(&hasher)));
     let args = [
         "-Declipse.application=org.eclipse.jdt.ls.core.id1",
         "-Dosgi.bundles.defaultStartLevel=4",
@@ -166,12 +255,19 @@ fn jdtls_launch(root: &Path, workspace: &Path) -> Option<Launch> {
         data.to_string_lossy().into_owned(),
     ])
     .collect();
-    Some(Launch { command: java, args })
+    Some(Launch {
+        command: java,
+        args,
+    })
 }
 
 fn java_executable() -> Option<PathBuf> {
     std::env::var_os("JAVA_HOME")
-        .map(|home| PathBuf::from(home).join("bin").join(if cfg!(windows) { "java.exe" } else { "java" }))
+        .map(|home| {
+            PathBuf::from(home)
+                .join("bin")
+                .join(if cfg!(windows) { "java.exe" } else { "java" })
+        })
         .filter(|path| path.is_file())
         .or_else(|| find_on_path("java"))
 }
@@ -180,13 +276,19 @@ fn java_executable() -> Option<PathBuf> {
 pub fn locate(language: &Language, workspace: &Path) -> Option<Launch> {
     let args = || language.args.iter().map(|arg| arg.to_string()).collect();
     if let Some(command) = find_on_path(language.command) {
-        return Some(Launch { command, args: args() });
+        return Some(Launch {
+            command,
+            args: args(),
+        });
     }
     let root = install_dir().ok()?;
     if language.id == "java" {
         return jdtls_launch(&root, workspace);
     }
-    managed_executable(&root, language).map(|command| Launch { command, args: args() })
+    managed_executable(&root, language).map(|command| Launch {
+        command,
+        args: args(),
+    })
 }
 
 /// Packages installed with npm for languages served by Node.js servers.
@@ -205,7 +307,9 @@ pub fn initialization_options(language: &Language) -> Option<Value> {
     if language.id != "vue" {
         return None;
     }
-    let managed = install_dir().ok().map(|root| root.join("node/node_modules/typescript/lib"));
+    let managed = install_dir()
+        .ok()
+        .map(|root| root.join("node/node_modules/typescript/lib"));
     let tsdk = managed.filter(|path| path.is_dir()).or_else(|| {
         // A global tsc lives at <prefix>/node_modules/typescript/bin/tsc.
         let tsc = find_on_path("tsc")?.canonicalize().ok()?;
@@ -221,9 +325,14 @@ pub fn resolve_command(command: &str, workspace: &Path) -> Option<Launch> {
         return None;
     }
     if let Some(path) = find_on_path(command) {
-        return Some(Launch { command: path, args: Vec::new() });
+        return Some(Launch {
+            command: path,
+            args: Vec::new(),
+        });
     }
-    let language = LANGUAGES.iter().find(|language| language.command == command)?;
+    let language = LANGUAGES
+        .iter()
+        .find(|language| language.command == command)?;
     let mut launch = locate(language, workspace)?;
     // Configured arguments replace the defaults for an ordinary executable.
     if language.id != "java" {
@@ -306,7 +415,12 @@ pub fn status(workspace: &Path) -> Vec<Value> {
         .collect()
 }
 
-async fn run(program: &Path, args: &[&str], envs: &[(&str, &Path)], progress: &(dyn Fn(&str) + Sync)) -> Result<()> {
+async fn run(
+    program: &Path,
+    args: &[&str],
+    envs: &[(&str, &Path)],
+    progress: &(dyn Fn(&str) + Sync),
+) -> Result<()> {
     progress(&format!("$ {} {}", program.display(), args.join(" ")));
     let mut command = tokio::process::Command::new(program);
     command.args(args).stdin(std::process::Stdio::null());
@@ -321,8 +435,17 @@ async fn run(program: &Path, args: &[&str], envs: &[(&str, &Path)], progress: &(
         // Some tools (python -m venv) report failures on stdout.
         let stderr = String::from_utf8_lossy(&output.stderr);
         let stdout = String::from_utf8_lossy(&output.stdout);
-        let text = if stderr.trim().is_empty() { stdout } else { stderr };
-        let tail: Vec<&str> = text.lines().filter(|line| !line.trim().is_empty()).rev().take(8).collect();
+        let text = if stderr.trim().is_empty() {
+            stdout
+        } else {
+            stderr
+        };
+        let tail: Vec<&str> = text
+            .lines()
+            .filter(|line| !line.trim().is_empty())
+            .rev()
+            .take(8)
+            .collect();
         bail!(
             "{} failed ({}):\n{}",
             program.display(),
@@ -343,8 +466,17 @@ pub async fn install(language: &Language, progress: &(dyn Fn(&str) + Sync)) -> R
     std::fs::create_dir_all(&root)?;
     match language.id {
         "rust" => {
-            let rustup = require("rustup", "install Rust with rustup first (https://rustup.rs)")?;
-            run(&rustup, &["component", "add", "rust-analyzer"], &[], progress).await?;
+            let rustup = require(
+                "rustup",
+                "install Rust with rustup first (https://rustup.rs)",
+            )?;
+            run(
+                &rustup,
+                &["component", "add", "rust-analyzer"],
+                &[],
+                progress,
+            )
+            .await?;
         }
         "python" => {
             let venv = root.join("python");
@@ -377,7 +509,13 @@ pub async fn install(language: &Language, progress: &(dyn Fn(&str) + Sync)) -> R
             let prefix = root.join("node");
             std::fs::create_dir_all(&prefix)?;
             let prefix_arg = prefix.to_string_lossy().into_owned();
-            let mut args = vec!["install", "--prefix", &prefix_arg, "--no-fund", "--no-audit"];
+            let mut args = vec![
+                "install",
+                "--prefix",
+                &prefix_arg,
+                "--no-fund",
+                "--no-audit",
+            ];
             args.extend(npm_packages(language).unwrap_or_default());
             run(&npm, &args, &[], progress).await?;
         }
@@ -385,14 +523,29 @@ pub async fn install(language: &Language, progress: &(dyn Fn(&str) + Sync)) -> R
             let go = require("go", "install Go first (https://go.dev/dl)")?;
             let bin = root.join("bin");
             std::fs::create_dir_all(&bin)?;
-            run(&go, &["install", "golang.org/x/tools/gopls@latest"], &[("GOBIN", bin.as_path())], progress).await?;
+            run(
+                &go,
+                &["install", "golang.org/x/tools/gopls@latest"],
+                &[("GOBIN", bin.as_path())],
+                progress,
+            )
+            .await?;
         }
         "csharp" => {
-            let dotnet = require("dotnet", "install the .NET SDK first (https://dotnet.microsoft.com/download)")?;
+            let dotnet = require(
+                "dotnet",
+                "install the .NET SDK first (https://dotnet.microsoft.com/download)",
+            )?;
             let bin = root.join("bin");
             std::fs::create_dir_all(&bin)?;
             let bin_arg = bin.to_string_lossy().into_owned();
-            run(&dotnet, &["tool", "install", "csharp-ls", "--tool-path", &bin_arg], &[], progress).await?;
+            run(
+                &dotnet,
+                &["tool", "install", "csharp-ls", "--tool-path", &bin_arg],
+                &[],
+                progress,
+            )
+            .await?;
         }
         "java" => install_jdtls(&root, progress).await?,
         _ => bail!(
@@ -403,7 +556,11 @@ pub async fn install(language: &Language, progress: &(dyn Fn(&str) + Sync)) -> R
     }
     let workspace = std::env::current_dir().unwrap_or_else(|_| root.clone());
     locate(language, &workspace).with_context(|| {
-        format!("{} was installed but could not be found afterwards; check {}", language.command, root.display())
+        format!(
+            "{} was installed but could not be found afterwards; check {}",
+            language.command,
+            root.display()
+        )
     })
 }
 
@@ -415,7 +572,9 @@ fn java_platform() -> Result<&'static str> {
         ("macos", "aarch64") => "darwin-arm64",
         ("windows", "x86_64") => "win32-x64",
         ("windows", "aarch64") => "win32-arm64",
-        (os, arch) => bail!("No packaged Java language server for {os}/{arch}; install jdtls manually"),
+        (os, arch) => {
+            bail!("No packaged Java language server for {os}/{arch}; install jdtls manually")
+        }
     })
 }
 
@@ -423,7 +582,9 @@ async fn install_jdtls(root: &Path, progress: &(dyn Fn(&str) + Sync)) -> Result<
     use futures::StreamExt;
     use tokio::io::AsyncWriteExt;
     let platform = java_platform()?;
-    let client = reqwest::Client::builder().timeout(std::time::Duration::from_secs(1800)).build()?;
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(1800))
+        .build()?;
     let release: Value = client
         .get(format!("{JAVA_PACKAGE_API}/{platform}/latest"))
         .send()
@@ -432,8 +593,13 @@ async fn install_jdtls(root: &Path, progress: &(dyn Fn(&str) + Sync)) -> Result<
         .json()
         .await
         .context("open-vsx.org did not return package metadata")?;
-    let url = release["files"]["download"].as_str().context("open-vsx.org returned no download link")?;
-    progress(&format!("Downloading redhat.java {} ({platform})", release["version"].as_str().unwrap_or("latest")));
+    let url = release["files"]["download"]
+        .as_str()
+        .context("open-vsx.org returned no download link")?;
+    progress(&format!(
+        "Downloading redhat.java {} ({platform})",
+        release["version"].as_str().unwrap_or("latest")
+    ));
     let response = client.get(url).send().await?.error_for_status()?;
     let archive = root.join("java-package.vsix");
     let mut file = tokio::fs::File::create(&archive).await?;
@@ -456,7 +622,10 @@ async fn install_jdtls(root: &Path, progress: &(dyn Fn(&str) + Sync)) -> Result<
         let _ = std::fs::remove_file(&archive);
         bail!("The download is not a package archive (the server may be unavailable); try again later");
     }
-    progress(&format!("Downloaded {:.1} MB; unpacking", written as f64 / 1_048_576.0));
+    progress(&format!(
+        "Downloaded {:.1} MB; unpacking",
+        written as f64 / 1_048_576.0
+    ));
     // Unpack beside the old install and swap, so a failure keeps it working.
     let staging = root.join("java.new");
     let _ = std::fs::remove_dir_all(&staging);
@@ -466,7 +635,10 @@ async fn install_jdtls(root: &Path, progress: &(dyn Fn(&str) + Sync)) -> Result<
     result?;
     let extension = staging.join("extension");
     let server = extension.join("server");
-    ensure!(server.join("plugins").is_dir(), "The package has no language server");
+    ensure!(
+        server.join("plugins").is_dir(),
+        "The package has no language server"
+    );
     let jre = std::fs::read_dir(extension.join("jre"))
         .ok()
         .and_then(|mut entries| entries.find_map(|entry| entry.ok().map(|entry| entry.path())));
@@ -481,7 +653,11 @@ async fn install_jdtls(root: &Path, progress: &(dyn Fn(&str) + Sync)) -> Result<
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
-        for entry in std::fs::read_dir(root.join("jre").join("bin")).into_iter().flatten().flatten() {
+        for entry in std::fs::read_dir(root.join("jre").join("bin"))
+            .into_iter()
+            .flatten()
+            .flatten()
+        {
             let _ = std::fs::set_permissions(entry.path(), std::fs::Permissions::from_mode(0o755));
         }
     }
@@ -495,13 +671,39 @@ async fn unzip(archive: &Path, target: &Path, progress: &(dyn Fn(&str) + Sync)) 
     if !cfg!(target_os = "linux") {
         // bsdtar on Windows 10+ and macOS reads zip archives.
         let tar = require("tar", "it is needed to unpack the package")?;
-        return run(&tar, &["-xf", &archive_arg, "-C", &target_arg], &[], progress).await;
+        return run(
+            &tar,
+            &["-xf", &archive_arg, "-C", &target_arg],
+            &[],
+            progress,
+        )
+        .await;
     }
     if let Some(unzip) = find_on_path("unzip") {
-        return run(&unzip, &["-q", &archive_arg, "extension/server/*", "extension/jre/*", "-d", &target_arg], &[], progress).await;
+        return run(
+            &unzip,
+            &[
+                "-q",
+                &archive_arg,
+                "extension/server/*",
+                "extension/jre/*",
+                "-d",
+                &target_arg,
+            ],
+            &[],
+            progress,
+        )
+        .await;
     }
-    let python = find_on_path("python3").context("Neither unzip nor python3 was found; install unzip")?;
-    run(&python, &["-m", "zipfile", "-e", &archive_arg, &target_arg], &[], progress).await
+    let python =
+        find_on_path("python3").context("Neither unzip nor python3 was found; install unzip")?;
+    run(
+        &python,
+        &["-m", "zipfile", "-e", &archive_arg, &target_arg],
+        &[],
+        progress,
+    )
+    .await
 }
 
 #[cfg(test)]
@@ -510,14 +712,29 @@ mod tests {
 
     #[test]
     fn extensions_map_to_languages_and_ids_accept_aliases() {
-        assert_eq!(for_extension("JAVA").map(|(language, id)| (language.id, id)), Some(("java", "java")));
-        assert_eq!(for_extension("tsx").map(|(_, id)| id), Some("typescriptreact"));
+        assert_eq!(
+            for_extension("JAVA").map(|(language, id)| (language.id, id)),
+            Some(("java", "java"))
+        );
+        assert_eq!(
+            for_extension("tsx").map(|(_, id)| id),
+            Some("typescriptreact")
+        );
         assert!(for_extension("txt").is_none());
         assert_eq!(by_id("js").map(|language| language.id), Some("typescript"));
         assert_eq!(by_id("c++").map(|language| language.id), Some("cpp"));
-        assert_eq!(by_id("C#").map(|language| language.command), Some("csharp-ls"));
-        assert_eq!(for_extension("scss").map(|(language, id)| (language.id, id)), Some(("css", "scss")));
-        assert_eq!(for_extension("vue").map(|(language, _)| language.command), Some("vue-language-server"));
+        assert_eq!(
+            by_id("C#").map(|language| language.command),
+            Some("csharp-ls")
+        );
+        assert_eq!(
+            for_extension("scss").map(|(language, id)| (language.id, id)),
+            Some(("css", "scss"))
+        );
+        assert_eq!(
+            for_extension("vue").map(|(language, _)| language.command),
+            Some("vue-language-server")
+        );
         assert!(initialization_options(by_id("html").unwrap()).is_none());
     }
 
@@ -525,7 +742,10 @@ mod tests {
     fn missing_servers_explain_how_to_install() {
         let java = by_id("java").unwrap();
         let message = missing_message(java);
-        assert!(message.contains("jdtls") && message.contains("/lsp install java"), "{message}");
+        assert!(
+            message.contains("jdtls") && message.contains("/lsp install java"),
+            "{message}"
+        );
         let cpp = by_id("cpp").unwrap();
         assert!(!missing_message(cpp).contains("/lsp install"));
     }

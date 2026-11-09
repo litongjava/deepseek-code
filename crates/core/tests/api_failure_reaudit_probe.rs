@@ -13,7 +13,10 @@ fn a_spaced_input_echo_in_the_error_message_is_withheld() {
     let text = json_body(serde_json::json!({
         "error": {"message": format!("rejected payload: {{\"input\" : \"{PRIVATE}\"}}")}
     }));
-    assert!(!text.contains(PRIVATE), "spaced request input leaked: {text}");
+    assert!(
+        !text.contains(PRIVATE),
+        "spaced request input leaked: {text}"
+    );
 }
 
 #[test]
@@ -45,7 +48,10 @@ fn request_structures_are_withheld_in_every_supported_shape() {
                 value[&key] = serde_json::json!(shape);
             }
             let text = json_body(value);
-            assert!(!text.contains(PRIVATE), "leaked via {field} shape {shape}: {text}");
+            assert!(
+                !text.contains(PRIVATE),
+                "leaked via {field} shape {shape}: {text}"
+            );
         }
     }
 }
@@ -59,7 +65,10 @@ fn a_plain_text_body_is_never_reproduced() {
     // A plain-text status line keeps its meaning through a category only.
     let unauthorized = safe_remote_error(b"Unauthorized", "text/plain");
     assert!(!unauthorized.contains("Unauthorized"), "{unauthorized}");
-    assert!(unauthorized.contains("authentication failed"), "{unauthorized}");
+    assert!(
+        unauthorized.contains("authentication failed"),
+        "{unauthorized}"
+    );
     assert!(unauthorized.contains("content omitted"), "{unauthorized}");
 
     let limited = safe_remote_error(b"rate limit exceeded, slow down", "text/plain");
@@ -77,9 +86,11 @@ fn a_structured_message_survives_wrapping_without_reproducing_the_body() {
         status: 400,
         retry_after: None,
         message,
+        server_request_id: None,
+        remote_code: None,
     });
-    let error = anyhow::Error::new(RequestFailure::from_error(&raw, 1))
-        .context("API request failed");
+    let error =
+        anyhow::Error::new(RequestFailure::from_error(&raw, 1)).context("API request failed");
     let diagnostic = deepseek_code_core::performance::request_diagnostic(&error);
     assert!(!diagnostic.contains(PRIVATE), "{diagnostic}");
     // The classification still works, so the failure stays diagnosable.
@@ -101,15 +112,25 @@ fn a_legitimate_error_message_still_reaches_the_diagnostic() {
     let text = json_body(serde_json::json!({
         "error": {"message": "max_tokens is invalid", "type": "invalid_request_error"}
     }));
-    assert!(text.contains("max_tokens is invalid"), "{text}");
+    // The identifier is a closed vocabulary; the free-text message is not kept.
+    assert!(text.contains("invalid_request_error"), "{text}");
+    assert!(text.contains("invalid request"), "{text}");
+    assert!(!text.contains("max_tokens is invalid"), "{text}");
 
     let failure = RequestFailure::from_error(
         &anyhow::Error::new(deepseek_code_core::performance::ApiError {
             status: 400,
             retry_after: None,
             message: text,
+            server_request_id: None,
+            remote_code: None,
         }),
         1,
     );
-    assert!(failure.diagnostic().contains("max_tokens is invalid"));
+    let diagnostic = failure.diagnostic();
+    assert!(diagnostic.contains("invalid_request_error"), "{diagnostic}");
+    assert!(
+        !diagnostic.contains("max_tokens is invalid"),
+        "{diagnostic}"
+    );
 }

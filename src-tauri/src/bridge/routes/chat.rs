@@ -194,6 +194,8 @@ pub(super) async fn start_chat(
                 response_schema: None,
                 provider_id: req.provider_id.clone(), effort: req.effort.clone(),
                 conversation_id: conv_id.clone(),
+                // The client supplies the messages; no boundary can be proven.
+                context_boundary: None,
                 messages: messages.clone(),
                 model: if model.is_empty() { "claude-sonnet-4-6".to_string() } else { model.clone() },
                 system_prompt: req.system_prompt.clone(),

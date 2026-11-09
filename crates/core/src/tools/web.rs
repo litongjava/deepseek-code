@@ -3,7 +3,12 @@ use anyhow::{anyhow, bail, Result};
 use futures::{stream::FuturesUnordered, StreamExt};
 use scraper::{ElementRef, Html, Selector};
 use serde_json::{json, Value};
-use std::{collections::{HashMap, HashSet}, io::Read, sync::{LazyLock, Mutex}, time::{Duration, Instant}};
+use std::{
+    collections::{HashMap, HashSet},
+    io::Read,
+    sync::{LazyLock, Mutex},
+    time::{Duration, Instant},
+};
 
 const MAX_RESPONSE_BYTES: usize = 2 * 1024 * 1024;
 const DEFAULT_CHARS: usize = 12_000;
@@ -29,7 +34,9 @@ pub(super) fn model_url(url: &str, local_approved: bool) -> Result<String> {
         bail!("WebFetch requires approval to access this local or private address");
     }
     if parsed.scheme() == "http" && !local {
-        parsed.set_scheme("https").map_err(|_| anyhow!("Cannot upgrade {url} to HTTPS"))?;
+        parsed
+            .set_scheme("https")
+            .map_err(|_| anyhow!("Cannot upgrade {url} to HTTPS"))?;
     }
     Ok(parsed.to_string())
 }
@@ -45,14 +52,23 @@ static CACHE: LazyLock<Mutex<HashMap<String, (Instant, Page)>>> = LazyLock::new(
 
 fn cached(url: &str) -> Option<Page> {
     let cache = CACHE.lock().unwrap_or_else(|e| e.into_inner());
-    cache.get(url).filter(|(at, _)| at.elapsed() < CACHE_TTL).map(|(_, page)| page.clone())
+    cache
+        .get(url)
+        .filter(|(at, _)| at.elapsed() < CACHE_TTL)
+        .map(|(_, page)| page.clone())
 }
 
 fn remember(url: &str, page: &Page) {
     let mut cache = CACHE.lock().unwrap_or_else(|e| e.into_inner());
     cache.retain(|_, (at, _)| at.elapsed() < CACHE_TTL);
     if cache.len() >= CACHE_ENTRIES {
-        if let Some(oldest) = cache.iter().min_by_key(|(_, (at, _))| *at).map(|(key, _)| key.clone()) { cache.remove(&oldest); }
+        if let Some(oldest) = cache
+            .iter()
+            .min_by_key(|(_, (at, _))| *at)
+            .map(|(key, _)| key.clone())
+        {
+            cache.remove(&oldest);
+        }
     }
     cache.insert(url.to_owned(), (Instant::now(), page.clone()));
 }
@@ -61,16 +77,36 @@ fn remember(url: &str, page: &Page) {
 /// to the model instead, which can fetch it explicitly.
 fn redirect_policy() -> reqwest::redirect::Policy {
     reqwest::redirect::Policy::custom(|attempt| {
-        let same_host = attempt.previous().first().and_then(|first| first.host_str()) == attempt.url().host_str();
-        if attempt.previous().len() >= 10 { attempt.error("too many redirects") } else if same_host { attempt.follow() } else { attempt.stop() }
+        let same_host = attempt
+            .previous()
+            .first()
+            .and_then(|first| first.host_str())
+            == attempt.url().host_str();
+        if attempt.previous().len() >= 10 {
+            attempt.error("too many redirects")
+        } else if same_host {
+            attempt.follow()
+        } else {
+            attempt.stop()
+        }
     })
 }
 
-fn cross_host_redirect(from: &str, status: reqwest::StatusCode, location: Option<&str>) -> Option<Value> {
-    if !status.is_redirection() { return None; }
-    let target = location.and_then(|location| reqwest::Url::parse(from).ok()?.join(location).ok()).map(|url| url.to_string())?;
-    Some(json!({"url":from,"redirect_url":target,"status":status.as_u16(),
-        "content":format!("The page redirects to a different host: {target}. Call WebFetch again with that URL to follow it.")}))
+fn cross_host_redirect(
+    from: &str,
+    status: reqwest::StatusCode,
+    location: Option<&str>,
+) -> Option<Value> {
+    if !status.is_redirection() {
+        return None;
+    }
+    let target = location
+        .and_then(|location| reqwest::Url::parse(from).ok()?.join(location).ok())
+        .map(|url| url.to_string())?;
+    Some(
+        json!({"url":from,"redirect_url":target,"status":status.as_u16(),
+        "content":format!("The page redirects to a different host: {target}. Call WebFetch again with that URL to follow it.")}),
+    )
 }
 
 fn selector(value: &str) -> Selector {
@@ -243,7 +279,9 @@ pub(super) async fn fetch(input: Value) -> Result<Value> {
             .as_str()
             .ok_or_else(|| anyhow!("url required"))?,
     )?;
-    let cacheable = input["headers"].as_object().map_or(true, |headers| headers.is_empty());
+    let cacheable = input["headers"]
+        .as_object()
+        .map_or(true, |headers| headers.is_empty());
     let page = match cacheable.then(|| cached(url.as_str())).flatten() {
         Some(page) => page,
         None => {
@@ -262,8 +300,16 @@ pub(super) async fn fetch(input: Value) -> Result<Value> {
                 }
             }
             let response = request.send().await?;
-            let location = response.headers().get("location").and_then(|v| v.to_str().ok()).map(str::to_owned);
-            if let Some(redirect) = cross_host_redirect(response.url().as_str(), response.status(), location.as_deref()) {
+            let location = response
+                .headers()
+                .get("location")
+                .and_then(|v| v.to_str().ok())
+                .map(str::to_owned);
+            if let Some(redirect) = cross_host_redirect(
+                response.url().as_str(),
+                response.status(),
+                location.as_deref(),
+            ) {
                 return Ok(redirect);
             }
             let response = response.error_for_status()?;
@@ -276,7 +322,9 @@ pub(super) async fn fetch(input: Value) -> Result<Value> {
                 .to_string();
             let (bytes, truncated) = read_bounded(response).await?;
             let page = (final_url, content_type, bytes, truncated);
-            if cacheable { remember(url.as_str(), &page); }
+            if cacheable {
+                remember(url.as_str(), &page);
+            }
             page
         }
     };
@@ -291,7 +339,9 @@ pub(super) fn fetch_blocking(input: Value) -> Result<Value> {
             .as_str()
             .ok_or_else(|| anyhow!("url required"))?,
     )?;
-    let cacheable = input["headers"].as_object().map_or(true, |headers| headers.is_empty());
+    let cacheable = input["headers"]
+        .as_object()
+        .map_or(true, |headers| headers.is_empty());
     if let Some(page) = cacheable.then(|| cached(url.as_str())).flatten() {
         return page_result(&input, &page.0, &page.1, &page.2, page.3);
     }
@@ -310,8 +360,16 @@ pub(super) fn fetch_blocking(input: Value) -> Result<Value> {
         }
     }
     let response = request.send()?;
-    let location = response.headers().get("location").and_then(|v| v.to_str().ok()).map(str::to_owned);
-    if let Some(redirect) = cross_host_redirect(response.url().as_str(), response.status(), location.as_deref()) {
+    let location = response
+        .headers()
+        .get("location")
+        .and_then(|v| v.to_str().ok())
+        .map(str::to_owned);
+    if let Some(redirect) = cross_host_redirect(
+        response.url().as_str(),
+        response.status(),
+        location.as_deref(),
+    ) {
         return Ok(redirect);
     }
     let response = response.error_for_status()?;
@@ -329,7 +387,9 @@ pub(super) fn fetch_blocking(input: Value) -> Result<Value> {
     let truncated = bytes.len() > MAX_RESPONSE_BYTES;
     bytes.truncate(MAX_RESPONSE_BYTES);
     let page = (final_url, content_type, bytes, truncated);
-    if cacheable { remember(url.as_str(), &page); }
+    if cacheable {
+        remember(url.as_str(), &page);
+    }
     page_result(&input, &page.0, &page.1, &page.2, page.3)
 }
 
@@ -642,18 +702,43 @@ mod tests {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let port = listener.local_addr().unwrap().port();
         let app = axum::Router::new()
-            .route("/page", axum::routing::get(move || { counter.fetch_add(1, std::sync::atomic::Ordering::SeqCst); async { "cached body" } }))
-            .route("/same", axum::routing::get(|| async { axum::response::Redirect::temporary("/page") }))
-            .route("/away", axum::routing::get(move || async move { axum::response::Redirect::temporary(&format!("http://localhost:{port}/page")) }));
-        let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap(); });
+            .route(
+                "/page",
+                axum::routing::get(move || {
+                    counter.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                    async { "cached body" }
+                }),
+            )
+            .route(
+                "/same",
+                axum::routing::get(|| async { axum::response::Redirect::temporary("/page") }),
+            )
+            .route(
+                "/away",
+                axum::routing::get(move || async move {
+                    axum::response::Redirect::temporary(&format!("http://localhost:{port}/page"))
+                }),
+            );
+        let server = tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
         let base = format!("http://127.0.0.1:{port}");
         for _ in 0..2 {
-            assert_eq!(fetch(json!({"url":format!("{base}/page")})).await.unwrap()["content"], "cached body");
+            assert_eq!(
+                fetch(json!({"url":format!("{base}/page")})).await.unwrap()["content"],
+                "cached body"
+            );
         }
         assert_eq!(hits.load(std::sync::atomic::Ordering::SeqCst), 1);
-        assert_eq!(fetch(json!({"url":format!("{base}/same")})).await.unwrap()["content"], "cached body");
+        assert_eq!(
+            fetch(json!({"url":format!("{base}/same")})).await.unwrap()["content"],
+            "cached body"
+        );
         let away = fetch(json!({"url":format!("{base}/away")})).await.unwrap();
-        assert_eq!(away["redirect_url"], format!("http://localhost:{port}/page"));
+        assert_eq!(
+            away["redirect_url"],
+            format!("http://localhost:{port}/page")
+        );
         assert!(away["content"].as_str().unwrap().contains("different host"));
         server.abort();
     }

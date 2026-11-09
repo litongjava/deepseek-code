@@ -25,25 +25,45 @@ pub fn definition() -> super::ToolDefinition {
 
 /// Validates the findings and renders the list the user sees.
 pub fn execute(input: &Value) -> Result<Value> {
-    let findings = input["findings"].as_array().context("findings must be an array")?;
+    let findings = input["findings"]
+        .as_array()
+        .context("findings must be an array")?;
     ensure!(findings.len() <= 32, "At most 32 findings");
     let mut lines = Vec::new();
     for (index, finding) in findings.iter().enumerate() {
         let field = |key: &str| finding[key].as_str().filter(|text| !text.trim().is_empty());
         let file = field("file").context("Each finding needs a file")?;
         let summary = field("summary").context("Each finding needs a summary")?;
-        let scenario = field("failure_scenario").context("Each finding needs a failure_scenario")?;
-        let location = match finding["line"].as_i64() { Some(line) => format!("{file}:{line}"), None => file.to_owned() };
-        let tags: Vec<&str> = ["category", "verdict", "outcome"].iter().filter_map(|key| field(key)).collect();
-        let tags = if tags.is_empty() { String::new() } else { format!(" [{}]", tags.join(", ")) };
-        lines.push(format!("{}. {location}{tags}\n   {summary}\n   Failure: {scenario}", index + 1));
+        let scenario =
+            field("failure_scenario").context("Each finding needs a failure_scenario")?;
+        let location = match finding["line"].as_i64() {
+            Some(line) => format!("{file}:{line}"),
+            None => file.to_owned(),
+        };
+        let tags: Vec<&str> = ["category", "verdict", "outcome"]
+            .iter()
+            .filter_map(|key| field(key))
+            .collect();
+        let tags = if tags.is_empty() {
+            String::new()
+        } else {
+            format!(" [{}]", tags.join(", "))
+        };
+        lines.push(format!(
+            "{}. {location}{tags}\n   {summary}\n   Failure: {scenario}",
+            index + 1
+        ));
     }
     let header = match findings.len() {
         0 => "No findings survived verification.".to_owned(),
         1 => "1 finding:".to_owned(),
         count => format!("{count} findings:"),
     };
-    let content = if lines.is_empty() { header } else { format!("{header}\n{}", lines.join("\n")) };
+    let content = if lines.is_empty() {
+        header
+    } else {
+        format!("{header}\n{}", lines.join("\n"))
+    };
     Ok(json!({"count":findings.len(),"level":input["level"],"content":content}))
 }
 
@@ -58,7 +78,10 @@ mod tests {
             {"file":"src/b.rs","summary":"Leak","failure_scenario":"handle never closed"}]})).unwrap();
         assert_eq!(out["count"], 2);
         assert_eq!(out["content"], "2 findings:\n1. src/a.rs:12 [correctness, CONFIRMED]\n   Off by one\n   Failure: len 0 panics\n2. src/b.rs\n   Leak\n   Failure: handle never closed");
-        assert_eq!(execute(&json!({"findings":[]})).unwrap()["content"], "No findings survived verification.");
+        assert_eq!(
+            execute(&json!({"findings":[]})).unwrap()["content"],
+            "No findings survived verification."
+        );
         assert!(execute(&json!({"findings":[{"file":"a","summary":"s"}]})).is_err());
     }
 }

@@ -121,6 +121,7 @@ async fn h5_chat_handler(
                 response_schema: None,
                 provider_id: None, effort: None,
                 conversation_id: conv_id.clone(),
+                context_boundary: None,
                 messages: vec![serde_json::json!({
                     "role": "user",
                     "content": message

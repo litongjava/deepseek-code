@@ -124,7 +124,9 @@ pub fn preview(name: &str, input: &Value, cwd: &Path) -> Option<Value> {
     };
     let before = capture(&path)?;
     let replace = |content: &str, old: &str, new: &str, all: bool| -> Option<String> {
-        super::text_edit::replace(content, old, new, all).ok().map(|(text, _)| text)
+        super::text_edit::replace(content, old, new, all)
+            .ok()
+            .map(|(text, _)| text)
     };
     let after = match name {
         "Write" => input["content"].as_str()?.to_owned(),
@@ -137,7 +139,12 @@ pub fn preview(name: &str, input: &Value, cwd: &Path) -> Option<Value> {
         "MultiEdit" => {
             let mut content = before.clone();
             for edit in input["edits"].as_array()? {
-                content = replace(&content, edit["old_string"].as_str()?, edit["new_string"].as_str()?, edit["replace_all"].as_bool().unwrap_or(false))?;
+                content = replace(
+                    &content,
+                    edit["old_string"].as_str()?,
+                    edit["new_string"].as_str()?,
+                    edit["replace_all"].as_bool().unwrap_or(false),
+                )?;
             }
             content
         }
@@ -228,11 +235,34 @@ mod tests {
         fs::write(temp.path().join("a.py"), "def f():\n    return 1\n").unwrap();
         let edit = json!({"file_path":"a.py","old_string":"return 1","new_string":"return 2"});
         let change = preview("Edit", &edit, temp.path()).unwrap();
-        assert_eq!((change["added"].clone(), change["removed"].clone(), change["created"].clone()), (json!(1), json!(1), json!(false)));
-        assert_eq!(fs::read_to_string(temp.path().join("a.py")).unwrap(), "def f():\n    return 1\n");
-        assert!(preview("Edit", &json!({"file_path":"a.py","old_string":"missing","new_string":"x"}), temp.path()).is_none());
-        let created = preview("Write", &json!({"file_path":"new.txt","content":"a\nb\n"}), temp.path()).unwrap();
-        assert_eq!((created["added"].clone(), created["created"].clone()), (json!(2), json!(true)));
+        assert_eq!(
+            (
+                change["added"].clone(),
+                change["removed"].clone(),
+                change["created"].clone()
+            ),
+            (json!(1), json!(1), json!(false))
+        );
+        assert_eq!(
+            fs::read_to_string(temp.path().join("a.py")).unwrap(),
+            "def f():\n    return 1\n"
+        );
+        assert!(preview(
+            "Edit",
+            &json!({"file_path":"a.py","old_string":"missing","new_string":"x"}),
+            temp.path()
+        )
+        .is_none());
+        let created = preview(
+            "Write",
+            &json!({"file_path":"new.txt","content":"a\nb\n"}),
+            temp.path(),
+        )
+        .unwrap();
+        assert_eq!(
+            (created["added"].clone(), created["created"].clone()),
+            (json!(2), json!(true))
+        );
         assert!(preview("Bash", &json!({"command":"ls"}), temp.path()).is_none());
     }
 }

@@ -198,18 +198,18 @@ async fn execute(
     std::env::set_var(jobs::CONTROL_ENV, &dir);
     // These are the only settings accepted from the same-user IPC frontend.
     for name in [
-        "CLAUDE_RUST_CHILD_API_KEY",
-        "CLAUDE_RUST_WORKER_AUTO_ROUTE",
-        "CLAUDE_RUST_WORKER_MODEL",
+        "DEEPSEEK_CODE_CHILD_API_KEY",
+        "DEEPSEEK_CODE_WORKER_AUTO_ROUTE",
+        "DEEPSEEK_CODE_WORKER_MODEL",
     ] {
         std::env::remove_var(name);
     }
     for (name, value) in environment {
         ensure!(
             [
-                "CLAUDE_RUST_CHILD_API_KEY",
-                "CLAUDE_RUST_WORKER_AUTO_ROUTE",
-                "CLAUDE_RUST_WORKER_MODEL"
+                "DEEPSEEK_CODE_CHILD_API_KEY",
+                "DEEPSEEK_CODE_WORKER_AUTO_ROUTE",
+                "DEEPSEEK_CODE_WORKER_MODEL"
             ]
             .contains(&name.as_str()),
             "Unsupported worker environment setting"
@@ -225,7 +225,7 @@ async fn execute(
     let paths = RuntimePaths::new(worker.root.clone())?;
     let mut selection =
         crate::config::select(&cli, &paths, cli.model.as_deref(), cli.provider.as_deref())?;
-    if let Ok(value) = std::env::var("CLAUDE_RUST_WORKER_MODEL") {
+    if let Ok(value) = std::env::var("DEEPSEEK_CODE_WORKER_MODEL") {
         let model: deepseek_code_core::native_engine::provider_manager::ModelConfig =
             serde_json::from_str(&value)?;
         let provider = selection
@@ -250,7 +250,7 @@ async fn execute(
         session.full_access = cli.full_access;
         session.permissions.set_plan_launch_permissions(cli.allow_dangerously_skip_permissions, cli.full_access);
         session.auto_route =
-            std::env::var("CLAUDE_RUST_WORKER_AUTO_ROUTE").as_deref() == Ok("true");
+            std::env::var("DEEPSEEK_CODE_WORKER_AUTO_ROUTE").as_deref() == Ok("true");
         session
             .set_permission_mode(match cli.permission_mode {
                 PermissionModeArg::Ask => "ask",

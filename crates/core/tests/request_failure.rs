@@ -4,7 +4,10 @@
 //! credential or billing endpoint is used.
 use deepseek_code_core::{
     config::OrchestrationConfig,
-    native_engine::{openai_client::OpenAIClient, provider_manager::ResolvedProvider},
+    native_engine::{
+        anthropic_client::AnthropicClient, openai_client::OpenAIClient,
+        provider_manager::ResolvedProvider,
+    },
     performance::{self, AttemptBudget, ErrorClass, RequestStage},
 };
 use futures::StreamExt;
@@ -36,8 +39,12 @@ enum Reply {
     /// Send one content chunk, then close without the terminating chunk.
     SseContentThenClose,
     /// Send one content chunk, terminate the chunked body properly, and never
+
     /// send a completion marker: a clean end of stream without completion.
     SsePartialCleanEnd,
+
+    /// The same for the Anthropic Messages protocol.
+    AnthropicPartialCleanEnd,
     Status {
         code: u16,
         body: String,
@@ -131,9 +138,35 @@ async fn answer(socket: &mut TcpStream, reply: Reply) -> std::io::Result<()> {
             socket.write_all(b"0\r\n\r\n").await?;
             socket.flush().await
         }
+        Reply::AnthropicPartialCleanEnd => {
+            read_request(socket).await?;
+
+            socket
+
+                .write_all(
+
+                    b"HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\ntransfer-encoding: chunked\r\nconnection: close\r\n\r\n",
+
+                )
+
+                .await?;
+
+            let payload = "data: {{\"type\":\"content_block_delta\",\"index\":0,\"delta\":{{\"type\":\"text_delta\",\"text\":\"Partial anthro\"}}}}\n\n";
+
+            socket
+                .write_all(format!("{:x}\r\n{payload}\r\n", payload.len()).as_bytes())
+                .await?;
+
+            socket.write_all(b"0\r\n\r\n").await?;
+
+            socket.flush().await
+        }
+
         Reply::Status {
             code,
+
             body,
+
             retry_after,
         } => {
             read_request(socket).await?;
@@ -203,6 +236,15 @@ async fn read_request(socket: &mut TcpStream) -> std::io::Result<Vec<u8>> {
         }
         return Ok(buffer);
     }
+}
+
+fn anthropic_provider(base: &str) -> ResolvedProvider {
+    let mut selected = provider(base);
+
+    selected.provider.api_format =
+        deepseek_code_core::native_engine::provider_manager::ApiFormat::Anthropic;
+
+    selected
 }
 
 fn provider(base: &str) -> ResolvedProvider {
@@ -365,8 +407,9 @@ async fn a_clean_stream_end_after_a_send_retry_keeps_both_attempts() {
     assert_eq!(fixture.count(), 2);
     assert_eq!(text.matches("Partial clean").count(), 1, "{text}");
     // The tool loop reads this after a clean end of stream, so a missing
-    // completion marker no longer reports an unknown count.
+    // completion marker no longer reports an unknown count or status.
     assert_eq!(attempts.attempts(), Some(2));
+    assert_eq!(attempts.status(), Some(200));
 }
 
 #[tokio::test]
@@ -381,17 +424,50 @@ async fn a_clean_stream_end_on_the_first_attempt_keeps_one_attempt() {
     assert_eq!(fixture.count(), 1);
     assert_eq!(text.matches("Partial clean").count(), 1, "{text}");
     assert_eq!(attempts.attempts(), Some(1));
+    assert_eq!(attempts.status(), Some(200));
 }
 
 #[tokio::test]
 async fn an_unobserved_counter_stays_unknown() {
     let counter = performance::AttemptCounter::default();
     assert_eq!(counter.attempts(), None, "zero attempts must not become 1");
-    counter.set(3);
+    counter.set_attempts(3);
     assert_eq!(counter.attempts(), Some(3));
 }
 
 #[tokio::test]
+
+async fn the_anthropic_protocol_reports_attempts_and_status_after_a_clean_eof() {
+    let fixture = fixture(vec![Reply::AnthropicPartialCleanEnd]).await;
+
+    let (stream, attempts) = AnthropicClient::new()
+        .send_message_stream_with_thinking_counted(
+            &anthropic_provider(&fixture.base),
+            vec![],
+            None,
+            vec![],
+            128,
+            false,
+            None,
+        )
+        .await
+        .unwrap();
+
+    let (text, error) = collect(stream).await;
+
+    assert_eq!(error, None);
+
+    assert_eq!(fixture.count(), 1);
+
+    assert_eq!(text.matches("Partial anthro").count(), 1, "{text}");
+
+    assert_eq!(attempts.attempts(), Some(1));
+
+    assert_eq!(attempts.status(), Some(200));
+}
+
+#[tokio::test]
+
 async fn authentication_and_request_errors_are_not_retried() {
     let denied = fixture(vec![Reply::Status {
         code: 401,
@@ -428,7 +504,12 @@ async fn authentication_and_request_errors_are_not_retried() {
         "{error:#}"
     );
     let diagnostic = performance::request_diagnostic(&error);
-    assert!(diagnostic.contains("max_tokens is invalid"), "{diagnostic}");
+    // Free text from the body is never reproduced; only the category is kept.
+    assert!(
+        !diagnostic.contains("max_tokens is invalid"),
+        "{diagnostic}"
+    );
+    assert!(diagnostic.contains("invalid request"), "{diagnostic}");
     assert!(diagnostic.contains("class=permanent"), "{diagnostic}");
 }
 
@@ -441,8 +522,9 @@ async fn an_echoed_credential_is_redacted_from_the_diagnostic() {
             .await,
     );
     let diagnostic = performance::request_diagnostic(&error);
+    // Nothing from the body is reproduced, so the echoed key cannot survive.
     assert!(!diagnostic.contains(API_KEY), "{diagnostic}");
-    assert!(diagnostic.contains("[REDACTED]"), "{diagnostic}");
+    assert!(diagnostic.contains("authentication failed"), "{diagnostic}");
     // The log line written by the engine is the same sanitized text.
     let rendered = format!("{error:#}");
     assert!(!rendered.contains(API_KEY), "{rendered}");
@@ -454,6 +536,8 @@ fn a_structured_failure_survives_wrapping_and_reports_matching_attempts() {
         status: 503,
         retry_after: None,
         message: "upstream unavailable".into(),
+        server_request_id: None,
+        remote_code: None,
     }
     .into();
     let failure = performance::RequestFailure::from_error(&raw, 4);
@@ -542,8 +626,9 @@ async fn a_server_echoing_the_request_body_cannot_reach_the_diagnostic() {
         !diagnostic.contains("fixture-private-prompt"),
         "{diagnostic}"
     );
-    // The server's own error meaning survives.
-    assert!(diagnostic.contains("invalid parameter"), "{diagnostic}");
+    // The server's own error meaning survives as a category, not as its text.
+    assert!(!diagnostic.contains("invalid parameter"), "{diagnostic}");
+    assert!(diagnostic.contains("invalid request"), "{diagnostic}");
     assert!(diagnostic.contains("http=400"), "{diagnostic}");
     // A raw rendering of the same chain must not expose it either.
     assert!(!format!("{error:#}").contains("fixture-private-prompt"));
@@ -567,7 +652,7 @@ async fn a_non_json_error_body_is_summarized_instead_of_included() {
         !diagnostic.contains("fixture-private-prompt"),
         "{diagnostic}"
     );
-    assert!(diagnostic.contains("non-JSON"), "{diagnostic}");
+    assert!(diagnostic.contains("content omitted"), "{diagnostic}");
     assert!(diagnostic.contains("http=400"), "{diagnostic}");
     assert_eq!(fixture.count(), 1);
 }
@@ -596,7 +681,7 @@ async fn an_error_message_that_echoes_request_json_is_withheld() {
         !diagnostic.contains("fixture-private-prompt"),
         "{diagnostic}"
     );
-    assert!(diagnostic.contains("echo the request"), "{diagnostic}");
+    assert!(diagnostic.contains("invalid request"), "{diagnostic}");
     assert!(diagnostic.contains("http=400"), "{diagnostic}");
 }
 

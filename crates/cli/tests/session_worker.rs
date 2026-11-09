@@ -317,7 +317,7 @@ async fn submit_in_mode(
         "--api-format".into(),
         "openai".into(),
         "--api-key-env".into(),
-        "CLAUDE_RUST_CHILD_API_KEY".into(),
+        "DEEPSEEK_CODE_CHILD_API_KEY".into(),
         "--model".into(),
         model.into(),
         "--max-tokens".into(),
@@ -331,13 +331,13 @@ async fn submit_in_mode(
         prompt.into(),
     ];
     let mut environment = vec![(
-        "CLAUDE_RUST_CHILD_API_KEY".into(),
+        "DEEPSEEK_CODE_CHILD_API_KEY".into(),
         "fixture-secret-only-in-memory".into(),
     )];
     if let Some(base) =
         deepseek_code_core::native_engine::provider_manager::one_million_context_base(model)
     {
-        environment.push(("CLAUDE_RUST_WORKER_MODEL".into(),json!({"id":base,"name":base,"enabled":true,"supports_vision":false,"supports_web_search":false,"context_window":1_000_000,"max_tokens":max_tokens}).to_string()));
+        environment.push(("DEEPSEEK_CODE_WORKER_MODEL".into(),json!({"id":base,"name":base,"enabled":true,"supports_vision":false,"supports_web_search":false,"context_window":1_000_000,"max_tokens":max_tokens}).to_string()));
     }
     worker::call(
         host,
@@ -454,7 +454,7 @@ async fn added_directory_survives_worker_resume_without_granting_other_sessions(
             "--api-format",
             "openai",
             "--api-key-env",
-            "CLAUDE_RUST_CHILD_API_KEY",
+            "DEEPSEEK_CODE_CHILD_API_KEY",
             "--model",
             "fixture-one",
             "--permission-mode",
@@ -463,7 +463,7 @@ async fn added_directory_survives_worker_resume_without_granting_other_sessions(
             "--",
             "setup",
         ])
-        .env("CLAUDE_RUST_CHILD_API_KEY", "fixture-secret-only-in-memory")
+        .env("DEEPSEEK_CODE_CHILD_API_KEY", "fixture-secret-only-in-memory")
         .output()
         .await
         .unwrap();

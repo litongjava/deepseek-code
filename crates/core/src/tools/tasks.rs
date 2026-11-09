@@ -38,25 +38,51 @@ fn readonly(name: &str) -> bool {
 /// Read only the owning session's title; never open logs or create task storage.
 pub fn display_title(root: &Path, session: &str, input: &Value) -> Option<String> {
     let session = uuid::Uuid::parse_str(session).ok()?.to_string();
-    let id = input["task_id"].as_str().or_else(|| input["taskId"].as_str()).or_else(|| input["id"].as_str()).or_else(|| input["shell_id"].as_str())?;
-    let title = if uuid::Uuid::parse_str(id).is_ok() && root.join("background-tasks").join(id).join("state.json").is_file() {
+    let id = input["task_id"]
+        .as_str()
+        .or_else(|| input["taskId"].as_str())
+        .or_else(|| input["id"].as_str())
+        .or_else(|| input["shell_id"].as_str())?;
+    let title = if uuid::Uuid::parse_str(id).is_ok()
+        && root
+            .join("background-tasks")
+            .join(id)
+            .join("state.json")
+            .is_file()
+    {
         let job = crate::services::background_sessions::get(root, id).ok()?;
-        if job.parent_session_id != session { return None; }
+        if job.parent_session_id != session {
+            return None;
+        }
         job.title
     } else {
-        let db = rusqlite::Connection::open_with_flags(root.join("tasks").join(format!("{session}.sqlite3")), rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY).ok()?;
+        let db = rusqlite::Connection::open_with_flags(
+            root.join("tasks").join(format!("{session}.sqlite3")),
+            rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+        )
+        .ok()?;
         db.busy_timeout(std::time::Duration::from_millis(25)).ok()?;
-        let body: String = db.query_row("SELECT body FROM tasks WHERE id=?1", [id], |row| row.get(0)).ok()?;
+        let body: String = db
+            .query_row("SELECT body FROM tasks WHERE id=?1", [id], |row| row.get(0))
+            .ok()?;
         let task: Value = serde_json::from_str(&body).ok()?;
         task["subject"].as_str()?.to_owned()
     };
-    let title: String = title.chars().filter(|ch| !ch.is_control()).take(160).collect();
+    let title: String = title
+        .chars()
+        .filter(|ch| !ch.is_control())
+        .take(160)
+        .collect();
     (!title.trim().is_empty()).then(|| title.trim().into())
 }
 
 pub fn execute_for_session(name: &str, input: Value, root: &Path, session: &str) -> Result<Value> {
     let session = uuid::Uuid::parse_str(session).context("Invalid task session ID")?;
-    if let Some(output) = super::background_shell::control(name, &input, root, &session.to_string())? { return Ok(output); }
+    if let Some(output) =
+        super::background_shell::control(name, &input, root, &session.to_string())?
+    {
+        return Ok(output);
+    }
     execute_at(
         name,
         input,
@@ -72,37 +98,93 @@ pub async fn execute_for_session_async(
 ) -> Result<Value> {
     uuid::Uuid::parse_str(session).context("Invalid task session ID")?;
     if matches!(name, "TaskGet" | "TaskOutput" | "TaskStop") {
-        if let Some(id) = input["task_id"].as_str().or_else(|| input["taskId"].as_str()).or_else(|| input["id"].as_str()) {
-            if uuid::Uuid::parse_str(id).is_ok() && root.join("background-tasks").join(id).join("state.json").exists() {
+        if let Some(id) = input["task_id"]
+            .as_str()
+            .or_else(|| input["taskId"].as_str())
+            .or_else(|| input["id"].as_str())
+        {
+            if uuid::Uuid::parse_str(id).is_ok()
+                && root
+                    .join("background-tasks")
+                    .join(id)
+                    .join("state.json")
+                    .exists()
+            {
                 use crate::services::background_sessions;
                 let mut job = background_sessions::get(root, id)?;
-                ensure!(job.parent_session_id == session, "Task belongs to another session");
+                ensure!(
+                    job.parent_session_id == session,
+                    "Task belongs to another session"
+                );
                 if name == "TaskOutput" {
-                    let block = input.get("block").map(|value| value.as_bool().context("block must be boolean")).transpose()?.unwrap_or(true);
-                    let timeout = input.get("timeout").map(|value| value.as_u64().context("TaskOutput timeout must be an integer number of milliseconds")).transpose()?.unwrap_or(30_000);
-                    ensure!(timeout <= 600_000, "TaskOutput timeout must be 0..600000 milliseconds");
-                    let deadline = tokio::time::Instant::now() + std::time::Duration::from_millis(timeout);
-                    while block && matches!(job.status.as_str(), "starting" | "running") && tokio::time::Instant::now() < deadline {
-                        tokio::time::sleep_until((tokio::time::Instant::now() + std::time::Duration::from_millis(100)).min(deadline)).await;
+                    let block = input
+                        .get("block")
+                        .map(|value| value.as_bool().context("block must be boolean"))
+                        .transpose()?
+                        .unwrap_or(true);
+                    let timeout = input
+                        .get("timeout")
+                        .map(|value| {
+                            value.as_u64().context(
+                                "TaskOutput timeout must be an integer number of milliseconds",
+                            )
+                        })
+                        .transpose()?
+                        .unwrap_or(30_000);
+                    ensure!(
+                        timeout <= 600_000,
+                        "TaskOutput timeout must be 0..600000 milliseconds"
+                    );
+                    let deadline =
+                        tokio::time::Instant::now() + std::time::Duration::from_millis(timeout);
+                    while block
+                        && matches!(job.status.as_str(), "starting" | "running")
+                        && tokio::time::Instant::now() < deadline
+                    {
+                        tokio::time::sleep_until(
+                            (tokio::time::Instant::now() + std::time::Duration::from_millis(100))
+                                .min(deadline),
+                        )
+                        .await;
                         job = background_sessions::get(root, id)?;
                     }
                 }
-                if name == "TaskStop" { job = background_sessions::cancel(root, id)?; }
-                let (stdout, stderr) = background_sessions::output(root, id)?;
-                let mut stdout = stdout.lines().filter_map(|line| serde_json::from_str::<Value>(line).ok()).filter_map(|event| {
-                    event["result"].as_str().or_else(|| event["delta"].as_str()).map(str::to_owned)
-                }).collect::<Vec<_>>().join("\n");
-                if root.join(crate::runtime::DATABASE_FILE).exists() {
-                    let execution = crate::services::session_worker::job_execution_session(root, &job)?;
-                    let conn = rusqlite::Connection::open_with_flags(root.join(crate::runtime::DATABASE_FILE), rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)?;
-                    let report: Option<String> = conn.query_row("SELECT content FROM messages WHERE conversation_id=?1 AND role='assistant' AND content<>'' ORDER BY sort_order DESC LIMIT 1", [&execution], |row| row.get(0)).optional()?;
-                    if let Some(report) = report { stdout = report; }
+                if name == "TaskStop" {
+                    job = background_sessions::cancel(root, id)?;
                 }
-                return Ok(json!({"task_id":job.id,"subject":job.title,"status":job.status,"stdout":stdout,"stderr":stderr,"exit_code":job.exit_code,"error":job.error,"retrieval_status":if matches!(job.status.as_str(),"completed"|"failed"|"cancelled") {"success"} else {"not_ready"}}));
+                let (stdout, stderr) = background_sessions::output(root, id)?;
+                let mut stdout = stdout
+                    .lines()
+                    .filter_map(|line| serde_json::from_str::<Value>(line).ok())
+                    .filter_map(|event| {
+                        event["result"]
+                            .as_str()
+                            .or_else(|| event["delta"].as_str())
+                            .map(str::to_owned)
+                    })
+                    .collect::<Vec<_>>()
+                    .join("\n");
+                if root.join(crate::runtime::DATABASE_FILE).exists() {
+                    let execution =
+                        crate::services::session_worker::job_execution_session(root, &job)?;
+                    let conn = rusqlite::Connection::open_with_flags(
+                        root.join(crate::runtime::DATABASE_FILE),
+                        rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+                    )?;
+                    let report: Option<String> = conn.query_row("SELECT content FROM messages WHERE conversation_id=?1 AND role='assistant' AND content<>'' ORDER BY sort_order DESC LIMIT 1", [&execution], |row| row.get(0)).optional()?;
+                    if let Some(report) = report {
+                        stdout = report;
+                    }
+                }
+                return Ok(
+                    json!({"task_id":job.id,"subject":job.title,"status":job.status,"stdout":stdout,"stderr":stderr,"exit_code":job.exit_code,"error":job.error,"retrieval_status":if matches!(job.status.as_str(),"completed"|"failed"|"cancelled") {"success"} else {"not_ready"}}),
+                );
             }
         }
     }
-    if let Some(output) = super::background_shell::control_async(name, &input, root, session).await? {
+    if let Some(output) =
+        super::background_shell::control_async(name, &input, root, session).await?
+    {
         return Ok(output);
     }
     let (name, root, session) = (name.to_owned(), root.to_owned(), session.to_owned());
@@ -161,12 +243,23 @@ fn execute_at(name: &str, input: Value, path: &Path) -> Result<Value> {
 fn execute_at_owned(name: &str, mut input: Value, path: &Path, shell_owner: bool) -> Result<Value> {
     if !shell_owner {
         ensure!(
-            input.get("metadata").and_then(|m| m.get("managed_shell")).is_none(),
+            input
+                .get("metadata")
+                .and_then(|m| m.get("managed_shell"))
+                .is_none(),
             "managed_shell provenance is reserved for the shell process owner"
         );
     }
     // shell_id is the reference CLI's deprecated TaskStop alias.
-    if input.get("id").is_none() { if let Some(id) = input.get("task_id").or_else(|| input.get("shell_id")).cloned() { input["id"] = id; } }
+    if input.get("id").is_none() {
+        if let Some(id) = input
+            .get("task_id")
+            .or_else(|| input.get("shell_id"))
+            .cloned()
+        {
+            input["id"] = id;
+        }
+    }
     if input.get("taskId").is_none() {
         if let Some(id) = input.get("id").cloned() {
             input["taskId"] = id;
@@ -453,14 +546,40 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         let job = json!({"id":id,"parent_session_id":parent,"session_id":uuid::Uuid::new_v4().to_string(),"title":"Review changes","status":"completed","supervisor_pid":null,"child_pid":null,"started_ms":0,"heartbeat_ms":0,"finished_ms":1,"exit_code":0,"error":null});
         std::fs::write(dir.join("state.json"), job.to_string()).unwrap();
-        assert_eq!(display_title(root.path(), &parent, &json!({"task_id":id})).as_deref(), Some("Review changes"));
-        assert!(display_title(root.path(), &uuid::Uuid::new_v4().to_string(), &json!({"task_id":id})).is_none());
-        std::fs::write(dir.join("output.jsonl"), "{\"type\":\"result\",\"result\":\"Review report\"}\n").unwrap();
+        assert_eq!(
+            display_title(root.path(), &parent, &json!({"task_id":id})).as_deref(),
+            Some("Review changes")
+        );
+        assert!(display_title(
+            root.path(),
+            &uuid::Uuid::new_v4().to_string(),
+            &json!({"task_id":id})
+        )
+        .is_none());
+        std::fs::write(
+            dir.join("output.jsonl"),
+            "{\"type\":\"result\",\"result\":\"Review report\"}\n",
+        )
+        .unwrap();
         for name in ["TaskGet", "TaskOutput"] {
-            let output = execute_for_session_async(name, json!({"task_id":id,"block":false}), root.path(), &parent).await.unwrap();
+            let output = execute_for_session_async(
+                name,
+                json!({"task_id":id,"block":false}),
+                root.path(),
+                &parent,
+            )
+            .await
+            .unwrap();
             assert_eq!(output["subject"], "Review changes");
             assert_eq!(output["stdout"], "Review report");
-            assert!(execute_for_session_async(name, json!({"task_id":id}), root.path(), &uuid::Uuid::new_v4().to_string()).await.is_err());
+            assert!(execute_for_session_async(
+                name,
+                json!({"task_id":id}),
+                root.path(),
+                &uuid::Uuid::new_v4().to_string()
+            )
+            .await
+            .is_err());
         }
     }
     fn execute(name: &str, input: Value, cwd: &str) -> Result<Value> {
@@ -473,11 +592,22 @@ mod tests {
         let session = uuid::Uuid::new_v4().to_string();
         assert!(display_title(root.path(), &session, &json!({"id":"1"})).is_none());
         assert!(!root.path().join("tasks").exists());
-        let task = execute_for_session("TaskCreate", json!({"subject":"Build\n项目"}), root.path(), &session).unwrap();
+        let task = execute_for_session(
+            "TaskCreate",
+            json!({"subject":"Build\n项目"}),
+            root.path(),
+            &session,
+        )
+        .unwrap();
         for key in ["id", "task_id", "taskId", "shell_id"] {
             let input = json!({key: task["id"]});
-            assert_eq!(display_title(root.path(), &session, &input).as_deref(), Some("Build项目"));
-            assert!(display_title(root.path(), &uuid::Uuid::new_v4().to_string(), &input).is_none());
+            assert_eq!(
+                display_title(root.path(), &session, &input).as_deref(),
+                Some("Build项目")
+            );
+            assert!(
+                display_title(root.path(), &uuid::Uuid::new_v4().to_string(), &input).is_none()
+            );
         }
         assert!(display_title(root.path(), "../invalid", &json!({"id":"1"})).is_none());
     }
@@ -534,7 +664,8 @@ mod tests {
             "actual output"
         );
         assert_eq!(
-            execute("TaskStop", json!({"shell_id":task["id"]}), cwd).unwrap()["worker_process_stopped"],
+            execute("TaskStop", json!({"shell_id":task["id"]}), cwd).unwrap()
+                ["worker_process_stopped"],
             false
         );
         assert_eq!(

@@ -58,6 +58,8 @@ pub struct RequestFailure {
     attempts: Option<u32>,
     content_started: Option<bool>,
     cause: String,
+    /// Validated correlation ID from the response, when one was provided.
+    server_request_id: Option<String>,
 }
 
 impl RequestFailure {
@@ -69,6 +71,7 @@ impl RequestFailure {
             existing.attempts = Some(attempts);
             return existing;
         }
+        let api = find_in_chain::<super::ApiError>(error);
         Self {
             stage: stage_of(error),
             class: super::classify_raw(error),
@@ -76,56 +79,98 @@ impl RequestFailure {
             attempts: Some(attempts),
             content_started: None,
             cause: sanitized_chain(error),
+            server_request_id: api.and_then(|api| api.server_request_id.clone()),
         }
     }
 
     /// Wrap a failure observed while a response stream was being consumed.
     /// An existing structured failure keeps its stage: a connection reopened
     /// for a pre-content retry reports `send`, not `stream`.
-    pub fn stream(error: &anyhow::Error, attempts: Option<u32>, content_started: bool) -> Self {
+    pub fn stream(
+        error: &anyhow::Error,
+        attempts: Option<u32>,
+        status: Option<u16>,
+        content_started: bool,
+    ) -> Self {
         if let Some(existing) = find_in_chain::<Self>(error) {
             let mut existing = existing.clone();
             existing.attempts = existing.attempts.or(attempts);
+            existing.status = existing.status.or(status);
             existing.content_started =
                 Some(existing.content_started.unwrap_or(false) || content_started);
             return existing;
         }
+        let api = find_in_chain::<super::ApiError>(error);
         Self {
             stage: RequestStage::Stream,
             class: super::classify_raw(error),
-            status: status_of(error),
+            status: status.or_else(|| status_of(error)),
             attempts,
             content_started: Some(content_started),
             cause: sanitized_chain(error),
+            server_request_id: api.and_then(|api| api.server_request_id.clone()),
         }
     }
 
     /// A stream closed before any content or completion marker after bounded retries.
-    pub fn stream_exhausted(attempts: u32) -> Self {
+    pub fn stream_exhausted(attempts: u32, status: Option<u16>) -> Self {
         Self {
             stage: RequestStage::Stream,
             class: ErrorClass::Transient,
-            status: None,
+            status,
             attempts: Some(attempts),
             content_started: Some(false),
             cause: format!(
                 "stream closed before any content or completion marker after {attempts} attempts"
             ),
+            server_request_id: None,
         }
     }
 
     /// The stream stopped without a completion marker and without a transport
     /// error. `attempts` comes from the send layer, which knows how many HTTP
     /// requests were really made; `None` stays unknown instead of defaulting to 1.
-    pub fn stream_incomplete(attempts: Option<u32>, content_started: bool) -> Self {
+    pub fn stream_incomplete(
+        attempts: Option<u32>,
+        status: Option<u16>,
+        content_started: bool,
+    ) -> Self {
         Self {
             stage: RequestStage::Stream,
             class: ErrorClass::Transient,
-            status: None,
+            status,
             attempts,
             content_started: Some(content_started),
             cause: "provider stream closed without a completion marker".to_owned(),
+            server_request_id: None,
         }
+    }
+
+    /// A provider-reported error delivered inside an otherwise successful
+    /// response, such as an SSE `error` event. The event is remote data and is
+    /// reduced to the shared vocabulary before it is stored.
+    pub fn remote_event(
+        value: &serde_json::Value,
+        attempts: Option<u32>,
+        status: Option<u16>,
+        content_started: bool,
+    ) -> Self {
+        Self {
+            stage: RequestStage::Stream,
+            class: super::classify_remote_code(super::remote_error_code(value).as_deref()),
+            status,
+            attempts,
+            content_started: Some(content_started),
+            cause: super::safe_remote_value(value),
+            server_request_id: super::remote_event_request_id(value),
+        }
+    }
+
+    /// Fill fields the trace layer could not know; reported values win.
+    pub fn with_observation(mut self, attempts: Option<u32>, status: Option<u16>) -> Self {
+        self.attempts = self.attempts.or(attempts);
+        self.status = self.status.or(status);
+        self
     }
 
     /// A shared attempt budget was already spent before this layer could send.
@@ -138,6 +183,7 @@ impl RequestFailure {
             attempts: Some(attempts),
             content_started: None,
             cause: format!("model request attempt budget exhausted after {attempts} attempts"),
+            server_request_id: None,
         }
     }
 
@@ -163,6 +209,10 @@ impl RequestFailure {
 
     pub fn content_started(&self) -> Option<bool> {
         self.content_started
+    }
+
+    pub fn server_request_id(&self) -> Option<&str> {
+        self.server_request_id.as_deref()
     }
 
     pub fn cause(&self) -> &str {
@@ -199,14 +249,16 @@ impl RequestFailure {
             content
         );
         match self.status {
-            Some(status) => {
+            // Only a real error status reads as `Model API error`; a 200 here means
+            // the handshake succeeded and the stream itself ended early.
+            Some(status) if status >= 400 => {
                 // The cause chain already starts with the provider status; keep
                 // one copy so the line reads as a single statement.
                 let prefix = format!("Model API error {status}: ");
                 let cause = self.cause.strip_prefix(&prefix).unwrap_or(&self.cause);
                 format!("Model API error {status}: {cause}{metadata}")
             }
-            None => format!("Model request failed: {}{metadata}", self.cause),
+            _ => format!("Model request failed: {}{metadata}", self.cause),
         }
     }
 
@@ -219,6 +271,7 @@ impl RequestFailure {
             "retries": self.retries(),
             "contentStarted": self.content_started,
             "cause": self.cause,
+            "serverRequestId": self.server_request_id,
         })
     }
 }
@@ -597,6 +650,7 @@ mod tests {
             attempts: Some(3),
             content_started: Some(true),
             cause: "body [stage=send; class=permanent] trailing".into(),
+            server_request_id: None,
         };
         let summary = parse_failure_summary(&failure.diagnostic()).unwrap();
         assert_eq!(summary.stage, "stream");

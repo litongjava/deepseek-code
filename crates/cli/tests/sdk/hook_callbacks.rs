@@ -254,6 +254,7 @@ async fn sdk_callback_registration_is_inherited_by_owned_child_with_child_identi
     for anthropic in [false, true] {
         let root = tempfile::tempdir().unwrap();
         let server = Server::start(anthropic, Mode::RuntimeAgent).await;
+        enable_delegation_tools(&root.path().join("data"));
         let mut client = Client::start(root.path(), &server, &[]);
         client.send(initialize_request("child", json!({
             "agents":{"sdk-child":{"description":"Callback child","prompt":"CHILD_CALLBACK_PROMPT","tools":["Read","Write"],"model":"inherit","maxTurns":3}},

@@ -228,10 +228,16 @@ pub async fn instructions(
 
 pub fn api_error_kind(error: &str) -> &'static str {
     // Classify the transport status, never numbers supplied by the server body.
-    let status = error
-        .split_once("Model API error ")
-        .and_then(|(_, tail)| tail.split(':').next())
-        .and_then(|status| status.trim().parse::<u16>().ok());
+    // The structured metadata is host-generated; the legacy prefix remains for
+    // diagnostics produced by older builds.
+    let status = crate::performance::parse_failure_summary(error)
+        .and_then(|failure| failure.http)
+        .or_else(|| {
+            error
+                .split_once("Model API error ")
+                .and_then(|(_, tail)| tail.split(':').next())
+                .and_then(|status| status.trim().parse::<u16>().ok())
+        });
     match status {
         Some(401 | 403) => "authentication_failed",
         Some(402) => "billing_error",

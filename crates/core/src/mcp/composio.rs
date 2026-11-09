@@ -58,22 +58,45 @@ fn composio_connector_profiles() -> HashMap<&'static str, ComposioConnectorProfi
     ];
 
     for (id, connector_id, slug) in profiles {
-        map.insert(id, ComposioConnectorProfile {
-            connector_id: connector_id.to_string(),
-            toolkit_slug: slug.to_string(),
-        });
+        map.insert(
+            id,
+            ComposioConnectorProfile {
+                connector_id: connector_id.to_string(),
+                toolkit_slug: slug.to_string(),
+            },
+        );
     }
     map
 }
 
 pub fn default_connector_ids() -> Vec<&'static str> {
     vec![
-        "github", "google-drive", "gmail", "google-calendar",
-        "slack", "notion", "jira", "confluence", "linear",
-        "airtable", "asana", "microsoft-teams", "onedrive",
-        "figma", "zoom", "dropbox", "box", "salesforce",
-        "hubspot", "intercom", "miro", "monday", "trello",
-        "zendesk", "gitlab", "bitbucket",
+        "github",
+        "google-drive",
+        "gmail",
+        "google-calendar",
+        "slack",
+        "notion",
+        "jira",
+        "confluence",
+        "linear",
+        "airtable",
+        "asana",
+        "microsoft-teams",
+        "onedrive",
+        "figma",
+        "zoom",
+        "dropbox",
+        "box",
+        "salesforce",
+        "hubspot",
+        "intercom",
+        "miro",
+        "monday",
+        "trello",
+        "zendesk",
+        "gitlab",
+        "bitbucket",
     ]
 }
 
@@ -194,14 +217,21 @@ impl ComposioManager {
     }
 
     pub fn list_connector_ids(&self) -> Vec<String> {
-        default_connector_ids().iter().map(|s| s.to_string()).collect()
+        default_connector_ids()
+            .iter()
+            .map(|s| s.to_string())
+            .collect()
     }
 
     pub fn get_connector_profile(&self, connector_id: &str) -> Option<ComposioConnectorProfile> {
         composio_connector_profiles().get(connector_id).cloned()
     }
 
-    pub async fn create_session(&mut self, user_id: &str, toolkit_slugs: Vec<String>) -> Result<ComposioSession> {
+    pub async fn create_session(
+        &mut self,
+        user_id: &str,
+        toolkit_slugs: Vec<String>,
+    ) -> Result<ComposioSession> {
         let api_key = self.get_resolved_api_key();
         if api_key.is_empty() {
             return Err(anyhow!("Missing Composio API key"));
@@ -216,7 +246,8 @@ impl ComposioManager {
             body["toolkits"] = serde_json::json!({ "enable": toolkit_slugs });
         }
 
-        let response = self.client
+        let response = self
+            .client
             .post(&url)
             .header("Content-Type", "application/json")
             .header("x-api-key", &api_key)
@@ -227,19 +258,31 @@ impl ComposioManager {
         if !response.status().is_success() {
             let status = response.status();
             let text = response.text().await.unwrap_or_default();
-            return Err(anyhow!("Composio session creation failed {}: {}", status, text));
+            return Err(anyhow!(
+                "Composio session creation failed {}: {}",
+                status,
+                text
+            ));
         }
 
         let payload: serde_json::Value = response.json().await?;
 
         let session = ComposioSession {
-            session_id: payload.get("session_id").and_then(|v| v.as_str()).map(String::from),
-            mcp_url: payload.pointer("/mcp/url").and_then(|v| v.as_str()).map(String::from),
+            session_id: payload
+                .get("session_id")
+                .and_then(|v| v.as_str())
+                .map(String::from),
+            mcp_url: payload
+                .pointer("/mcp/url")
+                .and_then(|v| v.as_str())
+                .map(String::from),
             updated_at: Some(chrono::Utc::now().to_rfc3339()),
             user_id: Some(user_id.to_string()),
         };
 
-        self.session_store.0.insert(user_id.to_string(), session.clone());
+        self.session_store
+            .0
+            .insert(user_id.to_string(), session.clone());
         self.save_session_store()?;
 
         Ok(session)
@@ -251,8 +294,12 @@ impl ComposioManager {
             return Err(anyhow!("Missing Composio API key"));
         }
 
-        let url = format!("{}/api/v3/tool_router/session/{}", COMPOSIO_API_BASE, session_id);
-        let response = self.client
+        let url = format!(
+            "{}/api/v3/tool_router/session/{}",
+            COMPOSIO_API_BASE, session_id
+        );
+        let response = self
+            .client
             .get(&url)
             .header("x-api-key", &api_key)
             .send()
@@ -267,24 +314,35 @@ impl ComposioManager {
         let payload: serde_json::Value = response.json().await?;
 
         Ok(ComposioSession {
-            session_id: payload.get("session_id").and_then(|v| v.as_str()).map(String::from)
+            session_id: payload
+                .get("session_id")
+                .and_then(|v| v.as_str())
+                .map(String::from)
                 .or(Some(session_id.to_string())),
-            mcp_url: payload.pointer("/mcp/url").and_then(|v| v.as_str()).map(String::from),
+            mcp_url: payload
+                .pointer("/mcp/url")
+                .and_then(|v| v.as_str())
+                .map(String::from),
             updated_at: Some(chrono::Utc::now().to_rfc3339()),
             user_id: None,
         })
     }
 
-    pub async fn get_toolkits(&self, session_id: &str, toolkit_slugs: Option<Vec<String>>) -> Result<Vec<serde_json::Value>> {
+    pub async fn get_toolkits(
+        &self,
+        session_id: &str,
+        toolkit_slugs: Option<Vec<String>>,
+    ) -> Result<Vec<serde_json::Value>> {
         let api_key = self.get_resolved_api_key();
         if api_key.is_empty() {
             return Err(anyhow!("Missing Composio API key"));
         }
 
-        let url = format!("{}/api/v3.1/tool_router/session/{}/toolkits", COMPOSIO_API_BASE, session_id);
-        let mut request = self.client
-            .get(&url)
-            .header("x-api-key", &api_key);
+        let url = format!(
+            "{}/api/v3.1/tool_router/session/{}/toolkits",
+            COMPOSIO_API_BASE, session_id
+        );
+        let mut request = self.client.get(&url).header("x-api-key", &api_key);
 
         if let Some(slugs) = toolkit_slugs {
             request = request.query(&[("toolkits", slugs.join(","))]);
@@ -299,19 +357,28 @@ impl ComposioManager {
         }
 
         let payload: serde_json::Value = response.json().await?;
-        Ok(payload.get("items")
+        Ok(payload
+            .get("items")
             .and_then(|v| v.as_array())
             .cloned()
             .unwrap_or_default())
     }
 
-    pub async fn create_connection_link(&self, session_id: &str, toolkit_slug: &str, callback_url: Option<&str>) -> Result<serde_json::Value> {
+    pub async fn create_connection_link(
+        &self,
+        session_id: &str,
+        toolkit_slug: &str,
+        callback_url: Option<&str>,
+    ) -> Result<serde_json::Value> {
         let api_key = self.get_resolved_api_key();
         if api_key.is_empty() {
             return Err(anyhow!("Missing Composio API key"));
         }
 
-        let url = format!("{}/api/v3.1/tool_router/session/{}/link", COMPOSIO_API_BASE, session_id);
+        let url = format!(
+            "{}/api/v3.1/tool_router/session/{}/link",
+            COMPOSIO_API_BASE, session_id
+        );
         let mut body = serde_json::json!({
             "toolkit": toolkit_slug,
         });
@@ -320,7 +387,8 @@ impl ComposioManager {
             body["callback_url"] = serde_json::json!(cb_url);
         }
 
-        let response = self.client
+        let response = self
+            .client
             .post(&url)
             .header("Content-Type", "application/json")
             .header("x-api-key", &api_key)
@@ -350,20 +418,30 @@ impl ComposioManager {
         }))
     }
 
-    pub fn get_connector_statuses(&self, connector_ids: &[&str]) -> HashMap<String, ComposioConnectorStatus> {
+    pub fn get_connector_statuses(
+        &self,
+        connector_ids: &[&str],
+    ) -> HashMap<String, ComposioConnectorStatus> {
         let profiles = composio_connector_profiles();
         let mut statuses = HashMap::new();
 
         for connector_id in connector_ids {
             let profile = profiles.get(connector_id);
-            statuses.insert(connector_id.to_string(), ComposioConnectorStatus {
-                available: profile.is_some(),
-                connected: false,
-                connected_account_id: None,
-                installed: profile.is_some(),
-                server_name: if profile.is_some() { Some(COMPOSIO_SERVER_NAME.to_string()) } else { None },
-                toolkit_slug: profile.map(|p| p.toolkit_slug.clone()),
-            });
+            statuses.insert(
+                connector_id.to_string(),
+                ComposioConnectorStatus {
+                    available: profile.is_some(),
+                    connected: false,
+                    connected_account_id: None,
+                    installed: profile.is_some(),
+                    server_name: if profile.is_some() {
+                        Some(COMPOSIO_SERVER_NAME.to_string())
+                    } else {
+                        None
+                    },
+                    toolkit_slug: profile.map(|p| p.toolkit_slug.clone()),
+                },
+            );
         }
 
         statuses
@@ -385,35 +463,49 @@ impl McpManagedConnector {
     pub fn new() -> Self {
         let mut profiles = HashMap::new();
 
-        profiles.insert("figma", McpManagedProfile {
-            connector_ids: vec!["figma".to_string()],
-            server_name: "figma".to_string(),
-            server_url: "https://mcp.figma.com/mcp".to_string(),
-        });
+        profiles.insert(
+            "figma",
+            McpManagedProfile {
+                connector_ids: vec!["figma".to_string()],
+                server_name: "figma".to_string(),
+                server_url: "https://mcp.figma.com/mcp".to_string(),
+            },
+        );
 
-        profiles.insert("notion", McpManagedProfile {
-            connector_ids: vec!["notion".to_string()],
-            server_name: "notion".to_string(),
-            server_url: "https://mcp.notion.com/mcp".to_string(),
-        });
+        profiles.insert(
+            "notion",
+            McpManagedProfile {
+                connector_ids: vec!["notion".to_string()],
+                server_name: "notion".to_string(),
+                server_url: "https://mcp.notion.com/mcp".to_string(),
+            },
+        );
 
-        profiles.insert("linear", McpManagedProfile {
-            connector_ids: vec!["linear".to_string()],
-            server_name: "linear".to_string(),
-            server_url: "https://mcp.linear.app/mcp".to_string(),
-        });
+        profiles.insert(
+            "linear",
+            McpManagedProfile {
+                connector_ids: vec!["linear".to_string()],
+                server_name: "linear".to_string(),
+                server_url: "https://mcp.linear.app/mcp".to_string(),
+            },
+        );
 
-        profiles.insert("atlassian", McpManagedProfile {
-            connector_ids: vec!["jira".to_string(), "confluence".to_string()],
-            server_name: "atlassian".to_string(),
-            server_url: "https://mcp.atlassian.com/v1/mcp".to_string(),
-        });
+        profiles.insert(
+            "atlassian",
+            McpManagedProfile {
+                connector_ids: vec!["jira".to_string(), "confluence".to_string()],
+                server_name: "atlassian".to_string(),
+                server_url: "https://mcp.atlassian.com/v1/mcp".to_string(),
+            },
+        );
 
         Self { profiles }
     }
 
     pub fn get_profile_for_connector(&self, connector_id: &str) -> Option<&McpManagedProfile> {
-        self.profiles.values().find(|p| p.connector_ids.iter().any(|c| c == connector_id))
+        self.profiles
+            .values()
+            .find(|p| p.connector_ids.iter().any(|c| c == connector_id))
     }
 
     pub fn list_profiles(&self) -> &HashMap<&'static str, McpManagedProfile> {

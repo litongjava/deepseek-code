@@ -196,6 +196,27 @@ async fn task_created_and_completed_hooks_block_and_roll_back() {
     let session = uuid::Uuid::new_v4().to_string();
     let shell = if cfg!(windows) { "powershell" } else { "sh" };
     let make = executor;
+    // The task tools are on demand by default; this test drives them directly.
+    crate::services::customization::save(
+        &data,
+        &crate::services::customization::Customization {
+            tool_loading: ["TaskCreate", "TaskUpdate", "TaskGet", "TaskList"]
+                .into_iter()
+                .map(|name| {
+                    (
+                        name.to_owned(),
+                        crate::services::customization::ToolLoading {
+                            enabled: true,
+                            on_demand: true,
+                        },
+                    )
+                })
+                .collect(),
+            ..Default::default()
+        },
+        &[],
+    )
+    .unwrap();
     std::fs::write(
         temp.path().join("settings.json"),
         json!({"hooks":{"TaskCreated":[{"hooks":[{"type":"command","command":"exit 2","shell":shell}]}]}})

@@ -1,5 +1,26 @@
 use super::*;
 
+/// The memory tools load on demand by default; these tests drive them directly.
+fn memory_tools(dir: &std::path::Path) -> std::path::PathBuf {
+    let customization = crate::services::customization::Customization {
+        tool_loading: ["memory_search", "memory_ingest"]
+            .into_iter()
+            .map(|name| {
+                (
+                    name.to_owned(),
+                    crate::services::customization::ToolLoading {
+                        enabled: true,
+                        on_demand: true,
+                    },
+                )
+            })
+            .collect(),
+        ..Default::default()
+    };
+    crate::services::customization::save(dir, &customization, &[]).unwrap();
+    dir.join("config.json")
+}
+
 #[tokio::test]
 async fn fresh_read_retains_requested_source_range_beyond_spill_limit() {
     let dir = tempfile::tempdir().unwrap();
@@ -24,7 +45,10 @@ async fn fresh_read_retains_requested_source_range_beyond_spill_limit() {
     assert!(!failed, "{output}");
     assert!(output.len() > 16_000);
     let retained = executor.retained_tool_output("Read", &output);
-    assert_eq!(retained, serde_json::from_str::<Value>(&output).unwrap()["content"]);
+    assert_eq!(
+        retained,
+        serde_json::from_str::<Value>(&output).unwrap()["content"]
+    );
     assert!(retained.contains("line_400"));
     assert!(!dir.path().join("tool-outputs").exists());
 
@@ -36,7 +60,10 @@ async fn fresh_read_retains_requested_source_range_beyond_spill_limit() {
         )
         .await;
     assert!(!failed, "{range}");
-    assert_eq!(executor.retained_tool_output("Read", &range), serde_json::from_str::<Value>(&range).unwrap()["content"]);
+    assert_eq!(
+        executor.retained_tool_output("Read", &range),
+        serde_json::from_str::<Value>(&range).unwrap()["content"]
+    );
     assert!(range.contains("line_400"));
     assert!(!range.contains("line_349"));
 
@@ -58,26 +85,62 @@ async fn immediate_terminal_answers_are_registered_before_events() {
     let dir = tempfile::tempdir().unwrap();
     for permission in [false, true] {
         let (tx, mut rx) = mpsc::channel(16);
-        let mut executor = ToolLoopExecutor::new(provider("http://127.0.0.1:1", "openai"), vec![], None, 128, tx, dir.path().to_string_lossy().into(), ReasoningMode::Standard);
+        let mut executor = ToolLoopExecutor::new(
+            provider("http://127.0.0.1:1", "openai"),
+            vec![],
+            None,
+            128,
+            tx,
+            dir.path().to_string_lossy().into(),
+            ReasoningMode::Standard,
+        );
         let waiters = executor.get_answer_waiters();
         let task = tokio::spawn(async move {
             if permission {
-                executor.execute_ask_user_confirmation("Write", &json!({"file_path":"approved.txt","content":"approved"}), "call", "approve").await
+                executor
+                    .execute_ask_user_confirmation(
+                        "Write",
+                        &json!({"file_path":"approved.txt","content":"approved"}),
+                        "call",
+                        "approve",
+                    )
+                    .await
             } else {
-                executor.execute_ask_user_question(&json!({"question":"Which option?","options":[]}), "question-fixture").await
+                executor
+                    .execute_ask_user_question(
+                        &json!({"question":"Which option?","options":[]}),
+                        "question-fixture",
+                    )
+                    .await
             }
         });
         let event = rx.recv().await.unwrap();
         let request_id = match event {
-            EngineEvent::AskUser { request_id, .. } | EngineEvent::ToolPermission { request_id, .. } => request_id,
+            EngineEvent::AskUser { request_id, .. }
+            | EngineEvent::ToolPermission { request_id, .. } => request_id,
             other => panic!("Unexpected event: {other:?}"),
         };
-        let sender = waiters.lock().await.remove(&request_id).expect("Answer channel must exist when event arrives");
-        sender.send(if permission { "yes" } else { "selected" }.into()).unwrap();
-        let (_, output, is_error) = tokio::time::timeout(Duration::from_secs(5), task).await.unwrap().unwrap();
+        let sender = waiters
+            .lock()
+            .await
+            .remove(&request_id)
+            .expect("Answer channel must exist when event arrives");
+        sender
+            .send(if permission { "yes" } else { "selected" }.into())
+            .unwrap();
+        let (_, output, is_error) = tokio::time::timeout(Duration::from_secs(5), task)
+            .await
+            .unwrap()
+            .unwrap();
         assert!(!is_error, "{output}");
-        if permission { assert_eq!(std::fs::read_to_string(dir.path().join("approved.txt")).unwrap(), "approved"); }
-        else { assert!(output.contains("selected")); }
+        if permission {
+            assert_eq!(
+                std::fs::read_to_string(dir.path().join("approved.txt")).unwrap(),
+                "approved"
+            );
+        } else {
+            assert!(output.contains("selected"));
+        }
     }
 }
 
@@ -88,9 +151,13 @@ fn provider(base: &str, format: &str) -> ResolvedProvider {
         provider: serde_json::from_value(json!({
             "id": "code-test", "name": "code-test", "base_url": base,
             "api_key": "local-test-key", "api_format": format, "models": [], "enabled": true
-        })).unwrap(),
-        model: serde_json::from_value(json!({"id": "code-test", "name": "code-test", "enabled": true,
-            "supports_vision": false, "supports_web_search": false})).unwrap(),
+        }))
+        .unwrap(),
+        model: serde_json::from_value(
+            json!({"id": "code-test", "name": "code-test", "enabled": true,
+            "supports_vision": false, "supports_web_search": false}),
+        )
+        .unwrap(),
     }
 }
 
@@ -99,31 +166,48 @@ async fn all_modes_preserve_memory_and_settings_in_either_builder_order() {
     let temp = tempfile::tempdir().unwrap();
     let (tx, _rx) = mpsc::channel(16);
     for mode in ["chat", "work", "study", "code"] {
-    for memory_first in [true, false] {
-        let client = MemExClient::with_path(temp.path().join("memory.sqlite3"), None);
-        let mut config = client.get_config().await;
-        config.auto_search = false;
-        config.auto_ingest = false;
-        config.search_top_k = 7;
-        client.update_config(config).await.unwrap();
-        let profile = PromptProfile::from_workspace_mode(mode);
-        let executor = ToolLoopExecutor::new(provider("http://127.0.0.1:1", "openai"), vec![], None, 128, tx.clone(), temp.path().to_string_lossy().into(), ReasoningMode::Standard);
-        let mut executor = if memory_first {
-            executor.with_memex(client.clone()).with_prompt_profile(profile)
-        } else {
-            executor.with_prompt_profile(profile).with_memex(client.clone())
-        };
-        assert!(executor.memex_client.is_some());
-        assert!(executor.context_manager.is_some());
-        let config = executor.memex_client.as_ref().unwrap().get_config().await;
-        assert!(!config.auto_search && !config.auto_ingest);
-        assert_eq!(config.search_top_k, 7);
-        for name in ["memory_ingest", "memory_search"] {
-            let (_, output, is_error) = executor.execute_tool_call(name, &json!({"content":"remember native memory", "query":"native memory", "importance":0.9}), "test").await;
-            assert!(!is_error, "{mode}: {output}");
-            assert!(output.contains(if name == "memory_ingest" { "ingested" } else { "remember native memory" }));
+        for memory_first in [true, false] {
+            let client = MemExClient::with_path(temp.path().join("memory.sqlite3"), None);
+            let mut config = client.get_config().await;
+            config.auto_search = false;
+            config.auto_ingest = false;
+            config.search_top_k = 7;
+            client.update_config(config).await.unwrap();
+            let profile = PromptProfile::from_workspace_mode(mode);
+            let executor = ToolLoopExecutor::new(
+                provider("http://127.0.0.1:1", "openai"),
+                vec![],
+                None,
+                128,
+                tx.clone(),
+                temp.path().to_string_lossy().into(),
+                ReasoningMode::Standard,
+            )
+            .with_search_config_path(memory_tools(temp.path()));
+            let mut executor = if memory_first {
+                executor
+                    .with_memex(client.clone())
+                    .with_prompt_profile(profile)
+            } else {
+                executor
+                    .with_prompt_profile(profile)
+                    .with_memex(client.clone())
+            };
+            assert!(executor.memex_client.is_some());
+            assert!(executor.context_manager.is_some());
+            let config = executor.memex_client.as_ref().unwrap().get_config().await;
+            assert!(!config.auto_search && !config.auto_ingest);
+            assert_eq!(config.search_top_k, 7);
+            for name in ["memory_ingest", "memory_search"] {
+                let (_, output, is_error) = executor.execute_tool_call(name, &json!({"content":"remember native memory", "query":"native memory", "importance":0.9}), "test").await;
+                assert!(!is_error, "{mode}: {output}");
+                assert!(output.contains(if name == "memory_ingest" {
+                    "ingested"
+                } else {
+                    "remember native memory"
+                }));
+            }
         }
-    }
     }
 }
 
@@ -133,12 +217,12 @@ async fn all_modes_preserve_memory_and_settings_in_either_builder_order() {
 async fn all_modes_recall_ingest_and_run_memory_tools_on_both_protocols() {
     use axum::{http::header, routing::post, Json, Router};
     for format in ["anthropic", "openai"] {
-    for mode in ["chat", "work", "study", "code"] {
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let base = format!("http://{}", listener.local_addr().unwrap());
-        let captured = Arc::new(Mutex::new(Vec::<Value>::new()));
-        let requests = captured.clone();
-        let app = Router::new().route(if format == "anthropic" { "/v1/messages" } else { "/v1/chat/completions" }, post(move |Json(body): Json<Value>| {
+        for mode in ["chat", "work", "study", "code"] {
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let base = format!("http://{}", listener.local_addr().unwrap());
+            let captured = Arc::new(Mutex::new(Vec::<Value>::new()));
+            let requests = captured.clone();
+            let app = Router::new().route(if format == "anthropic" { "/v1/messages" } else { "/v1/chat/completions" }, post(move |Json(body): Json<Value>| {
             let requests = requests.clone();
             async move {
                 let mut requests = requests.lock().await;
@@ -175,48 +259,109 @@ async fn all_modes_recall_ingest_and_run_memory_tools_on_both_protocols() {
                 ([(header::CONTENT_TYPE, "text/event-stream")], stream)
             }
         }));
-        let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap(); });
-        let (tx, mut rx) = mpsc::channel(128);
-        let temp = tempfile::tempdir().unwrap();
-        let client = MemExClient::with_path(temp.path().join("memory.sqlite3"), None);
-        let config = client.get_config().await;
-        assert!(config.enabled && config.auto_search && config.auto_ingest);
-        client.ingest("recallmarker existing architecture", Some(0.9), None).await.unwrap();
-        let profile = PromptProfile::from_workspace_mode(mode);
-        let prompt = crate::prompt::compose_system_prompt(Some("custom project rule"), "code-test", profile);
-        let mut executor = ToolLoopExecutor::new(provider(&base, format), vec![json!({"role":"user","content":"recallmarker"})], Some(prompt), 128, tx, ".".into(), ReasoningMode::Standard)
-            .with_prompt_profile(profile).with_memex(client.clone()).with_conv_id(format!("{mode}-{format}"));
-        let (text, _) = tokio::time::timeout(Duration::from_secs(15), executor.execute()).await.unwrap().unwrap();
-        server.abort();
-        assert_eq!(text, "verified", "{format}");
-        let requests = captured.lock().await;
-        assert_eq!(requests.len(), 3, "{format} {mode}");
-        let first = &requests[0];
-        let system = if format == "anthropic" { first["system"].to_string() } else { first["messages"][0]["content"].to_string() };
-        assert_eq!(system.contains("<code_behavior>"), mode == "code");
-        assert!(system.contains("custom project rule") && system.contains("<memory_guidance>"));
-        assert!(first["tools"].to_string().contains("memory_ingest"));
-        assert!(first["tools"].to_string().contains("memory_search"));
-        assert!(first["messages"].to_string().contains("recallmarker existing architecture"));
-        // Recall follows the prompt in the same user message, on every request of the turn.
-        for request in requests.iter() {
-            let user = request["messages"].as_array().unwrap().iter().find(|m| m["role"] == "user").unwrap().to_string();
-            let (prompt, recall) = (user.find("recallmarker\"").or_else(|| user.find("recallmarker\\n")).unwrap(), user.find(crate::memory::RECALL_LEAD_IN).unwrap());
-            assert!(prompt < recall, "{format} {mode}: {user}");
-        }
-        assert!(requests[1]["messages"].to_string().contains("ingested"));
-        assert!(requests[2]["messages"].to_string().contains("search_completed"));
-        assert!(requests[2]["messages"].to_string().contains("remember toolmemory"));
-        let saved = client.search("verified", None).await.unwrap();
-        assert!(saved.iter().any(|item| item.content.contains("Assistant: verified")), "automatic ingestion: {mode} {format}");
-        let mut completed = Vec::new();
-        while let Ok(event) = rx.try_recv() {
-            if let EngineEvent::ToolUseDone { tool_name, is_error, .. } = event {
-                if crate::prompt::code::is_memory_tool(&tool_name) { assert!(!is_error); completed.push(tool_name); }
+            let server = tokio::spawn(async move {
+                axum::serve(listener, app).await.unwrap();
+            });
+            let (tx, mut rx) = mpsc::channel(128);
+            let temp = tempfile::tempdir().unwrap();
+            let client = MemExClient::with_path(temp.path().join("memory.sqlite3"), None);
+            let config = client.get_config().await;
+            assert!(config.enabled && config.auto_search && config.auto_ingest);
+            client
+                .ingest("recallmarker existing architecture", Some(0.9), None)
+                .await
+                .unwrap();
+            let profile = PromptProfile::from_workspace_mode(mode);
+            let prompt = crate::prompt::compose_system_prompt(
+                Some("custom project rule"),
+                "code-test",
+                profile,
+            );
+            let mut executor = ToolLoopExecutor::new(
+                provider(&base, format),
+                vec![json!({"role":"user","content":"recallmarker"})],
+                Some(prompt),
+                128,
+                tx,
+                ".".into(),
+                ReasoningMode::Standard,
+            )
+            .with_prompt_profile(profile)
+            .with_memex(client.clone())
+            .with_conv_id(format!("{mode}-{format}"))
+            .with_search_config_path(memory_tools(temp.path()));
+            let (text, _) = tokio::time::timeout(Duration::from_secs(15), executor.execute())
+                .await
+                .unwrap()
+                .unwrap();
+            server.abort();
+            assert_eq!(text, "verified", "{format}");
+            let requests = captured.lock().await;
+            assert_eq!(requests.len(), 3, "{format} {mode}");
+            let first = &requests[0];
+            let system = if format == "anthropic" {
+                first["system"].to_string()
+            } else {
+                first["messages"][0]["content"].to_string()
+            };
+            assert_eq!(system.contains("<code_behavior>"), mode == "code");
+            assert!(system.contains("custom project rule") && system.contains("<memory_guidance>"));
+            assert!(first["tools"].to_string().contains("memory_ingest"));
+            assert!(first["tools"].to_string().contains("memory_search"));
+            assert!(first["messages"]
+                .to_string()
+                .contains("recallmarker existing architecture"));
+            // Recall follows the prompt in the same user message, on every request of the turn.
+            for request in requests.iter() {
+                let user = request["messages"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .find(|m| m["role"] == "user")
+                    .unwrap()
+                    .to_string();
+                let (prompt, recall) = (
+                    user.find("recallmarker\"")
+                        .or_else(|| user.find("recallmarker\\n"))
+                        .unwrap(),
+                    user.find(crate::memory::RECALL_LEAD_IN).unwrap(),
+                );
+                assert!(prompt < recall, "{format} {mode}: {user}");
             }
+            assert!(requests[1]["messages"].to_string().contains("ingested"));
+            assert!(requests[2]["messages"]
+                .to_string()
+                .contains("search_completed"));
+            assert!(requests[2]["messages"]
+                .to_string()
+                .contains("remember toolmemory"));
+            let saved = client.search("verified", None).await.unwrap();
+            assert!(
+                saved
+                    .iter()
+                    .any(|item| item.content.contains("Assistant: verified")),
+                "automatic ingestion: {mode} {format}"
+            );
+            let mut completed = Vec::new();
+            while let Ok(event) = rx.try_recv() {
+                if let EngineEvent::ToolUseDone {
+                    tool_name,
+                    is_error,
+                    ..
+                } = event
+                {
+                    if crate::prompt::code::is_memory_tool(&tool_name) {
+                        assert!(!is_error);
+                        completed.push(tool_name);
+                    }
+                }
+            }
+            assert_eq!(
+                completed,
+                vec!["memory_ingest", "memory_search"],
+                "{mode} {format}"
+            );
         }
-        assert_eq!(completed, vec!["memory_ingest", "memory_search"], "{mode} {format}");
-    }
     }
 }
 
@@ -260,20 +405,45 @@ async fn context_reminders_open_the_first_user_message() {
                 ([(header::CONTENT_TYPE, "text/event-stream")], stream)
             }
         }));
-        let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap(); });
+        let server = tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
         let (tx, _rx) = mpsc::channel(128);
         let temp = tempfile::tempdir().unwrap();
-        let reminders = vec!["<system-reminder>\nreminder-marker-rules\n</system-reminder>".to_string(), "<system-reminder>\n# gitStatus\n</system-reminder>".to_string()];
+        let reminders = vec![
+            "<system-reminder>\nreminder-marker-rules\n</system-reminder>".to_string(),
+            "<system-reminder>\n# gitStatus\n</system-reminder>".to_string(),
+        ];
         let prompt = crate::prompt::compose_system_prompt(None, "code-test", PromptProfile::Code);
-        let history = vec![json!({"role":"user","content":"hello"}), json!({"role":"assistant","content":"hi"}), json!({"role":"user","content":"again"})];
+        let history = vec![
+            json!({"role":"user","content":"hello"}),
+            json!({"role":"assistant","content":"hi"}),
+            json!({"role":"user","content":"again"}),
+        ];
         // Recorded on an earlier turn for "hello", and on this turn for "again".
         let turn_context = vec![
-            crate::services::turn_context::for_last(&history[..1], vec!["hook-for-hello".into()]).unwrap(),
-            crate::services::turn_context::for_last(&history, vec!["skill-for-again".into()]).unwrap(),
+            crate::services::turn_context::for_last(&history[..1], vec!["hook-for-hello".into()])
+                .unwrap(),
+            crate::services::turn_context::for_last(&history, vec!["skill-for-again".into()])
+                .unwrap(),
         ];
-        let mut executor = ToolLoopExecutor::new(provider(&base, format), history.clone(), Some(prompt), 128, tx, temp.path().to_string_lossy().into(), ReasoningMode::Standard)
-            .with_prompt_profile(PromptProfile::Code).with_context_reminders(reminders.clone()).with_turn_context(turn_context).with_conv_id(format!("reminders-{format}"));
-        let (text, _) = tokio::time::timeout(Duration::from_secs(15), executor.execute()).await.unwrap().unwrap();
+        let mut executor = ToolLoopExecutor::new(
+            provider(&base, format),
+            history.clone(),
+            Some(prompt),
+            128,
+            tx,
+            temp.path().to_string_lossy().into(),
+            ReasoningMode::Standard,
+        )
+        .with_prompt_profile(PromptProfile::Code)
+        .with_context_reminders(reminders.clone())
+        .with_turn_context(turn_context)
+        .with_conv_id(format!("reminders-{format}"));
+        let (text, _) = tokio::time::timeout(Duration::from_secs(15), executor.execute())
+            .await
+            .unwrap()
+            .unwrap();
         server.abort();
         assert_eq!(text, "done", "{format}");
         let requests = captured.lock().await;
@@ -285,16 +455,36 @@ async fn context_reminders_open_the_first_user_message() {
                 assert_eq!(content[1]["text"], reminders[1].as_str());
                 assert_eq!(content[2]["text"], "hello");
                 assert_eq!(content[3]["text"], "hook-for-hello");
-                let texts: Vec<_> = request["messages"][2]["content"].as_array().unwrap().iter().map(|block| block["text"].clone()).collect();
+                let texts: Vec<_> = request["messages"][2]["content"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .map(|block| block["text"].clone())
+                    .collect();
                 assert_eq!(texts, [json!("again"), json!("skill-for-again")]);
                 assert!(!request["system"].to_string().contains("reminder-marker"));
             } else {
-                let users: Vec<_> = request["messages"].as_array().unwrap().iter().filter(|m| m["role"] == "user").collect();
-                assert_eq!(users[0]["content"], format!("{}\n\n{}\n\nhello\n\nhook-for-hello", reminders[0], reminders[1]).as_str());
+                let users: Vec<_> = request["messages"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .filter(|m| m["role"] == "user")
+                    .collect();
+                assert_eq!(
+                    users[0]["content"],
+                    format!(
+                        "{}\n\n{}\n\nhello\n\nhook-for-hello",
+                        reminders[0], reminders[1]
+                    )
+                    .as_str()
+                );
                 assert_eq!(users[1]["content"], "again\n\nskill-for-again");
             }
         }
-        assert_eq!(executor.messages[0], history[0], "{format}: the transcript keeps the user's own text");
+        assert_eq!(
+            executor.messages[0], history[0],
+            "{format}: the transcript keeps the user's own text"
+        );
     }
 }
 
@@ -320,34 +510,69 @@ async fn recalled_memories_stay_with_their_message_on_later_turns() {
             ([(header::CONTENT_TYPE, "text/event-stream")], events.iter().map(|event| format!("data: {event}\n\n")).collect::<String>())
         }
     }));
-    let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap(); });
+    let server = tokio::spawn(async move {
+        axum::serve(listener, app).await.unwrap();
+    });
     let temp = tempfile::tempdir().unwrap();
     let client = MemExClient::with_path(temp.path().join("memory.sqlite3"), None);
     let mut config = client.get_config().await;
     config.auto_ingest = false;
     client.update_config(config).await.unwrap();
-    client.ingest("alphamark uses port 7001", Some(0.9), None).await.unwrap();
-    client.ingest("betamark uses port 7002", Some(0.9), None).await.unwrap();
+    client
+        .ingest("alphamark uses port 7001", Some(0.9), None)
+        .await
+        .unwrap();
+    client
+        .ingest("betamark uses port 7002", Some(0.9), None)
+        .await
+        .unwrap();
     let mut history = vec![json!({"role":"user","content":"alphamark"})];
+    let config_path = memory_tools(temp.path());
     for turn in 0..2 {
         if turn == 1 {
-            history.extend([json!({"role":"assistant","content":"done"}), json!({"role":"user","content":"betamark"})]);
+            history.extend([
+                json!({"role":"assistant","content":"done"}),
+                json!({"role":"user","content":"betamark"}),
+            ]);
         }
         let (tx, _rx) = mpsc::channel(64);
         let saved = crate::services::turn_context::load(temp.path(), "recall-session").unwrap();
-        let mut executor = ToolLoopExecutor::new(provider(&base, "anthropic"), history.clone(), None, 128, tx, temp.path().to_string_lossy().into(), ReasoningMode::Standard)
-            .with_memex(client.clone()).with_conv_id("recall-session".into()).with_turn_context(saved)
-            .with_search_config_path(temp.path().join("config.json"));
-        tokio::time::timeout(Duration::from_secs(15), executor.execute()).await.unwrap().unwrap();
+        let mut executor = ToolLoopExecutor::new(
+            provider(&base, "anthropic"),
+            history.clone(),
+            None,
+            128,
+            tx,
+            temp.path().to_string_lossy().into(),
+            ReasoningMode::Standard,
+        )
+        .with_memex(client.clone())
+        .with_conv_id("recall-session".into())
+        .with_turn_context(saved)
+        .with_search_config_path(config_path.clone());
+        tokio::time::timeout(Duration::from_secs(15), executor.execute())
+            .await
+            .unwrap()
+            .unwrap();
     }
     server.abort();
     let requests = captured.lock().await;
     let last = &requests.last().unwrap()["messages"];
     let first_message = last[0].to_string();
-    assert_eq!(first_message.matches(crate::memory::RECALL_LEAD_IN).count(), 1, "{first_message}");
+    assert_eq!(
+        first_message.matches(crate::memory::RECALL_LEAD_IN).count(),
+        1,
+        "{first_message}"
+    );
     assert!(first_message.contains("alphamark uses port 7001"));
     assert!(last[2].to_string().contains("betamark uses port 7002"));
     // Turn 1's message is sent exactly as it was on turn 1, so the prefix stays cacheable.
-    let strip = |message: &Value| { let mut message = message.clone(); for block in message["content"].as_array_mut().unwrap() { block.as_object_mut().unwrap().remove("cache_control"); } message };
+    let strip = |message: &Value| {
+        let mut message = message.clone();
+        for block in message["content"].as_array_mut().unwrap() {
+            block.as_object_mut().unwrap().remove("cache_control");
+        }
+        message
+    };
     assert_eq!(strip(&requests[0]["messages"][0]), strip(&last[0]));
 }

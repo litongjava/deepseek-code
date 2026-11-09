@@ -61,6 +61,28 @@ fn fixture() -> (
     let cwd = temp.path().join("project");
     std::fs::create_dir(&cwd).unwrap();
     let context = mail::context(&temp.path().join("data")).unwrap();
+    // Agent and SendMessage are not default core tools, so this module loads
+    // them explicitly.
+    crate::services::customization::save(
+        &context.paths.data_dir,
+        &crate::services::customization::Customization {
+            tool_loading: ["Agent", "SendMessage"]
+                .into_iter()
+                .map(|name| {
+                    (
+                        name.to_owned(),
+                        crate::services::customization::ToolLoading {
+                            enabled: true,
+                            on_demand: true,
+                        },
+                    )
+                })
+                .collect(),
+            ..Default::default()
+        },
+        &[],
+    )
+    .unwrap();
     let store = SessionStore::new(context.db.clone());
     let parent = store.create(&cwd, "fixture", "fixture").unwrap();
     (temp, context, store, parent, cwd)
@@ -176,7 +198,10 @@ async fn foreground_agent_accepts_model_effort_and_worktree_without_backgroundin
     assert_eq!(result["status"], "completed");
     assert_ne!(result["backgrounded"], true);
     let retained = registry.lock().unwrap();
-    let progress = context.setting::<Value>(&format!("delegation.{child}")).unwrap().unwrap();
+    let progress = context
+        .setting::<Value>(&format!("delegation.{child}"))
+        .unwrap()
+        .unwrap();
     assert_eq!(progress["preview"], "child complete");
     let child_executor = &retained[child].executor;
     assert_eq!(child_executor.provider.model.id, "alternate");

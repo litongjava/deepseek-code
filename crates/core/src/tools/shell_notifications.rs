@@ -17,7 +17,10 @@ impl Finished {
     /// The line shown when it finishes, as in the reference CLI:
     /// `Background command "build" completed (exit code 0)`.
     pub fn summary(&self) -> String {
-        let code = self.exit_code.map(|code| format!(" (exit code {code})")).unwrap_or_default();
+        let code = self
+            .exit_code
+            .map(|code| format!(" (exit code {code})"))
+            .unwrap_or_default();
         match self.status.as_str() {
             "cancelled" => format!("Background command \"{}\" was stopped", self.subject),
             status => format!("Background command \"{}\" {status}{code}", self.subject),
@@ -98,11 +101,19 @@ pub fn collect_finished(root: &Path, session: &str) -> Result<Vec<Finished>> {
         let exit_code = output
             .and_then(|output| serde_json::from_str::<serde_json::Value>(&output).ok())
             .and_then(|output| output["exit_code"].as_i64());
-        let directory = match log_dir.filter(|name| name.starts_with("fg-") && uuid::Uuid::parse_str(&name[3..]).is_ok()) {
+        let directory = match log_dir
+            .filter(|name| name.starts_with("fg-") && uuid::Uuid::parse_str(&name[3..]).is_ok())
+        {
             Some(name) => base.join(name),
             None => base.join(&id),
         };
-        finished.push(Finished { id, subject, status, exit_code, output_file: directory.join("stdout.log") });
+        finished.push(Finished {
+            id,
+            subject,
+            status,
+            exit_code,
+            output_file: directory.join("stdout.log"),
+        });
     }
     tx.commit()?;
     Ok(finished)
@@ -111,7 +122,12 @@ pub fn collect_finished(root: &Path, session: &str) -> Result<Vec<Finished>> {
 pub fn collect_completed(root: &Path, session: &str) -> Result<Vec<String>> {
     Ok(collect_finished(root, session)?
         .into_iter()
-        .map(|task| format!("Background shell {}: {}\n  /tasks show {}", task.status, task.subject, task.id))
+        .map(|task| {
+            format!(
+                "Background shell {}: {}\n  /tasks show {}",
+                task.status, task.subject, task.id
+            )
+        })
         .collect())
 }
 
@@ -120,14 +136,34 @@ mod tests {
     use super::*;
     #[test]
     fn notifications_follow_the_reference_format() {
-        let task = Finished { id: "t1".into(), subject: "Wait then print".into(), status: "completed".into(), exit_code: Some(0), output_file: "/d/stdout.log".into() };
-        assert_eq!(task.summary(), "Background command \"Wait then print\" completed (exit code 0)");
+        let task = Finished {
+            id: "t1".into(),
+            subject: "Wait then print".into(),
+            status: "completed".into(),
+            exit_code: Some(0),
+            output_file: "/d/stdout.log".into(),
+        };
+        assert_eq!(
+            task.summary(),
+            "Background command \"Wait then print\" completed (exit code 0)"
+        );
         let text = task.notification();
-        assert!(text.starts_with(NOTIFICATION_START) && text.contains("<task-id>t1</task-id>") && text.contains("<status>completed</status>"));
+        assert!(
+            text.starts_with(NOTIFICATION_START)
+                && text.contains("<task-id>t1</task-id>")
+                && text.contains("<status>completed</status>")
+        );
         assert_eq!(notification_summary(&text), Some(task.summary().as_str()));
         assert_eq!(notification_summary("plain text"), None);
-        let stopped = Finished { status: "cancelled".into(), exit_code: None, ..task };
-        assert_eq!(stopped.summary(), "Background command \"Wait then print\" was stopped");
+        let stopped = Finished {
+            status: "cancelled".into(),
+            exit_code: None,
+            ..task
+        };
+        assert_eq!(
+            stopped.summary(),
+            "Background command \"Wait then print\" was stopped"
+        );
     }
     #[test]
     fn completion_claim_is_durable_concurrent_and_session_local() {

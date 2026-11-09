@@ -1,5 +1,5 @@
-mod sync_runtime;
 pub(crate) mod screenshot_file;
+mod sync_runtime;
 use anyhow::{anyhow, Result};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -10,44 +10,46 @@ use std::sync::Arc;
 use tokio::process::Command;
 use tokio::sync::RwLock;
 
+mod lsp;
 pub mod macros;
 mod notebook;
 mod read;
 mod search;
 pub mod tasks;
-mod lsp;
 
 /// Whether a plugin language server declaration is usable by the LSP tool.
 pub fn lsp_config_is_valid(server: &serde_json::Value) -> bool {
     lsp::validate_configuration(server).is_ok()
 }
-pub mod lsp_servers;
 pub mod external_agents;
-pub use lsp::{configure as configure_lsp_servers, shutdown_all as shutdown_lsp_servers, status as lsp_status};
+pub mod lsp_servers;
 pub(crate) use lsp::passive_feedback as lsp_passive_feedback;
 pub(crate) use lsp::validate_configuration as validate_lsp_configuration;
-mod worktrees;
+pub use lsp::{
+    configure as configure_lsp_servers, shutdown_all as shutdown_lsp_servers, status as lsp_status,
+};
 pub mod agent_messages;
-pub mod coordination;
-pub mod teams;
-pub mod scheduled;
-pub mod cron_jobs;
-pub mod session_worktree;
-pub mod wakeup;
-pub mod sandbox;
-mod findings;
 mod content_compat;
-pub(crate) mod utf8;
+pub mod coordination;
+pub mod cron_jobs;
+mod findings;
 pub mod linux_env;
+pub mod sandbox;
+pub mod scheduled;
+pub mod session_worktree;
+pub mod teams;
+pub(crate) mod utf8;
+pub mod wakeup;
+mod worktrees;
 pub use utf8::powershell_command;
-mod shell_discovery;
-mod bash_process;
 pub mod background_shell;
-pub(crate) mod path_scope;
+mod bash_process;
 pub mod file_change;
-mod web;
-pub(crate) mod provider_search;
 pub(crate) mod image_generation;
+pub(crate) mod path_scope;
+pub(crate) mod provider_search;
+mod shell_discovery;
+mod web;
 pub use provider_search::search as search_provider;
 
 #[cfg(windows)]
@@ -75,8 +77,6 @@ fn tool_memory_ingest(input: serde_json::Value) -> Result<serde_json::Value> {
     }))
 }
 
-
-
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ToolDefinition {
     pub name: String,
@@ -95,7 +95,7 @@ pub fn get_tool_definitions() -> Vec<ToolDefinition> {
         agent_messages::list_agents_definition(),
         // `cron` stays dispatchable for older transcripts; the model sees the reference trio.
         crate::services::goal_proposals::definition(),
-        ToolDefinition { name: "ToolSearch".into(), description: "Search the currently registered built-in tool names, descriptions and schemas. MCP tools are supplied separately by the host.".into(), input_schema: serde_json::json!({"type":"object","properties":{"query":{"type":"string"}},"required":["query"]}) },
+        ToolDefinition { name: "ToolSearch".into(), description: "Load built-in tools that are not in this request yet. A successful search returns their real definitions with schemas and marks them loaded, so they can be called from the next model request on. Match by tool name first, otherwise by keywords. Tools that commonly load on demand include listing directories (ListDir), multiple edits (MultiEdit), web access (WebFetch, WebSearch), Git and LSP helpers, subagents (Agent, SendMessage), Workflow, long-term memory, scheduled jobs and desktop control. Searching costs nothing and grants no permission: the tool still goes through the usual approval and scope checks. MCP tools are supplied separately by the host.".into(), input_schema: serde_json::json!({"type":"object","properties":{"query":{"type":"string","description":"A tool name or keywords describing what you need"}},"required":["query"]}) },
         ToolDefinition {
             name: "PluginRun".into(),
             description: "Execute an installed, enabled plugin command with OS user permissions. Requires execution approval.".into(),
@@ -464,9 +464,16 @@ macro_rules! tool_dispatch {
     };
 }
 
-fn directory_input(name: &str, mut input: serde_json::Value, cwd: &str) -> Result<serde_json::Value> {
+fn directory_input(
+    name: &str,
+    mut input: serde_json::Value,
+    cwd: &str,
+) -> Result<serde_json::Value> {
     if matches!(name, "ListDir" | "git_status" | "git_diff") {
-        let path = input["path"].as_str().filter(|path| !path.trim().is_empty()).unwrap_or(".");
+        let path = input["path"]
+            .as_str()
+            .filter(|path| !path.trim().is_empty())
+            .unwrap_or(".");
         input["path"] = serde_json::json!(resolve_read_path(path, cwd)?);
     }
     Ok(input)
@@ -481,12 +488,24 @@ pub fn execute_tool(name: &str, input: serde_json::Value, cwd: &str) -> Result<s
     )
 }
 
-pub async fn execute_tool_async(name: &str, input: serde_json::Value, cwd: &str) -> Result<serde_json::Value> {
+pub async fn execute_tool_async(
+    name: &str,
+    input: serde_json::Value,
+    cwd: &str,
+) -> Result<serde_json::Value> {
     let input = directory_input(name, input, cwd)?;
-    if name == "computer_use" { return tool_computer_use_async(input).await; }
-    if name == "LSP" || name == "lsp" { return lsp::execute(input, cwd).await; }
-    if name == "worktree" { return worktrees::execute(input, cwd).await; }
-    if external_agents::is_external_agent(name) { return external_agents::execute(name, input, cwd).await; }
+    if name == "computer_use" {
+        return tool_computer_use_async(input).await;
+    }
+    if name == "LSP" || name == "lsp" {
+        return lsp::execute(input, cwd).await;
+    }
+    if name == "worktree" {
+        return worktrees::execute(input, cwd).await;
+    }
+    if external_agents::is_external_agent(name) {
+        return external_agents::execute(name, input, cwd).await;
+    }
     tool_dispatch!(name, input, cwd,
         Bash => tool_bash_async(input, cwd).await,
         WebFetch => tool_web_fetch_async(input).await,
@@ -494,14 +513,35 @@ pub async fn execute_tool_async(name: &str, input: serde_json::Value, cwd: &str)
     )
 }
 
+/// The host-level fallback: it only lists definitions and has no session, so it
+/// cannot load anything. `success` stays false so a stored result can never be
+/// read back as a load.
 fn tool_search(input: serde_json::Value) -> Result<serde_json::Value> {
-    let query = input["query"].as_str().ok_or_else(|| anyhow!("query is required"))?.to_lowercase();
-    let tools: Vec<_> = get_tool_definitions().into_iter().filter(|tool| tool.name.to_lowercase().contains(&query) || tool.description.to_lowercase().contains(&query)).collect();
-    Ok(serde_json::json!({"tools": tools}))
+    let query = input["query"]
+        .as_str()
+        .ok_or_else(|| anyhow!("query is required"))?
+        .to_lowercase();
+    let tools: Vec<_> = get_tool_definitions()
+        .into_iter()
+        .filter(|tool| {
+            tool.name.to_lowercase().contains(&query)
+                || tool.description.to_lowercase().contains(&query)
+        })
+        .collect();
+    Ok(serde_json::json!({
+        "success": false,
+        "loaded_tools": [],
+        "tools": tools,
+        "content": "This host entry only lists definitions; a session loads tools through its own engine.",
+    }))
 }
 
-fn max_output_bytes() -> usize { crate::config::OrchestrationConfig::max_output_bytes() }
-fn default_bash_timeout_secs() -> u64 { crate::config::OrchestrationConfig::default_bash_timeout_secs() }
+fn max_output_bytes() -> usize {
+    crate::config::OrchestrationConfig::max_output_bytes()
+}
+fn default_bash_timeout_secs() -> u64 {
+    crate::config::OrchestrationConfig::default_bash_timeout_secs()
+}
 
 mod dangerous_command;
 mod text_edit;
@@ -518,8 +558,12 @@ mod command_filter_tests {
         use std::ffi::OsStr;
         let root = OsStr::new("X:/Windows");
         let programs = OsStr::new("X:/Program Files");
-        let candidates = super::windows_powershell_candidates("powershell", Some(root), Some(programs));
-        assert_eq!(candidates[0], std::path::Path::new(root).join("System32/WindowsPowerShell/v1.0/powershell.exe"));
+        let candidates =
+            super::windows_powershell_candidates("powershell", Some(root), Some(programs));
+        assert_eq!(
+            candidates[0],
+            std::path::Path::new(root).join("System32/WindowsPowerShell/v1.0/powershell.exe")
+        );
         let modern = super::windows_powershell_candidates("pwsh", Some(root), Some(programs));
         assert_eq!(modern[1], candidates[0]);
         assert!(super::windows_powershell_candidates("powershell", None, None).is_empty());
@@ -528,24 +572,37 @@ mod command_filter_tests {
     #[tokio::test]
     async fn bypass_executes_filtered_text_and_tracks_live_mode_without_argument_spoofing() {
         use crate::permissions::{AuditLogger, PermissionManager, PermissionMode};
-        let manager = std::sync::Arc::new(PermissionManager::new(std::sync::Arc::new(AuditLogger::new(16))));
+        let manager = std::sync::Arc::new(PermissionManager::new(std::sync::Arc::new(
+            AuditLogger::new(16),
+        )));
         let dir = tempfile::tempdir().unwrap();
         crate::config::OrchestrationConfig::init_global().unwrap();
         // Matched evaluation primitives with harmless payloads; never shut down.
-        let cases = if cfg!(windows) { vec![("powershell", "Invoke-Expression \"Write-Output 'shutdown /s /t 0'\"")] }
-                    else { vec![("sh", "eval \"printf '%s' 'shutdown /s /t 0'\"")] };
+        let cases = if cfg!(windows) {
+            vec![(
+                "powershell",
+                "Invoke-Expression \"Write-Output 'shutdown /s /t 0'\"",
+            )]
+        } else {
+            vec![("sh", "eval \"printf '%s' 'shutdown /s /t 0'\"")]
+        };
         for (shell, command) in cases {
-            let input = serde_json::json!({"shell":shell,"command":command,"__bypass_permissions":true});
+            let input =
+                serde_json::json!({"shell":shell,"command":command,"__bypass_permissions":true});
             let run = || super::tool_bash_async(input.clone(), dir.path().to_str().unwrap());
             assert_eq!(run().await.unwrap()["blocked"], true);
             super::path_scope::with_permissions(Some(manager.clone()), async {
                 manager.set_mode(PermissionMode::BypassPermissions);
                 let result = run().await.unwrap();
                 assert_eq!(result["exit_code"], 0, "{result}");
-                assert!(result["stdout"].as_str().unwrap().contains("shutdown /s /t 0"));
+                assert!(result["stdout"]
+                    .as_str()
+                    .unwrap()
+                    .contains("shutdown /s /t 0"));
                 manager.set_mode(PermissionMode::AskPermissions);
                 assert_eq!(run().await.unwrap()["blocked"], true);
-            }).await;
+            })
+            .await;
             assert_eq!(run().await.unwrap()["blocked"], true);
         }
     }
@@ -577,23 +634,39 @@ fn is_path_allowed(resolved_path: &Path, cwd: &str) -> bool {
             let mut current = resolved_path.to_path_buf();
             let mut suffix = PathBuf::new();
             loop {
-                if let Ok(p) = current.canonicalize() { break p.join(suffix); }
+                if let Ok(p) = current.canonicalize() {
+                    break p.join(suffix);
+                }
                 match current.file_name() {
-                    Some(name) => { suffix = PathBuf::from(name).join(suffix); current = match current.parent() { Some(p) => p.to_path_buf(), None => return false }; }
+                    Some(name) => {
+                        suffix = PathBuf::from(name).join(suffix);
+                        current = match current.parent() {
+                            Some(p) => p.to_path_buf(),
+                            None => return false,
+                        };
+                    }
                     None => return false,
                 }
             }
         }
     };
-    if path_scope::allows(&canonical) { return true; }
+    if path_scope::allows(&canonical) {
+        return true;
+    }
     if let Ok(cwd_canonical) = Path::new(cwd).canonicalize() {
-        if canonical.starts_with(&cwd_canonical) { return true; }
+        if canonical.starts_with(&cwd_canonical) {
+            return true;
+        }
     }
     if let Some(appdata) = dirs::data_dir() {
-        if canonical.starts_with(&appdata) { return true; }
+        if canonical.starts_with(&appdata) {
+            return true;
+        }
     }
     if let Some(local_appdata) = dirs::data_local_dir() {
-        if canonical.starts_with(&local_appdata) { return true; }
+        if canonical.starts_with(&local_appdata) {
+            return true;
+        }
     }
     false
 }
@@ -610,17 +683,39 @@ async fn bash_keeps_its_directory_and_resets_outside_the_project() {
     let run = |command: &str| serde_json::json!({"command":command,"__cwd_state":state.to_string_lossy()});
     tool_bash_async(run("cd sub"), cwd).await.unwrap();
     let out = tool_bash_async(run("pwd -P"), cwd).await.unwrap();
-    assert_eq!(out["stdout"].as_str().unwrap().trim(), project.join("sub").to_str().unwrap());
+    assert_eq!(
+        out["stdout"].as_str().unwrap().trim(),
+        project.join("sub").to_str().unwrap()
+    );
     // Exiting early keeps the previous directory.
     let _ = tool_bash_async(run("cd /; exit 3"), cwd).await;
-    assert!(tool_bash_async(run("pwd -P"), cwd).await.unwrap()["stdout"].as_str().unwrap().contains("sub"));
+    assert!(tool_bash_async(run("pwd -P"), cwd).await.unwrap()["stdout"]
+        .as_str()
+        .unwrap()
+        .contains("sub"));
     let reset = tool_bash_async(run("cd /"), cwd).await.unwrap();
     assert_eq!(reset["note"], format!("Shell cwd was reset to {cwd}"));
-    assert_eq!(tool_bash_async(run("pwd -P"), cwd).await.unwrap()["stdout"].as_str().unwrap().trim(), cwd);
+    assert_eq!(
+        tool_bash_async(run("pwd -P"), cwd).await.unwrap()["stdout"]
+            .as_str()
+            .unwrap()
+            .trim(),
+        cwd
+    );
     // Without the engine's state file every call starts in the project.
-    let plain = tool_bash_async(serde_json::json!({"command":"cd sub && pwd"}), cwd).await.unwrap();
+    let plain = tool_bash_async(serde_json::json!({"command":"cd sub && pwd"}), cwd)
+        .await
+        .unwrap();
     assert!(plain["stdout"].as_str().unwrap().contains("sub"));
-    assert_eq!(tool_bash_async(serde_json::json!({"command":"pwd -P"}), cwd).await.unwrap()["stdout"].as_str().unwrap().trim(), cwd);
+    assert_eq!(
+        tool_bash_async(serde_json::json!({"command":"pwd -P"}), cwd)
+            .await
+            .unwrap()["stdout"]
+            .as_str()
+            .unwrap()
+            .trim(),
+        cwd
+    );
 }
 
 /// A batch file captures errorlevel on a separate parsed line before bookkeeping.
@@ -632,7 +727,9 @@ fn cmd_cwd_footer(command: &str, state: &str) -> String {
 #[cfg(all(test, unix))]
 #[tokio::test]
 async fn powershell_keeps_its_directory_and_exit_codes() {
-    if find_shell("pwsh").is_none() { return; }
+    if find_shell("pwsh").is_none() {
+        return;
+    }
     crate::config::OrchestrationConfig::init_global().unwrap();
     let dir = tempfile::tempdir().unwrap();
     let project = dir.path().canonicalize().unwrap();
@@ -641,23 +738,52 @@ async fn powershell_keeps_its_directory_and_exit_codes() {
     let state = project.join("cwd-state");
     let run = |command: &str| serde_json::json!({"command":command,"shell":"pwsh","__cwd_state":state.to_string_lossy()});
     tool_bash_async(run("Set-Location sub"), cwd).await.unwrap();
-    let out = tool_bash_async(run("(Get-Location).ProviderPath"), cwd).await.unwrap();
-    assert_eq!(out["stdout"].as_str().unwrap().trim(), project.join("sub").to_str().unwrap(), "{out}");
+    let out = tool_bash_async(run("(Get-Location).ProviderPath"), cwd)
+        .await
+        .unwrap();
+    assert_eq!(
+        out["stdout"].as_str().unwrap().trim(),
+        project.join("sub").to_str().unwrap(),
+        "{out}"
+    );
     // A native command's exit code survives the directory bookkeeping.
     let failed = tool_bash_async(run("sh -c 'exit 3'"), cwd).await.unwrap();
     assert_eq!(failed["exit_code"], 3, "{failed}");
     let reset = tool_bash_async(run("Set-Location /"), cwd).await.unwrap();
     assert_eq!(reset["note"], format!("Shell cwd was reset to {cwd}"));
-    assert_eq!(tool_bash_async(run("(Get-Location).ProviderPath"), cwd).await.unwrap()["stdout"].as_str().unwrap().trim(), cwd);
+    assert_eq!(
+        tool_bash_async(run("(Get-Location).ProviderPath"), cwd)
+            .await
+            .unwrap()["stdout"]
+            .as_str()
+            .unwrap()
+            .trim(),
+        cwd
+    );
 }
 
 #[cfg(test)]
 #[test]
 fn search_results_follow_domain_filters() {
     let results = serde_json::json!({"results":[{"url":"https://docs.rs/a"},{"url":"https://www.docs.rs/b"},{"url":"https://example.com/c"},{"url":"not a url"}]});
-    let urls = |input: serde_json::Value| { let mut value = results.clone(); filter_search_domains(&mut value, &input); value["results"].as_array().unwrap().iter().map(|r| r["url"].as_str().unwrap().to_owned()).collect::<Vec<_>>() };
-    assert_eq!(urls(serde_json::json!({"allowed_domains":["docs.rs"]})), ["https://docs.rs/a", "https://www.docs.rs/b"]);
-    assert_eq!(urls(serde_json::json!({"blocked_domains":["www.docs.rs","example.com"]})), ["https://docs.rs/a", "not a url"]);
+    let urls = |input: serde_json::Value| {
+        let mut value = results.clone();
+        filter_search_domains(&mut value, &input);
+        value["results"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|r| r["url"].as_str().unwrap().to_owned())
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(
+        urls(serde_json::json!({"allowed_domains":["docs.rs"]})),
+        ["https://docs.rs/a", "https://www.docs.rs/b"]
+    );
+    assert_eq!(
+        urls(serde_json::json!({"blocked_domains":["www.docs.rs","example.com"]})),
+        ["https://docs.rs/a", "not a url"]
+    );
     assert_eq!(urls(serde_json::json!({})).len(), 4);
 }
 
@@ -677,16 +803,27 @@ pub(super) fn resolve_read_path(file_path: &str, cwd: &str) -> Result<String> {
 }
 
 pub fn resolve_path(file_path: &str, cwd: &str) -> Result<String> {
-    let resolved = if Path::new(file_path).is_absolute() { PathBuf::from(file_path) } else { Path::new(cwd).join(file_path) };
+    let resolved = if Path::new(file_path).is_absolute() {
+        PathBuf::from(file_path)
+    } else {
+        Path::new(cwd).join(file_path)
+    };
     if !is_path_allowed(&resolved, cwd) {
-        return Err(anyhow!("Path is outside allowed directories: {}", resolved.display()));
+        return Err(anyhow!(
+            "Path is outside allowed directories: {}",
+            resolved.display()
+        ));
     }
     Ok(resolved.to_string_lossy().to_string())
 }
 
 fn tool_write(input: serde_json::Value, cwd: &str) -> Result<serde_json::Value> {
-    let file_path = input["file_path"].as_str().ok_or_else(|| anyhow!("file_path required"))?;
-    let content = input["content"].as_str().ok_or_else(|| anyhow!("content required"))?;
+    let file_path = input["file_path"]
+        .as_str()
+        .ok_or_else(|| anyhow!("file_path required"))?;
+    let content = input["content"]
+        .as_str()
+        .ok_or_else(|| anyhow!("content required"))?;
     let path = resolve_path(file_path, cwd)?;
 
     if let Some(parent) = Path::new(&path).parent() {
@@ -705,18 +842,29 @@ fn tool_write(input: serde_json::Value, cwd: &str) -> Result<serde_json::Value> 
 }
 
 fn tool_edit(input: serde_json::Value, cwd: &str) -> Result<serde_json::Value> {
-    let file_path = input["file_path"].as_str().ok_or_else(|| anyhow!("file_path required"))?;
-    let old_string = input["old_string"].as_str().ok_or_else(|| anyhow!("old_string required"))?;
-    let new_string = input["new_string"].as_str().ok_or_else(|| anyhow!("new_string required"))?;
+    let file_path = input["file_path"]
+        .as_str()
+        .ok_or_else(|| anyhow!("file_path required"))?;
+    let old_string = input["old_string"]
+        .as_str()
+        .ok_or_else(|| anyhow!("old_string required"))?;
+    let new_string = input["new_string"]
+        .as_str()
+        .ok_or_else(|| anyhow!("new_string required"))?;
     let replace_all = input["replace_all"].as_bool().unwrap_or(false);
     let path = resolve_path(file_path, cwd)?;
 
     let content = fs::read_to_string(&path)?;
     let before = file_change::snapshot(&content);
 
-    let (new_content, replacements) = match text_edit::replace(&content, old_string, new_string, replace_all) {
+    let (new_content, replacements) =
+        match text_edit::replace(&content, old_string, new_string, replace_all) {
         Ok(result) => result,
-        Err(error) => return Ok(serde_json::json!({"success":false,"error":error.to_string(),"replacements":0})),
+            Err(error) => {
+                return Ok(
+                    serde_json::json!({"success":false,"error":error.to_string(),"replacements":0}),
+                )
+            }
     };
     fs::write(&path, new_content.as_bytes())?;
 
@@ -729,8 +877,12 @@ fn tool_edit(input: serde_json::Value, cwd: &str) -> Result<serde_json::Value> {
 }
 
 fn tool_multi_edit(input: serde_json::Value, cwd: &str) -> Result<serde_json::Value> {
-    let file_path = input["file_path"].as_str().ok_or_else(|| anyhow!("file_path required"))?;
-    let edits = input["edits"].as_array().ok_or_else(|| anyhow!("edits array required"))?;
+    let file_path = input["file_path"]
+        .as_str()
+        .ok_or_else(|| anyhow!("file_path required"))?;
+    let edits = input["edits"]
+        .as_array()
+        .ok_or_else(|| anyhow!("edits array required"))?;
     let path = resolve_path(file_path, cwd)?;
 
     let content = fs::read_to_string(&path)?;
@@ -738,11 +890,27 @@ fn tool_multi_edit(input: serde_json::Value, cwd: &str) -> Result<serde_json::Va
     let mut new_content = content.clone();
     let mut total_replacements = 0;
     for (index, edit) in edits.iter().enumerate() {
-        let old = edit["old_string"].as_str().ok_or_else(|| anyhow!("edit {} old_string required", index + 1))?;
-        let new = edit["new_string"].as_str().ok_or_else(|| anyhow!("edit {} new_string required", index + 1))?;
-        match text_edit::replace(&new_content, old, new, edit["replace_all"].as_bool().unwrap_or(false)) {
-            Ok((updated, count)) => { new_content = updated; total_replacements += count; }
-            Err(error) => return Ok(serde_json::json!({"success":false,"error":format!("Edit {}: {error}", index + 1),"replacements":0})),
+        let old = edit["old_string"]
+            .as_str()
+            .ok_or_else(|| anyhow!("edit {} old_string required", index + 1))?;
+        let new = edit["new_string"]
+            .as_str()
+            .ok_or_else(|| anyhow!("edit {} new_string required", index + 1))?;
+        match text_edit::replace(
+            &new_content,
+            old,
+            new,
+            edit["replace_all"].as_bool().unwrap_or(false),
+        ) {
+            Ok((updated, count)) => {
+                new_content = updated;
+                total_replacements += count;
+            }
+            Err(error) => {
+                return Ok(
+                    serde_json::json!({"success":false,"error":format!("Edit {}: {error}", index + 1),"replacements":0}),
+                )
+            }
         }
     }
     fs::write(&path, new_content.as_bytes())?;
@@ -756,8 +924,12 @@ fn tool_multi_edit(input: serde_json::Value, cwd: &str) -> Result<serde_json::Va
 }
 
 fn tool_ask_user_question(input: serde_json::Value) -> Result<serde_json::Value> {
-    let question = input["question"].as_str().ok_or_else(|| anyhow!("question required"))?;
-    let options = input["options"].as_array().ok_or_else(|| anyhow!("options array required"))?;
+    let question = input["question"]
+        .as_str()
+        .ok_or_else(|| anyhow!("question required"))?;
+    let options = input["options"]
+        .as_array()
+        .ok_or_else(|| anyhow!("options array required"))?;
 
     if options.is_empty() {
         return Ok(serde_json::json!({
@@ -769,12 +941,15 @@ fn tool_ask_user_question(input: serde_json::Value) -> Result<serde_json::Value>
     let description = input["description"].as_str().unwrap_or("");
     let multi_select = input["multiSelect"].as_bool().unwrap_or(false);
 
-    let options_list: Vec<serde_json::Value> = options.iter().map(|opt| {
+    let options_list: Vec<serde_json::Value> = options
+        .iter()
+        .map(|opt| {
         serde_json::json!({
             "label": opt["label"].as_str().unwrap_or(""),
             "description": opt["description"].as_str().unwrap_or("")
         })
-    }).collect();
+        })
+        .collect();
 
     Ok(serde_json::json!({
         "type": "ask_user_question",
@@ -813,21 +988,21 @@ async fn tool_computer_use_async(input: serde_json::Value) -> Result<serde_json:
         "TypeText" => ComputerActionType::TypeText,
         "Screenshot" => ComputerActionType::Screenshot,
         "Wait" => ComputerActionType::Wait,
-        _ => return Ok(serde_json::json!({ "error": format!("Unknown action_type: {}", action_type_str), "is_error": true })),
+        _ => {
+            return Ok(
+                serde_json::json!({ "error": format!("Unknown action_type: {}", action_type_str), "is_error": true }),
+            )
+        }
     };
 
-    let coordinate = input
-        .get("coordinate")
-        .and_then(|c| {
+    let coordinate = input.get("coordinate").and_then(|c| {
             Some(ScreenCoordinate {
                 x: c.get("x")?.as_i64()? as i32,
                 y: c.get("y")?.as_i64()? as i32,
             })
         });
 
-    let button = input["button"]
-        .as_str()
-        .and_then(|b| match b {
+    let button = input["button"].as_str().and_then(|b| match b {
             "Left" => Some(MouseButton::Left),
             "Right" => Some(MouseButton::Right),
             "Middle" => Some(MouseButton::Middle),
@@ -884,25 +1059,40 @@ fn pipeline_failure_flag(flag: &str, shell: &str, wsl: bool) -> bool {
 }
 
 async fn tool_bash_async(input: serde_json::Value, cwd: &str) -> Result<serde_json::Value> {
-    let command = input["command"].as_str().ok_or_else(|| anyhow!("command required"))?;
+    let command = input["command"]
+        .as_str()
+        .ok_or_else(|| anyhow!("command required"))?;
     // Milliseconds, like the reference CLI. Background tasks may run longer.
     let background = input["run_in_background"].as_bool().unwrap_or(false);
     // A detached command is an unmanaged service: it must outlive this call.
     let detach = input["detach"].as_bool().unwrap_or(false);
     anyhow::ensure!(!(detach && background), "detach and run_in_background are mutually exclusive: run_in_background is a managed task, detach is an unmanaged service");
-    anyhow::ensure!(!(detach && input["timeout"].is_number()), "A detached command is not waited for, so timeout has no effect; remove it");
+    anyhow::ensure!(
+        !(detach && input["timeout"].is_number()),
+        "A detached command is not waited for, so timeout has no effect; remove it"
+    );
     let timeout_ms = match input.get("timeout").filter(|value| !value.is_null()) {
-        Some(value) => value.as_f64().filter(|ms| ms.is_finite() && *ms >= 1.0).ok_or_else(|| anyhow!("Bash timeout must be a positive number of milliseconds"))? as u64,
+        Some(value) => value
+            .as_f64()
+            .filter(|ms| ms.is_finite() && *ms >= 1.0)
+            .ok_or_else(|| anyhow!("Bash timeout must be a positive number of milliseconds"))?
+            as u64,
         None => default_bash_timeout_secs() * 1000,
     };
     let max_ms = if background { 86_400_000 } else { 600_000 };
-    anyhow::ensure!(timeout_ms <= max_ms, "Bash timeout must be at most {max_ms} milliseconds");
+    anyhow::ensure!(
+        timeout_ms <= max_ms,
+        "Bash timeout must be at most {max_ms} milliseconds"
+    );
     let timeout = std::time::Duration::from_millis(timeout_ms);
     let settings = background_shell::shell_settings()?;
     let resolved = settings.resolve(input["shell"].as_str(), false)?;
     let shell_type = resolved.name.as_str();
 
-    if !path_scope::bypass_permissions() && !path_scope::approved_auto_command(command) && is_dangerous_command(command) {
+    if !path_scope::bypass_permissions()
+        && !path_scope::approved_auto_command(command)
+        && is_dangerous_command(command)
+    {
         return Ok(serde_json::json!({
             "error": "Command blocked by security filter: dangerous command detected",
             "is_error": true,
@@ -914,7 +1104,11 @@ async fn tool_bash_async(input: serde_json::Value, cwd: &str) -> Result<serde_js
     let flag = resolved.command_flag.to_string();
 
     let actual_shell = shell_type;
-    if resolved.wsl.is_some() && input.get("__sandbox").is_some_and(|policy| policy.is_object()) {
+    if resolved.wsl.is_some()
+        && input
+            .get("__sandbox")
+            .is_some_and(|policy| policy.is_object())
+    {
         return Err(anyhow!("The configured sandbox cannot isolate WSL commands; select a supported shell or change the sandbox configuration explicitly"));
     }
     let mut cmd = match input.get("__sandbox").filter(|policy| policy.is_object()) {
@@ -946,25 +1140,45 @@ async fn tool_bash_async(input: serde_json::Value, cwd: &str) -> Result<serde_js
     #[cfg(windows)]
     cmd.creation_flags(CREATE_NO_WINDOW);
 
-    anyhow::ensure!(Path::new(cwd).is_dir(), "Shell working directory does not exist: {cwd}");
+    anyhow::ensure!(
+        Path::new(cwd).is_dir(),
+        "Shell working directory does not exist: {cwd}"
+    );
     let safe_cwd = cwd.to_owned();
     // Like the reference CLI, a foreground shell keeps its working directory
     // between calls; the engine passes a per-session state file.
     let shell_name = shell_type.to_lowercase();
     let powershell = flag == "-Command";
     let cmd_shell = flag == "/C" && cfg!(windows);
-    let cwd_state = input["__cwd_state"].as_str().map(PathBuf::from).map(|state| {
+    let cwd_state = input["__cwd_state"]
+        .as_str()
+        .map(PathBuf::from)
+        .map(|state| {
         if let Some(wsl) = &resolved.wsl {
             use std::hash::{Hash, Hasher};
             let mut hash = std::collections::hash_map::DefaultHasher::new();
             wsl.distribution.hash(&mut hash);
             state.with_extension(format!("wsl-{:016x}", hash.finish()))
-        } else { state }
+            } else {
+                state
+            }
     })
-        .filter(|_| !background && (powershell || cmd_shell || (flag == "-c" && matches!(shell_name.as_str(), "bash" | "sh" | "zsh" | "wsl"))));
-    let saved_cwd = |state: &PathBuf| fs::read_to_string(state).ok().map(|text| text.trim_start_matches('\u{feff}').trim().to_owned());
+        .filter(|_| {
+            !background
+                && (powershell
+                    || cmd_shell
+                    || (flag == "-c"
+                        && matches!(shell_name.as_str(), "bash" | "sh" | "zsh" | "wsl")))
+        });
+    let saved_cwd = |state: &PathBuf| {
+        fs::read_to_string(state)
+            .ok()
+            .map(|text| text.trim_start_matches('\u{feff}').trim().to_owned())
+    };
     let safe_cwd = match cwd_state.as_ref().and_then(saved_cwd) {
-        Some(saved) if Path::new(&saved).is_dir() && is_path_allowed(Path::new(&saved), cwd) => saved,
+        Some(saved) if Path::new(&saved).is_dir() && is_path_allowed(Path::new(&saved), cwd) => {
+            saved
+        }
         _ => safe_cwd,
     };
 
@@ -979,7 +1193,10 @@ async fn tool_bash_async(input: serde_json::Value, cwd: &str) -> Result<serde_js
     let command = if !cfg!(windows) || resolved.wsl.is_some() {
         match background_shell::session_environment()? {
             Some(script)
-                if matches!(shell_type.to_lowercase().as_str(), "bash" | "sh" | "zsh" | "wsl") =>
+                if matches!(
+                    shell_type.to_lowercase().as_str(),
+                    "bash" | "sh" | "zsh" | "wsl"
+                ) =>
             {
                 format!(
                     "{{\n{script}\n}} && eval '{}'",
@@ -1029,7 +1246,10 @@ async fn tool_bash_async(input: serde_json::Value, cwd: &str) -> Result<serde_js
     }
     let mut wsl_guard = None;
     if let Some(settings) = &resolved.wsl {
-        let (launched, guard) = crate::services::wsl::launch(settings, Path::new(&safe_cwd), Some(&command)).await?.command();
+        let (launched, guard) =
+            crate::services::wsl::launch(settings, Path::new(&safe_cwd), Some(&command))
+                .await?
+                .command();
         cmd = launched;
         wsl_guard = Some(guard);
     }
@@ -1039,8 +1259,12 @@ async fn tool_bash_async(input: serde_json::Value, cwd: &str) -> Result<serde_js
     } else if flag == "/C" {
         // cmd uses its own quoting rules; normal Windows argument escaping adds
         // literal backslashes before quotes in nested PowerShell file paths.
-        let argument = cmd_script.as_ref().map(|file| format!("\"{}\"", file.path().display())).unwrap_or_else(|| command.clone());
-        cmd.args(["/D", "/S", "/C"]).raw_arg(format!("\"{argument}\""));
+        let argument = cmd_script
+            .as_ref()
+            .map(|file| format!("\"{}\"", file.path().display()))
+            .unwrap_or_else(|| command.clone());
+        cmd.args(["/D", "/S", "/C"])
+            .raw_arg(format!("\"{argument}\""));
     } else {
         // Without this, `failing | head` reports head's success.
         if pipeline_failure_flag(&flag, &shell_name, resolved.wsl.is_some()) {
@@ -1060,7 +1284,11 @@ async fn tool_bash_async(input: serde_json::Value, cwd: &str) -> Result<serde_js
         .stderr(Stdio::piped());
 
     // Background commands are named by their description, or the command.
-    let description = input["description"].as_str().filter(|text| !text.trim().is_empty()).unwrap_or(&command).to_owned();
+    let description = input["description"]
+        .as_str()
+        .filter(|text| !text.trim().is_empty())
+        .unwrap_or(&command)
+        .to_owned();
     if detach {
         let directory = crate::runtime::resolve_default_data_dir()?
             .join("detached-shells")
@@ -1071,14 +1299,34 @@ async fn tool_bash_async(input: serde_json::Value, cwd: &str) -> Result<serde_js
         result["shell_path"] = serde_json::json!(shell);
         Ok(result)
     } else if background {
-        let mut result = background_shell::start(cmd, input.get("timeout").filter(|value| !value.is_null()).map(|_| timeout), actual_shell, &description, &command, wsl_guard)?;
+        let mut result = background_shell::start(
+            cmd,
+            input
+                .get("timeout")
+                .filter(|value| !value.is_null())
+                .map(|_| timeout),
+            actual_shell,
+            &description,
+            &command,
+            wsl_guard,
+        )?;
         result["shell_path"] = serde_json::json!(shell);
         Ok(result)
     } else {
         // Ctrl+B can move it to the background while it runs.
-        let filtered = input.get("__sandbox").filter(|policy| policy["network_rules"].is_object() && input["dangerouslyDisableSandbox"] != true);
+        let filtered = input.get("__sandbox").filter(|policy| {
+            policy["network_rules"].is_object() && input["dangerouslyDisableSandbox"] != true
+        });
         let mark = filtered.map(sandbox::blocked_mark);
-        let mut result = background_shell::run_foreground(cmd, timeout, actual_shell, &description, &command, wsl_guard).await?;
+        let mut result = background_shell::run_foreground(
+            cmd,
+            timeout,
+            actual_shell,
+            &description,
+            &command,
+            wsl_guard,
+        )
+        .await?;
         result["shell_path"] = serde_json::json!(shell);
         // Name refused hosts: an HTTPS client often reports only a reset.
         if let (Some(policy), Some(mark)) = (filtered, mark) {
@@ -1089,10 +1337,16 @@ async fn tool_bash_async(input: serde_json::Value, cwd: &str) -> Result<serde_js
         }
         if let Some(state) = &cwd_state {
             let moved = saved_cwd(state);
-            if moved.as_deref().is_some_and(|dir| !is_path_allowed(Path::new(dir), cwd)) {
+            if moved
+                .as_deref()
+                .is_some_and(|dir| !is_path_allowed(Path::new(dir), cwd))
+            {
                 let _ = fs::remove_file(state);
                 if let Some(object) = result.as_object_mut() {
-                    object.insert("note".into(), serde_json::json!(format!("Shell cwd was reset to {cwd}")));
+                    object.insert(
+                        "note".into(),
+                        serde_json::json!(format!("Shell cwd was reset to {cwd}")),
+                    );
                 }
             }
         }
@@ -1112,16 +1366,35 @@ pub fn find_git_bash() -> Option<String> {
 }
 
 #[cfg(any(windows, test))]
-fn windows_powershell_candidates(shell: &str, system_root: Option<&std::ffi::OsStr>, program_files: Option<&std::ffi::OsStr>) -> Vec<PathBuf> {
-    let native = system_root.map(|root| PathBuf::from(root).join("System32").join("WindowsPowerShell").join("v1.0").join("powershell.exe"));
-    let modern = program_files.map(|root| PathBuf::from(root).join("PowerShell").join("7").join("pwsh.exe"));
-    if shell == "pwsh" { modern.into_iter().chain(native).collect() }
-    else { native.into_iter().chain(modern).collect() }
+fn windows_powershell_candidates(
+    shell: &str,
+    system_root: Option<&std::ffi::OsStr>,
+    program_files: Option<&std::ffi::OsStr>,
+) -> Vec<PathBuf> {
+    let native = system_root.map(|root| {
+        PathBuf::from(root)
+            .join("System32")
+            .join("WindowsPowerShell")
+            .join("v1.0")
+            .join("powershell.exe")
+    });
+    let modern = program_files.map(|root| {
+        PathBuf::from(root)
+            .join("PowerShell")
+            .join("7")
+            .join("pwsh.exe")
+    });
+    if shell == "pwsh" {
+        modern.into_iter().chain(native).collect()
+    } else {
+        native.into_iter().chain(modern).collect()
+    }
 }
 
 pub fn find_shell(shell_name: &str) -> Option<String> {
     if cfg!(windows) && matches!(shell_name, "bash" | "sh") {
-        return shell_discovery::windows_git_shell(shell_name).map(|path| path.to_string_lossy().into_owned());
+        return shell_discovery::windows_git_shell(shell_name)
+            .map(|path| path.to_string_lossy().into_owned());
     }
     #[cfg(windows)]
     if matches!(shell_name, "powershell" | "pwsh") {
@@ -1129,12 +1402,20 @@ pub fn find_shell(shell_name: &str) -> Option<String> {
         // Prefer the running OS over an offline installation's C:\Windows.
         let system_root = std::env::var_os("SystemRoot").or_else(|| std::env::var_os("WINDIR"));
         let program_files = std::env::var_os("ProgramFiles");
-        let candidates = windows_powershell_candidates(shell_name, system_root.as_deref(), program_files.as_deref());
+        let candidates = windows_powershell_candidates(
+            shell_name,
+            system_root.as_deref(),
+            program_files.as_deref(),
+        );
         if let Some(path) = candidates.into_iter().find(|path| path.is_file()) {
             return Some(path.to_string_lossy().into_owned());
         }
         return lsp_servers::find_on_path(shell_name)
-            .or_else(|| (shell_name == "pwsh").then(|| lsp_servers::find_on_path("powershell")).flatten())
+            .or_else(|| {
+                (shell_name == "pwsh")
+                    .then(|| lsp_servers::find_on_path("powershell"))
+                    .flatten()
+            })
             .map(|path| path.to_string_lossy().into_owned());
     }
     let candidates = match (shell_name, cfg!(target_os = "windows")) {
@@ -1205,7 +1486,9 @@ pub fn find_shell(shell_name: &str) -> Option<String> {
 }
 
 fn tool_list_dir(input: serde_json::Value, _cwd: &str) -> Result<serde_json::Value> {
-    let dir_path = input["path"].as_str().ok_or_else(|| anyhow!("path required"))?;
+    let dir_path = input["path"]
+        .as_str()
+        .ok_or_else(|| anyhow!("path required"))?;
 
     let mut entries: Vec<serde_json::Value> = Vec::new();
     for entry in fs::read_dir(dir_path)? {
@@ -1224,14 +1507,38 @@ fn tool_list_dir(input: serde_json::Value, _cwd: &str) -> Result<serde_json::Val
 /// Applies WebSearch allowed_domains/blocked_domains to `results`; a domain
 /// also matches its subdomains.
 pub fn filter_search_domains(result: &mut serde_json::Value, input: &serde_json::Value) {
-    let list = |key: &str| -> Vec<String> { input[key].as_array().into_iter().flatten().filter_map(|d| d.as_str()).map(|d| d.trim().trim_start_matches("*.").trim_start_matches('.').to_ascii_lowercase()).filter(|d| !d.is_empty()).collect() };
+    let list = |key: &str| -> Vec<String> {
+        input[key]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter_map(|d| d.as_str())
+            .map(|d| {
+                d.trim()
+                    .trim_start_matches("*.")
+                    .trim_start_matches('.')
+                    .to_ascii_lowercase()
+            })
+            .filter(|d| !d.is_empty())
+            .collect()
+    };
     let (allowed, blocked) = (list("allowed_domains"), list("blocked_domains"));
-    if allowed.is_empty() && blocked.is_empty() { return; }
-    let matches = |host: &str, domain: &str| host == domain || host.ends_with(&format!(".{domain}"));
+    if allowed.is_empty() && blocked.is_empty() {
+        return;
+    }
+    let matches =
+        |host: &str, domain: &str| host == domain || host.ends_with(&format!(".{domain}"));
     if let Some(results) = result.get_mut("results").and_then(|r| r.as_array_mut()) {
         results.retain(|item| {
-            let Some(host) = item["url"].as_str().and_then(|url| reqwest::Url::parse(url).ok()).and_then(|url| url.host_str().map(str::to_ascii_lowercase)) else { return allowed.is_empty() };
-            (allowed.is_empty() || allowed.iter().any(|d| matches(&host, d))) && !blocked.iter().any(|d| matches(&host, d))
+            let Some(host) = item["url"]
+                .as_str()
+                .and_then(|url| reqwest::Url::parse(url).ok())
+                .and_then(|url| url.host_str().map(str::to_ascii_lowercase))
+            else {
+                return allowed.is_empty();
+            };
+            (allowed.is_empty() || allowed.iter().any(|d| matches(&host, d)))
+                && !blocked.iter().any(|d| matches(&host, d))
         });
     }
 }
@@ -1247,8 +1554,12 @@ fn model_fetch_input(mut input: serde_json::Value) -> Result<serde_json::Value> 
     )?);
     Ok(input)
 }
-fn tool_web_fetch_blocking(input: serde_json::Value) -> Result<serde_json::Value> { web::fetch_blocking(model_fetch_input(input)?) }
-async fn tool_web_fetch_async(input: serde_json::Value) -> Result<serde_json::Value> { web::fetch(model_fetch_input(input)?).await }
+fn tool_web_fetch_blocking(input: serde_json::Value) -> Result<serde_json::Value> {
+    web::fetch_blocking(model_fetch_input(input)?)
+}
+async fn tool_web_fetch_async(input: serde_json::Value) -> Result<serde_json::Value> {
+    web::fetch(model_fetch_input(input)?).await
+}
 fn tool_web_search_blocking(_input: serde_json::Value) -> Result<serde_json::Value> {
     Err(anyhow!("WebSearch requires a conversation provider and its search settings. Start search from a conversation."))
 }
@@ -1266,7 +1577,9 @@ pub fn run_git_command(args: &[&str], cwd: &str) -> Result<std::process::Output>
 }
 
 fn tool_git_status(input: serde_json::Value) -> Result<serde_json::Value> {
-    let path = input["path"].as_str().ok_or_else(|| anyhow!("path required"))?;
+    let path = input["path"]
+        .as_str()
+        .ok_or_else(|| anyhow!("path required"))?;
 
     let output = run_git_command(&["status", "--porcelain"], path)?;
 
@@ -1280,14 +1593,18 @@ fn tool_git_status(input: serde_json::Value) -> Result<serde_json::Value> {
         }));
     }
 
-    let files: Vec<serde_json::Value> = stdout.lines().filter(|l| !l.is_empty()).map(|line| {
+    let files: Vec<serde_json::Value> = stdout
+        .lines()
+        .filter(|l| !l.is_empty())
+        .map(|line| {
         let status = &line[..2];
         let file_path = &line[3..];
         serde_json::json!({
             "status": status.trim(),
             "file": file_path
         })
-    }).collect();
+        })
+        .collect();
 
     Ok(serde_json::json!({
         "files": files,
@@ -1297,7 +1614,9 @@ fn tool_git_status(input: serde_json::Value) -> Result<serde_json::Value> {
 }
 
 fn tool_git_diff(input: serde_json::Value) -> Result<serde_json::Value> {
-    let path = input["path"].as_str().ok_or_else(|| anyhow!("path required"))?;
+    let path = input["path"]
+        .as_str()
+        .ok_or_else(|| anyhow!("path required"))?;
     let staged = input["staged"].as_bool().unwrap_or(false);
     let file = input["file"].as_str();
 
@@ -1330,7 +1649,9 @@ fn tool_git_diff(input: serde_json::Value) -> Result<serde_json::Value> {
 }
 
 fn tool_git_log(input: serde_json::Value) -> Result<serde_json::Value> {
-    let path = input["path"].as_str().ok_or_else(|| anyhow!("path required"))?;
+    let path = input["path"]
+        .as_str()
+        .ok_or_else(|| anyhow!("path required"))?;
     let count = input["count"].as_u64().unwrap_or(10);
     let oneline = input["oneline"].as_bool().unwrap_or(true);
 
@@ -1353,7 +1674,10 @@ fn tool_git_log(input: serde_json::Value) -> Result<serde_json::Value> {
         }));
     }
 
-    let commits: Vec<serde_json::Value> = stdout.lines().filter(|l| !l.is_empty()).map(|line| {
+    let commits: Vec<serde_json::Value> = stdout
+        .lines()
+        .filter(|l| !l.is_empty())
+        .map(|line| {
         if oneline {
             let parts: Vec<&str> = line.splitn(2, ' ').collect();
             serde_json::json!({
@@ -1363,7 +1687,8 @@ fn tool_git_log(input: serde_json::Value) -> Result<serde_json::Value> {
         } else {
             serde_json::json!({ "raw": line })
         }
-    }).collect();
+        })
+        .collect();
 
     Ok(serde_json::json!({
         "commits": commits,
@@ -1373,8 +1698,12 @@ fn tool_git_log(input: serde_json::Value) -> Result<serde_json::Value> {
 }
 
 fn tool_git_commit(input: serde_json::Value) -> Result<serde_json::Value> {
-    let path = input["path"].as_str().ok_or_else(|| anyhow!("path required"))?;
-    let message = input["message"].as_str().ok_or_else(|| anyhow!("message required"))?;
+    let path = input["path"]
+        .as_str()
+        .ok_or_else(|| anyhow!("path required"))?;
+    let message = input["message"]
+        .as_str()
+        .ok_or_else(|| anyhow!("message required"))?;
 
     let add_output = run_git_command(&["add", "-A"], path)?;
     if !add_output.status.success() {
@@ -1478,11 +1807,19 @@ impl ToolExecutionManager {
 }
 
 fn tool_git_add(input: serde_json::Value) -> Result<serde_json::Value> {
-    let path = input["path"].as_str().ok_or_else(|| anyhow!("path required"))?;
-    let files = input["files"].as_array().ok_or_else(|| anyhow!("files array required"))?;
-    anyhow::ensure!(files.iter().all(serde_json::Value::is_string), "Every requested Git path must be a string");
+    let path = input["path"]
+        .as_str()
+        .ok_or_else(|| anyhow!("path required"))?;
+    let files = input["files"]
+        .as_array()
+        .ok_or_else(|| anyhow!("files array required"))?;
+    anyhow::ensure!(
+        files.iter().all(serde_json::Value::is_string),
+        "Every requested Git path must be a string"
+    );
 
-    let file_strs: Vec<String> = files.iter()
+    let file_strs: Vec<String> = files
+        .iter()
         .filter_map(|f| f.as_str().map(String::from))
         .collect();
 
@@ -1518,9 +1855,15 @@ fn tool_git_add(input: serde_json::Value) -> Result<serde_json::Value> {
     }))
 }
 
-async fn tool_web_search_async(input: serde_json::Value) -> Result<serde_json::Value> { tool_web_search_blocking(input) }
+async fn tool_web_search_async(input: serde_json::Value) -> Result<serde_json::Value> {
+    tool_web_search_blocking(input)
+}
 
-pub(crate) async fn execute_public_web_search(input: serde_json::Value) -> Result<serde_json::Value> { web::search(input).await }
+pub(crate) async fn execute_public_web_search(
+    input: serde_json::Value,
+) -> Result<serde_json::Value> {
+    web::search(input).await
+}
 
 #[cfg(test)]
 mod directory_edit_regressions {
@@ -1553,9 +1896,19 @@ mod directory_edit_regressions {
         assert!(run_git_command(&["init"], cwd).unwrap().status.success());
         for input in [json!({}), json!({"path":"."}), json!({"path":null})] {
             let list = execute_tool("ListDir", input.clone(), cwd).unwrap();
-            assert!(list["entries"].as_array().unwrap().iter().any(|entry| entry["name"] == "sentinel.txt"));
-            let status = execute_tool_async("git_status", input.clone(), cwd).await.unwrap();
-            assert!(status["files"].as_array().unwrap().iter().any(|file| file["file"] == "sentinel.txt"));
+            assert!(list["entries"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|entry| entry["name"] == "sentinel.txt"));
+            let status = execute_tool_async("git_status", input.clone(), cwd)
+                .await
+                .unwrap();
+            assert!(status["files"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|file| file["file"] == "sentinel.txt"));
             assert_eq!(execute_tool("git_diff", input, cwd).unwrap()["diff"], "");
         }
     }
@@ -1566,10 +1919,16 @@ mod directory_edit_regressions {
         let path = root.path().join("file.txt");
         fs::write(&path, "one\r\ntwo\r\n").unwrap();
         let input = json!({"file_path":"file.txt","edits":[{"old_string":"one\ntwo\n","new_string":"three\nfour\n"}]});
-        assert_eq!(tool_multi_edit(input, root.path().to_str().unwrap()).unwrap()["success"], true);
+        assert_eq!(
+            tool_multi_edit(input, root.path().to_str().unwrap()).unwrap()["success"],
+            true
+        );
         assert_eq!(fs::read_to_string(&path).unwrap(), "three\r\nfour\r\n");
         let input = json!({"file_path":"file.txt","edits":[{"old_string":"three","new_string":"changed"},{"old_string":"missing","new_string":"bad"}]});
-        assert_eq!(tool_multi_edit(input, root.path().to_str().unwrap()).unwrap()["replacements"], 0);
+        assert_eq!(
+            tool_multi_edit(input, root.path().to_str().unwrap()).unwrap()["replacements"],
+            0
+        );
         assert_eq!(fs::read_to_string(path).unwrap(), "three\r\nfour\r\n");
     }
 
@@ -1589,13 +1948,21 @@ mod directory_edit_regressions {
         crate::config::OrchestrationConfig::init_global().unwrap();
         let root = tempfile::tempdir().unwrap();
         let cwd = root.path().to_str().unwrap();
-        let failed = execute_tool_async("Bash", json!({"command":"false | head -1","shell":"bash"}), cwd)
+        let failed = execute_tool_async(
+            "Bash",
+            json!({"command":"false | head -1","shell":"bash"}),
+            cwd,
+        )
             .await
             .unwrap();
         assert_eq!(failed["success"], false, "{failed}");
         assert_ne!(failed["exit_code"], 0, "{failed}");
 
-        let passed = execute_tool_async("Bash", json!({"command":"printf 'a\\nb\\n' | head -1","shell":"bash"}), cwd)
+        let passed = execute_tool_async(
+            "Bash",
+            json!({"command":"printf 'a\\nb\\n' | head -1","shell":"bash"}),
+            cwd,
+        )
             .await
             .unwrap();
         assert_eq!(passed["success"], true, "{passed}");

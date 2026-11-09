@@ -97,8 +97,8 @@ fn canonical_target(path: &Path) -> Option<PathBuf> {
 
 pub(super) fn approved_auto_command(command: &str) -> bool {
     EXACT_COMMAND
-            .try_with(|approved| approved.as_deref() == Some(command))
-            .unwrap_or(false)
+        .try_with(|approved| approved.as_deref() == Some(command))
+        .unwrap_or(false)
 }
 
 pub(super) fn external_reads() -> bool {
@@ -210,11 +210,15 @@ mod tests {
         approved_auto_call("Bash", &input, ".", true, async {
             assert!(approved_auto_command("shutdown"));
             assert!(!approved_auto_command("shutdown /s"));
-            assert!(!tokio::spawn(async { approved_auto_command("shutdown") }).await.unwrap());
-        }).await;
+            assert!(!tokio::spawn(async { approved_auto_command("shutdown") })
+                .await
+                .unwrap());
+        })
+        .await;
         approved_auto_call("Bash", &input, ".", false, async {
             assert!(!approved_auto_command("shutdown"));
-        }).await;
+        })
+        .await;
         assert!(!approved_auto_command("shutdown"));
     }
     #[tokio::test]

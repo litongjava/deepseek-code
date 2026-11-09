@@ -178,6 +178,7 @@ async fn skill_execute(
     // cancellation and provider synchronization must remain identical to chat.
     super::chat::chat_handler(State(state), Json(ChatRequest {
         conversation_id: req.conversation_id,
+        context_boundary: None,
         messages: vec![serde_json::json!({"role":"user","content":req.input})],
         model: req.model,
         provider_id: req.provider_id,

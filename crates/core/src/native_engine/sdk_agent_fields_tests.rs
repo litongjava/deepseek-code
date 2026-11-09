@@ -2,8 +2,7 @@ use super::*;
 use crate::{
     db::conversation_repo,
     native_engine::{
-        engine_core::ReasoningMode,
-        provider_manager::ResolvedProvider,
+        engine_core::ReasoningMode, provider_manager::ResolvedProvider,
         runtime_agents::RuntimeAgent,
     },
     services::{agents, EnvironmentCredentials},

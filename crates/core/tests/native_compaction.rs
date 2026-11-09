@@ -42,6 +42,19 @@ async fn fixture(
     deepseek_code_core::config::OrchestrationConfig::init_global().unwrap();
     let dir = tempfile::tempdir().unwrap();
     let paths = RuntimePaths::new(dir.path().join("data")).unwrap();
+    // ImageGenerate is not a default core tool; this fixture drives it directly.
+    deepseek_code_core::services::customization::save(
+        &paths.data_dir,
+        &deepseek_code_core::services::customization::Customization {
+            tool_loading: std::collections::BTreeMap::from([(
+                "ImageGenerate".to_owned(),
+                deepseek_code_core::services::customization::ToolLoading { enabled: true, on_demand: true },
+            )]),
+            ..Default::default()
+        },
+        &[],
+    )
+    .unwrap();
     let store = SessionStore::new(paths.open_database().unwrap());
     let id = store.create(dir.path(), "gpt-6-astra", "gateway").unwrap();
     store.append(&id, "user", "Finish 中文 tests").unwrap();
@@ -63,13 +76,43 @@ async fn fixture(
     }));
     let captured = seen.clone();
     let app = app.route("/tools/codex/v1/responses", post(move |Json(body): Json<Value>| {
-        let first = captured.lock().unwrap().is_empty();
-        if mode == 4 { assert!(body["tools"].as_array().unwrap().iter().any(|tool| tool["name"] == "ImageGenerate")); }
+        let step = captured.lock().unwrap().len();
+        let first = step == 0;
+        if mode == 4 {
+            // The Responses adapter sends the same filtered list: the tool the
+            // fixture enabled, never an on-demand one nobody loaded.
+            let names: Vec<&str> = body["tools"].as_array().unwrap().iter().filter_map(|tool| tool["name"].as_str()).collect();
+            assert!(names.contains(&"ImageGenerate"), "{names:?}");
+            assert!(names.contains(&"Read"), "{names:?}");
+            assert!(!names.contains(&"ListDir"), "{names:?}");
+        }
+        if mode == 5 {
+            // Step 0 is the compaction exchange; the first turn request follows
+            // it with no restored load, and the search adds the tool from the
+            // next request on.
+            let names: Vec<String> = body["tools"].as_array().map(|tools| tools.iter().filter_map(|tool| tool["name"].as_str().map(str::to_owned)).collect()).unwrap_or_default();
+            match step {
+                1 => assert!(!names.contains(&"ListDir".to_owned()), "{names:?}"),
+                _ => assert!(names.contains(&"ListDir".to_owned()), "{names:?}"),
+            }
+        }
         captured.lock().unwrap().push(body);
         async move {
-            let output = if mode == 4 && first { json!([{"type":"function_call","id":"fc-image","call_id":"call-image","name":"ImageGenerate","arguments":json!({"prompt":"Create an icon","file_path":"assets/图标.png"}).to_string()}]) } else { json!([{"type":"message","role":"assistant","content":[{"type":"output_text","text":"done"}]}]) };
+            let call = |id: &str, name: &str, arguments: Value| json!({"type":"function_call","id":format!("fc-{id}"),"call_id":id,"name":name,"arguments":arguments.to_string()});
+            let output = if mode == 5 {
+                match step {
+                    1 => json!([call("search-1", "ToolSearch", json!({"query":"ListDir"}))]),
+                    2 => json!([call("list-1", "ListDir", json!({"path":"."}))]),
+                    _ => json!([{"type":"message","role":"assistant","content":[{"type":"output_text","text":"done"}]}]),
+                }
+            } else if mode == 4 && first {
+                json!([{"type":"function_call","id":"fc-image","call_id":"call-image","name":"ImageGenerate","arguments":json!({"prompt":"Create an icon","file_path":"assets/图标.png"}).to_string()}])
+            } else {
+                json!([{"type":"message","role":"assistant","content":[{"type":"output_text","text":"done"}]}])
+            };
             let data = json!({"type":"response.completed","response":{"id":"response","status":"completed","output":output,"usage":{"input_tokens":80,"output_tokens":1}}});
-            let delta = if mode == 4 && first { String::new() } else { format!("event: response.output_text.delta\ndata: {}\n\n", json!({"type":"response.output_text.delta","delta":"done"})) };
+            let tool_step = (mode == 4 && first) || (mode == 5 && step <= 2);
+            let delta = if tool_step { String::new() } else { format!("event: response.output_text.delta\ndata: {}\n\n", json!({"type":"response.output_text.delta","delta":"done"})) };
             ([("Content-Type", "text/event-stream")], format!("{delta}event: response.completed\ndata: {data}\n\n")).into_response()
         }
     }));
@@ -276,4 +319,99 @@ async fn failure_and_cancellation_never_commit_opaque_state() {
         assert_eq!(count, 0);
         server.abort();
     }
+}
+
+/// A real compaction exchange replaces the history that carried a successful
+/// ToolSearch, so the restored session cannot treat the summary as an
+/// authorization; a fresh search loads the tool again for the next request.
+#[tokio::test]
+async fn a_compacted_search_record_cannot_authorize_and_a_fresh_search_restores_it() {
+    let (dir, store, id, engine, seen, server) = fixture(5).await;
+    std::fs::write(dir.path().join("item.txt"), "listing").unwrap();
+    let assistant = uuid::Uuid::new_v4().to_string();
+    store.append(&id, "assistant", "").unwrap();
+    store
+        .db
+        .with_conn(|conn| {
+            deepseek_code_core::db::message_repo::save_stream_tool_result(
+                conn,
+                &id,
+                &assistant,
+                "",
+                &deepseek_code_core::db::message_repo::ToolCallRow {
+                    id: format!("{assistant}:search-1"),
+                    message_id: assistant.clone(),
+                    name: "ToolSearch".to_owned(),
+                    input: Some(json!({"query":"ListDir"}).to_string()),
+                    output: Some(
+                        json!({"success":true,"loaded_tools":["ListDir"],"tools":[]}).to_string(),
+                    ),
+                    is_error: false,
+                    sort_order: 0,
+                },
+            )
+        })
+        .unwrap()
+        .unwrap();
+    store.append(&id, "user", "Continue").unwrap();
+    let before = store.model_history(&id, &ApiFormat::OpenAI).unwrap();
+    assert!(
+        serde_json::to_string(&before).unwrap().contains("loaded_tools"),
+        "{before:?}"
+    );
+
+    compaction::compact(&engine, &store.db, &id, "gateway", "gpt-6-astra", "")
+        .await
+        .unwrap();
+    let after = store.model_history(&id, &ApiFormat::OpenAI).unwrap();
+    assert!(
+        !serde_json::to_string(&after).unwrap().contains("loaded_tools"),
+        "the compaction window must replace the search record: {after:?}"
+    );
+
+    store.append(&id, "user", "Continue").unwrap();
+    let request: ChatRequest = serde_json::from_value(json!({"conversation_id":id,"messages":store.model_history(&id,&ApiFormat::OpenAI).unwrap(),"model":"gpt-6-astra","provider_id":"gateway","workspace_path":dir.path(),"max_tokens":8192})).unwrap();
+    let mut events = engine.send_message(request).await.unwrap();
+    let mut errors = Vec::new();
+    tokio::time::timeout(std::time::Duration::from_secs(10), async {
+        while let Some(event) = events.recv().await {
+            if let deepseek_code_core::native_engine::tool_loop::EngineEvent::ToolUseDone {
+                tool_name,
+                output,
+                is_error,
+                ..
+            } = event
+            {
+                if is_error {
+                    errors.push(format!("{tool_name}: {output}"));
+                }
+            }
+        }
+    })
+    .await
+    .unwrap();
+    assert!(errors.is_empty(), "{errors:?}");
+    let requests = seen.lock().unwrap();
+    // The compaction exchange, then the first turn request without the tool,
+    // the request after the fresh search, and the request carrying the listing.
+    assert_eq!(requests.len(), 4, "{requests:#?}");
+    let names = |body: &Value| -> Vec<String> {
+        body["tools"]
+            .as_array()
+            .map(|tools| {
+                tools
+                    .iter()
+                    .filter_map(|tool| tool["name"].as_str().map(str::to_owned))
+                    .collect()
+            })
+            .unwrap_or_default()
+    };
+    assert!(!names(&requests[1]).contains(&"ListDir".to_owned()));
+    assert!(names(&requests[2]).contains(&"ListDir".to_owned()));
+    assert!(names(&requests[3]).contains(&"ListDir".to_owned()));
+    assert!(
+        requests[3].to_string().contains("item.txt"),
+        "the restored search did not run the tool"
+    );
+    server.abort();
 }

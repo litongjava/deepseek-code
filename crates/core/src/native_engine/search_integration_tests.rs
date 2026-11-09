@@ -11,8 +11,10 @@ fn search_provider(base: &str, id: &str) -> ResolvedProvider {
         model: serde_json::from_value(json!({
             "id": id, "name": id, "enabled": true,
             "supports_vision": false, "supports_web_search": true
-        })).unwrap(),
-    }).unwrap()
+        }))
+        .unwrap(),
+    })
+    .unwrap()
 }
 
 #[tokio::test]
@@ -28,11 +30,32 @@ async fn parallel_searches_keep_provider_credentials_and_usage_separate() {
             "output": [{"type":"web_search_call", "status":"completed", "action":{"sources":[{"url":format!("https://{model}.example"), "title":model}]}}],
             "usage":{"input_tokens":100,"output_tokens":20,"total_tokens":120,"input_tokens_details":{"cached_tokens":40}}}))
     }));
-    let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap(); });
+    let server = tokio::spawn(async move {
+        axum::serve(listener, app).await.unwrap();
+    });
     let (tx, mut rx) = mpsc::channel(32);
-    let (provider_a, provider_b) = (search_provider(&base, "model-a"), search_provider(&base, "model-b"));
-    let a = execute_builtin_tool("WebSearch", json!({"query":"Rust release notes"}), ".", &provider_a, &tx, None, false);
-    let b = execute_builtin_tool("WebSearch", json!({"query":"Rust release notes"}), ".", &provider_b, &tx, None, false);
+    let (provider_a, provider_b) = (
+        search_provider(&base, "model-a"),
+        search_provider(&base, "model-b"),
+    );
+    let a = execute_builtin_tool(
+        "WebSearch",
+        json!({"query":"Rust release notes"}),
+        ".",
+        &provider_a,
+        &tx,
+        None,
+        false,
+    );
+    let b = execute_builtin_tool(
+        "WebSearch",
+        json!({"query":"Rust release notes"}),
+        ".",
+        &provider_b,
+        &tx,
+        None,
+        false,
+    );
     let (a, b) = tokio::join!(a, b);
     let (a, b) = (a.unwrap().to_string(), b.unwrap().to_string());
     assert!(a.contains("model-a.example") && !a.contains("model-b.example"));
@@ -42,7 +65,9 @@ async fn parallel_searches_keep_provider_credentials_and_usage_separate() {
         if let EngineEvent::RequestSnapshot(snapshot) = event {
             assert_eq!(snapshot["source"], "web_search");
             assert!(!snapshot.to_string().contains("key-"));
-            if snapshot["status"] == "completed" { completed.push(snapshot); }
+            if snapshot["status"] == "completed" {
+                completed.push(snapshot);
+            }
         }
     }
     assert_eq!(completed.len(), 2);
@@ -60,16 +85,33 @@ async fn parallel_searches_keep_provider_credentials_and_usage_separate() {
 async fn search_failure_still_records_provider_usage() {
     use axum::{routing::post, Json, Router};
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let provider = search_provider(&format!("http://{}", listener.local_addr().unwrap()), "failed");
+    let provider = search_provider(
+        &format!("http://{}", listener.local_addr().unwrap()),
+        "failed",
+    );
     let app = Router::new().route("/v1/responses", post(|| async {
         Json(json!({"model":"failed", "output":[{"type":"message"}], "usage":{"input_tokens":50,"output_tokens":10,"total_tokens":60}}))
     }));
-    let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap(); });
+    let server = tokio::spawn(async move {
+        axum::serve(listener, app).await.unwrap();
+    });
     let (tx, mut rx) = mpsc::channel(8);
-    assert!(execute_builtin_tool("WebSearch", json!({"query":"Rust"}), ".", &provider, &tx, None, false).await.is_err());
+    assert!(execute_builtin_tool(
+        "WebSearch",
+        json!({"query":"Rust"}),
+        ".",
+        &provider,
+        &tx,
+        None,
+        false
+    )
+    .await
+    .is_err());
     let mut final_snapshot = None;
     while let Ok(event) = rx.try_recv() {
-        if let EngineEvent::RequestSnapshot(snapshot) = event { final_snapshot = Some(snapshot); }
+        if let EngineEvent::RequestSnapshot(snapshot) = event {
+            final_snapshot = Some(snapshot);
+        }
     }
     let snapshot = final_snapshot.unwrap();
     assert_eq!(snapshot["status"], "error");
@@ -81,23 +123,49 @@ async fn search_failure_still_records_provider_usage() {
 async fn deepseek_search_falls_back_to_chat_when_unconfigured() {
     use axum::{http::HeaderMap, routing::post, Json, Router};
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let mut provider = search_provider(&format!("http://{}", listener.local_addr().unwrap()), "deepseek-flash");
+    let mut provider = search_provider(
+        &format!("http://{}", listener.local_addr().unwrap()),
+        "deepseek-flash",
+    );
     provider.provider.web_search_strategy = None;
     let app = Router::new().route("/v1/messages", post(|headers: HeaderMap, Json(body): Json<Value>| async move {
         assert_eq!(headers["x-api-key"], "key-deepseek-flash");
         assert_eq!(body["model"], "deepseek-flash");
         Json(json!({"model":"deepseek-flash", "content":[{"type":"web_search_tool_result","content":[{"type":"web_search_result","url":"https://example.com","title":"Result"}]}]}))
     }));
-    let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap(); });
+    let server = tokio::spawn(async move {
+        axum::serve(listener, app).await.unwrap();
+    });
     let (tx, _rx) = mpsc::channel(16);
-    let value = execute_builtin_tool("WebSearch", json!({"query":"weather"}), ".", &provider, &tx, None, false).await.unwrap();
+    let value = execute_builtin_tool(
+        "WebSearch",
+        json!({"query":"weather"}),
+        ".",
+        &provider,
+        &tx,
+        None,
+        false,
+    )
+    .await
+    .unwrap();
     assert_eq!(value["provider_id"], "deepseek-flash");
     let temp = tempfile::tempdir().unwrap();
     let path = temp.path().join("config.json");
     let mut config = crate::config::AppConfig::default();
     config.deepseek_search.base_url = "https://search.example/v1".into();
     std::fs::write(&path, serde_json::to_vec(&config).unwrap()).unwrap();
-    let error = execute_builtin_tool("WebSearch", json!({"query":"weather"}), ".", &provider, &tx, Some(&path), false).await.unwrap_err().to_string();
+    let error = execute_builtin_tool(
+        "WebSearch",
+        json!({"query":"weather"}),
+        ".",
+        &provider,
+        &tx,
+        Some(&path),
+        false,
+    )
+    .await
+    .unwrap_err()
+    .to_string();
     assert!(error.contains("DeepSeek"));
     server.abort();
 }
@@ -117,21 +185,43 @@ async fn deepseek_search_reads_independent_endpoint_model_and_new_key_on_each_ca
                 "usage":{"input_tokens":30,"output_tokens":10,"cache_read_input_tokens":20}}))
         }
     }));
-    let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap(); });
+    let server = tokio::spawn(async move {
+        axum::serve(listener, app).await.unwrap();
+    });
     let temp = tempfile::tempdir().unwrap();
     let config_path = temp.path().join("config.json");
     let mut chat = search_provider("http://127.0.0.1:1", "proxy/deepseek-v4.1-flash");
     chat.provider.web_search_strategy = None;
     let (tx, mut rx) = mpsc::channel(16);
-    for (key, model) in [("search-key-one", "deepseek-search-one"), ("search-key-two", "deepseek-search-two")] {
+    for (key, model) in [
+        ("search-key-one", "deepseek-search-one"),
+        ("search-key-two", "deepseek-search-two"),
+    ] {
         let mut config = crate::config::AppConfig::default();
-        config.deepseek_search = serde_json::from_value(json!({"base_url":base,"model":model,"api_key":key})).unwrap();
+        config.deepseek_search =
+            serde_json::from_value(json!({"base_url":base,"model":model,"api_key":key})).unwrap();
         std::fs::write(&config_path, serde_json::to_vec(&config).unwrap()).unwrap();
-        let value = execute_builtin_tool("WebSearch", json!({"query":"Rust"}), ".", &chat, &tx, Some(&config_path), false).await.unwrap();
+        let value = execute_builtin_tool(
+            "WebSearch",
+            json!({"query":"Rust"}),
+            ".",
+            &chat,
+            &tx,
+            Some(&config_path),
+            false,
+        )
+        .await
+        .unwrap();
         assert_eq!(value["provider_id"], "deepseek-search");
         assert_eq!(value["model"], model);
     }
-    assert_eq!(*requests.lock().await, vec![("search-key-one".into(), "deepseek-search-one".into()), ("search-key-two".into(), "deepseek-search-two".into())]);
+    assert_eq!(
+        *requests.lock().await,
+        vec![
+            ("search-key-one".into(), "deepseek-search-one".into()),
+            ("search-key-two".into(), "deepseek-search-two".into())
+        ]
+    );
     while let Ok(event) = rx.try_recv() {
         if let EngineEvent::RequestSnapshot(snapshot) = event {
             assert_eq!(snapshot["providerId"], "deepseek-search");

@@ -107,7 +107,7 @@ pub fn save_live_requests(session: &Session, snapshots: &[Value]) -> Result<()> 
     // Store only accounting fields, never prompt bodies or credentials.
     let values: Vec<Value> = snapshots.iter().map(|snapshot| {
         let mut value = serde_json::Map::new();
-        for key in ["id", "source", "model", "startedAt", "inputTokens", "outputTokens", "contextUsage"] {
+        for key in ["id", "source", "model", "providerId", "contextBoundary", "startedAt", "inputTokens", "outputTokens", "contextUsage"] {
             if let Some(field) = snapshot.get(key) { value.insert(key.into(), field.clone()); }
         }
         Value::Object(value)
@@ -633,10 +633,16 @@ pub fn retryable_goal_error(error: &anyhow::Error, has_worker_frontend: bool) ->
         return true;
     }
     // EngineEvent currently serializes errors. Accept its exact host-generated
-    // API prefix, never a transport-looking substring in a provider/tool body.
+    // prefixes and structured metadata, never a transport-looking substring in a
+    // provider/tool body.
     let text = error.to_string();
-    let text = text.strip_prefix("Engine execution failed: ").unwrap_or(&text);
+    let text = text
+        .strip_prefix("Engine execution failed: ")
+        .unwrap_or(&text);
     let text = text.strip_prefix("API request failed: ").unwrap_or(text);
+    if let Some(failure) = deepseek_code_core::performance::parse_failure_summary(text) {
+        return matches!(failure.class.as_str(), "transient" | "rate_limit");
+    }
     text.strip_prefix("Model API error ")
         .and_then(|rest| rest.split(':').next())
         .and_then(|s| s.parse::<u16>().ok())
@@ -881,7 +887,7 @@ pub fn is_context_overflow(error: &anyhow::Error) -> bool {
 /// context window, drop the failed attempt, compact the earlier conversation
 /// the way autocompact does, and let the caller send the prompt again. False
 /// (with nothing changed) when there is no earlier conversation to compact.
-pub async fn reactive_compact(session: &Session, prompt: &str) -> Result<bool> {
+pub async fn reactive_compact(session: &Session, prompt: &str, turn: &mut deepseek_code_core::db::turn_repo::TurnTimer) -> Result<bool> {
     use deepseek_code_core::db::message_repo;
     let rows = session.store.db.with_conn(|conn| message_repo::get_messages_by_conversation(conn, &session.id))??;
     let start = rows.iter().rposition(|row| row.is_compact_boundary).unwrap_or(0);
@@ -892,9 +898,8 @@ pub async fn reactive_compact(session: &Session, prompt: &str) -> Result<bool> {
     crate::compaction::notice("Context limit reached; compacting the conversation and retrying…");
     let failed_attempt = rows[index].sort_order;
     session.store.db.with_conn(|conn| message_repo::delete_messages_from(conn, &session.id, failed_attempt))??;
-    let context = crate::services::context(&session.paths)?;
-    let report = crate::hook_progress::during(&session.id, true, deepseek_code_core::services::compaction::compact_with_hooks(&session.engine, &context, &session.workspace, &session.id, &session.provider_id, &session.model, "", "auto")).await?;
-    for warning in report.warnings { crate::compaction::notice(&format!("Hook: {warning}")); }
+    turn.clear_segment();
+    compact_automatic(session).await?;
     Ok(true)
 }
 
@@ -918,13 +923,42 @@ pub async fn prepare_turn(session: &Session, context_window: Option<u32>) -> Res
     crate::compaction::notice(&format!(
         "Auto-compacting conversation (estimated {estimated} tokens, threshold {threshold})…"
     ));
+    compact_automatic(session).await
+}
+
+/// Both automatic entries retain the commit outcome across cancellation.
+async fn compact_automatic(session: &Session) -> Result<()> {
+    use deepseek_code_core::services::compaction::{compact_with_hooks_tracked, CompactionTracker};
     let context = crate::services::context(&session.paths)?;
-    tokio::select! {
-        result = crate::hook_progress::during(&session.id, true, deepseek_code_core::services::compaction::compact_with_hooks(&session.engine, &context, &session.workspace, &session.id, &session.provider_id, &session.model, "", "auto")) => {
-            for warning in result?.warnings { crate::compaction::notice(&format!("Hook: {warning}")); }
-        },
-        _ = tokio::signal::ctrl_c() => anyhow::bail!("Autocompact interrupted; check /history for a completed summary. Original transcript retained"),
-        _ = deepseek_code_core::services::background_sessions::wait_for_cancellation() => anyhow::bail!("Autocompact task cancelled; check /history for a completed summary. Original transcript retained"),
+    let tracker = CompactionTracker::default();
+    // The SDK frame reader owns stdin; terminal progress must not inspect it.
+    let result = {
+        tokio::select! {
+            biased;
+            _ = session.sdk_cancelled() => None,
+            result = crate::hook_progress::during(&session.id, session.sdk_permissions.is_none(), compact_with_hooks_tracked(
+                &session.engine, &context, &session.workspace, &session.id,
+                &session.provider_id, &session.model, "", "auto", Some(&tracker),
+            )) => Some(result),
+            _ = tokio::signal::ctrl_c() => None,
+            _ = deepseek_code_core::services::background_sessions::wait_for_cancellation() => None,
+        }
+    };
+    let (report, cancelled) = match result {
+        Some(result) => (result?, false),
+        None => (crate::repl::committed_after_cancel(
+            &tracker, "Interrupted: automatic compaction cancelled before it was saved; original transcript retained",
+        )?.report, true),
+    };
+    for warning in &report.warnings {
+        crate::compaction::notice(&format!("Hook: {warning}"));
+    }
+    crate::compaction::notice(&crate::compaction::completion_report(&report));
+    if cancelled {
+        crate::compaction::notice(
+            "Stopped the remaining post-compaction steps; summary already saved.",
+        );
+        anyhow::bail!("Interrupted: automatic compaction cancelled after commit");
     }
     Ok(())
 }
@@ -1091,6 +1125,8 @@ mod tests {
             status: 503,
             retry_after: None,
             message: "fixture".into(),
+            server_request_id: None,
+            remote_code: None,
         }
         .into();
         assert!(retryable_goal_error(&typed, true));
@@ -1110,6 +1146,38 @@ mod tests {
         ] {
             assert!(
                 !retryable_goal_error(&anyhow::anyhow!(message), true),
+                "{message}"
+            );
+        }
+    }
+
+    #[test]
+    fn structured_failure_metadata_drives_goal_retry_classification() {
+        for (message, retryable) in [
+            (
+                "Model request failed: reset by peer[stage=send; class=transient; http=unknown; attempts=4; retries=3; content_started=unknown]",
+                true,
+            ),
+            (
+                "Engine execution failed: Model request failed: slow down[stage=response; class=rate_limit; http=429; attempts=4; retries=3; content_started=unknown] (session s)",
+                true,
+            ),
+            (
+                "Model request failed: denied[stage=response; class=authentication; http=401; attempts=1; retries=0; content_started=unknown]",
+                false,
+            ),
+            (
+                "Model request failed: bad request[stage=response; class=permanent; http=400; attempts=1; retries=0; content_started=unknown]",
+                false,
+            ),
+            (
+                "Model request failed: too long[stage=response; class=context_limit; http=400; attempts=1; retries=0; content_started=unknown]",
+                false,
+            ),
+        ] {
+            assert_eq!(
+                retryable_goal_error(&anyhow::anyhow!(message), true),
+                retryable,
                 "{message}"
             );
         }

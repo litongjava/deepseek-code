@@ -225,7 +225,7 @@ fn request_trace_preserves_initial_arguments_and_explains_eof() {
         "delta":{"type":"input_json_delta","partial_json":""}}));
     let snapshot = trace.finish("completed", None);
     assert_eq!(snapshot["responseBlocks"][0]["input"]["file_path"], "a.txt");
-    assert_eq!(snapshot["status"], "interrupted");
+    assert_eq!(snapshot["status"], "stream_error");
     assert!(snapshot["error"]
         .as_str()
         .unwrap()
@@ -270,9 +270,13 @@ async fn non_sse_success_responses_report_gateway_errors_for_both_clients() {
             let error = stream.next().await.unwrap().unwrap_err().to_string();
             assert!(error.contains("HTTP 200"), "{error}");
             assert!(error.contains(content_type), "{error}");
-            if content_type == "application/json" {
-                assert!(error.contains("fixture gateway rejected tool history"));
-            }
+            // Gateway text is free text: only the category or a known error
+            // identifier may appear, never the body itself.
+            assert!(
+                !error.contains("fixture gateway rejected tool history"),
+                "{error}"
+            );
+            assert!(error.contains("content omitted"), "{error}");
             assert!(stream.next().await.is_none());
         }
         server.abort();
