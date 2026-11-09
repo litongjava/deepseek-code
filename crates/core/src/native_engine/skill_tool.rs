@@ -53,7 +53,9 @@ impl ToolLoopExecutor {
             Ok(None)
         } else {
             ensure!(
-                result["status"] == "completed" || (result["execution"] == "workflow" && matches!(result["status"].as_str(), Some("partial" | "inconclusive"))),
+                result["status"] == "completed"
+                    || (result["execution"] == "workflow"
+                        && matches!(result["status"].as_str(), Some("partial" | "inconclusive"))),
                 "Skill child did not complete"
             );
             let text = result["result"]
@@ -101,34 +103,57 @@ impl ToolLoopExecutor {
             "Skill /{name} is disabled for model invocation; it requires an explicit user command"
         );
         if skill.path.parent() == Some(Path::new("__embedded_cli_skills__")) {
-            if let Some(prepared) = crate::skills::code_review::prepare_named(name, Path::new(&self.workspace_cwd), arguments).await {
+            if let Some(prepared) = crate::skills::code_review::prepare_named(
+                name,
+                Path::new(&self.workspace_cwd),
+                arguments,
+            )
+            .await
+            {
                 let instructions = prepared?;
-                return Ok(json!({"skill":name,"path":skill.path,"instructions":instructions,"execution":"inline","shell_context_already_collected":true}));
+                return Ok(
+                    json!({"skill":name,"path":skill.path,"instructions":instructions,"execution":"inline","shell_context_already_collected":true}),
+                );
             }
         }
-        if name == "deep-research" && skill.path == Path::new("__embedded_cli_skills__").join("deep-research") {
-            ensure!(!arguments.trim().is_empty(), "Usage: /deep-research <specific research question>");
+        if name == "deep-research"
+            && skill.path == Path::new("__embedded_cli_skills__").join("deep-research")
+        {
+            ensure!(
+                !arguments.trim().is_empty(),
+                "Usage: /deep-research <specific research question>"
+            );
             let workflow = json!({"name":"deep-research","args":arguments});
-            let (_, output, failed) = Box::pin(self.execute_tool_call("Workflow", &workflow, &uuid::Uuid::new_v4().to_string())).await;
+            let (_, output, failed) = Box::pin(self.execute_host_tool(
+                "Workflow",
+                &workflow,
+                &uuid::Uuid::new_v4().to_string(),
+            ))
+            .await;
             ensure!(!failed, "Deep research failed: {output}");
             return serde_json::from_str(&output).context("Invalid research result");
         }
-        if name == "doctor"
-            && skill.path.parent() == Some(Path::new("__embedded_cli_skills__"))
-        {
-            let instructions = skill.render_template(arguments, self.conv_id.as_deref().unwrap_or("unknown"))?;
+        if name == "doctor" && skill.path.parent() == Some(Path::new("__embedded_cli_skills__")) {
+            let instructions =
+                skill.render_template(arguments, self.conv_id.as_deref().unwrap_or("unknown"))?;
             let snapshot = crate::services::doctor::inspect(
-                Path::new(&self.workspace_cwd), Some(&context.paths),
-            ).render();
-            return Ok(json!({"skill":name,"path":skill.path,"instructions":crate::services::doctor::attach_snapshot(&instructions, &snapshot),"execution":"inline","shell_context_already_collected":true}));
+                Path::new(&self.workspace_cwd),
+                Some(&context.paths),
+            )
+            .render();
+            return Ok(
+                json!({"skill":name,"path":skill.path,"instructions":crate::services::doctor::attach_snapshot(&instructions, &snapshot),"execution":"inline","shell_context_already_collected":true}),
+            );
         }
         if crate::skills::bundled_resources::supports(name)
             && skill.path.parent() == Some(Path::new("__embedded_cli_skills__"))
         {
-            let instructions = self.bundled_resources.prepare(
-                name, arguments, Path::new(&self.workspace_cwd),
-            )?;
-            return Ok(json!({"skill":name,"path":skill.path,"instructions":instructions,"execution":"inline","shell_context_already_collected":true}));
+            let instructions =
+                self.bundled_resources
+                    .prepare(name, arguments, Path::new(&self.workspace_cwd))?;
+            return Ok(
+                json!({"skill":name,"path":skill.path,"instructions":instructions,"execution":"inline","shell_context_already_collected":true}),
+            );
         }
         // user-invocable controls slash commands, not model-only skills.
         let mut selected = skill.clone();

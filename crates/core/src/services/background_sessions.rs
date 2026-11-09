@@ -113,7 +113,8 @@ pub(crate) fn directory(root: &Path, id: &str) -> Result<PathBuf> {
 }
 pub(crate) fn read_job(dir: &Path) -> Result<Job> {
     let path = dir.join("state.json");
-    let bytes = fs::read(&path).with_context(|| format!("Reading task state {}", path.display()))?;
+    let bytes =
+        fs::read(&path).with_context(|| format!("Reading task state {}", path.display()))?;
     serde_json::from_slice(&bytes).with_context(|| format!("Parsing task state {}", path.display()))
 }
 fn observed(mut job: Job) -> Job {
@@ -361,12 +362,12 @@ fn supervise(dir: &Path, job: &mut Job) -> Result<()> {
             if job.status == "failed" {
                 // The worker records its own sanitized failure. Fall back to the
                 // exit status only; stdout/stderr may contain user content.
-                job.error = Some(read_worker_failure(dir).unwrap_or_else(|| {
-                    match job.exit_code {
+                job.error = Some(
+                    read_worker_failure(dir).unwrap_or_else(|| match job.exit_code {
                         Some(code) => format!("Worker exited with code {code}"),
                         None => "Worker exited without an exit code".to_owned(),
-                    }
-                }));
+                    }),
+                );
             }
             break;
         }
@@ -737,18 +738,38 @@ mod answer_cleanup_tests {
         let id = uuid::Uuid::new_v4().to_string();
         let path = dir.path().to_path_buf();
         let request = id.clone();
-        let task = tokio::spawn(async move { wait_for_answer(&path, &request, "permission", "Allow?", None).await });
+        let task = tokio::spawn(async move {
+            wait_for_answer(&path, &request, "permission", "Allow?", None).await
+        });
         tokio::time::timeout(Duration::from_secs(3), async {
-            while !dir.path().join("pending-question.json").exists() { tokio::time::sleep(Duration::from_millis(10)).await; }
-        }).await.unwrap();
+            while !dir.path().join("pending-question.json").exists() {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .unwrap();
         task.abort();
         assert!(task.await.unwrap_err().is_cancelled());
         assert!(!dir.path().join("pending-question.json").exists());
-        let guard = PendingAnswerCleanup { dir:dir.path().into(), request:id.clone() };
-        save(&dir.path().join("pending-question.json"), &PendingQuestion {request_id:"next".into(),question:"Next?".into(),kind:"permission".into(),tool:None}).unwrap();
+        let guard = PendingAnswerCleanup {
+            dir: dir.path().into(),
+            request: id.clone(),
+        };
+        save(
+            &dir.path().join("pending-question.json"),
+            &PendingQuestion {
+                request_id: "next".into(),
+                question: "Next?".into(),
+                kind: "permission".into(),
+                tool: None,
+            },
+        )
+        .unwrap();
         fs::write(response_path(dir.path(), &id).unwrap(), b"late").unwrap();
         drop(guard);
-        let pending: PendingQuestion = serde_json::from_slice(&fs::read(dir.path().join("pending-question.json")).unwrap()).unwrap();
+        let pending: PendingQuestion =
+            serde_json::from_slice(&fs::read(dir.path().join("pending-question.json")).unwrap())
+                .unwrap();
         assert_eq!(pending.request_id, "next");
         assert!(!response_path(dir.path(), &id).unwrap().exists());
     }
@@ -756,16 +777,30 @@ mod answer_cleanup_tests {
 impl Drop for PendingAnswerCleanup {
     fn drop(&mut self) {
         let pending = self.dir.join("pending-question.json");
-        if fs::read(&pending).ok().and_then(|bytes| serde_json::from_slice::<serde_json::Value>(&bytes).ok())
-            .is_some_and(|value| value["request_id"] == self.request) {
+        if fs::read(&pending)
+            .ok()
+            .and_then(|bytes| serde_json::from_slice::<serde_json::Value>(&bytes).ok())
+            .is_some_and(|value| value["request_id"] == self.request)
+        {
             let _ = fs::remove_file(pending);
         }
-        if let Ok(response) = response_path(&self.dir, &self.request) { let _ = fs::remove_file(response); }
+        if let Ok(response) = response_path(&self.dir, &self.request) {
+            let _ = fs::remove_file(response);
+        }
     }
 }
 
-async fn wait_for_answer(dir: &Path, request: &str, kind: &str, question: &str, tool: Option<serde_json::Value>) -> Result<String> {
-    let _cleanup = PendingAnswerCleanup { dir: dir.to_path_buf(), request: request.into() };
+async fn wait_for_answer(
+    dir: &Path,
+    request: &str,
+    kind: &str,
+    question: &str,
+    tool: Option<serde_json::Value>,
+) -> Result<String> {
+    let _cleanup = PendingAnswerCleanup {
+        dir: dir.to_path_buf(),
+        request: request.into(),
+    };
     save(
         &dir.join("pending-question.json"),
         &PendingQuestion {
@@ -793,10 +828,12 @@ async fn wait_for_answer(dir: &Path, request: &str, kind: &str, question: &str, 
                     .to_owned();
                 // The request-bound guard removes only this generation. An older
                 // waiter must never remove a newly published question.
-                let pending: PendingQuestion = serde_json::from_slice(
-                    &fs::read(dir.join("pending-question.json"))?,
-                )?;
-                ensure!(pending.request_id == request, "Background question was superseded");
+                let pending: PendingQuestion =
+                    serde_json::from_slice(&fs::read(dir.join("pending-question.json"))?)?;
+                ensure!(
+                    pending.request_id == request,
+                    "Background question was superseded"
+                );
                 return Ok(answer);
             }
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
@@ -834,8 +871,8 @@ pub fn events_since(
     if !path.exists() {
         return Ok((job, cursor, vec![]));
     }
-    let mut file = fs::File::open(&path)
-        .with_context(|| format!("Opening task output {}", path.display()))?;
+    let mut file =
+        fs::File::open(&path).with_context(|| format!("Opening task output {}", path.display()))?;
     ensure!(
         cursor <= file.metadata()?.len(),
         "Task output was truncated; attach again from the start"
@@ -922,9 +959,16 @@ pub fn collect_completed(
             .find(|event| event["type"] == "result")
             .and_then(|event| event["result"].as_str().map(str::to_owned));
         let result = if execution_session != job.session_id {
-            store.db.with_conn(|conn| crate::db::message_repo::get_messages_by_conversation(conn, &execution_session))??
-                .into_iter().rev().find(|message| message.role == "assistant" && !message.content.trim().is_empty())
-                .map(|message| message.content).or(result)
+            store
+                .db
+                .with_conn(|conn| {
+                    crate::db::message_repo::get_messages_by_conversation(conn, &execution_session)
+                })??
+                .into_iter()
+                .rev()
+                .find(|message| message.role == "assistant" && !message.content.trim().is_empty())
+                .map(|message| message.content)
+                .or(result)
         } else if job.session_id == parent {
             Some(if job.status == "completed" {
                 "The worker completed and stored its answer directly in this session. This notice does not duplicate that answer.".to_owned()
@@ -1225,9 +1269,11 @@ mod tests {
     async fn worker_mailbox_cancellation_does_not_approve() {
         let (_root, dir, _) = fixture("");
         fs::write(dir.join("cancel"), b"cancel").unwrap();
-        assert!(wait_for_answer(&dir, "request", "permission", "Allow?", None)
-            .await
-            .is_err());
+        assert!(
+            wait_for_answer(&dir, "request", "permission", "Allow?", None)
+                .await
+                .is_err()
+        );
     }
     #[test]
     fn attachment_preserves_partial_records_and_rejects_foreign_parent() {

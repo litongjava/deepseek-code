@@ -28,46 +28,94 @@ pub(super) fn definition() -> ToolDefinition {
 
 /// Whether this call is a script workflow rather than the built-in deep research.
 pub(super) fn is_script(input: &Value) -> bool {
-    !input["script"].is_null() || !input["scriptPath"].is_null() || input["name"].as_str().is_some_and(|name| name != "deep-research")
+    !input["script"].is_null()
+        || !input["scriptPath"].is_null()
+        || input["name"]
+            .as_str()
+            .is_some_and(|name| name != "deep-research")
 }
 
 /// `name` and `description` from the script's leading meta literal.
 fn meta_field(script: &str, field: &str) -> Option<String> {
     let head: String = script.chars().take(4000).collect();
-    let pattern = regex::Regex::new(&format!(r#"\b{field}\s*:\s*(?:'([^']*)'|"([^"]*)"|`([^`]*)`)"#)).ok()?;
+    let pattern = regex::Regex::new(&format!(
+        r#"\b{field}\s*:\s*(?:'([^']*)'|"([^"]*)"|`([^`]*)`)"#
+    ))
+    .ok()?;
     let captures = pattern.captures(&head)?;
-    captures.get(1).or(captures.get(2)).or(captures.get(3)).map(|m| m.as_str().to_owned())
+    captures
+        .get(1)
+        .or(captures.get(2))
+        .or(captures.get(3))
+        .map(|m| m.as_str().to_owned())
 }
 
 impl ToolLoopExecutor {
     fn workflow_script(&self, input: &Value) -> Result<String> {
         let script = if let Some(path) = input["scriptPath"].as_str() {
-            std::fs::read_to_string(crate::tools::resolve_path(path, &self.workspace_cwd)?).with_context(|| format!("Reading workflow script {path}"))?
+            std::fs::read_to_string(crate::tools::resolve_path(path, &self.workspace_cwd)?)
+                .with_context(|| format!("Reading workflow script {path}"))?
         } else if let Some(script) = input["script"].as_str() {
             script.to_owned()
         } else {
-            let name = input["name"].as_str().context("Workflow needs script, scriptPath or name")?;
-            ensure!(name.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_')), "Invalid workflow name");
-            let root = self.search_config_path.as_deref().and_then(Path::parent).map(Path::to_path_buf);
-            let candidates = [Some(PathBuf::from(&self.workspace_cwd).join(".claude/workflows")), root.map(|root| root.join("workflows"))];
-            candidates.into_iter().flatten().flat_map(|dir| ["js", "mjs"].map(|ext| dir.join(format!("{name}.{ext}"))))
+            let name = input["name"]
+                .as_str()
+                .context("Workflow needs script, scriptPath or name")?;
+            ensure!(
+                name.chars()
+                    .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_')),
+                "Invalid workflow name"
+            );
+            let root = self
+                .search_config_path
+                .as_deref()
+                .and_then(Path::parent)
+                .map(Path::to_path_buf);
+            let candidates = [
+                Some(PathBuf::from(&self.workspace_cwd).join(".claude/workflows")),
+                root.map(|root| root.join("workflows")),
+            ];
+            candidates
+                .into_iter()
+                .flatten()
+                .flat_map(|dir| ["js", "mjs"].map(|ext| dir.join(format!("{name}.{ext}"))))
                 .find_map(|path| std::fs::read_to_string(path).ok())
                 .with_context(|| format!("No workflow named {name} in .claude/workflows/"))?
         };
-        ensure!(script.len() <= MAX_SCRIPT_BYTES, "Workflow script exceeds 512 KiB");
-        ensure!(script.trim_start().starts_with("export const meta"), "A workflow script must begin with `export const meta = {{...}}`");
+        ensure!(
+            script.len() <= MAX_SCRIPT_BYTES,
+            "Workflow script exceeds 512 KiB"
+        );
+        ensure!(
+            script.trim_start().starts_with("export const meta"),
+            "A workflow script must begin with `export const meta = {{...}}`"
+        );
         Ok(script)
     }
 
     pub(super) async fn execute_script_workflow(&self, input: &Value) -> Result<Value> {
-        ensure!(self.delegation_depth == 0, "Workflows start from the main session only");
-        let root = self.search_config_path.as_deref().and_then(Path::parent).context("Runtime directory is unavailable")?.to_path_buf();
+        ensure!(
+            self.delegation_depth == 0,
+            "Workflows start from the main session only"
+        );
+        let root = self
+            .search_config_path
+            .as_deref()
+            .and_then(Path::parent)
+            .context("Runtime directory is unavailable")?
+            .to_path_buf();
         let session = self.conv_id.clone().context("Workflows need a session")?;
         let script = self.workflow_script(input)?;
         let sessions = root.join("workflows").join(&session);
         let resume_dir = match input["resumeFromRunId"].as_str() {
             Some(id) => {
-                ensure!(id.starts_with("wf_") && id[3..].chars().all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-'), "Invalid resumeFromRunId");
+                ensure!(
+                    id.starts_with("wf_")
+                        && id[3..]
+                            .chars()
+                            .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-'),
+                    "Invalid resumeFromRunId"
+                );
                 let dir = sessions.join(id);
                 ensure!(dir.is_dir(), "No workflow run {id} in this session");
                 Some(dir)
@@ -85,9 +133,12 @@ impl ToolLoopExecutor {
         let (agent_args, environment) = self.child_cli_launch(&root)?;
         let mut arguments = vec![
             "workflow-run".to_owned(),
-            "--script".into(), script_path.to_string_lossy().into_owned(),
-            "--run-dir".into(), run_dir.to_string_lossy().into_owned(),
-            "--agent-args".into(), serde_json::to_string(&agent_args)?,
+            "--script".into(),
+            script_path.to_string_lossy().into_owned(),
+            "--run-dir".into(),
+            run_dir.to_string_lossy().into_owned(),
+            "--agent-args".into(),
+            serde_json::to_string(&agent_args)?,
         ];
         if !input["args"].is_null() {
             arguments.extend(["--args-json".into(), input["args"].to_string()]);
@@ -96,14 +147,24 @@ impl ToolLoopExecutor {
             arguments.extend(["--resume-dir".into(), dir.to_string_lossy().into_owned()]);
         }
         let mut command = tokio::process::Command::new(std::env::current_exe()?);
-        command.args(&arguments).envs(environment).current_dir(&self.workspace_cwd).stdout(std::process::Stdio::piped()).stderr(std::process::Stdio::piped());
+        command
+            .args(&arguments)
+            .envs(environment)
+            .current_dir(&self.workspace_cwd)
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped());
         // A REPL turn runs in a session worker whose control channel would make
         // every child agent refuse to start ("does not own this session").
-        command.env_remove(crate::services::background_sessions::CONTROL_ENV).env_remove(crate::services::background_sessions::WORKER_ENV);
+        command
+            .env_remove(crate::services::background_sessions::CONTROL_ENV)
+            .env_remove(crate::services::background_sessions::WORKER_ENV);
         let label = format!("Workflow {name}");
-        let started = crate::tools::background_shell::start(command, None, "workflow", &label, &label, None)?;
+        let started =
+            crate::tools::background_shell::start(command, None, "workflow", &label, &label, None)?;
         let task_id = started["task_id"].clone();
-        if task_id.is_null() { bail!("The workflow did not start: {started}"); }
+        if task_id.is_null() {
+            bail!("The workflow did not start: {started}");
+        }
         // What /workflows lists for this run.
         std::fs::write(run_dir.join("run.json"), json!({"run_id": run_id, "task_id": task_id, "name": name, "description": description, "started_ms": chrono::Utc::now().timestamp_millis()}).to_string())?;
         Ok(json!({
@@ -125,10 +186,18 @@ mod tests {
     #[test]
     fn meta_fields_and_script_detection() {
         let script = "export const meta = {\n  name: 'review-changes',\n  description: \"Review the diff\",\n}\nreturn 1";
-        assert_eq!(meta_field(script, "name").as_deref(), Some("review-changes"));
-        assert_eq!(meta_field(script, "description").as_deref(), Some("Review the diff"));
+        assert_eq!(
+            meta_field(script, "name").as_deref(),
+            Some("review-changes")
+        );
+        assert_eq!(
+            meta_field(script, "description").as_deref(),
+            Some("Review the diff")
+        );
         assert!(is_script(&json!({"script":script})));
         assert!(is_script(&json!({"name":"saved-flow"})));
-        assert!(!is_script(&json!({"name":"deep-research","args":"question"})));
+        assert!(!is_script(
+            &json!({"name":"deep-research","args":"question"})
+        ));
     }
 }

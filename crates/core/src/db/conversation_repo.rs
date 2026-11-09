@@ -21,6 +21,12 @@ pub fn branch_conversation(conn: &Connection, source_id: &str, message_id: Optio
     insert_conversation(&transaction, &new_id, Some(&title), source.model.as_deref(), source.provider.as_deref(),
         source.workspace_path.as_deref(), source.project_id.as_deref(), source.research_mode, false, false,
         &now, &now, messages.len() as i64)?;
+    // The copied boundaries belong to the ancestor session; a branch counts
+    // only the compactions it commits itself.
+    transaction.execute(
+        "INSERT INTO peripheral_settings(key,value) VALUES(?1,'0') ON CONFLICT(key) DO UPDATE SET value='0'",
+        [crate::services::compaction::count_key(&new_id)],
+    )?;
     set_workspace_mode(&transaction, &new_id, &source.workspace_mode)?;
     // Preserve the bound agent's prompt and tool restrictions for both CLI and
     // Desktop branches. Older databases may not have the agent-service schema.

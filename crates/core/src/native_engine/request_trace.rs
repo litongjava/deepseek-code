@@ -15,7 +15,8 @@ pub struct RequestTrace {
     finish_reason: Option<String>,
     response_id: Option<String>,
     response_finished: bool,
-    stream_error: Option<String>,
+    /// A provider error event, already reduced to the shared vocabulary.
+    remote_failure: Option<crate::performance::RequestFailure>,
 }
 
 impl RequestTrace {
@@ -36,7 +37,7 @@ impl RequestTrace {
             finish_reason: None,
             response_id: None,
             response_finished: false,
-            stream_error: None,
+            remote_failure: None,
         }
     }
 
@@ -48,6 +49,7 @@ impl RequestTrace {
 
     pub fn started(&self) -> Value {
         let mut snapshot = self.snapshot.clone();
+        snapshot["usage"] = self.usage.clone();
         if let Some(usage) = self.context_capture.as_ref().and_then(|c| c.snapshot()) {
             snapshot["contextUsage"] = serde_json::to_value(usage).unwrap_or(Value::Null);
         }
@@ -58,16 +60,19 @@ impl RequestTrace {
         self.response_finished = true;
     }
 
+    /// A provider error event is remote data: it is reduced here, before the
+    /// snapshot, the emitted event or the stored session can see it.
     fn observe_error(&mut self, event: &Value) {
-        if let Some(error) = event.get("error").filter(|error| !error.is_null()) {
-            self.stream_error = Some(
-                error["message"]
-                    .as_str()
-                    .or_else(|| error.as_str())
-                    .map(String::from)
-                    .unwrap_or_else(|| error.to_string()),
-            );
-        }
+        let Some(error) = event.get("error").filter(|error| !error.is_null()) else {
+            return;
+        };
+        let content_started = !self.blocks.is_empty();
+        self.remote_failure = Some(crate::performance::RequestFailure::remote_event(
+            error,
+            None,
+            None,
+            content_started,
+        ));
     }
 
     fn first_content(&mut self) {
@@ -76,13 +81,22 @@ impl RequestTrace {
     }
 
     fn merge_usage(&mut self, usage: &Value) {
-        if let Some(fields) = usage.as_object() {
-            for (key, value) in fields {
-                // Anthropic sends input usage at message_start and cumulative output
-                // usage at message_delta; replace rather than summing these values.
-                self.usage[key] = value.clone();
+        fn update(current: &mut Value, reported: &Value) {
+            if let Some(fields) = reported.as_object() {
+                if !current.is_object() {
+                    *current = json!({});
+                }
+                for (key, value) in fields {
+                    if !value.is_null() {
+                        update(&mut current[key], value);
+                    }
+                }
+            } else if !reported.is_null() {
+                // Reports within one request are cumulative, never additive.
+                *current = reported.clone();
             }
         }
+        update(&mut self.usage, usage);
     }
 
     fn append_text(&mut self, kind: &str, text: &str) {
@@ -266,8 +280,27 @@ impl RequestTrace {
         }
     }
 
-    pub fn finish(mut self, status: &str, error: Option<&str>) -> Value {
-        let mut error = error.map(String::from).or(self.stream_error.take());
+    pub fn finish(self, status: &str, error: Option<&str>) -> Value {
+        self.finish_observed(status, error, None, None)
+    }
+
+    /// Same as [`Self::finish`], with the HTTP attempts and status observed by
+    /// the send layer so a provider error event reports them instead of
+    /// `unknown`.
+    pub fn finish_observed(
+        mut self,
+        status: &str,
+        error: Option<&str>,
+        attempts: Option<u32>,
+        http_status: Option<u16>,
+    ) -> Value {
+        let failure = self
+            .remote_failure
+            .take()
+            .map(|failure| failure.with_observation(attempts, http_status));
+        let mut error = error
+            .map(String::from)
+            .or_else(|| failure.as_ref().map(|failure| failure.diagnostic()));
         let status = if error.is_some() {
             "error"
         } else if status == "completed" && matches!(self.finish_reason.as_deref(),Some("max_tokens"|"length")) {
@@ -275,10 +308,15 @@ impl RequestTrace {
             "incomplete"
         } else if status == "completed" && !self.response_finished && self.finish_reason.is_none() {
             error = Some("Model response ended before completion: provider stream closed without a completion marker. Partial output was retained; pending tools were not executed.".into());
-            "interrupted"
+            // Distinct from `interrupted`, which means the consumer went away.
+            // A stream that ended early is a failure, not a user cancellation.
+            "stream_error"
         } else {
             status
         };
+        if let Some(failure) = &failure {
+            self.snapshot["failure"] = failure.as_json();
+        }
         let duration_ms = self.clock.elapsed().as_millis() as u64;
         let generation_ms = self
             .first_content_ms
@@ -348,6 +386,20 @@ impl RequestTrace {
 mod tests {
     use super::*;
     #[test]
+    fn later_null_usage_does_not_erase_reported_request_or_cache_counters() {
+        let mut trace = RequestTrace::new(json!({"id":"request"}));
+        trace.observe_openai(&json!({"usage":{"prompt_tokens":11,"completion_tokens":1,
+            "prompt_tokens_details":{"cached_tokens":4}}}));
+        trace.observe_openai(&json!({"usage":{"prompt_tokens":null,"completion_tokens":2,
+            "prompt_tokens_details":{"cached_tokens":null,"cache_write_tokens":3}}}));
+        let result = trace.finish("interrupted",None);
+        assert_eq!(result["usage"],json!({"prompt_tokens":11,"completion_tokens":2,
+            "prompt_tokens_details":{"cached_tokens":4,"cache_write_tokens":3}}));
+        assert_eq!(result["inputTokens"],11);
+        assert_eq!(result["outputTokens"],2);
+    }
+
+    #[test]
     fn openai_response_keeps_blocks_usage_only_chunks_and_reasoning_split() {
         let mut trace = RequestTrace::new(json!({"id":"request", "startedAt":1000}));
         trace.observe_openai(
@@ -397,7 +449,7 @@ mod tests {
         let mut trace = RequestTrace::new(json!({"id":"request", "startedAt":1000}));
         trace.observe_openai(&json!({"choices":[{"delta":{"content":"Partial"}}]}));
         let result = trace.finish("completed", None);
-        assert_eq!(result["status"], "interrupted");
+        assert_eq!(result["status"], "stream_error");
         assert_eq!(result["responseBlocks"][0]["text"], "Partial");
         assert!(result["outputTokens"].is_null());
     }
@@ -410,7 +462,13 @@ mod tests {
         );
         let result = trace.finish("completed", None);
         assert_eq!(result["status"], "error");
-        assert_eq!(result["error"], "Overloaded");
+        // The provider text is remote data: only the shared vocabulary survives,
+        // and the failure is structured so callers can classify it.
+        let error = result["error"].as_str().unwrap();
+        assert!(!error.contains("Overloaded"), "{error}");
+        assert!(error.contains("temporarily unavailable"), "{error}");
+        assert_eq!(result["failure"]["stage"], "stream");
+        assert_eq!(result["failure"]["class"], "transient");
     }
 
     #[test]

@@ -133,8 +133,15 @@ pub(super) fn definitions() -> Vec<ToolDefinition> {
 pub(super) fn normalize_agent_input(input: &Value, main_session: bool) -> Value {
     let mut input = input.clone();
     if input["agent_type"].is_null() {
-        if let Some(kind) = input["subagent_type"].as_str().filter(|kind| !kind.is_empty()) {
-            input["agent_type"] = json!(if kind == "general-purpose" { "general" } else { kind });
+        if let Some(kind) = input["subagent_type"]
+            .as_str()
+            .filter(|kind| !kind.is_empty())
+        {
+            input["agent_type"] = json!(if kind == "general-purpose" {
+                "general"
+            } else {
+                kind
+            });
         }
     }
     if input["run_in_background"].is_null() && main_session {
@@ -800,10 +807,14 @@ impl ToolLoopExecutor {
             .map(|manager| crate::services::session_permission_mode::name(manager.get_mode()))
             .unwrap_or("ask");
         let mut arguments = vec![
-            "--data-dir".to_owned(), root.to_string_lossy().into_owned(),
-            "--provider".into(), provider.provider.id.clone(),
-            "--model".into(), provider.model.id.clone(),
-            "--permission-mode".into(), mode.into(),
+            "--data-dir".to_owned(),
+            root.to_string_lossy().into_owned(),
+            "--provider".into(),
+            provider.provider.id.clone(),
+            "--model".into(),
+            provider.model.id.clone(),
+            "--permission-mode".into(),
+            mode.into(),
         ];
         if provider.provider.builtin_id.is_none() {
             arguments.extend(["--base-url".into(), provider.provider.base_url.clone()]);
@@ -817,13 +828,13 @@ impl ToolLoopExecutor {
             ]);
         }
         let mut environment = vec![(
-            "CLAUDE_RUST_WORKER_MODEL".to_owned(),
+            "DEEPSEEK_CODE_WORKER_MODEL".to_owned(),
             serde_json::to_string(&provider.model)?,
         )];
         if !provider.provider.api_key.is_empty() {
-            arguments.extend(["--api-key-env".into(), "CLAUDE_RUST_CHILD_API_KEY".into()]);
+            arguments.extend(["--api-key-env".into(), "DEEPSEEK_CODE_CHILD_API_KEY".into()]);
             environment.push((
-                "CLAUDE_RUST_CHILD_API_KEY".into(),
+                "DEEPSEEK_CODE_CHILD_API_KEY".into(),
                 provider.provider.api_key.clone(),
             ));
         }
@@ -844,7 +855,10 @@ impl ToolLoopExecutor {
             "Background agents start from the main session only"
         );
         let prompt = input["prompt"].as_str().context("prompt is required")?;
-        ensure!(!prompt.trim().is_empty() && prompt.len() <= 64_000, "Child prompt must contain 1–64000 bytes");
+        ensure!(
+            !prompt.trim().is_empty() && prompt.len() <= 64_000,
+            "Child prompt must contain 1–64000 bytes"
+        );
         let parent = self.conv_id.clone().context("Child owner unavailable")?;
         let root = self
             .search_config_path
@@ -892,13 +906,23 @@ impl ToolLoopExecutor {
                 definition.system_prompt.clone(),
             ]);
         }
-        if let Some(model) = input["model"].as_str().filter(|model| !model.trim().is_empty()) {
-            let at = arguments.iter().position(|arg| arg == "--model").context("child model argument")? + 1;
+        if let Some(model) = input["model"]
+            .as_str()
+            .filter(|model| !model.trim().is_empty())
+        {
+            let at = arguments
+                .iter()
+                .position(|arg| arg == "--model")
+                .context("child model argument")?
+                + 1;
             arguments[at] = model.to_owned();
-            environment.retain(|(key, _)| key != "CLAUDE_RUST_WORKER_MODEL");
+            environment.retain(|(key, _)| key != "DEEPSEEK_CODE_WORKER_MODEL");
         }
         if let Some(effort) = input["effort"].as_str() {
-            ensure!(["low", "medium", "high", "xhigh", "max"].contains(&effort), "Invalid effort");
+            ensure!(
+                ["low", "medium", "high", "xhigh", "max"].contains(&effort),
+                "Invalid effort"
+            );
             arguments.extend(["--effort".into(), effort.into()]);
         }
         let child_workspace = match input["isolation"].as_str() {
@@ -1043,7 +1067,7 @@ impl ToolLoopExecutor {
                     Some(tools) => tools,
                     None => {
                         let mut tools = self
-                            .tool_definitions()
+                            .builtin_catalog()
                             .into_iter()
                             .map(|tool| tool.name)
                             .collect::<Vec<_>>();
@@ -1070,7 +1094,7 @@ impl ToolLoopExecutor {
         if let Some(agent) = &runtime {
             if !agent.mcp_servers.is_empty() {
                 let mut available: Vec<String> = self
-                    .tool_definitions()
+                    .builtin_catalog()
                     .into_iter()
                     .map(|tool| tool.name)
                     .filter(|name| !name.starts_with("mcp__"))
@@ -1269,7 +1293,10 @@ impl ToolLoopExecutor {
         child.permission_manager = self.permission_manager.as_ref().map(|manager| {
             Arc::new(manager.fork_session(self.conv_id.as_deref().unwrap_or_default(), &id))
         });
-        if let Some(mode) = runtime.as_ref().and_then(|agent| agent.permission_mode.as_ref()) {
+        if let Some(mode) = runtime
+            .as_ref()
+            .and_then(|agent| agent.permission_mode.as_ref())
+        {
             let mode = crate::permissions::PermissionMode::parse(mode)?;
             let parent_mode = self
                 .permission_manager

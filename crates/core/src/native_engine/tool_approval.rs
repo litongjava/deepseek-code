@@ -29,10 +29,11 @@ impl ToolLoopExecutor {
     ) -> Option<String> {
         // A sandboxed command's host question belongs to its Bash call, which
         // already passed this check.
-        if tool != "SandboxNetwork" && self
-            .allowed_tools
-            .as_ref()
-            .is_some_and(|tools| !tools.iter().any(|name| name == tool))
+        if tool != "SandboxNetwork"
+            && self
+                .allowed_tools
+                .as_ref()
+                .is_some_and(|tools| !tools.iter().any(|name| name == tool))
         {
             return Some("Tool is not allowed by this agent definition".into());
         }
@@ -96,13 +97,15 @@ impl ToolLoopExecutor {
     ) -> Result<()> {
         anyhow::ensure!(input.is_object(), "Approved tool input must be an object");
         let mut schema = self
-            .tool_definitions()
+            .tool_definitions()?
             .into_iter()
             .find(|definition| definition.name == tool)
             .map(|definition| definition.input_schema);
         // Not a model tool: the host a sandboxed command wants to reach.
         if tool == "SandboxNetwork" {
-            schema = Some(json!({"type":"object","properties":{"host":{"type":"string"},"url":{"type":"string"}},"required":["host","url"],"additionalProperties":false}));
+            schema = Some(
+                json!({"type":"object","properties":{"host":{"type":"string"},"url":{"type":"string"}},"required":["host","url"],"additionalProperties":false}),
+            );
         }
         if schema.is_none() {
             if let Some(registry) = &self.mcp_registry {
@@ -121,8 +124,8 @@ impl ToolLoopExecutor {
         let path_keys: &[&str] = match tool {
             "Write" | "Edit" | "Read" | "MultiEdit" => &["file_path"],
             "NotebookEdit" => &["notebook_path", "path"],
-            "ListDir" | "Grep" | "Glob" | "smart_project_scan" | "git_status"
-            | "git_diff" | "git_log" | "git_commit" | "git_add" => &["path"],
+            "ListDir" | "Grep" | "Glob" | "smart_project_scan" | "git_status" | "git_diff"
+            | "git_log" | "git_commit" | "git_add" => &["path"],
             "Bash" | "Shell" => &["cwd"],
             "LSP" | "lsp" => &["filePath", "path"],
             "worktree" | "EnterWorktree" => &["path", "name"],
@@ -144,7 +147,17 @@ impl ToolLoopExecutor {
                                     .as_deref()
                                     .is_some_and(|session| manager.edit_session_allowed(session)))
                             || (manager.get_mode() == crate::permissions::PermissionMode::Auto
-                                && matches!(tool, "Read" | "Glob" | "Grep" | "ListDir" | "Write" | "Edit" | "MultiEdit" | "NotebookEdit"))
+                                && matches!(
+                                    tool,
+                                    "Read"
+                                        | "Glob"
+                                        | "Grep"
+                                        | "ListDir"
+                                        | "Write"
+                                        | "Edit"
+                                        | "MultiEdit"
+                                        | "NotebookEdit"
+                                ))
                             || (manager.get_mode() == crate::permissions::PermissionMode::PlanMode
                                 && matches!(tool, "Read" | "Glob" | "Grep" | "ListDir"))
                     })
@@ -204,7 +217,14 @@ impl ToolLoopExecutor {
             request_id: request_id.clone(),
         };
         crate::native_engine::permission_response::register_owner(
-            &request_id, self.conv_id.as_deref().unwrap_or_default(), id, "permission", input.clone(), None, None, None,
+            &request_id,
+            self.conv_id.as_deref().unwrap_or_default(),
+            id,
+            "permission",
+            input.clone(),
+            None,
+            None,
+            None,
         );
         crate::native_engine::permission_response::set_owner_tool(&request_id, tool);
         if let Some(hooks) = &self.hooks {
@@ -413,12 +433,34 @@ impl ToolLoopExecutor {
                     })),
                 }
             }
-            PermissionResponse::AllowBashForSession { updated_input, note } => {
-                let actual = updated_input.as_ref().filter(|value| !value.as_object().is_some_and(|fields| fields.is_empty())).unwrap_or(input);
-                anyhow::ensure!(crate::native_engine::permission_response::can_allow_bash_session(tool, actual), "Session Bash approval excludes dangerous or invalid commands");
-                let manager = self.permission_manager.clone().ok_or_else(|| anyhow!("Session permission manager unavailable"))?;
-                let session = self.conv_id.clone().ok_or_else(|| anyhow!("Session identity unavailable"))?;
-                PermissionResponse::Allow { updated_input, note, commit: Some(Box::new(move || { manager.set_bash_session_allowed(&session, true); Ok(()) })) }
+            PermissionResponse::AllowBashForSession {
+                updated_input,
+                note,
+            } => {
+                let actual = updated_input
+                    .as_ref()
+                    .filter(|value| !value.as_object().is_some_and(|fields| fields.is_empty()))
+                    .unwrap_or(input);
+                anyhow::ensure!(
+                    crate::native_engine::permission_response::can_allow_bash_session(tool, actual),
+                    "Session Bash approval excludes dangerous or invalid commands"
+                );
+                let manager = self
+                    .permission_manager
+                    .clone()
+                    .ok_or_else(|| anyhow!("Session permission manager unavailable"))?;
+                let session = self
+                    .conv_id
+                    .clone()
+                    .ok_or_else(|| anyhow!("Session identity unavailable"))?;
+                PermissionResponse::Allow {
+                    updated_input,
+                    note,
+                    commit: Some(Box::new(move || {
+                        manager.set_bash_session_allowed(&session, true);
+                        Ok(())
+                    })),
+                }
             }
             other => other,
         };
@@ -475,7 +517,10 @@ impl ToolLoopExecutor {
                     anyhow::bail!("{reason}");
                 }
                 if let Some(note) = note.filter(|note| !note.trim().is_empty()) {
-                    self.approval_notes.lock().unwrap_or_else(|error| error.into_inner()).push(note);
+                    self.approval_notes
+                        .lock()
+                        .unwrap_or_else(|error| error.into_inner())
+                        .push(note);
                 }
                 Ok(actual)
             }
@@ -489,9 +534,14 @@ impl ToolLoopExecutor {
         id: &str,
         message: &str,
     ) -> (Value, String, bool) {
-        match self.prepare_after_confirmation(tool, input, id, message).await {
+        match self
+            .prepare_after_confirmation(tool, input, id, message)
+            .await
+        {
             CallStep::Finished(result) => result,
-            CallStep::Builtin(actual, approved) => self.run_prepared_builtin(tool, &actual, id, approved).await,
+            CallStep::Builtin(actual, approved) => {
+                self.run_prepared_builtin(tool, &actual, id, approved).await
+            }
         }
     }
 

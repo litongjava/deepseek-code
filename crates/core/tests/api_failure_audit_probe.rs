@@ -21,6 +21,8 @@ fn echoed_request_body_must_not_enter_diagnostics() {
         status: 400,
         retry_after: None,
         message: r#"{"error":{"message":"invalid parameter"},"request":{"messages":[{"role":"user","content":"fixture-private-prompt"}]}}"#.into(),
+        server_request_id: None,
+        remote_code: None,
     });
     let text = RequestFailure::from_error(&raw, 1).diagnostic();
     assert!(

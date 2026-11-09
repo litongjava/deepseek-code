@@ -20,6 +20,107 @@ pub enum PromptEvent {
     StepEffort(bool),
 }
 
+/// Whether a prompt can be edited in place and keys reach us before Enter.
+fn interactive_terminal() -> bool {
+    !crate::terminal::screen_reader()
+        && io::stdin().is_terminal()
+        && io::stdout().is_terminal()
+        && io::stderr().is_terminal()
+        && std::env::var("TERM").as_deref() != Ok("dumb")
+}
+
+/// Cancellation while a synchronous command (such as `/compact`) owns the
+/// turn. The existing input reader watches for Esc or Ctrl+C; no second
+/// stdin reader is started.
+pub struct CancelWatch {
+    stop: Arc<AtomicBool>,
+    signal: oneshot::Receiver<()>,
+}
+
+impl CancelWatch {
+    /// Resolves `true` for a cancel key, `false` when the reader stopped
+    /// without one. The caller keeps waiting on `false`.
+    pub async fn wait(&mut self) -> bool {
+        (&mut self.signal).await.is_ok()
+    }
+}
+
+impl Drop for CancelWatch {
+    fn drop(&mut self) {
+        self.stop.store(true, Ordering::Release);
+    }
+}
+
+struct WatchRequest {
+    stop: Arc<AtomicBool>,
+    signal: oneshot::Sender<()>,
+    transcript: Arc<std::sync::Mutex<Vec<super::change_view::Line>>>,
+}
+
+impl WatchRequest {
+    /// Reads keys while a synchronous command runs. Esc and Ctrl+C cancel;
+    /// Ctrl+O still opens the transcript, so history stays readable during the
+    /// wait. Resize is left to the progress renderer, which re-measures on its
+    /// next tick. Other keys are discarded by policy: the prompt is not
+    /// active, and replaying them later would submit input the user did not
+    /// type at a prompt.
+    fn run(self) {
+        let mut signal = Some(self.signal);
+        if crossterm::terminal::enable_raw_mode().is_err() {
+            return;
+        }
+        loop {
+            if self.stop.load(Ordering::Acquire) {
+                break;
+            }
+            match crossterm::event::poll(std::time::Duration::from_millis(50)) {
+                Ok(true) => match crossterm::event::read() {
+                    Ok(crossterm::event::Event::Key(key))
+                        if key.kind != crossterm::event::KeyEventKind::Release
+                            && (key.code == crossterm::event::KeyCode::Esc
+                                || (key.code == crossterm::event::KeyCode::Char('c')
+                                    && key
+                                        .modifiers
+                                        .contains(crossterm::event::KeyModifiers::CONTROL))) =>
+                    {
+                        if let Some(signal) = signal.take() {
+                            let _ = signal.send(());
+                        }
+                        break;
+                    }
+                    Ok(crossterm::event::Event::Key(key))
+                        if key.kind != crossterm::event::KeyEventKind::Release
+                            && key.code == crossterm::event::KeyCode::Char('o')
+                            && key
+                                .modifiers
+                                .contains(crossterm::event::KeyModifiers::CONTROL) =>
+                    {
+                        let lines = self
+                            .transcript
+                            .lock()
+                            .unwrap_or_else(|error| error.into_inner())
+                            .clone();
+                        if !lines.is_empty() {
+                            let _ = crate::terminal::transcript_pager::view(&lines);
+                            // The pager may leave the terminal usable but not in
+                            // the mode we entered with.
+                            if crossterm::terminal::enable_raw_mode().is_err() {
+                                break;
+                            }
+                        }
+                    }
+                    Ok(crossterm::event::Event::Resize(_, _)) => {}
+                    Ok(_) => {}
+                    Err(_) => break,
+                },
+                Ok(false) => {}
+                Err(_) => break,
+            }
+        }
+        let _ = crossterm::terminal::disable_raw_mode();
+    }
+}
+
 enum Message {
     Powerup(
         deepseek_code_core::runtime::RuntimePaths,
@@ -43,6 +144,7 @@ enum Message {
     Todos(Box<dyn Fn() -> Vec<(String, String)> + Send>),
     Vim(bool),
     Read(Request),
+    Watch(WatchRequest),
 }
 
 struct Request {
@@ -69,6 +171,8 @@ pub struct TerminalInput {
     queued: std::collections::VecDeque<PromptEvent>,
     effort: Arc<std::sync::Mutex<Option<String>>>,
     effort_steps: mpsc::UnboundedReceiver<bool>,
+    /// The last rendered transcript, so Ctrl+O works while a command runs.
+    transcript: Arc<std::sync::Mutex<Vec<super::change_view::Line>>>,
 }
 
 impl TerminalInput {
@@ -78,13 +182,12 @@ impl TerminalInput {
         let (suggestions, suggestion_rx) = std::sync::mpsc::channel();
         let effort = Arc::new(std::sync::Mutex::new(None));
         let editor_effort = effort.clone();
+        let transcript: Arc<std::sync::Mutex<Vec<super::change_view::Line>>> =
+            Arc::new(std::sync::Mutex::new(Vec::new()));
+        let thread_transcript = transcript.clone();
         let (step_tx, effort_steps) = mpsc::unbounded_channel();
         std::thread::spawn(move || {
-            let terminal = !crate::terminal::screen_reader()
-                && io::stdin().is_terminal()
-                && io::stdout().is_terminal()
-                && io::stderr().is_terminal()
-                && std::env::var("TERM").as_deref() != Ok("dumb");
+            let terminal = interactive_terminal();
             let mut editor = editor::PromptEditor::default();
             editor.set_effort_control(editor_effort, step_tx);
             editor.set_notices(notice_rx);
@@ -119,6 +222,9 @@ impl TerminalInput {
                         continue;
                     }
                     Message::Transcript(lines) => {
+                        *thread_transcript
+                            .lock()
+                            .unwrap_or_else(|error| error.into_inner()) = lines.clone();
                         editor.set_transcript(lines);
                         continue;
                     }
@@ -163,13 +269,22 @@ impl TerminalInput {
                         continue;
                     }
                     Message::Read(request) => request,
+                    Message::Watch(request) => {
+                        request.run();
+                        continue;
+                    }
                 };
                 if request.response.is_closed() {
                     continue;
                 }
                 let result = if !request.repl {
-                    super::answer_input::read(&mut plain, &request.prompt, &request.cancelled, request.secret)
-                        .map(|value| value.map(PromptEvent::Line))
+                    super::answer_input::read(
+                        &mut plain,
+                        &request.prompt,
+                        &request.cancelled,
+                        request.secret,
+                    )
+                    .map(|value| value.map(PromptEvent::Line))
                 } else if terminal {
                     editor.readline_until(&request.prompt, &request.cancelled)
                 } else {
@@ -188,6 +303,7 @@ impl TerminalInput {
             queued: Default::default(),
             effort,
             effort_steps,
+            transcript,
         }
     }
 
@@ -261,7 +377,11 @@ impl TerminalInput {
         let _ = self.requests.send(Message::AgentRows(rows));
     }
 
-    pub fn set_subagents(&self, context: deepseek_code_core::services::ServiceContext, session: String) {
+    pub fn set_subagents(
+        &self,
+        context: deepseek_code_core::services::ServiceContext,
+        session: String,
+    ) {
         let _ = self.requests.send(Message::Subagents(context, session));
     }
 
@@ -325,16 +445,41 @@ impl TerminalInput {
         let _ = self.requests.send(Message::PermissionMode(mode.into()));
     }
 
+    /// Arms Esc/Ctrl+C cancellation for a synchronous command that runs outside
+    /// the prompt loop. `None` when no key can arrive (piped or minimalist input).
+    pub fn watch_cancel(&mut self) -> io::Result<Option<CancelWatch>> {
+        if self.fixture.is_some() || self.pending.is_some() || !interactive_terminal() {
+            return Ok(None);
+        }
+        let stop = Arc::new(AtomicBool::new(false));
+        let (signal, receiver) = oneshot::channel();
+        self.requests
+            .send(Message::Watch(WatchRequest {
+                stop: stop.clone(),
+                signal,
+                transcript: self.transcript.clone(),
+            }))
+            .map_err(|_| io::Error::new(io::ErrorKind::BrokenPipe, "Terminal input closed"))?;
+        Ok(Some(CancelWatch {
+            stop,
+            signal: receiver,
+        }))
+    }
+
     /// Ends an outstanding interactive prompt read so another source can run a
     /// turn. Its draft is kept, and a line submitted meanwhile is re-queued.
     /// Returns false when the read cannot be interrupted (plain stdin).
     pub async fn yield_prompt(&mut self) -> io::Result<bool> {
-        let Some(pending) = self.pending.as_mut() else { return Ok(true) };
+        let Some(pending) = self.pending.as_mut() else {
+            return Ok(true);
+        };
         if !pending.repl {
             return Ok(false);
         }
         pending.cancelled.store(true, Ordering::Release);
-        match tokio::time::timeout(std::time::Duration::from_millis(500), &mut pending.receive).await {
+        match tokio::time::timeout(std::time::Duration::from_millis(500), &mut pending.receive)
+            .await
+        {
             Err(_) => {
                 pending.cancelled.store(false, Ordering::Release);
                 Ok(false)
@@ -404,7 +549,12 @@ impl TerminalInput {
         self.read_with(prompt, repl, false).await
     }
 
-    async fn read_with(&mut self, prompt: &str, repl: bool, secret: bool) -> io::Result<Option<PromptEvent>> {
+    async fn read_with(
+        &mut self,
+        prompt: &str,
+        repl: bool,
+        secret: bool,
+    ) -> io::Result<Option<PromptEvent>> {
         if let Some(fixture) = self.fixture.as_mut() {
             return Ok(fixture.recv().await.map(PromptEvent::Line));
         }
@@ -455,7 +605,9 @@ mod recall_tests {
         assert_eq!(input.take_prompts(&["waiting".into()]), ["waiting"]);
         assert!(input.take_prompts(&["waiting".into()]).is_empty());
         assert_eq!(input.queued.len(), 2);
-        assert!(matches!(input.queued.front(), Some(PromptEvent::Line(text)) if text == "/compact"));
+        assert!(
+            matches!(input.queued.front(), Some(PromptEvent::Line(text)) if text == "/compact")
+        );
     }
 }
 
@@ -471,6 +623,7 @@ impl From<mpsc::UnboundedReceiver<String>> for TerminalInput {
             fixture: Some(fixture),
             queued: Default::default(),
             effort: Default::default(),
+            transcript: Default::default(),
             effort_steps: mpsc::unbounded_channel().1,
         }
     }
@@ -515,6 +668,7 @@ mod tests {
             fixture: None,
             queued: Default::default(),
             effort: Default::default(),
+            transcript: Default::default(),
             effort_steps,
         };
         steps.send(true).unwrap();
@@ -623,6 +777,7 @@ mod tests {
             fixture: None,
             queued: Default::default(),
             effort: Default::default(),
+            transcript: Default::default(),
             effort_steps: mpsc::unbounded_channel().1,
         };
         let reader = std::thread::spawn(move || {
@@ -682,5 +837,38 @@ mod tests {
             io::ErrorKind::Interrupted
         );
         assert!(map_readline(Err(ReadlineError::Eof)).unwrap().is_none());
+    }
+
+    #[tokio::test]
+    async fn a_cancel_watch_reports_its_key_and_stops_the_reader_on_drop() {
+        let stop = Arc::new(AtomicBool::new(false));
+        let (signal, receiver) = oneshot::channel();
+        let mut watch = CancelWatch {
+            stop: stop.clone(),
+            signal: receiver,
+        };
+        signal.send(()).unwrap();
+        assert!(watch.wait().await);
+        assert!(!stop.load(Ordering::Acquire));
+        drop(watch);
+        assert!(stop.load(Ordering::Acquire));
+    }
+
+    #[tokio::test]
+    async fn a_stopped_reader_does_not_look_like_a_cancellation() {
+        let stop = Arc::new(AtomicBool::new(false));
+        let (signal, receiver) = oneshot::channel::<()>();
+        drop(signal);
+        let mut watch = CancelWatch {
+            stop,
+            signal: receiver,
+        };
+        assert!(!watch.wait().await);
+    }
+
+    #[test]
+    fn piped_input_cannot_arm_a_cancel_watch() {
+        let mut input = TerminalInput::from(mpsc::unbounded_channel().1);
+        assert!(input.watch_cancel().unwrap().is_none());
     }
 }

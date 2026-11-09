@@ -34,6 +34,7 @@ pub struct Session {
     /// Runtime-only options of the latest worker turn, retained for internal wakes.
     pub(crate) hook_wake_cli: std::sync::Mutex<Option<Arc<Cli>>>,
     pub(crate) sdk_permissions: Option<Arc<crate::sdk::Permissions>>,
+    pub(crate) sdk_interrupt: Option<tokio::sync::watch::Receiver<bool>>,
     pub(crate) sdk_content: Option<Value>,
     pub(crate) initial_hook_message: Option<String>,
     pub(crate) sdk_overrides: crate::sdk_initialization::Overrides,
@@ -71,6 +72,108 @@ pub(crate) fn recall_queued(session: &Session, input: &mut Option<TerminalInput>
     }
     recalled.sort_by_key(|text| shown.iter().position(|sent| sent == text).unwrap_or(usize::MAX));
     Ok(recalled)
+}
+
+// Attempt data is published only after optional recovery has settled.
+#[derive(Default)]
+struct TurnCompletion {
+    status: Option<deepseek_code_core::db::turn_repo::TurnStatus>,
+    failure: Option<Value>,
+    sdk_result: Option<Value>,
+    requests: Vec<Value>,
+}
+
+/// Fill the same SDK contract for completed attempts and setup/recovery errors.
+fn complete_sdk_result(payload: Option<Value>, cost: f64) -> Value {
+    let mut result = json!({"type":"result", "result":"", "usage":{}, "num_turns":0,
+        "permission_denials":[], "structured_output":null, "stop_reason":null,
+        "uuid":uuid::Uuid::new_v4().to_string()});
+    if let Some(Value::Object(fields)) = payload {
+        for (key, value) in fields {
+            result[&key] = value;
+        }
+    }
+    // This is a session total, read once after all attempts were persisted.
+    result["total_cost_usd"] = json!(cost);
+    result
+}
+
+/// Usage events contain reported counters, including nested cache counters.
+/// Missing or null values do not erase counters already reported by an attempt.
+fn add_reported_usage(total: &mut Value, additional: &Value) {
+    if let Some(fields) = additional.as_object() {
+        if !total.is_object() {
+            *total = json!({});
+        }
+        for (key, value) in fields {
+            add_reported_usage(&mut total[key], value);
+        }
+    } else if let Some(count) = additional.as_u64() {
+        *total = json!(total.as_u64().unwrap_or(0).saturating_add(count));
+    } else if !additional.is_null() {
+        *total = additional.clone();
+    }
+}
+
+/// Request snapshots carry identity; Usage events alone cannot distinguish a
+/// cumulative update from another request. This survives message segment resets.
+#[derive(Default)]
+struct RequestUsage(std::collections::BTreeMap<String, Value>);
+
+impl RequestUsage {
+    fn observe(&mut self, snapshot: &Value) {
+        if let (Some(id), Some(usage)) = (snapshot["id"].as_str(), snapshot.get("usage")) {
+            replace_reported_usage(
+                self.0.entry(id.to_owned()).or_insert_with(|| json!({})),
+                usage,
+            );
+        }
+    }
+
+    fn total(&self) -> Value {
+        let mut total = json!({});
+        for usage in self.0.values() {
+            add_reported_usage(&mut total, usage);
+        }
+        total
+    }
+}
+
+fn replace_reported_usage(current: &mut Value, update: &Value) {
+    if let Some(fields) = update.as_object() {
+        if !current.is_object() {
+            *current = json!({});
+        }
+        for (key, value) in fields {
+            if !value.is_null() {
+                replace_reported_usage(&mut current[key], value);
+            }
+        }
+    } else if !update.is_null() {
+        *current = update.clone();
+    }
+}
+
+fn merge_attempt_results(previous: Option<Value>, next: Option<Value>) -> Value {
+    let previous = complete_sdk_result(previous, 0.0);
+    let mut next = complete_sdk_result(next, 0.0);
+    add_reported_usage(&mut next["usage"], &previous["usage"]);
+    next["num_turns"] = json!(next["num_turns"]
+        .as_u64()
+        .unwrap_or(0)
+        .saturating_add(previous["num_turns"].as_u64().unwrap_or(0)));
+    let mut denials = previous["permission_denials"]
+        .as_array()
+        .cloned()
+        .unwrap_or_default();
+    denials.extend(
+        next["permission_denials"]
+            .as_array()
+            .cloned()
+            .unwrap_or_default(),
+    );
+    next["permission_denials"] = json!(denials);
+    next
 }
 
 impl Session {
@@ -261,9 +364,9 @@ impl Session {
             id
         };
         let internal_worker = deepseek_code_core::services::background_sessions::worker_directory(&paths.data_dir, &id)?.is_some();
-        let auto_route = if internal_worker { std::env::var("CLAUDE_RUST_WORKER_AUTO_ROUTE").as_deref() == Ok("true") } else { cli.auto_route };
+        let auto_route = if internal_worker { std::env::var("DEEPSEEK_CODE_WORKER_AUTO_ROUTE").as_deref() == Ok("true") } else { cli.auto_route };
         if internal_worker {
-            if let Ok(value) = std::env::var("CLAUDE_RUST_WORKER_MODEL") {
+            if let Ok(value) = std::env::var("DEEPSEEK_CODE_WORKER_MODEL") {
                 let model: deepseek_code_core::native_engine::provider_manager::ModelConfig = serde_json::from_str(&value)?;
                 let provider = selection.providers.iter_mut().find(|provider|provider.id == selection.provider_id).context("Worker provider unavailable")?;
                 let expected=deepseek_code_core::native_engine::provider_manager::resolve_model_selection(&provider.models,&selection.model).context("Worker model unavailable")?;
@@ -376,6 +479,7 @@ impl Session {
             bypass_available: cli.allow_dangerously_skip_permissions,
             full_access: cli.full_access,
             sdk_permissions: None,
+            sdk_interrupt: None,
             sdk_content: None,
             sdk_overrides: Default::default(),
             sdk_hooks: None,
@@ -826,15 +930,7 @@ impl Session {
         prompt: &str,
         input: &mut Option<TerminalInput>,
     ) -> Result<()> {
-        match self.run_turn_origin(cli, prompt, input, false, false, true).await {
-            Err(error) if crate::session_commands::is_context_overflow(&error) => {
-                if !crate::session_commands::reactive_compact(self, prompt).await? {
-                    return Err(error);
-                }
-                self.run_turn_origin(cli, prompt, input, false, false, true).await
-            }
-            result => result,
-        }
+        self.run_turn_origin(cli, prompt, input, false, false, true).await
     }
 
     pub(crate) async fn turn_initial_hook(
@@ -849,6 +945,31 @@ impl Session {
             .await
     }
 
+    pub(crate) async fn sdk_cancelled(&self) {
+        if let Some(mut interrupt) = self.sdk_interrupt.clone() {
+            loop {
+                if *interrupt.borrow_and_update() {
+                    return;
+                }
+                if interrupt.changed().await.is_err() {
+                    break;
+                }
+            }
+        }
+        std::future::pending::<()>().await;
+    }
+
+    async fn sdk_cancellable<T>(
+        &self,
+        future: impl std::future::Future<Output = Result<T>>,
+    ) -> Result<T> {
+        tokio::select! {
+            biased;
+            _ = self.sdk_cancelled() => bail!("Interrupted by SDK host"),
+            result = future => result,
+        }
+    }
+
     async fn run_turn_origin(
         &self,
         cli: &Cli,
@@ -858,19 +979,114 @@ impl Session {
         initial_hook: bool,
         publish: bool,
     ) -> Result<()> {
-        let mut turn = deepseek_code_core::db::turn_repo::TurnTimer::start(self.store.db.clone(), &self.id)?;
-        let result = self.run_timed_turn(cli, prompt, input, hook_wake, initial_hook, publish, &mut turn).await;
-        if !turn.is_finished() {
-            let status = match &result {
-                Err(error) if is_turn_cancel_error(error) => deepseek_code_core::db::turn_repo::TurnStatus::Cancelled,
-                _ => deepseek_code_core::db::turn_repo::TurnStatus::Failed,
-            };
-            let record = turn.finish(status)?;
-            if cli.output_format == OutputFormat::StreamJson {
-                emit_json(&json!({"type":"turn_timing","turn":record,"assistant_id":turn.message_id()}))?;
+        let mut turn =
+            deepseek_code_core::db::turn_repo::TurnTimer::start(self.store.db.clone(), &self.id)?;
+        let mut completion = TurnCompletion::default();
+        let mut recovery_requests = Vec::new();
+        let mut result = async {
+            let first = self.run_timed_turn(cli, prompt, input, hook_wake, initial_hook, publish, &mut turn, &mut completion).await;
+            match first {
+                Err(error) if !hook_wake && !initial_hook && crate::session_commands::is_context_overflow(&error) => {
+                    recovery_requests.extend(completion.requests.iter().cloned());
+                    if let Err(log_error) = crate::request_attempts::record(&self.paths.data_dir, &self.id, &json!({
+                        "type":"request_turn_attempt_end", "turnId":turn.record().turn_id,
+                        "outcome":"failed", "failure":completion.failure, "diagnostic":error.to_string(),
+                        "timestampMs":chrono::Utc::now().timestamp_millis(),
+                    })) {
+                        crate::compaction::notice(&format!("Could not save request attempt log: {log_error}"));
+                    }
+                    // Recovery errors must reach the same finalization as requests.
+                    match crate::session_commands::reactive_compact(self, prompt, &mut turn).await {
+                        Ok(false) => {
+                            recovery_requests.clear();
+                            Err(error)
+                        }
+                        Err(recovery_error) => {
+                            completion.failure = Some(json!({"stage":"compaction", "cause":format!("{recovery_error:#}")}));
+                            if let Some(payload) = completion.sdk_result.as_mut() {
+                                payload["stop_reason"] = if is_turn_cancel_error(&recovery_error) { json!("cancelled") } else { Value::Null };
+                                payload["structured_output"] = Value::Null;
+                            }
+                            Err(recovery_error)
+                        }
+                        Ok(true) => {
+                            let previous = completion.sdk_result.take();
+                            completion = TurnCompletion::default();
+                            let result = self.run_timed_turn(cli, prompt, input, hook_wake, initial_hook, publish, &mut turn, &mut completion).await;
+                            completion.sdk_result = Some(merge_attempt_results(previous, completion.sdk_result.take()));
+                            result
+                        }
+                    }
+                }
+                result => result,
             }
+        }.await;
+        if self.sdk_interrupt.as_ref().is_some_and(|interrupt| *interrupt.borrow()) {
+            result = Err(anyhow::anyhow!("Interrupted by SDK host"));
         }
-        result
+        let status = match &result {
+            Err(error) if is_turn_cancel_error(error) => {
+                deepseek_code_core::db::turn_repo::TurnStatus::Cancelled
+            }
+            Err(_) => deepseek_code_core::db::turn_repo::TurnStatus::Failed,
+            Ok(_) => completion
+                .status
+                .unwrap_or(deepseek_code_core::db::turn_repo::TurnStatus::Failed),
+        };
+        if !recovery_requests.is_empty() {
+            recovery_requests.extend(completion.requests.iter().cloned());
+            let segment = turn.ensure_segment()?;
+            self.store.db.with_conn(|conn| {
+                message_repo::save_request_snapshots(conn, &segment, &json!(recovery_requests))
+            })??;
+        }
+        let record = turn.finish(status)?;
+        let terminal_event = json!({"type":"request_turn_end", "turnId":record.turn_id,
+            "outcome":status, "failure":completion.failure,
+            "timestampMs":chrono::Utc::now().timestamp_millis()});
+        if let Err(error) =
+            crate::request_attempts::record(&self.paths.data_dir, &self.id, &terminal_event)
+        {
+            crate::compaction::notice(&format!("Could not save request outcome: {error}"));
+        }
+        if cli.output_format == OutputFormat::StreamJson {
+            emit_json(
+                &json!({"type":"turn_timing","turn":record,"assistant_id":turn.message_id()}),
+            )?;
+        }
+        if cli.output_format != OutputFormat::Text && (publish || result.is_err()) {
+            let error = result.as_ref().err().map(|error| format!("{error:#}"));
+            let cost = deepseek_code_core::services::usage::session_cost(
+                &self.store.db,
+                &self.id,
+                &self.paths.read_config()?,
+            )
+            .map(|cost| cost["known_subtotal_usd"].as_f64().unwrap_or(0.0))
+            .unwrap_or(0.0);
+            let mut payload = complete_sdk_result(completion.sdk_result, cost);
+            payload["session_id"] = json!(self.id);
+            payload["subtype"] = json!(crate::sdk_messages::result_subtype(error.as_deref()));
+            payload["is_error"] = json!(result.is_err());
+            payload["error"] = json!(error);
+            payload["duration_ms"] = json!(record.elapsed_ms.unwrap_or(0));
+            payload["duration_api_ms"] = json!(record.elapsed_ms.unwrap_or(0));
+            payload["turn"] = json!(record);
+            emit_json(&payload)?;
+        }
+        if cli.output_format != OutputFormat::Text {
+            result.map_err(|error| {
+                if error
+                    .downcast_ref::<crate::output::ReportedError>()
+                    .is_some()
+                {
+                    error
+                } else {
+                    crate::output::ReportedError(format!("{error:#}")).into()
+                }
+            })
+        } else {
+            result
+        }
     }
 
     async fn run_timed_turn(
@@ -882,17 +1098,18 @@ impl Session {
         initial_hook: bool,
         publish: bool,
         turn: &mut deepseek_code_core::db::turn_repo::TurnTimer,
+        completion: &mut TurnCompletion,
     ) -> Result<()> {
-        deepseek_code_core::services::lifecycle_events::check_configuration(
+        self.sdk_cancellable(deepseek_code_core::services::lifecycle_events::check_configuration(
             &self.hook_service_context(), &self.workspace, &self.id,
-        ).await?;
+        )).await?;
         let turn_goal = deepseek_code_core::services::session_goals::active(&self.store.db, &self.id)?;
         if let Err(error) = crate::ide_commands::restore(self).await {
             eprintln!("IDE connection unavailable: {error:#}");
             self.ide.disconnect().await;
         }
-        self.ensure_mcp().await?;
-        self.reload_plugins().await?;
+        self.sdk_cancellable(self.ensure_mcp()).await?;
+        self.sdk_cancellable(self.reload_plugins()).await?;
         if cli.output_format == OutputFormat::StreamJson {
             let init = self.sdk_init_message().await?;
             crate::sdk_messages::emit_init_once(|| init)?;
@@ -900,7 +1117,10 @@ impl Session {
         crate::session_commands::prepare_turn(self, self.context_window().await).await?;
         self.permissions
             .set_session_rules(&self.id, crate::permission_commands::load(self)?);
-        let mut history = self.store.model_history(&self.id, &self.api_format)?;
+        // Read the history and its compaction boundary in one store view, so the
+        // request reports the context it actually sends.
+        let (mut history, context_boundary) =
+            self.store.model_history_with_boundary(&self.id, &self.api_format)?;
         crate::session_commands::microcompact(self, &mut history, self.context_window().await)?;
         if !hook_wake {
             history.push(json!({"role":"user","content":self.sdk_content.as_ref().cloned().unwrap_or(json!(prompt))}));
@@ -984,6 +1204,7 @@ impl Session {
         );
         let chat_request = ChatRequest {
             conversation_id: self.id.clone(),
+            context_boundary,
             messages: history,
             model: self.model.clone(),
             provider_id: if self.auto_route {
@@ -1023,6 +1244,11 @@ impl Session {
         let worker_cancel = deepseek_code_core::services::background_sessions::wait_for_cancellation();
         tokio::pin!(worker_cancel);
         let mut events = tokio::select! {
+            biased;
+            _ = self.sdk_cancelled() => {
+                self.engine.cancel_turn(&self.id).await;
+                bail!("Interrupted by SDK host");
+            },
             _ = &mut worker_cancel => bail!("Background task cancelled before model request"),
             result = crate::hook_progress::during(&self.id, interactive_display, request) => result?,
             _ = tokio::signal::ctrl_c() => bail!("Interrupted before model request"),
@@ -1043,7 +1269,7 @@ impl Session {
         // Set when a tool runs, so text from the next model round starts on its own paragraph.
         let mut separate_text = false;
         let mut thinking_text = String::new();
-        let mut usage = json!({});
+        let mut request_usage = RequestUsage::default();
         let mut error = None;
         let mut completed = false;
         let mut stop = None::<String>;
@@ -1076,6 +1302,7 @@ impl Session {
         let turn_result: Result<()> = async {
             loop {
                 let event = tokio::select! {
+                    _ = self.sdk_cancelled() => bail!("Interrupted by SDK host"),
                     hooks = hook_progress.changed() => { progress.hook_snapshot(hooks); continue; },
                     event = events.recv() => event.context("Engine stream closed before completion")?,
                     _ = &mut worker_cancel => bail!("Background task cancelled"),
@@ -1194,7 +1421,7 @@ impl Session {
                         progress.notice("Planning context cleared. The approved plan starts a fresh context in this session; prior messages remain archived.");
                     },
                     EngineEvent::AgentProgress { session_id, agent_type, status, tool_name } => progress.agent_progress(&session_id, &agent_type, &status, tool_name.as_deref()),
-                    EngineEvent::Usage(value) => { progress.reported_usage(&value); if let Some(fields) = value.as_object() { for (key, value) in fields { usage[key] = value.clone(); } } },
+                    EngineEvent::Usage(value) => { progress.reported_usage(&value); },
                     EngineEvent::Error(message) => { progress.clear(); error = Some(message); },
                     EngineEvent::MessageStop { full_text, stop_reason } => {
                         stop = stop_reason.clone();
@@ -1219,6 +1446,7 @@ impl Session {
                         if let Some(sdk) = &self.sdk_permissions {
                             let decision = tokio::select! {
                                 biased;
+                                _ = self.sdk_cancelled() => bail!("Interrupted by SDK host"),
                                 _ = completion.changed() => None,
                                 decision = sdk.ask(&request_id, &tool_use_id, &tool_name, &tool_input) => Some(decision?),
                             };
@@ -1337,7 +1565,7 @@ impl Session {
                             continue;
                         }
                         if let Some(sdk)=&self.sdk_permissions {
-                            let answer=sdk.ask_question(&request_id,&tool_use_id,&question,&tool_input).await?;
+                            let answer=self.sdk_cancellable(sdk.ask_question(&request_id,&tool_use_id,&question,&tool_input)).await?;
                             self.engine.resume_with_answer(&request_id,answer).await?;
                             progress.set_activity("Composing");
                             continue;
@@ -1465,6 +1693,7 @@ impl Session {
                         if let Some(position) = position { tools[position] = row; } else { tools.push(row); }
                     },
                     EngineEvent::RequestSnapshot(snapshot) => {
+                        request_usage.observe(&snapshot);
                         goal_requests.observe(&snapshot);
                         if let Some(old) = snapshots.iter_mut().find(|s| s["id"] == snapshot["id"]) { *old = snapshot; } else { snapshots.push(snapshot); }
                         crate::session_commands::save_live_requests(self, &snapshots)?;
@@ -1490,10 +1719,10 @@ impl Session {
         } else {
             self.engine.cancel_turn(&self.id).await;
         }
-        // After joining, no producer can race the final background snapshot.
-        if background_transcript {
+        // After joining, drain the last reported snapshots for every frontend.
+        {
             while let Ok(event) = events.try_recv() {
-                live_transcript.observe(&event, &mut tools);
+                if background_transcript { live_transcript.observe(&event, &mut tools); }
                 match event {
                     EngineEvent::Text(delta) => {
                         if std::mem::take(&mut separate_text) && !text.is_empty() && !text.ends_with('\n') { text.push_str("\n\n"); }
@@ -1514,6 +1743,7 @@ impl Session {
                         observed_plan_boundary = Some(boundary_id);
                     }
                     EngineEvent::RequestSnapshot(snapshot) => {
+                        request_usage.observe(&snapshot);
                         goal_requests.observe(&snapshot);
                         if let Some(old) = snapshots.iter_mut().find(|s| s["id"] == snapshot["id"]) { *old = snapshot; } else { snapshots.push(snapshot); }
                     }
@@ -1523,8 +1753,10 @@ impl Session {
                     _ => {}
                 }
             }
-            live_transcript.dirty = true;
-            live_transcript.flush(&self.store.db, &self.id, &assistant_id, &text, &thinking_text, &tools)?;
+            if background_transcript {
+                live_transcript.dirty = true;
+                live_transcript.flush(&self.store.db, &self.id, &assistant_id, &text, &thinking_text, &tools)?;
+            }
         }
         // Cancellation may happen after the atomic boundary commit but before its event.
         let latest_boundary =
@@ -1607,15 +1839,11 @@ impl Session {
         } else {
             deepseek_code_core::db::turn_repo::terminal_status(stop.as_deref(), error.is_some() || !completed)
         };
-        let turn_record = turn.finish(terminal_status)?;
-        let terminal_event = json!({"type":"request_turn_end", "turnId":turn_record.turn_id,
-            "outcome":terminal_status, "timestampMs":chrono::Utc::now().timestamp_millis()});
-        if let Err(error) = crate::request_attempts::record(&self.paths.data_dir, &self.id, &terminal_event) {
-            progress.notice(&format!("Could not save request outcome: {error}"));
-        }
-        if cli.output_format == OutputFormat::StreamJson {
-            emit_json(&json!({"type":"turn_timing","turn":turn_record,"assistant_id":turn.message_id()}))?;
-        }
+        let usage = request_usage.total();
+        completion.requests = snapshots.clone();
+        completion.status = Some(terminal_status);
+        completion.failure = snapshots.iter().rev().find_map(|snapshot|
+            snapshot.get("failure").filter(|failure| !failure.is_null()).cloned());
         if publish || error.is_some() {
             match cli.output_format {
                 OutputFormat::Text => {
@@ -1627,13 +1855,10 @@ impl Session {
                 _ => {
                     let cost = deepseek_code_core::services::usage::session_cost(&self.store.db, &self.id, &self.paths.read_config()?)
                         .map(|cost| cost["known_subtotal_usd"].as_f64().unwrap_or(0.0)).unwrap_or(0.0);
-                    let elapsed = turn_record.elapsed_ms.unwrap_or(0);
-                    emit_json(
-                        &json!({"type":"result","subtype":crate::sdk_messages::result_subtype(error.as_deref()),"session_id":self.id,"result":text,"is_error":error.is_some(),"error":error,"usage":usage,
-                            "duration_ms":elapsed,"duration_api_ms":elapsed,"turn":turn_record,"num_turns":sdk_messages.as_ref().map_or(model_rounds, |t| t.turns),"total_cost_usd":cost,
+                    completion.sdk_result = Some(json!({"type":"result","subtype":crate::sdk_messages::result_subtype(error.as_deref()),"session_id":self.id,"result":text,"is_error":error.is_some(),"error":error,"usage":usage,
+                            "num_turns":sdk_messages.as_ref().map_or(model_rounds, |t| t.turns),"total_cost_usd":cost,
                             "stop_reason":stop,"permission_denials":sdk_messages.as_ref().map_or_else(|| denials.clone(), |t| t.denials.clone()),"uuid":uuid::Uuid::new_v4().to_string(),
-                            "structured_output":if error.is_none() && structured_output {serde_json::from_str::<Value>(&text).ok()} else {None}}),
-                    )?
+                            "structured_output":if error.is_none() && structured_output {serde_json::from_str::<Value>(&text).ok()} else {None}}));
                 },
             }
         }
@@ -1716,6 +1941,8 @@ fn is_turn_cancel_error(error: &anyhow::Error) -> bool {
 
 fn is_turn_cancellation(error: &str) -> bool {
     error.starts_with("Interrupted")
+        || error.starts_with("Autocompact interrupted;")
+        || error.starts_with("Autocompact task cancelled;")
         || error.starts_with("Background task cancelled")
         || error.starts_with("Tool permission interrupted")
         || error.starts_with("Turn stopped: cancelled")
@@ -2222,7 +2449,7 @@ mod event_tests {
         let resolved=session.selected_provider().await.unwrap();
         assert_eq!(resolved.model.id,"flash");
         let env=crate::background_commands::worker_environment(false,&resolved).unwrap();
-        let snapshot:Value=serde_json::from_str(&env.iter().find(|(key,_)|key=="CLAUDE_RUST_WORKER_MODEL").unwrap().1).unwrap();
+        let snapshot:Value=serde_json::from_str(&env.iter().find(|(key,_)|key=="DEEPSEEK_CODE_WORKER_MODEL").unwrap().1).unwrap();
         assert_eq!(snapshot["id"],"flash");assert_eq!(snapshot["context_window"],1_000_000);
         let saved=session.id.clone();session.sdk_set_model("flash").await.unwrap();assert_eq!(session.context_window().await,Some(128000));
         session.sdk_set_model("flash[1m]").await.unwrap();assert_eq!(session.model,"flash[1m]");
@@ -2290,5 +2517,139 @@ mod event_tests {
             "type": "agent_progress", "session_id": "child-42",
             "agent_type": "reviewer", "status": "tool_failed", "tool_name": "Read"
         }));
+    }
+}
+
+#[cfg(test)]
+mod compaction_cancellation_tests {
+    #[test]
+    fn automatic_cancellation_is_distinct_from_provider_and_hook_failures() {
+        for message in [
+            "Autocompact interrupted; original transcript retained",
+            "Autocompact task cancelled; original transcript retained",
+            "Interrupted",
+            "Interrupted: automatic compaction cancelled before it was saved",
+            "Interrupted: automatic compaction cancelled after commit",
+        ] {
+            assert!(
+                super::is_turn_cancel_error(&anyhow::anyhow!(message)),
+                "{message}"
+            );
+        }
+        for message in [
+            "Provider request failed",
+            "Hook failed",
+            "Hook failed: cancel requested",
+            "Autocompact task cancelled unexpectedly by provider",
+        ] {
+            assert!(
+                !super::is_turn_cancel_error(&anyhow::anyhow!(message)),
+                "{message}"
+            );
+        }
+    }
+}
+
+#[cfg(test)]
+mod recovery_result_tests {
+    use super::*;
+    #[test]
+    fn recovery_result_keeps_reported_statistics_and_denials_without_summing_session_cost() {
+        let previous = json!({"usage":{"input_tokens":17,"output_tokens":3,"details":{"cached_tokens":4}},
+            "num_turns":2,"permission_denials":[{"tool_name":"Bash","tool_use_id":"first"}],"total_cost_usd":5});
+        let next = json!({"usage":{"input_tokens":11,"output_tokens":null},"num_turns":1,
+            "permission_denials":[{"tool_name":"Edit","tool_use_id":"second"}],"total_cost_usd":7});
+        let payload = complete_sdk_result(
+            Some(merge_attempt_results(Some(previous.clone()), Some(next))),
+            7.0,
+        );
+        assert_eq!(payload["usage"]["input_tokens"], 28);
+        assert_eq!(payload["usage"]["output_tokens"], 3);
+        assert_eq!(payload["usage"]["details"]["cached_tokens"], 4);
+        assert_eq!(payload["num_turns"], 3);
+        assert_eq!(payload["permission_denials"].as_array().unwrap().len(), 2);
+        assert_eq!(payload["total_cost_usd"], 7.0);
+        let failed = complete_sdk_result(Some(previous), 5.0);
+        assert_eq!(failed["usage"]["input_tokens"], 17);
+        for key in [
+            "usage",
+            "num_turns",
+            "total_cost_usd",
+            "permission_denials",
+            "structured_output",
+            "stop_reason",
+        ] {
+            assert!(failed.get(key).is_some());
+            assert!(complete_sdk_result(None, 0.0).get(key).is_some());
+        }
+        assert_eq!(complete_sdk_result(None, 0.0)["usage"], json!({}));
+    }
+}
+
+#[cfg(test)]
+mod request_usage_tests {
+    use super::*;
+    #[test]
+    fn latest_report_per_request_and_unknown_fields_survive_duplicate_updates() {
+        let mut usage = RequestUsage::default();
+        usage.observe(
+            &json!({"id":"anthropic","usage":{"input_tokens":11,"output_tokens":0,
+            "cache_read_input_tokens":4,"cache_creation":{"ephemeral_5m_input_tokens":2}}}),
+        );
+        let update = json!({"id":"anthropic","usage":{"input_tokens":null,"output_tokens":2,
+            "cache_creation":{"ephemeral_1h_input_tokens":3}}});
+        usage.observe(&update);
+        usage.observe(&update);
+        usage.observe(&json!({"id":"anthropic","usage":null}));
+        usage.observe(&json!({"id":"unknown"}));
+        usage.observe(&json!({"usage":{"input_tokens":999}}));
+        assert_eq!(
+            usage.total(),
+            json!({"input_tokens":11,"output_tokens":2,"cache_read_input_tokens":4,
+            "cache_creation":{"ephemeral_5m_input_tokens":2,"ephemeral_1h_input_tokens":3}})
+        );
+        let mut unknown = RequestUsage::default();
+        unknown.observe(&json!({"id":"a","usage":{"prompt_tokens":null}}));
+        assert_eq!(unknown.total(), json!({}));
+        unknown.observe(&json!({"id":"a","usage":{"prompt_tokens":0}}));
+        assert_eq!(unknown.total(), json!({"prompt_tokens":0}));
+    }
+    #[test]
+    fn openai_final_usage_replaces_partial_and_null_updates_preserve_cache_counts() {
+        let mut usage = RequestUsage::default();
+        usage.observe(&json!({"id":"openai","usage":{"prompt_tokens":17,"completion_tokens":1,"total_tokens":18,
+            "prompt_tokens_details":{"cached_tokens":3}}}));
+        let final_report = json!({"id":"openai","usage":{"prompt_tokens":17,"completion_tokens":3,"total_tokens":20,
+            "prompt_tokens_details":{"cached_tokens":4}}});
+        usage.observe(&final_report);
+        usage.observe(&final_report);
+        usage.observe(&json!({"id":"openai","usage":{"prompt_tokens":null,"prompt_tokens_details":{"cached_tokens":null}}}));
+        assert_eq!(usage.total(), final_report["usage"]);
+    }
+
+    #[test]
+    fn distinct_requests_survive_segment_reset_and_merge_across_recovery() {
+        let mut usage = RequestUsage::default();
+        let mut segment = vec![
+            json!({"id":"first","usage":{"prompt_tokens":11,"completion_tokens":2,"total_tokens":13}}),
+        ];
+        usage.observe(&segment[0]);
+        segment.clear(); // ContextReset only discards the transcript segment.
+        segment.push(json!({"id":"second","usage":{"prompt_tokens":17,"completion_tokens":3,"total_tokens":20}}));
+        usage.observe(&segment[0]);
+        usage.observe(&segment[0]);
+        let result = merge_attempt_results(
+            Some(json!({"usage":usage.total()})),
+            Some(json!({"usage":{"prompt_tokens":23,"completion_tokens":5,"total_tokens":28}})),
+        );
+        assert_eq!(
+            result["usage"],
+            json!({"prompt_tokens":51,"completion_tokens":10,"total_tokens":61})
+        );
+        assert_eq!(
+            RequestUsage::default().total(),
+            json!({}),
+            "a new user turn starts empty"
+        );
     }
 }

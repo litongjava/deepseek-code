@@ -170,7 +170,7 @@ async fn single_turn(
     let proposal_frontend = if display.live.is_some() {
         Some(acquire_proposal_frontend(session).await?)
     } else { None };
-    let job = if std::env::var("CLAUDE_RUST_SINGLE_TURN_WORKER").as_deref() == Ok("1") {
+    let job = if std::env::var("DEEPSEEK_CODE_SINGLE_TURN_WORKER").as_deref() == Ok("1") {
         jobs::spawn_foreground(
             root,
             &executable,

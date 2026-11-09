@@ -43,14 +43,30 @@ pub(crate) struct McpExecution {
 }
 
 impl McpExecution {
-    fn tool(value: serde_json::Value) -> Self { Self { value, is_tool_call: true } }
-    fn resource(value: serde_json::Value) -> Self { Self { value, is_tool_call: false } }
+    fn tool(value: serde_json::Value) -> Self {
+        Self {
+            value,
+            is_tool_call: true,
+        }
+    }
+    fn resource(value: serde_json::Value) -> Self {
+        Self {
+            value,
+            is_tool_call: false,
+        }
+    }
 }
 
 /// Upstream `normalizeNameForMCP`: characters outside `[A-Za-z0-9_-]` become `_`.
 fn normalize_name(name: &str) -> String {
     name.chars()
-        .map(|c| if c.is_ascii_alphanumeric() || matches!(c, '_' | '-') { c } else { '_' })
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || matches!(c, '_' | '-') {
+                c
+            } else {
+                '_'
+            }
+        })
         .collect()
 }
 
@@ -124,20 +140,33 @@ impl McpToolRegistry {
             }
         }
 
-        if let Some(ide) = &self.ide { all_tools.extend(ide.tools().await); }
+        if let Some(ide) = &self.ide {
+            all_tools.extend(ide.tools().await);
+        }
         if let Some(sdk) = &self.sdk {
             let names = sdk.names();
             if !names.is_empty() {
-                let ids = names.iter().map(|name|format!("sdk:{name}")).collect::<Vec<_>>().join(", ");
-                for tool in all_tools.iter_mut().filter(|tool| matches!(tool.name.as_str(), "ListMcpResources" | "ReadMcpResource")) {
-                    tool.description.push_str(&format!(" Run-local SDK server IDs: {ids}."));
+                let ids = names
+                    .iter()
+                    .map(|name| format!("sdk:{name}"))
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                for tool in all_tools.iter_mut().filter(|tool| {
+                    matches!(tool.name.as_str(), "ListMcpResources" | "ReadMcpResource")
+                }) {
+                    tool.description
+                        .push_str(&format!(" Run-local SDK server IDs: {ids}."));
                 }
             }
             all_tools.extend(sdk.tools().await?);
         }
         let mut names = std::collections::HashSet::new();
         for tool in &all_tools {
-            anyhow::ensure!(names.insert(&tool.name), "Conflicting MCP tool name: {}", tool.name);
+            anyhow::ensure!(
+                names.insert(&tool.name),
+                "Conflicting MCP tool name: {}",
+                tool.name
+            );
         }
         Ok(all_tools)
     }
@@ -156,7 +185,13 @@ impl McpToolRegistry {
         arguments: serde_json::Value,
     ) -> Result<McpExecution> {
         if name.starts_with("mcp__ide__") {
-            return self.ide.as_ref().ok_or_else(||anyhow::anyhow!("IDE is not connected"))?.call_tool(name, arguments).await.map(McpExecution::tool);
+            return self
+                .ide
+                .as_ref()
+                .ok_or_else(|| anyhow::anyhow!("IDE is not connected"))?
+                .call_tool(name, arguments)
+                .await
+                .map(McpExecution::tool);
         }
         let manager = &self.manager;
         let servers = manager.list_servers_full().await;
@@ -172,12 +207,24 @@ impl McpToolRegistry {
                 .as_str()
                 .ok_or_else(|| anyhow::anyhow!("server_id is required"))?;
             if let Some(server_name) = id.strip_prefix("sdk:") {
-                let sdk = self.sdk.as_ref().ok_or_else(|| anyhow::anyhow!("SDK MCP run unavailable"))?;
+                let sdk = self
+                    .sdk
+                    .as_ref()
+                    .ok_or_else(|| anyhow::anyhow!("SDK MCP run unavailable"))?;
                 anyhow::ensure!(!server_name.is_empty(), "SDK MCP server name missing");
                 let uri = if name == "ReadMcpResource" {
-                    Some(arguments["uri"].as_str().ok_or_else(|| anyhow::anyhow!("uri is required"))?)
-                } else { None };
-                return sdk.resource(server_name, uri).await.map(McpExecution::resource);
+                    Some(
+                        arguments["uri"]
+                            .as_str()
+                            .ok_or_else(|| anyhow::anyhow!("uri is required"))?,
+                    )
+                } else {
+                    None
+                };
+                return sdk
+                    .resource(server_name, uri)
+                    .await
+                    .map(McpExecution::resource);
             }
             let server = servers
                 .iter()
@@ -194,7 +241,9 @@ impl McpToolRegistry {
                 .lock()
                 .await;
             return if name == "ListMcpResources" {
-                Ok(McpExecution::resource(serde_json::to_value(connector.list_resources().await?)?))
+                Ok(McpExecution::resource(serde_json::to_value(
+                    connector.list_resources().await?,
+                )?))
             } else {
                 let uri = arguments["uri"]
                     .as_str()
@@ -214,8 +263,14 @@ impl McpToolRegistry {
                 let connector = connector_arc.lock().await;
                 let tools = connector.list_tools().await.unwrap_or_default();
 
-                if let Some(tool) = tools.iter().find(|t| qualified_tool_name(&server.config.id, &t.name) == name) {
-                    return connector.call_tool(&tool.name, arguments).await.map(McpExecution::tool);
+                if let Some(tool) = tools
+                    .iter()
+                    .find(|t| qualified_tool_name(&server.config.id, &t.name) == name)
+                {
+                    return connector
+                        .call_tool(&tool.name, arguments)
+                        .await
+                        .map(McpExecution::tool);
                 }
             }
         }
@@ -227,7 +282,9 @@ impl McpToolRegistry {
     }
 
     pub async fn is_mcp_tool(&self, name: &str) -> bool {
-        if name.starts_with("mcp__ide__") { return true; }
+        if name.starts_with("mcp__ide__") {
+            return true;
+        }
         if matches!(name, "ListMcpResources" | "ReadMcpResource") {
             return true;
         }

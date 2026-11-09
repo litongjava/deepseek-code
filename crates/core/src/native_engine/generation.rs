@@ -29,6 +29,12 @@ const MAX_TOTAL_RECOVERIES: usize = 128;
 /// Room kept for protocol overhead and estimation differences on top of the
 /// output budget. The same 10% safety line bounds every request.
 const PROTOCOL_MARGIN: u32 = 1024;
+/// Hard limit on the characters one summary may contain, so a runaway response
+/// can never replace the transcript with something unusable.
+const MAX_SUMMARY_CHARS: usize = 32_000;
+/// The same limit as it appears in user-facing messages. A test keeps it in
+/// step with the numeric constant.
+const MAX_SUMMARY_CHARS_LABEL: &str = "32,000";
 
 /// A request that ended at its output limit instead of finishing. Only this
 /// structured error, never an error string, enables the bounded recovery.
@@ -49,15 +55,102 @@ impl fmt::Display for Truncated {
 
 impl std::error::Error for Truncated {}
 
-/// Why recovery stopped without a usable summary.
+/// Why a completed response cannot be used. Kept separate from [`Truncated`]
+/// because a larger output budget cannot repair either case.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum InvalidKind {
+    /// The response contained no text at all.
+    Empty { chars: usize },
+    /// The response exceeded the character limit.
+    Oversized { chars: usize },
+}
+
+/// A response that finished normally but produced nothing usable. Only this
+/// structured error, never an error string, enables the invalid-output
+/// recovery. It carries sizes and usage only, never the response text.
+#[derive(Clone, Debug, PartialEq)]
+struct InvalidSummary {
+    kind: InvalidKind,
+    /// Output budget of the request that produced it.
+    budget: u32,
+    finish: String,
+    /// Output tokens the provider reported, when it reported any.
+    completion: Option<u32>,
+}
+
+impl InvalidSummary {
+    fn kind(&self) -> InvalidKind {
+        self.kind
+    }
+
+    /// The finish reason, size and reported usage of this response, never its
+    /// text. Missing usage is named as unknown instead of reported as zero.
+    fn details(&self) -> String {
+        let used = match self.completion {
+            Some(tokens) => format!("{tokens} output tokens reported"),
+            None => "output usage not reported".to_owned(),
+        };
+        let size = match self.kind {
+            InvalidKind::Empty { chars } => format!("{chars} characters"),
+            InvalidKind::Oversized { chars } => {
+                format!("{chars} characters, above the {MAX_SUMMARY_CHARS_LABEL}-character limit")
+            }
+        };
+        format!(
+            "finish reason `{}`, {size} at its {}-token output budget, {}",
+            self.finish, self.budget, used
+        )
+    }
+}
+
+impl fmt::Display for InvalidSummary {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self.kind {
+            InvalidKind::Empty { chars } => write!(
+                f,
+                "Generation response ended at finish reason `{}` with an empty body ({chars} characters) at its {}-token output budget; {}",
+                self.finish,
+                self.budget,
+                match self.completion {
+                    Some(tokens) => format!("{tokens} output tokens reported"),
+                    None => "output usage not reported".to_owned(),
+                }
+            ),
+            InvalidKind::Oversized { chars } => write!(
+                f,
+                "Generation response ended at finish reason `{}` with {chars} characters, above the {MAX_SUMMARY_CHARS_LABEL}-character limit, at its {}-token output budget; {}",
+                self.finish,
+                self.budget,
+                match self.completion {
+                    Some(tokens) => format!("{tokens} output tokens reported"),
+                    None => "output usage not reported".to_owned(),
+                }
+            ),
+        }
+    }
+}
+
+impl std::error::Error for InvalidSummary {}
+
+/// Why recovery stopped without a usable summary.
+#[derive(Clone, Debug, PartialEq)]
 enum Exhausted {
     /// The input is already at the deepest recovery split.
     Depth,
-    /// The recovery allowance of this fragment or merge node is spent.
-    Allowance,
-    /// The input does not fit the safe budget for its output budget.
-    Input,
+    /// The recovery allowance of this fragment or merge node is spent. The
+    /// trigger names the unusable response that needed the unsent recovery, so
+    /// the report does not degrade to a bare "allowance is spent".
+    Allowance { trigger: Option<InvalidSummary> },
+    /// The input does not fit the safe budget for its output budget. Carries
+    /// the last unusable response when the input could not be split after one.
+    Input { invalid: Option<InvalidSummary> },
+    /// The last relevant response finished normally but stayed unusable.
+    /// `splittable` tells whether the input could still be split, so the report
+    /// names the real obstacle instead of always claiming the depth limit.
+    Unusable {
+        invalid: InvalidSummary,
+        splittable: bool,
+    },
 }
 
 /// Recovery stopped without a usable summary. Only this error lets the caller
@@ -91,22 +184,74 @@ impl fmt::Display for RecoveryExhausted {
             .merge_left
             .map(|left| format!(" ({left} merge recovery generations remain)"))
             .unwrap_or_default();
-        match self.cause {
-            Exhausted::Input => write!(
+        match &self.cause {
+            Exhausted::Input { invalid: None } => write!(
                 f,
                 "Compaction summary for {} could not be sent within the safe context budget planned for its {}-token output after {} of {} recovery generations{last}{pool}; no request was sent for this input and original history retained",
                 self.label, self.planned, self.used, self.limit
+            ),
+            Exhausted::Input { invalid: Some(invalid) } => write!(
+                f,
+                "Compaction summary for {} could not be split into requests inside the safe context budget planned for its {}-token output after {} of {} recovery generations; no request was sent for the remaining input, the last response ended at {}{last}{pool}; original history retained",
+                self.label,
+                self.planned,
+                self.used,
+                self.limit,
+                invalid.details()
             ),
             Exhausted::Depth => write!(
                 f,
                 "Compaction summary for {} still exceeded its {}-token output limit after {} of {} recovery generations (the input cannot be split further within the depth limit){last}{pool}; original history retained",
                 self.label, self.planned, self.used, self.limit
             ),
-            Exhausted::Allowance => write!(
-                f,
-                "Compaction summary for {} stopped after {} of {} recovery generations because its recovery allowance is spent (its next {}-token request was not sent){last}{pool}; original history retained",
-                self.label, self.used, self.limit, self.planned
-            ),
+            Exhausted::Allowance { trigger } => {
+                match trigger {
+                    None => write!(
+                        f,
+                        "Compaction summary for {} stopped after {} of {} recovery generations because its recovery allowance is spent (its next {}-token request was not sent){last}{pool}; original history retained",
+                        self.label, self.used, self.limit, self.planned
+                    ),
+                    Some(invalid) => write!(
+                        f,
+                        "Compaction summary for {} stopped after {} of {} recovery generations because its recovery allowance is spent (its next {}-token request was not sent); the response that needed that recovery ended at {}{last}{pool}; original history retained",
+                        self.label,
+                        self.used,
+                        self.limit,
+                        self.planned,
+                        invalid.details()
+                    ),
+                }
+            }
+            Exhausted::Unusable { invalid, splittable } => {
+                let obstacle = if *splittable {
+                    "its recovery allowance is spent before another attempt"
+                } else {
+                    "its input cannot be split further"
+                };
+                // The unsent split request's budget is only worth naming when it
+                // differs from the budget that produced the reported response.
+                let planned = if self.planned == invalid.budget {
+                    String::new()
+                } else {
+                    format!(
+                        "; its unsent split request would have used a {}-token output budget",
+                        self.planned
+                    )
+                };
+                let what = match invalid.kind {
+                    InvalidKind::Empty { .. } => "kept coming back empty",
+                    // The details already name the character limit.
+                    InvalidKind::Oversized { .. } => "kept returning an unusable body",
+                };
+                write!(
+                    f,
+                    "Compaction summary for {} {what} after {} of {} recovery generations, and {obstacle}; the last response ended at {}{planned}{last}{pool}; original history retained",
+                    self.label,
+                    self.used,
+                    self.limit,
+                    invalid.details()
+                )
+            }
         }
     }
 }
@@ -583,14 +728,20 @@ impl<'a, 'b> Summarizer<'a, 'b> {
     ) -> Result<String> {
         let text = self.text(stage, body);
         if !self.text_fits(&text, output) {
-            return Err(self.exhausted(label, output, Exhausted::Input, quota));
+            return Err(self.exhausted(label, output, Exhausted::Input { invalid: None }, quota));
         }
         match self.attempt(&text, output, label).await {
             Ok(summary) => Ok(summary),
-            Err(error) if error.is::<Truncated>() => {
-                self.recover(stage, body, output, label, depth, quota).await
+            Err(error) => {
+                if error.is::<Truncated>() {
+                    self.recover(stage, body, output, label, depth, quota).await
+                } else if let Some(invalid) = invalid_result(&error) {
+                    self.recover_invalid(stage, body, invalid, output, label, depth, quota)
+                        .await
+                } else {
+                    Err(self.request_failed(label, output, error, quota))
+                }
             }
-            Err(error) => Err(self.request_failed(label, output, error, quota)),
         }
     }
 
@@ -614,7 +765,12 @@ impl<'a, 'b> Summarizer<'a, 'b> {
             // The request this branch would send next is the raised one, so the
             // report names its budget rather than the truncated attempt's.
             if !quota.take() {
-                return Err(self.exhausted(label, raised, Exhausted::Allowance, quota));
+                return Err(self.exhausted(
+                    label,
+                    raised,
+                    Exhausted::Allowance { trigger: None },
+                    quota,
+                ));
             }
             let raised_label = format!("{label} (raising the output budget to {raised} tokens)");
             match self.attempt(&text, raised, &raised_label).await {
@@ -622,11 +778,101 @@ impl<'a, 'b> Summarizer<'a, 'b> {
                     self.save_original(stage, body, output, &summary)?;
                     return Ok(summary);
                 }
-                Err(error) if error.is::<Truncated>() => {}
-                Err(error) => return Err(self.request_failed(&raised_label, raised, error, quota)),
+                Err(error) => {
+                    if error.is::<Truncated>() {
+                        // Still an output limit: fall through to the split.
+                    } else if let Some(invalid) = invalid_result(&error) {
+                        // The raised request finished but carried nothing usable.
+                        // It gets the same empty-body retry as any other entry,
+                        // at its own budget, before this branch splits at the
+                        // original one.
+                        return self
+                            .recover_invalid(stage, body, invalid, output, label, depth, quota)
+                            .await;
+                    } else {
+                        return Err(self.request_failed(&raised_label, raised, error, quota));
+                    }
+                }
             }
         }
         // 2. Split the failing input, summarize both halves, then merge them.
+        self.split_recover(stage, body, output, label, depth, quota, None)
+            .await
+    }
+
+    /// Recovery for a response that finished normally but carried no usable
+    /// text. An empty body is re-requested once at the very budget that
+    /// produced it; a body over the character limit is never retried, because
+    /// no output budget makes it shorter. Both then fall through to the same
+    /// bounded split, which uses the original request budget `split_output`
+    /// rather than the budget of a raise.
+    async fn recover_invalid(
+        &mut self,
+        stage: Stage,
+        body: &str,
+        invalid: InvalidSummary,
+        split_output: u32,
+        label: &str,
+        depth: usize,
+        quota: &mut Quota,
+    ) -> Result<String> {
+        let mut unusable = Some(invalid.clone());
+        if matches!(invalid.kind(), InvalidKind::Empty { .. }) {
+            if !quota.take() {
+                return Err(self.exhausted(
+                    label,
+                    invalid.budget,
+                    Exhausted::Unusable {
+                        invalid,
+                        splittable: true,
+                    },
+                    quota,
+                ));
+            }
+            let retry_label = format!("{label} (retrying the empty summary)");
+            let text = self.text(stage, body);
+            // Same input, same budget: the retry must not turn a raised request
+            // back into the original one.
+            match self.attempt(&text, invalid.budget, &retry_label).await {
+                Ok(summary) => {
+                    self.save_original(stage, body, split_output, &summary)?;
+                    return Ok(summary);
+                }
+                Err(error) => {
+                    if error.is::<Truncated>() {
+                        // An output limit, not an unusable body, so the split
+                        // report must not blame the empty response.
+                        unusable = None;
+                    } else if let Some(next) = invalid_result(&error) {
+                        unusable = Some(next);
+                    } else {
+                        return Err(self.request_failed(
+                            &retry_label,
+                            invalid.budget,
+                            error,
+                            quota,
+                        ));
+                    }
+                }
+            }
+        }
+        self.split_recover(stage, body, split_output, label, depth, quota, unusable)
+            .await
+    }
+
+    /// Split the failing input, summarize both halves, then merge them. This is
+    /// the last step of every recovery branch; `unusable` names the result that
+    /// led here, so an exhausted split reports it instead of an output limit.
+    async fn split_recover(
+        &mut self,
+        stage: Stage,
+        body: &str,
+        output: u32,
+        label: &str,
+        depth: usize,
+        quota: &mut Quota,
+        unusable: Option<InvalidSummary>,
+    ) -> Result<String> {
         if depth < MAX_SPLIT_DEPTH {
             if let Some((first, second)) = split_in_half(self.system, body) {
                 let fits = |part: &str| self.text_fits(&self.text(stage, part), output);
@@ -639,6 +885,10 @@ impl<'a, 'b> Summarizer<'a, 'b> {
                             &format!("{label} split 1/2"),
                             depth + 1,
                             quota,
+                            // The unusable response is still the most recent
+                            // evidence until this request is actually sent, so a
+                            // refusal to send must report it.
+                            unusable.as_ref(),
                         )
                         .await?;
                     let second_summary = self
@@ -649,6 +899,9 @@ impl<'a, 'b> Summarizer<'a, 'b> {
                             &format!("{label} split 2/2"),
                             depth + 1,
                             quota,
+                            // The first half was answered, so the older invalid
+                            // response is no longer this branch's cause.
+                            None,
                         )
                         .await?;
                     let merged_input = format!("{first_summary}\n{second_summary}");
@@ -663,15 +916,29 @@ impl<'a, 'b> Summarizer<'a, 'b> {
                             &format!("{label} merge"),
                             depth + 1,
                             quota,
+                            None,
                         )
                         .await?;
                     self.save_original(stage, body, output, &merged)?;
                     return Ok(merged);
                 }
-                return Err(self.exhausted(label, output, Exhausted::Input, quota));
+                return Err(self.exhausted(
+                    label,
+                    output,
+                    Exhausted::Input { invalid: unusable },
+                    quota,
+                ));
             }
         }
-        Err(self.exhausted(label, output, Exhausted::Depth, quota))
+        Err(self.exhausted(
+            label,
+            output,
+            unusable.map_or(Exhausted::Depth, |invalid| Exhausted::Unusable {
+                invalid,
+                splittable: false,
+            }),
+            quota,
+        ))
     }
 
     async fn recovery_request(
@@ -682,20 +949,35 @@ impl<'a, 'b> Summarizer<'a, 'b> {
         label: &str,
         depth: usize,
         quota: &mut Quota,
+        trigger: Option<&InvalidSummary>,
     ) -> Result<String> {
         let text = self.text(stage, body);
         // A request that may not be sent is never answered from the cache
         // either, so a checkpoint written by an older policy cannot smuggle an
         // over-budget request back in.
         if !self.text_fits(&text, output) {
-            return Err(self.exhausted(label, output, Exhausted::Input, quota));
+            return Err(self.exhausted(
+                label,
+                output,
+                Exhausted::Input {
+                    invalid: trigger.cloned(),
+                },
+                quota,
+            ));
         }
         if let Some(saved) = self.cached(&text, output) {
             self.reuse(label);
             return Ok(saved);
         }
         if !quota.take() {
-            return Err(self.exhausted(label, output, Exhausted::Allowance, quota));
+            return Err(self.exhausted(
+                label,
+                output,
+                Exhausted::Allowance {
+                    trigger: trigger.cloned(),
+                },
+                quota,
+            ));
         }
         tracing::info!(
             module = "Compaction",
@@ -713,6 +995,15 @@ impl<'a, 'b> Summarizer<'a, 'b> {
 /// Whether this failure only ends one independent fragment.
 fn is_segment_failure(error: &anyhow::Error) -> bool {
     error.chain().any(|cause| cause.is::<RecoveryExhausted>())
+}
+
+/// The structured invalid result carried by this error, when it has one. The
+/// whole chain is searched so context from an outer layer cannot hide it.
+fn invalid_result(error: &anyhow::Error) -> Option<InvalidSummary> {
+    error
+        .chain()
+        .find_map(|cause| cause.downcast_ref::<InvalidSummary>())
+        .cloned()
 }
 
 /// Failure of one or more independent fragments, naming each one.
@@ -955,7 +1246,7 @@ async fn generate_request(
         None => None,
     };
     let operation = async {
-        let text = if provider.provider.builtin_id.is_some()
+        let (text, finish, completion) = if provider.provider.builtin_id.is_some()
             || matches!(
                 provider.provider.api_format,
                 super::provider_manager::ApiFormat::OpenAI
@@ -985,26 +1276,22 @@ async fn generate_request(
                 .into_iter()
                 .next()
                 .context("Model returned no choices")?;
-            log_request(
-                label,
-                estimate,
-                max_tokens,
-                choice.finish_reason.as_deref(),
-                usage,
-            );
-            match choice.finish_reason.as_deref() {
-                Some("stop") => {}
-                Some("length") => return Err(anyhow::Error::new(Truncated { budget: max_tokens })),
+            let finish = choice.finish_reason.unwrap_or_default();
+            log_request(label, estimate, max_tokens, Some(&finish), usage);
+            match finish.as_str() {
+                "stop" => {}
+                "length" => return Err(anyhow::Error::new(Truncated { budget: max_tokens })),
                 other => anyhow::bail!("Generation did not finish normally: {other:?}"),
             }
             ensure!(
                 choice.message.tool_calls.as_ref().is_none_or(Vec::is_empty),
                 "Unexpected tool request"
             );
-            match choice.message.content {
+            let text = match choice.message.content {
                 OpenAIContent::Text(text) => text,
                 _ => anyhow::bail!("Expected text response"),
-            }
+            };
+            (text, finish, usage.map(|(_, completion)| completion))
         } else {
             let response = AnthropicClient::new()
                 .plain_text()
@@ -1023,18 +1310,11 @@ async fn generate_request(
                 .usage
                 .as_ref()
                 .map(|usage| (usage.input_tokens, usage.output_tokens));
-            log_request(
-                label,
-                estimate,
-                max_tokens,
-                response.stop_reason.as_deref(),
-                usage,
-            );
-            match response.stop_reason.as_deref() {
-                Some("end_turn" | "stop_sequence") => {}
-                Some("max_tokens") => {
-                    return Err(anyhow::Error::new(Truncated { budget: max_tokens }))
-                }
+            let finish = response.stop_reason.unwrap_or_default();
+            log_request(label, estimate, max_tokens, Some(&finish), usage);
+            match finish.as_str() {
+                "end_turn" | "stop_sequence" => {}
+                "max_tokens" => return Err(anyhow::Error::new(Truncated { budget: max_tokens })),
                 other => anyhow::bail!("Generation did not finish normally: {other:?}"),
             }
             let mut text = String::new();
@@ -1045,15 +1325,36 @@ async fn generate_request(
                     _ => {}
                 }
             }
-            text
+            (text, finish, usage.map(|(_, completion)| completion))
         };
-        ensure!(
-            !text.trim().is_empty() && text.chars().count() <= 32_000,
-            "Empty or oversized generation result"
-        );
-        Ok(text)
+        validate_result(text, max_tokens, finish, completion)
     };
     generation_deadline(operation, short_deadline).await
+}
+
+/// Reject a finished response that carries no usable text, keeping the sizes,
+/// the finish reason and the reported usage so recovery can explain it without
+/// ever recording the response text.
+fn validate_result(
+    text: String,
+    budget: u32,
+    finish: String,
+    completion: Option<u32>,
+) -> Result<String> {
+    let chars = text.chars().count();
+    let kind = if text.trim().is_empty() {
+        InvalidKind::Empty { chars }
+    } else if chars > MAX_SUMMARY_CHARS {
+        InvalidKind::Oversized { chars }
+    } else {
+        return Ok(text);
+    };
+    Err(anyhow::Error::new(InvalidSummary {
+        kind,
+        budget,
+        finish,
+        completion,
+    }))
 }
 
 pub async fn generate(provider: ResolvedProvider, system: &str, input: &str) -> Result<String> {
@@ -1115,6 +1416,21 @@ mod tests {
             merge_pool: None,
             reused: 0,
             checkpoint: None,
+        }
+    }
+
+    /// One unusable result, as validation would build it.
+    fn invalid(
+        kind: InvalidKind,
+        budget: u32,
+        finish: &str,
+        completion: Option<u32>,
+    ) -> InvalidSummary {
+        InvalidSummary {
+            kind,
+            budget,
+            finish: finish.to_owned(),
+            completion,
         }
     }
 
@@ -1272,7 +1588,7 @@ mod tests {
             .exhausted(
                 "merge layer 1 group 1/2",
                 4096,
-                Exhausted::Allowance,
+                Exhausted::Allowance { trigger: None },
                 &quota,
             )
             .to_string();
@@ -1280,20 +1596,217 @@ mod tests {
             allowance.contains("its next 4096-token request was not sent"),
             "{allowance}"
         );
+        // A split that never got to send its first half still names the
+        // response that required it.
+        let triggered = summarizer
+            .exhausted(
+                "fragment 1/151 split 1/2 split 1/2",
+                4096,
+                Exhausted::Allowance {
+                    trigger: Some(invalid(
+                        InvalidKind::Oversized { chars: 32_001 },
+                        4096,
+                        "stop",
+                        Some(4096),
+                    )),
+                },
+                &quota,
+            )
+            .to_string();
+        assert!(
+            triggered.contains("its next 4096-token request was not sent"),
+            "{triggered}"
+        );
+        assert!(
+            triggered.contains("the response that needed that recovery ended at finish reason `stop`, 32001 characters"),
+            "{triggered}"
+        );
+        assert!(
+            triggered.contains("4096 output tokens reported"),
+            "{triggered}"
+        );
+        assert!(
+            triggered.contains("original history retained"),
+            "{triggered}"
+        );
         let input = summarizer
-            .exhausted("fragment 1/1", 4096, Exhausted::Input, &quota)
+            .exhausted(
+                "fragment 1/1",
+                4096,
+                Exhausted::Input { invalid: None },
+                &quota,
+            )
             .to_string();
         assert!(
             input.contains("no request was sent for this input"),
             "{input}"
         );
+        // An input limit reached after an unusable response still names it.
+        let split_input = summarizer
+            .exhausted(
+                "fragment 1/1",
+                4096,
+                Exhausted::Input {
+                    invalid: Some(invalid(InvalidKind::Empty { chars: 0 }, 4096, "stop", None)),
+                },
+                &quota,
+            )
+            .to_string();
+        assert!(
+            split_input.contains("no request was sent for the remaining input"),
+            "{split_input}"
+        );
+        assert!(
+            split_input.contains("finish reason `stop`, 0 characters"),
+            "{split_input}"
+        );
         assert!(is_segment_failure(&summarizer.exhausted(
             "fragment 1/1",
             4096,
-            Exhausted::Input,
+            Exhausted::Input { invalid: None },
             &quota
         )));
         assert!(!is_segment_failure(&anyhow::anyhow!("other")));
+    }
+
+    #[test]
+    fn unusable_results_are_structured_and_report_sizes_without_text() {
+        let empty = validate_result(String::new(), 8192, "stop".into(), Some(0)).unwrap_err();
+        let kind = empty
+            .downcast_ref::<InvalidSummary>()
+            .expect("an empty body must be structured");
+        assert_eq!(kind.kind(), InvalidKind::Empty { chars: 0 });
+        assert_eq!(kind.budget, 8192);
+        let text = empty.to_string();
+        assert!(text.contains("empty body"), "{text}");
+        assert!(text.contains("8192-token output budget"), "{text}");
+        assert!(text.contains("finish reason `stop`"), "{text}");
+        assert!(text.contains("0 output tokens reported"), "{text}");
+
+        // The character limit accepts exactly 32,000 characters and rejects one more.
+        let accepted = "中".repeat(MAX_SUMMARY_CHARS);
+        assert_eq!(
+            validate_result(accepted.clone(), 8192, "end_turn".into(), None).unwrap(),
+            accepted
+        );
+        let oversized =
+            validate_result(format!("{accepted}x"), 8192, "end_turn".into(), None).unwrap_err();
+        let kind = oversized
+            .downcast_ref::<InvalidSummary>()
+            .expect("an oversized body must be structured");
+        assert_eq!(
+            kind.kind(),
+            InvalidKind::Oversized {
+                chars: MAX_SUMMARY_CHARS + 1
+            }
+        );
+        let text = oversized.to_string();
+        assert!(text.contains("32001 characters"), "{text}");
+        assert!(text.contains("32,000-character limit"), "{text}");
+        assert!(text.contains("end_turn"), "{text}");
+
+        // The label in messages must keep matching the enforced limit.
+        assert_eq!(
+            MAX_SUMMARY_CHARS_LABEL.replace(',', ""),
+            MAX_SUMMARY_CHARS.to_string()
+        );
+
+        // Whitespace only is empty, and a truncated stop stays an output limit.
+        assert!(validate_result(" \n\t".into(), 4096, "stop".into(), None).is_err());
+        assert!(validate_result("summary".into(), 4096, "stop".into(), None).is_ok());
+    }
+
+    #[test]
+    fn unusable_exhaustion_names_the_result_instead_of_an_output_limit() {
+        let summarizer = summarizer(128_000, Some(16_384));
+        let mut quota = Quota::new(MAX_SEGMENT_RECOVERIES);
+        for _ in 0..3 {
+            quota.take();
+        }
+        let empty = summarizer
+            .exhausted(
+                "fragment 4/9",
+                8192,
+                Exhausted::Unusable {
+                    invalid: invalid(InvalidKind::Empty { chars: 0 }, 8192, "stop", Some(0)),
+                    splittable: false,
+                },
+                &quota,
+            )
+            .to_string();
+        assert!(empty.contains("fragment 4/9"), "{empty}");
+        assert!(empty.contains("kept coming back empty"), "{empty}");
+        assert!(empty.contains("3 of 8 recovery generations"), "{empty}");
+        assert!(empty.contains("cannot be split further"), "{empty}");
+        // The response metadata survives to the final error.
+        assert!(
+            empty.contains("finish reason `stop`, 0 characters"),
+            "{empty}"
+        );
+        assert!(empty.contains("0 output tokens reported"), "{empty}");
+        assert!(empty.contains("original history retained"), "{empty}");
+        // An unknown usage is named, never reported as zero.
+        let unknown = summarizer
+            .exhausted(
+                "fragment 5/9",
+                4096,
+                Exhausted::Unusable {
+                    invalid: invalid(InvalidKind::Empty { chars: 0 }, 4096, "stop", None),
+                    splittable: true,
+                },
+                &quota,
+            )
+            .to_string();
+        assert!(unknown.contains("output usage not reported"), "{unknown}");
+        assert!(unknown.contains("allowance is spent"), "{unknown}");
+        let oversized = summarizer
+            .exhausted(
+                "final summary",
+                8192,
+                Exhausted::Unusable {
+                    invalid: invalid(
+                        InvalidKind::Oversized { chars: 40_000 },
+                        8192,
+                        "end_turn",
+                        Some(8100),
+                    ),
+                    splittable: false,
+                },
+                &quota,
+            )
+            .to_string();
+        assert!(oversized.contains("32,000-character limit"), "{oversized}");
+        assert!(oversized.contains("40000 characters"), "{oversized}");
+        assert!(
+            oversized.contains("8100 output tokens reported"),
+            "{oversized}"
+        );
+        // A split request with a different budget is named separately.
+        let different = summarizer
+            .exhausted(
+                "fragment 6/9",
+                4096,
+                Exhausted::Unusable {
+                    invalid: invalid(InvalidKind::Empty { chars: 0 }, 8192, "stop", None),
+                    splittable: false,
+                },
+                &quota,
+            )
+            .to_string();
+        assert!(
+            different
+                .contains("its unsent split request would have used a 4096-token output budget"),
+            "{different}"
+        );
+        assert!(is_segment_failure(&summarizer.exhausted(
+            "fragment 4/9",
+            8192,
+            Exhausted::Unusable {
+                invalid: invalid(InvalidKind::Empty { chars: 0 }, 8192, "stop", Some(0)),
+                splittable: false,
+            },
+            &quota
+        )));
     }
 
     #[tokio::test(start_paused = true)]
@@ -1315,6 +1828,8 @@ mod tests {
                             status: 502,
                             retry_after: None,
                             message: "fixture incomplete response".into(),
+                            server_request_id: None,
+                            remote_code: None,
                         }
                         .into())
                     } else {

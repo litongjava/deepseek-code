@@ -234,7 +234,13 @@ fn detached_flags(breakaway: bool) -> u32 {
     const DETACHED_PROCESS: u32 = 0x0000_0008;
     const CREATE_NEW_PROCESS_GROUP: u32 = 0x0000_0200;
     const CREATE_BREAKAWAY_FROM_JOB: u32 = 0x0100_0000;
-    DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP | if breakaway { CREATE_BREAKAWAY_FROM_JOB } else { 0 }
+    DETACHED_PROCESS
+        | CREATE_NEW_PROCESS_GROUP
+        | if breakaway {
+            CREATE_BREAKAWAY_FROM_JOB
+        } else {
+            0
+        }
 }
 
 #[cfg(test)]
@@ -370,9 +376,15 @@ mod tests {
         assert!(pid > 0, "{result}");
 
         tokio::time::sleep(Duration::from_millis(1500)).await;
-        assert!(marker.exists(), "Detached service did not keep running: {result}");
+        assert!(
+            marker.exists(),
+            "Detached service did not keep running: {result}"
+        );
         let log = std::fs::read_to_string(temp.path().join("stdout.log")).unwrap();
-        assert!(log.contains("started"), "Detached stdout was not captured: {log:?}");
+        assert!(
+            log.contains("started"),
+            "Detached stdout was not captured: {log:?}"
+        );
         let isolated = result["isolated"].as_bool().unwrap();
         let message = result["message"].as_str().unwrap();
         assert_eq!(message.contains("outlives this call"), isolated, "{result}");
@@ -385,6 +397,8 @@ mod tests {
             .args(["/PID", &pid.to_string(), "/T", "/F"])
             .status();
         #[cfg(unix)]
-        let _ = std::process::Command::new("kill").args(["-9", &format!("-{pid}")]).status();
+        let _ = std::process::Command::new("kill")
+            .args(["-9", &format!("-{pid}")])
+            .status();
     }
 }

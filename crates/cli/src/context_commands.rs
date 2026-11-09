@@ -146,6 +146,7 @@ fn estimate(session: &Session, window: Option<u64>) -> Result<deepseek_code_core
     }
     Ok(deepseek_code_core::services::context_usage::LastRequest {
         model: session.model.clone(),
+        provider: Some(session.provider_id.clone()),
         started_at_ms: None,
         status: "estimate".into(),
         usage: Some(usage),
@@ -252,6 +253,7 @@ mod tests {
         let system = "x".repeat(3000);
         let request = LastRequest {
             model: "deepseek-flash".into(),
+            provider: Some("fixture".into()),
             started_at_ms: Some(0),
             status: "completed".into(),
             reported_input_tokens: None,
@@ -278,6 +280,7 @@ mod tests {
         assert!(render(None).contains("Context: unknown"));
         let request = LastRequest {
             model: "previous-model".into(),
+            provider: Some("fixture".into()),
             started_at_ms: Some(0),
             status: "completed".into(),
             reported_input_tokens: Some(90),
@@ -298,6 +301,7 @@ mod tests {
         assert!(!text.contains('\x1b'));
         let request = LastRequest {
             model: "model".into(),
+            provider: Some("fixture".into()),
             started_at_ms: None,
             status: "error".into(),
             reported_input_tokens: None,

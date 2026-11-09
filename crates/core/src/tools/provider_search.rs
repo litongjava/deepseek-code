@@ -113,7 +113,9 @@ fn endpoint(provider: &ResolvedProvider) -> Result<(Strategy, reqwest::Url)> {
 fn credentials(provider: &ResolvedProvider) -> Result<(String, bool)> {
     let configured = provider.provider.api_key.trim();
     if !configured.is_empty() {
-        if configured.starts_with("sk-ant-oat") || crate::services::anthropic_auth::is_oauth_marker(configured) {
+        if configured.starts_with("sk-ant-oat")
+            || crate::services::anthropic_auth::is_oauth_marker(configured)
+        {
             bail!("Native WebSearch currently requires an API key; Claude subscription OAuth credentials are not supported by this adapter.");
         }
         return Ok((configured.into(), false));
@@ -746,9 +748,15 @@ mod tests {
         let (uri, headers, body) = rx.recv().await.unwrap();
         assert_eq!(uri.path(), "/gateway/v1/responses");
         assert_eq!(headers["authorization"], "Bearer test-key");
-        assert!(body["input"].is_array(), "Codex native Responses requires a list");
+        assert!(
+            body["input"].is_array(),
+            "Codex native Responses requires a list"
+        );
         assert_eq!(body["input"][0]["role"], "user");
-        assert!(body["input"][0]["content"][0]["text"].as_str().unwrap().contains("test search"));
+        assert!(body["input"][0]["content"][0]["text"]
+            .as_str()
+            .unwrap()
+            .contains("test search"));
         assert_eq!(body["tools"][0]["type"], "web_search");
         assert_eq!(body["model"], "test-model");
         assert_eq!(result["api_format"], "openai");

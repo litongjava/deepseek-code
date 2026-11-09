@@ -59,7 +59,7 @@ async fn persistent_worker_refreshes_launch_rules_without_retaining_previous_gra
             "--api-format".into(),
             "openai".into(),
             "--api-key-env".into(),
-            "CLAUDE_RUST_CHILD_API_KEY".into(),
+            "DEEPSEEK_CODE_CHILD_API_KEY".into(),
             "--model".into(),
             "fixture".into(),
             "--permission-mode".into(),
@@ -78,7 +78,7 @@ async fn persistent_worker_refreshes_launch_rules_without_retaining_previous_gra
                 id: id.clone(),
                 prompt: format!("launch turn {index}"),
                 arguments,
-                environment: vec![("CLAUDE_RUST_CHILD_API_KEY".into(), "fixture-only".into())],
+                environment: vec![("DEEPSEEK_CODE_CHILD_API_KEY".into(), "fixture-only".into())],
             },
         )
         .await

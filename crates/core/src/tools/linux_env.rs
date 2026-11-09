@@ -34,8 +34,10 @@ pub fn default_rootfs() -> Option<(&'static str, &'static str)> {
         _ => None,
     }
 }
-const UBUNTU_AMD64_SHA256: &str = "e77b6f10c2590cef872b33ee9f635a0e3fd1f57fb074c0e52b5c7f56147a0c86";
-const UBUNTU_ARM64_SHA256: &str = "a91d5a93010193712d346d761372b7c9db6dfcf093893161c64ca107f05914f2";
+const UBUNTU_AMD64_SHA256: &str =
+    "e77b6f10c2590cef872b33ee9f635a0e3fd1f57fb074c0e52b5c7f56147a0c86";
+const UBUNTU_ARM64_SHA256: &str =
+    "a91d5a93010193712d346d761372b7c9db6dfcf093893161c64ca107f05914f2";
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct LinuxEnvironment {
@@ -50,11 +52,17 @@ impl LinuxEnvironment {
         let proot = PathBuf::from(std::env::var_os(PROOT_ENV)?);
         let rootfs = PathBuf::from(std::env::var_os(ROOTFS_ENV)?);
         let loader = std::env::var_os(LOADER_ENV).map(PathBuf::from);
-        Some(Self { proot, loader, rootfs })
+        Some(Self {
+            proot,
+            loader,
+            rootfs,
+        })
     }
 
     pub fn is_ready(&self) -> bool {
-        self.proot.is_file() && self.rootfs.join(READY_MARKER).is_file() && self.rootfs.join("bin/bash").exists()
+        self.proot.is_file()
+            && self.rootfs.join(READY_MARKER).is_file()
+            && self.rootfs.join("bin/bash").exists()
     }
 
     /// A command that runs `/bin/bash` inside the root filesystem. The caller
@@ -79,7 +87,10 @@ impl LinuxEnvironment {
         command
             .env("PROOT_TMP_DIR", &tmp)
             .env("HOME", "/root")
-            .env("PATH", "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin")
+            .env(
+                "PATH",
+                "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
+            )
             .env("LANG", "C.UTF-8")
             .env("TERM", "xterm-256color")
             .env_remove("LD_PRELOAD");
@@ -148,12 +159,17 @@ pub async fn install(rootfs: &Path, url: &str, sha256: &str) -> Result<()> {
     if rootfs.join(READY_MARKER).is_file() {
         return Ok(());
     }
-    let parent = rootfs.parent().context("Root filesystem path has no parent")?;
+    let parent = rootfs
+        .parent()
+        .context("Root filesystem path has no parent")?;
     std::fs::create_dir_all(parent)?;
     let archive = parent.join("rootfs.tar.gz.part");
     let bytes = reqwest::get(url).await?.error_for_status()?.bytes().await?;
     let digest = hex_digest(&bytes);
-    ensure!(digest.eq_ignore_ascii_case(sha256), "Root filesystem checksum mismatch: {digest}");
+    ensure!(
+        digest.eq_ignore_ascii_case(sha256),
+        "Root filesystem checksum mismatch: {digest}"
+    );
     std::fs::write(&archive, &bytes)?;
     let target = rootfs.to_path_buf();
     let source = archive.clone();
@@ -165,7 +181,10 @@ pub async fn install(rootfs: &Path, url: &str, sha256: &str) -> Result<()> {
 }
 
 fn hex_digest(bytes: &[u8]) -> String {
-    Sha256::digest(bytes).iter().map(|b| format!("{b:02x}")).collect()
+    Sha256::digest(bytes)
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect()
 }
 
 /// Unpacks a gzip tarball. Hard links are copied and device nodes skipped,
@@ -201,10 +220,13 @@ pub fn unpack(archive: &Path, target: &Path) -> Result<()> {
             std::os::unix::fs::symlink(link.as_ref(), &dest)?;
             continue;
         }
-        entry.unpack(&dest).with_context(|| format!("Cannot unpack {}", path.display()))?;
+        entry
+            .unpack(&dest)
+            .with_context(|| format!("Cannot unpack {}", path.display()))?;
     }
     for (dest, source) in hard_links {
-        std::fs::copy(&source, &dest).with_context(|| format!("Cannot copy {}", source.display()))?;
+        std::fs::copy(&source, &dest)
+            .with_context(|| format!("Cannot copy {}", source.display()))?;
     }
     Ok(())
 }
@@ -216,7 +238,9 @@ fn safe_relative(path: &Path) -> Result<PathBuf> {
         match component {
             Component::Normal(part) => clean.push(part),
             Component::CurDir | Component::RootDir => {}
-            Component::ParentDir | Component::Prefix(_) => bail!("Unsafe path in archive: {}", path.display()),
+            Component::ParentDir | Component::Prefix(_) => {
+                bail!("Unsafe path in archive: {}", path.display())
+            }
         }
     }
     Ok(clean)
@@ -229,8 +253,14 @@ fn configure(rootfs: &Path) -> Result<()> {
     std::fs::create_dir_all(rootfs.join("etc"))?;
     // Ubuntu's resolv.conf may be a dangling symlink to systemd-resolved.
     let _ = std::fs::remove_file(rootfs.join("etc/resolv.conf"));
-    std::fs::write(rootfs.join("etc/resolv.conf"), "nameserver 8.8.8.8\nnameserver 1.1.1.1\n")?;
-    std::fs::write(rootfs.join("etc/hosts"), "127.0.0.1 localhost\n::1 localhost\n")?;
+    std::fs::write(
+        rootfs.join("etc/resolv.conf"),
+        "nameserver 8.8.8.8\nnameserver 1.1.1.1\n",
+    )?;
+    std::fs::write(
+        rootfs.join("etc/hosts"),
+        "127.0.0.1 localhost\n::1 localhost\n",
+    )?;
     let apt = rootfs.join("etc/apt/apt.conf.d");
     std::fs::create_dir_all(&apt)?;
     // apt drops privileges to _apt, which PRoot's fake root cannot do.
@@ -245,7 +275,10 @@ mod tests {
     fn archive(dir: &Path) -> PathBuf {
         let path = dir.join("rootfs.tar.gz");
         let file = std::fs::File::create(&path).unwrap();
-        let mut builder = tar::Builder::new(flate2::write::GzEncoder::new(file, flate2::Compression::fast()));
+        let mut builder = tar::Builder::new(flate2::write::GzEncoder::new(
+            file,
+            flate2::Compression::fast(),
+        ));
         let mut add = |name: &str, kind: tar::EntryType, data: &[u8], link: Option<&str>| {
             let mut header = tar::Header::new_gnu();
             header.set_entry_type(kind);
@@ -258,7 +291,12 @@ mod tests {
         };
         add("bin/bash", tar::EntryType::Regular, b"#!fake", None);
         add("usr/bin/perl", tar::EntryType::Regular, b"perl", None);
-        add("usr/bin/perl5", tar::EntryType::Link, b"", Some("usr/bin/perl"));
+        add(
+            "usr/bin/perl5",
+            tar::EntryType::Link,
+            b"",
+            Some("usr/bin/perl"),
+        );
         add("bin/sh", tar::EntryType::Symlink, b"", Some("bash"));
         add("dev/null", tar::EntryType::Char, b"", None);
         builder.into_inner().unwrap().finish().unwrap();
@@ -270,17 +308,30 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let rootfs = dir.path().join("rootfs");
         unpack(&archive(dir.path()), &rootfs).unwrap();
-        assert_eq!(std::fs::read(rootfs.join("usr/bin/perl5")).unwrap(), b"perl");
-        assert_eq!(std::fs::read_link(rootfs.join("bin/sh")).unwrap(), Path::new("bash"));
+        assert_eq!(
+            std::fs::read(rootfs.join("usr/bin/perl5")).unwrap(),
+            b"perl"
+        );
+        assert_eq!(
+            std::fs::read_link(rootfs.join("bin/sh")).unwrap(),
+            Path::new("bash")
+        );
         assert!(!rootfs.join("dev/null").exists());
         configure(&rootfs).unwrap();
-        assert!(std::fs::read_to_string(rootfs.join("etc/apt/apt.conf.d/99deepseek")).unwrap().contains("Sandbox::User"));
+        assert!(
+            std::fs::read_to_string(rootfs.join("etc/apt/apt.conf.d/99deepseek"))
+                .unwrap()
+                .contains("Sandbox::User")
+        );
     }
 
     #[test]
     fn archive_paths_cannot_escape_the_target() {
         assert!(safe_relative(Path::new("../etc/passwd")).is_err());
-        assert_eq!(safe_relative(Path::new("/usr/./bin")).unwrap(), PathBuf::from("usr/bin"));
+        assert_eq!(
+            safe_relative(Path::new("/usr/./bin")).unwrap(),
+            PathBuf::from("usr/bin")
+        );
     }
 
     #[test]
@@ -288,7 +339,11 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let proot = dir.path().join("libproot.so");
         std::fs::write(&proot, b"").unwrap();
-        let env = LinuxEnvironment { proot, loader: None, rootfs: dir.path().join("rootfs") };
+        let env = LinuxEnvironment {
+            proot,
+            loader: None,
+            rootfs: dir.path().join("rootfs"),
+        };
         assert!(!env.is_ready());
         std::fs::create_dir_all(env.rootfs.join("bin")).unwrap();
         std::fs::write(env.rootfs.join("bin/bash"), b"").unwrap();
@@ -296,8 +351,12 @@ mod tests {
         std::fs::write(env.rootfs.join(READY_MARKER), b"sha").unwrap();
         assert!(env.is_ready());
         let args = env.proot_args(dir.path().to_str().unwrap());
-        assert!(args.windows(2).any(|w| w[0] == "-r" && w[1] == env.rootfs.to_string_lossy()));
-        assert!(args.windows(2).any(|w| w[0] == "-b" && w[1] == dir.path().to_string_lossy()));
+        assert!(args
+            .windows(2)
+            .any(|w| w[0] == "-r" && w[1] == env.rootfs.to_string_lossy()));
+        assert!(args
+            .windows(2)
+            .any(|w| w[0] == "-b" && w[1] == dir.path().to_string_lossy()));
         assert!(args.contains(&"--link2symlink".to_string()));
     }
 
@@ -317,7 +376,13 @@ mod tests {
         assert_eq!(args[args.len() - 2], "/bin/bash");
         assert_eq!(args[args.len() - 1], "--login");
         assert_eq!(command.get_env("HOME"), Some(std::ffi::OsStr::new("/root")));
-        assert_eq!(command.get_env("PROOT_LOADER"), env.loader.as_deref().map(Path::as_os_str));
-        assert_eq!(command.get_cwd().map(|p| p.as_os_str()), Some(std::ffi::OsStr::new(cwd)));
+        assert_eq!(
+            command.get_env("PROOT_LOADER"),
+            env.loader.as_deref().map(Path::as_os_str)
+        );
+        assert_eq!(
+            command.get_cwd().map(|p| p.as_os_str()),
+            Some(std::ffi::OsStr::new(cwd))
+        );
     }
 }

@@ -36,13 +36,15 @@ impl<'a> Checkpoint<'a> {
         session: &'a str,
         provider: &ResolvedProvider,
         system: &str,
-        input: &str,
     ) -> Result<Self> {
         // Hash credentials/configuration without persisting either as plaintext cache metadata.
-        // Version 2 marks the 64K fragment planning and per-fragment recovery
-        // policy, so results planned by the earlier strategy are not reused.
+        // The transcript is not part of this compatibility domain: it changes
+        // whenever a cancelled compaction is followed by new messages, and each
+        // completed request is already identified by its own exact request key.
+        // Version 3 separates that request key from the configuration domain so
+        // unchanged fragments survive a later turn; earlier layouts are dropped.
         let fingerprint = digest(
-            &json!({"version":2,"provider":provider.provider,"model":provider.model,"effort":provider.model.effort,"system":system,"input":input}),
+            &json!({"version":3,"provider":provider.provider,"model":provider.model,"effort":provider.model.effort,"system":system}),
         );
         let value: Option<String> = db.with_conn(|conn| {
             conn.query_row(
@@ -88,51 +90,43 @@ mod tests {
     use crate::runtime::{RuntimePaths, SessionStore};
 
     #[test]
-    fn completed_summaries_require_matching_history_provider_model_and_instructions() {
+    fn completed_summaries_survive_history_growth_but_require_matching_configuration() {
         let dir = tempfile::tempdir().unwrap();
         let paths = RuntimePaths::new(dir.path().join("data")).unwrap();
         let db = paths.open_database().unwrap();
         let provider = crate::native_engine::provider_manager::ProviderManager::in_memory(vec![serde_json::from_value(json!({"id":"p","name":"p","base_url":"http://localhost","api_key":"secret-fixture-key","api_format":"openai","enabled":true,"models":[{"id":"gpt-6-astra","name":"m","enabled":true,"max_tokens":8192,"supports_web_search":false}]})).unwrap()], dir.path().join("providers.json")).resolve_selected("p", "gpt-6-astra").unwrap();
         let request = Checkpoint::request_key("system", "fragment", 4096);
-        Checkpoint::open(&db, "session", &provider, "system", "history")
+        Checkpoint::open(&db, "session", &provider, "system")
             .unwrap()
             .save(request.clone(), "Completed summary".into())
             .unwrap();
         let reopened = paths.open_database().unwrap();
-        assert!(
-            Checkpoint::open(&reopened, "session", &provider, "system", "history")
+        // A later turn changes the transcript, but the completed request is
+        // still valid for the exact fragment it summarized.
+        let cache = Checkpoint::open(&reopened, "session", &provider, "system").unwrap();
+        assert_eq!(cache.get(&request).as_deref(), Some("Completed summary"));
+        assert!(cache
+            .get(&Checkpoint::request_key("system", "changed fragment", 4096))
+            .is_none());
+        // Session and instructions remain part of the compatibility domain.
+        for (session, system) in [("other", "system"), ("session", "new system")] {
+            assert!(Checkpoint::open(&reopened, session, &provider, system)
                 .unwrap()
                 .get(&request)
-                .is_some()
-        );
-        for (session, system, input) in [
-            ("other", "system", "history"),
-            ("session", "new system", "history"),
-            ("session", "system", "changed history"),
-        ] {
-            assert!(
-                Checkpoint::open(&reopened, session, &provider, system, input)
-                    .unwrap()
-                    .get(&request)
-                    .is_none()
-            );
+                .is_none());
         }
         let mut changed = provider.clone();
         changed.model.max_tokens = Some(2048);
-        assert!(
-            Checkpoint::open(&reopened, "session", &changed, "system", "history")
-                .unwrap()
-                .get(&request)
-                .is_none()
-        );
+        assert!(Checkpoint::open(&reopened, "session", &changed, "system")
+            .unwrap()
+            .get(&request)
+            .is_none());
         changed = provider.clone();
         changed.provider.base_url.push_str("/different");
-        assert!(
-            Checkpoint::open(&reopened, "session", &changed, "system", "history")
-                .unwrap()
-                .get(&request)
-                .is_none()
-        );
+        assert!(Checkpoint::open(&reopened, "session", &changed, "system")
+            .unwrap()
+            .get(&request)
+            .is_none());
         let value: String = db
             .with_conn(|c| {
                 c.query_row(
@@ -168,7 +162,7 @@ mod tests {
         .unwrap()
         .unwrap();
         assert!(
-            Checkpoint::open(&db, "session", &provider, "system", "history")
+            Checkpoint::open(&db, "session", &provider, "system")
                 .unwrap()
                 .get(&request)
                 .is_none(),
@@ -206,16 +200,14 @@ mod tests {
         let db = paths.open_database().unwrap();
         let provider = crate::native_engine::provider_manager::ProviderManager::in_memory(vec![serde_json::from_value(json!({"id":"p","name":"p","base_url":"http://localhost","api_key":"fixture","api_format":"openai","enabled":true,"models":[{"id":"gpt-6-astra","name":"m","enabled":true,"max_tokens":8192,"supports_web_search":false}]})).unwrap()], dir.path().join("providers.json")).resolve_selected("p", "gpt-6-astra").unwrap();
         let request = Checkpoint::request_key("system", "fragment", 4096);
-        Checkpoint::open(&db, "session", &provider, "system", "history")
+        Checkpoint::open(&db, "session", &provider, "system")
             .unwrap()
             .save(request.clone(), "   \n".into())
             .unwrap();
-        assert!(
-            Checkpoint::open(&db, "session", &provider, "system", "history")
-                .unwrap()
-                .get(&request)
-                .is_none()
-        );
+        assert!(Checkpoint::open(&db, "session", &provider, "system")
+            .unwrap()
+            .get(&request)
+            .is_none());
     }
 
     #[test]

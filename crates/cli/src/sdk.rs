@@ -457,6 +457,7 @@ pub async fn run(
         permissions.cancel().await;
     }
     session.sdk_content = None;
+    session.sdk_interrupt = None;
     session.sdk_overrides = Default::default();
     session.engine.clear_runtime_agents(&session.id);
     result
@@ -570,6 +571,8 @@ async fn run_inner(
                 }
                 _ => message.text.clone(),
             };
+            let (interrupt, interrupted) = tokio::sync::watch::channel(false);
+            session.sdk_interrupt = Some(interrupted);
             let turn = Box::pin(async {
                 if message.initial_hook {
                     session
@@ -606,13 +609,15 @@ async fn run_inner(
                             }
                             if value["request"]["subtype"]=="interrupt" {
                                 failed=true;turn_failed=true;
+                                interrupt.send_replace(true);
+                                // Stop tool execution before releasing cancelled hook waiters.
+                                // The Session future remains live to drain and finalize the turn.
                                 session.engine.cancel_turn(&session.id).await;
                                 callbacks.cancel_all();
                                 mcp.cancel_all();
                                 permissions.cancel().await;
                                 response(&value["request_id"],Ok(json!({})))?;
-                                crate::session::emit_json(&crate::sdk_messages::error_result(&session.id,"SDK turn interrupted"))?;
-                                break;
+                                continue;
                             }
                             let request = &value["request"];
                             if let Some(result) = crate::sdk_queries::read_only(session, request).await {

@@ -162,6 +162,12 @@ impl TurnTimer {
         self.new_segment()
     }
 
+    /// Forget a segment removed by recovery; the next attempt or finish links a
+    /// fresh assistant to this same execution turn.
+    pub fn clear_segment(&mut self) {
+        self.message_id = None;
+    }
+
     pub fn new_segment(&mut self) -> Result<String> {
         let id = uuid::Uuid::new_v4().to_string();
         self.db.with_conn(|conn| -> Result<()> {
@@ -393,6 +399,26 @@ mod tests {
             assert_eq!(copied.status, TurnStatus::Cancelled);
             assert_eq!(copied.ended_at, None);
             assert_eq!(copied.elapsed_ms, None);
+        })
+        .unwrap();
+    }
+
+    #[test]
+    fn recovery_rebinds_deleted_segments_without_finishing_the_turn() {
+        let (_temp, db, session) = fixture();
+        let mut timer = TurnTimer::start(db.clone(), &session).unwrap();
+        let removed = timer.ensure_segment().unwrap();
+        db.with_conn(|conn| super::super::message_repo::delete_message(conn, &removed))
+            .unwrap()
+            .unwrap();
+        timer.clear_segment();
+        assert!(!timer.is_finished());
+        let retry = timer.ensure_segment().unwrap();
+        assert_ne!(retry, removed);
+        let record = timer.finish(TurnStatus::Cancelled).unwrap();
+        db.with_conn(|conn| {
+            assert!(get_message_turn(conn, &removed).unwrap().is_none());
+            assert_eq!(get_message_turn(conn, &retry).unwrap(), Some(record));
         })
         .unwrap();
     }

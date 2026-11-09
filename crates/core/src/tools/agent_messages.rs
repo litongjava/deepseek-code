@@ -25,7 +25,9 @@ pub(super) fn list_agents_definition() -> super::ToolDefinition {
 pub fn list_agents(context: &crate::services::ServiceContext, session: &str) -> Result<Value> {
     let mut rows = Vec::new();
     for job in crate::services::background_sessions::list(&context.paths.data_dir, Some(session))? {
-        if job.foreground { continue; }
+        if job.foreground {
+            continue;
+        }
         rows.push(json!({"to":job.session_id,"agent_id":job.id,"name":job.title,"kind":"background agent","status":job.status}));
     }
     for peer in crate::services::session_messages::session_peers(context, session)? {
@@ -34,8 +36,24 @@ pub fn list_agents(context: &crate::services::ServiceContext, session: &str) -> 
         }
         rows.push(json!({"to":peer["id"],"name":peer["title"],"kind":"session","status":if peer["receiver_active"] == true { "running" } else { "idle" }}));
     }
-    let content = if rows.is_empty() { "No agents or sessions to message.".to_owned() } else {
-        rows.iter().map(|row| format!("{} — to: {} ({}, {})", row["name"].as_str().filter(|n| !n.is_empty()).unwrap_or("untitled"), row["to"].as_str().unwrap_or_default(), row["kind"].as_str().unwrap_or_default(), row["status"].as_str().unwrap_or_default())).collect::<Vec<_>>().join("\n")
+    let content = if rows.is_empty() {
+        "No agents or sessions to message.".to_owned()
+    } else {
+        rows.iter()
+            .map(|row| {
+                format!(
+                    "{} — to: {} ({}, {})",
+                    row["name"]
+                        .as_str()
+                        .filter(|n| !n.is_empty())
+                        .unwrap_or("untitled"),
+                    row["to"].as_str().unwrap_or_default(),
+                    row["kind"].as_str().unwrap_or_default(),
+                    row["status"].as_str().unwrap_or_default()
+                )
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
     };
     Ok(json!({"agents":rows,"content":content}))
 }
@@ -107,7 +125,8 @@ fn delivery(result: &mut Value, active: bool, open: bool) {
         result["note"] = json!("The recipient's session is open but idle: its user is notified and the message enters context on its next turn. Do not resume it from here.");
     } else {
         result["delivery"] = json!("next_resume");
-        result["note"] = json!("The recipient's session is closed; it reads the message when it is resumed.");
+        result["note"] =
+            json!("The recipient's session is closed; it reads the message when it is resumed.");
     }
 }
 
@@ -141,7 +160,9 @@ pub fn execute_live(
                 let mut result = json!({"message":message,"state":"queued","processed":false,
                     "to":to,"delivered":[delivered(None,to)]});
                 let name = crate::services::background_sessions::list(root, Some(session))?
-                    .into_iter().find(|job| job.session_id == to).map(|job| job.title)
+                    .into_iter()
+                    .find(|job| job.session_id == to)
+                    .map(|job| job.title)
                     .unwrap_or_else(|| "Agent".into());
                 result["recipient_name"] = json!(name);
                 delivery(&mut result, active, open);

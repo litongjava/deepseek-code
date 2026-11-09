@@ -44,6 +44,8 @@ mod interactive_config;
 mod args;
 mod migration;
 mod config;
+mod tool_settings;
+mod tools_menu;
 #[allow(dead_code)]
 mod legacy_api_config;
 mod session;
@@ -116,8 +118,41 @@ fn report_error(error: &anyhow::Error) {
     }
 }
 
-#[tokio::main]
-async fn main() -> std::process::ExitCode {
+/// Tool calls nest deep futures. Windows gives the main thread a small stack and
+/// debug builds overflow it mid-turn, aborting the process (0xc00000fd) before
+/// the turn can report anything. Run the runtime on a thread with room.
+const MAIN_STACK_SIZE: usize = 16 * 1024 * 1024;
+
+fn main() -> std::process::ExitCode {
+    // Only the stack size changes: the runtime keeps its multi-threaded
+    // scheduler, and every worker thread gets the same room so a nested tool
+    // call cannot overflow any of them.
+    let build = || {
+        tokio::runtime::Builder::new_multi_thread()
+            .thread_stack_size(MAIN_STACK_SIZE)
+            .thread_name("dcl-worker")
+            .enable_all()
+            .build()
+    };
+    match std::thread::Builder::new()
+        .name("dcl-main".into())
+        .stack_size(MAIN_STACK_SIZE)
+        .spawn(move || match build() {
+            Ok(runtime) => runtime.block_on(async_main()),
+            Err(error) => {
+                eprintln!("Starting the runtime: {error}");
+                std::process::ExitCode::FAILURE
+            }
+        }) {
+        Ok(handle) => handle.join().unwrap_or(std::process::ExitCode::FAILURE),
+        Err(error) => {
+            eprintln!("Starting the main thread: {error}");
+            std::process::ExitCode::FAILURE
+        }
+    }
+}
+
+async fn async_main() -> std::process::ExitCode {
     #[cfg(windows)]
     let _console_modes = terminal::screen_mode::ConsoleModes::capture();
     // Inside a sandbox with a domain allowlist: carry the proxy, then run the command.
@@ -640,8 +675,8 @@ async fn run(cli: &Cli) -> Result<()> {
             let compact = prompt.trim().strip_prefix("/compact").filter(|rest| rest.is_empty() || rest.starts_with(char::is_whitespace));
             match compact {
                 Some(instructions) if single => {
-                    let summarized = repl::compact(&paths, &mut session, instructions).await?;
-                    let message = format!("Compacted: {summarized} messages summarized; the original transcript remains in the session history.");
+                    let compacted = repl::compact(&paths, &mut session, instructions, None).await?;
+                    let message = crate::compaction::completion_report(&compacted.report);
                     if cli.output_format == OutputFormat::Text {
                         println!("{message}");
                     } else {
@@ -1049,7 +1084,7 @@ async fn run(cli: &Cli) -> Result<()> {
                 Err(error) => { command_eprintln!("Error: {error:#}"); continue; },
                 Ok(false) => {},
             }
-            match repl::handle(&line, &paths, &mut session).await {
+            match repl::handle(&line, &paths, &mut session, input.as_mut()).await {
                 Ok(true) => {
                     if let Some(draft) = terminal::NEXT_DRAFT.lock().unwrap_or_else(|error| error.into_inner()).take() {
                         if let Some(input) = &input { input.restore_draft(draft); }
@@ -1093,7 +1128,14 @@ async fn run(cli: &Cli) -> Result<()> {
                 },
                 "status" | ".status" => { if let Err(error) = status_commands::run(&session, "").await { command_eprintln!("Status: {error:#}"); } },
                 "/history" | "history" | ".history" => command_println!("{}", serde_json::to_string_pretty(&session.store.history(&session.id)?)?),
-                "/tools" | "tools" | ".tools" => for tool in deepseek_code_core::tools::get_tool_definitions() { command_eprintln!("{}: {}", tool.name, tool.description); },
+                "/tools" | "tools" | ".tools" => {
+                    let result = if terminal::picker::available() {
+                        tools_menu::run(&session.paths)
+                    } else {
+                        tool_settings::print(&session.paths)
+                    };
+                    if let Err(error) = result { command_eprintln!("Tools: {error:#}"); }
+                },
                 command if skills.contains_key(command.split_whitespace().next().unwrap_or(command)) => {
                     if let Err(error) = session.turn(cli, &line, &mut input).await { report_error(&error); }
                 },

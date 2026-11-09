@@ -19,16 +19,20 @@ async fn send(
             let request = request
                 .try_clone()
                 .ok_or_else(|| anyhow::anyhow!("Model request cannot be replayed"))?;
-            crate::performance::checked_response(
+            let response = crate::performance::checked_response(
                 request.headers(identity.headers()).send().await?,
             )
-            .await
+            .await?;
+            // The status of the attempt that produced this response stays known,
+            // so a stream ending without a completion marker can report it.
+            attempts.set_status(response.status().as_u16());
+            Ok(response)
         },
         budget,
     )
     .await;
     // Record what the server really saw, including the failing attempt.
-    attempts.set(budget.used());
+    attempts.set_attempts(budget.used());
     result
 }
 
@@ -39,7 +43,10 @@ async fn send(
 pub(super) async fn response(
     request: reqwest::RequestBuilder,
     identity: RequestIdentity,
-) -> Result<(Pin<Box<dyn Stream<Item = Result<String>> + Send>>, AttemptCounter)> {
+) -> Result<(
+    Pin<Box<dyn Stream<Item = Result<String>> + Send>>,
+    AttemptCounter,
+)> {
     let mut budget = AttemptBudget::configured();
     budget.id = identity.id().to_owned();
     let attempts = AttemptCounter::default();
@@ -82,7 +89,7 @@ pub(super) async fn response(
             if exposed || !unparsed.trim().is_empty() || !transport_failure {
                 if !pending.is_empty() { yield pending; }
                 if let Some(ref error) = failure {
-                    let detail = RequestFailure::stream(error, Some(budget.used()), exposed);
+                    let detail = RequestFailure::stream(error, Some(budget.used()), attempts.status(), exposed);
                     crate::performance::retry_events::emit(&budget, "stream_failed", Some(detail.as_json()), None, false, None).await;
                     Err(anyhow::Error::new(detail))?;
                 }
@@ -91,16 +98,16 @@ pub(super) async fn response(
             if attempt == retries || budget.remaining() == 0 {
                 if !pending.is_empty() { yield pending; }
                 let detail = match &failure {
-                    Some(error) => RequestFailure::stream(error, Some(budget.used()), false),
-                    None => RequestFailure::stream_exhausted(budget.used()),
+                    Some(error) => RequestFailure::stream(error, Some(budget.used()), attempts.status(), false),
+                    None => RequestFailure::stream_exhausted(budget.used(), attempts.status()),
                 };
                 crate::performance::retry_events::emit(&budget, "stream_failed", Some(detail.as_json()), None, false, None).await;
                 Err(anyhow::Error::new(detail))?;
             }
             let delay = crate::performance::retry_events::delay(budget.used(), None);
             let detail = match &failure {
-                Some(error) => RequestFailure::stream(error, Some(budget.used()), false),
-                None => RequestFailure::stream_exhausted(budget.used()),
+                Some(error) => RequestFailure::stream(error, Some(budget.used()), attempts.status(), false),
+                None => RequestFailure::stream_exhausted(budget.used(), attempts.status()),
             };
             crate::performance::retry_events::emit(&budget, "retry_wait", Some(detail.as_json()), Some(delay), false, None).await;
             // Dropping the consumer cancels this delay and the next attempt.

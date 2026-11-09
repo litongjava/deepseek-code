@@ -320,7 +320,7 @@ pub fn run(paths: &RuntimePaths, action: &ConfigCommands) -> Result<()> {
     paths.read_config()?; // Never overwrite a malformed Desktop config with defaults.
     match action {
         ConfigCommands::Show => {
-            let mut value = json!({"data_dir":paths.data_dir,"preferences":preferences(paths)?,"config":paths.read_config()?,"shell":deepseek_code_core::services::shell_settings::inspect(&paths.data_dir)?,"permissions.auto":deepseek_code_core::permissions::auto_config::load(&crate::services::context(paths)?)?});
+            let mut value = json!({"data_dir":paths.data_dir,"preferences":preferences(paths)?,"config":paths.read_config()?,"shell":deepseek_code_core::services::shell_settings::inspect(&paths.data_dir)?,"permissions.auto":deepseek_code_core::permissions::auto_config::load(&crate::services::context(paths)?)?,"tools":crate::tool_settings::rows(paths)?});
             redact(&mut value);
             println!("{}", serde_json::to_string_pretty(&value)?);
         }
@@ -328,6 +328,11 @@ pub fn run(paths: &RuntimePaths, action: &ConfigCommands) -> Result<()> {
             if let Some(field) = key.strip_prefix("shell.") {
                 deepseek_code_core::services::shell_settings::set(&paths.data_dir, field, value)?;
                 eprintln!("Updated {key}; applies to the next command or new terminal");
+                return Ok(());
+            }
+            if key.starts_with("tools.") {
+                let effective = crate::tool_settings::set_key(paths, key, value)?;
+                command_eprintln!("Updated {key}; {effective}");
                 return Ok(());
             }
             if key == deepseek_code_core::permissions::auto_config::KEY {

@@ -257,116 +257,134 @@ async fn auto_failure_fallback_asks_interactive_hosts_even_with_legacy_deny_poli
     use crate::permissions::auto_config::FailurePolicy;
     for manual in [false, true] {
         for interactive in [false, true] {
-          for failure in ["transport", "invalid", "timeout", "configuration"] {
-            let root = tempfile::tempdir().unwrap();
-            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-            let endpoint = format!("http://{}", listener.local_addr().unwrap());
-            let calls = Arc::new(AtomicUsize::new(0));
-            let requests = calls.clone();
-            let app = Router::new().route(
-                "/v1/chat/completions",
-                post(move || {
-                    let requests = requests.clone();
-                    async move {
-                        requests.fetch_add(1, Ordering::SeqCst);
-                        if failure == "timeout" {
-                            tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+            for failure in ["transport", "invalid", "timeout", "configuration"] {
+                let root = tempfile::tempdir().unwrap();
+                let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+                let endpoint = format!("http://{}", listener.local_addr().unwrap());
+                let calls = Arc::new(AtomicUsize::new(0));
+                let requests = calls.clone();
+                let app = Router::new().route(
+                    "/v1/chat/completions",
+                    post(move || {
+                        let requests = requests.clone();
+                        async move {
+                            requests.fetch_add(1, Ordering::SeqCst);
+                            if failure == "timeout" {
+                                tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+                            }
+                            (
+                                if failure == "transport" {
+                                    axum::http::StatusCode::SERVICE_UNAVAILABLE
+                                } else {
+                                    axum::http::StatusCode::OK
+                                },
+                                Json(response("invalid")),
+                            )
                         }
-                        (if failure == "transport" { axum::http::StatusCode::SERVICE_UNAVAILABLE } else { axum::http::StatusCode::OK }, Json(response("invalid")))
+                    }),
+                );
+                let server = tokio::spawn(async move {
+                    axum::serve(listener, app).await.unwrap();
+                });
+                let (executor, _events, manager) = executor(root.path(), &endpoint);
+                let context =
+                    crate::services::session_messages::context(&root.path().join("data")).unwrap();
+                let mut config = auto_config::load(&context).unwrap();
+                config.failure_policy = if manual {
+                    FailurePolicy::Manual
+                } else {
+                    FailurePolicy::Deny
+                };
+                config.timeout_ms = 100;
+                if failure == "configuration" {
+                    config.classifier = Some(ClassifierSelection::Named {
+                        provider_id: "missing".into(),
+                        model_id: "missing".into(),
+                    });
+                }
+                auto_config::save(&context, &config).unwrap();
+                let tool = crate::permissions::PermissionContext {
+                    mcp_read_only: false,
+                    tool_name: "Write".into(),
+                    tool_input: json!({"file_path":".bashrc","content":"fixture"}),
+                    conversation_id: "auto-session".into(),
+                    user_id: None,
+                    workspace_path: Some(root.path().to_string_lossy().into_owned()),
+                };
+                let authorization = crate::native_engine::auto_permissions::authorize(
+                    &context,
+                    &manager,
+                    &tool,
+                    &executor.provider,
+                    &[],
+                    interactive,
+                )
+                .await;
+                assert_eq!(
+                    matches!(
+                        authorization.result,
+                        crate::permissions::PermissionResult::RequiresConfirmation(_)
+                    ),
+                    interactive
+                );
+                let attempts = if failure == "configuration" { 0 } else { 1 };
+                assert_eq!(calls.load(Ordering::SeqCst), attempts);
+                assert_eq!(manager.auto_stats("auto-session").requests, attempts as u64);
+                let mut oversized = tool.clone();
+                oversized.tool_input = json!({"file_path":".bashrc","content": "x".repeat(40_000)});
+                let limited = crate::native_engine::auto_permissions::authorize(
+                    &context,
+                    &manager,
+                    &oversized,
+                    &executor.provider,
+                    &[],
+                    interactive,
+                )
+                .await;
+                let message = match limited.result {
+                    crate::permissions::PermissionResult::RequiresConfirmation(message) => {
+                        assert!(interactive);
+                        assert!(message.contains("requesting manual permission"));
+                        message
                     }
-                }),
-            );
-            let server = tokio::spawn(async move {
-                axum::serve(listener, app).await.unwrap();
-            });
-            let (executor, _events, manager) = executor(root.path(), &endpoint);
-            let context =
-                crate::services::session_messages::context(&root.path().join("data")).unwrap();
-            let mut config = auto_config::load(&context).unwrap();
-            config.failure_policy = if manual { FailurePolicy::Manual } else { FailurePolicy::Deny };
-            config.timeout_ms = 100;
-            if failure == "configuration" {
-                config.classifier = Some(ClassifierSelection::Named { provider_id: "missing".into(), model_id: "missing".into() });
-            }
-            auto_config::save(&context, &config).unwrap();
-            let tool = crate::permissions::PermissionContext {
-                mcp_read_only: false,
-                tool_name: "Write".into(),
-                tool_input: json!({"file_path":".bashrc","content":"fixture"}),
-                conversation_id: "auto-session".into(),
-                user_id: None,
-                workspace_path: Some(root.path().to_string_lossy().into_owned()),
-            };
-            let authorization = crate::native_engine::auto_permissions::authorize(
-                &context,
-                &manager,
-                &tool,
-                &executor.provider,
-                &[],
-                interactive,
-            )
-            .await;
-            assert_eq!(
-                matches!(
-                    authorization.result,
+                    crate::permissions::PermissionResult::Denied(message) => {
+                        assert!(!interactive);
+                        assert!(message.contains("no manual approval host"));
+                        message
+                    }
+                    _ => panic!("Oversized classifier input must never grant permission"),
+                };
+                assert!(message.contains(if failure == "configuration" {
+                    "configuration"
+                } else {
+                    "InputLimit"
+                }));
+                assert_eq!(manager.auto_stats("auto-session").denied_total, 0);
+                assert_eq!(calls.load(Ordering::SeqCst), attempts);
+                manager.set_session_rules(
+                    "auto-session",
+                    HashMap::from([("Write".into(), PermissionAction::Confirm)]),
+                );
+                let explicit = crate::native_engine::auto_permissions::authorize(
+                    &context,
+                    &manager,
+                    &tool,
+                    &executor.provider,
+                    &[],
+                    interactive,
+                )
+                .await;
+                assert!(matches!(
+                    explicit.result,
                     crate::permissions::PermissionResult::RequiresConfirmation(_)
-                ),
-                interactive
-            );
-            let attempts = if failure == "configuration" { 0 } else { 1 };
-            assert_eq!(calls.load(Ordering::SeqCst), attempts);
-            assert_eq!(manager.auto_stats("auto-session").requests, attempts as u64);
-            let mut oversized = tool.clone();
-            oversized.tool_input = json!({"file_path":".bashrc","content": "x".repeat(40_000)});
-            let limited = crate::native_engine::auto_permissions::authorize(
-                &context,
-                &manager,
-                &oversized,
-                &executor.provider,
-                &[],
-                interactive,
-            )
-            .await;
-            let message = match limited.result {
-                crate::permissions::PermissionResult::RequiresConfirmation(message) => {
-                    assert!(interactive);
-                    assert!(message.contains("requesting manual permission"));
-                    message
-                }
-                crate::permissions::PermissionResult::Denied(message) => {
-                    assert!(!interactive);
-                    assert!(message.contains("no manual approval host"));
-                    message
-                }
-                _ => panic!("Oversized classifier input must never grant permission"),
-            };
-            assert!(message.contains(if failure == "configuration" { "configuration" } else { "InputLimit" }));
-            assert_eq!(manager.auto_stats("auto-session").denied_total, 0);
-            assert_eq!(calls.load(Ordering::SeqCst), attempts);
-            manager.set_session_rules(
-                "auto-session",
-                HashMap::from([("Write".into(), PermissionAction::Confirm)]),
-            );
-            let explicit = crate::native_engine::auto_permissions::authorize(
-                &context,
-                &manager,
-                &tool,
-                &executor.provider,
-                &[],
-                interactive,
-            )
-            .await;
-            assert!(matches!(
-                explicit.result,
-                crate::permissions::PermissionResult::RequiresConfirmation(_)
-            ));
-            assert_eq!(
-                calls.load(Ordering::SeqCst),
-                attempts,
-                "explicit asks must never invoke classifier"
-            );
-            server.abort();
-          }
+                ));
+                assert_eq!(
+                    calls.load(Ordering::SeqCst),
+                    attempts,
+                    "explicit asks must never invoke classifier"
+                );
+                server.abort();
+            }
         }
     }
 }
@@ -597,7 +615,28 @@ async fn ordinary_auto_edits_need_neither_classifier_nor_manual_host() {
     let root = tempfile::tempdir().unwrap();
     let outside = tempfile::tempdir().unwrap();
     let (mut executor, mut events, manager) = executor(root.path(), "http://127.0.0.1:1");
-    executor.search_config_path = None;
+    // MultiEdit and NotebookEdit load on demand by default; this test drives
+    // them directly, so it turns both on for its own data directory.
+    crate::services::customization::save(
+        &root.path().join("data"),
+        &crate::services::customization::Customization {
+            tool_loading: ["MultiEdit", "NotebookEdit"]
+                .into_iter()
+                .map(|name| {
+                    (
+                        name.to_owned(),
+                        crate::services::customization::ToolLoading {
+                            enabled: true,
+                            on_demand: true,
+                        },
+                    )
+                })
+                .collect(),
+            ..Default::default()
+        },
+        &[],
+    )
+    .unwrap();
     let notebook = outside.path().join("normal.ipynb");
     std::fs::write(
         &notebook,

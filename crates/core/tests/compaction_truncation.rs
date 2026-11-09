@@ -54,6 +54,29 @@ enum Behavior {
     /// Never truncate; answer every request with a wide summary, so merge
     /// groups are bounded by the input limit instead of by the group size.
     LongSummaryAlways,
+    /// Answer the very first request with an empty body, then finish.
+    EmptyFirst,
+    /// Answer every request with an empty body.
+    EmptyAlways,
+    /// Answer empty bodies for inputs above this many tokens; smaller inputs
+    /// finish, so the retry and then the split can make progress.
+    EmptyAbove(u64),
+    /// Answer empty bodies for every request carrying this marker, including
+    /// the children a split produces, so one fragment spends its own allowance.
+    EmptyContaining(&'static str),
+    /// Truncate inputs above this many tokens at the initial budget, answer a
+    /// raised budget with an empty body, and finish smaller inputs. This is the
+    /// reported failure: a raise came back empty during result validation.
+    TruncateThenEmptyAbove(u64),
+    /// Like `TruncateThenEmptyAbove`, but only the first answer at the raised
+    /// budget is empty, so the same-budget retry finishes.
+    TruncateThenEmptyOnceAbove(u64),
+    /// Truncate inputs above this many tokens at the initial budget, answer a
+    /// raised budget with 32,001 characters, and finish smaller inputs.
+    TruncateThenOversizedAbove(u64),
+    /// Answer inputs above this many tokens with 32,001 characters, one over
+    /// the limit; smaller inputs finish.
+    OversizedAbove(u64),
 }
 
 /// The stage a request body belongs to, from the prompt it carries.
@@ -345,6 +368,14 @@ async fn start(config: Config) -> Fixture {
                 Behavior::TruncateMergeOnce => stage == "merge" && budget < 8_192,
                 Behavior::TruncateMergeSwitch => stage == "merge" && merge_flag,
                 Behavior::LongSummaryAlways => false,
+                Behavior::TruncateThenEmptyAbove(limit) => tokens > limit && budget <= 4096,
+                Behavior::TruncateThenEmptyOnceAbove(limit) => tokens > limit && budget <= 4096,
+                Behavior::TruncateThenOversizedAbove(limit) => tokens > limit && budget <= 4096,
+                Behavior::EmptyFirst
+                | Behavior::EmptyAlways
+                | Behavior::EmptyAbove(_)
+                | Behavior::EmptyContaining(_)
+                | Behavior::OversizedAbove(_) => false,
             };
             if truncate && stage == "fragment" {
                 // The two halves follow only when the raise is impossible or
@@ -366,6 +397,33 @@ async fn start(config: Config) -> Fixture {
                     truncated: truncate,
                 });
             }
+            // A finished response the summarizer cannot use. It is never
+            // reported as an output limit, so recovery must not raise the
+            // budget for it.
+            let empty = match behavior {
+                Behavior::EmptyFirst => number == 1 && !truncate,
+                Behavior::EmptyAlways => !truncate,
+                Behavior::EmptyAbove(limit) => tokens > limit && !truncate,
+                Behavior::EmptyContaining(marker) => sent.contains(marker) && !truncate,
+                Behavior::TruncateThenEmptyAbove(limit) => tokens > limit && budget > 4096,
+                // Only the first answer at the raised budget is empty; the
+                // same-budget retry of that input must then finish.
+                Behavior::TruncateThenEmptyOnceAbove(limit) => {
+                    tokens > limit
+                        && budget > 4096
+                        && captured_sent
+                            .lock()
+                            .unwrap()
+                            .iter()
+                            .filter(|entry| entry.tokens == tokens && entry.budget > 4096)
+                            .count()
+                            == 1
+                }
+                _ => false,
+            };
+            let oversized = (matches!(behavior, Behavior::OversizedAbove(limit) if tokens > limit)
+                || matches!(behavior, Behavior::TruncateThenOversizedAbove(limit) if tokens > limit && budget > 4096))
+                && !truncate;
             let finish = if captured_stop.load(Ordering::SeqCst) == number {
                 2
             } else if truncate {
@@ -378,27 +436,33 @@ async fn start(config: Config) -> Fixture {
             } else {
                 "summary-first"
             };
-            let text = match (finish, behavior) {
-                // Truncated text must never reach the cache or the history.
-                (1, _) => format!("TRUNCATED #{number}"),
-                (_, Behavior::LongSummaryAbove(_) | Behavior::SmallInputBelowBudget { .. }) => {
-                    "s".repeat(32_000)
+            let text = if empty {
+                String::new()
+            } else if oversized {
+                "s".repeat(32_001)
+            } else {
+                match (finish, behavior) {
+                    // Truncated text must never reach the cache or the history.
+                    (1, _) => format!("TRUNCATED #{number}"),
+                    (_, Behavior::LongSummaryAbove(_) | Behavior::SmallInputBelowBudget { .. }) => {
+                        "s".repeat(32_000)
+                    }
+                    // The widest text the character limit accepts: about 39k tokens
+                    // each, so merging two exceeds the 64k request ceiling while a
+                    // vast model window would still accept it.
+                    (_, Behavior::WideSummaryAbove(_)) => wide_summary(),
+                    // Distinguishable, near the character limit: about 10.7k tokens,
+                    // so only five fit one merge request next to its prompt.
+                    (_, Behavior::LongSummaryAlways) => {
+                        format!("summary{number} {}", "s".repeat(31_980))
+                    }
+                    // Long enough that merging the two children is a real input
+                    // which can itself be split after another truncation.
+                    (_, Behavior::TruncateMergeSwitch) if stage == "fragment" => {
+                        format!("{label} #{number} {}", "s".repeat(1_400))
+                    }
+                    _ => format!("{label} #{number}"),
                 }
-                // The widest text the character limit accepts: about 39k tokens
-                // each, so merging two exceeds the 64k request ceiling while a
-                // vast model window would still accept it.
-                (_, Behavior::WideSummaryAbove(_)) => wide_summary(),
-                // Distinguishable, near the character limit: about 10.7k tokens,
-                // so only five fit one merge request next to its prompt.
-                (_, Behavior::LongSummaryAlways) => {
-                    format!("summary{number} {}", "s".repeat(31_980))
-                }
-                // Long enough that merging the two children is a real input
-                // which can itself be split after another truncation.
-                (_, Behavior::TruncateMergeSwitch) if stage == "fragment" => {
-                    format!("{label} #{number} {}", "s".repeat(1_400))
-                }
-                _ => format!("{label} #{number}"),
             };
             Json(if anthropic {
                 json!({"id":"r","type":"message","role":"assistant","model":"gpt-6-astra","content":[{"type":"text","text":text}],"stop_reason":match finish { 1 => "max_tokens", 2 => "refusal", _ => "end_turn" },"usage":{"input_tokens":1,"output_tokens":1}})
@@ -1126,6 +1190,123 @@ async fn a_cancelled_recovery_reuses_the_sub_summaries_it_completed() {
     );
 }
 
+/// The checkpoint keeps completed fragments after a cancelled compaction is
+/// followed by a real new message. Only requests whose exact input changed may
+/// be sent again; the unchanged prefix fragments are reused.
+async fn unchanged_fragments_after_a_grown_history(reopen: bool) {
+    grown_history_case(reopen, Behavior::TruncateAbove(u64::MAX), 3, 0..2).await;
+}
+
+async fn grown_history_case(
+    reopen: bool,
+    behavior: Behavior,
+    hang: usize,
+    cached: std::ops::Range<usize>,
+) {
+    for format in ["openai", "anthropic"] {
+        let mut fixture = start(Config::new(
+            format,
+            30_000,
+            4096,
+            behavior,
+            History::Unique(30_000),
+        ))
+        .await;
+        let before = fixture.store.history(&fixture.id).unwrap();
+        // Hold the third fragment, so the first two complete.
+        fixture.hang_at.store(hang, Ordering::SeqCst);
+        let first_run = {
+            let future = compaction::compact(
+                &fixture.engine(),
+                &fixture.store.db,
+                &fixture.id,
+                "fixture",
+                "gpt-6-astra",
+                "",
+            );
+            tokio::pin!(future);
+            tokio::select! {
+                _ = &mut future => panic!("the third fragment must stay pending"),
+                _ = async {
+                    while fixture.requests.lock().unwrap().len() < hang {
+                        tokio::time::sleep(Duration::from_millis(10)).await;
+                    }
+                } => {}
+            }
+            drop(future);
+            bodies(&fixture)
+        };
+        assert_eq!(first_run.len(), hang);
+        match behavior {
+            Behavior::EmptyAbove(limit) => {
+                assert!(sent_log(&fixture)[0].tokens > limit);
+                assert_eq!(
+                    first_run[0], first_run[1],
+                    "empty response must retry before splitting"
+                );
+                assert!(sent_log(&fixture)[2].tokens < sent_log(&fixture)[0].tokens);
+            }
+            Behavior::OversizedAbove(limit) => {
+                assert!(sent_log(&fixture)[0].tokens > limit);
+                assert!(sent_log(&fixture)[1].tokens < sent_log(&fixture)[0].tokens);
+            }
+            _ => {}
+        }
+        let completed = first_run[cached.clone()].to_vec();
+        assert_eq!(fixture.store.history(&fixture.id).unwrap(), before);
+
+        // A real interrupted record now changes the transcript.
+        fixture
+            .store
+            .append(&fixture.id, "user", "INTERRUPTED-NOTE-ZZZ keep this record")
+            .unwrap();
+        if reopen {
+            let (store, engine) = fixture.reopen();
+            fixture.store = store;
+            fixture.engine = Some(engine);
+        }
+        fixture.hang_at.store(0, Ordering::SeqCst);
+        compaction::compact(
+            &fixture.engine(),
+            &fixture.store.db,
+            &fixture.id,
+            "fixture",
+            "gpt-6-astra",
+            "",
+        )
+        .await
+        .unwrap();
+
+        let retry = bodies(&fixture)[first_run.len()..].to_vec();
+        for body in &completed {
+            assert!(
+                !retry.contains(body),
+                "{format}: an unchanged fragment was sent again"
+            );
+        }
+        assert!(
+            retry
+                .iter()
+                .any(|body| body.to_string().contains("INTERRUPTED-NOTE-ZZZ")),
+            "{format}: the changed tail must be re-planned"
+        );
+        assert_eq!(
+            fixture.store.history(&fixture.id).unwrap().len(),
+            before.len() + 2
+        );
+    }
+}
+
+#[tokio::test]
+async fn a_cancelled_recovery_reuses_unchanged_fragments_after_history_grows() {
+    unchanged_fragments_after_a_grown_history(false).await;
+}
+
+#[tokio::test]
+async fn a_cancelled_recovery_reuses_unchanged_fragments_after_history_grows_and_restart() {
+    unchanged_fragments_after_a_grown_history(true).await;
+}
+
 #[tokio::test]
 async fn a_non_truncating_stop_reports_stage_budget_and_does_not_split() {
     let mut config = Config::new(
@@ -1745,30 +1926,295 @@ async fn long_summaries_form_smaller_groups_and_pass_a_single_one_through() {
     assert_eq!(log.last().unwrap().stage, "final");
 }
 
-#[tokio::test]
-async fn a_checkpoint_write_failure_stops_before_the_boundary_is_installed() {
-    let fixture = start(Config::new(
-        "openai",
-        128_000,
-        8192,
-        Behavior::TruncateAbove(60_000),
-        History::Marked,
-    ))
-    .await;
-    // The first summary succeeds but cannot be stored: the compaction must end
-    // instead of continuing without a reusable checkpoint.
+/// The checkpoint row, when one was written at all.
+fn cached_checkpoint(fixture: &Fixture) -> Option<String> {
     fixture
         .store
         .db
         .with_conn(|conn| {
-            conn.execute_batch(
-                "CREATE TRIGGER fail_checkpoint BEFORE INSERT ON peripheral_settings \
-                 WHEN NEW.key LIKE 'compaction.checkpoint.%' \
-                 BEGIN SELECT RAISE(ABORT, 'simulated checkpoint failure'); END;",
-            )
+            Ok::<Option<String>, anyhow::Error>(conn
+                .query_row(
+                    "SELECT value FROM peripheral_settings WHERE key LIKE 'compaction.checkpoint.%'",
+                    [],
+                    |row| row.get::<_, String>(0),
+                )
+                .ok())
         })
         .unwrap()
+        .unwrap()
+}
+
+#[tokio::test]
+async fn an_empty_summary_is_retried_once_and_then_installed() {
+    for format in ["openai", "anthropic"] {
+        let fixture = start(Config::new(
+            format,
+            128_000,
+            16_384,
+            Behavior::EmptyFirst,
+            History::Short,
+        ))
+        .await;
+        let before = fixture.store.history(&fixture.id).unwrap();
+        compaction::compact(
+            &fixture.engine(),
+            &fixture.store.db,
+            &fixture.id,
+            "fixture",
+            "gpt-6-astra",
+            "",
+        )
+        .await
         .unwrap();
+        let sent = bodies(&fixture);
+        let log = sent_log(&fixture);
+        // The empty body is a finished response, so it is retried unchanged at
+        // the same budget; only a valid summary may replace the history.
+        assert_eq!(sent.len(), 2, "{format}: {log:?}");
+        assert_eq!(log[0].stage, "final", "{format}");
+        assert_eq!(log[1].stage, "final", "{format}");
+        assert_eq!(log[0].budget, log[1].budget, "{format}");
+        assert_eq!(sent[0], sent[1], "{format}");
+        assert_eq!(
+            fixture.store.history(&fixture.id).unwrap().len(),
+            before.len() + 1,
+            "{format}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn an_empty_summary_splits_only_after_its_single_retry() {
+    for format in ["openai", "anthropic"] {
+        let fixture = start(Config::new(
+            format,
+            128_000,
+            16_384,
+            Behavior::EmptyAbove(40_000),
+            History::Short,
+        ))
+        .await;
+        let before = fixture.store.history(&fixture.id).unwrap();
+        compaction::compact(
+            &fixture.engine(),
+            &fixture.store.db,
+            &fixture.id,
+            "fixture",
+            "gpt-6-astra",
+            "",
+        )
+        .await
+        .unwrap();
+        let sent = bodies(&fixture);
+        let log = sent_log(&fixture);
+        // Empty, one unchanged retry, then the two halves and their merge.
+        assert_eq!(sent.len(), 5, "{format}: {log:?}");
+        assert_eq!((log[0].stage, log[1].stage), ("final", "final"), "{format}");
+        assert_eq!(
+            log[0].budget, log[1].budget,
+            "{format}: an empty body must not raise the output budget"
+        );
+        assert_eq!(sent[0], sent[1], "{format}: the retry is the same request");
+        assert_eq!((log[2].stage, log[3].stage), ("final", "final"), "{format}");
+        assert_eq!(log[4].stage, "merge", "{format}");
+        assert!(
+            log[2].tokens < log[0].tokens && log[3].tokens < log[0].tokens,
+            "{format}: {log:?}"
+        );
+        assert_eq!(
+            fixture.store.history(&fixture.id).unwrap().len(),
+            before.len() + 1,
+            "{format}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn an_oversized_summary_splits_without_raising_or_retrying() {
+    for format in ["openai", "anthropic"] {
+        let fixture = start(Config::new(
+            format,
+            128_000,
+            16_384,
+            Behavior::OversizedAbove(40_000),
+            History::Short,
+        ))
+        .await;
+        let before = fixture.store.history(&fixture.id).unwrap();
+        compaction::compact(
+            &fixture.engine(),
+            &fixture.store.db,
+            &fixture.id,
+            "fixture",
+            "gpt-6-astra",
+            "",
+        )
+        .await
+        .unwrap();
+        let sent = bodies(&fixture);
+        let log = sent_log(&fixture);
+        // 32,001 characters is not an output limit: no raise and no unchanged
+        // retry, the input is split at once.
+        assert_eq!(sent.len(), 4, "{format}: {log:?}");
+        assert_eq!(log[0].stage, "final", "{format}");
+        assert!(
+            log.iter().all(|entry| entry.budget != 16_384),
+            "{format}: an oversized body must not raise the budget: {log:?}"
+        );
+        assert_ne!(
+            sent[0], sent[1],
+            "{format}: it must not be retried unchanged"
+        );
+        assert_eq!((log[1].stage, log[2].stage), ("final", "final"), "{format}");
+        assert_eq!(log[3].stage, "merge", "{format}");
+        assert_eq!(
+            fixture.store.history(&fixture.id).unwrap().len(),
+            before.len() + 1,
+            "{format}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn a_raise_that_comes_back_empty_is_retried_at_its_own_budget_before_splitting() {
+    // The reported failure: the first answer is truncated, the raised answer
+    // is empty. The empty body is re-requested once at the raised budget; only
+    // when that also fails does the branch split, at the original budget.
+    for format in ["openai", "anthropic"] {
+        let fixture = start(Config::new(
+            format,
+            128_000,
+            16_384,
+            Behavior::TruncateThenEmptyAbove(40_000),
+            History::Marked,
+        ))
+        .await;
+        let before = fixture.store.history(&fixture.id).unwrap();
+        compaction::compact(
+            &fixture.engine(),
+            &fixture.store.db,
+            &fixture.id,
+            "fixture",
+            "gpt-6-astra",
+            "",
+        )
+        .await
+        .unwrap();
+        let requests = bodies(&fixture);
+        let log = sent_log(&fixture);
+        assert_eq!(log[0].stage, "fragment", "{format}: {log:?}");
+        assert!(log[0].truncated, "{format}: {log:?}");
+        assert_eq!(log[0].budget, 4096, "{format}");
+        // The raise, then an identical retry at the same budget.
+        assert_eq!(log[1].budget, 8192, "{format}");
+        assert!(
+            !log[1].truncated,
+            "{format}: the raised answer is empty, not truncated: {log:?}"
+        );
+        assert_eq!(
+            (log[1].tokens, log[1].budget),
+            (log[2].tokens, log[2].budget),
+            "{format}: the retry repeats the raised request: {log:?}"
+        );
+        assert_eq!(
+            requests[1], requests[2],
+            "{format}: the empty body must be retried unchanged"
+        );
+        // Only then does the branch split, and it splits at the original
+        // budget rather than reusing the raised one.
+        assert_eq!(
+            (log[3].stage, log[3].budget),
+            ("fragment", 4096),
+            "{format}: {log:?}"
+        );
+        assert_eq!(
+            (log[4].stage, log[4].budget),
+            ("fragment", 4096),
+            "{format}: {log:?}"
+        );
+        assert!(!log[3].truncated && !log[4].truncated, "{format}: {log:?}");
+        assert!(
+            log[3].tokens < log[0].tokens && log[4].tokens < log[0].tokens,
+            "{format}: {log:?}"
+        );
+        assert_eq!(log[5].stage, "merge", "{format}: {log:?}");
+        assert_eq!(
+            fixture.store.history(&fixture.id).unwrap().len(),
+            before.len() + 1,
+            "{format}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn a_raise_that_comes_back_empty_once_is_recovered_by_the_retry() {
+    // The raise finishes empty, and the same-budget retry succeeds: the branch
+    // never splits, and the summary is installed under the original key.
+    for format in ["openai", "anthropic"] {
+        let fixture = start(Config::new(
+            format,
+            128_000,
+            16_384,
+            Behavior::TruncateThenEmptyOnceAbove(40_000),
+            History::Marked,
+        ))
+        .await;
+        let before = fixture.store.history(&fixture.id).unwrap();
+        compaction::compact(
+            &fixture.engine(),
+            &fixture.store.db,
+            &fixture.id,
+            "fixture",
+            "gpt-6-astra",
+            "",
+        )
+        .await
+        .unwrap();
+        let requests = bodies(&fixture);
+        let log = sent_log(&fixture);
+        // Fragment 1: truncated, raised, empty raise, successful retry, then
+        // the merge, the second fragment and the final summary.
+        assert_eq!(
+            (log[0].budget, log[0].truncated),
+            (4096, true),
+            "{format}: {log:?}"
+        );
+        assert_eq!((log[1].budget, log[1].truncated), (8192, false), "{format}");
+        assert_eq!(
+            (log[2].budget, log[2].truncated),
+            (8192, false),
+            "{format}: {log:?}"
+        );
+        assert_eq!(requests[1], requests[2], "{format}");
+        // The split of the first fragment never happened: the next fragment
+        // request is the second planned fragment of the history.
+        let fragment_sizes: Vec<u64> = log
+            .iter()
+            .filter(|entry| entry.stage == "fragment")
+            .map(|entry| entry.tokens)
+            .collect();
+        assert!(
+            fragment_sizes.iter().all(|tokens| *tokens > 40_000),
+            "{format}: no recovery children expected: {log:?}"
+        );
+        assert_eq!(
+            fixture.store.history(&fixture.id).unwrap().len(),
+            before.len() + 1,
+            "{format}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn persistent_empty_summaries_stop_at_the_depth_limit_and_cache_nothing() {
+    let fixture = start(Config::new(
+        "openai",
+        128_000,
+        16_384,
+        Behavior::EmptyAlways,
+        History::Short,
+    ))
+    .await;
     let before = fixture.store.history(&fixture.id).unwrap();
     let error = compaction::compact(
         &fixture.engine(),
@@ -1781,8 +2227,429 @@ async fn a_checkpoint_write_failure_stops_before_the_boundary_is_installed() {
     .await
     .unwrap_err();
     let text = format!("{error:#}");
-    assert!(text.contains("simulated checkpoint failure"), "{text}");
+    assert!(text.contains("kept coming back empty"), "{text}");
+    assert!(text.contains("cannot be split further"), "{text}");
     assert!(text.contains("original history retained"), "{text}");
+    assert!(!text.contains("output limit"), "{text}");
     assert_eq!(fixture.store.history(&fixture.id).unwrap(), before);
-    assert!(!sent_log(&fixture).is_empty());
+    // The summary, its retry, then one split level with retries: the depth
+    // limit ends the branch instead of repeating the same request.
+    assert_eq!(bodies(&fixture).len(), 6, "{}", bodies(&fixture).len());
+    assert_eq!(
+        cached_checkpoint(&fixture),
+        None,
+        "an unusable result must never be cached"
+    );
+}
+
+#[tokio::test]
+async fn an_empty_fragment_failure_keeps_the_other_fragments_and_reuses_them() {
+    for format in ["openai", "anthropic"] {
+        // The first planned fragment carries a block that answers empty at
+        // every depth, so it spends its own allowance; the notes behind it
+        // finish and are cached for the retry.
+        let fixture = start(Config::new(
+            format,
+            128_000,
+            8192,
+            Behavior::EmptyContaining("ALPHA"),
+            History::Poisoned {
+                poison: 30_000,
+                rest: 40_000,
+            },
+        ))
+        .await;
+        let before = fixture.store.history(&fixture.id).unwrap();
+        let error = compaction::compact(
+            &fixture.engine(),
+            &fixture.store.db,
+            &fixture.id,
+            "fixture",
+            "gpt-6-astra",
+            "",
+        )
+        .await
+        .unwrap_err();
+        let text = format!("{error:#}");
+        assert!(
+            text.contains("compaction fragments failed"),
+            "{format}: {text}"
+        );
+        assert!(
+            text.contains("original history retained"),
+            "{format}: {text}"
+        );
+        assert_eq!(
+            fixture.store.history(&fixture.id).unwrap(),
+            before,
+            "{format}"
+        );
+
+        let first_run = sent_log(&fixture);
+        let bodies_before = bodies(&fixture);
+        // Only the fragments that carry no poisoned block can complete; the
+        // poisoned branch answers empty at every depth, so its requests are
+        // retried rather than reused.
+        let completed: Vec<Value> = first_run
+            .iter()
+            .zip(bodies_before.iter())
+            .filter(|(entry, body)| {
+                entry.origin == "original"
+                    && entry.stage == "fragment"
+                    && !entry.truncated
+                    && !body.to_string().contains("ALPHA")
+            })
+            .map(|(_, body)| body.clone())
+            .collect();
+        assert!(!completed.is_empty(), "{format}: {first_run:?}");
+
+        // The retry reuses the completed fragments and retries only the one
+        // that answered empty; an empty body is never cached.
+        compaction::compact(
+            &fixture.engine(),
+            &fixture.store.db,
+            &fixture.id,
+            "fixture",
+            "gpt-6-astra",
+            "",
+        )
+        .await
+        .unwrap_err();
+        let replay = bodies(&fixture)[bodies_before.len()..]
+            .iter()
+            .filter(|body| completed.contains(body))
+            .count();
+        assert_eq!(
+            replay, 0,
+            "{format}: a completed fragment must come from the checkpoint"
+        );
+        assert!(
+            bodies(&fixture)[bodies_before.len()..]
+                .iter()
+                .any(|body| body.to_string().contains("ALPHA")),
+            "{format}: the failed fragment must be requested again"
+        );
+    }
+}
+
+#[tokio::test]
+async fn a_raise_that_comes_back_oversized_splits_without_another_raise() {
+    // The raised answer passes the character limit. A larger budget cannot
+    // shorten it, so the branch splits at the original budget instead of
+    // retrying the same request or raising again.
+    for format in ["openai", "anthropic"] {
+        let fixture = start(Config::new(
+            format,
+            128_000,
+            16_384,
+            Behavior::TruncateThenOversizedAbove(40_000),
+            History::Marked,
+        ))
+        .await;
+        let before = fixture.store.history(&fixture.id).unwrap();
+        compaction::compact(
+            &fixture.engine(),
+            &fixture.store.db,
+            &fixture.id,
+            "fixture",
+            "gpt-6-astra",
+            "",
+        )
+        .await
+        .unwrap();
+        let requests = bodies(&fixture);
+        let log = sent_log(&fixture);
+        assert_eq!(log[0].stage, "fragment", "{format}: {log:?}");
+        assert!(log[0].truncated, "{format}: {log:?}");
+        assert_eq!(log[0].budget, 4096, "{format}");
+        assert_eq!(log[1].budget, 8192, "{format}");
+        assert!(!log[1].truncated, "{format}: {log:?}");
+        // The oversized answer is not repeated and no third budget appears.
+        assert_eq!(
+            requests.iter().filter(|body| **body == requests[1]).count(),
+            1,
+            "{format}: the oversized answer must not be retried"
+        );
+        assert!(
+            log[2..].iter().all(|entry| entry.budget <= 8192),
+            "{format}: {log:?}"
+        );
+        assert_eq!(
+            (log[2].stage, log[3].stage, log[2].budget),
+            ("fragment", "fragment", 4096),
+            "{format}: {log:?}"
+        );
+        assert!(!log[2].truncated && !log[3].truncated, "{format}: {log:?}");
+        assert_eq!(
+            fixture.store.history(&fixture.id).unwrap().len(),
+            before.len() + 1,
+            "{format}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn persistent_empty_summaries_keep_the_finish_reason_and_sizes_in_the_final_error() {
+    // The user-visible error must keep what the failed response reported, not
+    // just the category: finish reason, character count, budget and usage.
+    for format in ["openai", "anthropic"] {
+        let fixture = start(Config::new(
+            format,
+            128_000,
+            16_384,
+            Behavior::EmptyAlways,
+            History::Short,
+        ))
+        .await;
+        let before = fixture.store.history(&fixture.id).unwrap();
+        let error = compaction::compact(
+            &fixture.engine(),
+            &fixture.store.db,
+            &fixture.id,
+            "fixture",
+            "gpt-6-astra",
+            "",
+        )
+        .await
+        .unwrap_err();
+        let text = format!("{error:#}");
+        assert!(text.contains("kept coming back empty"), "{format}: {text}");
+        let finish = if format == "anthropic" {
+            "end_turn"
+        } else {
+            "stop"
+        };
+        assert!(
+            text.contains(&format!("finish reason `{finish}`, 0 characters")),
+            "{format}: {text}"
+        );
+        assert!(
+            text.contains("8192-token output budget"),
+            "{format}: {text}"
+        );
+        // A provider that reports no usage says so instead of claiming zero.
+        if format == "anthropic" {
+            assert!(
+                text.contains("1 output tokens reported"),
+                "{format}: {text}"
+            );
+        } else {
+            assert!(
+                text.contains("output usage not reported"),
+                "{format}: {text}"
+            );
+        }
+        assert!(text.contains("cannot be split further"), "{format}: {text}");
+        assert!(
+            text.contains("original history retained"),
+            "{format}: {text}"
+        );
+        assert_eq!(fixture.store.history(&fixture.id).unwrap(), before);
+    }
+}
+
+#[tokio::test]
+async fn persistent_oversized_summaries_keep_the_limit_and_sizes_in_the_final_error() {
+    for format in ["openai", "anthropic"] {
+        // Every answer is one character over the limit, whatever the budget.
+        let fixture = start(Config::new(
+            format,
+            128_000,
+            16_384,
+            Behavior::OversizedAbove(0),
+            History::Short,
+        ))
+        .await;
+        let before = fixture.store.history(&fixture.id).unwrap();
+        let error = compaction::compact(
+            &fixture.engine(),
+            &fixture.store.db,
+            &fixture.id,
+            "fixture",
+            "gpt-6-astra",
+            "",
+        )
+        .await
+        .unwrap_err();
+        let text = format!("{error:#}");
+        assert!(
+            text.contains("kept returning an unusable body"),
+            "{format}: {text}"
+        );
+        assert!(
+            text.contains("above the 32,000-character limit"),
+            "{format}: {text}"
+        );
+        assert!(text.contains("32001 characters"), "{format}: {text}");
+        let finish = if format == "anthropic" {
+            "end_turn"
+        } else {
+            "stop"
+        };
+        assert!(
+            text.contains(&format!("finish reason `{finish}`")),
+            "{format}: {text}"
+        );
+        assert!(text.contains("cannot be split further"), "{format}: {text}");
+        assert!(
+            text.contains("original history retained"),
+            "{format}: {text}"
+        );
+        // An oversized body is never retried unchanged and never raises.
+        let log = sent_log(&fixture);
+        assert!(
+            log.iter().all(|entry| entry.budget <= 8192),
+            "{format}: {log:?}"
+        );
+        assert_eq!(fixture.store.history(&fixture.id).unwrap(), before);
+        assert_eq!(cached_checkpoint(&fixture), None, "{format}");
+    }
+}
+
+/// The documented repro of a lost diagnostic: many fragments leave one recovery
+/// generation each, so the split of an oversized answer is refused before it is
+/// sent. The refusal must still name that answer.
+#[tokio::test]
+async fn an_oversized_response_that_runs_out_of_allowance_still_reports_its_details() {
+    for format in ["openai", "anthropic"] {
+        let fixture = start(Config::new(
+            format,
+            8_000,
+            4096,
+            Behavior::OversizedAbove(0),
+            History::Unique(80_000),
+        ))
+        .await;
+        let before = fixture.store.history(&fixture.id).unwrap();
+        let error = compaction::compact(
+            &fixture.engine(),
+            &fixture.store.db,
+            &fixture.id,
+            "fixture",
+            "gpt-6-astra",
+            "",
+        )
+        .await
+        .unwrap_err();
+        let text = format!("{error:#}");
+        // Every fragment that ran out of allowance must keep the response that
+        // needed the unsent request, not just the allowance wording.
+        let refusals: Vec<&str> = text
+            .split(" | ")
+            .filter(|line| line.contains("allowance is spent"))
+            .collect();
+        assert!(
+            !refusals.is_empty(),
+            "{format}: the fixture must exhaust an allowance: {text}"
+        );
+        assert!(
+            refusals.len() > 1,
+            "{format}: many fragments share the allowance: {}",
+            refusals.len()
+        );
+        for line in &refusals {
+            assert!(
+                line.contains("the response that needed that recovery ended at"),
+                "{format}: the allowance refusal lost its cause: {line}"
+            );
+            assert!(line.contains("32001 characters"), "{format}: {line}");
+            assert!(
+                line.contains("32,000-character limit") || line.contains("32,000-character"),
+                "{format}: {line}"
+            );
+            assert!(
+                line.contains("finish reason `stop`") || line.contains("finish reason `end_turn`"),
+                "{format}: {line}"
+            );
+            if format == "anthropic" {
+                assert!(
+                    line.contains("1 output tokens reported"),
+                    "{format}: {line}"
+                );
+            } else {
+                assert!(
+                    line.contains("output usage not reported"),
+                    "{format}: {line}"
+                );
+            }
+            assert!(
+                line.contains("original history retained"),
+                "{format}: {line}"
+            );
+        }
+        // The retry policy, cache and boundary rules are unchanged.
+        assert_eq!(
+            fixture.store.history(&fixture.id).unwrap(),
+            before,
+            "{format}"
+        );
+        assert_eq!(cached_checkpoint(&fixture), None, "{format}");
+        // Other independent fragments kept running.
+        assert!(bodies(&fixture).len() > 128, "{format}");
+    }
+}
+
+/// The same refusal after an empty body was retried once: the reported cause is
+/// the empty response, not an output limit.
+#[tokio::test]
+async fn a_retried_empty_response_that_runs_out_of_allowance_still_reports_its_details() {
+    for format in ["openai", "anthropic"] {
+        let fixture = start(Config::new(
+            format,
+            8_000,
+            4096,
+            Behavior::EmptyAlways,
+            History::Unique(80_000),
+        ))
+        .await;
+        let before = fixture.store.history(&fixture.id).unwrap();
+        let error = compaction::compact(
+            &fixture.engine(),
+            &fixture.store.db,
+            &fixture.id,
+            "fixture",
+            "gpt-6-astra",
+            "",
+        )
+        .await
+        .unwrap_err();
+        let text = format!("{error:#}");
+        let refusals: Vec<&str> = text
+            .split(" | ")
+            .filter(|line| line.contains("allowance is spent"))
+            .collect();
+        assert!(
+            !refusals.is_empty(),
+            "{format}: the fixture must exhaust an allowance: {text}"
+        );
+        for line in &refusals {
+            assert!(
+                line.contains("the response that needed that recovery ended at"),
+                "{format}: {line}"
+            );
+            assert!(line.contains("0 characters"), "{format}: {line}");
+            assert!(
+                line.contains("finish reason `stop`") || line.contains("finish reason `end_turn`"),
+                "{format}: {line}"
+            );
+            assert!(
+                line.contains("original history retained"),
+                "{format}: {line}"
+            );
+        }
+        assert_eq!(
+            fixture.store.history(&fixture.id).unwrap(),
+            before,
+            "{format}"
+        );
+        assert_eq!(cached_checkpoint(&fixture), None, "{format}");
+    }
+}
+
+#[tokio::test]
+async fn invalid_recovery_cancel_grow_restart_reuses_only_completed_requests() {
+    // The first fragment recovers by splitting; cancel its merge after both
+    // children are cached, then append real history and reopen the engine.
+    grown_history_case(true, Behavior::EmptyAbove(12_000), 5, 2..4).await;
+    grown_history_case(true, Behavior::OversizedAbove(12_000), 4, 1..3).await;
 }

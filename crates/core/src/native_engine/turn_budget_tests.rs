@@ -63,8 +63,15 @@ async fn check_budget(format: ApiFormat, budget: u32) {
     let mut complete_starts = 0;
     while let Ok(event) = rx.try_recv() {
         match event {
-            EngineEvent::ToolUseStart { tool_name, tool_input, .. } if tool_name == "Read" => {
-                assert!(!read_executed, "Complete input must precede tool completion");
+            EngineEvent::ToolUseStart {
+                tool_name,
+                tool_input,
+                ..
+            } if tool_name == "Read" => {
+                assert!(
+                    !read_executed,
+                    "Complete input must precede tool completion"
+                );
                 assert_eq!(tool_input["file_path"], "fixture.txt");
                 complete_starts += 1;
             }
@@ -79,7 +86,10 @@ async fn check_budget(format: ApiFormat, budget: u32) {
             _ => {}
         }
     }
-    assert_eq!(complete_starts, 1, "Exactly one start with complete arguments is emitted");
+    assert_eq!(
+        complete_starts, 1,
+        "Exactly one start with complete arguments is emitted"
+    );
     assert!(
         read_executed,
         "Budget tests must execute the real Read tool"
@@ -238,17 +248,32 @@ async fn check_output_limit_recovery(anthropic: bool) {
     .with_max_turns(Some(5))
     .unwrap();
     let result = tokio::time::timeout(Duration::from_secs(10), async {
-        if anthropic { executor.execute_anthropic_loop().await } else { executor.execute_openai_loop().await }
+        if anthropic {
+            executor.execute_anthropic_loop().await
+        } else {
+            executor.execute_openai_loop().await
+        }
     })
     .await
     .unwrap()
     .unwrap();
     assert!(result.0.ends_with("done"), "{}", result.0);
-    assert!(!dir.path().join("big.txt").exists(), "a cut-off Write must not run");
+    assert!(
+        !dir.path().join("big.txt").exists(),
+        "a cut-off Write must not run"
+    );
     let requests = requests.lock().unwrap();
     assert_eq!(requests.len(), 2);
-    let resume = requests[1]["messages"].as_array().unwrap().last().unwrap().to_string();
-    assert!(resume.contains("Output token limit hit (128 tokens)"), "{resume}");
+    let resume = requests[1]["messages"]
+        .as_array()
+        .unwrap()
+        .last()
+        .unwrap()
+        .to_string();
+    assert!(
+        resume.contains("Output token limit hit (128 tokens)"),
+        "{resume}"
+    );
     let mut warned = false;
     while let Ok(event) = rx.try_recv() {
         if let EngineEvent::BudgetWarning { message, .. } = event {

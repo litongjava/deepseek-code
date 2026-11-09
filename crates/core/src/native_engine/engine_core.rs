@@ -53,6 +53,11 @@ pub fn analyze_complexity(message: &str) -> ReasoningMode {
 pub struct ChatRequest {
     pub conversation_id: String,
     pub messages: Vec<Value>,
+    /// The compaction boundary the supplied messages were built from, resolved
+    /// by the same read that produced them. `None` means the caller cannot
+    /// prove a boundary, so status must treat the request as unattributed.
+    #[serde(default)]
+    pub context_boundary: Option<String>,
     pub model: String,
     #[serde(default)]
     pub provider_id: Option<String>,
@@ -143,7 +148,7 @@ impl QueryEngine {
     pub async fn generate_summary(&self, session: Option<&str>, provider_id: &str, model: &str, system: &str, input: &str) -> Result<String> {
         let provider = self.provider_manager.lock().await.resolve_selected(provider_id, model)
             .ok_or_else(|| anyhow!("Provider/model is unavailable: {provider_id}::{model}"))?;
-        let mut checkpoint = session.map(|id| crate::services::compaction::checkpoint::Checkpoint::open(&self.db_manager, id, &provider, system, input)).transpose()?;
+        let mut checkpoint = session.map(|id| crate::services::compaction::checkpoint::Checkpoint::open(&self.db_manager, id, &provider, system)).transpose()?;
         super::generation::summarize(provider, system, input, checkpoint.as_mut()).await
     }
     pub async fn generate_compaction(&self, session: &str, provider_id: &str, model: &str, system: &str, input: &str, instructions: &str) -> Result<crate::services::compaction::GeneratedSummary> {
@@ -744,6 +749,7 @@ impl QueryEngine {
         .with_learning_tools(learning.as_ref().map(|l| l.tools.clone()))
         .with_hooks(hooks)
         .with_goal_state(self.db_manager.clone())
+        .with_context_boundary(request.context_boundary)
         .with_allowed_tools(agent.and_then(|d|d.tools))
         .with_prompt_profile(prompt_profile)
         .with_context_reminders(context_reminders)

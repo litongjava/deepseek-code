@@ -128,7 +128,7 @@ async fn submit(host: &worker::Worker, endpoint: &str, format: &str, prompt: &st
         "--api-format",
         format,
         "--api-key-env",
-        "CLAUDE_RUST_CHILD_API_KEY",
+        "DEEPSEEK_CODE_CHILD_API_KEY",
         "--model",
         "fixture",
         "--permission-mode",
@@ -148,7 +148,7 @@ async fn submit(host: &worker::Worker, endpoint: &str, format: &str, prompt: &st
             prompt: prompt.into(),
             arguments,
             environment: vec![(
-                "CLAUDE_RUST_CHILD_API_KEY".into(),
+                "DEEPSEEK_CODE_CHILD_API_KEY".into(),
                 "memory-only-placeholder".into(),
             )],
         },

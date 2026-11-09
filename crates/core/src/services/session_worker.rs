@@ -13,8 +13,8 @@ use std::{
 };
 use tokio::io::{AsyncBufReadExt, AsyncRead, AsyncWrite, AsyncWriteExt, BufReader};
 
-pub const SUPERVISOR_ENV: &str = "CLAUDE_RUST_SESSION_SUPERVISOR";
-pub const HOST_ENV: &str = "CLAUDE_RUST_SESSION_HOST";
+pub const SUPERVISOR_ENV: &str = "DEEPSEEK_CODE_SESSION_SUPERVISOR";
+pub const HOST_ENV: &str = "DEEPSEEK_CODE_SESSION_HOST";
 const MAX_FRAME: usize = 16 * 1024 * 1024;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

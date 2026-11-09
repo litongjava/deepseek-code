@@ -117,19 +117,32 @@ pub async fn text(session: &Session, argument: &str) -> Result<String> {
             output = output.saturating_add(snapshot["outputTokens"].as_u64().unwrap_or(0));
         }
     }
-    let request =
-        deepseek_code_core::services::context_usage::last_request(&session.store.db, &session.id)?;
-    let latest = live
-        .iter()
-        .rev()
-        .find(|snapshot| snapshot["source"] == "native_engine" || snapshot.get("source").is_none())
-        .filter(|snapshot| {
-            request
-                .as_ref()
-                .and_then(|request| request.started_at_ms)
-                .unwrap_or(0)
-                <= snapshot["startedAt"].as_i64().unwrap_or(0)
-        });
+    let boundary = deepseek_code_core::services::context_usage::latest_boundary(
+        &session.store.db,
+        &session.id,
+    )?;
+    let boundary_id = boundary.as_ref().map(|boundary| boundary.id.as_str());
+    // The boundary a request recorded, plus its model and provider, identify
+    // the context it actually used. Timestamps do not.
+    let request = deepseek_code_core::services::context_usage::last_request_for(
+        &session.store.db,
+        &session.id,
+        boundary_id,
+        &session.model,
+        Some(&session.provider_id),
+    )?;
+    let same_context = |snapshot: &serde_json::Value| {
+        (snapshot["source"] == "native_engine" || snapshot.get("source").is_none())
+            && snapshot["model"] == session.model
+            && snapshot["providerId"] == session.provider_id
+            && match boundary_id {
+                Some(id) => snapshot["contextBoundary"].as_str() == Some(id),
+                None => snapshot
+                    .get("contextBoundary")
+                    .is_none_or(serde_json::Value::is_null),
+            }
+    };
+    let latest = live.iter().rev().find(|snapshot| same_context(snapshot));
     let used = latest
         .map(|snapshot| {
             snapshot["inputTokens"]
@@ -153,8 +166,22 @@ pub async fn text(session: &Session, argument: &str) -> Result<String> {
                 .as_ref()
                 .is_some_and(|request| request.reported_input_tokens.is_some())
         });
+    // After a commit, keep estimating the active compacted context until the
+    // provider actually reports input usage. A pending request's wire estimate
+    // is not a completed measurement.
+    let used = used.filter(|_| boundary.is_none() || measured);
     let window = provider.model.context_window.filter(|window| *window > 0);
-    let previous = if used.is_none() {
+    let estimate = if used.is_none() {
+        deepseek_code_core::services::context_usage::estimated_after_compaction(
+            &session.store,
+            &session.id,
+            &session.model,
+            Some(&session.provider_id),
+        )?
+    } else {
+        None
+    };
+    let previous = if used.is_none() && boundary.is_none() {
         let saved = deepseek_code_core::services::context_usage::last_reported_request(
             &session.store.db,
             &session.id,
@@ -194,15 +221,39 @@ pub async fn text(session: &Session, argument: &str) -> Result<String> {
                 "estimated last request"
             }
         ),
-        (None, _) if latest.is_none() && request.is_none() => {
-            "not available (no request yet)".into()
-        }
-        (None, _) if previous.is_some() => format!(
-            "{} used (last reported input; latest request input not yet available)",
-            token_count(previous.unwrap()),
-        ),
-        (None, _) => "pending (latest request input not reported or fully estimable)".into(),
+        (None, window) => match estimate {
+            Some(estimate) => match window {
+                Some(window) if estimate.complete => format!(
+                    "{}% left ({} used / {}; estimated after compact)",
+                    (u64::from(window).saturating_sub(estimate.tokens) * 100
+                        / u64::from(window)),
+                    token_count(estimate.tokens),
+                    token_count(u64::from(window)),
+                ),
+                // Images, opaque context or an unknown overhead are not
+                // measurable: never show a precise percentage for a partial
+                // estimate, and do not call it a guaranteed lower bound.
+                Some(_) => format!(
+                    "about {} used (partially estimated after compact; remaining capacity uncertain)",
+                    token_count(estimate.tokens),
+                ),
+                None => format!(
+                    "about {} used (partially estimated after compact; remaining capacity unknown)",
+                    token_count(estimate.tokens),
+                ),
+            },
+            None if latest.is_none() && request.is_none() => {
+                "not available (no request yet)".into()
+            }
+            None if previous.is_some() => format!(
+                "{} used (last reported input; latest request input not yet available)",
+                token_count(previous.unwrap()),
+            ),
+            None => "pending (latest request input not reported or fully estimable)".into(),
+        },
     };
+    let compactions =
+        deepseek_code_core::services::compaction::count(&session.store.db, &session.id)?;
     let mut sections = vec![
         vec![
             ("Version", env!("CARGO_PKG_VERSION").to_owned()),
@@ -266,6 +317,7 @@ pub async fn text(session: &Session, argument: &str) -> Result<String> {
                 ),
             ),
             ("Context usage", context),
+            ("Compactions", compactions.to_string()),
         ],
     ];
     let mut tools_section = vec![(

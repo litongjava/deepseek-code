@@ -80,7 +80,7 @@ pub const COMMANDS: &[(&str, &str)] = &[
     ("/history", "Persisted conversation messages"),
     ("/rename", "Rename this session: /rename TITLE"),
     ("/sessions", "List saved sessions; resume with --resume ID"),
-    ("/tools", "Available native tools"),
+    ("/tools", "Inspect or change tool loading; opens the Tools panel in a terminal"),
     ("/skills", "Installed skills"),
     ("/mcp", "Configured MCP servers"),
     ("/provider", "Inspect/configure providers: [ID|add|edit ID]"),

@@ -21,6 +21,8 @@ use tokio::{
 };
 
 const API_KEY: &str = "sk-fixture-cli-key-0001";
+/// Free text a server could echo; it must never reach a diagnostic.
+const MARKER: &str = "PRIVATE_REVIEW4_PROMPT";
 const SESSION_MARKER: &str = "6a1f2c3d-0000-4000-8000-000000000001";
 
 #[derive(Clone)]
@@ -40,6 +42,12 @@ enum Reply {
     /// Emit partial text, end the chunked body cleanly and never send a
     /// completion marker: a stream that ends without completion.
     SsePartialCleanEnd,
+    /// The same, in the Anthropic Messages stream format.
+    AnthropicPartialCleanEnd,
+    /// HTTP 200 with an SSE error event carrying the marker.
+    SseError { anthropic: bool },
+    /// 429 with a recognized permanent quota identifier.
+    QuotaError,
 }
 
 struct Fixture {
@@ -131,6 +139,56 @@ async fn answer(socket: &mut TcpStream, reply: Reply) -> std::io::Result<()> {
             socket.write_all(b"0\r\n\r\n").await?;
             socket.flush().await
         }
+        Reply::AnthropicPartialCleanEnd => {
+            read_request(socket).await?;
+            socket
+                .write_all(
+                    b"HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\ntransfer-encoding: chunked\r\nconnection: close\r\n\r\n",
+                )
+                .await?;
+            let payload = "data: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"Partial anthro\"}}\n\n";
+            socket
+                .write_all(format!("{:x}\r\n{payload}\r\n", payload.len()).as_bytes())
+                .await?;
+            socket.write_all(b"0\r\n\r\n").await?;
+            socket.flush().await
+        }
+
+        Reply::SseError { anthropic } => {
+            read_request(socket).await?;
+            // Both protocols carry the same error shape; the label only keeps
+            // the two cases readable in the test name.
+            let event = json!({
+                "type": "error",
+                "error": {"type": "invalid_request_error", "message": MARKER}
+            });
+            let _ = anthropic;
+            let header = "HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\ntransfer-encoding: chunked\r\nconnection: close\r\n\r\n";
+            socket.write_all(header.as_bytes()).await?;
+            let payload = format!("data: {event}\n\n");
+            socket
+                .write_all(format!("{:x}\r\n{payload}\r\n", payload.len()).as_bytes())
+                .await?;
+            socket.write_all(b"0\r\n\r\n").await?;
+            socket.flush().await
+        }
+        Reply::QuotaError => {
+            read_request(socket).await?;
+            let body = json!({
+                "error": {
+                    "message": "insufficient quota",
+                    "code": "insufficient_quota",
+                    "type": "insufficient_quota"
+                }
+            })
+            .to_string();
+            let response = format!(
+                "HTTP/1.1 429 Too Many Requests\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",
+                body.len()
+            );
+            socket.write_all(response.as_bytes()).await?;
+            socket.shutdown().await
+        }
         Reply::ToolThenPartialText => {
             let request = read_request(socket).await?;
             let text = String::from_utf8_lossy(&request).to_ascii_lowercase();
@@ -201,10 +259,10 @@ async fn read_request(socket: &mut TcpStream) -> std::io::Result<Vec<u8>> {
     }
 }
 
-fn provider_config(base: &str) -> Value {
+fn provider_config(base: &str, api_format: &str) -> Value {
     json!([{
         "id": "fixture", "name": "Fixture", "base_url": base,
-        "api_key": API_KEY, "api_format": "openai", "enabled": true,
+        "api_key": API_KEY, "api_format": api_format, "enabled": true,
         "models": [{
             "id": "fixture-model", "name": "Fixture", "enabled": true,
             "supports_vision": false, "supports_web_search": false, "max_tokens": 512
@@ -222,8 +280,12 @@ impl Project {
         std::fs::create_dir_all(temp.path().join("data")).unwrap();
         std::fs::create_dir_all(temp.path().join("project")).unwrap();
         std::fs::create_dir_all(temp.path().join("project/config")).unwrap();
-        std::fs::write(temp.path().join("project/config/orchestration.toml"),
-            include_str!("../../../src-tauri/config/orchestration.toml").replace("retry_base_backoff_ms = 2000", "retry_base_backoff_ms = 10")).unwrap();
+        std::fs::write(
+            temp.path().join("project/config/orchestration.toml"),
+            include_str!("../../../src-tauri/config/orchestration.toml")
+                .replace("retry_base_backoff_ms = 2000", "retry_base_backoff_ms = 10"),
+        )
+        .unwrap();
         Self { temp }
     }
 
@@ -235,10 +297,10 @@ impl Project {
         self.temp.path().join("project")
     }
 
-    fn configure(&self, base: &str) {
+    fn configure(&self, base: &str, api_format: &str) {
         std::fs::write(
             self.data().join("providers.json"),
-            provider_config(base).to_string(),
+            provider_config(base, api_format).to_string(),
         )
         .unwrap();
     }
@@ -318,6 +380,22 @@ fn persisted_snapshots(data: &Path, session: &str) -> Vec<Value> {
     .unwrap_or_default()
 }
 
+/// The persisted turn status is what the CLI reports as the turn outcome; it
+/// must agree with the diagnostic rather than default to a cancellation.
+fn turn_status(data: &Path, session: &str) -> String {
+    let paths = deepseek_code_core::runtime::RuntimePaths::new(data.to_path_buf()).unwrap();
+    let db = paths.open_database().unwrap();
+    db.with_conn(|conn| -> anyhow::Result<String> {
+        Ok(conn.query_row(
+            "SELECT status FROM execution_turns WHERE conversation_id=?1 ORDER BY started_at DESC LIMIT 1",
+            [session],
+            |row| row.get(0),
+        )?)
+    })
+    .unwrap()
+    .unwrap()
+}
+
 fn combined_output(output: &Output) -> String {
     format!(
         "{}{}",
@@ -330,7 +408,7 @@ fn combined_output(output: &Output) -> String {
 async fn attempts_are_consistent_between_cli_output_server_and_session() {
     let project = Project::new();
     let fixture = fixture(vec![Reply::CloseAfterRequest]).await;
-    project.configure(&fixture.base);
+    project.configure(&fixture.base, "openai");
     let output = execute(project.command(SESSION_MARKER)).await;
     assert!(!output.status.success(), "a failed turn must not exit zero");
     let text = combined_output(&output);
@@ -350,8 +428,18 @@ async fn attempts_are_consistent_between_cli_output_server_and_session() {
     }
     assert!(!text.contains(API_KEY), "the API key leaked: {text}");
 
-    let log = std::fs::read_to_string(project.data().join("logs/request-attempts").join(format!("{SESSION_MARKER}.jsonl"))).unwrap();
-    let records: Vec<Value> = log.lines().map(|line| serde_json::from_str::<Value>(line).unwrap()).filter(|event| event["type"] == "request_attempt").collect();
+    let log = std::fs::read_to_string(
+        project
+            .data()
+            .join("logs/request-attempts")
+            .join(format!("{SESSION_MARKER}.jsonl")),
+    )
+    .unwrap();
+    let records: Vec<Value> = log
+        .lines()
+        .map(|line| serde_json::from_str::<Value>(line).unwrap())
+        .filter(|event| event["type"] == "request_attempt")
+        .collect();
     assert_eq!(records.len(), limit as usize);
     assert_eq!(records.last().unwrap()["outcome"], "failed");
     for (index, event) in records.iter().enumerate() {
@@ -384,13 +472,14 @@ async fn an_authentication_error_is_sent_once_and_keeps_its_meaning() {
         retry_after: None,
     }])
     .await;
-    project.configure(&fixture.base);
+    project.configure(&fixture.base, "openai");
     let output = execute(project.command(SESSION_MARKER)).await;
     assert!(!output.status.success());
     assert_eq!(fixture.count(), 1, "authentication failures must not retry");
     let text = combined_output(&output);
     assert!(text.contains("401"), "{text}");
-    assert!(text.contains("invalid api key"), "{text}");
+    assert!(text.contains("authentication failed"), "{text}");
+    assert!(!text.contains("invalid api key"), "{text}");
 
     let snapshots = persisted_snapshots(&project.data(), SESSION_MARKER);
     let failure = snapshots
@@ -430,7 +519,7 @@ fn worker_directory(data: &Path, session: &str) -> PathBuf {
 async fn cancel_mid_request(reply: Reply, cancel_after: Duration) -> (usize, Vec<Value>, PathBuf) {
     let project = Project::new();
     let fixture = fixture(vec![reply]).await;
-    project.configure(&fixture.base);
+    project.configure(&fixture.base, "openai");
     let directory = worker_directory(&project.data(), SESSION_MARKER);
     let mut command = project.command(SESSION_MARKER);
     command.env(
@@ -460,12 +549,19 @@ async fn cancel_mid_request(reply: Reply, cancel_after: Duration) -> (usize, Vec
 async fn a_stream_that_ends_without_completion_reports_the_real_attempts() {
     let project = Project::new();
     let fixture = fixture(vec![Reply::CloseAfterRequest, Reply::SsePartialCleanEnd]).await;
-    project.configure(&fixture.base);
+    project.configure(&fixture.base, "openai");
     let output = execute(project.command(SESSION_MARKER)).await;
-    assert!(!output.status.success(), "an incomplete stream is a failed turn");
-    assert_eq!(fixture.count(), 2, "one disconnect, then the answering attempt");
+    assert!(
+        !output.status.success(),
+        "an incomplete stream is a failed turn"
+    );
+    assert_eq!(
+        fixture.count(),
+        2,
+        "one disconnect, then the answering attempt"
+    );
     let text = combined_output(&output);
-    for expected in ["attempts=2", "retries=1", "stage=stream"] {
+    for expected in ["attempts=2", "retries=1", "stage=stream", "http=200"] {
         assert!(text.contains(expected), "missing {expected}: {text}");
     }
 
@@ -476,7 +572,133 @@ async fn a_stream_that_ends_without_completion_reports_the_real_attempts() {
         .expect("the incomplete stream is recorded");
     assert_eq!(failure["attempts"], 2, "{failure}");
     assert_eq!(failure["retries"], 1, "{failure}");
+    assert_eq!(failure["http"], 200, "{failure}");
     assert_eq!(failure["contentStarted"], true, "{failure}");
+}
+
+#[tokio::test]
+async fn the_anthropic_protocol_reports_attempts_and_status_after_a_clean_eof() {
+    let project = Project::new();
+    let fixture = fixture(vec![Reply::AnthropicPartialCleanEnd]).await;
+    project.configure(&fixture.base, "anthropic");
+    let output = execute(project.command(SESSION_MARKER)).await;
+    assert!(
+        !output.status.success(),
+        "an incomplete stream is a failed turn"
+    );
+    let text = combined_output(&output);
+    assert_eq!(fixture.count(), 1);
+    for expected in ["attempts=1", "retries=0", "stage=stream", "http=200"] {
+        assert!(text.contains(expected), "missing {expected}: {text}");
+    }
+
+    let snapshots = persisted_snapshots(&project.data(), SESSION_MARKER);
+    let failure = snapshots
+        .iter()
+        .find_map(|snapshot| snapshot.get("failure").filter(|failure| !failure.is_null()))
+        .expect("the incomplete stream is recorded");
+    assert_eq!(failure["attempts"], 1, "{failure}");
+    assert_eq!(failure["retries"], 0, "{failure}");
+    assert_eq!(failure["http"], 200, "{failure}");
+    assert_eq!(failure["stage"], "stream", "{failure}");
+    assert_eq!(failure["contentStarted"], true, "{failure}");
+}
+
+#[tokio::test]
+async fn an_sse_error_event_is_safely_reported_for_both_protocols() {
+    for (format, label) in [("openai", "openai"), ("anthropic", "anthropic")] {
+        let project = Project::new();
+        let fixture = fixture(vec![Reply::SseError {
+            anthropic: label == "anthropic",
+        }])
+        .await;
+        project.configure(&fixture.base, format);
+        let output = execute(project.command(SESSION_MARKER)).await;
+        assert!(!output.status.success(), "a provider error fails the turn");
+        assert_eq!(fixture.count(), 1, "{label}: an error event is not retried");
+        let text = combined_output(&output);
+        assert!(!text.contains(MARKER), "{label}: marker leaked: {text}");
+        for expected in ["stage=stream", "http=200", "attempts=1"] {
+            assert!(text.contains(expected), "{label}: missing {expected}: {text}");
+        }
+        assert_eq!(turn_status(&project.data(), SESSION_MARKER), "failed", "{label}");
+
+        let snapshots = persisted_snapshots(&project.data(), SESSION_MARKER);
+        let failure = snapshots
+            .iter()
+            .find_map(|snapshot| snapshot.get("failure").filter(|failure| !failure.is_null()))
+            .unwrap_or_else(|| panic!("{label}: no structured failure: {snapshots:?}"));
+        assert_eq!(failure["stage"], "stream", "{label}");
+        assert_eq!(failure["http"], 200, "{label}");
+        assert_eq!(failure["attempts"], 1, "{label}");
+        assert!(
+            !failure.to_string().contains(MARKER),
+            "{label}: {failure}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn an_sse_error_records_a_linked_turn_failure() {
+    let project = Project::new();
+    let fixture = fixture(vec![Reply::SseError { anthropic: false }]).await;
+    project.configure(&fixture.base, "openai");
+    execute(project.command(SESSION_MARKER)).await;
+    // Per-attempt records are appended to a per-session JSONL file, which is
+    // what the CLI writes for `/tasks` and the trajectory view.
+    let path = project
+        .data()
+        .join("logs")
+        .join("request-attempts")
+        .join(format!("{SESSION_MARKER}.jsonl"));
+    let record = std::fs::read_to_string(&path)
+        .unwrap_or_else(|error| panic!("reading {}: {error}", path.display()));
+    let parsed: Vec<Value> = record
+        .lines()
+        .filter_map(|line| serde_json::from_str(line).ok())
+        .collect();
+    let terminal = parsed
+        .iter()
+        .find(|event| event["type"] == "request_turn_end")
+        .expect("a turn-end record");
+    assert_eq!(terminal["outcome"], "failed", "{terminal}");
+    let failure = terminal
+        .get("failure")
+        .filter(|failure| !failure.is_null())
+        .unwrap_or_else(|| panic!("turn end has no failure: {terminal}"));
+    assert_eq!(failure["stage"], "stream", "{failure}");
+    assert_eq!(failure["attempts"], 1, "{failure}");
+    assert!(!failure.to_string().contains(MARKER), "{failure}");
+}
+
+#[tokio::test]
+async fn a_partial_stream_end_is_recorded_as_failed_not_cancelled() {
+    let project = Project::new();
+    let fixture = fixture(vec![Reply::SsePartialCleanEnd]).await;
+    project.configure(&fixture.base, "openai");
+    let output = execute(project.command(SESSION_MARKER)).await;
+    assert!(!output.status.success());
+    assert_eq!(fixture.count(), 1, "no replay after visible content");
+    assert_eq!(
+        turn_status(&project.data(), SESSION_MARKER),
+        "failed",
+        "a stream that ended early is not a cancellation"
+    );
+}
+
+#[tokio::test]
+async fn a_permanent_quota_error_is_requested_once() {
+    let project = Project::new();
+    let fixture = fixture(vec![Reply::QuotaError]).await;
+    project.configure(&fixture.base, "openai");
+    let output = execute(project.command(SESSION_MARKER)).await;
+    assert!(!output.status.success());
+    let text = combined_output(&output);
+    assert_eq!(fixture.count(), 1, "a quota error must not be retried");
+    assert!(text.contains("insufficient_quota"), "{text}");
+    assert!(text.contains("attempts=1"), "{text}");
+    assert!(text.contains("class=permanent"), "{text}");
+    assert_eq!(turn_status(&project.data(), SESSION_MARKER), "failed");
 }
 
 #[tokio::test]
@@ -509,7 +731,7 @@ async fn cancelling_during_backoff_sends_nothing_more() {
 async fn a_completed_tool_is_not_rerun_after_a_stream_interruption() {
     let project = Project::new();
     let fixture = fixture(vec![Reply::ToolThenPartialText]).await;
-    project.configure(&fixture.base);
+    project.configure(&fixture.base, "openai");
     let output = execute(project.command(SESSION_MARKER)).await;
     let text = combined_output(&output);
     assert_eq!(

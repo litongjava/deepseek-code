@@ -32,7 +32,9 @@ async fn respond(State(state): State<Fixture>, Json(body): Json<Value>) -> Respo
         // longer reproduced in diagnostics: the body could echo the request.
         return (
             StatusCode::BAD_REQUEST,
-            Json(json!({"error": {"message": "fixture failure"}})),
+            Json(json!({
+                "error": {"type": "invalid_request_error", "message": "fixture failure"}
+            })),
         )
             .into_response();
     }
@@ -372,7 +374,8 @@ async fn noninteractive_approval_and_api_errors_fail_without_hanging() {
             assert!(!output.status.success());
             assert_eq!(result["is_error"], true);
             let error = result["error"].as_str().unwrap();
-            assert!(error.contains("fixture failure"), "{error}");
+            assert!(error.contains("invalid_request_error"), "{error}");
+            assert!(!error.contains("fixture failure"), "{error}");
             assert_durable_turn(&data, &result, "failed");
         } else {
             // With no approval host the call is denied and the model finishes the turn.

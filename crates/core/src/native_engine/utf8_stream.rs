@@ -17,14 +17,11 @@ pub(super) fn response(
                 let count = chunk.len().min(8192 - body.len());
                 body.extend_from_slice(&chunk[..count]);
             }
-            let value: serde_json::Value = serde_json::from_slice(&body).unwrap_or_default();
-            // Gateway bodies can echo the request; only the recognized error
-            // message is kept, sanitized, and never the raw document.
-            let detail = value["error"]["message"].as_str()
-                .or_else(|| value["error"].as_str()).or_else(|| value["message"].as_str())
-                .map(|s| crate::performance::sanitize_remote_text(&s.chars().take(1000).collect::<String>()))
-                .unwrap_or_default();
-            Err(anyhow::anyhow!("Expected an SSE model response, received HTTP {status} ({content_type}). {detail}"))?;
+            // A gateway body can echo the request, so it is reduced to a category
+            // and a known error identifier instead of being reproduced.
+            let media_type = crate::performance::safe_media_type(&content_type);
+            let detail = crate::performance::safe_remote_error(&body, &content_type);
+            Err(anyhow::anyhow!("Expected an SSE model response, received HTTP {status} ({media_type}). {detail}"))?;
         }
         let stream = decode(response.bytes_stream());
         futures::pin_mut!(stream);

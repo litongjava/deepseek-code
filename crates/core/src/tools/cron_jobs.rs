@@ -61,7 +61,9 @@ pub struct Scope<'a> {
 
 impl Scope<'_> {
     fn session_file(&self) -> PathBuf {
-        self.root.join("cron").join(format!("{}.json", self.session))
+        self.root
+            .join("cron")
+            .join(format!("{}.json", self.session))
     }
     fn durable_file(&self) -> PathBuf {
         self.project.join(".claude").join("scheduled_tasks.json")
@@ -71,8 +73,11 @@ impl Scope<'_> {
 fn load(path: &Path) -> Result<Vec<Job>> {
     match std::fs::read(path) {
         Ok(bytes) => {
-            let value: Value = serde_json::from_slice(&bytes).with_context(|| format!("Invalid scheduled tasks file {}", path.display()))?;
-            Ok(serde_json::from_value(value.get("tasks").cloned().unwrap_or(value))?)
+            let value: Value = serde_json::from_slice(&bytes)
+                .with_context(|| format!("Invalid scheduled tasks file {}", path.display()))?;
+            Ok(serde_json::from_value(
+                value.get("tasks").cloned().unwrap_or(value),
+            )?)
         }
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(Vec::new()),
         Err(error) => Err(error).with_context(|| format!("Reading {}", path.display())),
@@ -85,23 +90,37 @@ fn save(path: &Path, jobs: &[Job]) -> Result<()> {
     }
     std::fs::create_dir_all(path.parent().context("scheduled tasks directory")?)?;
     let temporary = path.with_extension("json.tmp");
-    std::fs::write(&temporary, serde_json::to_vec_pretty(&json!({"tasks": jobs}))?)?;
+    std::fs::write(
+        &temporary,
+        serde_json::to_vec_pretty(&json!({"tasks": jobs}))?,
+    )?;
     std::fs::rename(&temporary, path)?;
     Ok(())
 }
 
 fn schedule(expression: &str) -> Result<cron::Schedule> {
     let fields = expression.split_whitespace().count();
-    anyhow::ensure!(fields == 5, "cron must have 5 fields: minute hour day-of-month month day-of-week");
+    anyhow::ensure!(
+        fields == 5,
+        "cron must have 5 fields: minute hour day-of-month month day-of-week"
+    );
     cron::Schedule::from_str(&format!("0 {expression}")).context("Invalid cron expression")
 }
 
 fn next_after(expression: &str, after: DateTime<Local>) -> Result<i64> {
-    Ok(schedule(expression)?.after(&after).next().context("Cron expression has no future occurrence")?.timestamp())
+    Ok(schedule(expression)?
+        .after(&after)
+        .next()
+        .context("Cron expression has no future occurrence")?
+        .timestamp())
 }
 
 fn local(timestamp: i64) -> String {
-    Local.timestamp_opt(timestamp, 0).single().map(|time| time.format("%Y-%m-%d %H:%M %Z").to_string()).unwrap_or_default()
+    Local
+        .timestamp_opt(timestamp, 0)
+        .single()
+        .map(|time| time.format("%Y-%m-%d %H:%M %Z").to_string())
+        .unwrap_or_default()
 }
 
 fn describe(job: &Job) -> Value {
@@ -113,10 +132,21 @@ pub fn execute(name: &str, input: &Value, scope: &Scope) -> Result<Value> {
     let mut durable_jobs = load(&scope.durable_file())?;
     match name {
         "CronCreate" => {
-            let cron = input["cron"].as_str().context("cron is required")?.trim().to_owned();
-            let prompt = input["prompt"].as_str().filter(|p| !p.trim().is_empty()).context("prompt is required")?.to_owned();
+            let cron = input["cron"]
+                .as_str()
+                .context("cron is required")?
+                .trim()
+                .to_owned();
+            let prompt = input["prompt"]
+                .as_str()
+                .filter(|p| !p.trim().is_empty())
+                .context("prompt is required")?
+                .to_owned();
             anyhow::ensure!(prompt.len() <= 64 * 1024, "prompt exceeds 64 KiB");
-            anyhow::ensure!(session_jobs.len() + durable_jobs.len() < MAX_JOBS, "At most {MAX_JOBS} scheduled jobs");
+            anyhow::ensure!(
+                session_jobs.len() + durable_jobs.len() < MAX_JOBS,
+                "At most {MAX_JOBS} scheduled jobs"
+            );
             let now = Local::now();
             let job = Job {
                 id: uuid::Uuid::new_v4().simple().to_string()[..8].to_owned(),
@@ -128,21 +158,35 @@ pub fn execute(name: &str, input: &Value, scope: &Scope) -> Result<Value> {
                 created_at: now.timestamp(),
             };
             let result = describe(&job);
-            if job.durable { durable_jobs.push(job); save(&scope.durable_file(), &durable_jobs)?; } else { session_jobs.push(job); save(&scope.session_file(), &session_jobs)?; }
-            Ok(json!({"job":result,"content":format!("Scheduled job {} — next run {}{}", result["id"].as_str().unwrap_or_default(), result["next_run"].as_str().unwrap_or_default(), if input["recurring"].as_bool().unwrap_or(true) { ". Recurring jobs expire after 7 days." } else { "" })}))
+            if job.durable {
+                durable_jobs.push(job);
+                save(&scope.durable_file(), &durable_jobs)?;
+            } else {
+                session_jobs.push(job);
+                save(&scope.session_file(), &session_jobs)?;
+            }
+            Ok(
+                json!({"job":result,"content":format!("Scheduled job {} — next run {}{}", result["id"].as_str().unwrap_or_default(), result["next_run"].as_str().unwrap_or_default(), if input["recurring"].as_bool().unwrap_or(true) { ". Recurring jobs expire after 7 days." } else { "" })}),
+            )
         }
         "CronDelete" => {
             let id = input["id"].as_str().context("id is required")?;
             let (before_session, before_durable) = (session_jobs.len(), durable_jobs.len());
             session_jobs.retain(|job| job.id != id);
             durable_jobs.retain(|job| job.id != id);
-            if session_jobs.len() == before_session && durable_jobs.len() == before_durable { bail!("No scheduled job with id {id}"); }
+            if session_jobs.len() == before_session && durable_jobs.len() == before_durable {
+                bail!("No scheduled job with id {id}");
+            }
             save(&scope.session_file(), &session_jobs)?;
             save(&scope.durable_file(), &durable_jobs)?;
             Ok(json!({"deleted":id}))
         }
         "CronList" => {
-            let jobs: Vec<Value> = session_jobs.iter().chain(&durable_jobs).map(describe).collect();
+            let jobs: Vec<Value> = session_jobs
+                .iter()
+                .chain(&durable_jobs)
+                .map(describe)
+                .collect();
             Ok(json!({"jobs":jobs,"count":jobs.len()}))
         }
         _ => bail!("Unknown cron tool {name}"),
@@ -155,7 +199,10 @@ fn claim(root: &Path, jobs_file: &Path) -> Result<Option<std::fs::File>> {
     jobs_file.hash(&mut hash);
     let directory = root.join("cron-locks");
     std::fs::create_dir_all(&directory)?;
-    let file = std::fs::OpenOptions::new().write(true).create(true).truncate(false)
+    let file = std::fs::OpenOptions::new()
+        .write(true)
+        .create(true)
+        .truncate(false)
         .open(directory.join(format!("{:016x}.lock", hash.finish())))?;
     match crate::fs::try_lock_file(&file) {
         Ok(()) => Ok(Some(file)),
@@ -169,14 +216,24 @@ fn claim(root: &Path, jobs_file: &Path) -> Result<Option<std::fs::File>> {
 pub fn take_due(scope: &Scope, now: DateTime<Local>) -> Result<Vec<String>> {
     let mut prompts = Vec::new();
     for path in [scope.session_file(), scope.durable_file()] {
-        if !load(&path)?.iter().any(|job| job.next_run <= now.timestamp()) { continue; }
+        if !load(&path)?
+            .iter()
+            .any(|job| job.next_run <= now.timestamp())
+        {
+            continue;
+        }
         // Sessions of one project share durable jobs: whoever holds the lock fires
         // them and moves them on, so the others find nothing due when they look again.
-        let Some(_claim) = claim(scope.root, &path)? else { continue };
+        let Some(_claim) = claim(scope.root, &path)? else {
+            continue;
+        };
         let mut jobs = load(&path)?;
         let mut kept = Vec::new();
         for mut job in jobs.drain(..) {
-            if job.next_run > now.timestamp() { kept.push(job); continue; }
+            if job.next_run > now.timestamp() {
+                kept.push(job);
+                continue;
+            }
             prompts.push((job.next_run, job.prompt.clone()));
             let expired = now.timestamp() - job.created_at >= RECURRING_LIFETIME_SECS;
             if job.recurring && !expired {
@@ -198,27 +255,65 @@ mod tests {
     fn a_durable_job_fires_in_only_one_session() {
         let root = tempfile::tempdir().unwrap();
         let project = tempfile::tempdir().unwrap();
-        let first = Scope { root: root.path(), session: "s1", project: project.path() };
-        let second = Scope { root: root.path(), session: "s2", project: project.path() };
-        execute("CronCreate", &json!({"cron":"*/5 * * * *","prompt":"shared","durable":true}), &first).unwrap();
+        let first = Scope {
+            root: root.path(),
+            session: "s1",
+            project: project.path(),
+        };
+        let second = Scope {
+            root: root.path(),
+            session: "s2",
+            project: project.path(),
+        };
+        execute(
+            "CronCreate",
+            &json!({"cron":"*/5 * * * *","prompt":"shared","durable":true}),
+            &first,
+        )
+        .unwrap();
         let later = Local::now() + chrono::Duration::minutes(6);
 
         let held = claim(root.path(), &first.durable_file()).unwrap().unwrap();
-        assert!(take_due(&second, later).unwrap().is_empty(), "another session is firing it");
+        assert!(
+            take_due(&second, later).unwrap().is_empty(),
+            "another session is firing it"
+        );
         drop(held);
 
         assert_eq!(take_due(&first, later).unwrap(), ["shared"]);
-        assert!(take_due(&second, later).unwrap().is_empty(), "it already moved to its next run");
+        assert!(
+            take_due(&second, later).unwrap().is_empty(),
+            "it already moved to its next run"
+        );
     }
 
     #[test]
     fn create_list_fire_and_delete_session_and_durable_jobs() {
         let root = tempfile::tempdir().unwrap();
         let project = tempfile::tempdir().unwrap();
-        let scope = Scope { root: root.path(), session: "s1", project: project.path() };
-        assert!(execute("CronCreate", &json!({"cron":"* * * *","prompt":"x"}), &scope).is_err());
-        let every = execute("CronCreate", &json!({"cron":"*/5 * * * *","prompt":"check build"}), &scope).unwrap();
-        let once = execute("CronCreate", &json!({"cron":"7 9 1 1 *","prompt":"new year","recurring":false,"durable":true}), &scope).unwrap();
+        let scope = Scope {
+            root: root.path(),
+            session: "s1",
+            project: project.path(),
+        };
+        assert!(execute(
+            "CronCreate",
+            &json!({"cron":"* * * *","prompt":"x"}),
+            &scope
+        )
+        .is_err());
+        let every = execute(
+            "CronCreate",
+            &json!({"cron":"*/5 * * * *","prompt":"check build"}),
+            &scope,
+        )
+        .unwrap();
+        let once = execute(
+            "CronCreate",
+            &json!({"cron":"7 9 1 1 *","prompt":"new year","recurring":false,"durable":true}),
+            &scope,
+        )
+        .unwrap();
         assert!(project.path().join(".claude/scheduled_tasks.json").exists());
         assert_eq!(execute("CronList", &json!({}), &scope).unwrap()["count"], 2);
 
@@ -226,17 +321,35 @@ mod tests {
         let due = take_due(&scope, later).unwrap();
         assert_eq!(due.len(), 2);
         let listed = execute("CronList", &json!({}), &scope).unwrap();
-        assert_eq!(listed["count"], 0, "one-shot fired and the recurring job expired: {listed}");
+        assert_eq!(
+            listed["count"], 0,
+            "one-shot fired and the recurring job expired: {listed}"
+        );
 
-        let again = execute("CronCreate", &json!({"cron":"*/5 * * * *","prompt":"poll"}), &scope).unwrap();
-        assert_eq!(take_due(&scope, Local::now() + chrono::Duration::minutes(6)).unwrap(), ["poll"]);
+        let again = execute(
+            "CronCreate",
+            &json!({"cron":"*/5 * * * *","prompt":"poll"}),
+            &scope,
+        )
+        .unwrap();
+        assert_eq!(
+            take_due(&scope, Local::now() + chrono::Duration::minutes(6)).unwrap(),
+            ["poll"]
+        );
         assert_eq!(execute("CronList", &json!({}), &scope).unwrap()["count"], 1);
         let id = again["job"]["id"].as_str().unwrap();
         execute("CronDelete", &json!({"id":id}), &scope).unwrap();
         assert!(execute("CronDelete", &json!({"id":id}), &scope).is_err());
-        assert!(every["content"].as_str().unwrap().contains("expire after 7 days"));
+        assert!(every["content"]
+            .as_str()
+            .unwrap()
+            .contains("expire after 7 days"));
         assert_eq!(once["job"]["durable"], true);
-        let other = Scope { root: root.path(), session: "s2", project: project.path() };
+        let other = Scope {
+            root: root.path(),
+            session: "s2",
+            project: project.path(),
+        };
         assert_eq!(execute("CronList", &json!({}), &other).unwrap()["count"], 0);
     }
 }

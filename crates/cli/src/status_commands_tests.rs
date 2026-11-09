@@ -72,7 +72,7 @@ async fn known_window_survives_missing_request_and_opaque_live_input() {
 
     save_snapshot(
         &session,
-        json!({"id":"older", "source":"native_engine",
+        json!({"id":"older", "source":"native_engine","providerId":"fixture",
         "model":"gpt-6-astra", "startedAt":1, "status":"completed",
         "inputTokens":72000, "outputTokens":100,
         "usage":{"input_tokens":72000,"output_tokens":100}}),
@@ -86,7 +86,7 @@ async fn known_window_survives_missing_request_and_opaque_live_input() {
         8192,
     );
     assert!(usage.estimated_input_tokens.is_none());
-    let snapshot = json!({"id":"current","source":"native_engine","model":"gpt-6-astra",
+    let snapshot = json!({"id":"current","source":"native_engine","providerId":"fixture","model":"gpt-6-astra",
         "startedAt":2,"status":"running","inputTokens":null,"outputTokens":null,
         "contextUsage":usage});
     crate::session_commands::save_live_requests(&session, &[snapshot.clone()]).unwrap();
@@ -126,7 +126,7 @@ async fn reported_and_estimated_usage_agree_before_and_after_persistence() {
             ContextUsage::from_body("openai-responses", &json!({"input":[]}), Some(128000), 8192);
         usage.estimated_input_tokens = Some(64000);
         let snapshot = json!({"id":format!("r-{index}"), "model":"gpt-6-astra",
-            "source":"native_engine", "startedAt":index+1, "status":"completed",
+            "source":"native_engine","providerId":"fixture", "startedAt":index+1, "status":"completed",
             "inputTokens":reported, "outputTokens":10,
             "usage":{"input_tokens":reported,"output_tokens":10},"contextUsage":usage});
         crate::session_commands::save_live_requests(&session, &[snapshot.clone()]).unwrap();
@@ -147,7 +147,7 @@ async fn unconfigured_unknown_model_does_not_invent_a_window_or_percentage() {
     let (_root, session) = fixture("custom-unknown-model", None).await;
     save_snapshot(
         &session,
-        json!({"id":"r","source":"native_engine",
+        json!({"id":"r","source":"native_engine","providerId":"fixture",
         "model":"custom-unknown-model","status":"completed","usage":{"input_tokens":1000}}),
     );
     let report = consistent_report(&session).await;
@@ -165,7 +165,7 @@ async fn unconfigured_unknown_model_does_not_invent_a_window_or_percentage() {
 #[tokio::test]
 async fn auxiliary_search_cannot_replace_live_parent_context() {
     let (_root, session) = fixture("gpt-6-astra", None).await;
-    let parent = json!({"id":"parent", "source":"native_engine", "model":"gpt-6-astra",
+    let parent = json!({"id":"parent", "source":"native_engine","providerId":"fixture", "model":"gpt-6-astra",
         "startedAt":1, "inputTokens":72000, "outputTokens":100});
     let search = json!({"id":"search", "source":"web_search", "model":"gpt-6-astra",
         "startedAt":2, "inputTokens":10, "outputTokens":5});
@@ -175,7 +175,7 @@ async fn auxiliary_search_cannot_replace_live_parent_context() {
         field(&report, "Context usage"),
         "71% left (72.0K used / 256K; last request)"
     );
-    let pending = json!({"id":"pending", "source":"native_engine", "model":"gpt-6-astra",
+    let pending = json!({"id":"pending", "source":"native_engine","providerId":"fixture", "model":"gpt-6-astra",
         "startedAt":3, "inputTokens":null});
     crate::session_commands::save_live_requests(&session, &[parent, pending]).unwrap();
     let report = consistent_report(&session).await;
@@ -183,5 +183,132 @@ async fn auxiliary_search_cannot_replace_live_parent_context() {
         field(&report, "Context usage"),
         "72.0K used (last reported input; latest request input not yet available)"
     );
+    session.close().await.unwrap();
+}
+
+#[tokio::test]
+async fn a_committed_compaction_replaces_pre_compaction_usage_and_counts_once() {
+    let (_root, session) = fixture("gpt-6-astra", Some(128000)).await;
+    session.store.append(&session.id, "user", "task").unwrap();
+    let answer = session
+        .store
+        .append(&session.id, "assistant", "progress")
+        .unwrap();
+    let estimate = |tokens: u64| json!({"serialized_utf8_bytes":tokens * 3,"estimated_tokens":tokens,"unknown_parts":0});
+    let usage = json!({"version":1,"history":estimate(1),"instructions":estimate(500),"tools":estimate(700),"output_schema":estimate(0),
+        "configured_context_window":null,"requested_output_budget":0,"sent_output_reserve":null,"estimated_input_tokens":null});
+    session
+        .store
+        .db
+        .with_conn(|conn| {
+            message_repo::save_request_snapshots(
+                conn,
+                &answer,
+                &json!([{"id":"before","source":"native_engine","providerId":"fixture","model":"gpt-6-astra","startedAt":1000,"status":"completed","inputTokens":90000,"usage":{"input_tokens":90000},"contextUsage":usage}]),
+            )
+        })
+        .unwrap()
+        .unwrap();
+    let prepared =
+        deepseek_code_core::services::compaction::prepare(&session.store.db, &session.id).unwrap();
+    deepseek_code_core::services::compaction::commit(
+        &session.store.db,
+        prepared,
+        &format!("short summary {}", "z".repeat(200)),
+    )
+    .unwrap();
+    let boundary = deepseek_code_core::services::context_usage::latest_boundary(
+        &session.store.db,
+        &session.id,
+    )
+    .unwrap()
+    .expect("a boundary");
+    let boundary_id = boundary.id.clone();
+    let estimate = deepseek_code_core::services::context_usage::estimated_after_compaction(
+        &session.store,
+        &session.id,
+        &session.model,
+        Some(&session.provider_id),
+    )
+    .unwrap()
+    .expect("a post-compaction estimate");
+    assert!(estimate.complete, "{estimate:?}");
+    let report = consistent_report(&session).await;
+    assert_eq!(field(&report, "Compactions"), "1");
+    let usage = field(&report, "Context usage");
+    assert!(usage.ends_with("; estimated after compact)"), "{usage}");
+    assert!(!usage.contains("90.0K"), "{usage}");
+    let percent = 128_000u64.saturating_sub(estimate.tokens) * 100 / 128_000;
+    assert!(
+        usage.starts_with(&format!(
+            "{percent}% left ({} used",
+            token_count(estimate.tokens)
+        )),
+        "{usage}"
+    );
+
+    // A pending request has an estimate but no provider usage yet.
+    let mut pending_usage = ContextUsage::from_body(
+        "openai-completions",
+        &json!({"messages":[]}),
+        Some(128000),
+        4096,
+    );
+    pending_usage.estimated_input_tokens = Some(16200);
+    let pending = json!({"id":"pending","source":"native_engine","providerId":"fixture","contextBoundary":boundary_id,"model":"gpt-6-astra","status":"running", "contextUsage":pending_usage});
+    crate::session_commands::save_live_requests(&session, &[pending.clone()]).unwrap();
+    let report = consistent_report(&session).await;
+    assert!(
+        field(&report, "Context usage").contains("estimated after compact"),
+        "{report}"
+    );
+    save_snapshot(&session, pending);
+    crate::session_commands::save_live_requests(&session, &[]).unwrap();
+    let report = consistent_report(&session).await;
+    assert!(
+        field(&report, "Context usage").contains("estimated after compact"),
+        "{report}"
+    );
+
+    // A request that recorded this boundary restores measured usage.
+    save_snapshot(
+        &session,
+        json!({"id":"after","source":"native_engine","providerId":"fixture","contextBoundary":boundary_id,"model":"gpt-6-astra","startedAt":boundary.created_at_ms.unwrap_or(0) + 1000,"status":"completed","inputTokens":48000,"outputTokens":10,
+            "usage":{"input_tokens":48000,"output_tokens":10}}),
+    );
+    let report = consistent_report(&session).await;
+    assert_eq!(
+        field(&report, "Context usage"),
+        "62% left (48.0K used / 128K; last request)"
+    );
+    // A late request from the pre-compaction context cannot override it, even
+    // when it started in the boundary's own millisecond.
+    save_snapshot(
+        &session,
+        json!({"id":"late-old","source":"native_engine","providerId":"fixture","model":"gpt-6-astra","startedAt":boundary.created_at_ms.unwrap_or(0),"status":"completed","inputTokens":120000,"outputTokens":10,
+            "usage":{"input_tokens":120000,"output_tokens":10}}),
+    );
+    let report = consistent_report(&session).await;
+    assert_eq!(
+        field(&report, "Context usage"),
+        "62% left (48.0K used / 128K; last request)"
+    );
+    assert_eq!(field(&report, "Compactions"), "1");
+
+    // A second committed compaction counts again.
+    session
+        .store
+        .append(&session.id, "user", "next task")
+        .unwrap();
+    session
+        .store
+        .append(&session.id, "assistant", "next progress")
+        .unwrap();
+    let prepared =
+        deepseek_code_core::services::compaction::prepare(&session.store.db, &session.id).unwrap();
+    deepseek_code_core::services::compaction::commit(&session.store.db, prepared, "second summary")
+        .unwrap();
+    let report = consistent_report(&session).await;
+    assert_eq!(field(&report, "Compactions"), "2");
     session.close().await.unwrap();
 }

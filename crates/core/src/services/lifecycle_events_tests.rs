@@ -282,8 +282,8 @@ async fn lifecycle_cancellation_timeout_and_status_leave_once_retryable() {
 }
 #[tokio::test]
 async fn http_lifecycle_events_use_the_same_payload_and_output_rules() {
-    use std::sync::{Arc, Mutex};
     use axum::{extract::State, routing::post, Json, Router};
+    use std::sync::{Arc, Mutex};
     let received = Arc::new(Mutex::new(Vec::<Value>::new()));
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let url = format!("http://{}/hook", listener.local_addr().unwrap());
@@ -363,7 +363,11 @@ async fn unmatched_hooks_and_callbacks_never_materialize_transcripts() {
         "PermissionRequest":[{"matcher":"Write","hooks":[{"type":"command","command":"must-not-run"}]}]
     }}).to_string()).unwrap();
     // Any attempt to query this database would fail. Matching only uses memory.
-    std::fs::write(root.path().join(crate::runtime::DATABASE_FILE), "not a database").unwrap();
+    std::fs::write(
+        root.path().join(crate::runtime::DATABASE_FILE),
+        "not a database",
+    )
+    .unwrap();
     let session = uuid::Uuid::new_v4().to_string();
     let host: Arc<dyn Host> = Arc::new(Never);
     let callbacks = hook_callbacks::validate(&json!({"PreToolUse":[{"matcher":"Write","hookCallbackIds":["skip"]}],"PermissionRequest":[{"matcher":"Write","hookCallbackIds":["skip"]}]})).unwrap();

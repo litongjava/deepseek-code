@@ -292,23 +292,108 @@ async fn all_tools_keep_numbers_in_resume_and_detailed_transcript() {
     session.close().await.unwrap();
 }
 
-/// `/compact [instructions]`: summarize the session; returns how many
-/// messages were summarized. Shared by the REPL and print mode.
-pub async fn compact(paths: &RuntimePaths, session: &mut Session, instructions: &str) -> Result<usize> {
-    let context = crate::services::context(paths)?;
-    let report = tokio::select! {
-        // Manual compaction shows the same per-fragment progress as autocompact.
-        report = crate::hook_progress::during(&session.id, true, deepseek_code_core::services::compaction::compact_with_hooks(
-            &session.engine, &context, &session.workspace, &session.id,
-            &session.provider_id, &session.model, instructions.trim(), "manual",
-        )) => report?,
-        _ = tokio::signal::ctrl_c() => anyhow::bail!("Compaction interrupted; check /history for a completed summary. Original transcript retained"),
-    };
-    for warning in &report.warnings { command_eprintln!("Hook: {warning}"); }
-    Ok(report.summarized_messages)
+/// A finished compaction. `cancelled_after_commit` means the boundary and its
+/// file were already saved when the user pressed Esc; only the remaining post
+/// steps were stopped.
+pub struct Compacted {
+    pub report: deepseek_code_core::services::compaction::CompactionResult,
+    pub cancelled_after_commit: bool,
 }
 
-pub async fn handle(line: &str, paths: &RuntimePaths, session: &mut Session) -> Result<bool> {
+/// `/compact [instructions]`: summarize the session; returns the committed
+/// result with its duration and summary file. Shared by the REPL and print mode.
+pub async fn compact(
+    paths: &RuntimePaths,
+    session: &mut Session,
+    instructions: &str,
+    mut cancel: Option<crate::terminal::input::CancelWatch>,
+) -> Result<Compacted> {
+    use deepseek_code_core::services::compaction::CompactionTracker;
+    let context = crate::services::context(paths)?;
+    let tracker = CompactionTracker::default();
+    let compacted = {
+        let future = crate::hook_progress::during(&session.id, true, deepseek_code_core::services::compaction::compact_with_hooks_tracked(
+            &session.engine, &context, &session.workspace, &session.id,
+            &session.provider_id, &session.model, instructions.trim(), "manual", Some(&tracker),
+        ));
+        tokio::pin!(future);
+        loop {
+            tokio::select! {
+                report = &mut future => break Compacted { report: report?, cancelled_after_commit: false },
+                // The input owner forwards Esc/Ctrl+C here while the prompt loop
+                // is paused. The branch re-checks the recorded outcome instead
+                // of trusting a value captured when the select began: a cancel
+                // that arrives after the boundary transaction keeps the real
+                // committed result, stops the remaining post steps, and is
+                // never reported as an unsaved compaction.
+                _ = wait_for_cancel(cancel.as_mut()) => break committed_after_cancel(&tracker, "Compaction interrupted before it was saved; original transcript retained")?,
+                _ = tokio::signal::ctrl_c() => break committed_after_cancel(&tracker, "Compaction interrupted; check /history for a completed summary. Original transcript retained")?,
+            }
+        }
+        // The block ends here, so a cancel after the commit drops the future
+        // and stops the post-compaction hooks instead of waiting for them.
+    };
+    for warning in &compacted.report.warnings { command_eprintln!("Hook: {warning}"); }
+    Ok(compacted)
+}
+
+/// The result to report when the user cancels. A committed compaction keeps
+/// its saved boundary, file and count and is never reported as unsaved; its
+/// duration is measured when this returns, so the wait after the commit is
+/// included. Nothing is regenerated, exported or counted again.
+pub(crate) fn committed_after_cancel(
+    tracker: &deepseek_code_core::services::compaction::CompactionTracker,
+    unsaved: &str,
+) -> Result<Compacted> {
+    match tracker.outcome() {
+        Some(outcome) => {
+            let mut report: deepseek_code_core::services::compaction::CompactionResult =
+                outcome.into();
+            report.duration_ms = tracker.elapsed_ms();
+            Ok(Compacted {
+                report,
+                cancelled_after_commit: true,
+            })
+        }
+        None => anyhow::bail!("{unsaved}"),
+    }
+}
+
+/// Wait for an interactive cancel key; keep waiting when no watch is armed or
+/// when the reader stopped without one.
+async fn wait_for_cancel(watch: Option<&mut crate::terminal::input::CancelWatch>) {
+    match watch {
+        Some(watch) => {
+            if !watch.wait().await {
+                std::future::pending::<()>().await;
+            }
+        }
+        None => std::future::pending::<()>().await,
+    }
+}
+
+/// `12s` under a minute, `<1s` below a second, `1m 23s` or `1h 2m 3s` above.
+pub(crate) fn format_duration(ms: u64) -> String {
+    if ms < 1_000 {
+        return "<1s".into();
+    }
+    let seconds = ms / 1_000;
+    let (hours, minutes, seconds) = (seconds / 3_600, (seconds % 3_600) / 60, seconds % 60);
+    if hours > 0 {
+        format!("{hours}h {minutes}m {seconds}s")
+    } else if minutes > 0 {
+        format!("{minutes}m {seconds}s")
+    } else {
+        format!("{seconds}s")
+    }
+}
+
+pub async fn handle(
+    line: &str,
+    paths: &RuntimePaths,
+    session: &mut Session,
+    input: Option<&mut crate::terminal::input::TerminalInput>,
+) -> Result<bool> {
     let line = line.trim();
     let (command, argument) = line.split_once(char::is_whitespace).unwrap_or((line, ""));
     let command = crate::command_catalog::canonical(command);
@@ -341,11 +426,25 @@ pub async fn handle(line: &str, paths: &RuntimePaths, session: &mut Session) -> 
         }
         "/status" => crate::status_commands::run(session, argument).await?,
         "/compact" => {
-            let summarized = compact(paths, session, argument).await?;
+            let watch = match input {
+                Some(input) => input.watch_cancel()?,
+                None => None,
+            };
+            let compacted = compact(paths, session, argument, watch).await?;
+            let report = &compacted.report;
             // As in the reference CLI; the summary is in the Ctrl+O transcript.
             command_eprintln!(
-                "  \u{23bf}  Compacted (ctrl+o to see full summary)\n     {summarized} messages summarized; the original transcript remains in /history."
+                "  \u{23bf}  Compacted in {} (ctrl+o to see full summary)",
+                format_duration(report.duration_ms)
             );
+            for line in crate::compaction::completion_details(report) {
+                command_eprintln!("     {line}");
+            }
+            if compacted.cancelled_after_commit {
+                command_eprintln!(
+                    "     Stopped the remaining post-compaction steps by request; the summary above was already saved."
+                );
+            }
         }
         "/clear" => {
             ensure!(argument.trim().is_empty(), "Usage: /clear");
@@ -424,6 +523,17 @@ fn rename(store: &SessionStore, id: &str, title: &str) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn durations_use_seconds_minutes_and_hours() {
+        assert_eq!(format_duration(0), "<1s");
+        assert_eq!(format_duration(999), "<1s");
+        assert_eq!(format_duration(1_000), "1s");
+        assert_eq!(format_duration(59_999), "59s");
+        assert_eq!(format_duration(60_000), "1m 0s");
+        assert_eq!(format_duration(83_000), "1m 23s");
+        assert_eq!(format_duration(3_723_000), "1h 2m 3s");
+    }
 
     #[test]
     fn resumed_notice_offers_only_what_the_session_can_do() {

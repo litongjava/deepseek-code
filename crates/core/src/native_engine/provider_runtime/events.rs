@@ -236,18 +236,14 @@ impl State {
             }
             "response.failed" => bail!(
                 "Responses request failed: {}",
-                crate::performance::sanitize_remote_text(
-                    &event["response"]["error"].to_string()
-                )
+                crate::performance::safe_remote_value(&event["response"]["error"])
             ),
             "response.completed" | "response.incomplete" => {
                 let response = &event["response"];
                 if response["status"] == "failed" {
                     bail!(
                         "Responses request failed: {}",
-                        crate::performance::sanitize_remote_text(
-                            &response["error"].to_string()
-                        )
+                        crate::performance::safe_remote_value(&response["error"])
                     );
                 }
                 if let Some(items) = response["output"].as_array() {

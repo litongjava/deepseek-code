@@ -68,11 +68,24 @@ pub fn load(workspace: &Path) -> Result<String> {
 }
 
 /// User instructions from `user_dir` first, then the workspace's ancestor chain
-/// from the filesystem root down, preserving file order within each directory.
-/// Local instructions follow checked-in instructions. Missing files are normal;
-/// unreadable, oversized or invalid UTF-8 files fail explicitly rather than
-/// silently dropping user instructions.
+/// below the user's home directory, from the topmost of those down, preserving
+/// file order within each directory. Local instructions follow checked-in
+/// instructions. Missing files are normal; unreadable, oversized or invalid
+/// UTF-8 files fail explicitly rather than silently dropping user instructions.
 pub fn load_all(user_dir: Option<&Path>, workspace: &Path) -> Result<Vec<Instruction>> {
+    load_all_below_home(user_dir, workspace, dirs::home_dir().as_deref())
+}
+
+/// Ancestors at or above the user's home directory are not part of the project
+/// tree. A file such as `~/.claude/CLAUDE.md` is user-level configuration, so it
+/// must never be reported as "project instructions, checked into the codebase"
+/// or repeated for every project on the machine. User instructions come from
+/// `user_dir` only.
+fn load_all_below_home(
+    user_dir: Option<&Path>,
+    workspace: &Path,
+    home: Option<&Path>,
+) -> Result<Vec<Instruction>> {
     let workspace = workspace.canonicalize().with_context(|| {
         format!(
             "Resolving project instructions workspace {}",
@@ -84,7 +97,17 @@ pub fn load_all(user_dir: Option<&Path>, workspace: &Path) -> Result<Vec<Instruc
         "Instructions workspace is not a directory: {}",
         workspace.display()
     );
-    let mut directories: Vec<_> = workspace.ancestors().map(Path::to_path_buf).collect();
+    // Compare canonical paths so a `\\?\` prefix or a differing drive-letter
+    // case cannot let the home directory back into the chain.
+    let home = home.map(|home| home.canonicalize().unwrap_or_else(|_| home.to_path_buf()));
+    let mut directories: Vec<_> = workspace
+        .ancestors()
+        .filter(|directory| match &home {
+            Some(home) => !home.starts_with(directory),
+            None => true,
+        })
+        .map(Path::to_path_buf)
+        .collect();
     directories.reverse();
     let mut reader = Reader::default();
     if let Some(user_dir) = user_dir {
@@ -192,6 +215,53 @@ impl Reader {
 mod tests {
     use super::*;
     use std::fs;
+
+    #[test]
+    fn home_directory_and_above_are_never_project_instructions() {
+        let root = tempfile::tempdir().unwrap();
+        let home = root.path().join("home");
+        let project = home.join("code").join("proj");
+        fs::create_dir_all(&project).unwrap();
+        fs::write(root.path().join("CLAUDE.md"), "above home").unwrap();
+        fs::write(home.join("CLAUDE.md"), "home marker").unwrap();
+        fs::create_dir_all(home.join(".claude")).unwrap();
+        fs::write(home.join(".claude").join("CLAUDE.md"), "home claude marker").unwrap();
+        fs::write(home.join("code").join("CLAUDE.md"), "ancestor marker").unwrap();
+        fs::write(project.join("CLAUDE.md"), "project marker").unwrap();
+
+        let all = load_all_below_home(None, &project, Some(&home)).unwrap();
+        let contents: Vec<_> = all.iter().map(|item| item.content.trim()).collect();
+        assert_eq!(contents, ["ancestor marker", "project marker"]);
+        assert!(all.iter().all(|item| item.scope == Scope::Project));
+
+        // A user file in the configured user directory keeps the user scope even
+        // when it shares a name with the home-level file.
+        let user = root.path().join("data");
+        fs::create_dir_all(&user).unwrap();
+        fs::write(user.join("AGENTS.md"), "user marker").unwrap();
+        let all = load_all_below_home(Some(&user), &project, Some(&home)).unwrap();
+        assert_eq!(all.first().unwrap().scope, Scope::User);
+        assert_eq!(all.first().unwrap().content.trim(), "user marker");
+        assert_eq!(all.len(), 3);
+    }
+
+    #[test]
+    fn a_project_outside_home_still_reads_its_ancestors() {
+        let root = tempfile::tempdir().unwrap();
+        let home = root.path().join("home");
+        let project = root.path().join("elsewhere").join("proj");
+        fs::create_dir_all(&home).unwrap();
+        fs::create_dir_all(&project).unwrap();
+        fs::write(home.join("CLAUDE.md"), "home marker").unwrap();
+        fs::write(
+            root.path().join("elsewhere").join("CLAUDE.md"),
+            "ancestor marker",
+        )
+        .unwrap();
+        let all = load_all_below_home(None, &project, Some(&home)).unwrap();
+        let contents: Vec<_> = all.iter().map(|item| item.content.trim()).collect();
+        assert_eq!(contents, ["ancestor marker"]);
+    }
 
     #[test]
     fn hierarchy_is_ordered_and_ignores_descendants() {

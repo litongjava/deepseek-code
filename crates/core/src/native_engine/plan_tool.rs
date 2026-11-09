@@ -364,7 +364,12 @@ impl ToolLoopExecutor {
         let options = crate::services::plan_approval::options(bypass);
         let request_id = uuid::Uuid::new_v4().to_string();
         let approval_request = crate::services::plan_approval::ApprovalRequest::new(
-            &session, &request_id, id, &plan, &path, manager.bypass_available(),
+            &session,
+            &request_id,
+            id,
+            &plan,
+            &path,
+            manager.bypass_available(),
         );
         let (tx, rx) = oneshot::channel();
         self.answer_waiters
@@ -376,8 +381,14 @@ impl ToolLoopExecutor {
             request_id: request_id.clone(),
         };
         crate::native_engine::permission_response::register_owner(
-            &request_id, &session, id, "plan", serde_json::to_value(&approval_request)?,
-            Some(approval_request.clone()), Some(manager.clone()), Some(root.clone()),
+            &request_id,
+            &session,
+            id,
+            "plan",
+            serde_json::to_value(&approval_request)?,
+            Some(approval_request.clone()),
+            Some(manager.clone()),
+            Some(root.clone()),
         );
         let question = format!("Review plan\n{}\n\n{plan}\n\nChoose 1–4, or feedback: <changes>. Clear context preserves this session and its archived transcript.", path.display());
         let sent = self
@@ -474,7 +485,11 @@ impl ToolLoopExecutor {
         )
         }.await;
         crate::native_engine::permission_response::finish_answer(
-            &request_id, result.as_ref().cloned().map_err(|error: &anyhow::Error| format!("{error:#}")),
+            &request_id,
+            result
+                .as_ref()
+                .cloned()
+                .map_err(|error: &anyhow::Error| format!("{error:#}")),
         );
         result
     }

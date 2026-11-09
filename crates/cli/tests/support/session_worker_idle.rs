@@ -188,7 +188,7 @@ impl Fixture {
                     "--api-format".into(),
                     "openai".into(),
                     "--api-key-env".into(),
-                    "CLAUDE_RUST_CHILD_API_KEY".into(),
+                    "DEEPSEEK_CODE_CHILD_API_KEY".into(),
                     "--model".into(),
                     "fixture".into(),
                     "--permission-mode".into(),
@@ -200,7 +200,7 @@ impl Fixture {
                     "Delegate the initial task".into(),
                 ],
                 environment: vec![(
-                    "CLAUDE_RUST_CHILD_API_KEY".into(),
+                    "DEEPSEEK_CODE_CHILD_API_KEY".into(),
                     "fixture-secret-only-in-memory".into(),
                 )],
             },

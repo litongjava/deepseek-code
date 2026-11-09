@@ -37,7 +37,9 @@ mod tests {
     #[test]
     fn powershell_prefix_reads_utf8_files_without_a_bom() {
         // Runs wherever PowerShell 7 is installed; Windows PowerShell has its own test below.
-        let Some(pwsh) = crate::tools::lsp_servers::find_on_path("pwsh") else { return };
+        let Some(pwsh) = crate::tools::lsp_servers::find_on_path("pwsh") else {
+            return;
+        };
         let path = std::env::temp_dir().join(format!("claude-ps-utf8-{}.txt", std::process::id()));
         fs::write(&path, "物理内存\n").unwrap();
         let script = powershell_command(&format!("Get-Content -LiteralPath '{}'", path.display()));
@@ -48,7 +50,11 @@ mod tests {
             .output()
             .unwrap();
         fs::remove_file(&path).ok();
-        assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
         assert_eq!(String::from_utf8(output.stdout).unwrap().trim(), "物理内存");
     }
 

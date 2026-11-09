@@ -3,8 +3,8 @@
 use crossterm::{
     cursor::{position, MoveDown, MoveTo, MoveToColumn, MoveUp},
     event::{
-        DisableBracketedPaste, DisableMouseCapture, EnableBracketedPaste, EnableMouseCapture, Event, KeyCode, KeyEventKind, KeyModifiers,
-        MouseButton, MouseEventKind,
+        DisableBracketedPaste, DisableMouseCapture, EnableBracketedPaste, EnableMouseCapture,
+        Event, KeyCode, KeyEventKind, KeyModifiers, MouseButton, MouseEventKind,
     },
     execute, queue,
     style::{Attribute, ResetColor, SetAttribute, SetForegroundColor},
@@ -20,11 +20,19 @@ struct CommandOverlay {
     top: usize,
 }
 impl CommandOverlay {
-    fn draw_to(&mut self, out: &mut impl Write, menu: &[DisplayLine], bottom: usize, background: &[String]) -> io::Result<()> {
+    fn draw_to(
+        &mut self,
+        out: &mut impl Write,
+        menu: &[DisplayLine],
+        bottom: usize,
+        background: &[String],
+    ) -> io::Result<()> {
         let shown = menu.len().min(bottom);
         let menu = &menu[..shown];
         let top = bottom.saturating_sub(shown);
-        if self.previous == menu && (menu.is_empty() || self.top == top) { return Ok(()); }
+        if self.previous == menu && (menu.is_empty() || self.top == top) {
+            return Ok(());
+        }
         out.write_all(b"\x1b[?2026h\x1b7")?;
         for (index, text) in self.saved.iter().enumerate() {
             write!(out, "\x1b[{};1H\x1b[0m{}\x1b[K", self.top + index + 1, text)?;
@@ -32,9 +40,14 @@ impl CommandOverlay {
         self.saved = background.iter().skip(top).take(shown).cloned().collect();
         self.top = top;
         for (index, (text, style)) in menu.iter().enumerate() {
-            let color = match style { TextStyle::Selected => crate::terminal::style::selected(), _ => crate::terminal::style::muted() };
+            let color = match style {
+                TextStyle::Selected => crate::terminal::style::selected(),
+                _ => crate::terminal::style::muted(),
+            };
             write!(out, "\x1b[{};1H\x1b[0m", top + index + 1)?;
-            if std::env::var_os("NO_COLOR").is_none() { queue!(out, SetForegroundColor(color))?; }
+            if std::env::var_os("NO_COLOR").is_none() {
+                queue!(out, SetForegroundColor(color))?;
+            }
             write!(out, "{text}\x1b[0m\x1b[K")?;
         }
         out.write_all(b"\x1b8\x1b[?2026l")?;
@@ -120,14 +133,27 @@ impl Default for PromptEditor {
 struct RawMode;
 impl Drop for RawMode {
     fn drop(&mut self) {
-        let _ = execute!(io::stderr(), DisableBracketedPaste, DisableMouseCapture, ResetColor);
+        let _ = execute!(
+            io::stderr(),
+            DisableBracketedPaste,
+            DisableMouseCapture,
+            ResetColor
+        );
         let _ = terminal::disable_raw_mode();
     }
 }
 /// Moves the cursor between the rows of a multi-line prompt; false at the edges.
 fn vertical_move(buffer: &mut Buffer, prompt: &str, down: bool) -> bool {
-    let width = terminal::size().map_or(80, |(columns, _)| (columns as usize).saturating_sub(1).max(4));
-    let Some(cursor) = crate::terminal::prompt_display::vertical_cursor(prompt, &buffer.chars, buffer.cursor, width, down) else {
+    let width = terminal::size().map_or(80, |(columns, _)| {
+        (columns as usize).saturating_sub(1).max(4)
+    });
+    let Some(cursor) = crate::terminal::prompt_display::vertical_cursor(
+        prompt,
+        &buffer.chars,
+        buffer.cursor,
+        width,
+        down,
+    ) else {
         return false;
     };
     buffer.cursor = cursor;
@@ -165,7 +191,15 @@ impl Buffer {
     }
 }
 /// Directories never offered by `@` file completion.
-const SKIPPED_DIRS: &[&str] = &["node_modules", "target", "dist", "build", "out", "__pycache__", "vendor"];
+const SKIPPED_DIRS: &[&str] = &[
+    "node_modules",
+    "target",
+    "dist",
+    "build",
+    "out",
+    "__pycache__",
+    "vendor",
+];
 
 /// Project files and directories (with a trailing `/`) relative to `root`,
 /// with `/` separators, for `@` mentions.
@@ -173,7 +207,9 @@ fn project_files(root: &std::path::Path) -> Vec<String> {
     let mut files = Vec::new();
     let mut pending = vec![root.to_path_buf()];
     while let Some(dir) = pending.pop() {
-        let Ok(entries) = std::fs::read_dir(&dir) else { continue };
+        let Ok(entries) = std::fs::read_dir(&dir) else {
+            continue;
+        };
         for entry in entries.flatten() {
             let name = entry.file_name().to_string_lossy().into_owned();
             if name.starts_with('.') {
@@ -185,7 +221,10 @@ fn project_files(root: &std::path::Path) -> Vec<String> {
                     if !SKIPPED_DIRS.contains(&name.as_str()) {
                         // Directories can be mentioned too, as in the reference CLI.
                         if let Ok(relative) = path.strip_prefix(root) {
-                            files.push(format!("{}/", relative.to_string_lossy().replace('\\', "/")));
+                            files.push(format!(
+                                "{}/",
+                                relative.to_string_lossy().replace('\\', "/")
+                            ));
                         }
                         pending.push(path);
                     }
@@ -220,7 +259,11 @@ fn mention_matches(files: &[String], query: &str) -> Vec<(String, String)> {
         .iter()
         .filter_map(|file| {
             let lower = file.to_lowercase();
-            let name = lower.trim_end_matches('/').rsplit('/').next().unwrap_or(&lower);
+            let name = lower
+                .trim_end_matches('/')
+                .rsplit('/')
+                .next()
+                .unwrap_or(&lower);
             let rank = if lower.starts_with(&query) {
                 0
             } else if name.starts_with(&query) {
@@ -234,7 +277,11 @@ fn mention_matches(files: &[String], query: &str) -> Vec<(String, String)> {
         })
         .collect();
     found.sort();
-    found.into_iter().take(50).map(|(_, _, file)| (format!("@{file}"), String::new())).collect()
+    found
+        .into_iter()
+        .take(50)
+        .map(|(_, _, file)| (format!("@{file}"), String::new()))
+        .collect()
 }
 
 pub(crate) fn matches(commands: &[(String, String)], text: &str) -> Vec<usize> {
@@ -252,7 +299,11 @@ pub(crate) fn matches(commands: &[(String, String)], text: &str) -> Vec<usize> {
                 0
             } else if name.starts_with(&format!("/{query}")) {
                 1
-            } else if name.split(['-', '_']).skip(1).any(|word| word.starts_with(&query)) {
+            } else if name
+                .split(['-', '_'])
+                .skip(1)
+                .any(|word| word.starts_with(&query))
+            {
                 // A word inside the name: `/auto-mode-setup` for `mo`.
                 2
             } else if name.contains(&query) {
@@ -462,10 +513,7 @@ impl DetailsPanel {
                 .take(frame.viewport)
                 .map(|line| (line.clone(), TextStyle::Plain)),
         );
-        let label = clipped(
-            "Show less (Ctrl+O) \u{00b7} PgUp/PgDn scroll",
-            width,
-        );
+        let label = clipped("Show less (Ctrl+O) \u{00b7} PgUp/PgDn scroll", width);
         frame.toggle = Some(HitTarget {
             row: frame.lines.len(),
             start: 0,
@@ -517,7 +565,11 @@ impl Screen {
     }
     pub(crate) fn draw(&mut self, lines: &[DisplayLine], row: usize, col: usize) -> io::Result<()> {
         // The editor redraws on every poll; an unchanged frame writes nothing.
-        if !self.invalidated && self.previous == lines && self.cursor_row == row && self.cursor_col == col {
+        if !self.invalidated
+            && self.previous == lines
+            && self.cursor_row == row
+            && self.cursor_col == col
+        {
             return Ok(());
         }
         if self.pinned {
@@ -539,7 +591,8 @@ impl Screen {
         self.cursor_col = col;
         let mut out = io::stderr().lock();
         out.write_all(b"\x1b[?2026h")?;
-        let result = self.draw_pinned_to(&mut out, lines, row, col, rows as usize, cursor_y as usize);
+        let result =
+            self.draw_pinned_to(&mut out, lines, row, col, rows as usize, cursor_y as usize);
         out.write_all(b"\x1b[?2026l")?;
         out.flush()?;
         result
@@ -560,7 +613,9 @@ impl Screen {
         let viewport = crate::terminal::prompt_display::viewport(lines.len(), row, rows);
         let dropped = viewport.start;
         let lines = &lines[viewport];
-        let row = row.saturating_sub(dropped).min(lines.len().saturating_sub(1));
+        let row = row
+            .saturating_sub(dropped)
+            .min(lines.len().saturating_sub(1));
         let height = lines.len().max(1);
         let bottom_limit = rows - height;
         // Rows below the old frame's top belong to the frame. Before the first
@@ -569,19 +624,32 @@ impl Screen {
         let anchor = self
             .top
             .map(|old| old as usize)
-            .unwrap_or_else(|| if first { cursor_y } else { cursor_y.saturating_sub(row) })
+            .unwrap_or_else(|| {
+                if first {
+                    cursor_y
+                } else {
+                    cursor_y.saturating_sub(row)
+                }
+            })
             .min(rows - 1);
         let top = bottom_limit;
-        if first { self.transcript_end = Some(anchor); }
+        if first {
+            self.transcript_end = Some(anchor);
+        }
         if anchor > top {
-            self.transcript_end = self.transcript_end.map(|end| end.saturating_sub(anchor - top));
+            self.transcript_end = self
+                .transcript_end
+                .map(|end| end.saturating_sub(anchor - top));
         }
         let repaint = self.invalidated || anchor != top || self.height != height;
         let mut frame = Vec::new();
         if first && self.align_transcript && anchor < top {
             // Move the transcript into unused tail rows with the composer, so
             // completion stays one reserved blank row above the input border.
-            frame.extend_from_slice(crate::terminal::pinned_prompt::scroll_transcript_down(anchor, top - anchor).as_bytes());
+            frame.extend_from_slice(
+                crate::terminal::pinned_prompt::scroll_transcript_down(anchor, top - anchor)
+                    .as_bytes(),
+            );
             self.transcript_end = Some(top);
         }
         if anchor > top {
@@ -594,7 +662,11 @@ impl Screen {
         } else if self.height > height || first || self.invalidated {
             // The frame shrank: erase the rows it no longer covers.
             let clear_from = if first { top } else { anchor.min(top) };
-            queue!(frame, MoveTo(0, clear_from as u16), Clear(ClearType::FromCursorDown))?;
+            queue!(
+                frame,
+                MoveTo(0, clear_from as u16),
+                Clear(ClearType::FromCursorDown)
+            )?;
         }
         for (offset, (text, style)) in lines.iter().enumerate() {
             if !repaint && self.previous.get(offset) == Some(&(text.clone(), *style)) {
@@ -616,8 +688,13 @@ impl Screen {
                         queue!(frame, SetForegroundColor(crate::terminal::style::border()))?
                     }
                     TextStyle::Plain => queue!(frame, ResetColor)?,
-                    TextStyle::Muted => queue!(frame, SetForegroundColor(crate::terminal::style::muted()))?,
-                    TextStyle::Selected => queue!(frame, SetForegroundColor(crate::terminal::style::selected()))?,
+                    TextStyle::Muted => {
+                        queue!(frame, SetForegroundColor(crate::terminal::style::muted()))?
+                    }
+                    TextStyle::Selected => queue!(
+                        frame,
+                        SetForegroundColor(crate::terminal::style::selected())
+                    )?,
                 }
             }
             write!(frame, "{text}")?;
@@ -711,7 +788,11 @@ impl Screen {
         self.invalidated = false;
         Ok(())
     }
-    pub(crate) fn shortcut_popup(&mut self, context: crate::terminal::shortcuts::Context, next: &mut dyn FnMut() -> io::Result<Option<Event>>) -> io::Result<()> {
+    pub(crate) fn shortcut_popup(
+        &mut self,
+        context: crate::terminal::shortcuts::Context,
+        next: &mut dyn FnMut() -> io::Result<Option<Event>>,
+    ) -> io::Result<()> {
         let (cols, rows) = terminal::size().unwrap_or((80, 24));
         // A terminal that does not answer the cursor query still gets the popup.
         let top = self.top.unwrap_or_else(|| {
@@ -721,7 +802,9 @@ impl Screen {
         });
         let mut background = crate::terminal::scrollback::Scrollback::snapshot().screen(top, rows);
         for (index, (text, _)) in self.previous.iter().enumerate() {
-            if let Some(row) = background.get_mut(top as usize + index) { *row = clipped(text, cols as usize); }
+            if let Some(row) = background.get_mut(top as usize + index) {
+                *row = clipped(text, cols as usize);
+            }
         }
         crate::terminal::shortcuts::show(context, &background, next)?;
         self.invalidated = true;
@@ -789,8 +872,10 @@ fn write_notice(
     notice: &str,
     width: usize,
 ) -> io::Result<()> {
-    let safe: String = notice.chars()
-        .filter(|ch| !ch.is_control() || matches!(ch, '\n' | '\t')).collect();
+    let safe: String = notice
+        .chars()
+        .filter(|ch| !ch.is_control() || matches!(ch, '\n' | '\t'))
+        .collect();
     if history.needs_separator() {
         write!(out, "\r\n")?;
         history.push(String::new(), None);
@@ -844,7 +929,9 @@ impl PromptEditor {
     fn preserve_cycle_draft(&mut self, buffer: &Buffer) {
         self.pending_draft = buffer.chars.iter().collect();
         self.pending_cursor = Some(buffer.cursor);
-        self.pending_paste = buffer.pasted.then_some((buffer.paste_start, buffer.paste_end));
+        self.pending_paste = buffer
+            .pasted
+            .then_some((buffer.paste_start, buffer.paste_end));
     }
 
     fn resume_buffer(&mut self) -> Buffer {
@@ -882,7 +969,11 @@ impl PromptEditor {
     pub fn set_shell_counter(&mut self, counter: Box<dyn Fn() -> usize + Send>) {
         self.shell_counter = Some(counter);
     }
-    pub fn set_subagents(&mut self, context: deepseek_code_core::services::ServiceContext, session: String) {
+    pub fn set_subagents(
+        &mut self,
+        context: deepseek_code_core::services::ServiceContext,
+        session: String,
+    ) {
         self.subagent_context = Some((context, session));
     }
 
@@ -978,8 +1069,12 @@ impl PromptEditor {
         // frame below redraws it in place.
         let mut screen = Screen::pinned();
         screen.top = crate::terminal::take_handoff();
-        screen.align_transcript = !above.has_welcome() && !above.all().is_empty()
-            && !self.history.last().is_some_and(|line| line.trim_start().starts_with('/'));
+        screen.align_transcript = !above.has_welcome()
+            && !above.all().is_empty()
+            && !self
+                .history
+                .last()
+                .is_some_and(|line| line.trim_start().starts_with('/'));
         let mut command_overlay = CommandOverlay::default();
         let mut selection = crate::terminal::mouse_selection::Selection::default();
         let mut pinned = crate::terminal::pinned_prompt::PinnedPrompt {
@@ -1047,11 +1142,17 @@ impl PromptEditor {
             }
             if let Some(notices) = &self.notices {
                 while subagents.is_none() {
-                    let Ok(notice) = notices.try_recv() else { break; };
+                    let Ok(notice) = notices.try_recv() else {
+                        break;
+                    };
                     history_view.close()?;
                     screen.finish("", "", &mut above)?;
-                    write_notice(&mut io::stderr(), &mut above, &notice,
-                        terminal::size().map_or(79, |(cols, _)| cols.saturating_sub(1) as usize))?;
+                    write_notice(
+                        &mut io::stderr(),
+                        &mut above,
+                        &notice,
+                        terminal::size().map_or(79, |(cols, _)| cols.saturating_sub(1) as usize),
+                    )?;
                     io::stderr().flush()?;
                     screen = Screen::pinned();
                     screen.align_transcript = !above.has_welcome();
@@ -1069,7 +1170,10 @@ impl PromptEditor {
                 }
             }
             if buffer.chars != last_state.0 {
-                undo.push(std::mem::replace(&mut last_state, (buffer.chars.clone(), buffer.cursor)));
+                undo.push(std::mem::replace(
+                    &mut last_state,
+                    (buffer.chars.clone(), buffer.cursor),
+                ));
                 if undo.len() > 200 {
                     undo.remove(0);
                 }
@@ -1090,7 +1194,9 @@ impl PromptEditor {
             }
             let text = buffer.text();
             let ghost = self.suggestion.clone().filter(|_| buffer.chars.is_empty());
-            let mention_query = mention(&text).filter(|_| buffer.cursor == buffer.chars.len()).map(str::to_owned);
+            let mention_query = mention(&text)
+                .filter(|_| buffer.cursor == buffer.chars.len())
+                .map(str::to_owned);
             let mentioned: Vec<(String, String)> = match (&mention_query, &self.workspace) {
                 (Some(query), Some(root)) if !menu_hidden => {
                     let root = root.clone();
@@ -1099,7 +1205,11 @@ impl PromptEditor {
                 }
                 _ => Vec::new(),
             };
-            let entries: &[(String, String)] = if mention_query.is_some() { &mentioned } else { &self.commands };
+            let entries: &[(String, String)] = if mention_query.is_some() {
+                &mentioned
+            } else {
+                &self.commands
+            };
             let items = if menu_hidden {
                 vec![]
             } else if mention_query.is_some() {
@@ -1110,12 +1220,43 @@ impl PromptEditor {
             selected = selected.min(items.len().saturating_sub(1));
             // Wrap by display cells, never by UTF-8 bytes. Keep cursor in viewport.
             let prompt = clipped(prompt, width.saturating_sub(2));
-            let prefix: String = buffer.chars.iter().skip(buffer.paste_start).take(buffer.paste_end.saturating_sub(buffer.paste_start)).collect();
-            let label = buffer.pasted.then(|| crate::terminal::paste_input::paste_label(&prefix)).flatten().map(|label| format!("{}{}{}", buffer.chars.iter().take(buffer.paste_start).collect::<String>(), label, buffer.chars.iter().skip(buffer.paste_end).collect::<String>()));
-            let shown = label.as_ref().map(|label| label.chars().collect::<Vec<_>>());
+            let prefix: String = buffer
+                .chars
+                .iter()
+                .skip(buffer.paste_start)
+                .take(buffer.paste_end.saturating_sub(buffer.paste_start))
+                .collect();
+            let label = buffer
+                .pasted
+                .then(|| crate::terminal::paste_input::paste_label(&prefix))
+                .flatten()
+                .map(|label| {
+                    format!(
+                        "{}{}{}",
+                        buffer
+                            .chars
+                            .iter()
+                            .take(buffer.paste_start)
+                            .collect::<String>(),
+                        label,
+                        buffer
+                            .chars
+                            .iter()
+                            .skip(buffer.paste_end)
+                            .collect::<String>()
+                    )
+                });
+            let shown = label
+                .as_ref()
+                .map(|label| label.chars().collect::<Vec<_>>());
             let chars = shown.as_ref().unwrap_or(&buffer.chars);
-            let (input_lines, positions) = crate::terminal::prompt_display::layout(&prompt, chars, width.saturating_sub(1));
-            let (cursor_row, cursor_col) = positions[if shown.is_some() { chars.len() } else { buffer.cursor.min(chars.len()) }];
+            let (input_lines, positions) =
+                crate::terminal::prompt_display::layout(&prompt, chars, width.saturating_sub(1));
+            let (cursor_row, cursor_col) = positions[if shown.is_some() {
+                chars.len()
+            } else {
+                buffer.cursor.min(chars.len())
+            }];
             let max_input = (rows as usize / 3).max(1);
             // As in the reference CLI one footer line suffices; a tip helps only
             // before the first prompt.
@@ -1130,7 +1271,8 @@ impl PromptEditor {
             let panel = self.details.render(width, panel_budget);
             let panel_height = panel.lines.len();
             let mut lines = panel.lines;
-            let footer_rows = usize::from(show_tip) + 1 + usize::from(!self.details.entries.is_empty());
+            let footer_rows =
+                usize::from(show_tip) + 1 + usize::from(!self.details.entries.is_empty());
             // Five one-line entries at a time above the input box, as in the
             // reference CLI.
             let available = (rows as usize)
@@ -1138,11 +1280,19 @@ impl PromptEditor {
                 .min(MENU_ROWS);
             let heights = vec![1; items.len()];
             let (start, end) = menu_page(&heights, selected, available);
-            let longest = items[start..end].iter().map(|index| entries[*index].0.width()).max().unwrap_or(0);
+            let longest = items[start..end]
+                .iter()
+                .map(|index| entries[*index].0.width())
+                .max()
+                .unwrap_or(0);
             let name_width = (longest + 2).clamp(12, (width / 3).max(12)).min(width / 2);
             for (position, index) in items.iter().enumerate().take(end).skip(start) {
                 let (name, desc) = &entries[*index];
-                let prefix = if position == selected { "  \u{276f}" } else { "   " };
+                let prefix = if position == selected {
+                    "  \u{276f}"
+                } else {
+                    "   "
+                };
                 let label = clipped(name, name_width);
                 let style = if position == selected {
                     TextStyle::Selected
@@ -1157,20 +1307,49 @@ impl PromptEditor {
                     first.to_owned()
                 };
                 let pad = name_width.saturating_sub(label.width());
-                lines.push((clipped(&format!("{prefix} {label}{}  {description}", " ".repeat(pad)), width), style));
+                lines.push((
+                    clipped(
+                        &format!("{prefix} {label}{}  {description}", " ".repeat(pad)),
+                        width,
+                    ),
+                    style,
+                ));
             }
-            if items.is_empty() && mention_query.is_none() && !menu_hidden && text.len() > 1 && text.starts_with('/') && !text.contains(char::is_whitespace) {
-                lines.push((clipped(&format!("  No commands match \"{text}\""), width), TextStyle::Muted));
+            if items.is_empty()
+                && mention_query.is_none()
+                && !menu_hidden
+                && text.len() > 1
+                && text.starts_with('/')
+                && !text.contains(char::is_whitespace)
+            {
+                lines.push((
+                    clipped(&format!("  No commands match \"{text}\""), width),
+                    TextStyle::Muted,
+                ));
             }
             let command_menu: Vec<DisplayLine> = lines.drain(panel_height..).collect();
             if crate::terminal::TODOS_VISIBLE.load(std::sync::atomic::Ordering::Relaxed) {
                 for (row, done, current) in crate::terminal::todo_rows(&todo_list, width) {
-                    lines.push((row, if done { TextStyle::Muted } else if current { TextStyle::Selected } else { TextStyle::Plain }));
+                    lines.push((
+                        row,
+                        if done {
+                            TextStyle::Muted
+                        } else if current {
+                            TextStyle::Selected
+                        } else {
+                            TextStyle::Plain
+                        },
+                    ));
                 }
             }
             // Keep the same agent panel above the editor between turns.
             let limit = (rows as usize).saturating_sub(10).min(8);
-            lines.extend(agents.iter().take(limit).map(|row| (clipped(row, width), TextStyle::Muted)));
+            lines.extend(
+                agents
+                    .iter()
+                    .take(limit)
+                    .map(|row| (clipped(row, width), TextStyle::Muted)),
+            );
             // Reserved composer spacing, even for new or resumed sessions.
             lines.push((String::new(), TextStyle::Plain));
             let menu_height = lines.len() - panel_height;
@@ -1205,7 +1384,10 @@ impl PromptEditor {
                 if ghost.is_some() {
                     parts.push("tab to accept suggestion".into());
                 }
-                if self.details.entries.is_empty() && !self.transcript.is_empty() && !self.transcript_printed {
+                if self.details.entries.is_empty()
+                    && !self.transcript.is_empty()
+                    && !self.transcript_printed
+                {
                     parts.push("ctrl+o transcript".into());
                 }
                 if let Some(note) = &self.context_note {
@@ -1220,7 +1402,14 @@ impl PromptEditor {
                 }
                 if self.shells > 0 {
                     // Right after the mode label, as in the reference CLI.
-                    parts.insert(1, format!("{} shell{} \u{b7} \u{2193} to manage", self.shells, if self.shells == 1 { "" } else { "s" }));
+                    parts.insert(
+                        1,
+                        format!(
+                            "{} shell{} \u{b7} \u{2193} to manage",
+                            self.shells,
+                            if self.shells == 1 { "" } else { "s" }
+                        ),
+                    );
                 }
                 if kill_hint {
                     parts.push("Ctrl+Y to paste deleted text".into());
@@ -1247,13 +1436,24 @@ impl PromptEditor {
                 } else {
                     parts.join(" \u{b7} ")
                 };
-                match self.effort.as_ref().filter(|label| left.width() + 2 + label.width() <= width) {
-                    Some(label) => format!("{left}{}{label}", " ".repeat(width - left.width() - label.width())),
+                match self
+                    .effort
+                    .as_ref()
+                    .filter(|label| left.width() + 2 + label.width() <= width)
+                {
+                    Some(label) => format!(
+                        "{left}{}{label}",
+                        " ".repeat(width - left.width() - label.width())
+                    ),
                     None => left,
                 }
             };
             let footer = if search.is_none() && !text.starts_with('!') && !text.starts_with("# ") {
-                format!("{} {}", crate::terminal::style::status_mode(&self.permission_mode), self.effort.as_deref().unwrap_or_default())
+                format!(
+                    "{} {}",
+                    crate::terminal::style::status_mode(&self.permission_mode),
+                    self.effort.as_deref().unwrap_or_default()
+                )
             } else {
                 footer
             };
@@ -1262,7 +1462,11 @@ impl PromptEditor {
                 _ => TextStyle::Muted,
             };
             if shortcuts && items.is_empty() && search.is_none() {
-                lines.extend(crate::terminal::style::shortcut_rows(width).into_iter().map(|row| (clipped(&row, width), TextStyle::Muted)));
+                lines.extend(
+                    crate::terminal::style::shortcut_rows(width)
+                        .into_iter()
+                        .map(|row| (clipped(&row, width), TextStyle::Muted)),
+                );
             } else {
                 lines.push((clipped(&footer, width), footer_style));
             }
@@ -1293,22 +1497,29 @@ impl PromptEditor {
             if history_view.active() {
                 history_view.refresh(&[], &above.presentation(), width);
                 let color = std::env::var_os("NO_COLOR").is_none();
-                let composer: Vec<String> = lines.iter().map(|(text, style)| {
-                    let foreground = match style {
-                        TextStyle::Colored(color) => Some(*color),
-                        TextStyle::Accent => Some(crate::terminal::style::accent()),
-                        TextStyle::Success => Some(crate::terminal::style::success()),
-                        TextStyle::Border => Some(crate::terminal::style::border()),
-                        TextStyle::Plain => None,
-                        TextStyle::Muted => Some(crate::terminal::style::muted()),
-                        TextStyle::Selected => Some(crate::terminal::style::selected()),
-                    };
-                    match foreground.filter(|_| color) {
-                        Some(foreground) => format!("{}{text}{}", SetForegroundColor(foreground), ResetColor),
-                        None => text.clone(),
-                    }
-                }).collect();
-                if !selection.retained() { history_view.draw(&composer, input_row, cursor_col, (cols, rows))?; }
+                let composer: Vec<String> = lines
+                    .iter()
+                    .map(|(text, style)| {
+                        let foreground = match style {
+                            TextStyle::Colored(color) => Some(*color),
+                            TextStyle::Accent => Some(crate::terminal::style::accent()),
+                            TextStyle::Success => Some(crate::terminal::style::success()),
+                            TextStyle::Border => Some(crate::terminal::style::border()),
+                            TextStyle::Plain => None,
+                            TextStyle::Muted => Some(crate::terminal::style::muted()),
+                            TextStyle::Selected => Some(crate::terminal::style::selected()),
+                        };
+                        match foreground.filter(|_| color) {
+                            Some(foreground) => {
+                                format!("{}{text}{}", SetForegroundColor(foreground), ResetColor)
+                            }
+                            None => text.clone(),
+                        }
+                    })
+                    .collect();
+                if !selection.retained() {
+                    history_view.draw(&composer, input_row, cursor_col, (cols, rows))?;
+                }
             } else if !selection.retained() {
                 if screen.height == 0 && above.needs_separator() {
                     if let Some(top) = screen.top {
@@ -1328,9 +1539,14 @@ impl PromptEditor {
                     history_view.screen_rows(rows as usize, &composer)
                 } else {
                     let origin = screen.top.unwrap_or(0);
-                    let mut background = above.screen(screen.transcript_end.unwrap_or(origin as usize) as u16, rows);
+                    let mut background = above.screen(
+                        screen.transcript_end.unwrap_or(origin as usize) as u16,
+                        rows,
+                    );
                     for (index, text) in composer.iter().enumerate() {
-                        if let Some(row) = background.get_mut(origin as usize + index) { *row = text.clone(); }
+                        if let Some(row) = background.get_mut(origin as usize + index) {
+                            *row = text.clone();
+                        }
                     }
                     background
                 };
@@ -1345,7 +1561,10 @@ impl PromptEditor {
                     bottom,
                     &background,
                 )?;
-                if !history_view.active() && !crate::terminal::scrollback::compact() && !above.has_welcome() {
+                if !history_view.active()
+                    && !crate::terminal::scrollback::compact()
+                    && !above.has_welcome()
+                {
                     pinned.draw(width, rows as usize, &background)?;
                 }
             }
@@ -1363,9 +1582,11 @@ impl PromptEditor {
             // Remove the overlay before an event can resize, scroll or repaint
             // its background. Otherwise a menu row can enter the transcript.
             command_overlay.draw_to(&mut io::stderr().lock(), &[], 0, &[])?;
-            if matches!(&event, Event::Key(key) if key.kind != KeyEventKind::Release && key.modifiers.contains(KeyModifiers::ALT) && matches!(key.code, KeyCode::Left | KeyCode::Right)) {
+            if matches!(&event, Event::Key(key) if key.kind != KeyEventKind::Release && key.modifiers.contains(KeyModifiers::ALT) && matches!(key.code, KeyCode::Left | KeyCode::Right))
+            {
                 if let Some((context, session)) = &self.subagent_context {
-                    let mut view = crate::terminal::subagents::View::new(context.clone(), session.clone());
+                    let mut view =
+                        crate::terminal::subagents::View::new(context.clone(), session.clone());
                     if !view.event(&event) {
                         history_view.close()?;
                         view.enter()?;
@@ -1381,13 +1602,22 @@ impl PromptEditor {
                     history_view.screen_rows(rows as usize, &composer)
                 } else {
                     let origin = screen.top.unwrap_or(0);
-                    let mut background = above.screen(screen.transcript_end.unwrap_or(origin as usize) as u16, rows);
+                    let mut background = above.screen(
+                        screen.transcript_end.unwrap_or(origin as usize) as u16,
+                        rows,
+                    );
                     for (index, text) in composer.iter().enumerate() {
-                        if let Some(row) = background.get_mut(origin as usize + index) { *row = text.clone(); }
+                        if let Some(row) = background.get_mut(origin as usize + index) {
+                            *row = text.clone();
+                        }
                     }
                     background
                 };
-                crate::terminal::shortcuts::show(crate::terminal::shortcuts::Context::Input, &background, &mut || read_editor_event(&mut input_reader))?;
+                crate::terminal::shortcuts::show(
+                    crate::terminal::shortcuts::Context::Input,
+                    &background,
+                    &mut || read_editor_event(&mut input_reader),
+                )?;
                 screen.invalidated = true;
                 continue;
             }
@@ -1576,7 +1806,10 @@ impl PromptEditor {
                         selection.clear()?;
                         pinned.expanded = false;
                         history_view.refresh(&[], &above.presentation(), width);
-                        history_view.wheel(mouse.kind == MouseEventKind::ScrollUp, (rows as usize).saturating_sub(lines.len()))?;
+                        history_view.wheel(
+                            mouse.kind == MouseEventKind::ScrollUp,
+                            (rows as usize).saturating_sub(lines.len()),
+                        )?;
                         continue;
                     }
                     if history_view.active() {
@@ -1722,7 +1955,11 @@ impl PromptEditor {
                 }
                 Event::Key(key) if key.kind != KeyEventKind::Release => {
                     selection.clear()?;
-                    if buffer.cursor < buffer.paste_end || matches!(key.code, KeyCode::Up | KeyCode::Down | KeyCode::Home) { buffer.pasted = false; }
+                    if buffer.cursor < buffer.paste_end
+                        || matches!(key.code, KeyCode::Up | KeyCode::Down | KeyCode::Home)
+                    {
+                        buffer.pasted = false;
+                    }
                     let key = match self.keybindings.resolve(key, &mut keybinding_pending) {
                         crate::keybindings::Resolution::Key(key) => key,
                         crate::keybindings::Resolution::Consumed => continue,
@@ -1734,7 +1971,9 @@ impl PromptEditor {
                     }
                     let panel_scroll = self.details.expanded
                         && matches!(key.code, KeyCode::PageUp | KeyCode::PageDown);
-                    if !panel_scroll && crate::terminal::transcript_pager::HistoryView::is_navigation(key) {
+                    if !panel_scroll
+                        && crate::terminal::transcript_pager::HistoryView::is_navigation(key)
+                    {
                         history_view.refresh(&[], &above.presentation(), width);
                         history_view.navigate(key, (rows as usize).saturating_sub(lines.len()))?;
                         continue;
@@ -1769,7 +2008,9 @@ impl PromptEditor {
                     }
                     kill_hint = killing && !crate::terminal::killed().is_empty();
                     // Shortcuts from the reference CLI's `?` panel.
-                    if (control && matches!(key.code, KeyCode::Char('_' | '7' | '/' | '-'))) || key.code == KeyCode::Char('\x1f') {
+                    if (control && matches!(key.code, KeyCode::Char('_' | '7' | '/' | '-')))
+                        || key.code == KeyCode::Char('\x1f')
+                    {
                         if let Some((chars, cursor)) = undo.pop() {
                             buffer.chars = chars;
                             buffer.cursor = cursor.min(buffer.chars.len());
@@ -1793,7 +2034,8 @@ impl PromptEditor {
                     }
                     if control && key.code == KeyCode::Char('t') {
                         // As in the reference CLI, ctrl+t shows or hides the tasks.
-                        crate::terminal::TODOS_VISIBLE.fetch_xor(true, std::sync::atomic::Ordering::Relaxed);
+                        crate::terminal::TODOS_VISIBLE
+                            .fetch_xor(true, std::sync::atomic::Ordering::Relaxed);
                         continue;
                     }
                     if control && key.code == KeyCode::Char('y') {
@@ -1826,8 +2068,14 @@ impl PromptEditor {
                         screen = Screen::pinned();
                         continue;
                     }
-                    if key.code == KeyCode::Esc && items.is_empty() && !buffer.chars.is_empty() && !self.vim {
-                        if clear_esc.is_some_and(|at| at.elapsed() < std::time::Duration::from_secs(1)) {
+                    if key.code == KeyCode::Esc
+                        && items.is_empty()
+                        && !buffer.chars.is_empty()
+                        && !self.vim
+                    {
+                        if clear_esc
+                            .is_some_and(|at| at.elapsed() < std::time::Duration::from_secs(1))
+                        {
                             buffer.set("");
                             clear_esc = None;
                         } else {
@@ -1859,7 +2107,11 @@ impl PromptEditor {
                         return Ok(None);
                     }
                     if self.vim && !control {
-                        if vim_normal.is_none() && key.code == KeyCode::Esc && items.is_empty() && !buffer.chars.is_empty() {
+                        if vim_normal.is_none()
+                            && key.code == KeyCode::Esc
+                            && items.is_empty()
+                            && !buffer.chars.is_empty()
+                        {
                             vim_normal = Some(crate::terminal::vim::Normal::default());
                             crate::terminal::vim::leave_insert(&mut buffer.cursor);
                             continue;
@@ -1877,7 +2129,11 @@ impl PromptEditor {
                                 }
                                 Outcome::HistoryNext if history_pos < self.history.len() => {
                                     history_pos += 1;
-                                    buffer.set(if history_pos == self.history.len() { &draft } else { &self.history[history_pos] });
+                                    buffer.set(if history_pos == self.history.len() {
+                                        &draft
+                                    } else {
+                                        &self.history[history_pos]
+                                    });
                                 }
                                 _ => {}
                             }
@@ -1889,10 +2145,12 @@ impl PromptEditor {
                         // [Image #N]. Terminals that paste text themselves send
                         // bracketed paste instead; others pass the key on.
                         match crate::images::paste() {
-                            Some(crate::images::Pasted::Image(placeholder)) => buffer.insert(&placeholder),
+                            Some(crate::images::Pasted::Image(placeholder)) => {
+                                buffer.insert(&placeholder)
+                            }
                             Some(crate::images::Pasted::Text(text)) => {
                                 buffer.pasted = true;
-                    buffer.paste_start = buffer.cursor;
+                                buffer.paste_start = buffer.cursor;
                                 buffer.insert(&text);
                                 buffer.paste_end = buffer.cursor;
                             }
@@ -1911,7 +2169,10 @@ impl PromptEditor {
                         if self.details.entries.is_empty() && !self.transcript.is_empty() {
                             // As in the reference CLI: a full-screen pager over the
                             // whole conversation; `[` prints it into scrollback.
-                            let outcome = crate::terminal::transcript_pager::run(&self.transcript, &mut || read_editor_event(&mut input_reader))?;
+                            let outcome = crate::terminal::transcript_pager::run(
+                                &self.transcript,
+                                &mut || read_editor_event(&mut input_reader),
+                            )?;
                             screen.invalidated = true;
                             self.transcript_printed = true;
                             if matches!(outcome, crate::terminal::transcript_pager::Outcome::Closed)
@@ -1925,7 +2186,9 @@ impl PromptEditor {
                             let color = std::env::var_os("NO_COLOR").is_none();
                             let mut text = String::from("\x1b[?2026h");
                             for line in &self.transcript {
-                                text.push_str(&crate::terminal::change_view::render(line, width, color));
+                                text.push_str(&crate::terminal::change_view::render(
+                                    line, width, color,
+                                ));
                                 text.push_str("\r\n");
                             }
                             text.push_str("\x1b[?2026l");
@@ -1986,9 +2249,10 @@ impl PromptEditor {
                         }
                         continue;
                     }
-                    if let Some(suggestion) = ghost.as_ref().filter(|_| {
-                        matches!(key.code, KeyCode::Tab | KeyCode::Right) && !control
-                    }) {
+                    if let Some(suggestion) = ghost
+                        .as_ref()
+                        .filter(|_| matches!(key.code, KeyCode::Tab | KeyCode::Right) && !control)
+                    {
                         buffer.insert(suggestion);
                         self.suggestion = None;
                         continue;
@@ -2025,7 +2289,10 @@ impl PromptEditor {
                             if text.trim() == "/subagents" {
                                 if let Some((context, session)) = &self.subagent_context {
                                     history_view.close()?;
-                                    let mut view = crate::terminal::subagents::View::new(context.clone(), session.clone());
+                                    let mut view = crate::terminal::subagents::View::new(
+                                        context.clone(),
+                                        session.clone(),
+                                    );
                                     view.enter()?;
                                     subagents = Some(view);
                                     buffer.set("");
@@ -2071,7 +2338,13 @@ impl PromptEditor {
                         KeyCode::Down if !items.is_empty() => {
                             selected = (selected + 1) % items.len()
                         }
-                        KeyCode::Up | KeyCode::Down if items.is_empty() && vertical_move(&mut buffer, &prompt, key.code == KeyCode::Down) => {}
+                        KeyCode::Up | KeyCode::Down
+                            if items.is_empty()
+                                && vertical_move(
+                                    &mut buffer,
+                                    &prompt,
+                                    key.code == KeyCode::Down,
+                                ) => {}
                         KeyCode::Up => {
                             if history_pos == self.history.len() {
                                 draft = buffer.text();
@@ -2158,7 +2431,14 @@ mod mention_tests {
     #[test]
     fn mentions_complete_project_files_and_skip_build_output() {
         let dir = tempfile::tempdir().unwrap();
-        for file in ["src/main.rs", "src/lib.rs", "README.md", "node_modules/x/index.js", ".git/config", "target/debug/app"] {
+        for file in [
+            "src/main.rs",
+            "src/lib.rs",
+            "README.md",
+            "node_modules/x/index.js",
+            ".git/config",
+            "target/debug/app",
+        ] {
             let path = dir.path().join(file);
             std::fs::create_dir_all(path.parent().unwrap()).unwrap();
             std::fs::write(path, "").unwrap();
@@ -2170,7 +2450,10 @@ mod mention_tests {
         let found = mention_matches(&files, "ma");
         assert_eq!(found[0].0, "@src/main.rs");
         // The directory comes first, then what it holds.
-        let names: Vec<String> = mention_matches(&files, "src").into_iter().map(|(name, _)| name).collect();
+        let names: Vec<String> = mention_matches(&files, "src")
+            .into_iter()
+            .map(|(name, _)| name)
+            .collect();
         assert_eq!(names, ["@src/", "@src/lib.rs", "@src/main.rs"]);
     }
 }
@@ -2190,27 +2473,21 @@ mod tests {
         let first = editor.readline("❯ ").unwrap();
         assert!(matches!(first, Some(super::super::PromptEvent::Line(_))));
         let history = crate::terminal::scrollback::Scrollback::snapshot();
-        assert!(
-            history
-                .all()
-                .iter()
-                .any(|row| row.contains("FIRST_INPUT_00"))
-        );
-        assert!(
-            history
-                .all()
-                .iter()
-                .any(|row| row.contains("click to expand"))
-        );
+        assert!(history
+            .all()
+            .iter()
+            .any(|row| row.contains("FIRST_INPUT_00")));
+        assert!(history
+            .all()
+            .iter()
+            .any(|row| row.contains("click to expand")));
         editor.set_draft("SECOND_INPUT".into());
         editor.readline("❯ ").unwrap();
         let history = crate::terminal::scrollback::Scrollback::snapshot();
-        assert!(
-            history
-                .all()
-                .iter()
-                .any(|row| row.contains("FIRST_INPUT_00"))
-        );
+        assert!(history
+            .all()
+            .iter()
+            .any(|row| row.contains("FIRST_INPUT_00")));
         assert!(history.all().iter().any(|row| row.contains("SECOND_INPUT")));
         editor.readline("❯ ").unwrap();
     }
@@ -2218,13 +2495,20 @@ mod tests {
     fn slash_menu_overlay_restores_background_without_scrolling() {
         let mut overlay = CommandOverlay::default();
         let background: Vec<String> = (0..24).map(|i| format!("message {i}")).collect();
-        let menu = vec![("/help".into(), TextStyle::Selected), ("/resume".into(), TextStyle::Muted)];
+        let menu = vec![
+            ("/help".into(), TextStyle::Selected),
+            ("/resume".into(), TextStyle::Muted),
+        ];
         let mut output = Vec::new();
-        overlay.draw_to(&mut output, &menu, 20, &background).unwrap();
+        overlay
+            .draw_to(&mut output, &menu, 20, &background)
+            .unwrap();
         assert!(!output.contains(&b'\n'));
         assert_eq!(overlay.top, 18);
         output.clear();
-        overlay.draw_to(&mut output, &menu, 20, &background).unwrap();
+        overlay
+            .draw_to(&mut output, &menu, 20, &background)
+            .unwrap();
         assert!(output.is_empty());
         overlay.draw_to(&mut output, &[], 0, &[]).unwrap();
         let output = String::from_utf8(output).unwrap();
@@ -2352,14 +2636,24 @@ mod tests {
     fn handoff_anchor_survives_an_unrelated_cursor_move_and_notices_are_recorded() {
         let mut screen = Screen::pinned();
         screen.top = Some(20);
-        screen.draw_pinned_to(&mut Vec::new(), &frame_lines(), 1, 3, 36, 0).unwrap();
+        screen
+            .draw_pinned_to(&mut Vec::new(), &frame_lines(), 1, 3, 36, 0)
+            .unwrap();
         assert_eq!(screen.transcript_end, Some(20));
         let mut history = crate::terminal::scrollback::Scrollback::default();
         history.push("Previous answer".into(), None);
         let mut output = Vec::new();
-        write_notice(&mut output, &mut history, "Agent sender · queued\n中文 body\nsecond line", 80).unwrap();
-        assert_eq!(history.all().join("\r\n") + "\r\n",
-            "Previous answer\r\n".to_owned() + &String::from_utf8(output).unwrap());
+        write_notice(
+            &mut output,
+            &mut history,
+            "Agent sender · queued\n中文 body\nsecond line",
+            80,
+        )
+        .unwrap();
+        assert_eq!(
+            history.all().join("\r\n") + "\r\n",
+            "Previous answer\r\n".to_owned() + &String::from_utf8(output).unwrap()
+        );
     }
 
     #[test]
@@ -2394,7 +2688,9 @@ mod tests {
     fn command_selection_anchors_to_output_before_bottom_padding() {
         let mut screen = Screen::pinned();
         screen.align_transcript = false;
-        screen.draw_pinned_to(&mut Vec::new(), &frame_lines(), 1, 3, 36, 20).unwrap();
+        screen
+            .draw_pinned_to(&mut Vec::new(), &frame_lines(), 1, 3, 36, 20)
+            .unwrap();
         let mut history = crate::terminal::scrollback::Scrollback::default();
         history.push("Python".into(), None);
         history.push("TypeScript".into(), None);
@@ -2410,12 +2706,18 @@ mod tests {
         let mut screen = Screen::pinned();
         screen.align_transcript = true;
         let lines = frame_lines();
-        screen.draw_pinned_to(&mut Vec::new(), &lines, 1, 3, 30, 2).unwrap();
+        screen
+            .draw_pinned_to(&mut Vec::new(), &lines, 1, 3, 30, 2)
+            .unwrap();
         assert_eq!(screen.transcript_end, Some(26));
-        screen.draw_pinned_to(&mut Vec::new(), &lines, 1, 4, 30, 27).unwrap();
+        screen
+            .draw_pinned_to(&mut Vec::new(), &lines, 1, 4, 30, 27)
+            .unwrap();
         assert_eq!(screen.transcript_end, Some(26));
         let mut screen = Screen::pinned();
-        screen.draw_pinned_to(&mut Vec::new(), &lines, 1, 3, 10, 9).unwrap();
+        screen
+            .draw_pinned_to(&mut Vec::new(), &lines, 1, 3, 10, 9)
+            .unwrap();
         assert_eq!(screen.transcript_end, Some(6));
     }
 
@@ -2428,7 +2730,9 @@ mod tests {
         let mut screen = Screen::pinned();
         screen.align_transcript = true;
         let mut output = Vec::new();
-        screen.draw_pinned_to(&mut output, &lines, 2, 3, 12, 2).unwrap();
+        screen
+            .draw_pinned_to(&mut output, &lines, 2, 3, 12, 2)
+            .unwrap();
         terminal.process(&output);
         let rows: Vec<_> = terminal.screen().rows(0, 40).collect();
         assert_eq!(rows[5], "reply");
@@ -2437,7 +2741,9 @@ mod tests {
         assert_eq!(rows[8], lines[1].0);
         assert_eq!(rows[11], lines[4].0);
         output.clear();
-        screen.draw_pinned_to(&mut output, &lines, 2, 4, 12, 9).unwrap();
+        screen
+            .draw_pinned_to(&mut output, &lines, 2, 4, 12, 9)
+            .unwrap();
         terminal.process(&output);
         assert_eq!(terminal.screen().rows(0, 40).collect::<Vec<_>>(), rows);
     }
@@ -2449,13 +2755,24 @@ mod tests {
         let lines = frame_lines();
         let mut output = Vec::new();
         // Move the short transcript down into the otherwise unused tail rows.
-        screen.draw_pinned_to(&mut output, &lines, 1, 3, 10, 2).unwrap();
+        screen
+            .draw_pinned_to(&mut output, &lines, 1, 3, 10, 2)
+            .unwrap();
         let output = String::from_utf8(output).unwrap();
-        assert!(output.contains("\x1b[4T"), "transcript follows the composer into unused rows");
-        assert!(output.contains("\x1b[7;1H"), "first line is pinned above the footer");
+        assert!(
+            output.contains("\x1b[4T"),
+            "transcript follows the composer into unused rows"
+        );
+        assert!(
+            output.contains("\x1b[7;1H"),
+            "first line is pinned above the footer"
+        );
         assert!(output.contains("\x1b[10;1H"), "footer occupies bottom row");
         assert!(output.ends_with("\x1b[8;4H"), "cursor on the input row");
-        assert!(!output.contains("\r\n"), "nothing scrolls when it already fits");
+        assert!(
+            !output.contains("\r\n"),
+            "nothing scrolls when it already fits"
+        );
         assert_eq!(screen.top, Some(6));
     }
 
@@ -2466,15 +2783,25 @@ mod tests {
         let mut screen = Screen::pinned();
         let lines = frame_lines();
         let mut output = Vec::new();
-        screen.draw_pinned_to(&mut output, &lines, 1, 3, 24, 2).unwrap();
+        screen
+            .draw_pinned_to(&mut output, &lines, 1, 3, 24, 2)
+            .unwrap();
         terminal.process(&output);
-        assert_eq!(terminal.screen().rows(0, 80).next().unwrap(), "DeepSeek Code");
+        assert_eq!(
+            terminal.screen().rows(0, 80).next().unwrap(),
+            "DeepSeek Code"
+        );
         let original: Vec<_> = terminal.screen().rows(0, 80).collect();
         let mut overlay = CommandOverlay::default();
-        let menu = vec![("/add-dir".into(), TextStyle::Selected), ("/agents".into(), TextStyle::Muted)];
+        let menu = vec![
+            ("/add-dir".into(), TextStyle::Selected),
+            ("/agents".into(), TextStyle::Muted),
+        ];
         for bottom in [20, 19, 20] {
             output.clear();
-            overlay.draw_to(&mut output, &menu, bottom, &original).unwrap();
+            overlay
+                .draw_to(&mut output, &menu, bottom, &original)
+                .unwrap();
             terminal.process(&output);
             assert_eq!(terminal.screen().contents().matches("/add-dir").count(), 1);
             output.clear();
@@ -2489,14 +2816,21 @@ mod tests {
     fn growing_pinned_prompt_scrolls_only_the_rows_it_overshoots() {
         let mut screen = Screen::pinned();
         let mut lines = frame_lines();
-        screen.draw_pinned_to(&mut Vec::new(), &lines, 1, 3, 10, 9).unwrap();
+        screen
+            .draw_pinned_to(&mut Vec::new(), &lines, 1, 3, 10, 9)
+            .unwrap();
         lines.push(("/status".into(), TextStyle::Muted));
         let mut output = Vec::new();
-        screen.draw_pinned_to(&mut output, &lines, 1, 3, 10, 9).unwrap();
+        screen
+            .draw_pinned_to(&mut output, &lines, 1, 3, 10, 9)
+            .unwrap();
         let output = String::from_utf8(output).unwrap();
         assert_eq!(output.matches("\r\n").count(), 1);
         assert!(output.starts_with("\x1b[10;1H\r\n"));
-        assert!(output.contains("\x1b[6;1H"), "the taller frame starts a row up");
+        assert!(
+            output.contains("\x1b[6;1H"),
+            "the taller frame starts a row up"
+        );
         assert_eq!(screen.top, Some(5));
     }
 
@@ -2504,12 +2838,19 @@ mod tests {
     fn shrinking_pinned_prompt_erases_the_rows_it_leaves() {
         let mut screen = Screen::pinned();
         let mut lines = frame_lines();
-        screen.draw_pinned_to(&mut Vec::new(), &lines, 1, 3, 10, 9).unwrap();
+        screen
+            .draw_pinned_to(&mut Vec::new(), &lines, 1, 3, 10, 9)
+            .unwrap();
         lines.pop();
         let mut output = Vec::new();
-        screen.draw_pinned_to(&mut output, &lines, 1, 3, 10, 9).unwrap();
+        screen
+            .draw_pinned_to(&mut output, &lines, 1, 3, 10, 9)
+            .unwrap();
         let output = String::from_utf8(output).unwrap();
-        assert!(output.starts_with("\x1b[7;1H\x1b[J"), "shrinking clears the old frame without moving the transcript");
+        assert!(
+            output.starts_with("\x1b[7;1H\x1b[J"),
+            "shrinking clears the old frame without moving the transcript"
+        );
         assert_eq!(output.matches("\x1b[K").count(), 3);
         assert!(!output.contains("\r\n"));
         assert_eq!(screen.top, Some(7));
@@ -2526,7 +2867,9 @@ mod tests {
         for rows in 1..=3 {
             let mut screen = Screen::pinned();
             let mut output = Vec::new();
-            screen.draw_pinned_to(&mut output, &lines, 1, 4, rows, 0).unwrap();
+            screen
+                .draw_pinned_to(&mut output, &lines, 1, 4, rows, 0)
+                .unwrap();
             let output = String::from_utf8(output).unwrap();
             assert!(output.contains("INPUT_SENTINEL"));
             let input_row = if rows == 1 { 1 } else { 2 };
@@ -2539,10 +2882,15 @@ mod tests {
         let mut screen = Screen::pinned();
         let lines = vec![("row".into(), TextStyle::Plain); 12];
         let mut output = Vec::new();
-        screen.draw_pinned_to(&mut output, &lines, 11, 0, 10, 9).unwrap();
+        screen
+            .draw_pinned_to(&mut output, &lines, 11, 0, 10, 9)
+            .unwrap();
         let output = String::from_utf8(output).unwrap();
         assert!(output.contains("\x1b[1;1H"), "the frame fills the screen");
-        assert!(!output.contains("\x1b[11;1H"), "rows past the screen are dropped");
+        assert!(
+            !output.contains("\x1b[11;1H"),
+            "rows past the screen are dropped"
+        );
         assert!(output.ends_with("\x1b[10;1H"));
         assert_eq!(screen.top, Some(0));
     }
@@ -2558,11 +2906,35 @@ mod tests {
         assert_eq!(matches(&commands, "/model"), vec![1, 2, 0]);
         // The reference order for `/co` and `/mo`: shortest prefix matches
         // first, then names containing the text, then letters in order.
-        let names = ["/compact", "/context", "/config", "/color", "/copy", "/model", "/mobile", "/memory", "/auto-mode-setup"];
-        let commands: Vec<(String, String)> = names.iter().map(|name| (name.to_string(), String::new())).collect();
-        let order = |text| matches(&commands, text).into_iter().map(|index| names[index]).collect::<Vec<_>>();
-        assert_eq!(order("/co"), ["/copy", "/color", "/config", "/compact", "/context"]);
-        assert_eq!(order("/mo"), ["/model", "/mobile", "/auto-mode-setup", "/memory"]);
+        let names = [
+            "/compact",
+            "/context",
+            "/config",
+            "/color",
+            "/copy",
+            "/model",
+            "/mobile",
+            "/memory",
+            "/auto-mode-setup",
+        ];
+        let commands: Vec<(String, String)> = names
+            .iter()
+            .map(|name| (name.to_string(), String::new()))
+            .collect();
+        let order = |text| {
+            matches(&commands, text)
+                .into_iter()
+                .map(|index| names[index])
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(
+            order("/co"),
+            ["/copy", "/color", "/config", "/compact", "/context"]
+        );
+        assert_eq!(
+            order("/mo"),
+            ["/model", "/mobile", "/auto-mode-setup", "/memory"]
+        );
         assert_eq!(order("/")[..3], ["/auto-mode-setup", "/color", "/compact"]);
         // Scattered letters elsewhere in a long name are no match.
         let skill = vec![("/synced:54534282-ab-x9x".to_string(), String::new())];
@@ -2682,24 +3054,39 @@ fn external_editor() -> String {
     std::env::var("VISUAL")
         .or_else(|_| std::env::var("EDITOR"))
         .ok()
-        .and_then(|editor| editor.split_whitespace().next().map(|name| name.rsplit(['/', '\\']).next().unwrap_or(name).to_owned()))
+        .and_then(|editor| {
+            editor
+                .split_whitespace()
+                .next()
+                .map(|name| name.rsplit(['/', '\\']).next().unwrap_or(name).to_owned())
+        })
         .unwrap_or_else(|| "vi".into())
 }
 
 /// Ctrl+G: the input in an external editor, as in the reference CLI.
 pub(crate) fn edit_externally(text: &str) -> io::Result<String> {
     use std::io::Write as _;
-    let mut file = tempfile::Builder::new().prefix("dcl-prompt-").suffix(".md").tempfile()?;
+    let mut file = tempfile::Builder::new()
+        .prefix("dcl-prompt-")
+        .suffix(".md")
+        .tempfile()?;
     file.write_all(text.as_bytes())?;
     file.flush()?;
-    let editor = std::env::var("VISUAL").or_else(|_| std::env::var("EDITOR")).unwrap_or_else(|_| "vi".into());
+    let editor = std::env::var("VISUAL")
+        .or_else(|_| std::env::var("EDITOR"))
+        .unwrap_or_else(|_| "vi".into());
     let mut parts = editor.split_whitespace();
     let program = parts.next().unwrap_or("vi").to_owned();
     terminal::disable_raw_mode()?;
-    let status = std::process::Command::new(&program).args(parts).arg(file.path()).status();
+    let status = std::process::Command::new(&program)
+        .args(parts)
+        .arg(file.path())
+        .status();
     terminal::enable_raw_mode()?;
     match status {
-        Ok(_) => Ok(std::fs::read_to_string(file.path())?.trim_end_matches('\n').to_owned()),
+        Ok(_) => Ok(std::fs::read_to_string(file.path())?
+            .trim_end_matches('\n')
+            .to_owned()),
         Err(error) => {
             eprint!("Could not open {program}: {error}\r\n");
             Ok(text.to_owned())
@@ -2713,7 +3100,10 @@ fn suspend_process() -> io::Result<()> {
     eprintln!("DeepSeek Code has been suspended. Run `fg` to bring DeepSeek Code back.");
     #[cfg(unix)]
     {
-        let _ = std::process::Command::new("kill").arg("-TSTP").arg(std::process::id().to_string()).status();
+        let _ = std::process::Command::new("kill")
+            .arg("-TSTP")
+            .arg(std::process::id().to_string())
+            .status();
     }
     terminal::enable_raw_mode()?;
     Ok(())
