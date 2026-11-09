@@ -194,9 +194,10 @@ async fn simultaneous_sessions_children_and_cancellation_do_not_leak_identity() 
         TurnIdentity::new(Some("cancelled".into()), None).scope(std::future::pending::<()>()),
     )
     .await;
-    assert!(!RequestIdentity::new(None)
-        .headers()
-        .contains_key("session-id"));
+    let headers = RequestIdentity::new(None).headers();
+    assert!(!headers.contains_key("session-id"));
+    // Outside a conversation the routing session falls back to the request ID.
+    assert_eq!(headers["x-opencode-session"], headers["x-request-id"]);
 }
 
 #[test]

@@ -54,10 +54,10 @@ pub(super) fn metadata(provider: &ResolvedProvider) -> Result<(&'static Value, &
     Ok((entry, model))
 }
 
-/// The catalog model's base URL wins when the provider did not override the
-/// entry's base (empty or unchanged), so gateways can route each model itself.
-fn select_base_url<'a>(configured: &'a str, entry: &'a Value, model: &'a Value) -> &'a str {
-    if configured.is_empty()
+/// A provider without its own base URL uses the model's catalog URL, so one
+/// built-in entry can serve several protocol endpoints (OpenCode Go).
+fn resolved_base<'a>(configured: &'a str, entry: &'a Value, model: &'a Value) -> &'a str {
+    let base = if configured.is_empty()
         || Some(configured) == entry["baseUrl"].as_str().map(|s| s.trim_end_matches('/'))
     {
         model["baseUrl"]
@@ -66,7 +66,8 @@ fn select_base_url<'a>(configured: &'a str, entry: &'a Value, model: &'a Value) 
             .unwrap_or(configured)
     } else {
         configured
-    }
+    };
+    base.trim_end_matches('/')
 }
 
 pub async fn stream(
@@ -143,7 +144,7 @@ pub async fn stream_with_schema_observed(
     } else {
         String::new()
     };
-    let base = select_base_url(configured, entry, model).trim_end_matches('/');
+    let base = resolved_base(configured, entry, model);
     let base = if protocol == "bedrock-converse-stream"
         && (configured.is_empty() || configured.contains(".amazonaws.com"))
     {

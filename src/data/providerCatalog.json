@@ -13825,6 +13825,25 @@
           "compat": {
             "sessionAffinityFormat": "openai-nosession"
           }
+        },
+        {
+          "id": "longcat-2.5-free",
+          "name": "LongCat 2.5 Free",
+          "enabled": true,
+          "contextWindow": 1000000,
+          "maxTokens": 262144,
+          "inputTypes": [
+            "text",
+            "image"
+          ],
+          "api": "openai-completions",
+          "reasoning": true,
+          "baseUrl": "https://opencode.ai/inference/go/openai/v1",
+          "compat": {
+            "supportsStore": false,
+            "supportsDeveloperRole": false,
+            "maxTokensField": "max_tokens"
+          }
         }
       ]
     },

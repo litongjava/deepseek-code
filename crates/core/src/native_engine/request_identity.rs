@@ -86,8 +86,10 @@ impl RequestIdentity {
             .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
         set("x-request-id", &request_id);
         set("x-client-request-id", &request_id);
+        let mut has_opencode_session = false;
         let _ = TURN.try_with(|identity| {
             if let Some(session) = &identity.session {
+                has_opencode_session = true;
                 for name in [
                     "x-session-id",
                     "session-id",
@@ -103,6 +105,11 @@ impl RequestIdentity {
             }
             set("x-dcl-turn-id", &identity.turn);
         });
+        // OpenCode Go requires a routing session on every request, including
+        // connection tests that run before a conversation exists.
+        if !has_opencode_session {
+            set("x-opencode-session", &request_id);
+        }
         Self {
             headers,
             attempt: AtomicU32::new(0),

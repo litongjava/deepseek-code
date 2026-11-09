@@ -435,8 +435,8 @@ async fn native_protocol_matrix_uses_correct_endpoints_headers_and_payloads() {
 }
 
 #[test]
-fn opencode_go_catalog_selects_each_model_protocol_and_base_url() {
-    let entry = catalog_entry("opencode-go").expect("opencode-go catalog entry");
+fn opencode_go_models_take_their_base_url_and_protocol_from_the_catalog() {
+    let entry = catalog_entry("opencode-go").expect("the opencode-go catalog entry");
     assert_eq!(entry["baseUrl"], "");
     let model = |id: &str| {
         entry["models"]
@@ -444,22 +444,35 @@ fn opencode_go_catalog_selects_each_model_protocol_and_base_url() {
             .unwrap()
             .iter()
             .find(|model| model["id"] == id)
-            .unwrap_or_else(|| panic!("opencode-go has no {id} model"))
+            .unwrap_or_else(|| panic!("{id} is missing from the opencode-go catalog"))
     };
-    for (id, api, base) in [
-        ("deepseek-v4.1-flash", "openai-completions", "https://opencode.ai/inference/go/openai/v1"),
-        ("gpt-6-luna", "openai-responses", "https://opencode.ai/inference/go/openai/v1"),
-        ("claude-haiku-5-5", "anthropic-messages", "https://opencode.ai/inference/go/anthropic/v1"),
-        ("gemini-4-argon", "google-generative-ai", "https://opencode.ai/inference/go/google/v1beta"),
-    ] {
-        let model = model(id);
-        assert_eq!(model["api"], api, "{id}");
-        assert_eq!(select_base_url("", entry, model), base, "{id}");
-    }
-    // An explicitly configured URL (a proxy or a test server) still wins.
     let chat = model("deepseek-v4.1-flash");
+    assert_eq!(chat["api"], "openai-completions");
     assert_eq!(
-        select_base_url("http://127.0.0.1:9", entry, chat),
-        "http://127.0.0.1:9"
+        format!("{}/chat/completions", resolved_base("", entry, chat)),
+        "https://opencode.ai/inference/go/openai/v1/chat/completions"
+    );
+    let responses = model("gpt-6-luna");
+    assert_eq!(responses["api"], "openai-responses");
+    assert_eq!(
+        resolved_base("", entry, responses),
+        "https://opencode.ai/inference/go/openai/v1"
+    );
+    let messages = model("claude-haiku-5-5");
+    assert_eq!(messages["api"], "anthropic-messages");
+    assert_eq!(
+        resolved_base("", entry, messages),
+        "https://opencode.ai/inference/go/anthropic/v1"
+    );
+    let google = model("gemini-4-argon");
+    assert_eq!(google["api"], "google-generative-ai");
+    assert_eq!(
+        resolved_base("", entry, google),
+        "https://opencode.ai/inference/go/google/v1beta"
+    );
+    // An explicit gateway or mock address still wins.
+    assert_eq!(
+        resolved_base("http://127.0.0.1:9/v1", entry, chat),
+        "http://127.0.0.1:9/v1"
     );
 }

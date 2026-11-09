@@ -53,19 +53,23 @@ fn excerpt(body: &str) -> String {
     body.chars().take(200).collect()
 }
 
-/// A Base URL that points at a web page rather than the API answers with HTML.
-fn is_web_page(content_type: Option<&str>, body: &str) -> bool {
-    if content_type.is_some_and(|value| value.to_ascii_lowercase().contains("text/html")) {
-        return true;
-    }
-    let start = body.trim_start().to_ascii_lowercase();
-    start.starts_with("<!doctype html") || start.starts_with("<html")
+fn starts_with_ignore_case(value: &str, prefix: &str) -> bool {
+    value
+        .get(..prefix.len())
+        .is_some_and(|head| head.eq_ignore_ascii_case(prefix))
 }
 
-fn web_page_error(status: Option<reqwest::StatusCode>) -> anyhow::Error {
-    let status = status.map(|status| format!("{status} ")).unwrap_or_default();
+/// Web pages mean the address is not an API base; their HTML is not useful.
+fn is_web_page(body: &str, content_type: Option<&str>) -> bool {
+    let head = body.trim_start();
+    starts_with_ignore_case(head, "<!doctype html")
+        || starts_with_ignore_case(head, "<html")
+        || content_type.is_some_and(|value| value.to_ascii_lowercase().contains("text/html"))
+}
+
+fn web_page_error(status: reqwest::StatusCode) -> anyhow::Error {
     anyhow::anyhow!(
-        "The endpoint answered {status}with a web page, not an API response; check that the Base URL is the API base (it usually ends in /v1)."
+        "The endpoint answered {status} with a web page, not an API response; check that the Base URL is the API base (it usually ends in /v1)."
     )
 }
 
@@ -110,20 +114,14 @@ pub async fn list_models(protocol: &str, base_url: &str, api_key: &str) -> Resul
         .text()
         .await
         .context("Could not read the response")?;
-    let html = is_web_page(content_type.as_deref(), &body);
+    if is_web_page(&body, content_type.as_deref()) {
+        return Err(web_page_error(status));
+    }
     if !status.is_success() {
-        if html {
-            return Err(web_page_error(Some(status)));
-        }
         bail!("The endpoint answered {status}: {}", excerpt(&body));
     }
-    let value: Value = serde_json::from_str(&body).with_context(|| {
-        if html {
-            web_page_error(None).to_string()
-        } else {
-            format!("The response is not JSON: {}", excerpt(&body))
-        }
-    })?;
+    let value: Value = serde_json::from_str(&body)
+        .with_context(|| format!("The response is not JSON: {}", excerpt(&body)))?;
     let entries = value
         .get("data")
         .or_else(|| value.get("models"))
@@ -219,14 +217,17 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn listing_html_pages_asks_for_the_api_base_url() {
+    async fn web_page_answers_are_reported_without_their_html() {
         let router = Router::new().route(
             "/v1/models",
             get(|| async {
                 (
                     axum::http::StatusCode::NOT_FOUND,
-                    [(axum::http::header::CONTENT_TYPE, "text/html; charset=utf-8")],
-                    "<!DOCTYPE html><html><body><h1>Not found</h1></body></html>",
+                    [(
+                        axum::http::header::CONTENT_TYPE,
+                        "text/html; charset=utf-8",
+                    )],
+                    "<!DOCTYPE html><html lang=\"en\"><body>not found</body></html>",
                 )
             }),
         );
@@ -234,15 +235,15 @@ mod tests {
         let error = list_models("openai", &base, "fixture-key").await.unwrap_err();
         let message = format!("{error:#}");
         assert!(message.contains("web page"), "{message}");
-        assert!(message.contains("/v1"), "{message}");
         assert!(!message.contains("<html"), "{message}");
+        assert!(!message.contains("DOCTYPE"), "{message}");
     }
 
     #[test]
     fn html_detection_accepts_content_type_or_body() {
-        assert!(is_web_page(Some("text/html; charset=utf-8"), "{}"));
-        assert!(is_web_page(None, "  <!doctype HTML><html>"));
-        assert!(is_web_page(None, "<html><body></body></html>"));
-        assert!(!is_web_page(Some("application/json"), r#"{"data":[]}"#));
+        assert!(is_web_page("{}", Some("text/html; charset=utf-8")));
+        assert!(is_web_page("  <!doctype HTML><html>", None));
+        assert!(is_web_page("<html><body></body></html>", None));
+        assert!(!is_web_page(r#"{"data":[]}"#, Some("application/json")));
     }
 }

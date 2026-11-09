@@ -435,8 +435,17 @@ pub async fn wizard(
         match verify(paths, &id, &models[0]).await {
             Ok(()) => command_eprintln!("Connected with {}.", models[0]),
             Err(error) => {
-                command_eprintln!("The connection test failed: {error:#}");
+                let detail = format!("{error:#}");
+                command_eprintln!("The connection test failed: {detail}");
                 command_eprintln!("{id} is saved; fix it with /provider edit {id}.");
+                // A gateway can serve a model list while refusing one model in
+                // this region; that is not something the URL or key can fix.
+                if detail.to_ascii_lowercase().contains("region") {
+                    command_eprintln!(
+                        "{} is not available in this region; pick another model with /provider edit {id}.",
+                        models[0]
+                    );
+                }
             }
         }
     }

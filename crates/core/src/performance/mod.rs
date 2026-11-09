@@ -371,7 +371,7 @@ fn lookup<'a>(value: &'a serde_json::Value, path: &[&str]) -> Option<&'a str> {
 
 /// Project error identifiers, shared by the major providers. A value that is not
 /// on this list is treated as free text and never reproduced.
-const KNOWN_ERROR_IDENTIFIERS: [&str; 26] = [
+const KNOWN_ERROR_IDENTIFIERS: [&str; 29] = [
     "invalid_request_error",
     "invalid_request",
     "authentication_error",
@@ -379,6 +379,8 @@ const KNOWN_ERROR_IDENTIFIERS: [&str; 26] = [
     "unauthenticated",
     "permission_error",
     "permission_denied",
+    "unsupported_country_region_territory",
+    "regionerror",
     "not_found_error",
     "model_not_found",
     "not_found",
@@ -398,6 +400,7 @@ const KNOWN_ERROR_IDENTIFIERS: [&str; 26] = [
     "unavailable",
     "resource_exhausted",
     "failed_precondition",
+    "missingsessionid",
 ];
 
 fn known_error_identifier(text: &str) -> Option<&'static str> {
@@ -417,6 +420,13 @@ fn remote_error_category(text: &str) -> Option<&'static str> {
     let lower = text.to_ascii_lowercase();
     let has = |words: &[&str]| words.iter().any(|word| lower.contains(word));
     if has(&[
+        "not available in your country",
+        "country, region, or territory",
+        "unsupported_country_region_territory",
+    ]) {
+        // Gateways answer this for a model the account's region cannot use.
+        Some("model unavailable in this region")
+    } else if has(&[
         "context length",
         "context_length",
         "context window",
@@ -975,5 +985,31 @@ mod tests {
         apply_conversation_cache(&mut body);
         assert_eq!(body["system"], "short");
         assert_eq!(body["messages"][0]["content"], serde_json::json!([{"type":"text","text":"hi","cache_control":{"type":"ephemeral"}}]));
+    }
+    #[test]
+    fn region_and_session_rejections_stay_actionable_without_echoing_text() {
+        // OpenCode Go answers this for a model the account's region cannot use.
+        let region = serde_json::json!({
+            "type": "error",
+            "error": {"type": "RegionError", "message": "This model is not available in your country: fixture-prompt-echo"},
+        });
+        let message = safe_remote_value(&region);
+        assert!(message.contains("model unavailable in this region"), "{message}");
+        assert!(message.contains("regionerror"), "{message}");
+        assert!(!message.contains("fixture-prompt-echo"), "{message}");
+        let openai = serde_json::json!({
+            "model": "gpt-6-luna",
+            "error": {"code": "unsupported_country_region_territory", "message": "Country, region, or territory not supported"},
+        });
+        let message = safe_remote_value(&openai);
+        assert!(message.contains("unsupported_country_region_territory"), "{message}");
+        // A rejected request still reports the missing header by name.
+        let session = serde_json::json!({
+            "type": "error",
+            "error": {"type": "MissingSessionID", "message": "Request is missing x-opencode-session"},
+        });
+        let message = safe_remote_value(&session);
+        assert!(message.contains("missingsessionid"), "{message}");
+        assert!(!message.contains("x-opencode-session"), "{message}");
     }
 }

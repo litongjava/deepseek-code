@@ -192,13 +192,18 @@ provider mock 直接驱动公开 executor，覆盖 Anthropic、Chat Completions�
 
 使用 `OPENCODE_API_KEY` 与独立的临时数据目录；不要把密钥写进配置、脚本或记录，测试完删除临时目录。
 
-1. 首次启动选择 OpenCode Go：显示 `Using the API key from OPENCODE_API_KEY`，随后 `Connected`，模型列表来自 `src/data/providerCatalog.json`。
-2. 依次切换到 `deepseek-v4.1-flash`（chat-completions）、`gpt-6-luna`（responses）、`claude-haiku-5-5`（messages）、`gemini-4-argon`（generate-content），各发一句 `say hi`，都能得到回答；四个协议分别走 `/inference/go/openai/v1`、`/inference/go/openai/v1`、`/inference/go/anthropic/v1`、`/inference/go/google/v1beta`。
-3. `/provider add` 输入 `https://opencode.ai/v1`：提示对应协议的 `/inference/go/...` 地址并自动替换，能列出模型并保存；保存后显示连接测试结果。
-4. `/provider add` 输入 `https://opencode.ai/nope`：列模型时显示 `with a web page, not an API response`，不再打印 HTML；保存后显示连接测试失败，配置仍保留，可用 `/provider edit` 修复。
-5. `/provider add opencode-go` 直接进入预设流程，不经过通用向导。
-6. 同一会话连续两轮请求使用相同的 `x-opencode-session`，新会话后变化；可对照 `usage.prompt_tokens_details.cached_tokens` 或本地抓包核对。
-7. `node scripts/sync-opencode-go-catalog.mjs` 只改写 `opencode-go` 条目（读取 `OPENCODE_API_KEY`，不落盘）；运行 `scripts/import-provider-catalog.mjs` 之后必须重新运行它。
+OpenCode Go 用四种协议提供模型，模型地址和协议都来自内置目录的 `opencode-go` 条目：`chat-completions` 对应 `openai-completions`，`responses` 对应 `openai-responses`，`messages` 对应 `anthropic-messages`，`generate-content` 对应 `google-generative-ai`。预设供应商的 `baseUrl` 留空，运行时按模型自己的 `baseUrl` 取地址。
+
+1. 目录同步：`node scripts/sync-opencode-go-catalog.mjs` 只改 `opencode-go`。确认条目包含 `deepseek-v4.1-flash`、`gpt-6-luna`、`claude-haiku-5-5`、`gemini-4-argon`，且 `baseUrl` 是 `https://opencode.ai/inference/go/...`。重新运行 `scripts/import-provider-catalog.mjs` 会覆盖这个条目，之后必须再跑同步脚本。
+2. 首次启动选择 `OpenCode Go`：应显示 `Using the API key from OPENCODE_API_KEY.`、`Checking the connection with deepseek-v4.1-flash…` 和 `Connected. OpenCode Go is saved as the default provider.`，默认模型是 `deepseek-v4.1-flash`、`deepseek-v4-pro`、`glm-5.3`、`kimi-k3`。
+3. 真实对话：按 chat、responses、messages、Gemini 四种协议各问一句 `say hi`，都要有回答。可用 `deepseek-v4.1-flash`、`grok-4.7`、`minimax-m3`、`gemini-4-argon`。`gpt-6-luna`、`gpt-5.6-luna` 和 `claude-haiku-5-5` 在部分网络或地区会被上游拒绝（`unsupported_country_region_territory` 或 `Endpoint is unavailable`），这属于上游可用性，不是本地协议错误；先用上面可用的模型确认链路。
+4. `/provider add` 输入 `https://opencode.ai/v1`：应提示 `OpenCode Go serves this protocol at https://opencode.ai/inference/go/openai/v1; using that URL.` 和 `For every OpenCode model and protocol, choose the OpenCode Go preset (/provider add opencode-go).`，密钥默认值变为 `OPENCODE_API_KEY`，并列出模型；保存后显示 `Connected with ...`。
+5. 错误地址：`/provider add` 输入 `https://example.com/v1` 这类返回网页的地址，应看到 `The endpoint answered 404 Not Found with a web page, not an API response; check that the Base URL is the API base (it usually ends in /v1).` 和 `Check the Base URL and key, or /cancel and run /provider add again.`；保存后连接测试失败仍保留供应商，并提示 `... is saved; fix it with /provider edit ...`。
+6. 上游按地区拒绝模型：`/provider add` 列出模型后直接回车用第 1 项（`beam-free`），连接测试应显示 `service reported an error: model unavailable in this region (regionerror)`，再补一行 `beam-free is not available in this region; pick another model with /provider edit ...`，而不是 `no recognized error classification`。用 `/provider edit` 换成 `deepseek-v4.1-flash` 应显示 `Connected with deepseek-v4.1-flash.`。
+7. `/provider add opencode-go` 直接进入预设流程，不经过通用向导。
+8. 会话头：同一对话的每次请求都带 `x-opencode-session`，值是会话 ID；连接测试等会话外请求回退为请求 ID，保证这个头始终存在。缺少这个头时上游返回 `400 MissingSessionID`，可作为反向验证。
+
+自动回归：`cargo test --locked -p deepseek-code-cli opencode`、`cargo test --locked -p deepseek-code-cli presets_use_catalog_models`、`cargo test --locked -p deepseek-code-cli wizard_keeps_a_provider_saved_when_the_connection_test_fails`、`cargo test --locked -p deepseek-code-core model_listing`、`cargo test --locked -p deepseek-code-core request_identity`、`cargo test --locked -p deepseek-code-core provider_runtime`、`cargo test --locked -p deepseek-code-core --lib performance::tests::region_and_session`、`npm run test:run -- modelCapabilities`。单元测试覆盖 URL 纠正、预设字段、目录 baseUrl 推导、网页错误、会话头和会话外回退，以及地区拒绝时只输出固定词表（不回显上游正文）；真实终端步骤仍要按第 2 到第 7 条执行。
 
 ### J. 欢迎区与计划模式提示
 
@@ -289,6 +294,11 @@ provider mock 直接驱动公开 executor，覆盖 Anthropic、Chat Completions�
 - `services/input_queue.rs`：B、E4
 - 权限相关：E2，以及 `added_directory_survives_worker_resume_without_granting_other_sessions`（`bypass` 模式可以读工作区外的文件，其他模式受目录范围限制）
 - Provider、模型请求：E1、E6、M（OpenCode Go 的预设、URL 纠正、失败提示与会话头）
+- `scripts/sync-opencode-go-catalog.mjs`、`src/data/providerCatalog.json`：M，以及 `npm run test:run -- modelCapabilities`
+- `interactive_config.rs`：M 的预设、URL 纠正、保存后连接测试和失败提示
+- `native_engine/model_listing.rs`：M 的网页响应提示
+- `native_engine/request_identity.rs`：M 的会话头
+- `native_engine/provider_runtime.rs`：M 的目录 baseUrl 推导和四种协议真实对话
 - `native_engine/stream_retry.rs`、`native_engine/utf8_stream.rs`、`native_engine/request_trace.rs`、`performance/`：K，以及 E1
 - `project_instructions.rs`、`services/lifecycle_events.rs`：`cargo test --locked -p deepseek-code-core --lib project_instructions`，并确认用户级说明只来自数据目录、项目说明只取用户主目录以下的上级目录
 - `native_engine/tool_loop.rs` 的错误与请求快照路径：K、H
@@ -308,6 +318,7 @@ provider mock 直接驱动公开 executor，覆盖 Anthropic、Chat Completions�
 ## 尚未验证
 
 - 本次 Windows ConPTY 已验证下列审批、工具展示和数据库争用场景；不代表这份清单的所有场景都已完成。macOS 尚未验证。`Ctrl+J`、鼠标点击和进程退出判断都和平台有关，改动相关逻辑后仍要在对应终端确认。
+- OpenCode Go 的真实接入已在 Linux 验证。Windows、macOS，以及上文中被上游按地区拒绝的模型尚未验证。
 
 ## Shell 审批与工具展示回归
 
