@@ -93,6 +93,7 @@ impl RequestIdentity {
                     "session-id",
                     "thread-id",
                     "x-dcl-session-id",
+                    "x-opencode-session",
                 ] {
                     set(name, session);
                 }

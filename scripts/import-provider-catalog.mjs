@@ -19,3 +19,4 @@ const providers = builtinProviders().map(p => ({
 fs.mkdirSync('src/data', { recursive: true });
 fs.writeFileSync('src/data/providerCatalog.json', JSON.stringify({ source: `DeepSeek Harness / ${packageInfo.name}@${packageInfo.version}`, providers }, null, 2) + '\n', 'utf8');
 console.log(`Imported ${providers.length} providers and ${providers.reduce((n, p) => n + p.models.length, 0)} models`);
+console.log('Run `node scripts/sync-opencode-go-catalog.mjs` afterwards: this import overwrites the opencode-go entry with the upstream defaults.');

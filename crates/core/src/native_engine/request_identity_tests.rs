@@ -129,6 +129,7 @@ async fn model_transports_preserve_identity_effort_and_retry_ids() {
                 for (attempt, (headers, body)) in pair.iter().enumerate() {
                     assert_eq!(headers["session-id"], "session-child");
                     assert_eq!(headers["thread-id"], "session-child");
+                    assert_eq!(headers["x-opencode-session"], "session-child");
                     assert_eq!(headers["x-parent-session-id"], "session-parent");
                     assert_eq!(headers["x-dcl-runtime"], "rust");
                     assert_eq!(headers["x-dcl-retry-count"], attempt.to_string());
@@ -169,11 +170,16 @@ async fn simultaneous_sessions_children_and_cancellation_do_not_leak_identity() 
             TurnIdentity::new(Some(session.into()), None).scope(async move {
                 barrier.wait().await;
                 assert_eq!(RequestIdentity::new(None).headers()["session-id"], session);
+                assert_eq!(
+                    RequestIdentity::new(None).headers()["x-opencode-session"],
+                    session
+                );
                 TurnIdentity::new(Some("child".into()), None)
                     .scope(async {
                         let headers = RequestIdentity::new(None).headers();
                         assert_eq!(headers["x-parent-session-id"], session);
                         assert_eq!(headers["session-id"], "child");
+                        assert_eq!(headers["x-opencode-session"], "child");
                     })
                     .await;
                 assert_eq!(RequestIdentity::new(None).headers()["session-id"], session);

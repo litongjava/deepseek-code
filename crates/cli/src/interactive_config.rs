@@ -122,6 +122,28 @@ fn deepseek_base_url(protocol: &str, url: &str) -> Option<String> {
         .then(|| format!("{trimmed}/anthropic"))
 }
 
+/// OpenCode Go serves each protocol under `/inference/go/...`; the bare host
+/// is a web page. Returns the URL to use when the entered one is not an API base.
+fn opencode_base_url(protocol: &str, url: &str) -> Option<String> {
+    let trimmed = url.trim_end_matches('/');
+    let rest = trimmed.split_once("://")?.1;
+    let (authority, path) = rest.split_once('/').unwrap_or((rest, ""));
+    let host = authority.split(':').next()?.to_ascii_lowercase();
+    let path = format!("/{path}");
+    if host != "opencode.ai"
+        || path.starts_with("/inference/go/")
+        || path.starts_with("/zen")
+    {
+        return None;
+    }
+    let suffix = match protocol {
+        "anthropic" | "claude" => "/inference/go/anthropic/v1",
+        "gemini" => "/inference/go/google/v1beta",
+        _ => "/inference/go/openai/v1",
+    };
+    Some(format!("https://opencode.ai{suffix}"))
+}
+
 /// The protocols the wizard offers, in prompt order.
 const PROTOCOLS: &[(&str, &str)] = &[
     ("openai", "OpenAI Chat Completions-compatible endpoints"),
@@ -199,6 +221,7 @@ async fn choose_models(
     url: &str,
     api_key: Option<&str>,
 ) -> Result<Vec<String>> {
+    let mut listing_failed = false;
     let listed = match api_key.filter(|key| !key.is_empty()) {
         Some(key) => {
             command_eprintln!("  Listing models from {url}…");
@@ -211,10 +234,12 @@ async fn choose_models(
                 Ok(Ok(models)) => models,
                 Ok(Err(error)) => {
                     command_eprintln!("  Could not list models: {error:#}");
+                    listing_failed = true;
                     Vec::new()
                 }
                 Err(_) => {
                     command_eprintln!("  Listing models timed out.");
+                    listing_failed = true;
                     Vec::new()
                 }
             }
@@ -222,6 +247,11 @@ async fn choose_models(
         None => Vec::new(),
     };
     if listed.is_empty() {
+        if listing_failed {
+            command_eprintln!(
+                "  Check the Base URL and key, or /cancel and run /provider add again."
+            );
+        }
         return ask_valid(
             input,
             "Model IDs (comma separated; first is default)",
@@ -294,7 +324,23 @@ pub async fn wizard(
         }
         None => url,
     };
-    let suggested = url.contains("deepseek.com").then_some("DEEPSEEK_API_KEY");
+    let url = match opencode_base_url(&protocol, &url) {
+        Some(corrected) => {
+            command_eprintln!("  OpenCode Go serves this protocol at {corrected}; using that URL.");
+            command_eprintln!(
+                "  For every OpenCode model and protocol, choose the OpenCode Go preset (/provider add opencode-go)."
+            );
+            corrected
+        }
+        None => url,
+    };
+    let suggested = if url.contains("deepseek.com") {
+        Some("DEEPSEEK_API_KEY")
+    } else if url.contains("opencode.ai") {
+        Some("OPENCODE_API_KEY")
+    } else {
+        None
+    };
     let credential = ask_valid(
         input,
         "API key, or environment variable name (key:<key> forces a literal key)",
@@ -379,6 +425,21 @@ pub async fn wizard(
         ),
         (None, None) => unreachable!("the wizard always has a credential"),
     }
+    let key_available = match (&stored_key, &key_env) {
+        (Some(_), _) => true,
+        (None, Some(name)) => std::env::var_os(name).is_some(),
+        (None, None) => false,
+    };
+    if key_available {
+        command_eprintln!("Checking the connection with {}…", models[0]);
+        match verify(paths, &id, &models[0]).await {
+            Ok(()) => command_eprintln!("Connected with {}.", models[0]),
+            Err(error) => {
+                command_eprintln!("The connection test failed: {error:#}");
+                command_eprintln!("{id} is saved; fix it with /provider edit {id}.");
+            }
+        }
+    }
     Ok(id)
 }
 
@@ -423,8 +484,13 @@ const PRESETS: &[Preset] = &[
     Preset { id: "zai-coding-cn", name: "Zhipu GLM Coding Plan (China)", builtin: Some("zai-coding-cn"), models: &["glm-5.1", "glm-4.7"], key_url: "https://open.bigmodel.cn/usercenter/apikeys" },
     Preset { id: "minimax-cn", name: "MiniMax (China)", builtin: Some("minimax-cn"), models: &["MiniMax-M3", "MiniMax-M2.7"], key_url: "https://platform.minimaxi.com/user-center/basic-information/interface-key" },
     Preset { id: "qwen-token-plan-cn", name: "Alibaba Qwen Token Plan (China)", builtin: Some("qwen-token-plan-cn"), models: &["qwen3.6-flash", "deepseek-v4-flash", "glm-5.1"], key_url: "https://bailian.console.aliyun.com/" },
+    Preset { id: "opencode-go", name: "OpenCode Go", builtin: Some("opencode-go"), models: &["deepseek-v4.1-flash", "deepseek-v4-pro", "glm-5.3", "kimi-k3"], key_url: "https://opencode.ai/auth" },
     Preset { id: "openrouter", name: "OpenRouter", builtin: Some("openrouter"), models: &["anthropic/claude-sonnet-4.5", "anthropic/claude-opus-4.6"], key_url: "https://openrouter.ai/keys" },
 ];
+
+fn preset_by_id(id: &str) -> Option<&'static Preset> {
+    PRESETS.iter().find(|preset| preset.id == id)
+}
 
 fn preset_key_env(preset: &Preset) -> String {
     match preset.builtin {
@@ -700,6 +766,22 @@ pub async fn handle(
     }
     let argument = words.next();
     if command == "/provider" && matches!(argument, Some("add" | "edit")) {
+        if argument == Some("add") {
+            if let Some(target) = words.next() {
+                let preset = preset_by_id(target).with_context(|| {
+                    format!(
+                        "Unknown preset {target}; run /provider add without an ID for the wizard"
+                    )
+                })?;
+                ensure!(words.next().is_none(), "Unexpected argument");
+                if let Some(selection) = configure_preset(paths, input, preset).await? {
+                    session.switch(paths, selection).await?;
+                    config::save_default_model(paths, &session.provider_id, &session.model)?;
+                    status(session);
+                }
+                return Ok(true);
+            }
+        }
         let edit = if argument == Some("edit") {
             Some(words.next().context("Usage: /provider edit ID")?)
         } else {
@@ -873,7 +955,10 @@ mod tests {
         for preset in PRESETS {
             let provider = preset_provider(preset, None).unwrap();
             assert!(!provider.models.is_empty(), "{}", preset.id);
-            assert!(provider.base_url.starts_with("https://"), "{}", preset.id);
+            // OpenCode Go routes each model to its own base URL through the catalog.
+            if preset.id != "opencode-go" {
+                assert!(provider.base_url.starts_with("https://"), "{}", preset.id);
+            }
         }
         let deepseek = preset_provider(&PRESETS[0], Some("sk-test".into())).unwrap();
         assert_eq!(deepseek.base_url, "https://api.deepseek.com");
@@ -883,6 +968,57 @@ mod tests {
         let anthropic = preset_provider(&PRESETS[1], None).unwrap();
         assert_eq!(anthropic.settings["builtinId"], "anthropic");
         assert_eq!(anthropic.models[0].api.as_deref(), Some("anthropic-messages"));
+    }
+
+    #[test]
+    fn opencode_go_preset_uses_the_catalog_and_open_code_key() {
+        let preset = preset_by_id("opencode-go").expect("OpenCode Go preset");
+        let provider = preset_provider(preset, None).unwrap();
+        assert_eq!(provider.base_url, "");
+        assert_eq!(provider.settings["builtinId"], "opencode-go");
+        assert_eq!(provider.settings["apiKeyEnv"], "OPENCODE_API_KEY");
+        assert_eq!(preset_key_env(preset), "OPENCODE_API_KEY");
+        assert!(provider
+            .models
+            .iter()
+            .all(|model| model.api.as_deref().is_some_and(|api| !api.is_empty())));
+        assert!(provider
+            .models
+            .iter()
+            .any(|model| model.api.as_deref() == Some("openai-completions")));
+        assert_eq!(
+            provider.models.iter().find(|model| model.id == "deepseek-v4.1-flash").unwrap().api.as_deref(),
+            Some("openai-completions")
+        );
+    }
+
+    #[test]
+    fn opencode_base_urls_are_corrected_for_each_protocol() {
+        assert_eq!(
+            opencode_base_url("openai", "https://opencode.ai/v1").as_deref(),
+            Some("https://opencode.ai/inference/go/openai/v1")
+        );
+        assert_eq!(
+            opencode_base_url("responses", "https://opencode.ai/v1").as_deref(),
+            Some("https://opencode.ai/inference/go/openai/v1")
+        );
+        assert_eq!(
+            opencode_base_url("anthropic", "https://opencode.ai/v1").as_deref(),
+            Some("https://opencode.ai/inference/go/anthropic/v1")
+        );
+        assert_eq!(
+            opencode_base_url("gemini", "https://opencode.ai/v1").as_deref(),
+            Some("https://opencode.ai/inference/go/google/v1beta")
+        );
+        assert_eq!(
+            opencode_base_url("openai", "https://opencode.ai/inference/go/openai/v1"),
+            None
+        );
+        assert_eq!(
+            opencode_base_url("openai", "https://opencode.ai/zen/go/v1"),
+            None
+        );
+        assert_eq!(opencode_base_url("openai", "https://example.com/v1"), None);
     }
 
     #[test]
@@ -1042,17 +1178,26 @@ mod tests {
 
     #[tokio::test]
     async fn wizard_accepts_a_pasted_key_and_can_switch_back_to_a_variable() {
+        use axum::{routing::{get, post}, Json, Router};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}/v1", listener.local_addr().unwrap());
+        let app = Router::new()
+            .route(
+                "/v1/models",
+                get(|| async { Json(json!({"data": [{"id": "model-a"}]})) }),
+            )
+            .route(
+                "/v1/chat/completions",
+                post(|| async {
+                    Json(json!({"id":"test","object":"chat.completion","created":0,"model":"model-a","choices":[{"index":0,"message":{"role":"assistant","content":"OK"},"finish_reason":"stop"}],"usage":{"prompt_tokens":2,"completion_tokens":1,"total_tokens":3}}))
+                }),
+            );
+        let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
         let dir = tempfile::tempdir().unwrap();
         let paths = RuntimePaths::new(dir.path().to_path_buf()).unwrap();
         wizard(
             &paths,
-            &mut answers(&[
-                "local",
-                "openai",
-                "http://127.0.0.1:8318/v1",
-                "123456",
-                "model-a",
-            ]),
+            &mut answers(&["local", "openai", &url, "123456", "model-a"]),
             None,
         )
         .await
@@ -1063,12 +1208,7 @@ mod tests {
         assert!(!provider.settings.contains_key("apiKeyEnv"));
         wizard(
             &paths,
-            &mut answers(&[
-                "openai",
-                "http://127.0.0.1:8318/v1",
-                "DEEPSEEK_API_KEY",
-                "model-a",
-            ]),
+            &mut answers(&["openai", &url, "DEEPSEEK_API_KEY", "model-a"]),
             Some("local"),
         )
         .await
@@ -1079,12 +1219,7 @@ mod tests {
         assert_eq!(provider.settings["apiKeyEnv"], "DEEPSEEK_API_KEY");
         wizard(
             &paths,
-            &mut answers(&[
-                "openai",
-                "http://127.0.0.1:8318/v1",
-                "key:ABC123",
-                "model-a",
-            ]),
+            &mut answers(&["openai", &url, "key:ABC123", "model-a"]),
             Some("local"),
         )
         .await
@@ -1094,6 +1229,49 @@ mod tests {
         assert_eq!(provider.api_key.as_deref(), Some("ABC123"));
         assert!(!provider.settings.contains_key("apiKeyEnv"));
         select(&paths, "local", "model-a").unwrap();
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn wizard_keeps_a_provider_saved_when_the_connection_test_fails() {
+        use axum::{routing::{get, post}, Json, Router};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}/v1", listener.local_addr().unwrap());
+        let app = Router::new()
+            .route(
+                "/v1/models",
+                get(|| async { Json(json!({"data": [{"id": "model-a"}]})) }),
+            )
+            .route(
+                "/v1/chat/completions",
+                post(|| async {
+                    (
+                        axum::http::StatusCode::UNAUTHORIZED,
+                        Json(json!({"error": "invalid key"})),
+                    )
+                }),
+            );
+        let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        let dir = tempfile::tempdir().unwrap();
+        let paths = RuntimePaths::new(dir.path().to_path_buf()).unwrap();
+        let id = wizard(
+            &paths,
+            &mut answers(&["broken", "openai", &url, "123456", "model-a"]),
+            None,
+        )
+        .await
+        .unwrap();
+        assert_eq!(id, "broken");
+        let provider = paths
+            .read_config()
+            .unwrap()
+            .providers
+            .into_iter()
+            .find(|provider| provider.id == "broken")
+            .expect("the provider stays saved after a failed check");
+        assert_eq!(provider.api_key.as_deref(), Some("123456"));
+        assert_eq!(provider.models[0].id, "model-a");
+        server.abort();
     }
 
     #[tokio::test]

@@ -433,3 +433,33 @@ async fn native_protocol_matrix_uses_correct_endpoints_headers_and_payloads() {
         server.abort();
     }
 }
+
+#[test]
+fn opencode_go_catalog_selects_each_model_protocol_and_base_url() {
+    let entry = catalog_entry("opencode-go").expect("opencode-go catalog entry");
+    assert_eq!(entry["baseUrl"], "");
+    let model = |id: &str| {
+        entry["models"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|model| model["id"] == id)
+            .unwrap_or_else(|| panic!("opencode-go has no {id} model"))
+    };
+    for (id, api, base) in [
+        ("deepseek-v4.1-flash", "openai-completions", "https://opencode.ai/inference/go/openai/v1"),
+        ("gpt-6-luna", "openai-responses", "https://opencode.ai/inference/go/openai/v1"),
+        ("claude-haiku-5-5", "anthropic-messages", "https://opencode.ai/inference/go/anthropic/v1"),
+        ("gemini-4-argon", "google-generative-ai", "https://opencode.ai/inference/go/google/v1beta"),
+    ] {
+        let model = model(id);
+        assert_eq!(model["api"], api, "{id}");
+        assert_eq!(select_base_url("", entry, model), base, "{id}");
+    }
+    // An explicitly configured URL (a proxy or a test server) still wins.
+    let chat = model("deepseek-v4.1-flash");
+    assert_eq!(
+        select_base_url("http://127.0.0.1:9", entry, chat),
+        "http://127.0.0.1:9"
+    );
+}

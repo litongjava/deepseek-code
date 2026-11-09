@@ -391,14 +391,46 @@ mod tests {
         stop_test_service(pid as u32);
     }
 
+    /// procps `kill -9 -123456` without `--` signals pid -1 (every process of the
+    /// user), so an external `kill` given a negative pid must separate it with `--`.
+    #[test]
+    fn external_kill_never_takes_a_negative_pid_without_separator() {
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+        let mut offenders = Vec::new();
+        for dir in ["crates", "src-tauri/src"] {
+            let mut stack = vec![root.join(dir)];
+            while let Some(path) = stack.pop() {
+                let Ok(entries) = std::fs::read_dir(&path) else { continue };
+                for entry in entries.flatten() {
+                    let path = entry.path();
+                    if path.is_dir() {
+                        stack.push(path);
+                    } else if path.extension().is_some_and(|ext| ext == "rs") {
+                        let text = std::fs::read_to_string(&path).unwrap();
+                        let needle = concat!("Command::new(\"", "kill\")");
+                        for (index, _) in text.match_indices(needle) {
+                            let call: String = text[index..].lines().take(4).collect();
+                            if call.contains("format!(\"-") && !call.contains("\"--\"") {
+                                offenders.push(path.display().to_string());
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        assert!(offenders.is_empty(), "negative pid without `--`: {offenders:?}");
+    }
+
     fn stop_test_service(pid: u32) {
         #[cfg(windows)]
         let _ = std::process::Command::new("taskkill")
             .args(["/PID", &pid.to_string(), "/T", "/F"])
             .status();
+        // Signal the group directly: procps `kill -9 -123456` (no `--`) parses as
+        // `kill(-1, SIGKILL)` and kills every process of the user.
         #[cfg(unix)]
-        let _ = std::process::Command::new("kill")
-            .args(["-9", &format!("-{pid}")])
-            .status();
+        if let Some(group) = rustix::process::Pid::from_raw(pid as i32) {
+            let _ = rustix::process::kill_process_group(group, rustix::process::Signal::KILL);
+        }
     }
 }

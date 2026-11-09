@@ -53,6 +53,22 @@ fn excerpt(body: &str) -> String {
     body.chars().take(200).collect()
 }
 
+/// A Base URL that points at a web page rather than the API answers with HTML.
+fn is_web_page(content_type: Option<&str>, body: &str) -> bool {
+    if content_type.is_some_and(|value| value.to_ascii_lowercase().contains("text/html")) {
+        return true;
+    }
+    let start = body.trim_start().to_ascii_lowercase();
+    start.starts_with("<!doctype html") || start.starts_with("<html")
+}
+
+fn web_page_error(status: Option<reqwest::StatusCode>) -> anyhow::Error {
+    let status = status.map(|status| format!("{status} ")).unwrap_or_default();
+    anyhow::anyhow!(
+        "The endpoint answered {status}with a web page, not an API response; check that the Base URL is the API base (it usually ends in /v1)."
+    )
+}
+
 fn model_id(entry: &Value) -> Option<String> {
     let raw = entry
         .get("id")
@@ -85,15 +101,29 @@ pub async fn list_models(protocol: &str, base_url: &str, api_key: &str) -> Resul
         .await
         .with_context(|| format!("Could not reach {url}"))?;
     let status = response.status();
+    let content_type = response
+        .headers()
+        .get(reqwest::header::CONTENT_TYPE)
+        .and_then(|value| value.to_str().ok())
+        .map(str::to_owned);
     let body = response
         .text()
         .await
         .context("Could not read the response")?;
+    let html = is_web_page(content_type.as_deref(), &body);
     if !status.is_success() {
+        if html {
+            return Err(web_page_error(Some(status)));
+        }
         bail!("The endpoint answered {status}: {}", excerpt(&body));
     }
-    let value: Value = serde_json::from_str(&body)
-        .with_context(|| format!("The response is not JSON: {}", excerpt(&body)))?;
+    let value: Value = serde_json::from_str(&body).with_context(|| {
+        if html {
+            web_page_error(None).to_string()
+        } else {
+            format!("The response is not JSON: {}", excerpt(&body))
+        }
+    })?;
     let entries = value
         .get("data")
         .or_else(|| value.get("models"))
@@ -186,5 +216,33 @@ mod tests {
         let base = serve(router).await;
         let error = list_models("openai", &base, "bad-key").await.unwrap_err();
         assert!(error.to_string().contains("401"), "{error:#}");
+    }
+
+    #[tokio::test]
+    async fn listing_html_pages_asks_for_the_api_base_url() {
+        let router = Router::new().route(
+            "/v1/models",
+            get(|| async {
+                (
+                    axum::http::StatusCode::NOT_FOUND,
+                    [(axum::http::header::CONTENT_TYPE, "text/html; charset=utf-8")],
+                    "<!DOCTYPE html><html><body><h1>Not found</h1></body></html>",
+                )
+            }),
+        );
+        let base = serve(router).await;
+        let error = list_models("openai", &base, "fixture-key").await.unwrap_err();
+        let message = format!("{error:#}");
+        assert!(message.contains("web page"), "{message}");
+        assert!(message.contains("/v1"), "{message}");
+        assert!(!message.contains("<html"), "{message}");
+    }
+
+    #[test]
+    fn html_detection_accepts_content_type_or_body() {
+        assert!(is_web_page(Some("text/html; charset=utf-8"), "{}"));
+        assert!(is_web_page(None, "  <!doctype HTML><html>"));
+        assert!(is_web_page(None, "<html><body></body></html>"));
+        assert!(!is_web_page(Some("application/json"), r#"{"data":[]}"#));
     }
 }

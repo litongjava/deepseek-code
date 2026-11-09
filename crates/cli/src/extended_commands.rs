@@ -411,7 +411,7 @@ fn export_file(path: &Path, text: &str) -> Result<()> {
 /// own clipboard (OSC 52) when no clipboard program is available, and always
 /// a file with the text too.
 fn copy_with_file(text: &str) -> Result<String> {
-    let copied = copy_text(text).is_ok() || copy_osc52(text);
+    let copied = copy_text(text).is_ok();
     let directory = std::env::temp_dir().join("deepseek-code");
     std::fs::create_dir_all(&directory)?;
     let file = directory.join("response.md");
@@ -448,7 +448,38 @@ fn copy_osc52(text: &str) -> bool {
     write!(out, "\x1b]52;c;{encoded}\x07").and_then(|()| out.flush()).is_ok()
 }
 
+/// Copies through the OS clipboard program, then tmux's buffer, then OSC 52,
+/// so headless hosts and tmux panes without xclip still get the text.
 pub(crate) fn copy_text(text: &str) -> Result<()> {
+    let error = match copy_system(text) {
+        Ok(()) => return Ok(()),
+        Err(error) => error,
+    };
+    if std::env::var_os("TMUX").is_some() && copy_tmux(text).is_ok() {
+        return Ok(());
+    }
+    if copy_osc52(text) {
+        return Ok(());
+    }
+    Err(error)
+}
+
+/// `load-buffer -w` also forwards the text to the outer terminal's clipboard.
+fn copy_tmux(text: &str) -> Result<()> {
+    let mut child = Command::new("tmux")
+        .args(["load-buffer", "-w", "-"])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()?;
+    let written = child.stdin.take().context("tmux stdin unavailable")?.write_all(text.as_bytes());
+    let status = child.wait()?;
+    written?;
+    ensure!(status.success(), "tmux load-buffer failed");
+    Ok(())
+}
+
+fn copy_system(text: &str) -> Result<()> {
     // In-process first: a drag selection copies without a PowerShell start-up pause.
     #[cfg(windows)]
     if crate::images::native_clipboard::set_text(text) {

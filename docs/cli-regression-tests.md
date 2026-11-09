@@ -54,6 +54,8 @@ Windows 上，`tools::linux_env::tests::unpack_copies_hard_links_keeps_symlinks_
 - 每轮用新的数据目录，测试结束后结束自己启动的进程。
 - `until` 等待的文字如果也出现在自己输入的提示词里，会立刻匹配成功，这时后面的输入会变成运行中发送。等待模型回复时要选提示词里没有的文字，或用固定等待。
 - 不要用 `pkill -f "某段文字"`，它会连当前 shell 一起结束。
+- 用外部 `kill` 命令结束进程组时，负数 PID 前必须加 `--`（`kill -9 -- -123456`）。Debian 的 procps `kill -9 -123456` 会被解析成 `kill(-1, SIGKILL)`，结束当前用户的全部进程，包括 tmux 和正在运行的 dcl。代码里优先直接调用 `rustix::process::kill_process_group`；`external_kill_never_takes_a_negative_pid_without_separator` 会检查源码。
+- 怀疑测试会结束无关进程时，用 `unshare --map-current-user -Upf --mount-proc` 在独立 PID 命名空间里运行，信号到不了命名空间外。
 - `--resume` 时如果 worker 还活着，不能带 `--permission-mode`，这是有意的限制。
 
 ## 场景
@@ -186,6 +188,18 @@ provider mock 直接驱动公开 executor，覆盖 Anthropic、Chat Completions�
 6. `--print` 和 `--output-format stream-json` 正常输出（`crates/cli/tests/sdk.rs` 覆盖 SDK 协议）。
 7. Java SDK 的端到端测试通过（修改 SDK 协议时跑，方法见 Java SDK 仓库的 README）。
 
+### M. OpenCode Go 接入
+
+使用 `OPENCODE_API_KEY` 与独立的临时数据目录；不要把密钥写进配置、脚本或记录，测试完删除临时目录。
+
+1. 首次启动选择 OpenCode Go：显示 `Using the API key from OPENCODE_API_KEY`，随后 `Connected`，模型列表来自 `src/data/providerCatalog.json`。
+2. 依次切换到 `deepseek-v4.1-flash`（chat-completions）、`gpt-6-luna`（responses）、`claude-haiku-5-5`（messages）、`gemini-4-argon`（generate-content），各发一句 `say hi`，都能得到回答；四个协议分别走 `/inference/go/openai/v1`、`/inference/go/openai/v1`、`/inference/go/anthropic/v1`、`/inference/go/google/v1beta`。
+3. `/provider add` 输入 `https://opencode.ai/v1`：提示对应协议的 `/inference/go/...` 地址并自动替换，能列出模型并保存；保存后显示连接测试结果。
+4. `/provider add` 输入 `https://opencode.ai/nope`：列模型时显示 `with a web page, not an API response`，不再打印 HTML；保存后显示连接测试失败，配置仍保留，可用 `/provider edit` 修复。
+5. `/provider add opencode-go` 直接进入预设流程，不经过通用向导。
+6. 同一会话连续两轮请求使用相同的 `x-opencode-session`，新会话后变化；可对照 `usage.prompt_tokens_details.cached_tokens` 或本地抓包核对。
+7. `node scripts/sync-opencode-go-catalog.mjs` 只改写 `opencode-go` 条目（读取 `OPENCODE_API_KEY`，不落盘）；运行 `scripts/import-provider-catalog.mjs` 之后必须重新运行它。
+
 ### J. 欢迎区与计划模式提示
 
 1. 新会话分别发送普通问题、`/plan <任务>`，以及先 `/plan` 再提问：欢迎区三行保持启动位置，计划模式提示使用 `DeepSeek Code`。
@@ -274,12 +288,13 @@ provider mock 直接驱动公开 executor，覆盖 Anthropic、Chat Completions�
 - `runtime.rs`、`db/message_repo.rs`（发给模型的历史）：D2、E5，以及 SDK 测试
 - `services/input_queue.rs`：B、E4
 - 权限相关：E2，以及 `added_directory_survives_worker_resume_without_granting_other_sessions`（`bypass` 模式可以读工作区外的文件，其他模式受目录范围限制）
-- Provider、模型请求：E1、E6
+- Provider、模型请求：E1、E6、M（OpenCode Go 的预设、URL 纠正、失败提示与会话头）
 - `native_engine/stream_retry.rs`、`native_engine/utf8_stream.rs`、`native_engine/request_trace.rs`、`performance/`：K，以及 E1
 - `project_instructions.rs`、`services/lifecycle_events.rs`：`cargo test --locked -p deepseek-code-core --lib project_instructions`，并确认用户级说明只来自数据目录、项目说明只取用户主目录以下的上级目录
 - `native_engine/tool_loop.rs` 的错误与请求快照路径：K、H
 - `native_engine/generation.rs`、`services/compaction.rs`、`services/compaction/`：L，以及 E5
 - `native_engine/tool_call_ids.rs`（发给模型的请求体）：E1、E6；确认只改写超长调用 ID，未提供 `tool_calls`、`content` 等字段的消息不会被补成 `null`
+- `extended_commands.rs` 的复制（`/copy`、`/copy-session-id`、鼠标选择）：在没有 `xclip`、`wl-copy` 的 tmux 中执行 `/copy-session-id`，显示 `Copied session ID to clipboard`，`tmux show-buffer` 内容为会话 ID；在有 `xclip` 的桌面终端中复制后能粘贴。再跑 E
 - 其他范围：至少跑 E
 
 ## Shell 配置回归
