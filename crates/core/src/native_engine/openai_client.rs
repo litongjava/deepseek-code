@@ -188,7 +188,11 @@ impl OpenAIClient {
                 }
                 if let Some(reason) = choice["finish_reason"].as_str() { finish = Some(reason.to_string()); }
                 if value.get("provider_content").is_some() { native = Some(value["provider_content"].clone()); }
-                if value.get("usage").is_some() { usage = Some(serde_json::from_value(value["usage"].clone())?); }
+                // Streaming providers may omit usage or send null until final accounting.
+                // Keep the last reported usage when a later chunk has no accounting.
+                if let Some(reported) = value.get("usage").filter(|usage| !usage.is_null()) {
+                    usage = Some(serde_json::from_value(reported.clone())?);
+                }
             }
             return Ok(OpenAIResponse { id: uuid::Uuid::new_v4().to_string(), object: "chat.completion".into(), created: 0, model: provider.model.id.clone(),
                 choices: vec![OpenAIChoice { index: 0, finish_reason: finish, message: OpenAIMessage { role: "assistant".into(), content: OpenAIContent::Text(text),

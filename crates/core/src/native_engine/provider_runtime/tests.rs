@@ -476,3 +476,84 @@ fn opencode_go_models_take_their_base_url_and_protocol_from_the_catalog() {
         "http://127.0.0.1:9/v1"
     );
 }
+
+#[tokio::test]
+async fn opencode_connection_test_accepts_optional_usage_and_rejects_invalid_usage() {
+    async fn handler(
+        State(payload): State<String>,
+        headers: HeaderMap,
+        Json(body): Json<Value>,
+    ) -> String {
+        // Connection tests have no conversation; routing falls back to the request ID.
+        assert_eq!(headers["x-opencode-session"], headers["x-request-id"]);
+        assert_eq!(body["stream"], true);
+        payload
+    }
+    let valid = json!({"prompt_tokens":2,"completion_tokens":3,"total_tokens":5});
+    for (name, usages, expected_total, fails) in [
+        ("missing", vec![None], None, false),
+        ("null_only", vec![Some(Value::Null)], None, false),
+        (
+            "null_before_usage",
+            vec![Some(Value::Null), Some(valid.clone())],
+            Some(5),
+            false,
+        ),
+        (
+            "null_after_usage",
+            vec![Some(valid), Some(Value::Null), None],
+            Some(5),
+            false,
+        ),
+        ("invalid_non_null", vec![Some(json!("invalid"))], None, true),
+    ] {
+        let mut payload = String::new();
+        for usage in usages {
+            let mut chunk = json!({"choices":[{"delta":{"content":"hi"},"finish_reason":null}]});
+            if let Some(usage) = usage {
+                chunk["usage"] = usage;
+            }
+            payload.push_str(&format!("data: {chunk}\n\n"));
+        }
+        payload.push_str(
+            "data: {\"choices\":[{\"delta\":{},\"finish_reason\":\"stop\"}]}\n\ndata: [DONE]\n\n",
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let app = Router::new()
+            .route("/chat/completions", post(handler))
+            .with_state(payload);
+        let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        let p = provider(
+            "opencode-go",
+            "openai-completions",
+            &format!("http://{addr}"),
+        );
+        let result = OpenAIClient::new()
+            .send_message(&p, vec![user()], None, vec![], 100)
+            .await;
+        server.abort();
+        if fails {
+            assert!(
+                result.is_err(),
+                "{name}: invalid usage must remain an error"
+            );
+        } else {
+            let response = result.unwrap_or_else(|error| panic!("{name}: {error:#}"));
+            assert_eq!(
+                response.usage.map(|u| u.total_tokens),
+                expected_total,
+                "{name}"
+            );
+            assert!(
+                matches!(&response.choices[0].message.content, OpenAIContent::Text(text) if text.starts_with("hi")),
+                "{name}"
+            );
+            assert_eq!(
+                response.choices[0].finish_reason.as_deref(),
+                Some("stop"),
+                "{name}"
+            );
+        }
+    }
+}
