@@ -43,6 +43,19 @@ Windows 上，`tools::linux_env::tests::unpack_copies_hard_links_keeps_symlinks_
 
 出现其他失败时，先在未修改的代码上跑同一个测试，再判断是否由本次改动引入。不要将有已知失败的整套测试报告为通过。
 
+## 重试测试使用受控时钟
+
+`empty_disconnect_is_bounded_and_can_be_cancelled_during_backoff` 和 `persistent_send_failures_stop_at_the_configured_attempt_limit` 保留真实的本地 HTTP 通信，使用暂停的 Tokio 时钟验证完整退避过程。测试只在收到 `retry_wait` 事件并检查请求次数、等待时长后推进时间；每次在截止前 1 毫秒轮询请求，确认不会提前重试，再推进到截止时间。七次等待仍为 2、4、8、16、32、64、128 秒，虚拟累计耗时必须为 254 秒，实际执行无需等待这些时间。
+
+共享的 `manual_clock` 测试辅助代码在网络通信期间通过阻塞任务抑制 Tokio 自动推进时钟，避免本地 HTTP 尚未响应时提前触发请求超时；独立的真实时间看门狗将异常等待限制在 10 秒内，正常结束或 panic 时释放阻塞任务。不要只添加 `start_paused` 而让网络和请求超时自行竞争，也不要缩短产品配置中的重试间隔。
+
+```bash
+cargo test --locked -p deepseek-code-core --lib native_engine::stream_retry::tests::
+cargo test --locked -p deepseek-code-core --test request_failure --test reconnect_policy
+```
+
+检查这两个原有慢测试确实执行并通过，且不再各自等待约四分钟。保留流输出不重复、八次请求上限、错误阶段与脱敏断言；取消场景必须先观察第一次退避，推进 50 毫秒后丢弃流，再推进超过下一次重试截止时间，确认仍只有一次 HTTP 请求。`reconnect_policy` 继续独立验证重连事件和服务端 `Retry-After` 行为。单元测试与本地 HTTP 测试的通过不代表真实提供商或其他平台已经验收。
+
 ## 测试进程不应操作控制终端
 
 `cargo test -p deepseek-code-cli` 会运行 `--bin dcl` 的单元测试。这些用例不能查询光标位置，也不能切换 raw mode：`crossterm::cursor::position` 会自己把 `/dev/tty` 切到 raw mode，进程处在后台进程组时内核发送 `SIGTTOU`，整个进程组停止，cargo 会一直等到被强杀；在开发者终端里直接跑 `cargo test` 时，无参 `/config` 还会进入真实 picker 等待按键。`script` 默认创建的 pty 没有 winsize，`crossterm::terminal::size()` 会返回 `Ok((0, 0))`，绕过 `unwrap_or((80, 24))`，换行宽度变成 0。因此：

@@ -24,6 +24,9 @@ use tokio::{
     net::{TcpListener, TcpStream},
 };
 
+#[path = "support/manual_clock.rs"]
+mod manual_clock;
+
 const SSE_CONTENT: &str =
     "data: {\"choices\":[{\"delta\":{\"content\":\"Recovered 中文\"},\"finish_reason\":null}]}\n\n";
 const SSE_DONE: &str = "data: [DONE]\n\n";
@@ -297,32 +300,64 @@ async fn a_send_phase_disconnect_is_retried_once_and_succeeds() {
     assert_eq!(fixture.count(), 2);
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn persistent_send_failures_stop_at_the_configured_attempt_limit() {
-    let fixture = fixture(vec![Reply::CloseAfterRequest]).await;
-    let error = error_of(
-        OpenAIClient::new()
-            .send_message_stream(&provider(&fixture.base), vec![], None, vec![], 128)
-            .await,
-    );
-    let limit = OrchestrationConfig::max_retries() + 1;
-    assert_eq!(fixture.count(), limit as usize);
+    use deepseek_code_core::native_engine::tool_loop::EngineEvent;
 
-    let failure = performance::find_failure(&error).expect("typed failure retained");
-    assert_eq!(failure.attempts(), Some(limit));
-    assert_eq!(failure.retries(), Some(limit - 1));
-    assert_eq!(failure.class(), ErrorClass::Transient);
-    assert_eq!(failure.stage(), RequestStage::Send);
-    let diagnostic = performance::request_diagnostic(&error);
-    assert!(
-        diagnostic.contains(&format!("attempts={limit}")),
-        "{diagnostic}"
-    );
-    assert!(
-        diagnostic.contains(&format!("retries={}", limit - 1)),
-        "{diagnostic}"
-    );
-    assert!(!diagnostic.contains(API_KEY), "{diagnostic}");
+    manual_clock::run(async {
+        let fixture = fixture(vec![Reply::CloseAfterRequest]).await;
+        let (tx, mut events) = tokio::sync::mpsc::channel(32);
+        let selected = provider(&fixture.base);
+        let client = OpenAIClient::new();
+        let pending = performance::retry_events::scope(
+            tx,
+            client.send_message_stream(&selected, vec![], None, vec![], 128),
+        );
+        tokio::pin!(pending);
+        let started = tokio::time::Instant::now();
+        let limit = OrchestrationConfig::max_retries() + 1;
+        assert_eq!(limit, 8);
+        for attempt in 1..limit {
+            let event = loop {
+                tokio::select! {
+                    biased;
+                    _ = &mut pending => panic!("request ended before retry {attempt}"),
+                    event = events.recv() => match event.expect("retry events remain open") {
+                        EngineEvent::RequestAttempt(event) if event["outcome"] == "retry_wait" => break event,
+                        _ => {},
+                    },
+                }
+            };
+            let delay = Duration::from_secs(2 << (attempt - 1));
+            assert_eq!(event["attempts"], attempt);
+            assert_eq!(event["waitMs"], delay.as_millis() as u64);
+            assert_eq!(fixture.count(), attempt as usize);
+            tokio::time::advance(delay - Duration::from_millis(1)).await;
+            assert!(futures::poll!(&mut pending).is_pending());
+            assert_eq!(fixture.count(), attempt as usize);
+            tokio::time::advance(Duration::from_millis(1)).await;
+        }
+        let error = error_of(pending.await);
+        assert_eq!(started.elapsed(), Duration::from_secs(254));
+        assert_eq!(fixture.count(), limit as usize);
+
+        let failure = performance::find_failure(&error).expect("typed failure retained");
+        assert_eq!(failure.attempts(), Some(limit));
+        assert_eq!(failure.retries(), Some(limit - 1));
+        assert_eq!(failure.class(), ErrorClass::Transient);
+        assert_eq!(failure.stage(), RequestStage::Send);
+        let diagnostic = performance::request_diagnostic(&error);
+        assert!(
+            diagnostic.contains(&format!("attempts={limit}")),
+            "{diagnostic}"
+        );
+        assert!(
+            diagnostic.contains(&format!("retries={}", limit - 1)),
+            "{diagnostic}"
+        );
+        assert!(!diagnostic.contains(API_KEY), "{diagnostic}");
+    })
+    .await;
 }
 
 #[tokio::test]

@@ -7,6 +7,9 @@ use axum::{body::Body, http::HeaderMap, routing::post, Json, Router};
 use serde_json::json;
 use std::sync::{Arc, Mutex};
 
+#[path = "../../tests/support/manual_clock.rs"]
+mod manual_clock;
+
 const ANTHROPIC_EMPTY: &str = "data: {\"type\":\"message_start\",\"message\":{\"id\":\"empty\",\"content\":[],\"usage\":{\"input_tokens\":0,\"output_tokens\":0}}}\n\ndata: {\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"text\",\"text\":\"\"}}\n\n";
 const OPENAI_EMPTY: &str = "data: {\"choices\":[{\"delta\":{\"role\":\"assistant\",\"content\":\"\"},\"finish_reason\":null}]}\n\n";
 
@@ -114,29 +117,74 @@ async fn empty_disconnect_recovers_without_duplicate_events_or_changed_identity(
     }
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn empty_disconnect_is_bounded_and_can_be_cancelled_during_backoff() {
-    let (provider, requests, server) = fixture(vec![(ANTHROPIC_EMPTY.into(), false)]).await;
-    let (text, error) = collect(client(&provider, 2).await).await;
-    assert_eq!(requests.lock().unwrap().len(), 8);
-    assert_eq!(text, ANTHROPIC_EMPTY);
-    assert!(error.unwrap().contains("attempts=8"));
-    server.abort();
+    use crate::{native_engine::tool_loop::EngineEvent, performance::retry_events};
 
-    let (provider, requests, server) = fixture(vec![(ANTHROPIC_EMPTY.into(), false)]).await;
-    let mut stream = client(&provider, 2).await;
-    assert!(
-        tokio::time::timeout(Duration::from_millis(50), stream.next())
-            .await
-            .is_err()
-    );
-    drop(stream);
-    tokio::time::sleep(Duration::from_millis(
-        crate::config::OrchestrationConfig::retry_base_backoff_ms() + 100,
-    ))
+    manual_clock::run(async {
+        let (provider, requests, server) = fixture(vec![(ANTHROPIC_EMPTY.into(), false)]).await;
+        let (tx, mut events) = tokio::sync::mpsc::channel(32);
+        let pending = retry_events::scope(tx, async { collect(client(&provider, 2).await).await });
+        tokio::pin!(pending);
+        let started = tokio::time::Instant::now();
+        for attempt in 1..8 {
+            let event = loop {
+                tokio::select! {
+                    biased;
+                    result = &mut pending => panic!("stream ended before retry {attempt}: {result:?}"),
+                    event = events.recv() => match event.expect("retry events remain open") {
+                        EngineEvent::RequestAttempt(event) if event["outcome"] == "retry_wait" => break event,
+                        _ => {},
+                    },
+                }
+            };
+            let delay = Duration::from_secs(2 << (attempt - 1));
+            assert_eq!(event["attempts"], attempt);
+            assert_eq!(event["waitMs"], delay.as_millis() as u64);
+            assert_eq!(requests.lock().unwrap().len(), attempt as usize);
+            tokio::time::advance(delay - Duration::from_millis(1)).await;
+            assert!(futures::poll!(&mut pending).is_pending());
+            assert_eq!(requests.lock().unwrap().len(), attempt as usize);
+            tokio::time::advance(Duration::from_millis(1)).await;
+        }
+        let (text, error) = pending.await;
+        assert_eq!(started.elapsed(), Duration::from_secs(254));
+        assert_eq!(requests.lock().unwrap().len(), 8);
+        assert_eq!(text, ANTHROPIC_EMPTY);
+        assert!(error.unwrap().contains("attempts=8"));
+        server.abort();
+
+        let (provider, requests, server) = fixture(vec![(ANTHROPIC_EMPTY.into(), false)]).await;
+        let (tx, mut events) = tokio::sync::mpsc::channel(32);
+        let mut stream = retry_events::scope(tx, client(&provider, 2)).await;
+        let started = tokio::time::Instant::now();
+        {
+            let next = stream.next();
+            tokio::pin!(next);
+            loop {
+                tokio::select! {
+                    biased;
+                    result = &mut next => panic!("empty stream exposed output before retry: {result:?}"),
+                    event = events.recv() => {
+                        if let EngineEvent::RequestAttempt(event) = event.expect("retry events remain open") {
+                            if event["outcome"] == "retry_wait" {
+                                assert_eq!(event["waitMs"], 2000);
+                                break;
+                            }
+                        }
+                    },
+                }
+            }
+            assert_eq!(started.elapsed(), Duration::ZERO);
+            tokio::time::advance(Duration::from_millis(50)).await;
+            assert!(futures::poll!(&mut next).is_pending());
+        }
+        drop(stream);
+        tokio::time::advance(Duration::from_millis(2100)).await;
+        assert_eq!(requests.lock().unwrap().len(), 1);
+        server.abort();
+    })
     .await;
-    assert_eq!(requests.lock().unwrap().len(), 1);
-    server.abort();
 }
 
 #[tokio::test]
