@@ -153,6 +153,14 @@ pub async fn spawn_child_session(
     let description = describe(&spawn.description, &spawn.prompt);
 
     let sessions = SessionStore::new(context.db.clone());
+    // A directory child is created in its prepared workspace so its durable
+    // `conversations.workspace_path` is the isolated directory, not the parent.
+    // A worktree child necessarily starts in the parent workspace because the
+    // worktree binds to an existing session.
+    let requested_workspace = match &spawn.workspace {
+        ChildWorkspace::Directory(path) => Some(canonical_directory(path)?),
+        ChildWorkspace::Worktree => None,
+    };
     let (session_id, resumed) = match spawn.resume_session.as_deref() {
         Some(session) => {
             let child = require_session(&context, session, "Child session")?;
@@ -175,13 +183,29 @@ pub async fn spawn_child_session(
                 )?,
                 "Child session still has an active execution; stop it before resuming"
             );
+            let stored = child
+                .workspace_path
+                .as_deref()
+                .context("Child session has no recorded workspace")?;
+            let stored = canonical_directory(Path::new(stored))?;
+            if let Some(requested) = &requested_workspace {
+                ensure!(
+                    &stored == requested,
+                    "A resumed child keeps its existing workspace at {}; refusing to move it to {}",
+                    stored.display(),
+                    requested.display()
+                );
+            }
             (session.to_owned(), true)
         }
         None => {
             // Preserve the Agent-tool behavior: the session row keeps the
             // parent's model and an explicit `--model` only changes the launch.
+            let initial = requested_workspace
+                .clone()
+                .unwrap_or_else(|| spawn.parent_workspace.clone());
             let child = sessions.create(
-                &spawn.parent_workspace,
+                &initial,
                 &config.provider.model.id,
                 &config.provider.provider.id,
             )?;
@@ -196,14 +220,9 @@ pub async fn spawn_child_session(
     };
 
     let workspace = match &spawn.workspace {
-        ChildWorkspace::Directory(path) => {
-            ensure!(
-                path.is_dir(),
-                "Child workspace is unavailable: {}",
-                path.display()
-            );
-            path.clone()
-        }
+        ChildWorkspace::Directory(_) => requested_workspace
+            .clone()
+            .context("Child workspace is unavailable")?,
         ChildWorkspace::Worktree => {
             ensure!(
                 !resumed,
@@ -518,6 +537,18 @@ fn describe(description: &str, prompt: &str) -> String {
         .chars()
         .take(60)
         .collect()
+}
+
+fn canonical_directory(path: &Path) -> Result<PathBuf> {
+    let canonical = path
+        .canonicalize()
+        .with_context(|| format!("Child workspace is unavailable: {}", path.display()))?;
+    ensure!(
+        canonical.is_dir(),
+        "Child workspace is not a directory: {}",
+        canonical.display()
+    );
+    Ok(canonical)
 }
 
 fn owner_key(session: &str) -> String {
@@ -841,5 +872,137 @@ mod tests {
         assert!(names.contains(&background_sessions::WORKER_MODEL_ENV));
         assert!(names.contains(&"DEEPSEEK_CODE_CHILD_API_KEY"));
         assert!(!names.contains(&background_sessions::WORKER_AUTO_ROUTE_ENV));
+    }
+
+    #[tokio::test]
+    async fn a_directory_child_persists_the_prepared_workspace() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("project");
+        let workspace = temp.path().join("task-workspace");
+        std::fs::create_dir(&root).unwrap();
+        std::fs::create_dir(&workspace).unwrap();
+        std::fs::write(workspace.join("marker.txt"), "isolated").unwrap();
+        let data = temp.path().join("data");
+        let context = service_context(&data);
+        let parent = SessionStore::new(context.db.clone())
+            .create(&root, "fixture", "fixture")
+            .unwrap();
+        let mut request = spawn(&data, &parent, "inspect");
+        request.parent_workspace = root.clone();
+        request.workspace = ChildWorkspace::Directory(workspace.clone());
+        request.executable_override = Some(quiet_executable());
+        let handle = spawn_child_session(
+            ChildLaunchConfig {
+                provider: provider(),
+                permission_mode: "bypass".into(),
+            },
+            request,
+        )
+        .await
+        .unwrap();
+        let canonical = workspace.canonicalize().unwrap();
+        assert_eq!(handle.workspace, canonical);
+        let row = context
+            .db
+            .with_conn(|conn| {
+                crate::db::conversation_repo::get_conversation(conn, &handle.session_id)
+            })
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            row.workspace_path.as_deref(),
+            Some(canonical.to_string_lossy().as_ref())
+        );
+        let launch = std::fs::read_to_string(
+            data.join("background-tasks")
+                .join(&handle.job_id)
+                .join("launch.json"),
+        )
+        .unwrap();
+        let launch: Value = serde_json::from_str(&launch).unwrap();
+        assert_eq!(
+            launch["cwd"].as_str().map(std::path::PathBuf::from),
+            Some(canonical.clone())
+        );
+        let job = background_sessions::list(&data, Some(&parent))
+            .unwrap()
+            .into_iter()
+            .find(|job| job.id == handle.job_id)
+            .unwrap();
+        assert_eq!(job.parent_session_id, parent);
+        let owner = owner_record(&context, &handle.session_id).unwrap().unwrap();
+        assert_eq!(owner.parent_session_id, parent);
+    }
+
+    #[tokio::test]
+    async fn resume_cannot_move_a_child_to_a_different_workspace() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("project");
+        let first = temp.path().join("first");
+        let second = temp.path().join("second");
+        for path in [&root, &first, &second] {
+            std::fs::create_dir(path).unwrap();
+        }
+        let data = temp.path().join("data");
+        let context = service_context(&data);
+        let parent = SessionStore::new(context.db.clone())
+            .create(&root, "fixture", "fixture")
+            .unwrap();
+        let mut request = spawn(&data, &parent, "first run");
+        request.parent_workspace = root.clone();
+        request.workspace = ChildWorkspace::Directory(first.clone());
+        request.executable_override = Some(quiet_executable());
+        let handle = spawn_child_session(
+            ChildLaunchConfig {
+                provider: provider(),
+                permission_mode: "bypass".into(),
+            },
+            request,
+        )
+        .await
+        .unwrap();
+
+        let mut moved = spawn(&data, &parent, "second run");
+        moved.parent_workspace = root;
+        moved.workspace = ChildWorkspace::Directory(second);
+        moved.resume_session = Some(handle.session_id.clone());
+        moved.executable_override = Some(quiet_executable());
+        let error = spawn_child_session(
+            ChildLaunchConfig {
+                provider: provider(),
+                permission_mode: "bypass".into(),
+            },
+            moved,
+        )
+        .await
+        .unwrap_err();
+        assert!(
+            error.to_string().contains("keeps its existing workspace"),
+            "{error:#}"
+        );
+        assert_eq!(
+            background_sessions::list(&data, Some(&parent))
+                .unwrap()
+                .len(),
+            1
+        );
+
+        let mut same = spawn(&data, &parent, "continue");
+        same.parent_workspace = temp.path().join("project");
+        same.workspace = ChildWorkspace::Directory(first.clone());
+        same.resume_session = Some(handle.session_id.clone());
+        same.executable_override = Some(quiet_executable());
+        let resumed = spawn_child_session(
+            ChildLaunchConfig {
+                provider: provider(),
+                permission_mode: "bypass".into(),
+            },
+            same,
+        )
+        .await
+        .unwrap();
+        assert_eq!(resumed.workspace, first.canonicalize().unwrap());
+        assert_eq!(resumed.session_id, handle.session_id);
     }
 }
