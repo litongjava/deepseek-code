@@ -439,3 +439,18 @@ OpenCode Go 用四种协议提供模型，模型地址和协议都来自内置�
 - `cargo test --locked -p deepseek-code-cli --test sdk recovery_interrupt::`：同一轮先报告 11/2 和一次工具拒绝再超限，在 PreCompact/PostCompact SDK 回调挂起时 interrupt；两协议提交前不保存摘要、提交后恰好一份摘要/边界/计数，不发送重试主请求，保留统计并允许下一轮。
 - SDK 全套覆盖审批、Hook、MCP 等待取消及迟到回复；同时保留 `usage_accounting`、`recovery_result_contract`、`request_usage_tests`、ContextReset、初始 Hook/hook wake 回归。
 - 第十轮的独立复现与需求证据已在 2026-11-10 的开发支持目录清理中删除。未执行平台或旧验收组合继续标记未验证。
+
+### Super Agent 0–2 阶段：子会话、任务存储与隔离
+
+本轮只覆盖 Router 之前的基础能力；Coder/Reviewer 调度、`/crp` 和 Desktop 入口尚未实现，不能按完整 Super Agent 验收。
+
+- `cargo test --locked -p deepseek-code-core --lib super_agent`：任务规格、状态机、完成门禁、存储、仓库发现和隔离共 64 项。重点检查：
+  - 损坏的 `.git` 指针、损坏仓库、Git 不可执行和不可读元数据都是 `DETECTION_FAILED`，不会降级为“无 Git”；已有文件目标从其所在目录探测，尚不存在的文件目标从最近存在的目录探测。
+  - 审核报告的信封与正文版本、轮次必须等于任务当前值；通过结论必须覆盖每条验收标准、不得重复或引用未知标准、必须有证据；空的提交/审核/集成版本不被接受；会话必须在数据库中真实存在，执行轨迹必须包含实现、审核和 Harness 事件；非 Git 快照必须通过内容校验。
+  - 上一轮 `BLOCKED` 或退回的报告保留为历史，不会永久阻止后续轮次；只按当前 `spec_version` 和 `review_round` 判断。
+  - 锁只按当前 `sa_locks` 判断所有权：释放后的旧 operation 重放返回 `Released`，不会被当作仍持有；非 Git 路径锁按规范化路径的祖先/后代关系冲突，`/target` 与 `/target2` 互不冲突；独立数据库连接的并发只有一个持有者。
+- `cargo test --locked -p deepseek-code-cli --test super_agent_child`：真实 `dcl` 子进程加本地模型 mock（不连接真实服务）。子进程用 Bash 工具把 `pwd` 写入临时文件，验证首次和 `--resume` 后都在准备的工作目录；`conversations.workspace_path` 记录该目录；父工作目录没有子进程写入；旧的 Job 已完成、没有重复的活动子进程；尝试把已有子会话移到另一个目录会被拒绝。
+- `cargo test --locked -p deepseek-code-core --lib native_engine::child_session`：抽取后的启动/继续逻辑 7 项，覆盖无效父会话、归档父会话、启动失败不写成功状态、重新使用同一会话和拒绝更换工作目录。
+- `cargo test --locked -p deepseek-code-core --lib native_engine::tool_loop::delegation` 与 `cargo test --locked -p deepseek-code-core --test delegation`：原有 Agent 委派和后台子会话行为不变（分别 22 与 4 项）。
+- 非 Git 快照场景包含在 `super_agent::isolation`：用户自己的 `manifest.json`、文件与目录互换、可执行权限、快照目录位于源目录内或其符号链接别名的拒绝、损坏或缺失 payload 时先校验后恢复（当前文件保持不变）、被跳过条目（依赖目录等）在清单中如实记录而不是声称已保护。
+- 当前无法自动化的部分：真实多仓库任务的合并与清理、Router 与 `/crp` 交互、Desktop 角色切换、Windows 上的路径与符号链接行为，均在后续轮次实现并单独验收。
