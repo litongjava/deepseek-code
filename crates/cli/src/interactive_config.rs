@@ -481,6 +481,10 @@ struct Preset {
     /// Entry of the embedded catalog shared with Desktop; None for DeepSeek,
     /// which uses its OpenAI-compatible endpoint directly.
     builtin: Option<&'static str>,
+    /// Models offered by the preset. For a preset that expands to the whole
+    /// catalog (see `preset_uses_entire_catalog`), this only seeds the template
+    /// and the first entry becomes the default; the saved provider still keeps
+    /// every model of the catalog entry.
     models: &'static [&'static str],
     key_url: &'static str,
 }
@@ -493,6 +497,8 @@ const PRESETS: &[Preset] = &[
     Preset { id: "zai-coding-cn", name: "Zhipu GLM Coding Plan (China)", builtin: Some("zai-coding-cn"), models: &["glm-5.1", "glm-4.7"], key_url: "https://open.bigmodel.cn/usercenter/apikeys" },
     Preset { id: "minimax-cn", name: "MiniMax (China)", builtin: Some("minimax-cn"), models: &["MiniMax-M3", "MiniMax-M2.7"], key_url: "https://platform.minimaxi.com/user-center/basic-information/interface-key" },
     Preset { id: "qwen-token-plan-cn", name: "Alibaba Qwen Token Plan (China)", builtin: Some("qwen-token-plan-cn"), models: &["qwen3.6-flash", "deepseek-v4-flash", "glm-5.1"], key_url: "https://bailian.console.aliyun.com/" },
+    // Saves the whole catalog (31 models over four protocols), not just these
+    // four; the first entry seeds the template and becomes the default model.
     Preset { id: "opencode-go", name: "OpenCode Go", builtin: Some("opencode-go"), models: &["deepseek-v4.1-flash", "deepseek-v4-pro", "glm-5.3", "kimi-k3"], key_url: "https://opencode.ai/auth" },
     Preset { id: "openrouter", name: "OpenRouter", builtin: Some("openrouter"), models: &["anthropic/claude-sonnet-4.5", "anthropic/claude-opus-4.6"], key_url: "https://openrouter.ai/keys" },
 ];
@@ -1077,10 +1083,24 @@ mod tests {
             .into_iter()
             .collect()
         );
-        assert_eq!(
-            provider.models.iter().find(|model| model.id == "deepseek-v4.1-flash").unwrap().api.as_deref(),
-            Some("openai-completions")
-        );
+        // One representative model per protocol must be selectable from the
+        // preset, not only the chat models listed in Preset.models.
+        for (id, api) in [
+            ("deepseek-v4.1-flash", "openai-completions"),
+            ("grok-4.7", "openai-responses"),
+            ("minimax-m3", "anthropic-messages"),
+            ("gemini-4-argon", "google-generative-ai"),
+        ] {
+            let model = provider
+                .models
+                .iter()
+                .find(|model| model.id == id)
+                .unwrap_or_else(|| panic!("{id} is missing from the preset"));
+            assert_eq!(model.api.as_deref(), Some(api), "{id}");
+        }
+        // The first catalog entry stays the default so the connection test is
+        // predictable.
+        assert_eq!(provider.models[0].id, "deepseek-v4.1-flash");
     }
 
     #[test]
