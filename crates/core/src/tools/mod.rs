@@ -459,6 +459,9 @@ macro_rules! tool_dispatch {
             "memory_search" => tool_memory_search($input),
             "memory_ingest" => tool_memory_ingest($input),
             "smart_project_scan" => macros::execute_smart_project_scan($input, $cwd),
+            _ if $name.is_empty() => Ok(serde_json::json!({
+                "error": "Tool call has no name; the model returned an incomplete tool call"
+            })),
             _ => Ok(serde_json::json!({ "error": format!("Unknown tool: {}", $name) })),
         }
     };
