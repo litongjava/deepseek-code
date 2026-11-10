@@ -438,7 +438,7 @@ mod tests {
                 supports_text: true,
                 api: None,
                 effort: None,
-                fast: false,
+                fast: false, wire_identity: Default::default(),
             },
         }
     }

@@ -207,6 +207,22 @@ OpenCode Go 用四种协议提供模型，模型地址和协议都来自内置�
 
 自动回归：`cargo test --locked -p deepseek-code-cli opencode`、`cargo test --locked -p deepseek-code-cli presets_use_catalog_models`、`cargo test --locked -p deepseek-code-cli wizard_keeps_a_provider_saved_when_the_connection_test_fails`、`cargo test --locked -p deepseek-code-core model_listing`、`cargo test --locked -p deepseek-code-core request_identity`、`cargo test --locked -p deepseek-code-core provider_runtime`、`cargo test --locked -p deepseek-code-core --lib performance::tests::region_and_session`、`npm run test:run -- modelCapabilities`。单元测试覆盖 URL 纠正、预设字段、目录 baseUrl 推导、网页错误、只发 OpenCode 的会话头与会话外回退、非 OpenCode 不发送会话头，以及地区拒绝时只输出固定词表（不回显上游正文）；真实终端步骤仍要按第 2 到第 7 条执行。
 
+### N. Responses 请求档案（`/switch`）
+
+用本地 mock 端点核对实际请求头与请求体，不使用真实密钥。`/switch` 只影响 `api` 声明为 `openai-responses` 或 `openai-codex-responses` 的模型。
+
+1. 默认：新建会话执行 `/switch`，显示 `Request profile: default`。请求只带 dcl 自有标识，没有 `session-id`、`thread-id`、`x-codex-window-id`。
+2. `/switch compat`：下一次请求体出现 `tool_choice`、`parallel_tool_calls`、`prompt_cache_key`（值为会话 ID）、`text.verbosity`；已有 `reasoning` 时补 `context: all_turns`。`originator` 仍是 dcl，`x-dcl-session-id` 仍在。
+3. `/switch codex`：`originator` 为 `codex-tui`，`user-agent` 以 `codex-tui/` 开头，`session-id` 与 `thread-id` 等于会话 ID，`x-codex-window-id` 为 `<会话 ID>:0`；请求头 `x-codex-turn-metadata` 与请求体 `client_metadata.x-codex-turn-metadata` 是同一个 JSON。请求中不再出现 `x-app` 和任何 `x-dcl-*`（含 `x-dcl-retry-count`）。
+4. 同一轮内的多个模型请求共享 `turn_id`，`root_turn_id` 与之相同；新一轮生成新的 `turn_id`。
+5. 始终不发送 `x-codex-turn-state`、`x-openai-internal-codex-responses-lite`、`x-codex-beta-features`；`x-codex-turn-metadata` 中不含 `workspaces`、本地路径或 git 远程地址。
+6. 非 Responses 模型（`openai-completions`、`anthropic-messages`）在 `/switch codex` 后请求形状不变，命令同时提示该档案只对 Responses 生效。
+7. 持久化：`/switch codex` 后退出并用 `--resume` 恢复同一会话，首个请求仍是 codex 档案；`/clear` 后的新会话沿用；其他会话不受影响。
+8. `/switch default` 与 `/switch off` 恢复原状；`/switch turbo` 报用法错误且不改变已保存的设置。
+9. 原生压缩（`/responses/compact`）由单独请求发出，不携带该档案，只有 `x-request-id`。
+
+自动回归：`cargo test --locked -p deepseek-code-core --lib wire_identity`、`cargo test --locked -p deepseek-code-core --lib request_identity`、`cargo test --locked -p deepseek-code-core --lib provider_runtime::tests`、`cargo test --locked -p deepseek-code-cli --bin dcl -- session_commands`。这些覆盖档案解析、只对 Responses 生效、请求头替换与 `x-dcl-*` 移除、`client_metadata` 与 `turn_id`、真实 mock 端点上的请求头与请求体、会话设置持久化与解析器同步；第 4、5、7 条中的跨轮与恢复细节仍要在真实终端里按步骤核对。
+
 ### J. 欢迎区与计划模式提示
 
 1. 新会话分别发送普通问题、`/plan <任务>`，以及先 `/plan` 再提问：欢迎区三行保持启动位置，计划模式提示使用 `DeepSeek Code`。

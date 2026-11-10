@@ -234,7 +234,7 @@ impl AnthropicClient {
         }
         self.apply_options(&mut body, provider)?;
         crate::performance::apply_prompt_cache(&mut body);
-        let identity = super::request_identity::RequestIdentity::new(None, super::request_identity::is_opencode(provider));
+        let identity = super::request_identity::RequestIdentity::new(None, provider);
         let request = || async {
             let request = self.client
                 .post(&url)
@@ -301,7 +301,7 @@ impl AnthropicClient {
         if let Some(effort) = provider.model.effort.as_deref() { apply_effort(&mut body, effort, &provider.model.id, max_tokens)?; }
         self.apply_options(&mut body, provider)?;
         crate::performance::apply_prompt_cache(&mut body);
-        let identity = super::request_identity::RequestIdentity::new(None, super::request_identity::is_opencode(provider));
+        let identity = super::request_identity::RequestIdentity::new(None, provider);
         let request = self.client.post(&url)
             .header("anthropic-version", "2023-06-01")
             .header("content-type", "application/json")
@@ -399,7 +399,7 @@ impl AnthropicClient {
 
         self.apply_options(&mut body, provider)?;
         crate::performance::apply_conversation_cache(&mut body);
-        let identity = super::request_identity::RequestIdentity::new(context_capture, super::request_identity::is_opencode(provider));
+        let identity = super::request_identity::RequestIdentity::new(context_capture, provider);
         let request = self.client.post(&url)
             .header("anthropic-version", "2023-06-01")
             .header("content-type", "application/json")

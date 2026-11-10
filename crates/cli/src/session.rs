@@ -446,6 +446,8 @@ impl Session {
         let mcp = Arc::new(McpServerManager::new(
             paths.data_dir.join("mcp-servers.json"),
         ));
+        let identity = crate::session_commands::wire_identity(&store.db, &id)?;
+        providers.lock().await.set_wire_identity(identity);
         let ide = Arc::new(deepseek_code_core::services::ide::IdeClient::default());
         let sdk_mcp = Arc::new(deepseek_code_core::mcp::sdk::Runtime::default());
         let engine = runtime::create_engine(
@@ -612,9 +614,19 @@ impl Session {
         self.auto_route = false;
         self.id = id.to_owned();
         self.waiting_for_continue.store(true, std::sync::atomic::Ordering::Relaxed);
+        let identity = crate::session_commands::wire_identity(&self.store.db, &self.id)?;
+        self.providers.lock().await.set_wire_identity(identity);
         deepseek_code_core::services::session_permission_mode::set(&self.store.db, &self.id, &self.permissions, mode)?;
         if lifecycle_owned { self.start_hooks("resume").await?; }
         Ok(())
+    }
+
+    /// The request profile every later model request of this session uses.
+    pub(crate) async fn set_wire_identity(
+        &self,
+        identity: deepseek_code_core::native_engine::wire_identity::WireIdentity,
+    ) {
+        self.providers.lock().await.set_wire_identity(identity);
     }
 
     /// A separate engine on the same providers, for side requests such as

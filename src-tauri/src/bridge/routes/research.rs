@@ -54,7 +54,7 @@ async fn research_start_handler(State(state): State<AppState>, Json(req): Json<C
                         enabled: m.enabled,
                         max_tokens: m.max_tokens,
                         supports_vision: m.supports_vision,
-                        context_window: m.context_window, supports_text: m.supports_text, api: m.api.clone(), effort: None, fast: false,
+                        context_window: m.context_window, supports_text: m.supports_text, api: m.api.clone(), effort: None, fast: false, wire_identity: Default::default(),
                         supports_web_search: false,
                     }).collect(),
                     enabled: p.enabled,

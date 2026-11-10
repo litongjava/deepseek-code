@@ -70,6 +70,10 @@ pub struct ModelConfig {
     pub effort: Option<String>,
     #[serde(default)]
     pub fast: bool,
+    /// Session request profile. The manager stamps every resolved model with it
+    /// so all request paths agree; it is never persisted here.
+    #[serde(skip)]
+    pub wire_identity: super::wire_identity::WireIdentity,
 }
 
 impl ModelConfig {
@@ -102,6 +106,9 @@ pub struct ProviderManager {
     cache_ttl: Duration,
     request_timeout: Duration,
     max_retries: u32,
+    /// Applied to every resolved model, so one session setting reaches every
+    /// request path, including summaries and connection tests.
+    wire_identity: super::wire_identity::WireIdentity,
 }
 
 impl ProviderManager {
@@ -113,6 +120,7 @@ impl ProviderManager {
             cache_ttl: Duration::from_secs(300),
             request_timeout: DEFAULT_REQUEST_TIMEOUT,
             max_retries: MAX_RETRIES,
+            wire_identity: super::wire_identity::WireIdentity::Default,
         };
         manager.load();
         manager
@@ -135,7 +143,20 @@ impl ProviderManager {
             cache_ttl: Duration::from_secs(300),
             request_timeout: DEFAULT_REQUEST_TIMEOUT,
             max_retries: MAX_RETRIES,
+            wire_identity: super::wire_identity::WireIdentity::Default,
         }
+    }
+
+    /// Select the request profile used by every model this manager resolves.
+    /// Every resolution stamps the current value, so a cache hit cannot keep a
+    /// stale profile.
+    pub fn set_wire_identity(&mut self, identity: super::wire_identity::WireIdentity) {
+        self.wire_identity = identity;
+    }
+
+    fn stamp(&self, mut resolved: ResolvedProvider) -> ResolvedProvider {
+        resolved.model.wire_identity = self.wire_identity;
+        resolved
     }
 
     pub fn with_cache_ttl(mut self, ttl: Duration) -> Self {
@@ -205,10 +226,10 @@ impl ProviderManager {
                         model_id,
                         now.duration_since(entry.cached_at).as_secs_f64()
                     );
-                    return Some(ResolvedProvider {
+                    return Some(self.stamp(ResolvedProvider {
                         provider: entry.provider.clone(),
                         model: entry.model.clone(),
-                    });
+                    }));
                 }
             }
         }
@@ -228,13 +249,13 @@ impl ProviderManager {
             );
         }
 
-        result
+        result.map(|resolved| self.stamp(resolved))
     }
 
     pub fn resolve_selected(&self, provider_id: &str, model_id: &str) -> Option<ResolvedProvider> {
         let provider = self.providers.iter().find(|p| p.id == provider_id && p.enabled)?;
         let model = resolve_model_selection(&provider.models,model_id)?;
-        Some(ResolvedProvider { provider: provider.clone(), model })
+        Some(self.stamp(ResolvedProvider { provider: provider.clone(), model }))
     }
 
     fn resolve_provider_internal(&self, model_id: &str) -> Option<ResolvedProvider> {

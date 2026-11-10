@@ -267,6 +267,13 @@ pub async fn stream_with_schema_observed(
     };
     let vision = messages.iter().any(|m| matches!(&m.content, super::openai_client::OpenAIContent::Multi(parts) if parts.iter().any(|p| matches!(p,super::openai_client::OpenAIContentPart::Image{..}))));
     let mut body = messages::request(api, provider, model, messages, system, tools, max_tokens)?;
+    if api == "openai-responses" {
+        super::wire_identity::apply_to_responses_body(
+            &mut body,
+            provider,
+            &super::request_identity::ids(),
+        );
+    }
     if let Some(schema) = response_schema.filter(|_| !crate::structured_output::provider_enforces_schema(&provider.provider.base_url)) {
         match api {
             "openai-completions" => crate::structured_output::append_openai_instruction(&mut body, schema),
@@ -343,12 +350,13 @@ pub async fn stream_with_schema_observed(
     } else {
         None
     };
-    let identity = super::request_identity::RequestIdentity::new(context_capture, super::request_identity::is_opencode(provider));
+    let identity = super::request_identity::RequestIdentity::new(context_capture, provider);
     let response = retry_with_backoff(|| async {
         let mut request = client
             .post(&url)
             .headers(identity.headers())
             .header("content-type", "application/json")
+            .header("accept", "text/event-stream")
             .body(encoded_body.clone());
         if entry["id"] == "github-copilot" {
             request = request

@@ -1,10 +1,26 @@
 //! Task-scoped conversation identity and stable IDs for retried model requests.
 use super::provider_manager::ResolvedProvider;
+use super::wire_identity::{self, WireIdentity};
 use reqwest::header::{HeaderMap, HeaderValue};
 use serde_json::{json, Value};
 use std::sync::atomic::{AtomicU32, Ordering};
 
 tokio::task_local! { static TURN: TurnIdentity; }
+
+/// Session and turn IDs of the request in flight; empty outside a turn.
+#[derive(Clone, Default)]
+pub(super) struct RequestIds {
+    pub(super) session: Option<String>,
+    pub(super) turn: Option<String>,
+}
+
+pub(super) fn ids() -> RequestIds {
+    TURN.try_with(|identity| RequestIds {
+        session: identity.session.clone(),
+        turn: Some(identity.turn.clone()),
+    })
+    .unwrap_or_default()
+}
 
 #[derive(Clone)]
 pub(crate) struct TurnIdentity {
@@ -61,6 +77,9 @@ pub(super) fn is_opencode(provider: &ResolvedProvider) -> bool {
 pub(super) struct RequestIdentity {
     headers: HeaderMap,
     attempt: AtomicU32,
+    /// The selected profile names another client, so this client's own
+    /// diagnostic headers are left out.
+    codex: bool,
 }
 
 impl RequestIdentity {
@@ -69,8 +88,10 @@ impl RequestIdentity {
     }
     pub(super) fn new(
         capture: Option<&super::request_context::ContextCapture>,
-        opencode: bool,
+        provider: &ResolvedProvider,
     ) -> Self {
+        let ids = ids();
+        let opencode = is_opencode(provider);
         let mut headers = HeaderMap::new();
         let mut set = |name: &'static str, value: &str| {
             // Reject invalid external IDs without failing an otherwise valid request.
@@ -123,18 +144,22 @@ impl RequestIdentity {
         if opencode {
             set("x-opencode-session", session.as_deref().unwrap_or(&request_id));
         }
+        wire_identity::apply_headers(&mut headers, provider, &ids);
         Self {
             headers,
+            codex: wire_identity::active(provider) == WireIdentity::Codex,
             attempt: AtomicU32::new(0),
         }
     }
 
     pub(super) fn headers(&self) -> HeaderMap {
         let mut headers = self.headers.clone();
-        headers.insert(
-            "x-dcl-retry-count",
-            HeaderValue::from(self.attempt.fetch_add(1, Ordering::Relaxed)),
-        );
+        if !self.codex {
+            headers.insert(
+                "x-dcl-retry-count",
+                HeaderValue::from(self.attempt.fetch_add(1, Ordering::Relaxed)),
+            );
+        }
         headers
     }
 }

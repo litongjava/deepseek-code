@@ -476,3 +476,53 @@ fn opencode_go_models_take_their_base_url_and_protocol_from_the_catalog() {
         "http://127.0.0.1:9/v1"
     );
 }
+
+#[tokio::test]
+async fn the_codex_profile_reaches_the_wire() {
+    type Requests = Arc<Mutex<Vec<(HeaderMap, Value)>>>;
+    let requests: Requests = Default::default();
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let url = format!("http://{}", listener.local_addr().unwrap());
+    let app = Router::new()
+        .fallback(post(
+            |State(requests): State<Requests>, headers: HeaderMap, Json(body): Json<Value>| async move {
+                requests.lock().unwrap().push((headers, body));
+                (
+                    axum::http::StatusCode::BAD_REQUEST,
+                    Json(json!({"error":{"message":"fixture rejection"}})),
+                )
+            },
+        ))
+        .with_state(requests.clone());
+    let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+    let mut provider = provider("openai", "openai-responses", &url);
+    provider.model.wire_identity = crate::native_engine::wire_identity::WireIdentity::Codex;
+    let failed = crate::native_engine::request_identity::TurnIdentity::new(
+        Some("session-wire".into()),
+        None,
+    )
+    .scope(async {
+        let tools = vec![ToolDefinition {
+            name: "Read".into(),
+            description: "Read a file".into(),
+            input_schema: json!({"type":"object","properties":{"path":{"type":"string"}}}),
+        }];
+        stream_with_schema_observed(&provider, vec![user()], Some("system"), tools, 1024, None, None)
+            .await
+            .is_err()
+    })
+    .await;
+    assert!(failed);
+    let captured = requests.lock().unwrap();
+    let (headers, body) = &captured[0];
+    assert_eq!(headers["originator"], "codex-tui");
+    assert_eq!(headers["session-id"], "session-wire");
+    assert_eq!(headers["thread-id"], "session-wire");
+    assert_eq!(headers["accept"], "text/event-stream");
+    assert!(!headers.contains_key("x-dcl-session-id"));
+    assert_eq!(body["tool_choice"], "auto");
+    assert_eq!(body["prompt_cache_key"], "session-wire");
+    assert_eq!(body["text"]["verbosity"], "low");
+    assert_eq!(body["client_metadata"]["session_id"], "session-wire");
+    server.abort();
+}

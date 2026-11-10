@@ -139,7 +139,7 @@ pub fn provider_from_config(p: &ProviderConfig) -> Provider {
                 supports_vision: m.supports_vision,
                 api: m.api.clone(),
                 effort: None,
-                fast: false,
+                fast: false, wire_identity: Default::default(),
                 supports_web_search: false,
             })
             .collect(),

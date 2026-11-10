@@ -8,6 +8,7 @@ pub mod session_manager;
 pub mod tool_loop;
 pub mod request_trace;
 mod request_identity;
+pub mod wire_identity;
 pub mod token_counter;
 pub mod task_context;
 pub mod context_compressor;

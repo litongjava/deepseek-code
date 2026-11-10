@@ -10,6 +10,28 @@ use std::sync::{Arc, Mutex};
 
 type Requests = Arc<Mutex<Vec<(HeaderMap, Value)>>>;
 
+fn provider(builtin: Option<&str>, base_url: &str) -> ResolvedProvider {
+    let p: Provider = serde_json::from_value(json!({
+        "id": "fixture", "name": "fixture", "base_url": base_url,
+        "api_key": "test-only", "api_format": "openai", "builtin_id": builtin,
+        "enabled": true,
+        "models": [{"id":"fixture-model","name":"fixture","enabled":true,"supports_web_search":false}]
+    }))
+    .unwrap();
+    ResolvedProvider {
+        model: p.models[0].clone(),
+        provider: p,
+    }
+}
+
+fn routed() -> ResolvedProvider {
+    provider(Some("opencode"), "https://example.test/v1")
+}
+
+fn unrouted() -> ResolvedProvider {
+    provider(None, "https://example.test/v1")
+}
+
 async fn capture(
     State(requests): State<Requests>,
     headers: HeaderMap,
@@ -177,23 +199,23 @@ async fn simultaneous_sessions_children_and_cancellation_do_not_leak_identity() 
         tasks.push(tokio::spawn(
             TurnIdentity::new(Some(session.into()), None).scope(async move {
                 barrier.wait().await;
-                let headers = RequestIdentity::new(None, true).headers();
+                let headers = RequestIdentity::new(None, &routed()).headers();
                 assert_eq!(headers["x-opencode-session"], session);
                 assert_eq!(headers["x-dcl-session-id"], session);
                 // A provider that is not OpenCode never receives a session ID.
-                let other = RequestIdentity::new(None, false).headers();
+                let other = RequestIdentity::new(None, &unrouted()).headers();
                 assert!(!other.contains_key("x-opencode-session"));
                 assert!(!other.contains_key("session-id"));
                 TurnIdentity::new(Some("child".into()), None)
                     .scope(async {
-                        let headers = RequestIdentity::new(None, true).headers();
+                        let headers = RequestIdentity::new(None, &routed()).headers();
                         assert_eq!(headers["x-parent-session-id"], session);
                         assert_eq!(headers["x-opencode-session"], "child");
                         assert!(!headers.contains_key("session-id"));
                     })
                     .await;
                 assert_eq!(
-                    RequestIdentity::new(None, true).headers()["x-opencode-session"],
+                    RequestIdentity::new(None, &routed()).headers()["x-opencode-session"],
                     session
                 );
             }),
@@ -207,30 +229,17 @@ async fn simultaneous_sessions_children_and_cancellation_do_not_leak_identity() 
         TurnIdentity::new(Some("cancelled".into()), None).scope(std::future::pending::<()>()),
     )
     .await;
-    let headers = RequestIdentity::new(None, true).headers();
+    let headers = RequestIdentity::new(None, &routed()).headers();
     assert!(!headers.contains_key("session-id"));
     // Outside a conversation the routing session falls back to the request ID.
     assert_eq!(headers["x-opencode-session"], headers["x-request-id"]);
-    assert!(!RequestIdentity::new(None, false)
+    assert!(!RequestIdentity::new(None, &unrouted())
         .headers()
         .contains_key("x-opencode-session"));
 }
 
 #[test]
 fn only_open_code_providers_are_routed_by_session() {
-    fn provider(builtin: Option<&str>, base_url: &str) -> ResolvedProvider {
-        let p: Provider = serde_json::from_value(json!({
-            "id": "fixture", "name": "fixture", "base_url": base_url,
-            "api_key": "test-only", "api_format": "openai", "builtin_id": builtin,
-            "enabled": true,
-            "models": [{"id":"fixture-model","name":"fixture","enabled":true,"supports_web_search":false}]
-        }))
-        .unwrap();
-        ResolvedProvider {
-            model: p.models[0].clone(),
-            provider: p,
-        }
-    }
     assert!(is_opencode(&provider(
         Some("opencode-go"),
         "https://example.test/v1"

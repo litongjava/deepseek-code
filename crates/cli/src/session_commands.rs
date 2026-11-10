@@ -1,7 +1,11 @@
 //! Interactive session settings persisted alongside the shared conversation.
 use crate::session::Session;
 use anyhow::{ensure, Context, Result};
-use deepseek_code_core::{db::DbManager, runtime::RuntimePaths};
+use deepseek_code_core::{
+    db::DbManager,
+    native_engine::wire_identity::WireIdentity,
+    runtime::RuntimePaths,
+};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 
@@ -13,6 +17,9 @@ struct Settings {
     /// CLI's default threshold applies.
     #[serde(default)]
     autocompact_off: bool,
+    /// `/switch`: `compat` or `codex`, absent for the default request profile.
+    #[serde(default)]
+    wire_identity: Option<String>,
     #[serde(default)]
     goal: Option<Goal>,
 }
@@ -212,6 +219,17 @@ pub(crate) fn set_session_effort(session: &Session, effort: Option<String>) -> R
     save(&session.store.db, &session.id, &settings)
 }
 
+/// The request profile this session selected; unknown stored values fall back.
+pub(crate) fn wire_identity(db: &DbManager, id: &str) -> Result<WireIdentity> {
+    Ok(WireIdentity::from_setting(
+        load(db, id)?.wire_identity.as_deref(),
+    ))
+}
+
+fn parse_wire_identity(argument: &str) -> Result<WireIdentity> {
+    WireIdentity::parse(argument).with_context(|| "Usage: /switch default|compat|codex")
+}
+
 fn parse_effort(argument: &str) -> Result<Option<String>> {
     ensure!(
         ["default", "off", "low", "medium", "high", "xhigh", "max"].contains(&argument),
@@ -332,6 +350,38 @@ pub async fn handle(
                 "Session effort: {} (default follows --effort or the model default)",
                 settings.effort.as_deref().unwrap_or("default")
             );
+        }
+        "/switch" => {
+            if !argument.is_empty() {
+                let identity = parse_wire_identity(argument)?;
+                let mut settings = load(&session.store.db, &session.id)?;
+                settings.wire_identity = (identity != WireIdentity::Default)
+                    .then(|| identity.as_str().to_owned());
+                save(&session.store.db, &session.id, &settings)?;
+                session.set_wire_identity(identity).await;
+            }
+            let identity = wire_identity(&session.store.db, &session.id)?;
+            command_eprintln!(
+                "Request profile: {} ({})",
+                identity.as_str(),
+                match identity {
+                    WireIdentity::Default => "dcl request shape",
+                    WireIdentity::Compat => "Responses fields",
+                    WireIdentity::Codex => "Responses fields and Codex client identity",
+                }
+            );
+            let responses = session
+                .selected_provider()
+                .await
+                .is_ok_and(|provider| {
+                    matches!(
+                        provider.model.api.as_deref(),
+                        Some("openai-responses") | Some("openai-codex-responses")
+                    )
+                });
+            if identity != WireIdentity::Default && !responses {
+                command_eprintln!("The selected model does not use a Responses protocol; this profile applies only to Responses requests.");
+            }
         }
         "/autocompact" => {
             let mut settings = load(&session.store.db, &session.id)?;
@@ -1250,6 +1300,7 @@ mod tests {
                     effort: Some("high".into()),
                     autocompact_percent: Some(80),
                     autocompact_off: false,
+                    wire_identity: None,
                     goal: None,
                 },
             )
@@ -1259,6 +1310,61 @@ mod tests {
         assert_eq!(load(&db, "a").unwrap().effort.as_deref(), Some("high"));
         assert_eq!(load(&db, "a").unwrap().autocompact_percent, Some(80));
         assert!(load(&db, "b").unwrap().effort.is_none());
+    }
+
+    #[tokio::test]
+    async fn switch_profile_is_persisted_and_reaches_the_resolver() {
+        use clap::Parser;
+        use deepseek_code_core::runtime::SessionStore;
+        let directory = tempfile::tempdir().unwrap();
+        let paths = RuntimePaths::new(directory.path().join("data")).unwrap();
+        let provider = serde_json::from_value(json!({
+            "id":"fixture","name":"Fixture","base_url":"http://127.0.0.1:1/v1",
+            "api_key":"fixture-only","api_format":"openai","enabled":true,
+            "models":[{"id":"fixture-model","name":"Fixture","enabled":true,
+                "supports_vision":false,"supports_web_search":false,"api":"openai-responses"}]
+        }))
+        .unwrap();
+        let selection = crate::config::Selection {
+            providers: vec![provider],
+            provider_id: "fixture".into(),
+            model: "fixture-model".into(),
+        };
+        let cli = crate::args::Cli::parse_from(["dcl", "--print"]);
+        let store = SessionStore::new(paths.open_database().unwrap());
+        let id = store
+            .create(directory.path(), "fixture-model", "fixture")
+            .unwrap();
+        let mut session = Session::open(&cli, &paths, selection, Some(&id))
+            .await
+            .unwrap();
+        assert_eq!(
+            wire_identity(&session.store.db, &session.id).unwrap(),
+            WireIdentity::Default
+        );
+        assert!(handle("/switch", "codex", &paths, &mut session)
+            .await
+            .unwrap());
+        assert_eq!(
+            wire_identity(&session.store.db, &session.id).unwrap(),
+            WireIdentity::Codex
+        );
+        // The setting reaches the model the transports receive, not just storage.
+        assert_eq!(
+            session.selected_provider().await.unwrap().model.wire_identity,
+            WireIdentity::Codex
+        );
+        assert!(handle("/switch", "default", &paths, &mut session)
+            .await
+            .unwrap());
+        assert_eq!(
+            session.selected_provider().await.unwrap().model.wire_identity,
+            WireIdentity::Default
+        );
+        assert!(handle("/switch", "turbo", &paths, &mut session)
+            .await
+            .is_err());
+        session.close().await.unwrap();
     }
 
     #[test]
