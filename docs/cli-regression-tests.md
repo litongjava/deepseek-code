@@ -67,6 +67,18 @@ grep -rn "crossterm::terminal::size\|[^:]terminal::size()" crates/cli/src --incl
 
 这些渲染用例按宿主终端宽度换行。宿主控制终端尺寸异常（例如只剩 1×2）时，`cargo test --bin dcl` 会因宽度过小而失败；这是环境问题，不是卡死，改用第二条带 `stty` 的命令或 `setsid` 运行即可。
 
+## 执行类测试的工具前置条件
+
+团队、会话消息、持久 Worker、工作树用例在隔离数据目录中用 `tests/support/tool_loading.rs` 显式开启其执行所需的非核心工具：Agent、SendMessage、LSP 或团队工具。用例仍须验证真实工具执行、子会话、目录权限、取消和恢复结果，不能只断言进程成功退出。默认工具加载策略保持不变，发现与恢复加载资格由 core 的工具加载策略测试独立覆盖。
+
+修改工具默认值或这些夹具后，执行：
+
+```bash
+cargo test --locked --no-fail-fast -p deepseek-code-cli --test teams --test session_messages --test session_worker --test worktree_startup
+```
+
+若出现 `is not loaded. Call ToolSearch`，先确认场景是否需要显式加载工具或增加模型搜索步骤；不要把未执行工具导致的后续空结果误判为 Worker 或消息传递失效。
+
 ## 真实终端的测试方法
 
 真实终端指在伪终端里启动 `dcl`，发送按键，再检查屏幕内容。Linux 上使用开发目录的工具：

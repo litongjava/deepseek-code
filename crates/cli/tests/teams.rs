@@ -1,4 +1,7 @@
 //! Standalone CLI creates, spawns and disbands a team without Desktop.
+#[path = "support/tool_loading.rs"]
+mod tool_loading;
+
 use axum::{extract::State, routing::post, Json, Router};
 use serde_json::{json, Value};
 use std::{
@@ -87,6 +90,10 @@ async fn cli_creates_spawns_and_disbands_a_team_standalone() {
     let dir = tempfile::tempdir().unwrap();
     let data = dir.path().join("data");
     std::fs::create_dir(&data).unwrap();
+    tool_loading::enable(
+        &data,
+        &["TeamCreate", "TeamSpawn", "TeamDelete", "SendMessage"],
+    );
     let project = dir.path().join("project");
     std::fs::create_dir(&project).unwrap();
     let fixture = Arc::new(Fixture {
