@@ -293,6 +293,8 @@ OpenCode Go 用四种协议提供模型，模型地址和协议都来自内置�
 - `services/session_worker*`、`services/background_sessions.rs`：D、E4，以及 `cargo test --locked -p deepseek-code-core --test worker_environment`（普通子进程不继承 worker 的控制变量）
 - `tools/mod.rs` 的 shell 启动、`services/tool_hooks.rs`、`mcp/mod.rs` 的 stdio 启动：`worker_environment`，并按 E4 复核后台与分离命令
 - `runtime.rs`、`db/message_repo.rs`（发给模型的历史）：D2、E5，以及 SDK 测试
+- `db/mod.rs`（`write_tx`）：`cargo test --locked -p deepseek-code-core --lib db::write_tx`（重试、非争用不重试、超时报 label、失败不留半行）与 `cargo test --locked -p deepseek-code-core --test session_concurrency`。真实争用复验：用 `VACUUM INTO` 复制数据库，`DEEPSEEK_CODE_DATA_DIR` 指向副本，另一个进程 `BEGIN IMMEDIATE` 占锁 8 秒，期间跑一轮带工具调用的请求，确认回合完成、日志有重试告警、工具行与快照完整；再占锁 40 秒，确认回合以带 label 的错误结束（不是裸 `database is locked`），且没有半成品工具行。
+- `db/message_repo.rs` 的请求快照去重（`request_blobs` / `*Ref`）：`cargo test --locked -p deepseek-code-core --lib db::message_repo`（同头只存一份、往返字段一致、旧内联行可读、缺 blob 不伪造、不修改调用方数据）、`cargo test --locked -p deepseek-code-core --test compaction_status_regressions` 与 `cargo test --locked -p deepseek-code-cli --bin dcl status_commands_tests`。历史数据不会自动回填：要缩小现有库需另跑一次性回填脚本并 `VACUUM`，验证方法是回填前后比较 `requests_json` 总字节、`request_blobs` 行数，并抽 3 条消息确认 `get_request_snapshots` 往返一致。
 - `services/input_queue.rs`：B、E4
 - 权限相关：E2，以及 `added_directory_survives_worker_resume_without_granting_other_sessions`（`bypass` 模式可以读工作区外的文件，其他模式受目录范围限制）
 - Provider、模型请求：E1、E6、M（OpenCode Go 的预设、URL 纠正、失败提示与会话头）

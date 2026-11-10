@@ -1,16 +1,16 @@
-pub mod schema;
 pub mod conversation_repo;
-pub mod message_repo;
-pub mod turn_repo;
-pub mod request_repo;
-pub mod project_repo;
-pub mod task_repo;
 pub mod diff_repo;
-pub mod migration;
-pub mod permission_repo;
 pub mod h5_repo;
 pub mod im_config_repo;
 pub mod im_permission_repo;
+pub mod message_repo;
+pub mod migration;
+pub mod permission_repo;
+pub mod project_repo;
+pub mod request_repo;
+pub mod schema;
+pub mod task_repo;
+pub mod turn_repo;
 
 use anyhow::Result;
 use r2d2::Pool;
@@ -29,9 +29,87 @@ pub fn write_transaction(conn: &Connection) -> rusqlite::Result<rusqlite::Transa
 }
 
 pub fn is_contention(error: &anyhow::Error) -> bool {
-    error.chain().any(|cause| matches!(cause.downcast_ref::<rusqlite::Error>(),
+    error.chain().any(|cause| {
+        matches!(cause.downcast_ref::<rusqlite::Error>(),
         Some(rusqlite::Error::SqliteFailure(code, _)) if matches!(code.code,
-            rusqlite::ErrorCode::DatabaseBusy | rusqlite::ErrorCode::DatabaseLocked)))
+            rusqlite::ErrorCode::DatabaseBusy | rusqlite::ErrorCode::DatabaseLocked))
+    })
+}
+
+const WRITE_TX_BACKOFF_START: std::time::Duration = std::time::Duration::from_millis(20);
+const WRITE_TX_BACKOFF_MAX: std::time::Duration = std::time::Duration::from_millis(400);
+
+/// Exponential backoff plus up to 25% jitter, derived from the attempt and the
+/// calling thread so concurrent writers do not retry in lockstep.
+fn write_tx_backoff(attempts: u32) -> std::time::Duration {
+    use std::hash::{Hash, Hasher};
+    let multiplier = 1u32 << attempts.saturating_sub(1).min(16);
+    let base = WRITE_TX_BACKOFF_START
+        .saturating_mul(multiplier)
+        .min(WRITE_TX_BACKOFF_MAX);
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    attempts.hash(&mut hasher);
+    std::thread::current().id().hash(&mut hasher);
+    base + base.mul_f64((hasher.finish() % 2_501) as f64 / 10_000.0)
+}
+
+/// Retries a write transaction on transient SQLite contention.
+///
+/// The closure runs inside one IMMEDIATE transaction and must be re-runnable:
+/// every retry rolls back and calls it again from the start. Only contention
+/// is retried; any other error returns immediately.
+pub fn write_tx<T>(
+    conn: &Connection,
+    label: &str,
+    deadline: std::time::Duration,
+    mut f: impl FnMut(&rusqlite::Transaction<'_>) -> Result<T>,
+) -> Result<T> {
+    let started = std::time::Instant::now();
+    let mut attempts: u32 = 1;
+    loop {
+        // Opening the transaction can itself hit SQLITE_BUSY, and so can COMMIT.
+        let outcome = (|| -> Result<T> {
+            let tx = write_transaction(conn)?;
+            let value = f(&tx)?;
+            tx.commit()?;
+            Ok(value)
+        })();
+        match outcome {
+            Ok(value) => {
+                if attempts > 1 {
+                    tracing::warn!(
+                        module = "db",
+                        label,
+                        attempts,
+                        elapsed_ms = started.elapsed().as_millis() as u64,
+                        "write transaction recovered after contention"
+                    );
+                }
+                return Ok(value);
+            }
+            Err(error) if is_contention(&error) => {
+                let elapsed = started.elapsed();
+                if elapsed >= deadline {
+                    return Err(error.context(format!(
+                        "{label}: database busy, {attempts} attempts over {}ms",
+                        elapsed.as_millis()
+                    )));
+                }
+                let wait = write_tx_backoff(attempts);
+                tracing::warn!(
+                    module = "db",
+                    label,
+                    attempts,
+                    waited_ms = elapsed.as_millis() as u64,
+                    retry_in_ms = wait.as_millis() as u64,
+                    "write transaction hit database contention; retrying"
+                );
+                std::thread::sleep(wait);
+                attempts += 1;
+            }
+            Err(error) => return Err(error),
+        }
+    }
 }
 
 pub struct DbManager {
@@ -55,12 +133,21 @@ impl DbManager {
         let conn = pool.get()?;
         // journal_mode can report SQLITE_BUSY immediately during first-open races,
         // even with busy_timeout. Retry only this idempotent initialization step.
-        let deadline=std::time::Instant::now()+std::time::Duration::from_secs(5);
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
         loop {
-            match conn.execute_batch("PRAGMA journal_mode=WAL; PRAGMA synchronous=NORMAL; PRAGMA foreign_keys=ON;") {
-                Ok(())=>break,
-                Err(rusqlite::Error::SqliteFailure(error,_)) if matches!(error.code,rusqlite::ErrorCode::DatabaseBusy|rusqlite::ErrorCode::DatabaseLocked) && std::time::Instant::now()<deadline => std::thread::sleep(std::time::Duration::from_millis(20)),
-                Err(error)=>return Err(error.into()),
+            match conn.execute_batch(
+                "PRAGMA journal_mode=WAL; PRAGMA synchronous=NORMAL; PRAGMA foreign_keys=ON;",
+            ) {
+                Ok(()) => break,
+                Err(rusqlite::Error::SqliteFailure(error, _))
+                    if matches!(
+                        error.code,
+                        rusqlite::ErrorCode::DatabaseBusy | rusqlite::ErrorCode::DatabaseLocked
+                    ) && std::time::Instant::now() < deadline =>
+                {
+                    std::thread::sleep(std::time::Duration::from_millis(20))
+                }
+                Err(error) => return Err(error.into()),
             }
         }
         Ok(Self { pool })
@@ -167,5 +254,131 @@ impl DbManager {
     {
         let conn = self.pool.get()?;
         Ok(f(&conn))
+    }
+}
+
+#[cfg(test)]
+mod write_tx_tests {
+    use super::*;
+    use std::sync::mpsc;
+    use std::time::Duration;
+
+    fn fixture() -> (tempfile::TempDir, DbManager, std::path::PathBuf) {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("write_tx.sqlite");
+        let db = DbManager::new(path.clone()).unwrap();
+        db.init().unwrap();
+        db.with_conn(|conn| conn.execute_batch("CREATE TABLE items(x INTEGER)"))
+            .unwrap()
+            .unwrap();
+        (temp, db, path)
+    }
+
+    /// Hold the write lock until the returned sender fires.
+    fn hold_write_lock(
+        path: std::path::PathBuf,
+    ) -> (std::thread::JoinHandle<()>, mpsc::Sender<()>) {
+        let (locked_tx, locked_rx) = mpsc::channel();
+        let (release_tx, release_rx) = mpsc::channel();
+        let holder = std::thread::spawn(move || {
+            let conn = Connection::open(path).unwrap();
+            conn.execute_batch("BEGIN IMMEDIATE").unwrap();
+            locked_tx.send(()).unwrap();
+            release_rx.recv_timeout(Duration::from_secs(10)).unwrap();
+            conn.execute_batch("ROLLBACK").unwrap();
+        });
+        locked_rx.recv_timeout(Duration::from_secs(10)).unwrap();
+        (holder, release_tx)
+    }
+
+    #[test]
+    fn contention_is_retried_until_the_writer_releases() {
+        let (_temp, db, path) = fixture();
+        let (holder, release) = hold_write_lock(path);
+        let releaser = std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(300));
+            release.send(()).unwrap();
+        });
+        let value = db
+            .with_conn(|conn| {
+                conn.busy_timeout(Duration::from_millis(50)).unwrap();
+                write_tx(conn, "retry probe", Duration::from_secs(5), |tx| {
+                    tx.execute("INSERT INTO items(x) VALUES (42)", [])?;
+                    Ok(42)
+                })
+            })
+            .unwrap()
+            .unwrap();
+        assert_eq!(value, 42);
+        releaser.join().unwrap();
+        holder.join().unwrap();
+        let count: i64 = db
+            .with_conn(|conn| conn.query_row("SELECT COUNT(*) FROM items", [], |row| row.get(0)))
+            .unwrap()
+            .unwrap();
+        assert_eq!(count, 1);
+    }
+
+    #[test]
+    fn non_contention_errors_are_not_retried() {
+        let (_temp, db, _path) = fixture();
+        let mut calls = 0;
+        let error = db
+            .with_conn(|conn| {
+                write_tx(conn, "missing table", Duration::from_secs(5), |tx| {
+                    calls += 1;
+                    tx.execute("INSERT INTO missing_table(x) VALUES (1)", [])?;
+                    Ok(())
+                })
+            })
+            .unwrap()
+            .unwrap_err();
+        assert_eq!(calls, 1);
+        assert!(!is_contention(&error), "{error:#}");
+    }
+
+    #[test]
+    fn deadline_exhaustion_reports_the_label() {
+        let (_temp, db, path) = fixture();
+        let (holder, release) = hold_write_lock(path);
+        let error = db
+            .with_conn(|conn| {
+                conn.busy_timeout(Duration::from_millis(50)).unwrap();
+                write_tx(conn, "deadline probe", Duration::from_millis(200), |tx| {
+                    tx.execute("INSERT INTO items(x) VALUES (1)", [])?;
+                    Ok(())
+                })
+            })
+            .unwrap()
+            .unwrap_err();
+        assert!(is_contention(&error), "{error:#}");
+        assert!(format!("{error:#}").contains("deadline probe"), "{error:#}");
+        release.send(()).unwrap();
+        holder.join().unwrap();
+    }
+
+    #[test]
+    fn a_failed_transaction_leaves_no_partial_rows() {
+        let (_temp, db, _path) = fixture();
+        let error = db
+            .with_conn(|conn| {
+                write_tx(
+                    conn,
+                    "rollback probe",
+                    Duration::from_secs(5),
+                    |tx| -> Result<()> {
+                        tx.execute("INSERT INTO items(x) VALUES (7)", [])?;
+                        anyhow::bail!("intentional failure")
+                    },
+                )
+            })
+            .unwrap()
+            .unwrap_err();
+        assert!(format!("{error:#}").contains("intentional failure"));
+        let count: i64 = db
+            .with_conn(|conn| conn.query_row("SELECT COUNT(*) FROM items", [], |row| row.get(0)))
+            .unwrap()
+            .unwrap();
+        assert_eq!(count, 0);
     }
 }

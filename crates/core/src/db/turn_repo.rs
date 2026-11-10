@@ -3,7 +3,10 @@ use super::DbManager;
 use anyhow::Result;
 use rusqlite::{params, Connection, OptionalExtension};
 use serde::{Deserialize, Serialize};
-use std::{sync::Arc, time::Instant};
+use std::{
+    sync::Arc,
+    time::{Duration, Instant},
+};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -171,13 +174,13 @@ impl TurnTimer {
     pub fn new_segment(&mut self) -> Result<String> {
         let id = uuid::Uuid::new_v4().to_string();
         self.db.with_conn(|conn| -> Result<()> {
-            let tx = super::write_transaction(conn)?;
-            tx.execute("INSERT INTO messages(id,conversation_id,role,content,created_at,sort_order) VALUES(?1,?2,'assistant','',?3,(SELECT COALESCE(MAX(sort_order),-1)+1 FROM messages WHERE conversation_id=?2))",
-                params![id,self.conversation_id,chrono::Utc::now().to_rfc3339()])?;
-            link_message(&tx, &self.record.turn_id, &id)?;
-            tx.execute("UPDATE conversations SET message_count=(SELECT COUNT(*) FROM messages WHERE conversation_id=?1) WHERE id=?1", [&self.conversation_id])?;
-            tx.commit()?;
-            Ok(())
+            super::write_tx(conn, "start turn segment", Duration::from_secs(30), |tx| {
+                tx.execute("INSERT INTO messages(id,conversation_id,role,content,created_at,sort_order) VALUES(?1,?2,'assistant','',?3,(SELECT COALESCE(MAX(sort_order),-1)+1 FROM messages WHERE conversation_id=?2))",
+                    params![id,self.conversation_id,chrono::Utc::now().to_rfc3339()])?;
+                link_message(tx, &self.record.turn_id, &id)?;
+                tx.execute("UPDATE conversations SET message_count=(SELECT COUNT(*) FROM messages WHERE conversation_id=?1) WHERE id=?1", [&self.conversation_id])?;
+                Ok(())
+            })
         })??;
         self.message_id = Some(id.clone());
         Ok(id)
@@ -205,10 +208,17 @@ impl TurnTimer {
             .as_millis()
             .min(i64::MAX as u128) as u64;
         self.ensure_segment()?;
-        self.db.with_conn(|conn| conn.execute(
-            "UPDATE execution_turns SET ended_at=?2,elapsed_ms=?3,status=?4 WHERE id=?1 AND status='running'",
-            params![self.record.turn_id,ended_at,elapsed_ms,status_name(status)],
-        ))??;
+        // Finalize in the database first; memory fields change only after the
+        // write commits, so a retry never re-applies half of the state.
+        self.db.with_conn(|conn| {
+            super::write_tx(conn, "finish turn", Duration::from_secs(30), |tx| {
+                tx.execute(
+                    "UPDATE execution_turns SET ended_at=?2,elapsed_ms=?3,status=?4 WHERE id=?1 AND status='running'",
+                    params![self.record.turn_id,&ended_at,elapsed_ms,status_name(status)],
+                )?;
+                Ok(())
+            })
+        })??;
         self.record.ended_at = Some(ended_at);
         self.record.elapsed_ms = Some(elapsed_ms);
         self.record.status = status;
