@@ -4,10 +4,10 @@
 //! task moves. Keeping them pure makes every rejection and every unmet
 //! completion condition testable without a database or a model call.
 use super::model::{
-    decode_body, AcceptanceResult, AgentRole, AgentStatus, Approval, ApprovalStatus, ApprovalType,
-    CleanupStatus, Event, EventType, HarnessAnalysisReport, NewEvent, NonGitStatus, Phase,
-    RepoTarget, Report, ReportKind, ReviewStage, ReviewVerdict, SessionRef, Status, TaskRecord,
-    TaskReviewReport, Unmet,
+    decode_body, AgentRole, AgentStatus, Approval, ApprovalStatus, ApprovalType, CleanupStatus,
+    Event, EventType, GateEvidence, HarnessAnalysisReport, ImplementationReport, NewEvent,
+    NonGitStatus, Phase, RepoTarget, Report, ReportKind, ReviewStage, ReviewVerdict, SessionRef,
+    Status, TaskRecord, TaskReviewReport, Unmet,
 };
 use serde_json::Value;
 use std::collections::BTreeSet;
@@ -446,46 +446,176 @@ fn latest_report<'a>(reports: &'a [&'a Report]) -> Option<&'a Report> {
     })
 }
 
-fn current<'a>(reports: &'a [Report], spec_version: u32) -> Vec<&'a Report> {
-    reports
-        .iter()
-        .filter(|report| !report.invalidated && report.spec_version == spec_version)
-        .collect()
-}
-
 pub fn non_git_repository_id(path: &std::path::Path) -> String {
     format!("non-git:{}", path.display())
 }
 
+fn bind_report(
+    record: &TaskRecord,
+    report: &Report,
+    spec_version: u32,
+    round: u32,
+    unmet: &mut Vec<Unmet>,
+) -> bool {
+    if spec_version != record.spec_version {
+        unmet.push(Unmet::ReportSpecMismatch {
+            report_id: report.report_id.clone(),
+            kind: report.kind,
+            expected: record.spec_version,
+            found: spec_version,
+        });
+        return false;
+    }
+    if round != report.round {
+        unmet.push(Unmet::ReportRoundMismatch {
+            report_id: report.report_id.clone(),
+            kind: report.kind,
+            expected: report.round,
+            found: round,
+        });
+        return false;
+    }
+    true
+}
+
+fn acceptance_unmet(record: &TaskRecord, body: &TaskReviewReport) -> Vec<Unmet> {
+    let expected: std::collections::BTreeSet<&str> = record
+        .spec
+        .acceptance_criteria
+        .iter()
+        .map(|criterion| criterion.id.as_str())
+        .collect();
+    let mut unmet = Vec::new();
+    let mut seen = std::collections::BTreeSet::new();
+    for result in &body.acceptance_results {
+        if !expected.contains(result.criterion.as_str()) {
+            unmet.push(Unmet::UnknownAcceptance {
+                criterion: result.criterion.clone(),
+            });
+            continue;
+        }
+        if !seen.insert(result.criterion.as_str()) {
+            unmet.push(Unmet::DuplicateAcceptance {
+                criterion: result.criterion.clone(),
+            });
+            continue;
+        }
+        if !result.passed {
+            unmet.push(Unmet::FailedAcceptance {
+                criterion: result.criterion.clone(),
+                reason: "the reviewer marked it failed".into(),
+            });
+        } else if !result
+            .evidence
+            .iter()
+            .any(|evidence| !evidence.trim().is_empty())
+        {
+            unmet.push(Unmet::FailedAcceptance {
+                criterion: result.criterion.clone(),
+                reason: "no evidence was recorded".into(),
+            });
+        }
+    }
+    for criterion in expected {
+        if !seen.contains(criterion) {
+            unmet.push(Unmet::MissingAcceptance {
+                criterion: criterion.into(),
+            });
+        }
+    }
+    unmet
+}
+
+fn nonempty(value: &Option<String>) -> Option<&str> {
+    value
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+}
+
 /// The eight documented completion conditions. Every condition is evaluated
 /// even when an earlier one fails, so the caller can show all remaining work.
+///
+/// Only the current specification version and current review round decide the
+/// result. An earlier BLOCKED or rejected round stays in history without
+/// permanently poisoning a later approved round. Durable facts that the gate
+/// cannot obtain itself (existing sessions, persisted trace, verified non-Git
+/// snapshots) arrive through `evidence`; the gate never touches the database
+/// or filesystem.
 pub fn completion_gate(
     record: &TaskRecord,
     repos: &[RepoTarget],
     reports: &[Report],
     approvals: &[Approval],
+    evidence: &GateEvidence,
 ) -> Result<(), Vec<Unmet>> {
     let mut unmet = Vec::new();
-    let reports_current = current(reports, record.spec_version);
-    let review_reports: Vec<&Report> = reports_current
+    // Historical rounds and superseded specification versions are evidence,
+    // not active requirements.
+    let round_reports: Vec<&Report> = reports
         .iter()
-        .copied()
-        .filter(|report| report.kind == ReportKind::Review)
+        .filter(|report| {
+            !report.invalidated
+                && report.spec_version == record.spec_version
+                && report.round == record.review_round
+        })
         .collect();
-    let latest_review = latest_report(&review_reports);
-    let final_review = latest_review
-        .map(|report| (report, decode_body::<TaskReviewReport>(report)))
-        .and_then(|(report, body)| match body {
-            Ok(body) if body.stage == ReviewStage::FinalDelivery => Some((report, body)),
-            Ok(_) => None,
-            Err(_) => None,
-        });
 
-    // 1. The review must describe the current specification.
+    let mut final_reviews: Vec<(&Report, TaskReviewReport)> = Vec::new();
+    let mut harness_reports: Vec<(&Report, HarnessAnalysisReport)> = Vec::new();
+    let mut implementation_present = false;
+    for report in &round_reports {
+        match report.kind {
+            ReportKind::Review => match decode_body::<TaskReviewReport>(report) {
+                Ok(body) => {
+                    if bind_report(record, report, body.spec_version, body.round, &mut unmet)
+                        && body.stage == ReviewStage::FinalDelivery
+                    {
+                        final_reviews.push((report, body));
+                    }
+                }
+                Err(_) => unmet.push(Unmet::MalformedReport {
+                    report_id: report.report_id.clone(),
+                    kind: ReportKind::Review,
+                }),
+            },
+            ReportKind::Harness => match decode_body::<HarnessAnalysisReport>(report) {
+                Ok(body) => {
+                    if bind_report(record, report, body.spec_version, body.round, &mut unmet) {
+                        harness_reports.push((report, body));
+                    }
+                }
+                Err(_) => unmet.push(Unmet::MalformedReport {
+                    report_id: report.report_id.clone(),
+                    kind: ReportKind::Harness,
+                }),
+            },
+            ReportKind::Implementation => match decode_body::<ImplementationReport>(report) {
+                Ok(body) => {
+                    if bind_report(record, report, body.spec_version, body.round, &mut unmet) {
+                        implementation_present = true;
+                    }
+                }
+                Err(_) => unmet.push(Unmet::MalformedReport {
+                    report_id: report.report_id.clone(),
+                    kind: ReportKind::Implementation,
+                }),
+            },
+            ReportKind::Plan | ReportKind::Integration => {}
+        }
+    }
+    let final_review = final_reviews.into_iter().max_by(|left, right| {
+        left.0
+            .created_at
+            .cmp(&right.0.created_at)
+            .then_with(|| left.0.report_id.cmp(&right.0.report_id))
+    });
+
+    // 1. The final delivery review must describe the current contract version.
     if final_review.is_none() {
         let all_reviews: Vec<&Report> = reports
             .iter()
-            .filter(|report| report.kind == ReportKind::Review)
+            .filter(|report| report.kind == ReportKind::Review && !report.invalidated)
             .collect();
         match latest_report(&all_reviews) {
             Some(report) if report.spec_version != record.spec_version => {
@@ -493,6 +623,25 @@ pub fn completion_gate(
                     expected: record.spec_version,
                     found: Some(report.spec_version),
                 });
+            }
+            Some(report) if report.round != record.review_round => {
+                if let Ok(body) = decode_body::<TaskReviewReport>(report) {
+                    if body.spec_version == record.spec_version && body.round == report.round {
+                        unmet.push(Unmet::ReportRoundMismatch {
+                            report_id: report.report_id.clone(),
+                            kind: ReportKind::Review,
+                            expected: record.review_round,
+                            found: report.round,
+                        });
+                    } else {
+                        unmet.push(Unmet::FinalReviewMissing);
+                    }
+                } else {
+                    unmet.push(Unmet::MalformedReport {
+                        report_id: report.report_id.clone(),
+                        kind: ReportKind::Review,
+                    });
+                }
             }
             Some(report) => {
                 if decode_body::<TaskReviewReport>(report).is_err() {
@@ -509,7 +658,8 @@ pub fn completion_gate(
     }
 
     if let Some((report, body)) = &final_review {
-        // 2. The final task acceptance passed.
+        // 2. The final task acceptance passed, with evidence for every
+        //    acceptance criterion and no fabricated or duplicate results.
         if body.verdict != ReviewVerdict::Approved {
             unmet.push(Unmet::FinalReviewNotApproved {
                 verdict: Some(body.verdict),
@@ -520,47 +670,87 @@ pub fn completion_gate(
                 report_id: report.report_id.clone(),
             });
         }
+        unmet.extend(acceptance_unmet(record, body));
+
         // 3. Final delivered content equals the reviewed version.
         for repo in repos {
-            if repo.integrated_commit.is_some() || repo.integration_status != Default::default() {
-                let reviewed = body
-                    .reviewed_versions
-                    .iter()
-                    .find(|version| version.repository_id == repo.repository_id)
-                    .and_then(|version| version.commit.clone());
-                if repo.reviewed_commit != repo.integrated_commit
-                    || reviewed != repo.integrated_commit
-                {
-                    unmet.push(Unmet::VersionMismatch {
-                        repository_id: repo.repository_id.clone(),
-                        expected: repo.reviewed_commit.clone(),
-                        found: repo.integrated_commit.clone(),
-                    });
-                }
+            let Some(reviewed) = body
+                .reviewed_versions
+                .iter()
+                .find(|version| version.repository_id == repo.repository_id)
+                .and_then(|version| nonempty(&version.commit))
+            else {
+                unmet.push(Unmet::DeliveryVersionMissing {
+                    repository_id: repo.repository_id.clone(),
+                    version: "reviewed".into(),
+                });
+                continue;
+            };
+            let delivered = nonempty(&repo.integrated_commit);
+            let recorded = nonempty(&repo.reviewed_commit);
+            if delivered.is_none() || recorded.is_none() {
+                unmet.push(Unmet::DeliveryVersionMissing {
+                    repository_id: repo.repository_id.clone(),
+                    version: if delivered.is_none() {
+                        "integrated".into()
+                    } else {
+                        "reviewed".into()
+                    },
+                });
+                continue;
+            }
+            if delivered != recorded || delivered != Some(reviewed) {
+                unmet.push(Unmet::VersionMismatch {
+                    repository_id: repo.repository_id.clone(),
+                    expected: repo.reviewed_commit.clone(),
+                    found: repo.integrated_commit.clone(),
+                });
             }
         }
         for target in &record.non_git_targets {
+            let id = non_git_repository_id(&target.path);
             let reviewed = body
                 .reviewed_versions
                 .iter()
-                .find(|version| version.repository_id == non_git_repository_id(&target.path))
-                .and_then(|version| version.snapshot_ref.clone());
-            if reviewed.is_none() || reviewed != target.diff_ref {
+                .find(|version| version.repository_id == id)
+                .and_then(|version| nonempty(&version.snapshot_ref));
+            if reviewed.is_none() {
+                unmet.push(Unmet::DeliveryVersionMissing {
+                    repository_id: id,
+                    version: "snapshot".into(),
+                });
+            } else if reviewed != nonempty(&target.diff_ref) {
                 unmet.push(Unmet::VersionMismatch {
-                    repository_id: non_git_repository_id(&target.path),
+                    repository_id: id,
                     expected: target.diff_ref.clone(),
-                    found: reviewed,
+                    found: reviewed.map(str::to_owned),
                 });
             }
         }
         // 5. Independent verification is recorded by the reviewer.
-        if body.verification.is_empty() {
+        if body
+            .verification
+            .iter()
+            .all(|verification| verification.trim().is_empty())
+        {
             unmet.push(Unmet::ReviewVerificationMissing);
         }
     }
 
-    // 4. Every Git target was integrated by the Coder.
+    // 4. Every Git target was integrated by the Coder with a real version.
     for repo in repos {
+        for (label, value) in [
+            ("submitted", &repo.submitted_commit),
+            ("reviewed", &repo.reviewed_commit),
+            ("integrated", &repo.integrated_commit),
+        ] {
+            if nonempty(value).is_none() {
+                unmet.push(Unmet::DeliveryVersionMissing {
+                    repository_id: repo.repository_id.clone(),
+                    version: label.into(),
+                });
+            }
+        }
         if repo.integration_status != super::model::IntegrationStatus::Completed {
             unmet.push(Unmet::IntegrationIncomplete {
                 repository_id: repo.repository_id.clone(),
@@ -576,20 +766,32 @@ pub fn completion_gate(
         }
     }
 
-    // 6. Non-Git targets have a recorded diff and completed verification.
+    // 6. Non-Git targets have a recorded diff and a verified snapshot.
     for target in &record.non_git_targets {
+        let path = target.path.display().to_string();
         let complete = target.status == NonGitStatus::Completed
-            && target
-                .diff_ref
-                .as_deref()
-                .is_some_and(|value| !value.is_empty())
+            && nonempty(&target.diff_ref).is_some()
             && !target.snapshot_manifest_json.trim().is_empty()
             && !target.snapshot_dir.as_os_str().is_empty();
         if !complete {
             unmet.push(Unmet::NonGitTargetIncomplete {
-                path: target.path.display().to_string(),
+                path: path.clone(),
                 status: target.status,
             });
+        }
+        match evidence.non_git_manifests.get(&path) {
+            Some(verification) if verification.complete() => {}
+            Some(verification) => unmet.push(Unmet::NonGitManifestInvalid {
+                path,
+                reason: verification
+                    .error
+                    .clone()
+                    .unwrap_or_else(|| "snapshot contents failed verification".into()),
+            }),
+            None => unmet.push(Unmet::NonGitManifestInvalid {
+                path,
+                reason: "the stored snapshot was not verified".into(),
+            }),
         }
     }
 
@@ -604,28 +806,19 @@ pub fn completion_gate(
             });
         }
     }
-    for report in &reports_current {
-        match report.kind {
-            ReportKind::Harness => match decode_body::<HarnessAnalysisReport>(report) {
-                Ok(body) if body.blocking() => unmet.push(Unmet::BlockingReport {
-                    report_id: report.report_id.clone(),
-                }),
-                Err(_) => unmet.push(Unmet::MalformedReport {
-                    report_id: report.report_id.clone(),
-                    kind: ReportKind::Harness,
-                }),
-                Ok(_) => {}
-            },
-            ReportKind::Review => {
-                if let Ok(body) = decode_body::<TaskReviewReport>(report) {
-                    if body.verdict == ReviewVerdict::Blocked {
-                        unmet.push(Unmet::BlockingReport {
-                            report_id: report.report_id.clone(),
-                        });
-                    }
-                }
-            }
-            _ => {}
+    // Only the current round's harness analysis can block. An older blocking
+    // finding is resolved evidence once a newer round has been analysed.
+    let harness_present = !harness_reports.is_empty();
+    if let Some((report, body)) = harness_reports.into_iter().max_by(|left, right| {
+        left.0
+            .created_at
+            .cmp(&right.0.created_at)
+            .then_with(|| left.0.report_id.cmp(&right.0.report_id))
+    }) {
+        if body.blocking() {
+            unmet.push(Unmet::BlockingReport {
+                report_id: report.report_id.clone(),
+            });
         }
     }
     if matches!(
@@ -638,40 +831,40 @@ pub fn completion_gate(
     }
 
     // 8. Durable evidence and the sessions it refers to exist.
-    for (kind, present) in [
-        (
-            ReportKind::Implementation,
-            reports_current
-                .iter()
-                .any(|report| report.kind == ReportKind::Implementation),
-        ),
-        (
-            ReportKind::Harness,
-            reports_current
-                .iter()
-                .any(|report| report.kind == ReportKind::Harness),
-        ),
-        (
-            ReportKind::Review,
-            reports_current
-                .iter()
-                .any(|report| report.kind == ReportKind::Review),
-        ),
-    ] {
-        if !present {
-            unmet.push(Unmet::EvidenceMissing { report: kind });
-        }
+    if !implementation_present {
+        unmet.push(Unmet::EvidenceMissing {
+            report: ReportKind::Implementation,
+        });
+    }
+    if !harness_present {
+        unmet.push(Unmet::EvidenceMissing {
+            report: ReportKind::Harness,
+        });
+    }
+    if final_review.is_none() {
+        unmet.push(Unmet::EvidenceMissing {
+            report: ReportKind::Review,
+        });
     }
     for (role, session) in [
         (AgentRole::Coder, &record.coder),
         (AgentRole::Reviewer, &record.reviewer),
     ] {
-        if session
-            .session_id
-            .as_deref()
-            .is_none_or(|id| id.trim().is_empty())
-        {
-            unmet.push(Unmet::SessionMissing { role });
+        match session.session_id.as_deref().map(str::trim) {
+            None | Some("") => unmet.push(Unmet::SessionMissing { role }),
+            Some(id) if !evidence.verified_sessions.contains(id) => {
+                unmet.push(Unmet::SessionUnverified { role })
+            }
+            Some(_) => {}
+        }
+    }
+    for event in [
+        EventType::ImplementationSubmitted,
+        EventType::ReviewCompleted,
+        EventType::HarnessAnalysisCompleted,
+    ] {
+        if !evidence.event_types.contains(&event) {
+            unmet.push(Unmet::TraceMissing { event });
         }
     }
     if unmet.is_empty() {
@@ -787,7 +980,7 @@ mod tests {
     fn legal_flow_reaches_finalizing_and_rounds_reject_over_limit() {
         let policy = StatePolicy { max_rounds: 2 };
         let mut state = record(Phase::Discovering, Status::Queued);
-        let mut step = |state: &mut TaskRecord, draft: NewEvent| {
+        let step = |state: &mut TaskRecord, draft: NewEvent| {
             let transition = apply(state, &draft, &policy).unwrap();
             state.phase = transition.phase;
             state.status = transition.status;
@@ -1064,6 +1257,36 @@ mod tests {
         }
     }
 
+    fn evidence_for(record: &TaskRecord) -> GateEvidence {
+        let mut evidence = GateEvidence::default();
+        for id in [
+            record.coder.session_id.as_deref(),
+            record.reviewer.session_id.as_deref(),
+        ]
+        .into_iter()
+        .flatten()
+        {
+            evidence.verified_sessions.insert(id.to_owned());
+        }
+        evidence.event_types = [
+            EventType::ImplementationSubmitted,
+            EventType::ReviewCompleted,
+            EventType::HarnessAnalysisCompleted,
+        ]
+        .into_iter()
+        .collect();
+        evidence
+    }
+
+    fn gate(
+        record: &TaskRecord,
+        repos: &[RepoTarget],
+        reports: &[Report],
+        approvals: &[Approval],
+    ) -> Result<(), Vec<Unmet>> {
+        completion_gate(record, repos, reports, approvals, &evidence_for(record))
+    }
+
     fn reports_ok() -> Vec<Report> {
         vec![
             report(
@@ -1083,7 +1306,7 @@ mod tests {
         let mut state = record(Phase::Finalizing, Status::Running);
         state.repositories = vec![repo()];
         let repos = state.repositories.clone();
-        completion_gate(&state, &repos, &reports_ok(), &[]).unwrap();
+        gate(&state, &repos, &reports_ok(), &[]).unwrap();
     }
 
     #[test]
@@ -1091,12 +1314,12 @@ mod tests {
         let mut state = record(Phase::Finalizing, Status::Running);
         state.repositories = vec![repo()];
         let repos = state.repositories.clone();
-        let mut reports = reports_ok();
+        let reports = reports_ok();
 
         // 1. Stale specification.
         let mut stale = reports.clone();
         stale[0].spec_version = 2;
-        let unmet = completion_gate(&state, &repos, &stale, &[]).unwrap_err();
+        let unmet = gate(&state, &repos, &stale, &[]).unwrap_err();
         assert!(unmet
             .iter()
             .any(|item| matches!(item, Unmet::SpecMismatch { .. })));
@@ -1106,7 +1329,7 @@ mod tests {
         let mut body = approved_review("integrated");
         body.verdict = ReviewVerdict::ChangesRequested;
         rejected[0].body = serde_json::to_value(body).unwrap();
-        let unmet = completion_gate(&state, &repos, &rejected, &[]).unwrap_err();
+        let unmet = gate(&state, &repos, &rejected, &[]).unwrap_err();
         assert!(unmet
             .iter()
             .any(|item| matches!(item, Unmet::FinalReviewNotApproved { .. })));
@@ -1116,7 +1339,7 @@ mod tests {
         let mut body = approved_review("submitted");
         body.reviewed_versions[0].commit = Some("submitted".into());
         version[0].body = serde_json::to_value(body).unwrap();
-        let unmet = completion_gate(&state, &repos, &version, &[]).unwrap_err();
+        let unmet = gate(&state, &repos, &version, &[]).unwrap_err();
         assert!(unmet
             .iter()
             .any(|item| matches!(item, Unmet::VersionMismatch { .. })));
@@ -1124,8 +1347,7 @@ mod tests {
         // 4. Integration incomplete.
         let mut integration = state.clone();
         integration.repositories[0].integration_status = IntegrationStatus::InProgress;
-        let unmet =
-            completion_gate(&integration, &integration.repositories, &reports, &[]).unwrap_err();
+        let unmet = gate(&integration, &integration.repositories, &reports, &[]).unwrap_err();
         assert!(unmet
             .iter()
             .any(|item| matches!(item, Unmet::IntegrationIncomplete { .. })));
@@ -1133,8 +1355,7 @@ mod tests {
         // 5. Verification incomplete.
         let mut verification = state.clone();
         verification.repositories[0].verification_status = VerificationStatus::Failed;
-        let unmet =
-            completion_gate(&verification, &verification.repositories, &reports, &[]).unwrap_err();
+        let unmet = gate(&verification, &verification.repositories, &reports, &[]).unwrap_err();
         assert!(unmet
             .iter()
             .any(|item| matches!(item, Unmet::VerificationIncomplete { .. })));
@@ -1142,7 +1363,7 @@ mod tests {
         let mut body = approved_review("integrated");
         body.verification.clear();
         no_verification[0].body = serde_json::to_value(body).unwrap();
-        let unmet = completion_gate(&state, &repos, &no_verification, &[]).unwrap_err();
+        let unmet = gate(&state, &repos, &no_verification, &[]).unwrap_err();
         assert!(unmet
             .iter()
             .any(|item| *item == Unmet::ReviewVerificationMissing));
@@ -1158,7 +1379,7 @@ mod tests {
             status: NonGitStatus::Prepared,
             lock_key: "path:/workspace/scripts".into(),
         }];
-        let unmet = completion_gate(&non_git, &non_git.repositories, &reports, &[]).unwrap_err();
+        let unmet = gate(&non_git, &non_git.repositories, &reports, &[]).unwrap_err();
         assert!(unmet
             .iter()
             .any(|item| matches!(item, Unmet::NonGitTargetIncomplete { .. })));
@@ -1179,13 +1400,13 @@ mod tests {
             created_at: "2026-01-01T00:00:00Z".into(),
             resolved_at: None,
         };
-        let unmet = completion_gate(&state, &repos, &reports, &[approval]).unwrap_err();
+        let unmet = gate(&state, &repos, &reports, &[approval]).unwrap_err();
         assert!(unmet
             .iter()
             .any(|item| matches!(item, Unmet::UnresolvedApproval { .. })));
         let mut blocking = reports.clone();
         blocking[1].body = json!({"spec_version":1,"findings":[{"category":"HARNESS","severity":"HIGH","phenomenon":"lost output"}]});
-        let unmet = completion_gate(&state, &repos, &blocking, &[]).unwrap_err();
+        let unmet = gate(&state, &repos, &blocking, &[]).unwrap_err();
         assert!(unmet
             .iter()
             .any(|item| matches!(item, Unmet::BlockingReport { .. })));
@@ -1193,7 +1414,7 @@ mod tests {
         // 8. Missing evidence and sessions.
         let mut evidence = reports.clone();
         evidence.remove(2);
-        let unmet = completion_gate(&state, &repos, &evidence, &[]).unwrap_err();
+        let unmet = gate(&state, &repos, &evidence, &[]).unwrap_err();
         assert!(unmet.iter().any(|item| matches!(
             item,
             Unmet::EvidenceMissing {
@@ -1202,7 +1423,7 @@ mod tests {
         )));
         let mut no_session = state.clone();
         no_session.reviewer.session_id = None;
-        let unmet = completion_gate(&no_session, &repos, &reports, &[]).unwrap_err();
+        let unmet = gate(&no_session, &repos, &reports, &[]).unwrap_err();
         assert!(unmet.iter().any(|item| matches!(
             item,
             Unmet::SessionMissing {
@@ -1215,7 +1436,268 @@ mod tests {
         invalidated[0].invalidated = true;
         invalidated[1].invalidated = true;
         invalidated[2].invalidated = true;
-        let unmet = completion_gate(&state, &repos, &invalidated, &[]).unwrap_err();
+        let unmet = gate(&state, &repos, &invalidated, &[]).unwrap_err();
         assert!(unmet.iter().any(|item| *item == Unmet::FinalReviewMissing));
+    }
+
+    /// An APPROVED verdict alone must not bypass per-criterion evidence.
+    #[test]
+    fn acceptance_results_must_cover_each_criterion_with_evidence() {
+        let mut state = record(Phase::Finalizing, Status::Running);
+        state.repositories = vec![repo()];
+        let repos = state.repositories.clone();
+
+        let gate_with = |body: TaskReviewReport| {
+            let mut reports = reports_ok();
+            reports[0].body = serde_json::to_value(body).unwrap();
+            gate(&state, &repos, &reports, &[]).unwrap_err()
+        };
+
+        let mut missing = approved_review("integrated");
+        missing.acceptance_results.clear();
+        assert!(gate_with(missing).iter().any(
+            |item| matches!(item, Unmet::MissingAcceptance { criterion } if criterion == "AC-001")
+        ));
+
+        let mut failed = approved_review("integrated");
+        failed.acceptance_results[0].passed = false;
+        assert!(gate_with(failed)
+            .iter()
+            .any(|item| matches!(item, Unmet::FailedAcceptance { criterion, .. } if criterion == "AC-001")));
+
+        let mut no_evidence = approved_review("integrated");
+        no_evidence.acceptance_results[0].evidence = vec!["  ".into()];
+        assert!(gate_with(no_evidence).iter().any(
+            |item| matches!(item, Unmet::FailedAcceptance { reason, .. } if reason.contains("evidence"))
+        ));
+
+        let mut duplicate = approved_review("integrated");
+        duplicate
+            .acceptance_results
+            .push(duplicate.acceptance_results[0].clone());
+        assert!(gate_with(duplicate).iter().any(
+            |item| matches!(item, Unmet::DuplicateAcceptance { criterion } if criterion == "AC-001")
+        ));
+
+        let mut unknown = approved_review("integrated");
+        unknown.acceptance_results.push(AcceptanceResult {
+            criterion: "AC-999".into(),
+            passed: true,
+            evidence: vec!["fabricated".into()],
+        });
+        assert!(gate_with(unknown).iter().any(
+            |item| matches!(item, Unmet::UnknownAcceptance { criterion } if criterion == "AC-999")
+        ));
+    }
+
+    #[test]
+    fn report_envelopes_and_bodies_must_match_the_active_version_and_round() {
+        let mut state = record(Phase::Finalizing, Status::Running);
+        state.repositories = vec![repo()];
+        let repos = state.repositories.clone();
+
+        let mut body_version = reports_ok();
+        body_version[0].body =
+            serde_json::to_value(approved_review("integrated").with_spec(2)).unwrap();
+        let unmet = gate(&state, &repos, &body_version, &[]).unwrap_err();
+        assert!(unmet.iter().any(|item| matches!(
+            item,
+            Unmet::ReportSpecMismatch {
+                kind: ReportKind::Review,
+                ..
+            }
+        )));
+
+        let mut body_round = reports_ok();
+        let mut review = approved_review("integrated");
+        review.round = 1;
+        body_round[0].body = serde_json::to_value(review).unwrap();
+        let unmet = gate(&state, &repos, &body_round, &[]).unwrap_err();
+        assert!(unmet.iter().any(|item| matches!(
+            item,
+            Unmet::ReportRoundMismatch {
+                kind: ReportKind::Review,
+                ..
+            }
+        )));
+
+        // A review for an older round cannot satisfy the current round.
+        let mut old_round = reports_ok();
+        old_round[0].round = 1;
+        let mut review = approved_review("integrated");
+        review.round = 1;
+        old_round[0].body = serde_json::to_value(review).unwrap();
+        let unmet = gate(&state, &repos, &old_round, &[]).unwrap_err();
+        assert!(unmet.iter().any(|item| matches!(
+            item,
+            Unmet::ReportRoundMismatch {
+                expected: 0,
+                found: 1,
+                ..
+            }
+        )));
+    }
+
+    trait WithSpec {
+        fn with_spec(self, spec: u32) -> Self;
+    }
+    impl WithSpec for TaskReviewReport {
+        fn with_spec(mut self, spec: u32) -> Self {
+            self.spec_version = spec;
+            self
+        }
+    }
+
+    #[test]
+    fn empty_delivery_versions_are_rejected_even_when_they_compare_equal() {
+        let mut state = record(Phase::Finalizing, Status::Running);
+        state.repositories = vec![repo()];
+        for field in ["submitted", "reviewed", "integrated"] {
+            let mut repo = state.repositories[0].clone();
+            match field {
+                "submitted" => repo.submitted_commit = Some(String::new()),
+                "reviewed" => repo.reviewed_commit = Some(String::new()),
+                _ => repo.integrated_commit = Some(String::new()),
+            }
+            let mut review = approved_review("integrated");
+            if field != "submitted" {
+                review.reviewed_versions[0].commit = Some(String::new());
+            }
+            let mut reports = reports_ok();
+            reports[0].body = serde_json::to_value(review).unwrap();
+            let unmet = gate(&state, &[repo], &reports, &[]).unwrap_err();
+            assert!(
+                unmet
+                    .iter()
+                    .any(|item| matches!(item, Unmet::DeliveryVersionMissing { .. })),
+                "empty {field} version was accepted: {unmet:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn sessions_and_trace_must_be_durable_not_just_nonempty() {
+        let mut state = record(Phase::Finalizing, Status::Running);
+        state.repositories = vec![repo()];
+        let repos = state.repositories.clone();
+        let reports = reports_ok();
+        let mut evidence = evidence_for(&state);
+        evidence.verified_sessions.clear();
+        let unmet = completion_gate(&state, &repos, &reports, &[], &evidence).unwrap_err();
+        assert!(unmet
+            .iter()
+            .any(|item| matches!(item, Unmet::SessionUnverified { .. })));
+        assert!(!unmet
+            .iter()
+            .any(|item| matches!(item, Unmet::SessionMissing { .. })));
+
+        let mut evidence = evidence_for(&state);
+        evidence.event_types.clear();
+        let unmet = completion_gate(&state, &repos, &reports, &[], &evidence).unwrap_err();
+        assert!(unmet
+            .iter()
+            .any(|item| matches!(item, Unmet::TraceMissing { .. })));
+    }
+
+    #[test]
+    fn a_later_approved_round_supersedes_an_earlier_blocked_round() {
+        let mut state = record(Phase::Finalizing, Status::Running);
+        state.review_round = 1;
+        state.repositories = vec![repo()];
+        let repos = state.repositories.clone();
+
+        let mut old_review = approved_review("integrated");
+        old_review.round = 0;
+        old_review.verdict = ReviewVerdict::Blocked;
+        let mut old_report = report(
+            ReportKind::Review,
+            serde_json::to_value(old_review).unwrap(),
+        );
+        old_report.round = 0;
+        old_report.created_at = "2026-01-01T00:00:00Z".into();
+        let mut old_harness = report(
+            ReportKind::Harness,
+            json!({"spec_version":1,"round":0,"findings":[{"category":"HARNESS","severity":"HIGH","phenomenon":"lost output"}]}),
+        );
+        old_harness.round = 0;
+        old_harness.created_at = "2026-01-01T00:00:00Z".into();
+
+        let mut fresh_review = approved_review("integrated");
+        fresh_review.round = 1;
+        let mut fresh = vec![
+            report(
+                ReportKind::Review,
+                serde_json::to_value(fresh_review).unwrap(),
+            ),
+            report(
+                ReportKind::Harness,
+                json!({"spec_version":1,"round":1,"findings":[]}),
+            ),
+            report(
+                ReportKind::Implementation,
+                json!({"spec_version":1,"round":1,"summary":"fixed"}),
+            ),
+        ];
+        for item in &mut fresh {
+            item.round = 1;
+            item.created_at = "2026-01-02T00:00:00Z".into();
+        }
+        fresh.push(old_report);
+        fresh.push(old_harness);
+        gate(&state, &repos, &fresh, &[]).unwrap();
+    }
+
+    #[test]
+    fn non_git_targets_require_a_verified_snapshot() {
+        let mut state = record(Phase::Finalizing, Status::Running);
+        state.repositories.clear();
+        let path = std::path::PathBuf::from("/workspace/scripts");
+        state.non_git_targets = vec![NonGitTarget {
+            task_id: "task-001".into(),
+            path: path.clone(),
+            snapshot_dir: "/data/snapshots/1".into(),
+            snapshot_manifest_json: "{\"source\":\"/workspace/scripts\"}".into(),
+            diff_ref: Some("diff-1".into()),
+            status: NonGitStatus::Completed,
+            lock_key: "path:/workspace/scripts".into(),
+        }];
+        let mut review = approved_review("integrated");
+        review.reviewed_versions = vec![ReviewedVersion {
+            repository_id: non_git_repository_id(&path),
+            commit: None,
+            snapshot_ref: Some("diff-1".into()),
+        }];
+        let mut reports = reports_ok();
+        reports[0].body = serde_json::to_value(review).unwrap();
+
+        let evidence = evidence_for(&state);
+        let unmet = completion_gate(&state, &[], &reports, &[], &evidence).unwrap_err();
+        assert!(unmet
+            .iter()
+            .any(|item| matches!(item, Unmet::NonGitManifestInvalid { .. })));
+
+        let mut evidence = evidence_for(&state);
+        evidence.non_git_manifests.insert(
+            path.display().to_string(),
+            super::super::model::NonGitVerification {
+                valid: true,
+                source_matches: true,
+                payload_verified: true,
+                skipped: vec!["node_modules".into()],
+                error: None,
+            },
+        );
+        completion_gate(&state, &[], &reports, &[], &evidence).unwrap();
+
+        let mut corrupt = evidence;
+        corrupt
+            .non_git_manifests
+            .get_mut(&path.display().to_string())
+            .unwrap()
+            .payload_verified = false;
+        let unmet = completion_gate(&state, &[], &reports, &[], &corrupt).unwrap_err();
+        assert!(unmet
+            .iter()
+            .any(|item| matches!(item, Unmet::NonGitManifestInvalid { .. })));
     }
 }

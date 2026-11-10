@@ -6,7 +6,7 @@
 use anyhow::{ensure, Context, Result};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::PathBuf;
 
 macro_rules! text_enum {
@@ -482,7 +482,7 @@ impl TaskRecord {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "SCREAMING_SNAKE_CASE")]
 pub enum EventType {
     TaskCreated,
@@ -788,9 +788,48 @@ pub enum Unmet {
     SessionMissing {
         role: AgentRole,
     },
+    SessionUnverified {
+        role: AgentRole,
+    },
     MalformedReport {
         report_id: String,
         kind: ReportKind,
+    },
+    ReportSpecMismatch {
+        report_id: String,
+        kind: ReportKind,
+        expected: u32,
+        found: u32,
+    },
+    ReportRoundMismatch {
+        report_id: String,
+        kind: ReportKind,
+        expected: u32,
+        found: u32,
+    },
+    DeliveryVersionMissing {
+        repository_id: String,
+        version: String,
+    },
+    MissingAcceptance {
+        criterion: String,
+    },
+    DuplicateAcceptance {
+        criterion: String,
+    },
+    UnknownAcceptance {
+        criterion: String,
+    },
+    FailedAcceptance {
+        criterion: String,
+        reason: String,
+    },
+    NonGitManifestInvalid {
+        path: String,
+        reason: String,
+    },
+    TraceMissing {
+        event: EventType,
     },
 }
 
@@ -835,7 +874,77 @@ impl Unmet {
             Self::MalformedReport { report_id, kind } => {
                 format!("report {report_id} is not a valid {kind} body")
             }
+            Self::SessionUnverified { role } => {
+                format!("{role:?} session does not exist in the durable store")
+            }
+            Self::ReportSpecMismatch {
+                report_id,
+                kind,
+                expected,
+                found,
+            } => format!(
+                "{kind} report {report_id} describes spec version {found}, current version is {expected}"
+            ),
+            Self::ReportRoundMismatch {
+                report_id,
+                kind,
+                expected,
+                found,
+            } => format!(
+                "{kind} report {report_id} describes round {found}, current round is {expected}"
+            ),
+            Self::DeliveryVersionMissing {
+                repository_id,
+                version,
+            } => format!("repository {repository_id} has no {version} version"),
+            Self::MissingAcceptance { criterion } => {
+                format!("acceptance criterion {criterion} has no result")
+            }
+            Self::DuplicateAcceptance { criterion } => {
+                format!("acceptance criterion {criterion} is reported more than once")
+            }
+            Self::UnknownAcceptance { criterion } => {
+                format!("acceptance result names unknown criterion {criterion}")
+            }
+            Self::FailedAcceptance { criterion, reason } => {
+                format!("acceptance criterion {criterion} did not pass: {reason}")
+            }
+            Self::NonGitManifestInvalid { path, reason } => {
+                format!("non-Git target {path} has no verified snapshot: {reason}")
+            }
+            Self::TraceMissing { event } => {
+                format!("the durable task trace has no {event} event")
+            }
         }
+    }
+}
+
+/// Filesystem and database facts that the pure completion gate cannot obtain
+/// itself. The store fills it inside the completion transaction; tests supply
+/// it explicitly. It is never produced by the model.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct GateEvidence {
+    /// Sessions that exist, are not archived, and are readable in the store.
+    pub verified_sessions: BTreeSet<String>,
+    /// Event types persisted for this task.
+    pub event_types: BTreeSet<EventType>,
+    /// Verified snapshot state keyed by the target path as stored on the task.
+    pub non_git_manifests: BTreeMap<String, NonGitVerification>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct NonGitVerification {
+    pub valid: bool,
+    pub source_matches: bool,
+    pub payload_verified: bool,
+    /// Entries the snapshot could not protect (build output, non-UTF-8 names).
+    pub skipped: Vec<String>,
+    pub error: Option<String>,
+}
+
+impl NonGitVerification {
+    pub fn complete(&self) -> bool {
+        self.valid && self.source_matches && self.payload_verified
     }
 }
 

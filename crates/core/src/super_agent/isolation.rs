@@ -258,16 +258,24 @@ pub fn prepare_environment(
                 let lock_key = format!("path:{}", path.display());
                 let lock_operation = format!("{operation_prefix}:path:{index}");
                 if let Some(store) = store {
-                    match store
-                        .try_lock(&lock_operation, &lock_key, task_id)
-                        .map_err(|error| anyhow::anyhow!(error.to_string()))?
-                    {
-                        super::store::LockOutcome::Acquired
-                        | super::store::LockOutcome::AlreadyOwned => {}
+                    // A deterministic operation that was released earlier must
+                    // not masquerade as ownership; acquire with a fresh one.
+                    let mut operation = lock_operation.clone();
+                    loop {
+                        match store
+                            .try_lock(&operation, &lock_key, task_id)
+                            .map_err(|error| anyhow::anyhow!(error.to_string()))?
+                        {
+                            super::store::LockOutcome::Acquired
+                            | super::store::LockOutcome::AlreadyOwned => break,
+                            super::store::LockOutcome::Released => {
+                                operation = format!("{lock_operation}:{}", uuid::Uuid::new_v4());
+                            }
+                        }
                     }
                     guard
                         .locks
-                        .push((lock_key.clone(), task_id.into(), lock_operation));
+                        .push((lock_key.clone(), task_id.into(), operation));
                 }
                 let snapshot_dir = task_dir.join("snapshots").join(index.to_string());
                 let manifest = match load_snapshot(&snapshot_dir) {
@@ -648,6 +656,81 @@ pub fn create_snapshot(source: &Path, snapshot_dir: &Path) -> Result<SnapshotMan
         let _ = std::fs::remove_dir_all(snapshot_dir);
     }
     result
+}
+
+/// Reads the stored snapshot and verifies that every protected payload entry
+/// is present with matching content. It never modifies the source tree, and it
+/// reports entries that the snapshot intentionally skipped instead of claiming
+/// they are protected.
+pub fn verify_snapshot(
+    snapshot_dir: &Path,
+    expected_source: &Path,
+) -> super::model::NonGitVerification {
+    let mut verification = super::model::NonGitVerification::default();
+    let manifest = match load_snapshot(snapshot_dir) {
+        Ok(manifest) => manifest,
+        Err(error) => {
+            verification.error = Some(format!("{error:#}"));
+            return verification;
+        }
+    };
+    verification.valid = true;
+    verification.source_matches = manifest
+        .source
+        .canonicalize()
+        .ok()
+        .zip(expected_source.canonicalize().ok())
+        .is_some_and(|(left, right)| left == right);
+    verification.skipped = manifest.skipped.clone();
+    if !verification.source_matches {
+        verification.error = Some("snapshot source does not match the target".into());
+        return verification;
+    }
+    if manifest.truncated {
+        verification.error = Some("snapshot was truncated".into());
+        return verification;
+    }
+    let payload = snapshot_dir.join("payload");
+    for entry in &manifest.entries {
+        if !super::discovery::is_plain_relative_path(&entry.path) {
+            verification.error = Some(format!("snapshot entry {} is not a plain path", entry.path));
+            return verification;
+        }
+        match entry.kind {
+            SnapshotKind::Directory => {}
+            SnapshotKind::File => {
+                let path = payload.join(&entry.path);
+                match hash_file(&path) {
+                    Ok(hash) if hash == entry.hash => {}
+                    Ok(_) => {
+                        verification.error =
+                            Some(format!("payload hash mismatch for {}", entry.path));
+                        return verification;
+                    }
+                    Err(error) => {
+                        verification.error = Some(format!(
+                            "payload for {} is unavailable: {error}",
+                            entry.path
+                        ));
+                        return verification;
+                    }
+                }
+            }
+            SnapshotKind::Symlink => {
+                let matches = entry
+                    .link_target
+                    .as_deref()
+                    .is_some_and(|target| hash_bytes(target.as_bytes()) == entry.hash);
+                if !matches {
+                    verification.error =
+                        Some(format!("symlink payload mismatch for {}", entry.path));
+                    return verification;
+                }
+            }
+        }
+    }
+    verification.payload_verified = true;
+    verification
 }
 
 pub fn load_snapshot(snapshot_dir: &Path) -> Result<SnapshotManifest> {

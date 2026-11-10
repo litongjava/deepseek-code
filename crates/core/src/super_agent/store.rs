@@ -6,8 +6,9 @@
 //! task, kind or payload is an explicit conflict.
 use super::model::{
     AgentStatus, Approval, ApprovalStatus, ApprovalType, CleanupStatus, Event, EventType,
-    IntegrationStatus, NewEvent, NonGitStatus, NonGitTarget, Phase, RepoTarget, Report, ReportKind,
-    SessionRef, Status, TaskRecord, TaskSpec, VerificationStatus,
+    GateEvidence, HarnessAnalysisReport, ImplementationReport, IntegrationReport,
+    IntegrationStatus, NewEvent, NonGitStatus, NonGitTarget, Phase, PlanReport, RepoTarget, Report,
+    ReportKind, SessionRef, Status, TaskRecord, TaskReviewReport, TaskSpec, VerificationStatus,
 };
 use super::state::{self, StateError, StatePolicy};
 use crate::db::DbManager;
@@ -73,7 +74,11 @@ pub struct EventAppend {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum LockOutcome {
     Acquired,
+    /// The same operation is replayed while it still holds the lock.
     AlreadyOwned,
+    /// The operation is known but no longer owns the lock. A fresh operation
+    /// is required for a new acquisition.
+    Released,
 }
 
 #[derive(Debug, Clone)]
@@ -269,8 +274,9 @@ impl TaskStore {
                 let repos = load_repos_conn(tx, task_id)?;
                 let reports = load_reports_conn(tx, task_id)?;
                 let approvals = load_approvals_conn(tx, task_id)?;
+                let evidence = gate_evidence_conn(tx, &record)?;
                 if let Err(unmet) =
-                    state::completion_gate(&record, &repos, &reports, &approvals)
+                    state::completion_gate(&record, &repos, &reports, &approvals, &evidence)
                 {
                     return Err(StoreError::Gate(unmet));
                 }
@@ -469,9 +475,9 @@ impl TaskStore {
                     kind: stored_kind,
                 });
             }
-            if load_record_conn(tx, task_id)?.is_none() {
-                return Err(StoreError::TaskNotFound(task_id.into()));
-            }
+            let record = load_record_conn(tx, task_id)?
+                .ok_or_else(|| StoreError::TaskNotFound(task_id.into()))?;
+            validate_report_body(&record, kind, spec_version, round, &body)?;
             let report = Report {
                 report_id: uuid::Uuid::new_v4().to_string(),
                 task_id: task_id.into(),
@@ -653,29 +659,37 @@ impl TaskStore {
     ) -> Result<LockOutcome, StoreError> {
         validate_operation_id(operation_id)?;
         validate_lock_key(lock_key)?;
+        let lock_key = normalize_lock_key(lock_key)?;
         let hash = hash_json(&json!({"key":lock_key}));
         self.run_tx("super-agent acquire lock", |tx| {
-            if let Some((kind, stored_task, stored_hash)) = operation_row(tx, operation_id)? {
-                if kind == "lock" && stored_task == task_id && stored_hash == hash {
-                    return Ok(LockOutcome::AlreadyOwned);
-                }
-                return Err(StoreError::OperationConflict {
-                    operation_id: operation_id.into(),
-                    kind,
-                });
-            }
-            let holder: Option<(String, String)> = tx
+            // Ownership is decided from the lock table, never from the fact
+            // that an operation once recorded an acquisition.
+            let owned_now: Option<(String, String)> = tx
                 .query_row(
                     "SELECT task_id,owner_operation_id FROM sa_locks WHERE lock_key=?1",
-                    [lock_key],
+                    [&lock_key],
                     |row| Ok((row.get(0)?, row.get(1)?)),
                 )
                 .optional()?;
-            if let Some((holder_task, holder_operation)) = holder {
-                if holder_task == task_id && holder_operation == operation_id {
+            if let Some((stored_kind, stored_task, stored_hash)) =
+                operation_row(tx, operation_id)?
+            {
+                if stored_kind != "lock" || stored_task != task_id || stored_hash != hash {
+                    return Err(StoreError::OperationConflict {
+                        operation_id: operation_id.into(),
+                        kind: stored_kind,
+                    });
+                }
+                if owned_now
+                    .as_ref()
+                    .is_some_and(|(task, operation)| task == task_id && operation == operation_id)
+                {
                     return Ok(LockOutcome::AlreadyOwned);
                 }
-                return Err(StoreError::LockBusy(lock_key.into()));
+                return Ok(LockOutcome::Released);
+            }
+            if let Some(conflict) = conflicting_lock(tx, &lock_key)? {
+                return Err(StoreError::LockBusy(conflict));
             }
             claim_operation(tx, operation_id, "lock", task_id, &hash)?;
             tx.execute(
@@ -692,6 +706,7 @@ impl TaskStore {
         task_id: &str,
         owner_operation_id: &str,
     ) -> Result<bool, StoreError> {
+        let lock_key = normalize_lock_key(lock_key)?;
         self.run_tx("super-agent release lock", |tx| {
             let removed = tx.execute(
                 "DELETE FROM sa_locks WHERE lock_key=?1 AND task_id=?2 AND owner_operation_id=?3",
@@ -783,6 +798,135 @@ impl TaskStore {
     }
 }
 
+/// Validates a report against its typed schema and the task's active contract.
+/// A report that describes another specification version or review round is
+/// rejected instead of being stored where a later gate could trust it.
+fn validate_report_body(
+    record: &TaskRecord,
+    kind: ReportKind,
+    spec_version: u32,
+    round: u32,
+    body: &Value,
+) -> Result<(), StoreError> {
+    if spec_version != record.spec_version {
+        return Err(StoreError::Invalid(format!(
+            "{kind} report describes spec version {spec_version}, current version is {}",
+            record.spec_version
+        )));
+    }
+    if round != record.review_round {
+        return Err(StoreError::Invalid(format!(
+            "{kind} report describes round {round}, current round is {}",
+            record.review_round
+        )));
+    }
+    let invalid = |error: serde_json::Error| {
+        StoreError::Invalid(format!("Invalid {kind} report body: {error}"))
+    };
+    let check = |body_spec: u32, body_round: u32| -> Result<(), StoreError> {
+        if body_spec != spec_version || body_round != round {
+            return Err(StoreError::Invalid(format!(
+                "{kind} report body names version {body_spec} round {body_round}, envelope says version {spec_version} round {round}"
+            )));
+        }
+        Ok(())
+    };
+    match kind {
+        ReportKind::Review => {
+            let parsed: TaskReviewReport = serde_json::from_value(body.clone()).map_err(invalid)?;
+            check(parsed.spec_version, parsed.round)?;
+        }
+        ReportKind::Harness => {
+            let parsed: HarnessAnalysisReport =
+                serde_json::from_value(body.clone()).map_err(invalid)?;
+            check(parsed.spec_version, parsed.round)?;
+        }
+        ReportKind::Implementation => {
+            let parsed: ImplementationReport =
+                serde_json::from_value(body.clone()).map_err(invalid)?;
+            check(parsed.spec_version, parsed.round)?;
+        }
+        ReportKind::Plan => {
+            let parsed: PlanReport = serde_json::from_value(body.clone()).map_err(invalid)?;
+            check(parsed.spec_version, parsed.round)?;
+        }
+        ReportKind::Integration => {
+            let parsed: IntegrationReport =
+                serde_json::from_value(body.clone()).map_err(invalid)?;
+            check(parsed.spec_version, parsed.round)?;
+        }
+    }
+    Ok(())
+}
+
+/// Collects the durable facts the pure gate cannot read, inside the same
+/// transaction that will commit the completion.
+fn gate_evidence_conn(conn: &Connection, record: &TaskRecord) -> Result<GateEvidence, StoreError> {
+    let mut evidence = GateEvidence::default();
+    for session in [
+        record.coder.session_id.as_deref(),
+        record.reviewer.session_id.as_deref(),
+    ]
+    .into_iter()
+    .flatten()
+    {
+        let id = session.trim();
+        if id.is_empty() {
+            continue;
+        }
+        let archived: Option<i64> = conn
+            .query_row(
+                "SELECT archived FROM conversations WHERE id=?1",
+                [id],
+                |row| row.get(0),
+            )
+            .optional()?;
+        if archived == Some(0) {
+            evidence.verified_sessions.insert(id.to_owned());
+        }
+    }
+    let mut statement =
+        conn.prepare("SELECT DISTINCT event_type FROM sa_events WHERE task_id=?1")?;
+    let rows = statement
+        .query_map([&record.task_id], |row| row.get::<_, String>(0))?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    for row in rows {
+        if let Ok(event) = EventType::parse(&row) {
+            evidence.event_types.insert(event);
+        }
+    }
+    for target in &record.non_git_targets {
+        let path = target.path.display().to_string();
+        let mut verification =
+            super::isolation::verify_snapshot(&target.snapshot_dir, &target.path);
+        if verification.valid {
+            let stored = serde_json::from_str::<super::isolation::SnapshotManifest>(
+                &target.snapshot_manifest_json,
+            );
+            match stored {
+                Ok(stored) => match super::isolation::load_snapshot(&target.snapshot_dir) {
+                    Ok(disk) if stored == disk => {}
+                    Ok(_) => {
+                        verification.payload_verified = false;
+                        verification.error =
+                            Some("the recorded manifest differs from the snapshot on disk".into());
+                    }
+                    Err(error) => {
+                        verification.valid = false;
+                        verification.error = Some(format!("{error:#}"));
+                    }
+                },
+                Err(error) => {
+                    verification.valid = false;
+                    verification.error = Some(format!("the recorded manifest is invalid: {error}"));
+                }
+            }
+        }
+        evidence.non_git_manifests.insert(path, verification);
+    }
+    Ok(evidence)
+}
+
 fn upsert_repo_conn(conn: &Connection, repo: &RepoTarget) -> Result<(), StoreError> {
     conn.execute(
         "INSERT INTO sa_task_repos(task_id,repository_id,repo_root,git_common_dir,target_path,target_branch,task_branch,worktree_path,working_path,base_commit,submitted_commit,reviewed_commit,integrated_commit,integration_status,verification_status,source_state_json) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16) ON CONFLICT(task_id,repository_id) DO UPDATE SET repo_root=excluded.repo_root,git_common_dir=excluded.git_common_dir,target_path=excluded.target_path,target_branch=excluded.target_branch,task_branch=excluded.task_branch,worktree_path=excluded.worktree_path,working_path=excluded.working_path,base_commit=excluded.base_commit,submitted_commit=excluded.submitted_commit,reviewed_commit=excluded.reviewed_commit,integrated_commit=excluded.integrated_commit,integration_status=excluded.integration_status,verification_status=excluded.verification_status,source_state_json=excluded.source_state_json",
@@ -822,6 +966,78 @@ fn upsert_non_git_conn(conn: &Connection, target: &NonGitTarget) -> Result<(), S
         ],
     )?;
     Ok(())
+}
+
+/// Canonical path locks let ancestor and descendant directories conflict while
+/// sibling names such as `/target` and `/target2` stay independent. Other lock
+/// kinds compare exactly.
+fn normalize_lock_key(key: &str) -> Result<String, StoreError> {
+    let Some(path) = key.strip_prefix("path:") else {
+        return Ok(key.to_owned());
+    };
+    let path = Path::new(path);
+    if !path.is_absolute() {
+        return Err(StoreError::Invalid(
+            "Non-Git path locks must use an absolute path".into(),
+        ));
+    }
+    Ok(format!("path:{}", canonical_lock_path(path)?.display()))
+}
+
+fn canonical_lock_path(path: &Path) -> Result<PathBuf, StoreError> {
+    let mut existing = path.to_path_buf();
+    let mut remainder: Vec<std::ffi::OsString> = Vec::new();
+    while !existing.exists() {
+        let name = existing
+            .file_name()
+            .ok_or_else(|| StoreError::Invalid("Invalid path lock".into()))?
+            .to_owned();
+        if name == "." || name == ".." {
+            return Err(StoreError::Invalid("Invalid path lock".into()));
+        }
+        remainder.push(name);
+        existing = existing
+            .parent()
+            .ok_or_else(|| StoreError::Invalid("Invalid path lock".into()))?
+            .to_path_buf();
+    }
+    let mut canonical =
+        std::fs::canonicalize(&existing).map_err(|error| StoreError::Internal(error.into()))?;
+    for name in remainder.into_iter().rev() {
+        canonical.push(name);
+    }
+    Ok(canonical)
+}
+
+fn lock_path(key: &str) -> Option<&Path> {
+    key.strip_prefix("path:").map(Path::new)
+}
+
+/// Returns the key of a lock that overlaps the requested one, if any. Path
+/// locks conflict when either canonical path contains the other; component-wise
+/// `Path::starts_with` keeps `/target2` outside `/target`.
+fn conflicting_lock(conn: &Connection, key: &str) -> Result<Option<String>, StoreError> {
+    let requested = lock_path(key);
+    let mut statement = conn.prepare("SELECT lock_key,task_id,owner_operation_id FROM sa_locks")?;
+    let rows = statement
+        .query_map([], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
+            ))
+        })?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    for (existing, _task, _operation) in rows {
+        let conflicts = match (requested, lock_path(&existing)) {
+            (Some(left), Some(right)) => left.starts_with(right) || right.starts_with(left),
+            _ => existing == key,
+        };
+        if conflicts {
+            return Ok(Some(existing));
+        }
+    }
+    Ok(None)
 }
 
 fn validate_operation_id(value: &str) -> Result<(), StoreError> {

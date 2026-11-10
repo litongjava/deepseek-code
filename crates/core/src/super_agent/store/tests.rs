@@ -68,12 +68,16 @@ fn finalizing(store: &TaskStore) -> TaskRecord {
         .create_task("router", spec("Fix login"), "create")
         .unwrap();
     store.save_repo(&repo(&task.task_id)).unwrap();
+    // Sessions must exist in the durable store; a nonempty string is not proof.
+    let sessions = crate::runtime::SessionStore::new(store.db().clone());
+    let coder = sessions
+        .create(store.data_dir(), "fixture", "fixture")
+        .unwrap();
+    let reviewer = sessions
+        .create(store.data_dir(), "fixture", "fixture")
+        .unwrap();
     store
-        .set_sessions(
-            &task.task_id,
-            Some("coder-session"),
-            Some("reviewer-session"),
-        )
+        .set_sessions(&task.task_id, Some(&coder), Some(&reviewer))
         .unwrap();
     for (event_type, operation, payload) in [
         (EventType::DiscoveryCompleted, "discovery", json!({})),
@@ -99,6 +103,7 @@ fn finalizing(store: &TaskStore) -> TaskRecord {
             json!({"verdict":"APPROVED"}),
         ),
         (EventType::IntegrationCompleted, "integration", json!({})),
+        (EventType::HarnessAnalysisCompleted, "harness", json!({})),
         (
             EventType::ReviewCompleted,
             "review-final",
@@ -368,6 +373,7 @@ fn an_unmet_gate_leaves_the_task_untouched() {
             json!({"verdict":"APPROVED"}),
         ),
         (EventType::IntegrationCompleted, "integration", json!({})),
+        (EventType::HarnessAnalysisCompleted, "harness", json!({})),
         (
             EventType::ReviewCompleted,
             "review-final",
@@ -739,5 +745,329 @@ fn cleanup_status_and_coder_replacement_are_persisted() {
             .unwrap()
             .cleanup_status,
         CleanupStatus::Pending
+    );
+}
+
+#[test]
+fn report_validation_binds_version_round_and_typed_body() {
+    let (_temp, _data, store) = fixture();
+    let task = store
+        .create_task("router", spec("Reports"), "create")
+        .unwrap();
+    let review = json!({"verdict":"APPROVED","spec_version":1,"stage":"FINAL_DELIVERY"});
+    assert!(matches!(
+        store
+            .add_report(
+                "wrong-version",
+                &task.task_id,
+                ReportKind::Review,
+                2,
+                0,
+                review.clone()
+            )
+            .unwrap_err(),
+        StoreError::Invalid(_)
+    ));
+    assert!(matches!(
+        store
+            .add_report(
+                "wrong-round",
+                &task.task_id,
+                ReportKind::Review,
+                1,
+                1,
+                review.clone()
+            )
+            .unwrap_err(),
+        StoreError::Invalid(_)
+    ));
+    let mut mismatched = review.clone();
+    mismatched["spec_version"] = json!(2);
+    assert!(matches!(
+        store
+            .add_report(
+                "mismatched-body",
+                &task.task_id,
+                ReportKind::Review,
+                1,
+                0,
+                mismatched
+            )
+            .unwrap_err(),
+        StoreError::Invalid(_)
+    ));
+    assert!(matches!(
+        store
+            .add_report(
+                "missing-field",
+                &task.task_id,
+                ReportKind::Implementation,
+                1,
+                0,
+                json!({"spec_version":1})
+            )
+            .unwrap_err(),
+        StoreError::Invalid(_)
+    ));
+    let report = store
+        .add_report("valid", &task.task_id, ReportKind::Review, 1, 0, review)
+        .unwrap();
+    assert_eq!((report.spec_version, report.round), (1, 0));
+}
+
+fn gate_unmet(result: Result<TaskRecord, StoreError>) -> Vec<Unmet> {
+    match result {
+        Err(StoreError::Gate(unmet)) => unmet,
+        Ok(record) => panic!("task unexpectedly completed: {record:?}"),
+        Err(error) => panic!("unexpected store error: {error:?}"),
+    }
+}
+
+#[test]
+fn completion_requires_durable_sessions_and_trace() {
+    let (_temp, _data, store) = fixture();
+    let policy = StatePolicy::default();
+    let record = finalizing(&store);
+    let coder = record.coder.session_id.clone().unwrap();
+    let reviewer = record.reviewer.session_id.clone().unwrap();
+
+    store
+        .set_sessions(
+            &record.task_id,
+            Some("missing-coder"),
+            Some("missing-reviewer"),
+        )
+        .unwrap();
+    let unmet = gate_unmet(store.complete_task(&record.task_id, "complete-1", &policy));
+    assert_eq!(
+        unmet
+            .iter()
+            .filter(|item| matches!(item, Unmet::SessionUnverified { .. }))
+            .count(),
+        2,
+        "{unmet:?}"
+    );
+    assert_eq!(
+        store.get_task(&record.task_id).unwrap().unwrap().status,
+        Status::Running
+    );
+
+    store
+        .set_sessions(&record.task_id, Some(&coder), Some(&reviewer))
+        .unwrap();
+    store
+        .db()
+        .with_conn(|conn| {
+            conn.execute(
+                "DELETE FROM sa_events WHERE task_id=?1 AND event_type=?2",
+                rusqlite::params![record.task_id, "HARNESS_ANALYSIS_COMPLETED"],
+            )
+        })
+        .unwrap()
+        .unwrap();
+    let unmet = gate_unmet(store.complete_task(&record.task_id, "complete-2", &policy));
+    assert!(
+        unmet.iter().any(|item| matches!(
+            item,
+            Unmet::TraceMissing {
+                event: EventType::HarnessAnalysisCompleted
+            }
+        )),
+        "{unmet:?}"
+    );
+}
+
+#[test]
+fn completion_rejects_an_unverified_non_git_snapshot() {
+    let (_temp, data, store) = fixture();
+    let policy = StatePolicy::default();
+    let record = finalizing(&store);
+    store
+        .save_non_git_target(&NonGitTarget {
+            task_id: record.task_id.clone(),
+            path: data.join("scripts"),
+            snapshot_dir: data.join("super-agent").join("missing-snapshot"),
+            snapshot_manifest_json: "{}".into(),
+            diff_ref: Some("diff-1".into()),
+            status: NonGitStatus::Completed,
+            lock_key: format!("path:{}", data.join("scripts").display()),
+        })
+        .unwrap();
+    let unmet = gate_unmet(store.complete_task(&record.task_id, "complete", &policy));
+    assert!(
+        unmet
+            .iter()
+            .any(|item| matches!(item, Unmet::NonGitManifestInvalid { .. })),
+        "{unmet:?}"
+    );
+}
+
+fn separate_store(data: &std::path::Path) -> TaskStore {
+    let db = crate::db::DbManager::new(data.join(crate::runtime::DATABASE_FILE)).unwrap();
+    db.init().unwrap();
+    TaskStore::new(Arc::new(db), data.to_path_buf())
+}
+
+#[test]
+fn a_released_lock_operation_never_claims_current_ownership() {
+    let (_temp, data, store) = fixture();
+    let first = store.create_task("router", spec("A"), "create-a").unwrap();
+    let second = store.create_task("router", spec("B"), "create-b").unwrap();
+    let canonical = std::fs::canonicalize(&data).unwrap();
+    let key = format!("path:{}", canonical.display());
+
+    assert_eq!(
+        store.try_lock("op-a", &key, &first.task_id).unwrap(),
+        LockOutcome::Acquired
+    );
+    assert_eq!(
+        store.try_lock("op-a", &key, &first.task_id).unwrap(),
+        LockOutcome::AlreadyOwned
+    );
+    assert!(store.unlock(&key, &first.task_id, "op-a").unwrap());
+    // The operation is remembered, but it no longer owns anything.
+    assert_eq!(
+        store.try_lock("op-a", &key, &first.task_id).unwrap(),
+        LockOutcome::Released
+    );
+    assert_eq!(
+        store.try_lock("op-b", &key, &second.task_id).unwrap(),
+        LockOutcome::Acquired
+    );
+    assert_eq!(
+        store.try_lock("op-a", &key, &first.task_id).unwrap(),
+        LockOutcome::Released
+    );
+    assert!(store.locks(&first.task_id).unwrap().is_empty());
+    assert_eq!(store.locks(&second.task_id).unwrap(), vec![key.clone()]);
+    // A fresh operation must observe the current holder.
+    assert!(matches!(
+        store
+            .try_lock("op-a-fresh", &key, &first.task_id)
+            .unwrap_err(),
+        StoreError::LockBusy(_)
+    ));
+    // A release must name the current owner; wrong owners leave it in place.
+    assert!(!store.unlock(&key, &second.task_id, "op-a").unwrap());
+    assert!(!store.unlock(&key, &first.task_id, "op-b").unwrap());
+    assert_eq!(store.locks(&second.task_id).unwrap(), vec![key]);
+}
+
+#[test]
+fn overlapping_path_locks_conflict_across_separate_connections() {
+    let (_temp, data, store) = fixture();
+    let second = separate_store(&data);
+    let first_task = store
+        .create_task("router", spec("Parent"), "create-parent")
+        .unwrap();
+    let second_task = store
+        .create_task("router", spec("Child"), "create-child")
+        .unwrap();
+
+    let canonical = std::fs::canonicalize(&data).unwrap();
+    let target = canonical.join("target");
+    let child = target.join("sub");
+    let sibling = canonical.join("target2");
+    std::fs::create_dir(&target).unwrap();
+    std::fs::create_dir(&child).unwrap();
+    std::fs::create_dir(&sibling).unwrap();
+    let key = |path: &std::path::Path| format!("path:{}", path.display());
+
+    assert_eq!(
+        store
+            .try_lock("parent", &key(&target), &first_task.task_id)
+            .unwrap(),
+        LockOutcome::Acquired
+    );
+    // Ancestor/descendant and the same directory through a `.` alias conflict.
+    assert!(matches!(
+        second
+            .try_lock("descendant", &key(&child), &second_task.task_id)
+            .unwrap_err(),
+        StoreError::LockBusy(_)
+    ));
+    assert!(matches!(
+        second
+            .try_lock("alias", &key(&target.join(".")), &second_task.task_id)
+            .unwrap_err(),
+        StoreError::LockBusy(_)
+    ));
+    // Sibling prefixes are independent paths, not string prefixes.
+    assert_eq!(
+        second
+            .try_lock("sibling", &key(&sibling), &second_task.task_id)
+            .unwrap(),
+        LockOutcome::Acquired
+    );
+    // A second operation in the same task does not silently share the lock.
+    assert!(matches!(
+        store
+            .try_lock("same-task", &key(&child), &first_task.task_id)
+            .unwrap_err(),
+        StoreError::LockBusy(_)
+    ));
+
+    assert!(store
+        .unlock(&key(&target), &first_task.task_id, "parent")
+        .unwrap());
+    assert_eq!(
+        store
+            .try_lock("child-after-release", &key(&child), &first_task.task_id)
+            .unwrap(),
+        LockOutcome::Acquired
+    );
+    assert!(matches!(
+        second
+            .try_lock("parent-after-release", &key(&target), &second_task.task_id)
+            .unwrap_err(),
+        StoreError::LockBusy(_)
+    ));
+}
+
+#[test]
+fn concurrent_path_locks_on_separate_connections_allow_exactly_one_holder() {
+    let (_temp, data, store) = fixture();
+    let canonical = std::fs::canonicalize(&data).unwrap();
+    let shared = canonical.join("shared");
+    std::fs::create_dir(&shared).unwrap();
+    let key = format!("path:{}", shared.display());
+    let tasks: Vec<TaskRecord> = (0..4)
+        .map(|index| {
+            store
+                .create_task("router", spec("Concurrent"), &format!("create-{index}"))
+                .unwrap()
+        })
+        .collect();
+    let stores: Vec<TaskStore> = (0..4).map(|_| separate_store(&data)).collect();
+
+    let barrier = std::sync::Arc::new(std::sync::Barrier::new(tasks.len()));
+    let mut handles = Vec::new();
+    for (index, (store, task)) in stores.into_iter().zip(tasks).enumerate() {
+        let barrier = barrier.clone();
+        let key = key.clone();
+        handles.push(std::thread::spawn(move || {
+            barrier.wait();
+            store.try_lock(&format!("concurrent-{index}"), &key, &task.task_id)
+        }));
+    }
+    let results: Vec<_> = handles
+        .into_iter()
+        .map(|handle| handle.join().unwrap())
+        .collect();
+    assert_eq!(
+        results
+            .iter()
+            .filter(|result| matches!(result, Ok(LockOutcome::Acquired)))
+            .count(),
+        1,
+        "{results:?}"
+    );
+    assert_eq!(
+        results
+            .iter()
+            .filter(|result| matches!(result, Err(StoreError::LockBusy(_))))
+            .count(),
+        3,
+        "{results:?}"
     );
 }
