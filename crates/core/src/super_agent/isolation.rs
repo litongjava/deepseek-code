@@ -941,7 +941,10 @@ pub fn restore_snapshot(
         let target = safe_target(&source, &entry.path)?;
         match entry.kind {
             SnapshotKind::Directory => {
-                if !target.is_dir() {
+                let real_directory = std::fs::symlink_metadata(&target)
+                    .map(|metadata| metadata.is_dir() && !metadata.file_type().is_symlink())
+                    .unwrap_or(false);
+                if !real_directory {
                     if std::fs::symlink_metadata(&target).is_ok() {
                         remove_entry(&target)?;
                     }
@@ -1045,8 +1048,9 @@ fn prepare_restore(
             "Snapshot path is not a plain relative path: {}",
             entry.path
         );
-        // Never follow a link out of the source while restoring.
-        ensure_no_symlink_ancestor(source, &entry.path)?;
+        // Never follow a link out of the source while restoring, unless the
+        // manifest restores a real directory in its place first.
+        ensure_no_symlink_ancestor(source, &entry.path, manifest)?;
     }
     for entry in &manifest.entries {
         match entry.kind {
@@ -1135,7 +1139,11 @@ fn validate_manifest_tree(manifest: &SnapshotManifest) -> Result<()> {
 /// Rejects an intermediate symbolic link without requiring the current tree
 /// to already have the final shape (a file that this restore replaces by a
 /// directory is allowed).
-fn ensure_no_symlink_ancestor(source: &Path, relative: &str) -> Result<()> {
+fn ensure_no_symlink_ancestor(
+    source: &Path,
+    relative: &str,
+    manifest: &SnapshotManifest,
+) -> Result<()> {
     let relative = Path::new(relative);
     let components: Vec<_> = relative.components().collect();
     let mut current = source.to_path_buf();
@@ -1144,7 +1152,16 @@ fn ensure_no_symlink_ancestor(source: &Path, relative: &str) -> Result<()> {
         if index + 1 < components.len() {
             match std::fs::symlink_metadata(&current) {
                 Ok(metadata) if metadata.file_type().is_symlink() => {
-                    anyhow::bail!("Snapshot path escapes through a symbolic link")
+                    // The restore removes this link and creates the recorded
+                    // directory before writing children; otherwise a link
+                    // would redirect the write outside the source.
+                    let replaced = current.strip_prefix(source).ok().is_some_and(|ancestor| {
+                        manifest.entries.iter().any(|entry| {
+                            entry.kind == SnapshotKind::Directory
+                                && Path::new(&entry.path) == ancestor
+                        })
+                    });
+                    ensure!(replaced, "Snapshot path escapes through a symbolic link");
                 }
                 Ok(_) => {}
                 Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
@@ -1431,6 +1448,41 @@ mod tests {
         assert_eq!(
             std::fs::read_to_string(source.join("user.txt")).unwrap(),
             "user\n"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn restore_replaces_a_symlinked_directory_with_the_recorded_directory() {
+        let temp = tempfile::tempdir().unwrap();
+        let outside = temp.path().join("outside");
+        std::fs::create_dir(&outside).unwrap();
+        std::fs::write(outside.join("secret.txt"), "outside\n").unwrap();
+        let source = temp.path().join("source");
+        std::fs::create_dir(&source).unwrap();
+        std::fs::create_dir(source.join("data")).unwrap();
+        std::fs::write(source.join("data/inner.txt"), "inner\n").unwrap();
+        let snapshot_dir = temp.path().join("snapshots/1");
+        let manifest = create_snapshot(&source, &snapshot_dir).unwrap();
+
+        // The task replaces the directory with a link to an outside directory.
+        std::fs::remove_file(source.join("data/inner.txt")).unwrap();
+        std::fs::remove_dir(source.join("data")).unwrap();
+        std::os::unix::fs::symlink(&outside, source.join("data")).unwrap();
+        let coder = current_manifest(&source).unwrap();
+        restore_snapshot(&manifest, &snapshot_dir, &source, &coder).unwrap();
+
+        let data = source.join("data");
+        let metadata = std::fs::symlink_metadata(&data).unwrap();
+        assert!(metadata.is_dir() && !metadata.file_type().is_symlink());
+        assert_eq!(
+            std::fs::read_to_string(data.join("inner.txt")).unwrap(),
+            "inner\n"
+        );
+        assert_eq!(
+            std::fs::read_to_string(outside.join("secret.txt")).unwrap(),
+            "outside\n",
+            "the restore must never write through the link"
         );
     }
 
