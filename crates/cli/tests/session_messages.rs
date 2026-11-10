@@ -1,4 +1,7 @@
 //! Two real workers exchange durable context while a model request is in flight.
+#[path = "support/tool_loading.rs"]
+mod tool_loading;
+
 use axum::{extract::State, routing::post, Json, Router};
 use deepseek_code_core::{
     runtime::{RuntimePaths, SessionStore},
@@ -204,6 +207,7 @@ async fn messages_cross_real_workers_at_complete_tool_boundaries_on_both_protoco
         std::fs::create_dir(&workspace).unwrap();
         std::fs::write(workspace.join("fixture.txt"), "fixture").unwrap();
         let paths = RuntimePaths::new(temp.path().join("data")).unwrap();
+        tool_loading::enable(&paths.data_dir, &["Agent", "SendMessage"]);
         let store = SessionStore::new(paths.open_database().unwrap());
         let sender = store.create(&workspace, "fixture", "cli-runtime").unwrap();
         let recipient = store.create(&workspace, "fixture", "cli-runtime").unwrap();
@@ -352,6 +356,7 @@ async fn managed_worktree_owned_child_can_message_parent_without_new_source_trus
             .success());
     }
     let paths = RuntimePaths::new(temp.path().join("data")).unwrap();
+    tool_loading::enable(&paths.data_dir, &["Agent", "SendMessage"]);
     let store = SessionStore::new(paths.open_database().unwrap());
     let parent = store.create(&source, "fixture", "cli-runtime").unwrap();
     let prepared = deepseek_code_core::worktree::session::prepare(&source, None, true).unwrap();
@@ -426,6 +431,7 @@ async fn resident_owner_resumes_same_child_with_original_provider_after_switch()
     let workspace = temp.path().join("project");
     std::fs::create_dir(&workspace).unwrap();
     let paths = RuntimePaths::new(temp.path().join("data")).unwrap();
+    tool_loading::enable(&paths.data_dir, &["Agent", "SendMessage"]);
     let store = SessionStore::new(paths.open_database().unwrap());
     let parent = store.create(&workspace, "fixture", "cli-runtime").unwrap();
     let child_id = Arc::new(Mutex::new(None::<String>));

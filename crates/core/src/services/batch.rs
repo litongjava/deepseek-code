@@ -314,6 +314,22 @@ pub fn list(root: &Path, parent: &str) -> Result<Vec<Batch>> {
     batches.sort_by_key(|batch| std::cmp::Reverse(batch.heartbeat_ms));
     Ok(batches)
 }
+
+/// Build the command that starts the batch supervisor. The parent's worker
+/// state is stripped first so the supervisor does not inherit a model snapshot
+/// or job it does not own; explicitly forwarded values are then applied.
+fn supervisor_command(executable: &Path, dir: &Path, environment: &[(String, String)]) -> Command {
+    let mut command = Command::new(executable);
+    background_sessions::strip_internal_env(&mut command);
+    command
+        .env(WORKER_ENV, dir)
+        .envs(environment.iter().map(|(k, v)| (k, v)))
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null());
+    command
+}
+
 pub fn start(
     root: &Path,
     id: &str,
@@ -354,13 +370,7 @@ pub fn start(
     batch.heartbeat_ms = now();
     save(&dir.join("launch.json"), &launch)?;
     save(&dir.join("state.json"), &batch)?;
-    let mut command = Command::new(&launch.executable);
-    command
-        .env(WORKER_ENV, &dir)
-        .envs(environment.iter().map(|(k, v)| (k, v)))
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null());
+    let mut command = supervisor_command(&launch.executable, &dir, environment);
     #[cfg(windows)]
     {
         use std::os::windows::process::CommandExt;
@@ -699,6 +709,26 @@ mod tests {
         plan.units.clear();
         assert!(validate(&plan).is_err());
     }
+    #[test]
+    fn supervisor_command_drops_inherited_worker_state() {
+        let dir = Path::new("fixture-batch");
+        let command = supervisor_command(Path::new("fixture"), dir, &[]);
+        let envs: Vec<_> = command.get_envs().collect();
+        assert!(envs.iter().any(|(name, value)| *name
+            == background_sessions::WORKER_MODEL_ENV
+            && value.is_none()));
+        assert!(envs.iter().any(|(name, value)| *name
+            == background_sessions::WORKER_AUTO_ROUTE_ENV
+            && value.is_none()));
+        assert!(envs
+            .iter()
+            .any(|(name, value)| *name == background_sessions::CONTROL_ENV && value.is_none()));
+        // The batch supervisor still gets the directory this plan owns.
+        assert!(envs
+            .iter()
+            .any(|(name, value)| *name == WORKER_ENV && *value == Some(dir.as_os_str())));
+    }
+
     #[test]
     fn stale_supervisor_is_marked_unresponsive_without_faking_completion() {
         let dir = tempfile::tempdir().unwrap();

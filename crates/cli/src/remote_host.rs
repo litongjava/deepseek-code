@@ -433,10 +433,7 @@ pub fn host_address() -> Option<(u16, String)> {
 }
 
 fn terminal_size() -> (u16, u16) {
-    crossterm::terminal::size()
-        .ok()
-        .filter(|(cols, rows)| *cols > 0 && *rows > 0)
-        .unwrap_or((80, 24))
+    crate::terminal::size()
 }
 
 /// Restores the local terminal however the relay ends.
@@ -642,7 +639,7 @@ pub async fn run(listening: Listening, args: Vec<String>, workspace: &Path, data
     );
     // The emulator starts where the local cursor is, so its answers to cursor
     // queries match what the local terminal shows.
-    let start_row = crossterm::cursor::position().map_or(0, |(_, row)| row);
+    let start_row = crate::terminal::cursor_position().map_or(0, |(_, row)| row);
     let mut child = pty
         .slave
         .spawn_command(command)

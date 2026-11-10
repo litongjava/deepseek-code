@@ -1,4 +1,7 @@
 //! Real supervisor/host IPC with a local model endpoint and an actual MCP child.
+#[path = "support/tool_loading.rs"]
+mod tool_loading;
+
 use axum::{extract::State, routing::post, Json, Router};
 use deepseek_code_core::{
     runtime::{RuntimePaths, SessionStore},
@@ -420,6 +423,7 @@ async fn added_directory_survives_worker_resume_without_granting_other_sessions(
     std::fs::write(allowed.join("source.txt"), "permitted-source").unwrap();
     std::fs::write(denied.join("source.txt"), "private-neighbor").unwrap();
     let paths = RuntimePaths::new(temp.path().join("data")).unwrap();
+    tool_loading::enable(&paths.data_dir, &["Agent"]);
     let store = SessionStore::new(paths.open_database().unwrap());
     let session = store
         .create(&workspace, "fixture-one", "cli-runtime")
@@ -587,6 +591,7 @@ async fn persistent_engine_reuses_mcp_refreshes_settings_and_recovers_after_cras
     let workspace = temp.path().join("workspace");
     std::fs::create_dir_all(&workspace).unwrap();
     let paths = RuntimePaths::new(temp.path().join("data")).unwrap();
+    tool_loading::enable(&paths.data_dir, &["LSP"]);
     let store = SessionStore::new(paths.open_database().unwrap());
     let session = store
         .create(&workspace, "fixture-one", "cli-runtime")

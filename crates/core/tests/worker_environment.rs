@@ -12,7 +12,9 @@
 //! shell tool; it must succeed without seeing them.
 use deepseek_code_core::{
     config::OrchestrationConfig,
-    services::background_sessions::{CONTROL_ENV, WORKER_ENV},
+    services::background_sessions::{
+        CONTROL_ENV, WORKER_AUTO_ROUTE_ENV, WORKER_ENV, WORKER_MODEL_ENV,
+    },
     tools::execute_tool,
 };
 use serde_json::json;
@@ -24,11 +26,13 @@ fn a_shell_command_never_inherits_the_worker_control_variables() {
     let cwd = cwd.path().to_str().unwrap();
     std::env::set_var(CONTROL_ENV, "fixture-control");
     std::env::set_var(WORKER_ENV, "fixture-job");
+    std::env::set_var(WORKER_MODEL_ENV, r#"{"id":"parent-model"}"#);
+    std::env::set_var(WORKER_AUTO_ROUTE_ENV, "true");
     std::env::set_var("DCL_KEEP_ENV", "kept-value");
     let command = if cfg!(windows) {
-        r#"echo "[$env:DEEPSEEK_CODE_BACKGROUND_CONTROL][$env:DEEPSEEK_CODE_BACKGROUND_JOB][$env:DCL_KEEP_ENV]""#
+        r#"echo "[$env:DEEPSEEK_CODE_BACKGROUND_CONTROL][$env:DEEPSEEK_CODE_BACKGROUND_JOB][$env:DEEPSEEK_CODE_WORKER_MODEL][$env:DEEPSEEK_CODE_WORKER_AUTO_ROUTE][$env:DCL_KEEP_ENV]""#
     } else {
-        r#"printf '[%s][%s][%s]' "$DEEPSEEK_CODE_BACKGROUND_CONTROL" "$DEEPSEEK_CODE_BACKGROUND_JOB" "$DCL_KEEP_ENV""#
+        r#"printf '[%s][%s][%s][%s][%s]' "$DEEPSEEK_CODE_BACKGROUND_CONTROL" "$DEEPSEEK_CODE_BACKGROUND_JOB" "$DEEPSEEK_CODE_WORKER_MODEL" "$DEEPSEEK_CODE_WORKER_AUTO_ROUTE" "$DCL_KEEP_ENV""#
     };
     let output = execute_tool(
         "Bash",
@@ -41,9 +45,9 @@ fn a_shell_command_never_inherits_the_worker_control_variables() {
     .unwrap();
     assert_eq!(output["exit_code"], 0, "{output}");
     let stdout = output["stdout"].as_str().unwrap().trim().to_owned();
-    // Both host-private variables arrive empty; an ordinary user variable is
-    // still inherited.
-    assert_eq!(stdout, "[][][kept-value]", "{output}");
+    // Host-private variables, including the parent's model snapshot, arrive
+    // empty; an ordinary user variable is still inherited.
+    assert_eq!(stdout, "[][][][][kept-value]", "{output}");
 
     if let Some(command) = std::env::var_os("DCL_ACCEPTANCE_COMMAND") {
         let output = execute_tool(
@@ -57,6 +61,8 @@ fn a_shell_command_never_inherits_the_worker_control_variables() {
         .unwrap();
         std::env::remove_var(CONTROL_ENV);
         std::env::remove_var(WORKER_ENV);
+        std::env::remove_var(WORKER_MODEL_ENV);
+        std::env::remove_var(WORKER_AUTO_ROUTE_ENV);
         std::env::remove_var("DCL_KEEP_ENV");
         let stdout = output["stdout"].as_str().unwrap_or_default();
         let stderr = output["stderr"].as_str().unwrap_or_default();
@@ -68,5 +74,7 @@ fn a_shell_command_never_inherits_the_worker_control_variables() {
     }
     std::env::remove_var(CONTROL_ENV);
     std::env::remove_var(WORKER_ENV);
+    std::env::remove_var(WORKER_MODEL_ENV);
+    std::env::remove_var(WORKER_AUTO_ROUTE_ENV);
     std::env::remove_var("DCL_KEEP_ENV");
 }

@@ -95,8 +95,8 @@ fn read_terminal(prompt: &str, flag: &AtomicBool, secret: bool) -> io::Result<Op
         };
         cancelled(flag)?;
         if super::shortcuts::requested(&event) {
-            let (cols, rows) = terminal::size().unwrap_or((80, 24));
-            let (_, y) = cursor::position()?;
+            let (cols, rows) = crate::terminal::size();
+            let (_, y) = super::cursor_position()?;
             let mut background = super::scrollback::Scrollback::snapshot().screen(y, rows);
             let shown = if secret { "*".repeat(value.chars().count()) } else { value.clone() };
             if let Some(row) = background.get_mut(y as usize) {

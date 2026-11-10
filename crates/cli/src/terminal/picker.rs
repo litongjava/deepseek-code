@@ -91,7 +91,7 @@ impl Picker<'_> {
         loop {
             let shown = self.matching(&query);
             selected = selected.min(shown.len().saturating_sub(1));
-            let (cols, rows) = terminal::size().unwrap_or((80, 24));
+            let (cols, rows) = crate::terminal::size();
             let (lines, cursor) = self.lines(&shown, selected, &query, cols as usize, rows as usize);
             screen.draw(&lines, cursor, 3)?;
             let Some(Event::Key(key)) = next_event()? else {
@@ -216,7 +216,7 @@ fn edit_text(heading: &str, initial: &str, next_event: &mut dyn FnMut() -> io::R
     let mut screen = Screen::default();
     let mut text = initial.to_owned();
     let result = loop {
-        let width = terminal::size().map_or(80, |(cols, _)| cols as usize).saturating_sub(1).max(20);
+        let width = (crate::terminal::size().0 as usize).saturating_sub(1).max(20);
         let lines = vec![
             (clipped(&format!(" {heading}"), width), TextStyle::Accent),
             (clipped(&format!(" {text}"), width), TextStyle::Plain),
@@ -280,7 +280,7 @@ pub fn details_live(heading: &str, rows: &mut dyn FnMut() -> Vec<String>, hint: 
     let mut ticks = 0;
     let mut current = rows();
     let result = loop {
-        let (cols, height) = terminal::size().unwrap_or((80, 24));
+        let (cols, height) = crate::terminal::size();
         let width = (cols as usize).saturating_sub(1).max(20);
         let mut lines = vec![(clipped(&format!(" {heading}"), width), TextStyle::Accent)];
         let room = (height as usize).saturating_sub(4).max(1);
@@ -325,7 +325,7 @@ fn show_details(
     next_event: &mut dyn FnMut() -> io::Result<Option<Event>>,
 ) -> io::Result<Option<char>> {
     let mut screen = Screen::default();
-    let (cols, height) = terminal::size().unwrap_or((80, 24));
+    let (cols, height) = crate::terminal::size();
     let width = (cols as usize).saturating_sub(1).max(20);
     let mut lines = vec![(clipped(&format!(" {heading}"), width), TextStyle::Accent)];
     let room = (height as usize).saturating_sub(4).max(1);

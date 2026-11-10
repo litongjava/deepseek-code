@@ -1,4 +1,7 @@
 //! Actual Git + CLI processes exercise source isolation and durable resume.
+#[path = "support/tool_loading.rs"]
+mod tool_loading;
+
 use axum::{routing::post, Json, Router};
 use deepseek_code_core::runtime::{RuntimePaths, SessionStore};
 use serde_json::{json, Value};
@@ -85,6 +88,7 @@ async fn background_agent_binds_worktree_before_resuming_child() {
     git(&source, &["add", "."]);
     git(&source, &["commit", "-m", "initial"]);
     let paths = RuntimePaths::new(temp.path().join("data")).unwrap();
+    tool_loading::enable(&paths.data_dir, &["Agent"]);
     let parent = uuid::Uuid::new_v4().to_string();
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let endpoint = format!("http://{}/v1", listener.local_addr().unwrap());

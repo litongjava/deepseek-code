@@ -1097,7 +1097,10 @@ pub async fn handle(
     let command = words.next().unwrap_or_default();
     // Status uses the same scrollable report as a running turn. Config and
     // usage retain their settings tabs; arguments keep the text forms.
-    if words.clone().next().is_none() && crate::terminal::picker::available() {
+    if words.clone().next().is_none()
+        && !input.is_fixture()
+        && crate::terminal::picker::available()
+    {
         if command == "/status" {
             let text = crate::status_commands::text(session, "").await?;
             crate::terminal::live::show_inspection("Status", &text)?;

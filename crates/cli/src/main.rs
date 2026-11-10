@@ -660,13 +660,13 @@ async fn run(cli: &Cli) -> Result<()> {
                     let mut history = terminal::scrollback::Scrollback::take();
                     terminal::prompt_display::write_recorded(
                         &mut io::stderr(), &mut history, &prompt,
-                        crossterm::terminal::size().map_or(79, |(cols, _)| cols.saturating_sub(1) as usize), false,
+                        crate::terminal::size().0.saturating_sub(1) as usize, false,
                     )?;
                     history.save();
                 } else {
                     terminal::prompt_display::write_submitted(
                     &mut io::stderr(), &format!("{} ", terminal::prompt_glyph()), &prompt,
-                    crossterm::terminal::size().map(|(cols, _)| cols.saturating_sub(1) as usize).unwrap_or(79),
+                    crate::terminal::size().0.saturating_sub(1) as usize,
                     io::stderr().is_terminal() && std::env::var_os("NO_COLOR").is_none() && !terminal::screen_reader(), false,
                 )?;
                 }

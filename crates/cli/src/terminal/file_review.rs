@@ -5,7 +5,7 @@ use crossterm::{
     event::{Event, KeyCode, KeyEventKind, KeyModifiers, MouseButton, MouseEventKind},
     execute, queue,
     style::Print,
-    terminal::{self, Clear, ClearType},
+    terminal::{Clear, ClearType},
 };
 use std::{
     io::{self, Write},
@@ -183,7 +183,7 @@ pub(super) fn show(
         dragging_divider: false,
     };
     let result = (|| {
-        let mut size = terminal::size().unwrap_or((80, 24));
+        let mut size = crate::terminal::size();
         let mut selection = super::mouse_selection::Selection::default();
         let mut redraw = true;
         let mut rows = Vec::new();
@@ -245,7 +245,7 @@ pub(super) fn show(
         }
         selection.clear()
     })();
-    let size = terminal::size().unwrap_or((80, 24));
+    let size = crate::terminal::size();
     let background = &background[background.len().saturating_sub(size.1 as usize)..];
     let restored =
         paint(&mut out, background, size).and_then(|_| execute!(out, RestorePosition, Show));

@@ -743,7 +743,7 @@ pub fn approval(
                 ("Bash" | "PowerShell", Some(command)) => {
                     // As in the reference CLI: the description, then the command
                     // between dashed rules.
-                    let width = crossterm::terminal::size().map_or(80, |(cols, _)| cols.saturating_sub(1).max(20) as usize);
+                    let width = crate::terminal::size().0.saturating_sub(1).max(20) as usize;
                     let rule = change_view::muted(&"\u{254c}".repeat(width));
                     lines.push(change_view::heading(&format!("{name} command")));
                     if let Some(description) = input["description"].as_str() {

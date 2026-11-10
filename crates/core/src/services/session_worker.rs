@@ -17,6 +17,29 @@ pub const SUPERVISOR_ENV: &str = "DEEPSEEK_CODE_SESSION_SUPERVISOR";
 pub const HOST_ENV: &str = "DEEPSEEK_CODE_SESSION_HOST";
 const MAX_FRAME: usize = 16 * 1024 * 1024;
 
+/// Start a supervisor for one session. Inherited worker state is removed first:
+/// this process owns a new session, and a parent's job directory or model
+/// snapshot would make it reject the launch.
+fn supervisor_command(executable: &Path, dir: &Path) -> Command {
+    let mut command = Command::new(executable);
+    jobs::strip_internal_env(&mut command);
+    command.env(SUPERVISOR_ENV, dir);
+    command
+}
+
+/// Start the engine process the supervisor owns. It gets the supervisor's
+/// directory through `HOST_ENV`; worker state inherited from a parent worker
+/// must not follow it, since each job supplies its own explicitly.
+fn engine_command(executable: &Path, dir: &Path, workspace: &Path) -> Command {
+    let mut command = Command::new(executable);
+    jobs::strip_internal_env(&mut command);
+    command
+        .env(HOST_ENV, dir)
+        .env_remove(SUPERVISOR_ENV)
+        .current_dir(workspace);
+    command
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Worker {
     pub id: String,
@@ -485,9 +508,8 @@ pub async fn ensure_worker(
         &worker_path(root, session)?.join("current.json"),
         &worker.id,
     )?;
-    let mut command = Command::new(executable);
+    let mut command = supervisor_command(executable, &dir);
     command
-        .env(SUPERVISOR_ENV, &dir)
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null());
@@ -813,11 +835,8 @@ pub fn run_supervisor_from_env() -> Result<bool> {
     Ok(true)
 }
 fn supervise(dir: &Path, worker: &mut Worker) -> Result<()> {
-    let mut command = Command::new(&worker.executable);
+    let mut command = engine_command(&worker.executable, dir, &worker.workspace);
     command
-        .env(HOST_ENV, dir)
-        .env_remove(SUPERVISOR_ENV)
-        .current_dir(&worker.workspace)
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::from(fs::File::create(dir.join("stderr.log"))?));
@@ -1085,6 +1104,36 @@ mod settle_tests {
             startup_failure(None, dir.path()),
             "Session host failed: path must be shorter than SUN_LEN"
         );
+    }
+
+    #[test]
+    fn session_worker_commands_drop_inherited_worker_state() {
+        let dir = Path::new("fixture-session");
+        // Both processes belong to a new session: a parent's job directory,
+        // model snapshot and auto-route decision must not follow them.
+        for command in [
+            supervisor_command(Path::new("fixture"), dir),
+            engine_command(Path::new("fixture"), dir, Path::new("workspace")),
+        ] {
+            let envs: Vec<_> = command.get_envs().collect();
+            for name in jobs::INTERNAL_ENV {
+                assert!(
+                    envs.iter()
+                        .any(|(entry, value)| *entry == name && value.is_none()),
+                    "{name} was not stripped"
+                );
+            }
+        }
+        let supervisor = supervisor_command(Path::new("fixture"), dir);
+        assert!(supervisor.get_envs().any(|(name, value)| name == SUPERVISOR_ENV
+            && value == Some(dir.as_os_str())));
+        let engine = engine_command(Path::new("fixture"), dir, Path::new("workspace"));
+        assert!(engine
+            .get_envs()
+            .any(|(name, value)| name == HOST_ENV && value == Some(dir.as_os_str())));
+        assert!(engine
+            .get_envs()
+            .any(|(name, value)| name == SUPERVISOR_ENV && value.is_none()));
     }
 
     fn exited_pid() -> u32 {

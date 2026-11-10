@@ -4,7 +4,6 @@ use crossterm::{
     event::{Event, KeyCode, KeyEventKind, KeyModifiers, MouseEventKind},
     queue,
     style::Print,
-    terminal,
 };
 use std::io::{self, Write};
 
@@ -69,7 +68,7 @@ fn run(
     let mut touched = usize::MAX;
     queue!(out, SavePosition)?;
     let result = (|| loop {
-        let (width, height) = terminal::size().unwrap_or((80, 24));
+        let (width, height) = crate::terminal::size();
         let height = height.max(1) as usize;
         let count = content.len().min(height);
         offset = offset.min(content.len().saturating_sub(count));
@@ -113,7 +112,7 @@ fn run(
             break;
         }
     })();
-    let height = terminal::size().unwrap_or((80, 24)).1 as usize;
+    let height = crate::terminal::size().1 as usize;
     for row in touched..height {
         queue!(
             out,

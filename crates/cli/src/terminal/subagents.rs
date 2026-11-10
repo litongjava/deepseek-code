@@ -235,7 +235,7 @@ impl View {
                 }
             }
         }
-        let (cols, rows) = crossterm::terminal::size()?;
+        let (cols, rows) = crate::terminal::size();
         if !refresh_due && self.last_size == (cols, rows) && !self.last_frame.is_empty() {
             return Ok(());
         }

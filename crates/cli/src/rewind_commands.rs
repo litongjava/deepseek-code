@@ -290,7 +290,7 @@ fn redraw(session: &Session) -> Result<()> {
     eprint!("\x1b[2J\x1b[3J\x1b[H");
     command_eprintln!("{}", crate::terminal::banner(&session.model, &session.workspace));
     let color = std::env::var_os("NO_COLOR").is_none();
-    let width = crossterm::terminal::size().map_or(80, |(columns, _)| columns as usize).saturating_sub(1);
+    let width = (crate::terminal::size().0 as usize).saturating_sub(1);
     for line in crate::repl::transcript_of(session, &session.id)? {
         command_eprintln!("{}", crate::terminal::change_view::render(&line, width, color));
     }

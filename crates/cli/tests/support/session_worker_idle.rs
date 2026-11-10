@@ -132,6 +132,7 @@ impl Fixture {
         let workspace = temp.path().join("workspace");
         std::fs::create_dir(&workspace).unwrap();
         let context = session_messages::context(&temp.path().join("data")).unwrap();
+        tool_loading::enable(&context.paths.data_dir, &["Agent", "SendMessage"]);
         if let Some(settings) = settings {
             std::fs::write(
                 context.paths.data_dir.join("settings.json"),
