@@ -1,14 +1,14 @@
 # deepseek-code-cli 剩余工作清单（新 session 入口）
 
-维护说明：长期开发记录、验收证据和脚本已迁到相邻的 `dev-support/deepseek-code`，可复用环境放在 `dev-support/environments`。下文旧 `temp/claude-code-cli-dev` 引用对应迁移后的同名文件；新记录不再写入临时目录。
+维护说明：长期开发记录、验收证据和脚本原放在相邻的 `dev-support/deepseek-code`，可复用测试环境原在 `dev-support/environments`。2026-11-10 已清理这些目录（记录见 `dev-support/deepseek-code/cleanup-20261110/README.md`），可复用测试环境改为 `D:\wsl`。下文 `temp/claude-code-cli-dev/` 和其他 `*-2026MMDD/` 路径是历史引用，文件和脚本已不在磁盘上，只保留为方法说明；新记录不再写入临时目录。
 
 更新：2026-10-18。本文汇总独立 Rust CLI 与原版 Claude Code 对齐的未完成项，供新 session 直接接手。详细审计依据见 `D:/code/project/project-harven/temp/claude-code-cli-dev/remaining-parity-acceptance-checklist.md`（以下简称"清单"）。
 
 ## 1. 起步
 
 - 开发目录：`D:/code/project/project-harven/deepseek-code-desktop`，分支 `feat/claude-code-optimization`。2026-10-17 已合并全部 worktree 和功能分支并删除，直接在此开发，不再使用 worktree。
-- 未 push。合并备份与已删除分支的 SHA 在 `D:/code/project/project-harven/temp/merge-backup/`；`git stash@{0}` 为合并前原 checkout 的未提交改动（已被合并内容取代，保留以备核对）。
-- 开发记录目录：`D:/code/project/project-harven/temp/claude-code-cli-dev`（状态见其中 `handoff-current.md`、`README.md`）。
+- 未 push。合并备份与已删除分支的 SHA 原在 `temp/merge-backup/`，已在 2026-11-10 清理中删除；`git stash@{0}` 为合并前原 checkout 的未提交改动（已被合并内容取代，保留以备核对）。
+- 开发记录目录原为 `temp/claude-code-cli-dev`（状态见其中 `handoff-current.md`、`README.md`），内容已随 2026-11-10 清理删除。
 
 ## 2. 约束
 

@@ -10,6 +10,8 @@
 4. 新修的问题要在本文补一个场景，避免以后再次出现。
 5. 汇报时说明跑了什么、结果如何、哪些没有验证（例如 Windows）。没跑的不能写成通过。
 
+本文中 `*-2026MMDD/` 形式的脚本与证据目录原在相邻的 `dev-support/deepseek-code`，已在 2026-11-10 清理中删除（记录见该目录的 `cleanup-20261110/README.md`）。这些条目保留为可重跑的步骤和验收口径，`cargo test` 目标不受影响；涉及已删脚本的项要按条目描述重新实现，不能引用旧结果作为本次通过。
+
 ## 必跑命令
 
 Linux 上先加载本机构建环境（`source ~/.local/dcl-build-env.sh`）。Cargo 命令串行执行。
@@ -224,7 +226,7 @@ OpenCode Go 用四种协议提供模型，模型地址和协议都来自内置�
 - `cargo test --locked -p deepseek-code-cli --test api_failure_diagnostics`：真实 CLI 进程对本地故障服务，核对最终输出、服务端实际请求数与 SQLite 中的请求快照。
 - `cargo test --locked -p deepseek-code-cli --test background_failure_diagnostics`：真实 supervisor 启动真实 CLI Worker，核对服务端请求数、任务输出（`/tasks show` 展示的内容）与会话快照三者一致；同一目标覆盖后台任务的认证错误与取消。
 
-`dev-support/deepseek-code/api-failure-audit-20261107/terminal_acceptance.py` 在真实 ConPTY 中完成下列终端步骤，需要传入本次构建的 `dcl.exe`。
+以下终端步骤需要在真实 ConPTY 中手工执行，使用本次构建的 `dcl.exe`。原有的 `terminal_acceptance.py` 自动化脚本已在 2026-11-10 的开发支持目录清理中随证据删除，步骤本身仍然适用。
 
 1. 首次连接读走请求后直接关闭，第二次正常返回 SSE：请求成功，回答只出现一次，实际请求 2 次。
 2. 每次都在发送阶段断开：达到“1 加 HTTP 重试配置”的上限后结束；最终输出、请求快照与任务记录中的尝试次数一致，重试次数等于尝试次数减一。
@@ -353,7 +355,7 @@ OpenCode Go 用四种协议提供模型，模型地址和协议都来自内置�
 - `timing_verify.py auto|pre`：8 秒 PostCompact / 8 秒 PreCompact 加 1 秒 PostCompact；正例通过且零时长负例必须失败。
 - `browse_resize_verify.py`：80 列进入 Ctrl+O，完成时仍浏览，resize 到 120 列后返回，核对路径与单次提交及下一请求。
 - `status_pending_verify.py`：自动压缩后挂起主请求，检查 Status 仍为 estimated after compact 和 Compactions: 1。
-- 以上脚本和分次证据在相邻 dev-support/deepseek-code；实际执行状态以 implementation.md 为准，未执行组合不视为通过。
+- 上述脚本与分次证据已在 2026-11-10 的开发支持目录清理中删除，清单保留为可重跑步骤；未执行组合不视为通过。
 
 ### 第七轮：超限恢复与轮次生命周期
 
@@ -361,7 +363,7 @@ OpenCode Go 用四种协议提供模型，模型地址和协议都来自内置�
 - `cargo test --locked -p deepseek-code-cli --test sdk --test agent_hooks --test async_hooks --test async_rewake`：SDK与初始hook/hook wake入口回归；运行中turn_timing可以更新，最终非running计时、result与request_turn_end每轮各一次。
 - `compaction-review7-20261109/recovery_outcomes.py success|summary-failed|retry-failed`：独立本地HTTP服务，128K窗口，第二个主请求明确超限；检查同一turn覆盖首次请求、恢复与重试，最终Completed/Failed、SDK只一次终结，尝试诊断及model_requests保留、所有轮次都有有效assistant关联。
 - `run_cancel_matrix.py`：真实ConPTY，reactive摘要提交前Esc、提交后Esc/Ctrl+C；worker和execution_turns均Cancelled；保存结果按阶段显示，取消后不发送第三个主请求，下一唯一请求完成并保存；没有重复边界/文件/次数，也没有悬空message_turns。
-- 产品构建、逐项结果与证据均在相邻dev-support/deepseek-code/compaction-review7-20261109/implementation.md。不用更改已结束轮次或删除finish_at的单次结束保护来修复恢复取消。
+- 第七轮的产品构建、逐项结果与证据记录已在 2026-11-10 的开发支持目录清理中删除，仅保留上述步骤。不用更改已结束轮次或删除finish_at的单次结束保护来修复恢复取消。
 
 ### 第八轮：恢复结果契约与诊断日志故障
 
@@ -369,7 +371,7 @@ OpenCode Go 用四种协议提供模型，模型地址和协议都来自内置�
 - `cargo test --locked -p deepseek-code-cli --test recovery_result_contract`：本机HTTP与隔离数据库，六种组合（无历史、成功、摘要失败、重试失败、日志目录冲突后恢复、日志冲突叠加摘要失败）。检查完整SDK结构、一次终态、无历史原始context_limit、业务失败不被日志错误替换。
 - 固定验收入口 `compaction-review8-20261109/run_acceptance.py <二进制>`：先把自身、fixture和所有本地导入复制到独立runs目录，实际执行副本并记录前后SHA256与真实退出码。OpenAI/Anthropic分别运行恢复及SDK取消契约，OpenAI另跑先发生工具拒绝/已报告用量再超限的场景。
 - 原 `compaction_truncation_acceptance.py` CLI入口同样先固定自身再执行副本，snapshot.json记录执行位置及前后哈希；run/results仍写回指定输出目录，详细场景证据位于evidence子目录。新增脚本不会用后来复制的文件追认旧证据。
-- 本次执行状态及各协议覆盖边界以compaction-review8-20261109/implementation.md为准；cache_sequence.py另以提交前取消保留完整缓存，确认重试无新增摘要HTTP、连续两次各自计时与次数达到2；精确竞态、重启回放、配置切换及CLI重置/计划切换迟到响应等原任务仍需独立场景，不由协议契约测试替代。
+- 第八轮的执行状态与协议覆盖边界记录已随 2026-11-10 清理删除，不能作为本次通过的依据；`cache_sequence.py` 的检查保留为可重跑步骤：提交前取消保留完整缓存，确认重试无新增摘要HTTP、连续两次各自计时与次数达到2；精确竞态、重启回放、配置切换及CLI重置/计划切换迟到响应等原任务仍需独立场景，不由协议契约测试替代。
 
 ### 第九轮：同轮多请求用量
 
@@ -377,11 +379,11 @@ OpenCode Go 用四种协议提供模型，模型地址和协议都来自内置�
 - `cargo test --locked -p deepseek-code-core --lib native_engine::request_trace::tests`：请求内重复累积字段替换而非相加，后续null不擦除已报告计数或缓存字段。
 - `cargo test --locked -p deepseek-code-cli --test usage_accounting`：真实本地HTTP/CLI，OpenAI和Anthropic各三次模型响应合计51输入/10输出，同请求重复累积及最后null更新不重复计数；OpenAI total=61，缓存按各自协议保留。未知usage保持空对象，下一用户轮次只统计自身7/1。
 - `cargo test --locked -p deepseek-code-cli --test sdk sdk_plan_clear_boundary_survives_actual_cli_process`：真实计划审批和ContextReset，两协议的第一次10/4和重置后的10/4均在SDK结果中保留为20/8。
-- 第九轮run_acceptance.py在固定脚本副本中复跑第八轮20场景，并新增multi_round_usage.py known-stats：压缩前两次工具拒绝报告11/2及17/3，恢复后23/5，断言51/10/61、num_turns=3、两条拒绝及唯一终结。需显式传入本轮新构建。
+- 第九轮脚本（已在 2026-11-10 清理中删除，按本条重建）在固定副本中复跑第八轮20场景，并新增 `multi_round_usage.py` known-stats：压缩前两次工具拒绝报告11/2及17/3，恢复后23/5，断言51/10/61、num_turns=3、两条拒绝及唯一终结。需显式传入本轮新构建。
 
 ### 第十轮：SDK interrupt 统一收尾
 
 - `cargo test --locked -p deepseek-code-cli --test sdk interrupt_usage::`：本地真实 HTTP/CLI，OpenAI/Anthropic × 已知/未知四组合。流保持打开，已知用量更新 11/1 → 11/2 → 重复/null 后 interrupt；结果保留 11/2，OpenAI total=13，未知保持空对象；受控 120ms 等待纳入真实耗时，终态计时、result、request_turn_end 各一次，SQLite 状态/消息关联有效，下一轮仅统计 7/1。
 - `cargo test --locked -p deepseek-code-cli --test sdk recovery_interrupt::`：同一轮先报告 11/2 和一次工具拒绝再超限，在 PreCompact/PostCompact SDK 回调挂起时 interrupt；两协议提交前不保存摘要、提交后恰好一份摘要/边界/计数，不发送重试主请求，保留统计并允许下一轮。
 - SDK 全套覆盖审批、Hook、MCP 等待取消及迟到回复；同时保留 `usage_accounting`、`recovery_result_contract`、`request_usage_tests`、ContextReset、初始 Hook/hook wake 回归。
-- 独立复现与需求证据在相邻 dev-support/deepseek-code/compaction-review10-20261109/implementation.md，未执行平台或旧验收组合继续标记未验证。
+- 第十轮的独立复现与需求证据已在 2026-11-10 的开发支持目录清理中删除。未执行平台或旧验收组合继续标记未验证。
