@@ -40,7 +40,7 @@ pub struct TargetPlan {
     pub target_branch: Option<String>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "SCREAMING_SNAKE_CASE")]
 pub enum SnapshotKind {
     File,
@@ -56,6 +56,9 @@ pub struct SnapshotEntry {
     pub size: u64,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub link_target: Option<String>,
+    /// Unix permission bits (`mode & 0o7777`), preserved across a restore.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mode: Option<u32>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -63,8 +66,20 @@ pub struct SnapshotManifest {
     pub source: PathBuf,
     pub created_at: String,
     pub entries: Vec<SnapshotEntry>,
+    /// Entries the snapshot intentionally did not protect: build output,
+    /// dependency trees, non-UTF-8 names and unsupported file types. A restore
+    /// leaves them untouched rather than pretending they were captured.
     pub skipped: Vec<String>,
     pub truncated: bool,
+}
+
+impl SnapshotManifest {
+    /// True only when every entry in the target is represented in the manifest.
+    /// Callers must not describe a snapshot as complete while entries are
+    /// skipped, even though restoring remains safe for the protected subset.
+    pub fn is_complete(&self) -> bool {
+        !self.truncated && self.skipped.is_empty()
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -512,6 +527,7 @@ fn walk(source: &Path, copy_to: Option<&Path>) -> Result<(Vec<SnapshotEntry>, Ve
                     hash: hash_bytes(text.as_bytes()),
                     size: 0,
                     link_target: Some(text),
+                    mode: None,
                 });
                 if let Some(destination) = copy_to {
                     copy_symlink(&link_target, &destination.join(&relative_string))?;
@@ -523,6 +539,7 @@ fn walk(source: &Path, copy_to: Option<&Path>) -> Result<(Vec<SnapshotEntry>, Ve
                     hash: String::new(),
                     size: 0,
                     link_target: None,
+                    mode: unix_mode(&metadata),
                 });
                 if let Some(destination) = copy_to {
                     std::fs::create_dir_all(destination.join(&relative_string))?;
@@ -542,6 +559,7 @@ fn walk(source: &Path, copy_to: Option<&Path>) -> Result<(Vec<SnapshotEntry>, Ve
                     hash,
                     size,
                     link_target: None,
+                    mode: unix_mode(&metadata),
                 });
                 if let Some(destination) = copy_to {
                     let destination = destination.join(&relative_string);
@@ -625,9 +643,21 @@ fn hex(bytes: impl AsRef<[u8]>) -> String {
         .collect()
 }
 
+#[cfg(unix)]
+fn unix_mode(metadata: &std::fs::Metadata) -> Option<u32> {
+    use std::os::unix::fs::PermissionsExt;
+    Some(metadata.permissions().mode() & 0o7777)
+}
+
+#[cfg(not(unix))]
+fn unix_mode(_metadata: &std::fs::Metadata) -> Option<u32> {
+    None
+}
+
 pub fn create_snapshot(source: &Path, snapshot_dir: &Path) -> Result<SnapshotManifest> {
     let source = source.canonicalize()?;
     ensure!(source.is_dir(), "Snapshot source must be a directory");
+    ensure_snapshot_outside_source(&source, snapshot_dir)?;
     ensure!(
         !snapshot_dir.exists(),
         "Snapshot directory already exists: {}",
@@ -635,7 +665,18 @@ pub fn create_snapshot(source: &Path, snapshot_dir: &Path) -> Result<SnapshotMan
     );
     std::fs::create_dir_all(snapshot_dir)?;
     let result = (|| -> Result<SnapshotManifest> {
-        let (entries, skipped, truncated) = walk(&source, Some(snapshot_dir))?;
+        // The canonical check runs again after creation so a symlinked
+        // destination cannot direct copied data back into the source tree.
+        let created = snapshot_dir.canonicalize()?;
+        ensure!(
+            !created.starts_with(&source),
+            "Snapshot directory must be outside the source tree"
+        );
+        // Payload and metadata have separate namespaces: a user file named
+        // `manifest.json` is preserved instead of being overwritten.
+        let payload = created.join("payload");
+        std::fs::create_dir_all(&payload)?;
+        let (entries, skipped, truncated) = walk(&source, Some(&payload))?;
         ensure!(
             !truncated,
             "Target exceeds snapshot limits ({} entries or {} bytes)",
@@ -656,6 +697,25 @@ pub fn create_snapshot(source: &Path, snapshot_dir: &Path) -> Result<SnapshotMan
         let _ = std::fs::remove_dir_all(snapshot_dir);
     }
     result
+}
+
+/// Refuses a snapshot directory that is the source or lies inside it, using
+/// the canonical location of the deepest existing ancestor so aliases and
+/// symbolic links cannot hide the relationship.
+fn ensure_snapshot_outside_source(source: &Path, snapshot_dir: &Path) -> Result<()> {
+    let mut existing = snapshot_dir.to_path_buf();
+    while !existing.exists() {
+        existing = existing
+            .parent()
+            .context("Snapshot directory has no existing ancestor")?
+            .to_path_buf();
+    }
+    let existing = existing.canonicalize()?;
+    ensure!(
+        !(existing == source || existing.starts_with(source)),
+        "Snapshot directory must be outside the source tree"
+    );
+    Ok(())
 }
 
 /// Reads the stored snapshot and verifies that every protected payload entry
@@ -818,6 +878,10 @@ fn same_content(left: &SnapshotManifest, right: &SnapshotManifest) -> bool {
 /// Restores the snapshot only if the current tree still equals the tree the
 /// task is expected to have produced. Any later user edit makes this refuse
 /// instead of overwriting newer content.
+///
+/// Every payload entry and every target path is validated before the first
+/// deletion or replacement, so a missing or corrupt snapshot leaves the
+/// current tree unchanged.
 pub fn restore_snapshot(
     manifest: &SnapshotManifest,
     snapshot_dir: &Path,
@@ -844,6 +908,9 @@ pub fn restore_snapshot(
             removed: 0,
         });
     }
+    let payload = snapshot_dir.join("payload");
+    // Prevalidate the whole restore before mutating anything.
+    let payloads = prepare_restore(manifest, &payload, &source, expected_after)?;
     let current_by_path: BTreeMap<_, _> = current
         .entries
         .iter()
@@ -888,21 +955,17 @@ pub fn restore_snapshot(
                 {
                     continue;
                 }
-                let snapshot_path = snapshot_dir.join(&entry.path);
-                let bytes = std::fs::read(&snapshot_path)
+                let bytes = payloads
+                    .get(&entry.path)
                     .with_context(|| format!("Snapshot copy is missing for {}", entry.path))?;
-                ensure!(
-                    hash_bytes(&bytes) == entry.hash,
-                    "Snapshot copy is corrupt for {}",
-                    entry.path
-                );
                 if std::fs::symlink_metadata(&target)
                     .map(|metadata| metadata.is_dir())
                     .unwrap_or(false)
                 {
                     remove_entry(&target)?;
                 }
-                write_atomic(&target, &bytes)?;
+                write_atomic(&target, bytes)?;
+                apply_mode(&target, entry.mode)?;
                 restored += 1;
             }
             SnapshotKind::Symlink => {
@@ -945,7 +1008,151 @@ pub fn restore_snapshot(
             let _ = std::fs::remove_dir(target);
         }
     }
+    // Directory modes are applied last so writing children was still possible.
+    let mut directory_modes: Vec<&SnapshotEntry> = manifest
+        .entries
+        .iter()
+        .filter(|entry| entry.kind == SnapshotKind::Directory)
+        .collect();
+    directory_modes.sort_by(|left, right| right.path.cmp(&left.path));
+    for entry in directory_modes {
+        let target = safe_target(&source, &entry.path)?;
+        if target.is_dir() {
+            apply_mode(&target, entry.mode)?;
+        }
+    }
     Ok(RestoreReport { restored, removed })
+}
+
+/// Validates every snapshot payload and target path without modifying the
+/// source. Returns the verified payload bytes keyed by relative path.
+fn prepare_restore(
+    manifest: &SnapshotManifest,
+    payload: &Path,
+    source: &Path,
+    expected_after: &SnapshotManifest,
+) -> Result<BTreeMap<String, Vec<u8>>> {
+    ensure!(payload.is_dir(), "Snapshot payload directory is missing");
+    let mut payloads = BTreeMap::new();
+    // The snapshot must describe a tree: every entry's ancestors are
+    // directories in the manifest. A corrupt manifest cannot direct a write
+    // through an unexpected path shape.
+    validate_manifest_tree(manifest)?;
+    validate_manifest_tree(expected_after)?;
+    for entry in manifest.entries.iter().chain(expected_after.entries.iter()) {
+        ensure!(
+            super::discovery::is_plain_relative_path(&entry.path),
+            "Snapshot path is not a plain relative path: {}",
+            entry.path
+        );
+        // Never follow a link out of the source while restoring.
+        ensure_no_symlink_ancestor(source, &entry.path)?;
+    }
+    for entry in &manifest.entries {
+        match entry.kind {
+            SnapshotKind::Directory => {}
+            SnapshotKind::File => {
+                let path = payload.join(&entry.path);
+                let bytes = std::fs::read(&path)
+                    .with_context(|| format!("Snapshot copy is missing for {}", entry.path))?;
+                ensure!(
+                    hash_bytes(&bytes) == entry.hash,
+                    "Snapshot copy is corrupt for {}",
+                    entry.path
+                );
+                ensure!(
+                    bytes.len() as u64 == entry.size,
+                    "Snapshot copy has the wrong size for {}",
+                    entry.path
+                );
+                payloads.insert(entry.path.clone(), bytes);
+            }
+            SnapshotKind::Symlink => {
+                ensure!(
+                    entry
+                        .link_target
+                        .as_deref()
+                        .is_some_and(|target| hash_bytes(target.as_bytes()) == entry.hash),
+                    "Snapshot symlink payload differs for {}",
+                    entry.path
+                );
+            }
+        }
+    }
+    Ok(payloads)
+}
+
+#[cfg(unix)]
+fn apply_mode(path: &Path, mode: Option<u32>) -> Result<()> {
+    use std::os::unix::fs::PermissionsExt;
+    if let Some(mode) = mode {
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(mode))?;
+    }
+    Ok(())
+}
+
+#[cfg(not(unix))]
+fn apply_mode(_path: &Path, _mode: Option<u32>) -> Result<()> {
+    Ok(())
+}
+
+/// A manifest must describe a tree by itself: every entry's ancestors are
+/// recorded as directories. The before and after manifests are checked
+/// separately because the task may intentionally have replaced a directory
+/// with a file (or the reverse).
+fn validate_manifest_tree(manifest: &SnapshotManifest) -> Result<()> {
+    let kinds: BTreeMap<PathBuf, SnapshotKind> = manifest
+        .entries
+        .iter()
+        .map(|entry| (PathBuf::from(&entry.path), entry.kind))
+        .collect();
+    for entry in &manifest.entries {
+        ensure!(
+            super::discovery::is_plain_relative_path(&entry.path),
+            "Snapshot path is not a plain relative path: {}",
+            entry.path
+        );
+        for ancestor in Path::new(&entry.path).ancestors().skip(1) {
+            if ancestor.as_os_str().is_empty() {
+                break;
+            }
+            match kinds.get(ancestor) {
+                Some(SnapshotKind::Directory) => {}
+                Some(_) => anyhow::bail!(
+                    "Snapshot path {} descends through a non-directory",
+                    entry.path
+                ),
+                None => anyhow::bail!(
+                    "Snapshot path {} has no recorded parent directory",
+                    entry.path
+                ),
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Rejects an intermediate symbolic link without requiring the current tree
+/// to already have the final shape (a file that this restore replaces by a
+/// directory is allowed).
+fn ensure_no_symlink_ancestor(source: &Path, relative: &str) -> Result<()> {
+    let relative = Path::new(relative);
+    let components: Vec<_> = relative.components().collect();
+    let mut current = source.to_path_buf();
+    for (index, component) in components.iter().enumerate() {
+        current.push(component);
+        if index + 1 < components.len() {
+            match std::fs::symlink_metadata(&current) {
+                Ok(metadata) if metadata.file_type().is_symlink() => {
+                    anyhow::bail!("Snapshot path escapes through a symbolic link")
+                }
+                Ok(_) => {}
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                Err(error) => return Err(error.into()),
+            }
+        }
+    }
+    Ok(())
 }
 
 fn safe_target(source: &Path, relative: &str) -> Result<PathBuf> {
@@ -1225,6 +1432,202 @@ mod tests {
             std::fs::read_to_string(source.join("user.txt")).unwrap(),
             "user\n"
         );
+    }
+
+    #[test]
+    fn a_user_manifest_json_is_snapshotted_under_the_payload_namespace() {
+        let temp = tempfile::tempdir().unwrap();
+        let source = temp.path().join("source");
+        std::fs::create_dir(&source).unwrap();
+        std::fs::write(source.join("manifest.json"), "user data\n").unwrap();
+        let snapshot_dir = temp.path().join("snapshots/1");
+        create_snapshot(&source, &snapshot_dir).unwrap();
+        assert_eq!(
+            std::fs::read_to_string(snapshot_dir.join("payload/manifest.json")).unwrap(),
+            "user data\n"
+        );
+        // The snapshot metadata owns the root name, not the copied document.
+        let stored: SnapshotManifest = serde_json::from_str(
+            &std::fs::read_to_string(snapshot_dir.join("manifest.json")).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(stored.source, source.canonicalize().unwrap());
+
+        let manifest = load_snapshot(&snapshot_dir).unwrap();
+        std::fs::write(source.join("manifest.json"), "coder data\n").unwrap();
+        let coder = current_manifest(&source).unwrap();
+        restore_snapshot(&manifest, &snapshot_dir, &source, &coder).unwrap();
+        assert_eq!(
+            std::fs::read_to_string(source.join("manifest.json")).unwrap(),
+            "user data\n"
+        );
+    }
+
+    #[test]
+    fn file_and_directory_collisions_are_restored_without_partial_state() {
+        let temp = tempfile::tempdir().unwrap();
+        let source = temp.path().join("source");
+        std::fs::create_dir(&source).unwrap();
+        std::fs::create_dir(source.join("item")).unwrap();
+        std::fs::write(source.join("item/child.txt"), "child\n").unwrap();
+        let snapshot_dir = temp.path().join("snapshots/1");
+        let manifest = create_snapshot(&source, &snapshot_dir).unwrap();
+
+        std::fs::remove_file(source.join("item/child.txt")).unwrap();
+        std::fs::remove_dir(source.join("item")).unwrap();
+        std::fs::write(source.join("item"), "now a file\n").unwrap();
+        let coder = current_manifest(&source).unwrap();
+        restore_snapshot(&manifest, &snapshot_dir, &source, &coder).unwrap();
+        assert!(source.join("item").is_dir());
+        assert_eq!(
+            std::fs::read_to_string(source.join("item/child.txt")).unwrap(),
+            "child\n"
+        );
+
+        // The reverse collision: a snapshot file replaced by a directory.
+        let second = temp.path().join("second");
+        std::fs::create_dir(&second).unwrap();
+        std::fs::write(second.join("entry"), "original\n").unwrap();
+        let second_snapshot = temp.path().join("snapshots/2");
+        let manifest = create_snapshot(&second, &second_snapshot).unwrap();
+        std::fs::remove_file(second.join("entry")).unwrap();
+        std::fs::create_dir(second.join("entry")).unwrap();
+        std::fs::write(second.join("entry/extra.txt"), "extra\n").unwrap();
+        let coder = current_manifest(&second).unwrap();
+        restore_snapshot(&manifest, &second_snapshot, &second, &coder).unwrap();
+        assert!(second.join("entry").is_file());
+        assert_eq!(
+            std::fs::read_to_string(second.join("entry")).unwrap(),
+            "original\n"
+        );
+        assert!(!second.join("entry/extra.txt").exists());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn restores_preserve_executable_permissions() {
+        use std::os::unix::fs::PermissionsExt;
+        let temp = tempfile::tempdir().unwrap();
+        let source = temp.path().join("source");
+        std::fs::create_dir(&source).unwrap();
+        let script = source.join("run.sh");
+        std::fs::write(&script, "#!/bin/sh\necho old\n").unwrap();
+        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let snapshot_dir = temp.path().join("snapshots/1");
+        let manifest = create_snapshot(&source, &snapshot_dir).unwrap();
+        assert_eq!(
+            manifest
+                .entries
+                .iter()
+                .find(|entry| entry.path == "run.sh")
+                .and_then(|entry| entry.mode),
+            Some(0o755)
+        );
+        std::fs::write(&script, "#!/bin/sh\necho new\n").unwrap();
+        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o644)).unwrap();
+        let coder = current_manifest(&source).unwrap();
+        restore_snapshot(&manifest, &snapshot_dir, &source, &coder).unwrap();
+        assert_eq!(
+            std::fs::read_to_string(&script).unwrap(),
+            "#!/bin/sh\necho old\n"
+        );
+        assert_eq!(
+            std::fs::metadata(&script).unwrap().permissions().mode() & 0o777,
+            0o755
+        );
+    }
+
+    #[test]
+    fn a_snapshot_destination_inside_the_source_is_rejected() {
+        let temp = tempfile::tempdir().unwrap();
+        let source = temp.path().join("source");
+        std::fs::create_dir(&source).unwrap();
+        std::fs::write(source.join("keep.txt"), "keep\n").unwrap();
+        let inside = source.join("snapshots/1");
+        let error = create_snapshot(&source, &inside).unwrap_err();
+        assert!(error.to_string().contains("outside the source tree"));
+        assert!(!source.join("snapshots").exists());
+        assert_eq!(
+            std::fs::read_to_string(source.join("keep.txt")).unwrap(),
+            "keep\n"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_symlinked_snapshot_destination_cannot_escape_containment() {
+        let temp = tempfile::tempdir().unwrap();
+        let source = temp.path().join("source");
+        std::fs::create_dir(&source).unwrap();
+        std::fs::write(source.join("keep.txt"), "keep\n").unwrap();
+        let alias = temp.path().join("alias");
+        std::os::unix::fs::symlink(&source, &alias).unwrap();
+        let error = create_snapshot(&source, &alias.join("snap")).unwrap_err();
+        assert!(error.to_string().contains("outside the source tree"));
+        assert!(!source.join("snap").exists());
+    }
+
+    #[test]
+    fn corrupt_snapshot_does_not_delete_new_files_before_failing() {
+        let temp = tempfile::tempdir().unwrap();
+        let source = temp.path().join("source");
+        std::fs::create_dir(&source).unwrap();
+        std::fs::write(source.join("a.txt"), "a\n").unwrap();
+        let snapshot_dir = temp.path().join("snapshots/1");
+        let manifest = create_snapshot(&source, &snapshot_dir).unwrap();
+        std::fs::write(source.join("a.txt"), "coder\n").unwrap();
+        std::fs::write(source.join("new.txt"), "new\n").unwrap();
+        let before_restore = current_manifest(&source).unwrap();
+        // Corrupt the payload after the task produced its candidate result.
+        std::fs::write(snapshot_dir.join("payload/a.txt"), "corrupt\n").unwrap();
+        let error =
+            restore_snapshot(&manifest, &snapshot_dir, &source, &before_restore).unwrap_err();
+        assert!(error.to_string().contains("corrupt"), "{error:#}");
+        assert_eq!(
+            std::fs::read_to_string(source.join("a.txt")).unwrap(),
+            "coder\n"
+        );
+        assert_eq!(
+            std::fs::read_to_string(source.join("new.txt")).unwrap(),
+            "new\n"
+        );
+
+        // A missing payload entry is also caught before any deletion.
+        std::fs::remove_file(snapshot_dir.join("payload/a.txt")).unwrap();
+        let error =
+            restore_snapshot(&manifest, &snapshot_dir, &source, &before_restore).unwrap_err();
+        assert!(error.to_string().contains("missing"), "{error:#}");
+        assert_eq!(
+            std::fs::read_to_string(source.join("a.txt")).unwrap(),
+            "coder\n"
+        );
+        assert_eq!(
+            std::fs::read_to_string(source.join("new.txt")).unwrap(),
+            "new\n"
+        );
+    }
+
+    #[test]
+    fn skipped_entries_are_audited_instead_of_claimed_as_protected() {
+        let temp = tempfile::tempdir().unwrap();
+        let source = temp.path().join("source");
+        std::fs::create_dir_all(source.join("node_modules/pkg")).unwrap();
+        std::fs::write(source.join("node_modules/pkg/index.js"), "x\n").unwrap();
+        std::fs::write(source.join("app.js"), "app\n").unwrap();
+        let snapshot_dir = temp.path().join("snapshots/1");
+        let manifest = create_snapshot(&source, &snapshot_dir).unwrap();
+        assert!(manifest
+            .skipped
+            .iter()
+            .any(|path| path.contains("node_modules")));
+        assert!(!manifest.is_complete());
+        assert!(!snapshot_dir.join("payload/node_modules").exists());
+        let verification = verify_snapshot(&snapshot_dir, &source);
+        assert!(verification.valid && verification.payload_verified);
+        assert!(verification
+            .skipped
+            .iter()
+            .any(|path| path.contains("node_modules")));
     }
 
     #[test]
