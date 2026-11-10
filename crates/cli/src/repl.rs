@@ -89,7 +89,7 @@ fn completion_for_message(data_dir: &std::path::Path, message: &deepseek_code_co
 
 fn conversation(session: &Session, id: &str, detailed: bool, mut recorded: Option<&mut crate::terminal::scrollback::Scrollback>) -> Result<Vec<crate::terminal::change_view::Line>> {
     use crate::terminal::{change_view, tool_view};
-    let width = crossterm::terminal::size().map_or(80, |(cols, _)| cols.saturating_sub(1) as usize);
+    let width = crate::terminal::size().0.saturating_sub(1) as usize;
     session.store.db.with_conn(|conn| {
         let rows = deepseek_code_core::db::message_repo::get_messages_by_conversation(conn, id)?;
         let mut lines = Vec::new();

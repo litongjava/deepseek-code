@@ -35,8 +35,7 @@ impl Transcript {
             return;
         }
         self.separate();
-        let width =
-            crossterm::terminal::size().map_or(80, |(cols, _)| cols.saturating_sub(2) as usize);
+        let width = crate::terminal::size().0.saturating_sub(2) as usize;
         let mut renderer = markdown::MarkdownStream::new(std::env::var_os("NO_COLOR").is_none());
         renderer.set_width(width.saturating_sub(2));
         let mut rows = text

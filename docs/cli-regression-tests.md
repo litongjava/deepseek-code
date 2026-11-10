@@ -43,19 +43,22 @@ Windows 上，`tools::linux_env::tests::unpack_copies_hard_links_keeps_symlinks_
 
 ## 测试进程不应操作控制终端
 
-`cargo test -p deepseek-code-cli` 会运行 `--bin dcl` 的单元测试。这些用例不能查询光标位置，也不能切换 raw mode：`crossterm::cursor::position` 会自己把 `/dev/tty` 切到 raw mode，进程处在后台进程组时内核发送 `SIGTTOU`，整个进程组停止，cargo 会一直等到被强杀；在开发者终端里直接跑 `cargo test` 时，无参 `/config` 还会进入真实 picker 等待按键。因此：
+`cargo test -p deepseek-code-cli` 会运行 `--bin dcl` 的单元测试。这些用例不能查询光标位置，也不能切换 raw mode：`crossterm::cursor::position` 会自己把 `/dev/tty` 切到 raw mode，进程处在后台进程组时内核发送 `SIGTTOU`，整个进程组停止，cargo 会一直等到被强杀；在开发者终端里直接跑 `cargo test` 时，无参 `/config` 还会进入真实 picker 等待按键。`script` 默认创建的 pty 没有 winsize，`crossterm::terminal::size()` 会返回 `Ok((0, 0))`，绕过 `unwrap_or((80, 24))`，换行宽度变成 0。因此：
 
 - 光标查询统一走 `crate::terminal::cursor_position()`，未处于 raw mode 时返回 `NotConnected`，调用方保留原有的回退行号。
+- 终端尺寸统一走 `crate::terminal::size()`，尺寸为 0 时回退到 80×24。
 - `TerminalInput` 由测试夹具提供答案（`is_fixture()`）时，无参 `/config`、`/cost`、`/status` 走文本路径，不进入 picker。
 
 验证方式：
 
 ```bash
 cargo test --locked -p deepseek-code-cli --bin dcl
+script -qec "stty rows 40 cols 100 && cargo test --locked -p deepseek-code-cli --bin dcl" /dev/null
 script -qec "cargo test --locked -p deepseek-code-cli --bin dcl" /dev/null
+grep -rn "crossterm::cursor::position" crates/cli/src --include=*.rs
 ```
 
-2026-11-09：修复前第一条命令会停住（进程状态 `Tl`，`wchan=do_signal_stop`），第二条停在 Settings 菜单等待输入；修复后两者都在数秒内完成，`terminal::cursor_tests::cursor_position_is_unavailable_without_raw_mode` 与 `terminal::input::tests::fixture_answers_are_non_interactive` 通过。在 pty 下仍有 29 个用例失败，同一个用例集合在未修改的代码上同样失败（它们假定标准流不是终端），不属于本次改动。
+2026-11-09：修复前第一条命令会停住（进程状态 `Tl`，`wchan=do_signal_stop`），有窗口大小的 pty 里曾停在 Settings 菜单等待输入；修复后两条命令都在数秒内完成，`terminal::cursor_tests::cursor_position_is_unavailable_without_raw_mode` 与 `terminal::input::tests::fixture_answers_are_non_interactive` 通过。第三条命令使用 `script` 默认的 0×0 pty：修复前 29 个用例因宽度为 0 失败，修复后应与第一条一致。最后一条 grep 只应命中 `crates/cli/src/terminal.rs` 里的辅助函数本身和它的注释。
 
 ## 真实终端的测试方法
 

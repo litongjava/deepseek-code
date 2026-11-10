@@ -2,7 +2,6 @@
 //! tool result can show it in full and a second click can fold it again. Only
 //! rows below the clicked block are redrawn; scrollback stays as it was.
 use super::change_view::{self, Line};
-use crossterm::terminal;
 use std::collections::VecDeque;
 use unicode_width::UnicodeWidthChar;
 
@@ -209,14 +208,14 @@ impl Scrollback {
         rows
     }
     pub(super) fn push_logged(&mut self, mut line: Logged) -> usize {
-        line.rows = screen_rows(&line.text, terminal::size().unwrap_or((80, 24)).0 as usize);
+        line.rows = screen_rows(&line.text, crate::terminal::size().0 as usize);
         let rows = line.rows;
         self.logged.push_back(line);
         rows
     }
     /// Records a written line; returns the screen rows it takes.
     pub(crate) fn push(&mut self, text: String, block: Option<usize>) -> usize {
-        let (columns, _height) = terminal::size().unwrap_or((80, 24));
+        let (columns, _height) = crate::terminal::size();
         let rows = screen_rows(&text, columns as usize);
         self.logged.push_back(Logged {
             text,
@@ -391,7 +390,7 @@ impl Scrollback {
             .chain(after)
             .collect();
         let mut visible = Vec::new();
-        let columns = terminal::size().unwrap_or((80, 24)).0 as usize;
+        let columns = crate::terminal::size().0 as usize;
         for mut line in rows {
             line.rows = screen_rows(&line.text, columns);
             self.logged.push_back(line.clone());
@@ -452,7 +451,7 @@ impl Scrollback {
         if !text.trim_start().starts_with('/') {
             self.latest_prompt = text.to_owned();
         }
-        let width = terminal::size().unwrap_or((80, 24)).0.saturating_sub(1) as usize;
+        let width = crate::terminal::size().0.saturating_sub(1) as usize;
         let (short, full) = prompt_lines(text, width);
         let (id, rows) = self.block(short, full);
         self.blocks[id].prompt = Some(text.to_owned());
@@ -711,7 +710,7 @@ impl Scrollback {
         self.screen_at(
             bottom,
             height,
-            terminal::size().unwrap_or((80, 24)).0 as usize,
+            crate::terminal::size().0 as usize,
         )
     }
     fn screen_at(&self, bottom: u16, height: u16, width: usize) -> Vec<String> {
@@ -849,7 +848,7 @@ fn prompt_lines(text: &str, width: usize) -> (Vec<Line>, Vec<Line>) {
 
 /// A tool result's lines as written above the input box.
 fn collapsed(lines: &[Line]) -> Vec<String> {
-    let width = terminal::size().unwrap_or((80, 24)).0.saturating_sub(1) as usize;
+    let width = crate::terminal::size().0.saturating_sub(1) as usize;
     collapsed_at_width(lines, width)
 }
 
@@ -884,7 +883,7 @@ fn collapsed_at_width(lines: &[Line], width: usize) -> Vec<String> {
 }
 
 fn rendered(lines: &[Line]) -> Vec<String> {
-    let width = terminal::size().unwrap_or((80, 24)).0.saturating_sub(1) as usize;
+    let width = crate::terminal::size().0.saturating_sub(1) as usize;
     rendered_at_width(lines, width)
 }
 

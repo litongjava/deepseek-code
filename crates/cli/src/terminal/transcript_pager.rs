@@ -401,7 +401,7 @@ fn pager(
     footer: &str,
 ) -> io::Result<Outcome> {
     let color = std::env::var_os("NO_COLOR").is_none();
-    let mut size = terminal::size().unwrap_or((80, 24));
+    let mut size = crate::terminal::size();
     let mut all = transcript_rows(lines, logged, (size.0 as usize).saturating_sub(1).max(10), color);
     // Opens at the end, where the latest turn is.
     let mut top = if from_start { 0 } else { usize::MAX };

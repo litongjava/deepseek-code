@@ -57,13 +57,27 @@ pub fn release_handoff() {
 /// waiting forever, and without a terminal it waits for a report that never
 /// arrives. Callers keep their own fallbacks for the missing row.
 pub(crate) fn cursor_position() -> std::io::Result<(u16, u16)> {
-    if !crossterm::terminal::is_raw_mode_enabled()? {
+    // Windows reports `Err` instead of `Ok(false)` when the handle is not a
+    // console, so a failure to query raw mode means "not raw" on both platforms.
+    let raw = crossterm::terminal::is_raw_mode_enabled().unwrap_or(false);
+    if !raw {
         return Err(std::io::Error::new(
             std::io::ErrorKind::NotConnected,
             "the cursor position needs the terminal in raw mode",
         ));
     }
     crossterm::cursor::position()
+}
+
+/// Terminal columns and rows. A pty without a winsize (`script` creates one by
+/// default) answers `TIOCGWINSZ` with `0x0`; that is as unusable as a missing
+/// terminal, so callers get the documented 80×24 defaults instead of a zero
+/// wrapping width.
+pub(crate) fn size() -> (u16, u16) {
+    match crossterm::terminal::size() {
+        Ok((cols, rows)) if cols > 0 && rows > 0 => (cols, rows),
+        _ => (80, 24),
+    }
 }
 
 /// Lines a mouse wheel notch scrolls in the transcript pager (/scroll-speed).
@@ -376,9 +390,11 @@ pub(crate) fn print_recorded(text: &str) -> std::io::Result<()> {
     release_handoff();
     let mut history = scrollback::Scrollback::take();
     let mut out = std::io::stderr().lock();
-    let raw = crossterm::terminal::is_raw_mode_enabled()?;
+    // A console probe can fail when stderr is redirected; plain lines remain
+    // readable, so only the newline choice changes.
+    let raw = crossterm::terminal::is_raw_mode_enabled().unwrap_or(false);
     let newline = if raw { "\r\n" } else { "\n" };
-    let width = crossterm::terminal::size().map_or(79, |(cols, _)| cols.saturating_sub(1) as usize).max(1);
+    let width = (size().0.saturating_sub(1) as usize).max(1);
     for row in text.lines() {
         if row.is_empty() {
             writeln_recorded(&mut out, &mut history, row, newline)?;

@@ -204,7 +204,7 @@ impl TurnProgress {
             eprintln!();
             self.line_open = false;
         }
-        let (width, _) = crossterm::terminal::size().unwrap_or((80, 24));
+        let (width, _) = crate::terminal::size();
         let width = width as usize;
         for row in notice_rows(message, width.saturating_sub(1), wrap) {
             eprintln!("{row}");
@@ -248,7 +248,7 @@ impl TurnProgress {
         };
         // Keep the cursor on the last frame row. Timer updates repaint only
         // changed rows, without line feeds that would scroll the viewport.
-        let (width, height) = crossterm::terminal::size().unwrap_or((80, 24));
+        let (width, height) = crate::terminal::size();
         let size = (width, height);
         let width = width as usize;
         let mut status = format!("* {} ({seconds}s{})", self.hook_activity.as_deref().unwrap_or(&self.activity), if self.hook_activity.is_some() { "" } else { self.phase });
@@ -293,7 +293,7 @@ impl TurnProgress {
 
     pub fn clear(&mut self) {
         if self.visible {
-            let height = crossterm::terminal::size().map(|(_, h)| h).unwrap_or(24);
+            let height = crate::terminal::size().1;
             let rows = self.visible_rows.min(usize::from(height).max(1));
             let mut output = String::from("\x1b[?25l\r\x1b[2K");
             for _ in 1..rows {

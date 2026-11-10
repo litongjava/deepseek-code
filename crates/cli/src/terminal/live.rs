@@ -325,7 +325,7 @@ impl Draft {
         (rows.get(shown.clone()).map(<[String]>::to_vec).unwrap_or_default(), row - shown.start, cell)
     }
     fn move_row(&mut self, down: bool) -> bool {
-        let width = terminal::size().map_or(80, |(columns, _)| (columns as usize).saturating_sub(1).max(4));
+        let width = (crate::terminal::size().0 as usize).saturating_sub(1).max(4);
         let prompt = format!("{} ", crate::terminal::prompt_glyph());
         let Some(cursor) = super::prompt_display::vertical_cursor(&prompt, &self.characters, self.cursor, width, down) else {
             return false;
@@ -1226,7 +1226,7 @@ fn stream_text(state: &mut State, screen: &mut Frame, text: &str) {
 /// Logs one finished answer line through the Markdown renderer. The first
 /// line of an answer block gets the reference CLI's `●`, later lines indent.
 fn emit_text_line(state: &mut State, screen: &mut Frame, line: &str) {
-    state.markdown.set_width(terminal::size().map_or(80, |(cols, _)| cols as usize).saturating_sub(3));
+    state.markdown.set_width((crate::terminal::size().0 as usize).saturating_sub(3));
     for rendered in state.markdown.line(line) {
         log_answer_line(state, screen, &rendered);
     }
@@ -1241,7 +1241,7 @@ fn log_answer_line(state: &mut State, screen: &mut Frame, rendered: &str) {
     let first = if std::mem::take(&mut state.block_start) { "\u{25cf} " } else { "  " };
     // Wrap at word boundaries with the answer's indent instead of letting the
     // terminal break words at the edge.
-    let width = terminal::size().map_or(80, |(cols, _)| cols as usize).saturating_sub(1);
+    let width = (crate::terminal::size().0 as usize).saturating_sub(1);
     let indent = " ".repeat(2 + super::markdown::hanging_indent(rendered));
     screen.logged.push(format!("{first}{rendered}"));
     for row in screen.scrollback.push_flow(rendered, first, &indent, width) {
@@ -1336,7 +1336,7 @@ fn finish_answer(state: &mut State, screen: &mut Frame) {
         let line = std::mem::take(&mut state.partial);
         emit_text_line(state, screen, &line);
     }
-    state.markdown.set_width(terminal::size().map_or(80, |(cols, _)| cols as usize).saturating_sub(3));
+    state.markdown.set_width((crate::terminal::size().0 as usize).saturating_sub(3));
     for rendered in state.markdown.finish() {
         log_answer_line(state, screen, &rendered);
     }
@@ -1474,7 +1474,7 @@ impl Frame {
         if !super::transcript_pager::HistoryView::is_navigation(key) {
             return Ok(false);
         }
-        let size = terminal::size().unwrap_or((80, 24));
+        let size = crate::terminal::size();
         self.refresh_history(state, size.0.saturating_sub(1) as usize);
         self.history_view.navigate(key, (size.1 as usize).saturating_sub(self.composer_height))
     }
@@ -1500,10 +1500,10 @@ impl Frame {
     /// Writes anything queued and removes the frame from the screen.
     fn clear(&mut self) -> io::Result<()> {
         self.history_view.close()?;
-        let rows = terminal::size().map_or(24, |(_, rows)| rows as usize).max(1);
+        let rows = (crate::terminal::size().1 as usize).max(1);
         let mut out = std::mem::take(&mut self.pending);
         if self.top.is_none() && !self.logs.is_empty() {
-            self.top = Some(crossterm::cursor::position().map_or(0, |(_, row)| row));
+            self.top = Some(crate::terminal::cursor_position().map_or(0, |(_, row)| row));
         }
         self.write_logs(&mut out, rows);
         if let (Some(top), false) = (self.top, self.lines.is_empty()) {
@@ -1520,7 +1520,7 @@ impl Frame {
     /// follows takes over without the box moving or blinking.
     fn hand_off(&mut self) -> io::Result<()> {
         self.history_view.close()?;
-        let rows = terminal::size().map_or(24, |(_, rows)| rows as usize).max(1);
+        let rows = (crate::terminal::size().1 as usize).max(1);
         match self.hand_off_output(rows) {
             Some((out, row)) => {
                 write(&out)?;
@@ -1572,7 +1572,7 @@ impl Frame {
     fn log_line(&mut self, text: String, block: Option<usize>) {
         self.logged.push(text.clone());
         if block.is_none() {
-            let width = terminal::size().unwrap_or((80, 24)).0.saturating_sub(1) as usize;
+            let width = crate::terminal::size().0.saturating_sub(1) as usize;
             for line in text.split("\r\n") {
                 for row in self.scrollback.push_flow(line, "", "", width) {
                     self.logs.push((row, 1));
@@ -1737,7 +1737,7 @@ impl Frame {
         Some(format!("\x1b[?25l{out}"))
     }
     fn draw(&mut self, state: &mut State) -> io::Result<()> {
-        let size = terminal::size().unwrap_or((80, 24));
+        let size = crate::terminal::size();
         let width = (size.0 as usize).saturating_sub(1).max(4);
         let color = std::env::var_os("NO_COLOR").is_none();
         let prompt = if state.answer.is_some() { "Answer \u{203a} ".to_owned() } else { format!("{} ", crate::terminal::prompt_glyph()) };
@@ -1957,7 +1957,7 @@ impl Frame {
             None => draft_column.min(width),
         };
         let Some(out) = self.place(lines, content_rows, input_row, cursor_column, size, &mut || {
-            crossterm::cursor::position().map_or(0, |(_, row)| row as usize)
+            crate::terminal::cursor_position().map_or(0, |(_, row)| row as usize)
         }) else {
             return Ok(());
         };
@@ -2119,7 +2119,7 @@ fn run(
                 Ok(Update::Styled(lines)) => {
                     finish_text(state, screen);
                     if !lines.is_empty() { screen.separate_block(); }
-                    let width = terminal::size().unwrap_or((80, 24)).0.saturating_sub(1) as usize;
+                    let width = crate::terminal::size().0.saturating_sub(1) as usize;
                     let color = std::env::var_os("NO_COLOR").is_none();
                     for line in lines {
                         screen.log_rendered(&change_view::render(&line, width, color));
@@ -2129,7 +2129,7 @@ fn run(
                 Ok(Update::FileSummary(lines, files)) => {
                     finish_text(state, screen);
                     screen.separate_block();
-                    let width = terminal::size().unwrap_or((80, 24)).0.saturating_sub(1) as usize;
+                    let width = crate::terminal::size().0.saturating_sub(1) as usize;
                     let color = std::env::var_os("NO_COLOR").is_none();
                     if let Some(header) = lines.first() {
                         screen.log_rendered(&change_view::render(header, width, color));
@@ -2179,7 +2179,7 @@ fn run(
                         None if short.is_empty() => {}
                         None => {
                             screen.separate_block();
-                            let width = terminal::size().unwrap_or((80, 24)).0.saturating_sub(1) as usize;
+                            let width = crate::terminal::size().0.saturating_sub(1) as usize;
                             let color = std::env::var_os("NO_COLOR").is_none();
                             for line in short {
                                 screen.log_rendered(&change_view::render(&line, width, color));
@@ -2566,7 +2566,7 @@ fn run(
                     } else if control && key.code == KeyCode::Char('o') {
                         // As at the prompt: the transcript so far, this turn's
                         // calls included, in the full-screen pager.
-                        let width = terminal::size().unwrap_or((80, 24)).0.saturating_sub(1) as usize;
+                        let width = crate::terminal::size().0.saturating_sub(1) as usize;
                         let color = std::env::var_os("NO_COLOR").is_none();
                         let logged = screen.detailed_log(state, width, color);
                         let outcome = super::transcript_pager::run_with_logged(&state.transcript, &logged, &mut || input_reader.next(Duration::from_millis(100)))?;
@@ -3108,7 +3108,7 @@ impl Drop for AlternateCleanup {
 fn inspection_scroll(scroll: usize, event: &Event) -> usize {
     match event {
         Event::Key(key) if matches!(key.code, KeyCode::PageDown | KeyCode::PageUp) => {
-            let height = terminal::size().unwrap_or((80, 24)).1.saturating_sub(2);
+            let height = crate::terminal::size().1.saturating_sub(2);
             let step = super::page_step(height as usize);
             if key.code == KeyCode::PageUp { scroll.saturating_sub(step) } else { scroll.saturating_add(step) }
         }
@@ -3328,7 +3328,7 @@ mod tests {
 
     #[test]
     fn long_completion_matches_the_selection_snapshot_and_reflows() {
-        let columns = terminal::size().unwrap_or((80, 24)).0;
+        let columns = crate::terminal::size().0;
         let mut terminal = vt100::Parser::new(30, columns, 200);
         let mut frame = Frame::default();
         place(&mut frame, &mut terminal, &[], "working", 0);

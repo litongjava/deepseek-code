@@ -144,9 +144,9 @@ impl Drop for RawMode {
 }
 /// Moves the cursor between the rows of a multi-line prompt; false at the edges.
 fn vertical_move(buffer: &mut Buffer, prompt: &str, down: bool) -> bool {
-    let width = terminal::size().map_or(80, |(columns, _)| {
-        (columns as usize).saturating_sub(1).max(4)
-    });
+    let width = (crate::terminal::size().0 as usize)
+        .saturating_sub(1)
+        .max(4);
     let Some(cursor) = crate::terminal::prompt_display::vertical_cursor(
         prompt,
         &buffer.chars,
@@ -586,7 +586,7 @@ impl Screen {
     }
 
     fn draw_pinned(&mut self, lines: &[DisplayLine], row: usize, col: usize) -> io::Result<()> {
-        let rows = terminal::size().map(|(_, rows)| rows).unwrap_or(24).max(1);
+        let rows = crate::terminal::size().1.max(1);
         let (_, cursor_y) = crate::terminal::cursor_position()?;
         self.cursor_col = col;
         let mut out = io::stderr().lock();
@@ -793,7 +793,7 @@ impl Screen {
         context: crate::terminal::shortcuts::Context,
         next: &mut dyn FnMut() -> io::Result<Option<Event>>,
     ) -> io::Result<()> {
-        let (cols, rows) = terminal::size().unwrap_or((80, 24));
+        let (cols, rows) = crate::terminal::size();
         // A terminal that does not answer the cursor query still gets the popup.
         let top = self.top.unwrap_or_else(|| {
             crate::terminal::cursor_position()
@@ -858,7 +858,7 @@ impl Screen {
                 &mut out,
                 history,
                 text,
-                terminal::size().map_or(79, |(cols, _)| cols.saturating_sub(1) as usize),
+                crate::terminal::size().0.saturating_sub(1) as usize,
                 true,
             )?;
         }
@@ -1151,7 +1151,7 @@ impl PromptEditor {
                         &mut io::stderr(),
                         &mut above,
                         &notice,
-                        terminal::size().map_or(79, |(cols, _)| cols.saturating_sub(1) as usize),
+                        crate::terminal::size().0.saturating_sub(1) as usize,
                     )?;
                     io::stderr().flush()?;
                     screen = Screen::pinned();
@@ -2180,9 +2180,7 @@ impl PromptEditor {
                                 continue;
                             }
                             screen.finish("", "", &mut above)?;
-                            let width = terminal::size()
-                                .map(|(cols, _)| cols.saturating_sub(1) as usize)
-                                .unwrap_or(79);
+                            let width = crate::terminal::size().0.saturating_sub(1) as usize;
                             let color = std::env::var_os("NO_COLOR").is_none();
                             let mut text = String::from("\x1b[?2026h");
                             for line in &self.transcript {

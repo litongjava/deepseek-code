@@ -1581,7 +1581,7 @@ impl Session {
                                 Some(answer) => answer.strip_prefix("plan:").map(str::to_owned).ok_or(answer),
                                 None => match progress.live.as_ref() {
                                     Some(live) if input.is_some() => {
-                                        let width = crossterm::terminal::size().map_or(80, |(cols, _)| cols.saturating_sub(1) as usize);
+                                        let width = crate::terminal::size().0.saturating_sub(1) as usize;
                                         let view = crate::terminal::plan_view::review(&plan, &path, auto, bypass, width);
                                         let reply = live.plan_choice(view.lines, view.question, view.options, view.footer);
                                         let answer = wait_answer(self, &mut progress, input, reply).await?;
@@ -1597,7 +1597,7 @@ impl Session {
                                 Ok(answer) => {
                                     let decision = crate::terminal::plan_view::decide(&answer, auto, bypass);
                                     if decision.rejected && progress.is_live() {
-                                        let width = crossterm::terminal::size().map_or(80, |(cols, _)| cols.saturating_sub(1) as usize);
+                                        let width = crate::terminal::size().0.saturating_sub(1) as usize;
                                         progress.styled_lines(crate::terminal::plan_view::rejected(&plan, width));
                                     }
                                     if let Some(note) = &decision.note {

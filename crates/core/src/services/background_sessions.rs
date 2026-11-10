@@ -12,12 +12,25 @@ use std::{
 
 pub const WORKER_ENV: &str = "DEEPSEEK_CODE_BACKGROUND_JOB";
 pub const CONTROL_ENV: &str = "DEEPSEEK_CODE_BACKGROUND_CONTROL";
+/// The supervising worker's model snapshot and auto-route decision. They belong
+/// to that worker alone: a managed child resolves its own model from its launch
+/// arguments, and a deliberately forwarded snapshot arrives through the
+/// explicit `environment` after inherited values have been stripped.
+pub const WORKER_MODEL_ENV: &str = "DEEPSEEK_CODE_WORKER_MODEL";
+pub const WORKER_AUTO_ROUTE_ENV: &str = "DEEPSEEK_CODE_WORKER_AUTO_ROUTE";
 
 /// Host-private variables of the supervising worker. An ordinary child process
 /// (shell command, hook, MCP server, nested CLI) is a separate session:
 /// inheriting these would make it claim the worker's control directory and be
-/// rejected by its own ownership check, or silently join the parent's job.
-pub const INTERNAL_ENV: [&str; 2] = [WORKER_ENV, CONTROL_ENV];
+/// rejected by its own ownership check, or silently join the parent's job. A
+/// managed worker additionally inherits the parent's model snapshot, which its
+/// own launch then rejects as a mismatch.
+pub const INTERNAL_ENV: [&str; 4] = [
+    WORKER_ENV,
+    CONTROL_ENV,
+    WORKER_MODEL_ENV,
+    WORKER_AUTO_ROUTE_ENV,
+];
 
 /// A command type whose environment can be pruned before it starts.
 pub trait EnvScrub {
@@ -172,6 +185,21 @@ impl Drop for SessionClaim {
     }
 }
 
+/// Build the command that starts a managed worker. Inherited worker state is
+/// removed first, then only what the caller passes explicitly is applied;
+/// delegation forwards a deliberate model snapshot that way.
+fn supervisor_command(supervisor: &Path, dir: &Path, environment: &[(String, String)]) -> Command {
+    let mut command = Command::new(supervisor);
+    strip_internal_env(&mut command);
+    command
+        .envs(environment.iter().map(|(key, value)| (key, value)))
+        .env(WORKER_ENV, dir)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null());
+    command
+}
+
 /// Starts another instance of the host executable as an independent supervisor.
 /// The host must call run_worker_from_env before parsing its normal CLI arguments.
 pub fn spawn_foreground(
@@ -250,13 +278,7 @@ fn spawn_impl(
     };
     save(&dir.join("launch.json"), &launch)?;
     save(&dir.join("state.json"), &job)?;
-    let mut command = Command::new(supervisor);
-    command
-        .envs(environment.iter().map(|(key, value)| (key, value)))
-        .env(WORKER_ENV, &dir)
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null());
+    let mut command = supervisor_command(supervisor, &dir, environment);
     #[cfg(windows)]
     {
         use std::os::windows::process::CommandExt;
@@ -1050,6 +1072,28 @@ mod tests {
             .any(|(name, value)| *name == "DCL_KEEP_ME"
                 && *value == Some(std::ffi::OsStr::new("kept"))));
     }
+    #[test]
+    fn managed_workers_drop_inherited_model_state_and_keep_explicit_values() {
+        let dir = Path::new("fixture-job");
+        let command = supervisor_command(
+            Path::new("fixture"),
+            dir,
+            &[(WORKER_MODEL_ENV.to_owned(), "explicit-model".to_owned())],
+        );
+        let envs: Vec<_> = command.get_envs().collect();
+        assert!(envs
+            .iter()
+            .any(|(name, value)| *name == WORKER_AUTO_ROUTE_ENV && value.is_none()));
+        assert!(envs
+            .iter()
+            .any(|(name, value)| *name == CONTROL_ENV && value.is_none()));
+        assert!(envs.iter().any(|(name, value)| *name == WORKER_ENV
+            && *value == Some(dir.as_os_str())));
+        // Delegation passes a deliberate snapshot; it is applied after the strip.
+        assert!(envs.iter().any(|(name, value)| *name == WORKER_MODEL_ENV
+            && *value == Some(std::ffi::OsStr::new("explicit-model"))));
+    }
+
     fn fixture(script: &str) -> (tempfile::TempDir, PathBuf, String) {
         let root = tempfile::tempdir().unwrap();
         let id = uuid::Uuid::new_v4().to_string();
