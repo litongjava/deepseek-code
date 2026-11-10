@@ -56,9 +56,14 @@ cargo test --locked -p deepseek-code-cli --bin dcl
 script -qec "stty rows 40 cols 100 && cargo test --locked -p deepseek-code-cli --bin dcl" /dev/null
 script -qec "cargo test --locked -p deepseek-code-cli --bin dcl" /dev/null
 grep -rn "crossterm::cursor::position" crates/cli/src --include=*.rs
+grep -rn "crossterm::terminal::size\|[^:]terminal::size()" crates/cli/src --include=*.rs
 ```
 
-2026-11-09：修复前第一条命令会停住（进程状态 `Tl`，`wchan=do_signal_stop`），有窗口大小的 pty 里曾停在 Settings 菜单等待输入；修复后两条命令都在数秒内完成，`terminal::cursor_tests::cursor_position_is_unavailable_without_raw_mode` 与 `terminal::input::tests::fixture_answers_are_non_interactive` 通过。第三条命令使用 `script` 默认的 0×0 pty：修复前 29 个用例因宽度为 0 失败，修复后应与第一条一致。最后一条 grep 只应命中 `crates/cli/src/terminal.rs` 里的辅助函数本身和它的注释。
+2026-11-09：修复前第一条命令会停住（进程状态 `Tl`，`wchan=do_signal_stop`），有窗口大小的 pty 里曾停在 Settings 菜单等待输入；修复后前两条命令都在数秒内完成，`terminal::cursor_tests::cursor_position_is_unavailable_without_raw_mode` 与 `terminal::input::tests::fixture_answers_are_non_interactive` 通过。第三条命令使用 `script` 默认的 0×0 pty：修复前 29 个用例因宽度为 0 失败，修复后应与第一条一致。光标 grep 只应命中 `crates/cli/src/terminal.rs` 里的辅助函数本身和它的注释；尺寸 grep 只应命中 `crates/cli/src/terminal.rs` 中 `size()` 的实现（`remote_host.rs` 和 `remote_client.rs` 的 `terminal_size()` 已委托给它）。
+
+0×0 pty 下还要人工执行一次 `/status`：`script -qec "stty rows 0 cols 0 && dcl" /dev/null`，进入会话后输入 `/status`，确认报告按 80 列换行，没有宽度为 0 的退化。
+
+这些渲染用例按宿主终端宽度换行。宿主控制终端尺寸异常（例如只剩 1×2）时，`cargo test --bin dcl` 会因宽度过小而失败；这是环境问题，不是卡死，改用第二条带 `stty` 的命令或 `setsid` 运行即可。
 
 ## 真实终端的测试方法
 

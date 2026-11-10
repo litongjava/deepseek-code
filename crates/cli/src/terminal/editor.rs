@@ -1179,7 +1179,7 @@ impl PromptEditor {
                 }
             }
             last_state.1 = buffer.cursor;
-            let (cols, rows) = terminal::size()?;
+            let (cols, rows) = crate::terminal::size();
             let width = cols.saturating_sub(1).max(4) as usize;
             if last_agents.elapsed() >= std::time::Duration::from_secs(1) {
                 last_agents = std::time::Instant::now();

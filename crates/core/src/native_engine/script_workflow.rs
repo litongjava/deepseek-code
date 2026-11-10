@@ -10,6 +10,18 @@ use std::path::{Path, PathBuf};
 
 const MAX_SCRIPT_BYTES: usize = 512 * 1024;
 
+/// A workflow's child agent is a separate session. A REPL turn runs in a session
+/// worker whose control channel would make every child refuse to start ("does
+/// not own this session"), so the whole inherited worker state is stripped; the
+/// explicit environment applied by the caller then re-adds the snapshot this
+/// delegation deliberately forwards.
+fn workflow_child_command(workspace: &Path) -> Result<tokio::process::Command> {
+    let mut command = tokio::process::Command::new(std::env::current_exe()?);
+    crate::services::background_sessions::strip_internal_env(&mut command);
+    command.current_dir(workspace);
+    Ok(command)
+}
+
 pub(super) fn definition() -> ToolDefinition {
     ToolDefinition {
         name: "Workflow".into(),
@@ -146,18 +158,12 @@ impl ToolLoopExecutor {
         if let Some(dir) = &resume_dir {
             arguments.extend(["--resume-dir".into(), dir.to_string_lossy().into_owned()]);
         }
-        let mut command = tokio::process::Command::new(std::env::current_exe()?);
+        let mut command = workflow_child_command(Path::new(&self.workspace_cwd))?;
         command
             .args(&arguments)
             .envs(environment)
-            .current_dir(&self.workspace_cwd)
             .stdout(std::process::Stdio::piped())
             .stderr(std::process::Stdio::piped());
-        // A REPL turn runs in a session worker whose control channel would make
-        // every child agent refuse to start ("does not own this session").
-        command
-            .env_remove(crate::services::background_sessions::CONTROL_ENV)
-            .env_remove(crate::services::background_sessions::WORKER_ENV);
         let label = format!("Workflow {name}");
         let started =
             crate::tools::background_shell::start(command, None, "workflow", &label, &label, None)?;
@@ -182,6 +188,20 @@ impl ToolLoopExecutor {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn workflow_child_drops_inherited_worker_state() {
+        let command = workflow_child_command(Path::new("fixture-workspace")).unwrap();
+        let stripped: Vec<_> = command.as_std().get_envs().collect();
+        for name in crate::services::background_sessions::INTERNAL_ENV {
+            assert!(
+                stripped
+                    .iter()
+                    .any(|(entry, value)| *entry == name && value.is_none()),
+                "{name} was not stripped"
+            );
+        }
+    }
 
     #[test]
     fn meta_fields_and_script_detection() {

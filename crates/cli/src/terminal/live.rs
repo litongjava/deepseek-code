@@ -3160,7 +3160,7 @@ pub(super) fn draw_inspection(
     sidebar: bool,
     scroll: usize,
 ) -> io::Result<()> {
-    let (columns, rows) = terminal::size()?;
+    let (columns, rows) = crate::terminal::size();
     let left = if sidebar { columns / 2 } else { 0 };
     let width = columns.saturating_sub(left + 1) as usize;
     let body = terminal_text(text);

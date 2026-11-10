@@ -234,7 +234,7 @@ pub fn run(paths: &RuntimePaths, argument: &str) -> Result<()> {
     execute!(io::stderr(), Hide)?;
     let mut reader = crate::terminal::paste_input::Reader::new()?;
     loop {
-        let (columns, rows) = terminal::size()?;
+        let (columns, rows) = crate::terminal::size();
         let frame = tour.frame(columns as usize, rows.saturating_sub(1).max(1) as usize);
         modal
             .screen

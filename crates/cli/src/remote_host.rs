@@ -433,10 +433,7 @@ pub fn host_address() -> Option<(u16, String)> {
 }
 
 fn terminal_size() -> (u16, u16) {
-    crossterm::terminal::size()
-        .ok()
-        .filter(|(cols, rows)| *cols > 0 && *rows > 0)
-        .unwrap_or((80, 24))
+    crate::terminal::size()
 }
 
 /// Restores the local terminal however the relay ends.

@@ -10,6 +10,15 @@ use deepseek_code_core::{
 };
 use std::{process::Stdio, time::Duration};
 
+/// The planner runs as an ordinary read-only session, so it must not inherit
+/// the parent worker's control channel, job or model snapshot. Only the
+/// credential forwarded by `launch` is applied afterwards.
+fn planner_command(executable: &std::path::Path) -> tokio::process::Command {
+    let mut process = tokio::process::Command::new(executable);
+    deepseek_code_core::services::background_sessions::strip_internal_env(&mut process);
+    process
+}
+
 fn display(batch: &Batch) {
     command_eprintln!(
         "Batch {} — {}\n{}\nBase commit: {}\nVerification: {}",
@@ -231,7 +240,7 @@ pub async fn handle(
                 deepseek_code_core::services::agents::bind(&session.store.db, &planner_id, &agent)?;
             }
             let prompt=format!("Research this repository using read-only tools and plan the user's batch change: {instruction}\nReturn 5–30 roughly equal independent units, each mergeable without other units. Give each unit non-overlapping repository-relative file/directory paths (no traversal), a precise title and self-contained implementation instructions. Include observed code conventions in summary, and a concrete shared unit/e2e verification recipe. Do not fabricate repository findings. Do not modify files or run workers. Return only the requested structured plan.");
-            let mut process = tokio::process::Command::new(&launch.executable);
+            let mut process = planner_command(&launch.executable);
             process
                 .args(&launch.arguments)
                 .args([
@@ -283,4 +292,23 @@ pub async fn handle(
         }
     }
     Ok(true)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn planner_drops_inherited_worker_state() {
+        let command = planner_command(std::path::Path::new("fixture"));
+        let stripped: Vec<_> = command.as_std().get_envs().collect();
+        for name in deepseek_code_core::services::background_sessions::INTERNAL_ENV {
+            assert!(
+                stripped
+                    .iter()
+                    .any(|(entry, value)| *entry == name && value.is_none()),
+                "{name} was not stripped"
+            );
+        }
+    }
 }

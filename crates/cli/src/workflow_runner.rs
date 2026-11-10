@@ -10,6 +10,19 @@ use serde_json::{json, Value};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
+/// A workflow agent is a separate session: it must not inherit the parent
+/// worker's control channel, job or model snapshot.
+fn agent_command(executable: &Path, args: &[String], cwd: &Path) -> tokio::process::Command {
+    let mut process = tokio::process::Command::new(executable);
+    deepseek_code_core::services::background_sessions::strip_internal_env(&mut process);
+    process
+        .args(args)
+        .current_dir(cwd)
+        .stdin(std::process::Stdio::null())
+        .kill_on_drop(true);
+    process
+}
+
 const PRELUDE: &str = r#"
 const args = JSON.parse(__ARGS);
 async function agent(prompt, opts) {
@@ -127,9 +140,8 @@ impl Runner {
             args.extend(["--json-schema".into(), opts["schema"].to_string()]);
         }
         args.extend(["--".into(), prompt.into()]);
-        let output = tokio::process::Command::new(&self.exe).args(&args).current_dir(&self.cwd)
-            .env_remove(deepseek_code_core::services::background_sessions::CONTROL_ENV).env_remove(deepseek_code_core::services::background_sessions::WORKER_ENV)
-            .stdin(std::process::Stdio::null()).kill_on_drop(true).output().await
+        let output = agent_command(&self.exe, &args, &self.cwd)
+            .output().await
             .with_context(|| format!("Cannot start agent {label}"))?;
         let stdout = String::from_utf8_lossy(&output.stdout);
         let result: Value = serde_json::from_str(stdout.trim()).with_context(|| {
@@ -202,4 +214,27 @@ pub async fn run(run: Run<'_>) -> Result<Value> {
     }).await;
     runtime.idle().await;
     Ok(serde_json::from_str(&result?)?)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn workflow_agent_drops_inherited_worker_state() {
+        let command = agent_command(
+            Path::new("fixture"),
+            &["-p".to_owned()],
+            Path::new("fixture-workspace"),
+        );
+        let stripped: Vec<_> = command.as_std().get_envs().collect();
+        for name in deepseek_code_core::services::background_sessions::INTERNAL_ENV {
+            assert!(
+                stripped
+                    .iter()
+                    .any(|(entry, value)| *entry == name && value.is_none()),
+                "{name} was not stripped"
+            );
+        }
+    }
 }

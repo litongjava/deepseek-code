@@ -831,6 +831,11 @@ impl ToolLoopExecutor {
             "DEEPSEEK_CODE_WORKER_MODEL".to_owned(),
             serde_json::to_string(&provider.model)?,
         )];
+        // `DEEPSEEK_CODE_WORKER_AUTO_ROUTE` belongs to the parent worker and is
+        // deliberately not forwarded: a delegated child is pinned to the
+        // provider and model resolved for this request, which its
+        // `--provider`/`--model` arguments name explicitly. The spawn path also
+        // strips inherited worker state, so the child cannot inherit it.
         if !provider.provider.api_key.is_empty() {
             arguments.extend(["--api-key-env".into(), "DEEPSEEK_CODE_CHILD_API_KEY".into()]);
             environment.push((
@@ -1681,6 +1686,10 @@ mod workspace_tests;
 #[cfg(test)]
 #[path = "delegation_resume_tests.rs"]
 mod resume_tests;
+
+#[cfg(test)]
+#[path = "delegation_launch_tests.rs"]
+mod launch_tests;
 
 #[cfg(test)]
 #[path = "team_spawn_tests.rs"]
