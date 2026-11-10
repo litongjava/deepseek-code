@@ -42,8 +42,8 @@ export default function UsagePopover({ label, trigger, children, align = 'center
   }, [open, align]);
   return <>
     <button ref={button} type="button" aria-label={label} aria-expanded={open} aria-controls={open ? id : undefined} aria-haspopup="dialog" title={label}
-      onClick={() => setOpen(value => !value)} className={`inline-flex items-center justify-center gap-1.5 rounded-lg px-2 py-1 text-claude-textSecondary hover:bg-claude-hover hover:text-claude-text transition-colors ${open ? 'bg-claude-hover' : ''}`}>{trigger}</button>
+      onClick={() => setOpen(value => !value)} className={`inline-flex items-center justify-center gap-1.5 rounded-lg px-2 py-1 text-deepseek-textSecondary hover:bg-deepseek-hover hover:text-deepseek-text transition-colors ${open ? 'bg-deepseek-hover' : ''}`}>{trigger}</button>
     {open && createPortal(<div ref={panel} id={id} role="dialog" aria-label={label} tabIndex={-1} style={{ position: 'fixed', left: position.left, ...(position.above ? { bottom: position.top } : { top: position.top }), width: 'min(440px, calc(100vw - 24px))', maxHeight: position.maxHeight }}
-      className="z-[220] overflow-auto overscroll-contain outline-none rounded-2xl border border-claude-border bg-claude-input p-5 text-[14px] text-claude-text shadow-xl font-sans">{children}</div>, document.body)}
+      className="z-[220] overflow-auto overscroll-contain outline-none rounded-2xl border border-deepseek-border bg-deepseek-input p-5 text-[14px] text-deepseek-text shadow-xl font-sans">{children}</div>, document.body)}
   </>;
 }

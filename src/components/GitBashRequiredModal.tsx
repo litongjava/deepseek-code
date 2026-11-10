@@ -38,7 +38,7 @@ const GitBashRequiredModal: React.FC<Props> = ({ onResolved }) => {
 
   return (
     <div className="fixed inset-0 z-[9999] flex items-center justify-center bg-black/60 backdrop-blur-sm">
-      <div className="max-w-md w-full mx-4 rounded-2xl bg-claude-bg border border-claude-border shadow-2xl p-7">
+      <div className="max-w-md w-full mx-4 rounded-2xl bg-deepseek-bg border border-deepseek-border shadow-2xl p-7">
         <div className="flex items-start gap-3 mb-4">
           <div className="flex-shrink-0 w-10 h-10 rounded-full bg-amber-100 dark:bg-amber-900/30 flex items-center justify-center">
             <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className="text-amber-600 dark:text-amber-400">
@@ -48,13 +48,13 @@ const GitBashRequiredModal: React.FC<Props> = ({ onResolved }) => {
             </svg>
           </div>
           <div className="flex-1">
-            <h2 className="text-[17px] font-semibold text-claude-text">需要安装 Git for Windows</h2>
-            <p className="text-[13px] text-claude-textSecondary mt-1">DeepSeek Code Desktop 在 Windows 上需要 git-bash 才能运行内置工具。</p>
+            <h2 className="text-[17px] font-semibold text-deepseek-text">需要安装 Git for Windows</h2>
+            <p className="text-[13px] text-deepseek-textSecondary mt-1">DeepSeek Code Desktop 在 Windows 上需要 git-bash 才能运行内置工具。</p>
           </div>
         </div>
 
-        <div className="rounded-lg bg-claude-hover/50 p-3.5 mb-4">
-          <p className="text-[12.5px] text-claude-text leading-relaxed">
+        <div className="rounded-lg bg-deepseek-hover/50 p-3.5 mb-4">
+          <p className="text-[12.5px] text-deepseek-text leading-relaxed">
             点击下方按钮下载并安装 <span className="font-medium">Git for Windows</span>。安装时使用默认选项即可，安装完成后回到此处点击"重新检测"。
           </p>
         </div>
@@ -68,20 +68,20 @@ const GitBashRequiredModal: React.FC<Props> = ({ onResolved }) => {
         <div className="flex flex-col gap-2">
           <button
             onClick={openDownload}
-            className="w-full px-4 py-2.5 rounded-lg bg-claude-text text-claude-bg text-[14px] font-medium hover:opacity-90 transition-opacity"
+            className="w-full px-4 py-2.5 rounded-lg bg-deepseek-text text-deepseek-bg text-[14px] font-medium hover:opacity-90 transition-opacity"
           >
             下载 Git for Windows
           </button>
           <button
             onClick={recheck}
             disabled={checking}
-            className="w-full px-4 py-2.5 rounded-lg border border-claude-border text-claude-text text-[14px] font-medium hover:bg-claude-hover transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+            className="w-full px-4 py-2.5 rounded-lg border border-deepseek-border text-deepseek-text text-[14px] font-medium hover:bg-deepseek-hover transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
           >
             {checking ? '检测中...' : '我已安装，重新检测'}
           </button>
         </div>
 
-        <p className="text-[11px] text-claude-textSecondary text-center mt-4">
+        <p className="text-[11px] text-deepseek-textSecondary text-center mt-4">
           已安装但未生效？请尝试关闭并重新打开 DeepSeek Code Desktop。
         </p>
       </div>

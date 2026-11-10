@@ -126,7 +126,7 @@ const ResponsiveLayout: React.FC<ResponsiveLayoutProps> = ({
       <>
         {renderMobileOverlay()}
         <div
-          className={`fixed inset-y-0 left-0 z-50 w-[280px] bg-claude-sidebar transform transition-transform duration-300 ease-out touch-manipulation ${
+          className={`fixed inset-y-0 left-0 z-50 w-[280px] bg-deepseek-sidebar transform transition-transform duration-300 ease-out touch-manipulation ${
             mobileSidebarOpen ? 'translate-x-0' : '-translate-x-full'
           }`}
         >
@@ -142,7 +142,7 @@ const ResponsiveLayout: React.FC<ResponsiveLayoutProps> = ({
 
     return (
       <div
-        className={`flex-shrink-0 h-full bg-claude-sidebar transition-all duration-300 ease-out overflow-hidden ${
+        className={`flex-shrink-0 h-full bg-deepseek-sidebar transition-all duration-300 ease-out overflow-hidden ${
           sidebarCollapsed ? 'w-0' : 'w-[288px]'
         }`}
       >
@@ -157,7 +157,7 @@ const ResponsiveLayout: React.FC<ResponsiveLayoutProps> = ({
 
     return (
       <div
-        className={`flex-shrink-0 h-full bg-claude-sidebar border-l border-claude-border transition-all duration-300 ease-out ${
+        className={`flex-shrink-0 h-full bg-deepseek-sidebar border-l border-deepseek-border transition-all duration-300 ease-out ${
           isMobile ? 'w-full' : isTablet ? 'w-[320px]' : 'w-[400px]'
         }`}
       >
@@ -173,7 +173,7 @@ const ResponsiveLayout: React.FC<ResponsiveLayoutProps> = ({
     return (
       <button
         onClick={() => setMobileSidebarOpen(true)}
-        className="fixed top-3 left-3 z-30 p-2 rounded-lg bg-claude-input border border-claude-border text-claude-textSecondary hover:text-claude-text hover:bg-claude-hover transition-colors touch-manipulation"
+        className="fixed top-3 left-3 z-30 p-2 rounded-lg bg-deepseek-input border border-deepseek-border text-deepseek-textSecondary hover:text-deepseek-text hover:bg-deepseek-hover transition-colors touch-manipulation"
       >
         <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round">
           <line x1="3" y1="6" x2="21" y2="6" />
@@ -185,7 +185,7 @@ const ResponsiveLayout: React.FC<ResponsiveLayoutProps> = ({
   };
 
   return (
-    <div className="flex w-full h-full overflow-hidden bg-claude-bg">
+    <div className="flex w-full h-full overflow-hidden bg-deepseek-bg">
       {renderMobileSidebar()}
       {renderDesktopSidebar()}
       <div className="flex-1 flex flex-col min-w-0 overflow-hidden">

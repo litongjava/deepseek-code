@@ -96,21 +96,21 @@ const DocumentCard: React.FC<DocumentCardProps> = ({ document, onOpen }) => {
   return (
     <div
       onClick={() => onOpen(document)}
-      className="group/card flex items-center p-3 gap-3 border border-claude-border rounded-xl hover:bg-[#FDFCFA] dark:hover:bg-[#2A2A28] hover:border-[#CCC] dark:hover:border-[#40403E] transition-all cursor-pointer w-full select-none"
+      className="group/card flex items-center p-3 gap-3 border border-deepseek-border rounded-xl hover:bg-[#FDFCFA] dark:hover:bg-[#2A2A28] hover:border-[#CCC] dark:hover:border-[#40403E] transition-all cursor-pointer w-full select-none"
     >
       {/* Icon Area - Tilted Paper Style */}
       <div className="w-12 h-12 flex items-center justify-center flex-shrink-0">
-        <div className="w-9 h-11 bg-claude-input border border-claude-border rounded-[6px] -rotate-6 shadow-[0_1px_1px_rgba(0,0,0,0.05)] flex items-center justify-center transition-transform group-hover/card:-rotate-12 duration-300">
-          <FileText size={18} className="text-claude-textSecondary opacity-80" strokeWidth={1.5} />
+        <div className="w-9 h-11 bg-deepseek-input border border-deepseek-border rounded-[6px] -rotate-6 shadow-[0_1px_1px_rgba(0,0,0,0.05)] flex items-center justify-center transition-transform group-hover/card:-rotate-12 duration-300">
+          <FileText size={18} className="text-deepseek-textSecondary opacity-80" strokeWidth={1.5} />
         </div>
       </div>
 
       {/* Content */}
       <div className="flex-1 min-w-0 flex flex-col justify-center">
-        <h3 className="font-semibold text-[15px] text-claude-text truncate leading-tight mb-0.5">
+        <h3 className="font-semibold text-[15px] text-deepseek-text truncate leading-tight mb-0.5">
           {document.title}
         </h3>
-        <p className="text-[12px] text-claude-textSecondary font-medium tracking-wide flex items-center">
+        <p className="text-[12px] text-deepseek-textSecondary font-medium tracking-wide flex items-center">
           Document <span className="mx-1.5 opacity-40">·</span> {fmt.toUpperCase()}
         </p>
       </div>
@@ -120,7 +120,7 @@ const DocumentCard: React.FC<DocumentCardProps> = ({ document, onOpen }) => {
         {/* Download Button */}
         <button
           onClick={handleDownload} // Updated event handler to take e
-          className="p-2 text-claude-textSecondary hover:text-claude-text hover:bg-claude-btn-hover rounded-lg transition-colors"
+          className="p-2 text-deepseek-textSecondary hover:text-deepseek-text hover:bg-deepseek-btn-hover rounded-lg transition-colors"
           title="Download"
         >
           <Download size={18} strokeWidth={2} />

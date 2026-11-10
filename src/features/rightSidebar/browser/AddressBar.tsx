@@ -64,7 +64,7 @@ export default function AddressBar({ value, onNavigate, autoFocus = false, class
           aria-invalid={!!error}
           aria-describedby={error ? errorId : undefined}
           placeholder={t('rightSidebar.browserAddressPlaceholder')}
-          className={`min-w-0 flex-1 rounded-md border bg-claude-input px-2 py-1 text-[13px] text-claude-text placeholder-claude-textSecondary/60 outline-none transition-colors focus:border-claude-textSecondary/60 ${error ? 'border-red-500/70' : 'border-claude-border'}`}
+          className={`min-w-0 flex-1 rounded-md border bg-deepseek-input px-2 py-1 text-[13px] text-deepseek-text placeholder-deepseek-textSecondary/60 outline-none transition-colors focus:border-deepseek-textSecondary/60 ${error ? 'border-red-500/70' : 'border-deepseek-border'}`}
         />
         {children}
       </div>

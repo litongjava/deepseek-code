@@ -30,11 +30,11 @@ const Spinner: React.FC<SpinnerProps> = ({
       <div className={containerSizeMap[size]}>
         <Loader2
           size={sizeMap[size]}
-          className="animate-spin text-claude-textSecondary"
+          className="animate-spin text-deepseek-textSecondary"
         />
       </div>
       {label && (
-        <span className="text-[13px] text-claude-textSecondary animate-shimmer-text">
+        <span className="text-[13px] text-deepseek-textSecondary animate-shimmer-text">
           {label}
         </span>
       )}

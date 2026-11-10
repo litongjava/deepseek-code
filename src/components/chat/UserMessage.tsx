@@ -48,10 +48,10 @@ const UserMessage: React.FC<UserMessageProps> = ({
 
   if (isEditing) {
     return (
-      <div className="w-full bg-[#F0EEE7] dark:bg-claude-btnHover rounded-xl p-3 border border-black/5 dark:border-white/10">
+      <div className="w-full bg-[#F0EEE7] dark:bg-deepseek-btnHover rounded-xl p-3 border border-black/5 dark:border-white/10">
         <div className="bg-white dark:bg-black/20 rounded-lg border border-black/10 dark:border-white/10 focus-within:ring-2 focus-within:ring-blue-500/20 focus-within:border-blue-500 transition-all p-3">
           <textarea
-            className="w-full bg-transparent text-claude-text outline-none resize-none text-[16px] leading-relaxed font-sans font-[350] block"
+            className="w-full bg-transparent text-deepseek-text outline-none resize-none text-[16px] leading-relaxed font-sans font-[350] block"
             value={editingContent}
             onChange={(e) => {
               onSetEditingContent(e.target.value);
@@ -70,7 +70,7 @@ const UserMessage: React.FC<UserMessageProps> = ({
           />
         </div>
         <div className="flex items-start justify-between mt-3 px-1 gap-4">
-          <div className="flex items-start gap-2 text-claude-textSecondary text-[13px] leading-tight pt-1">
+          <div className="flex items-start gap-2 text-deepseek-textSecondary text-[13px] leading-tight pt-1">
             <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className="mt-0.5 shrink-0">
               <circle cx="12" cy="12" r="10" />
               <line x1="12" y1="16" x2="12" y2="12" />
@@ -81,14 +81,14 @@ const UserMessage: React.FC<UserMessageProps> = ({
           <div className="flex items-center gap-2 shrink-0">
             <button
               onClick={onEditCancel}
-              className="px-3 py-1.5 text-[13px] font-medium text-claude-text bg-white dark:bg-claude-bg border border-black/10 dark:border-white/10 hover:bg-gray-50 dark:hover:bg-claude-hover rounded-lg transition-colors"
+              className="px-3 py-1.5 text-[13px] font-medium text-deepseek-text bg-white dark:bg-deepseek-bg border border-black/10 dark:border-white/10 hover:bg-gray-50 dark:hover:bg-deepseek-hover rounded-lg transition-colors"
             >
               {t('chat.cancelEdit')}
             </button>
             <button
               onClick={onEditSave}
               disabled={!editingContent.trim() || editingContent === msg.content}
-              className="px-3 py-1.5 text-[13px] font-medium text-white bg-claude-text hover:bg-claude-textSecondary rounded-lg transition-colors disabled:opacity-30 disabled:cursor-not-allowed"
+              className="px-3 py-1.5 text-[13px] font-medium text-white bg-deepseek-text hover:bg-deepseek-textSecondary rounded-lg transition-colors disabled:opacity-30 disabled:cursor-not-allowed"
             >
               {t('chat.saveEdit')}
             </button>
@@ -107,7 +107,7 @@ const UserMessage: React.FC<UserMessageProps> = ({
       )}
       {(!msg.attachments || msg.attachments.length === 0) && msg.has_attachments === 1 && (
         <div className="max-w-[85%] w-fit mb-1">
-          <div className="bg-[#F0EEE7] dark:bg-claude-btnHover text-claude-textSecondary px-3.5 py-2 text-[14px] rounded-2xl font-sans italic">
+          <div className="bg-[#F0EEE7] dark:bg-deepseek-btnHover text-deepseek-textSecondary px-3.5 py-2 text-[14px] rounded-2xl font-sans italic">
             Files attached
           </div>
         </div>
@@ -115,7 +115,7 @@ const UserMessage: React.FC<UserMessageProps> = ({
       {displayText && displayText.trim() !== '' && (
         <div className="max-w-[85%] w-fit relative">
           <div
-            className="bg-[#F0EEE7] dark:bg-claude-btnHover text-claude-text px-3.5 py-2.5 text-[16px] leading-relaxed font-sans font-[350] whitespace-pre-wrap break-words relative overflow-hidden"
+            className="bg-[#F0EEE7] dark:bg-deepseek-btnHover text-deepseek-text px-3.5 py-2.5 text-[16px] leading-relaxed font-sans font-[350] whitespace-pre-wrap break-words relative overflow-hidden"
             style={{
               maxHeight: isExpanded ? 'none' : '300px',
               borderRadius: (() => {
@@ -150,7 +150,7 @@ const UserMessage: React.FC<UserMessageProps> = ({
               const el = messageContentRefs.current.get(idx);
               return el && el.scrollHeight > 300;
             })() && (
-              <div className="absolute bottom-0 left-0 right-0 h-16 bg-gradient-to-t from-[#F0EEE7] dark:from-claude-btnHover to-transparent pointer-events-none" />
+              <div className="absolute bottom-0 left-0 right-0 h-16 bg-gradient-to-t from-[#F0EEE7] dark:from-deepseek-btnHover to-transparent pointer-events-none" />
             )}
           </div>
           {(() => {
@@ -158,8 +158,8 @@ const UserMessage: React.FC<UserMessageProps> = ({
             const isOverflow = el && el.scrollHeight > 300;
             if (!isOverflow) return null;
             return (
-              <div className="bg-[#F0EEE7] dark:bg-claude-btnHover rounded-b-2xl px-3.5 pb-3 pt-1 -mt-[1px] relative" style={{ borderTopLeftRadius: 0, borderTopRightRadius: 0 }}>
-                <button onClick={() => onToggleExpand(idx)} className="text-[13px] text-claude-textSecondary hover:text-claude-text transition-colors">
+              <div className="bg-[#F0EEE7] dark:bg-deepseek-btnHover rounded-b-2xl px-3.5 pb-3 pt-1 -mt-[1px] relative" style={{ borderTopLeftRadius: 0, borderTopRightRadius: 0 }}>
+                <button onClick={() => onToggleExpand(idx)} className="text-[13px] text-deepseek-textSecondary hover:text-deepseek-text transition-colors">
                   {isExpanded ? 'Show less' : 'Show more'}
                 </button>
               </div>
@@ -169,12 +169,12 @@ const UserMessage: React.FC<UserMessageProps> = ({
       )}
       <div className="flex items-center gap-1.5 mt-1.5 pr-1">
         {msg.created_at && (
-          <span className="text-[12px] text-claude-textSecondary mr-1">{formatMessageTime(msg.created_at)}</span>
+          <span className="text-[12px] text-deepseek-textSecondary mr-1">{formatMessageTime(msg.created_at)}</span>
         )}
         <div className="flex items-center gap-0.5 overflow-hidden transition-all duration-200 ease-in-out max-w-0 opacity-0 group-hover:max-w-[200px] group-hover:opacity-100">
-          <button onClick={() => onResend(msg.content, idx)} className="p-1 text-claude-textSecondary hover:text-claude-text hover:bg-claude-hover rounded transition-colors" title="重新发送"><RotateCcw size={14} /></button>
-          <button onClick={() => onEdit(msg.content, idx)} className="p-1 text-claude-textSecondary hover:text-claude-text hover:bg-claude-hover rounded transition-colors" title="编辑"><Pencil size={14} /></button>
-          <button onClick={() => onCopy(msg.content, idx)} className="p-1 text-claude-textSecondary hover:text-claude-text hover:bg-claude-hover rounded transition-colors" title="复制">
+          <button onClick={() => onResend(msg.content, idx)} className="p-1 text-deepseek-textSecondary hover:text-deepseek-text hover:bg-deepseek-hover rounded transition-colors" title="重新发送"><RotateCcw size={14} /></button>
+          <button onClick={() => onEdit(msg.content, idx)} className="p-1 text-deepseek-textSecondary hover:text-deepseek-text hover:bg-deepseek-hover rounded transition-colors" title="编辑"><Pencil size={14} /></button>
+          <button onClick={() => onCopy(msg.content, idx)} className="p-1 text-deepseek-textSecondary hover:text-deepseek-text hover:bg-deepseek-hover rounded transition-colors" title="复制">
             {isCopied ? <Check size={14} className="text-green-500" /> : <Copy size={14} />}
           </button>
         </div>

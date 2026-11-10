@@ -109,8 +109,8 @@ const SkillStatsPanel: React.FC<SkillStatsPanelProps> = ({ totalSkills }) => {
 
   if (loading) {
     return (
-      <div className="w-[260px] flex-shrink-0 border-r border-claude-border bg-claude-surface/30 flex items-center justify-center">
-        <div className="flex flex-col items-center gap-2 text-claude-textSecondary">
+      <div className="w-[260px] flex-shrink-0 border-r border-deepseek-border bg-deepseek-surface/30 flex items-center justify-center">
+        <div className="flex flex-col items-center gap-2 text-deepseek-textSecondary">
           <Loader2 size={20} className="animate-spin opacity-40" />
           <span className="text-[11px]">加载统计...</span>
         </div>
@@ -121,11 +121,11 @@ const SkillStatsPanel: React.FC<SkillStatsPanelProps> = ({ totalSkills }) => {
   const maxModeValue = Math.max(1, ...Object.values(displayStats.by_mode));
 
   return (
-    <div className="w-[260px] flex-shrink-0 border-r border-claude-border bg-claude-surface/20 flex flex-col overflow-y-auto">
+    <div className="w-[260px] flex-shrink-0 border-r border-deepseek-border bg-deepseek-surface/20 flex flex-col overflow-y-auto">
       <div className="px-3.5 pt-3 pb-2">
         <div className="flex items-center gap-2 mb-2">
           <BarChart3 size={14} className="text-[#8B5CF6]" />
-          <span className="text-[12px] font-semibold text-claude-text">设计统计</span>
+          <span className="text-[12px] font-semibold text-deepseek-text">设计统计</span>
           {usingMock && (
             <span className="text-[9px] px-1.5 py-0.5 rounded bg-amber-500/10 text-amber-400 border border-amber-500/20">
               MOCK
@@ -136,56 +136,56 @@ const SkillStatsPanel: React.FC<SkillStatsPanelProps> = ({ totalSkills }) => {
 
       <div className="px-3.5 pb-3 space-y-3">
         <div className="grid grid-cols-2 gap-1.5">
-          <div className="bg-claude-hover rounded-lg p-2.5">
+          <div className="bg-deepseek-hover rounded-lg p-2.5">
             <div className="flex items-center gap-1 mb-0.5">
               <Layers size={11} className="text-[#8B5CF6]" />
-              <span className="text-[10px] text-claude-textSecondary">技能总数</span>
+              <span className="text-[10px] text-deepseek-textSecondary">技能总数</span>
             </div>
-            <p className="text-[16px] font-semibold text-claude-text">{displayStats.total_design_skills}</p>
+            <p className="text-[16px] font-semibold text-deepseek-text">{displayStats.total_design_skills}</p>
           </div>
-          <div className="bg-claude-hover rounded-lg p-2.5">
+          <div className="bg-deepseek-hover rounded-lg p-2.5">
             <div className="flex items-center gap-1 mb-0.5">
               <Sparkles size={11} className="text-amber-400" />
-              <span className="text-[10px] text-claude-textSecondary">推荐</span>
+              <span className="text-[10px] text-deepseek-textSecondary">推荐</span>
             </div>
-            <p className="text-[16px] font-semibold text-claude-text">{displayStats.featured_skills}</p>
+            <p className="text-[16px] font-semibold text-deepseek-text">{displayStats.featured_skills}</p>
           </div>
         </div>
 
-        <div className="bg-claude-hover rounded-lg p-2.5 space-y-1.5">
+        <div className="bg-deepseek-hover rounded-lg p-2.5 space-y-1.5">
           <div className="flex items-center gap-1.5 mb-0.5">
             <Zap size={11} className="text-[#10B981]" />
-            <span className="text-[10px] font-medium text-claude-textSecondary">今日用量</span>
-            <span className="text-[9px] text-claude-textSecondary/60 ml-auto">{displayStats.today_usage.date}</span>
+            <span className="text-[10px] font-medium text-deepseek-textSecondary">今日用量</span>
+            <span className="text-[9px] text-deepseek-textSecondary/60 ml-auto">{displayStats.today_usage.date}</span>
           </div>
           <div className="flex items-center justify-between">
-            <span className="text-[10px] text-claude-textSecondary">消息</span>
-            <span className="text-[12px] font-medium text-claude-text">{displayStats.today_usage.today_messages}</span>
+            <span className="text-[10px] text-deepseek-textSecondary">消息</span>
+            <span className="text-[12px] font-medium text-deepseek-text">{displayStats.today_usage.today_messages}</span>
           </div>
           <div className="flex items-center justify-between">
-            <span className="text-[10px] text-claude-textSecondary">会话</span>
-            <span className="text-[12px] font-medium text-claude-text">{displayStats.today_usage.today_conversations}</span>
+            <span className="text-[10px] text-deepseek-textSecondary">会话</span>
+            <span className="text-[12px] font-medium text-deepseek-text">{displayStats.today_usage.today_conversations}</span>
           </div>
           <div className="flex items-center justify-between">
-            <span className="text-[10px] text-claude-textSecondary">Token</span>
-            <span className="text-[12px] font-medium text-claude-text">{displayStats.today_usage.today_tokens.toLocaleString()}</span>
+            <span className="text-[10px] text-deepseek-textSecondary">Token</span>
+            <span className="text-[12px] font-medium text-deepseek-text">{displayStats.today_usage.today_tokens.toLocaleString()}</span>
           </div>
         </div>
 
         <div>
           <div className="flex items-center gap-1.5 mb-2">
             <Target size={11} className="text-[#8B5CF6]" />
-            <span className="text-[10px] font-medium text-claude-textSecondary">按模式</span>
+            <span className="text-[10px] font-medium text-deepseek-textSecondary">按模式</span>
           </div>
           <div className="space-y-1">
             {Object.entries(displayStats.by_mode)
               .sort(([, a], [, b]) => b - a)
               .map(([mode, count]) => (
                 <div key={mode} className="flex items-center gap-1.5">
-                  <span className="text-[10px] text-claude-textSecondary w-12 text-right flex-shrink-0">
+                  <span className="text-[10px] text-deepseek-textSecondary w-12 text-right flex-shrink-0">
                     {MODE_LABELS[mode] || mode}
                   </span>
-                  <div className="flex-1 h-3.5 bg-claude-hover rounded-full overflow-hidden">
+                  <div className="flex-1 h-3.5 bg-deepseek-hover rounded-full overflow-hidden">
                     <div
                       className="h-full rounded-full transition-all duration-500"
                       style={{
@@ -194,7 +194,7 @@ const SkillStatsPanel: React.FC<SkillStatsPanelProps> = ({ totalSkills }) => {
                       }}
                     />
                   </div>
-                  <span className="text-[10px] font-medium text-claude-text w-4 text-right flex-shrink-0">{count}</span>
+                  <span className="text-[10px] font-medium text-deepseek-text w-4 text-right flex-shrink-0">{count}</span>
                 </div>
               ))}
           </div>
@@ -203,7 +203,7 @@ const SkillStatsPanel: React.FC<SkillStatsPanelProps> = ({ totalSkills }) => {
         <div>
           <div className="flex items-center gap-1.5 mb-2">
             <TrendingUp size={11} className="text-[#10B981]" />
-            <span className="text-[10px] font-medium text-claude-textSecondary">按场景</span>
+            <span className="text-[10px] font-medium text-deepseek-textSecondary">按场景</span>
           </div>
           <div className="flex flex-wrap gap-1">
             {Object.entries(displayStats.by_scenario)
@@ -227,22 +227,22 @@ const SkillStatsPanel: React.FC<SkillStatsPanelProps> = ({ totalSkills }) => {
         <div>
           <div className="flex items-center gap-1.5 mb-2">
             <Brain size={11} className="text-[#06B6D4]" />
-            <span className="text-[10px] font-medium text-claude-textSecondary">Caveman RTK</span>
+            <span className="text-[10px] font-medium text-deepseek-textSecondary">Caveman RTK</span>
           </div>
           <div className="grid grid-cols-2 gap-1.5">
-            <div className="bg-claude-hover rounded-lg p-2">
-              <span className="text-[9px] text-claude-textSecondary">记忆片段</span>
-              <p className="text-[13px] font-semibold text-claude-text">{displayStats.caveman.total_segments}</p>
+            <div className="bg-deepseek-hover rounded-lg p-2">
+              <span className="text-[9px] text-deepseek-textSecondary">记忆片段</span>
+              <p className="text-[13px] font-semibold text-deepseek-text">{displayStats.caveman.total_segments}</p>
             </div>
-            <div className="bg-claude-hover rounded-lg p-2">
-              <span className="text-[9px] text-claude-textSecondary">节省 Token</span>
+            <div className="bg-deepseek-hover rounded-lg p-2">
+              <span className="text-[9px] text-deepseek-textSecondary">节省 Token</span>
               <p className="text-[13px] font-semibold text-[#10B981]">{displayStats.caveman.tokens_saved.toLocaleString()}</p>
             </div>
-            <div className="bg-claude-hover rounded-lg p-2 col-span-2">
+            <div className="bg-deepseek-hover rounded-lg p-2 col-span-2">
               <div className="flex items-center justify-between">
-                <span className="text-[9px] text-claude-textSecondary">处理 / 压缩比</span>
+                <span className="text-[9px] text-deepseek-textSecondary">处理 / 压缩比</span>
                 <div className="flex items-center gap-2">
-                  <span className="text-[11px] text-claude-text">{displayStats.caveman.total_tokens_processed.toLocaleString()}</span>
+                  <span className="text-[11px] text-deepseek-text">{displayStats.caveman.total_tokens_processed.toLocaleString()}</span>
                   <span className="text-[9px] px-1 py-0.5 rounded bg-[#06B6D4]/10 text-[#06B6D4]">
                     {(displayStats.caveman.avg_compression_ratio * 100).toFixed(1)}%
                   </span>
@@ -254,21 +254,21 @@ const SkillStatsPanel: React.FC<SkillStatsPanelProps> = ({ totalSkills }) => {
 
         <div>
           <div className="flex items-center gap-1.5 mb-2">
-            <Monitor size={11} className="text-claude-textSecondary" />
-            <span className="text-[10px] font-medium text-claude-textSecondary">平台</span>
+            <Monitor size={11} className="text-deepseek-textSecondary" />
+            <span className="text-[10px] font-medium text-deepseek-textSecondary">平台</span>
           </div>
           <div className="flex items-center gap-3">
             {Object.entries(displayStats.by_platform).map(([platform, count]) => (
               <div key={platform} className="flex items-center gap-1">
                 {platform === 'mobile' ? (
-                  <Smartphone size={11} className="text-claude-textSecondary" />
+                  <Smartphone size={11} className="text-deepseek-textSecondary" />
                 ) : (
-                  <Monitor size={11} className="text-claude-textSecondary" />
+                  <Monitor size={11} className="text-deepseek-textSecondary" />
                 )}
-                <span className="text-[10px] text-claude-textSecondary">
+                <span className="text-[10px] text-deepseek-textSecondary">
                   {platform === 'mobile' ? '移动' : '桌面'}:
                 </span>
-                <span className="text-[11px] font-medium text-claude-text">{count}</span>
+                <span className="text-[11px] font-medium text-deepseek-text">{count}</span>
               </div>
             ))}
           </div>

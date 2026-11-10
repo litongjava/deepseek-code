@@ -27,10 +27,10 @@ const RenameModal = ({ isOpen, onClose, onSave, initialTitle }: { isOpen: boolea
   return createPortal(
     <div className="fixed inset-0 z-[100] flex items-center justify-center bg-black/40" onClick={onClose}>
       <div
-        className="bg-claude-input rounded-2xl shadow-xl w-[400px] p-6 animate-fade-in"
+        className="bg-deepseek-input rounded-2xl shadow-xl w-[400px] p-6 animate-fade-in"
         onClick={e => e.stopPropagation()}
       >
-        <h3 className="text-[18px] font-semibold text-claude-text mb-4">Rename chat</h3>
+        <h3 className="text-[18px] font-semibold text-deepseek-text mb-4">Rename chat</h3>
         <input
           ref={inputRef}
           type="text"
@@ -44,12 +44,12 @@ const RenameModal = ({ isOpen, onClose, onSave, initialTitle }: { isOpen: boolea
               onClose();
             }
           }}
-          className="w-full px-3 py-2 bg-transparent border border-claude-border rounded-lg text-claude-text focus:outline-none focus:border-blue-500 mb-6 text-[15px]"
+          className="w-full px-3 py-2 bg-transparent border border-deepseek-border rounded-lg text-deepseek-text focus:outline-none focus:border-blue-500 mb-6 text-[15px]"
         />
         <div className="flex justify-end gap-3">
           <button
             onClick={onClose}
-            className="px-4 py-2 text-[14px] font-medium text-claude-text hover:bg-claude-hover rounded-lg transition-colors"
+            className="px-4 py-2 text-[14px] font-medium text-deepseek-text hover:bg-deepseek-hover rounded-lg transition-colors"
           >
             Cancel
           </button>
@@ -262,11 +262,11 @@ const ChatsPage = () => {
   };
 
   return (
-    <div className="flex-1 h-full bg-claude-bg overflow-y-auto">
+    <div className="flex-1 h-full bg-deepseek-bg overflow-y-auto">
       <div className="max-w-[800px] mx-auto px-4 py-8 md:px-8 md:py-12">
         <div className="flex items-center justify-between mb-8">
           <h1
-            className="font-[Spectral] text-[32px] text-claude-text"
+            className="font-[Spectral] text-[32px] text-deepseek-text"
             style={{
               fontWeight: 500,
               WebkitTextStroke: '0.5px currentColor'
@@ -276,7 +276,7 @@ const ChatsPage = () => {
           </h1>
           <button
             onClick={() => navigate('/')}
-            className="flex items-center gap-2 px-3.5 py-1.5 bg-claude-text text-claude-bg hover:opacity-90 rounded-lg transition-opacity font-medium"
+            className="flex items-center gap-2 px-3.5 py-1.5 bg-deepseek-text text-deepseek-bg hover:opacity-90 rounded-lg transition-opacity font-medium"
             style={{ fontSize: '14px' }}
           >
             <Plus size={16} strokeWidth={2.5} />
@@ -286,14 +286,14 @@ const ChatsPage = () => {
 
         <div className="relative mb-6">
           <div className="absolute inset-y-0 left-3 flex items-center pointer-events-none">
-            <Search className="h-5 w-5 text-claude-textSecondary opacity-80" />
+            <Search className="h-5 w-5 text-deepseek-textSecondary opacity-80" />
           </div>
           <input
             type="text"
             placeholder="Search your chats..."
             value={searchQuery}
             onChange={(e) => setSearchQuery(e.target.value)}
-            className="w-full pl-10 pr-4 py-3 bg-white dark:bg-claude-input border border-gray-200 dark:border-claude-border rounded-xl text-claude-text placeholder-claude-textSecondary focus:outline-none focus:ring-2 focus:ring-blue-500/20 focus:border-blue-500 transition-all text-[15px]"
+            className="w-full pl-10 pr-4 py-3 bg-white dark:bg-deepseek-input border border-gray-200 dark:border-deepseek-border rounded-xl text-deepseek-text placeholder-deepseek-textSecondary focus:outline-none focus:ring-2 focus:ring-blue-500/20 focus:border-blue-500 transition-all text-[15px]"
           />
         </div>
 
@@ -310,16 +310,16 @@ const ChatsPage = () => {
                 ) : selectedChatIds.size > 0 ? (
                   <Minus size={14} strokeWidth={3} />
                 ) : (
-                  <div className="w-5 h-5 border border-gray-300 rounded bg-white dark:bg-claude-input"></div>
+                  <div className="w-5 h-5 border border-gray-300 rounded bg-white dark:bg-deepseek-input"></div>
                 )}
               </button>
-              <span className="text-[13px] text-claude-textSecondary">
+              <span className="text-[13px] text-deepseek-textSecondary">
                 {selectedChatIds.size} selected
               </span>
               <div className="flex items-center gap-2 ml-2">
                 <button
                   ref={projectBtnRef}
-                  className="p-1 text-claude-textSecondary hover:text-claude-text transition-colors"
+                  className="p-1 text-deepseek-textSecondary hover:text-deepseek-text transition-colors"
                   title="Add to project"
                   onClick={handleAddToProject}
                 >
@@ -328,15 +328,15 @@ const ChatsPage = () => {
                 {showProjectPicker && pickerPos && createPortal(
                   <>
                     <div className="fixed inset-0 z-[90]" onClick={() => setShowProjectPicker(false)} />
-                    <div ref={projectPickerRef} className="fixed w-[240px] bg-white dark:bg-[#2A2928] border border-claude-border rounded-xl shadow-lg py-1.5 z-[100]" style={{ top: pickerPos.top, left: pickerPos.left }}>
-                      <div className="px-3 py-2 text-[12px] font-medium text-claude-textSecondary border-b border-claude-border">
+                    <div ref={projectPickerRef} className="fixed w-[240px] bg-white dark:bg-[#2A2928] border border-deepseek-border rounded-xl shadow-lg py-1.5 z-[100]" style={{ top: pickerPos.top, left: pickerPos.left }}>
+                      <div className="px-3 py-2 text-[12px] font-medium text-deepseek-textSecondary border-b border-deepseek-border">
                         移动到项目
                       </div>
                       {projectList.map(p => (
                         <button
                           key={p.id}
                           onClick={() => handleMoveToProject(p.id)}
-                          className="w-full text-left px-3 py-2.5 text-[14px] text-claude-text hover:bg-black/5 dark:hover:bg-white/5 transition-colors truncate"
+                          className="w-full text-left px-3 py-2.5 text-[14px] text-deepseek-text hover:bg-black/5 dark:hover:bg-white/5 transition-colors truncate"
                         >
                           {p.name}
                         </button>
@@ -356,13 +356,13 @@ const ChatsPage = () => {
             </div>
             <button
               onClick={toggleSelectionMode}
-              className="text-claude-textSecondary hover:text-claude-text transition-colors"
+              className="text-deepseek-textSecondary hover:text-deepseek-text transition-colors"
             >
               <X size={20} />
             </button>
           </div>
         ) : (
-          <div className="flex items-center gap-2 mb-4 text-[13px] text-claude-textSecondary h-8">
+          <div className="flex items-center gap-2 mb-4 text-[13px] text-deepseek-textSecondary h-8">
             <span>{modeChats.length} chats with DeepSeek Code</span>
             <button onClick={toggleSelectionMode} className="text-blue-600 hover:underline">Select</button>
           </div>
@@ -370,9 +370,9 @@ const ChatsPage = () => {
 
         <div className="space-y-0">
           {loading ? (
-            <div className="py-8 text-center text-claude-textSecondary">Loading chats...</div>
+            <div className="py-8 text-center text-deepseek-textSecondary">Loading chats...</div>
           ) : filteredChats.length === 0 ? (
-            <div className="py-8 text-center text-claude-textSecondary">No chats found</div>
+            <div className="py-8 text-center text-deepseek-textSecondary">No chats found</div>
           ) : (
             filteredChats.map((chat) => {
               const isSelected = selectedChatIds.has(chat.id);
@@ -387,8 +387,8 @@ const ChatsPage = () => {
                     }
                   }}
                   className={`
-                    group relative py-4 border-b border-[#DAD9D4] dark:border-claude-border px-4 -mx-4 cursor-pointer transition-colors flex items-center
-                    ${isSelected ? 'bg-[#EBF1F5] dark:bg-blue-900/20' : 'hover:bg-[#F5F4ED] dark:hover:bg-claude-hover'}
+                    group relative py-4 border-b border-[#DAD9D4] dark:border-deepseek-border px-4 -mx-4 cursor-pointer transition-colors flex items-center
+                    ${isSelected ? 'bg-[#EBF1F5] dark:bg-blue-900/20' : 'hover:bg-[#F5F4ED] dark:hover:bg-deepseek-hover'}
                   `}
                 >
                   {/* Checkbox (Always visible in selection mode, or on hover) */}
@@ -413,17 +413,17 @@ const ChatsPage = () => {
                         <Check size={14} strokeWidth={3} />
                       </div>
                     ) : (
-                      <div className="w-5 h-5 border border-gray-300 rounded bg-white dark:bg-claude-input hover:border-gray-400"></div>
+                      <div className="w-5 h-5 border border-gray-300 rounded bg-white dark:bg-deepseek-input hover:border-gray-400"></div>
                     )}
                   </div>
 
                   <div className={`flex-1 transition-all duration-200 ${isSelectionMode ? 'pl-8' : 'pl-0 group-hover:pl-8'}`}>
                     <div className="flex justify-between items-baseline mb-1">
-                      <h3 className="text-[16px] font-medium text-claude-text truncate pr-4 flex-1">
+                      <h3 className="text-[16px] font-medium text-deepseek-text truncate pr-4 flex-1">
                         {chat.title || 'Untitled'}
                       </h3>
                     </div>
-                    <div className="text-[13px] text-claude-textSecondary">
+                    <div className="text-[13px] text-deepseek-textSecondary">
                       Last message {formatTimeAgo(chat.updated_at || chat.created_at)}
                     </div>
                   </div>
@@ -432,7 +432,7 @@ const ChatsPage = () => {
                   {!isSelectionMode && (
                     <button
                       onClick={(e) => handleMenuClick(e, chat)}
-                      className={`absolute right-4 p-1.5 rounded-md text-claude-textSecondary hover:text-claude-text hover:bg-black/5 dark:hover:bg-white/10 transition-all ${activeMenuId === chat.id ? 'opacity-100' : 'opacity-0 group-hover:opacity-100'}`}
+                      className={`absolute right-4 p-1.5 rounded-md text-deepseek-textSecondary hover:text-deepseek-text hover:bg-black/5 dark:hover:bg-white/10 transition-all ${activeMenuId === chat.id ? 'opacity-100' : 'opacity-0 group-hover:opacity-100'}`}
                     >
                       <MoreHorizontal size={20} />
                     </button>
@@ -448,24 +448,24 @@ const ChatsPage = () => {
       {activeMenuId && menuPosition && !isSelectionMode && (
         <div
           ref={menuRef}
-          className="fixed z-50 bg-claude-input border border-claude-border rounded-xl shadow-[0_4px_12px_rgba(0,0,0,0.08)] py-1.5 flex flex-col w-[200px]"
+          className="fixed z-50 bg-deepseek-input border border-deepseek-border rounded-xl shadow-[0_4px_12px_rgba(0,0,0,0.08)] py-1.5 flex flex-col w-[200px]"
           style={{ top: menuPosition.top, left: menuPosition.left }}
         >
-          <button className="flex items-center gap-3 px-3 py-2 hover:bg-claude-hover text-left w-full transition-colors group">
-            <Star size={16} className="text-claude-textSecondary group-hover:text-claude-text" />
-            <span className="text-[13px] text-claude-text">Star</span>
+          <button className="flex items-center gap-3 px-3 py-2 hover:bg-deepseek-hover text-left w-full transition-colors group">
+            <Star size={16} className="text-deepseek-textSecondary group-hover:text-deepseek-text" />
+            <span className="text-[13px] text-deepseek-text">Star</span>
           </button>
           <button
             onClick={() => handleRenameClick(chats.find(c => c.id === activeMenuId))}
-            className="flex items-center gap-3 px-3 py-2 hover:bg-claude-hover text-left w-full transition-colors group"
+            className="flex items-center gap-3 px-3 py-2 hover:bg-deepseek-hover text-left w-full transition-colors group"
           >
-            <Pencil size={16} className="text-claude-textSecondary group-hover:text-claude-text" />
-            <span className="text-[13px] text-claude-text">Rename</span>
+            <Pencil size={16} className="text-deepseek-textSecondary group-hover:text-deepseek-text" />
+            <span className="text-[13px] text-deepseek-text">Rename</span>
           </button>
-          <div className="h-[1px] bg-claude-border my-1 mx-3" />
+          <div className="h-[1px] bg-deepseek-border my-1 mx-3" />
           <button
             onClick={() => handleDeleteChat(activeMenuId)}
-            className="flex items-center gap-3 px-3 py-2 hover:bg-claude-hover text-left w-full transition-colors group"
+            className="flex items-center gap-3 px-3 py-2 hover:bg-deepseek-hover text-left w-full transition-colors group"
           >
             <Trash size={16} className="text-[#B9382C]" />
             <span className="text-[13px] text-[#B9382C]">Delete</span>

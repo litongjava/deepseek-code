@@ -118,7 +118,7 @@ async fn recovery_results_keep_the_sdk_contract_and_logging_is_nonfatal() {
             .stdin(Stdio::null())
             .kill_on_drop(true);
         for (key, _) in std::env::vars() {
-            if key.starts_with("DEEPSEEK_CODE") || key.starts_with("CLAUDE_RUST") {
+            if key.starts_with("DEEPSEEK_CODE") {
                 command.env_remove(key);
             }
         }

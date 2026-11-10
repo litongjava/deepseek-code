@@ -130,7 +130,7 @@ pub fn prepare(
         "datetime":chrono::Utc::now().to_rfc3339(),
         "description":description,
         "platform":std::env::consts::OS,
-        "version":format!("claude-rust/{}",env!("CARGO_PKG_VERSION")),
+        "version":format!("deepseek-code/{}",env!("CARGO_PKG_VERSION")),
         "transcript":transcript,
     });
     redact_value(&mut content, secrets);
@@ -193,7 +193,7 @@ async fn submit_to(
         .post(endpoint)
         .header(
             "User-Agent",
-            concat!("claude-rust-cli/", env!("CARGO_PKG_VERSION")),
+            concat!("deepseek-code-cli/", env!("CARGO_PKG_VERSION")),
         )
         .json(&json!({"content": serde_json::to_string(&draft.content)?}));
     let mut response =
@@ -244,10 +244,18 @@ mod tests {
                             |headers: axum::http::HeaderMap,
                              axum::Json(body): axum::Json<Value>| async move {
                                 assert_eq!(headers["x-api-key"], "mock-credential");
+                                assert_eq!(
+                                    headers["user-agent"],
+                                    concat!("deepseek-code-cli/", env!("CARGO_PKG_VERSION"))
+                                );
                                 let content: Value =
                                     serde_json::from_str(body["content"].as_str().unwrap())
                                         .unwrap();
                                 assert_eq!(content["description"], "Mock feedback");
+                                assert_eq!(
+                                    content["version"],
+                                    concat!("deepseek-code/", env!("CARGO_PKG_VERSION"))
+                                );
                                 assert_eq!(content["transcript"], json!([]));
                                 axum::Json(json!({"feedback_id":"mock-confirmed"}))
                             },

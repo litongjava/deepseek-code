@@ -3,19 +3,131 @@ use rusqlite::{params, Connection};
 use serde::{Deserialize, Serialize};
 
 /// Request snapshots belong to the assistant message and follow its deletion lifecycle.
-pub fn save_request_snapshots(conn: &Connection, message_id: &str, snapshots: &serde_json::Value) -> Result<()> {
+///
+/// Repeated large headers (tools and system prompts are identical across most
+/// requests of a session) are stored once in `request_blobs` and referenced by
+/// hash; the caller's value is left untouched for live display.
+pub fn save_request_snapshots(
+    conn: &Connection,
+    message_id: &str,
+    snapshots: &serde_json::Value,
+) -> Result<()> {
+    let stored = store_trajectory_blobs(conn, snapshots)?;
     conn.execute("INSERT INTO message_trajectory (message_id, requests_json) VALUES (?1, ?2) ON CONFLICT(message_id) DO UPDATE SET requests_json = excluded.requests_json",
-        params![message_id, serde_json::to_string(snapshots)?])?;
-    if let Some(requests) = snapshots.as_array() {
-        for request in requests { super::request_repo::save_request(conn, message_id, request)?; }
+        params![message_id, serde_json::to_string(&stored)?])?;
+    if let Some(requests) = stored.as_array() {
+        for request in requests {
+            super::request_repo::save_request(conn, message_id, request)?;
+        }
     }
     Ok(())
 }
 
 pub fn get_request_snapshots(conn: &Connection, message_id: &str) -> Result<serde_json::Value> {
     use rusqlite::OptionalExtension;
-    let raw: Option<String> = conn.query_row("SELECT requests_json FROM message_trajectory WHERE message_id = ?1", params![message_id], |row| row.get(0)).optional()?;
-    Ok(match raw { Some(raw) => serde_json::from_str(&raw)?, None => serde_json::json!([]) })
+    let raw: Option<String> = conn
+        .query_row(
+            "SELECT requests_json FROM message_trajectory WHERE message_id = ?1",
+            params![message_id],
+            |row| row.get(0),
+        )
+        .optional()?;
+    let mut snapshots: serde_json::Value = match raw {
+        Some(raw) => serde_json::from_str(&raw)?,
+        None => serde_json::json!([]),
+    };
+    if let Some(items) = snapshots.as_array_mut() {
+        for item in items {
+            load_trajectory_blobs(conn, item)?;
+        }
+    }
+    Ok(snapshots)
+}
+
+/// Header fields shared by most requests of a session, chosen by measured size
+/// (`tools` 79.6%, `systemPrompt` 16.3%, `systemMessages` 1.0% of requests_json).
+const TRAJECTORY_BLOB_FIELDS: [&str; 3] = ["systemPrompt", "tools", "systemMessages"];
+
+fn trajectory_blob_ref(field: &str) -> String {
+    format!("{field}Ref")
+}
+
+fn content_hash(body: &str) -> String {
+    use sha2::{Digest, Sha256};
+    Sha256::digest(body.as_bytes())
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect()
+}
+
+/// Replaces repeated headers with `*Ref` keys and stores each distinct body
+/// once. Returns a copy; the caller keeps the full payload for display.
+fn store_trajectory_blobs(
+    conn: &Connection,
+    snapshots: &serde_json::Value,
+) -> Result<serde_json::Value> {
+    let Some(items) = snapshots.as_array() else {
+        return Ok(snapshots.clone());
+    };
+    let mut stored = Vec::with_capacity(items.len());
+    for item in items {
+        let mut item = item.clone();
+        if let Some(object) = item.as_object_mut() {
+            for field in TRAJECTORY_BLOB_FIELDS {
+                let ref_key = trajectory_blob_ref(field);
+                let Some(value) = object.remove(field) else {
+                    continue;
+                };
+                object.remove(&ref_key);
+                if value.is_null() {
+                    // Keep an explicit null inline so the round trip is exact.
+                    object.insert(field.to_string(), value);
+                    continue;
+                }
+                let body = serde_json::to_string(&value)?;
+                let hash = content_hash(&body);
+                conn.execute(
+                    "INSERT INTO request_blobs(hash, body) VALUES (?1, ?2) ON CONFLICT(hash) DO NOTHING",
+                    params![hash, body],
+                )?;
+                object.insert(ref_key, serde_json::Value::String(hash));
+            }
+        }
+        stored.push(item);
+    }
+    Ok(serde_json::Value::Array(stored))
+}
+
+/// Restores inline fields from their references. A reference whose body is gone
+/// is kept as is, so callers can tell the content is missing instead of seeing
+/// invented data.
+pub fn load_trajectory_blobs(conn: &Connection, snapshot: &mut serde_json::Value) -> Result<()> {
+    use rusqlite::OptionalExtension;
+    let Some(object) = snapshot.as_object_mut() else {
+        return Ok(());
+    };
+    for field in TRAJECTORY_BLOB_FIELDS {
+        let ref_key = trajectory_blob_ref(field);
+        let Some(hash) = object
+            .get(&ref_key)
+            .and_then(|value| value.as_str())
+            .map(str::to_owned)
+        else {
+            continue;
+        };
+        let body: Option<String> = conn
+            .query_row(
+                "SELECT body FROM request_blobs WHERE hash = ?1",
+                params![hash],
+                |row| row.get(0),
+            )
+            .optional()?;
+        if let Some(body) = body {
+            object.insert(field.to_string(), serde_json::from_str(&body)?);
+            object.remove(&ref_key);
+        }
+    }
+    Ok(())
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -153,7 +265,10 @@ pub fn user_content_for_display(
     ])))
 }
 
-pub fn get_messages_by_conversation(conn: &Connection, conversation_id: &str) -> Result<Vec<MessageRow>> {
+pub fn get_messages_by_conversation(
+    conn: &Connection,
+    conversation_id: &str,
+) -> Result<Vec<MessageRow>> {
     let mut stmt = conn.prepare_cached(
         "SELECT id, conversation_id, role, content, thinking, created_at, is_compact_boundary, sort_order FROM messages WHERE conversation_id = ?1 ORDER BY sort_order ASC"
     )?;
@@ -182,10 +297,13 @@ pub fn delete_message(conn: &Connection, id: &str) -> Result<()> {
     Ok(())
 }
 
-pub fn delete_messages_from(conn: &Connection, conversation_id: &str, sort_order: i64) -> Result<()> {
-    let mut stmt = conn.prepare_cached(
-        "DELETE FROM messages WHERE conversation_id = ?1 AND sort_order >= ?2"
-    )?;
+pub fn delete_messages_from(
+    conn: &Connection,
+    conversation_id: &str,
+    sort_order: i64,
+) -> Result<()> {
+    let mut stmt = conn
+        .prepare_cached("DELETE FROM messages WHERE conversation_id = ?1 AND sort_order >= ?2")?;
     stmt.execute(params![conversation_id, sort_order])?;
     Ok(())
 }
@@ -199,9 +317,7 @@ pub fn delete_messages_tail(conn: &Connection, conversation_id: &str, count: i64
 }
 
 pub fn update_message_content(conn: &Connection, id: &str, content: &str) -> Result<()> {
-    let mut stmt = conn.prepare_cached(
-        "UPDATE messages SET content = ?1 WHERE id = ?2"
-    )?;
+    let mut stmt = conn.prepare_cached("UPDATE messages SET content = ?1 WHERE id = ?2")?;
     stmt.execute(params![content, id])?;
     Ok(())
 }
@@ -232,7 +348,11 @@ pub fn set_tool_call_note(conn: &Connection, tool_call_id: &str, note: &str) -> 
 pub fn tool_call_note(conn: &Connection, tool_call_id: &str) -> Result<Option<String>> {
     use rusqlite::OptionalExtension;
     Ok(conn
-        .query_row("SELECT note FROM tool_call_notes WHERE tool_call_id = ?1", [tool_call_id], |row| row.get(0))
+        .query_row(
+            "SELECT note FROM tool_call_notes WHERE tool_call_id = ?1",
+            [tool_call_id],
+            |row| row.get(0),
+        )
         .optional()?)
 }
 
@@ -294,13 +414,28 @@ pub fn insert_tool_call(
 }
 
 /// Save each result as it arrives, rather than waiting for the whole assistant turn.
-pub fn save_stream_tool_result(conn: &Connection, conversation_id: &str, message_id: &str, content: &str, tool: &ToolCallRow) -> Result<()> {
+pub fn save_stream_tool_result(
+    conn: &Connection,
+    conversation_id: &str,
+    message_id: &str,
+    content: &str,
+    tool: &ToolCallRow,
+) -> Result<()> {
     let tx = crate::db::write_transaction(&conn)?;
     tx.execute("INSERT INTO messages (id, conversation_id, role, content, created_at, sort_order)
         VALUES (?1, ?2, 'assistant', ?3, ?4, (SELECT COALESCE(MAX(sort_order), -1) + 1 FROM messages WHERE conversation_id = ?2))
         ON CONFLICT(id) DO UPDATE SET content = excluded.content",
         params![message_id, conversation_id, content, chrono::Utc::now().to_rfc3339()])?;
-    insert_tool_call(&tx, &tool.id, message_id, &tool.name, tool.input.as_deref(), tool.output.as_deref(), tool.is_error, tool.sort_order)?;
+    insert_tool_call(
+        &tx,
+        &tool.id,
+        message_id,
+        &tool.name,
+        tool.input.as_deref(),
+        tool.output.as_deref(),
+        tool.is_error,
+        tool.sort_order,
+    )?;
     tx.commit()?;
     Ok(())
 }
@@ -314,20 +449,78 @@ mod stream_tool_tests {
         let conn = Connection::open_in_memory().unwrap();
         conn.execute_batch(crate::db::schema::SCHEMA_SQL).unwrap();
         for session in ["one", "two"] {
-            crate::db::conversation_repo::insert_conversation(&conn, session, None, None, None, None, None, false, false, false, "now", "now", 0).unwrap();
-            insert_message(&conn, session, session, "assistant", "", None, "now", false, 0).unwrap();
+            crate::db::conversation_repo::insert_conversation(
+                &conn, session, None, None, None, None, None, false, false, false, "now", "now", 0,
+            )
+            .unwrap();
+            insert_message(
+                &conn,
+                session,
+                session,
+                "assistant",
+                "",
+                None,
+                "now",
+                false,
+                0,
+            )
+            .unwrap();
         }
         let content = crate::native_engine::mcp_output::McpOutput::from_transport(&serde_json::json!({"content":[{"type":"text","text":"final content"}],"_meta":{"trace":"preserved"}})).unwrap();
         let display = content.display();
         content.save(&conn, "one", "call", &display, false).unwrap();
-        insert_tool_call(&conn, "one:call", "one", "mcp__test__call", None, Some(&display), false, 0).unwrap();
-        let saved = crate::native_engine::mcp_output::McpOutput::load(&conn, "one", "one:call", &display).unwrap().unwrap();
+        insert_tool_call(
+            &conn,
+            "one:call",
+            "one",
+            "mcp__test__call",
+            None,
+            Some(&display),
+            false,
+            0,
+        )
+        .unwrap();
+        let saved =
+            crate::native_engine::mcp_output::McpOutput::load(&conn, "one", "one:call", &display)
+                .unwrap()
+                .unwrap();
         assert_eq!(saved.content, content.content);
         assert_eq!(saved.metadata, content.metadata);
-        insert_tool_call(&conn, "two:call", "two", "mcp__test__call", None, Some(&display), false, 0).unwrap();
-        assert!(crate::native_engine::mcp_output::McpOutput::load(&conn, "two", "two:call", &display).unwrap().is_none());
-        insert_tool_call(&conn, "one:call", "one", "Read", None, Some("new native output"), false, 0).unwrap();
-        assert!(crate::native_engine::mcp_output::McpOutput::load(&conn, "one", "one:call", "new native output").unwrap().is_none());
+        insert_tool_call(
+            &conn,
+            "two:call",
+            "two",
+            "mcp__test__call",
+            None,
+            Some(&display),
+            false,
+            0,
+        )
+        .unwrap();
+        assert!(crate::native_engine::mcp_output::McpOutput::load(
+            &conn, "two", "two:call", &display
+        )
+        .unwrap()
+        .is_none());
+        insert_tool_call(
+            &conn,
+            "one:call",
+            "one",
+            "Read",
+            None,
+            Some("new native output"),
+            false,
+            0,
+        )
+        .unwrap();
+        assert!(crate::native_engine::mcp_output::McpOutput::load(
+            &conn,
+            "one",
+            "one:call",
+            "new native output"
+        )
+        .unwrap()
+        .is_none());
     }
 
     #[test]
@@ -341,18 +534,40 @@ mod stream_tool_tests {
         let conn = Connection::open_in_memory().unwrap();
         conn.execute_batch(crate::db::schema::SCHEMA_SQL).unwrap();
         crate::db::conversation_repo::migrate_workspace_mode(&conn).unwrap();
-        crate::db::conversation_repo::insert_conversation(&conn, "conv", None, None, None, None, None, false, false, false, "now", "now", 0).unwrap();
+        crate::db::conversation_repo::insert_conversation(
+            &conn, "conv", None, None, None, None, None, false, false, false, "now", "now", 0,
+        )
+        .unwrap();
         crate::db::conversation_repo::set_workspace_mode(&conn, "conv", mode).unwrap();
-        let mut tool = ToolCallRow { id: "assistant:call-1".into(), message_id: "assistant".into(), name: "Read".into(), input: Some("{}".into()), output: Some("first".into()), is_error: false, sort_order: 0 };
+        let mut tool = ToolCallRow {
+            id: "assistant:call-1".into(),
+            message_id: "assistant".into(),
+            name: "Read".into(),
+            input: Some("{}".into()),
+            output: Some("first".into()),
+            is_error: false,
+            sort_order: 0,
+        };
         save_stream_tool_result(&conn, "conv", "assistant", "Checking", &tool).unwrap();
-        assert_eq!(get_tool_calls_for_message(&conn, "assistant").unwrap()[0].output.as_deref(), Some("first"));
+        assert_eq!(
+            get_tool_calls_for_message(&conn, "assistant").unwrap()[0]
+                .output
+                .as_deref(),
+            Some("first")
+        );
         tool.output = Some("updated".into());
         save_stream_tool_result(&conn, "conv", "assistant", "Checking again", &tool).unwrap();
         let calls = get_tool_calls_for_message(&conn, "assistant").unwrap();
         assert_eq!(calls.len(), 1);
         assert_eq!(calls[0].output.as_deref(), Some("updated"));
-        assert_eq!(get_messages_by_conversation(&conn, "conv").unwrap().len(), 1);
-        assert_eq!(get_message(&conn, "assistant").unwrap().unwrap().content, "Checking again");
+        assert_eq!(
+            get_messages_by_conversation(&conn, "conv").unwrap().len(),
+            1
+        );
+        assert_eq!(
+            get_message(&conn, "assistant").unwrap().unwrap().content,
+            "Checking again"
+        );
     }
 }
 
@@ -363,7 +578,13 @@ pub fn set_tool_duration(conn: &Connection, id: &str, duration_ms: u64) -> Resul
 }
 pub fn tool_duration(conn: &Connection, id: &str) -> Result<Option<u64>> {
     use rusqlite::OptionalExtension;
-    Ok(conn.query_row("SELECT duration_ms FROM tool_call_timings WHERE tool_call_id=?1", params![id], |row| row.get::<_, u64>(0)).optional()?)
+    Ok(conn
+        .query_row(
+            "SELECT duration_ms FROM tool_call_timings WHERE tool_call_id=?1",
+            params![id],
+            |row| row.get::<_, u64>(0),
+        )
+        .optional()?)
 }
 
 #[cfg(test)]
@@ -378,5 +599,130 @@ mod duration_tests {
         assert_eq!(tool_duration(&conn, "call").unwrap(), Some(2050));
         set_tool_duration(&conn, "zero", 0).unwrap();
         assert_eq!(tool_duration(&conn, "zero").unwrap(), Some(0));
+    }
+}
+
+#[cfg(test)]
+mod trajectory_tests {
+    use super::*;
+    use serde_json::json;
+
+    fn fixture() -> Connection {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(crate::db::schema::SCHEMA_SQL).unwrap();
+        crate::db::conversation_repo::insert_conversation(
+            &conn, "conv", None, None, None, None, None, false, false, false, "now", "now", 0,
+        )
+        .unwrap();
+        insert_message(
+            &conn,
+            "assistant",
+            "conv",
+            "assistant",
+            "",
+            None,
+            "now",
+            false,
+            0,
+        )
+        .unwrap();
+        conn
+    }
+
+    fn snapshots(count: usize, prompt: &str) -> serde_json::Value {
+        let tools = json!([{"name": "Read", "description": "reads a file"}]);
+        json!((0..count)
+            .map(|index| json!({
+                "id": format!("request-{index}"),
+                "systemPrompt": prompt,
+                "tools": tools,
+                "usage": {"input_tokens": index},
+            }))
+            .collect::<Vec<_>>())
+    }
+
+    #[test]
+    fn identical_headers_are_stored_once() {
+        let conn = fixture();
+        let prompt = "You are a careful assistant. ".repeat(200);
+        let payload = snapshots(297, &prompt);
+        save_request_snapshots(&conn, "assistant", &payload).unwrap();
+        let blobs: i64 = conn
+            .query_row("SELECT COUNT(*) FROM request_blobs", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(blobs, 2, "one blob per distinct header");
+        let raw: String = conn
+            .query_row(
+                "SELECT requests_json FROM message_trajectory WHERE message_id='assistant'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert!(!raw.contains("You are a careful assistant"), "{raw}");
+        assert!(raw.contains("systemPromptRef"), "{raw}");
+        assert!(raw.contains("toolsRef"), "{raw}");
+        assert!(
+            raw.len() < serde_json::to_string(&payload).unwrap().len() / 20,
+            "snapshots should shrink far below the inline form"
+        );
+    }
+
+    #[test]
+    fn round_trip_restores_every_field() {
+        let conn = fixture();
+        let payload = snapshots(3, "prompt");
+        save_request_snapshots(&conn, "assistant", &payload).unwrap();
+        let loaded = get_request_snapshots(&conn, "assistant").unwrap();
+        assert_eq!(loaded, payload);
+        assert_eq!(loaded[1]["tools"], payload[1]["tools"]);
+        assert_eq!(loaded[2]["usage"]["input_tokens"], 2);
+    }
+
+    #[test]
+    fn legacy_rows_still_read() {
+        let conn = fixture();
+        insert_message(
+            &conn,
+            "legacy",
+            "conv",
+            "assistant",
+            "",
+            None,
+            "now",
+            false,
+            0,
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO message_trajectory(message_id, requests_json) VALUES (?1, ?2)",
+            params![
+                "legacy",
+                r#"[{"id":"old","systemPrompt":"inline prompt","tools":[]}]"#
+            ],
+        )
+        .unwrap();
+        let loaded = get_request_snapshots(&conn, "legacy").unwrap();
+        assert_eq!(loaded[0]["systemPrompt"], "inline prompt");
+        assert_eq!(loaded[0]["tools"], json!([]));
+    }
+
+    #[test]
+    fn a_missing_blob_is_reported_not_invented() {
+        let conn = fixture();
+        save_request_snapshots(&conn, "assistant", &snapshots(1, "prompt")).unwrap();
+        conn.execute("DELETE FROM request_blobs", []).unwrap();
+        let loaded = get_request_snapshots(&conn, "assistant").unwrap();
+        assert!(loaded[0].get("systemPrompt").is_none(), "{loaded}");
+        assert!(loaded[0]["systemPromptRef"].is_string(), "{loaded}");
+        assert!(loaded[0].get("tools").is_none(), "{loaded}");
+    }
+
+    #[test]
+    fn saving_does_not_mutate_the_caller_payload() {
+        let conn = fixture();
+        let payload = snapshots(2, "original prompt");
+        save_request_snapshots(&conn, "assistant", &payload).unwrap();
+        assert_eq!(payload[0]["systemPrompt"], "original prompt");
+        assert!(payload[0].get("systemPromptRef").is_none());
     }
 }

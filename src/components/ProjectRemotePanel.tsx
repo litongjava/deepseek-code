@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from 'react';
 import { invokeDesktop as invoke } from '../platform/native';
 
-const field = 'w-full rounded border p-2 bg-claude-bg';
+const field = 'w-full rounded border p-2 bg-deepseek-bg';
 const command = <T,>(request: Record<string, unknown>) => invoke<T>('peripheral_command', { request });
 interface Plan { destination: string; files: {path:string;content:string}[]; commands: string[] }
 export default function ProjectRemotePanel() {

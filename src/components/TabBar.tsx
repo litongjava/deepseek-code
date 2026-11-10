@@ -120,11 +120,11 @@ const TabBar: React.FC<{
 
   return (
     <>
-      <div className="relative flex items-center h-10 bg-claude-bg border-b border-claude-border">
+      <div className="relative flex items-center h-10 bg-deepseek-bg border-b border-deepseek-border">
         {showLeftArrow && (
           <button
             onClick={() => scroll('left')}
-            className="flex-shrink-0 w-7 h-full flex items-center justify-center bg-claude-bg/90 hover:bg-claude-hover text-claude-textSecondary transition-colors z-10"
+            className="flex-shrink-0 w-7 h-full flex items-center justify-center bg-deepseek-bg/90 hover:bg-deepseek-hover text-deepseek-textSecondary transition-colors z-10"
           >
             <ChevronLeft size={16} />
           </button>
@@ -148,14 +148,14 @@ const TabBar: React.FC<{
                   group relative flex items-center gap-1.5 h-8 px-3 rounded-md cursor-pointer
                   transition-all duration-150 select-none min-w-0 flex-shrink-0
                   ${isActive
-                    ? 'bg-claude-hover text-claude-text'
-                    : 'text-claude-textSecondary hover:bg-claude-hover/50 hover:text-claude-text'
+                    ? 'bg-deepseek-hover text-deepseek-text'
+                    : 'text-deepseek-textSecondary hover:bg-deepseek-hover/50 hover:text-deepseek-text'
                   }
                 `}
                 style={{ maxWidth: '200px', minWidth: '100px' }}
               >
                 {tab.pinned && (
-                  <Pin size={12} className="flex-shrink-0 text-claude-textSecondary opacity-60" />
+                  <Pin size={12} className="flex-shrink-0 text-deepseek-textSecondary opacity-60" />
                 )}
 
                 {!tab.pinned && (
@@ -178,7 +178,7 @@ const TabBar: React.FC<{
                       if (e.key === 'Escape') setEditingTabId(null);
                     }}
                     onClick={(e) => e.stopPropagation()}
-                    className="flex-1 min-w-0 bg-transparent text-claude-text text-sm outline-none border-none p-0"
+                    className="flex-1 min-w-0 bg-transparent text-deepseek-text text-sm outline-none border-none p-0"
                   />
                 ) : (
                   <span className="flex-1 min-w-0 truncate text-sm leading-none">
@@ -197,7 +197,7 @@ const TabBar: React.FC<{
                   className={`
                     flex-shrink-0 w-4 h-4 flex items-center justify-center rounded-sm
                     transition-all duration-100
-                    ${isActive || true ? 'opacity-0 group-hover:opacity-100 hover:bg-claude-border' : 'opacity-0 group-hover:opacity-100 hover:bg-claude-border'}
+                    ${isActive || true ? 'opacity-0 group-hover:opacity-100 hover:bg-deepseek-border' : 'opacity-0 group-hover:opacity-100 hover:bg-deepseek-border'}
                   `}
                 >
                   <X size={12} />
@@ -210,7 +210,7 @@ const TabBar: React.FC<{
         {showRightArrow && (
           <button
             onClick={() => scroll('right')}
-            className="flex-shrink-0 w-7 h-full flex items-center justify-center bg-claude-bg/90 hover:bg-claude-hover text-claude-textSecondary transition-colors z-10"
+            className="flex-shrink-0 w-7 h-full flex items-center justify-center bg-deepseek-bg/90 hover:bg-deepseek-hover text-deepseek-textSecondary transition-colors z-10"
           >
             <ChevronRight size={16} />
           </button>
@@ -220,7 +220,7 @@ const TabBar: React.FC<{
 
         <button
           onClick={onNewChat}
-          className="flex-shrink-0 w-8 h-full flex items-center justify-center text-claude-textSecondary hover:text-claude-text hover:bg-claude-hover transition-colors"
+          className="flex-shrink-0 w-8 h-full flex items-center justify-center text-deepseek-textSecondary hover:text-deepseek-text hover:bg-deepseek-hover transition-colors"
         >
           <Plus size={16} />
         </button>
@@ -228,33 +228,33 @@ const TabBar: React.FC<{
 
       {contextMenu && (
         <div
-          className="fixed z-[200] bg-claude-input border border-claude-border rounded-xl shadow-[0_4px_12px_rgba(0,0,0,0.15)] py-1.5 w-[180px]"
+          className="fixed z-[200] bg-deepseek-input border border-deepseek-border rounded-xl shadow-[0_4px_12px_rgba(0,0,0,0.15)] py-1.5 w-[180px]"
           style={{ top: contextMenu.y, left: contextMenu.x }}
         >
           <button
             onClick={() => handleStartRename(contextMenu.tabId)}
-            className="flex items-center gap-2.5 px-3 py-1.5 text-[13px] text-claude-text hover:bg-claude-hover w-full transition-colors"
+            className="flex items-center gap-2.5 px-3 py-1.5 text-[13px] text-deepseek-text hover:bg-deepseek-hover w-full transition-colors"
           >
-            <IconPencil size={14} className="text-claude-textSecondary" />
+            <IconPencil size={14} className="text-deepseek-textSecondary" />
             {t('sidebar.rename') || '重命名'}
           </button>
           <button
             onClick={() => handlePinToggle(contextMenu.tabId)}
-            className="flex items-center gap-2.5 px-3 py-1.5 text-[13px] text-claude-text hover:bg-claude-hover w-full transition-colors"
+            className="flex items-center gap-2.5 px-3 py-1.5 text-[13px] text-deepseek-text hover:bg-deepseek-hover w-full transition-colors"
           >
             {openTabs.find(t => t.id === contextMenu.tabId)?.pinned ? (
-              <PinOff size={14} className="text-claude-textSecondary" />
+              <PinOff size={14} className="text-deepseek-textSecondary" />
             ) : (
-              <Pin size={14} className="text-claude-textSecondary" />
+              <Pin size={14} className="text-deepseek-textSecondary" />
             )}
             {openTabs.find(t => t.id === contextMenu.tabId)?.pinned ? (t('common.unpin') || '取消置顶') : (t('common.pin') || '置顶')}
           </button>
-          <div className="h-[1px] bg-claude-border my-1 mx-2" />
+          <div className="h-[1px] bg-deepseek-border my-1 mx-2" />
           <button
             onClick={() => handleCloseOtherTabs(contextMenu.tabId)}
-            className="flex items-center gap-2.5 px-3 py-1.5 text-[13px] text-claude-text hover:bg-claude-hover w-full transition-colors"
+            className="flex items-center gap-2.5 px-3 py-1.5 text-[13px] text-deepseek-text hover:bg-deepseek-hover w-full transition-colors"
           >
-            <X size={14} className="text-claude-textSecondary" />
+            <X size={14} className="text-deepseek-textSecondary" />
             {t('tabs.closeOthers') || '关闭其他标签'}
           </button>
         </div>

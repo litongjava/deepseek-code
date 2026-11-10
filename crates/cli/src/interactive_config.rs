@@ -435,8 +435,17 @@ pub async fn wizard(
         match verify(paths, &id, &models[0]).await {
             Ok(()) => command_eprintln!("Connected with {}.", models[0]),
             Err(error) => {
-                command_eprintln!("The connection test failed: {error:#}");
+                let detail = format!("{error:#}");
+                command_eprintln!("The connection test failed: {detail}");
                 command_eprintln!("{id} is saved; fix it with /provider edit {id}.");
+                // A gateway can serve a model list while refusing one model in
+                // this region; that is not something the URL or key can fix.
+                if detail.to_ascii_lowercase().contains("region") {
+                    command_eprintln!(
+                        "{} is not available in this region; pick another model with /provider edit {id}.",
+                        models[0]
+                    );
+                }
             }
         }
     }
@@ -472,6 +481,10 @@ struct Preset {
     /// Entry of the embedded catalog shared with Desktop; None for DeepSeek,
     /// which uses its OpenAI-compatible endpoint directly.
     builtin: Option<&'static str>,
+    /// Models offered by the preset. For a preset that expands to the whole
+    /// catalog (see `preset_uses_entire_catalog`), this only seeds the template
+    /// and the first entry becomes the default; the saved provider still keeps
+    /// every model of the catalog entry.
     models: &'static [&'static str],
     key_url: &'static str,
 }
@@ -484,12 +497,20 @@ const PRESETS: &[Preset] = &[
     Preset { id: "zai-coding-cn", name: "Zhipu GLM Coding Plan (China)", builtin: Some("zai-coding-cn"), models: &["glm-5.1", "glm-4.7"], key_url: "https://open.bigmodel.cn/usercenter/apikeys" },
     Preset { id: "minimax-cn", name: "MiniMax (China)", builtin: Some("minimax-cn"), models: &["MiniMax-M3", "MiniMax-M2.7"], key_url: "https://platform.minimaxi.com/user-center/basic-information/interface-key" },
     Preset { id: "qwen-token-plan-cn", name: "Alibaba Qwen Token Plan (China)", builtin: Some("qwen-token-plan-cn"), models: &["qwen3.6-flash", "deepseek-v4-flash", "glm-5.1"], key_url: "https://bailian.console.aliyun.com/" },
+    // Saves every catalog model over four protocols, not just these four; the
+    // first entry seeds the template and becomes the default model.
     Preset { id: "opencode-go", name: "OpenCode Go", builtin: Some("opencode-go"), models: &["deepseek-v4.1-flash", "deepseek-v4-pro", "glm-5.3", "kimi-k3"], key_url: "https://opencode.ai/auth" },
     Preset { id: "openrouter", name: "OpenRouter", builtin: Some("openrouter"), models: &["anthropic/claude-sonnet-4.5", "anthropic/claude-opus-4.6"], key_url: "https://openrouter.ai/keys" },
 ];
 
 fn preset_by_id(id: &str) -> Option<&'static Preset> {
     PRESETS.iter().find(|preset| preset.id == id)
+}
+
+/// OpenCode Go advertises models over four protocols, so its preset keeps the
+/// whole catalog instead of a hand-picked subset.
+fn preset_uses_entire_catalog(preset: &Preset) -> bool {
+    preset.id == "opencode-go"
 }
 
 fn preset_key_env(preset: &Preset) -> String {
@@ -533,8 +554,26 @@ fn preset_provider(preset: &Preset, api_key: Option<String>) -> Result<deepseek_
             provider.base_url = entry["baseUrl"].as_str().unwrap_or_default().into();
             provider.settings.insert("builtinId".into(), json!(builtin));
             let catalog = entry["models"].as_array().cloned().unwrap_or_default();
-            provider.models = preset
-                .models
+            let wanted: Vec<&str> = if preset_uses_entire_catalog(preset) {
+                catalog
+                    .iter()
+                    .filter_map(|model| model["id"].as_str())
+                    .collect()
+            } else {
+                preset.models.to_vec()
+            };
+            // A catalog refresh that drops a model must fail loudly here rather
+            // than silently saving a shorter list.
+            let missing: Vec<_> = wanted
+                .iter()
+                .filter(|id| !catalog.iter().any(|model| model["id"] == **id))
+                .collect();
+            ensure!(
+                missing.is_empty(),
+                "Preset {} references models missing from the built-in catalog: {missing:?}",
+                preset.id
+            );
+            provider.models = wanted
                 .iter()
                 .filter_map(|id| catalog.iter().find(|model| model["id"] == *id))
                 .map(|model| {
@@ -576,6 +615,8 @@ async fn verify(paths: &RuntimePaths, provider: &str, model: &str) -> Result<()>
 
 async fn configure_preset(paths: &RuntimePaths, input: &mut TerminalInput, preset: &Preset) -> Result<Option<config::Selection>> {
     let key_env = preset_key_env(preset);
+    // Keep the chosen model across a retry with another key.
+    let mut chosen: Option<String> = None;
     loop {
         let api_key = if std::env::var_os(&key_env).is_some_and(|value| !value.is_empty()) {
             command_eprintln!("Using the API key from {key_env}.");
@@ -594,7 +635,15 @@ async fn configure_preset(paths: &RuntimePaths, input: &mut TerminalInput, prese
             Some(key)
         };
         let provider = preset_provider(preset, api_key.clone())?;
-        let model = provider.models[0].id.clone();
+        // List the available models after the key, then test the chosen one.
+        let model = match &chosen {
+            Some(model) => model.clone(),
+            None => {
+                let model = choose_default_model(input, &provider).await?;
+                chosen = Some(model.clone());
+                model
+            }
+        };
         let mut manager = ConfigManager::new(paths.data_dir.clone());
         manager.update_config(|c| {
             c.providers.retain(|p| p.id != provider.id);
@@ -612,7 +661,6 @@ async fn configure_preset(paths: &RuntimePaths, input: &mut TerminalInput, prese
                     preset.name.trim_end_matches(" (recommended)"),
                     if api_key.is_some() { " (key stored in config.json, readable only by you)" } else { "" }
                 );
-                let model = choose_default_model(input, preset).await?;
                 crate::config::save_default_model(paths, preset.id, &model)?;
                 return Ok(Some(select(paths, preset.id, &model)?));
             }
@@ -632,23 +680,51 @@ async fn configure_preset(paths: &RuntimePaths, input: &mut TerminalInput, prese
 }
 
 /// After the key works: which of the provider's models runs by default.
-async fn choose_default_model(input: &mut TerminalInput, preset: &Preset) -> Result<String> {
-    if preset.models.len() < 2 {
-        return Ok(preset.models[0].to_owned());
+async fn choose_default_model(
+    input: &mut TerminalInput,
+    provider: &deepseek_code_core::config::ProviderConfig,
+) -> Result<String> {
+    let models: Vec<_> = provider.models.iter().filter(|model| model.enabled).collect();
+    ensure!(!models.is_empty(), "This provider has no models to choose from");
+    if models.len() < 2 {
+        return Ok(models[0].id.clone());
     }
     if crate::terminal::picker::available() {
         use crate::terminal::picker::{Entry, Picker};
-        let entries: Vec<Entry> = preset.models.iter().map(|model| Entry { title: (*model).into(), detail: String::new() }).collect();
-        let picker = Picker { heading: "Choose the default model", subtitle: Some("Change it later with /model"), entries: &entries, search: false, hint: "Enter to confirm \u{b7} Esc for the first", selected: 0 };
-        return Ok(preset.models[picker.run()?.unwrap_or(0)].to_owned());
+        let entries: Vec<Entry> = models
+            .iter()
+            .map(|model| Entry {
+                title: model.id.clone(),
+                detail: if model.name == model.id { String::new() } else { model.name.clone() },
+            })
+            .collect();
+        let picker = Picker {
+            heading: "Choose the model to use",
+            subtitle: Some("Change it later with /model"),
+            entries: &entries,
+            // A gateway can list dozens of models, so let typing narrow them.
+            search: entries.len() > 8,
+            hint: "Enter to confirm \u{b7} Esc for the first",
+            selected: 0,
+        };
+        return Ok(models[picker.run()?.unwrap_or(0)].id.clone());
     }
-    command_eprintln!("\nChoose the default model:");
-    for (index, model) in preset.models.iter().enumerate() {
-        command_eprintln!("  {}. {model}", index + 1);
+    command_eprintln!("\nChoose the model to use:");
+    for (index, model) in models.iter().enumerate() {
+        command_eprintln!(
+            "  {:>2}. {}{}",
+            index + 1,
+            model.id,
+            model.api.as_deref().map(|api| format!(" ({api})")).unwrap_or_default()
+        );
     }
     let choice = ask(input, "Number [1]").await?;
-    let index = choice.parse::<usize>().ok().filter(|n| (1..=preset.models.len()).contains(n)).unwrap_or(1);
-    Ok(preset.models[index - 1].to_owned())
+    let index = choice
+        .parse::<usize>()
+        .ok()
+        .filter(|number| (1..=models.len()).contains(number))
+        .unwrap_or(1);
+    Ok(models[index - 1].id.clone())
 }
 
 /// First-run setup: pick a built-in provider (DeepSeek by default), a saved
@@ -981,18 +1057,53 @@ mod tests {
         assert_eq!(provider.settings["builtinId"], "opencode-go");
         assert_eq!(provider.settings["apiKeyEnv"], "OPENCODE_API_KEY");
         assert_eq!(preset_key_env(preset), "OPENCODE_API_KEY");
+        // The preset lists every catalog model, so /provider add can offer them.
+        let catalog = deepseek_code_core::native_engine::provider_runtime::catalog_entry(
+            "opencode-go",
+        )
+        .unwrap()["models"]
+            .as_array()
+            .unwrap()
+            .len();
+        assert_eq!(provider.models.len(), catalog);
         assert!(provider
             .models
             .iter()
             .all(|model| model.api.as_deref().is_some_and(|api| !api.is_empty())));
-        assert!(provider
+        let protocols: std::collections::BTreeSet<_> = provider
             .models
             .iter()
-            .any(|model| model.api.as_deref() == Some("openai-completions")));
+            .filter_map(|model| model.api.as_deref())
+            .collect();
         assert_eq!(
-            provider.models.iter().find(|model| model.id == "deepseek-v4.1-flash").unwrap().api.as_deref(),
-            Some("openai-completions")
+            protocols,
+            [
+                "anthropic-messages",
+                "google-generative-ai",
+                "openai-completions",
+                "openai-responses",
+            ]
+            .into_iter()
+            .collect()
         );
+        // One representative model per protocol must be selectable from the
+        // preset, not only the chat models listed in Preset.models.
+        for (id, api) in [
+            ("deepseek-v4.1-flash", "openai-completions"),
+            ("grok-4.7", "openai-responses"),
+            ("minimax-m3", "anthropic-messages"),
+            ("gemini-4-argon", "google-generative-ai"),
+        ] {
+            let model = provider
+                .models
+                .iter()
+                .find(|model| model.id == id)
+                .unwrap_or_else(|| panic!("{id} is missing from the preset"));
+            assert_eq!(model.api.as_deref(), Some(api), "{id}");
+        }
+        // The first catalog entry stays the default so the connection test is
+        // predictable.
+        assert_eq!(provider.models[0].id, "deepseek-v4.1-flash");
     }
 
     #[test]

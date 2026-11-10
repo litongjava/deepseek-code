@@ -91,7 +91,7 @@ const MessageList = React.memo<MessageListProps>(({
           100% { background-position: -200% 0; }
         }
         .animate-shimmer-text {
-          background: linear-gradient(90deg, var(--text-claude-secondary) 45%, var(--text-claude-main) 50%, var(--text-claude-secondary) 55%);
+          background: linear-gradient(90deg, var(--text-deepseek-secondary) 45%, var(--text-deepseek-main) 50%, var(--text-deepseek-secondary) 55%);
           background-size: 200% 100%;
           -webkit-background-clip: text;
           -webkit-text-fill-color: transparent;
@@ -106,20 +106,20 @@ const MessageList = React.memo<MessageListProps>(({
         const isPairStart = msg.role === 'user' && (idx === 0 || messages[idx - 1]?.role === 'assistant');
         return (
         <div key={msg.id || idx} data-message-index={idx} className="group" style={{ marginBottom: isPairStart && idx > 0 ? '28px' : 'var(--msg-gap)' }}>
-          {readingDivider && <hr className="mb-5 border-0 border-t border-claude-border" />}
+          {readingDivider && <hr className="mb-5 border-0 border-t border-deepseek-border" />}
           {(msg.is_summary === 1 || msg.is_compact_boundary) && (
             <div className="flex items-center gap-3 mb-5 mt-2">
-              <div className="flex-1 h-px bg-claude-border" />
-              <span className="text-[12px] text-claude-textSecondary whitespace-nowrap">Context compacted above this point</span>
-              <div className="flex-1 h-px bg-claude-border" />
+              <div className="flex-1 h-px bg-deepseek-border" />
+              <span className="text-[12px] text-deepseek-textSecondary whitespace-nowrap">Context compacted above this point</span>
+              <div className="flex-1 h-px bg-deepseek-border" />
             </div>
           )}
           {(msg.is_summary === 1 || msg.is_compact_boundary) ? null : msg.role === 'user' ? (
             !readingMode && !readOnly && editingMessageIdx === idx ? (
-              <div className="w-full bg-[#F0EEE7] dark:bg-claude-btnHover rounded-xl p-3 border border-black/5 dark:border-white/10">
+              <div className="w-full bg-[#F0EEE7] dark:bg-deepseek-btnHover rounded-xl p-3 border border-black/5 dark:border-white/10">
                 <div className="bg-white dark:bg-black/20 rounded-lg border border-black/10 dark:border-white/10 focus-within:ring-2 focus-within:ring-blue-500/20 focus-within:border-blue-500 transition-all p-3">
                   <textarea
-                    className="w-full bg-transparent text-claude-text outline-none resize-none text-[16px] leading-relaxed font-sans font-[350] block"
+                    className="w-full bg-transparent text-deepseek-text outline-none resize-none text-[16px] leading-relaxed font-sans font-[350] block"
                     value={editingContent}
                     onChange={(e) => {
                       onSetEditingContent?.(e.target.value);
@@ -138,7 +138,7 @@ const MessageList = React.memo<MessageListProps>(({
                   />
                 </div>
                 <div className="flex items-start justify-between mt-3 px-1 gap-4">
-                  <div className="flex items-start gap-2 text-claude-textSecondary text-[13px] leading-tight pt-1">
+                  <div className="flex items-start gap-2 text-deepseek-textSecondary text-[13px] leading-tight pt-1">
                     <Info size={14} className="mt-0.5 shrink-0" />
                     <span>
                       {t('chat.editingMessageWarning')}
@@ -147,14 +147,14 @@ const MessageList = React.memo<MessageListProps>(({
                   <div className="flex items-center gap-2 shrink-0">
                     <button
                       onClick={onEditCancel}
-                      className="px-3 py-1.5 text-[13px] font-medium text-claude-text bg-white dark:bg-claude-bg border border-black/10 dark:border-white/10 hover:bg-gray-50 dark:hover:bg-claude-hover rounded-lg transition-colors"
+                      className="px-3 py-1.5 text-[13px] font-medium text-deepseek-text bg-white dark:bg-deepseek-bg border border-black/10 dark:border-white/10 hover:bg-gray-50 dark:hover:bg-deepseek-hover rounded-lg transition-colors"
                     >
                       {t('chat.cancelEdit')}
                     </button>
                     <button
                       onClick={onEditSave}
                       disabled={!editingContent.trim() || editingContent === extractTextContent(msg.content)}
-                      className="px-3 py-1.5 text-[13px] font-medium text-white bg-claude-text hover:bg-claude-textSecondary rounded-lg transition-colors disabled:opacity-30 disabled:cursor-not-allowed"
+                      className="px-3 py-1.5 text-[13px] font-medium text-white bg-deepseek-text hover:bg-deepseek-textSecondary rounded-lg transition-colors disabled:opacity-30 disabled:cursor-not-allowed"
                     >
                       {t('chat.saveEdit')}
                     </button>
@@ -170,7 +170,7 @@ const MessageList = React.memo<MessageListProps>(({
                 )}
                 {(!msg.attachments || msg.attachments.length === 0) && msg.has_attachments === 1 && (
                   <div className="max-w-[85%] w-fit">
-                    <div className="bg-[#F0EEE7] dark:bg-claude-input/60 text-claude-textSecondary px-4 py-2 text-[14px] rounded-xl font-sans italic border border-black/5 dark:border-white/5">
+                    <div className="bg-[#F0EEE7] dark:bg-deepseek-input/60 text-deepseek-textSecondary px-4 py-2 text-[14px] rounded-xl font-sans italic border border-black/5 dark:border-white/5">
                       📎 Files attached
                     </div>
                   </div>
@@ -178,7 +178,7 @@ const MessageList = React.memo<MessageListProps>(({
                 {contentBlocks(msg.content) ? <UserContentBlocks content={msg.content} /> : !!extractTextContent(msg.content).trim() && (
                   <div className="max-w-[85%] w-fit">
                     <div
-                      className="conversation-text bg-[var(--msg-user-bg)] text-claude-text px-4 py-[10px] text-[15px] leading-relaxed font-sans font-[400] whitespace-pre-wrap break-words relative overflow-hidden"
+                      className="conversation-text bg-[var(--msg-user-bg)] text-deepseek-text px-4 py-[10px] text-[15px] leading-relaxed font-sans font-[400] whitespace-pre-wrap break-words relative overflow-hidden"
                       style={{ borderRadius: 'var(--msg-user-radius)', maxHeight: expandedMessages.has(idx) ? 'none' : '300px' }}
                       ref={(el) => { if (el) messageContentRefs.current.set(idx, el); }}
                     >
@@ -202,7 +202,7 @@ const MessageList = React.memo<MessageListProps>(({
                         const el = messageContentRefs.current.get(idx);
                         return el && el.scrollHeight > 300;
                       })() && (
-                          <div className="absolute bottom-0 left-0 right-0 h-16 bg-gradient-to-t from-[#F0EEE7] dark:from-claude-btnHover to-transparent pointer-events-none" />
+                          <div className="absolute bottom-0 left-0 right-0 h-16 bg-gradient-to-t from-[#F0EEE7] dark:from-deepseek-btnHover to-transparent pointer-events-none" />
                         )}
                     </div>
                     {(() => {
@@ -210,8 +210,8 @@ const MessageList = React.memo<MessageListProps>(({
                       const isOverflow = el && el.scrollHeight > 300;
                       if (!isOverflow) return null;
                       return (
-                        <div className="bg-[#F0EEE7] dark:bg-claude-btnHover rounded-b-2xl px-3.5 pb-3 pt-1 -mt-[1px] relative" style={{ borderTopLeftRadius: 0, borderTopRightRadius: 0 }}>
-                          <button onClick={() => onToggleExpand(idx)} className="text-[13px] text-claude-textSecondary hover:text-claude-text transition-colors">
+                        <div className="bg-[#F0EEE7] dark:bg-deepseek-btnHover rounded-b-2xl px-3.5 pb-3 pt-1 -mt-[1px] relative" style={{ borderTopLeftRadius: 0, borderTopRightRadius: 0 }}>
+                          <button onClick={() => onToggleExpand(idx)} className="text-[13px] text-deepseek-textSecondary hover:text-deepseek-text transition-colors">
                             {expandedMessages.has(idx) ? 'Show less' : 'Show more'}
                           </button>
                         </div>
@@ -219,22 +219,22 @@ const MessageList = React.memo<MessageListProps>(({
                     })()}
                   </div>
                 )}
-                {!contentBlocks(msg.content) && hasUnavailableImages(msg.content) && <div role="note" className="text-sm text-claude-textSecondary">Image unavailable: this historical message contains only a placeholder.</div>}
+                {!contentBlocks(msg.content) && hasUnavailableImages(msg.content) && <div role="note" className="text-sm text-deepseek-textSecondary">Image unavailable: this historical message contains only a placeholder.</div>}
                 {!readingMode && <div className="flex items-center gap-1.5 mt-1.5 pr-1">
                   {msg.created_at && (
-                    <span className="text-[12px] tabular-nums text-claude-textSecondary mr-1">{formatMessageTime(msg.created_at)}</span>
+                    <span className="text-[12px] tabular-nums text-deepseek-textSecondary mr-1">{formatMessageTime(msg.created_at)}</span>
                   )}
                   <div className="message-actions flex items-center gap-0.5 opacity-0 transition-opacity duration-150 group-hover:opacity-100 group-focus-within:opacity-100">
-                    {!readOnly && <button onClick={() => onResend?.(msg.content, idx)} className="p-1 text-claude-textSecondary hover:text-claude-text hover:bg-claude-hover rounded transition-colors" title="重新发送"><RotateCcw size={14} /></button>}
-                    {!readOnly && <button onClick={() => onEdit?.(msg.content, idx)} className="p-1 text-claude-textSecondary hover:text-claude-text hover:bg-claude-hover rounded transition-colors" title="编辑"><Pencil size={14} /></button>}
+                    {!readOnly && <button onClick={() => onResend?.(msg.content, idx)} className="p-1 text-deepseek-textSecondary hover:text-deepseek-text hover:bg-deepseek-hover rounded transition-colors" title="重新发送"><RotateCcw size={14} /></button>}
+                    {!readOnly && <button onClick={() => onEdit?.(msg.content, idx)} className="p-1 text-deepseek-textSecondary hover:text-deepseek-text hover:bg-deepseek-hover rounded transition-colors" title="编辑"><Pencil size={14} /></button>}
                     <CopyButton key={`${conversationId}:${idx}`} text={extractTextContent(msg.content)} />
                   </div>
                 </div>}
               </div>
             )
           ) : (
-            <div className="text-claude-text text-[16.5px] leading-normal mt-2">
-              {!readingMode && timingLabel && <div className="mb-4 text-sm tabular-nums text-claude-textSecondary" aria-label="Turn duration">{timingLabel}<div className="mt-3 h-px w-full bg-claude-border" /></div>}
+            <div className="text-deepseek-text text-[16.5px] leading-normal mt-2">
+              {!readingMode && timingLabel && <div className="mb-4 text-sm tabular-nums text-deepseek-textSecondary" aria-label="Turn duration">{timingLabel}<div className="mt-3 h-px w-full bg-deepseek-border" /></div>}
               {/* Research badge */}
               {!readingMode && msg.research && (
                 <button
@@ -263,7 +263,7 @@ const MessageList = React.memo<MessageListProps>(({
               <WorkDetails textOnly={readingMode} conversationId={conversationId} message={msg} index={idx} live={isCurrentlyStreaming} onInspect={onInspect} />
               {!readingMode && msg.searchStatus && (!msg.searchLogs || msg.searchLogs.length === 0) && (!msg.content || msg.content.length === (msg._contentLenBeforeSearch || 0)) && loading && idx === messages.length - 1 && (
                 <div className="flex items-center justify-center gap-2 text-[15px] font-medium mb-4 w-full">
-                  <Globe size={18} className="text-claude-textSecondary" />
+                  <Globe size={18} className="text-deepseek-textSecondary" />
                   <span className="animate-shimmer-text">
                     Searching the web
                   </span>
@@ -359,7 +359,7 @@ const MessageList = React.memo<MessageListProps>(({
                 </div>
               )}
               {loading && idx === messages.length - 1 && !msg.content && !msg.searchStatus && normalizeDocumentDrafts(msg).length === 0 && !(msg.toolCalls && msg.toolCalls.length > 0) && (
-                <div role="status" className="flex items-center gap-2 ml-1 text-[14px] text-claude-textSecondary font-sans">
+                <div role="status" className="flex items-center gap-2 ml-1 text-[14px] text-deepseek-textSecondary font-sans">
                   <span aria-hidden="true" className="shrink-0"><ClaudeLogo breathe style={{ width: '40px', height: '40px' }} /></span>
                   <span>Working on it...</span>
                 </div>

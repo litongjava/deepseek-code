@@ -29,25 +29,25 @@ function BrowserStart({ onOpen }: { onOpen: (url: string) => void }) {
   const { t } = useI18n();
   return (
     <div className="flex h-full flex-col items-center justify-center gap-3 px-6 text-center">
-      <div className="flex h-10 w-10 items-center justify-center rounded-xl bg-claude-hover text-claude-textSecondary">
+      <div className="flex h-10 w-10 items-center justify-center rounded-xl bg-deepseek-hover text-deepseek-textSecondary">
         <Globe size={20} strokeWidth={1.5} aria-hidden="true" />
       </div>
-      <p className="text-[14px] font-medium text-claude-text">{t('rightSidebar.browserEmptyTitle')}</p>
-      <p className="max-w-[280px] text-[13px] leading-5 text-claude-textSecondary">{t('rightSidebar.browserEmptyDescription')}</p>
+      <p className="text-[14px] font-medium text-deepseek-text">{t('rightSidebar.browserEmptyTitle')}</p>
+      <p className="max-w-[280px] text-[13px] leading-5 text-deepseek-textSecondary">{t('rightSidebar.browserEmptyDescription')}</p>
       <AddressBar value="" onNavigate={onOpen} className="w-full max-w-[320px] text-left">
-        <button type="submit" className="flex-shrink-0 rounded-md border border-claude-border px-2.5 py-1 text-[13px] text-claude-text transition-colors hover:bg-claude-hover">
+        <button type="submit" className="flex-shrink-0 rounded-md border border-deepseek-border px-2.5 py-1 text-[13px] text-deepseek-text transition-colors hover:bg-deepseek-hover">
           {t('rightSidebar.browserGo')}
         </button>
       </AddressBar>
       <div className="w-full max-w-[320px] text-left">
-        <p id="right-sidebar-browser-suggestions" className="mb-1 text-[12px] text-claude-textSecondary">{t('rightSidebar.browserSuggestions')}</p>
+        <p id="right-sidebar-browser-suggestions" className="mb-1 text-[12px] text-deepseek-textSecondary">{t('rightSidebar.browserSuggestions')}</p>
         <ul aria-labelledby="right-sidebar-browser-suggestions" className="flex flex-wrap gap-1.5">
           {LOCAL_DEV_SUGGESTIONS.map(url => (
             <li key={url}>
               <button
                 type="button"
                 onClick={() => onOpen(url)}
-                className="rounded-md border border-claude-border px-2 py-0.5 font-mono text-[12px] text-claude-textSecondary transition-colors hover:bg-claude-hover hover:text-claude-text"
+                className="rounded-md border border-deepseek-border px-2 py-0.5 font-mono text-[12px] text-deepseek-textSecondary transition-colors hover:bg-deepseek-hover hover:text-deepseek-text"
               >
                 {url.replace(/^http:\/\//, '')}
               </button>

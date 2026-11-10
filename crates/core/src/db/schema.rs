@@ -86,6 +86,12 @@ CREATE TABLE IF NOT EXISTS message_trajectory (
     requests_json TEXT NOT NULL
 );
 
+-- Content-addressed bodies for request headers repeated across snapshots.
+CREATE TABLE IF NOT EXISTS request_blobs (
+    hash TEXT PRIMARY KEY,
+    body TEXT NOT NULL
+);
+
 CREATE TABLE IF NOT EXISTS message_user_content (
     message_id TEXT PRIMARY KEY REFERENCES messages(id) ON DELETE CASCADE,
     content_json TEXT NOT NULL

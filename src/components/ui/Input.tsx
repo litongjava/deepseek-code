@@ -24,21 +24,21 @@ const Input: React.FC<InputProps> = ({
   return (
     <div className={`flex flex-col gap-1.5 ${wrapperClassName}`}>
       {label && (
-        <label htmlFor={inputId} className="text-[13px] font-medium text-claude-text">
+        <label htmlFor={inputId} className="text-[13px] font-medium text-deepseek-text">
           {label}
         </label>
       )}
       <div className="relative">
         {leftIcon && (
-          <div className="absolute left-3 top-1/2 -translate-y-1/2 text-claude-textSecondary pointer-events-none">
+          <div className="absolute left-3 top-1/2 -translate-y-1/2 text-deepseek-textSecondary pointer-events-none">
             {leftIcon}
           </div>
         )}
         <input
           id={inputId}
           className={`
-            w-full px-3 py-2 bg-claude-input border border-claude-border rounded-lg 
-            text-claude-text placeholder-claude-textSecondary
+            w-full px-3 py-2 bg-deepseek-input border border-deepseek-border rounded-lg
+            text-deepseek-text placeholder-deepseek-textSecondary
             focus:outline-none focus:ring-2 focus:ring-blue-500/20 focus:border-blue-500
             transition-all duration-200 text-[14px]
             ${leftIcon ? 'pl-10' : ''}
@@ -49,7 +49,7 @@ const Input: React.FC<InputProps> = ({
           {...props}
         />
         {rightIcon && (
-          <div className="absolute right-3 top-1/2 -translate-y-1/2 text-claude-textSecondary">
+          <div className="absolute right-3 top-1/2 -translate-y-1/2 text-deepseek-textSecondary">
             {rightIcon}
           </div>
         )}

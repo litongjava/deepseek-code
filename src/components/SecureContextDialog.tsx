@@ -9,11 +9,11 @@ export default function SecureContextDialog() {
   const close = useSecureContextNotice((state) => state.close);
   return (
     <Modal isOpen={feature !== null} onClose={close} title={t('secureContext.title')} size="sm" className="max-w-[92vw]">
-      <div role="alert" className="text-sm text-claude-text">
+      <div role="alert" className="text-sm text-deepseek-text">
         <p>{feature ? t(`secureContext.${feature}`) : ''}</p>
-        <p className="mt-2 text-claude-textSecondary">{t('secureContext.hint')}</p>
+        <p className="mt-2 text-deepseek-textSecondary">{t('secureContext.hint')}</p>
         <div className="mt-5 flex justify-end">
-          <button type="button" onClick={close} className="rounded-lg bg-claude-accent px-4 py-2 text-white">
+          <button type="button" onClick={close} className="rounded-lg bg-deepseek-accent px-4 py-2 text-white">
             {t('common.close')}
           </button>
         </div>

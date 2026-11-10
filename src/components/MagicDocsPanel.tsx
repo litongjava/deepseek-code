@@ -6,8 +6,8 @@ import { startVisiblePolling } from '../hooks/useVisiblePolling';
 interface Document { id:string; path:string; title:string; auto_update:boolean; update_count:number }
 interface Preview { id:string; document_id:string; original:string; proposed:string; diff?:string }
 interface Snapshot { include_conversations?:boolean; documents:Document[]; previews:Preview[]; services:{name:string;state:string;error:string|null}[] }
-const button = 'rounded border border-claude-border p-2 text-sm disabled:opacity-40';
-const field = 'w-full rounded border border-claude-border bg-claude-bg p-2 text-sm';
+const button = 'rounded border border-deepseek-border p-2 text-sm disabled:opacity-40';
+const field = 'w-full rounded border border-deepseek-border bg-deepseek-bg p-2 text-sm';
 
 export default function MagicDocsPanel() {
   const [projects, setProjects] = useState<Project[]>([]);
@@ -36,7 +36,7 @@ export default function MagicDocsPanel() {
     catch (failure) { setError(String(failure)); } finally { setBusy(false); }
   };
   const running = (name:string) => snapshot?.services.some(s=>s.name===name && ['running','stopping'].includes(s.state));
-  return <section className="space-y-3 rounded border border-claude-border p-3">
+  return <section className="space-y-3 rounded border border-deepseek-border p-3">
     <h3 className="font-semibold">Magic Docs 文档维护</h3>
     <p className="text-sm">选择已信任的项目，登记包含 <code># MAGIC DOC: 标题</code> 的 Markdown 文件。生成预览后核对原文和修改内容，再确认应用；模型调用可能产生费用。</p>
     {error && <p role="alert">{error}</p>}{notice && <p role="status">{notice}</p>}
@@ -50,7 +50,7 @@ export default function MagicDocsPanel() {
     <input aria-label="文档模型" className={field} value={model} onChange={e=>setModel(e.target.value)} placeholder="模型 ID" />
     <textarea aria-label="文档更新背景" className={field} rows={4} value={context} onChange={e=>setContext(e.target.value)} placeholder="需要纳入文档的新信息" />
     <label className="flex gap-2 text-sm"><input type="checkbox" disabled={busy||!project} checked={snapshot?.include_conversations ?? false} onChange={e=>void run({action:'context_config',enabled:e.target.checked},'项目会话来源设置已保存')} />允许自动更新时将此项目近期会话文本发送给所选模型</label>
-    {snapshot?.documents.map(doc=><article key={doc.id} className="space-y-2 rounded border border-claude-border p-3">
+    {snapshot?.documents.map(doc=><article key={doc.id} className="space-y-2 rounded border border-deepseek-border p-3">
       <p>{doc.title} · 已更新 {doc.update_count} 次</p><p className="break-all text-xs">{doc.path}</p>
       <button className={button} disabled={busy||!provider||!model} onClick={()=>void run({action:'update',id:doc.id,new_context:context,provider,model},'预览已生成，原文件未修改')}>生成更新预览</button>
       <label className="flex gap-2 text-sm"><input type="checkbox" disabled={busy} checked={doc.auto_update} onChange={e=>void run({action:'auto',id:doc.id,enabled:e.target.checked},'自动更新设置已保存')} />允许自动更新此文档</label>

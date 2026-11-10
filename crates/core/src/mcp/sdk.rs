@@ -136,7 +136,7 @@ impl Run {
             let mut all_names = HashSet::new();
             let mut schema_bytes = 0usize;
             for name in &self.names {
-                let initialized = self.request(name,"initialize",json!({"protocolVersion":"2025-06-18","capabilities":{"elicitation":{}},"clientInfo":{"name":"claude-code-rust","version":env!("CARGO_PKG_VERSION")}})).await?;
+                let initialized = self.request(name,"initialize",json!({"protocolVersion":"2025-06-18","capabilities":{"elicitation":{}},"clientInfo":{"name":"deepseek-code","version":env!("CARGO_PKG_VERSION")}})).await?;
                 ensure!(matches!(initialized["protocolVersion"].as_str(),Some("2024-11-05" | "2025-03-26" | "2025-06-18" | "2025-11-25")), "Unsupported SDK MCP protocol version");
                 ensure!(initialized["capabilities"].is_object(), "SDK MCP initialize requires capabilities");
                 ensure!(initialized["serverInfo"]["name"].is_string() && initialized["serverInfo"]["version"].is_string(), "SDK MCP initialize requires serverInfo");

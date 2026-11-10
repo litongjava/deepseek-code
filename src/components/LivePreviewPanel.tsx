@@ -116,12 +116,12 @@ const LivePreviewPanel: React.FC<LivePreviewPanelProps> = ({
   const InfoIcon = info.icon;
 
   return (
-    <div className="flex-1 h-full flex flex-col bg-claude-bg">
+    <div className="flex-1 h-full flex flex-col bg-deepseek-bg">
       {/* ── Header ── */}
-      <div className="flex items-center justify-between px-4 py-3 border-b border-claude-border bg-claude-surface flex-shrink-0">
+      <div className="flex items-center justify-between px-4 py-3 border-b border-deepseek-border bg-deepseek-surface flex-shrink-0">
         <div className="flex items-center gap-3">
           {onBack && (
-            <button onClick={onBack} className="flex items-center gap-1.5 text-claude-textSecondary hover:text-claude-text transition-colors">
+            <button onClick={onBack} className="flex items-center gap-1.5 text-deepseek-textSecondary hover:text-deepseek-text transition-colors">
               <span className="text-[14px]">&larr; Back</span>
             </button>
           )}
@@ -130,8 +130,8 @@ const LivePreviewPanel: React.FC<LivePreviewPanelProps> = ({
               <InfoIcon size={14} className="text-[#8B5CF6]" />
             </div>
             <div>
-              <h2 className="text-[14px] font-semibold text-claude-text">{info.label}</h2>
-              <p className="text-[11px] text-claude-textSecondary flex items-center gap-1.5">
+              <h2 className="text-[14px] font-semibold text-deepseek-text">{info.label}</h2>
+              <p className="text-[11px] text-deepseek-textSecondary flex items-center gap-1.5">
                 Live Preview
                 {generating && (
                   <span className="flex items-center gap-1 px-1.5 py-0.5 rounded-full bg-amber-500/15 border border-amber-500/25">
@@ -145,11 +145,11 @@ const LivePreviewPanel: React.FC<LivePreviewPanelProps> = ({
         </div>
 
         <div className="flex items-center gap-2">
-          <span className="text-[11px] text-claude-textSecondary">模型:</span>
+          <span className="text-[11px] text-deepseek-textSecondary">模型:</span>
           <select
             value={model}
             onChange={e => setModel(e.target.value)}
-            className="px-2 py-0.5 bg-claude-input border border-claude-border rounded text-[12px] text-claude-text"
+            className="px-2 py-0.5 bg-deepseek-input border border-deepseek-border rounded text-[12px] text-deepseek-text"
             disabled={generating}
           >
             <option value="claude-sonnet-4-6">Claude Sonnet 4.6</option>
@@ -161,17 +161,17 @@ const LivePreviewPanel: React.FC<LivePreviewPanelProps> = ({
       {/* ── Main Content: Left Panel + Right Canvas ── */}
       <div className="flex-1 flex overflow-hidden">
         {/* Left panel — prompt + controls + streaming text */}
-        <div className="w-[340px] flex-shrink-0 border-r border-claude-border bg-claude-surface flex flex-col overflow-hidden">
+        <div className="w-[340px] flex-shrink-0 border-r border-deepseek-border bg-deepseek-surface flex flex-col overflow-hidden">
           {/* Prompt area */}
-          <div className="p-4 border-b border-claude-border flex-shrink-0">
-            <label className="block text-[12px] font-medium text-claude-textSecondary mb-2">
+          <div className="p-4 border-b border-deepseek-border flex-shrink-0">
+            <label className="block text-[12px] font-medium text-deepseek-textSecondary mb-2">
               设计描述
             </label>
             <textarea
               value={prompt}
               onChange={e => setPrompt(e.target.value)}
               placeholder="描述你想要的设计..."
-              className="w-full px-3 py-2 bg-claude-input border border-claude-border rounded-lg text-[13px] text-claude-text focus:outline-none focus:border-[#8B5CF6] resize-none"
+              className="w-full px-3 py-2 bg-deepseek-input border border-deepseek-border rounded-lg text-[13px] text-deepseek-text focus:outline-none focus:border-[#8B5CF6] resize-none"
               rows={3}
               disabled={generating}
               onKeyDown={e => {
@@ -183,7 +183,7 @@ const LivePreviewPanel: React.FC<LivePreviewPanelProps> = ({
 
             {/* Style selector */}
             <div className="mt-3">
-              <label className="block text-[11px] text-claude-textSecondary mb-1.5">视觉风格</label>
+              <label className="block text-[11px] text-deepseek-textSecondary mb-1.5">视觉风格</label>
               <div className="flex flex-wrap gap-1">
                 {DESIGN_STYLES.map(style => (
                   <button
@@ -193,7 +193,7 @@ const LivePreviewPanel: React.FC<LivePreviewPanelProps> = ({
                     className={`px-2 py-0.5 rounded text-[11px] transition-colors ${
                       selectedStyle === style.id
                         ? 'bg-[#8B5CF6] text-white'
-                        : 'bg-claude-hover text-claude-textSecondary hover:text-claude-text'
+                        : 'bg-deepseek-hover text-deepseek-textSecondary hover:text-deepseek-text'
                     }`}
                   >
                     {style.name}
@@ -218,7 +218,7 @@ const LivePreviewPanel: React.FC<LivePreviewPanelProps> = ({
               {generating && (
                 <button
                   onClick={handleStop}
-                  className="px-3 py-2 bg-claude-hover text-claude-textSecondary hover:text-claude-text rounded-lg text-[13px]"
+                  className="px-3 py-2 bg-deepseek-hover text-deepseek-textSecondary hover:text-deepseek-text rounded-lg text-[13px]"
                 >
                   <Square size={14} />
                 </button>
@@ -239,16 +239,16 @@ const LivePreviewPanel: React.FC<LivePreviewPanelProps> = ({
               <div>
                 <div className="flex items-center gap-2 mb-3">
                   <span className={`w-2 h-2 rounded-full ${generating ? 'bg-green-400 animate-pulse' : 'bg-gray-400'}`} />
-                  <span className="text-[11px] text-claude-textSecondary">
+                  <span className="text-[11px] text-deepseek-textSecondary">
                     {generating ? 'AI 正在生成...' : '生成完成'}
                   </span>
                 </div>
-                <pre className="text-[11px] text-claude-text font-mono whitespace-pre-wrap leading-relaxed">
+                <pre className="text-[11px] text-deepseek-text font-mono whitespace-pre-wrap leading-relaxed">
                   {streamingText}
                 </pre>
               </div>
             ) : (
-              <div className="flex flex-col items-center justify-center h-full text-claude-textSecondary">
+              <div className="flex flex-col items-center justify-center h-full text-deepseek-textSecondary">
                 <Wand2 size={28} className="mb-3 opacity-30" />
                 <p className="text-[13px]">描述你的设计需求</p>
                 <p className="text-[11px] mt-1 opacity-60">AI 将生成完整 HTML 并实时预览</p>
@@ -259,15 +259,15 @@ const LivePreviewPanel: React.FC<LivePreviewPanelProps> = ({
 
         {/* Right panel — live DesignCanvas with glow during generation */}
         <div className={`flex-1 bg-white p-4 ${generating ? 'preview-generating-border' : ''}`}>
-          <div className="w-full h-full rounded-xl border border-claude-border overflow-hidden bg-white shadow-sm">
+          <div className="w-full h-full rounded-xl border border-deepseek-border overflow-hidden bg-white shadow-sm">
             <DesignCanvas ref={canvasRef} />
           </div>
         </div>
       </div>
 
       {/* ── Footer ── */}
-      <div className="px-4 py-2 border-t border-claude-border bg-claude-surface flex items-center justify-between flex-shrink-0">
-        <span className="text-[11px] text-claude-textSecondary">
+      <div className="px-4 py-2 border-t border-deepseek-border bg-deepseek-surface flex items-center justify-between flex-shrink-0">
+        <span className="text-[11px] text-deepseek-textSecondary">
           {generatedHtml ? `${generatedHtml.length.toLocaleString()} 字符` : 'Ready'}
         </span>
         <div className="flex items-center gap-2">
@@ -280,7 +280,7 @@ const LivePreviewPanel: React.FC<LivePreviewPanelProps> = ({
                     canvasRef.current?.sendMessage({ type: 'set_content', payload: { html: generatedHtml! } });
                   }, 100);
                 }}
-                className="flex items-center gap-1 px-3 py-1.5 text-[12px] text-claude-textSecondary hover:text-claude-text bg-claude-hover rounded-md transition-colors"
+                className="flex items-center gap-1 px-3 py-1.5 text-[12px] text-deepseek-textSecondary hover:text-deepseek-text bg-deepseek-hover rounded-md transition-colors"
               >
                 <RefreshCw size={13} />
                 重置预览

@@ -248,14 +248,14 @@ const McpSettingsPage = () => {
     <div className="space-y-6">
       <McpLegacyImport onImported={refresh} />
       <div className="flex items-center justify-between">
-        <h3 className="text-[18px] font-medium text-claude-text">MCP Servers</h3>
+        <h3 className="text-[18px] font-medium text-deepseek-text">MCP Servers</h3>
         <button
           onClick={() => {
             resetForm();
             setEditingServer(null);
             setShowAddForm(true);
           }}
-          className="flex items-center gap-1.5 px-3 py-1.5 bg-claude-accent text-white rounded-lg text-[14px] hover:opacity-90 transition-opacity"
+          className="flex items-center gap-1.5 px-3 py-1.5 bg-deepseek-accent text-white rounded-lg text-[14px] hover:opacity-90 transition-opacity"
         >
           <Plus size={16} />
           Add Server
@@ -278,7 +278,7 @@ const McpSettingsPage = () => {
       {/* Add/Edit Form */}
       {showAddForm && (
         <div className="border border-[#e5e5e5] rounded-xl p-4 space-y-4 bg-[#fafafa]">
-          <h4 className="text-[16px] font-medium text-claude-text">
+          <h4 className="text-[16px] font-medium text-deepseek-text">
             {editingServer ? 'Edit Server' : 'Add MCP Server'}
           </h4>
           
@@ -375,7 +375,7 @@ const McpSettingsPage = () => {
           <div className="flex gap-2">
             <button
               onClick={handleSubmit}
-              className="px-4 py-2 bg-claude-accent text-white rounded-lg text-[14px] hover:opacity-90 transition-opacity"
+              className="px-4 py-2 bg-deepseek-accent text-white rounded-lg text-[14px] hover:opacity-90 transition-opacity"
             >
               {editingServer ? 'Update' : 'Add'}
             </button>
@@ -415,7 +415,7 @@ const McpSettingsPage = () => {
                     server.running ? 'bg-green-500' : server.enabled ? 'bg-gray-400' : 'bg-gray-300'
                   }`} />
                   <div>
-                    <h4 className="text-[15px] font-medium text-claude-text">{server.name}</h4>
+                    <h4 className="text-[15px] font-medium text-deepseek-text">{server.name}</h4>
                     <p className="text-[12px] text-[#999] font-mono mt-0.5">
                       {server.url ? `${server.transport_type} ${server.url}` : `${server.command} ${(server.args || []).join(' ')}`}
                     </p>
@@ -498,7 +498,7 @@ const McpSettingsPage = () => {
       {/* Tools Section */}
       {tools.length > 0 && (
         <div className="border-t border-[#e5e5e5] pt-6">
-          <h3 className="text-[18px] font-medium text-claude-text mb-4 flex items-center gap-2">
+          <h3 className="text-[18px] font-medium text-deepseek-text mb-4 flex items-center gap-2">
             <Wrench size={20} />
             Available MCP Tools ({tools.length})
           </h3>
@@ -512,7 +512,7 @@ const McpSettingsPage = () => {
                 >
                   <div className="flex items-center gap-2">
                     {expandedTools.has(serverName) ? <ChevronDown size={16} /> : <ChevronRight size={16} />}
-                    <span className="text-[14px] font-medium text-claude-text">{serverName}</span>
+                    <span className="text-[14px] font-medium text-deepseek-text">{serverName}</span>
                     <span className="text-[12px] text-[#999]">{serverTools.length} tools</span>
                   </div>
                 </button>
@@ -521,7 +521,7 @@ const McpSettingsPage = () => {
                   <div className="divide-y divide-[#f0f0f0]">
                     {serverTools.map((tool) => (
                       <div key={tool.name} className="px-4 py-3">
-                        <h5 className="text-[14px] font-mono text-claude-text">{tool.name}</h5>
+                        <h5 className="text-[14px] font-mono text-deepseek-text">{tool.name}</h5>
                         {tool.description && (
                           <p className="text-[13px] text-[#666] mt-1">{tool.description}</p>
                         )}
@@ -538,7 +538,7 @@ const McpSettingsPage = () => {
       {/* Quick Add Templates */}
       {!showAddForm && servers.length === 0 && (
         <div className="border border-[#e5e5e5] rounded-xl p-4">
-          <h4 className="text-[14px] font-medium text-claude-text mb-3">Quick Add Templates</h4>
+          <h4 className="text-[14px] font-medium text-deepseek-text mb-3">Quick Add Templates</h4>
           <div className="grid grid-cols-1 gap-2">
             {[
               { name: 'Filesystem', command: 'npx', args: '-y @modelcontextprotocol/server-filesystem .' },
@@ -565,7 +565,7 @@ const McpSettingsPage = () => {
               >
                 <Globe size={16} className="text-[#999]" />
                 <div>
-                  <span className="text-[14px] font-medium text-claude-text">{template.name}</span>
+                  <span className="text-[14px] font-medium text-deepseek-text">{template.name}</span>
                   <p className="text-[12px] text-[#999] font-mono">{template.command} {template.args}</p>
                 </div>
               </button>

@@ -168,22 +168,22 @@ const DocumentPanel: React.FC<DocumentPanelProps> = ({ document: doc, onClose })
   };
 
   return (
-    <div className="flex-1 h-full flex flex-col bg-claude-input border-l border-claude-border min-w-0">
+    <div className="flex-1 h-full flex flex-col bg-deepseek-input border-l border-deepseek-border min-w-0">
       {/* Header */}
-      <div className="flex items-center justify-between px-4 py-3 border-b border-claude-border flex-shrink-0">
+      <div className="flex items-center justify-between px-4 py-3 border-b border-deepseek-border flex-shrink-0">
         <div className="flex items-center min-w-0 gap-3 flex-1">
           {(isMarkdown || isRenderable) && (
-            <div className="flex bg-claude-btnHover rounded-lg p-0.5 flex-shrink-0">
+            <div className="flex bg-deepseek-btnHover rounded-lg p-0.5 flex-shrink-0">
                 <button
                     onClick={() => setViewMode('preview')}
-                    className={`p-1.5 rounded-md transition-all ${viewMode === 'preview' ? 'bg-white dark:bg-[#555] shadow-sm text-claude-text' : 'text-claude-textSecondary hover:text-claude-text'}`}
+                    className={`p-1.5 rounded-md transition-all ${viewMode === 'preview' ? 'bg-white dark:bg-[#555] shadow-sm text-deepseek-text' : 'text-deepseek-textSecondary hover:text-deepseek-text'}`}
                     title="Preview"
                 >
                     <Eye size={16} />
                 </button>
                 <button
                     onClick={() => setViewMode('code')}
-                    className={`p-1.5 rounded-md transition-all ${viewMode === 'code' ? 'bg-white dark:bg-[#555] shadow-sm text-claude-text' : 'text-claude-textSecondary hover:text-claude-text'}`}
+                    className={`p-1.5 rounded-md transition-all ${viewMode === 'code' ? 'bg-white dark:bg-[#555] shadow-sm text-deepseek-text' : 'text-deepseek-textSecondary hover:text-deepseek-text'}`}
                     title="Code"
                 >
                     <Code size={16} />
@@ -191,9 +191,9 @@ const DocumentPanel: React.FC<DocumentPanelProps> = ({ document: doc, onClose })
             </div>
           )}
           <div className="flex items-center min-w-0 text-[14px] truncate">
-            <span className="text-claude-text font-normal truncate">{doc.title}</span>
+            <span className="text-deepseek-text font-normal truncate">{doc.title}</span>
             {!doc.title.toLowerCase().endsWith(`.${fmt}`) && (
-              <span className="text-claude-textSecondary font-normal ml-1 flex-shrink-0">· {fmt.toUpperCase()}</span>
+              <span className="text-deepseek-textSecondary font-normal ml-1 flex-shrink-0">· {fmt.toUpperCase()}</span>
             )}
           </div>
         </div>
@@ -202,14 +202,14 @@ const DocumentPanel: React.FC<DocumentPanelProps> = ({ document: doc, onClose })
           <div className="relative flex items-center">
             <button
                 onClick={handleCopyContent}
-                className="h-7 flex items-center px-3 text-[13px] font-medium text-claude-text border border-claude-border border-r-0 rounded-l-lg hover:bg-claude-btnHover transition-colors"
+                className="h-7 flex items-center px-3 text-[13px] font-medium text-deepseek-text border border-deepseek-border border-r-0 rounded-l-lg hover:bg-deepseek-btnHover transition-colors"
             >
                 {copied ? 'Copied' : 'Copy'}
             </button>
             <button
                 ref={copyBtnRef}
                 onClick={() => setShowCopyMenu(!showCopyMenu)}
-                className="h-7 px-2 flex items-center justify-center border border-claude-border rounded-r-lg hover:bg-claude-btnHover transition-colors text-claude-text"
+                className="h-7 px-2 flex items-center justify-center border border-deepseek-border rounded-r-lg hover:bg-deepseek-btnHover transition-colors text-deepseek-text"
             >
                 <ChevronDown size={14} />
             </button>
@@ -217,24 +217,24 @@ const DocumentPanel: React.FC<DocumentPanelProps> = ({ document: doc, onClose })
             {showCopyMenu && (
                 <div 
                     ref={copyMenuRef}
-                    className="absolute top-full right-0 mt-1 w-48 bg-white dark:bg-claude-input border border-claude-border rounded-lg shadow-lg py-1 z-50"
+                    className="absolute top-full right-0 mt-1 w-48 bg-white dark:bg-deepseek-input border border-deepseek-border rounded-lg shadow-lg py-1 z-50"
                 >
                     <button 
                         onClick={() => handleDownload()}
-                        className="w-full text-left px-4 py-2 text-[13px] text-claude-text hover:bg-claude-btnHover transition-colors"
+                        className="w-full text-left px-4 py-2 text-[13px] text-deepseek-text hover:bg-deepseek-btnHover transition-colors"
                     >
                         Download
                     </button>
                     {fmt === 'markdown' && (
                         <button 
                             onClick={() => handleDownload('pdf')}
-                            className="w-full text-left px-4 py-2 text-[13px] text-claude-text hover:bg-claude-btnHover transition-colors"
+                            className="w-full text-left px-4 py-2 text-[13px] text-deepseek-text hover:bg-deepseek-btnHover transition-colors"
                         >
                             Download as PDF
                         </button>
                     )}
                     <button 
-                        className="w-full text-left px-4 py-2 text-[13px] text-claude-text hover:bg-claude-btnHover transition-colors"
+                        className="w-full text-left px-4 py-2 text-[13px] text-deepseek-text hover:bg-deepseek-btnHover transition-colors"
                         onClick={() => setShowCopyMenu(false)}
                     >
                         Publish artifact
@@ -245,7 +245,7 @@ const DocumentPanel: React.FC<DocumentPanelProps> = ({ document: doc, onClose })
 
           <button
             onClick={() => {}} // Retry/Refresh logic placeholder
-            className="p-1.5 text-claude-textSecondary hover:text-claude-text hover:bg-claude-btnHover rounded-lg transition-colors"
+            className="p-1.5 text-deepseek-textSecondary hover:text-deepseek-text hover:bg-deepseek-btnHover rounded-lg transition-colors"
             title="Reload"
           >
             <RefreshCw size={16} />
@@ -253,7 +253,7 @@ const DocumentPanel: React.FC<DocumentPanelProps> = ({ document: doc, onClose })
           
           <button
             onClick={onClose}
-            className="p-1.5 text-claude-textSecondary hover:text-claude-text hover:bg-claude-btnHover rounded-lg transition-colors"
+            className="p-1.5 text-deepseek-textSecondary hover:text-deepseek-text hover:bg-deepseek-btnHover rounded-lg transition-colors"
             title="Close"
           >
             <X size={20} />
@@ -262,7 +262,7 @@ const DocumentPanel: React.FC<DocumentPanelProps> = ({ document: doc, onClose })
       </div>
 
       {/* Content */}
-      <div className={`flex-1 overflow-y-auto chat-font-scope ${fmt === 'docx' || fmt === 'pdf' ? 'px-6 py-6 bg-claude-hover' : 'px-8 py-6'} ${viewMode === 'code' || isCode ? '!p-0 overflow-hidden bg-[#FAFAFA] dark:bg-[#1E1E1E]' : ''} ${viewMode === 'preview' && isRenderable ? '!p-0 !overflow-hidden' : ''}`}>
+      <div className={`flex-1 overflow-y-auto chat-font-scope ${fmt === 'docx' || fmt === 'pdf' ? 'px-6 py-6 bg-deepseek-hover' : 'px-8 py-6'} ${viewMode === 'code' || isCode ? '!p-0 overflow-hidden bg-[#FAFAFA] dark:bg-[#1E1E1E]' : ''} ${viewMode === 'preview' && isRenderable ? '!p-0 !overflow-hidden' : ''}`}>
         {/* Live HTML/React preview */}
         {viewMode === 'preview' && isRenderable && doc.content ? (
           <ArtifactPreview content={doc.content} type={isReact ? 'application/vnd.ant.react' : 'text/html'} />
@@ -272,7 +272,7 @@ const DocumentPanel: React.FC<DocumentPanelProps> = ({ document: doc, onClose })
                 <div ref={contentRef} onScroll={handleScroll} className="flex-1 overflow-auto bg-[#FAFAFA] dark:bg-[#1E1E1E]">
                     <div className="flex min-h-full">
                         {/* Line Numbers — inside the scroll container so they scroll together */}
-                        <div className="flex-none w-[40px] bg-[#FAFAFA] dark:bg-[#1E1E1E] text-right pt-4 pr-2 select-none text-claude-textSecondary opacity-50 sticky left-0">
+                        <div className="flex-none w-[40px] bg-[#FAFAFA] dark:bg-[#1E1E1E] text-right pt-4 pr-2 select-none text-deepseek-textSecondary opacity-50 sticky left-0">
                             {doc.content?.split('\n').map((_: string, i: number) => (
                                 <div key={i} style={{ lineHeight: '1.625' }}>{i + 1}</div>
                             ))}
@@ -315,8 +315,8 @@ const DocumentPanel: React.FC<DocumentPanelProps> = ({ document: doc, onClose })
                   <div className="space-y-6">
                     {doc.sheets.map((sheet, si) => (
                       <div key={si}>
-                        <div className="text-[14px] font-medium text-claude-text mb-2">{sheet.name}</div>
-                        <div className="overflow-x-auto border border-claude-border rounded-lg">
+                        <div className="text-[14px] font-medium text-deepseek-text mb-2">{sheet.name}</div>
+                        <div className="overflow-x-auto border border-deepseek-border rounded-lg">
                           <table className="w-full text-[13px]">
                             <thead>
                               <tr className="bg-[#4472C4] text-white">
@@ -327,9 +327,9 @@ const DocumentPanel: React.FC<DocumentPanelProps> = ({ document: doc, onClose })
                             </thead>
                             <tbody>
                               {sheet.rows.map((row, ri) => (
-                                <tr key={ri} className={ri % 2 === 0 ? 'bg-claude-bg' : 'bg-transparent'}>
+                                <tr key={ri} className={ri % 2 === 0 ? 'bg-deepseek-bg' : 'bg-transparent'}>
                                   {row.map((cell, ci) => (
-                                    <td key={ci} className="px-3 py-1.5 border-t border-claude-border whitespace-nowrap text-claude-text">{cell ?? ''}</td>
+                                    <td key={ci} className="px-3 py-1.5 border-t border-deepseek-border whitespace-nowrap text-deepseek-text">{cell ?? ''}</td>
                                   ))}
                                 </tr>
                               ))}

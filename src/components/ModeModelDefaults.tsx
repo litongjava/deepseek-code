@@ -10,10 +10,10 @@ export default function ModeModelDefaults({ providers }: { providers: Provider[]
   const saveError = useGeneralSettingsStore(state => state.saveError);
   const available = providers.filter(provider => provider.enabled && provider.models.some(model => model.enabled !== false)).sort(compareModelNames);
   const save = (mode: HomeModelMode, value: ModeModel | null) => update({ defaultModelByMode: { ...defaults, [mode]: value } });
-  const selectClass = 'min-w-0 w-full rounded-lg border border-claude-border bg-claude-input px-3 py-2 text-sm text-claude-text';
-  return <fieldset className="mb-6 min-w-0 rounded-2xl border border-claude-border bg-claude-input p-5">
+  const selectClass = 'min-w-0 w-full rounded-lg border border-deepseek-border bg-deepseek-input px-3 py-2 text-sm text-deepseek-text';
+  return <fieldset className="mb-6 min-w-0 rounded-2xl border border-deepseek-border bg-deepseek-input p-5">
     <legend className="px-2 text-sm font-medium">{t('general.modeModels')}</legend>
-    <p className="mb-4 text-xs text-claude-textSecondary">{t('general.modeModelsDescription')}</p>
+    <p className="mb-4 text-xs text-deepseek-textSecondary">{t('general.modeModelsDescription')}</p>
     {saveError && <p role="alert" className="mb-3 text-sm text-red-500">{saveError}</p>}
     <div className="grid gap-3">
       {(['chat', 'work', 'study'] as const).map(mode => {
@@ -24,7 +24,7 @@ export default function ModeModelDefaults({ providers }: { providers: Provider[]
         const missing = selected && (!provider || !models.some(model => model.id === selected.modelId));
         return <div key={mode} className="grid items-center gap-3 sm:grid-cols-[70px_1fr_1fr]">
           <span className="text-sm">{label}</span>
-          <label className="min-w-0 text-xs text-claude-textSecondary">{t('general.modelProvider')}
+          <label className="min-w-0 text-xs text-deepseek-textSecondary">{t('general.modelProvider')}
             <select aria-label={`${label} · ${t('general.modelProvider')}`} className={`${selectClass} mt-1`} value={selected?.providerId || ''} onChange={event => {
               const entry = available.find(item => item.id === event.target.value);
               const first = entry && [...entry.models].filter(model => model.enabled !== false).sort(compareModelNames)[0];
@@ -35,7 +35,7 @@ export default function ModeModelDefaults({ providers }: { providers: Provider[]
               {available.map(entry => <option key={entry.id} value={entry.id}>{entry.name}</option>)}
             </select>
           </label>
-          <label className="min-w-0 text-xs text-claude-textSecondary">Model
+          <label className="min-w-0 text-xs text-deepseek-textSecondary">Model
             <select aria-label={`${label} · Model`} disabled={!provider} className={`${selectClass} mt-1 disabled:opacity-50`} value={selected?.modelId || ''} onChange={event => {
               if (provider) save(mode, { providerId: provider.id, modelId: event.target.value });
             }}>

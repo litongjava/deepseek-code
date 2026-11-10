@@ -112,7 +112,7 @@ pub fn configure(path: Option<PathBuf>) -> anyhow::Result<()> {
     *DESTINATION.write().unwrap_or_else(|e| e.into_inner()) = path;
     *FILE.write().unwrap_or_else(|e| e.into_inner()) = file;
     handle.reload(EnvFilter::new(if enabled {
-        "error,deepseek_code_core=debug,claude_code=debug"
+        "error,deepseek_code_core=debug,deepseek_code_cli=debug"
     } else {
         "error"
     }))?;
@@ -129,14 +129,14 @@ pub fn destination() -> Option<PathBuf> {
 fn category_filter(categories: &str) -> anyhow::Result<EnvFilter> {
     use anyhow::{bail, ensure};
     if categories.trim().is_empty() {
-        return Ok(EnvFilter::new("error,deepseek_code_core=debug,claude_code=debug"));
+        return Ok(EnvFilter::new("error,deepseek_code_core=debug,deepseek_code_cli=debug"));
     }
     let parts: Vec<_> = categories.split(',').map(str::trim).collect();
     let has_inclusions = parts.iter().any(|part| !part.starts_with('!'));
     let mut filter = if has_inclusions {
         "error".to_owned()
     } else {
-        "error,deepseek_code_core=debug,claude_code=debug".to_owned()
+        "error,deepseek_code_core=debug,deepseek_code_cli=debug".to_owned()
     };
     for part in parts {
         let (enabled, name) = part
@@ -152,7 +152,7 @@ fn category_filter(categories: &str) -> anyhow::Result<EnvFilter> {
             "ide" => "deepseek_code_core::services::ide",
             "skills" => "deepseek_code_core::skills",
             "permissions" => "deepseek_code_core::permissions",
-            "cli" => "claude_code",
+            "cli" => "deepseek_code_cli",
             "1p" => "deepseek_code_core::native_engine::anthropic_client",
             "file" => "deepseek_code_core::tools",
             _ => bail!("Unknown debug category '{name}'; use api,hooks,mcp,lsp,ide,skills,permissions,cli,1p,file (prefix ! to exclude)"),

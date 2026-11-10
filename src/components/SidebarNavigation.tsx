@@ -57,10 +57,10 @@ export default function SidebarNavigation({ collapsed, onNewChat, onSearch, onPa
     { label: t('sidebar.h5Access'), icon: Smartphone, action: () => onPanel('h5') },
     { label: 'GitHub', icon: Github, action: () => onPanel('github') },
   ];
-  const itemClass = 'flex w-full items-center gap-2.5 rounded-lg px-2 py-2 text-left text-[13px] text-claude-text hover:bg-claude-hover';
+  const itemClass = 'flex w-full items-center gap-2.5 rounded-lg px-2 py-2 text-left text-[13px] text-deepseek-text hover:bg-deepseek-hover';
   const groups = <div className="flex items-center gap-1" aria-label="Tools and extensions">
     {[{ id: 'tools', label: t('sidebar.tools'), icon: Wrench, items: tools }, { id: 'extensions', label: t('sidebar.extensions'), icon: Puzzle, items: extensions }].map(group => <div key={group.id}>
-      <button type="button" aria-label={group.label} aria-haspopup="menu" aria-expanded={expanded === group.id} onClick={event => { triggerRef.current = event.currentTarget; const rect = event.currentTarget.getBoundingClientRect(); setPosition({ left: Math.max(8, Math.min(rect.left, window.innerWidth - 232)), top: rect.bottom + 5 }); setExpanded(expanded === group.id ? null : group.id); }} className="flex h-8 items-center gap-1.5 rounded-md px-2 text-[13px] text-claude-text hover:bg-claude-hover"><group.icon size={15} className="shrink-0" /><span>{group.label}</span><ChevronDown size={12} /></button>
+      <button type="button" aria-label={group.label} aria-haspopup="menu" aria-expanded={expanded === group.id} onClick={event => { triggerRef.current = event.currentTarget; const rect = event.currentTarget.getBoundingClientRect(); setPosition({ left: Math.max(8, Math.min(rect.left, window.innerWidth - 232)), top: rect.bottom + 5 }); setExpanded(expanded === group.id ? null : group.id); }} className="flex h-8 items-center gap-1.5 rounded-md px-2 text-[13px] text-deepseek-text hover:bg-deepseek-hover"><group.icon size={15} className="shrink-0" /><span>{group.label}</span><ChevronDown size={12} /></button>
       {expanded === group.id && createPortal(<div ref={menuRef} role="menu" aria-label={group.label} style={position} onKeyDown={event => {
         if (!['ArrowDown', 'ArrowUp', 'Home', 'End'].includes(event.key)) return;
         event.preventDefault();
@@ -68,7 +68,7 @@ export default function SidebarNavigation({ collapsed, onNewChat, onSearch, onPa
         const current = buttons.indexOf(document.activeElement as HTMLButtonElement);
         const index = event.key === 'Home' ? 0 : event.key === 'End' ? buttons.length - 1 : (current + (event.key === 'ArrowDown' ? 1 : buttons.length - 1)) % buttons.length;
         buttons[index]?.focus();
-      }} className="fixed z-[10010] max-h-[min(440px,80vh)] w-56 overflow-y-auto rounded-lg border border-claude-border bg-claude-sidebar p-1 shadow-md">
+      }} className="fixed z-[10010] max-h-[min(440px,80vh)] w-56 overflow-y-auto rounded-lg border border-deepseek-border bg-deepseek-sidebar p-1 shadow-md">
         {group.items.map(item => <button type="button" role="menuitem" key={item.label} onClick={() => { item.action(); setExpanded(null); }} className={itemClass}><item.icon size={15} className="shrink-0" />{item.label}</button>)}
       </div>, document.body)}
     </div>)}

@@ -19,8 +19,8 @@ interface Snapshot {
   services: {name: string; pid: number; state: string; error: string | null; completed: number}[];
   memories: Memory[]; conflicts: {local: Memory; remote: Memory}[];
 }
-const fieldStyle = 'w-full bg-claude-input border border-claude-border rounded p-2 text-sm';
-const buttonStyle = 'border border-claude-border rounded px-3 py-2 text-sm hover:bg-claude-hover disabled:opacity-40';
+const fieldStyle = 'w-full bg-deepseek-input border border-deepseek-border rounded p-2 text-sm';
+const buttonStyle = 'border border-deepseek-border rounded px-3 py-2 text-sm hover:bg-deepseek-hover disabled:opacity-40';
 const command = (request: Record<string, unknown>) => invoke('peripheral_command', {request});
 // Keep the active credential intact when endpoint validation or authentication fails.
 async function configure(action: string, config: Record<string, unknown>, value: string) {
@@ -66,7 +66,7 @@ export default function ServicesSettings() {
   };
   const resetEditor = () => {setEditing(null); setTitle(''); setContent(''); setTags('');};
   const field = (label: string, value: string, setter: (s: string) => void, password = false) => <label className="block">{label}<input type={password ? 'password' : 'text'} className={fieldStyle} value={value} onChange={e => setter(e.target.value)} /></label>;
-  return <div className="py-8 space-y-7 text-claude-text">
+  return <div className="py-8 space-y-7 text-deepseek-text">
     <h2 className="text-xl font-semibold">服务与团队</h2>
     {error && <p role="alert" className="text-red-500 whitespace-pre-wrap">{error}</p>}{message && <p role="status">{message}</p>}
     <button className={buttonStyle} onClick={() => setShowDocs(!showDocs)}>Magic Docs 文档维护</button>
@@ -105,19 +105,19 @@ export default function ServicesSettings() {
       {snapshot?.team && <>
         <button className={buttonStyle} onClick={()=>setShowTeamContext(!showTeamContext)}>团队记忆进入模型的项目授权</button>
         {showTeamContext&&<TeamContextSharing />}
-        <div className="space-y-2 border border-claude-border rounded p-4">
+        <div className="space-y-2 border border-deepseek-border rounded p-4">
           {field('旧团队记忆目录', legacySource, setLegacySource)}
           <button disabled={busy || !legacySource} className={buttonStyle} onClick={() => run(async () => {setImportReport(await command({action:'team_import', source:legacySource, preview:true}) as typeof importReport);}, '预览完成，尚未写入')}>预览导入</button>
           <button disabled={busy || !legacySource} className={buttonStyle} onClick={() => run(async () => {setImportReport(await command({action:'team_import', source:legacySource, preview:false}) as typeof importReport);}, '导入完成，等待同步')}>备份并导入</button>
           {importReport && <p className="text-sm">{importReport.preview ? '预计新增' : '已新增'} {importReport.imported} 条，跳过 {importReport.skipped} 条{importReport.backup && `；备份：${importReport.backup}`}</p>}
         </div>
-        <div className="border border-claude-border rounded p-4 space-y-2"><h4>{editing ? '编辑记忆' : '创建记忆'}</h4>
+        <div className="border border-deepseek-border rounded p-4 space-y-2"><h4>{editing ? '编辑记忆' : '创建记忆'}</h4>
           {field('记忆标题', title, setTitle)}<label className="block">记忆内容<textarea className={fieldStyle} value={content} onChange={e => setContent(e.target.value)} /></label>{field('标签（逗号分隔）', tags, setTags)}
           <button className={buttonStyle} disabled={busy || !content.trim()} onClick={() => run(async () => {
             await command({action: 'team_put', id: editing, title, content, tags: tags.split(',').map(t => t.trim()).filter(Boolean)});resetEditor();
           }, '已保存本地记忆，等待同步')}>保存记忆</button>{editing && <button className={buttonStyle} onClick={resetEditor}>取消编辑</button>}
         </div>
-        {snapshot.memories.map(memory => <article key={memory.id} className="border border-claude-border rounded p-4 space-y-2"><h4>{memory.title}</h4><p className="whitespace-pre-wrap">{memory.content}</p><small>版本 {memory.revision} · {memory.tags.join(', ')}</small><div>
+        {snapshot.memories.map(memory => <article key={memory.id} className="border border-deepseek-border rounded p-4 space-y-2"><h4>{memory.title}</h4><p className="whitespace-pre-wrap">{memory.content}</p><small>版本 {memory.revision} · {memory.tags.join(', ')}</small><div>
           <button className={buttonStyle} disabled={busy} onClick={() => {setEditing(memory.id);setTitle(memory.title);setContent(memory.content);setTags(memory.tags.join(','));}}>编辑</button>
           <button className={buttonStyle} disabled={busy} onClick={() => {if (window.confirm(`删除“${memory.title}”？删除标记将在同步后传播。`)) void run(() => command({action:'team_delete',id:memory.id}), '已标记删除');}}>删除</button></div></article>)}
         {snapshot.conflicts.map(conflict => <article key={conflict.local.id} className="border border-orange-400 rounded p-4"><h4>冲突：{conflict.local.title}</h4>

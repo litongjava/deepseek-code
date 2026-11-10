@@ -111,9 +111,9 @@ const FileTreeNode: React.FC<FileTreeNodeProps> = ({
             selectSkill(skill.id);
           }
         }}
-        className={`flex items-center gap-3 px-3 py-2 rounded-lg cursor-pointer transition-colors ${isSelected ? 'bg-claude-hover' : 'hover:bg-claude-hover/50'}`}
+        className={`flex items-center gap-3 px-3 py-2 rounded-lg cursor-pointer transition-colors ${isSelected ? 'bg-deepseek-hover' : 'hover:bg-deepseek-hover/50'}`}
       >
-        <div className="flex items-center justify-center w-[24px] h-[24px] rounded-md border border-claude-border bg-black/5 dark:bg-[#30302E] flex-shrink-0">
+        <div className="flex items-center justify-center w-[24px] h-[24px] rounded-md border border-deepseek-border bg-black/5 dark:bg-[#30302E] flex-shrink-0">
           <img
             src={skillsImg}
             className={`w-[15.5px] h-[15.5px] ${isEnabled ? 'dark:invert opacity-90' : 'dark:invert opacity-30 invert-[0.3]'}`}
@@ -122,13 +122,13 @@ const FileTreeNode: React.FC<FileTreeNodeProps> = ({
         </div>
 
         <div className="flex-1 min-w-0">
-          <span className={`truncate text-[14px] ${isEnabled ? 'text-claude-text font-medium' : 'text-[#262624] dark:text-[#6B6B68]'}`}>
+          <span className={`truncate text-[14px] ${isEnabled ? 'text-deepseek-text font-medium' : 'text-[#262624] dark:text-[#6B6B68]'}`}>
             {skill.name}
           </span>
         </div>
 
         {isSelected && (
-          <ChevronRight size={16} className={`text-claude-textSecondary transition-transform duration-300 ease-[cubic-bezier(0.4,0,0.2,1)] ${isExpanded && hasFiles ? 'rotate-90' : ''}`} />
+          <ChevronRight size={16} className={`text-deepseek-textSecondary transition-transform duration-300 ease-[cubic-bezier(0.4,0,0.2,1)] ${isExpanded && hasFiles ? 'rotate-90' : ''}`} />
         )}
       </div>
 
@@ -147,16 +147,16 @@ const FileTreeNode: React.FC<FileTreeNodeProps> = ({
                       loadFileContent(skill.id, file.name);
                     }
                   }}
-                  className={`flex items-center gap-2 px-2 py-1.5 rounded-md cursor-pointer text-[13.5px] group ${selectedSkillId === skill.id && selectedFile === file.name && file.type !== 'folder' ? 'bg-claude-hover' : 'hover:bg-claude-hover/70'}`}
+                  className={`flex items-center gap-2 px-2 py-1.5 rounded-md cursor-pointer text-[13.5px] group ${selectedSkillId === skill.id && selectedFile === file.name && file.type !== 'folder' ? 'bg-deepseek-hover' : 'hover:bg-deepseek-hover/70'}`}
                 >
                   <div className="w-[12px]" />
                   {file.type === 'folder' ? (
-                    <Folder size={15.5} className="text-claude-textSecondary fill-claude-textSecondary/10" />
+                    <Folder size={15.5} className="text-deepseek-textSecondary fill-deepseek-textSecondary/10" />
                   ) : (
-                    <File size={15.5} className="text-claude-textSecondary group-hover:text-claude-text transition-colors" />
+                    <File size={15.5} className="text-deepseek-textSecondary group-hover:text-deepseek-text transition-colors" />
                   )}
-                  <span className={`truncate ${selectedSkillId === skill.id && selectedFile === file.name && file.type !== 'folder' ? 'text-claude-text font-medium' : 'text-claude-textSecondary group-hover:text-claude-text transition-colors'}`}>{file.name}</span>
-                  {file.type === 'folder' && <ChevronRight size={14} className={`ml-auto text-claude-textSecondary transition-transform duration-200 ${mockFolderState[file.name] ? 'rotate-90' : ''}`} />}
+                  <span className={`truncate ${selectedSkillId === skill.id && selectedFile === file.name && file.type !== 'folder' ? 'text-deepseek-text font-medium' : 'text-deepseek-textSecondary group-hover:text-deepseek-text transition-colors'}`}>{file.name}</span>
+                  {file.type === 'folder' && <ChevronRight size={14} className={`ml-auto text-deepseek-textSecondary transition-transform duration-200 ${mockFolderState[file.name] ? 'rotate-90' : ''}`} />}
                 </div>
                 {file.type === 'folder' && (
                   <div className={`grid transition-all duration-300 ease-[cubic-bezier(0.4,0,0.2,1)] ${mockFolderState[file.name] ? 'grid-rows-[1fr] opacity-100' : 'grid-rows-[0fr] opacity-0'}`}>
@@ -173,15 +173,15 @@ const FileTreeNode: React.FC<FileTreeNodeProps> = ({
                                 setSelectedSkillId(skill.id);
                                 loadFileContent(skill.id, childPath);
                               }}
-                              className={`flex items-center gap-2 px-2 py-1 rounded-md cursor-pointer text-[13px] group ${selectedSkillId === skill.id && selectedFile === child.name ? 'bg-claude-hover' : 'hover:bg-claude-hover/70'}`}
+                              className={`flex items-center gap-2 px-2 py-1 rounded-md cursor-pointer text-[13px] group ${selectedSkillId === skill.id && selectedFile === child.name ? 'bg-deepseek-hover' : 'hover:bg-deepseek-hover/70'}`}
                             >
-                              <File size={14} className="text-claude-textSecondary group-hover:text-claude-text transition-colors" />
-                              <span className={`truncate ${selectedSkillId === skill.id && selectedFile === child.name ? 'text-claude-text font-medium' : 'text-claude-textSecondary group-hover:text-claude-text transition-colors'}`}>{child.name}</span>
+                              <File size={14} className="text-deepseek-textSecondary group-hover:text-deepseek-text transition-colors" />
+                              <span className={`truncate ${selectedSkillId === skill.id && selectedFile === child.name ? 'text-deepseek-text font-medium' : 'text-deepseek-textSecondary group-hover:text-deepseek-text transition-colors'}`}>{child.name}</span>
                             </div>
                           ))}
                         </div>
                       ) : (
-                        <div className="pl-12 py-1 pb-2 text-[12px] text-claude-textSecondary/60 italic pointer-events-none">
+                        <div className="pl-12 py-1 pb-2 text-[12px] text-deepseek-textSecondary/60 italic pointer-events-none">
                           {t('customize.emptyDirectory')}
                         </div>
                       )}
@@ -425,17 +425,17 @@ const CustomizePage = ({ onCreateWithDeepSeek, onBack }: { onCreateWithDeepSeek?
   );
 
   return (
-    <div className="flex h-full min-h-0 w-full overflow-hidden bg-claude-bg text-claude-text font-sans">
+    <div className="flex h-full min-h-0 w-full overflow-hidden bg-deepseek-bg text-deepseek-text font-sans">
 
       {/* 1. Left Navigation (Fixed width) */}
-      <div className="w-[160px] xl:w-[200px] 2xl:w-[240px] border-r border-claude-border flex flex-col pt-4 pb-4 flex-shrink-0 bg-claude-bg">
+      <div className="w-[160px] xl:w-[200px] 2xl:w-[240px] border-r border-deepseek-border flex flex-col pt-4 pb-4 flex-shrink-0 bg-deepseek-bg">
         <div className="px-4 mb-6">
           <button onClick={() => {
             if (tab !== 'overview') setTab('overview');
             else if (onBack) onBack();
             else navigate(-1);
           }}
-            className="flex items-center gap-2 text-claude-text font-medium hover:text-claude-text/80 transition-colors">
+            className="flex items-center gap-2 text-deepseek-text font-medium hover:text-deepseek-text/80 transition-colors">
             <ArrowLeft size={20} />
             <span className="text-lg font-semibold">{t('customize.title')}</span>
           </button>
@@ -443,7 +443,7 @@ const CustomizePage = ({ onCreateWithDeepSeek, onBack }: { onCreateWithDeepSeek?
         <nav aria-label={t('customize.title')} className="flex-1 px-2 space-y-1 overflow-y-auto">
           {entries.map(item => (
             <button key={item.id} aria-current={tab === item.id ? 'page' : undefined} onClick={() => setTab(item.id)}
-              className={`w-full flex items-center gap-3 px-3 py-2 text-[15px] font-medium rounded-lg transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-500 ${tab === item.id ? 'bg-claude-hover text-claude-text' : 'text-claude-text hover:bg-claude-hover'}`}>
+              className={`w-full flex items-center gap-3 px-3 py-2 text-[15px] font-medium rounded-lg transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-500 ${tab === item.id ? 'bg-deepseek-hover text-deepseek-text' : 'text-deepseek-text hover:bg-deepseek-hover'}`}>
               {'image' in item ? <img src={item.image} alt="" className="w-[22px] h-[22px] dark:invert" /> : <item.icon size={22} />}
               {item.label}
             </button>
@@ -453,15 +453,15 @@ const CustomizePage = ({ onCreateWithDeepSeek, onBack }: { onCreateWithDeepSeek?
 
       {/* 2. Middle Column: Skills List or Connectors List */}
       {tab === 'skills' ? (
-        <div className="w-[220px] 2xl:w-[300px] border-r border-claude-border flex flex-col flex-shrink-0 bg-claude-bg">
+        <div className="w-[220px] 2xl:w-[300px] border-r border-deepseek-border flex flex-col flex-shrink-0 bg-deepseek-bg">
           {/* Header */}
-          <div className="h-14 px-4 flex items-center justify-between border-b border-claude-border">
-            <span className="font-semibold text-claude-text">{t('customize.skills')}</span>
+          <div className="h-14 px-4 flex items-center justify-between border-b border-deepseek-border">
+            <span className="font-semibold text-deepseek-text">{t('customize.skills')}</span>
             <div className="flex items-center gap-2 relative">
               <button
                 aria-label={t('customize.filterSkills')}
                 onClick={() => setShowSearchInput(!showSearchInput)}
-                className="p-1.5 rounded-md hover:bg-claude-hover text-claude-textSecondary hover:text-claude-text transition-colors group"
+                className="p-1.5 rounded-md hover:bg-deepseek-hover text-deepseek-textSecondary hover:text-deepseek-text transition-colors group"
               >
                 <Search size={21} className="opacity-70 group-hover:opacity-100 transition-opacity" />
               </button>
@@ -469,24 +469,24 @@ const CustomizePage = ({ onCreateWithDeepSeek, onBack }: { onCreateWithDeepSeek?
                 <button
                   aria-label={t('customize.createNewSkills')}
                   onClick={() => setShowPlusMenu(!showPlusMenu)}
-                  className="p-1.5 rounded-md hover:bg-claude-hover text-claude-textSecondary hover:text-claude-text transition-colors"
+                  className="p-1.5 rounded-md hover:bg-deepseek-hover text-deepseek-textSecondary hover:text-deepseek-text transition-colors"
                 >
                   <Plus size={22} />
                 </button>
                 {showPlusMenu && (
                   <>
                     <div className="fixed inset-0 z-40" onClick={() => setShowPlusMenu(false)} />
-                    <div className="absolute top-full right-0 mt-2 w-64 bg-white dark:bg-[#202020] rounded-[16px] shadow-[0_4px_24px_rgba(0,0,0,0.15)] border border-claude-border py-2 z-50">
-                      <button className="w-full flex items-center gap-3.5 px-4 py-3 text-[14.5px] font-medium text-claude-text hover:bg-black/5 dark:hover:bg-white/5 transition-colors text-left" onClick={() => { setShowPlusMenu(false); onCreateWithDeepSeek?.(); }}>
-                        <MessageSquare size={18} className="text-claude-textSecondary" />
+                    <div className="absolute top-full right-0 mt-2 w-64 bg-white dark:bg-[#202020] rounded-[16px] shadow-[0_4px_24px_rgba(0,0,0,0.15)] border border-deepseek-border py-2 z-50">
+                      <button className="w-full flex items-center gap-3.5 px-4 py-3 text-[14.5px] font-medium text-deepseek-text hover:bg-black/5 dark:hover:bg-white/5 transition-colors text-left" onClick={() => { setShowPlusMenu(false); onCreateWithDeepSeek?.(); }}>
+                        <MessageSquare size={18} className="text-deepseek-textSecondary" />
                         {t('customize.createWithDeepSeek')}
                       </button>
-                      <button className="w-full flex items-center gap-3.5 px-4 py-3 text-[14.5px] font-medium text-claude-text hover:bg-black/5 dark:hover:bg-white/5 transition-colors text-left" onClick={() => { setShowPlusMenu(false); startCreate(); }}>
-                        <ClipboardList size={18} className="text-claude-textSecondary" />
+                      <button className="w-full flex items-center gap-3.5 px-4 py-3 text-[14.5px] font-medium text-deepseek-text hover:bg-black/5 dark:hover:bg-white/5 transition-colors text-left" onClick={() => { setShowPlusMenu(false); startCreate(); }}>
+                        <ClipboardList size={18} className="text-deepseek-textSecondary" />
                         {t('customize.writeSkillInstructions')}
                       </button>
-                      <button className="w-full flex items-center gap-3.5 px-4 py-3 text-[14.5px] font-medium text-claude-text hover:bg-black/5 dark:hover:bg-white/5 transition-colors text-left" onClick={() => { setShowPlusMenu(false); setShowUploadModal(true); }}>
-                        <Upload size={18} className="text-claude-textSecondary" />
+                      <button className="w-full flex items-center gap-3.5 px-4 py-3 text-[14.5px] font-medium text-deepseek-text hover:bg-black/5 dark:hover:bg-white/5 transition-colors text-left" onClick={() => { setShowPlusMenu(false); setShowUploadModal(true); }}>
+                        <Upload size={18} className="text-deepseek-textSecondary" />
                         {t('customize.uploadSkill')}
                       </button>
                     </div>
@@ -498,13 +498,13 @@ const CustomizePage = ({ onCreateWithDeepSeek, onBack }: { onCreateWithDeepSeek?
 
           {/* Search Input (Conditional) */}
           {showSearchInput && (
-            <div className="px-3 py-2 border-b border-claude-border">
+            <div className="px-3 py-2 border-b border-deepseek-border">
               <input
                 autoFocus
                 value={search}
                 onChange={e => setSearch(e.target.value)}
                 placeholder={t('customize.filterSkills')}
-                className="w-full px-2 py-1.5 bg-claude-input rounded-md text-sm outline-none border border-transparent focus:border-blue-500"
+                className="w-full px-2 py-1.5 bg-deepseek-input rounded-md text-sm outline-none border border-transparent focus:border-blue-500"
               />
             </div>
           )}
@@ -516,7 +516,7 @@ const CustomizePage = ({ onCreateWithDeepSeek, onBack }: { onCreateWithDeepSeek?
               <div className="mb-2">
                 <button
                   onClick={() => toggleSection('examples')}
-                  className="w-full flex items-center gap-1 px-3 py-1.5 text-xs font-semibold text-claude-textSecondary hover:text-claude-text uppercase tracking-wider"
+                  className="w-full flex items-center gap-1 px-3 py-1.5 text-xs font-semibold text-deepseek-textSecondary hover:text-deepseek-text uppercase tracking-wider"
                 >
                   <ChevronDown size={14} className={`transition-transform ${expandedSections.has('examples') ? '' : '-rotate-90'}`} />
                   {t('customize.examples')}
@@ -550,7 +550,7 @@ const CustomizePage = ({ onCreateWithDeepSeek, onBack }: { onCreateWithDeepSeek?
               <div>
                 <button
                   onClick={() => toggleSection('myskills')}
-                  className="w-full flex items-center gap-1 px-3 py-1.5 text-xs font-semibold text-claude-textSecondary hover:text-claude-text uppercase tracking-wider"
+                  className="w-full flex items-center gap-1 px-3 py-1.5 text-xs font-semibold text-deepseek-textSecondary hover:text-deepseek-text uppercase tracking-wider"
                 >
                   <ChevronDown size={14} className={`transition-transform ${expandedSections.has('myskills') ? '' : '-rotate-90'}`} />
                   {t('customize.mySkills')}
@@ -583,33 +583,33 @@ const CustomizePage = ({ onCreateWithDeepSeek, onBack }: { onCreateWithDeepSeek?
               </div>
             )}
 
-            {loading && <p role="status" className="p-4 text-sm text-claude-textSecondary">{t('common.loading')}</p>}
+            {loading && <p role="status" className="p-4 text-sm text-deepseek-textSecondary">{t('common.loading')}</p>}
             {!loading && !skillError && !filteredExamples.length && !filteredMy.length && (
-              <div className="p-4 text-center text-sm text-claude-textSecondary">
+              <div className="p-4 text-center text-sm text-deepseek-textSecondary">
                 {t('customize.noSkillsFound')}
               </div>
             )}
           </div>
         </div>
       ) : tab === 'connectors' ? (
-        <div className="w-[220px] 2xl:w-[300px] border-r border-claude-border flex flex-col flex-shrink-0 bg-claude-bg">
-          <div className="h-14 px-4 flex items-center justify-between border-b border-claude-border">
-            <span className="font-semibold text-claude-text">{t('customize.connectors')}</span>
+        <div className="w-[220px] 2xl:w-[300px] border-r border-deepseek-border flex flex-col flex-shrink-0 bg-deepseek-bg">
+          <div className="h-14 px-4 flex items-center justify-between border-b border-deepseek-border">
+            <span className="font-semibold text-deepseek-text">{t('customize.connectors')}</span>
           </div>
           <div className="flex-1 overflow-y-auto pt-4 px-2">
             {githubConnected && (
               <div className="mb-2">
-                <button className="w-full flex items-center gap-1.5 px-3 py-1.5 text-[12px] font-medium text-claude-textSecondary/80 uppercase tracking-wider">
+                <button className="w-full flex items-center gap-1.5 px-3 py-1.5 text-[12px] font-medium text-deepseek-textSecondary/80 uppercase tracking-wider">
                   <ChevronDown size={14} className="stroke-[2px] opacity-70" />
                   {t('customize.connected')}
                 </button>
                 <div className="mt-1 px-1 space-y-1">
                   <div
                     onClick={() => setSelectedConnector('github')}
-                    className={`flex items-center gap-3 px-3 py-2.5 rounded-[10px] cursor-pointer transition-colors ${selectedConnector === 'github' ? 'bg-claude-hover' : 'hover:bg-claude-hover/50'}`}
+                    className={`flex items-center gap-3 px-3 py-2.5 rounded-[10px] cursor-pointer transition-colors ${selectedConnector === 'github' ? 'bg-deepseek-hover' : 'hover:bg-deepseek-hover/50'}`}
                   >
                     <Github size={20} className="fill-current stroke-none opacity-80" />
-                    <span className="truncate text-[14px] text-claude-text font-medium">{t('customize.githubIntegration')}</span>
+                    <span className="truncate text-[14px] text-deepseek-text font-medium">{t('customize.githubIntegration')}</span>
                     <div className="ml-auto w-2 h-2 rounded-full bg-green-500 flex-shrink-0" />
                   </div>
                 </div>
@@ -617,7 +617,7 @@ const CustomizePage = ({ onCreateWithDeepSeek, onBack }: { onCreateWithDeepSeek?
             )}
             {(!githubConnected || true) && (
               <div className="mb-2">
-                <button className="w-full flex items-center gap-1.5 px-3 py-1.5 text-[12px] font-medium text-claude-textSecondary/80 uppercase tracking-wider">
+                <button className="w-full flex items-center gap-1.5 px-3 py-1.5 text-[12px] font-medium text-deepseek-textSecondary/80 uppercase tracking-wider">
                   <ChevronDown size={14} className="stroke-[2px] opacity-70" />
                   {githubConnected ? t('customize.available') : t('customize.notConnected')}
                 </button>
@@ -625,20 +625,20 @@ const CustomizePage = ({ onCreateWithDeepSeek, onBack }: { onCreateWithDeepSeek?
                   {!githubConnected && (
                     <div
                       onClick={() => setSelectedConnector('github')}
-                      className={`flex items-center gap-3 px-3 py-2.5 rounded-[10px] cursor-pointer transition-colors ${selectedConnector === 'github' ? 'bg-claude-hover' : 'hover:bg-claude-hover/50'}`}
+                      className={`flex items-center gap-3 px-3 py-2.5 rounded-[10px] cursor-pointer transition-colors ${selectedConnector === 'github' ? 'bg-deepseek-hover' : 'hover:bg-deepseek-hover/50'}`}
                     >
                       <Github size={20} className="fill-current stroke-none opacity-80" />
-                      <span className={`truncate text-[14px] ${selectedConnector === 'github' ? 'text-claude-text font-medium' : 'text-claude-textSecondary'}`}>{t('customize.githubIntegration')}</span>
+                      <span className={`truncate text-[14px] ${selectedConnector === 'github' ? 'text-deepseek-text font-medium' : 'text-deepseek-textSecondary'}`}>{t('customize.githubIntegration')}</span>
                     </div>
                   )}
                   <div
                     onClick={() => setSelectedConnector('gdrive')}
-                    className={`flex items-center gap-3 px-3 py-2.5 rounded-[10px] cursor-pointer transition-colors ${selectedConnector === 'gdrive' ? 'bg-claude-hover' : 'hover:bg-claude-hover/50'}`}
+                    className={`flex items-center gap-3 px-3 py-2.5 rounded-[10px] cursor-pointer transition-colors ${selectedConnector === 'gdrive' ? 'bg-deepseek-hover' : 'hover:bg-deepseek-hover/50'}`}
                   >
                     <div className="w-5 h-5 flex items-center justify-center">
                       <img src="https://upload.wikimedia.org/wikipedia/commons/1/12/Google_Drive_icon_%282020%29.svg" className="w-[18px] h-[18px]" alt="" />
                     </div>
-                    <span className={`truncate text-[14px] ${selectedConnector === 'gdrive' ? 'text-claude-text font-medium' : 'text-claude-textSecondary'}`}>Google Drive</span>
+                    <span className={`truncate text-[14px] ${selectedConnector === 'gdrive' ? 'text-deepseek-text font-medium' : 'text-deepseek-textSecondary'}`}>Google Drive</span>
                   </div>
                 </div>
               </div>
@@ -667,69 +667,69 @@ const CustomizePage = ({ onCreateWithDeepSeek, onBack }: { onCreateWithDeepSeek?
               <img src={customizeMainImg} alt="Customize" className="w-[140px] h-auto dark:invert opacity-90" />
             </div>
             <div className="text-center mb-12">
-              <h2 className="text-xl font-medium text-claude-text mb-2">{t('customize.manageContext')}</h2>
+              <h2 className="text-xl font-medium text-deepseek-text mb-2">{t('customize.manageContext')}</h2>
             </div>
 
             <div aria-label={t('customize.manageContext')} className="w-full space-y-4">
               {entries.map(item => (
                 <button key={item.id} onClick={() => setTab(item.id)}
-                  className="w-full min-h-[96px] flex items-center gap-4 p-4 border border-claude-border bg-black/[0.02] dark:bg-white/[0.04] rounded-[24px] hover:bg-black/[0.05] dark:hover:bg-white/[0.07] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-500 focus-visible:ring-offset-2 focus-visible:ring-offset-claude-bg transition-colors text-left group">
-                  <span className="w-11 h-11 shrink-0 rounded-xl bg-claude-bg/50 border border-claude-border flex items-center justify-center text-claude-textSecondary group-hover:border-claude-textSecondary/30 transition-colors">
+                  className="w-full min-h-[96px] flex items-center gap-4 p-4 border border-deepseek-border bg-black/[0.02] dark:bg-white/[0.04] rounded-[24px] hover:bg-black/[0.05] dark:hover:bg-white/[0.07] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-500 focus-visible:ring-offset-2 focus-visible:ring-offset-claude-bg transition-colors text-left group">
+                  <span className="w-11 h-11 shrink-0 rounded-xl bg-deepseek-bg/50 border border-deepseek-border flex items-center justify-center text-deepseek-textSecondary group-hover:border-deepseek-textSecondary/30 transition-colors">
                     {'image' in item ? <img src={item.image} className="w-7 h-7 dark:invert opacity-70" alt="" /> : <item.icon size={28} />}
                   </span>
                   <span className="flex-1 min-w-0">
-                    <span className="block font-medium text-claude-text text-[15.5px]">{item.label}</span>
-                    <span className="block text-sm text-claude-textSecondary">{item.description}</span>
+                    <span className="block font-medium text-deepseek-text text-[15.5px]">{item.label}</span>
+                    <span className="block text-sm text-deepseek-textSecondary">{item.description}</span>
                   </span>
-                  <ChevronRight size={16} className="shrink-0 text-claude-textSecondary" />
+                  <ChevronRight size={16} className="shrink-0 text-deepseek-textSecondary" />
                 </button>
               ))}
             </div>
           </div>
         ) : tab === 'connectors' ? (
-          <div className="flex-1 h-full bg-claude-bg overflow-y-auto">
+          <div className="flex-1 h-full bg-deepseek-bg overflow-y-auto">
             {selectedConnector === 'github' ? (
               githubConnected ? (
                 <div className="h-full flex flex-col">
-                  <div className="flex items-center justify-between px-8 py-5 border-b border-claude-border">
+                  <div className="flex items-center justify-between px-8 py-5 border-b border-deepseek-border">
                     <div className="flex items-center gap-3">
-                      <Github size={22} className="fill-current stroke-none text-claude-text" />
-                      <span className="text-[17px] font-semibold text-claude-text">{t('customize.githubIntegration')}</span>
+                      <Github size={22} className="fill-current stroke-none text-deepseek-text" />
+                      <span className="text-[17px] font-semibold text-deepseek-text">{t('customize.githubIntegration')}</span>
                     </div>
-                    <button onClick={handleGithubDisconnect} className="px-4 py-1.5 text-[13px] font-medium text-claude-textSecondary border border-claude-border rounded-lg hover:bg-claude-hover transition-colors">
+                    <button onClick={handleGithubDisconnect} className="px-4 py-1.5 text-[13px] font-medium text-deepseek-textSecondary border border-deepseek-border rounded-lg hover:bg-deepseek-hover transition-colors">
                       {t('customize.disconnect')}
                     </button>
                   </div>
                   <div className="px-8 py-6 overflow-y-auto">
-                    <p className="text-[14px] text-claude-textSecondary mb-6 leading-relaxed">
-                      {t('customize.connectedTo')} <span className="text-claude-text font-medium">{githubUser?.login}</span>{t('customize.canAccessRepo')}
+                    <p className="text-[14px] text-deepseek-textSecondary mb-6 leading-relaxed">
+                      {t('customize.connectedTo')} <span className="text-deepseek-text font-medium">{githubUser?.login}</span>{t('customize.canAccessRepo')}
                     </p>
-                    <ul className="space-y-4 text-[14px] text-claude-textSecondary leading-relaxed">
+                    <ul className="space-y-4 text-[14px] text-deepseek-textSecondary leading-relaxed">
                       <li>
-                        <span className="text-claude-text font-medium">{t('customize.conversations')}</span> — {t('customize.quoteRepo')}
+                        <span className="text-deepseek-text font-medium">{t('customize.conversations')}</span> — {t('customize.quoteRepo')}
                       </li>
                       <li>
-                        <span className="text-claude-text font-medium">{t('customize.projectsTab')}</span> — {t('customize.syncFiles')}
+                        <span className="text-deepseek-text font-medium">{t('customize.projectsTab')}</span> — {t('customize.syncFiles')}
                       </li>
                       <li>
-                        <span className="text-claude-text font-medium">{t('customize.code')}</span> — {t('customize.browseCode')}
+                        <span className="text-deepseek-text font-medium">{t('customize.code')}</span> — {t('customize.browseCode')}
                       </li>
                       <li>
-                        <span className="text-claude-text font-medium">{t('customize.more')}</span> — {t('customize.moreFeatures')}
+                        <span className="text-deepseek-text font-medium">{t('customize.more')}</span> — {t('customize.moreFeatures')}
                       </li>
                     </ul>
                   </div>
                 </div>
               ) : (
                 <div className="flex flex-col items-center justify-center h-full mt-[-10vh]">
-                  <div className="w-[68px] h-[68px] bg-black/[0.03] dark:bg-white/[0.04] border border-claude-border rounded-[18px] flex items-center justify-center mb-6 shadow-sm">
-                    <Github size={36} className="text-claude-text fill-current stroke-none" />
+                  <div className="w-[68px] h-[68px] bg-black/[0.03] dark:bg-white/[0.04] border border-deepseek-border rounded-[18px] flex items-center justify-center mb-6 shadow-sm">
+                    <Github size={36} className="text-deepseek-text fill-current stroke-none" />
                   </div>
-                  <p className="text-[14px] text-claude-textSecondary mb-6 font-normal">{t('customize.notConnectedGithub')}</p>
+                  <p className="text-[14px] text-deepseek-textSecondary mb-6 font-normal">{t('customize.notConnectedGithub')}</p>
                   {githubOauth ? (
                     <button
                       onClick={handleGithubConnect}
-                      className="px-6 py-2.5 text-[14px] font-medium text-claude-bg bg-claude-text hover:opacity-90 rounded-[10px] transition-colors shadow-sm"
+                      className="px-6 py-2.5 text-[14px] font-medium text-deepseek-bg bg-deepseek-text hover:opacity-90 rounded-[10px] transition-colors shadow-sm"
                     >
                       {t('customize.connect')}
                     </button>
@@ -740,39 +740,39 @@ const CustomizePage = ({ onCreateWithDeepSeek, onBack }: { onCreateWithDeepSeek?
               )
             ) : (
               <div className="flex flex-col items-center mt-[-10vh]">
-                <div className="w-[68px] h-[68px] bg-black/[0.03] dark:bg-white/[0.04] border border-claude-border rounded-[18px] flex items-center justify-center mb-6 shadow-sm">
+                <div className="w-[68px] h-[68px] bg-black/[0.03] dark:bg-white/[0.04] border border-deepseek-border rounded-[18px] flex items-center justify-center mb-6 shadow-sm">
                   <img src="https://upload.wikimedia.org/wikipedia/commons/1/12/Google_Drive_icon_%282020%29.svg" className="w-9 h-9" alt="" />
                 </div>
-                <p className="text-[14px] text-claude-textSecondary mb-6 font-normal">{t('customize.comingSoon')}</p>
+                <p className="text-[14px] text-deepseek-textSecondary mb-6 font-normal">{t('customize.comingSoon')}</p>
               </div>
             )}
           </div>
         ) : creating || editing ? (
           // Create Form
           <div className="max-w-3xl mx-auto w-full p-8 space-y-6 overflow-y-auto">
-            <h2 className="text-2xl font-semibold text-claude-text">{t(editing ? 'customize.editDetails' : 'customize.createSkillTitle')}</h2>
+            <h2 className="text-2xl font-semibold text-deepseek-text">{t(editing ? 'customize.editDetails' : 'customize.createSkillTitle')}</h2>
             <div className="space-y-4">
               <div>
-                <label className="block text-sm font-medium text-claude-textSecondary mb-1.5">{t('customize.name')}</label>
+                <label className="block text-sm font-medium text-deepseek-textSecondary mb-1.5">{t('customize.name')}</label>
                 <input
                   aria-label={t('customize.name')} value={editName} onChange={e => setEditName(e.target.value)}
-                  className="w-full px-3 py-2 rounded-lg border border-claude-border bg-transparent text-claude-text outline-none focus:border-blue-500 transition-colors"
+                  className="w-full px-3 py-2 rounded-lg border border-deepseek-border bg-transparent text-deepseek-text outline-none focus:border-blue-500 transition-colors"
                   placeholder={t('customize.skillNamePlaceholder')}
                 />
               </div>
               <div>
-                <label className="block text-sm font-medium text-claude-textSecondary mb-1.5">{t('customize.description')}</label>
+                <label className="block text-sm font-medium text-deepseek-textSecondary mb-1.5">{t('customize.description')}</label>
                 <input
                   aria-label={t('customize.description')} value={editDesc} onChange={e => setEditDesc(e.target.value)}
-                  className="w-full px-3 py-2 rounded-lg border border-claude-border bg-transparent text-claude-text outline-none focus:border-blue-500 transition-colors"
+                  className="w-full px-3 py-2 rounded-lg border border-deepseek-border bg-transparent text-deepseek-text outline-none focus:border-blue-500 transition-colors"
                   placeholder={t('customize.skillDescPlaceholder')}
                 />
               </div>
               <div>
-                <label className="block text-sm font-medium text-claude-textSecondary mb-1.5">{t('customize.content')}</label>
+                <label className="block text-sm font-medium text-deepseek-textSecondary mb-1.5">{t('customize.content')}</label>
                 <textarea
                   aria-label={t('customize.content')} value={editContent} onChange={e => setEditContent(e.target.value)} rows={15}
-                  className="w-full px-3 py-2 rounded-lg border border-claude-border bg-transparent text-claude-text font-mono text-sm outline-none focus:border-blue-500 transition-colors resize-y"
+                  className="w-full px-3 py-2 rounded-lg border border-deepseek-border bg-transparent text-deepseek-text font-mono text-sm outline-none focus:border-blue-500 transition-colors resize-y"
                   placeholder={t('customize.contentPlaceholder')}
                 />
               </div>
@@ -782,7 +782,7 @@ const CustomizePage = ({ onCreateWithDeepSeek, onBack }: { onCreateWithDeepSeek?
                   {saving ? t('common.loading') : t(editing ? 'customize.save' : 'customize.createSkillBtn')}
                 </button>
                 <button onClick={() => { setCreating(false); setEditing(false); }}
-                  className="px-4 py-2 rounded-lg border border-claude-border text-claude-text hover:bg-claude-hover transition-colors">
+                  className="px-4 py-2 rounded-lg border border-deepseek-border text-deepseek-text hover:bg-deepseek-hover transition-colors">
                   {t('customize.cancel')}
                 </button>
               </div>
@@ -794,13 +794,13 @@ const CustomizePage = ({ onCreateWithDeepSeek, onBack }: { onCreateWithDeepSeek?
             {/* Header */}
             <div className="flex-shrink-0 px-8 py-6 border-b border-transparent">
               <div className="flex items-start justify-between mb-4">
-                <h2 className="text-xl font-bold text-claude-text">{detail.name}</h2>
+                <h2 className="text-xl font-bold text-deepseek-text">{detail.name}</h2>
                 <div className="flex items-center gap-4">
                   <ToggleSwitch
                     enabled={detail.enabled}
                     onToggle={(e) => handleToggle(detail.id, detail.enabled, e)}
                   />
-                  {!detail.isExample && detail.source !== 'bundled' && <button onClick={() => setEditing(true)} className="text-sm text-claude-textSecondary hover:text-claude-text">
+                  {!detail.isExample && detail.source !== 'bundled' && <button onClick={() => setEditing(true)} className="text-sm text-deepseek-textSecondary hover:text-deepseek-text">
                     {t('customize.editDetails')}
                   </button>}
                 </div>
@@ -809,17 +809,17 @@ const CustomizePage = ({ onCreateWithDeepSeek, onBack }: { onCreateWithDeepSeek?
               <div className="space-y-4">
                 {detail.isExample && (
                   <div className="text-sm">
-                    <span className="text-claude-textSecondary">{t('customize.addedBy')}</span>
-                    <div className="font-medium text-claude-text mt-0.5">Anthropic</div>
+                    <span className="text-deepseek-textSecondary">{t('customize.addedBy')}</span>
+                    <div className="font-medium text-deepseek-text mt-0.5">Anthropic</div>
                   </div>
                 )}
 
                 <div>
-                  <div className="flex items-center gap-1.5 text-sm text-claude-textSecondary mb-1">
+                  <div className="flex items-center gap-1.5 text-sm text-deepseek-textSecondary mb-1">
                     {t('customize.description')}
                     <Info size={14} />
                   </div>
-                  <p className="text-sm text-claude-text leading-relaxed">
+                  <p className="text-sm text-deepseek-text leading-relaxed">
                     {detail.description || t('customize.noDescription')}
                   </p>
                 </div>
@@ -828,11 +828,11 @@ const CustomizePage = ({ onCreateWithDeepSeek, onBack }: { onCreateWithDeepSeek?
 
             {/* Content Area */}
             <div className="flex-1 overflow-y-auto px-8 pb-8">
-              <div className="border border-claude-border rounded-xl bg-white dark:bg-[#30302E] overflow-hidden shadow-sm">
-                <div className="flex items-center justify-end px-4 py-2 border-b border-claude-border bg-claude-bg/50">
+              <div className="border border-deepseek-border rounded-xl bg-white dark:bg-[#30302E] overflow-hidden shadow-sm">
+                <div className="flex items-center justify-end px-4 py-2 border-b border-deepseek-border bg-deepseek-bg/50">
                   <button
                     onClick={() => setViewMode(viewMode === 'preview' ? 'code' : 'preview')}
-                    className="flex items-center gap-2 px-3 py-1.5 text-xs font-medium text-claude-textSecondary hover:bg-claude-hover rounded-md transition-colors"
+                    className="flex items-center gap-2 px-3 py-1.5 text-xs font-medium text-deepseek-textSecondary hover:bg-deepseek-hover rounded-md transition-colors"
                   >
                     {viewMode === 'preview' ? <Code size={14} /> : <Eye size={14} />}
                     {viewMode === 'preview' ? t('customize.codeView') : t('customize.previewView')}
@@ -866,7 +866,7 @@ const CustomizePage = ({ onCreateWithDeepSeek, onBack }: { onCreateWithDeepSeek?
             </div>
           </div>
         ) : (
-          <div className="flex items-center justify-center h-full text-claude-textSecondary">
+          <div className="flex items-center justify-center h-full text-deepseek-textSecondary">
             <div className="text-center">
               <Sparkles size={32} className="mx-auto mb-3 opacity-20" />
               <p>{t('customize.selectSkillPrompt')}</p>

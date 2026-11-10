@@ -17,10 +17,10 @@ body:has([data-app-titlebar]) .plan-review { max-height: calc(100dvh - 76px); }
   display: flex;
   flex-direction: column;
   overflow: hidden;
-  border: 1px solid var(--border-claude);
+  border: 1px solid var(--border-deepseek);
   border-radius: 16px;
-  background: var(--bg-claude-main);
-  color: var(--text-claude-main);
+  background: var(--bg-deepseek-main);
+  color: var(--text-deepseek-main);
   box-shadow: 0 20px 70px rgb(0 0 0 / 20%);
   font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', 'PingFang SC', 'Microsoft YaHei', sans-serif;
   font-size: 14px;
@@ -29,7 +29,7 @@ body:has([data-app-titlebar]) .plan-review { max-height: calc(100dvh - 76px); }
 .plan-review-header, .plan-review-footer { flex: 0 0 auto; padding: 16px 20px; }
 .plan-review-header { display: flex; justify-content: space-between; gap: 16px; }
 .plan-review h2 { font-size: 18px; font-weight: 600; margin: 0; }
-.plan-review-header p, .plan-review-help { color: var(--text-claude-secondary); font-size: 12px; }
+.plan-review-header p, .plan-review-help { color: var(--text-deepseek-secondary); font-size: 12px; }
 .plan-review-body { min-height: 0; overflow-y: auto; overflow-x: hidden; padding: 0 20px 16px; overflow-wrap: anywhere; }
 .plan-review .plan-review-body .assistant-markdown.markdown-body {
   font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', 'PingFang SC', 'Microsoft YaHei', sans-serif;
@@ -52,21 +52,21 @@ body:has([data-app-titlebar]) .plan-review { max-height: calc(100dvh - 76px); }
 .plan-review-toolbar, .plan-review-actions { display: flex; align-items: center; gap: 8px; }
 .plan-review-toolbar strong { flex: 1; }
 .plan-review button { padding: 4px 10px; border-radius: 7px; }
-.plan-review button:hover { background: var(--bg-claude-hover); }
+.plan-review button:hover { background: var(--bg-deepseek-hover); }
 .plan-review button:disabled { opacity: .5; cursor: not-allowed; }
-.plan-review :focus-visible { outline: 2px solid var(--text-claude-secondary); outline-offset: 2px; }
+.plan-review :focus-visible { outline: 2px solid var(--text-deepseek-secondary); outline-offset: 2px; }
 .plan-review-path { font-size: 12px; margin: 8px 0; }
 .plan-review-path code { display: block; white-space: pre-wrap; overflow-wrap: anywhere; }
-.plan-review-footer { border-top: 1px solid var(--border-claude); }
+.plan-review-footer { border-top: 1px solid var(--border-deepseek); }
 .plan-review legend { font-weight: 600; margin-bottom: 4px; }
 .plan-review-choices { display: grid; grid-template-columns: 1fr 1fr; gap: 4px 12px; }
 .plan-review-choices label { display: flex; align-items: flex-start; gap: 6px; font-size: 13px; }
 .plan-review-choices input { margin-top: 6px; flex-shrink: 0; }
 .plan-review-choices small { display: block; font-size: 11px; line-height: 16px; }
 .plan-review-feedback { display: block; margin-top: 8px; }
-.plan-review-feedback textarea { display: block; width: 100%; resize: vertical; max-height: 96px; padding: 6px 8px; background: var(--bg-claude-input); border: 1px solid var(--border-claude); border-radius: 8px; }
+.plan-review-feedback textarea { display: block; width: 100%; resize: vertical; max-height: 96px; padding: 6px 8px; background: var(--bg-deepseek-input); border: 1px solid var(--border-deepseek); border-radius: 8px; }
 .plan-review-actions { justify-content: space-between; margin-top: 8px; }
-.plan-review .plan-review-primary { background: var(--text-claude-main); color: var(--bg-claude-main); padding: 6px 14px; }
+.plan-review .plan-review-primary { background: var(--text-deepseek-main); color: var(--bg-deepseek-main); padding: 6px 14px; }
 .plan-review [role='alert'] { color: #c75050; font-size: 12px; }
 @media (max-width: 560px) {
   .plan-review-header, .plan-review-footer { padding: 12px; }

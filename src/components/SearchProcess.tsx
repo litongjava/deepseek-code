@@ -52,7 +52,7 @@ const SearchLogItem: React.FC<{ log: SearchLog; defaultOpen?: boolean }> = ({ lo
   return (
     <div className="relative pl-8 pb-2">
       {/* Node Icon */}
-      <div className="absolute left-0 top-0.5 z-10 bg-claude-bg text-claude-textSecondary">
+      <div className="absolute left-0 top-0.5 z-10 bg-deepseek-bg text-deepseek-textSecondary">
         <Globe size={16} />
       </div>
       
@@ -60,10 +60,10 @@ const SearchLogItem: React.FC<{ log: SearchLog; defaultOpen?: boolean }> = ({ lo
         className="flex items-center justify-between mb-1 cursor-pointer group select-none py-0.5"
         onClick={() => setIsOpen(!isOpen)}
       >
-        <div className="flex items-center gap-2 text-claude-textSecondary group-hover:text-claude-text transition-colors">
-          <span className="text-[13px] font-medium text-claude-text">{log.query}</span>
+        <div className="flex items-center gap-2 text-deepseek-textSecondary group-hover:text-deepseek-text transition-colors">
+          <span className="text-[13px] font-medium text-deepseek-text">{log.query}</span>
         </div>
-        <div className="flex items-center gap-2 text-claude-textSecondary">
+        <div className="flex items-center gap-2 text-deepseek-textSecondary">
             <span className="text-[11px]">{log.results.length} results</span>
             <ChevronDown 
               size={14} 
@@ -73,7 +73,7 @@ const SearchLogItem: React.FC<{ log: SearchLog; defaultOpen?: boolean }> = ({ lo
       </div>
 
       {isOpen && (
-        <div className="bg-claude-bgSecondary border border-claude-border rounded-xl overflow-hidden shadow-sm mt-1">
+        <div className="bg-deepseek-bgSecondary border border-deepseek-border rounded-xl overflow-hidden shadow-sm mt-1">
           <div className="max-h-[180px] overflow-y-auto overflow-x-hidden custom-scrollbar">
             {log.results.map((result, rIndex) => (
               <a
@@ -81,14 +81,14 @@ const SearchLogItem: React.FC<{ log: SearchLog; defaultOpen?: boolean }> = ({ lo
                 href={result.url}
                 target="_blank"
                 rel="noopener noreferrer"
-                className="flex items-center gap-2.5 px-3 py-1.5 hover:bg-claude-hover transition-colors no-underline group border-b border-black/5 dark:border-white/5 last:border-b-0"
+                className="flex items-center gap-2.5 px-3 py-1.5 hover:bg-deepseek-hover transition-colors no-underline group border-b border-black/5 dark:border-white/5 last:border-b-0"
               >
                 <Favicon url={result.url} />
                 <div className="flex-1 min-w-0 flex items-center gap-2">
-                  <span className="text-[12px] text-claude-text font-medium truncate max-w-[70%] transition-colors">
+                  <span className="text-[12px] text-deepseek-text font-medium truncate max-w-[70%] transition-colors">
                     {result.title || result.url}
                   </span>
-                  <span className="text-[11px] text-claude-textSecondary truncate flex-shrink-0">
+                  <span className="text-[11px] text-deepseek-textSecondary truncate flex-shrink-0">
                     {new URL(result.url).hostname}
                   </span>
                 </div>
@@ -125,7 +125,7 @@ const SearchProcess: React.FC<SearchProcessProps> = ({ logs, isThinking, isDone 
   return (
     <div className="mb-2 font-sans">
       <div 
-        className="flex items-center gap-2 text-claude-textSecondary text-[14px] cursor-pointer hover:text-claude-text transition-colors select-none mb-1"
+        className="flex items-center gap-2 text-deepseek-textSecondary text-[14px] cursor-pointer hover:text-deepseek-text transition-colors select-none mb-1"
         onClick={() => setIsExpanded(!isExpanded)}
       >
         <span>Searched the web</span>
@@ -140,7 +140,7 @@ const SearchProcess: React.FC<SearchProcessProps> = ({ logs, isThinking, isDone 
         ref={containerRef}
       >
         <div className="relative pb-2">
-          <div className="absolute left-[7.5px] top-2 bottom-2 w-px bg-claude-border" />
+          <div className="absolute left-[7.5px] top-2 bottom-2 w-px bg-deepseek-border" />
           
           {logs.map((log, index) => (
             <SearchLogItem key={index} log={log} defaultOpen={!isDone} />
@@ -148,13 +148,13 @@ const SearchProcess: React.FC<SearchProcessProps> = ({ logs, isThinking, isDone 
 
           {!isThinking && (
             <div className="relative pl-8 pt-1 pb-1">
-              <div className="absolute left-0 top-1 z-10 bg-claude-bg text-claude-textSecondary">
+              <div className="absolute left-0 top-1 z-10 bg-deepseek-bg text-deepseek-textSecondary">
                 <Check size={16} />
               </div>
-              <div className="flex items-center gap-2 text-claude-textSecondary">
+              <div className="flex items-center gap-2 text-deepseek-textSecondary">
                 <span className="text-[13px]">Done</span>
                 {totalTokens > 0 && (
-                  <span className="text-[11px] text-claude-textSecondary">· {totalTokens.toLocaleString()} tokens</span>
+                  <span className="text-[11px] text-deepseek-textSecondary">· {totalTokens.toLocaleString()} tokens</span>
                 )}
               </div>
             </div>

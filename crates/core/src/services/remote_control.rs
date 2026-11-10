@@ -449,7 +449,7 @@ impl Client {
             "branch": registration.branch,
             "git_repo_url": registration.git_repo_url,
             "max_sessions": 1,
-            "metadata": {"worker_type": "claude_code"},
+            "metadata": {"worker_type": "deepseek_code"},
         });
         if let Some(id) = environment_id {
             body["environment_id"] = json!(id);

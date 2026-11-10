@@ -168,7 +168,7 @@ function Menu({ items, close }: { items: MenuItem[]; close: () => void }) {
             {item.label}
           </span>
           {item.shortcut && (
-            <span className="shrink-0 text-[11px] text-claude-textSecondary">
+            <span className="shrink-0 text-[11px] text-deepseek-textSecondary">
               {item.shortcut}
             </span>
           )}
@@ -537,7 +537,7 @@ export default function SidebarProjects({
     <div
       key={chat.id}
       data-session-id={chat.id}
-      className={`project-sidebar-row group ${nested ? "project-session-row" : ""} ${activeId === chat.id || popup?.id === chat.id ? "bg-claude-hover" : ""}`}
+      className={`project-sidebar-row group ${nested ? "project-session-row" : ""} ${activeId === chat.id || popup?.id === chat.id ? "bg-deepseek-hover" : ""}`}
     >
       <button
         type="button"
@@ -554,7 +554,7 @@ export default function SidebarProjects({
           preferences.unreadChats.includes(chat.id)) && (
           <span
             aria-label={streamingIds.has(chat.id) ? t("sidebar.running") : t("sidebar.unread")}
-            className={`h-1.5 w-1.5 shrink-0 rounded-full bg-claude-text ${streamingIds.has(chat.id) ? "animate-pulse" : ""}`}
+            className={`h-1.5 w-1.5 shrink-0 rounded-full bg-deepseek-text ${streamingIds.has(chat.id) ? "animate-pulse" : ""}`}
           />
         )}
         <span className="truncate">{chatTitle(chat)}</span>
@@ -589,7 +589,7 @@ export default function SidebarProjects({
       {list.length > 5 && (
         <button
           type="button"
-          className={`py-1.5 text-[13px] text-claude-textSecondary hover:text-claude-text ${nested ? "pl-8" : "pl-2"}`}
+          className={`py-1.5 text-[13px] text-deepseek-textSecondary hover:text-deepseek-text ${nested ? "pl-8" : "pl-2"}`}
           onClick={() =>
             setExpandedLists((previous) =>
               previous.includes(key)
@@ -774,7 +774,7 @@ export default function SidebarProjects({
           <button
             type="button"
             onClick={() => navigate("/projects")}
-            className="mr-1 rounded px-1 py-1 text-[11px] text-claude-textSecondary hover:bg-claude-hover hover:text-claude-text"
+            className="mr-1 rounded px-1 py-1 text-[11px] text-deepseek-textSecondary hover:bg-deepseek-hover hover:text-deepseek-text"
           >
             {t("sidebar.allProjects")}
           </button>
@@ -782,7 +782,7 @@ export default function SidebarProjects({
             type="button"
             aria-label={t("sidebar.createProject")}
             title={t("sidebar.createProject")}
-            className="rounded p-1 text-claude-textSecondary hover:bg-claude-hover"
+            className="rounded p-1 text-deepseek-textSecondary hover:bg-deepseek-hover"
             onClick={() => setCreating(true)}
           >
             <Plus size={14} />
@@ -790,7 +790,7 @@ export default function SidebarProjects({
         </div>
         {!preferences.projectsCollapsed && (
           <div data-project-list className="min-h-0 flex-1 overflow-y-auto sidebar-scroll">
-            {!sortedProjects.length && <p className="px-2 py-1.5 text-xs text-claude-textSecondary">{t('sidebar.noProjects')}</p>}
+            {!sortedProjects.length && <p className="px-2 py-1.5 text-xs text-deepseek-textSecondary">{t('sidebar.noProjects')}</p>}
             {sortedProjects.map((project) => {
               const selected = selectedProjectId === project.id;
               const expanded = expandedProjects.includes(project.id);
@@ -799,7 +799,7 @@ export default function SidebarProjects({
                 <div key={project.id} className="mb-1">
                   <div
                     data-project-id={project.id}
-                    className={`project-sidebar-row group ${selected || popup?.id === project.id ? "bg-claude-hover" : ""}`}
+                    className={`project-sidebar-row group ${selected || popup?.id === project.id ? "bg-deepseek-hover" : ""}`}
                     onMouseEnter={(event) => {
                       if (popup && popup.kind !== "details") return;
                       const element = event.currentTarget;
@@ -845,7 +845,7 @@ export default function SidebarProjects({
                       {preferences.pinnedProjects.includes(project.id) && (
                         <Pin
                           size={11}
-                          className="shrink-0 text-claude-textSecondary"
+                          className="shrink-0 text-deepseek-textSecondary"
                         />
                       )}
                     </button>
@@ -875,7 +875,7 @@ export default function SidebarProjects({
                   </div>
                   {expanded && <div id={`project-sessions-${project.id}`} role="group" aria-label={project.name}>
                     {sessions.length ? chatList(sessions, `project:${project.id}`, true) : (
-                      <p className="pl-8 py-1.5 text-xs text-claude-textSecondary">{t('sidebar.noProjectChats')}</p>
+                      <p className="pl-8 py-1.5 text-xs text-deepseek-textSecondary">{t('sidebar.noProjectChats')}</p>
                     )}
                   </div>}
                 </div>
@@ -903,7 +903,7 @@ export default function SidebarProjects({
           </button>
           {!recentsCollapsed && <div className="min-h-0 flex-1 overflow-y-auto sidebar-scroll" data-recent-list>
             {recent.length ? chatList(recent, `recents:${recentsMode}`) : (
-              <p className="px-2 py-1.5 text-xs text-claude-textSecondary">{t("sidebar.noRecentChats")}</p>
+              <p className="px-2 py-1.5 text-xs text-deepseek-textSecondary">{t("sidebar.noRecentChats")}</p>
             )}
           </div>}
         </section>
@@ -926,7 +926,7 @@ export default function SidebarProjects({
       {notice && (
         <p
           role="status"
-          className="px-2 py-2 text-xs text-claude-textSecondary"
+          className="px-2 py-2 text-xs text-deepseek-textSecondary"
         >
           {notice}
         </p>
@@ -936,7 +936,7 @@ export default function SidebarProjects({
           <div
             ref={popupRef}
             data-project-popup
-            className="fixed z-[190] text-claude-text"
+            className="fixed z-[190] text-deepseek-text"
             style={{
               left: popup.left,
               top: popup.top,
@@ -988,7 +988,7 @@ export default function SidebarProjects({
                     />
                   </button>
                 </div>
-                <div className="my-2 flex items-center gap-2 text-claude-textSecondary">
+                <div className="my-2 flex items-center gap-2 text-deepseek-textSecondary">
                   <MessageCircle size={14} />
                   {
                     chats.filter(
@@ -998,7 +998,7 @@ export default function SidebarProjects({
                   }{" "}
                   {t("sidebar.tasks")}
                 </div>
-                <div className="border-y border-claude-border py-2 max-h-28 overflow-auto">
+                <div className="border-y border-deepseek-border py-2 max-h-28 overflow-auto">
                   {(popupProject.folders || []).map((folder) => (
                     <button
                       type="button"
@@ -1008,7 +1008,7 @@ export default function SidebarProjects({
                     >
                       <Folder
                         size={14}
-                        className="mt-0.5 shrink-0 text-claude-textSecondary"
+                        className="mt-0.5 shrink-0 text-deepseek-textSecondary"
                       />
                       <span className="break-all">{folder.path}</span>
                     </button>
@@ -1082,7 +1082,7 @@ export default function SidebarProjects({
               role="dialog"
               aria-modal="true"
               aria-labelledby="sidebar-dialog-title"
-              className="w-[440px] max-w-full rounded-2xl border border-claude-border bg-claude-bg p-5 shadow-xl text-claude-text"
+              className="w-[440px] max-w-full rounded-2xl border border-deepseek-border bg-deepseek-bg p-5 shadow-xl text-deepseek-text"
               onSubmit={(event) => {
                 event.preventDefault();
                 void perform(async () => {
@@ -1114,7 +1114,7 @@ export default function SidebarProjects({
                 {removing ? t("sidebar.removeNamedProject", { name: removing.name }) : t("sidebar.renameChat")}
               </h2>
               {removing ? (
-                <p className="text-sm text-claude-textSecondary">
+                <p className="text-sm text-deepseek-textSecondary">
                   {t("sidebar.removeProjectDescription")}
                 </p>
               ) : (
@@ -1123,7 +1123,7 @@ export default function SidebarProjects({
                   aria-label={t("sidebar.chatName")}
                   value={name}
                   onChange={(event) => setName(event.target.value)}
-                  className="w-full rounded-lg border border-claude-border bg-claude-input px-3 py-2 outline-none focus:border-blue-500"
+                  className="w-full rounded-lg border border-deepseek-border bg-deepseek-input px-3 py-2 outline-none focus:border-blue-500"
                 />
               )}
               {error && (
@@ -1146,7 +1146,7 @@ export default function SidebarProjects({
                 <button
                   type="submit"
                   disabled={busy || (!!renaming && !name.trim())}
-                  className="rounded-lg bg-claude-text px-4 py-2 text-claude-bg disabled:opacity-40"
+                  className="rounded-lg bg-deepseek-text px-4 py-2 text-deepseek-bg disabled:opacity-40"
                 >
                   {busy ? t("sidebar.saving") : removing ? t("sidebar.removeProject") : t("common.save")}
                 </button>

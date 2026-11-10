@@ -74,6 +74,10 @@ mod parallel_tool_tests;
 mod turn_budget_tests;
 
 #[cfg(test)]
+#[path = "tool_name_delta_tests.rs"]
+mod tool_name_delta_tests;
+
+#[cfg(test)]
 #[path = "resumed_stream_tests.rs"]
 mod resumed_stream_tests;
 
@@ -340,6 +344,17 @@ mod model_output;
 
 fn model_tool_output(tool_name: &str, output: &str) -> String {
     model_output::render(tool_name, output, None)
+}
+
+/// OpenAI-compatible gateways can repeat `function.name` in every argument
+/// delta, sending an empty string after the first chunk. Keep the accumulated
+/// name instead of letting a later empty delta erase it; real fragments still
+/// append.
+fn merge_tool_call_name(name: &mut String, delta: &str) {
+    if delta.is_empty() || name.ends_with(delta) {
+        return;
+    }
+    name.push_str(delta);
 }
 
 fn compact_tool_output(tool_name: &str, output: &str) -> String {
@@ -4768,14 +4783,9 @@ impl ToolLoopExecutor {
                                 if let Some(id) = tc_delta.get("id").and_then(|i| i.as_str()) {
                                     entry.0 = id.to_string();
                                 }
-                                if let Some(call_type) =
-                                    tc_delta.get("type").and_then(|t| t.as_str())
-                                {
-                                    entry.1 = call_type.to_string();
-                                }
                                 if let Some(func) = tc_delta.get("function") {
                                     if let Some(name) = func.get("name").and_then(|n| n.as_str()) {
-                                        entry.1 = name.to_string();
+                                        merge_tool_call_name(&mut entry.1, name);
                                     }
                                     if let Some(args) =
                                         func.get("arguments").and_then(|a| a.as_str())
@@ -5366,6 +5376,18 @@ impl ToolLoopExecutor {
             Value::Null
         }
     }
+}
+
+#[cfg(test)]
+#[test]
+fn tool_name_fragments_append_and_empty_chunks_are_ignored() {
+    let mut name = String::new();
+    merge_tool_call_name(&mut name, "Re");
+    merge_tool_call_name(&mut name, "");
+    merge_tool_call_name(&mut name, "ad");
+    assert_eq!(name, "Read");
+    merge_tool_call_name(&mut name, "Read");
+    assert_eq!(name, "Read");
 }
 
 #[cfg(test)]

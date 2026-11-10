@@ -199,7 +199,7 @@ impl IdeClient {
             status,
             tools: vec![],
         };
-        let initialized = self.request_on(&candidate, "initialize", json!({"protocolVersion":"2024-11-05","capabilities":{},"clientInfo":{"name":"claude-code-rust","version":env!("CARGO_PKG_VERSION")}})).await?;
+        let initialized = self.request_on(&candidate, "initialize", json!({"protocolVersion":"2024-11-05","capabilities":{},"clientInfo":{"name":"deepseek-code","version":env!("CARGO_PKG_VERSION")}})).await?;
         ensure!(
             initialized["protocolVersion"].is_string(),
             "IDE returned an invalid initialize response"

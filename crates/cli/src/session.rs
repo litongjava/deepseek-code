@@ -1037,7 +1037,18 @@ impl Session {
             recovery_requests.extend(completion.requests.iter().cloned());
             let segment = turn.ensure_segment()?;
             self.store.db.with_conn(|conn| {
-                message_repo::save_request_snapshots(conn, &segment, &json!(recovery_requests))
+                deepseek_code_core::db::write_tx(
+                    conn,
+                    "persist recovery requests",
+                    std::time::Duration::from_secs(30),
+                    |tx| {
+                        message_repo::save_request_snapshots(
+                            tx,
+                            &segment,
+                            &json!(recovery_requests),
+                        )
+                    },
+                )
             })??;
         }
         let record = turn.finish(status)?;
@@ -1796,30 +1807,37 @@ impl Session {
         {
             let message_id = assistant_id;
             self.store.db.with_conn(|conn| -> Result<()> {
-                message_repo::update_message_content(conn, &message_id, &text)?;
-                if !thinking_text.is_empty() { conn.execute("UPDATE messages SET thinking = ?1 WHERE id = ?2", [&thinking_text, &message_id])?; }
-                for tool in &tools {
-                    let call_id = format!("{message_id}:{}", tool.id);
-                    message_repo::insert_tool_call(
-                        conn,
-                        &call_id,
-                        &message_id,
-                        &tool.name,
-                        tool.input.as_deref(),
-                        tool.output.as_deref(),
-                        tool.is_error,
-                        tool.sort_order,
-                    )?;
-                    if let Some(duration) = tool_durations.get(&tool.id) { message_repo::set_tool_duration(conn, &call_id, *duration)?; }
-                    if let Some(inputs) = queued_inputs_by_tool.get(&tool.id) {
-                        deepseek_code_core::services::input_queue::save_delivered(conn, &call_id, inputs)?;
-                    }
-                    if let Some(notes) = approval_notes.get(&tool.id) {
-                        message_repo::set_tool_call_note(conn, &call_id, &notes.join("\n\n"))?;
-                    }
-                }
-                message_repo::save_request_snapshots(conn, &message_id, &json!(snapshots))?;
-                Ok(())
+                deepseek_code_core::db::write_tx(
+                    conn,
+                    "persist turn results",
+                    std::time::Duration::from_secs(30),
+                    |tx| {
+                        message_repo::update_message_content(tx, &message_id, &text)?;
+                        if !thinking_text.is_empty() { tx.execute("UPDATE messages SET thinking = ?1 WHERE id = ?2", [&thinking_text, &message_id])?; }
+                        for tool in &tools {
+                            let call_id = format!("{message_id}:{}", tool.id);
+                            message_repo::insert_tool_call(
+                                tx,
+                                &call_id,
+                                &message_id,
+                                &tool.name,
+                                tool.input.as_deref(),
+                                tool.output.as_deref(),
+                                tool.is_error,
+                                tool.sort_order,
+                            )?;
+                            if let Some(duration) = tool_durations.get(&tool.id) { message_repo::set_tool_duration(tx, &call_id, *duration)?; }
+                            if let Some(inputs) = queued_inputs_by_tool.get(&tool.id) {
+                                deepseek_code_core::services::input_queue::save_delivered(tx, &call_id, inputs)?;
+                            }
+                            if let Some(notes) = approval_notes.get(&tool.id) {
+                                message_repo::set_tool_call_note(tx, &call_id, &notes.join("\n\n"))?;
+                            }
+                        }
+                        message_repo::save_request_snapshots(tx, &message_id, &json!(snapshots))?;
+                        Ok(())
+                    },
+                )
             })??;
         }
         crate::session_commands::save_live_requests(self, &[])?;

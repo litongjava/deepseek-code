@@ -19,7 +19,7 @@ export default function RightSidebarToggle({ expanded, onToggle, shortcutLabel =
         aria-controls={expanded ? RIGHT_SIDEBAR_ID : undefined}
         aria-keyshortcuts={shortcutLabel.startsWith('Ctrl') ? 'Control+Alt+B' : 'Meta+Alt+B'}
         onClick={onToggle}
-        className={`p-1.5 rounded-md transition-colors hover:bg-black/5 dark:hover:bg-white/5 ${expanded ? 'text-claude-text' : 'text-claude-textSecondary hover:text-claude-text'}`}
+        className={`p-1.5 rounded-md transition-colors hover:bg-black/5 dark:hover:bg-white/5 ${expanded ? 'text-deepseek-text' : 'text-deepseek-textSecondary hover:text-deepseek-text'}`}
       >
         <Icon size={16} strokeWidth={1.5} />
       </button>

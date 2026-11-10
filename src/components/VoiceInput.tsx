@@ -98,14 +98,14 @@ const VoiceInput: React.FC<VoiceInputProps> = ({ onResult, onClose, isOpen }) =>
   const close = () => { cancel(); onClose(); };
   if (!isOpen) return null;
   return <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40" role="dialog" aria-modal="true" aria-label={t('chat.voiceInput')}>
-    <div className="w-[460px] max-w-[95vw] bg-claude-input border border-claude-border rounded-2xl p-6 shadow-xl text-claude-text">
+    <div className="w-[460px] max-w-[95vw] bg-deepseek-input border border-deepseek-border rounded-2xl p-6 shadow-xl text-deepseek-text">
       <div className="flex items-center justify-between"><h3 className="text-lg">{t('chat.voiceInput')}</h3><button aria-label={t('chat.closeVoiceInput')} onClick={close}><X size={20} /></button></div>
       <p className="text-sm my-4" role="status">{status === 'listening' ? `正在录音 · ${seconds} 秒` : status === 'processing' ? '正在准备或转写音频…' : status === 'done' ? '转写完成，可继续录音或编辑后使用' : '通过设置中的音频转写后端识别，每段最多 60 秒'}</p>
       {error && <p role="alert" className="text-sm text-red-500 mb-3">{error}</p>}
-      <textarea aria-label="转写文本" className="w-full min-h-24 bg-claude-bg border border-claude-border rounded p-3" value={text} onChange={event => setText(event.target.value)} />
+      <textarea aria-label="转写文本" className="w-full min-h-24 bg-deepseek-bg border border-deepseek-border rounded p-3" value={text} onChange={event => setText(event.target.value)} />
       <div className="flex justify-between mt-4 gap-3">
         {status === 'listening' ? <button onClick={() => recorder.current?.stop()}>停止并转写</button> : <button disabled={status === 'processing'} onClick={start} className="flex items-center gap-2">{status === 'processing' ? <Loader2 className="animate-spin" size={18} /> : <Mic size={18} />} {text ? '继续录音' : '开始录音'}</button>}
-        <button disabled={!text.trim() || status === 'listening' || status === 'processing'} onClick={() => { onResult(text.trim()); close(); }} className="bg-claude-accent text-white rounded px-4 py-2">使用文本</button>
+        <button disabled={!text.trim() || status === 'listening' || status === 'processing'} onClick={() => { onResult(text.trim()); close(); }} className="bg-deepseek-accent text-white rounded px-4 py-2">使用文本</button>
       </div>
     </div>
   </div>;

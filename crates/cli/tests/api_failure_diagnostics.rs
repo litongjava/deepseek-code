@@ -340,13 +340,9 @@ impl Project {
             "RUST_LOG",
             "DEEPSEEK_CODE_DATA_DIR",
             "DEEPSEEK_CODE_BACKGROUND_CONTROL",
-            "CLAUDE_RUST_BACKGROUND_CONTROL",
             "DEEPSEEK_CODE_BACKGROUND_JOB",
-            "CLAUDE_RUST_BACKGROUND_JOB",
             "DEEPSEEK_CODE_WORKER_MODEL",
-            "CLAUDE_RUST_WORKER_MODEL",
             "DEEPSEEK_CODE_WORKER_AUTO_ROUTE",
-            "CLAUDE_RUST_WORKER_AUTO_ROUTE",
         ] {
             command.env_remove(key);
         }

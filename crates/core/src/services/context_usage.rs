@@ -1,5 +1,8 @@
 //! Local inspection of the last parent-session request; never prepares a new request.
-use crate::{db::DbManager, native_engine::request_context::ContextUsage};
+use crate::{
+    db::{message_repo, DbManager},
+    native_engine::request_context::ContextUsage,
+};
 use anyhow::Result;
 use serde_json::Value;
 
@@ -133,7 +136,11 @@ fn matching_request(
             if let Some(snapshot) = items.iter().rev().find(|s| (s["source"] == "native_engine" || s.get("source").is_none()) && accept(s)) {
                 // Preserve unknown metadata on this request; never replace it
                 // with an older request merely because the old one has counts.
-                return Ok(Some(snapshot.clone()));
+                // Only the selected snapshot is expanded: restoring every row
+                // would multiply the status query's work.
+                let mut snapshot = snapshot.clone();
+                message_repo::load_trajectory_blobs(conn, &mut snapshot)?;
+                return Ok(Some(snapshot));
             }
             // Local workflows and failed pre-request turns can persist [].
             // A row containing only side-query snapshots is not a parent request.

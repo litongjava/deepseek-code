@@ -47,7 +47,7 @@ export class ErrorBoundary extends React.Component<ErrorBoundaryProps, ErrorBoun
           </p>
           <button
             onClick={this.handleRetry}
-            className="px-4 py-2 text-sm font-medium text-white bg-claude-textPrimary rounded-lg hover:bg-claude-textSecondary transition-colors"
+            className="px-4 py-2 text-sm font-medium text-white bg-deepseek-textPrimary rounded-lg hover:bg-deepseek-textSecondary transition-colors"
           >
             Try Again
           </button>

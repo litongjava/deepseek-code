@@ -14,13 +14,13 @@ export default function SubagentPanel({ invocation, active }: { invocation: Suba
   const refs = useRef(new Map<number, HTMLDivElement>());
   const status = snapshot?.status;
   return <section className="chat-font-scope chat-surface flex h-full min-h-0 flex-col" aria-label="Subagent transcript">
-    <header className="shrink-0 border-b border-claude-border p-3 text-xs">
+    <header className="shrink-0 border-b border-deepseek-border p-3 text-xs">
       <div className="font-medium">{snapshot?.invocation.description || invocation.description || 'Subagent'}</div>
-      <div className="my-1 break-all text-claude-textSecondary">{invocation.child_session_id} · {snapshot?.invocation.mode || invocation.mode} · {status || 'Loading'}</div>
-      <button type="button" disabled={!snapshot?.parent_exists} onClick={() => navigate(`/chat/${encodeURIComponent(invocation.parent_session_id)}`)} className="rounded px-2 py-1 hover:bg-claude-hover disabled:opacity-40">Go to parent conversation</button>
-      <button type="button" onClick={retry} className="rounded px-2 py-1 hover:bg-claude-hover">Refresh</button>
+      <div className="my-1 break-all text-deepseek-textSecondary">{invocation.child_session_id} · {snapshot?.invocation.mode || invocation.mode} · {status || 'Loading'}</div>
+      <button type="button" disabled={!snapshot?.parent_exists} onClick={() => navigate(`/chat/${encodeURIComponent(invocation.parent_session_id)}`)} className="rounded px-2 py-1 hover:bg-deepseek-hover disabled:opacity-40">Go to parent conversation</button>
+      <button type="button" onClick={retry} className="rounded px-2 py-1 hover:bg-deepseek-hover">Refresh</button>
       {snapshot && !snapshot.parent_exists && <p>Parent conversation unavailable.</p>}
-      <p className="mt-1 text-claude-textSecondary">Read-only. Closing this view does not stop the agent.</p>
+      <p className="mt-1 text-deepseek-textSecondary">Read-only. Closing this view does not stop the agent.</p>
     </header>
     <div className="min-h-0 flex-1 overflow-auto p-3" tabIndex={0} onKeyDown={event => {
       const top = conversationPageTop(event.nativeEvent, event.currentTarget);

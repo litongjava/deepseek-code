@@ -44,13 +44,13 @@ export default function AppTitleBar({ children, trailing, height = 44 }: {
   };
 
   return (
-    <div dir="ltr" data-app-titlebar className="absolute top-0 left-0 w-full z-[10000] flex items-center select-none bg-claude-bg border-b border-claude-border" style={{ height }}>
+    <div dir="ltr" data-app-titlebar className="absolute top-0 left-0 w-full z-[10000] flex items-center select-none bg-deepseek-bg border-b border-deepseek-border" style={{ height }}>
       {children}
       {/* Tauri handles native dragging and double-click maximize on this region. */}
       <div data-tauri-drag-region={custom ? true : undefined} className="h-full flex-1 min-w-4" />
       {trailing}
       {custom && (
-        <div className="flex h-full shrink-0 text-claude-text" role="group" aria-label="窗口控制">
+        <div className="flex h-full shrink-0 text-deepseek-text" role="group" aria-label="窗口控制">
           <button type="button" aria-label="最小化" title="最小化" onClick={() => run('minimize')} className="w-[46px] flex items-center justify-center hover:bg-black/5 dark:hover:bg-white/10"><Minus size={15} strokeWidth={1.5} /></button>
           <button type="button" aria-label={maximized ? '还原' : '最大化'} title={maximized ? '还原' : '最大化'} onClick={() => run('toggleMaximize')} className="w-[46px] flex items-center justify-center hover:bg-black/5 dark:hover:bg-white/10">
             {maximized ? <Copy size={13} strokeWidth={1.5} /> : <Square size={13} strokeWidth={1.5} />}
@@ -67,7 +67,7 @@ export default function AppTitleBar({ children, trailing, height = 44 }: {
 export function WindowFrame({ children }: { children: React.ReactNode }) {
   if (!hasCustomTitleBar()) return <>{children}</>;
   return (
-    <div className="relative h-screen overflow-hidden bg-claude-bg pt-11">
+    <div className="relative h-screen overflow-hidden bg-deepseek-bg pt-11">
       <AppTitleBar />
       <div className="h-full overflow-auto [transform:translateZ(0)] [&>*]:!min-h-full [&>*]:!h-full">{children}</div>
     </div>

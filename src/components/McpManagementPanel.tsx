@@ -168,43 +168,43 @@ export default function McpManagementPanel({ onClose }: { onClose: () => void })
   return (
     <div className="fixed inset-0 z-[100] flex items-center justify-center bg-black/40" onClick={onClose}>
       <div
-        className="w-[600px] max-h-[80vh] bg-white dark:bg-[#2A2928] border border-claude-border rounded-xl shadow-2xl flex flex-col overflow-hidden"
+        className="w-[600px] max-h-[80vh] bg-white dark:bg-[#2A2928] border border-deepseek-border rounded-xl shadow-2xl flex flex-col overflow-hidden"
         onClick={e => e.stopPropagation()}
       >
-        <div className="flex items-center justify-between px-5 py-4 border-b border-claude-border">
+        <div className="flex items-center justify-between px-5 py-4 border-b border-deepseek-border">
           <div className="flex items-center gap-3">
             <div className="p-2 bg-blue-500/10 rounded-lg">
               <Server size={20} className="text-blue-500" />
             </div>
             <div>
-              <h2 className="text-[16px] font-semibold text-claude-text">MCP Servers</h2>
-              <p className="text-[12px] text-claude-textSecondary">Manage Model Context Protocol servers</p>
+              <h2 className="text-[16px] font-semibold text-deepseek-text">MCP Servers</h2>
+              <p className="text-[12px] text-deepseek-textSecondary">Manage Model Context Protocol servers</p>
             </div>
           </div>
           <button onClick={onClose} className="p-1.5 hover:bg-black/5 dark:hover:bg-white/5 rounded-lg transition-colors">
-            <X size={18} className="text-claude-textSecondary" />
+            <X size={18} className="text-deepseek-textSecondary" />
           </button>
         </div>
 
         <div className="flex-1 overflow-y-auto p-5">
           {loading ? (
             <div className="flex items-center justify-center py-12">
-              <Loader2 size={24} className="animate-spin text-claude-textSecondary" />
+              <Loader2 size={24} className="animate-spin text-deepseek-textSecondary" />
             </div>
           ) : servers.length === 0 ? (
             <div className="text-center py-12">
-              <Server size={40} className="mx-auto text-claude-textSecondary/30 mb-3" />
-              <p className="text-claude-textSecondary text-[14px]">No MCP servers configured</p>
-              <p className="text-claude-textSecondary/60 text-[12px] mt-1">Add a server to extend DeepSeek Code's capabilities</p>
+              <Server size={40} className="mx-auto text-deepseek-textSecondary/30 mb-3" />
+              <p className="text-deepseek-textSecondary text-[14px]">No MCP servers configured</p>
+              <p className="text-deepseek-textSecondary/60 text-[12px] mt-1">Add a server to extend DeepSeek Code's capabilities</p>
             </div>
           ) : (
             <div className="space-y-3">
               {servers.map((server) => (
-                <div key={server.name} className="border border-claude-border rounded-lg p-4">
+                <div key={server.name} className="border border-deepseek-border rounded-lg p-4">
                   <div className="flex items-center justify-between mb-2">
                     <div className="flex items-center gap-2">
-                      <Terminal size={14} className="text-claude-textSecondary" />
-                      <span className="text-[14px] font-medium text-claude-text">{server.name}</span>
+                      <Terminal size={14} className="text-deepseek-textSecondary" />
+                      <span className="text-[14px] font-medium text-deepseek-text">{server.name}</span>
                       <span className={`px-1.5 py-0.5 text-[10px] rounded-full ${
                         server.enabled
                           ? 'bg-green-500/10 text-green-600 dark:text-green-400'
@@ -219,7 +219,7 @@ export default function McpManagementPanel({ onClose }: { onClose: () => void })
                         className="p-1.5 hover:bg-black/5 dark:hover:bg-white/5 rounded-md transition-colors"
                         title={server.enabled ? 'Disable' : 'Enable'}
                       >
-                        {server.enabled ? <PowerOff size={14} className="text-claude-textSecondary" /> : <Power size={14} className="text-green-500" />}
+                        {server.enabled ? <PowerOff size={14} className="text-deepseek-textSecondary" /> : <Power size={14} className="text-green-500" />}
                       </button>
                       <button
                         onClick={() => handleRemoveServer(server.name)}
@@ -230,7 +230,7 @@ export default function McpManagementPanel({ onClose }: { onClose: () => void })
                       </button>
                     </div>
                   </div>
-                  <div className="text-[12px] text-claude-textSecondary font-mono bg-claude-hover/50 rounded px-2 py-1">
+                  <div className="text-[12px] text-deepseek-textSecondary font-mono bg-deepseek-hover/50 rounded px-2 py-1">
                     {server.command} {server.args.join(' ')}
                   </div>
                   {Object.keys(server.env).length > 0 && (
@@ -248,41 +248,41 @@ export default function McpManagementPanel({ onClose }: { onClose: () => void })
           )}
 
           {showAddForm && (
-            <div className="mt-4 border border-claude-border rounded-lg p-4 bg-claude-hover/30">
-              <h3 className="text-[14px] font-medium text-claude-text mb-3">Add MCP Server</h3>
+            <div className="mt-4 border border-deepseek-border rounded-lg p-4 bg-deepseek-hover/30">
+              <h3 className="text-[14px] font-medium text-deepseek-text mb-3">Add MCP Server</h3>
 
               <div className="space-y-3">
                 <div>
-                  <label className="text-[12px] text-claude-textSecondary block mb-1">Name</label>
+                  <label className="text-[12px] text-deepseek-textSecondary block mb-1">Name</label>
                   <input
                     type="text"
                     value={newServer.name}
                     onChange={e => setNewServer(prev => ({ ...prev, name: e.target.value }))}
-                    className="w-full px-3 py-2 bg-transparent border border-claude-border rounded-lg text-claude-text text-[13px] focus:outline-none focus:border-blue-500"
+                    className="w-full px-3 py-2 bg-transparent border border-deepseek-border rounded-lg text-deepseek-text text-[13px] focus:outline-none focus:border-blue-500"
                     placeholder="my-server"
                   />
                 </div>
 
                 <div>
-                  <label className="text-[12px] text-claude-textSecondary block mb-1">Command</label>
+                  <label className="text-[12px] text-deepseek-textSecondary block mb-1">Command</label>
                   <input
                     type="text"
                     value={newServer.command}
                     onChange={e => setNewServer(prev => ({ ...prev, command: e.target.value }))}
-                    className="w-full px-3 py-2 bg-transparent border border-claude-border rounded-lg text-claude-text text-[13px] focus:outline-none focus:border-blue-500"
+                    className="w-full px-3 py-2 bg-transparent border border-deepseek-border rounded-lg text-deepseek-text text-[13px] focus:outline-none focus:border-blue-500"
                     placeholder="npx -y @modelcontextprotocol/server-filesystem"
                   />
                 </div>
 
                 <div>
-                  <label className="text-[12px] text-claude-textSecondary block mb-1">Arguments</label>
+                  <label className="text-[12px] text-deepseek-textSecondary block mb-1">Arguments</label>
                   <div className="flex gap-2">
                     <input
                       type="text"
                       value={argInput}
                       onChange={e => setArgInput(e.target.value)}
                       onKeyDown={e => { if (e.key === 'Enter') { e.preventDefault(); addArg(); } }}
-                      className="flex-1 px-3 py-2 bg-transparent border border-claude-border rounded-lg text-claude-text text-[13px] focus:outline-none focus:border-blue-500"
+                      className="flex-1 px-3 py-2 bg-transparent border border-deepseek-border rounded-lg text-deepseek-text text-[13px] focus:outline-none focus:border-blue-500"
                       placeholder="--path /some/dir"
                     />
                     <button onClick={addArg} className="px-3 py-2 bg-blue-500 text-white rounded-lg text-[12px] hover:bg-blue-600">
@@ -292,7 +292,7 @@ export default function McpManagementPanel({ onClose }: { onClose: () => void })
                   {newServer.args && newServer.args.length > 0 && (
                     <div className="flex flex-wrap gap-1 mt-2">
                       {newServer.args.map((arg, i) => (
-                        <span key={i} className="flex items-center gap-1 text-[11px] px-2 py-0.5 bg-claude-hover rounded">
+                        <span key={i} className="flex items-center gap-1 text-[11px] px-2 py-0.5 bg-deepseek-hover rounded">
                           {arg}
                           <button onClick={() => removeArg(i)} className="hover:text-red-500"><X size={10} /></button>
                         </span>
@@ -302,13 +302,13 @@ export default function McpManagementPanel({ onClose }: { onClose: () => void })
                 </div>
 
                 <div>
-                  <label className="text-[12px] text-claude-textSecondary block mb-1">Environment Variables</label>
+                  <label className="text-[12px] text-deepseek-textSecondary block mb-1">Environment Variables</label>
                   <div className="flex gap-2">
                     <input
                       type="text"
                       value={envKeyInput}
                       onChange={e => setEnvKeyInput(e.target.value)}
-                      className="w-1/3 px-3 py-2 bg-transparent border border-claude-border rounded-lg text-claude-text text-[13px] focus:outline-none focus:border-blue-500"
+                      className="w-1/3 px-3 py-2 bg-transparent border border-deepseek-border rounded-lg text-deepseek-text text-[13px] focus:outline-none focus:border-blue-500"
                       placeholder="KEY"
                     />
                     <input
@@ -316,7 +316,7 @@ export default function McpManagementPanel({ onClose }: { onClose: () => void })
                       value={envValueInput}
                       onChange={e => setEnvValueInput(e.target.value)}
                       onKeyDown={e => { if (e.key === 'Enter') { e.preventDefault(); addEnv(); } }}
-                      className="flex-1 px-3 py-2 bg-transparent border border-claude-border rounded-lg text-claude-text text-[13px] focus:outline-none focus:border-blue-500"
+                      className="flex-1 px-3 py-2 bg-transparent border border-deepseek-border rounded-lg text-deepseek-text text-[13px] focus:outline-none focus:border-blue-500"
                       placeholder="value"
                     />
                     <button onClick={addEnv} className="px-3 py-2 bg-blue-500 text-white rounded-lg text-[12px] hover:bg-blue-600">
@@ -338,7 +338,7 @@ export default function McpManagementPanel({ onClose }: { onClose: () => void })
                 <div className="flex justify-end gap-2 pt-2">
                   <button
                     onClick={() => setShowAddForm(false)}
-                    className="px-4 py-2 text-[13px] text-claude-textSecondary hover:text-claude-text transition-colors"
+                    className="px-4 py-2 text-[13px] text-deepseek-textSecondary hover:text-deepseek-text transition-colors"
                   >
                     Cancel
                   </button>
@@ -355,8 +355,8 @@ export default function McpManagementPanel({ onClose }: { onClose: () => void })
           )}
         </div>
 
-        <div className="px-5 py-3 border-t border-claude-border flex items-center justify-between">
-          <span className="text-[12px] text-claude-textSecondary">{servers.length} server{servers.length !== 1 ? 's' : ''} configured</span>
+        <div className="px-5 py-3 border-t border-deepseek-border flex items-center justify-between">
+          <span className="text-[12px] text-deepseek-textSecondary">{servers.length} server{servers.length !== 1 ? 's' : ''} configured</span>
           <button
             onClick={() => setShowAddForm(!showAddForm)}
             className="flex items-center gap-2 px-3 py-1.5 text-[13px] text-white bg-blue-500 hover:bg-blue-600 rounded-lg transition-colors"

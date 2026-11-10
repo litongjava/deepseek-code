@@ -149,13 +149,13 @@ const PreviewPanel: React.FC<PreviewPanelProps> = ({
         onClick={onClose}
       />
 
-      <div className="relative w-[90vw] max-w-6xl h-[85vh] bg-claude-bg rounded-2xl shadow-2xl border border-claude-border flex flex-col overflow-hidden animate-in fade-in zoom-in duration-200">
-        <div className="flex items-center justify-between px-4 py-3 bg-claude-surface border-b border-claude-border">
+      <div className="relative w-[90vw] max-w-6xl h-[85vh] bg-deepseek-bg rounded-2xl shadow-2xl border border-deepseek-border flex flex-col overflow-hidden animate-in fade-in zoom-in duration-200">
+        <div className="flex items-center justify-between px-4 py-3 bg-deepseek-surface border-b border-deepseek-border">
           <div className="flex items-center gap-3">
-            <h2 className="text-[14px] font-semibold text-claude-text truncate max-w-md">
+            <h2 className="text-[14px] font-semibold text-deepseek-text truncate max-w-md">
               {title}
             </h2>
-            <span className="px-2 py-0.5 bg-claude-hover text-claude-textSecondary text-[11px] font-medium rounded">
+            <span className="px-2 py-0.5 bg-deepseek-hover text-deepseek-textSecondary text-[11px] font-medium rounded">
               {contentType}
             </span>
             {previewId && (
@@ -167,39 +167,39 @@ const PreviewPanel: React.FC<PreviewPanelProps> = ({
           </div>
 
           <div className="flex items-center gap-1">
-            <div className="flex items-center gap-1 px-2 py-1 bg-claude-hover rounded-lg">
+            <div className="flex items-center gap-1 px-2 py-1 bg-deepseek-hover rounded-lg">
               <button
                 onClick={handleZoomOut}
-                className="p-1.5 text-claude-textSecondary hover:text-claude-text hover:bg-claude-input rounded transition-colors"
+                className="p-1.5 text-deepseek-textSecondary hover:text-deepseek-text hover:bg-deepseek-input rounded transition-colors"
                 title="Zoom Out"
               >
                 <ZoomOut size={14} />
               </button>
-              <span className="px-2 text-[12px] text-claude-textSecondary font-medium min-w-[50px] text-center">
+              <span className="px-2 text-[12px] text-deepseek-textSecondary font-medium min-w-[50px] text-center">
                 {zoom}%
               </span>
               <button
                 onClick={handleZoomIn}
-                className="p-1.5 text-claude-textSecondary hover:text-claude-text hover:bg-claude-input rounded transition-colors"
+                className="p-1.5 text-deepseek-textSecondary hover:text-deepseek-text hover:bg-deepseek-input rounded transition-colors"
                 title="Zoom In"
               >
                 <ZoomIn size={14} />
               </button>
               <button
                 onClick={handleResetZoom}
-                className="p-1.5 text-claude-textSecondary hover:text-claude-text hover:bg-claude-input rounded transition-colors"
+                className="p-1.5 text-deepseek-textSecondary hover:text-deepseek-text hover:bg-deepseek-input rounded transition-colors"
                 title="Reset Zoom"
               >
                 <Maximize2 size={14} />
               </button>
             </div>
 
-            <div className="h-6 w-px bg-claude-border mx-2" />
+            <div className="h-6 w-px bg-deepseek-border mx-2" />
 
             <button
               onClick={handleRefresh}
               disabled={isRefreshing}
-              className="p-1.5 text-claude-textSecondary hover:text-claude-text hover:bg-claude-input rounded-lg transition-colors disabled:opacity-50"
+              className="p-1.5 text-deepseek-textSecondary hover:text-deepseek-text hover:bg-deepseek-input rounded-lg transition-colors disabled:opacity-50"
               title="Refresh"
             >
               <RefreshCw size={14} className={isRefreshing ? 'animate-spin' : ''} />
@@ -207,7 +207,7 @@ const PreviewPanel: React.FC<PreviewPanelProps> = ({
 
             <button
               onClick={handleDownload}
-              className="p-1.5 text-claude-textSecondary hover:text-claude-text hover:bg-claude-input rounded-lg transition-colors"
+              className="p-1.5 text-deepseek-textSecondary hover:text-deepseek-text hover:bg-deepseek-input rounded-lg transition-colors"
               title="Download"
             >
               <Download size={14} />
@@ -215,17 +215,17 @@ const PreviewPanel: React.FC<PreviewPanelProps> = ({
 
             <button
               onClick={handleOpenInBrowser}
-              className="p-1.5 text-claude-textSecondary hover:text-claude-text hover:bg-claude-input rounded-lg transition-colors"
+              className="p-1.5 text-deepseek-textSecondary hover:text-deepseek-text hover:bg-deepseek-input rounded-lg transition-colors"
               title="Open in Browser"
             >
               <ExternalLink size={14} />
             </button>
 
-            <div className="h-6 w-px bg-claude-border mx-1" />
+            <div className="h-6 w-px bg-deepseek-border mx-1" />
 
             <button
               onClick={onClose}
-              className="p-1.5 text-claude-textSecondary hover:text-claude-text hover:bg-claude-input rounded-lg transition-colors"
+              className="p-1.5 text-deepseek-textSecondary hover:text-deepseek-text hover:bg-deepseek-input rounded-lg transition-colors"
               title="Close"
             >
               <X size={14} />
@@ -233,9 +233,9 @@ const PreviewPanel: React.FC<PreviewPanelProps> = ({
           </div>
         </div>
 
-        <div className="flex-1 overflow-hidden bg-claude-bg p-4">
+        <div className="flex-1 overflow-hidden bg-deepseek-bg p-4">
           {error ? (
-            <div className="flex flex-col items-center justify-center h-full text-claude-textSecondary">
+            <div className="flex flex-col items-center justify-center h-full text-deepseek-textSecondary">
               <div className="w-12 h-12 rounded-xl bg-red-500/10 flex items-center justify-center mb-4">
                 <span className="text-red-400 text-xl">!</span>
               </div>
@@ -255,8 +255,8 @@ const PreviewPanel: React.FC<PreviewPanelProps> = ({
               />
             </div>
           ) : (
-            <div className="flex flex-col items-center justify-center h-full text-claude-textSecondary">
-              <div className="w-12 h-12 rounded-xl bg-claude-hover flex items-center justify-center mb-4">
+            <div className="flex flex-col items-center justify-center h-full text-deepseek-textSecondary">
+              <div className="w-12 h-12 rounded-xl bg-deepseek-hover flex items-center justify-center mb-4">
                 <RefreshCw size={24} className="animate-spin" />
               </div>
               <p className="text-[14px] font-medium">Loading preview...</p>

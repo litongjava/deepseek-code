@@ -187,35 +187,35 @@ const KnowledgePanel: React.FC<{ onClose?: () => void }> = ({ onClose }) => {
   ) : nodes;
 
   return (
-    <div className="h-full flex flex-col bg-claude-bg">
+    <div className="h-full flex flex-col bg-deepseek-bg">
       {/* Header */}
-      <div className="flex items-center justify-between px-4 py-2.5 border-b border-claude-border shrink-0">
+      <div className="flex items-center justify-between px-4 py-2.5 border-b border-deepseek-border shrink-0">
         <div className="flex items-center gap-2">
           <Network size={16} className="text-purple-400" />
-          <span className="text-[13px] font-semibold text-claude-text">知识库</span>
-          <span className="text-[10px] text-claude-textSecondary bg-claude-hover px-1.5 py-0.5 rounded-full">{nodes.length}</span>
+          <span className="text-[13px] font-semibold text-deepseek-text">知识库</span>
+          <span className="text-[10px] text-deepseek-textSecondary bg-deepseek-hover px-1.5 py-0.5 rounded-full">{nodes.length}</span>
         </div>
         <div className="flex items-center gap-1">
-          <button onClick={() => setViewMode('graph')} className={`p-1.5 rounded ${viewMode === 'graph' ? 'bg-claude-hover text-purple-400' : 'text-claude-textSecondary hover:text-claude-text'}`}><Network size={14} /></button>
-          <button onClick={() => setViewMode('list')} className={`p-1.5 rounded ${viewMode === 'list' ? 'bg-claude-hover text-purple-400' : 'text-claude-textSecondary hover:text-claude-text'}`}><List size={14} /></button>
-          <button onClick={loadData} className="p-1.5 rounded text-claude-textSecondary hover:text-claude-text"><Loader2 size={14} /></button>
-          {onClose && <button onClick={onClose} className="p-1.5 rounded hover:bg-claude-hover text-claude-textSecondary"><X size={14} /></button>}
+          <button onClick={() => setViewMode('graph')} className={`p-1.5 rounded ${viewMode === 'graph' ? 'bg-deepseek-hover text-purple-400' : 'text-deepseek-textSecondary hover:text-deepseek-text'}`}><Network size={14} /></button>
+          <button onClick={() => setViewMode('list')} className={`p-1.5 rounded ${viewMode === 'list' ? 'bg-deepseek-hover text-purple-400' : 'text-deepseek-textSecondary hover:text-deepseek-text'}`}><List size={14} /></button>
+          <button onClick={loadData} className="p-1.5 rounded text-deepseek-textSecondary hover:text-deepseek-text"><Loader2 size={14} /></button>
+          {onClose && <button onClick={onClose} className="p-1.5 rounded hover:bg-deepseek-hover text-deepseek-textSecondary"><X size={14} /></button>}
         </div>
       </div>
 
       {/* Search */}
-      <div className="px-3 py-2 border-b border-claude-border">
-        <div className="flex items-center gap-2 bg-claude-hover rounded-lg px-2.5 py-1.5">
-          <Search size={13} className="text-claude-textSecondary" />
+      <div className="px-3 py-2 border-b border-deepseek-border">
+        <div className="flex items-center gap-2 bg-deepseek-hover rounded-lg px-2.5 py-1.5">
+          <Search size={13} className="text-deepseek-textSecondary" />
           <input value={searchQuery} onChange={e => setSearchQuery(e.target.value)}
-            placeholder="搜索知识库..." className="flex-1 bg-transparent text-[12px] text-claude-text outline-none placeholder:text-claude-textSecondary/50" />
+            placeholder="搜索知识库..." className="flex-1 bg-transparent text-[12px] text-deepseek-text outline-none placeholder:text-deepseek-textSecondary/50" />
         </div>
       </div>
 
       {/* Content */}
       <div className="flex-1 flex overflow-hidden">
         {/* Left: Graph or List */}
-        <div className={`${selectedNode ? 'w-1/2' : 'flex-1'} border-r border-claude-border flex flex-col`}>
+        <div className={`${selectedNode ? 'w-1/2' : 'flex-1'} border-r border-deepseek-border flex flex-col`}>
           {loading ? (
             <div className="flex-1 flex items-center justify-center"><Loader2 size={20} className="animate-spin text-purple-400" /></div>
           ) : viewMode === 'graph' ? (
@@ -234,40 +234,40 @@ const KnowledgePanel: React.FC<{ onClose?: () => void }> = ({ onClose }) => {
                     if (n) { setEditTitle(n.title); setEditContent(n.content); setEditTags(n.tags.join(', ')); setEditorOpen(false); } }
                 }}
               />
-              <div className="absolute bottom-2 left-2 text-[10px] text-claude-textSecondary/50">图谱视图 · 悬停查看节点</div>
+              <div className="absolute bottom-2 left-2 text-[10px] text-deepseek-textSecondary/50">图谱视图 · 悬停查看节点</div>
             </div>
           ) : (
             <div className="flex-1 overflow-y-auto">
               {filteredNodes.length === 0 ? (
-                <div className="flex flex-col items-center justify-center h-full text-claude-textSecondary text-[12px] gap-3">
+                <div className="flex flex-col items-center justify-center h-full text-deepseek-textSecondary text-[12px] gap-3">
                   <FileText size={32} className="opacity-30" />
                   <p>{searchQuery ? '无匹配结果' : '知识库为空'}</p>
                 </div>
               ) : filteredNodes.map(n => (
                 <div key={n.id} onClick={() => { setSelectedId(n.id); setEditTitle(n.title); setEditContent(n.content); setEditTags(n.tags.join(', ')); setEditorOpen(false); }}
-                  className={`flex items-start gap-2.5 px-3 py-2.5 cursor-pointer hover:bg-claude-hover/50 transition-colors border-b border-claude-border/30 ${selectedId === n.id ? 'bg-claude-hover/70' : ''}`}>
+                  className={`flex items-start gap-2.5 px-3 py-2.5 cursor-pointer hover:bg-deepseek-hover/50 transition-colors border-b border-deepseek-border/30 ${selectedId === n.id ? 'bg-deepseek-hover/70' : ''}`}>
                   <span className="mt-0.5 text-[14px]">{n.source === 'chat_auto' ? '🧠' : '📄'}</span>
                   <div className="flex-1 min-w-0">
-                    <div className="text-[12px] font-medium text-claude-text truncate">{n.title}</div>
-                    <div className="text-[10px] text-claude-textSecondary truncate mt-0.5">{n.content.slice(0, 80)}</div>
+                    <div className="text-[12px] font-medium text-deepseek-text truncate">{n.title}</div>
+                    <div className="text-[10px] text-deepseek-textSecondary truncate mt-0.5">{n.content.slice(0, 80)}</div>
                     {n.tags.length > 0 && <div className="flex gap-1 mt-1 flex-wrap">
                       {n.tags.slice(0, 3).map(t => <span key={t} className="text-[9px] px-1.5 py-0.5 rounded-full bg-purple-500/10 text-purple-400">#{t}</span>)}
                     </div>}
                   </div>
-                  <span className="text-[10px] text-claude-textSecondary/50 shrink-0">{n.links.length} ↦</span>
+                  <span className="text-[10px] text-deepseek-textSecondary/50 shrink-0">{n.links.length} ↦</span>
                 </div>
               ))}
             </div>
           )}
           {/* Action buttons */}
-          <div className="flex items-center gap-1 px-3 py-2 border-t border-claude-border shrink-0">
+          <div className="flex items-center gap-1 px-3 py-2 border-t border-deepseek-border shrink-0">
             <button onClick={handleCreate} className="flex items-center gap-1 px-2.5 py-1.5 text-[11px] bg-purple-500/10 text-purple-400 hover:bg-purple-500/20 rounded-lg transition-colors"><Plus size={12} />新建</button>
-            <button onClick={() => setImportText(importText ? '' : 'paste')} className="flex items-center gap-1 px-2.5 py-1.5 text-[11px] bg-claude-hover text-claude-textSecondary hover:text-claude-text rounded-lg transition-colors"><Upload size={12} />导入</button>
+            <button onClick={() => setImportText(importText ? '' : 'paste')} className="flex items-center gap-1 px-2.5 py-1.5 text-[11px] bg-deepseek-hover text-deepseek-textSecondary hover:text-deepseek-text rounded-lg transition-colors"><Upload size={12} />导入</button>
           </div>
           {importText === 'paste' && (
-            <div className="px-3 py-2 border-t border-claude-border">
+            <div className="px-3 py-2 border-t border-deepseek-border">
               <textarea value={importText === 'paste' ? '' : importText} onChange={e => setImportText(e.target.value)}
-                placeholder="粘贴 Markdown 内容导入..." className="w-full h-20 bg-claude-hover text-[11px] text-claude-text p-2 rounded-lg outline-none resize-none" />
+                placeholder="粘贴 Markdown 内容导入..." className="w-full h-20 bg-deepseek-hover text-[11px] text-deepseek-text p-2 rounded-lg outline-none resize-none" />
               <button onClick={handleImport} className="mt-1 text-[11px] text-blue-400 hover:underline">导入</button>
             </div>
           )}
@@ -279,35 +279,35 @@ const KnowledgePanel: React.FC<{ onClose?: () => void }> = ({ onClose }) => {
             {editorOpen ? (
               <div className="flex-1 flex flex-col p-3 gap-2 overflow-y-auto">
                 <input value={editTitle} onChange={e => setEditTitle(e.target.value)}
-                  className="w-full bg-claude-hover text-[14px] font-semibold text-claude-text px-2.5 py-1.5 rounded-lg outline-none" placeholder="标题" />
+                  className="w-full bg-deepseek-hover text-[14px] font-semibold text-deepseek-text px-2.5 py-1.5 rounded-lg outline-none" placeholder="标题" />
                 <textarea value={editContent} onChange={e => setEditContent(e.target.value)}
-                  className="flex-1 bg-claude-hover text-[12px] text-claude-text p-2.5 rounded-lg outline-none resize-none font-mono leading-relaxed" placeholder="内容 (Markdown)" />
+                  className="flex-1 bg-deepseek-hover text-[12px] text-deepseek-text p-2.5 rounded-lg outline-none resize-none font-mono leading-relaxed" placeholder="内容 (Markdown)" />
                 <input value={editTags} onChange={e => setEditTags(e.target.value)}
-                  className="w-full bg-claude-hover text-[11px] text-claude-text px-2.5 py-1.5 rounded-lg outline-none" placeholder="标签 (逗号分隔)" />
+                  className="w-full bg-deepseek-hover text-[11px] text-deepseek-text px-2.5 py-1.5 rounded-lg outline-none" placeholder="标签 (逗号分隔)" />
                 <div className="flex gap-2">
                   <button onClick={handleSave} className="px-3 py-1.5 bg-purple-500/20 text-purple-400 text-[11px] rounded-lg hover:bg-purple-500/30">保存</button>
-                  <button onClick={() => setEditorOpen(false)} className="px-3 py-1.5 bg-claude-hover text-claude-textSecondary text-[11px] rounded-lg">取消</button>
+                  <button onClick={() => setEditorOpen(false)} className="px-3 py-1.5 bg-deepseek-hover text-deepseek-textSecondary text-[11px] rounded-lg">取消</button>
                 </div>
               </div>
             ) : (
               <div className="flex-1 overflow-y-auto p-4">
                 <div className="flex items-center justify-between mb-3">
-                  <h3 className="text-[14px] font-semibold text-claude-text">{selectedNode.title}</h3>
+                  <h3 className="text-[14px] font-semibold text-deepseek-text">{selectedNode.title}</h3>
                   <div className="flex gap-1">
-                    <button onClick={() => setEditorOpen(true)} className="p-1.5 rounded hover:bg-claude-hover text-claude-textSecondary"><Edit3 size={13} /></button>
+                    <button onClick={() => setEditorOpen(true)} className="p-1.5 rounded hover:bg-deepseek-hover text-deepseek-textSecondary"><Edit3 size={13} /></button>
                     <button onClick={() => handleDelete(selectedNode.id)} className="p-1.5 rounded hover:bg-red-500/10 text-red-400"><Trash2 size={13} /></button>
                   </div>
                 </div>
                 <div className="flex gap-1 flex-wrap mb-3">
                   {selectedNode.tags.map(t => <span key={t} className="text-[10px] px-2 py-0.5 rounded-full bg-purple-500/10 text-purple-400">#{t}</span>)}
-                  <span className="text-[9px] text-claude-textSecondary/50 px-1">{selectedNode.source}</span>
+                  <span className="text-[9px] text-deepseek-textSecondary/50 px-1">{selectedNode.source}</span>
                 </div>
-                <div className="text-[12px] text-claude-text leading-relaxed whitespace-pre-wrap font-mono">
+                <div className="text-[12px] text-deepseek-text leading-relaxed whitespace-pre-wrap font-mono">
                   {selectedNode.content || '（空）'}
                 </div>
                 {selectedNode.links.length > 0 && (
-                  <div className="mt-4 pt-3 border-t border-claude-border">
-                    <span className="text-[10px] font-semibold text-claude-textSecondary uppercase">链接到</span>
+                  <div className="mt-4 pt-3 border-t border-deepseek-border">
+                    <span className="text-[10px] font-semibold text-deepseek-textSecondary uppercase">链接到</span>
                     <div className="mt-1 flex flex-wrap gap-1">
                       {selectedNode.links.map(l => {
                         const target = nodes.find(n => n.title === l);
@@ -317,8 +317,8 @@ const KnowledgePanel: React.FC<{ onClose?: () => void }> = ({ onClose }) => {
                   </div>
                 )}
                 {selectedNode.backlinks.length > 0 && (
-                  <div className="mt-3 pt-3 border-t border-claude-border">
-                    <span className="text-[10px] font-semibold text-claude-textSecondary uppercase">被链接</span>
+                  <div className="mt-3 pt-3 border-t border-deepseek-border">
+                    <span className="text-[10px] font-semibold text-deepseek-textSecondary uppercase">被链接</span>
                     <div className="mt-1 flex flex-wrap gap-1">
                       {selectedNode.backlinks.map(b => {
                         const source = nodes.find(n => n.id === b);

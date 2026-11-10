@@ -50,10 +50,10 @@ function getRiskColor(riskLevel: string): { bg: string; text: string; border: st
       };
     default:
       return {
-        bg: 'bg-claude-textSecondary/15',
-        text: 'text-claude-textSecondary',
-        border: 'border-claude-border',
-        icon: 'text-claude-textSecondary',
+        bg: 'bg-deepseek-textSecondary/15',
+        text: 'text-deepseek-textSecondary',
+        border: 'border-deepseek-border',
+        icon: 'text-deepseek-textSecondary',
       };
   }
 }
@@ -130,7 +130,7 @@ export default function PermissionDialog({
       onClick={handleOverlayClick}
     >
       <div
-        className="bg-claude-input rounded-2xl shadow-xl w-[460px] animate-fade-in border border-claude-border"
+        className="bg-deepseek-input rounded-2xl shadow-xl w-[460px] animate-fade-in border border-deepseek-border"
         onClick={(e) => e.stopPropagation()}
       >
         <div className="flex items-center justify-between p-5 pb-3">
@@ -139,19 +139,19 @@ export default function PermissionDialog({
               <AlertTriangle size={20} className={riskColors.icon} />
             </div>
             <div>
-              <h3 className="text-[16px] font-semibold text-claude-text">
+              <h3 className="text-[16px] font-semibold text-deepseek-text">
                 {'\u6743\u9650\u5ba1\u6279'}
               </h3>
-              <p className="text-[13px] text-claude-textSecondary mt-0.5">
+              <p className="text-[13px] text-deepseek-textSecondary mt-0.5">
                 Permission Approval Required
               </p>
             </div>
           </div>
           <button
             onClick={handleClose}
-            className="w-8 h-8 rounded-lg flex items-center justify-center hover:bg-claude-hover transition-colors"
+            className="w-8 h-8 rounded-lg flex items-center justify-center hover:bg-deepseek-hover transition-colors"
           >
-            <X size={16} className="text-claude-textSecondary" />
+            <X size={16} className="text-deepseek-textSecondary" />
           </button>
         </div>
 
@@ -165,28 +165,28 @@ export default function PermissionDialog({
 
             <div className="space-y-2.5">
               <div className="flex items-center justify-between">
-                <span className="text-[12px] text-claude-textSecondary">{'\u5de5\u5177\u540d\u79f0'}</span>
-                <span className="text-[13px] font-medium text-claude-text font-mono bg-claude-hover px-2 py-0.5 rounded">
+                <span className="text-[12px] text-deepseek-textSecondary">{'\u5de5\u5177\u540d\u79f0'}</span>
+                <span className="text-[13px] font-medium text-deepseek-text font-mono bg-deepseek-hover px-2 py-0.5 rounded">
                   {approval.tool_name}
                 </span>
               </div>
               <div className="flex items-center justify-between">
-                <span className="text-[12px] text-claude-textSecondary">{'\u64cd\u4f5c\u7c7b\u578b'}</span>
-                <span className="text-[13px] font-medium text-claude-text font-mono bg-claude-hover px-2 py-0.5 rounded">
+                <span className="text-[12px] text-deepseek-textSecondary">{'\u64cd\u4f5c\u7c7b\u578b'}</span>
+                <span className="text-[13px] font-medium text-deepseek-text font-mono bg-deepseek-hover px-2 py-0.5 rounded">
                   {approval.action}
                 </span>
               </div>
               <div>
-                <span className="text-[12px] text-claude-textSecondary">{'\u63cf\u8ff0'}</span>
-                <p className="text-[13px] text-claude-text mt-1 leading-relaxed">
+                <span className="text-[12px] text-deepseek-textSecondary">{'\u63cf\u8ff0'}</span>
+                <p className="text-[13px] text-deepseek-text mt-1 leading-relaxed">
                   {approval.description}
                 </p>
               </div>
             </div>
           </div>
 
-          <div className="p-3 rounded-lg bg-claude-hover/50 mb-4">
-            <p className="text-[12px] text-claude-textSecondary leading-relaxed">
+          <div className="p-3 rounded-lg bg-deepseek-hover/50 mb-4">
+            <p className="text-[12px] text-deepseek-textSecondary leading-relaxed">
               {'\u8be5\u64cd\u4f5c\u5c5e\u4e8e\u6f5c\u5728\u98ce\u9669\u64cd\u4f5c\uff0c\u8bf7\u786e\u8ba4\u662f\u5426\u5141\u8bb8\u6267\u884c\u3002'}
             </p>
           </div>
@@ -235,7 +235,7 @@ export default function PermissionDialog({
                 value={rejectReason}
                 onChange={(e) => setRejectReason(e.target.value)}
                 placeholder={'\u62d2\u7edd\u539f\u56e0\uff08\u53ef\u9009\uff09...'}
-                className="w-full px-3 py-2 text-[13px] bg-claude-hover border border-claude-border rounded-lg resize-none text-claude-text placeholder:text-claude-textSecondary/50 focus:outline-none focus:border-red-500/50"
+                className="w-full px-3 py-2 text-[13px] bg-deepseek-hover border border-deepseek-border rounded-lg resize-none text-deepseek-text placeholder:text-deepseek-textSecondary/50 focus:outline-none focus:border-red-500/50"
                 rows={2}
                 autoFocus
               />

@@ -180,8 +180,14 @@ impl RequestTrace {
                 if let Some(id) = call["id"].as_str() {
                     block["id"] = json!(id);
                 }
-                if let Some(name) = call["function"]["name"].as_str() {
-                    block["name"] = json!(name);
+                if let Some(delta) = call["function"]["name"]
+                    .as_str()
+                    .filter(|name| !name.is_empty())
+                {
+                    let current = block["name"].as_str().unwrap_or_default().to_owned();
+                    if !current.ends_with(delta) {
+                        block["name"] = json!(format!("{current}{delta}"));
+                    }
                 }
                 if let Some(args) = call["function"]["arguments"].as_str() {
                     self.arguments.entry(position).or_default().push_str(args);
@@ -421,6 +427,17 @@ mod tests {
         assert_eq!(result["finishReason"], "tool_calls");
         assert!(result["firstTokenAt"].is_number());
     }
+    #[test]
+    fn repeated_empty_tool_name_deltas_keep_the_first_name() {
+        let mut trace = RequestTrace::new(json!({"id":"request"}));
+        trace.observe_openai(&json!({"choices":[{"delta":{"tool_calls":[{"index":0,"id":"call","type":"function","function":{"name":"Bash","arguments":""}}]}}]}));
+        trace.observe_openai(&json!({"choices":[{"delta":{"tool_calls":[{"index":0,"id":null,"type":null,"function":{"name":"","arguments":"{\"command\":"}}]}}]}));
+        trace.observe_openai(&json!({"choices":[{"delta":{"tool_calls":[{"index":0,"type":null,"function":{"name":"","arguments":"\"pwd\"}"}}]}, "finish_reason":"tool_calls"}]}));
+        let result = trace.finish("completed", None);
+        assert_eq!(result["responseBlocks"][0]["name"], "Bash");
+        assert_eq!(result["responseBlocks"][0]["input"], json!({"command":"pwd"}));
+    }
+
     #[test]
     fn anthropic_cumulative_usage_is_not_double_counted_and_unknown_split_is_null() {
         let mut trace = RequestTrace::new(json!({"id":"request", "startedAt":1000}));

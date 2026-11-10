@@ -55,10 +55,10 @@ const SkillCard: React.FC<SkillCardProps> = ({ skill, isSelected, onSelect, onVi
 
   return (
     <div
-      className={`relative bg-claude-input border rounded-xl transition-all duration-200 cursor-pointer group overflow-hidden ${
+      className={`relative bg-deepseek-input border rounded-xl transition-all duration-200 cursor-pointer group overflow-hidden ${
         isSelected
           ? 'border-[#8B5CF6] ring-1 ring-[#8B5CF6]/30 shadow-lg shadow-[#8B5CF6]/10'
-          : 'border-claude-border hover:border-claude-textSecondary/40 hover:shadow-md'
+          : 'border-deepseek-border hover:border-deepseek-textSecondary/40 hover:shadow-md'
       }`}
       onClick={() => onSelect(skill)}
     >
@@ -78,10 +78,10 @@ const SkillCard: React.FC<SkillCardProps> = ({ skill, isSelected, onSelect, onVi
             <ModeIcon size={20} style={{ color: modeConf.color }} />
           </div>
           <div className="min-w-0 flex-1">
-            <h3 className="text-[14px] font-semibold text-claude-text truncate">
+            <h3 className="text-[14px] font-semibold text-deepseek-text truncate">
               {skill.name}
             </h3>
-            <p className="text-[12px] text-claude-textSecondary mt-0.5 line-clamp-2 leading-relaxed">
+            <p className="text-[12px] text-deepseek-textSecondary mt-0.5 line-clamp-2 leading-relaxed">
               {skill.description}
             </p>
           </div>
@@ -95,31 +95,31 @@ const SkillCard: React.FC<SkillCardProps> = ({ skill, isSelected, onSelect, onVi
             {modeConf.label}
           </span>
           {od?.fidelity && FIDELITY_CONFIG[od.fidelity] && (
-            <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-md text-[10px] font-medium bg-claude-hover text-claude-textSecondary">
+            <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-md text-[10px] font-medium bg-deepseek-hover text-deepseek-textSecondary">
               <Zap size={10} />
               {FIDELITY_CONFIG[od.fidelity]}
             </span>
           )}
           {od?.platform && (
-            <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-md text-[10px] font-medium bg-claude-hover text-claude-textSecondary">
+            <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-md text-[10px] font-medium bg-deepseek-hover text-deepseek-textSecondary">
               {od.platform === 'mobile' ? <Smartphone size={10} /> : <Monitor size={10} />}
               {od.platform === 'mobile' ? '移动端' : '桌面端'}
             </span>
           )}
           {od?.scenario && SCENARIO_CONFIG[od.scenario] && (
-            <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-md text-[10px] font-medium bg-claude-hover text-claude-textSecondary">
+            <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-md text-[10px] font-medium bg-deepseek-hover text-deepseek-textSecondary">
               {SCENARIO_CONFIG[od.scenario]}
             </span>
           )}
         </div>
 
-        <div className="flex items-center justify-between pt-2 border-t border-claude-border">
+        <div className="flex items-center justify-between pt-2 border-t border-deepseek-border">
           <button
             onClick={(e) => {
               e.stopPropagation();
               onViewDetail(skill);
             }}
-            className="text-[11px] font-medium text-claude-textSecondary hover:text-claude-text transition-colors"
+            className="text-[11px] font-medium text-deepseek-textSecondary hover:text-deepseek-text transition-colors"
           >
             查看详情
           </button>
@@ -131,7 +131,7 @@ const SkillCard: React.FC<SkillCardProps> = ({ skill, isSelected, onSelect, onVi
             className={`flex items-center gap-1 px-3 py-1.5 rounded-lg text-[12px] font-medium transition-all ${
               isSelected
                 ? 'bg-[#8B5CF6] text-white'
-                : 'bg-claude-text text-claude-bg hover:opacity-80'
+                : 'bg-deepseek-text text-deepseek-bg hover:opacity-80'
             }`}
           >
             {isSelected ? '已选择' : '使用此技能'}

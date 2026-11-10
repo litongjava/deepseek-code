@@ -52,7 +52,7 @@ export default function EditProjectDialog({
           event.preventDefault();
           void save();
         }}
-        className="w-[500px] max-w-full max-h-[85vh] overflow-y-auto rounded-2xl border border-claude-border bg-claude-bg p-4 shadow-xl text-claude-text"
+        className="w-[500px] max-w-full max-h-[85vh] overflow-y-auto rounded-2xl border border-deepseek-border bg-deepseek-bg p-4 shadow-xl text-deepseek-text"
       >
         <div className="mb-3 flex items-center justify-between">
           <h2 id="edit-project-title" className="text-lg font-semibold">
@@ -67,7 +67,7 @@ export default function EditProjectDialog({
             <X size={16} />
           </button>
         </div>
-        <label className="mb-3 flex items-center gap-3 rounded-xl border border-claude-border bg-claude-input px-3 focus-within:border-blue-500">
+        <label className="mb-3 flex items-center gap-3 rounded-xl border border-deepseek-border bg-deepseek-input px-3 focus-within:border-blue-500">
           <Folder size={16} />
           <input
             autoFocus
@@ -102,14 +102,14 @@ export default function EditProjectDialog({
             type="button"
             disabled={busy}
             onClick={onClose}
-            className="text-claude-textSecondary"
+            className="text-deepseek-textSecondary"
           >
             {t("common.cancel")}
           </button>
           <button
             type="submit"
             disabled={busy || !name.trim() || !folders.length}
-            className="rounded-lg bg-claude-text px-4 py-2 text-claude-bg disabled:opacity-40"
+            className="rounded-lg bg-deepseek-text px-4 py-2 text-deepseek-bg disabled:opacity-40"
           >
             {busy ? t("sidebar.saving") : t("common.save")}
           </button>

@@ -299,11 +299,11 @@ const SettingsPage = ({ onCreateWithDeepSeek }: { onCreateWithDeepSeek?: () => v
 
   // Font selector options
   return (
-    <div className="flex-1 flex flex-col min-h-0 h-full overflow-hidden bg-claude-bg text-claude-text">
+    <div className="flex-1 flex flex-col min-h-0 h-full overflow-hidden bg-deepseek-bg text-deepseek-text">
       <div className="flex items-center justify-between shrink-0 px-4 py-2 md:block md:px-8 md:pt-8 md:pb-6">
         <button
           onClick={() => navigate('/')}
-          className="flex min-h-11 md:min-h-0 items-center gap-1.5 text-[14px] text-claude-textSecondary hover:text-claude-text transition-colors"
+          className="flex min-h-11 md:min-h-0 items-center gap-1.5 text-[14px] text-deepseek-textSecondary hover:text-deepseek-text transition-colors"
         >
           <ArrowLeft size={16} />
           <span>{t('common.back')}</span>
@@ -314,7 +314,7 @@ const SettingsPage = ({ onCreateWithDeepSeek }: { onCreateWithDeepSeek?: () => v
         {/* Navigation: a scrollable tab row on phones, a sidebar on wider screens. */}
         <div className="settings-navigation flex w-full flex-shrink-0 flex-row gap-1 overflow-x-auto px-4 pb-3 md:w-[200px] md:flex-col md:overflow-x-visible md:overflow-y-auto md:pb-8 md:pl-8 md:pr-0">
           <div aria-hidden="true"
-            className="hidden font-[Spectral] text-[28px] text-claude-text px-3 mb-6 md:block"
+            className="hidden font-[Spectral] text-[28px] text-deepseek-text px-3 mb-6 md:block"
             style={{
               fontWeight: 500,
               WebkitTextStroke: '0.5px currentColor'
@@ -323,12 +323,12 @@ const SettingsPage = ({ onCreateWithDeepSeek }: { onCreateWithDeepSeek?: () => v
             {t('settings.title')}
           </div>
 
-          <button onClick={() => setTab('account')} className={`shrink-0 whitespace-nowrap text-left px-3 py-2 rounded-lg text-[15px] font-medium transition-colors flex items-center gap-2 ${tab === 'account' ? 'bg-claude-btn-hover text-claude-text' : 'text-claude-textSecondary hover:bg-claude-hover'}`}>
+          <button onClick={() => setTab('account')} className={`shrink-0 whitespace-nowrap text-left px-3 py-2 rounded-lg text-[15px] font-medium transition-colors flex items-center gap-2 ${tab === 'account' ? 'bg-deepseek-btn-hover text-deepseek-text' : 'text-deepseek-textSecondary hover:bg-deepseek-hover'}`}>
             <UserRound size={16} />{t('settings.account')}
           </button>
           <button
             onClick={() => setTab('general')}
-            className={`shrink-0 whitespace-nowrap text-left px-3 py-2 rounded-lg text-[15px] font-medium transition-colors flex items-center gap-2 ${tab === 'general' ? 'bg-claude-btn-hover text-claude-text' : 'text-claude-textSecondary hover:bg-claude-hover'
+            className={`shrink-0 whitespace-nowrap text-left px-3 py-2 rounded-lg text-[15px] font-medium transition-colors flex items-center gap-2 ${tab === 'general' ? 'bg-deepseek-btn-hover text-deepseek-text' : 'text-deepseek-textSecondary hover:bg-deepseek-hover'
               }`}
           >
             <Settings size={16} />
@@ -337,20 +337,20 @@ const SettingsPage = ({ onCreateWithDeepSeek }: { onCreateWithDeepSeek?: () => v
           {localStorage.getItem('user_mode') === 'selfhosted' && (
             <button
               onClick={() => setTab('models')}
-              className={`shrink-0 whitespace-nowrap text-left px-3 py-2 rounded-lg text-[15px] font-medium transition-colors flex items-center gap-2 ${tab === 'models' ? 'bg-claude-btn-hover text-claude-text' : 'text-claude-textSecondary hover:bg-claude-hover'
+              className={`shrink-0 whitespace-nowrap text-left px-3 py-2 rounded-lg text-[15px] font-medium transition-colors flex items-center gap-2 ${tab === 'models' ? 'bg-deepseek-btn-hover text-deepseek-text' : 'text-deepseek-textSecondary hover:bg-deepseek-hover'
                 }`}
             >
               <Cpu size={16} />
               {t('settings.models')}
             </button>
           )}
-          <button onClick={() => setTab('search')} className={`shrink-0 whitespace-nowrap text-left px-3 py-2 rounded-lg text-[15px] font-medium transition-colors flex items-center gap-2 ${tab === 'search' ? 'bg-claude-btn-hover text-claude-text' : 'text-claude-textSecondary hover:bg-claude-hover'}`}>
+          <button onClick={() => setTab('search')} className={`shrink-0 whitespace-nowrap text-left px-3 py-2 rounded-lg text-[15px] font-medium transition-colors flex items-center gap-2 ${tab === 'search' ? 'bg-deepseek-btn-hover text-deepseek-text' : 'text-deepseek-textSecondary hover:bg-deepseek-hover'}`}>
             <Globe size={16} />{t('searchSettings.nav')}
           </button>
           {localStorage.getItem('user_mode') !== 'selfhosted' && (
             <button
               onClick={() => setTab('usage')}
-              className={`shrink-0 whitespace-nowrap text-left px-3 py-2 rounded-lg text-[15px] font-medium transition-colors flex items-center gap-2 ${tab === 'usage' ? 'bg-claude-btn-hover text-claude-text' : 'text-claude-textSecondary hover:bg-claude-hover'
+              className={`shrink-0 whitespace-nowrap text-left px-3 py-2 rounded-lg text-[15px] font-medium transition-colors flex items-center gap-2 ${tab === 'usage' ? 'bg-deepseek-btn-hover text-deepseek-text' : 'text-deepseek-textSecondary hover:bg-deepseek-hover'
                 }`}
             >
               <BarChart3 size={16} />
@@ -360,7 +360,7 @@ const SettingsPage = ({ onCreateWithDeepSeek }: { onCreateWithDeepSeek?: () => v
           <button
             onClick={() => setTab('customize')}
             aria-current={tab === 'customize' ? 'page' : undefined}
-            className={`shrink-0 whitespace-nowrap text-left px-3 py-2 rounded-lg text-[15px] font-medium transition-colors flex items-center gap-2 ${tab === 'customize' ? 'bg-claude-btn-hover text-claude-text' : 'text-claude-textSecondary hover:bg-claude-hover'
+            className={`shrink-0 whitespace-nowrap text-left px-3 py-2 rounded-lg text-[15px] font-medium transition-colors flex items-center gap-2 ${tab === 'customize' ? 'bg-deepseek-btn-hover text-deepseek-text' : 'text-deepseek-textSecondary hover:bg-deepseek-hover'
               }`}
           >
             <Puzzle size={16} />
@@ -368,13 +368,13 @@ const SettingsPage = ({ onCreateWithDeepSeek }: { onCreateWithDeepSeek?: () => v
           </button>
           <button
             onClick={() => setTab('tasks')}
-            className={`shrink-0 whitespace-nowrap text-left px-3 py-2 rounded-lg text-[15px] font-medium transition-colors flex items-center gap-2 ${tab === 'tasks' ? 'bg-claude-btn-hover text-claude-text' : 'text-claude-textSecondary hover:bg-claude-hover'
+            className={`shrink-0 whitespace-nowrap text-left px-3 py-2 rounded-lg text-[15px] font-medium transition-colors flex items-center gap-2 ${tab === 'tasks' ? 'bg-deepseek-btn-hover text-deepseek-text' : 'text-deepseek-textSecondary hover:bg-deepseek-hover'
               }`}
           >
             <Clock size={16} />
             {t('tasks.title')}
           </button>
-          <button onClick={() => setTab('about')} className={`shrink-0 whitespace-nowrap text-left px-3 py-2 rounded-lg text-[15px] font-medium transition-colors flex items-center gap-2 ${tab === 'about' ? 'bg-claude-btn-hover text-claude-text' : 'text-claude-textSecondary hover:bg-claude-hover'}`}>
+          <button onClick={() => setTab('about')} className={`shrink-0 whitespace-nowrap text-left px-3 py-2 rounded-lg text-[15px] font-medium transition-colors flex items-center gap-2 ${tab === 'about' ? 'bg-deepseek-btn-hover text-deepseek-text' : 'text-deepseek-textSecondary hover:bg-deepseek-hover'}`}>
             <Info size={16} />{t('settings.about')}
           </button>
         </div>
@@ -392,7 +392,7 @@ const SettingsPage = ({ onCreateWithDeepSeek }: { onCreateWithDeepSeek?: () => v
               <div className="h-full flex flex-col">
                 {tasksLoading ? (
                   <div className="flex items-center justify-center h-full">
-                    <span className="text-[13px] text-claude-textSecondary">{t('tasks.loading')}</span>
+                    <span className="text-[13px] text-deepseek-textSecondary">{t('tasks.loading')}</span>
                   </div>
                 ) : (
                   <TaskList
@@ -473,25 +473,25 @@ const SettingsPage = ({ onCreateWithDeepSeek }: { onCreateWithDeepSeek?: () => v
     return (
       <div className="space-y-10 animate-fade-in">
         {renderAccountPreferences()}
-        <hr className="border-claude-border" />
+        <hr className="border-deepseek-border" />
         {/* 邮箱 */}
         <section>
-          <h3 className="text-[16px] font-semibold text-claude-text mb-5">{t('settings.account')}</h3>
+          <h3 className="text-[16px] font-semibold text-deepseek-text mb-5">{t('settings.account')}</h3>
           <div className="space-y-5">
             <div className="flex items-center justify-between">
               <div>
-                <label className="block text-[13px] font-medium text-claude-textSecondary mb-1.5">{t('settings.emailAddress')}</label>
-                <div className="text-[14px] text-claude-text">{profile?.email || '-'}</div>
+                <label className="block text-[13px] font-medium text-deepseek-textSecondary mb-1.5">{t('settings.emailAddress')}</label>
+                <div className="text-[14px] text-deepseek-text">{profile?.email || '-'}</div>
               </div>
               <div className="flex items-center gap-4 mt-4">
                 <button
                   type="button"
                   onClick={(e) => { e.preventDefault(); setShowPwdForm(true); setPwdError(''); setPwdMsg(''); }}
-                  className="text-[13px] text-claude-textSecondary hover:text-claude-text hover:underline transition-colors"
+                  className="text-[13px] text-deepseek-textSecondary hover:text-deepseek-text hover:underline transition-colors"
                 >
                   {t('settings.changePassword')}
                 </button>
-                <div className="w-[1px] h-3 bg-claude-border"></div>
+                <div className="w-[1px] h-3 bg-deepseek-border"></div>
                 <button
                   type="button"
                   onClick={(e) => { e.preventDefault(); setShowDeleteAccount(true); setDeleteError(''); setDeletePassword(''); }}
@@ -506,26 +506,26 @@ const SettingsPage = ({ onCreateWithDeepSeek }: { onCreateWithDeepSeek?: () => v
           {showPwdForm && (
             <div className="fixed inset-0 z-[60] flex items-center justify-center p-4 bg-black/50 backdrop-blur-sm animate-fade-in"
               onClick={() => { setShowPwdForm(false); setPwdError(''); setPwdCurrent(''); setPwdNew(''); setPwdConfirm(''); }}>
-              <div className="bg-white dark:bg-[#2B2A29] p-6 rounded-2xl w-full max-w-sm shadow-xl border border-claude-border animate-in zoom-in-95 duration-200"
+              <div className="bg-white dark:bg-[#2B2A29] p-6 rounded-2xl w-full max-w-sm shadow-xl border border-deepseek-border animate-in zoom-in-95 duration-200"
                 onClick={e => e.stopPropagation()}>
-                <h4 className="text-[18px] font-semibold text-claude-text mb-4">{t('settings.changePassword')}</h4>
+                <h4 className="text-[18px] font-semibold text-deepseek-text mb-4">{t('settings.changePassword')}</h4>
                 {pwdMsg && <div className="p-2 mb-3 bg-green-50 text-green-700 text-[13px] rounded-lg">{pwdMsg}</div>}
                 {pwdError && <div className="p-2 mb-3 bg-red-50 text-red-600 text-[13px] rounded-lg">{pwdError}</div>}
                 <div className="space-y-3">
                   <input type="password" value={pwdCurrent} onChange={e => setPwdCurrent(e.target.value)}
-                    placeholder={t('settings.currentPassword')} className="w-full px-3 py-2 bg-claude-input border border-claude-border rounded-lg text-[14px] text-claude-text focus:outline-none focus:border-[#387ee0] focus:ring-0" />
+                    placeholder={t('settings.currentPassword')} className="w-full px-3 py-2 bg-deepseek-input border border-deepseek-border rounded-lg text-[14px] text-deepseek-text focus:outline-none focus:border-[#387ee0] focus:ring-0" />
                   <input type="password" value={pwdNew} onChange={e => setPwdNew(e.target.value)}
-                    placeholder={t('settings.newPassword')} className="w-full px-3 py-2 bg-claude-input border border-claude-border rounded-lg text-[14px] text-claude-text focus:outline-none focus:border-[#387ee0] focus:ring-0" />
+                    placeholder={t('settings.newPassword')} className="w-full px-3 py-2 bg-deepseek-input border border-deepseek-border rounded-lg text-[14px] text-deepseek-text focus:outline-none focus:border-[#387ee0] focus:ring-0" />
                   <input type="password" value={pwdConfirm} onChange={e => setPwdConfirm(e.target.value)}
-                    placeholder={t('settings.confirmNewPassword')} className="w-full px-3 py-2 bg-claude-input border border-claude-border rounded-lg text-[14px] text-claude-text focus:outline-none focus:border-[#387ee0] focus:ring-0" />
+                    placeholder={t('settings.confirmNewPassword')} className="w-full px-3 py-2 bg-deepseek-input border border-deepseek-border rounded-lg text-[14px] text-deepseek-text focus:outline-none focus:border-[#387ee0] focus:ring-0" />
                 </div>
                 <div className="flex gap-3 pt-5 justify-end">
                   <button onClick={(e) => { e.preventDefault(); setShowPwdForm(false); setPwdError(''); setPwdCurrent(''); setPwdNew(''); setPwdConfirm(''); }}
-                    className="px-4 py-2 text-claude-textSecondary hover:bg-claude-hover rounded-lg text-[14px] font-medium transition-colors">
+                    className="px-4 py-2 text-deepseek-textSecondary hover:bg-deepseek-hover rounded-lg text-[14px] font-medium transition-colors">
                     {t('settings.cancel')}
                   </button>
                   <button onClick={(e) => { e.preventDefault(); handleChangePassword(); }} disabled={pwdSaving}
-                    className="px-4 py-2 bg-claude-accent text-white text-[14px] font-medium rounded-lg transition-colors disabled:opacity-60">
+                    className="px-4 py-2 bg-deepseek-accent text-white text-[14px] font-medium rounded-lg transition-colors disabled:opacity-60">
                     {pwdSaving ? t('settings.updating') : t('settings.updatePassword')}
                   </button>
                 </div>
@@ -540,16 +540,16 @@ const SettingsPage = ({ onCreateWithDeepSeek }: { onCreateWithDeepSeek?: () => v
               <div className="bg-white dark:bg-[#2B2A29] p-6 rounded-2xl w-full max-w-sm shadow-xl border border-red-200 dark:border-red-900/30 animate-in zoom-in-95 duration-200"
                 onClick={e => e.stopPropagation()}>
                 <h4 className="text-[18px] font-semibold text-[#B9382C] mb-2">{t('settings.deleteAccount')}</h4>
-                <p className="text-[14px] text-claude-textSecondary mb-4">
+                <p className="text-[14px] text-deepseek-textSecondary mb-4">
                   {t('settings.deleteAccountWarning2')}
                 </p>
                 {deleteError && <div className="p-2 mb-3 bg-red-50 text-red-600 text-[13px] rounded-lg">{deleteError}</div>}
                 <input type="password" value={deletePassword} onChange={e => setDeletePassword(e.target.value)}
                   placeholder={t('settings.enterPasswordToConfirm')}
-                  className="w-full px-3 py-2 bg-claude-input border border-claude-border rounded-lg text-[14px] text-claude-text focus:outline-none focus:border-[#B9382C] focus:ring-1 focus:ring-[#B9382C]" />
+                  className="w-full px-3 py-2 bg-deepseek-input border border-deepseek-border rounded-lg text-[14px] text-deepseek-text focus:outline-none focus:border-[#B9382C] focus:ring-1 focus:ring-[#B9382C]" />
                 <div className="flex gap-3 pt-5 justify-end">
                   <button onClick={(e) => { e.preventDefault(); setShowDeleteAccount(false); setDeleteError(''); setDeletePassword(''); }}
-                    className="px-4 py-2 text-claude-textSecondary hover:bg-claude-hover rounded-lg text-[14px] font-medium transition-colors">
+                    className="px-4 py-2 text-deepseek-textSecondary hover:bg-deepseek-hover rounded-lg text-[14px] font-medium transition-colors">
                     {t('settings.cancel')}
                   </button>
                   <button onClick={async (e) => {
@@ -571,17 +571,17 @@ const SettingsPage = ({ onCreateWithDeepSeek }: { onCreateWithDeepSeek?: () => v
           )}
         </section>
 
-        <hr className="border-claude-border" />
+        <hr className="border-deepseek-border" />
 
         {/* 活跃会话 */}
         <section>
           <div className="flex items-center justify-between mb-4">
-            <h3 className="text-[16px] font-semibold text-claude-text">{t('settings.activeSessions')}</h3>
+            <h3 className="text-[16px] font-semibold text-deepseek-text">{t('settings.activeSessions')}</h3>
           </div>
           <div className="overflow-x-auto">
             <table className="w-full text-left border-collapse">
               <thead>
-                <tr className="border-b border-claude-border text-[13px] font-medium text-claude-textSecondary">
+                <tr className="border-b border-deepseek-border text-[13px] font-medium text-deepseek-textSecondary">
                   <th className="py-2 pb-3 font-medium">{t('settings.device')}</th>
                   <th className="py-2 pb-3 font-medium">{t('settings.location')}</th>
                   <th className="py-2 pb-3 font-medium">{t('settings.createdAt')}</th>
@@ -589,27 +589,27 @@ const SettingsPage = ({ onCreateWithDeepSeek }: { onCreateWithDeepSeek?: () => v
                   <th className="py-2 pb-3 font-medium"></th>
                 </tr>
               </thead>
-              <tbody className="text-[14px] text-claude-text">
+              <tbody className="text-[14px] text-deepseek-text">
                 {sessions.map(s => (
-                  <tr key={s.id} className="border-b border-claude-border last:border-0 group">
+                  <tr key={s.id} className="border-b border-deepseek-border last:border-0 group">
                     <td className="py-3 pr-4 align-middle">
                       <div className="flex items-center gap-2">
-                        <span className="text-claude-textSecondary flex-shrink-0">
+                        <span className="text-deepseek-textSecondary flex-shrink-0">
                           {s.device?.includes('Android') || s.device?.includes('iOS') ? <Smartphone size={16} /> : <MonitorIcon size={16} />}
                         </span>
                         <span className="font-medium">{s.device || t('settings.unknownDevice')}</span>
                         {s.id === currentSessionId && (
-                          <span className="ml-1 text-[11px] px-1.5 py-0.5 rounded-sm bg-neutral-200 dark:bg-neutral-700 text-claude-textSecondary">{t('settings.currentDeviceTag')}</span>
+                          <span className="ml-1 text-[11px] px-1.5 py-0.5 rounded-sm bg-neutral-200 dark:bg-neutral-700 text-deepseek-textSecondary">{t('settings.currentDeviceTag')}</span>
                         )}
                       </div>
                     </td>
-                    <td className="py-3 pr-4 align-middle text-claude-textSecondary">
+                    <td className="py-3 pr-4 align-middle text-deepseek-textSecondary">
                       {s.location || t('settings.unknownLocation')}
                     </td>
-                    <td className="py-3 pr-4 align-middle text-claude-textSecondary whitespace-nowrap">
+                    <td className="py-3 pr-4 align-middle text-deepseek-textSecondary whitespace-nowrap">
                       {formatTime(s.created_at || '')}
                     </td>
-                    <td className="py-3 pr-4 align-middle text-claude-textSecondary whitespace-nowrap">
+                    <td className="py-3 pr-4 align-middle text-deepseek-textSecondary whitespace-nowrap">
                       {formatTime(s.last_active || '')}
                     </td>
                     <td className="py-3 align-middle text-right">
@@ -621,7 +621,7 @@ const SettingsPage = ({ onCreateWithDeepSeek }: { onCreateWithDeepSeek?: () => v
                               const rect = e.currentTarget.getBoundingClientRect();
                               setCtxMenu({ x: rect.right, y: rect.bottom, sessionId: s.id });
                             }}
-                            className="p-1 rounded text-claude-textSecondary hover:text-claude-text hover:bg-claude-hover transition-colors"
+                            className="p-1 rounded text-deepseek-textSecondary hover:text-deepseek-text hover:bg-deepseek-hover transition-colors"
                           >
                             <MoreHorizontal size={16} />
                           </button>
@@ -633,7 +633,7 @@ const SettingsPage = ({ onCreateWithDeepSeek }: { onCreateWithDeepSeek?: () => v
               </tbody>
             </table>
             {sessions.length === 0 && (
-              <div className="text-[13px] text-claude-textSecondary py-4 text-center">{t('settings.noActiveSessions')}</div>
+              <div className="text-[13px] text-deepseek-textSecondary py-4 text-center">{t('settings.noActiveSessions')}</div>
             )}
           </div>
 
@@ -648,7 +648,7 @@ const SettingsPage = ({ onCreateWithDeepSeek }: { onCreateWithDeepSeek?: () => v
                   top: ctxMenu.y + 4     // Slightly below button
                 }}>
                 <button onClick={() => { handleDeleteSession(ctxMenu.sessionId); setCtxMenu(null); }}
-                  className="w-full text-left px-4 py-2 text-[13px] text-claude-text hover:bg-[#F5F4F1] dark:hover:bg-[#383838] transition-colors">
+                  className="w-full text-left px-4 py-2 text-[13px] text-deepseek-text hover:bg-[#F5F4F1] dark:hover:bg-[#383838] transition-colors">
                   {t('settings.logOut')}
                 </button>
               </div>
@@ -662,8 +662,8 @@ const SettingsPage = ({ onCreateWithDeepSeek }: { onCreateWithDeepSeek?: () => v
   function renderChatFont() {
     return (<>
         {/* Chat font family */}
-        <section className="border-b border-claude-border py-6">
-          <h3 className="text-[16px] font-normal text-claude-text mb-4">{t('settings.chatFont')}</h3>
+        <section className="border-b border-deepseek-border py-6">
+          <h3 className="text-[16px] font-normal text-deepseek-text mb-4">{t('settings.chatFont')}</h3>
           <div className="space-y-6">
             {/* Chat Font - kept for feature parity even if not in screenshot */}
             <div>
@@ -682,8 +682,8 @@ const SettingsPage = ({ onCreateWithDeepSeek }: { onCreateWithDeepSeek?: () => v
                     className={`
                       w-full flex flex-col items-center gap-2 py-3 px-2 rounded-lg border transition-all
                       ${chatFont === opt.value
-                        ? 'border-[#3b82f6]/80 scale-[1.02] bg-claude-input text-claude-text shadow-sm'
-                        : 'border-claude-border bg-claude-input hover:border-[#CCC] text-claude-textSecondary hover:text-claude-text'
+                        ? 'border-[#3b82f6]/80 scale-[1.02] bg-deepseek-input text-deepseek-text shadow-sm'
+                        : 'border-deepseek-border bg-deepseek-input hover:border-[#CCC] text-deepseek-textSecondary hover:text-deepseek-text'
                       }
                     `}
                   >
@@ -707,14 +707,14 @@ const SettingsPage = ({ onCreateWithDeepSeek }: { onCreateWithDeepSeek?: () => v
     return (<div className="space-y-10">
         {/* Profile Section */}
         <section>
-          <h3 className="text-[16px] font-semibold text-claude-text mb-5">{t('settings.personalInfo')}</h3>
+          <h3 className="text-[16px] font-semibold text-deepseek-text mb-5">{t('settings.personalInfo')}</h3>
 
           <div className="space-y-6">
             <div className="grid grid-cols-2 gap-6">
               <div>
-                <label className="block text-[13px] font-medium text-claude-textSecondary mb-1.5">{t('settings.fullName')}</label>
+                <label className="block text-[13px] font-medium text-deepseek-textSecondary mb-1.5">{t('settings.fullName')}</label>
                 <div className="flex items-center gap-3">
-                  <div className="w-10 h-10 rounded-full bg-claude-avatar text-claude-avatarText flex items-center justify-center text-[16px] font-medium flex-shrink-0">
+                  <div className="w-10 h-10 rounded-full bg-deepseek-avatar text-deepseek-avatarText flex items-center justify-center text-[16px] font-medium flex-shrink-0">
                     {initials}
                   </div>
                   <input
@@ -722,20 +722,20 @@ const SettingsPage = ({ onCreateWithDeepSeek }: { onCreateWithDeepSeek?: () => v
                     value={fullName}
                     onChange={e => setFullName(e.target.value)}
                     onBlur={() => handleSave(true)}
-                    className="flex-1 px-3 py-2 bg-claude-input border border-claude-border rounded-md text-[14px] text-claude-text focus:outline-none focus:border-[#387ee0] focus:ring-0 transition-all placeholder-claude-textSecondary"
+                    className="flex-1 px-3 py-2 bg-deepseek-input border border-deepseek-border rounded-md text-[14px] text-deepseek-text focus:outline-none focus:border-[#387ee0] focus:ring-0 transition-all placeholder-deepseek-textSecondary"
                     placeholder={t('settings.fullNamePlaceholder')}
                   />
                 </div>
               </div>
 
               <div>
-                <label className="block text-[13px] font-medium text-claude-textSecondary mb-1.5">{t('settings.whatToCallYou')}</label>
+                <label className="block text-[13px] font-medium text-deepseek-textSecondary mb-1.5">{t('settings.whatToCallYou')}</label>
                 <input
                   type="text"
                   value={displayName}
                   onChange={e => setDisplayName(e.target.value)}
                   onBlur={() => handleSave(true)}
-                  className="w-full px-3 py-2 bg-claude-input border border-claude-border rounded-md text-[14px] text-claude-text focus:outline-none focus:border-[#387ee0] focus:ring-0 transition-all placeholder-claude-textSecondary"
+                  className="w-full px-3 py-2 bg-deepseek-input border border-deepseek-border rounded-md text-[14px] text-deepseek-text focus:outline-none focus:border-[#387ee0] focus:ring-0 transition-all placeholder-deepseek-textSecondary"
                   placeholder={t('settings.whatToCallYouPlaceholder')}
                 />
               </div>
@@ -743,30 +743,30 @@ const SettingsPage = ({ onCreateWithDeepSeek }: { onCreateWithDeepSeek?: () => v
 
             {/* Work Function */}
             <div>
-              <label className="block text-[13px] font-medium text-claude-textSecondary mb-1.5">{t('settings.occupation')}</label>
+              <label className="block text-[13px] font-medium text-deepseek-textSecondary mb-1.5">{t('settings.occupation')}</label>
               <div className="relative">
                 <select
                   value={workFunction}
                   onChange={e => { setWorkFunction(e.target.value); setTimeout(() => handleSave(true), 100); }}
-                  className="w-full px-3 py-2.5 bg-claude-input border border-claude-border rounded-md text-[14px] text-claude-text focus:outline-none focus:border-[#387ee0] focus:ring-0 transition-all appearance-none cursor-pointer"
+                  className="w-full px-3 py-2.5 bg-deepseek-input border border-deepseek-border rounded-md text-[14px] text-deepseek-text focus:outline-none focus:border-[#387ee0] focus:ring-0 transition-all appearance-none cursor-pointer"
                 >
                   <option value="">{t('settings.occupationPlaceholder')}</option>
                   {WORK_OPTIONS.map(option => <option key={option.key} value={option.value}>{t(`occupations.${option.key}`)}</option>)}
                 </select>
-                <ChevronRight size={16} className="absolute right-3 top-1/2 -translate-y-1/2 rotate-90 text-claude-textSecondary pointer-events-none" />
+                <ChevronRight size={16} className="absolute right-3 top-1/2 -translate-y-1/2 rotate-90 text-deepseek-textSecondary pointer-events-none" />
               </div>
             </div>
 
             {/* Personal Preferences */}
             <div>
-              <label className="block text-[13px] font-medium text-claude-textSecondary mb-1">{t('settings.personalPreferences')}</label>
-              <p className="text-[12px] text-claude-textSecondary/60 mb-2">{t('settings.personalPreferencesSubtitle')}</p>
+              <label className="block text-[13px] font-medium text-deepseek-textSecondary mb-1">{t('settings.personalPreferences')}</label>
+              <p className="text-[12px] text-deepseek-textSecondary/60 mb-2">{t('settings.personalPreferencesSubtitle')}</p>
               <textarea
                 value={personalPreferences}
                 onChange={e => setPersonalPreferences(e.target.value)}
                 onBlur={() => handleSave(true)}
                 rows={3}
-                className="w-full px-3 py-2.5 bg-claude-input border border-claude-border rounded-md text-[14px] text-claude-text focus:outline-none focus:border-[#387ee0] focus:ring-0 transition-all resize-none placeholder-claude-textSecondary"
+                className="w-full px-3 py-2.5 bg-deepseek-input border border-deepseek-border rounded-md text-[14px] text-deepseek-text focus:outline-none focus:border-[#387ee0] focus:ring-0 transition-all resize-none placeholder-deepseek-textSecondary"
                 placeholder={t('settings.personalPreferencesPlaceholder')}
               />
             </div>
@@ -774,10 +774,10 @@ const SettingsPage = ({ onCreateWithDeepSeek }: { onCreateWithDeepSeek?: () => v
           </div>
         </section>
 
-        <hr className="border-claude-border" />
+        <hr className="border-deepseek-border" />
         {/* User Mode Switch */}
         <section>
-          <h3 className="text-[16px] font-semibold text-claude-text mb-5">{t('settings.userMode')}</h3>
+          <h3 className="text-[16px] font-semibold text-deepseek-text mb-5">{t('settings.userMode')}</h3>
           <div className="flex gap-3">
             {([
               { value: 'selfhosted', label: t('settings.selfHosted'), desc: t('settings.selfHostedSubtitle') },
@@ -799,11 +799,11 @@ const SettingsPage = ({ onCreateWithDeepSeek }: { onCreateWithDeepSeek?: () => v
                     }
                     window.location.reload();
                   }}
-                  className={`flex-1 px-4 py-3 rounded-xl border text-left transition-all ${active ? 'border-[#3b82f6]/80 bg-blue-500/5' : 'border-claude-border/60 hover:border-claude-textSecondary/20'
+                  className={`flex-1 px-4 py-3 rounded-xl border text-left transition-all ${active ? 'border-[#3b82f6]/80 bg-blue-500/5' : 'border-deepseek-border/60 hover:border-deepseek-textSecondary/20'
                     }`}
                 >
-                  <div className={`text-[14px] font-medium ${active ? 'text-claude-text' : 'text-claude-textSecondary'}`}>{opt.label}</div>
-                  <div className="text-[12px] text-claude-textSecondary/60 mt-0.5">{opt.desc}</div>
+                  <div className={`text-[14px] font-medium ${active ? 'text-deepseek-text' : 'text-deepseek-textSecondary'}`}>{opt.label}</div>
+                  <div className="text-[12px] text-deepseek-textSecondary/60 mt-0.5">{opt.desc}</div>
                 </button>
               );
             })}
@@ -817,10 +817,10 @@ const SettingsPage = ({ onCreateWithDeepSeek }: { onCreateWithDeepSeek?: () => v
     return (<div className="animate-fade-in">
         {/* About Section */}
         <section>
-          <h3 className="text-[16px] font-semibold text-claude-text mb-3">{t('settings.about')}</h3>
+          <h3 className="text-[16px] font-semibold text-deepseek-text mb-3">{t('settings.about')}</h3>
           <div className="flex items-center justify-between py-2">
-            <span className="text-[14px] text-claude-textSecondary">{t('settings.currentVersion')}</span>
-            <span className="text-[14px] font-mono text-claude-text">v{appVersion}</span>
+            <span className="text-[14px] text-deepseek-textSecondary">{t('settings.currentVersion')}</span>
+            <span className="text-[14px] font-mono text-deepseek-text">v{appVersion}</span>
           </div>
         </section>
     </div>);
@@ -830,22 +830,22 @@ const SettingsPage = ({ onCreateWithDeepSeek }: { onCreateWithDeepSeek?: () => v
     return (<div className="space-y-10 animate-fade-in">
       <GeneralPreferences chatFont={renderChatFont()} />
         {/* Default Model Section — only for Clawparrot (self-hosted configures in Models tab) */}
-        {localStorage.getItem('user_mode') !== 'selfhosted' && <><hr className="border-claude-border" /><section>
-          <h3 className="text-[16px] font-semibold text-claude-text mb-5">{t('settings.defaultModel')}</h3>
+        {localStorage.getItem('user_mode') !== 'selfhosted' && <><hr className="border-deepseek-border" /><section>
+          <h3 className="text-[16px] font-semibold text-deepseek-text mb-5">{t('settings.defaultModel')}</h3>
           <div className="space-y-5">
             <div>
-              <label className="block text-[13px] font-medium text-claude-textSecondary mb-1.5">{t('settings.defaultModelLabel')}</label>
+              <label className="block text-[13px] font-medium text-deepseek-textSecondary mb-1.5">{t('settings.defaultModelLabel')}</label>
               <div className="relative">
                 <select
                   value={defaultModelBase}
                   onChange={e => applyDefaultModel(e.target.value, defaultModelIsThinking)}
-                  className="w-full px-3 py-2 bg-claude-input border border-claude-border rounded-md text-[14px] text-claude-text focus:outline-none focus:border-[#387ee0] focus:ring-0 appearance-none transition-all"
+                  className="w-full px-3 py-2 bg-deepseek-input border border-deepseek-border rounded-md text-[14px] text-deepseek-text focus:outline-none focus:border-[#387ee0] focus:ring-0 appearance-none transition-all"
                 >
                   {MODEL_BASES.map(m => (
                     <option key={m.base} value={m.base}>{m.label}</option>
                   ))}
                 </select>
-                <div className="absolute right-3 top-1/2 -translate-y-1/2 pointer-events-none text-claude-textSecondary">
+                <div className="absolute right-3 top-1/2 -translate-y-1/2 pointer-events-none text-deepseek-textSecondary">
                   <svg width="10" height="6" viewBox="0 0 10 6" fill="none" xmlns="http://www.w3.org/2000/svg">
                     <path d="M1 1L5 5L9 1" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" />
                   </svg>
@@ -855,8 +855,8 @@ const SettingsPage = ({ onCreateWithDeepSeek }: { onCreateWithDeepSeek?: () => v
 
             <div className="flex items-center justify-between">
               <div>
-                <div className="text-[13px] font-medium text-claude-textSecondary">{t('settings.extendedThinking')}</div>
-                <div className="text-[12px] text-claude-textSecondary mt-0.5">{t('settings.extendedThinkingDesc')}</div>
+                <div className="text-[13px] font-medium text-deepseek-textSecondary">{t('settings.extendedThinking')}</div>
+                <div className="text-[12px] text-deepseek-textSecondary mt-0.5">{t('settings.extendedThinkingDesc')}</div>
               </div>
               <button
                 onClick={() => applyDefaultModel(defaultModelBase, !defaultModelIsThinking)}
@@ -927,18 +927,18 @@ const SettingsPage = ({ onCreateWithDeepSeek }: { onCreateWithDeepSeek?: () => v
       const isHigh = pct >= 80;
 
       return (
-        <div className="py-4 border-b border-claude-border last:border-0">
+        <div className="py-4 border-b border-deepseek-border last:border-0">
           <div className="flex items-start justify-between mb-2">
             <div>
-              <div className="text-[14px] font-medium text-claude-text mb-1">{title}</div>
-              <div className="text-[13px] text-claude-textSecondary">{subtitle}</div>
+              <div className="text-[14px] font-medium text-deepseek-text mb-1">{title}</div>
+              <div className="text-[13px] text-deepseek-textSecondary">{subtitle}</div>
             </div>
-            <div className="text-[14px] text-claude-textSecondary font-medium">
+            <div className="text-[14px] text-deepseek-textSecondary font-medium">
               {Math.round(pct)}% {t('settings.percentUsedSuffix')}
             </div>
           </div>
           <div className="flex items-center gap-3">
-            <div className="flex-1 h-2 bg-claude-border rounded-full overflow-hidden">
+            <div className="flex-1 h-2 bg-deepseek-border rounded-full overflow-hidden">
               <div
                 className={`h-full rounded-full transition-all duration-500 ease-out ${isHigh ? 'bg-[#D93025]' : 'bg-[#3b82f6]'
                   }`}
@@ -953,24 +953,24 @@ const SettingsPage = ({ onCreateWithDeepSeek }: { onCreateWithDeepSeek?: () => v
     return (
       <div className="space-y-8 animate-fade-in">
         <section>
-          <h3 className="text-[16px] font-semibold text-claude-text mb-5">{t('settings.usageTitle')}</h3>
+          <h3 className="text-[16px] font-semibold text-deepseek-text mb-5">{t('settings.usageTitle')}</h3>
 
           <div className="space-y-6">
             {/* Plan info */}
-            <div className="p-4 bg-claude-bg border border-claude-border rounded-xl shadow-sm">
+            <div className="p-4 bg-deepseek-bg border border-deepseek-border rounded-xl shadow-sm">
               <div className="flex items-center gap-2 mb-1">
-                <span className="text-[15px] font-semibold text-claude-text">
+                <span className="text-[15px] font-semibold text-deepseek-text">
                   {plan ? plan.name : t('settings.freePlanLabel')}
                 </span>
-                <span className={`px-2 py-0.5 text-[11px] font-medium rounded-full ${plan ? 'bg-[#4B9C68]/10 text-[#4B9C68]' : 'bg-claude-hover text-claude-textSecondary'
+                <span className={`px-2 py-0.5 text-[11px] font-medium rounded-full ${plan ? 'bg-[#4B9C68]/10 text-[#4B9C68]' : 'bg-deepseek-hover text-deepseek-textSecondary'
                   }`}>
                   {plan ? t('settings.activeLabel') : t('settings.freeLabel')}
                 </span>
               </div>
               {plan ? (
-                <p className="text-[13px] text-claude-textSecondary">{t('settings.expiresOn')}：{plan.expires_at?.slice(0, 10)}（{t('settings.daysRemaining', { days: daysRemaining })}）</p>
+                <p className="text-[13px] text-deepseek-textSecondary">{t('settings.expiresOn')}：{plan.expires_at?.slice(0, 10)}（{t('settings.daysRemaining', { days: daysRemaining })}）</p>
               ) : (
-                <p className="text-[13px] text-claude-textSecondary">{t('settings.noActivePlan')}</p>
+                <p className="text-[13px] text-deepseek-textSecondary">{t('settings.noActivePlan')}</p>
               )}
             </div>
 
@@ -978,7 +978,7 @@ const SettingsPage = ({ onCreateWithDeepSeek }: { onCreateWithDeepSeek?: () => v
             {quota && (
               <div className="space-y-6">
                 <div>
-                  <h4 className="text-[16px] font-semibold text-claude-text mb-1">{t('settings.planUsageLimits')}</h4>
+                  <h4 className="text-[16px] font-semibold text-deepseek-text mb-1">{t('settings.planUsageLimits')}</h4>
 
                   {/* Window (5h) */}
                   {quota.window.limit > 0 && renderLimitItem(
@@ -1011,12 +1011,12 @@ const SettingsPage = ({ onCreateWithDeepSeek }: { onCreateWithDeepSeek?: () => v
             {!quota && (
               <div>
                 <div className="flex items-center justify-between mb-2">
-                  <span className="text-[13px] font-medium text-claude-text">{t('settings.quotaLabel')}</span>
-                  <span className="text-[13px] text-claude-textSecondary">
+                  <span className="text-[13px] font-medium text-deepseek-text">{t('settings.quotaLabel')}</span>
+                  <span className="text-[13px] text-deepseek-textSecondary">
                     {t('settings.percentUsed', { percent: usagePercent.toFixed(2) })}
                   </span>
                 </div>
-                <div className="h-2 bg-claude-border rounded-full overflow-hidden">
+                <div className="h-2 bg-deepseek-border rounded-full overflow-hidden">
                   <div
                     className="h-full rounded-full transition-all duration-500 ease-out"
                     style={{
@@ -1032,12 +1032,12 @@ const SettingsPage = ({ onCreateWithDeepSeek }: { onCreateWithDeepSeek?: () => v
             {!hasNativeDesktop() && (
               <div>
                 <div className="flex items-center justify-between mb-2">
-                  <span className="text-[13px] font-medium text-claude-text">{t('settings.storageLabel')}</span>
-                  <span className="text-[13px] text-claude-textSecondary">
+                  <span className="text-[13px] font-medium text-deepseek-text">{t('settings.storageLabel')}</span>
+                  <span className="text-[13px] text-deepseek-textSecondary">
                     {t('settings.storageUsedLabel', { used: formatBytes(storageUsed), total: formatBytes(storageQuota) })}
                   </span>
                 </div>
-                <div className="h-2 bg-claude-border rounded-full overflow-hidden">
+                <div className="h-2 bg-deepseek-border rounded-full overflow-hidden">
                   <div
                     className="h-full rounded-full transition-all duration-500 ease-out"
                     style={{
@@ -1047,8 +1047,8 @@ const SettingsPage = ({ onCreateWithDeepSeek }: { onCreateWithDeepSeek?: () => v
                   />
                 </div>
                 <div className="flex justify-between mt-1.5">
-                  <span className="text-[12px] text-claude-textSecondary">{t('settings.percentUsed', { percent: storagePercent })}</span>
-                  <span className="text-[12px] text-claude-textSecondary">{t('settings.storageRemaining')} {formatBytes(storageQuota - storageUsed)}</span>
+                  <span className="text-[12px] text-deepseek-textSecondary">{t('settings.percentUsed', { percent: storagePercent })}</span>
+                  <span className="text-[12px] text-deepseek-textSecondary">{t('settings.storageRemaining')} {formatBytes(storageQuota - storageUsed)}</span>
                 </div>
               </div>
             )}
@@ -1056,13 +1056,13 @@ const SettingsPage = ({ onCreateWithDeepSeek }: { onCreateWithDeepSeek?: () => v
             {/* Message Stats */}
             {messages && (
               <div className="flex gap-4">
-                <div className="flex-1 p-3 bg-claude-bg border border-claude-border rounded-xl text-center">
-                  <div className="text-[20px] font-semibold text-claude-text">{messages.today}</div>
-                  <div className="text-[12px] text-claude-textSecondary">{t('settings.messagesToday')}</div>
+                <div className="flex-1 p-3 bg-deepseek-bg border border-deepseek-border rounded-xl text-center">
+                  <div className="text-[20px] font-semibold text-deepseek-text">{messages.today}</div>
+                  <div className="text-[12px] text-deepseek-textSecondary">{t('settings.messagesToday')}</div>
                 </div>
-                <div className="flex-1 p-3 bg-claude-bg border border-claude-border rounded-xl text-center">
-                  <div className="text-[20px] font-semibold text-claude-text">{messages.month}</div>
-                  <div className="text-[12px] text-claude-textSecondary">{t('settings.messagesThisMonth')}</div>
+                <div className="flex-1 p-3 bg-deepseek-bg border border-deepseek-border rounded-xl text-center">
+                  <div className="text-[20px] font-semibold text-deepseek-text">{messages.month}</div>
+                  <div className="text-[12px] text-deepseek-textSecondary">{t('settings.messagesThisMonth')}</div>
                 </div>
               </div>
             )}

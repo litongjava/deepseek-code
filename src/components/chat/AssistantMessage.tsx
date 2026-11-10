@@ -116,13 +116,13 @@ const AssistantMessage: React.FC<AssistantMessageProps> = ({
     return (
       <div className="mb-4 scan-light-wrapper rounded-lg p-2 -mx-2">
         <div
-          className="flex items-center gap-2 cursor-pointer select-none group/think text-claude-textSecondary hover:text-claude-text transition-colors"
+          className="flex items-center gap-2 cursor-pointer select-none group/think text-deepseek-textSecondary hover:text-deepseek-text transition-colors"
           onClick={handleThinkingToggle}
         >
           {msg.isThinking && (
             <span className="loading-ring flex-shrink-0" />
           )}
-          <span className={`text-[14px] ${msg.isThinking ? 'animate-shimmer-text' : 'text-claude-textSecondary'}`}>
+          <span className={`text-[14px] ${msg.isThinking ? 'animate-shimmer-text' : 'text-deepseek-textSecondary'}`}>
             {(() => {
               if (msg.thinking_summary) return msg.thinking_summary;
               const text = (msg.thinking || '').trim();
@@ -136,11 +136,11 @@ const AssistantMessage: React.FC<AssistantMessageProps> = ({
         </div>
 
         {msg.isThinkingExpanded && (
-          <div className="mt-2 ml-1 pl-4 border-l-2 border-claude-border animate-expand-in">
+          <div className="mt-2 ml-1 pl-4 border-l-2 border-deepseek-border animate-expand-in">
             <div className="flex flex-col">
               <div className="relative">
                 <div
-                  className="text-claude-textSecondary text-[14px] leading-normal whitespace-pre-wrap overflow-hidden"
+                  className="text-deepseek-textSecondary text-[14px] leading-normal whitespace-pre-wrap overflow-hidden"
                   style={{ maxHeight: isExpanded ? 'none' : '300px' }}
                   ref={(el) => { if (el) messageContentRef.current = el; }}
                 >
@@ -149,7 +149,7 @@ const AssistantMessage: React.FC<AssistantMessageProps> = ({
                 {!isExpanded && (() => {
                   return messageContentRef.current && messageContentRef.current.scrollHeight > 300;
                 })() && (
-                  <div className="absolute bottom-0 left-0 right-0 h-16 bg-gradient-to-t from-claude-bg to-transparent pointer-events-none" />
+                  <div className="absolute bottom-0 left-0 right-0 h-16 bg-gradient-to-t from-deepseek-bg to-transparent pointer-events-none" />
                 )}
               </div>
               {(() => {
@@ -158,7 +158,7 @@ const AssistantMessage: React.FC<AssistantMessageProps> = ({
                 if (!isOverflow) return null;
                 return (
                   <div className="pt-1">
-                    <button onClick={() => onToggleExpand(idx)} className="text-[13px] text-claude-text hover:text-claude-textSecondary transition-colors font-medium">
+                    <button onClick={() => onToggleExpand(idx)} className="text-[13px] text-deepseek-text hover:text-deepseek-textSecondary transition-colors font-medium">
                       {isExpanded ? 'Show less' : 'Show more'}
                     </button>
                   </div>
@@ -166,7 +166,7 @@ const AssistantMessage: React.FC<AssistantMessageProps> = ({
               })()}
             </div>
             {!msg.isThinking && (
-              <div className="flex items-center gap-2 mt-2 text-claude-textSecondary animate-fade-in">
+              <div className="flex items-center gap-2 mt-2 text-deepseek-textSecondary animate-fade-in">
                 <Check size={16} />
                 <span className="text-[14px]">Done</span>
               </div>
@@ -215,19 +215,19 @@ const AssistantMessage: React.FC<AssistantMessageProps> = ({
       <div className="mb-4">
         <div className={`rounded-lg overflow-hidden ${!allDone ? 'bg-black/[0.04] dark:bg-white/[0.04]' : ''}`}>
           <div
-            className="flex items-center gap-2 cursor-pointer select-none group/tool text-claude-textSecondary hover:text-claude-text transition-colors px-2 py-1.5"
+            className="flex items-center gap-2 cursor-pointer select-none group/tool text-deepseek-textSecondary hover:text-deepseek-text transition-colors px-2 py-1.5"
             onClick={handleToolCallsToggle}
           >
             {!allDone && (
-              <FileText size={16} className="text-claude-textSecondary animate-pulse" />
+              <FileText size={16} className="text-deepseek-textSecondary animate-pulse" />
             )}
             {allDone && !hasError && (
-              <Check size={16} className="text-claude-textSecondary" />
+              <Check size={16} className="text-deepseek-textSecondary" />
             )}
             {allDone && hasError && (
               <span className="text-red-400 text-[14px]">✗</span>
             )}
-            <span className={`text-[14px] ${!allDone ? 'animate-shimmer-text' : 'text-claude-textSecondary'}`}>
+            <span className={`text-[14px] ${!allDone ? 'animate-shimmer-text' : 'text-deepseek-textSecondary'}`}>
               {summary}
             </span>
             <ChevronDown size={14} className={`transform transition-transform duration-200 ${expanded ? 'rotate-180' : ''}`} />
@@ -235,7 +235,7 @@ const AssistantMessage: React.FC<AssistantMessageProps> = ({
         </div>
 
         {expanded && (
-          <div className="mt-2 ml-1 pl-4 border-l-2 border-claude-border space-y-2">
+          <div className="mt-2 ml-1 pl-4 border-l-2 border-deepseek-border space-y-2">
             {visibleToolCalls.map((tc: any, tcIdx: number) => {
               const inputStr = tc.input ? (typeof tc.input === 'string' ? tc.input : JSON.stringify(tc.input, null, 2)) : '';
               const rawPath = tc.input?.file_path || tc.input?.path || '';
@@ -255,7 +255,7 @@ const AssistantMessage: React.FC<AssistantMessageProps> = ({
               return (
                 <div key={tc.id || tcIdx}>
                   {tc.textBefore && (
-                    <div className="text-[13px] text-claude-textSecondary px-1 py-1.5 leading-relaxed">
+                    <div className="text-[13px] text-deepseek-textSecondary px-1 py-1.5 leading-relaxed">
                       {tc.textBefore}
                     </div>
                   )}
@@ -269,11 +269,11 @@ const AssistantMessage: React.FC<AssistantMessageProps> = ({
                     >
                       <div className="flex items-center gap-2 overflow-hidden">
                         {tc.name === 'Bash' ? (
-                          <span className="text-claude-textSecondary font-mono font-bold">&gt;_</span>
+                          <span className="text-deepseek-textSecondary font-mono font-bold">&gt;_</span>
                         ) : (
-                          <FileText size={14} className="text-claude-textSecondary flex-shrink-0" />
+                          <FileText size={14} className="text-deepseek-textSecondary flex-shrink-0" />
                         )}
-                        <span className="text-claude-text font-mono text-[12px] truncate">
+                        <span className="text-deepseek-text font-mono text-[12px] truncate">
                           {inputPreview || tc.name}
                         </span>
                       </div>
@@ -284,10 +284,10 @@ const AssistantMessage: React.FC<AssistantMessageProps> = ({
                             {stats.removed > 0 && <span className="text-red-500 dark:text-red-400">-{stats.removed}</span>}
                           </span>
                         )}
-                        {realStatus === 'running' && <span className="text-claude-textSecondary text-[12px] animate-shimmer-text">Running...</span>}
+                        {realStatus === 'running' && <span className="text-deepseek-textSecondary text-[12px] animate-shimmer-text">Running...</span>}
                         {realStatus === 'error' && <span className="text-red-400/80 text-[12px]">Failed</span>}
                         {expandable && (
-                          <ChevronDown size={14} className={`text-claude-textSecondary transform transition-transform duration-200 ${(tc.isExpanded ?? false) ? 'rotate-180' : ''}`} />
+                          <ChevronDown size={14} className={`text-deepseek-textSecondary transform transition-transform duration-200 ${(tc.isExpanded ?? false) ? 'rotate-180' : ''}`} />
                         )}
                       </div>
                     </div>
@@ -296,7 +296,7 @@ const AssistantMessage: React.FC<AssistantMessageProps> = ({
                         {shouldUseDiffView(tc.name, tc.input) ? (
                           <ToolDiffView toolName={tc.name} input={tc.input} result={tc.result} />
                         ) : tc.result != null ? (
-                          <div className="px-1 text-claude-textSecondary text-[12px] font-mono max-h-[400px] overflow-y-auto whitespace-pre-wrap bg-black/5 dark:bg-black/40 rounded-md p-2">
+                          <div className="px-1 text-deepseek-textSecondary text-[12px] font-mono max-h-[400px] overflow-y-auto whitespace-pre-wrap bg-black/5 dark:bg-black/40 rounded-md p-2">
                             {typeof tc.result === 'string' ? (tc.result.length > 2000 ? tc.result.slice(0, 2000) + '...' : tc.result || '(Empty output)') : JSON.stringify(tc.result).slice(0, 2000)}
                           </div>
                         ) : null}
@@ -307,12 +307,12 @@ const AssistantMessage: React.FC<AssistantMessageProps> = ({
               );
             })}
             {isCurrentlyStreaming && pendingWorkText && (
-              <div className="text-[13px] text-claude-textSecondary px-1 py-1.5 leading-relaxed animate-shimmer-text">
+              <div className="text-[13px] text-deepseek-textSecondary px-1 py-1.5 leading-relaxed animate-shimmer-text">
                 {pendingWorkText}
               </div>
             )}
             {allDone && !isCurrentlyStreaming && (
-              <div className="flex items-center gap-2 text-claude-textSecondary pt-1 pb-1">
+              <div className="flex items-center gap-2 text-deepseek-textSecondary pt-1 pb-1">
                 <Check size={14} />
                 <span className="text-[13px]">Done</span>
               </div>
@@ -408,7 +408,7 @@ const AssistantMessage: React.FC<AssistantMessageProps> = ({
       if (msg.searchStatus && (!msg.content || msg.content.length === (msg._contentLenBeforeSearch || 0)) && loading && idx === messagesLength - 1) {
         return (
           <div className="flex items-center justify-center gap-2 text-[15px] font-medium mb-4 w-full">
-            <Globe size={18} className="text-claude-textSecondary" />
+            <Globe size={18} className="text-deepseek-textSecondary" />
             <span className="animate-shimmer-text">Searching the web</span>
           </div>
         );
@@ -515,7 +515,7 @@ const AssistantMessage: React.FC<AssistantMessageProps> = ({
   };
 
   return (
-    <div className={`px-1 text-claude-text text-[16.5px] leading-normal mt-2 ${isCurrentlyStreaming ? 'streaming-active' : ''}`}>
+    <div className={`px-1 text-deepseek-text text-[16.5px] leading-normal mt-2 ${isCurrentlyStreaming ? 'streaming-active' : ''}`}>
       {renderThinking()}
       {renderResearchBadge()}
       {renderToolCalls()}

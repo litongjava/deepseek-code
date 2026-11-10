@@ -57,8 +57,8 @@ function getDomain(url: string): string {
 const PhaseHeader: React.FC<{ icon: React.ReactNode; label: string; subtle?: string }> = ({ icon, label, subtle }) => (
     <div className="flex items-center gap-2 mb-3">
         <div className="text-[#2E7CF6]">{icon}</div>
-        <h3 className="text-[14px] font-semibold text-claude-text">{label}</h3>
-        {subtle && <span className="text-[12px] text-claude-textSecondary">{subtle}</span>}
+        <h3 className="text-[14px] font-semibold text-deepseek-text">{label}</h3>
+        {subtle && <span className="text-[12px] text-deepseek-textSecondary">{subtle}</span>}
     </div>
 );
 
@@ -70,15 +70,15 @@ const SourceChip: React.FC<{ source: ResearchSource }> = ({ source }) => {
             href={source.url}
             target="_blank"
             rel="noopener noreferrer"
-            className="flex items-center gap-1.5 px-2 py-1 rounded-md bg-claude-hover hover:bg-claude-btnHover transition-colors flex-shrink-0 max-w-[180px]"
+            className="flex items-center gap-1.5 px-2 py-1 rounded-md bg-deepseek-hover hover:bg-deepseek-btnHover transition-colors flex-shrink-0 max-w-[180px]"
             title={source.title}
         >
             {favicon ? (
                 <img src={favicon} width={14} height={14} alt="" className="rounded-sm flex-shrink-0" />
             ) : (
-                <div className="w-3.5 h-3.5 bg-claude-textSecondary rounded-sm flex-shrink-0" />
+                <div className="w-3.5 h-3.5 bg-deepseek-textSecondary rounded-sm flex-shrink-0" />
             )}
-            <span className="text-[11px] text-claude-textSecondary truncate">{domain}</span>
+            <span className="text-[11px] text-deepseek-textSecondary truncate">{domain}</span>
         </a>
     );
 };
@@ -89,16 +89,16 @@ const ResearchPanel: React.FC<Props> = ({ research, onClose }) => {
     return (
         <div className="h-full w-full flex flex-col bg-transparent">
             {/* Header */}
-            <div className="flex items-center justify-between px-5 py-4 flex-shrink-0 border-b border-claude-border">
+            <div className="flex items-center justify-between px-5 py-4 flex-shrink-0 border-b border-deepseek-border">
                 <div className="flex items-center gap-2 min-w-0">
                     <IconResearch size={18} className="text-[#2E7CF6] flex-shrink-0" />
-                    <h2 className="text-[15px] font-semibold text-claude-text truncate">
+                    <h2 className="text-[15px] font-semibold text-deepseek-text truncate">
                         {plan?.title || 'Research'}
                     </h2>
                 </div>
                 <button
                     onClick={onClose}
-                    className="p-1.5 text-claude-textSecondary hover:text-claude-text hover:bg-claude-hover rounded-lg transition-colors flex-shrink-0"
+                    className="p-1.5 text-deepseek-textSecondary hover:text-deepseek-text hover:bg-deepseek-hover rounded-lg transition-colors flex-shrink-0"
                     title="Close"
                 >
                     <X size={18} />
@@ -115,7 +115,7 @@ const ResearchPanel: React.FC<Props> = ({ research, onClose }) => {
                             label="Research plan created"
                             subtle={`${plan.sub_questions.length} sub-questions`}
                         />
-                        <ol className="space-y-1.5 ml-6 list-decimal text-[12.5px] text-claude-textSecondary">
+                        <ol className="space-y-1.5 ml-6 list-decimal text-[12.5px] text-deepseek-textSecondary">
                             {plan.sub_questions.map((q, i) => (
                                 <li key={i}>{q}</li>
                             ))}
@@ -140,16 +140,16 @@ const ResearchPanel: React.FC<Props> = ({ research, onClose }) => {
 
                 {/* Sub-agents and their findings */}
                 {sub_agents.map((sub) => (
-                    <section key={sub.id} className="border-l-2 border-claude-border pl-4">
+                    <section key={sub.id} className="border-l-2 border-deepseek-border pl-4">
                         <div className="flex items-center gap-2 mb-2">
                             {sub.status === 'running' ? (
                                 <Loader2 size={14} className="text-[#2E7CF6] animate-spin flex-shrink-0" />
                             ) : sub.status === 'error' ? (
                                 <span className="text-red-500 text-[14px] flex-shrink-0">✗</span>
                             ) : (
-                                <Check size={14} className="text-claude-textSecondary flex-shrink-0" />
+                                <Check size={14} className="text-deepseek-textSecondary flex-shrink-0" />
                             )}
-                            <h4 className="text-[13px] font-medium text-claude-text">{sub.sub_question}</h4>
+                            <h4 className="text-[13px] font-medium text-deepseek-text">{sub.sub_question}</h4>
                         </div>
                         {sub.sources.length > 0 && (
                             <div className="flex flex-wrap gap-1.5 mb-3">
@@ -159,7 +159,7 @@ const ResearchPanel: React.FC<Props> = ({ research, onClose }) => {
                             </div>
                         )}
                         {sub.findings && (
-                            <div className="text-[12.5px] text-claude-textSecondary leading-relaxed prose-sm max-w-none">
+                            <div className="text-[12.5px] text-deepseek-textSecondary leading-relaxed prose-sm max-w-none">
                                 <MarkdownRenderer content={sub.findings} />
                             </div>
                         )}
@@ -171,7 +171,7 @@ const ResearchPanel: React.FC<Props> = ({ research, onClose }) => {
 
                 {/* Phase indicator (when running) */}
                 {phase && !completed && (
-                    <section className="flex items-center gap-2 text-[12.5px] text-claude-textSecondary">
+                    <section className="flex items-center gap-2 text-[12.5px] text-deepseek-textSecondary">
                         <Loader2 size={14} className="animate-spin text-[#2E7CF6]" />
                         <span>{phase_label || phase}</span>
                     </section>
@@ -197,7 +197,7 @@ const ResearchPanel: React.FC<Props> = ({ research, onClose }) => {
                 )}
 
                 {completed && !error && (
-                    <section className="text-[11.5px] text-claude-textSecondary text-center pt-2 pb-4">
+                    <section className="text-[11.5px] text-deepseek-textSecondary text-center pt-2 pb-4">
                         Research complete{research.duration_ms ? ` · ${(research.duration_ms / 1000).toFixed(1)}s` : ''}
                     </section>
                 )}

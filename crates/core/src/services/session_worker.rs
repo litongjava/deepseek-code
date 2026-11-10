@@ -428,6 +428,40 @@ pub async fn call(worker: &Worker, request: &Request) -> Result<Reply> {
     .context("Session worker IPC timed out")?
 }
 
+/// `sockaddr_un::sun_path` holds this many bytes including the terminator.
+/// macOS uses the smallest capacity of the supported Unix targets.
+#[cfg(unix)]
+const SUN_PATH_LIMIT: usize = 104;
+
+/// IPC endpoint for a session worker: a named pipe on Windows, a socket in the
+/// temp directory elsewhere.
+#[cfg(windows)]
+fn worker_endpoint(id: &str) -> Result<String> {
+    Ok(format!(r"\\.\pipe\deepseek-code-session-{id}"))
+}
+
+/// macOS keeps `TMPDIR` in a long per-user directory, which leaves no room for
+/// a full UUID in `sun_path`. Compact the identifier and fall back to `/tmp`
+/// when even that does not fit.
+#[cfg(unix)]
+fn worker_endpoint(id: &str) -> Result<String> {
+    socket_endpoint(id, [std::env::temp_dir(), PathBuf::from("/tmp")]).context(
+        "No temporary directory has room for the session worker socket; point TMPDIR at a shorter path",
+    )
+}
+
+#[cfg(unix)]
+fn socket_endpoint(id: &str, bases: impl IntoIterator<Item = PathBuf>) -> Option<String> {
+    use std::os::unix::ffi::OsStrExt;
+    let compact: String = id.chars().filter(|character| *character != '-').collect();
+    let name = format!("deepseek-code-{compact}.sock");
+    bases
+        .into_iter()
+        .map(|base| base.join(&name))
+        .find(|path| path.as_os_str().as_bytes().len() < SUN_PATH_LIMIT)
+        .map(|path| path.to_string_lossy().into_owned())
+}
+
 pub async fn ensure_worker(
     root: &Path,
     executable: &Path,
@@ -453,13 +487,7 @@ pub async fn ensure_worker(
     let mut claim = SessionClaim::acquire(root, session, &id)?;
     let dir = worker_path(root, session)?.join(&id);
     fs::create_dir_all(&dir)?;
-    #[cfg(windows)]
-    let endpoint = format!(r"\\.\pipe\claude-rust-session-{id}");
-    #[cfg(unix)]
-    let endpoint = std::env::temp_dir()
-        .join(format!("claude-rust-{id}.sock"))
-        .to_string_lossy()
-        .into_owned();
+    let endpoint = worker_endpoint(&id)?;
     let worker = Worker {
         id,
         session_id: session.into(),
@@ -516,11 +544,12 @@ async fn wait_ready(worker: Worker) -> Result<Worker> {
     tokio::time::timeout(Duration::from_secs(12), async {
         loop {
             let observed = read_worker(&dir)?;
-            ensure!(
-                observed.status != "stopped",
-                "Session worker startup failed: {}",
-                observed.error.unwrap_or_default()
-            );
+            if observed.status == "stopped" {
+                anyhow::bail!(
+                    "Session worker startup failed: {}",
+                    startup_failure(observed.error.as_deref(), &dir)
+                );
+            }
             if observed.status == "running"
                 && observed.child_pid.is_some()
                 && call(&observed, &Request::Ping).await.is_ok()
@@ -532,6 +561,27 @@ async fn wait_ready(worker: Worker) -> Result<Worker> {
     })
     .await
     .context("Session worker did not become ready within 12 seconds")?
+}
+
+/// The supervisor records its own error; when it only observed the host exit,
+/// the host's stderr log holds the real reason.
+fn startup_failure(error: Option<&str>, dir: &Path) -> String {
+    if let Some(error) = error.map(str::trim).filter(|error| !error.is_empty()) {
+        return error.to_owned();
+    }
+    let log = dir.join("stderr.log");
+    let last = fs::read_to_string(&log).ok().and_then(|text| {
+        text.lines()
+            .rev()
+            .find(|line| !line.trim().is_empty())
+            .map(|line| line.trim().to_owned())
+    });
+    last.unwrap_or_else(|| {
+        format!(
+            "session host exited before becoming ready; see {}",
+            log.display()
+        )
+    })
 }
 
 pub fn begin_job(worker: &Worker, id: &str, prompt: &str) -> Result<Job> {
@@ -946,7 +996,7 @@ mod tests {
 
     #[tokio::test]
     async fn named_pipe_dacl_grants_only_current_token_user() {
-        let name = format!(r"\\.\pipe\claude-rust-acl-test-{}", uuid::Uuid::new_v4());
+        let name = format!(r"\\.\pipe\deepseek-code-acl-test-{}", uuid::Uuid::new_v4());
         let pipe = secure_pipe(&name, true).unwrap();
         unsafe {
             let mut descriptor = PSECURITY_DESCRIPTOR::default();
@@ -997,6 +1047,64 @@ mod tests {
 #[cfg(test)]
 mod settle_tests {
     use super::*;
+    #[cfg(unix)]
+    #[test]
+    fn unix_endpoint_fits_the_socket_path_limit() {
+        let id = uuid::Uuid::new_v4().to_string();
+        let endpoint = worker_endpoint(&id).unwrap();
+        assert!(endpoint.contains("deepseek-code"), "{endpoint}");
+        assert!(endpoint.contains(&id.replace('-', "")), "{endpoint}");
+        assert!(!endpoint.contains("claude"), "{endpoint}");
+        assert!(
+            endpoint.len() < SUN_PATH_LIMIT,
+            "{endpoint} has {} bytes",
+            endpoint.len()
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn long_temp_directory_falls_back_to_a_short_one() {
+        let long = PathBuf::from("/").join("x".repeat(80));
+        let endpoint = socket_endpoint(
+            "0123456789abcdef0123456789abcdef",
+            [long, PathBuf::from("/tmp")],
+        )
+        .unwrap();
+        assert_eq!(
+            Path::new(&endpoint).parent(),
+            Some(Path::new("/tmp")),
+            "{endpoint}"
+        );
+        assert!(endpoint.len() < SUN_PATH_LIMIT, "{endpoint}");
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_endpoint_is_named_after_the_product() {
+        let endpoint = worker_endpoint("fixture-id").unwrap();
+        assert!(endpoint.contains("deepseek-code"), "{endpoint}");
+        assert!(endpoint.contains("fixture-id"), "{endpoint}");
+        assert!(!endpoint.contains("claude"), "{endpoint}");
+    }
+
+    #[test]
+    fn startup_failure_prefers_recorded_error_then_host_stderr() {
+        let dir = tempfile::tempdir().unwrap();
+        assert_eq!(
+            startup_failure(Some("supervisor error"), dir.path()),
+            "supervisor error"
+        );
+        fs::write(
+            dir.path().join("stderr.log"),
+            "banner\n\nSession host failed: path must be shorter than SUN_LEN\n",
+        )
+        .unwrap();
+        assert_eq!(
+            startup_failure(None, dir.path()),
+            "Session host failed: path must be shorter than SUN_LEN"
+        );
+    }
 
     #[test]
     fn session_worker_commands_drop_inherited_worker_state() {
@@ -1099,7 +1207,7 @@ mod runtime_status_tests {
         for behavior in ["old", "unresponsive"] {
             let id = uuid::Uuid::new_v4().to_string();
             let endpoint = if cfg!(windows) {
-                format!(r"\\.\pipe\claude-status-{id}")
+                format!(r"\\.\pipe\deepseek-code-status-{id}")
             } else {
                 dir.path()
                     .join(format!("{id}.sock"))

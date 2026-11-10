@@ -14,17 +14,17 @@ import { commandStreams, groupWorkSteps, messageSteps, recordId, toolCategory, t
 
 export function InspectButton({ id, onInspect }: { id: string; onInspect?: (id: string) => void }) {
   if (!onInspect) return null;
-  return <div className="mt-1 mb-0.5 ml-1 flex items-start"><button type="button" onClick={() => onInspect(id)} className="inline-flex items-center gap-1 rounded-full border-[0.5px] border-claude-border bg-claude-bg px-2 py-0.5 text-[11px] leading-4 text-claude-textSecondary pointer-events-none opacity-0 transition-opacity group-hover/process:pointer-events-auto group-hover/process:opacity-100 group-focus-within/process:pointer-events-auto group-focus-within/process:opacity-100 focus-visible:pointer-events-auto focus-visible:opacity-100" aria-label="Inspect"><Code2 size={13} />Inspect</button></div>;
+  return <div className="mt-1 mb-0.5 ml-1 flex items-start"><button type="button" onClick={() => onInspect(id)} className="inline-flex items-center gap-1 rounded-full border-[0.5px] border-deepseek-border bg-deepseek-bg px-2 py-0.5 text-[11px] leading-4 text-deepseek-textSecondary pointer-events-none opacity-0 transition-opacity group-hover/process:pointer-events-auto group-hover/process:opacity-100 group-focus-within/process:pointer-events-auto group-focus-within/process:opacity-100 focus-visible:pointer-events-auto focus-visible:opacity-100" aria-label="Inspect"><Code2 size={13} />Inspect</button></div>;
 }
 function StatusDot({ status }: { status: string }) {
   const label = status === 'error' ? '运行失败' : status === 'done' ? '运行成功' : status === 'running' ? '运行中' : '已中断';
-  return <span role="img" aria-label={label} title={label} className={`h-2 w-2 shrink-0 rounded-full ${status === 'error' ? 'bg-red-500' : status === 'done' ? 'bg-green-500' : status === 'running' ? 'animate-pulse bg-amber-500' : 'bg-claude-textSecondary'}`} />;
+  return <span role="img" aria-label={label} title={label} className={`h-2 w-2 shrink-0 rounded-full ${status === 'error' ? 'bg-red-500' : status === 'done' ? 'bg-green-500' : status === 'running' ? 'animate-pulse bg-amber-500' : 'bg-deepseek-textSecondary'}`} />;
 }
 const dotStatus = (status: ToolCallStatus, interrupted?: boolean) =>
   interrupted ? 'interrupted' : status === 'failed' ? 'error' : status === 'completed' ? 'done' : status === 'running' ? 'running' : 'interrupted';
 /** Tree connector for a row inside a group. */
 function Connector({ last }: { last: boolean }) {
-  return <span aria-hidden="true" className="shrink-0 select-none font-mono text-claude-textSecondary/60">{last ? '└─' : '├─'}</span>;
+  return <span aria-hidden="true" className="shrink-0 select-none font-mono text-deepseek-textSecondary/60">{last ? '└─' : '├─'}</span>;
 }
 const displayName = (name: string) => name ? name.charAt(0).toUpperCase() + name.slice(1) : 'Tool';
 function ToolBlock({ conversationId, messageId, tool, level, live, id, onInspect, last = true }: { conversationId?: string | null; messageId?: string; tool: any; level: DetailLevel; live: boolean; id: string; onInspect?: (id: string) => void; last?: boolean }) {
@@ -43,29 +43,29 @@ function ToolBlock({ conversationId, messageId, tool, level, live, id, onInspect
   const hasStdout = !!streams?.stdout;
   const hasStderr = !!streams?.stderr;
   const outputLabel = isCommand ? hasStdout && hasStderr ? 'output' : hasStderr ? 'stderr' : 'stdout' : 'Result';
-  const outputColor = hasStdout && hasStderr ? 'text-yellow-600 dark:text-yellow-400' : hasStderr ? 'text-red-500' : 'text-claude-textSecondary';
+  const outputColor = hasStdout && hasStderr ? 'text-yellow-600 dark:text-yellow-400' : hasStderr ? 'text-red-500' : 'text-deepseek-textSecondary';
   const title = toolDisplayTitle(tool);
   const description = title !== tool.name ? '' : input.description || input.file_path || input.path || input.pattern || command || tool.name;
   return <div className="group/process relative min-w-0">
-    <button type="button" aria-controls={panelId} aria-expanded={open} onClick={() => setExpanded(!open)} className={`flex w-full min-w-0 items-center gap-2 text-left text-[13px] leading-6 ${failed ? 'text-red-500' : 'text-claude-textSecondary'}`}>
+    <button type="button" aria-controls={panelId} aria-expanded={open} onClick={() => setExpanded(!open)} className={`flex w-full min-w-0 items-center gap-2 text-left text-[13px] leading-6 ${failed ? 'text-red-500' : 'text-deepseek-textSecondary'}`}>
       <Connector last={last} /><StatusDot status={status === 'running' && !live ? 'interrupted' : status} />
-      <span className="shrink-0 text-claude-text/80">{title !== tool.name ? title : displayName(tool.name)}</span>
+      <span className="shrink-0 text-deepseek-text/80">{title !== tool.name ? title : displayName(tool.name)}</span>
       {description && <span className="min-w-0 truncate">· {rawText(description).split('\n')[0]}</span>}
       {running && <span className="ml-auto animate-pulse">运行中</span>}{failed && <span className="ml-auto">失败</span>}
       {status === 'running' && !live && <span className="ml-auto">已中断</span>}
     </button>
     <GridDisclosure open={open} id={panelId}><div className="chat-tool-panel mt-1 overflow-hidden rounded-xl text-xs">
-      <div className="flex items-start justify-between gap-3 border-b border-claude-border p-3">
+      <div className="flex items-start justify-between gap-3 border-b border-deepseek-border p-3">
         <pre className="max-h-48 flex-1 overflow-auto whitespace-pre-wrap break-words font-mono">{command || '(无参数)'}</pre>
         {level !== 'compact' && <CopyButton text={command} label="复制命令" />}
       </div>
-      {level === 'verbose' && command !== rawText(tool.input) && <div className="border-b border-claude-border p-3"><CopyButton text={rawText(tool.input)} label="复制参数" /><pre className="max-h-64 overflow-auto whitespace-pre-wrap">{rawText(tool.input)}</pre></div>}
+      {level === 'verbose' && command !== rawText(tool.input) && <div className="border-b border-deepseek-border p-3"><CopyButton text={rawText(tool.input)} label="复制参数" /><pre className="max-h-64 overflow-auto whitespace-pre-wrap">{rawText(tool.input)}</pre></div>}
       <div className="p-3"><div className="mb-2 flex items-center justify-between"><span className={outputColor}>{outputLabel}</span>{level !== 'compact' && <CopyButton text={output} label="复制输出" />}</div>
         <TypedToolAttachments result={tool.mcp_result} />
         <ToolOutput name={tool.name} result={result} showLabels={hasStdout && hasStderr} empty={running ? '等待输出…' : '(无输出)'} />
       </div>
       {toolCategory(tool.name) !== 'Ran commands' && shouldUseDiffView(tool.name, input) && <ToolDiffView toolName={tool.name} input={input} result={tool.result} />}
-      {level === 'verbose' && <div className={`border-t border-claude-border p-3 ${failed ? 'text-red-500' : 'text-claude-textSecondary'}`}>{status} · {tool.startedAt && tool.endedAt ? `${tool.endedAt - tool.startedAt} ms` : '耗时未记录'}</div>}
+      {level === 'verbose' && <div className={`border-t border-deepseek-border p-3 ${failed ? 'text-red-500' : 'text-deepseek-textSecondary'}`}>{status} · {tool.startedAt && tool.endedAt ? `${tool.endedAt - tool.startedAt} ms` : '耗时未记录'}</div>}
     </div>
     {status === 'done' && <InspectButton id={id} onInspect={onInspect} />}
     </GridDisclosure>
@@ -77,10 +77,10 @@ function ThinkingRow({ step, last }: { step: ProcessStep; last: boolean }) {
   const [open, setOpen] = useState(false);
   const panelId = useId();
   return <div className="min-w-0">
-    <button type="button" aria-expanded={open} aria-controls={panelId} onClick={() => setOpen(!open)} className="flex w-full min-w-0 items-center gap-2 text-left text-[13px] leading-6 text-claude-textSecondary">
-      <Connector last={last} /><Brain size={13} className="shrink-0" /><span className="shrink-0 text-claude-text/80">Think</span><span className="min-w-0 truncate">· {(step.text || '').trim().split('\n')[0]}</span>
+    <button type="button" aria-expanded={open} aria-controls={panelId} onClick={() => setOpen(!open)} className="flex w-full min-w-0 items-center gap-2 text-left text-[13px] leading-6 text-deepseek-textSecondary">
+      <Connector last={last} /><Brain size={13} className="shrink-0" /><span className="shrink-0 text-deepseek-text/80">Think</span><span className="min-w-0 truncate">· {(step.text || '').trim().split('\n')[0]}</span>
     </button>
-    <GridDisclosure open={open} id={panelId}><div className="ml-8 mt-1 max-h-96 overflow-auto whitespace-pre-wrap text-xs text-claude-textSecondary">{step.text}</div></GridDisclosure>
+    <GridDisclosure open={open} id={panelId}><div className="ml-8 mt-1 max-h-96 overflow-auto whitespace-pre-wrap text-xs text-deepseek-textSecondary">{step.text}</div></GridDisclosure>
   </div>;
 }
 
@@ -97,10 +97,10 @@ const ToolCallGroupView = memo(function ToolCallGroupView({ conversationId, grou
   const calls = group.items.filter(item => item.tool).length;
   return <div className="chat-tool-run my-1.5" data-group-status={group.status}>
     <button type="button" aria-controls={panelId} aria-expanded={open} onClick={() => setUserOpen(!open)}
-      className={`flex max-w-full items-center gap-1.5 py-1 text-left text-[13px] ${failed ? 'text-red-500' : 'text-claude-textSecondary'} hover:text-claude-text`}>
+      className={`flex max-w-full items-center gap-1.5 py-1 text-left text-[13px] ${failed ? 'text-red-500' : 'text-deepseek-textSecondary'} hover:text-deepseek-text`}>
       <ChevronRight size={14} className={`shrink-0 transition-transform ${open ? 'rotate-90' : ''}`} />
       <span>{group.title}</span>
-      {calls > 1 && <span className="text-claude-textSecondary/70">· {calls}</span>}
+      {calls > 1 && <span className="text-deepseek-textSecondary/70">· {calls}</span>}
       {group.status === 'running' && <span className="animate-pulse">运行中</span>}
       {failed && <StatusDot status="error" />}
     </button>
@@ -117,7 +117,7 @@ const ToolCallGroupView = memo(function ToolCallGroupView({ conversationId, grou
 function ThinkingBlock({ step }: { step: ProcessStep }) {
   const [open, setOpen] = useState(false);
   const panelId = useId();
-  return <div className="my-3 text-sm text-claude-textSecondary">
+  return <div className="my-3 text-sm text-deepseek-textSecondary">
     <button type="button" aria-expanded={open} aria-controls={panelId} onClick={() => setOpen(!open)} className="flex w-full min-w-0 items-center gap-2 text-left">
       <Brain size={14} className="shrink-0" /><span>Think</span><span className="truncate">· {step.text}</span>
     </button>

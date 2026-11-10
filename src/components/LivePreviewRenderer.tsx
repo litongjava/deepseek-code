@@ -40,15 +40,15 @@ const LivePreviewRenderer: React.FC<{ onClose: () => void }> = ({ onClose }) => 
 
   if (!content) {
     return (
-      <div className="h-full flex flex-col bg-claude-bg">
-        <div className="flex items-center justify-between px-4 py-3 border-b border-claude-border">
-          <span className="text-[13px] font-semibold text-claude-text flex items-center gap-2">
+      <div className="h-full flex flex-col bg-deepseek-bg">
+        <div className="flex items-center justify-between px-4 py-3 border-b border-deepseek-border">
+          <span className="text-[13px] font-semibold text-deepseek-text flex items-center gap-2">
             <Monitor size={14} className="text-blue-400" />
             实时预览
           </span>
-          <button onClick={onClose} className="p-1 rounded hover:bg-claude-hover text-claude-textSecondary"><X size={14} /></button>
+          <button onClick={onClose} className="p-1 rounded hover:bg-deepseek-hover text-deepseek-textSecondary"><X size={14} /></button>
         </div>
-        <div className="flex-1 flex items-center justify-center text-claude-textSecondary text-[12px] px-6 text-center leading-relaxed">
+        <div className="flex-1 flex items-center justify-center text-deepseek-textSecondary text-[12px] px-6 text-center leading-relaxed">
           AI 生成 HTML 代码时，实时预览将自动显示在这里
         </div>
       </div>
@@ -56,12 +56,12 @@ const LivePreviewRenderer: React.FC<{ onClose: () => void }> = ({ onClose }) => 
   }
 
   return (
-    <div className="h-full flex flex-col bg-claude-bg">
+    <div className="h-full flex flex-col bg-deepseek-bg">
       {/* Header */}
-      <div className="flex items-center justify-between px-4 py-3 border-b border-claude-border">
+      <div className="flex items-center justify-between px-4 py-3 border-b border-deepseek-border">
         <div className="flex items-center gap-2">
           <Monitor size={14} className="text-blue-400" />
-          <span className="text-[13px] font-semibold text-claude-text">实时预览</span>
+          <span className="text-[13px] font-semibold text-deepseek-text">实时预览</span>
           {isGenerating && (
             <span className="flex items-center gap-1 text-[10px] text-amber-400">
               <Loader2 size={10} className="animate-spin" />
@@ -70,21 +70,21 @@ const LivePreviewRenderer: React.FC<{ onClose: () => void }> = ({ onClose }) => 
           )}
         </div>
         <div className="flex items-center gap-1">
-          <button onClick={() => setViewport('desktop')} className={`p-1 rounded ${viewport === 'desktop' ? 'bg-claude-hover text-claude-text' : 'text-claude-textSecondary hover:text-claude-text'}`}>
+          <button onClick={() => setViewport('desktop')} className={`p-1 rounded ${viewport === 'desktop' ? 'bg-deepseek-hover text-deepseek-text' : 'text-deepseek-textSecondary hover:text-deepseek-text'}`}>
             <Monitor size={13} />
           </button>
-          <button onClick={() => setViewport('mobile')} className={`p-1 rounded ${viewport === 'mobile' ? 'bg-claude-hover text-claude-text' : 'text-claude-textSecondary hover:text-claude-text'}`}>
+          <button onClick={() => setViewport('mobile')} className={`p-1 rounded ${viewport === 'mobile' ? 'bg-deepseek-hover text-deepseek-text' : 'text-deepseek-textSecondary hover:text-deepseek-text'}`}>
             <Smartphone size={13} />
           </button>
-          <button onClick={() => setIsFullscreen(!isFullscreen)} className="p-1 rounded text-claude-textSecondary hover:text-claude-text">
+          <button onClick={() => setIsFullscreen(!isFullscreen)} className="p-1 rounded text-deepseek-textSecondary hover:text-deepseek-text">
             {isFullscreen ? <Minimize2 size={13} /> : <Maximize2 size={13} />}
           </button>
-          <button onClick={onClose} className="p-1 rounded hover:bg-claude-hover text-claude-textSecondary"><X size={14} /></button>
+          <button onClick={onClose} className="p-1 rounded hover:bg-deepseek-hover text-deepseek-textSecondary"><X size={14} /></button>
         </div>
       </div>
 
       {/* Preview area with animated border when generating */}
-      <div className={`flex-1 relative m-3 rounded-xl overflow-hidden ${isGenerating ? 'preview-generating-border' : 'border border-claude-border'}`}>
+      <div className={`flex-1 relative m-3 rounded-xl overflow-hidden ${isGenerating ? 'preview-generating-border' : 'border border-deepseek-border'}`}>
         <iframe
           ref={iframeRef}
           className="w-full h-full bg-white"

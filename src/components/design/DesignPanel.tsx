@@ -189,23 +189,23 @@ const DesignPanel: React.FC<DesignPanelProps> = ({
   ];
 
   return (
-    <div className="flex flex-col h-full bg-claude-surface border-r border-claude-border">
-      <div className="flex-shrink-0 px-3 py-2 border-b border-claude-border">
-        <h3 className="text-[13px] font-semibold text-claude-text flex items-center gap-2">
+    <div className="flex flex-col h-full bg-deepseek-surface border-r border-deepseek-border">
+      <div className="flex-shrink-0 px-3 py-2 border-b border-deepseek-border">
+        <h3 className="text-[13px] font-semibold text-deepseek-text flex items-center gap-2">
           <Layers size={14} />
           Design Panel
         </h3>
       </div>
 
-      <div className="flex border-b border-claude-border flex-shrink-0">
+      <div className="flex border-b border-deepseek-border flex-shrink-0">
         {tabs.map(tab => (
           <button
             key={tab.id}
             onClick={() => setActiveTab(tab.id)}
             className={`flex-1 flex items-center justify-center gap-1.5 py-2 text-[12px] font-medium transition-colors ${
               activeTab === tab.id
-                ? 'text-claude-accent border-b-2 border-claude-accent -mb-[1px]'
-                : 'text-claude-textSecondary hover:text-claude-text'
+                ? 'text-deepseek-accent border-b-2 border-deepseek-accent -mb-[1px]'
+                : 'text-deepseek-textSecondary hover:text-deepseek-text'
             }`}
           >
             <tab.icon size={13} />
@@ -219,7 +219,7 @@ const DesignPanel: React.FC<DesignPanelProps> = ({
           <div className="p-3 space-y-4">
             {COMPONENT_CATEGORIES.map(cat => (
               <div key={cat.name}>
-                <h4 className="text-[11px] font-semibold text-claude-textSecondary uppercase tracking-wider mb-2">
+                <h4 className="text-[11px] font-semibold text-deepseek-textSecondary uppercase tracking-wider mb-2">
                   {cat.name}
                 </h4>
                 <div className="grid grid-cols-2 gap-1.5">
@@ -227,7 +227,7 @@ const DesignPanel: React.FC<DesignPanelProps> = ({
                     <button
                       key={item.id}
                       onClick={() => insertComponent(item.id)}
-                      className="flex items-center gap-2 px-3 py-2 rounded-md text-[12px] text-claude-text bg-claude-hover/50 hover:bg-claude-hover transition-colors border border-claude-border/50"
+                      className="flex items-center gap-2 px-3 py-2 rounded-md text-[12px] text-deepseek-text bg-deepseek-hover/50 hover:bg-deepseek-hover transition-colors border border-deepseek-border/50"
                     >
                       <span className="text-[14px] w-5 text-center">{item.icon}</span>
                       {item.label}
@@ -242,7 +242,7 @@ const DesignPanel: React.FC<DesignPanelProps> = ({
         {activeTab === 'styles' && (
           <div className="p-3 space-y-4">
             <div>
-              <h4 className="text-[11px] font-semibold text-claude-textSecondary uppercase tracking-wider mb-2">
+              <h4 className="text-[11px] font-semibold text-deepseek-textSecondary uppercase tracking-wider mb-2">
                 风格预设
               </h4>
               <div className="space-y-1">
@@ -250,20 +250,20 @@ const DesignPanel: React.FC<DesignPanelProps> = ({
                   <button
                     key={preset.id}
                     onClick={() => applyStylePreset(preset.id)}
-                    className="w-full flex items-center gap-3 px-3 py-2 rounded-md text-[12px] hover:bg-claude-hover transition-colors"
+                    className="w-full flex items-center gap-3 px-3 py-2 rounded-md text-[12px] hover:bg-deepseek-hover transition-colors"
                   >
                     <div
-                      className="w-6 h-6 rounded-full border border-claude-border flex-shrink-0"
+                      className="w-6 h-6 rounded-full border border-deepseek-border flex-shrink-0"
                       style={{ background: `linear-gradient(135deg, ${preset.colors.primary}, ${preset.colors.background})` }}
                     />
-                    <span className="text-claude-text">{preset.name}</span>
+                    <span className="text-deepseek-text">{preset.name}</span>
                   </button>
                 ))}
               </div>
             </div>
 
             <div>
-              <h4 className="text-[11px] font-semibold text-claude-textSecondary uppercase tracking-wider mb-2">
+              <h4 className="text-[11px] font-semibold text-deepseek-textSecondary uppercase tracking-wider mb-2">
                 自定义颜色
               </h4>
               <div className="space-y-2">
@@ -273,7 +273,7 @@ const DesignPanel: React.FC<DesignPanelProps> = ({
                   { key: 'text', label: '文字色' },
                 ].map(({ key, label }) => (
                   <div key={key} className="flex items-center gap-2">
-                    <label className="text-[12px] text-claude-textSecondary w-16 flex-shrink-0">{label}</label>
+                    <label className="text-[12px] text-deepseek-textSecondary w-16 flex-shrink-0">{label}</label>
                     <div className="relative flex-1">
                       <input
                         type="color"
@@ -281,12 +281,12 @@ const DesignPanel: React.FC<DesignPanelProps> = ({
                         onChange={e => updateColor(key, e.target.value)}
                         className="absolute inset-0 w-full h-full opacity-0 cursor-pointer"
                       />
-                      <div className="flex items-center gap-2 px-2 py-1 rounded border border-claude-border bg-claude-bg">
+                      <div className="flex items-center gap-2 px-2 py-1 rounded border border-deepseek-border bg-deepseek-bg">
                         <div
                           className="w-4 h-4 rounded-full border border-gray-300"
                           style={{ backgroundColor: styleConfig.colors[key as keyof typeof styleConfig.colors] }}
                         />
-                        <span className="text-[11px] text-claude-textSecondary font-mono">
+                        <span className="text-[11px] text-deepseek-textSecondary font-mono">
                           {styleConfig.colors[key as keyof typeof styleConfig.colors]}
                         </span>
                       </div>
@@ -297,16 +297,16 @@ const DesignPanel: React.FC<DesignPanelProps> = ({
             </div>
 
             <div>
-              <h4 className="text-[11px] font-semibold text-claude-textSecondary uppercase tracking-wider mb-2">
+              <h4 className="text-[11px] font-semibold text-deepseek-textSecondary uppercase tracking-wider mb-2">
                 排版
               </h4>
               <div className="space-y-2">
                 <div>
-                  <label className="text-[11px] text-claude-textSecondary block mb-1">字体</label>
+                  <label className="text-[11px] text-deepseek-textSecondary block mb-1">字体</label>
                   <select
                     value={styleConfig.typography.fontFamily}
                     onChange={e => updateTypography('fontFamily', e.target.value)}
-                    className="w-full px-2 py-1.5 text-[12px] rounded border border-claude-border bg-claude-bg text-claude-text"
+                    className="w-full px-2 py-1.5 text-[12px] rounded border border-deepseek-border bg-deepseek-bg text-deepseek-text"
                   >
                     {FONT_FAMILIES.map(f => (
                       <option key={f} value={f}>{f.split(',')[0].replace(/'/g, '')}</option>
@@ -315,23 +315,23 @@ const DesignPanel: React.FC<DesignPanelProps> = ({
                 </div>
                 <div className="flex gap-2">
                   <div className="flex-1">
-                    <label className="text-[11px] text-claude-textSecondary block mb-1">正文字号</label>
+                    <label className="text-[11px] text-deepseek-textSecondary block mb-1">正文字号</label>
                     <input
                       type="number"
                       value={styleConfig.typography.fontSize}
                       onChange={e => updateTypography('fontSize', Number(e.target.value))}
-                      className="w-full px-2 py-1.5 text-[12px] rounded border border-claude-border bg-claude-bg text-claude-text"
+                      className="w-full px-2 py-1.5 text-[12px] rounded border border-deepseek-border bg-deepseek-bg text-deepseek-text"
                       min={10}
                       max={24}
                     />
                   </div>
                   <div className="flex-1">
-                    <label className="text-[11px] text-claude-textSecondary block mb-1">标题字号</label>
+                    <label className="text-[11px] text-deepseek-textSecondary block mb-1">标题字号</label>
                     <input
                       type="number"
                       value={styleConfig.typography.headingSize}
                       onChange={e => updateTypography('headingSize', Number(e.target.value))}
-                      className="w-full px-2 py-1.5 text-[12px] rounded border border-claude-border bg-claude-bg text-claude-text"
+                      className="w-full px-2 py-1.5 text-[12px] rounded border border-deepseek-border bg-deepseek-bg text-deepseek-text"
                       min={14}
                       max={48}
                     />
@@ -341,12 +341,12 @@ const DesignPanel: React.FC<DesignPanelProps> = ({
             </div>
 
             <div>
-              <h4 className="text-[11px] font-semibold text-claude-textSecondary uppercase tracking-wider mb-2">
+              <h4 className="text-[11px] font-semibold text-deepseek-textSecondary uppercase tracking-wider mb-2">
                 间距与圆角
               </h4>
               <div className="space-y-2">
                 <div>
-                  <label className="text-[11px] text-claude-textSecondary block mb-1">
+                  <label className="text-[11px] text-deepseek-textSecondary block mb-1">
                     内边距: {styleConfig.spacing.padding}px
                   </label>
                   <input
@@ -359,7 +359,7 @@ const DesignPanel: React.FC<DesignPanelProps> = ({
                   />
                 </div>
                 <div>
-                  <label className="text-[11px] text-claude-textSecondary block mb-1">
+                  <label className="text-[11px] text-deepseek-textSecondary block mb-1">
                     圆角: {styleConfig.borderRadius}px
                   </label>
                   <input
@@ -378,7 +378,7 @@ const DesignPanel: React.FC<DesignPanelProps> = ({
 
         {activeTab === 'layout' && (
           <div className="p-3 space-y-3">
-            <h4 className="text-[11px] font-semibold text-claude-textSecondary uppercase tracking-wider mb-2">
+            <h4 className="text-[11px] font-semibold text-deepseek-textSecondary uppercase tracking-wider mb-2">
               布局模板
             </h4>
             <div className="space-y-1.5">
@@ -386,15 +386,15 @@ const DesignPanel: React.FC<DesignPanelProps> = ({
                 <button
                   key={lo.id}
                   onClick={() => applyLayout(lo.id)}
-                  className="w-full text-left px-3 py-2.5 rounded-md hover:bg-claude-hover transition-colors border border-claude-border/50"
+                  className="w-full text-left px-3 py-2.5 rounded-md hover:bg-deepseek-hover transition-colors border border-deepseek-border/50"
                 >
-                  <div className="text-[12px] font-medium text-claude-text">{lo.name}</div>
-                  <div className="text-[11px] text-claude-textSecondary mt-0.5">{lo.description}</div>
+                  <div className="text-[12px] font-medium text-deepseek-text">{lo.name}</div>
+                  <div className="text-[11px] text-deepseek-textSecondary mt-0.5">{lo.description}</div>
                 </button>
               ))}
             </div>
 
-            <div className="pt-3 border-t border-claude-border">
+            <div className="pt-3 border-t border-deepseek-border">
               <button
                 onClick={resetCanvas}
                 className="w-full flex items-center justify-center gap-2 px-3 py-2 text-[12px] text-red-500 hover:bg-red-50 rounded-md transition-colors"
@@ -411,29 +411,29 @@ const DesignPanel: React.FC<DesignPanelProps> = ({
             <div className="flex gap-2">
               <button
                 onClick={handleCopyState}
-                className="flex-1 flex items-center justify-center gap-1.5 px-3 py-2 text-[12px] font-medium bg-claude-hover text-claude-text rounded-md hover:bg-claude-border transition-colors"
+                className="flex-1 flex items-center justify-center gap-1.5 px-3 py-2 text-[12px] font-medium bg-deepseek-hover text-deepseek-text rounded-md hover:bg-deepseek-border transition-colors"
               >
                 {copied ? <Check size={13} className="text-green-500" /> : <Copy size={13} />}
                 {copied ? '已复制' : '复制状态'}
               </button>
               <button
                 onClick={() => canvasRef.current?.reloadPreview()}
-                className="flex items-center justify-center gap-1.5 px-3 py-2 text-[12px] font-medium bg-claude-hover text-claude-text rounded-md hover:bg-claude-border transition-colors"
+                className="flex items-center justify-center gap-1.5 px-3 py-2 text-[12px] font-medium bg-deepseek-hover text-deepseek-text rounded-md hover:bg-deepseek-border transition-colors"
               >
                 <RefreshCw size={13} />
                 刷新
               </button>
             </div>
 
-            <div className="border-t border-claude-border pt-3">
+            <div className="border-t border-deepseek-border pt-3">
               <div className="flex items-center justify-between mb-2">
-                <h4 className="text-[11px] font-semibold text-claude-textSecondary uppercase tracking-wider">
+                <h4 className="text-[11px] font-semibold text-deepseek-textSecondary uppercase tracking-wider">
                   已保存方案 ({savedDesigns.length})
                 </h4>
               </div>
 
               {savedDesigns.length === 0 ? (
-                <p className="text-[12px] text-claude-textSecondary/60 py-3 text-center">
+                <p className="text-[12px] text-deepseek-textSecondary/60 py-3 text-center">
                   暂无保存的设计方案
                 </p>
               ) : (
@@ -441,24 +441,24 @@ const DesignPanel: React.FC<DesignPanelProps> = ({
                   {savedDesigns.map(design => (
                     <div
                       key={design.id}
-                      className="flex items-center gap-2 px-2 py-1.5 rounded hover:bg-claude-hover group"
+                      className="flex items-center gap-2 px-2 py-1.5 rounded hover:bg-deepseek-hover group"
                     >
                       <div className="flex-1 min-w-0">
-                        <div className="text-[12px] text-claude-text truncate">{design.name}</div>
-                        <div className="text-[10px] text-claude-textSecondary">
+                        <div className="text-[12px] text-deepseek-text truncate">{design.name}</div>
+                        <div className="text-[10px] text-deepseek-textSecondary">
                           {new Date(design.createdAt).toLocaleDateString()}
                         </div>
                       </div>
                       <button
                         onClick={() => onLoadDesign(design)}
-                        className="p-1 text-claude-textSecondary hover:text-claude-accent opacity-0 group-hover:opacity-100 transition-all"
+                        className="p-1 text-deepseek-textSecondary hover:text-deepseek-accent opacity-0 group-hover:opacity-100 transition-all"
                         title="加载方案"
                       >
                         <Download size={12} />
                       </button>
                       <button
                         onClick={() => onDeleteDesign(design.id)}
-                        className="p-1 text-claude-textSecondary hover:text-red-500 opacity-0 group-hover:opacity-100 transition-all"
+                        className="p-1 text-deepseek-textSecondary hover:text-red-500 opacity-0 group-hover:opacity-100 transition-all"
                         title="删除方案"
                       >
                         <Trash2 size={12} />
@@ -469,10 +469,10 @@ const DesignPanel: React.FC<DesignPanelProps> = ({
               )}
             </div>
 
-            <div className="border-t border-claude-border pt-3">
+            <div className="border-t border-deepseek-border pt-3">
               <button
                 onClick={() => setShowSaveDialog(true)}
-                className="w-full flex items-center justify-center gap-2 px-3 py-2 text-[12px] font-medium bg-claude-accent text-white rounded-md hover:opacity-90 transition-opacity"
+                className="w-full flex items-center justify-center gap-2 px-3 py-2 text-[12px] font-medium bg-deepseek-accent text-white rounded-md hover:opacity-90 transition-opacity"
               >
                 <Save size={13} />
                 保存当前方案
@@ -480,26 +480,26 @@ const DesignPanel: React.FC<DesignPanelProps> = ({
             </div>
 
             {showSaveDialog && (
-              <div className="border border-claude-border rounded-md p-3 bg-claude-surface space-y-2">
+              <div className="border border-deepseek-border rounded-md p-3 bg-deepseek-surface space-y-2">
                 <input
                   type="text"
                   value={saveName}
                   onChange={e => setSaveName(e.target.value)}
                   placeholder="方案名称..."
-                  className="w-full px-2 py-1.5 text-[12px] rounded border border-claude-border bg-claude-input text-claude-text"
+                  className="w-full px-2 py-1.5 text-[12px] rounded border border-deepseek-border bg-deepseek-input text-deepseek-text"
                   autoFocus
                   onKeyDown={e => e.key === 'Enter' && handleSave()}
                 />
                 <div className="flex gap-2">
                   <button
                     onClick={handleSave}
-                    className="flex-1 px-3 py-1.5 text-[12px] font-medium bg-claude-accent text-white rounded hover:opacity-90"
+                    className="flex-1 px-3 py-1.5 text-[12px] font-medium bg-deepseek-accent text-white rounded hover:opacity-90"
                   >
                     保存
                   </button>
                   <button
                     onClick={() => setShowSaveDialog(false)}
-                    className="px-3 py-1.5 text-[12px] text-claude-textSecondary hover:text-claude-text rounded"
+                    className="px-3 py-1.5 text-[12px] text-deepseek-textSecondary hover:text-deepseek-text rounded"
                   >
                     取消
                   </button>

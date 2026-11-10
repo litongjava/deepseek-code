@@ -217,7 +217,8 @@ impl CompactionTracker {
 
 pub struct PreparedCompaction {
     conversation_id: String,
-    snapshot: String,
+    /// SHA-256 of the history at planning time; only equality matters.
+    fingerprint: String,
     transcript: String,
     count: usize,
 }
@@ -253,7 +254,13 @@ impl From<CommittedCompaction> for CompactionResult {
 }
 
 // Include tools and attachment metadata in conflict detection, not just message count.
-fn snapshot(conn: &rusqlite::Connection, id: &str) -> Result<(String, String, usize)> {
+//
+// Returns a digest instead of a second full copy of the history: `prepare`
+// already serializes the tail for the prompt, and a whole-session string cost
+// megabytes per commit. The digest is stable because every entry is serialized
+// in order with a separator.
+fn fingerprint(conn: &rusqlite::Connection, id: &str) -> Result<(String, String, usize)> {
+    use sha2::{Digest, Sha256};
     let rows = message_repo::get_messages_by_conversation(conn, id)?;
     let start = rows
         .iter()
@@ -268,8 +275,20 @@ fn snapshot(conn: &rusqlite::Connection, id: &str) -> Result<(String, String, us
         })?.collect::<rusqlite::Result<Vec<_>>>()?;
         all.push(json!({"message": row, "tools": calls, "attachment_metadata": attachments}));
     }
+    let mut hasher = Sha256::new();
+    for entry in &all {
+        serde_json::to_writer(&mut hasher, entry)?;
+        hasher.write_all(b"\n")?;
+    }
+    let digest = hasher.finalize();
+    let fingerprint = digest
+        .iter()
+        .fold(String::with_capacity(64), |mut text, byte| {
+            text.push_str(&format!("{byte:02x}"));
+            text
+        });
     Ok((
-        serde_json::to_string(&all)?,
+        fingerprint,
         serde_json::to_string(&all[start..])?,
         rows.len() - start,
     ))
@@ -280,11 +299,11 @@ pub fn prepare(db: &DbManager, id: &str) -> Result<PreparedCompaction> {
         let conversation =
             conversation_repo::get_conversation(conn, id)?.context("Session not found")?;
         ensure!(!conversation.archived, "Session is archived");
-        let (snapshot, transcript, count) = snapshot(conn, id)?;
+        let (fingerprint, transcript, count) = fingerprint(conn, id)?;
         ensure!(count >= 2, "Not enough messages to compact");
         Ok(PreparedCompaction {
             conversation_id: id.into(),
-            snapshot,
+            fingerprint,
             transcript,
             count,
         })
@@ -311,81 +330,104 @@ fn commit_with_context(
         !summary.trim().is_empty() && summary.chars().count() <= 32_000,
         "Empty or oversized compaction summary"
     );
+    // The whole commit is atomic and retried on transient contention; the body
+    // only reads its arguments and writes rows, so a retry starts from scratch.
     db.with_conn(|conn| {
-        let tx =
-            rusqlite::Transaction::new_unchecked(conn, rusqlite::TransactionBehavior::Immediate)?;
-        let id = &prepared.conversation_id;
-        let conversation =
-            conversation_repo::get_conversation(&tx, id)?.context("Session no longer exists")?;
-        ensure!(!conversation.archived, "Session is archived");
-        ensure!(
-            snapshot(&tx, id)?.0 == prepared.snapshot,
-            "Session changed during compaction; retry after the active turn finishes"
-        );
-        let (own, inherited) = boundary_attribution(&tx, id)?;
-        let saved = saved_count(&tx, id)?;
-        // Only a session without a counter can have an unprovable base; a new
-        // branch's explicit zero is exact.
-        let legacy = (saved.is_none() && inherited > 0) || legacy_marked(&tx, id)?;
-        let compactions = match saved {
-            Some(count) => count,
-            // The boundaries this session provably committed; inherited ones
-            // are never used as a base.
-            None => own,
-        };
-        let order: i64 = tx.query_row(
-            "SELECT COALESCE(MAX(sort_order), -1) + 1 FROM messages WHERE conversation_id=?1",
-            [id],
-            |r| r.get(0),
-        )?;
-        let message_id = uuid::Uuid::new_v4().to_string();
-        let now = chrono::Utc::now().to_rfc3339();
-        let content = format!(
-            "[Conversation summary — earlier transcript retained in session history]\n{}",
-            summary.trim()
-        );
-        message_repo::insert_message(
-            &tx,
-            &message_id,
-            id,
-            "user",
-            &content,
-            None,
-            &now,
-            true,
-            order,
-        )?;
-        conversation_repo::increment_message_count(&tx, id)?;
-        if let Some(native) = &generated.native {
-            tx.execute("INSERT INTO peripheral_settings(key,value) VALUES(?1,?2)",
-                [native::key(&message_id), serde_json::to_string(native)?])?;
-        }
-        conversation_repo::update_conversation_timestamp(&tx, id, &now)?;
-        tx.execute("DELETE FROM peripheral_settings WHERE key=?1", [checkpoint::key(id)])?;
-        tx.execute("INSERT INTO peripheral_settings(key,value) VALUES(?1,?2) ON CONFLICT(key) DO UPDATE SET value=excluded.value",
-            [count_key(id), compactions.saturating_add(1).to_string()])?;
-        if legacy {
-            // Keep the unprovable history visible instead of freezing a total
-            // that includes an ancestor's boundaries.
-            tx.execute("INSERT INTO peripheral_settings(key,value) VALUES(?1,'1') ON CONFLICT(key) DO NOTHING",
-                [legacy_key(id)])?;
-        }
-        if let Some(context) = session_context {
-            tx.execute(
-                "INSERT INTO peripheral_settings(key,value) VALUES(?1,?2) ON CONFLICT(key) DO UPDATE SET value=excluded.value",
-                [super::session_hooks::key(id), serde_json::to_string(context)?],
-            )?;
-        }
-        tx.commit()?;
-        Ok(CompactionResult {
-            message_id,
-            summarized_messages: prepared.count,
-            warnings: Vec::new(),
-            summary_path: None,
-            export_error: None,
-            duration_ms: 0,
-        })
+        crate::db::write_tx(
+            conn,
+            "commit compaction",
+            std::time::Duration::from_secs(30),
+            |tx| commit_locked(tx, &prepared, generated, session_context),
+        )
     })?
+}
+
+fn commit_locked(
+    tx: &rusqlite::Transaction<'_>,
+    prepared: &PreparedCompaction,
+    generated: &GeneratedSummary,
+    session_context: Option<&str>,
+) -> Result<CompactionResult> {
+    let summary = &generated.text;
+    let id = &prepared.conversation_id;
+    let conversation =
+        conversation_repo::get_conversation(tx, id)?.context("Session no longer exists")?;
+    ensure!(!conversation.archived, "Session is archived");
+    ensure!(
+        fingerprint(tx, id)?.0 == prepared.fingerprint,
+        "Session changed during compaction; retry after the active turn finishes"
+    );
+    let (own, inherited) = boundary_attribution(tx, id)?;
+    let saved = saved_count(tx, id)?;
+    // Only a session without a counter can have an unprovable base; a new
+    // branch's explicit zero is exact.
+    let legacy = (saved.is_none() && inherited > 0) || legacy_marked(tx, id)?;
+    let compactions = match saved {
+        Some(count) => count,
+        // The boundaries this session provably committed; inherited ones
+        // are never used as a base.
+        None => own,
+    };
+    let order: i64 = tx.query_row(
+        "SELECT COALESCE(MAX(sort_order), -1) + 1 FROM messages WHERE conversation_id=?1",
+        [id],
+        |r| r.get(0),
+    )?;
+    let message_id = uuid::Uuid::new_v4().to_string();
+    let now = chrono::Utc::now().to_rfc3339();
+    let content = format!(
+        "[Conversation summary — earlier transcript retained in session history]\n{}",
+        summary.trim()
+    );
+    message_repo::insert_message(
+        tx,
+        &message_id,
+        id,
+        "user",
+        &content,
+        None,
+        &now,
+        true,
+        order,
+    )?;
+    conversation_repo::increment_message_count(tx, id)?;
+    if let Some(native) = &generated.native {
+        tx.execute(
+            "INSERT INTO peripheral_settings(key,value) VALUES(?1,?2)",
+            [native::key(&message_id), serde_json::to_string(native)?],
+        )?;
+    }
+    conversation_repo::update_conversation_timestamp(tx, id, &now)?;
+    tx.execute(
+        "DELETE FROM peripheral_settings WHERE key=?1",
+        [checkpoint::key(id)],
+    )?;
+    tx.execute(
+        "INSERT INTO peripheral_settings(key,value) VALUES(?1,?2) ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+        [count_key(id), compactions.saturating_add(1).to_string()],
+    )?;
+    if legacy {
+        // Keep the unprovable history visible instead of freezing a total
+        // that includes an ancestor's boundaries.
+        tx.execute(
+            "INSERT INTO peripheral_settings(key,value) VALUES(?1,'1') ON CONFLICT(key) DO NOTHING",
+            [legacy_key(id)],
+        )?;
+    }
+    if let Some(context) = session_context {
+        tx.execute(
+            "INSERT INTO peripheral_settings(key,value) VALUES(?1,?2) ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+            [super::session_hooks::key(id), serde_json::to_string(context)?],
+        )?;
+    }
+    Ok(CompactionResult {
+        message_id,
+        summarized_messages: prepared.count,
+        warnings: Vec::new(),
+        summary_path: None,
+        export_error: None,
+        duration_ms: 0,
+    })
 }
 
 /// Write the committed summary to its own Markdown file. A name collision from
@@ -1289,5 +1331,68 @@ mod count_tests {
         assert_eq!(after.proven(), 1);
         assert!(after.to_string().contains("legacy history"));
         assert_eq!(count(&store.db, &id).unwrap(), CompactionCount::Exact(1));
+    }
+}
+
+#[cfg(test)]
+mod fingerprint_tests {
+    use super::*;
+    use crate::runtime::{RuntimePaths, SessionStore, DATABASE_FILE};
+
+    fn fixture() -> (
+        tempfile::TempDir,
+        RuntimePaths,
+        SessionStore,
+        String,
+        Vec<String>,
+    ) {
+        let dir = tempfile::tempdir().unwrap();
+        let paths = RuntimePaths::new(dir.path().join("data")).unwrap();
+        let store = SessionStore::new(paths.open_database().unwrap());
+        let id = store.create(dir.path(), "model", "provider").unwrap();
+        let ids = vec![
+            store.append(&id, "user", "First task").unwrap(),
+            store.append(&id, "assistant", "First reply").unwrap(),
+            store.append(&id, "user", "Second task").unwrap(),
+            store.append(&id, "assistant", "Second reply").unwrap(),
+        ];
+        (dir, paths, store, id, ids)
+    }
+
+    fn digest(store: &SessionStore, id: &str) -> String {
+        store
+            .db
+            .with_conn(|conn| fingerprint(conn, id))
+            .unwrap()
+            .unwrap()
+            .0
+    }
+
+    #[test]
+    fn fingerprint_is_stable_for_unchanged_history() {
+        let (_dir, paths, store, id, _ids) = fixture();
+        let first = digest(&store, &id);
+        assert_eq!(first, digest(&store, &id));
+        assert_eq!(first.len(), 64, "expected a hex SHA-256 digest");
+        // Reading must not depend on any in-process cache.
+        drop(store);
+        let reopened = SessionStore::new(std::sync::Arc::new(
+            DbManager::new(paths.data_dir.join(DATABASE_FILE)).expect("reopen database"),
+        ));
+        reopened.db.init().unwrap();
+        assert_eq!(first, digest(&reopened, &id));
+    }
+
+    #[test]
+    fn fingerprint_changes_when_a_message_is_edited() {
+        let (_dir, _paths, store, id, ids) = fixture();
+        let before = digest(&store, &id);
+        store
+            .db
+            .with_conn(|conn| message_repo::update_message_content(conn, &ids[0], "Edited task"))
+            .unwrap()
+            .unwrap();
+        let after = digest(&store, &id);
+        assert_ne!(before, after);
     }
 }

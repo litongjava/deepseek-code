@@ -1883,20 +1883,20 @@ const MainContent = ({ onNewChat, resetKey, tunerConfig, onOpenDocument, onArtif
       {projectToTrust && <TrustProjectDialog project={projectToTrust} onTrusted={async project => { await handleAttachToProject(project); setProjectToTrust(null); }} onClose={() => setProjectToTrust(null)} />}
       {projectAddToast && (
         projectAddToast.startsWith('⚠️') ? (
-          <div role="alert" className="fixed bottom-6 left-1/2 -translate-x-1/2 z-[300] max-w-[92vw] px-4 py-2 bg-claude-input border border-claude-border rounded-lg shadow-lg text-[13px] text-claude-text flex items-center gap-2">
+          <div role="alert" className="fixed bottom-6 left-1/2 -translate-x-1/2 z-[300] max-w-[92vw] px-4 py-2 bg-deepseek-input border border-deepseek-border rounded-lg shadow-lg text-[13px] text-deepseek-text flex items-center gap-2">
             <AlertTriangle size={14} className="shrink-0 text-amber-500" />
             {projectAddToast.replace(/^⚠️\s*/, '')}
           </div>
         ) : (
-        <div className="fixed bottom-6 left-1/2 -translate-x-1/2 z-[300] px-4 py-2 bg-claude-input border border-claude-border rounded-lg shadow-lg text-[13px] text-claude-text flex items-center gap-2">
+        <div className="fixed bottom-6 left-1/2 -translate-x-1/2 z-[300] px-4 py-2 bg-deepseek-input border border-deepseek-border rounded-lg shadow-lg text-[13px] text-deepseek-text flex items-center gap-2">
           <Check size={14} className="text-[#C6613F]" />
           {projectAddToast}
         </div>
         )
       )}
       {webSearchToast && (
-        <div className="fixed bottom-6 left-1/2 -translate-x-1/2 z-[300] px-4 py-2 bg-claude-input border border-claude-border rounded-lg shadow-lg text-[13px] text-claude-text flex items-center gap-2">
-          <IconWebSearch size={14} className="text-claude-textSecondary" />
+        <div className="fixed bottom-6 left-1/2 -translate-x-1/2 z-[300] px-4 py-2 bg-deepseek-input border border-deepseek-border rounded-lg shadow-lg text-[13px] text-deepseek-text flex items-center gap-2">
+          <IconWebSearch size={14} className="text-deepseek-textSecondary" />
           {webSearchToast}
         </div>
       )}
@@ -1916,7 +1916,7 @@ const MainContent = ({ onNewChat, resetKey, tunerConfig, onOpenDocument, onArtif
   // MODE 1: Landing Page (No ID)
   if (!activeId && messages.length === 0) {
     return (
-      <div ref={slashCommandBoundaryRef} className={`desktop-chat-layout flex-1 min-h-0 min-w-0 bg-claude-bg h-full flex flex-col relative overflow-hidden text-claude-text chat-font-scope chat-surface ${showEntranceAnimation ? 'animate-slide-in' : ''}`} style={{ '--chat-custom-width': tunerConfig?.mainContentWidth ? `${tunerConfig.mainContentWidth}px` : undefined } as React.CSSProperties}>
+      <div ref={slashCommandBoundaryRef} className={`desktop-chat-layout flex-1 min-h-0 min-w-0 bg-deepseek-bg h-full flex flex-col relative overflow-hidden text-deepseek-text chat-font-scope chat-surface ${showEntranceAnimation ? 'animate-slide-in' : ''}`} style={{ '--chat-custom-width': tunerConfig?.mainContentWidth ? `${tunerConfig.mainContentWidth}px` : undefined } as React.CSSProperties}>
 
         {/* Centered Content */}
         <div
@@ -1934,7 +1934,7 @@ const MainContent = ({ onNewChat, resetKey, tunerConfig, onOpenDocument, onArtif
               <ClaudeLogo color="#D97757" maxScale={0.17} />
             </div>
             <h1
-              className="min-w-0 text-claude-text dark:!text-[#d6cec3] tracking-tight leading-tight pt-1 transition-all duration-100 ease-out"
+              className="min-w-0 text-deepseek-text dark:!text-[#d6cec3] tracking-tight leading-tight pt-1 transition-all duration-100 ease-out"
               style={{
                 fontFamily: 'Optima, Candara, "Segoe UI", Segoe, "Humanist 521", sans-serif',
                 fontSize: 'clamp(28px, 3.2vw, 46px)',
@@ -1947,7 +1947,7 @@ const MainContent = ({ onNewChat, resetKey, tunerConfig, onOpenDocument, onArtif
           </div>
 
           {/* 输入框区域 */}
-          <div ref={slashCommandAnchorRef} className="w-full relative z-20 group shrink-0 bg-claude-bg pt-2">
+          <div ref={slashCommandAnchorRef} className="w-full relative z-20 group shrink-0 bg-deepseek-bg pt-2">
             <ProjectWorkspaceBar projectId={pendingProjectId} onSelect={handleAttachToProject} disabled={loading || modeChanging}>
               {isCodeMode && pendingProjectId && <SessionGitSettings key={`${pendingProjectId}:${resetKey}`} projectId={pendingProjectId} disabled={loading || modeChanging} initialSelection={sessionGit} onChange={setSessionGit} />}
             </ProjectWorkspaceBar>
@@ -1993,7 +1993,7 @@ const MainContent = ({ onNewChat, resetKey, tunerConfig, onOpenDocument, onArtif
                   />
                   <textarea
                     ref={inputRef}
-                    className={`w-full pl-5 pr-4 pt-5 pb-1 placeholder:text-claude-textSecondary text-[16px] outline-none resize-none overflow-hidden bg-transparent font-sans font-normal ${inputText.match(/^\/[a-zA-Z0-9_-]+/) ? 'text-transparent caret-claude-text' : 'text-claude-text'}`}
+                    className={`w-full pl-5 pr-4 pt-5 pb-1 placeholder:text-deepseek-textSecondary text-[16px] outline-none resize-none overflow-hidden bg-transparent font-sans font-normal ${inputText.match(/^\/[a-zA-Z0-9_-]+/) ? 'text-transparent caret-deepseek-text' : 'text-deepseek-text'}`}
                     style={{ minHeight: '48px', borderRadius: `${tunerConfig?.inputRadius || 16}px ${tunerConfig?.inputRadius || 16}px 0 0` }}
                     placeholder={selectedSkill ? `Describe what you want ${selectedSkill.name} to do...` : t('chat.inputPlaceholder')}
                     value={inputText}
@@ -2029,7 +2029,7 @@ const MainContent = ({ onNewChat, resetKey, tunerConfig, onOpenDocument, onArtif
                   <button
                     ref={plusBtnRef}
                     onClick={() => setShowPlusMenu(prev => !prev)}
-                    className="p-2 text-claude-textSecondary hover:text-claude-text hover:bg-claude-hover rounded-lg transition-colors"
+                    className="p-2 text-deepseek-textSecondary hover:text-deepseek-text hover:bg-deepseek-hover rounded-lg transition-colors"
                   >
                     <IconPlus size={20} />
                   </button>
@@ -2045,7 +2045,7 @@ const MainContent = ({ onNewChat, resetKey, tunerConfig, onOpenDocument, onArtif
                     />
                   )}
                   {!isCodeMode && <button type="button" onClick={() => fileInputRef.current?.click()} aria-label={t('chat.addAttachment')} title={t('chat.addAttachment')}
-                    className="p-2 text-claude-textSecondary hover:text-claude-text hover:bg-claude-hover rounded-lg transition-colors">
+                    className="p-2 text-deepseek-textSecondary hover:text-deepseek-text hover:bg-deepseek-hover rounded-lg transition-colors">
                     <Paperclip size={20} />
                   </button>}
                   {!isCodeMode && <HomeModeSelector mode={workspaceMode} onChange={handleHomeModeChange} disabled={loading || modeChanging} />}
@@ -2065,7 +2065,7 @@ const MainContent = ({ onNewChat, resetKey, tunerConfig, onOpenDocument, onArtif
                     <button
                       onMouseDown={(e) => e.preventDefault()}
                       onClick={toggleVoiceInput}
-                      className={`p-2 rounded-lg transition-all ${isListening ? 'bg-red-500 text-white animate-pulse shadow-lg shadow-red-500/30 scale-110' : 'text-claude-textSecondary hover:bg-claude-hover hover:text-claude-text'}`}
+                      className={`p-2 rounded-lg transition-all ${isListening ? 'bg-red-500 text-white animate-pulse shadow-lg shadow-red-500/30 scale-110' : 'text-deepseek-textSecondary hover:bg-deepseek-hover hover:text-deepseek-text'}`}
                       title={isListening ? t('chat.stopRecording') : t('chat.voiceInput')}
                     >
                       <IconVoice size={20} />
@@ -2084,18 +2084,18 @@ const MainContent = ({ onNewChat, resetKey, tunerConfig, onOpenDocument, onArtif
               </div>
             </div>
             {false && (
-              <div className="mx-4 flex items-center justify-between px-4 py-1.5 bg-claude-bgSecondary border-x border-b border-claude-border rounded-b-xl text-claude-textSecondary text-xs">
+              <div className="mx-4 flex items-center justify-between px-4 py-1.5 bg-deepseek-bgSecondary border-x border-b border-deepseek-border rounded-b-xl text-deepseek-textSecondary text-xs">
                 <span>您当前没有可用套餐，无法发送消息</span>
                 <button
                   onClick={() => window.dispatchEvent(new CustomEvent('open-upgrade'))}
-                  className="px-2 py-0.5 bg-claude-btnHover hover:bg-claude-hover text-claude-text text-xs font-medium rounded transition-colors border border-claude-border hover:border-blue-500 hover:text-blue-600"
+                  className="px-2 py-0.5 bg-deepseek-btnHover hover:bg-deepseek-hover text-deepseek-text text-xs font-medium rounded transition-colors border border-deepseek-border hover:border-blue-500 hover:text-blue-600"
                 >
                   购买套餐
                 </button>
               </div>
             )}
             {modeError && <p role="alert" className="text-xs text-red-500">{modeError}</p>}
-            {!isCodeMode && showAiDisclaimer && <p className="pt-2 pb-2 text-center text-[12px] text-claude-textSecondary font-sans">DeepSeek Code is AI and can make mistakes. Please double-check responses.</p>}
+            {!isCodeMode && showAiDisclaimer && <p className="pt-2 pb-2 text-center text-[12px] text-deepseek-textSecondary font-sans">DeepSeek Code is AI and can make mistakes. Please double-check responses.</p>}
           </div>
           <div className="w-full shrink-0 mb-auto pb-4">
             <PromptSuggestionsPanel key={isCodeMode ? 'code' : 'home'} mode={isCodeMode ? 'code' : 'home'} onSelectPrompt={(prompt) => {
@@ -2120,7 +2120,7 @@ const MainContent = ({ onNewChat, resetKey, tunerConfig, onOpenDocument, onArtif
   // MODE 2: Chat Interface (Has ID or Messages)
   return (
     <div className="relative flex h-full min-h-0 min-w-0 flex-1 overflow-hidden">
-    <div className="desktop-chat-layout flex-1 min-h-0 min-w-0 bg-claude-bg h-full flex flex-col overflow-clip text-claude-text chat-root chat-font-scope chat-surface" style={{ '--chat-custom-width': tunerConfig?.mainContentWidth ? `${tunerConfig.mainContentWidth}px` : undefined } as React.CSSProperties}>
+    <div className="desktop-chat-layout flex-1 min-h-0 min-w-0 bg-deepseek-bg h-full flex flex-col overflow-clip text-deepseek-text chat-root chat-font-scope chat-surface" style={{ '--chat-custom-width': tunerConfig?.mainContentWidth ? `${tunerConfig.mainContentWidth}px` : undefined } as React.CSSProperties}>
       {showCodingView && conversationView === 'trajectory' && <div className="min-h-0 flex-1"><TrajectoryView messages={messages} loading={loading} focusId={inspectId} /></div>}
 
       {/* Content area - positioning container for scroll + bottom bars */}
@@ -2165,7 +2165,7 @@ const MainContent = ({ onNewChat, resetKey, tunerConfig, onOpenDocument, onArtif
         </div>
 
         {/* Keep the complete opaque composer below the message scroller. */}
-        <div className="relative shrink-0 z-20 bg-claude-bg pt-2 px-4" style={{ paddingRight: 16 + scrollbarWidth }}>
+        <div className="relative shrink-0 z-20 bg-deepseek-bg pt-2 px-4" style={{ paddingRight: 16 + scrollbarWidth }}>
           <div
             className="chat-composer-column mx-auto pointer-events-auto"
           >
@@ -2204,7 +2204,7 @@ const MainContent = ({ onNewChat, resetKey, tunerConfig, onOpenDocument, onArtif
                   />
                   <textarea
                     ref={inputRef}
-                    className={`w-full px-4 pt-4 pb-0 placeholder:text-claude-textSecondary text-[16px] outline-none resize-none bg-transparent font-sans font-normal ${inputText.match(/^\/[a-zA-Z0-9_-]+/) ? 'text-transparent caret-claude-text' : 'text-claude-text'}`}
+                    className={`w-full px-4 pt-4 pb-0 placeholder:text-deepseek-textSecondary text-[16px] outline-none resize-none bg-transparent font-sans font-normal ${inputText.match(/^\/[a-zA-Z0-9_-]+/) ? 'text-transparent caret-deepseek-text' : 'text-deepseek-text'}`}
                     style={{ height: `${inputBarBaseHeight}px`, minHeight: '16px', boxSizing: 'border-box', overflowY: 'hidden' }}
                     placeholder={selectedSkill ? `Describe what you want ${selectedSkill.name} to do...` : t('chat.inputPlaceholder')}
                     value={inputText}
@@ -2239,7 +2239,7 @@ const MainContent = ({ onNewChat, resetKey, tunerConfig, onOpenDocument, onArtif
                     <button
                       ref={plusBtnRef}
                       onClick={() => setShowPlusMenu(prev => !prev)}
-                      className="p-2 text-claude-textSecondary hover:text-claude-text hover:bg-claude-hover rounded-lg transition-colors"
+                      className="p-2 text-deepseek-textSecondary hover:text-deepseek-text hover:bg-deepseek-hover rounded-lg transition-colors"
                     >
                       <IconPlus size={20} />
                     </button>
@@ -2260,7 +2260,7 @@ const MainContent = ({ onNewChat, resetKey, tunerConfig, onOpenDocument, onArtif
                       />
                     )}
                     {!isCodeMode && <button type="button" onClick={() => fileInputRef.current?.click()} aria-label={t('chat.addAttachment')} title={t('chat.addAttachment')}
-                      className="p-2 text-claude-textSecondary hover:text-claude-text hover:bg-claude-hover rounded-lg transition-colors">
+                      className="p-2 text-deepseek-textSecondary hover:text-deepseek-text hover:bg-deepseek-hover rounded-lg transition-colors">
                       <Paperclip size={20} />
                     </button>}
                     {researchMode && <ResearchBadge onToggle={toggleResearchMode} />}
@@ -2281,7 +2281,7 @@ const MainContent = ({ onNewChat, resetKey, tunerConfig, onOpenDocument, onArtif
                       <button
                         onMouseDown={(e) => e.preventDefault()}
                         onClick={toggleVoiceInput}
-                        className={`p-2 rounded-lg transition-all ${isListening ? 'bg-red-500 text-white animate-pulse' : 'text-claude-textSecondary hover:bg-claude-hover hover:text-claude-text'}`}
+                        className={`p-2 rounded-lg transition-all ${isListening ? 'bg-red-500 text-white animate-pulse' : 'text-deepseek-textSecondary hover:bg-deepseek-hover hover:text-deepseek-text'}`}
                         title={t('chat.voiceInput')}
                       >
                         <IconVoice size={20} />
@@ -2292,7 +2292,7 @@ const MainContent = ({ onNewChat, resetKey, tunerConfig, onOpenDocument, onArtif
                         onClick={handleStop}
                         aria-label={t('chat.stopGenerating')}
                         title={t('chat.stopGenerating')}
-                        className="p-2 text-claude-text hover:bg-claude-hover rounded-lg transition-colors"
+                        className="p-2 text-deepseek-text hover:bg-deepseek-hover rounded-lg transition-colors"
                       >
                         <svg
                           xmlns="http://www.w3.org/2000/svg"
@@ -2327,13 +2327,13 @@ const MainContent = ({ onNewChat, resetKey, tunerConfig, onOpenDocument, onArtif
               </div>
               {modeError && <p role="alert" className="text-xs text-red-500">{modeError}</p>}
               {showUsage && messages.some(message => message.role === 'user') && <SessionUsageBar key={`usage:${activeId || 'new'}`} messages={messages} contextLimit={selectorModels.find(model => model.id === currentModelString)?.contextWindow} />}
-              {!isCodeMode && showAiDisclaimer && <p className="pt-2 pb-2 text-center text-[12px] text-claude-textSecondary font-sans">DeepSeek Code is AI and can make mistakes. Please double-check responses.</p>}
+              {!isCodeMode && showAiDisclaimer && <p className="pt-2 pb-2 text-center text-[12px] text-deepseek-textSecondary font-sans">DeepSeek Code is AI and can make mistakes. Please double-check responses.</p>}
               {false && (
-                <div className="mx-4 flex items-center justify-between px-4 py-1.5 bg-claude-bgSecondary border-x border-b border-claude-border rounded-b-xl text-claude-textSecondary text-xs pointer-events-auto">
+                <div className="mx-4 flex items-center justify-between px-4 py-1.5 bg-deepseek-bgSecondary border-x border-b border-deepseek-border rounded-b-xl text-deepseek-textSecondary text-xs pointer-events-auto">
                   <span>您当前没有可用套餐，无法发送消息</span>
                   <button
                     onClick={() => window.dispatchEvent(new CustomEvent('open-upgrade'))}
-                    className="px-2 py-0.5 bg-claude-btnHover hover:bg-claude-hover text-claude-text text-xs font-medium rounded transition-colors border border-claude-border hover:border-blue-500 hover:text-blue-600"
+                    className="px-2 py-0.5 bg-deepseek-btnHover hover:bg-deepseek-hover text-deepseek-text text-xs font-medium rounded transition-colors border border-deepseek-border hover:border-blue-500 hover:text-blue-600"
                   >
                     购买套餐
                   </button>
@@ -2358,7 +2358,7 @@ const MainContent = ({ onNewChat, resetKey, tunerConfig, onOpenDocument, onArtif
       {activeTasks.size > 0 && (
         <div className="fixed bottom-[140px] right-6 z-[90] flex flex-col gap-1.5 max-w-[320px]">
           {Array.from(activeTasks.entries()).map(([taskId, task]) => (
-            <div key={taskId} className="bg-claude-bg border border-claude-border rounded-lg px-3 py-2 shadow-lg flex items-center gap-2 text-[12px] text-claude-textSecondary animate-pulse">
+            <div key={taskId} className="bg-deepseek-bg border border-deepseek-border rounded-lg px-3 py-2 shadow-lg flex items-center gap-2 text-[12px] text-deepseek-textSecondary animate-pulse">
               <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" className="animate-spin flex-shrink-0"><path d="M21 12a9 9 0 1 1-6.219-8.56"/></svg>
               <span className="truncate">{task.last_tool_name ? `${task.description} (${task.last_tool_name})` : task.description}</span>
             </div>
@@ -2370,9 +2370,9 @@ const MainContent = ({ onNewChat, resetKey, tunerConfig, onOpenDocument, onArtif
       <PlanApprovalController sessionId={activeId} executing={loading} />
       {askUserDialog && !askUserDialog.planApprovalRequest && (
         <div className="fixed inset-0 z-[200] flex items-center justify-center bg-black/40">
-          <div className="bg-claude-bg border border-claude-border rounded-2xl shadow-xl w-[480px] max-h-[80vh] overflow-y-auto" onClick={e => e.stopPropagation()}>
+          <div className="bg-deepseek-bg border border-deepseek-border rounded-2xl shadow-xl w-[480px] max-h-[80vh] overflow-y-auto" onClick={e => e.stopPropagation()}>
             <div className="px-5 pt-5 pb-3">
-              <h3 className="text-[15px] font-semibold text-claude-text mb-1 flex items-center gap-2">
+              <h3 className="text-[15px] font-semibold text-deepseek-text mb-1 flex items-center gap-2">
                 <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><circle cx="12" cy="12" r="10"/><path d="M9.09 9a3 3 0 0 1 5.83 1c0 2-3 3-3 3"/><line x1="12" y1="17" x2="12.01" y2="17"/></svg>
                 Claude needs your input
               </h3>
@@ -2380,7 +2380,7 @@ const MainContent = ({ onNewChat, resetKey, tunerConfig, onOpenDocument, onArtif
             <div className="px-5 pb-4 flex flex-col gap-4">
               {askUserDialog.questions.map((q, qi) => (
                 <div key={qi} className="flex flex-col gap-1.5">
-                  <label className="text-[13px] font-medium text-claude-text">{q.question}</label>
+                  <label className="text-[13px] font-medium text-deepseek-text">{q.question}</label>
                   {q.options && q.options.length > 0 ? (
                     <div className="flex flex-col gap-1">
                       {q.options.map((opt, oi) => {
@@ -2389,10 +2389,10 @@ const MainContent = ({ onNewChat, resetKey, tunerConfig, onOpenDocument, onArtif
                           <button
                             key={oi}
                             onClick={() => setAskUserDialog(prev => prev ? { ...prev, answers: { ...prev.answers, [q.question]: opt.label } } : null)}
-                            className={`text-left px-3 py-2 rounded-lg border text-[13px] transition-colors ${selected ? 'border-[#C6613F] bg-[#C6613F]/10 text-claude-text' : 'border-claude-border hover:bg-claude-hover text-claude-textSecondary'}`}
+                            className={`text-left px-3 py-2 rounded-lg border text-[13px] transition-colors ${selected ? 'border-[#C6613F] bg-[#C6613F]/10 text-deepseek-text' : 'border-deepseek-border hover:bg-deepseek-hover text-deepseek-textSecondary'}`}
                           >
-                            <div className="font-medium text-claude-text">{opt.label}</div>
-                            {opt.description && <div className="text-[12px] text-claude-textSecondary mt-0.5">{opt.description}</div>}
+                            <div className="font-medium text-deepseek-text">{opt.label}</div>
+                            {opt.description && <div className="text-[12px] text-deepseek-textSecondary mt-0.5">{opt.description}</div>}
                           </button>
                         );
                       })}
@@ -2400,7 +2400,7 @@ const MainContent = ({ onNewChat, resetKey, tunerConfig, onOpenDocument, onArtif
                   ) : (
                     <input
                       type="text"
-                      className="w-full bg-claude-input border border-claude-border rounded-lg px-3 py-2 text-[13px] text-claude-text outline-none focus:border-claude-textSecondary/40 transition-colors"
+                      className="w-full bg-deepseek-input border border-deepseek-border rounded-lg px-3 py-2 text-[13px] text-deepseek-text outline-none focus:border-deepseek-textSecondary/40 transition-colors"
                       placeholder="Type your answer..."
                       value={askUserDialog.answers[q.question] || ''}
                       onChange={e => setAskUserDialog(prev => prev ? { ...prev, answers: { ...prev.answers, [q.question]: e.target.value } } : null)}

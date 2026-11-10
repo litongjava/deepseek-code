@@ -296,7 +296,7 @@ describe('work details and inspect', () => {
     expect(within(screen.getByRole('tabpanel')).getByText('Actual prompt')).toBeInTheDocument();
   });
   it.each([
-    { stdout: 'result', stderr: '', label: 'stdout', color: 'text-claude-textSecondary' },
+    { stdout: 'result', stderr: '', label: 'stdout', color: 'text-deepseek-textSecondary' },
     { stdout: '', stderr: 'error', label: 'stderr', color: 'text-red-500' },
     { stdout: 'result', stderr: 'warning', label: 'output', color: 'text-yellow-600' },
   ])('labels command output $label with the matching color', ({ stdout, stderr, label, color }) => {

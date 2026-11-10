@@ -50,7 +50,7 @@ function loginState(error: unknown): GateState {
 
 function Centered({ children }: { children: React.ReactNode }) {
   return (
-    <div className="flex items-center justify-center w-full min-h-screen bg-claude-bg px-4 py-8"
+    <div className="flex items-center justify-center w-full min-h-screen bg-deepseek-bg px-4 py-8"
       style={{ paddingTop: 'max(2rem, env(safe-area-inset-top))', paddingBottom: 'max(2rem, env(safe-area-inset-bottom))' }}>
       {children}
     </div>
@@ -59,7 +59,7 @@ function Centered({ children }: { children: React.ReactNode }) {
 
 function ConnectingText() {
   const { t } = useI18n();
-  return <div className="text-claude-textSecondary text-[14px]">{t('serverLogin.connecting')}</div>;
+  return <div className="text-deepseek-textSecondary text-[14px]">{t('serverLogin.connecting')}</div>;
 }
 
 function ServerLoginForm({ state, onConnected }: {
@@ -91,27 +91,27 @@ function ServerLoginForm({ state, onConnected }: {
     }
   };
 
-  const input = 'w-full rounded-lg border border-claude-border bg-claude-input px-3 py-2.5 text-[15px] text-claude-text outline-none focus:border-claude-accent';
+  const input = 'w-full rounded-lg border border-deepseek-border bg-deepseek-input px-3 py-2.5 text-[15px] text-deepseek-text outline-none focus:border-deepseek-accent';
   return (
     <form onSubmit={submit} className="w-full max-w-sm space-y-4" aria-label={t('serverLogin.title')}>
       <div className="space-y-1">
-        <h1 className="text-xl font-semibold text-claude-text">{t('serverLogin.title')}</h1>
-        <p className="text-[14px] text-claude-textSecondary">{t('serverLogin.description')}</p>
+        <h1 className="text-xl font-semibold text-deepseek-text">{t('serverLogin.title')}</h1>
+        <p className="text-[14px] text-deepseek-textSecondary">{t('serverLogin.description')}</p>
       </div>
       {showServer && (
         <label className="block space-y-1">
-          <span className="text-[13px] text-claude-textSecondary">{t('serverLogin.serverUrl')}</span>
+          <span className="text-[13px] text-deepseek-textSecondary">{t('serverLogin.serverUrl')}</span>
           <input className={input} type="url" inputMode="url" autoCapitalize="off" autoCorrect="off" required
             placeholder="https://server.example:30085" value={serverUrl} onChange={e => setServerUrl(e.target.value)} />
         </label>
       )}
       <div className="space-y-1">
         <label className="block space-y-1">
-          <span className="text-[13px] text-claude-textSecondary">{t('serverLogin.token')}</span>
+          <span className="text-[13px] text-deepseek-textSecondary">{t('serverLogin.token')}</span>
           <input className={input} type="password" autoComplete="current-password" autoCapitalize="off" required
             aria-describedby="server-token-hint" value={token} onChange={e => setToken(e.target.value)} />
         </label>
-        <p id="server-token-hint" className="text-[12px] text-claude-textSecondary">{t('serverLogin.tokenHint')}</p>
+        <p id="server-token-hint" className="text-[12px] text-deepseek-textSecondary">{t('serverLogin.tokenHint')}</p>
       </div>
       {error && (
         <p role="alert" className="text-[13px] text-red-500">
@@ -119,16 +119,16 @@ function ServerLoginForm({ state, onConnected }: {
         </p>
       )}
       <button type="submit" disabled={busy || !token.trim()}
-        className="w-full rounded-lg bg-claude-accent px-4 py-2.5 text-[15px] font-medium text-white disabled:opacity-50">
+        className="w-full rounded-lg bg-deepseek-accent px-4 py-2.5 text-[15px] font-medium text-white disabled:opacity-50">
         {busy ? t('serverLogin.connecting') : t('serverLogin.submit')}
       </button>
       {!showServer && (
-        <button type="button" className="w-full text-[13px] text-claude-textSecondary underline" onClick={() => setShowServer(true)}>
+        <button type="button" className="w-full text-[13px] text-deepseek-textSecondary underline" onClick={() => setShowServer(true)}>
           {t('serverLogin.otherServer')}
         </button>
       )}
       {isMobileApp && (
-        <button type="button" className="w-full text-[13px] text-claude-textSecondary underline"
+        <button type="button" className="w-full text-[13px] text-deepseek-textSecondary underline"
           onClick={() => { switchToLocalEngine(); window.location.reload(); }}>
           {t('serverLogin.useThisPhone')}
         </button>

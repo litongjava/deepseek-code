@@ -52,33 +52,33 @@ export default function RightSidebar({ onClose, active = true }: { onClose: () =
     if (next === null) return;
     event.preventDefault(); setTab(tabs[next].id); tabRefs.current.get(tabs[next].id)?.focus();
   };
-  return <aside id={RIGHT_SIDEBAR_ID} aria-label={t('rightSidebar.panel')} className="flex h-full w-full min-w-0 flex-col bg-claude-bg">
+  return <aside id={RIGHT_SIDEBAR_ID} aria-label={t('rightSidebar.panel')} className="flex h-full w-full min-w-0 flex-col bg-deepseek-bg">
     <div className="relative flex h-[44px] shrink-0 items-center gap-1 px-2">
       <div role="tablist" aria-label={t('rightSidebar.tabs')} className="flex min-w-0 flex-1 items-center gap-1 overflow-x-auto">
         {tabs.map(item => {
           const selected = item.id === tab;
           const title = item.kind === 'subagent' ? (item.invocation.description || 'Subagent') : item.kind === 'file' ? item.relativePath : item.kind === 'terminal' ? 'Terminal' : t(`rightSidebar.${item.kind}`);
           const duplicate = item.kind === 'file' && tabs.some(other => other.kind === 'file' && other.id !== item.id && other.name === item.name);
-          return <div key={item.id} className={`flex shrink-0 items-center rounded-md ${selected ? 'bg-claude-btn-hover text-claude-text' : 'text-claude-textSecondary'}`}>
+          return <div key={item.id} className={`flex shrink-0 items-center rounded-md ${selected ? 'bg-deepseek-btn-hover text-deepseek-text' : 'text-deepseek-textSecondary'}`}>
             <button type="button" role="tab" ref={node => { if (node) tabRefs.current.set(item.id, node); else tabRefs.current.delete(item.id); }}
               id={`${RIGHT_SIDEBAR_ID}-tab-${item.id}`} aria-controls={`${RIGHT_SIDEBAR_ID}-content`} aria-selected={selected} tabIndex={selected ? 0 : -1}
               title={item.kind === 'file' ? item.path : title} onClick={() => setTab(item.id)} onKeyDown={event => keyboard(event, item.id)}
-              className="max-w-[190px] truncate rounded-md px-2 py-1.5 text-xs hover:bg-claude-hover focus-visible:ring-2 focus-visible:ring-blue-500">
+              className="max-w-[190px] truncate rounded-md px-2 py-1.5 text-xs hover:bg-deepseek-hover focus-visible:ring-2 focus-visible:ring-blue-500">
               {item.kind === 'file' ? (duplicate ? `${item.rootId}/${item.relativePath}` : item.name) : title}
             </button>
-            <button type="button" aria-label={`Close ${title}`} title={`Close ${title}`} disabled={closing} onClick={() => void close(item.id)} className="mr-1 rounded p-0.5 hover:bg-claude-hover"><X size={12} /></button>
+            <button type="button" aria-label={`Close ${title}`} title={`Close ${title}`} disabled={closing} onClick={() => void close(item.id)} className="mr-1 rounded p-0.5 hover:bg-deepseek-hover"><X size={12} /></button>
           </div>;
         })}
       </div>
-      <button type="button" title="Open panel tab" aria-label="Open panel tab" aria-expanded={adding} onClick={() => setAdding(value => !value)} className="rounded p-1 text-claude-textSecondary hover:bg-claude-hover"><Plus size={16} /></button>
-      <button type="button" title={t('rightSidebar.close')} aria-label={t('rightSidebar.close')} onClick={onClose} className="rounded p-1 text-claude-textSecondary hover:bg-claude-hover"><X size={16} /></button>
-      {adding && <div className="absolute right-7 top-full z-30 rounded-lg border border-claude-border bg-claude-bg p-1 shadow-lg">
-        {RIGHT_SIDEBAR_TABS.map(id => <button key={id} type="button" className="block w-full rounded px-4 py-2 text-left text-xs hover:bg-claude-hover" onClick={() => { openTab(id); setAdding(false); }}>{id === 'terminal' ? 'Terminal' : t(`rightSidebar.${id}`)}</button>)}
+      <button type="button" title="Open panel tab" aria-label="Open panel tab" aria-expanded={adding} onClick={() => setAdding(value => !value)} className="rounded p-1 text-deepseek-textSecondary hover:bg-deepseek-hover"><Plus size={16} /></button>
+      <button type="button" title={t('rightSidebar.close')} aria-label={t('rightSidebar.close')} onClick={onClose} className="rounded p-1 text-deepseek-textSecondary hover:bg-deepseek-hover"><X size={16} /></button>
+      {adding && <div className="absolute right-7 top-full z-30 rounded-lg border border-deepseek-border bg-deepseek-bg p-1 shadow-lg">
+        {RIGHT_SIDEBAR_TABS.map(id => <button key={id} type="button" className="block w-full rounded px-4 py-2 text-left text-xs hover:bg-deepseek-hover" onClick={() => { openTab(id); setAdding(false); }}>{id === 'terminal' ? 'Terminal' : t(`rightSidebar.${id}`)}</button>)}
       </div>}
     </div>
     {error && <p role="alert" className="px-3 text-xs text-red-600">{error}</p>}
     <div role="tabpanel" id={`${RIGHT_SIDEBAR_ID}-content`} aria-labelledby={tab ? `${RIGHT_SIDEBAR_ID}-tab-${tab}` : undefined} className="min-h-0 flex-1 overflow-hidden">
-      {!tabs.length && <div className="flex h-full items-center justify-center gap-2">{RIGHT_SIDEBAR_TABS.map(id => <button type="button" key={id} onClick={() => { openTab(id); }} className="rounded-md bg-claude-hover px-3 py-2 text-xs">{id === 'terminal' ? 'Terminal' : t(`rightSidebar.${id}`)}</button>)}</div>}
+      {!tabs.length && <div className="flex h-full items-center justify-center gap-2">{RIGHT_SIDEBAR_TABS.map(id => <button type="button" key={id} onClick={() => { openTab(id); }} className="rounded-md bg-deepseek-hover px-3 py-2 text-xs">{id === 'terminal' ? 'Terminal' : t(`rightSidebar.${id}`)}</button>)}</div>}
       {tabs.map(item => item.kind === 'subagent' && <div key={item.id} hidden={tab !== item.id} className="h-full"><SubagentPanel invocation={item.invocation} active={active && tab === item.id} /></div>)}
       {hasFiles && <div hidden={!fileActive} className="h-full"><RightSidebarFilesTab /></div>}
       {tabs.some(item => item.kind === 'browser') && <div hidden={tab !== 'browser'} className="h-full"><RightSidebarBrowserTab /></div>}

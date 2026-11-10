@@ -21,7 +21,7 @@ const FRAME_SANDBOX = 'allow-scripts allow-same-origin allow-forms allow-popups 
 
 interface Navigation { url: string; id: number }
 
-const iconButton = 'flex-shrink-0 rounded-md p-1 text-claude-textSecondary transition-colors hover:bg-claude-btn-hover hover:text-claude-text disabled:cursor-not-allowed disabled:opacity-30 disabled:hover:bg-transparent';
+const iconButton = 'flex-shrink-0 rounded-md p-1 text-deepseek-textSecondary transition-colors hover:bg-deepseek-btn-hover hover:text-deepseek-text disabled:cursor-not-allowed disabled:opacity-30 disabled:hover:bg-transparent';
 
 /**
  * Iframe browser for the right sidebar. Back and Forward walk the pages opened
@@ -89,7 +89,7 @@ export default function EmbeddedBrowser({ initialUrl, navigation, onUrlChange, o
 
   return (
     <div className="flex h-full min-h-0 flex-col">
-      <div className="flex-shrink-0 space-y-1 border-b border-claude-border px-2 py-1.5">
+      <div className="flex-shrink-0 space-y-1 border-b border-deepseek-border px-2 py-1.5">
         <div className="flex items-start gap-0.5">
           <button type="button" className={iconButton} onClick={() => go(-1)} disabled={index <= 0} aria-label={t('rightSidebar.browserBack')} title={t('rightSidebar.browserBack')}>
             <ArrowLeft size={15} aria-hidden="true" />
@@ -108,7 +108,7 @@ export default function EmbeddedBrowser({ initialUrl, navigation, onUrlChange, o
           </button>
           <button
             type="button"
-            className="min-w-[44px] rounded-md px-1 py-0.5 text-center text-[12px] tabular-nums text-claude-textSecondary transition-colors hover:bg-claude-btn-hover hover:text-claude-text"
+            className="min-w-[44px] rounded-md px-1 py-0.5 text-center text-[12px] tabular-nums text-deepseek-textSecondary transition-colors hover:bg-deepseek-btn-hover hover:text-deepseek-text"
             onClick={() => setZoom(1)}
             aria-label={t('rightSidebar.browserZoomReset', { percent: zoomPercent })}
             title={t('rightSidebar.browserZoomReset', { percent: zoomPercent })}
@@ -121,7 +121,7 @@ export default function EmbeddedBrowser({ initialUrl, navigation, onUrlChange, o
           <div className="flex-1" />
           <button
             type="button"
-            className="flex min-w-0 items-center gap-1 rounded-md px-1.5 py-0.5 text-[12px] text-claude-textSecondary transition-colors hover:bg-claude-btn-hover hover:text-claude-text disabled:cursor-not-allowed disabled:opacity-30"
+            className="flex min-w-0 items-center gap-1 rounded-md px-1.5 py-0.5 text-[12px] text-deepseek-textSecondary transition-colors hover:bg-deepseek-btn-hover hover:text-deepseek-text disabled:cursor-not-allowed disabled:opacity-30"
             onClick={() => { void openInSystemBrowser(currentUrl); }}
             disabled={isBlank}
             title={t('rightSidebar.browserOpenExternal')}
@@ -138,11 +138,11 @@ export default function EmbeddedBrowser({ initialUrl, navigation, onUrlChange, o
       </div>
 
       {showHint && (
-        <div role="status" className="flex flex-shrink-0 items-start gap-2 border-b border-claude-border bg-claude-hover/60 px-3 py-2 text-[12px] leading-4 text-claude-textSecondary">
+        <div role="status" className="flex flex-shrink-0 items-start gap-2 border-b border-deepseek-border bg-deepseek-hover/60 px-3 py-2 text-[12px] leading-4 text-deepseek-textSecondary">
           <Info size={14} className="mt-px flex-shrink-0" aria-hidden="true" />
           <p className="min-w-0 flex-1">
             {t('rightSidebar.browserBlockedHint')}{' '}
-            <button type="button" className="font-medium text-claude-text underline underline-offset-2 hover:no-underline" onClick={() => { void openInSystemBrowser(currentUrl); }}>
+            <button type="button" className="font-medium text-deepseek-text underline underline-offset-2 hover:no-underline" onClick={() => { void openInSystemBrowser(currentUrl); }}>
               {t('rightSidebar.browserOpenExternalShort')}
             </button>
           </p>

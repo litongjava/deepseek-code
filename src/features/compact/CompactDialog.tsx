@@ -50,21 +50,21 @@ export default function CompactDialog({
       onClick={() => setShowCompactDialog(false)}
     >
       <div
-        className="bg-claude-bg border border-claude-border rounded-2xl shadow-xl w-[440px] overflow-hidden"
+        className="bg-deepseek-bg border border-deepseek-border rounded-2xl shadow-xl w-[440px] overflow-hidden"
         onClick={(e) => e.stopPropagation()}
       >
         <div className="px-5 pt-5 pb-3">
-          <h3 className="text-[15px] font-semibold text-claude-text mb-1">
+          <h3 className="text-[15px] font-semibold text-deepseek-text mb-1">
             Compact conversation
           </h3>
-          <p className="text-[13px] text-claude-textSecondary leading-snug">
+          <p className="text-[13px] text-deepseek-textSecondary leading-snug">
             Summarize the conversation history to free up context space. The
             engine will preserve key decisions and context.
           </p>
         </div>
         <div className="px-5 pb-3">
           <textarea
-            className="w-full bg-claude-input border border-claude-border rounded-lg px-3 py-2 text-[13px] text-claude-text placeholder:text-claude-textSecondary/50 outline-none focus:border-claude-textSecondary/40 transition-colors resize-none"
+            className="w-full bg-deepseek-input border border-deepseek-border rounded-lg px-3 py-2 text-[13px] text-deepseek-text placeholder:text-deepseek-textSecondary/50 outline-none focus:border-deepseek-textSecondary/40 transition-colors resize-none"
             rows={3}
             placeholder="Optional: add instructions for the summary (e.g. 'preserve all API endpoint details')"
             value={compactInstruction}
@@ -81,7 +81,7 @@ export default function CompactDialog({
         <div className="flex items-center justify-end gap-2 px-5 pb-4">
           <button
             onClick={() => setShowCompactDialog(false)}
-            className="px-3.5 py-1.5 text-[13px] text-claude-textSecondary hover:text-claude-text rounded-lg hover:bg-claude-hover transition-colors"
+            className="px-3.5 py-1.5 text-[13px] text-deepseek-textSecondary hover:text-deepseek-text rounded-lg hover:bg-deepseek-hover transition-colors"
           >
             Cancel
           </button>

@@ -315,7 +315,7 @@ const Sidebar = ({ overlay = false, isCollapsed, toggleSidebar, refreshTrigger, 
     <>
       <div
         className={`
-          h-dvh bg-claude-sidebar border-r border-claude-border flex-shrink-0 text-claude-text antialiased flex flex-col transition-all duration-200 ease-in-out overflow-hidden ${overlay ? 'fixed left-0 top-0 z-50 shadow-xl' : 'relative'}
+          h-dvh bg-deepseek-sidebar border-r border-deepseek-border flex-shrink-0 text-deepseek-text antialiased flex flex-col transition-all duration-200 ease-in-out overflow-hidden ${overlay ? 'fixed left-0 top-0 z-50 shadow-xl' : 'relative'}
         `}
         style={{
           paddingTop: `${titleBarHeight || 44}px`,
@@ -325,12 +325,12 @@ const Sidebar = ({ overlay = false, isCollapsed, toggleSidebar, refreshTrigger, 
           borderRightWidth: overlay && isCollapsed ? 0 : undefined,
         }}
       >
-        {overlay && !isCollapsed && <div className="flex shrink-0 items-center justify-between px-4 py-1 border-b border-claude-border">
+        {overlay && !isCollapsed && <div className="flex shrink-0 items-center justify-between px-4 py-1 border-b border-deepseek-border">
           <span className="text-sm font-medium">DeepSeek Code</span>
-          <button type="button" aria-label={t('common.close')} onClick={toggleSidebar} className="flex h-11 w-11 items-center justify-center rounded-lg hover:bg-claude-hover"><X size={20} /></button>
+          <button type="button" aria-label={t('common.close')} onClick={toggleSidebar} className="flex h-11 w-11 items-center justify-center rounded-lg hover:bg-deepseek-hover"><X size={20} /></button>
         </div>}
         {!isCollapsed && (
-          <div className="flex-shrink-0 border-b border-claude-border px-2 py-2 mt-1.5">
+          <div className="flex-shrink-0 border-b border-deepseek-border px-2 py-2 mt-1.5">
             <div className="flex rounded-lg bg-[var(--bg-mode-tabs)] p-0.5" role="group" aria-label={t('sidebar.workspaceMode')}>
               {[
                 { id: 'home' as const, icon: <Home size={15} />, label: t('sidebar.homeMode') },
@@ -342,7 +342,7 @@ const Sidebar = ({ overlay = false, isCollapsed, toggleSidebar, refreshTrigger, 
                     setActiveTab(tab.id === 'code' ? 'code' : lastHomeMode);
                     handleNewChat();
                   }}
-                  className={`flex-1 flex items-center justify-center gap-1.5 h-7 px-1.5 rounded-md text-[13px] font-normal text-claude-text transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-claude-textSecondary ${activeSection === tab.id ? 'bg-[var(--bg-mode-tab-active)] shadow-sm' : 'hover:bg-claude-btnHover'}`}>
+                  className={`flex-1 flex items-center justify-center gap-1.5 h-7 px-1.5 rounded-md text-[13px] font-normal text-deepseek-text transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-deepseek-textSecondary ${activeSection === tab.id ? 'bg-[var(--bg-mode-tab-active)] shadow-sm' : 'hover:bg-deepseek-btnHover'}`}>
                   {tab.icon}{tab.label}
                 </button>
               ))}
@@ -360,36 +360,36 @@ const Sidebar = ({ overlay = false, isCollapsed, toggleSidebar, refreshTrigger, 
         {updateStatus && !isCollapsed && (updateStatus.type === 'available' || updateStatus.type === 'progress' || updateStatus.type === 'downloaded') && (
           <div className="mx-3 mb-2 mt-auto">
             {(updateStatus.type === 'available' || updateStatus.type === 'progress') && (
-              <div className="flex items-center gap-2.5 px-3 py-2.5 rounded-lg bg-claude-hover">
-                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className="text-claude-textSecondary flex-shrink-0 animate-spin">
+              <div className="flex items-center gap-2.5 px-3 py-2.5 rounded-lg bg-deepseek-hover">
+                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className="text-deepseek-textSecondary flex-shrink-0 animate-spin">
                   <path d="M21 12a9 9 0 1 1-6.219-8.56" />
                 </svg>
                 <div className="flex-1 min-w-0">
-                  <div className="text-[12px] text-claude-textSecondary leading-tight">
+                  <div className="text-[12px] text-deepseek-textSecondary leading-tight">
                     {t('sidebar.updateDownloading')}{updateStatus.percent != null ? ` ${updateStatus.percent}%` : ''}
                   </div>
                   {updateStatus.percent != null && (
-                    <div className="mt-1.5 h-[3px] rounded-full bg-claude-border overflow-hidden">
-                      <div className="h-full rounded-full bg-claude-textSecondary transition-all duration-300" style={{ width: `${updateStatus.percent}%` }} />
+                    <div className="mt-1.5 h-[3px] rounded-full bg-deepseek-border overflow-hidden">
+                      <div className="h-full rounded-full bg-deepseek-textSecondary transition-all duration-300" style={{ width: `${updateStatus.percent}%` }} />
                     </div>
                   )}
                 </div>
               </div>
             )}
             {updateStatus.type === 'downloaded' && (
-              <div className="px-3 py-3 rounded-lg bg-claude-hover">
+              <div className="px-3 py-3 rounded-lg bg-deepseek-hover">
                 <div className="flex items-center gap-2 mb-1">
-                  <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className="text-claude-text flex-shrink-0">
+                  <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className="text-deepseek-text flex-shrink-0">
                     <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" />
                     <polyline points="7 10 12 15 17 10" />
                     <line x1="12" y1="15" x2="12" y2="3" />
                   </svg>
-                  <div className="text-[13px] text-claude-text font-medium leading-tight">{t('sidebar.updatedTo')} {updateStatus.version}</div>
+                  <div className="text-[13px] text-deepseek-text font-medium leading-tight">{t('sidebar.updatedTo')} {updateStatus.version}</div>
                 </div>
-                <div className="text-[11.5px] text-claude-textSecondary mb-2.5 ml-6">{t('sidebar.relaunchToApply')}</div>
+                <div className="text-[11.5px] text-deepseek-textSecondary mb-2.5 ml-6">{t('sidebar.relaunchToApply')}</div>
                 <button
                   onClick={() => { import('../utils/tauriAPI').then(m => m.tauriAPI.installUpdate()); }}
-                  className="w-full px-3 py-1.5 rounded-md bg-claude-bg border border-claude-border text-[13px] text-claude-text font-medium hover:bg-claude-btnHover transition-colors"
+                  className="w-full px-3 py-1.5 rounded-md bg-deepseek-bg border border-deepseek-border text-[13px] text-deepseek-text font-medium hover:bg-deepseek-btnHover transition-colors"
                 >
                   {t('sidebar.relaunch')}
                 </button>
@@ -400,7 +400,7 @@ const Sidebar = ({ overlay = false, isCollapsed, toggleSidebar, refreshTrigger, 
 
         {/* User Profile Footer */}
         <div
-          className={`${!updateStatus || isCollapsed || (updateStatus.type !== 'available' && updateStatus.type !== 'progress' && updateStatus.type !== 'downloaded') ? 'mt-auto' : ''} border-t border-claude-border flex-shrink-0 relative transition-all duration-200`}
+          className={`${!updateStatus || isCollapsed || (updateStatus.type !== 'available' && updateStatus.type !== 'progress' && updateStatus.type !== 'downloaded') ? 'mt-auto' : ''} border-t border-deepseek-border flex-shrink-0 relative transition-all duration-200`}
           style={{
             paddingTop: `${tunerConfig?.profilePy || 12}px`,
             paddingBottom: `${tunerConfig?.profilePy || 12}px`,
@@ -417,13 +417,13 @@ const Sidebar = ({ overlay = false, isCollapsed, toggleSidebar, refreshTrigger, 
               }
               setShowUserMenu(!showUserMenu);
             }}
-            className={`w-full flex items-center gap-2 hover:bg-claude-hover rounded-lg transition-all duration-200 overflow-hidden whitespace-nowrap`}
+            className={`w-full flex items-center gap-2 hover:bg-deepseek-hover rounded-lg transition-all duration-200 overflow-hidden whitespace-nowrap`}
             style={{
               padding: isCollapsed ? '8px 0px 8px 5px' : '8px'
             }}
           >
             <div
-              className="rounded-full bg-claude-avatar text-claude-avatarText flex items-center justify-center text-[15px] font-medium flex-shrink-0"
+              className="rounded-full bg-deepseek-avatar text-deepseek-avatarText flex items-center justify-center text-[15px] font-medium flex-shrink-0"
               style={{ width: `${tunerConfig?.userAvatarSize || 32}px`, height: `${tunerConfig?.userAvatarSize || 32}px` }}
             >
               {(userUser?.display_name || userUser?.full_name || userUser?.nickname || 'U').charAt(0).toUpperCase()}
@@ -431,58 +431,58 @@ const Sidebar = ({ overlay = false, isCollapsed, toggleSidebar, refreshTrigger, 
             <div className={`flex items-center justify-between w-full transition-opacity duration-200 ${isCollapsed ? 'opacity-0' : 'opacity-100'}`}>
               <div className="text-left overflow-hidden flex-1 min-w-0">
                 <div
-                  className="font-medium text-claude-text leading-tight"
+                  className="font-medium text-deepseek-text leading-tight"
                   style={{ fontSize: `${tunerConfig?.userNameSize || 15}px`, whiteSpace: 'nowrap', textOverflow: 'ellipsis', overflow: 'hidden' }}
                 >
                   {userUser?.display_name || userUser?.full_name || userUser?.nickname || t('sidebar.user')}
                 </div>
                 {localStorage.getItem('user_mode') === 'selfhosted' ? (
-                  <div className="text-[13px] text-claude-textSecondary mt-1 leading-tight">{t('sidebar.selfHosted')}</div>
+                  <div className="text-[13px] text-deepseek-textSecondary mt-1 leading-tight">{t('sidebar.selfHosted')}</div>
                 ) : usageData && usageData.token_quota > 0 ? (
                   <div className="mt-1.5 mr-3">
-                    <div className="h-1 w-full rounded-full bg-claude-hover overflow-hidden">
+                    <div className="h-1 w-full rounded-full bg-deepseek-hover overflow-hidden">
                       <div
                         className="h-full bg-neutral-700 dark:bg-neutral-300 transition-[width] duration-300"
                         style={{ width: `${Math.min(100, (usageData.token_used / usageData.token_quota) * 100)}%` }}
                       />
                     </div>
-                    <div className="text-[10px] text-claude-textSecondary mt-1 leading-none tabular-nums">
+                    <div className="text-[10px] text-deepseek-textSecondary mt-1 leading-none tabular-nums">
                       ${usageData.token_used.toFixed(2)} / ${usageData.token_quota.toFixed(2)}
                     </div>
                   </div>
                 ) : (
-                  <div className="text-[13px] text-claude-textSecondary mt-1 leading-tight">{planLabel}</div>
+                  <div className="text-[13px] text-deepseek-textSecondary mt-1 leading-tight">{planLabel}</div>
                 )}
               </div>
-              <ChevronUp size={16} className="text-claude-textSecondary shrink-0 ml-1" />
+              <ChevronUp size={16} className="text-deepseek-textSecondary shrink-0 ml-1" />
             </div>
           </button>
 
           {/* User Menu Popup */}
           {showUserMenu && userMenuPos && (
-            <div ref={userMenuRef} className="fixed w-[220px] bg-claude-input border border-claude-border rounded-xl shadow-[0_4px_16px_rgba(0,0,0,0.12)] py-1.5 z-[60]"
+            <div ref={userMenuRef} className="fixed w-[220px] bg-deepseek-input border border-deepseek-border rounded-xl shadow-[0_4px_16px_rgba(0,0,0,0.12)] py-1.5 z-[60]"
               style={{ bottom: `${userMenuPos.bottom}px`, left: `${userMenuPos.left}px` }}
             >
               {/* User info header */}
-              <div className="px-4 py-2.5 border-b border-claude-border">
-                <div className="text-[13px] font-medium text-claude-text">{userUser?.display_name || userUser?.full_name || userUser?.nickname || t('sidebar.user')}</div>
-                <div className="text-[12px] text-claude-textSecondary mt-0.5">{userUser?.email || ''}</div>
+              <div className="px-4 py-2.5 border-b border-deepseek-border">
+                <div className="text-[13px] font-medium text-deepseek-text">{userUser?.display_name || userUser?.full_name || userUser?.nickname || t('sidebar.user')}</div>
+                <div className="text-[12px] text-deepseek-textSecondary mt-0.5">{userUser?.email || ''}</div>
               </div>
               {/* Menu items */}
               <div className="py-1">
                 <button
                   onClick={() => { setShowUserMenu(false); onOpenSettings?.(); }}
-                  className="w-full flex items-center gap-3 px-4 py-2 text-[13px] text-claude-text hover:bg-claude-hover transition-colors"
+                  className="w-full flex items-center gap-3 px-4 py-2 text-[13px] text-deepseek-text hover:bg-deepseek-hover transition-colors"
                 >
-                  <Settings size={16} className="text-claude-textSecondary" />
+                  <Settings size={16} className="text-deepseek-textSecondary" />
                   {t('sidebar.settings')}
                 </button>
                 {isAdmin && localStorage.getItem('user_mode') !== 'selfhosted' && (
                   <button
-                    className="w-full flex items-center gap-3 px-4 py-2 text-[13px] text-claude-text hover:bg-claude-hover transition-colors"
+                    className="w-full flex items-center gap-3 px-4 py-2 text-[13px] text-deepseek-text hover:bg-deepseek-hover transition-colors"
                     onClick={() => { setShowUserMenu(false); navigate('/admin'); }}
                   >
-                    <Shield size={16} className="text-claude-textSecondary" />
+                    <Shield size={16} className="text-deepseek-textSecondary" />
                     {t('sidebar.adminPanel')}
                   </button>
                 )}
@@ -493,27 +493,27 @@ const Sidebar = ({ overlay = false, isCollapsed, toggleSidebar, refreshTrigger, 
                       if (connectionMode() === 'web') { switchToLocalEngine(); window.location.reload(); }
                       else requestServerLogin();
                     }}
-                    className="w-full flex items-center gap-3 px-4 py-2 text-[13px] text-claude-text hover:bg-claude-hover transition-colors"
+                    className="w-full flex items-center gap-3 px-4 py-2 text-[13px] text-deepseek-text hover:bg-deepseek-hover transition-colors"
                   >
-                    <Server size={16} className="text-claude-textSecondary" />
+                    <Server size={16} className="text-deepseek-textSecondary" />
                     {connectionMode() === 'web' ? t('serverLogin.useThisPhone') : t('serverLogin.connectServer')}
                   </button>
                 )}
                 <button
                   onClick={() => { setShowUserMenu(false); setShowHelpModal(true); }}
-                  className="w-full flex items-center gap-3 px-4 py-2 text-[13px] text-claude-text hover:bg-claude-hover transition-colors"
+                  className="w-full flex items-center gap-3 px-4 py-2 text-[13px] text-deepseek-text hover:bg-deepseek-hover transition-colors"
                 >
-                  <HelpCircle size={16} className="text-claude-textSecondary" />
+                  <HelpCircle size={16} className="text-deepseek-textSecondary" />
                   {t('sidebar.getHelp')}
                 </button>
               </div>
-              <div className="h-[1px] bg-claude-border mx-3" />
+              <div className="h-[1px] bg-deepseek-border mx-3" />
               <div className="py-1">
                 <button
                   onClick={() => { setShowUserMenu(false); setShowLogoutConfirm(true); }}
-                  className="w-full flex items-center gap-3 px-4 py-2 text-[13px] text-claude-text hover:bg-claude-hover transition-colors"
+                  className="w-full flex items-center gap-3 px-4 py-2 text-[13px] text-deepseek-text hover:bg-deepseek-hover transition-colors"
                 >
-                  <LogOut size={16} className="text-claude-textSecondary" />
+                  <LogOut size={16} className="text-deepseek-textSecondary" />
                   {t('sidebar.logout')}
                 </button>
               </div>
@@ -531,7 +531,7 @@ const Sidebar = ({ overlay = false, isCollapsed, toggleSidebar, refreshTrigger, 
       {/* H5 Access Panel */}
       {showH5Panel && !isCollapsed && (
         <div
-          className="fixed z-40 border-l border-claude-border bg-claude-sidebar flex flex-col shadow-2xl transition-all duration-300 ease-in-out"
+          className="fixed z-40 border-l border-deepseek-border bg-deepseek-sidebar flex flex-col shadow-2xl transition-all duration-300 ease-in-out"
           style={{
             top: `${titleBarHeight || 44}px`,
             left: `${tunerConfig?.sidebarWidth || 280}px`,
@@ -547,7 +547,7 @@ const Sidebar = ({ overlay = false, isCollapsed, toggleSidebar, refreshTrigger, 
       {/* IM Integration Panel */}
       {showIMPanel && !isCollapsed && (
         <div
-          className="fixed z-40 border-l border-claude-border bg-claude-sidebar flex flex-col shadow-2xl transition-all duration-300 ease-in-out"
+          className="fixed z-40 border-l border-deepseek-border bg-deepseek-sidebar flex flex-col shadow-2xl transition-all duration-300 ease-in-out"
           style={{
             top: `${titleBarHeight || 44}px`,
             left: `${tunerConfig?.sidebarWidth || 280}px`,
@@ -563,7 +563,7 @@ const Sidebar = ({ overlay = false, isCollapsed, toggleSidebar, refreshTrigger, 
       {/* Agent View Panel */}
       {showCodingView && showAgentView && !isCollapsed && (
         <div
-          className="fixed z-40 border-l border-claude-border bg-claude-bg flex flex-col shadow-2xl transition-all duration-300 ease-in-out"
+          className="fixed z-40 border-l border-deepseek-border bg-deepseek-bg flex flex-col shadow-2xl transition-all duration-300 ease-in-out"
           style={{
             top: `${titleBarHeight || 44}px`,
             left: `${tunerConfig?.sidebarWidth || 280}px`,
@@ -579,7 +579,7 @@ const Sidebar = ({ overlay = false, isCollapsed, toggleSidebar, refreshTrigger, 
       {/* Live Preview Panel */}
       {showLivePreview && !isCollapsed && (
         <div
-          className="fixed z-40 border-l border-claude-border bg-claude-bg flex flex-col shadow-2xl transition-all duration-300 ease-in-out"
+          className="fixed z-40 border-l border-deepseek-border bg-deepseek-bg flex flex-col shadow-2xl transition-all duration-300 ease-in-out"
           style={{
             top: `${titleBarHeight || 44}px`,
             left: `${tunerConfig?.sidebarWidth || 280}px`,
@@ -594,7 +594,7 @@ const Sidebar = ({ overlay = false, isCollapsed, toggleSidebar, refreshTrigger, 
 
       {/* Knowledge Base Panel */}
       {showKnowledgePanel && !isCollapsed && (
-        <div className="fixed z-40 border-l border-claude-border bg-claude-bg flex flex-col shadow-2xl transition-all duration-300 ease-in-out"
+        <div className="fixed z-40 border-l border-deepseek-border bg-deepseek-bg flex flex-col shadow-2xl transition-all duration-300 ease-in-out"
           style={{ top: `${titleBarHeight || 44}px`, left: `${tunerConfig?.sidebarWidth || 280}px`, width: 'min(700px, 55vw)', height: `calc(100vh - ${titleBarHeight || 44}px)`, borderRadius: '0 12px 12px 0' }}>
           <KnowledgePanel onClose={() => setShowKnowledgePanel(false)} />
         </div>
@@ -602,7 +602,7 @@ const Sidebar = ({ overlay = false, isCollapsed, toggleSidebar, refreshTrigger, 
 
       {/* GitHub Hub Panel */}
       {showGitHubHub && !isCollapsed && (
-        <div className="fixed z-40 border-l border-claude-border bg-claude-bg flex flex-col shadow-2xl transition-all duration-300 ease-in-out"
+        <div className="fixed z-40 border-l border-deepseek-border bg-deepseek-bg flex flex-col shadow-2xl transition-all duration-300 ease-in-out"
           style={{ top: `${titleBarHeight || 44}px`, left: `${tunerConfig?.sidebarWidth || 280}px`, width: 'min(650px, 50vw)', height: `calc(100vh - ${titleBarHeight || 44}px)`, borderRadius: '0 12px 12px 0' }}>
           <GitHubHubPanel onClose={() => setShowGitHubHub(false)} />
         </div>
@@ -610,15 +610,15 @@ const Sidebar = ({ overlay = false, isCollapsed, toggleSidebar, refreshTrigger, 
 
       {/* App Studio Panel */}
       {showAppStudio && !isCollapsed && (
-        <div className="fixed z-40 border-l border-claude-border bg-claude-bg flex flex-col shadow-2xl transition-all duration-300 ease-in-out"
+        <div className="fixed z-40 border-l border-deepseek-border bg-deepseek-bg flex flex-col shadow-2xl transition-all duration-300 ease-in-out"
           style={{ top: `${titleBarHeight || 44}px`, left: `${tunerConfig?.sidebarWidth || 280}px`, width: 'min(900px, 65vw)', height: `calc(100vh - ${titleBarHeight || 44}px)`, borderRadius: '0 12px 12px 0' }}>
           <AppStudioPanel onClose={() => setShowAppStudio(false)} />
         </div>
       )}
 
       {showSwarm && <div className="fixed inset-0 z-[100] flex items-center justify-center bg-black/40 p-6">
-        <div className="relative w-[720px] max-w-full max-h-[85vh] overflow-y-auto rounded-2xl bg-claude-bg p-5">
-          <button type="button" aria-label="Close Swarm Collaboration" onClick={() => setShowSwarm(false)} className="absolute right-3 top-3 z-10 p-1 text-claude-text"><X size={18} /></button>
+        <div className="relative w-[720px] max-w-full max-h-[85vh] overflow-y-auto rounded-2xl bg-deepseek-bg p-5">
+          <button type="button" aria-label="Close Swarm Collaboration" onClick={() => setShowSwarm(false)} className="absolute right-3 top-3 z-10 p-1 text-deepseek-text"><X size={18} /></button>
           <SwarmCollaboration />
         </div>
       </div>}
@@ -628,13 +628,13 @@ const Sidebar = ({ overlay = false, isCollapsed, toggleSidebar, refreshTrigger, 
       {/* Logout Confirmation Modal */}
       {showLogoutConfirm && (
         <div className="fixed inset-0 z-[100] flex items-center justify-center bg-black/40">
-          <div className="bg-claude-input rounded-2xl shadow-xl w-[360px] p-6">
-            <h3 className="text-[16px] font-semibold text-claude-text mb-2">{t('sidebar.logoutConfirm')}</h3>
-            <p className="text-[14px] text-claude-textSecondary mb-6">{t('sidebar.logoutMessage')}</p>
+          <div className="bg-deepseek-input rounded-2xl shadow-xl w-[360px] p-6">
+            <h3 className="text-[16px] font-semibold text-deepseek-text mb-2">{t('sidebar.logoutConfirm')}</h3>
+            <p className="text-[14px] text-deepseek-textSecondary mb-6">{t('sidebar.logoutMessage')}</p>
             <div className="flex justify-end gap-3">
               <button
                 onClick={() => setShowLogoutConfirm(false)}
-                className="px-4 py-2 text-[13px] text-claude-text bg-claude-btn-hover hover:bg-claude-hover rounded-lg transition-colors"
+                className="px-4 py-2 text-[13px] text-deepseek-text bg-deepseek-btn-hover hover:bg-deepseek-hover rounded-lg transition-colors"
               >
                 {t('sidebar.cancelLogout')}
               </button>
@@ -655,31 +655,31 @@ const Sidebar = ({ overlay = false, isCollapsed, toggleSidebar, refreshTrigger, 
             role="dialog"
             aria-modal="true"
             aria-labelledby="help-dialog-title"
-            className="bg-claude-input rounded-2xl shadow-xl w-[360px] p-6"
+            className="bg-deepseek-input rounded-2xl shadow-xl w-[360px] p-6"
             onClick={(e) => e.stopPropagation()}
           >
-            <h3 id="help-dialog-title" className="text-[16px] font-semibold text-claude-text mb-2">{t('sidebar.supportTitle')}</h3>
-            <div className="mb-4 rounded-xl border border-claude-border p-3 space-y-2 text-[13px]">
+            <h3 id="help-dialog-title" className="text-[16px] font-semibold text-deepseek-text mb-2">{t('sidebar.supportTitle')}</h3>
+            <div className="mb-4 rounded-xl border border-deepseek-border p-3 space-y-2 text-[13px]">
               <div className="flex items-center justify-between gap-4">
-                <span className="font-medium text-claude-text">DeepSeek Code</span>
-                <span className="text-claude-textSecondary">v{__APP_VERSION__}</span>
+                <span className="font-medium text-deepseek-text">DeepSeek Code</span>
+                <span className="text-deepseek-textSecondary">v{__APP_VERSION__}</span>
               </div>
               <div className="flex items-center justify-between gap-4">
-                <span className="text-claude-textSecondary">Bridge</span>
-                <span className="flex items-center gap-2 text-claude-text">
+                <span className="text-deepseek-textSecondary">Bridge</span>
+                <span className="flex items-center gap-2 text-deepseek-text">
                   <span className={`w-1.5 h-1.5 rounded-full ${bridgeHealthy ? 'bg-green-500' : 'bg-amber-500'}`} />
                   {bridgePort ? `:${bridgePort}` : 'Connecting...'}
                 </span>
               </div>
             </div>
-            <p className="text-[14px] text-claude-textSecondary mb-3">{t('sidebar.supportQQLabel')}</p>
-            <div className="px-4 py-3 mb-6 rounded-xl bg-claude-btn-hover text-[20px] font-semibold tracking-wide text-claude-text text-center select-all">
+            <p className="text-[14px] text-deepseek-textSecondary mb-3">{t('sidebar.supportQQLabel')}</p>
+            <div className="px-4 py-3 mb-6 rounded-xl bg-deepseek-btn-hover text-[20px] font-semibold tracking-wide text-deepseek-text text-center select-all">
               629466903
             </div>
             <div className="flex justify-end">
               <button
                 onClick={() => setShowHelpModal(false)}
-                className="px-4 py-2 text-[13px] text-claude-text bg-claude-btn-hover hover:bg-claude-hover rounded-lg transition-colors"
+                className="px-4 py-2 text-[13px] text-deepseek-text bg-deepseek-btn-hover hover:bg-deepseek-hover rounded-lg transition-colors"
               >
                 {t('sidebar.close')}
               </button>

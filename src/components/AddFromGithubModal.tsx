@@ -370,20 +370,20 @@ const AddFromGithubModal: React.FC<Props> = ({ isOpen, onClose, onConfirm, curre
       onClick={handleClose}
     >
       <div
-        className="bg-claude-bg border border-claude-border rounded-2xl shadow-2xl w-[min(720px,92vw)] h-[min(680px,88vh)] flex flex-col font-sans"
+        className="bg-deepseek-bg border border-deepseek-border rounded-2xl shadow-2xl w-[min(720px,92vw)] h-[min(680px,88vh)] flex flex-col font-sans"
         onClick={e => e.stopPropagation()}
       >
         {/* Header */}
         <div className="flex items-start justify-between px-5 pt-5 pb-3">
           <div>
-            <h2 className="text-[15px] font-semibold text-claude-text">Add content from GitHub</h2>
-            <p className="text-[12px] text-claude-textSecondary mt-0.5">
+            <h2 className="text-[15px] font-semibold text-deepseek-text">Add content from GitHub</h2>
+            <p className="text-[12px] text-deepseek-textSecondary mt-0.5">
               Select the files you would like to add to this chat
             </p>
           </div>
           <button
             onClick={handleClose}
-            className="p-1 text-claude-textSecondary hover:text-claude-text hover:bg-claude-hover rounded-md transition-colors"
+            className="p-1 text-deepseek-textSecondary hover:text-deepseek-text hover:bg-deepseek-hover rounded-md transition-colors"
           >
             <X size={16} />
           </button>
@@ -391,36 +391,36 @@ const AddFromGithubModal: React.FC<Props> = ({ isOpen, onClose, onConfirm, curre
 
         {/* Repo picker row */}
         <div className="px-5 pb-3 flex items-center gap-2">
-          <Github size={18} className="text-claude-text flex-shrink-0" />
+          <Github size={18} className="text-deepseek-text flex-shrink-0" />
           <div className="relative">
             <button
               ref={repoBtnRef}
               disabled={!connected}
               onClick={() => setShowRepoDropdown(prev => !prev)}
-              className="flex items-center gap-1.5 px-3 py-1.5 border border-claude-border rounded-lg text-[13px] text-claude-text bg-claude-input hover:bg-claude-hover transition-colors disabled:opacity-50 min-w-[180px]"
+              className="flex items-center gap-1.5 px-3 py-1.5 border border-deepseek-border rounded-lg text-[13px] text-deepseek-text bg-deepseek-input hover:bg-deepseek-hover transition-colors disabled:opacity-50 min-w-[180px]"
             >
               <span className="truncate">
                 {selectedRepo ? selectedRepo.full_name : 'Select a repository'}
               </span>
-              <ChevronDown size={14} className="text-claude-textSecondary ml-auto flex-shrink-0" />
+              <ChevronDown size={14} className="text-deepseek-textSecondary ml-auto flex-shrink-0" />
             </button>
             {showRepoDropdown && connected && (
-              <div className="absolute left-0 top-full mt-1 w-[300px] bg-claude-input border border-claude-border rounded-xl shadow-[0_4px_16px_rgba(0,0,0,0.16)] py-1 z-10 max-h-[260px] overflow-y-auto">
+              <div className="absolute left-0 top-full mt-1 w-[300px] bg-deepseek-input border border-deepseek-border rounded-xl shadow-[0_4px_16px_rgba(0,0,0,0.16)] py-1 z-10 max-h-[260px] overflow-y-auto">
                 {reposLoading && (
-                  <div className="px-4 py-3 text-[12px] text-claude-textSecondary flex items-center gap-2">
+                  <div className="px-4 py-3 text-[12px] text-deepseek-textSecondary flex items-center gap-2">
                     <Loader2 size={12} className="animate-spin" /> Loading repositories...
                   </div>
                 )}
                 {!reposLoading && repos.length === 0 && (
-                  <div className="px-4 py-3 text-[12px] text-claude-textSecondary">No repositories found</div>
+                  <div className="px-4 py-3 text-[12px] text-deepseek-textSecondary">No repositories found</div>
                 )}
                 {!reposLoading && repos.map(r => (
                   <button
                     key={r.id}
                     onClick={() => handleSelectRepo(r)}
-                    className="w-full text-left px-4 py-2 text-[13px] text-claude-text hover:bg-claude-hover transition-colors truncate flex items-center gap-2"
+                    className="w-full text-left px-4 py-2 text-[13px] text-deepseek-text hover:bg-deepseek-hover transition-colors truncate flex items-center gap-2"
                   >
-                    <span className="text-claude-textSecondary">{r.full_name.split('/')[0]} /</span>
+                    <span className="text-deepseek-textSecondary">{r.full_name.split('/')[0]} /</span>
                     <span>{r.name}</span>
                   </button>
                 ))}
@@ -430,7 +430,7 @@ const AddFromGithubModal: React.FC<Props> = ({ isOpen, onClose, onConfirm, curre
           <button
             onClick={() => setShowUrlInput(prev => !prev)}
             title="Paste a GitHub URL"
-            className="p-1.5 text-claude-textSecondary hover:text-claude-text hover:bg-claude-hover rounded-md transition-colors"
+            className="p-1.5 text-deepseek-textSecondary hover:text-deepseek-text hover:bg-deepseek-hover rounded-md transition-colors"
           >
             <Link2 size={16} />
           </button>
@@ -444,7 +444,7 @@ const AddFromGithubModal: React.FC<Props> = ({ isOpen, onClose, onConfirm, curre
               value={urlInput}
               onChange={e => setUrlInput(e.target.value)}
               onKeyDown={e => { if (e.key === 'Enter') handleUrlSubmit(); }}
-              className="flex-1 px-3 py-1.5 border border-claude-border rounded-lg text-[13px] bg-claude-input text-claude-text outline-none focus:border-[#CCC] dark:focus:border-[#5a5a58]"
+              className="flex-1 px-3 py-1.5 border border-deepseek-border rounded-lg text-[13px] bg-deepseek-input text-deepseek-text outline-none focus:border-[#CCC] dark:focus:border-[#5a5a58]"
             />
             <button
               onClick={handleUrlSubmit}
@@ -456,11 +456,11 @@ const AddFromGithubModal: React.FC<Props> = ({ isOpen, onClose, onConfirm, curre
         )}
 
         {/* Browser area */}
-        <div className="mx-5 mb-3 flex-1 min-h-0 border border-claude-border rounded-xl bg-claude-input overflow-hidden flex flex-col">
+        <div className="mx-5 mb-3 flex-1 min-h-0 border border-deepseek-border rounded-xl bg-deepseek-input overflow-hidden flex flex-col">
           {connected === false && (
             <div className="flex-1 flex flex-col items-center justify-center gap-3 p-6 text-center">
-              <Github size={36} className="text-claude-textSecondary" />
-              <p className="text-[13px] text-claude-textSecondary">Connect your GitHub account to browse repositories.</p>
+              <Github size={36} className="text-deepseek-textSecondary" />
+              <p className="text-[13px] text-deepseek-textSecondary">Connect your GitHub account to browse repositories.</p>
               {oauthAvailable ? (
                 <button
                   onClick={handleConnect}
@@ -476,7 +476,7 @@ const AddFromGithubModal: React.FC<Props> = ({ isOpen, onClose, onConfirm, curre
 
           {connected && !selectedRepo && (
             <div className="flex-1 flex items-center justify-center px-6 text-center">
-              <p className="text-[13px] text-claude-textSecondary">
+              <p className="text-[13px] text-deepseek-textSecondary">
                 Select a repository or paste a URL above to get started
               </p>
             </div>
@@ -484,25 +484,25 @@ const AddFromGithubModal: React.FC<Props> = ({ isOpen, onClose, onConfirm, curre
 
           {connected && selectedRepo && (
             <>
-              <div className="flex items-center gap-1 px-3 py-2 border-b border-claude-border text-[12px] text-claude-textSecondary flex-shrink-0">
+              <div className="flex items-center gap-1 px-3 py-2 border-b border-deepseek-border text-[12px] text-deepseek-textSecondary flex-shrink-0">
                 {currentPath && (
                   <button
                     onClick={handleGoUp}
-                    className="p-0.5 hover:text-claude-text hover:bg-claude-hover rounded"
+                    className="p-0.5 hover:text-deepseek-text hover:bg-deepseek-hover rounded"
                     title="Go up"
                   >
                     <ChevronLeft size={14} />
                   </button>
                 )}
                 <span className="truncate">
-                  <span className="text-claude-text font-medium">{selectedRepo.name}</span>
+                  <span className="text-deepseek-text font-medium">{selectedRepo.name}</span>
                   {pathParts.length > 0 && <span> / {pathParts.join(' / ')}</span>}
                 </span>
                 {treeLoading && <Loader2 size={11} className="animate-spin ml-auto" />}
               </div>
               <div className="flex-1 overflow-y-auto">
                 {entriesLoading && (
-                  <div className="p-4 text-[12px] text-claude-textSecondary flex items-center gap-2">
+                  <div className="p-4 text-[12px] text-deepseek-textSecondary flex items-center gap-2">
                     <Loader2 size={12} className="animate-spin" /> Loading...
                   </div>
                 )}
@@ -510,7 +510,7 @@ const AddFromGithubModal: React.FC<Props> = ({ isOpen, onClose, onConfirm, curre
                   <div className="p-4 text-[12px] text-red-500">{browseError}</div>
                 )}
                 {!entriesLoading && !browseError && entries.length === 0 && (
-                  <div className="p-4 text-[12px] text-claude-textSecondary">Empty folder</div>
+                  <div className="p-4 text-[12px] text-deepseek-textSecondary">Empty folder</div>
                 )}
                 {!entriesLoading && entries.map(entry => {
                   const isFile = entry.type === 'file';
@@ -519,11 +519,11 @@ const AddFromGithubModal: React.FC<Props> = ({ isOpen, onClose, onConfirm, curre
                   return (
                     <div
                       key={entry.sha || entry.path}
-                      className="flex items-center gap-2 px-3 py-1.5 text-[13px] text-claude-text hover:bg-claude-hover transition-colors"
+                      className="flex items-center gap-2 px-3 py-1.5 text-[13px] text-deepseek-text hover:bg-deepseek-hover transition-colors"
                     >
                       <div
                         onClick={(e) => { e.stopPropagation(); toggleEntry(entry); }}
-                        className={`w-4 h-4 border rounded flex items-center justify-center flex-shrink-0 cursor-pointer ${isSelected ? 'border-transparent' : 'border-claude-border'}`}
+                        className={`w-4 h-4 border rounded flex items-center justify-center flex-shrink-0 cursor-pointer ${isSelected ? 'border-transparent' : 'border-deepseek-border'}`}
                         style={isSelected ? { backgroundColor: BLUE, borderColor: BLUE } : undefined}
                       >
                         {isSelected && <Check size={10} className="text-white" />}
@@ -533,12 +533,12 @@ const AddFromGithubModal: React.FC<Props> = ({ isOpen, onClose, onConfirm, curre
                         className="flex items-center gap-2 flex-1 min-w-0 cursor-pointer"
                       >
                         {isFile ? (
-                          <FileText size={14} className="text-claude-textSecondary flex-shrink-0" />
+                          <FileText size={14} className="text-deepseek-textSecondary flex-shrink-0" />
                         ) : (
                           <Folder size={14} className="flex-shrink-0" style={{ color: isSelected ? BLUE : undefined }} fill={isSelected ? BLUE : 'none'} />
                         )}
                         <span className="truncate flex-1">{entry.name}</span>
-                        <span className="text-[11px] text-claude-textSecondary flex-shrink-0">
+                        <span className="text-[11px] text-deepseek-textSecondary flex-shrink-0">
                           {isFile ? formatSize(entry.size) : getEntryPctLabel(entry)}
                         </span>
                       </div>
@@ -551,15 +551,15 @@ const AddFromGithubModal: React.FC<Props> = ({ isOpen, onClose, onConfirm, curre
 
           {connected === null && (
             <div className="flex-1 flex items-center justify-center">
-              <Loader2 size={18} className="animate-spin text-claude-textSecondary" />
+              <Loader2 size={18} className="animate-spin text-deepseek-textSecondary" />
             </div>
           )}
         </div>
 
         {/* Footer */}
-        <div className="px-5 py-3 border-t border-claude-border">
+        <div className="px-5 py-3 border-t border-deepseek-border">
           <div className="flex items-center justify-between gap-3 mb-2">
-            <div className="flex items-center gap-2 text-[12px] text-claude-textSecondary">
+            <div className="flex items-center gap-2 text-[12px] text-deepseek-textSecondary">
               <span>
                 {selected.size === 0
                   ? 'Select files to add to chat context'
@@ -571,7 +571,7 @@ const AddFromGithubModal: React.FC<Props> = ({ isOpen, onClose, onConfirm, curre
                 className="text-[11px] whitespace-nowrap"
                 style={{ color: isOverflow ? '#dc2626' : undefined }}
               >
-                <span className={isOverflow ? '' : 'text-claude-textSecondary'}>
+                <span className={isOverflow ? '' : 'text-deepseek-textSecondary'}>
                   {capacityLabel}% of capacity used
                 </span>
               </span>
@@ -586,7 +586,7 @@ const AddFromGithubModal: React.FC<Props> = ({ isOpen, onClose, onConfirm, curre
             </div>
           </div>
           {/* Progress bar */}
-          <div className="h-[6px] w-full rounded-full bg-transparent border border-claude-border overflow-hidden">
+          <div className="h-[6px] w-full rounded-full bg-transparent border border-deepseek-border overflow-hidden">
             <div
               className={`h-full transition-all duration-200 ${isOverflow ? 'bg-red-600' : 'bg-black dark:bg-white'}`}
               style={{ width: `${capacityBarPct}%` }}
