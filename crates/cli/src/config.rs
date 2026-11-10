@@ -32,6 +32,16 @@ pub fn save_default_model(paths: &RuntimePaths, provider: &str, model: &str) -> 
     save_preferences(paths, &prefs)
 }
 
+/// The saved default model as `(provider, model)`, if both parts were stored.
+pub fn default_model(paths: &RuntimePaths) -> Option<(String, String)> {
+    let prefs = preferences(paths).ok()?;
+    let (provider, model) = prefs["model"].as_str()?.split_once("::")?;
+    if provider.is_empty() || model.is_empty() {
+        return None;
+    }
+    Some((provider.to_owned(), model.to_owned()))
+}
+
 fn save_preferences(paths: &RuntimePaths, value: &Value) -> Result<()> {
     std::fs::create_dir_all(&paths.data_dir)?;
     std::fs::write(
