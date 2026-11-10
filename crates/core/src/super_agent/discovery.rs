@@ -129,7 +129,15 @@ pub enum BranchSelectionError {
 /// Detects one target. Detection errors are returned as `DetectionFailed`,
 /// never as `NonGit`.
 pub fn discover_target(target: &Path, options: &DiscoveryOptions) -> Discovery {
-    match detect_target(target, options) {
+    detect_with(target, options, &|cwd, args| command(cwd, args))
+}
+
+type GitRunner<'a> = &'a dyn Fn(&Path, &[&str]) -> Result<Output>;
+
+/// Testable core: every Git invocation goes through `run`, so a spawn failure
+/// (Git missing or not executable) is distinguishable from "no repository".
+fn detect_with(target: &Path, options: &DiscoveryOptions, run: GitRunner<'_>) -> Discovery {
+    match detect_target(target, options, run) {
         Ok(discovery) => discovery,
         Err(error) => Discovery::DetectionFailed {
             target: target.to_path_buf(),
@@ -138,45 +146,69 @@ pub fn discover_target(target: &Path, options: &DiscoveryOptions) -> Discovery {
     }
 }
 
-fn detect_target(target: &Path, options: &DiscoveryOptions) -> Result<Discovery> {
+fn detect_target(
+    target: &Path,
+    options: &DiscoveryOptions,
+    run: GitRunner<'_>,
+) -> Result<Discovery> {
     let target = absolute(target)?;
-    let ancestor = nearest_existing_ancestor(&target)?;
-    let canonical_ancestor = ancestor
+    // An existing file target is probed from its containing directory, and a
+    // not-yet-created target from its nearest existing directory. Git is never
+    // run inside a file, where it would only report a spawn failure.
+    let probe = probe_directory(&target)?;
+    let probe = probe
         .canonicalize()
-        .with_context(|| format!("Resolving target ancestor {}", ancestor.display()))?;
-    authorize(&canonical_ancestor, options)?;
-    let probe = command(&canonical_ancestor, &["rev-parse", "--is-inside-work-tree"])
-        .context("Running Git discovery")?;
-    if !probe.status.success() {
-        let stderr = String::from_utf8_lossy(&probe.stderr).to_lowercase();
-        if stderr.contains("not a git repository") {
-            return Ok(Discovery::NonGit { target });
+        .with_context(|| format!("Resolving target ancestor {}", probe.display()))?;
+    authorize(&probe, options)?;
+    let output =
+        run(&probe, &["rev-parse", "--is-inside-work-tree"]).context("Running Git discovery")?;
+    if output.status.success() {
+        if String::from_utf8_lossy(&output.stdout).trim() != "true" {
+            return Ok(Discovery::GitSetupRequired {
+                target,
+                root: None,
+                common_dir: None,
+                reason: "target is not inside a Git working tree".into(),
+            });
         }
+        return detect_repository(target, &probe, run);
+    }
+    let stderr = String::from_utf8_lossy(&output.stderr).trim().to_owned();
+    // A `.git` entry anywhere above the target means metadata exists. Git
+    // failing with it in place is a damaged or unusable repository, not an
+    // unversioned directory, even when its message also says "not a git
+    // repository". Validate the metadata so the error names the actual defect.
+    if let Some(marker) = find_git_marker(&probe)? {
+        validate_git_marker(&marker).with_context(|| {
+            format!(
+                "Git metadata at {} is present but unusable",
+                marker.display()
+            )
+        })?;
         return Ok(Discovery::DetectionFailed {
             target,
             error: format!(
-                "Git discovery failed: {}",
-                String::from_utf8_lossy(&probe.stderr).trim()
+                "Git metadata at {} is present but Git cannot use it: {stderr}",
+                marker.display()
             ),
         });
     }
-    if String::from_utf8_lossy(&probe.stdout).trim() != "true" {
-        return Ok(Discovery::GitSetupRequired {
-            target,
-            root: None,
-            common_dir: None,
-            reason: "target is not inside a Git working tree".into(),
-        });
+    if stderr.to_lowercase().contains("not a git repository") {
+        return Ok(Discovery::NonGit { target });
     }
-    let root = PathBuf::from(git_ok(
-        &canonical_ancestor,
-        &["rev-parse", "--show-toplevel"],
-    )?);
-    let common_dir = absolute_git_dir(&canonical_ancestor, "--git-common-dir")?;
-    let git_dir = absolute_git_dir(&canonical_ancestor, "--absolute-git-dir")
-        .unwrap_or_else(|_| common_dir.clone());
+    Ok(Discovery::DetectionFailed {
+        target,
+        error: format!("Git discovery failed: {stderr}"),
+    })
+}
+
+fn detect_repository(target: PathBuf, probe: &Path, run: GitRunner<'_>) -> Result<Discovery> {
+    let root = PathBuf::from(git_ok(run, probe, &["rev-parse", "--show-toplevel"])?);
+    let common_dir = absolute_git_dir(run, probe, "--git-common-dir")?;
+    let git_dir =
+        absolute_git_dir(run, probe, "--absolute-git-dir").unwrap_or_else(|_| common_dir.clone());
     let root = root.canonicalize().unwrap_or(root);
-    if let Some(reason) = repository_setup_requirement(&canonical_ancestor, &git_dir)? {
+    if let Some(reason) = repository_setup_requirement(run, probe, &git_dir)? {
         return Ok(Discovery::GitSetupRequired {
             target,
             root: Some(root),
@@ -184,25 +216,19 @@ fn detect_target(target: &Path, options: &DiscoveryOptions) -> Result<Discovery>
             reason,
         });
     }
-    let current_branch = command(
-        &canonical_ancestor,
-        &["symbolic-ref", "--quiet", "--short", "HEAD"],
-    )
-    .ok()
-    .filter(|output| output.status.success())
-    .map(|output| String::from_utf8_lossy(&output.stdout).trim().to_owned())
-    .filter(|branch| !branch.is_empty());
+    let current_branch = run(probe, &["symbolic-ref", "--quiet", "--short", "HEAD"])
+        .ok()
+        .filter(|output| output.status.success())
+        .map(|output| String::from_utf8_lossy(&output.stdout).trim().to_owned())
+        .filter(|branch| !branch.is_empty());
     let detached = current_branch.is_none();
-    let superproject = command(
-        &canonical_ancestor,
-        &["rev-parse", "--show-superproject-working-tree"],
-    )
-    .ok()
-    .filter(|output| output.status.success())
-    .map(|output| String::from_utf8_lossy(&output.stdout).trim().to_owned())
-    .filter(|path| !path.is_empty())
-    .map(PathBuf::from)
-    .and_then(|path| path.canonicalize().ok());
+    let superproject = run(probe, &["rev-parse", "--show-superproject-working-tree"])
+        .ok()
+        .filter(|output| output.status.success())
+        .map(|output| String::from_utf8_lossy(&output.stdout).trim().to_owned())
+        .filter(|path| !path.is_empty())
+        .map(PathBuf::from)
+        .and_then(|path| path.canonicalize().ok());
     Ok(Discovery::GitRepository(GitRepository {
         target_path: target,
         root,
@@ -214,8 +240,9 @@ fn detect_target(target: &Path, options: &DiscoveryOptions) -> Result<Discovery>
     }))
 }
 
-fn absolute_git_dir(cwd: &Path, argument: &str) -> Result<PathBuf> {
+fn absolute_git_dir(run: GitRunner<'_>, cwd: &Path, argument: &str) -> Result<PathBuf> {
     let path = PathBuf::from(git_ok(
+        run,
         cwd,
         &["rev-parse", "--path-format=absolute", argument],
     )?);
@@ -227,10 +254,14 @@ fn absolute_git_dir(cwd: &Path, argument: &str) -> Result<PathBuf> {
     Ok(path.canonicalize().unwrap_or(path))
 }
 
-fn repository_setup_requirement(cwd: &Path, git_dir: &Path) -> Result<Option<String>> {
-    let head = command(cwd, &["rev-parse", "--verify", "HEAD^{commit}"])?;
+fn repository_setup_requirement(
+    run: GitRunner<'_>,
+    cwd: &Path,
+    git_dir: &Path,
+) -> Result<Option<String>> {
+    let head = run(cwd, &["rev-parse", "--verify", "HEAD^{commit}"])?;
     if !head.status.success() {
-        let symbolic = command(cwd, &["symbolic-ref", "--quiet", "HEAD"])?;
+        let symbolic = run(cwd, &["symbolic-ref", "--quiet", "HEAD"])?;
         let stderr = String::from_utf8_lossy(&head.stderr).to_lowercase();
         if symbolic.status.success()
             || stderr.contains("needed a single revision")
@@ -266,21 +297,143 @@ fn absolute(path: &Path) -> Result<PathBuf> {
     }
 }
 
-fn nearest_existing_ancestor(path: &Path) -> Result<PathBuf> {
-    let mut current = path.to_path_buf();
+/// The directory Git should run in for a target. Existing directories are
+/// used directly, existing files use their parent, and paths that do not
+/// exist yet use the nearest existing ancestor.
+fn probe_directory(target: &Path) -> Result<PathBuf> {
+    let mut current = target.to_path_buf();
     loop {
-        if current.exists() {
-            return Ok(current);
+        match std::fs::metadata(&current) {
+            Ok(metadata) if metadata.is_dir() => return Ok(current),
+            Ok(_) if current == target => {
+                return current
+                    .parent()
+                    .map(Path::to_path_buf)
+                    .with_context(|| format!("Target {} has no parent", target.display()))
+            }
+            Ok(_) => anyhow::bail!(
+                "Target {} descends through non-directory {}",
+                target.display(),
+                current.display()
+            ),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                let parent = current
+                    .parent()
+                    .context("Target has no existing ancestor")?
+                    .to_path_buf();
+                if parent == current {
+                    anyhow::bail!("Target has no existing ancestor");
+                }
+                current = parent;
+            }
+            Err(error) => {
+                return Err(error).with_context(|| format!("Inspecting {}", current.display()))
+            }
         }
-        let parent = current
-            .parent()
-            .context("Target has no existing ancestor")?
-            .to_path_buf();
-        if parent == current {
-            anyhow::bail!("Target has no existing ancestor");
-        }
-        current = parent;
     }
+}
+
+/// The nearest `.git` entry above `start`, which may be a directory or a file
+/// pointing at another Git directory (worktrees and submodules use the file
+/// form).
+fn find_git_marker(start: &Path) -> Result<Option<PathBuf>> {
+    for ancestor in start.ancestors() {
+        let candidate = ancestor.join(".git");
+        match std::fs::symlink_metadata(&candidate) {
+            Ok(_) => return Ok(Some(candidate)),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(error) => {
+                return Err(error)
+                    .with_context(|| format!("Inspecting Git metadata {}", candidate.display()))
+            }
+        }
+    }
+    Ok(None)
+}
+
+/// Checks that a `.git` entry can plausibly be used. It never repairs
+/// anything: callers turn any failure into `DetectionFailed`.
+fn validate_git_marker(marker: &Path) -> Result<()> {
+    let metadata = std::fs::metadata(marker)
+        .with_context(|| format!("Reading Git metadata {}", marker.display()))?;
+    if metadata.is_dir() {
+        return validate_git_dir(marker);
+    }
+    ensure!(
+        metadata.is_file(),
+        "Git metadata {} is neither a file nor a directory",
+        marker.display()
+    );
+    let text = std::fs::read_to_string(marker)
+        .with_context(|| format!("Reading Git metadata file {}", marker.display()))?;
+    let target = text
+        .lines()
+        .next()
+        .and_then(|line| line.trim().strip_prefix("gitdir:"))
+        .map(str::trim)
+        .filter(|target| !target.is_empty())
+        .with_context(|| {
+            format!(
+                "Git metadata file {} has no valid gitdir directive",
+                marker.display()
+            )
+        })?;
+    let git_dir = if Path::new(target).is_absolute() {
+        PathBuf::from(target)
+    } else {
+        marker
+            .parent()
+            .context("Git metadata file has no parent")?
+            .join(target)
+    };
+    let git_dir = git_dir.canonicalize().with_context(|| {
+        format!(
+            "Git metadata file {} points to an unavailable directory",
+            marker.display()
+        )
+    })?;
+    ensure!(
+        git_dir.is_dir(),
+        "Git metadata target {} is not a directory",
+        git_dir.display()
+    );
+    validate_git_dir(&git_dir)
+}
+
+fn validate_git_dir(git_dir: &Path) -> Result<()> {
+    let head = git_dir.join("HEAD");
+    ensure!(
+        head.is_file(),
+        "Git directory {} has no HEAD",
+        git_dir.display()
+    );
+    std::fs::read_to_string(&head)
+        .with_context(|| format!("Reading Git HEAD at {}", head.display()))?;
+    let commondir = git_dir.join("commondir");
+    if commondir.is_file() {
+        let target = std::fs::read_to_string(&commondir)
+            .with_context(|| format!("Reading {}", commondir.display()))?;
+        let target = target.trim();
+        ensure!(!target.is_empty(), "Git commondir is empty");
+        let common = git_dir.join(target).canonicalize().with_context(|| {
+            format!(
+                "Git commondir in {} points to an unavailable directory",
+                git_dir.display()
+            )
+        })?;
+        ensure!(
+            common.join("objects").is_dir(),
+            "Git common directory {} has no objects",
+            common.display()
+        );
+    } else {
+        ensure!(
+            git_dir.join("objects").is_dir(),
+            "Git directory {} has no objects",
+            git_dir.display()
+        );
+    }
+    Ok(())
 }
 
 fn authorize(path: &Path, options: &DiscoveryOptions) -> Result<()> {
@@ -302,8 +455,8 @@ fn authorize(path: &Path, options: &DiscoveryOptions) -> Result<()> {
     anyhow::bail!("Target {} is outside the authorized roots", path.display())
 }
 
-fn git_ok(cwd: &Path, args: &[&str]) -> Result<String> {
-    let output = command(cwd, args)?;
+fn git_ok(run: GitRunner<'_>, cwd: &Path, args: &[&str]) -> Result<String> {
+    let output = run(cwd, args)?;
     ensure!(
         output.status.success(),
         "{}",
@@ -311,7 +464,6 @@ fn git_ok(cwd: &Path, args: &[&str]) -> Result<String> {
     );
     Ok(String::from_utf8_lossy(&output.stdout).trim().to_owned())
 }
-
 /// Scans a workspace without following symlinks. It stops after `max_entries`
 /// visited entries and skips dependency/build directories by name.
 pub fn scan_repositories(root: &Path, options: &DiscoveryOptions) -> Result<ScanOutcome> {
@@ -534,6 +686,109 @@ mod tests {
             authorized_roots: vec![root.to_path_buf()],
             ..DiscoveryOptions::default()
         }
+    }
+
+    #[test]
+    fn broken_gitdir_pointer_is_a_detection_failure_not_non_git() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().canonicalize().unwrap();
+        let broken = root.join("broken");
+        std::fs::create_dir(&broken).unwrap();
+        std::fs::write(
+            broken.join(".git"),
+            format!("gitdir: {}\n", root.join("missing-git-dir").display()),
+        )
+        .unwrap();
+        match discover_target(&broken, &options(&root)) {
+            Discovery::DetectionFailed { error, .. } => {
+                assert!(error.contains("Git metadata"), "{error}");
+            }
+            other => panic!("expected detection failure, got {other:?}"),
+        }
+        assert!(!broken.join(".git").is_dir());
+    }
+
+    #[test]
+    fn corrupt_git_directory_is_a_detection_failure() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().canonicalize().unwrap();
+        let corrupt = root.join("corrupt");
+        std::fs::create_dir_all(corrupt.join(".git")).unwrap();
+        std::fs::write(corrupt.join(".git/config"), "garbage").unwrap();
+        match discover_target(&corrupt, &options(&root)) {
+            Discovery::DetectionFailed { error, .. } => {
+                assert!(error.contains("no HEAD"), "{error}");
+            }
+            other => panic!("expected detection failure, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_missing_git_executable_is_a_detection_failure() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().canonicalize().unwrap();
+        let plain = root.join("plain");
+        std::fs::create_dir(&plain).unwrap();
+        let discovery = detect_with(&plain, &options(&root), &|_cwd, _args| {
+            Err(anyhow::anyhow!(
+                "Could not run Git. Check that Git is installed"
+            ))
+        });
+        match discovery {
+            Discovery::DetectionFailed { error, .. } => {
+                assert!(error.contains("Could not run Git"), "{error}");
+            }
+            other => panic!("expected detection failure, got {other:?}"),
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn unreadable_git_metadata_is_a_detection_failure() {
+        use std::os::unix::fs::PermissionsExt;
+        let (temp, root) = repo("unreadable");
+        let git_dir = root.join(".git");
+        std::fs::set_permissions(&git_dir, std::fs::Permissions::from_mode(0o000)).unwrap();
+        let discovery = discover_target(&root, &options(temp.path()));
+        let readable_anyway = std::fs::read_dir(&git_dir).is_ok();
+        std::fs::set_permissions(&git_dir, std::fs::Permissions::from_mode(0o755)).unwrap();
+        if readable_anyway {
+            // Running with privileges that bypass the mode; the scenario cannot
+            // be constructed here, so no classification is claimed.
+            return;
+        }
+        match discovery {
+            Discovery::DetectionFailed { .. } => {}
+            other => panic!("expected detection failure, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn existing_and_not_yet_created_file_targets_use_the_containing_directory() {
+        let (temp, root) = repo("files");
+        let existing = root.join("file.txt");
+        let discovery = discover_target(&existing, &options(temp.path()));
+        let repository = discovery
+            .repository()
+            .unwrap_or_else(|| panic!("expected repository, got {discovery:?}"));
+        assert_eq!(repository.target_path, existing);
+        assert_eq!(repository.root, root);
+
+        let future = root.join("new-file.txt");
+        assert!(!future.exists());
+        let discovery = discover_target(&future, &options(temp.path()));
+        let repository = discovery
+            .repository()
+            .unwrap_or_else(|| panic!("expected repository, got {discovery:?}"));
+        assert_eq!(repository.target_path, future);
+
+        let plain = temp.path().join("plain");
+        std::fs::create_dir(&plain).unwrap();
+        let outside = plain.join("new-file.txt");
+        assert!(matches!(
+            discover_target(&outside, &options(temp.path())),
+            Discovery::NonGit { .. }
+        ));
     }
 
     #[test]
