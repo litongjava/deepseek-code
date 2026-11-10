@@ -25,6 +25,17 @@ fn preferences(paths: &RuntimePaths) -> Result<Value> {
     Ok(serde_json::from_str(&std::fs::read_to_string(path)?)?)
 }
 
+/// The saved default selection as `(provider, model)`, if one is stored.
+/// Reads the same `provider::model` form that [`save_default_model`] writes.
+pub fn default_model(paths: &RuntimePaths) -> Option<(String, String)> {
+    let saved = preferences(paths).ok()?;
+    let (provider, model) = saved["model"].as_str()?.split_once("::")?;
+    if provider.is_empty() || model.is_empty() {
+        return None;
+    }
+    Some((provider.to_owned(), model.to_owned()))
+}
+
 /// The model new sessions start with, until `--model` or `/model` says otherwise.
 pub fn save_default_model(paths: &RuntimePaths, provider: &str, model: &str) -> Result<()> {
     let mut prefs = preferences(paths)?;
@@ -56,7 +67,10 @@ pub(crate) fn default_max_tokens(model: &str) -> u32 {
         64_000
     } else if model.contains("claude-3-opus") || model.contains("claude-3-haiku") {
         4096
-    } else if model.contains("claude-3-sonnet") || model.contains("3-5-sonnet") || model.contains("3-5-haiku") {
+    } else if model.contains("claude-3-sonnet")
+        || model.contains("3-5-sonnet")
+        || model.contains("3-5-haiku")
+    {
         8192
     } else {
         32_000
@@ -66,7 +80,9 @@ pub(crate) fn default_max_tokens(model: &str) -> u32 {
 /// Known context windows for CLI model defaults.
 pub(crate) fn default_context_window(model: &str) -> Option<u32> {
     if let Some(limit) =
-        deepseek_code_core::native_engine::token_counter::TokenCounter::default_context_window(model)
+        deepseek_code_core::native_engine::token_counter::TokenCounter::default_context_window(
+            model,
+        )
     {
         return Some(limit);
     }
@@ -160,11 +176,15 @@ pub fn select(
         .model
         .as_deref()
         .or(resumed_model)
-        .or_else(|| prefs["model"].as_str().filter(|saved| {
-            cli.provider.as_deref().is_none_or(|explicit| {
-                saved.split_once("::").is_some_and(|(provider, _)| provider == explicit)
+        .or_else(|| {
+            prefs["model"].as_str().filter(|saved| {
+                cli.provider.as_deref().is_none_or(|explicit| {
+                    saved
+                        .split_once("::")
+                        .is_some_and(|(provider, _)| provider == explicit)
+                })
             })
-        }))
+        })
         .or(first_model)
         .unwrap_or(if std::env::var_os("DEEPSEEK_API_KEY").is_some() {
             "deepseek-flash"
@@ -182,25 +202,52 @@ pub fn select(
         );
     }
     let selected_provider = qualified_provider.or(selected_provider);
-    let model = if providers
-        .iter()
-        .any(|p| p.enabled && selected_provider.is_none_or(|id|id==p.id) && p.models.iter().any(|m| m.enabled && m.id == raw_model))
-    {
+    let model = if providers.iter().any(|p| {
+        p.enabled
+            && selected_provider.is_none_or(|id| id == p.id)
+            && p.models.iter().any(|m| m.enabled && m.id == raw_model)
+    }) {
         raw_model.to_owned()
     } else {
-        if let Some(base)=deepseek_code_core::native_engine::provider_manager::one_million_context_base(raw_model){
-            let known=providers.iter().any(|p|p.enabled&&selected_provider.is_none_or(|id|id==p.id)&&p.models.iter().any(|m|m.enabled&&m.id==base));
-            format!("{}[1m]",if known {base.to_owned()}else{ApiConfig::resolve_model_alias(base)})
-        }else{ApiConfig::resolve_model_alias(raw_model)}
+        if let Some(base) =
+            deepseek_code_core::native_engine::provider_manager::one_million_context_base(raw_model)
+        {
+            let known = providers.iter().any(|p| {
+                p.enabled
+                    && selected_provider.is_none_or(|id| id == p.id)
+                    && p.models.iter().any(|m| m.enabled && m.id == base)
+            });
+            format!(
+                "{}[1m]",
+                if known {
+                    base.to_owned()
+                } else {
+                    ApiConfig::resolve_model_alias(base)
+                }
+            )
+        } else {
+            ApiConfig::resolve_model_alias(raw_model)
+        }
     };
-    let exact=providers.iter().any(|p|p.enabled&&selected_provider.is_none_or(|id|id==p.id)&&p.models.iter().any(|m|m.enabled&&m.id==model));
+    let exact = providers.iter().any(|p| {
+        p.enabled
+            && selected_provider.is_none_or(|id| id == p.id)
+            && p.models.iter().any(|m| m.enabled && m.id == model)
+    });
     let matching: Vec<usize> = providers
         .iter()
         .enumerate()
         .filter(|(_, p)| {
             p.enabled
                 && selected_provider.map_or(true, |id| p.id == id)
-                && if exact {p.models.iter().any(|m|m.enabled&&m.id==model)}else{deepseek_code_core::native_engine::provider_manager::resolve_model_selection(&p.models,&model).is_some()}
+                && if exact {
+                    p.models.iter().any(|m| m.enabled && m.id == model)
+                } else {
+                    deepseek_code_core::native_engine::provider_manager::resolve_model_selection(
+                        &p.models, &model,
+                    )
+                    .is_some()
+                }
         })
         .map(|(i, _)| i)
         .collect();
@@ -255,7 +302,9 @@ pub fn select(
             selected_provider.is_none() || selected_provider == Some("cli-runtime"),
             "Selected provider does not contain enabled model {model}"
         );
-        let base=deepseek_code_core::native_engine::provider_manager::one_million_context_base(&model).unwrap_or(&model);
+        let base =
+            deepseek_code_core::native_engine::provider_manager::one_million_context_base(&model)
+                .unwrap_or(&model);
         let mut p = provider_from_config(&provider_template(base));
         p.id = "cli-runtime".into();
         providers.push(p);
@@ -336,8 +385,12 @@ pub fn run(paths: &RuntimePaths, action: &ConfigCommands) -> Result<()> {
                 return Ok(());
             }
             if key == deepseek_code_core::permissions::auto_config::KEY {
-                let config: deepseek_code_core::permissions::auto_config::AutoConfig = serde_json::from_str(value)?;
-                deepseek_code_core::permissions::auto_config::save(&crate::services::context(paths)?, &config)?;
+                let config: deepseek_code_core::permissions::auto_config::AutoConfig =
+                    serde_json::from_str(value)?;
+                deepseek_code_core::permissions::auto_config::save(
+                    &crate::services::context(paths)?,
+                    &config,
+                )?;
                 return crate::services::print(&config);
             }
             if let Some(field) = key.strip_prefix("search.") {
@@ -466,11 +519,39 @@ mod budget_tests {
     fn shell_configuration_is_shared_and_does_not_need_a_provider() {
         let root = tempfile::tempdir().unwrap();
         let paths = RuntimePaths::new(root.path().join("data")).unwrap();
-        run(&paths, &ConfigCommands::Set { key: "shell.toolDefault".into(), value: "pwsh".into() }).unwrap();
+        run(
+            &paths,
+            &ConfigCommands::Set {
+                key: "shell.toolDefault".into(),
+                value: "pwsh".into(),
+            },
+        )
+        .unwrap();
         let settings = deepseek_code_core::services::shell_settings::load(&paths.data_dir).unwrap();
         assert_eq!(settings.tool_default, "pwsh");
         assert_eq!(settings.terminal_default, "auto");
-        assert!(run(&paths, &ConfigCommands::Set { key: "shell.bashPath".into(), value: "does-not-exist".into() }).is_err());
+        assert!(run(
+            &paths,
+            &ConfigCommands::Set {
+                key: "shell.bashPath".into(),
+                value: "does-not-exist".into()
+            }
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn saved_default_model_is_read_in_provider_model_form() {
+        let root = tempfile::tempdir().unwrap();
+        let paths = RuntimePaths::new(root.path().join("data")).unwrap();
+        assert_eq!(default_model(&paths), None);
+        save_default_model(&paths, "cli", "fixture-model").unwrap();
+        assert_eq!(
+            default_model(&paths),
+            Some(("cli".into(), "fixture-model".into()))
+        );
+        std::fs::write(paths.data_dir.join("cli.json"), r#"{"model":"broken"}"#).unwrap();
+        assert_eq!(default_model(&paths), None);
     }
 
     #[test]
@@ -512,21 +593,38 @@ mod search_tests {
         let root = tempfile::tempdir().unwrap();
         let paths = RuntimePaths::new(root.path().join("data")).unwrap();
         let mut manager = ConfigManager::new(paths.data_dir.clone());
-        manager.update_config(|config| {
-            config.providers = ["first", "second"].into_iter().map(|id| {
-                let mut provider = provider_template("fixture-model");
-                provider.id = id.into();
-                provider.api_key = Some("fixture-only".into());
-                provider
-            }).collect();
-            config.default_provider_id = Some("first".into());
-        }).unwrap();
+        manager
+            .update_config(|config| {
+                config.providers = ["first", "second"]
+                    .into_iter()
+                    .map(|id| {
+                        let mut provider = provider_template("fixture-model");
+                        provider.id = id.into();
+                        provider.api_key = Some("fixture-only".into());
+                        provider
+                    })
+                    .collect();
+                config.default_provider_id = Some("first".into());
+            })
+            .unwrap();
         save_default_model(&paths, "second", "fixture-model").unwrap();
         let selected = select(&Cli::parse_from(["dcl"]), &paths, None, None).unwrap();
         assert_eq!(selected.provider_id, "second");
-        let selected = select(&Cli::parse_from(["dcl", "--provider", "first"]), &paths, None, None).unwrap();
+        let selected = select(
+            &Cli::parse_from(["dcl", "--provider", "first"]),
+            &paths,
+            None,
+            None,
+        )
+        .unwrap();
         assert_eq!(selected.provider_id, "first");
-        let selected = select(&Cli::parse_from(["dcl"]), &paths, Some("fixture-model"), Some("first")).unwrap();
+        let selected = select(
+            &Cli::parse_from(["dcl"]),
+            &paths,
+            Some("fixture-model"),
+            Some("first"),
+        )
+        .unwrap();
         assert_eq!(selected.provider_id, "first");
     }
 
@@ -534,16 +632,28 @@ mod search_tests {
     fn search_settings_are_saved_where_web_search_reads_them() {
         let root = tempfile::tempdir().unwrap();
         let paths = RuntimePaths::new(root.path().join("data")).unwrap();
-        let set = |key: &str, value: &str| run(&paths, &ConfigCommands::Set { key: key.into(), value: value.into() });
+        let set = |key: &str, value: &str| {
+            run(
+                &paths,
+                &ConfigCommands::Set {
+                    key: key.into(),
+                    value: value.into(),
+                },
+            )
+        };
         set("search.api_key", " search-key ").unwrap();
         set("search.model", "deepseek-pro").unwrap();
         assert!(set("search.base_url", "ftp://example.com").is_err());
         assert!(set("search.other", "x").is_err());
         let saved: deepseek_code_core::config::AppConfig =
-            serde_json::from_slice(&std::fs::read(paths.data_dir.join("config.json")).unwrap()).unwrap();
+            serde_json::from_slice(&std::fs::read(paths.data_dir.join("config.json")).unwrap())
+                .unwrap();
         assert_eq!(saved.deepseek_search.api_key, "search-key");
         assert_eq!(saved.deepseek_search.model, "deepseek-pro");
-        assert_eq!(saved.deepseek_search.base_url, "https://api.deepseek.com/anthropic/v1");
+        assert_eq!(
+            saved.deepseek_search.base_url,
+            "https://api.deepseek.com/anthropic/v1"
+        );
         let mut shown = json!({"config": saved});
         redact(&mut shown);
         assert!(!shown.to_string().contains("search-key"));
