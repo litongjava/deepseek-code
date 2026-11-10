@@ -22,17 +22,17 @@ export default function ResponseFooter({ message, index, conversationId, disable
   const [error, setError] = useState('');
   const usage = aggregateUsage([message]);
   const time = message.created_at || (message.processEndedAt ? new Date(message.processEndedAt).toISOString() : null);
-  const buttonClass = 'inline-flex items-center justify-center rounded-lg p-2 text-claude-textSecondary hover:bg-claude-hover hover:text-claude-text focus-visible:ring-2 focus-visible:ring-blue-400 disabled:opacity-40 disabled:cursor-not-allowed';
+  const buttonClass = 'inline-flex items-center justify-center rounded-lg p-2 text-deepseek-textSecondary hover:bg-deepseek-hover hover:text-deepseek-text focus-visible:ring-2 focus-visible:ring-blue-400 disabled:opacity-40 disabled:cursor-not-allowed';
 
   return <div className="mt-4 mb-2" aria-label="Response actions">
-    <div className="flex flex-wrap items-center gap-1 text-[13px] text-claude-textSecondary">
+    <div className="flex flex-wrap items-center gap-1 text-[13px] text-deepseek-textSecondary">
       <CopyButton text={extractTextContent(message.content)} label="Copy response" />
       {!readOnly && <><button type="button" aria-label="Good response" title="Good response" aria-pressed={rating === 'up'}
-        className={`${buttonClass} ${rating === 'up' ? 'bg-claude-hover text-claude-text' : ''}`} onClick={() => toggle(key, 'up')}>
+        className={`${buttonClass} ${rating === 'up' ? 'bg-deepseek-hover text-deepseek-text' : ''}`} onClick={() => toggle(key, 'up')}>
         <ThumbsUp size={17} fill={rating === 'up' ? 'currentColor' : 'none'} />
       </button>
       <button type="button" aria-label="Bad response" title="Bad response" aria-pressed={rating === 'down'}
-        className={`${buttonClass} ${rating === 'down' ? 'bg-claude-hover text-claude-text' : ''}`} onClick={() => toggle(key, 'down')}>
+        className={`${buttonClass} ${rating === 'down' ? 'bg-deepseek-hover text-deepseek-text' : ''}`} onClick={() => toggle(key, 'down')}>
         <ThumbsDown size={17} fill={rating === 'down' ? 'currentColor' : 'none'} />
       </button>
       <button type="button" aria-label="Branch into a new conversation" title="Branch into a new conversation"

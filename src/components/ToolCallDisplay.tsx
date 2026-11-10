@@ -47,7 +47,7 @@ const ToolCallDisplay: React.FC<ToolCallDisplayProps> = ({
     <div className="mb-4">
       <div className={`rounded-lg overflow-hidden ${!allDone ? 'bg-black/[0.04] dark:bg-white/[0.04]' : ''}`}>
         <div
-          className="flex items-center gap-2 cursor-pointer select-none group/tool text-claude-textSecondary hover:text-claude-text transition-colors px-2 py-1.5"
+          className="flex items-center gap-2 cursor-pointer select-none group/tool text-deepseek-textSecondary hover:text-deepseek-text transition-colors px-2 py-1.5"
           onClick={() => {
             onSetMessages(prev =>
               prev.map((m, i) =>
@@ -57,15 +57,15 @@ const ToolCallDisplay: React.FC<ToolCallDisplayProps> = ({
           }}
         >
           {!allDone && (
-            <FileText size={16} className="text-claude-textSecondary animate-pulse" />
+            <FileText size={16} className="text-deepseek-textSecondary animate-pulse" />
           )}
           {allDone && !hasError && (
-            <Check size={16} className="text-claude-textSecondary" />
+            <Check size={16} className="text-deepseek-textSecondary" />
           )}
           {allDone && hasError && (
             <span className="text-red-400 text-[14px]">✗</span>
           )}
-          <span className={`text-[14px] ${!allDone ? 'animate-shimmer-text' : 'text-claude-textSecondary'}`}>
+          <span className={`text-[14px] ${!allDone ? 'animate-shimmer-text' : 'text-deepseek-textSecondary'}`}>
             {summary}
           </span>
           <ChevronDown size={14} className={`transform transition-transform duration-200 ${(toolCalls[idx]?.isToolCallsExpanded ?? (isCurrentlyStreaming || !allDone)) ? 'rotate-180' : ''}`} />
@@ -73,7 +73,7 @@ const ToolCallDisplay: React.FC<ToolCallDisplayProps> = ({
       </div>
 
       {(toolCalls[idx]?.isToolCallsExpanded ?? (isCurrentlyStreaming || !allDone)) && (
-        <div className="mt-2 ml-1 pl-4 border-l-2 border-claude-border space-y-2">
+        <div className="mt-2 ml-1 pl-4 border-l-2 border-deepseek-border space-y-2">
           {visibleToolCalls.map((tc: any, tcIdx: number) => {
             const inputStr = tc.input ? (typeof tc.input === 'string' ? tc.input : JSON.stringify(tc.input, null, 2)) : '';
             const rawPath = tc.input?.file_path || tc.input?.path || '';
@@ -93,7 +93,7 @@ const ToolCallDisplay: React.FC<ToolCallDisplayProps> = ({
             return (
               <div key={tc.id || tcIdx}>
                 {tc.textBefore && (
-                  <div className="text-[13px] text-claude-textSecondary px-1 py-1.5 leading-relaxed">
+                  <div className="text-[13px] text-deepseek-textSecondary px-1 py-1.5 leading-relaxed">
                     {tc.textBefore}
                   </div>
                 )}
@@ -114,11 +114,11 @@ const ToolCallDisplay: React.FC<ToolCallDisplayProps> = ({
                   >
                     <div className="flex items-center gap-2 overflow-hidden">
                       {tc.name === 'Bash' ? (
-                        <span className="text-claude-textSecondary font-mono font-bold">&gt;_</span>
+                        <span className="text-deepseek-textSecondary font-mono font-bold">&gt;_</span>
                       ) : (
-                        <FileText size={14} className="text-claude-textSecondary flex-shrink-0" />
+                        <FileText size={14} className="text-deepseek-textSecondary flex-shrink-0" />
                       )}
-                      <span className="text-claude-text font-mono text-[12px] truncate">
+                      <span className="text-deepseek-text font-mono text-[12px] truncate">
                         {inputPreview || tc.name}
                       </span>
                     </div>
@@ -129,10 +129,10 @@ const ToolCallDisplay: React.FC<ToolCallDisplayProps> = ({
                           {stats.removed > 0 && <span className="text-red-500 dark:text-red-400">-{stats.removed}</span>}
                         </span>
                       )}
-                      {realStatus === 'running' && <span className="text-claude-textSecondary text-[12px] animate-shimmer-text">Running...</span>}
+                      {realStatus === 'running' && <span className="text-deepseek-textSecondary text-[12px] animate-shimmer-text">Running...</span>}
                       {realStatus === 'error' && <span className="text-red-400/80 text-[12px]">Failed</span>}
                       {expandable && (
-                        <ChevronDown size={14} className={`text-claude-textSecondary transform transition-transform duration-200 ${(tc.isExpanded ?? false) ? 'rotate-180' : ''}`} />
+                        <ChevronDown size={14} className={`text-deepseek-textSecondary transform transition-transform duration-200 ${(tc.isExpanded ?? false) ? 'rotate-180' : ''}`} />
                       )}
                     </div>
                   </div>
@@ -141,7 +141,7 @@ const ToolCallDisplay: React.FC<ToolCallDisplayProps> = ({
                       {shouldUseDiffView(tc.name, tc.input) ? (
                         <ToolDiffView toolName={tc.name} input={tc.input} result={tc.result} />
                       ) : tc.result != null ? (
-                        <div className="px-1 text-claude-textSecondary text-[12px] font-mono max-h-[400px] overflow-y-auto whitespace-pre-wrap bg-black/5 dark:bg-black/40 rounded-md p-2">
+                        <div className="px-1 text-deepseek-textSecondary text-[12px] font-mono max-h-[400px] overflow-y-auto whitespace-pre-wrap bg-black/5 dark:bg-black/40 rounded-md p-2">
                           {typeof tc.result === 'string' ? (tc.result.length > 2000 ? tc.result.slice(0, 2000) + '...' : tc.result || '(Empty output)') : JSON.stringify(tc.result).slice(0, 2000)}
                         </div>
                       ) : null}
@@ -152,7 +152,7 @@ const ToolCallDisplay: React.FC<ToolCallDisplayProps> = ({
             );
           })}
           {allDone && !isCurrentlyStreaming && (
-            <div className="flex items-center gap-2 text-claude-textSecondary pt-1 pb-1">
+            <div className="flex items-center gap-2 text-deepseek-textSecondary pt-1 pb-1">
               <Check size={14} />
               <span className="text-[13px]">Done</span>
             </div>

@@ -164,14 +164,14 @@ const ComputerUsePanel: React.FC<ComputerUsePanelProps> = ({ onClose }) => {
 
   return (
     <div className="flex flex-col h-full">
-      <div className="flex items-center justify-between px-4 py-3 border-b border-claude-border flex-shrink-0">
+      <div className="flex items-center justify-between px-4 py-3 border-b border-deepseek-border flex-shrink-0">
         <div className="flex items-center gap-2">
           <Monitor size={16} className="text-blue-400" />
-          <span className="text-[14px] font-medium text-claude-text">Computer Use</span>
+          <span className="text-[14px] font-medium text-deepseek-text">Computer Use</span>
         </div>
         <div className="flex items-center gap-2">
           <label className="flex items-center gap-1.5 cursor-pointer">
-            <span className="text-[11px] text-claude-textSecondary">ON/OFF</span>
+            <span className="text-[11px] text-deepseek-textSecondary">ON/OFF</span>
             <div
               className={`w-8 h-4 rounded-full relative transition-colors ${enabled ? 'bg-blue-500' : 'bg-gray-600'}`}
               onClick={() => setEnabled(!enabled)}
@@ -181,7 +181,7 @@ const ComputerUsePanel: React.FC<ComputerUsePanelProps> = ({ onClose }) => {
           </label>
           <button
             onClick={onClose}
-            className="p-1 rounded hover:bg-claude-hover text-claude-textSecondary hover:text-claude-text transition-colors"
+            className="p-1 rounded hover:bg-deepseek-hover text-deepseek-textSecondary hover:text-deepseek-text transition-colors"
           >
             <X size={16} />
           </button>
@@ -190,15 +190,15 @@ const ComputerUsePanel: React.FC<ComputerUsePanelProps> = ({ onClose }) => {
 
       <div className="flex-1 overflow-y-auto">
         {!enabled ? (
-          <div className="flex flex-col items-center justify-center h-full text-claude-textSecondary">
+          <div className="flex flex-col items-center justify-center h-full text-deepseek-textSecondary">
             <ShieldAlert size={48} className="mb-3 opacity-30" />
             <p className="text-[13px]">Computer Use is disabled</p>
           </div>
         ) : (
           <div className="p-3 space-y-3">
-            <div className="border border-claude-border rounded-lg overflow-hidden">
-              <div className="flex items-center justify-between px-3 py-2 bg-claude-hover/30">
-                <span className="text-[12px] font-medium text-claude-text">Screenshot</span>
+            <div className="border border-deepseek-border rounded-lg overflow-hidden">
+              <div className="flex items-center justify-between px-3 py-2 bg-deepseek-hover/30">
+                <span className="text-[12px] font-medium text-deepseek-text">Screenshot</span>
                 <button
                   onClick={takeScreenshot}
                   disabled={loading}
@@ -221,7 +221,7 @@ const ComputerUsePanel: React.FC<ComputerUsePanelProps> = ({ onClose }) => {
                     draggable={false}
                   />
                 ) : (
-                  <div className="text-claude-textSecondary text-[12px] flex flex-col items-center gap-2">
+                  <div className="text-deepseek-textSecondary text-[12px] flex flex-col items-center gap-2">
                     <Monitor size={32} className="opacity-30" />
                     <span>Click "Capture" to take a screenshot</span>
                   </div>
@@ -241,15 +241,15 @@ const ComputerUsePanel: React.FC<ComputerUsePanelProps> = ({ onClose }) => {
                 )}
               </div>
               {clickCoord && (
-                <div className="flex items-center justify-between px-3 py-2 bg-claude-hover/20 text-[11px]">
-                  <span className="text-claude-textSecondary">
+                <div className="flex items-center justify-between px-3 py-2 bg-deepseek-hover/20 text-[11px]">
+                  <span className="text-deepseek-textSecondary">
                     Position: ({clickCoord.x}, {clickCoord.y})
                   </span>
                   <div className="flex items-center gap-2">
                     <select
                       value={mouseButton}
                       onChange={e => setMouseButton(e.target.value as any)}
-                      className="bg-transparent text-claude-text text-[11px] border border-claude-border rounded px-1 py-0.5"
+                      className="bg-transparent text-deepseek-text text-[11px] border border-deepseek-border rounded px-1 py-0.5"
                     >
                       <option value="left">Left</option>
                       <option value="right">Right</option>
@@ -268,9 +268,9 @@ const ComputerUsePanel: React.FC<ComputerUsePanelProps> = ({ onClose }) => {
               )}
             </div>
 
-            <div className="border border-claude-border rounded-lg overflow-hidden">
-              <div className="px-3 py-2 bg-claude-hover/30">
-                <span className="text-[12px] font-medium text-claude-text">Keyboard</span>
+            <div className="border border-deepseek-border rounded-lg overflow-hidden">
+              <div className="px-3 py-2 bg-deepseek-hover/30">
+                <span className="text-[12px] font-medium text-deepseek-text">Keyboard</span>
               </div>
               <div className="p-3 space-y-2">
                 <div className="flex gap-2">
@@ -280,7 +280,7 @@ const ComputerUsePanel: React.FC<ComputerUsePanelProps> = ({ onClose }) => {
                     onChange={e => setInputText(e.target.value)}
                     onKeyDown={e => { if (e.key === 'Enter') doType(); }}
                     placeholder="Type text..."
-                    className="flex-1 bg-transparent text-claude-text text-[12px] border border-claude-border rounded px-2 py-1.5 placeholder:text-claude-textSecondary/50 focus:outline-none focus:border-blue-500/50"
+                    className="flex-1 bg-transparent text-deepseek-text text-[12px] border border-deepseek-border rounded px-2 py-1.5 placeholder:text-deepseek-textSecondary/50 focus:outline-none focus:border-blue-500/50"
                   />
                   <button
                     onClick={doType}
@@ -297,7 +297,7 @@ const ComputerUsePanel: React.FC<ComputerUsePanelProps> = ({ onClose }) => {
                     onChange={e => setKeyCombo(e.target.value)}
                     onKeyDown={e => { if (e.key === 'Enter') doKey(); }}
                     placeholder="Key combo (e.g. ctrl+c, enter, alt+tab)"
-                    className="flex-1 bg-transparent text-claude-text text-[12px] border border-claude-border rounded px-2 py-1.5 placeholder:text-claude-textSecondary/50 focus:outline-none focus:border-blue-500/50"
+                    className="flex-1 bg-transparent text-deepseek-text text-[12px] border border-deepseek-border rounded px-2 py-1.5 placeholder:text-deepseek-textSecondary/50 focus:outline-none focus:border-blue-500/50"
                   />
                   <button
                     onClick={doKey}
@@ -312,7 +312,7 @@ const ComputerUsePanel: React.FC<ComputerUsePanelProps> = ({ onClose }) => {
                     <button
                       key={k}
                       onClick={() => { setKeyCombo(k); }}
-                      className="px-2 py-0.5 text-[10px] rounded bg-claude-hover text-claude-textSecondary hover:text-claude-text transition-colors"
+                      className="px-2 py-0.5 text-[10px] rounded bg-deepseek-hover text-deepseek-textSecondary hover:text-deepseek-text transition-colors"
                     >
                       {k}
                     </button>
@@ -321,15 +321,15 @@ const ComputerUsePanel: React.FC<ComputerUsePanelProps> = ({ onClose }) => {
               </div>
             </div>
 
-            <div className="border border-claude-border rounded-lg overflow-hidden">
-              <div className="px-3 py-2 bg-claude-hover/30">
-                <span className="text-[12px] font-medium text-claude-text">Scroll</span>
+            <div className="border border-deepseek-border rounded-lg overflow-hidden">
+              <div className="px-3 py-2 bg-deepseek-hover/30">
+                <span className="text-[12px] font-medium text-deepseek-text">Scroll</span>
               </div>
               <div className="p-3 flex items-center gap-3">
                 <button
                   onClick={() => doScroll('up')}
                   disabled={loading}
-                  className="flex items-center gap-1 px-3 py-1.5 text-[11px] rounded bg-claude-hover text-claude-text hover:bg-claude-hover/80 disabled:opacity-50"
+                  className="flex items-center gap-1 px-3 py-1.5 text-[11px] rounded bg-deepseek-hover text-deepseek-text hover:bg-deepseek-hover/80 disabled:opacity-50"
                 >
                   <ArrowUpDown size={12} />
                   Up
@@ -337,34 +337,34 @@ const ComputerUsePanel: React.FC<ComputerUsePanelProps> = ({ onClose }) => {
                 <button
                   onClick={() => doScroll('down')}
                   disabled={loading}
-                  className="flex items-center gap-1 px-3 py-1.5 text-[11px] rounded bg-claude-hover text-claude-text hover:bg-claude-hover/80 disabled:opacity-50"
+                  className="flex items-center gap-1 px-3 py-1.5 text-[11px] rounded bg-deepseek-hover text-deepseek-text hover:bg-deepseek-hover/80 disabled:opacity-50"
                 >
                   <ArrowUpDown size={12} className="rotate-180" />
                   Down
                 </button>
                 <div className="flex items-center gap-1">
-                  <span className="text-[11px] text-claude-textSecondary">Amount:</span>
+                  <span className="text-[11px] text-deepseek-textSecondary">Amount:</span>
                   <input
                     type="number"
                     value={scrollAmount}
                     onChange={e => setScrollAmount(Math.max(1, parseInt(e.target.value) || 1))}
-                    className="w-12 bg-transparent text-claude-text text-[11px] border border-claude-border rounded px-1 py-0.5 text-center focus:outline-none focus:border-blue-500/50"
+                    className="w-12 bg-transparent text-deepseek-text text-[11px] border border-deepseek-border rounded px-1 py-0.5 text-center focus:outline-none focus:border-blue-500/50"
                   />
                 </div>
               </div>
             </div>
 
-            <div className="border border-claude-border rounded-lg overflow-hidden">
+            <div className="border border-deepseek-border rounded-lg overflow-hidden">
               <div
-                className="flex items-center justify-between px-3 py-2 bg-claude-hover/30 cursor-pointer"
+                className="flex items-center justify-between px-3 py-2 bg-deepseek-hover/30 cursor-pointer"
                 onClick={() => setShowLogs(!showLogs)}
               >
-                <span className="text-[12px] font-medium text-claude-text">Action Log ({actionLogs.length})</span>
+                <span className="text-[12px] font-medium text-deepseek-text">Action Log ({actionLogs.length})</span>
                 <div className="flex items-center gap-2">
                   {actionLogs.length > 0 && (
                     <button
                       onClick={e => { e.stopPropagation(); clearLogs(); }}
-                      className="p-0.5 rounded hover:bg-claude-hover text-claude-textSecondary hover:text-red-400 transition-colors"
+                      className="p-0.5 rounded hover:bg-deepseek-hover text-deepseek-textSecondary hover:text-red-400 transition-colors"
                     >
                       <Trash2 size={12} />
                     </button>
@@ -375,20 +375,20 @@ const ComputerUsePanel: React.FC<ComputerUsePanelProps> = ({ onClose }) => {
               {showLogs && (
                 <div className="max-h-[200px] overflow-y-auto">
                   {actionLogs.length === 0 ? (
-                    <div className="px-3 py-4 text-[11px] text-claude-textSecondary text-center">
+                    <div className="px-3 py-4 text-[11px] text-deepseek-textSecondary text-center">
                       No actions yet
                     </div>
                   ) : (
                     actionLogs.map(log => (
                       <div
                         key={log.id}
-                        className={`flex items-start gap-2 px-3 py-1.5 border-t border-claude-border/50 text-[11px] ${
-                          log.success ? 'text-claude-textSecondary' : 'text-red-400'
+                        className={`flex items-start gap-2 px-3 py-1.5 border-t border-deepseek-border/50 text-[11px] ${
+                          log.success ? 'text-deepseek-textSecondary' : 'text-red-400'
                         }`}
                       >
                         <span className="mt-0.5 flex-shrink-0">{logTypeIcon(log.type)}</span>
                         <span className="flex-1 break-all">{log.description}</span>
-                        <span className="text-claude-textSecondary/50 flex-shrink-0">{formatTime(log.timestamp)}</span>
+                        <span className="text-deepseek-textSecondary/50 flex-shrink-0">{formatTime(log.timestamp)}</span>
                       </div>
                     ))
                   )}
@@ -396,11 +396,11 @@ const ComputerUsePanel: React.FC<ComputerUsePanelProps> = ({ onClose }) => {
               )}
             </div>
 
-            <div className="border border-claude-border rounded-lg overflow-hidden">
-              <div className="px-3 py-2 bg-claude-hover/30">
+            <div className="border border-deepseek-border rounded-lg overflow-hidden">
+              <div className="px-3 py-2 bg-deepseek-hover/30">
                 <div className="flex items-center gap-1.5">
                   {permIcon()}
-                  <span className="text-[12px] font-medium text-claude-text">Permission Mode</span>
+                  <span className="text-[12px] font-medium text-deepseek-text">Permission Mode</span>
                 </div>
               </div>
               <div className="p-3">
@@ -416,7 +416,7 @@ const ComputerUsePanel: React.FC<ComputerUsePanelProps> = ({ onClose }) => {
                       className={`flex-1 px-2 py-2 rounded text-[11px] border transition-colors ${
                         permissionMode === opt.mode
                           ? `border-${opt.color}-500/50 bg-${opt.color}-500/10 text-${opt.color}-400`
-                          : 'border-claude-border text-claude-textSecondary hover:text-claude-text'
+                          : 'border-deepseek-border text-deepseek-textSecondary hover:text-deepseek-text'
                       }`}
                     >
                       <div className="font-medium">{opt.label}</div>

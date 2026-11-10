@@ -13,7 +13,7 @@ const statusLabel: Record<string, string> = { completed: 'Completed', done: 'Com
 export default function RequestMetrics({ request: r, status, timingOnly = false, summaryOnly = false, onSelectRequest }: {
   request: RequestSnapshot; status: string; timingOnly?: boolean; summaryOnly?: boolean; onSelectRequest?: (id: string) => void;
 }) {
-  const row = (label: string, value: React.ReactNode) => <><dt className="text-claude-textSecondary">{label}</dt><dd className="min-w-0 break-words">{value}</dd></>;
+  const row = (label: string, value: React.ReactNode) => <><dt className="text-deepseek-textSecondary">{label}</dt><dd className="min-w-0 break-words">{value}</dd></>;
   const effectiveStatus = r.status === 'running' && status === 'interrupted' ? status : r.status || status;
   return <>
     {!timingOnly && <dl className="mb-4 grid grid-cols-[auto_1fr] gap-x-4 gap-y-2 text-xs">

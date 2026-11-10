@@ -123,9 +123,9 @@ const STATUS_CONFIG: Record<string, { label: string; color: string; bg: string; 
   },
   disconnected: {
     label: '已断开',
-    color: 'text-claude-textSecondary',
-    bg: 'bg-claude-hover',
-    border: 'border-claude-border',
+    color: 'text-deepseek-textSecondary',
+    bg: 'bg-deepseek-hover',
+    border: 'border-deepseek-border',
     icon: <Unlink size={12} />,
   },
   error: {
@@ -567,7 +567,7 @@ const IMIntegrationPanel: React.FC<IMIntegrationPanelProps> = ({ onClose }) => {
         <span className={`flex items-center gap-1 text-[11px] font-medium px-2 py-0.5 rounded-full border ${
           running
             ? 'bg-green-500/10 text-green-500 border-green-500/20'
-            : 'bg-claude-hover text-claude-textSecondary border-claude-border'
+            : 'bg-deepseek-hover text-deepseek-textSecondary border-deepseek-border'
         }`}>
           {running ? <CheckCircle2 size={12} /> : <Unlink size={12} />}
           {running ? '已连接' : '未运行'}
@@ -595,13 +595,13 @@ const IMIntegrationPanel: React.FC<IMIntegrationPanelProps> = ({ onClose }) => {
 
     return (
       <div className="space-y-3 animate-fade-in">
-        <div className="flex bg-claude-hover rounded-lg p-0.5">
+        <div className="flex bg-deepseek-hover rounded-lg p-0.5">
           <button
             onClick={() => setMode(platformKey, 'qr')}
             className={`flex-1 flex items-center justify-center gap-1.5 py-1.5 rounded-md text-[11px] font-medium transition-all ${
               mode === 'qr'
-                ? 'bg-claude-bg text-claude-text shadow-sm'
-                : 'text-claude-textSecondary hover:text-claude-text'
+                ? 'bg-deepseek-bg text-deepseek-text shadow-sm'
+                : 'text-deepseek-textSecondary hover:text-deepseek-text'
             }`}
           >
             <QrCode size={12} />
@@ -611,8 +611,8 @@ const IMIntegrationPanel: React.FC<IMIntegrationPanelProps> = ({ onClose }) => {
             onClick={() => setMode(platformKey, 'manual')}
             className={`flex-1 flex items-center justify-center gap-1.5 py-1.5 rounded-md text-[11px] font-medium transition-all ${
               mode === 'manual'
-                ? 'bg-claude-bg text-claude-text shadow-sm'
-                : 'text-claude-textSecondary hover:text-claude-text'
+                ? 'bg-deepseek-bg text-deepseek-text shadow-sm'
+                : 'text-deepseek-textSecondary hover:text-deepseek-text'
             }`}
           >
             <KeyRound size={12} />
@@ -625,29 +625,29 @@ const IMIntegrationPanel: React.FC<IMIntegrationPanelProps> = ({ onClose }) => {
             <div className="flex flex-col items-center gap-3 py-3">
               {qrCodeUrl[platformKey] ? (
                 <div className="relative">
-                  <div className="w-40 h-40 rounded-xl border-2 border-claude-border bg-white p-2 flex items-center justify-center">
-                    <QrCode size={120} className="text-claude-text" />
+                  <div className="w-40 h-40 rounded-xl border-2 border-deepseek-border bg-white p-2 flex items-center justify-center">
+                    <QrCode size={120} className="text-deepseek-text" />
                   </div>
-                  <div className="absolute -bottom-1 -right-1 w-6 h-6 rounded-full bg-claude-bg border border-claude-border flex items-center justify-center">
+                  <div className="absolute -bottom-1 -right-1 w-6 h-6 rounded-full bg-deepseek-bg border border-deepseek-border flex items-center justify-center">
                     <PlatformIcon platform={platformKey} size={14} />
                   </div>
                 </div>
               ) : (
-                <div className="w-40 h-40 rounded-xl border-2 border-dashed border-claude-border bg-claude-hover flex flex-col items-center justify-center gap-2">
-                  <QrCode size={32} className="text-claude-textSecondary/40" />
-                  <span className="text-[10px] text-claude-textSecondary">点击生成二维码</span>
+                <div className="w-40 h-40 rounded-xl border-2 border-dashed border-deepseek-border bg-deepseek-hover flex flex-col items-center justify-center gap-2">
+                  <QrCode size={32} className="text-deepseek-textSecondary/40" />
+                  <span className="text-[10px] text-deepseek-textSecondary">点击生成二维码</span>
                 </div>
               )}
               <button
                 onClick={() => handleGenerateQr(platformKey)}
                 disabled={qrLoading}
-                className="flex items-center gap-1.5 px-3 py-2 rounded-lg bg-claude-hover border border-claude-border text-claude-text text-[11px] font-medium hover:bg-claude-btnHover transition-colors disabled:opacity-50"
+                className="flex items-center gap-1.5 px-3 py-2 rounded-lg bg-deepseek-hover border border-deepseek-border text-deepseek-text text-[11px] font-medium hover:bg-deepseek-btnHover transition-colors disabled:opacity-50"
               >
                 {qrLoading ? <Loader2 size={12} className="animate-spin" /> : <RefreshCw size={12} />}
                 生成二维码
               </button>
               {qrCodeUrl[platformKey] && (
-                <p className="text-[10px] text-claude-textSecondary text-center">
+                <p className="text-[10px] text-deepseek-textSecondary text-center">
                   请使用{platformMeta.label}扫描二维码完成授权
                 </p>
               )}
@@ -657,7 +657,7 @@ const IMIntegrationPanel: React.FC<IMIntegrationPanelProps> = ({ onClose }) => {
           <div className="space-y-2.5">
             {platformMeta.fields.map((field: PlatformField) => (
               <div key={field.key}>
-                <label className="block text-[11px] font-medium text-claude-textSecondary mb-1.5">
+                <label className="block text-[11px] font-medium text-deepseek-textSecondary mb-1.5">
                   {field.label}
                 </label>
                 <input
@@ -666,7 +666,7 @@ const IMIntegrationPanel: React.FC<IMIntegrationPanelProps> = ({ onClose }) => {
                   onChange={e => handleConfigChange(platformKey, field.key, e.target.value)}
                   placeholder={field.placeholder}
                   disabled={connected}
-                  className="w-full px-3 py-2 rounded-lg bg-claude-bg border border-claude-border text-[12px] text-claude-text placeholder:text-claude-textSecondary/40 focus:outline-none focus:border-blue-500/50 disabled:opacity-50 transition-colors"
+                  className="w-full px-3 py-2 rounded-lg bg-deepseek-bg border border-deepseek-border text-[12px] text-deepseek-text placeholder:text-deepseek-textSecondary/40 focus:outline-none focus:border-blue-500/50 disabled:opacity-50 transition-colors"
                 />
               </div>
             ))}
@@ -696,14 +696,14 @@ const IMIntegrationPanel: React.FC<IMIntegrationPanelProps> = ({ onClose }) => {
         )}
 
         {connected && (
-          <div className="space-y-2.5 pt-2 border-t border-claude-border/30">
-            <div className="text-[11px] font-medium text-claude-textSecondary mb-1">发送消息</div>
+          <div className="space-y-2.5 pt-2 border-t border-deepseek-border/30">
+            <div className="text-[11px] font-medium text-deepseek-textSecondary mb-1">发送消息</div>
             <input
               type="text"
               value={sendForms[platformKey].chatId}
               onChange={e => handleSendFormChange(platformKey, 'chatId', e.target.value)}
               placeholder="Chat ID"
-              className="w-full px-3 py-2 rounded-lg bg-claude-bg border border-claude-border text-[12px] text-claude-text placeholder:text-claude-textSecondary/40 focus:outline-none focus:border-blue-500/50 transition-colors"
+              className="w-full px-3 py-2 rounded-lg bg-deepseek-bg border border-deepseek-border text-[12px] text-deepseek-text placeholder:text-deepseek-textSecondary/40 focus:outline-none focus:border-blue-500/50 transition-colors"
             />
             <div className="flex gap-2">
               <input
@@ -711,7 +711,7 @@ const IMIntegrationPanel: React.FC<IMIntegrationPanelProps> = ({ onClose }) => {
                 value={sendForms[platformKey].message}
                 onChange={e => handleSendFormChange(platformKey, 'message', e.target.value)}
                 placeholder="输入消息内容..."
-                className="flex-1 px-3 py-2 rounded-lg bg-claude-bg border border-claude-border text-[12px] text-claude-text placeholder:text-claude-textSecondary/40 focus:outline-none focus:border-blue-500/50 transition-colors"
+                className="flex-1 px-3 py-2 rounded-lg bg-deepseek-bg border border-deepseek-border text-[12px] text-deepseek-text placeholder:text-deepseek-textSecondary/40 focus:outline-none focus:border-blue-500/50 transition-colors"
                 onKeyDown={e => {
                   if (e.key === 'Enter' && !e.shiftKey) {
                     e.preventDefault();
@@ -743,29 +743,29 @@ const IMIntegrationPanel: React.FC<IMIntegrationPanelProps> = ({ onClose }) => {
           <div className={`rounded-lg border ${platformMeta.borderColor} ${platformMeta.bgColor} p-3`}>
             <div className="flex items-center gap-1.5 mb-1.5">
               <MessageSquare size={12} className={platformMeta.color} />
-              <span className="text-[10px] text-claude-textSecondary font-medium">今日消息</span>
+              <span className="text-[10px] text-deepseek-textSecondary font-medium">今日消息</span>
             </div>
-            <span className="text-[20px] font-bold text-claude-text">{stats?.today_messages ?? 0}</span>
+            <span className="text-[20px] font-bold text-deepseek-text">{stats?.today_messages ?? 0}</span>
           </div>
           <div className={`rounded-lg border ${platformMeta.borderColor} ${platformMeta.bgColor} p-3`}>
             <div className="flex items-center gap-1.5 mb-1.5">
               <Users size={12} className={platformMeta.color} />
-              <span className="text-[10px] text-claude-textSecondary font-medium">活跃用户</span>
+              <span className="text-[10px] text-deepseek-textSecondary font-medium">活跃用户</span>
             </div>
-            <span className="text-[20px] font-bold text-claude-text">{stats?.active_users ?? 0}</span>
+            <span className="text-[20px] font-bold text-deepseek-text">{stats?.active_users ?? 0}</span>
           </div>
         </div>
         <div className={`rounded-lg border ${platformMeta.borderColor} ${platformMeta.bgColor} p-3`}>
           <div className="flex items-center justify-between">
             <div className="flex items-center gap-1.5">
               <BarChart3 size={12} className={platformMeta.color} />
-              <span className="text-[10px] text-claude-textSecondary font-medium">总消息数</span>
+              <span className="text-[10px] text-deepseek-textSecondary font-medium">总消息数</span>
             </div>
-            <span className="text-[16px] font-semibold text-claude-text">{stats?.total_messages ?? 0}</span>
+            <span className="text-[16px] font-semibold text-deepseek-text">{stats?.total_messages ?? 0}</span>
           </div>
         </div>
         {stats?.updated_at && (
-          <p className="text-[10px] text-claude-textSecondary/60 text-right">
+          <p className="text-[10px] text-deepseek-textSecondary/60 text-right">
             更新于 {new Date(stats.updated_at).toLocaleTimeString()}
           </p>
         )}
@@ -784,7 +784,7 @@ const IMIntegrationPanel: React.FC<IMIntegrationPanelProps> = ({ onClose }) => {
     return (
       <div className="space-y-3 animate-fade-in">
         <div className="space-y-1.5">
-          <label className="text-[11px] font-medium text-claude-textSecondary">权限模式</label>
+          <label className="text-[11px] font-medium text-deepseek-textSecondary">权限模式</label>
           <div className="space-y-1.5">
             {(Object.keys(PERMISSION_MODE_CONFIG) as ImPermissionMode[]).map(mode => {
               const config = PERMISSION_MODE_CONFIG[mode];
@@ -797,17 +797,17 @@ const IMIntegrationPanel: React.FC<IMIntegrationPanelProps> = ({ onClose }) => {
                   className={`w-full flex items-center gap-2.5 px-3 py-2.5 rounded-lg border text-left transition-all ${
                     isActive
                       ? `${platformMeta.borderColor} ${platformMeta.bgColor}`
-                      : 'border-claude-border bg-claude-bg hover:bg-claude-hover'
+                      : 'border-deepseek-border bg-deepseek-bg hover:bg-deepseek-hover'
                   }`}
                 >
-                  <div className={`${isActive ? platformMeta.color : 'text-claude-textSecondary'}`}>
+                  <div className={`${isActive ? platformMeta.color : 'text-deepseek-textSecondary'}`}>
                     {config.icon}
                   </div>
                   <div className="flex-1 min-w-0">
-                    <div className={`text-[12px] font-medium ${isActive ? 'text-claude-text' : 'text-claude-textSecondary'}`}>
+                    <div className={`text-[12px] font-medium ${isActive ? 'text-deepseek-text' : 'text-deepseek-textSecondary'}`}>
                       {config.label}
                     </div>
-                    <div className="text-[10px] text-claude-textSecondary/70">{config.desc}</div>
+                    <div className="text-[10px] text-deepseek-textSecondary/70">{config.desc}</div>
                   </div>
                   {isActive && <CheckCircle2 size={14} className={platformMeta.color} />}
                 </button>
@@ -817,13 +817,13 @@ const IMIntegrationPanel: React.FC<IMIntegrationPanelProps> = ({ onClose }) => {
         </div>
 
         {currentMode === 'pairing_code' && (
-          <div className="space-y-2 pt-2 border-t border-claude-border/30">
+          <div className="space-y-2 pt-2 border-t border-deepseek-border/30">
             <div className="flex items-center justify-between">
-              <label className="text-[11px] font-medium text-claude-textSecondary">配对码</label>
+              <label className="text-[11px] font-medium text-deepseek-textSecondary">配对码</label>
               <button
                 onClick={() => handleGeneratePairingCode(platformKey)}
                 disabled={pairLoading}
-                className="flex items-center gap-1 px-2 py-1 rounded-md bg-claude-hover border border-claude-border text-claude-text text-[10px] hover:bg-claude-btnHover transition-colors disabled:opacity-50"
+                className="flex items-center gap-1 px-2 py-1 rounded-md bg-deepseek-hover border border-deepseek-border text-deepseek-text text-[10px] hover:bg-deepseek-btnHover transition-colors disabled:opacity-50"
               >
                 {pairLoading ? <Loader2 size={10} className="animate-spin" /> : <RefreshCw size={10} />}
                 生成
@@ -832,11 +832,11 @@ const IMIntegrationPanel: React.FC<IMIntegrationPanelProps> = ({ onClose }) => {
             {code && (
               <div className="flex items-center gap-2">
                 <div className={`flex-1 px-3 py-2 rounded-lg ${platformMeta.lightBg} border ${platformMeta.borderColor} text-center`}>
-                  <span className="text-[18px] font-mono font-bold tracking-widest text-claude-text">{code}</span>
+                  <span className="text-[18px] font-mono font-bold tracking-widest text-deepseek-text">{code}</span>
                 </div>
                 <button
                   onClick={() => copyToClipboard(code, `${platformKey}_pair`)}
-                  className="p-2 rounded-lg bg-claude-hover border border-claude-border text-claude-textSecondary hover:text-claude-text transition-colors"
+                  className="p-2 rounded-lg bg-deepseek-hover border border-deepseek-border text-deepseek-textSecondary hover:text-deepseek-text transition-colors"
                 >
                   {copied[`${platformKey}_pair`] ? <Check size={14} className="text-green-500" /> : <Copy size={14} />}
                 </button>
@@ -846,22 +846,22 @@ const IMIntegrationPanel: React.FC<IMIntegrationPanelProps> = ({ onClose }) => {
         )}
 
         {requests.length > 0 && (
-          <div className="space-y-2 pt-2 border-t border-claude-border/30">
+          <div className="space-y-2 pt-2 border-t border-deepseek-border/30">
             <div className="flex items-center justify-between">
-              <label className="text-[11px] font-medium text-claude-textSecondary">待审核请求</label>
+              <label className="text-[11px] font-medium text-deepseek-textSecondary">待审核请求</label>
               <span className="text-[10px] px-1.5 py-0.5 rounded-full bg-amber-500/10 text-amber-500 font-medium">
                 {requests.length}
               </span>
             </div>
             <div className="space-y-1.5 max-h-40 overflow-y-auto sidebar-scroll">
               {requests.map(req => (
-                <div key={req.id} className="flex items-center gap-2 px-2.5 py-2 rounded-lg bg-claude-hover border border-claude-border/50">
-                  <div className="w-6 h-6 rounded-full bg-claude-accent/20 flex items-center justify-center flex-shrink-0">
-                    <Users size={12} className="text-claude-accent" />
+                <div key={req.id} className="flex items-center gap-2 px-2.5 py-2 rounded-lg bg-deepseek-hover border border-deepseek-border/50">
+                  <div className="w-6 h-6 rounded-full bg-deepseek-accent/20 flex items-center justify-center flex-shrink-0">
+                    <Users size={12} className="text-deepseek-accent" />
                   </div>
                   <div className="flex-1 min-w-0">
-                    <div className="text-[11px] font-medium text-claude-text truncate">{req.user_name || req.user_id}</div>
-                    <div className="text-[9px] text-claude-textSecondary/60">
+                    <div className="text-[11px] font-medium text-deepseek-text truncate">{req.user_name || req.user_id}</div>
+                    <div className="text-[9px] text-deepseek-textSecondary/60">
                       {new Date(req.created_at).toLocaleString()}
                     </div>
                   </div>
@@ -901,7 +901,7 @@ const IMIntegrationPanel: React.FC<IMIntegrationPanelProps> = ({ onClose }) => {
         {logs.length === 0 ? (
           <div className="flex flex-col items-center justify-center py-6 gap-2">
             <CheckCircle2 size={24} className="text-green-500/40" />
-            <span className="text-[11px] text-claude-textSecondary">暂无错误日志</span>
+            <span className="text-[11px] text-deepseek-textSecondary">暂无错误日志</span>
           </div>
         ) : (
           <>
@@ -913,9 +913,9 @@ const IMIntegrationPanel: React.FC<IMIntegrationPanelProps> = ({ onClose }) => {
                     <div className="flex-1 min-w-0">
                       <div className="text-[11px] text-red-400 font-medium truncate">{log.error}</div>
                       {log.details && (
-                        <div className="text-[10px] text-claude-textSecondary/60 mt-0.5 line-clamp-2">{log.details}</div>
+                        <div className="text-[10px] text-deepseek-textSecondary/60 mt-0.5 line-clamp-2">{log.details}</div>
                       )}
-                      <div className="text-[9px] text-claude-textSecondary/40 mt-1">
+                      <div className="text-[9px] text-deepseek-textSecondary/40 mt-1">
                         {new Date(log.created_at).toLocaleString()}
                       </div>
                     </div>
@@ -926,7 +926,7 @@ const IMIntegrationPanel: React.FC<IMIntegrationPanelProps> = ({ onClose }) => {
             {logs.length > 3 && (
               <button
                 onClick={() => setShowAllLogs(prev => ({ ...prev, [platformKey]: !prev[platformKey] }))}
-                className="w-full flex items-center justify-center gap-1 py-1.5 text-[10px] text-claude-textSecondary hover:text-claude-text transition-colors"
+                className="w-full flex items-center justify-center gap-1 py-1.5 text-[10px] text-deepseek-textSecondary hover:text-deepseek-text transition-colors"
               >
                 {showAll ? <EyeOff size={10} /> : <Eye size={10} />}
                 {showAll ? '收起' : `查看全部 ${logs.length} 条`}
@@ -940,7 +940,7 @@ const IMIntegrationPanel: React.FC<IMIntegrationPanelProps> = ({ onClose }) => {
 
   return (
     <div className="flex flex-col h-full">
-      <div className="flex items-center justify-between px-4 py-3 border-b border-claude-border flex-shrink-0">
+      <div className="flex items-center justify-between px-4 py-3 border-b border-deepseek-border flex-shrink-0">
         <div className="flex items-center gap-2.5">
           <div className="w-7 h-7 rounded-lg bg-gradient-to-br from-blue-500/20 to-indigo-500/20 flex items-center justify-center">
             <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" className="text-blue-400">
@@ -949,11 +949,11 @@ const IMIntegrationPanel: React.FC<IMIntegrationPanelProps> = ({ onClose }) => {
               <path d="M8 13h5"/>
             </svg>
           </div>
-          <span className="text-[14px] font-medium text-claude-text">{t('sidebar.imIntegration')}</span>
+          <span className="text-[14px] font-medium text-deepseek-text">{t('sidebar.imIntegration')}</span>
         </div>
         <button
           onClick={onClose}
-          className="p-1.5 rounded-lg hover:bg-claude-hover text-claude-textSecondary hover:text-claude-text transition-colors"
+          className="p-1.5 rounded-lg hover:bg-deepseek-hover text-deepseek-textSecondary hover:text-deepseek-text transition-colors"
         >
           <X size={16} />
         </button>
@@ -982,17 +982,17 @@ const IMIntegrationPanel: React.FC<IMIntegrationPanelProps> = ({ onClose }) => {
               className={`rounded-xl border transition-all duration-300 overflow-hidden ${
                 connected
                   ? `${platform.borderColor} ${platform.bgColor}`
-                  : 'border-claude-border bg-claude-bg'
+                  : 'border-deepseek-border bg-deepseek-bg'
               }`}
             >
               <div
-                className="flex items-center justify-between px-4 py-3.5 cursor-pointer hover:bg-claude-hover/30 transition-colors"
+                className="flex items-center justify-between px-4 py-3.5 cursor-pointer hover:bg-deepseek-hover/30 transition-colors"
                 onClick={() => toggleExpand(platform.key)}
               >
                 <div className="flex items-center gap-3">
                   <PlatformIcon platform={platform.key} size={28} />
                   <div className="flex flex-col gap-0.5">
-                    <span className="text-[13px] font-semibold text-claude-text">{platform.label}</span>
+                    <span className="text-[13px] font-semibold text-deepseek-text">{platform.label}</span>
                     {renderStatusBadge(platform.key)}
                   </div>
                 </div>
@@ -1000,7 +1000,7 @@ const IMIntegrationPanel: React.FC<IMIntegrationPanelProps> = ({ onClose }) => {
                   {isLoading && <Loader2 size={14} className="animate-spin text-blue-400" />}
                   <ChevronDown
                     size={14}
-                    className={`text-claude-textSecondary transition-transform duration-300 ${isExpanded ? 'rotate-180' : ''}`}
+                    className={`text-deepseek-textSecondary transition-transform duration-300 ${isExpanded ? 'rotate-180' : ''}`}
                   />
                 </div>
               </div>
@@ -1010,7 +1010,7 @@ const IMIntegrationPanel: React.FC<IMIntegrationPanelProps> = ({ onClose }) => {
                   isExpanded ? 'max-h-[800px] opacity-100' : 'max-h-0 opacity-0'
                 } overflow-hidden`}
               >
-                <div className="px-4 pb-4 border-t border-claude-border/40">
+                <div className="px-4 pb-4 border-t border-deepseek-border/40">
                   <div className="flex gap-0.5 py-2 -mx-1 overflow-x-auto">
                     {(Object.keys(TAB_CONFIG) as PanelTab[]).map(tab => {
                       const tabConfig = TAB_CONFIG[tab];
@@ -1025,7 +1025,7 @@ const IMIntegrationPanel: React.FC<IMIntegrationPanelProps> = ({ onClose }) => {
                           className={`flex items-center gap-1 px-2.5 py-1.5 rounded-md text-[11px] font-medium whitespace-nowrap transition-all ${
                             isActive
                               ? `${platform.bgColor} ${platform.color} border ${platform.borderColor}`
-                              : 'text-claude-textSecondary hover:text-claude-text hover:bg-claude-hover'
+                              : 'text-deepseek-textSecondary hover:text-deepseek-text hover:bg-deepseek-hover'
                           }`}
                         >
                           {tabConfig.icon}
@@ -1040,7 +1040,7 @@ const IMIntegrationPanel: React.FC<IMIntegrationPanelProps> = ({ onClose }) => {
                       <div className="space-y-3 animate-fade-in pt-2">
                         {/* Bridge instance status */}
                         {bridgeLoading ? (
-                          <div className="flex items-center justify-center py-8 text-claude-textSecondary">
+                          <div className="flex items-center justify-center py-8 text-deepseek-textSecondary">
                             <Loader2 size={16} className="animate-spin mr-2" />
                             <span className="text-[12px]">检测 bridge 中...</span>
                           </div>
@@ -1048,7 +1048,7 @@ const IMIntegrationPanel: React.FC<IMIntegrationPanelProps> = ({ onClose }) => {
                           <>
                             {/* Feishu credential status */}
                             {credentialLoading ? (
-                              <div className="flex items-center justify-center py-4 text-[12px] text-claude-textSecondary">
+                              <div className="flex items-center justify-center py-4 text-[12px] text-deepseek-textSecondary">
                                 <Loader2 size={14} className="animate-spin mr-2" />
                                 检测飞书凭证中...
                               </div>
@@ -1056,10 +1056,10 @@ const IMIntegrationPanel: React.FC<IMIntegrationPanelProps> = ({ onClose }) => {
                               <div className="rounded-xl border border-green-500/20 bg-green-500/5 p-4 space-y-2">
                                 <div className="flex items-center gap-2">
                                   <CheckCircle2 size={16} className="text-green-500" />
-                                  <span className="text-[13px] font-semibold text-claude-text">飞书凭证已就绪</span>
+                                  <span className="text-[13px] font-semibold text-deepseek-text">飞书凭证已就绪</span>
                                 </div>
-                                <div className="text-[11px] text-claude-textSecondary space-y-1">
-                                  <div>App ID: <span className="font-mono text-claude-text">{bridgeCredentials.app_id}</span></div>
+                                <div className="text-[11px] text-deepseek-textSecondary space-y-1">
+                                  <div>App ID: <span className="font-mono text-deepseek-text">{bridgeCredentials.app_id}</span></div>
                                   <div>租户: {bridgeCredentials.tenant}</div>
                                 </div>
                                 <button
@@ -1085,13 +1085,13 @@ const IMIntegrationPanel: React.FC<IMIntegrationPanelProps> = ({ onClose }) => {
                             ) : qrAuthStatus === 'scanning' ? (
                               <div className="flex flex-col items-center gap-3 py-6">
                                 <QrCode size={64} className="text-[#3370FF]" />
-                                <span className="text-[12px] text-claude-textSecondary text-center max-w-[220px]">
+                                <span className="text-[12px] text-deepseek-textSecondary text-center max-w-[220px]">
                                   {qrAuthUrl
                                     ? '在飞书 App 中打开此链接完成授权'
                                     : '正在生成授权二维码...'}
                                 </span>
                                 {qrAuthUrl && (
-                                  <div className="text-[10px] bg-claude-hover px-3 py-2 rounded-lg break-all text-claude-textSecondary font-mono text-center max-w-full">
+                                  <div className="text-[10px] bg-deepseek-hover px-3 py-2 rounded-lg break-all text-deepseek-textSecondary font-mono text-center max-w-full">
                                     {qrAuthUrl}
                                   </div>
                                 )}
@@ -1100,14 +1100,14 @@ const IMIntegrationPanel: React.FC<IMIntegrationPanelProps> = ({ onClose }) => {
                             ) : qrAuthStatus === 'completed' ? (
                               <div className="rounded-xl border border-green-500/20 bg-green-500/5 p-4 text-center space-y-2">
                                 <CheckCircle2 size={24} className="text-green-500 mx-auto" />
-                                <span className="text-[13px] text-claude-text font-semibold">授权完成</span>
+                                <span className="text-[13px] text-deepseek-text font-semibold">授权完成</span>
                               </div>
                             ) : (
                               <div className="flex flex-col items-center gap-3 py-6">
-                                <span className="text-[12px] text-claude-textSecondary text-center">
+                                <span className="text-[12px] text-deepseek-textSecondary text-center">
                                   未检测到飞书凭证
                                 </span>
-                                <span className="text-[11px] text-claude-textSecondary/60 text-center max-w-[240px]">
+                                <span className="text-[11px] text-deepseek-textSecondary/60 text-center max-w-[240px]">
                                   需要先在飞书开放平台创建应用，或使用已有 bridge 的凭证
                                 </span>
                                 <button
@@ -1127,13 +1127,13 @@ const IMIntegrationPanel: React.FC<IMIntegrationPanelProps> = ({ onClose }) => {
                                 <div className="flex items-center justify-between">
                                   <div className="flex items-center gap-2">
                                     <span className="w-2 h-2 rounded-full bg-green-500" />
-                                    <span className="text-[13px] font-semibold text-claude-text">{inst.bot_name || 'Lark Bridge'}</span>
+                                    <span className="text-[13px] font-semibold text-deepseek-text">{inst.bot_name || 'Lark Bridge'}</span>
                                   </div>
-                                  <span className="text-[10px] text-claude-textSecondary bg-claude-hover px-2 py-0.5 rounded-full">{inst.version || '-'}</span>
+                                  <span className="text-[10px] text-deepseek-textSecondary bg-deepseek-hover px-2 py-0.5 rounded-full">{inst.version || '-'}</span>
                                 </div>
-                                <div className="grid grid-cols-2 gap-2 text-[11px] text-claude-textSecondary">
-                                  <div><span className="opacity-60">PID</span><div className="font-mono text-claude-text">{inst.pid || '-'}</div></div>
-                                  <div><span className="opacity-60">App ID</span><div className="font-mono text-claude-text truncate">{inst.app_id || '-'}</div></div>
+                                <div className="grid grid-cols-2 gap-2 text-[11px] text-deepseek-textSecondary">
+                                  <div><span className="opacity-60">PID</span><div className="font-mono text-deepseek-text">{inst.pid || '-'}</div></div>
+                                  <div><span className="opacity-60">App ID</span><div className="font-mono text-deepseek-text truncate">{inst.app_id || '-'}</div></div>
                                   <div>
                                     <span className="opacity-60">状态</span>
                                     <div className="flex items-center gap-1">
@@ -1141,20 +1141,20 @@ const IMIntegrationPanel: React.FC<IMIntegrationPanelProps> = ({ onClose }) => {
                                       <span className="text-green-500">运行中</span>
                                     </div>
                                   </div>
-                                  <div><span className="opacity-60">启动</span><div className="text-claude-text">{inst.started_at ? new Date(inst.started_at).toLocaleString() : '-'}</div></div>
+                                  <div><span className="opacity-60">启动</span><div className="text-deepseek-text">{inst.started_at ? new Date(inst.started_at).toLocaleString() : '-'}</div></div>
                                 </div>
                                 <div className="flex gap-2 pt-1">
                                   <button onClick={() => handleBridgeStop(inst)} disabled={bridgeActionLoading}
                                     className="flex items-center gap-1 px-3 py-1.5 text-[11px] text-red-400 border border-red-400/30 rounded-lg hover:bg-red-500/10 transition-colors disabled:opacity-50"
                                   >{bridgeActionLoading ? <Loader2 size={12} className="animate-spin" /> : <Unlink size={12} />}停止</button>
                                   <button onClick={loadBridgeStatus}
-                                    className="flex items-center gap-1 px-3 py-1.5 text-[11px] text-claude-textSecondary border border-claude-border rounded-lg hover:bg-claude-hover transition-colors"
+                                    className="flex items-center gap-1 px-3 py-1.5 text-[11px] text-deepseek-textSecondary border border-deepseek-border rounded-lg hover:bg-deepseek-hover transition-colors"
                                   ><RefreshCw size={12} />刷新</button>
                                 </div>
                               </div>
                             )) : (
                               <div className="flex flex-col items-center gap-2 py-4 mt-2">
-                                <span className="text-[11px] text-claude-textSecondary">
+                                <span className="text-[11px] text-deepseek-textSecondary">
                                   (bridge 后台管理进程未运行)
                                 </span>
                                 <button onClick={handleBridgeStart} disabled={bridgeActionLoading}
@@ -1180,10 +1180,10 @@ const IMIntegrationPanel: React.FC<IMIntegrationPanelProps> = ({ onClose }) => {
           );
         })}
 
-        <div className="mt-4 pt-3 border-t border-claude-border/50">
-          <div className="text-[11px] text-claude-textSecondary/60 space-y-1.5">
-            <p className="font-medium text-claude-textSecondary/80">Webhook 接收地址：</p>
-            <code className="block px-3 py-2 rounded-lg bg-claude-bg border border-claude-border text-[10px] text-claude-textSecondary break-all">
+        <div className="mt-4 pt-3 border-t border-deepseek-border/50">
+          <div className="text-[11px] text-deepseek-textSecondary/60 space-y-1.5">
+            <p className="font-medium text-deepseek-textSecondary/80">Webhook 接收地址：</p>
+            <code className="block px-3 py-2 rounded-lg bg-deepseek-bg border border-deepseek-border text-[10px] text-deepseek-textSecondary break-all">
               http://127.0.0.1:{bridgePort}/api/im/webhook/&#123;platform&#125;
             </code>
             <p className="mt-1">将此地址配置到对应 IM 平台的 Webhook 回调中即可接收消息。</p>

@@ -29,7 +29,7 @@ export default function ViewSubagentButton({ conversationId, toolId, live }: { c
     return () => { controller.abort(); clearTimeout(timer); };
   }, [requested, conversationId, toolId, live, revision]);
   return <div className="my-1 text-xs">
-    <button type="button" disabled={!conversationId || !toolId} onClick={() => { setRequested(true); setRevision(value => value + 1); setError(''); }} className="rounded-full border border-claude-border px-2 py-1 hover:bg-claude-hover disabled:opacity-40">View subagent</button>
+    <button type="button" disabled={!conversationId || !toolId} onClick={() => { setRequested(true); setRevision(value => value + 1); setError(''); }} className="rounded-full border border-deepseek-border px-2 py-1 hover:bg-deepseek-hover disabled:opacity-40">View subagent</button>
     {requested && error && <p role="status">{error}</p>}
     {requested && invocations.length > 1 && invocations.map(item => <button type="button" key={item.attempt_id} onClick={() => { openSubagentPanel(item); setRequested(false); }} className="block p-1">{item.description || 'Subagent'} · {item.child_session_id} · {item.status}</button>)}
   </div>;

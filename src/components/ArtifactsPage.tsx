@@ -147,11 +147,11 @@ const ArtifactsPage: React.FC<ArtifactsPageProps> = ({ onTryPrompt }) => {
 
   if (selectedItem) {
     return (
-      <div className="flex-1 h-full bg-claude-bg overflow-y-auto">
+      <div className="flex-1 h-full bg-deepseek-bg overflow-y-auto">
         <div className="max-w-[800px] mx-auto px-4 py-6 md:px-8 md:py-10">
           <button
             onClick={() => setSelectedItem(null)}
-            className="flex items-center gap-1.5 text-claude-textSecondary hover:text-claude-text transition-colors mb-5"
+            className="flex items-center gap-1.5 text-deepseek-textSecondary hover:text-deepseek-text transition-colors mb-5"
           >
             <ArrowLeft size={16} />
             <span className="text-[14px]">{t('customize.back')}</span>
@@ -163,13 +163,13 @@ const ArtifactsPage: React.FC<ArtifactsPageProps> = ({ onTryPrompt }) => {
                 <path d="M715.922286 204.8h-140.946286l256.877714 649.728H972.8L715.922286 204.8z m-407.844572 0L51.2 854.528h143.945143l52.955428-135.936h268.909715l51.931428 135.936h143.981715L456.009143 204.8H308.077714z m-13.970285 392.813714l87.954285-227.876571 87.954286 227.876571h-175.908571z" fill="#c5c5c5" />
               </svg>
             </div>
-            <span className="text-[14px] text-claude-text font-medium">{t('customize.anthropic')}</span>
+            <span className="text-[14px] text-deepseek-text font-medium">{t('customize.anthropic')}</span>
           </div>
 
           <div className="flex items-start justify-between gap-6 mb-6">
             <div className="flex-1 min-w-0">
-              <h1 className="text-[20px] font-semibold text-claude-text mb-1.5">{selectedItem.name}</h1>
-              <p className="text-[14px] text-claude-textSecondary leading-relaxed">{selectedItem.description}</p>
+              <h1 className="text-[20px] font-semibold text-deepseek-text mb-1.5">{selectedItem.name}</h1>
+              <p className="text-[14px] text-deepseek-textSecondary leading-relaxed">{selectedItem.description}</p>
             </div>
             <button
               onClick={() => handleCustomize(selectedItem)}
@@ -205,7 +205,7 @@ const ArtifactsPage: React.FC<ArtifactsPageProps> = ({ onTryPrompt }) => {
             </div>
             {artifactLoading ? (
               <div className="w-full flex items-center justify-center bg-white dark:bg-[#1a1a19]" style={{ minHeight: '400px' }}>
-                <Loader2 size={24} className="animate-spin text-claude-textSecondary" />
+                <Loader2 size={24} className="animate-spin text-deepseek-textSecondary" />
               </div>
             ) : artifactHtml ? (
               <ArtifactIframe ref={iframeRef} html={artifactHtml} title={selectedItem.name} />
@@ -225,42 +225,42 @@ const ArtifactsPage: React.FC<ArtifactsPageProps> = ({ onTryPrompt }) => {
 
           <div className="flex gap-10 flex-wrap">
             <div className="flex-1 min-w-[300px]">
-              <h2 className="text-[16px] font-semibold text-claude-text mb-4">{t('customize.about')}</h2>
+              <h2 className="text-[16px] font-semibold text-deepseek-text mb-4">{t('customize.about')}</h2>
               <div className="bg-[#f5f5f4] dark:bg-[#121212] border border-black/[0.06] dark:border-white/[0.06] rounded-xl p-5">
                 <div className="flex items-center justify-between mb-3">
-                  <h3 className="text-[14px] font-semibold text-claude-text">{t('customize.startingPrompt')}</h3>
+                  <h3 className="text-[14px] font-semibold text-deepseek-text">{t('customize.startingPrompt')}</h3>
                   <button
                     onClick={() => handleCopyPrompt(selectedItem.starting_prompt)}
-                    className="p-1.5 rounded-md text-claude-textSecondary hover:bg-claude-hover hover:text-claude-text transition-colors"
+                    className="p-1.5 rounded-md text-deepseek-textSecondary hover:bg-deepseek-hover hover:text-deepseek-text transition-colors"
                     title={copied ? t('customize.copied') : t('customize.copyPrompt')}
                   >
                     {copied ? <Check size={15} /> : <Copy size={15} />}
                   </button>
                 </div>
-                <p className="text-[14px] text-claude-textSecondary leading-relaxed whitespace-pre-wrap italic">
+                <p className="text-[14px] text-deepseek-textSecondary leading-relaxed whitespace-pre-wrap italic">
                   {selectedItem.starting_prompt}
                 </p>
               </div>
             </div>
 
             <div className="w-[200px] flex-shrink-0">
-              <h2 className="text-[16px] font-semibold text-claude-text mb-4">{t('customize.keepLearning')}</h2>
+              <h2 className="text-[16px] font-semibold text-deepseek-text mb-4">{t('customize.keepLearning')}</h2>
               <div className="flex flex-col gap-2">
                 <button
                   onClick={() => handleTryIt(selectedItem.starting_prompt)}
-                  className="flex items-center justify-between w-full px-4 py-2.5 border border-claude-border rounded-xl text-[13px] font-medium text-claude-text hover:bg-claude-hover transition-colors"
+                  className="flex items-center justify-between w-full px-4 py-2.5 border border-deepseek-border rounded-xl text-[13px] font-medium text-deepseek-text hover:bg-deepseek-hover transition-colors"
                 >
                   <span>{t('customize.viewFullChat')}</span>
-                  <ExternalLink size={13} className="text-claude-textSecondary" />
+                  <ExternalLink size={13} className="text-deepseek-textSecondary" />
                 </button>
                 <a
                   href="https://support.anthropic.com/en/articles/9487310-what-are-artifacts-and-how-do-i-use-them"
                   target="_blank"
                   rel="noopener noreferrer"
-                  className="flex items-center justify-between w-full px-4 py-2.5 border border-claude-border rounded-xl text-[13px] font-medium text-claude-text hover:bg-claude-hover transition-colors"
+                  className="flex items-center justify-between w-full px-4 py-2.5 border border-deepseek-border rounded-xl text-[13px] font-medium text-deepseek-text hover:bg-deepseek-hover transition-colors"
                 >
                   <span>{t('customize.artifactsGuide')}</span>
-                  <ExternalLink size={13} className="text-claude-textSecondary" />
+                  <ExternalLink size={13} className="text-deepseek-textSecondary" />
                 </a>
               </div>
             </div>
@@ -271,18 +271,18 @@ const ArtifactsPage: React.FC<ArtifactsPageProps> = ({ onTryPrompt }) => {
   }
 
   return (
-    <div className="flex-1 h-full bg-claude-bg overflow-y-auto">
+    <div className="flex-1 h-full bg-deepseek-bg overflow-y-auto">
       <div className="max-w-[800px] mx-auto px-4 py-8 md:px-8 md:py-12">
         <div className="flex items-center justify-between mb-8">
           <h1
-            className="font-[Spectral] text-[32px] text-claude-text"
+            className="font-[Spectral] text-[32px] text-deepseek-text"
             style={{ fontWeight: 500, WebkitTextStroke: '0.5px currentColor' }}
           >
             {t('artifacts.title')}
           </h1>
           <button
             onClick={() => handleTryIt('Create a new interactive artifact.')}
-            className="flex items-center gap-2 px-3.5 py-1.5 bg-claude-text text-claude-bg hover:opacity-90 rounded-lg transition-opacity font-medium"
+            className="flex items-center gap-2 px-3.5 py-1.5 bg-deepseek-text text-deepseek-bg hover:opacity-90 rounded-lg transition-opacity font-medium"
             style={{ fontSize: '14px' }}
           >
             {t('customize.newArtifact')}
@@ -292,13 +292,13 @@ const ArtifactsPage: React.FC<ArtifactsPageProps> = ({ onTryPrompt }) => {
         <div className="flex items-center gap-6 border-b border-[#262624] mb-6">
           <button
             onClick={() => setActiveTab('inspiration')}
-            className={`pb-3 text-[14px] font-medium transition-colors border-b-2 ${activeTab === 'inspiration' ? 'text-claude-text border-claude-text' : 'text-claude-textSecondary border-transparent hover:text-claude-text'}`}
+            className={`pb-3 text-[14px] font-medium transition-colors border-b-2 ${activeTab === 'inspiration' ? 'text-deepseek-text border-deepseek-text' : 'text-deepseek-textSecondary border-transparent hover:text-deepseek-text'}`}
           >
             {t('customize.inspiration')}
           </button>
           <button
             onClick={() => setActiveTab('your_artifacts')}
-            className={`pb-3 text-[14px] font-medium transition-colors border-b-2 ${activeTab === 'your_artifacts' ? 'text-claude-text border-claude-text' : 'text-claude-textSecondary border-transparent hover:text-claude-text'}`}
+            className={`pb-3 text-[14px] font-medium transition-colors border-b-2 ${activeTab === 'your_artifacts' ? 'text-deepseek-text border-deepseek-text' : 'text-deepseek-textSecondary border-transparent hover:text-deepseek-text'}`}
           >
             {t('customize.yourArtifacts')}
           </button>
@@ -312,8 +312,8 @@ const ArtifactsPage: React.FC<ArtifactsPageProps> = ({ onTryPrompt }) => {
                   key={id}
                   onClick={() => setActiveFilter(id)}
                   className={`px-4 py-1.5 rounded-full text-[13px] transition-colors ${activeFilter === id
-                    ? 'bg-claude-text text-claude-bg font-medium'
-                    : 'text-claude-textSecondary hover:bg-black/5 dark:hover:bg-white/5'
+                    ? 'bg-deepseek-text text-deepseek-bg font-medium'
+                    : 'text-deepseek-textSecondary hover:bg-black/5 dark:hover:bg-white/5'
                     }`}
                 >
                   {t(`customize.${id === 'all' ? 'all' : id === 'learn' ? 'learn' : id === 'life-hacks' ? 'lifeHacks' : id === 'games' ? 'games' : id === 'creative' ? 'creative' : 'touchGrass'}`)}
@@ -328,7 +328,7 @@ const ArtifactsPage: React.FC<ArtifactsPageProps> = ({ onTryPrompt }) => {
                   className="group cursor-pointer"
                   onClick={() => setSelectedItem(item)}
                 >
-                  <div className="w-full aspect-[4/3] rounded-[16px] overflow-hidden mb-3 border border-transparent group-hover:border-[#262624] relative bg-claude-input transition-colors duration-200">
+                  <div className="w-full aspect-[4/3] rounded-[16px] overflow-hidden mb-3 border border-transparent group-hover:border-[#262624] relative bg-deepseek-input transition-colors duration-200">
                     <img
                       src={`./artifacts/previews/${item.img_src}`}
                       alt={item.name}
@@ -336,14 +336,14 @@ const ArtifactsPage: React.FC<ArtifactsPageProps> = ({ onTryPrompt }) => {
                       onError={(e) => {
                         const el = e.target as HTMLImageElement;
                         el.style.display = 'none';
-                        el.parentElement!.classList.add('bg-gradient-to-br', 'from-claude-hover', 'to-claude-input');
+                        el.parentElement!.classList.add('bg-gradient-to-br', 'from-deepseek-hover', 'to-deepseek-input');
                       }}
                     />
                   </div>
-                  <h3 className="text-[14px] font-medium text-claude-text group-hover:underline decoration-1 underline-offset-2">
+                  <h3 className="text-[14px] font-medium text-deepseek-text group-hover:underline decoration-1 underline-offset-2">
                     {item.name}
                   </h3>
-                  <p className="text-[12px] text-claude-textSecondary mt-0.5 line-clamp-2">
+                  <p className="text-[12px] text-deepseek-textSecondary mt-0.5 line-clamp-2">
                     {item.description}
                   </p>
                 </div>
@@ -353,14 +353,14 @@ const ArtifactsPage: React.FC<ArtifactsPageProps> = ({ onTryPrompt }) => {
         ) : (
           userArtifactsLoading ? (
             <div className="flex items-center justify-center py-20">
-              <Loader2 size={24} className="animate-spin text-claude-textSecondary" />
+              <Loader2 size={24} className="animate-spin text-deepseek-textSecondary" />
             </div>
           ) : userArtifacts.length === 0 ? (
-            <div className="flex flex-col items-center justify-center py-20 text-claude-textSecondary">
-              <div className="w-16 h-16 rounded-2xl bg-claude-hover flex items-center justify-center mb-4">
+            <div className="flex flex-col items-center justify-center py-20 text-deepseek-textSecondary">
+              <div className="w-16 h-16 rounded-2xl bg-deepseek-hover flex items-center justify-center mb-4">
                 <FileCode size={24} className="opacity-40" />
               </div>
-              <p className="text-[15px] font-medium text-claude-text mb-1">{t('customize.noArtifactsYet')}</p>
+              <p className="text-[15px] font-medium text-deepseek-text mb-1">{t('customize.noArtifactsYet')}</p>
               <p className="text-[13px]">{t('customize.artifactsDesc')}</p>
             </div>
           ) : (
@@ -369,21 +369,21 @@ const ArtifactsPage: React.FC<ArtifactsPageProps> = ({ onTryPrompt }) => {
                 <div
                   key={artifact.id}
                   onClick={() => handleOpenUserArtifact(artifact)}
-                  className="group cursor-pointer border border-claude-border/30 rounded-xl p-4 hover:bg-claude-hover transition-colors"
+                  className="group cursor-pointer border border-deepseek-border/30 rounded-xl p-4 hover:bg-deepseek-hover transition-colors"
                 >
                   <div className="flex items-start gap-3">
-                    <div className="w-10 h-10 rounded-lg bg-claude-input flex items-center justify-center flex-shrink-0 mt-0.5">
-                      <FileCode size={20} className="text-claude-textSecondary" />
+                    <div className="w-10 h-10 rounded-lg bg-deepseek-input flex items-center justify-center flex-shrink-0 mt-0.5">
+                      <FileCode size={20} className="text-deepseek-textSecondary" />
                     </div>
                     <div className="flex-1 min-w-0">
-                      <h3 className="text-[14px] font-medium text-claude-text truncate group-hover:underline decoration-1 underline-offset-2">
+                      <h3 className="text-[14px] font-medium text-deepseek-text truncate group-hover:underline decoration-1 underline-offset-2">
                         {artifact.title}
                       </h3>
                       <div className="flex items-center gap-1.5 mt-1">
-                        <MessageSquare size={12} className="text-claude-textSecondary" />
-                        <span className="text-[12px] text-claude-textSecondary truncate">{artifact.conversation_title}</span>
+                        <MessageSquare size={12} className="text-deepseek-textSecondary" />
+                        <span className="text-[12px] text-deepseek-textSecondary truncate">{artifact.conversation_title}</span>
                       </div>
-                      <span className="text-[11px] text-claude-textSecondary/60 mt-1 block">
+                      <span className="text-[11px] text-deepseek-textSecondary/60 mt-1 block">
                         {new Date(artifact.created_at).toLocaleDateString()}
                       </span>
                     </div>

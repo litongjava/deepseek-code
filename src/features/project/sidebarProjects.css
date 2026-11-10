@@ -6,7 +6,7 @@
   align-items: center;
   gap: 5px;
   padding: 10px 8px 6px;
-  color: var(--text-claude-secondary);
+  color: var(--text-deepseek-secondary);
   font-size: 12px;
 }
 .project-sidebar-row {
@@ -18,7 +18,7 @@
   padding: 0 8px;
 }
 .project-sidebar-row:hover {
-  background: var(--bg-claude-hover);
+  background: var(--bg-deepseek-hover);
 }
 .project-session-row {
   padding-left: 32px;
@@ -36,17 +36,17 @@
 .project-row-actions button {
   padding: 3px;
   border-radius: 4px;
-  color: var(--text-claude-secondary);
+  color: var(--text-deepseek-secondary);
 }
 .project-row-actions button:hover {
-  color: var(--text-claude-main);
-  background: var(--bg-claude-hover);
+  color: var(--text-deepseek-main);
+  background: var(--bg-deepseek-hover);
 }
 .project-popup-menu {
   padding: 5px;
-  border: 1px solid var(--border-claude);
+  border: 1px solid var(--border-deepseek);
   border-radius: 14px;
-  background: var(--bg-claude-input);
+  background: var(--bg-deepseek-input);
   box-shadow: 0 5px 18px rgb(0 0 0 / 10%);
   max-height: min(400px, calc(100vh - 16px));
   overflow-y: auto;
@@ -64,7 +64,7 @@
 .project-menu-item:hover,
 .project-menu-item:focus-visible,
 .project-menu-item[aria-expanded="true"] {
-  background: var(--bg-claude-hover);
+  background: var(--bg-deepseek-hover);
   outline: none;
 }
 .project-menu-item:disabled {
@@ -73,7 +73,7 @@
 }
 .project-menu-separator {
   margin-top: 5px;
-  border-top: 1px solid var(--border-claude);
+  border-top: 1px solid var(--border-deepseek);
   padding-top: 9px;
 }
 .project-sidebar-tree button:focus-visible {

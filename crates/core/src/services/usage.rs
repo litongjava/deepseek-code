@@ -103,7 +103,7 @@ pub async fn plan(root: &Path) -> Result<Option<PlanUsage>> {
         .build()?;
     let request = http.get(format!("{base}/api/oauth/usage")).header(
         "User-Agent",
-        concat!("claude-code-rust/", env!("CARGO_PKG_VERSION")),
+        concat!("deepseek-code/", env!("CARGO_PKG_VERSION")),
     );
     let request = auth::authorize(request, &auth::credential_marker(root)?, base, false).await?;
     Ok(Some(read_plan(request).await?))

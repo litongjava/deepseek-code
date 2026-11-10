@@ -27,18 +27,18 @@ export default function FolderFields({ folders, onChange, disabled = false, comp
     } catch (error) { setError(String(error)); }
   };
   return <div className="space-y-3">
-    <label className="block text-sm font-medium text-claude-text">{t('projectDialogs.sourceFolders')}</label>
-    <div className="rounded-xl border border-claude-border bg-claude-input p-3 space-y-2">
-      {folders.map(folder => <div key={folder} className="flex items-center gap-2 text-sm text-claude-text">
+    <label className="block text-sm font-medium text-deepseek-text">{t('projectDialogs.sourceFolders')}</label>
+    <div className="rounded-xl border border-deepseek-border bg-deepseek-input p-3 space-y-2">
+      {folders.map(folder => <div key={folder} className="flex items-center gap-2 text-sm text-deepseek-text">
         <Folder size={15} className="shrink-0" />
         <span title={folder} className="flex-1 min-w-0 truncate">{compact ? folder.split(/[\\/]/).filter(Boolean).pop() || folder : folder}</span>
-        <button type="button" disabled={disabled} aria-label={t('projectDialogs.removeFolder', { path: folder })} onClick={() => onChange(folders.filter(p => p !== folder))} className="p-1 rounded hover:bg-claude-hover disabled:opacity-40"><X size={14} /></button>
+        <button type="button" disabled={disabled} aria-label={t('projectDialogs.removeFolder', { path: folder })} onClick={() => onChange(folders.filter(p => p !== folder))} className="p-1 rounded hover:bg-deepseek-hover disabled:opacity-40"><X size={14} /></button>
       </div>)}
-      {!folders.length && <p className="py-3 text-center text-sm text-claude-textSecondary">{t('projectDialogs.needFolder')}</p>}
-      {compact ? <button type="button" disabled={disabled} onClick={browse} className="flex w-full items-center gap-2 border-t border-claude-border pt-3 text-sm text-claude-text"><FolderPlus size={15} /> {t('projectDialogs.addFolder')}</button> : <button type="button" disabled={disabled} onClick={browse} className="mx-auto flex items-center gap-2 rounded-lg bg-claude-hover px-3 py-1.5 text-sm text-claude-text"><FolderPlus size={15} /> {t('projectDialogs.browseFolders')}</button>}
+      {!folders.length && <p className="py-3 text-center text-sm text-deepseek-textSecondary">{t('projectDialogs.needFolder')}</p>}
+      {compact ? <button type="button" disabled={disabled} onClick={browse} className="flex w-full items-center gap-2 border-t border-deepseek-border pt-3 text-sm text-deepseek-text"><FolderPlus size={15} /> {t('projectDialogs.addFolder')}</button> : <button type="button" disabled={disabled} onClick={browse} className="mx-auto flex items-center gap-2 rounded-lg bg-deepseek-hover px-3 py-1.5 text-sm text-deepseek-text"><FolderPlus size={15} /> {t('projectDialogs.browseFolders')}</button>}
       {(!compact || adding) && <div className="flex gap-2 pt-2">
-        <input aria-label={t('projectDialogs.folderPath')} placeholder={t('projectDialogs.absolutePath')} value={path} disabled={disabled} onChange={e => setPath(e.target.value)} onKeyDown={e => { if (e.key === 'Enter') { e.preventDefault(); if (path.trim()) add([path]); } }} className="min-w-0 flex-1 rounded-lg border border-claude-border bg-transparent px-3 py-2 text-sm text-claude-text outline-none focus:border-blue-500" />
-        <button type="button" disabled={disabled || !path.trim()} onClick={() => add([path])} className="rounded-lg bg-claude-hover px-3 text-sm text-claude-text disabled:opacity-40">{t('projectDialogs.add')}</button>
+        <input aria-label={t('projectDialogs.folderPath')} placeholder={t('projectDialogs.absolutePath')} value={path} disabled={disabled} onChange={e => setPath(e.target.value)} onKeyDown={e => { if (e.key === 'Enter') { e.preventDefault(); if (path.trim()) add([path]); } }} className="min-w-0 flex-1 rounded-lg border border-deepseek-border bg-transparent px-3 py-2 text-sm text-deepseek-text outline-none focus:border-blue-500" />
+        <button type="button" disabled={disabled || !path.trim()} onClick={() => add([path])} className="rounded-lg bg-deepseek-hover px-3 text-sm text-deepseek-text disabled:opacity-40">{t('projectDialogs.add')}</button>
       </div>}
     </div>
     {error && <p role="alert" className="text-sm text-red-500">{error}</p>}

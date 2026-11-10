@@ -80,7 +80,7 @@ export default function PlanApprovalController({ sessionId, executing = false }:
 
   if (!plan) return null;
   return <>
-    {hidden && <button type="button" className="fixed bottom-24 right-6 z-50 rounded-lg bg-claude-surface p-3 shadow-lg" onClick={() => setHidden(false)}>待审阅计划</button>}
+    {hidden && <button type="button" className="fixed bottom-24 right-6 z-50 rounded-lg bg-deepseek-surface p-3 shadow-lg" onClick={() => setHidden(false)}>待审阅计划</button>}
     <div style={{ display: hidden ? 'none' : undefined }}>
       <PlanApprovalDialog key={plan.requestId} request={plan} active={!hidden && !opened} onSubmit={submit} onClose={() => setHidden(true)} onOpen={() => setOpened(true)} />
     </div>

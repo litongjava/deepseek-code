@@ -118,11 +118,11 @@ export default function SlashCommandPalette({ isOpen, onClose, onSelect, inputVa
   return (
     <div className="fixed inset-0 z-[200] flex items-start justify-center pt-[20vh] bg-black/30" onClick={onClose}>
       <div
-        className="w-[520px] max-h-[400px] bg-white dark:bg-[#2A2928] border border-claude-border rounded-xl shadow-2xl overflow-hidden flex flex-col animate-fade-in"
+        className="w-[520px] max-h-[400px] bg-white dark:bg-[#2A2928] border border-deepseek-border rounded-xl shadow-2xl overflow-hidden flex flex-col animate-fade-in"
         onClick={e => e.stopPropagation()}
       >
-        <div className="flex items-center gap-2 px-4 py-3 border-b border-claude-border">
-          <Search size={16} className="text-claude-textSecondary" />
+        <div className="flex items-center gap-2 px-4 py-3 border-b border-deepseek-border">
+          <Search size={16} className="text-deepseek-textSecondary" />
           <input
             ref={inputRef}
             type="text"
@@ -130,24 +130,24 @@ export default function SlashCommandPalette({ isOpen, onClose, onSelect, inputVa
             value={inputValue}
             onChange={e => filterCommands(e.target.value)}
             onKeyDown={handleKeyDown}
-            className="flex-1 bg-transparent text-claude-text placeholder-claude-textSecondary focus:outline-none text-[14px]"
+            className="flex-1 bg-transparent text-deepseek-text placeholder-deepseek-textSecondary focus:outline-none text-[14px]"
           />
-          <kbd className="px-1.5 py-0.5 text-[11px] text-claude-textSecondary bg-claude-hover rounded border border-claude-border">ESC</kbd>
+          <kbd className="px-1.5 py-0.5 text-[11px] text-deepseek-textSecondary bg-deepseek-hover rounded border border-deepseek-border">ESC</kbd>
         </div>
 
         <div ref={listRef} className="flex-1 overflow-y-auto py-1">
           {loading ? (
-            <div className="flex items-center justify-center py-8 text-claude-textSecondary text-[13px]">
+            <div className="flex items-center justify-center py-8 text-deepseek-textSecondary text-[13px]">
               Loading commands...
             </div>
           ) : filteredCommands.length === 0 ? (
-            <div className="flex items-center justify-center py-8 text-claude-textSecondary text-[13px]">
+            <div className="flex items-center justify-center py-8 text-deepseek-textSecondary text-[13px]">
               No commands found
             </div>
           ) : (
             Object.entries(groupedCommands).map(([category, cmds]) => (
               <div key={category}>
-                <div className="px-4 py-1.5 text-[11px] font-semibold text-claude-textSecondary uppercase tracking-wider flex items-center gap-1.5">
+                <div className="px-4 py-1.5 text-[11px] font-semibold text-deepseek-textSecondary uppercase tracking-wider flex items-center gap-1.5">
                   {CATEGORY_ICONS[category] || <Zap size={14} />}
                   {category}
                 </div>
@@ -169,11 +169,11 @@ export default function SlashCommandPalette({ isOpen, onClose, onSelect, inputVa
                         <span className={`font-mono text-[13px] font-medium ${CATEGORY_COLORS[category] || 'text-blue-500'}`}>
                           {cmd.name}
                         </span>
-                        <span className="text-[12px] text-claude-textSecondary truncate">
+                        <span className="text-[12px] text-deepseek-textSecondary truncate">
                           {cmd.description}
                         </span>
                       </div>
-                      <ChevronRight size={14} className="text-claude-textSecondary flex-shrink-0" />
+                      <ChevronRight size={14} className="text-deepseek-textSecondary flex-shrink-0" />
                     </button>
                   );
                 })}
@@ -182,10 +182,10 @@ export default function SlashCommandPalette({ isOpen, onClose, onSelect, inputVa
           )}
         </div>
 
-        <div className="px-4 py-2 border-t border-claude-border flex items-center gap-4 text-[11px] text-claude-textSecondary">
-          <span><kbd className="px-1 py-0.5 bg-claude-hover rounded">↑↓</kbd> Navigate</span>
-          <span><kbd className="px-1 py-0.5 bg-claude-hover rounded">Enter</kbd> Select</span>
-          <span><kbd className="px-1 py-0.5 bg-claude-hover rounded">Esc</kbd> Close</span>
+        <div className="px-4 py-2 border-t border-deepseek-border flex items-center gap-4 text-[11px] text-deepseek-textSecondary">
+          <span><kbd className="px-1 py-0.5 bg-deepseek-hover rounded">↑↓</kbd> Navigate</span>
+          <span><kbd className="px-1 py-0.5 bg-deepseek-hover rounded">Enter</kbd> Select</span>
+          <span><kbd className="px-1 py-0.5 bg-deepseek-hover rounded">Esc</kbd> Close</span>
         </div>
       </div>
     </div>

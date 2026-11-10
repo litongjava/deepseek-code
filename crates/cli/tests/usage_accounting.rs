@@ -137,7 +137,7 @@ async fn distinct_requests_accumulate_once_without_compaction_and_new_turns_star
                 .stdin(Stdio::null())
                 .kill_on_drop(true);
             for (key, _) in std::env::vars() {
-                if key.starts_with("DEEPSEEK_CODE") || key.starts_with("CLAUDE_RUST") {
+                if key.starts_with("DEEPSEEK_CODE") {
                     cmd.env_remove(key);
                 }
             }

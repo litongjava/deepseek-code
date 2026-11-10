@@ -405,6 +405,22 @@ pub async fn call(worker: &Worker, request: &Request) -> Result<Reply> {
     .context("Session worker IPC timed out")?
 }
 
+/// IPC endpoint for a session worker: a named pipe on Windows, a socket in the
+/// temp directory elsewhere.
+fn worker_endpoint(id: &str) -> String {
+    #[cfg(windows)]
+    {
+        format!(r"\\.\pipe\deepseek-code-session-{id}")
+    }
+    #[cfg(unix)]
+    {
+        std::env::temp_dir()
+            .join(format!("deepseek-code-{id}.sock"))
+            .to_string_lossy()
+            .into_owned()
+    }
+}
+
 pub async fn ensure_worker(
     root: &Path,
     executable: &Path,
@@ -430,13 +446,7 @@ pub async fn ensure_worker(
     let mut claim = SessionClaim::acquire(root, session, &id)?;
     let dir = worker_path(root, session)?.join(&id);
     fs::create_dir_all(&dir)?;
-    #[cfg(windows)]
-    let endpoint = format!(r"\\.\pipe\claude-rust-session-{id}");
-    #[cfg(unix)]
-    let endpoint = std::env::temp_dir()
-        .join(format!("claude-rust-{id}.sock"))
-        .to_string_lossy()
-        .into_owned();
+    let endpoint = worker_endpoint(&id);
     let worker = Worker {
         id,
         session_id: session.into(),
@@ -927,7 +937,7 @@ mod tests {
 
     #[tokio::test]
     async fn named_pipe_dacl_grants_only_current_token_user() {
-        let name = format!(r"\\.\pipe\claude-rust-acl-test-{}", uuid::Uuid::new_v4());
+        let name = format!(r"\\.\pipe\deepseek-code-acl-test-{}", uuid::Uuid::new_v4());
         let pipe = secure_pipe(&name, true).unwrap();
         unsafe {
             let mut descriptor = PSECURITY_DESCRIPTOR::default();
@@ -978,6 +988,13 @@ mod tests {
 #[cfg(test)]
 mod settle_tests {
     use super::*;
+    #[test]
+    fn worker_endpoint_is_named_after_the_product() {
+        let endpoint = worker_endpoint("fixture-id");
+        assert!(endpoint.contains("deepseek-code"), "{endpoint}");
+        assert!(endpoint.contains("fixture-id"), "{endpoint}");
+        assert!(!endpoint.contains("claude"), "{endpoint}");
+    }
 
     fn exited_pid() -> u32 {
         let mut child = std::process::Command::new(std::env::current_exe().unwrap())
@@ -1050,7 +1067,7 @@ mod runtime_status_tests {
         for behavior in ["old", "unresponsive"] {
             let id = uuid::Uuid::new_v4().to_string();
             let endpoint = if cfg!(windows) {
-                format!(r"\\.\pipe\claude-status-{id}")
+                format!(r"\\.\pipe\deepseek-code-status-{id}")
             } else {
                 dir.path()
                     .join(format!("{id}.sock"))

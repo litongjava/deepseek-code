@@ -28,7 +28,7 @@ export default function LearningPanel() {
     const link = document.createElement('a'); link.href = url; link.download = 'SKILL.md'; link.click();
     setTimeout(() => URL.revokeObjectURL(url), 1000);
   };
-  return <section className="space-y-3 border border-claude-border rounded p-4">
+  return <section className="space-y-3 border border-deepseek-border rounded p-4">
     <h3 className="font-semibold">学习与性能</h3>
     <p>启用后仅记录工具名称、耗时及结果。建议需审核，不会自动执行或扩大权限。</p>
     <div className="flex gap-3">
@@ -38,7 +38,7 @@ export default function LearningPanel() {
     </div>
     {error && <p role="alert">{error}</p>}{message && <p role="status">{message}</p>}
     <p>已记录 {snapshot.experiences.length} 次；发现 {snapshot.suggestions.length} 个重复工作流。</p>
-    {snapshot.suggestions.map(s => <article key={s.id} className="border border-claude-border rounded p-3 space-y-2">
+    {snapshot.suggestions.map(s => <article key={s.id} className="border border-deepseek-border rounded p-3 space-y-2">
       <p>{s.intent}：{s.tools.join(' → ')}；{s.occurrences} 次，成功率 {Math.round(s.success_rate * 100)}%</p>
       <details><summary>预览技能建议</summary><pre className="whitespace-pre-wrap">{s.skill_markdown}</pre></details>
       <button disabled={busy || s.accepted} onClick={() => run({ action: 'learning_accept', id: s.id }, '已接受建议，可下载并审核安装')}>{s.accepted ? '已接受' : '接受建议'}</button>
@@ -52,8 +52,8 @@ export default function LearningPanel() {
     <h4 className="font-semibold">简单请求模型路由</h4>
     <p>仅对新会话的简短文本生效，目标必须是已有且启用的模型。</p>
     <label className="block"><input type="checkbox" checked={router.enabled} onChange={e => setRouter({ ...router, enabled: e.target.checked })} />启用路由</label>
-    <label className="block">Provider ID<input className="bg-claude-input border rounded p-1 ml-2" value={router.provider_id} onChange={e => setRouter({ ...router, provider_id: e.target.value })} /></label>
-    <label className="block">Model ID<input className="bg-claude-input border rounded p-1 ml-2" value={router.model_id} onChange={e => setRouter({ ...router, model_id: e.target.value })} /></label>
+    <label className="block">Provider ID<input className="bg-deepseek-input border rounded p-1 ml-2" value={router.provider_id} onChange={e => setRouter({ ...router, provider_id: e.target.value })} /></label>
+    <label className="block">Model ID<input className="bg-deepseek-input border rounded p-1 ml-2" value={router.model_id} onChange={e => setRouter({ ...router, model_id: e.target.value })} /></label>
     <button disabled={busy} onClick={() => run({ action: 'performance_configure', config: router }, '已保存路由设置')}>保存路由设置</button>
   </section>;
 }

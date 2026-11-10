@@ -270,34 +270,34 @@ const RemotionMotionPanel: React.FC<RemotionMotionPanelProps> = ({ onRenderCompl
 
   const btnBase = "px-3 py-1.5 rounded-lg text-[12px] font-medium transition-colors flex items-center gap-1.5";
   const btnPrimary = `${btnBase} bg-[#8B5CF6] text-white hover:bg-[#7C3AED] disabled:opacity-50`;
-  const btnSecondary = `${btnBase} bg-claude-hover text-claude-textSecondary hover:text-claude-text`;
+  const btnSecondary = `${btnBase} bg-deepseek-hover text-deepseek-textSecondary hover:text-deepseek-text`;
   const btnPink = `${btnBase} bg-[#EC4899] text-white hover:bg-[#DB2777] disabled:opacity-50`;
-  const inputClass = "w-full px-3 py-2 bg-claude-input border border-claude-border rounded-lg text-[13px] text-claude-text focus:outline-none focus:border-[#8B5CF6] transition-colors";
-  const labelClass = "block text-[12px] text-claude-textSecondary mb-1.5";
+  const inputClass = "w-full px-3 py-2 bg-deepseek-input border border-deepseek-border rounded-lg text-[13px] text-deepseek-text focus:outline-none focus:border-[#8B5CF6] transition-colors";
+  const labelClass = "block text-[12px] text-deepseek-textSecondary mb-1.5";
 
   // ━━━━━━━━━━━━━━ RENDER ━━━━━━━━━━━━━━
 
   return (
-    <div className="flex-1 h-full bg-claude-bg flex flex-col overflow-hidden">
+    <div className="flex-1 h-full bg-deepseek-bg flex flex-col overflow-hidden">
       {/* ── Header ── */}
-      <div className="flex items-center justify-between px-4 py-3 border-b border-claude-border flex-shrink-0">
+      <div className="flex items-center justify-between px-4 py-3 border-b border-deepseek-border flex-shrink-0">
         <div className="flex items-center gap-2">
           <div className="w-7 h-7 rounded-lg flex items-center justify-center bg-[#EC4899]/10">
             <Video size={15} className="text-[#EC4899]" />
           </div>
-          <h2 className="text-[14px] font-semibold text-claude-text">Remotion 视频引擎</h2>
+          <h2 className="text-[14px] font-semibold text-deepseek-text">Remotion 视频引擎</h2>
         </div>
         <div className="flex items-center gap-1">
           <button
             onClick={() => { setView('ai-generate'); setError(null); setAiGeneratedCode(''); }}
-            className={`${btnBase} ${view === 'ai-generate' ? 'bg-[#EC4899]/20 text-[#EC4899]' : 'text-claude-textSecondary hover:text-claude-text'}`}
+            className={`${btnBase} ${view === 'ai-generate' ? 'bg-[#EC4899]/20 text-[#EC4899]' : 'text-deepseek-textSecondary hover:text-deepseek-text'}`}
           >
             <Sparkles size={13} />
             AI 生成
           </button>
           <button
             onClick={() => { setView('projects'); setError(null); }}
-            className={`${btnBase} ${view === 'projects' ? 'bg-[#8B5CF6]/20 text-[#8B5CF6]' : 'text-claude-textSecondary hover:text-claude-text'}`}
+            className={`${btnBase} ${view === 'projects' ? 'bg-[#8B5CF6]/20 text-[#8B5CF6]' : 'text-deepseek-textSecondary hover:text-deepseek-text'}`}
           >
             <FolderOpen size={13} />
             项目
@@ -332,30 +332,30 @@ const RemotionMotionPanel: React.FC<RemotionMotionPanelProps> = ({ onRenderCompl
               <div className="w-16 h-16 rounded-2xl bg-[#EC4899]/10 flex items-center justify-center mx-auto mb-3">
                 <Wand2 size={28} className="text-[#EC4899]" />
               </div>
-              <h3 className="text-[15px] font-semibold text-claude-text">AI 视频生成</h3>
-              <p className="text-[12px] text-claude-textSecondary mt-1">
+              <h3 className="text-[15px] font-semibold text-deepseek-text">AI 视频生成</h3>
+              <p className="text-[12px] text-deepseek-textSecondary mt-1">
                 用自然语言描述你想要的动画，模型会生成完整的 Remotion 代码并渲染成视频
               </p>
             </div>
 
             {/* Model selector */}
             <div className="flex items-center gap-2">
-              <span className="text-[11px] text-claude-textSecondary">模型:</span>
+              <span className="text-[11px] text-deepseek-textSecondary">模型:</span>
               <select
                 value={aiSelectedModel}
                 onChange={e => setAiSelectedModel(e.target.value)}
-                className="px-2 py-0.5 bg-claude-input border border-claude-border rounded text-[12px] text-claude-text"
+                className="px-2 py-0.5 bg-deepseek-input border border-deepseek-border rounded text-[12px] text-deepseek-text"
               >
                 <option value="claude-sonnet-4-6">Claude Sonnet 4.6</option>
                 <option value="claude-opus-4-7">Claude Opus 4.7</option>
                 <option value="claude-3-5-sonnet-latest">Claude 3.5 Sonnet</option>
               </select>
               <div className="flex-1" />
-              <span className="text-[11px] text-claude-textSecondary">输出目录:</span>
+              <span className="text-[11px] text-deepseek-textSecondary">输出目录:</span>
               <input
                 value={aiOutputDir}
                 onChange={e => setAiOutputDir(e.target.value)}
-                className="w-48 px-2 py-0.5 bg-claude-input border border-claude-border rounded text-[12px] text-claude-text"
+                className="w-48 px-2 py-0.5 bg-deepseek-input border border-deepseek-border rounded text-[12px] text-deepseek-text"
                 placeholder="C:\Users\user\remotion-projects"
               />
             </div>
@@ -377,7 +377,7 @@ const RemotionMotionPanel: React.FC<RemotionMotionPanelProps> = ({ onRenderCompl
                     }
                   }}
                 />
-                <div className="absolute bottom-2 right-2 text-[11px] text-claude-textSecondary">
+                <div className="absolute bottom-2 right-2 text-[11px] text-deepseek-textSecondary">
                   {aiGenerating ? '' : 'Ctrl+Enter 发送'}
                 </div>
               </div>
@@ -395,7 +395,7 @@ const RemotionMotionPanel: React.FC<RemotionMotionPanelProps> = ({ onRenderCompl
                 <button
                   key={i}
                   onClick={() => setAiPrompt(ex)}
-                  className="px-2 py-1 text-[11px] bg-claude-hover text-claude-textSecondary hover:text-claude-text rounded-md transition-colors"
+                  className="px-2 py-1 text-[11px] bg-deepseek-hover text-deepseek-textSecondary hover:text-deepseek-text rounded-md transition-colors"
                   disabled={aiGenerating}
                 >
                   {ex}
@@ -425,14 +425,14 @@ const RemotionMotionPanel: React.FC<RemotionMotionPanelProps> = ({ onRenderCompl
 
             {/* AI streaming preview */}
             {aiStreamingText && (
-              <div className="p-3 bg-claude-input border border-claude-border rounded-lg max-h-64 overflow-y-auto">
+              <div className="p-3 bg-deepseek-input border border-deepseek-border rounded-lg max-h-64 overflow-y-auto">
                 <div className="flex items-center gap-2 mb-2">
                   <span className="w-2 h-2 rounded-full bg-green-400 animate-pulse" />
-                  <span className="text-[11px] text-claude-textSecondary">
+                  <span className="text-[11px] text-deepseek-textSecondary">
                     {aiGenerating ? '模型正在生成...' : '生成完成'}
                   </span>
                 </div>
-                <pre className="text-[11px] text-claude-text font-mono whitespace-pre-wrap">
+                <pre className="text-[11px] text-deepseek-text font-mono whitespace-pre-wrap">
                   {aiStreamingText.slice(-3000)}
                 </pre>
               </div>
@@ -455,7 +455,7 @@ const RemotionMotionPanel: React.FC<RemotionMotionPanelProps> = ({ onRenderCompl
                     创建项目并渲染
                   </button>
                 </div>
-                <pre className="text-[11px] text-claude-textSecondary font-mono max-h-32 overflow-y-auto whitespace-pre-wrap">
+                <pre className="text-[11px] text-deepseek-textSecondary font-mono max-h-32 overflow-y-auto whitespace-pre-wrap">
                   {aiGeneratedCode.slice(0, 1500)}
                 </pre>
               </div>
@@ -467,7 +467,7 @@ const RemotionMotionPanel: React.FC<RemotionMotionPanelProps> = ({ onRenderCompl
         {view === 'projects' && (
           <div className="space-y-4">
             <div className="flex items-center justify-between">
-              <h3 className="text-[15px] font-semibold text-claude-text">
+              <h3 className="text-[15px] font-semibold text-deepseek-text">
                 项目列表 ({projects.length})
               </h3>
               <button onClick={loadProjects} disabled={loading} className={btnSecondary}>
@@ -477,18 +477,18 @@ const RemotionMotionPanel: React.FC<RemotionMotionPanelProps> = ({ onRenderCompl
             </div>
 
             {loading && projects.length === 0 && (
-              <div className="flex items-center justify-center py-12 text-claude-textSecondary">
+              <div className="flex items-center justify-center py-12 text-deepseek-textSecondary">
                 <Loader2 size={20} className="animate-spin mr-2" />
                 <span className="text-[13px]">扫描 Remotion 项目...</span>
               </div>
             )}
 
             {!loading && projects.length === 0 && (
-              <div className="flex flex-col items-center justify-center py-12 text-claude-textSecondary">
-                <div className="w-14 h-14 rounded-2xl bg-claude-hover flex items-center justify-center mb-3">
+              <div className="flex flex-col items-center justify-center py-12 text-deepseek-textSecondary">
+                <div className="w-14 h-14 rounded-2xl bg-deepseek-hover flex items-center justify-center mb-3">
                   <Video size={24} className="opacity-40" />
                 </div>
-                <p className="text-[14px] font-medium text-claude-text mb-1">没有找到 Remotion 项目</p>
+                <p className="text-[14px] font-medium text-deepseek-text mb-1">没有找到 Remotion 项目</p>
                 <p className="text-[12px] mb-4">
                   使用 <span className="text-[#EC4899]">AI 生成</span> 自动创建，或手动创建
                 </p>
@@ -507,11 +507,11 @@ const RemotionMotionPanel: React.FC<RemotionMotionPanelProps> = ({ onRenderCompl
 
             <div className="space-y-2">
               {projects.map(project => (
-                <div key={project.path} className="p-3 bg-claude-input border border-claude-border rounded-lg hover:bg-claude-hover/50 transition-colors">
+                <div key={project.path} className="p-3 bg-deepseek-input border border-deepseek-border rounded-lg hover:bg-deepseek-hover/50 transition-colors">
                   <div className="flex items-center justify-between">
                     <div className="flex-1 min-w-0">
-                      <p className="text-[13px] font-medium text-claude-text truncate">{project.name}</p>
-                      <p className="text-[11px] text-claude-textSecondary truncate mt-0.5">{project.path}</p>
+                      <p className="text-[13px] font-medium text-deepseek-text truncate">{project.name}</p>
+                      <p className="text-[11px] text-deepseek-textSecondary truncate mt-0.5">{project.path}</p>
                       <div className="flex items-center gap-2 mt-1.5">
                         <span className={`px-1.5 py-0.5 rounded text-[10px] font-medium ${
                           project.has_node_modules ? 'bg-green-500/10 text-green-400' : 'bg-yellow-500/10 text-yellow-400'
@@ -549,7 +549,7 @@ const RemotionMotionPanel: React.FC<RemotionMotionPanelProps> = ({ onRenderCompl
         {/* ════════════════ CREATE VIEW ════════════════ */}
         {view === 'create' && (
           <div className="space-y-4">
-            <h3 className="text-[15px] font-semibold text-claude-text">手动创建 Remotion 项目</h3>
+            <h3 className="text-[15px] font-semibold text-deepseek-text">手动创建 Remotion 项目</h3>
 
             <div>
               <label className={labelClass}>项目名称</label>
@@ -571,10 +571,10 @@ const RemotionMotionPanel: React.FC<RemotionMotionPanelProps> = ({ onRenderCompl
                     className={`p-3 rounded-lg border text-left transition-all ${
                       selectedTemplate === tpl.id
                         ? 'border-[#8B5CF6] bg-[#8B5CF6]/10'
-                        : 'border-claude-border hover:border-claude-textSecondary/30'
+                        : 'border-deepseek-border hover:border-deepseek-textSecondary/30'
                     }`}>
-                    <p className="text-[13px] font-medium text-claude-text">{tpl.name}</p>
-                    <p className="text-[11px] text-claude-textSecondary mt-0.5">{tpl.description}</p>
+                    <p className="text-[13px] font-medium text-deepseek-text">{tpl.name}</p>
+                    <p className="text-[11px] text-deepseek-textSecondary mt-0.5">{tpl.description}</p>
                   </button>
                 ))}
               </div>
@@ -597,8 +597,8 @@ const RemotionMotionPanel: React.FC<RemotionMotionPanelProps> = ({ onRenderCompl
           <div className="space-y-4">
             <div className="flex items-center justify-between">
               <div>
-                <h3 className="text-[15px] font-semibold text-claude-text">{activeProject.name}</h3>
-                <p className="text-[11px] text-claude-textSecondary mt-0.5">{activeProject.path}</p>
+                <h3 className="text-[15px] font-semibold text-deepseek-text">{activeProject.name}</h3>
+                <p className="text-[11px] text-deepseek-textSecondary mt-0.5">{activeProject.path}</p>
               </div>
               <div className="flex items-center gap-1">
                 <button onClick={() => handleStartStudio(activeProject)} className={btnSecondary}>
@@ -613,7 +613,7 @@ const RemotionMotionPanel: React.FC<RemotionMotionPanelProps> = ({ onRenderCompl
             {compositions.length === 0 ? (
               <div className="p-4 bg-yellow-500/5 border border-yellow-500/20 rounded-lg text-center">
                 <p className="text-[13px] text-yellow-400">没有找到 Compositions</p>
-                <p className="text-[11px] text-claude-textSecondary mt-1">
+                <p className="text-[11px] text-deepseek-textSecondary mt-1">
                   确认 src/Root.tsx 中包含 &lt;Composition&gt; 注册，然后重新生成。你可以点击 Studio 查看。
                 </p>
               </div>
@@ -625,15 +625,15 @@ const RemotionMotionPanel: React.FC<RemotionMotionPanelProps> = ({ onRenderCompl
                       className={`w-full p-3 rounded-lg border text-left transition-all ${
                         selectedComposition === comp.id
                           ? 'border-[#8B5CF6] bg-[#8B5CF6]/10'
-                          : 'border-claude-border hover:border-claude-textSecondary/30'
+                          : 'border-deepseek-border hover:border-deepseek-textSecondary/30'
                       }`}>
                       <div className="flex items-center justify-between">
-                        <p className="text-[13px] font-medium text-claude-text">{comp.id}</p>
-                        <span className="text-[10px] text-claude-textSecondary bg-claude-hover px-1.5 py-0.5 rounded">
+                        <p className="text-[13px] font-medium text-deepseek-text">{comp.id}</p>
+                        <span className="text-[10px] text-deepseek-textSecondary bg-deepseek-hover px-1.5 py-0.5 rounded">
                           {comp.width}×{comp.height}
                         </span>
                       </div>
-                      <div className="flex items-center gap-3 mt-1 text-[11px] text-claude-textSecondary">
+                      <div className="flex items-center gap-3 mt-1 text-[11px] text-deepseek-textSecondary">
                         <span>{comp.duration_in_frames} 帧</span>
                         <span>{comp.fps} fps</span>
                         <span>{(comp.duration_in_frames / comp.fps).toFixed(1)} 秒</span>
@@ -643,8 +643,8 @@ const RemotionMotionPanel: React.FC<RemotionMotionPanelProps> = ({ onRenderCompl
                 </div>
 
                 {/* ── Render controls ── */}
-                <div className="p-4 bg-claude-input border border-claude-border rounded-lg space-y-3">
-                  <h4 className="text-[13px] font-semibold text-claude-text flex items-center gap-2">
+                <div className="p-4 bg-deepseek-input border border-deepseek-border rounded-lg space-y-3">
+                  <h4 className="text-[13px] font-semibold text-deepseek-text flex items-center gap-2">
                     <Settings size={13} /> 渲染设置
                   </h4>
 
@@ -656,21 +656,21 @@ const RemotionMotionPanel: React.FC<RemotionMotionPanelProps> = ({ onRenderCompl
                           className={`px-2.5 py-1 rounded text-[11px] font-medium transition-colors ${
                             selectedPreset === i
                               ? 'bg-[#8B5CF6] text-white'
-                              : 'bg-claude-hover text-claude-textSecondary hover:text-claude-text'
+                              : 'bg-deepseek-hover text-deepseek-textSecondary hover:text-deepseek-text'
                           }`}>{preset.label}</button>
                       ))}
                     </div>
                   </div>
 
                   <div className="flex items-center gap-3">
-                    <label className="flex items-center gap-1.5 text-[12px] text-claude-textSecondary">
+                    <label className="flex items-center gap-1.5 text-[12px] text-deepseek-textSecondary">
                       <input type="checkbox" checked={useCustomFps}
                         onChange={e => setUseCustomFps(e.target.checked)} className="rounded" />
                       自定义 FPS
                     </label>
                     {useCustomFps && (
                       <input type="number" value={fps} onChange={e => setFps(Number(e.target.value))}
-                        className="w-20 px-2 py-1 bg-claude-input border border-claude-border rounded text-[12px] text-claude-text"
+                        className="w-20 px-2 py-1 bg-deepseek-input border border-deepseek-border rounded text-[12px] text-deepseek-text"
                         min={1} max={120} />
                     )}
                   </div>
@@ -683,7 +683,7 @@ const RemotionMotionPanel: React.FC<RemotionMotionPanelProps> = ({ onRenderCompl
                           className={`px-3 py-1 rounded text-[11px] font-medium transition-colors ${
                             outputFormat === fmt.id
                               ? 'bg-[#8B5CF6] text-white'
-                              : 'bg-claude-hover text-claude-textSecondary hover:text-claude-text'
+                              : 'bg-deepseek-hover text-deepseek-textSecondary hover:text-deepseek-text'
                           }`}>{fmt.label}</button>
                       ))}
                     </div>
@@ -725,7 +725,7 @@ const RemotionMotionPanel: React.FC<RemotionMotionPanelProps> = ({ onRenderCompl
                         </span>
                       </div>
                       {renderResult.success && (
-                        <div className="mt-2 text-[12px] text-claude-textSecondary space-y-0.5">
+                        <div className="mt-2 text-[12px] text-deepseek-textSecondary space-y-0.5">
                           <p>输出: {renderResult.output_file}</p>
                           <p>耗时: {renderResult.duration_secs.toFixed(1)} 秒</p>
                         </div>
@@ -746,11 +746,11 @@ const RemotionMotionPanel: React.FC<RemotionMotionPanelProps> = ({ onRenderCompl
       </div>
 
       {/* ── Footer ── */}
-      <div className="px-4 py-2 border-t border-claude-border bg-claude-surface flex items-center justify-between flex-shrink-0">
-        <span className="text-[11px] text-claude-textSecondary">
+      <div className="px-4 py-2 border-t border-deepseek-border bg-deepseek-surface flex items-center justify-between flex-shrink-0">
+        <span className="text-[11px] text-deepseek-textSecondary">
           {studioRunning ? `Studio: :${studioPort}` : 'Ready'}
         </span>
-        <span className="text-[11px] text-claude-textSecondary">
+        <span className="text-[11px] text-deepseek-textSecondary">
           {projects.length} project{projects.length !== 1 ? 's' : ''}
         </span>
       </div>

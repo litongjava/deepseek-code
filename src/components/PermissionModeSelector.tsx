@@ -189,12 +189,12 @@ export default function PermissionModeSelector({ className = '', value, onChange
 
   const getModeBadgeColor = (mode: PermissionMode) => {
     switch (mode) {
-      case 'ask_permissions': return 'bg-claude-textSecondary/20 text-claude-textSecondary';
+      case 'ask_permissions': return 'bg-deepseek-textSecondary/20 text-deepseek-textSecondary';
       case 'accept_edits': return 'bg-green-500/20 text-green-500';
-      case 'dont_ask': return 'bg-claude-textSecondary/20 text-claude-textSecondary';
+      case 'dont_ask': return 'bg-deepseek-textSecondary/20 text-deepseek-textSecondary';
       case 'plan_mode': return 'bg-blue-500/20 text-blue-500';
       case 'bypass_permissions': return 'bg-orange-500/20 text-orange-500';
-      default: return 'bg-claude-textSecondary/20 text-claude-textSecondary';
+      default: return 'bg-deepseek-textSecondary/20 text-deepseek-textSecondary';
     }
   };
 
@@ -206,11 +206,11 @@ export default function PermissionModeSelector({ className = '', value, onChange
           aria-expanded={isOpen}
           aria-haspopup="dialog"
           onClick={() => setIsOpen(!isOpen)}
-          className="flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg text-[12px] font-medium bg-claude-input border border-claude-border hover:bg-claude-hover transition-colors"
+          className="flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg text-[12px] font-medium bg-deepseek-input border border-deepseek-border hover:bg-deepseek-hover transition-colors"
         >
           {currentMode.icon}
-          <span className={neutral ? 'text-claude-text' : getModeBadgeColor(permissionMode as PermissionMode)}>{currentMode.label}</span>
-          <svg width="10" height="6" viewBox="0 0 10 6" fill="none" className={`text-claude-textSecondary transition-transform ${isOpen ? 'rotate-180' : ''}`}>
+          <span className={neutral ? 'text-deepseek-text' : getModeBadgeColor(permissionMode as PermissionMode)}>{currentMode.label}</span>
+          <svg width="10" height="6" viewBox="0 0 10 6" fill="none" className={`text-deepseek-textSecondary transition-transform ${isOpen ? 'rotate-180' : ''}`}>
             <path d="M1 1L5 5L9 1" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" />
           </svg>
         </button>
@@ -220,16 +220,16 @@ export default function PermissionModeSelector({ className = '', value, onChange
             ref={menuRef}
             role="dialog"
             aria-label="Permission Mode"
-            className="fixed z-[120] w-72 rounded-xl shadow-xl border border-claude-border bg-claude-input overflow-y-auto"
+            className="fixed z-[120] w-72 rounded-xl shadow-xl border border-deepseek-border bg-deepseek-input overflow-y-auto"
             style={menuStyle}
           >
-            <div className="px-3 py-2 border-b border-claude-border">
-              <span className="text-[11px] font-medium text-claude-textSecondary uppercase tracking-wide">
+            <div className="px-3 py-2 border-b border-deepseek-border">
+              <span className="text-[11px] font-medium text-deepseek-textSecondary uppercase tracking-wide">
                 Permission Mode
               </span>
             </div>
             <div className="p-1.5">
-              {modeError && <p role="alert" className="px-3 py-2 text-[12px] text-claude-textSecondary break-words">{modeError}</p>}
+              {modeError && <p role="alert" className="px-3 py-2 text-[12px] text-deepseek-textSecondary break-words">{modeError}</p>}
               {MODE_OPTIONS.map((option) => (
                 <button
                   key={option.value}
@@ -237,18 +237,18 @@ export default function PermissionModeSelector({ className = '', value, onChange
                   onClick={() => handleModeChange(option.value)}
                   className={`w-full text-left px-3 py-2.5 rounded-lg transition-colors flex items-start gap-2.5 ${
                     permissionMode === option.value
-                      ? 'bg-claude-btn-hover'
-                      : 'hover:bg-claude-hover'
+                      ? 'bg-deepseek-btn-hover'
+                      : 'hover:bg-deepseek-hover'
                   }`}
                 >
-                  <div className={`mt-0.5 flex-shrink-0 ${permissionMode === option.value ? 'text-claude-text' : 'text-claude-textSecondary'}`}>
+                  <div className={`mt-0.5 flex-shrink-0 ${permissionMode === option.value ? 'text-deepseek-text' : 'text-deepseek-textSecondary'}`}>
                     {option.icon}
                   </div>
                   <div className="flex-1 min-w-0">
-                    <div className={`text-[13px] font-medium ${permissionMode === option.value ? 'text-claude-text' : 'text-claude-textSecondary'}`}>
+                    <div className={`text-[13px] font-medium ${permissionMode === option.value ? 'text-deepseek-text' : 'text-deepseek-textSecondary'}`}>
                       {option.label}
                     </div>
-                    <div className="text-[11px] text-claude-textSecondary/70 mt-0.5 leading-tight">
+                    <div className="text-[11px] text-deepseek-textSecondary/70 mt-0.5 leading-tight">
                       {option.description}
                     </div>
                   </div>
@@ -261,7 +261,7 @@ export default function PermissionModeSelector({ className = '', value, onChange
                   )}
                 </button>
               ))}
-              {conversationId && <div className="border-t border-claude-border px-3 py-2 text-xs text-claude-textSecondary">
+              {conversationId && <div className="border-t border-deepseek-border px-3 py-2 text-xs text-deepseek-textSecondary">
                 <p>Session Bash: {bashAllowed == null ? 'Loading…' : bashAllowed ? 'Allowed · dangerous commands excluded' : 'Not granted'}</p>
                 {bashAllowed && <button className="mt-2 underline" disabled={changingMode} onClick={async () => {
                   setChangingMode(true);
@@ -279,7 +279,7 @@ export default function PermissionModeSelector({ className = '', value, onChange
       {showBypassWarning && (
         <div className="fixed inset-0 z-[100] flex items-center justify-center bg-black/50" onClick={() => setShowBypassWarning(false)}>
           <div
-            className="bg-claude-input rounded-2xl shadow-xl w-[420px] p-6 animate-fade-in border border-claude-border"
+            className="bg-deepseek-input rounded-2xl shadow-xl w-[420px] p-6 animate-fade-in border border-deepseek-border"
             onClick={(e) => e.stopPropagation()}
           >
             <div className="flex items-center gap-3 mb-4">
@@ -287,10 +287,10 @@ export default function PermissionModeSelector({ className = '', value, onChange
                 <ShieldOff size={20} className="text-orange-500" />
               </div>
               <div>
-                <h3 className="text-[16px] font-semibold text-claude-text">
+                <h3 className="text-[16px] font-semibold text-deepseek-text">
                   启用全托管模式？
                 </h3>
-                <p className="text-[13px] text-claude-textSecondary mt-0.5">
+                <p className="text-[13px] text-deepseek-textSecondary mt-0.5">
                   Enable Bypass Permissions mode?
                 </p>
               </div>
@@ -306,7 +306,7 @@ export default function PermissionModeSelector({ className = '', value, onChange
             <div className="flex justify-end gap-3">
               <button
                 onClick={() => setShowBypassWarning(false)}
-                className="px-4 py-2 text-[13px] font-medium text-claude-text bg-claude-btn-hover hover:bg-claude-hover rounded-lg transition-colors"
+                className="px-4 py-2 text-[13px] font-medium text-deepseek-text bg-deepseek-btn-hover hover:bg-deepseek-hover rounded-lg transition-colors"
               >
                 取消
               </button>

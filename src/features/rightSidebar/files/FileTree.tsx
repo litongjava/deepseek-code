@@ -128,7 +128,7 @@ export default function FileTree({ root, dirs, expanded, selectedPath, focusRequ
         if (row.kind === 'status') {
           return (
             <div key={row.key} role="treeitem" aria-level={row.level} aria-disabled="true" style={{ paddingLeft: `${8 + (row.level - 1) * 14 + 20}px` }}
-              className={`py-1 pr-2 text-[12px] italic ${row.error ? 'text-red-600 dark:text-red-400' : 'text-claude-textSecondary'}`}>
+              className={`py-1 pr-2 text-[12px] italic ${row.error ? 'text-red-600 dark:text-red-400' : 'text-deepseek-textSecondary'}`}>
               {row.text}
             </div>
           );
@@ -154,12 +154,12 @@ export default function FileTree({ root, dirs, expanded, selectedPath, focusRequ
             onClick={() => { setActivePath(node.path); activate(node); }}
             onFocus={() => setActivePath(node.path)}
             style={indent}
-            className={`flex cursor-pointer select-none items-center gap-1 py-[3px] pr-2 text-[13px] text-claude-text outline-none hover:bg-claude-hover focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-blue-500 ${node.path === selectedPath ? 'bg-claude-btn-hover' : ''}`}
+            className={`flex cursor-pointer select-none items-center gap-1 py-[3px] pr-2 text-[13px] text-deepseek-text outline-none hover:bg-deepseek-hover focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-blue-500 ${node.path === selectedPath ? 'bg-deepseek-btn-hover' : ''}`}
           >
-            <span className="flex w-4 flex-shrink-0 justify-center text-claude-textSecondary" aria-hidden="true">
+            <span className="flex w-4 flex-shrink-0 justify-center text-deepseek-textSecondary" aria-hidden="true">
               {node.is_dir && (loading ? <Loader2 size={13} className="animate-spin" /> : <Chevron size={13} />)}
             </span>
-            <Icon size={15} strokeWidth={1.6} aria-hidden="true" className={`flex-shrink-0 ${node.is_dir ? 'text-[#C6613F]' : 'text-claude-textSecondary'}`} />
+            <Icon size={15} strokeWidth={1.6} aria-hidden="true" className={`flex-shrink-0 ${node.is_dir ? 'text-[#C6613F]' : 'text-deepseek-textSecondary'}`} />
             <span className="min-w-0 truncate">{node.name}</span>
           </div>
         );

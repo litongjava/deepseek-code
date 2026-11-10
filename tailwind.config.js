@@ -5,20 +5,20 @@ export default {
   theme: {
     extend: {
       colors: {
-        claude: {
-          bg: 'var(--bg-claude-main)',
-          sidebar: 'var(--bg-claude-sidebar)',
-          border: 'var(--border-claude)',
-          text: 'var(--text-claude-main)',
-          textSecondary: 'var(--text-claude-secondary)',
-          accent: 'var(--bg-claude-accent)',
-          hover: 'var(--bg-claude-hover)',
-          btnHover: 'var(--bg-claude-btn-hover)',
-          // Components write the kebab-case class (bg-claude-btn-hover).
-          'btn-hover': 'var(--bg-claude-btn-hover)',
-          input: 'var(--bg-claude-input)',
-          avatar: 'var(--bg-claude-avatar)',
-          avatarText: 'var(--text-claude-avatar)',
+        deepseek: {
+          bg: 'var(--bg-deepseek-main)',
+          sidebar: 'var(--bg-deepseek-sidebar)',
+          border: 'var(--border-deepseek)',
+          text: 'var(--text-deepseek-main)',
+          textSecondary: 'var(--text-deepseek-secondary)',
+          accent: 'var(--bg-deepseek-accent)',
+          hover: 'var(--bg-deepseek-hover)',
+          btnHover: 'var(--bg-deepseek-btn-hover)',
+          // Components write the kebab-case class (bg-deepseek-btn-hover).
+          'btn-hover': 'var(--bg-deepseek-btn-hover)',
+          input: 'var(--bg-deepseek-input)',
+          avatar: 'var(--bg-deepseek-avatar)',
+          avatarText: 'var(--text-deepseek-avatar)',
           tooltipBg: 'var(--bg-tooltip)',
           tooltipText: 'var(--text-tooltip)',
           navActive: 'var(--text-nav-active)',

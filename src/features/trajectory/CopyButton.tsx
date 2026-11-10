@@ -28,7 +28,7 @@ export default function CopyButton({ text, label = '复制' }: { text: string; l
     return () => animation.cancel();
   }, [feedback]);
   const feedbackLabel = state === 'done' ? '已复制' : state === 'error' ? '复制失败' : label;
-  return <button ref={button} type="button" aria-label={label} title={feedbackLabel} className={`inline-flex shrink-0 items-center justify-center rounded p-1.5 text-xs hover:bg-claude-hover focus-visible:ring-2 focus-visible:ring-blue-400 ${state === 'error' ? 'text-red-500' : 'text-claude-textSecondary'}`}
+  return <button ref={button} type="button" aria-label={label} title={feedbackLabel} className={`inline-flex shrink-0 items-center justify-center rounded p-1.5 text-xs hover:bg-deepseek-hover focus-visible:ring-2 focus-visible:ring-blue-400 ${state === 'error' ? 'text-red-500' : 'text-deepseek-textSecondary'}`}
     onClick={async event => {
       event.stopPropagation();
       const sequence = ++request.current;

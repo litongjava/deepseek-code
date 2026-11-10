@@ -170,21 +170,21 @@ export default function CostTracker({ conversationId, compact = false, apiBase =
 
   if (compact) {
     return (
-      <div className="bg-claude-hover rounded-lg p-4">
+      <div className="bg-deepseek-hover rounded-lg p-4">
         <div className="flex items-center gap-2 mb-2">
           <TrendingUp size={14} className="text-[#C6613F]" />
-          <span className="text-xs text-claude-textSecondary">今日 Token 用量</span>
+          <span className="text-xs text-deepseek-textSecondary">今日 Token 用量</span>
         </div>
         {usageStats ? (
           <div className="flex items-baseline gap-2">
-            <span className="text-2xl font-semibold tabular-nums text-claude-text">{formatTokens(usageStats.daily_usage)}</span>
-            <span className="text-xs text-claude-textSecondary">Token</span>
+            <span className="text-2xl font-semibold tabular-nums text-deepseek-text">{formatTokens(usageStats.daily_usage)}</span>
+            <span className="text-xs text-deepseek-textSecondary">Token</span>
             {usageStats.daily_budget != null && usageStats.daily_budget > 0 && (
-              <span className="ml-auto text-xs text-claude-textSecondary">每日预算：{formatTokens(usageStats.daily_budget)} Token</span>
+              <span className="ml-auto text-xs text-deepseek-textSecondary">每日预算：{formatTokens(usageStats.daily_budget)} Token</span>
             )}
           </div>
         ) : (
-          <span className="text-sm text-claude-textSecondary animate-pulse">加载中...</span>
+          <span className="text-sm text-deepseek-textSecondary animate-pulse">加载中...</span>
         )}
         {budgetWarning && (
           <div className="mt-2 flex items-center gap-1.5 text-xs text-amber-600 dark:text-amber-400">
@@ -197,10 +197,10 @@ export default function CostTracker({ conversationId, compact = false, apiBase =
   }
 
   return (
-    <div className="border-t border-claude-border pt-2">
+    <div className="border-t border-deepseek-border pt-2">
       <button
         onClick={() => setExpanded(!expanded)}
-        className="w-full flex items-center justify-between px-2 py-1.5 text-[12px] text-claude-textSecondary hover:text-claude-text transition-colors rounded-md hover:bg-black/5 dark:hover:bg-white/5"
+        className="w-full flex items-center justify-between px-2 py-1.5 text-[12px] text-deepseek-textSecondary hover:text-deepseek-text transition-colors rounded-md hover:bg-black/5 dark:hover:bg-white/5"
       >
         <div className="flex items-center gap-2">
           <Coins size={14} className="text-amber-500" />
@@ -214,7 +214,7 @@ export default function CostTracker({ conversationId, compact = false, apiBase =
             <span className="font-mono text-[11px]">
               {formatTokens(usageStats.daily_usage)}
               {usageStats.daily_budget && (
-                <span className="text-claude-textSecondary">/{formatTokens(usageStats.daily_budget)}</span>
+                <span className="text-deepseek-textSecondary">/{formatTokens(usageStats.daily_budget)}</span>
               )}
             </span>
           )}
@@ -236,13 +236,13 @@ export default function CostTracker({ conversationId, compact = false, apiBase =
               {usageStats.daily_budget && (
                 <div>
                   <div className="flex items-center justify-between text-[10px] mb-0.5">
-                    <span className="text-claude-textSecondary">Daily Budget</span>
+                    <span className="text-deepseek-textSecondary">Daily Budget</span>
                     <span className={getBudgetTextColor(usageStats.daily_percent)}>
                       {formatTokens(usageStats.daily_usage)} / {formatTokens(usageStats.daily_budget)}
                       {usageStats.daily_percent !== null && ` (${usageStats.daily_percent}%)`}
                     </span>
                   </div>
-                  <div className="h-1.5 bg-claude-hover rounded-full overflow-hidden">
+                  <div className="h-1.5 bg-deepseek-hover rounded-full overflow-hidden">
                     <div
                       className={`h-full rounded-full transition-all duration-500 ${getBudgetBarColor(usageStats.daily_percent)}`}
                       style={{ width: `${Math.min(usageStats.daily_percent || 0, 100)}%` }}
@@ -253,13 +253,13 @@ export default function CostTracker({ conversationId, compact = false, apiBase =
               {usageStats.monthly_budget && (
                 <div>
                   <div className="flex items-center justify-between text-[10px] mb-0.5">
-                    <span className="text-claude-textSecondary">Monthly Budget</span>
+                    <span className="text-deepseek-textSecondary">Monthly Budget</span>
                     <span className={getBudgetTextColor(usageStats.monthly_percent)}>
                       {formatTokens(usageStats.monthly_usage)} / {formatTokens(usageStats.monthly_budget)}
                       {usageStats.monthly_percent !== null && ` (${usageStats.monthly_percent}%)`}
                     </span>
                   </div>
-                  <div className="h-1.5 bg-claude-hover rounded-full overflow-hidden">
+                  <div className="h-1.5 bg-deepseek-hover rounded-full overflow-hidden">
                     <div
                       className={`h-full rounded-full transition-all duration-500 ${getBudgetBarColor(usageStats.monthly_percent)}`}
                       style={{ width: `${Math.min(usageStats.monthly_percent || 0, 100)}%` }}
@@ -273,31 +273,31 @@ export default function CostTracker({ conversationId, compact = false, apiBase =
           {dashboard && (
             <>
               <div className="grid grid-cols-3 gap-2">
-                <div className="bg-claude-hover/50 rounded-lg p-2">
-                  <div className="text-[10px] text-claude-textSecondary mb-0.5">Total Cost</div>
+                <div className="bg-deepseek-hover/50 rounded-lg p-2">
+                  <div className="text-[10px] text-deepseek-textSecondary mb-0.5">Total Cost</div>
                   <div className="text-[13px] font-semibold text-amber-600 dark:text-amber-400 font-mono">
                     {formatCost(dashboard.total_cost)}
                   </div>
                 </div>
-                <div className="bg-claude-hover/50 rounded-lg p-2">
-                  <div className="text-[10px] text-claude-textSecondary mb-0.5">Total Tokens</div>
-                  <div className="text-[13px] font-mono text-claude-text">{formatTokens(dashboard.total_tokens)}</div>
+                <div className="bg-deepseek-hover/50 rounded-lg p-2">
+                  <div className="text-[10px] text-deepseek-textSecondary mb-0.5">Total Tokens</div>
+                  <div className="text-[13px] font-mono text-deepseek-text">{formatTokens(dashboard.total_tokens)}</div>
                 </div>
-                <div className="bg-claude-hover/50 rounded-lg p-2">
-                  <div className="text-[10px] text-claude-textSecondary mb-0.5">Sessions</div>
-                  <div className="text-[13px] font-mono text-claude-text">{dashboard.session_count}</div>
+                <div className="bg-deepseek-hover/50 rounded-lg p-2">
+                  <div className="text-[10px] text-deepseek-textSecondary mb-0.5">Sessions</div>
+                  <div className="text-[13px] font-mono text-deepseek-text">{dashboard.session_count}</div>
                 </div>
               </div>
 
               {summary && (
                 <div className="grid grid-cols-2 gap-2">
-                  <div className="bg-claude-hover/50 rounded-lg p-2">
-                    <div className="text-[10px] text-claude-textSecondary mb-0.5">Input Tokens</div>
-                    <div className="text-[13px] font-mono text-claude-text">{formatTokens(summary.total_input_tokens)}</div>
+                  <div className="bg-deepseek-hover/50 rounded-lg p-2">
+                    <div className="text-[10px] text-deepseek-textSecondary mb-0.5">Input Tokens</div>
+                    <div className="text-[13px] font-mono text-deepseek-text">{formatTokens(summary.total_input_tokens)}</div>
                   </div>
-                  <div className="bg-claude-hover/50 rounded-lg p-2">
-                    <div className="text-[10px] text-claude-textSecondary mb-0.5">Output Tokens</div>
-                    <div className="text-[13px] font-mono text-claude-text">{formatTokens(summary.total_output_tokens)}</div>
+                  <div className="bg-deepseek-hover/50 rounded-lg p-2">
+                    <div className="text-[10px] text-deepseek-textSecondary mb-0.5">Output Tokens</div>
+                    <div className="text-[13px] font-mono text-deepseek-text">{formatTokens(summary.total_output_tokens)}</div>
                   </div>
                 </div>
               )}
@@ -305,20 +305,20 @@ export default function CostTracker({ conversationId, compact = false, apiBase =
               {dashboard.daily_trend.length > 0 && (
                 <div>
                   <div className="flex items-center justify-between mb-1">
-                    <div className="text-[10px] text-claude-textSecondary flex items-center gap-1">
+                    <div className="text-[10px] text-deepseek-textSecondary flex items-center gap-1">
                       <TrendingUp size={10} />
                       Token Trend
                     </div>
                     <div className="flex gap-1">
                       <button
                         onClick={() => setTrendDays(7)}
-                        className={`text-[9px] px-1.5 py-0.5 rounded ${trendDays === 7 ? 'bg-claude-hover text-claude-text' : 'text-claude-textSecondary'}`}
+                        className={`text-[9px] px-1.5 py-0.5 rounded ${trendDays === 7 ? 'bg-deepseek-hover text-deepseek-text' : 'text-deepseek-textSecondary'}`}
                       >
                         7d
                       </button>
                       <button
                         onClick={() => setTrendDays(30)}
-                        className={`text-[9px] px-1.5 py-0.5 rounded ${trendDays === 30 ? 'bg-claude-hover text-claude-text' : 'text-claude-textSecondary'}`}
+                        className={`text-[9px] px-1.5 py-0.5 rounded ${trendDays === 30 ? 'bg-deepseek-hover text-deepseek-text' : 'text-deepseek-textSecondary'}`}
                       >
                         30d
                       </button>
@@ -332,7 +332,7 @@ export default function CostTracker({ conversationId, compact = false, apiBase =
                         style={{ height: `${(record.total_tokens / maxTrendTokens) * 100}%` }}
                         title={`${record.date}: ${formatTokens(record.total_tokens)}`}
                       >
-                        <div className="absolute bottom-full left-1/2 -translate-x-1/2 mb-1 hidden group-hover:block bg-claude-text text-claude-bg text-[9px] px-1 py-0.5 rounded whitespace-nowrap z-10">
+                        <div className="absolute bottom-full left-1/2 -translate-x-1/2 mb-1 hidden group-hover:block bg-deepseek-text text-deepseek-bg text-[9px] px-1 py-0.5 rounded whitespace-nowrap z-10">
                           {record.date.slice(5)}: {formatTokens(record.total_tokens)}
                         </div>
                       </div>
@@ -343,7 +343,7 @@ export default function CostTracker({ conversationId, compact = false, apiBase =
 
               {Object.keys(dashboard.model_breakdown).length > 0 && (
                 <div>
-                  <div className="text-[10px] text-claude-textSecondary mb-1 flex items-center gap-1">
+                  <div className="text-[10px] text-deepseek-textSecondary mb-1 flex items-center gap-1">
                     <BarChart3 size={10} />
                     Model Breakdown
                   </div>
@@ -352,9 +352,9 @@ export default function CostTracker({ conversationId, compact = false, apiBase =
                       .sort(([, a], [, b]) => b.total_tokens - a.total_tokens)
                       .map(([model, data]) => (
                         <div key={model} className="flex items-center justify-between text-[11px]">
-                          <span className="text-claude-textSecondary truncate max-w-[120px]">{model}</span>
+                          <span className="text-deepseek-textSecondary truncate max-w-[120px]">{model}</span>
                           <div className="flex items-center gap-2">
-                            <span className="font-mono text-claude-text">{formatTokens(data.total_tokens)}</span>
+                            <span className="font-mono text-deepseek-text">{formatTokens(data.total_tokens)}</span>
                             <span className="text-amber-600 dark:text-amber-400 font-mono">{formatCost(data.total_cost)}</span>
                           </div>
                         </div>
@@ -368,31 +368,31 @@ export default function CostTracker({ conversationId, compact = false, apiBase =
           <div>
             <button
               onClick={() => setShowSettings(!showSettings)}
-              className="flex items-center gap-1 text-[10px] text-claude-textSecondary hover:text-claude-text transition-colors"
+              className="flex items-center gap-1 text-[10px] text-deepseek-textSecondary hover:text-deepseek-text transition-colors"
             >
               <Settings size={10} />
               Budget Settings
             </button>
             {showSettings && (
-              <div className="mt-2 space-y-2 bg-claude-hover/30 rounded-lg p-2">
+              <div className="mt-2 space-y-2 bg-deepseek-hover/30 rounded-lg p-2">
                 <div>
-                  <label className="text-[10px] text-claude-textSecondary block mb-0.5">Daily Token Budget</label>
+                  <label className="text-[10px] text-deepseek-textSecondary block mb-0.5">Daily Token Budget</label>
                   <input
                     type="number"
                     value={dailyBudget}
                     onChange={e => setDailyBudget(e.target.value)}
                     placeholder="No limit"
-                    className="w-full bg-claude-hover border border-claude-border rounded px-2 py-1 text-[11px] font-mono text-claude-text focus:outline-none focus:ring-1 focus:ring-amber-500/50"
+                    className="w-full bg-deepseek-hover border border-deepseek-border rounded px-2 py-1 text-[11px] font-mono text-deepseek-text focus:outline-none focus:ring-1 focus:ring-amber-500/50"
                   />
                 </div>
                 <div>
-                  <label className="text-[10px] text-claude-textSecondary block mb-0.5">Monthly Token Budget</label>
+                  <label className="text-[10px] text-deepseek-textSecondary block mb-0.5">Monthly Token Budget</label>
                   <input
                     type="number"
                     value={monthlyBudget}
                     onChange={e => setMonthlyBudget(e.target.value)}
                     placeholder="No limit"
-                    className="w-full bg-claude-hover border border-claude-border rounded px-2 py-1 text-[11px] font-mono text-claude-text focus:outline-none focus:ring-1 focus:ring-amber-500/50"
+                    className="w-full bg-deepseek-hover border border-deepseek-border rounded px-2 py-1 text-[11px] font-mono text-deepseek-text focus:outline-none focus:ring-1 focus:ring-amber-500/50"
                   />
                 </div>
                 <button

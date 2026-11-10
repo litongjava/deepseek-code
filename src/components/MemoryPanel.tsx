@@ -3,8 +3,8 @@ import { Brain, Search, Database, Trash2, Settings, RefreshCw, Clock, Star, X, P
 import { memoryApi, type MemoryConfig, type MemoryItem, type MemoryStats } from '../api/memory';
 import DreamControls from './DreamControls';
 
-const inputClass = 'w-full rounded-lg border border-claude-border bg-claude-bg px-3 py-2 text-sm text-claude-text';
-const buttonClass = 'rounded-lg bg-claude-accent px-4 py-2 text-sm text-white disabled:opacity-50';
+const inputClass = 'w-full rounded-lg border border-deepseek-border bg-deepseek-bg px-3 py-2 text-sm text-deepseek-text';
+const buttonClass = 'rounded-lg bg-deepseek-accent px-4 py-2 text-sm text-white disabled:opacity-50';
 
 export function MemoryPanel() {
   const [query, setQuery] = useState('');
@@ -81,21 +81,21 @@ export function MemoryPanel() {
   };
 
   return (
-    <div className="flex h-full flex-col bg-claude-bg text-claude-text">
-      <div className="flex items-center justify-between border-b border-claude-border px-4 py-3">
+    <div className="flex h-full flex-col bg-deepseek-bg text-deepseek-text">
+      <div className="flex items-center justify-between border-b border-deepseek-border px-4 py-3">
         <h2 className="flex items-center gap-2 text-sm font-semibold"><Brain size={20} />长期记忆</h2>
         <div className="flex gap-2">
-          <button aria-label="刷新记忆" title="刷新记忆" disabled={busy} onClick={() => void run(() => refresh(query))} className="rounded p-2 hover:bg-claude-hover"><RefreshCw size={16} className={busy ? 'animate-spin' : ''} /></button>
-          <button aria-label="记忆设置" title="记忆设置" disabled={!config || busy} onClick={() => { setDraftConfig(config && { ...config }); setShowConfig(true); }} className="rounded p-2 hover:bg-claude-hover"><Settings size={16} /></button>
+          <button aria-label="刷新记忆" title="刷新记忆" disabled={busy} onClick={() => void run(() => refresh(query))} className="rounded p-2 hover:bg-deepseek-hover"><RefreshCw size={16} className={busy ? 'animate-spin' : ''} /></button>
+          <button aria-label="记忆设置" title="记忆设置" disabled={!config || busy} onClick={() => { setDraftConfig(config && { ...config }); setShowConfig(true); }} className="rounded p-2 hover:bg-deepseek-hover"><Settings size={16} /></button>
           <button aria-label="清空记忆" title="清空记忆" disabled={busy || !stats?.total_memories} onClick={clear} className="rounded p-2 text-red-500 hover:bg-red-500/10 disabled:opacity-40"><Trash2 size={16} /></button>
         </div>
       </div>
       <div className="flex-1 space-y-4 overflow-y-auto p-4">
-        <p className="text-xs leading-5 text-claude-textSecondary">跨对话保存重要信息。默认保存在本机，支持中英文关键词检索；开启自动存储后会保存完成的对话，自动检索会在新问题中引用相关记忆。</p>
+        <p className="text-xs leading-5 text-deepseek-textSecondary">跨对话保存重要信息。默认保存在本机，支持中英文关键词检索；开启自动存储后会保存完成的对话，自动检索会在新问题中引用相关记忆。</p>
         {error && <div role="alert" className="rounded-lg bg-red-500/10 p-3 text-sm text-red-500">{error}</div>}
         {notice && <div role="status" className="rounded-lg bg-green-500/10 p-3 text-sm text-green-600">{notice}</div>}
-        {config && !config.enabled && <p className="rounded-lg bg-claude-hover p-3 text-sm">长期记忆已关闭。已保存的数据会保留，重新启用后可检索。</p>}
-        {stats && <div className="flex flex-wrap items-center gap-3 rounded-lg border border-claude-border p-3 text-xs text-claude-textSecondary">
+        {config && !config.enabled && <p className="rounded-lg bg-deepseek-hover p-3 text-sm">长期记忆已关闭。已保存的数据会保留，重新启用后可检索。</p>}
+        {stats && <div className="flex flex-wrap items-center gap-3 rounded-lg border border-deepseek-border p-3 text-xs text-deepseek-textSecondary">
           <span className="flex items-center gap-1"><Database size={14} />{stats.total_memories.toLocaleString()} 条记忆</span>
           <span>约 {stats.total_tokens_approx.toLocaleString()} tokens</span>
           <span>{stats.backend}</span>
@@ -104,9 +104,9 @@ export function MemoryPanel() {
           <input aria-label="搜索长期记忆" value={query} onChange={e => setQuery(e.target.value)} placeholder="搜索记忆，留空查看最近保存" className={inputClass} />
           <button aria-label="搜索" disabled={busy || !config?.enabled} className={buttonClass}><Search size={16} /></button>
         </form>
-        <details className="space-y-3 rounded-lg border border-claude-border p-3">
+        <details className="space-y-3 rounded-lg border border-deepseek-border p-3">
           <summary>导入 / 导出本机记忆</summary>
-          <p className="text-xs text-claude-textSecondary">支持旧 CLI 导出的 JSON。导入前自动备份；冲突会取消整批导入。仅影响个人记忆。</p>
+          <p className="text-xs text-deepseek-textSecondary">支持旧 CLI 导出的 JSON。导入前自动备份；冲突会取消整批导入。仅影响个人记忆。</p>
           <button className={buttonClass} disabled={busy || config?.backend_url !== 'local'} onClick={() => void run(async () => {
             const archive = await memoryApi.exportArchive();
             const url = URL.createObjectURL(new Blob([JSON.stringify(archive, null, 2)], { type: 'application/json' }));
@@ -128,24 +128,24 @@ export function MemoryPanel() {
             })}>确认导入</button>
           </div>
         </details>
-        <button onClick={() => setShowAdd(!showAdd)} disabled={busy || !config?.enabled} className="flex items-center gap-1 text-sm text-claude-primary disabled:opacity-40"><Plus size={16} />添加记忆</button>
-        <button className="text-sm text-claude-primary" onClick={() => setShowDream(!showDream)}>记忆整理与自动整理</button>
+        <button onClick={() => setShowAdd(!showAdd)} disabled={busy || !config?.enabled} className="flex items-center gap-1 text-sm text-deepseek-primary disabled:opacity-40"><Plus size={16} />添加记忆</button>
+        <button className="text-sm text-deepseek-primary" onClick={() => setShowDream(!showDream)}>记忆整理与自动整理</button>
         {showDream && <DreamControls onComplete={() => { void refresh(query).catch(e => setError(String(e))); }} />}
-        {showAdd && <form onSubmit={e => { e.preventDefault(); void saveMemory(); }} className="space-y-3 rounded-lg border border-claude-border p-3">
+        {showAdd && <form onSubmit={e => { e.preventDefault(); void saveMemory(); }} className="space-y-3 rounded-lg border border-deepseek-border p-3">
           <textarea aria-label="记忆内容" maxLength={32000} required rows={4} value={content} onChange={e => setContent(e.target.value)} placeholder="例如：我偏好中文回复，项目使用 Rust 和 React。" className={inputClass} />
           <label className="flex items-center gap-3 text-xs">重要性 {importance.toFixed(1)}<input aria-label="重要性" type="range" min={config?.min_importance_threshold ?? 0} max="1" step="0.1" value={importance} onChange={e => setImportance(Number(e.target.value))} /></label>
           <button disabled={busy || !content.trim() || importance < (config?.min_importance_threshold ?? 0)} className={buttonClass}>保存记忆</button>
         </form>}
         <div className="space-y-3">
-          {results.map(item => <article key={item.id} className="rounded-lg border border-claude-border bg-claude-surface p-3">
-            <div className="mb-2 flex flex-wrap items-center gap-3 text-xs text-claude-textSecondary">
+          {results.map(item => <article key={item.id} className="rounded-lg border border-deepseek-border bg-deepseek-surface p-3">
+            <div className="mb-2 flex flex-wrap items-center gap-3 text-xs text-deepseek-textSecondary">
               <span className="flex items-center gap-1"><Star size={12} />{item.importance.toFixed(2)}</span>
               <span className="flex items-center gap-1"><Clock size={12} />{new Date(item.created_at).toLocaleString()}</span>
               {item.similarity_score != null && <span>匹配度 {(item.similarity_score * 100).toFixed(0)}%</span>}
               <span>{item.metadata?.type === 'manual' ? '手动添加' : '对话记忆'}</span>
               {config?.backend_url === 'local' && <span className="ml-auto flex gap-1">
-                <button aria-label="编辑这条记忆" title="编辑" disabled={busy} onClick={() => setEditing({ id: item.id, content: item.content, importance: item.importance })} className="rounded p-1 hover:bg-claude-hover"><Pencil size={14} /></button>
-                <button aria-label="删除这条记忆" title="删除" disabled={busy} onClick={() => removeItem(item)} className="rounded p-1 text-red-500 hover:bg-claude-hover"><Trash2 size={14} /></button>
+                <button aria-label="编辑这条记忆" title="编辑" disabled={busy} onClick={() => setEditing({ id: item.id, content: item.content, importance: item.importance })} className="rounded p-1 hover:bg-deepseek-hover"><Pencil size={14} /></button>
+                <button aria-label="删除这条记忆" title="删除" disabled={busy} onClick={() => removeItem(item)} className="rounded p-1 text-red-500 hover:bg-deepseek-hover"><Trash2 size={14} /></button>
               </span>}
             </div>
             {editing?.id === item.id ? <form onSubmit={e => { e.preventDefault(); void saveEdit(); }} className="space-y-3">
@@ -153,20 +153,20 @@ export function MemoryPanel() {
               <label className="flex items-center gap-3 text-xs">重要性 {editing.importance.toFixed(1)}<input aria-label="编辑重要性" type="range" min={0} max={1} step={0.1} value={editing.importance} onChange={e => setEditing({ ...editing, importance: Number(e.target.value) })} /></label>
               <div className="flex gap-2">
                 <button disabled={busy || !editing.content.trim()} className={buttonClass}>保存修改</button>
-                <button type="button" onClick={() => setEditing(null)} className="rounded-lg border border-claude-border px-4 py-2 text-sm">取消</button>
+                <button type="button" onClick={() => setEditing(null)} className="rounded-lg border border-deepseek-border px-4 py-2 text-sm">取消</button>
               </div>
             </form> : <p className="whitespace-pre-wrap break-words text-sm">{item.content}</p>}
           </article>)}
-          {!busy && config?.enabled && results.length === 0 && <p className="py-8 text-center text-sm text-claude-textSecondary">{searchedQuery ? '未找到相关记忆，试试其他关键词。' : '还没有记忆。可以手动添加，或完成一次对话后自动保存。'}</p>}
+          {!busy && config?.enabled && results.length === 0 && <p className="py-8 text-center text-sm text-deepseek-textSecondary">{searchedQuery ? '未找到相关记忆，试试其他关键词。' : '还没有记忆。可以手动添加，或完成一次对话后自动保存。'}</p>}
         </div>
       </div>
       {showConfig && draftConfig && <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 p-4" onClick={() => setShowConfig(false)}>
-        <div role="dialog" aria-modal="true" aria-label="长期记忆设置" className="w-full max-w-md space-y-4 rounded-xl border border-claude-border bg-claude-bg p-5 shadow-xl" onClick={e => e.stopPropagation()}>
+        <div role="dialog" aria-modal="true" aria-label="长期记忆设置" className="w-full max-w-md space-y-4 rounded-xl border border-deepseek-border bg-deepseek-bg p-5 shadow-xl" onClick={e => e.stopPropagation()}>
           <div className="flex items-center justify-between"><h3 className="font-semibold">长期记忆设置</h3><button aria-label="关闭设置" onClick={() => setShowConfig(false)}><X size={18} /></button></div>
           {(['enabled', 'auto_search', 'auto_ingest'] as const).map((key, index) => <label key={key} className="flex items-center justify-between text-sm">{['启用长期记忆', '自动检索相关记忆', '自动保存完成的对话'][index]}<input type="checkbox" checked={draftConfig[key]} onChange={e => setDraftConfig({ ...draftConfig, [key]: e.target.checked })} /></label>)}
           <label className="block space-y-1 text-sm"><span>存储方式</span><select value={draftConfig.backend_url === 'local' ? 'local' : 'remote'} onChange={e => setDraftConfig({ ...draftConfig, backend_url: e.target.value === 'local' ? 'local' : 'http://127.0.0.1:8765' })} className={inputClass}><option value="local">本机存储（推荐）</option><option value="remote">MemEx HTTP 服务</option></select></label>
           {draftConfig.backend_url !== 'local' && <label className="block space-y-1 text-sm"><span>服务地址</span><input type="url" value={draftConfig.backend_url} onChange={e => setDraftConfig({ ...draftConfig, backend_url: e.target.value })} className={inputClass} /></label>}
-          <p className="text-xs text-claude-textSecondary">切换存储方式不会搬迁或删除已有记忆。使用 HTTP 服务时，记忆会发送到该地址。</p>
+          <p className="text-xs text-deepseek-textSecondary">切换存储方式不会搬迁或删除已有记忆。使用 HTTP 服务时，记忆会发送到该地址。</p>
           <label className="block space-y-1 text-sm"><span>每次自动检索条数（1–50）</span><input type="number" min="1" max="50" value={draftConfig.search_top_k} onChange={e => setDraftConfig({ ...draftConfig, search_top_k: Number(e.target.value) })} className={inputClass} /></label>
           <label className="block space-y-1 text-sm"><span>最低重要性（0–1）</span><input type="number" min="0" max="1" step="0.1" value={draftConfig.min_importance_threshold} onChange={e => setDraftConfig({ ...draftConfig, min_importance_threshold: Number(e.target.value) })} className={inputClass} /></label>
           {error && <p role="alert" className="text-sm text-red-500">{error}</p>}

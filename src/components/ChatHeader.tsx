@@ -104,7 +104,7 @@ export default function ChatHeader({
   };
 
   return (
-    <div data-session-header className="relative flex min-w-0 flex-wrap items-center gap-x-2 px-3 md:flex-nowrap md:gap-3 md:px-5 py-1 md:py-2 bg-claude-bg flex-shrink-0 md:h-[54px] z-40">
+    <div data-session-header className="relative flex min-w-0 flex-wrap items-center gap-x-2 px-3 md:flex-nowrap md:gap-3 md:px-5 py-1 md:py-2 bg-deepseek-bg flex-shrink-0 md:h-[54px] z-40">
       <div className="flex min-w-0 w-full md:w-auto flex-1 basis-full md:basis-auto items-center gap-3">
       {isEditing ? (
         <input
@@ -113,24 +113,24 @@ export default function ChatHeader({
           onBlur={handleRenameSubmit}
           onKeyDown={(e) => { if (e.key === 'Enter') handleRenameSubmit(); else if (e.key === 'Escape') setIsEditing(false); }}
           autoFocus
-          className="max-w-[60%] px-2 py-1 text-[14px] font-medium text-claude-text bg-claude-input border border-blue-500 rounded-md outline-none shadow-sm"
+          className="max-w-[60%] px-2 py-1 text-[14px] font-medium text-deepseek-text bg-deepseek-input border border-blue-500 rounded-md outline-none shadow-sm"
           style={{ WebkitAppRegion: 'no-drag' } as React.CSSProperties}
         />
       ) : (
         <div className="relative flex min-w-0 flex-1 items-center gap-1" style={{ WebkitAppRegion: 'no-drag' } as React.CSSProperties}>
           <Laptop size={18} className="mr-1 shrink-0" />
-          <button onClick={startEditing} title={displayTitle} className="block min-w-0 px-2 py-1.5 hover:bg-claude-btn-hover rounded-md transition-colors text-[14px] font-medium text-claude-text max-w-[280px] truncate">
+          <button onClick={startEditing} title={displayTitle} className="block min-w-0 px-2 py-1.5 hover:bg-deepseek-btn-hover rounded-md transition-colors text-[14px] font-medium text-deepseek-text max-w-[280px] truncate">
             {displayTitle}
           </button>
-          <button ref={buttonRef} type="button" aria-label={t('chat.sessionMenu')} aria-expanded={showMenu} onClick={() => setShowMenu(!showMenu)} className={`shrink-0 p-1 hover:bg-claude-btn-hover rounded-md transition-colors text-claude-textSecondary hover:text-claude-text ${showMenu ? 'bg-claude-btn-hover text-claude-text' : ''}`}>
+          <button ref={buttonRef} type="button" aria-label={t('chat.sessionMenu')} aria-expanded={showMenu} onClick={() => setShowMenu(!showMenu)} className={`shrink-0 p-1 hover:bg-deepseek-btn-hover rounded-md transition-colors text-deepseek-textSecondary hover:text-deepseek-text ${showMenu ? 'bg-deepseek-btn-hover text-deepseek-text' : ''}`}>
             <ChevronDown size={14} />
           </button>
-          {workspaceLabel && <button type="button" title={workspacePath} onClick={() => { if (workspacePath && tauriAPI.isTauri) void tauriAPI.openFolder(workspacePath); }} className="ml-3 hidden truncate rounded-lg bg-claude-hover px-2 py-1 text-xs text-claude-textSecondary max-w-[220px] md:block">{workspaceLabel}</button>}
+          {workspaceLabel && <button type="button" title={workspacePath} onClick={() => { if (workspacePath && tauriAPI.isTauri) void tauriAPI.openFolder(workspacePath); }} className="ml-3 hidden truncate rounded-lg bg-deepseek-hover px-2 py-1 text-xs text-deepseek-textSecondary max-w-[220px] md:block">{workspaceLabel}</button>}
           {showMenu && (
-            <div ref={menuRef} className="absolute top-full left-0 mt-1 z-50 bg-claude-input border border-claude-border rounded-xl shadow-[0_4px_12px_rgba(0,0,0,0.08)] py-1.5 flex flex-col w-[200px]">
-              <button onClick={(e) => { e.stopPropagation(); startEditing(); }} className="flex items-center gap-3 px-3 py-2 hover:bg-claude-hover text-left w-full transition-colors group">
-                <Pencil size={16} className="text-claude-textSecondary group-hover:text-claude-text" />
-                <span className="text-[13px] text-claude-text">Rename</span>
+            <div ref={menuRef} className="absolute top-full left-0 mt-1 z-50 bg-deepseek-input border border-deepseek-border rounded-xl shadow-[0_4px_12px_rgba(0,0,0,0.08)] py-1.5 flex flex-col w-[200px]">
+              <button onClick={(e) => { e.stopPropagation(); startEditing(); }} className="flex items-center gap-3 px-3 py-2 hover:bg-deepseek-hover text-left w-full transition-colors group">
+                <Pencil size={16} className="text-deepseek-textSecondary group-hover:text-deepseek-text" />
+                <span className="text-[13px] text-deepseek-text">Rename</span>
               </button>
               <button disabled={!id} onClick={async () => {
                 if (!id) return;
@@ -138,10 +138,10 @@ export default function ChatHeader({
                 const success = await copyToClipboard(copiedId).catch(() => false);
                 setCopyResult({ id: copiedId, success });
                 setShowMenu(false);
-              }} className="flex items-center gap-3 px-3 py-2 hover:bg-claude-hover text-left w-full text-[13px] disabled:opacity-50"><Copy size={16} />{t('chat.copySessionId')}</button>
-              <div className="h-[1px] bg-claude-border my-1 mx-3" />
-              <button disabled={isExporting} onClick={async () => { if (!id) return; setIsExporting(true); try { await exportConversation(id); } catch (error) { window.alert(String(error)); } finally { setIsExporting(false); setShowMenu(false); } }} className="flex items-center gap-3 px-3 py-2 hover:bg-claude-hover text-left w-full text-[13px]"><Download size={16} />{isExporting ? '导出中…' : '导出会话'}</button>
-              <button onClick={(e) => { e.stopPropagation(); handleDelete(); }} className="flex items-center gap-3 px-3 py-2 hover:bg-claude-hover text-left w-full transition-colors group">
+              }} className="flex items-center gap-3 px-3 py-2 hover:bg-deepseek-hover text-left w-full text-[13px] disabled:opacity-50"><Copy size={16} />{t('chat.copySessionId')}</button>
+              <div className="h-[1px] bg-deepseek-border my-1 mx-3" />
+              <button disabled={isExporting} onClick={async () => { if (!id) return; setIsExporting(true); try { await exportConversation(id); } catch (error) { window.alert(String(error)); } finally { setIsExporting(false); setShowMenu(false); } }} className="flex items-center gap-3 px-3 py-2 hover:bg-deepseek-hover text-left w-full text-[13px]"><Download size={16} />{isExporting ? '导出中…' : '导出会话'}</button>
+              <button onClick={(e) => { e.stopPropagation(); handleDelete(); }} className="flex items-center gap-3 px-3 py-2 hover:bg-deepseek-hover text-left w-full transition-colors group">
                 <Trash size={16} className="text-[#B9382C]" />
                 <span className="text-[13px] text-[#B9382C]">Delete</span>
               </button>
@@ -151,16 +151,16 @@ export default function ChatHeader({
       )}
       </div>
       <div className="flex min-w-0 w-full md:w-auto shrink-0 md:max-w-[50%] gap-4 overflow-x-auto text-sm" role="tablist" aria-label={t('chat.sessionView')}>
-        {(['chat', 'reading', ...(showCodingView ? ['trajectory' as const] : [])] as const).map(tab => <button type="button" key={tab} role="tab" aria-selected={view === tab} onClick={() => setView(tab)} className={`shrink-0 py-2 ${view === tab ? 'border-b-2 border-blue-500 text-blue-500' : 'text-claude-textSecondary'}`}>{tab === 'chat' ? 'Chat' : tab === 'reading' ? t('chat.readingMode') : 'Trajectory'}</button>)}
+        {(['chat', 'reading', ...(showCodingView ? ['trajectory' as const] : [])] as const).map(tab => <button type="button" key={tab} role="tab" aria-selected={view === tab} onClick={() => setView(tab)} className={`shrink-0 py-2 ${view === tab ? 'border-b-2 border-blue-500 text-blue-500' : 'text-deepseek-textSecondary'}`}>{tab === 'chat' ? 'Chat' : tab === 'reading' ? t('chat.readingMode') : 'Trajectory'}</button>)}
       </div>
-      {copyResult && copyResult.id === id && <div role={copyResult.success ? 'status' : 'alert'} className="absolute right-4 top-full rounded-md border border-claude-border bg-claude-input px-3 py-2 text-xs">{t(copyResult.success ? 'chat.sessionIdCopied' : 'chat.sessionIdCopyFailed')}</div>}
+      {copyResult && copyResult.id === id && <div role={copyResult.success ? 'status' : 'alert'} className="absolute right-4 top-full rounded-md border border-deepseek-border bg-deepseek-input px-3 py-2 text-xs">{t(copyResult.success ? 'chat.sessionIdCopied' : 'chat.sessionIdCopyFailed')}</div>}
       {/* Phones reach these panels from the right sidebar toggle in the title bar. */}
       <div className="hidden shrink-0 items-center gap-1 md:flex">
         {([{ panel: 'terminal', label: 'Terminal', Icon: Terminal }, { panel: 'files', label: 'Files', Icon: Files }, { panel: 'browser', label: 'Browser', Icon: Globe }] as const).map(({ panel, label, Icon }) => (
-          <button key={panel} type="button" aria-label={label} title={label} onClick={() => window.dispatchEvent(new CustomEvent('request-open-panel', { detail: { panel } }))} className="flex h-8 w-8 items-center justify-center rounded-md text-claude-textSecondary hover:bg-claude-hover"><Icon size={18} /></button>
+          <button key={panel} type="button" aria-label={label} title={label} onClick={() => window.dispatchEvent(new CustomEvent('request-open-panel', { detail: { panel } }))} className="flex h-8 w-8 items-center justify-center rounded-md text-deepseek-textSecondary hover:bg-deepseek-hover"><Icon size={18} /></button>
         ))}
         {hasArtifacts && (
-          <button onClick={onOpenArtifacts} className={`w-8 h-8 flex items-center justify-center text-claude-textSecondary hover:bg-claude-btn-hover rounded-md transition-colors ${showArtifacts ? 'bg-claude-btn-hover text-claude-text' : ''}`} title="View Artifacts">
+          <button onClick={onOpenArtifacts} className={`w-8 h-8 flex items-center justify-center text-deepseek-textSecondary hover:bg-deepseek-btn-hover rounded-md transition-colors ${showArtifacts ? 'bg-deepseek-btn-hover text-deepseek-text' : ''}`} title="View Artifacts">
             <FileText size={18} strokeWidth={1.5} />
           </button>
         )}

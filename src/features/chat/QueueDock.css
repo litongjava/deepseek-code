@@ -1,8 +1,8 @@
-.queue-dock { width: 100%; min-width: 0; color: var(--text-claude-main); font-family: var(--assistant-default-family); font-size: 12px; background: var(--chat-raised); border: 1px solid var(--border-claude); border-radius: 12px 12px 0 0; padding: 4px 8px; }
+.queue-dock { width: 100%; min-width: 0; color: var(--text-deepseek-main); font-family: var(--assistant-default-family); font-size: 12px; background: var(--chat-raised); border: 1px solid var(--border-deepseek); border-radius: 12px 12px 0 0; padding: 4px 8px; }
 .queue-header { width: 100%; text-align: left; min-height: 28px; }
 .queue-rows { max-height: 180px; overflow-y: auto; }
 .queue-row { display: flex; align-items: center; gap: 8px; min-height: 36px; min-width: 0; }
-.queue-icon { flex-shrink: 0; color: var(--text-claude-secondary); }
+.queue-icon { flex-shrink: 0; color: var(--text-deepseek-secondary); }
 .queue-preview { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .queue-preview img { display: inline-block; width: 28px; height: 28px; object-fit: cover; margin-right: 4px; }
 .queue-attachment { display: inline-flex; align-items: center; gap: 4px; margin-right: 8px; vertical-align: middle; }

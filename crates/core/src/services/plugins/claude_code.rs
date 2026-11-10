@@ -31,7 +31,7 @@ pub(super) fn language_servers(claude_home: &Path) -> Vec<Value> {
         let declared = declared_servers(&root, &plugins.join("marketplaces").join(marketplace), name);
         for (server, mut config) in declared {
             official::replace_plugin_root(&mut config, &root.to_string_lossy().replace('\\', "/"));
-            config["name"] = Value::String(format!("claude-code:{id}:{server}"));
+            config["name"] = Value::String(format!("deepseek-code:{id}:{server}"));
             if crate::tools::lsp_config_is_valid(&config) {
                 servers.push(config);
             }
@@ -98,7 +98,7 @@ mod tests {
         assert_eq!(servers.len(), 1, "{servers:?}");
         assert_eq!(servers[0]["command"], "rust-analyzer");
         assert_eq!(servers[0]["extensionToLanguage"][".rs"], "rust");
-        assert_eq!(servers[0]["name"], "claude-code:rust-analyzer-lsp@claude-plugins-official:rust-analyzer");
+        assert_eq!(servers[0]["name"], "deepseek-code:rust-analyzer-lsp@claude-plugins-official:rust-analyzer");
         assert!(language_servers(&home.path().join("missing")).is_empty());
     }
 }

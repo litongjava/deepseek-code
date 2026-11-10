@@ -115,19 +115,19 @@ const AppStudioPanel: React.FC<{ onClose: () => void }> = ({ onClose }) => {
   };
 
   return (
-    <div className="h-full flex flex-col bg-claude-bg">
+    <div className="h-full flex flex-col bg-deepseek-bg">
       {/* Header */}
-      <div className="flex items-center justify-between px-4 py-2.5 border-b border-claude-border shrink-0">
+      <div className="flex items-center justify-between px-4 py-2.5 border-b border-deepseek-border shrink-0">
         <div className="flex items-center gap-2">
           <Smartphone size={16} className="text-emerald-400" />
-          <span className="text-[13px] font-semibold text-claude-text">App Studio</span>
-          {project && <span className="text-[10px] text-claude-textSecondary bg-claude-hover px-1.5 py-0.5 rounded-full">{project.name}</span>}
+          <span className="text-[13px] font-semibold text-deepseek-text">App Studio</span>
+          {project && <span className="text-[10px] text-deepseek-textSecondary bg-deepseek-hover px-1.5 py-0.5 rounded-full">{project.name}</span>}
         </div>
-        <button onClick={onClose} className="p-1 rounded hover:bg-claude-hover text-claude-textSecondary"><X size={14} /></button>
+        <button onClick={onClose} className="p-1 rounded hover:bg-deepseek-hover text-deepseek-textSecondary"><X size={14} /></button>
       </div>
 
       {/* Tabs */}
-      <div className="flex border-b border-claude-border">
+      <div className="flex border-b border-deepseek-border">
         {[
           { id: 'design' as StudioTab, label: '设计', icon: Palette },
           { id: 'code' as StudioTab, label: '代码', icon: Code },
@@ -135,7 +135,7 @@ const AppStudioPanel: React.FC<{ onClose: () => void }> = ({ onClose }) => {
           { id: 'deploy' as StudioTab, label: '部署', icon: Rocket },
         ].map(t => (
           <button key={t.id} onClick={() => setActiveTab(t.id)}
-            className={`flex-1 flex items-center justify-center gap-1 py-2 text-[11px] font-medium transition-colors ${activeTab === t.id ? 'text-emerald-400 border-b-2 border-emerald-400' : 'text-claude-textSecondary hover:text-claude-text'}`}>
+            className={`flex-1 flex items-center justify-center gap-1 py-2 text-[11px] font-medium transition-colors ${activeTab === t.id ? 'text-emerald-400 border-b-2 border-emerald-400' : 'text-deepseek-textSecondary hover:text-deepseek-text'}`}>
             <t.icon size={13} />{t.label}
           </button>
         ))}
@@ -155,7 +155,7 @@ const AppStudioPanel: React.FC<{ onClose: () => void }> = ({ onClose }) => {
               {(Object.keys(DEVICE_FRAMES) as DeviceType[]).map(d => {
                 const D = DEVICE_FRAMES[d];
                 return <button key={d} onClick={() => setDevice(d)}
-                  className={`p-1.5 rounded-lg transition-colors ${device === d ? 'bg-emerald-500/15 text-emerald-400' : 'text-claude-textSecondary hover:text-claude-text'}`}
+                  className={`p-1.5 rounded-lg transition-colors ${device === d ? 'bg-emerald-500/15 text-emerald-400' : 'text-deepseek-textSecondary hover:text-deepseek-text'}`}
                   title={D.name}><D.icon size={14} /></button>;
               })}
             </div>
@@ -163,24 +163,24 @@ const AppStudioPanel: React.FC<{ onClose: () => void }> = ({ onClose }) => {
         </div>
 
         {/* Side panel */}
-        <div className="w-[300px] border-l border-claude-border overflow-y-auto shrink-0">
+        <div className="w-[300px] border-l border-deepseek-border overflow-y-auto shrink-0">
           {activeTab === 'design' && (
             <div className="p-3 space-y-3">
-              <div className="text-[11px] font-semibold text-claude-text uppercase tracking-wider">新建项目</div>
+              <div className="text-[11px] font-semibold text-deepseek-text uppercase tracking-wider">新建项目</div>
               <div className="space-y-2">
                 <input value={projectName} onChange={e => setProjectName(e.target.value)}
-                  placeholder="项目名称" className="w-full bg-claude-hover text-[12px] text-claude-text px-2.5 py-2 rounded-lg outline-none" />
+                  placeholder="项目名称" className="w-full bg-deepseek-hover text-[12px] text-deepseek-text px-2.5 py-2 rounded-lg outline-none" />
               </div>
-              <div className="text-[11px] font-semibold text-claude-text uppercase tracking-wider">模板</div>
+              <div className="text-[11px] font-semibold text-deepseek-text uppercase tracking-wider">模板</div>
               <div className="space-y-1.5">
                 {TEMPLATES.map(t => (
                   <button key={t.id} onClick={() => setSelectedTemplate(t.id)}
-                    className={`w-full text-left p-2.5 rounded-xl border transition-colors ${selectedTemplate === t.id ? 'border-emerald-500/40 bg-emerald-500/5' : 'border-claude-border hover:bg-claude-hover'}`}>
+                    className={`w-full text-left p-2.5 rounded-xl border transition-colors ${selectedTemplate === t.id ? 'border-emerald-500/40 bg-emerald-500/5' : 'border-deepseek-border hover:bg-deepseek-hover'}`}>
                     <div className="flex items-center gap-2">
                       <t.icon size={14} className="text-emerald-400" />
-                      <span className="text-[12px] font-medium text-claude-text">{t.name}</span>
+                      <span className="text-[12px] font-medium text-deepseek-text">{t.name}</span>
                     </div>
-                    <p className="text-[10px] text-claude-textSecondary mt-0.5 ml-6">{t.desc}</p>
+                    <p className="text-[10px] text-deepseek-textSecondary mt-0.5 ml-6">{t.desc}</p>
                   </button>
                 ))}
               </div>
@@ -191,14 +191,14 @@ const AppStudioPanel: React.FC<{ onClose: () => void }> = ({ onClose }) => {
               </button>
 
               {showExport && project && (
-                <div className="pt-2 border-t border-claude-border space-y-2">
-                  <div className="text-[11px] font-semibold text-claude-text uppercase tracking-wider">导出</div>
+                <div className="pt-2 border-t border-deepseek-border space-y-2">
+                  <div className="text-[11px] font-semibold text-deepseek-text uppercase tracking-wider">导出</div>
                   <button onClick={handleExportToCode}
                     className="w-full py-2 bg-blue-500/15 text-blue-400 text-[11px] rounded-lg hover:bg-blue-500/25 transition-colors flex items-center justify-center gap-1.5">
                     <Code size={12} /> 导出到 Code 工作区
                   </button>
                   <button onClick={() => setPreviewHtml(previewHtml)}
-                    className="w-full py-1.5 bg-claude-hover text-claude-textSecondary text-[11px] rounded-lg hover:bg-claude-btnHover transition-colors">
+                    className="w-full py-1.5 bg-deepseek-hover text-deepseek-textSecondary text-[11px] rounded-lg hover:bg-deepseek-btnHover transition-colors">
                     刷新预览
                   </button>
                 </div>
@@ -209,21 +209,21 @@ const AppStudioPanel: React.FC<{ onClose: () => void }> = ({ onClose }) => {
           {activeTab === 'code' && (
             <div className="p-3 space-y-2">
               <div className="flex items-center justify-between">
-                <span className="text-[11px] font-semibold text-claude-text uppercase tracking-wider">生成的文件</span>
-                {generatedFiles.length > 0 && <span className="text-[10px] text-claude-textSecondary">{generatedFiles.length} 个文件</span>}
+                <span className="text-[11px] font-semibold text-deepseek-text uppercase tracking-wider">生成的文件</span>
+                {generatedFiles.length > 0 && <span className="text-[10px] text-deepseek-textSecondary">{generatedFiles.length} 个文件</span>}
               </div>
               {generatedFiles.length > 0 ? (
                 <div className="space-y-1">
                   {generatedFiles.map((f, i) => (
-                    <div key={i} className="flex items-center gap-2 px-2 py-1.5 rounded-lg hover:bg-claude-hover/50 text-[11px]">
+                    <div key={i} className="flex items-center gap-2 px-2 py-1.5 rounded-lg hover:bg-deepseek-hover/50 text-[11px]">
                       <FileText size={12} className="text-blue-400 shrink-0" />
-                      <span className="text-claude-text font-mono truncate">{f.path}</span>
-                      <span className="text-[9px] text-claude-textSecondary ml-auto">{f.content.length} 字</span>
+                      <span className="text-deepseek-text font-mono truncate">{f.path}</span>
+                      <span className="text-[9px] text-deepseek-textSecondary ml-auto">{f.content.length} 字</span>
                     </div>
                   ))}
                 </div>
               ) : (
-                <div className="text-[12px] text-claude-textSecondary py-4 text-center">
+                <div className="text-[12px] text-deepseek-textSecondary py-4 text-center">
                   {project ? '项目已创建，生成文件将在此显示' : '先在设计 Tab 创建项目'}
                 </div>
               )}
@@ -237,38 +237,38 @@ const AppStudioPanel: React.FC<{ onClose: () => void }> = ({ onClose }) => {
 
           {activeTab === 'api' && (
             <div className="p-4 space-y-3">
-              <div className="text-[11px] font-semibold text-claude-text uppercase tracking-wider">API 端点</div>
+              <div className="text-[11px] font-semibold text-deepseek-text uppercase tracking-wider">API 端点</div>
               {project ? (
                 <div className="space-y-1.5">
                   {['GET /api/users', 'POST /api/auth/login', 'GET /api/profile', 'PUT /api/profile', 'DELETE /api/users/:id'].map(ep => (
-                    <div key={ep} className="flex items-center gap-2 px-2 py-1.5 rounded-lg bg-claude-hover text-[11px]">
+                    <div key={ep} className="flex items-center gap-2 px-2 py-1.5 rounded-lg bg-deepseek-hover text-[11px]">
                       <span className="text-[9px] px-1 py-0.5 rounded bg-blue-500/15 text-blue-400 font-mono">{ep.split(' ')[0]}</span>
-                      <span className="text-claude-text font-mono">{ep.split(' ')[1]}</span>
+                      <span className="text-deepseek-text font-mono">{ep.split(' ')[1]}</span>
                     </div>
                   ))}
-                  <button className="w-full py-1.5 border border-dashed border-claude-border text-[11px] text-claude-textSecondary rounded-lg hover:bg-claude-hover mt-2">+ 添加端点</button>
+                  <button className="w-full py-1.5 border border-dashed border-deepseek-border text-[11px] text-deepseek-textSecondary rounded-lg hover:bg-deepseek-hover mt-2">+ 添加端点</button>
                 </div>
-              ) : <div className="text-[12px] text-claude-textSecondary">先创建项目</div>}
+              ) : <div className="text-[12px] text-deepseek-textSecondary">先创建项目</div>}
             </div>
           )}
 
           {activeTab === 'deploy' && (
             <div className="p-4 space-y-3">
-              <div className="text-[11px] font-semibold text-claude-text uppercase tracking-wider">部署</div>
+              <div className="text-[11px] font-semibold text-deepseek-text uppercase tracking-wider">部署</div>
               {deployUrl ? (
                 <div className="space-y-3">
-                  <div className="p-4 rounded-xl bg-claude-hover text-center">
-                    <div className="w-32 h-32 mx-auto bg-white dark:bg-black rounded-xl flex items-center justify-center border border-claude-border">
+                  <div className="p-4 rounded-xl bg-deepseek-hover text-center">
+                    <div className="w-32 h-32 mx-auto bg-white dark:bg-black rounded-xl flex items-center justify-center border border-deepseek-border">
                       <div className="text-center">
                         <div className="text-[40px] font-mono font-bold tracking-widest text-black dark:text-white opacity-20">⬛⬛⬛</div>
-                        <div className="text-[8px] text-claude-textSecondary mt-1">Expo QR Code</div>
+                        <div className="text-[8px] text-deepseek-textSecondary mt-1">Expo QR Code</div>
                       </div>
                     </div>
-                    <p className="text-[11px] text-claude-textSecondary mt-2">用 Expo Go 扫码安装到手机</p>
+                    <p className="text-[11px] text-deepseek-textSecondary mt-2">用 Expo Go 扫码安装到手机</p>
                   </div>
-                  <div className="text-[10px] bg-claude-hover p-2 rounded-lg font-mono text-claude-textSecondary break-all select-all">{deployUrl}</div>
+                  <div className="text-[10px] bg-deepseek-hover p-2 rounded-lg font-mono text-deepseek-textSecondary break-all select-all">{deployUrl}</div>
                   <div className="flex gap-2">
-                    <button onClick={() => setDeployUrl('')} className="flex-1 py-2 bg-claude-hover text-claude-textSecondary text-[11px] rounded-lg hover:bg-claude-btnHover">停止</button>
+                    <button onClick={() => setDeployUrl('')} className="flex-1 py-2 bg-deepseek-hover text-deepseek-textSecondary text-[11px] rounded-lg hover:bg-deepseek-btnHover">停止</button>
                     <button onClick={handleDeploy} className="flex-1 py-2 bg-emerald-500/20 text-emerald-400 text-[11px] rounded-lg hover:bg-emerald-500/30 flex items-center justify-center gap-1">
                       <RefreshCw size={12} /> 重新部署
                     </button>
@@ -279,7 +279,7 @@ const AppStudioPanel: React.FC<{ onClose: () => void }> = ({ onClose }) => {
                   <button onClick={handleDeploy} className="w-full py-2 bg-emerald-500/20 text-emerald-400 text-[11px] rounded-lg hover:bg-emerald-500/30 flex items-center justify-center gap-1.5">
                     <Play size={12} /> 启动 Expo 开发服务器
                   </button>
-                  <p className="text-[10px] text-claude-textSecondary/60 text-center">需要本地安装 Node.js + Expo CLI</p>
+                  <p className="text-[10px] text-deepseek-textSecondary/60 text-center">需要本地安装 Node.js + Expo CLI</p>
                 </div>
               )}
             </div>

@@ -31,7 +31,7 @@ pub fn status_text(workspace: &Path, plugin_servers: &[Value]) -> String {
             text.push_str(&format!(
                 "  {} {:<48} {command:<28} {extensions}\n",
                 if found { "\u{2713}" } else { "\u{2717}" },
-                server["name"].as_str().unwrap_or_default().trim_start_matches("claude-code:"),
+                server["name"].as_str().unwrap_or_default().trim_start_matches("deepseek-code:"),
             ));
         }
     }

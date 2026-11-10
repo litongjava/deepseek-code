@@ -4,7 +4,7 @@ import { invokeDesktop as invoke } from '../platform/native';
 import { listProjects, type Project } from '../api/projects';
 
 interface Definition { id:string; description:string; system_prompt:string; tools:string[]|null }
-const field = 'w-full rounded border border-claude-border bg-claude-bg p-2 text-sm';
+const field = 'w-full rounded border border-deepseek-border bg-deepseek-bg p-2 text-sm';
 const command = <T,>(request:Record<string,unknown>) => invoke<T>('peripheral_command',{request});
 export default function AgentLauncher({ onOpen }: { onOpen:()=>void }) {
   const [definitions,setDefinitions] = useState<Definition[]>([]);
@@ -20,7 +20,7 @@ export default function AgentLauncher({ onOpen }: { onOpen:()=>void }) {
     Promise.all([command<Definition[]>({action:'agents'}),listProjects()]).then(([defs,items])=>{setDefinitions(defs);setProjects(items.filter(p=>!p.is_archived&&p.workspace_path&&p.folders.length>0&&p.folders.every(f=>f.trusted)));}).catch(e=>setError(String(e)));
   },[]);
   const run = async (operation:()=>Promise<void>) => {setBusy(true);setError('');try{await operation();}catch(e){setError(String(e));}finally{setBusy(false);}};
-  return <section className="mb-4 space-y-3 rounded border border-claude-border p-3">
+  return <section className="mb-4 space-y-3 rounded border border-deepseek-border p-3">
     <h3>运行共享 Agent</h3>
     <p className="text-xs">选择类型后打开项目会话，再输入任务运行。结果、工具轨迹、权限确认和取消均使用聊天窗口；探索、规划与指南限制为只读工具。</p>
     {error&&<p role="alert">{error}</p>}

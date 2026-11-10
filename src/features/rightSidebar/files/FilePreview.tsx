@@ -43,17 +43,17 @@ export default function FilePreview({ file, diff, active, reloadKey }: {
     const match = container.current?.querySelector('[data-search-match]');
     match?.scrollIntoView?.({ block: 'center', inline: 'center' });
   }, [active, diff, data, file.navigation]);
-  return <div ref={container} role="region" aria-label={file.relativePath} className="h-full min-h-0 overflow-auto bg-claude-bg">
+  return <div ref={container} role="region" aria-label={file.relativePath} className="h-full min-h-0 overflow-auto bg-deepseek-bg">
     {error ? <div role="alert" className="p-4 text-sm text-red-600">{error}<button type="button" className="ml-2 underline" onClick={() => setRetry(value => value + 1)}>Retry</button></div> : diff ? patch ? <>
-      <p className="sticky top-0 z-10 bg-claude-bg px-3 py-2 text-xs text-claude-textSecondary">
+      <p className="sticky top-0 z-10 bg-deepseek-bg px-3 py-2 text-xs text-deepseek-textSecondary">
         {patch.status === 'not-git' ? 'No Git baseline' : patch.status === 'untracked' ? 'New file vs empty content' : patch.baseline === 'head' ? `Working tree vs HEAD · ${patch.baselineOid?.slice(0, 8)}` : 'Working tree vs empty tree'}
       </p>
-      {patch.notice && <p className="px-3 py-2 text-xs text-claude-textSecondary">{patch.notice}</p>}
-      {patch.status === 'unchanged' && <p className="p-4 text-sm text-claude-textSecondary">No differences.</p>}
-      {patch.patch && <pre className="min-w-max p-3 text-xs leading-relaxed">{patch.patch.split('\n').map((line, index) => <div key={index} className={line.startsWith('+') ? 'bg-green-500/10 text-green-700 dark:text-green-300' : line.startsWith('-') ? 'bg-red-500/10 text-red-700 dark:text-red-300' : 'text-claude-text'}>{line || ' '}</div>)}</pre>}
+      {patch.notice && <p className="px-3 py-2 text-xs text-deepseek-textSecondary">{patch.notice}</p>}
+      {patch.status === 'unchanged' && <p className="p-4 text-sm text-deepseek-textSecondary">No differences.</p>}
+      {patch.patch && <pre className="min-w-max p-3 text-xs leading-relaxed">{patch.patch.split('\n').map((line, index) => <div key={index} className={line.startsWith('+') ? 'bg-green-500/10 text-green-700 dark:text-green-300' : line.startsWith('-') ? 'bg-red-500/10 text-red-700 dark:text-red-300' : 'text-deepseek-text'}>{line || ' '}</div>)}</pre>}
     </> : <p role="status" className="p-4 text-sm">Loading diff…</p> : data ? <>
-      {data.notice && <p className="p-3 text-xs text-claude-textSecondary">{data.notice}</p>}
-      {data.binary ? <p className="p-4 text-sm text-claude-textSecondary">Binary file · {data.size} bytes</p> : data.content !== null ? <FileContent content={data.content} file={file} dark={dark} /> : <p className="p-4 text-sm">File content is unavailable.</p>}
+      {data.notice && <p className="p-3 text-xs text-deepseek-textSecondary">{data.notice}</p>}
+      {data.binary ? <p className="p-4 text-sm text-deepseek-textSecondary">Binary file · {data.size} bytes</p> : data.content !== null ? <FileContent content={data.content} file={file} dark={dark} /> : <p className="p-4 text-sm">File content is unavailable.</p>}
     </> : <p role="status" className="p-4 text-sm">Loading file…</p>}
   </div>;
 }
@@ -66,7 +66,7 @@ function FileContent({ content, file, dark }: { content: string; file: SidebarFi
     const index = position.line - 1;
     if (index >= 0 && index < lines.length) {
       const line = lines[index];
-      return <pre className="min-w-max p-3 text-xs leading-[1.6] text-claude-text" style={{ fontFamily: MONO_FONT }}>
+      return <pre className="min-w-max p-3 text-xs leading-[1.6] text-deepseek-text" style={{ fontFamily: MONO_FONT }}>
         {lines.slice(0, index).join('\n')}{index > 0 ? '\n' : ''}
         {line.slice(0, position.startColumn - 1)}<mark data-search-match tabIndex={-1} className="bg-yellow-300/50 text-inherit">{line.slice(position.startColumn - 1, position.endColumn - 1)}</mark>{line.slice(position.endColumn - 1)}
         {index < lines.length - 1 ? '\n' : ''}{lines.slice(index + 1).join('\n')}
@@ -80,7 +80,7 @@ function FileContent({ content, file, dark }: { content: string; file: SidebarFi
     codeTagProps={{ style: { fontFamily: 'inherit' } }}
   >{content}</SyntaxHighlighter>;
   const numbers = Array.from({ length: content.split('\n').length }, (_, i) => i + 1).join('\n');
-  return <div className="flex min-w-max text-[12px] leading-[1.6] text-claude-text" style={{ fontFamily: MONO_FONT }}>
+  return <div className="flex min-w-max text-[12px] leading-[1.6] text-deepseek-text" style={{ fontFamily: MONO_FONT }}>
     <pre aria-hidden="true" className="m-0 select-none py-2 pl-1 pr-3 text-right opacity-45">{numbers}</pre>
     <pre className="m-0 py-2 pr-3" data-testid="file-preview-text">{content}</pre>
   </div>;

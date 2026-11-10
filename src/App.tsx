@@ -382,8 +382,8 @@ const Layout = () => {
 
   if (!authChecked) {
     return (
-      <WindowFrame><div className="flex items-center justify-center w-full h-screen bg-claude-bg">
-        <div className="text-claude-textSecondary text-[14px]">Loading...</div>
+      <WindowFrame><div className="flex items-center justify-center w-full h-screen bg-deepseek-bg">
+        <div className="text-deepseek-textSecondary text-[14px]">Loading...</div>
       </div></WindowFrame>
     );
   }
@@ -393,9 +393,9 @@ const Layout = () => {
 
   return (
     <>
-      <div className="relative flex w-full h-dvh overflow-hidden bg-claude-bg font-sans antialiased" style={{ zoom: zoomLevel }}>
+      <div className="relative flex w-full h-dvh overflow-hidden bg-deepseek-bg font-sans antialiased" style={{ zoom: zoomLevel }}>
         {showZoomIndicator && (
-          <div className="fixed bottom-6 left-1/2 -translate-x-1/2 z-[300] px-4 py-2 bg-claude-tooltipBg text-claude-tooltipText rounded-lg shadow-lg text-[13px] font-medium flex items-center gap-2 transition-opacity duration-300">
+          <div className="fixed bottom-6 left-1/2 -translate-x-1/2 z-[300] px-4 py-2 bg-deepseek-tooltipBg text-deepseek-tooltipText rounded-lg shadow-lg text-[13px] font-medium flex items-center gap-2 transition-opacity duration-300">
             <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/><line x1="11" y1="8" x2="11" y2="14"/><line x1="8" y1="11" x2="14" y2="11"/></svg>
             {Math.round(zoomLevel * 100)}%
             <button onClick={() => { setZoomLevel(1); localStorage.setItem('app_zoom', '1'); }} className="ml-1 px-1.5 py-0.5 text-[11px] rounded bg-white/20 dark:bg-black/10 hover:bg-white/30 dark:hover:bg-black/20 transition-colors">Reset</button>
@@ -407,18 +407,18 @@ const Layout = () => {
           </div>
         )}>
           <div className="h-full flex items-center pr-2 gap-0.5" style={{ pointerEvents: 'auto', WebkitAppRegion: 'no-drag', paddingLeft: isMac ? '78px' : '4px' } as React.CSSProperties}>
-            {!narrowScreen && <Tooltip content="Menu"><button onClick={() => { }} className="p-2 hover:bg-black/5 dark:hover:bg-white/5 rounded-md text-claude-textSecondary hover:text-claude-text transition-colors"><Menu size={18} className="opacity-80" /></button></Tooltip>}
-            <Tooltip content={isSidebarCollapsed ? "Expand sidebar" : "Collapse sidebar"}><button aria-label={isSidebarCollapsed ? "Expand sidebar" : "Collapse sidebar"} aria-expanded={!isSidebarCollapsed} onClick={() => setIsSidebarCollapsed(!isSidebarCollapsed)} className="p-2 md:p-1.5 hover:bg-black/5 dark:hover:bg-white/5 rounded-md text-claude-textSecondary hover:text-claude-text transition-colors"><IconSidebarToggle size={26} className="dark:invert transition-[filter] duration-200" /></button></Tooltip>
+            {!narrowScreen && <Tooltip content="Menu"><button onClick={() => { }} className="p-2 hover:bg-black/5 dark:hover:bg-white/5 rounded-md text-deepseek-textSecondary hover:text-deepseek-text transition-colors"><Menu size={18} className="opacity-80" /></button></Tooltip>}
+            <Tooltip content={isSidebarCollapsed ? "Expand sidebar" : "Collapse sidebar"}><button aria-label={isSidebarCollapsed ? "Expand sidebar" : "Collapse sidebar"} aria-expanded={!isSidebarCollapsed} onClick={() => setIsSidebarCollapsed(!isSidebarCollapsed)} className="p-2 md:p-1.5 hover:bg-black/5 dark:hover:bg-white/5 rounded-md text-deepseek-textSecondary hover:text-deepseek-text transition-colors"><IconSidebarToggle size={26} className="dark:invert transition-[filter] duration-200" /></button></Tooltip>
             {!narrowScreen && (<>
             {canGoBack ? (
-              <Tooltip content="Back"><button onClick={handleNavBack} className="p-1.5 rounded-md transition-colors hover:bg-black/5 dark:hover:bg-white/5 text-claude-navActive"><ArrowLeft size={16} strokeWidth={1.5} /></button></Tooltip>
-            ) : (<span className="p-1.5 text-claude-navDisabled"><ArrowLeft size={16} strokeWidth={1.5} /></span>)}
+              <Tooltip content="Back"><button onClick={handleNavBack} className="p-1.5 rounded-md transition-colors hover:bg-black/5 dark:hover:bg-white/5 text-deepseek-navActive"><ArrowLeft size={16} strokeWidth={1.5} /></button></Tooltip>
+            ) : (<span className="p-1.5 text-deepseek-navDisabled"><ArrowLeft size={16} strokeWidth={1.5} /></span>)}
             {canGoForward ? (
-              <Tooltip content="Forward"><button onClick={handleNavForward} className="p-1.5 rounded-md transition-colors hover:bg-black/5 dark:hover:bg-white/5 text-claude-navActive"><ArrowRight size={16} strokeWidth={1.5} /></button></Tooltip>
-            ) : (<span className="p-1.5 text-claude-navDisabled"><ArrowRight size={16} strokeWidth={1.5} /></span>)}
-            {showCodingView && <Tooltip content="Agent Worktree (Ctrl+Shift+A)"><button onClick={() => { setShowAgentPanel(true); setShowAnalyticsPanel(false); }} className="p-1.5 hover:bg-black/5 dark:hover:bg-white/5 rounded-md text-claude-textSecondary hover:text-claude-text transition-colors"><GitBranch size={16} strokeWidth={1.5} /></button></Tooltip>}
-            <Tooltip content="使用统计"><button onClick={() => { setShowAnalyticsPanel(true); setShowAgentPanel(false); }} className="p-1.5 hover:bg-black/5 dark:hover:bg-white/5 rounded-md text-claude-textSecondary hover:text-claude-text transition-colors"><BarChart3 size={16} strokeWidth={1.5} /></button></Tooltip>
-            <Tooltip content={t('common.help')}><button type="button" aria-label={t('common.help')} aria-haspopup="dialog" aria-expanded={showHelpModal} onClick={() => setShowHelpModal(true)} className="p-1.5 hover:bg-black/5 dark:hover:bg-white/5 rounded-md text-claude-textSecondary hover:text-claude-text transition-colors"><HelpCircle size={16} strokeWidth={1.5} /></button></Tooltip>
+              <Tooltip content="Forward"><button onClick={handleNavForward} className="p-1.5 rounded-md transition-colors hover:bg-black/5 dark:hover:bg-white/5 text-deepseek-navActive"><ArrowRight size={16} strokeWidth={1.5} /></button></Tooltip>
+            ) : (<span className="p-1.5 text-deepseek-navDisabled"><ArrowRight size={16} strokeWidth={1.5} /></span>)}
+            {showCodingView && <Tooltip content="Agent Worktree (Ctrl+Shift+A)"><button onClick={() => { setShowAgentPanel(true); setShowAnalyticsPanel(false); }} className="p-1.5 hover:bg-black/5 dark:hover:bg-white/5 rounded-md text-deepseek-textSecondary hover:text-deepseek-text transition-colors"><GitBranch size={16} strokeWidth={1.5} /></button></Tooltip>}
+            <Tooltip content="使用统计"><button onClick={() => { setShowAnalyticsPanel(true); setShowAgentPanel(false); }} className="p-1.5 hover:bg-black/5 dark:hover:bg-white/5 rounded-md text-deepseek-textSecondary hover:text-deepseek-text transition-colors"><BarChart3 size={16} strokeWidth={1.5} /></button></Tooltip>
+            <Tooltip content={t('common.help')}><button type="button" aria-label={t('common.help')} aria-haspopup="dialog" aria-expanded={showHelpModal} onClick={() => setShowHelpModal(true)} className="p-1.5 hover:bg-black/5 dark:hover:bg-white/5 rounded-md text-deepseek-textSecondary hover:text-deepseek-text transition-colors"><HelpCircle size={16} strokeWidth={1.5} /></button></Tooltip>
             </>)}
           </div>
           <div id="desktop-tool-menus" className="flex h-full shrink-0 items-center" />

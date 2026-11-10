@@ -3,9 +3,9 @@ import { Pencil, Plus, RotateCcw, Trash2 } from 'lucide-react';
 import { useI18n } from '../hooks/useI18n';
 import { customizationApi, type BuiltinTool, type Customization, type CustomizationState, type CustomTool, type PromptMode, type ToolLoading } from '../api/customization';
 
-const inputClass = 'w-full rounded-lg border border-claude-border bg-claude-bg px-3 py-2 text-sm text-claude-text';
-const primaryClass = 'rounded-lg bg-claude-accent px-4 py-2 text-sm text-white disabled:opacity-50';
-const secondaryClass = 'rounded-lg border border-claude-border px-3 py-1.5 text-sm text-claude-text hover:bg-claude-hover';
+const inputClass = 'w-full rounded-lg border border-deepseek-border bg-deepseek-bg px-3 py-2 text-sm text-deepseek-text';
+const primaryClass = 'rounded-lg bg-deepseek-accent px-4 py-2 text-sm text-white disabled:opacity-50';
+const secondaryClass = 'rounded-lg border border-deepseek-border px-3 py-1.5 text-sm text-deepseek-text hover:bg-deepseek-hover';
 const emptySchema = JSON.stringify({ type: 'object', properties: {} }, null, 2);
 
 interface ToolDraft { index: number | null; name: string; description: string; schema: string; command: string; timeout: string }
@@ -47,7 +47,7 @@ export function AgentCustomization({ section }: { section: AgentCustomizationSec
   }, [state, filter]);
 
   if (!state || !draft) {
-    return error ? <div role="alert" className="rounded-lg bg-red-500/10 p-3 text-sm text-red-500">{error}</div> : <p className="text-sm text-claude-textSecondary">{t('agentSettings.loading')}</p>;
+    return error ? <div role="alert" className="rounded-lg bg-red-500/10 p-3 text-sm text-red-500">{error}</div> : <p className="text-sm text-deepseek-textSecondary">{t('agentSettings.loading')}</p>;
   }
 
   const update = (patch: Partial<Customization>) => { setDraft({ ...draft, ...patch }); setNotice(''); };
@@ -163,11 +163,11 @@ export function AgentCustomization({ section }: { section: AgentCustomizationSec
         </select>
       </label>
       {draft.system_prompt.mode === 'default'
-        ? <details className="rounded-lg border border-claude-border p-3 text-sm"><summary>{t('agentSettings.viewBuiltin')}</summary><pre className="mt-2 max-h-80 overflow-auto whitespace-pre-wrap text-xs text-claude-textSecondary">{state.default_system_prompt}</pre></details>
+        ? <details className="rounded-lg border border-deepseek-border p-3 text-sm"><summary>{t('agentSettings.viewBuiltin')}</summary><pre className="mt-2 max-h-80 overflow-auto whitespace-pre-wrap text-xs text-deepseek-textSecondary">{state.default_system_prompt}</pre></details>
         : <>
           <textarea aria-label={t('agentSettings.promptText')} rows={12} className={`${inputClass} font-mono`} value={draft.system_prompt.text} onChange={e => setPrompt(draft.system_prompt.mode, e.target.value)} />
           {draft.system_prompt.mode === 'replace' && <>
-            <p className="text-xs text-claude-textSecondary">{t('agentSettings.environmentNote')}</p>
+            <p className="text-xs text-deepseek-textSecondary">{t('agentSettings.environmentNote')}</p>
             <button className={secondaryClass} onClick={() => setPrompt('replace', state.default_system_prompt)}><RotateCcw size={14} className="mr-1 inline" />{t('agentSettings.restoreBuiltin')}</button>
           </>}
         </>}
@@ -180,14 +180,14 @@ export function AgentCustomization({ section }: { section: AgentCustomizationSec
         <h3 className="font-semibold">{t('agentSettings.customTools')}</h3>
         <button className={secondaryClass} onClick={() => setToolDraft({ ...blankTool })}><Plus size={14} className="mr-1 inline" />{t('agentSettings.addTool')}</button>
       </div>
-      <p className="text-xs text-claude-textSecondary">{t('agentSettings.customToolsNote')}</p>
-      {draft.custom_tools.map((tool, index) => <div key={tool.name} className="flex items-center gap-3 rounded-lg border border-claude-border p-3">
+      <p className="text-xs text-deepseek-textSecondary">{t('agentSettings.customToolsNote')}</p>
+      {draft.custom_tools.map((tool, index) => <div key={tool.name} className="flex items-center gap-3 rounded-lg border border-deepseek-border p-3">
         <input type="checkbox" aria-label={t('agentSettings.enableTool', { name: tool.name })} checked={tool.enabled} onChange={e => update({ custom_tools: draft.custom_tools.map((item, i) => i === index ? { ...item, enabled: e.target.checked } : item) })} />
-        <div className="min-w-0 flex-1"><div className="font-mono text-sm">{tool.name}</div><div className="truncate text-xs text-claude-textSecondary">{tool.description}</div></div>
-        <button aria-label={t('agentSettings.editTool', { name: tool.name })} className="rounded p-1 hover:bg-claude-hover" onClick={() => setToolDraft({ index, name: tool.name, description: tool.description, schema: JSON.stringify(tool.input_schema, null, 2), command: tool.command, timeout: tool.timeout_secs ? String(tool.timeout_secs) : '' })}><Pencil size={14} /></button>
-        <button aria-label={t('agentSettings.deleteTool', { name: tool.name })} className="rounded p-1 text-red-500 hover:bg-claude-hover" onClick={() => update({ custom_tools: draft.custom_tools.filter((_, i) => i !== index) })}><Trash2 size={14} /></button>
+        <div className="min-w-0 flex-1"><div className="font-mono text-sm">{tool.name}</div><div className="truncate text-xs text-deepseek-textSecondary">{tool.description}</div></div>
+        <button aria-label={t('agentSettings.editTool', { name: tool.name })} className="rounded p-1 hover:bg-deepseek-hover" onClick={() => setToolDraft({ index, name: tool.name, description: tool.description, schema: JSON.stringify(tool.input_schema, null, 2), command: tool.command, timeout: tool.timeout_secs ? String(tool.timeout_secs) : '' })}><Pencil size={14} /></button>
+        <button aria-label={t('agentSettings.deleteTool', { name: tool.name })} className="rounded p-1 text-red-500 hover:bg-deepseek-hover" onClick={() => update({ custom_tools: draft.custom_tools.filter((_, i) => i !== index) })}><Trash2 size={14} /></button>
       </div>)}
-      {toolDraft && <form className="space-y-3 rounded-lg border border-claude-border p-3" onSubmit={e => { e.preventDefault(); saveTool(); }}>
+      {toolDraft && <form className="space-y-3 rounded-lg border border-deepseek-border p-3" onSubmit={e => { e.preventDefault(); saveTool(); }}>
         <input aria-label={t('agentSettings.toolName')} required placeholder={t('agentSettings.toolNamePlaceholder')} className={inputClass} value={toolDraft.name} onChange={e => setToolDraft({ ...toolDraft, name: e.target.value })} />
         <textarea aria-label={t('agentSettings.toolDescription')} required rows={2} placeholder={t('agentSettings.toolDescriptionPlaceholder')} className={inputClass} value={toolDraft.description} onChange={e => setToolDraft({ ...toolDraft, description: e.target.value })} />
         <textarea aria-label={t('agentSettings.toolCommand')} required rows={2} placeholder={t('agentSettings.toolCommandPlaceholder')} className={`${inputClass} font-mono`} value={toolDraft.command} onChange={e => setToolDraft({ ...toolDraft, command: e.target.value })} />
@@ -200,7 +200,7 @@ export function AgentCustomization({ section }: { section: AgentCustomizationSec
     <section className="space-y-3">
       <h3 className="font-semibold">{t('agentSettings.builtinTools')}</h3>
       <input aria-label={t('agentSettings.filterBuiltin')} placeholder={t('agentSettings.filterPlaceholder')} className={inputClass} value={filter} onChange={e => setFilter(e.target.value)} />
-      <div className="divide-y divide-claude-border rounded-lg border border-claude-border">
+      <div className="divide-y divide-deepseek-border rounded-lg border border-deepseek-border">
         {tools.map(tool => {
           const loading = loadingOf(tool);
           const edited = draft.tool_descriptions[tool.name];
@@ -209,8 +209,8 @@ export function AgentCustomization({ section }: { section: AgentCustomizationSec
               <div className="min-w-0 flex-1">
                 <div className="flex flex-wrap items-center gap-2">
                   <span className="font-mono text-sm">{tool.name}</span>
-                  {tool.core && <span className="rounded bg-claude-hover px-1.5 py-0.5 text-xs text-claude-textSecondary">{t('agentSettings.coreDefault')}</span>}
-                  {edited !== undefined && <span className="text-xs text-claude-textSecondary">{t('agentSettings.modified')}</span>}
+                  {tool.core && <span className="rounded bg-deepseek-hover px-1.5 py-0.5 text-xs text-deepseek-textSecondary">{t('agentSettings.coreDefault')}</span>}
+                  {edited !== undefined && <span className="text-xs text-deepseek-textSecondary">{t('agentSettings.modified')}</span>}
                 </div>
                 <div className="mt-2 flex flex-wrap items-center gap-x-5 gap-y-1 text-sm">
                   <label className="flex items-center gap-2">
@@ -222,10 +222,10 @@ export function AgentCustomization({ section }: { section: AgentCustomizationSec
                     <span>{t('agentSettings.onDemand')}</span>
                   </label>
                 </div>
-                <p className="mt-1 text-xs text-claude-textSecondary">{t('agentSettings.loadingHint')}</p>
+                <p className="mt-1 text-xs text-deepseek-textSecondary">{t('agentSettings.loadingHint')}</p>
                 {tool.name === 'ToolSearch' && !loading.enabled && <p className="mt-1 text-xs text-amber-600">{t('agentSettings.toolSearchDisabledHint')}</p>}
               </div>
-              <button aria-label={t('agentSettings.editToolDescription', { name: tool.name })} className="rounded p-1 hover:bg-claude-hover" onClick={() => setEditingTool(editingTool === tool.name ? null : tool.name)}><Pencil size={14} /></button>
+              <button aria-label={t('agentSettings.editToolDescription', { name: tool.name })} className="rounded p-1 hover:bg-deepseek-hover" onClick={() => setEditingTool(editingTool === tool.name ? null : tool.name)}><Pencil size={14} /></button>
             </div>
             {editingTool === tool.name && <div className="space-y-2">
               <textarea aria-label={t('agentSettings.descriptionLabel', { name: tool.name })} rows={8} className={`${inputClass} font-mono text-xs`} value={edited ?? tool.description} onChange={e => setDescription(tool.name, e.target.value)} />
@@ -238,12 +238,12 @@ export function AgentCustomization({ section }: { section: AgentCustomizationSec
   </>;
 
   return (
-    <div className="mx-auto max-w-3xl space-y-8 text-claude-text">
+    <div className="mx-auto max-w-3xl space-y-8 text-deepseek-text">
       <div className="flex items-center justify-between gap-4">
         <div>
           <h2 className="text-xl font-semibold">{isPrompts ? t('customize.prompts') : t('customize.tools')}</h2>
-          <p className="mt-1 text-sm text-claude-textSecondary">{isPrompts ? t('customize.promptsDescription') : t('customize.toolsDescription')}</p>
-          <p className="mt-0.5 text-xs text-claude-textSecondary">{t('agentSettings.shared')}</p>
+          <p className="mt-1 text-sm text-deepseek-textSecondary">{isPrompts ? t('customize.promptsDescription') : t('customize.toolsDescription')}</p>
+          <p className="mt-0.5 text-xs text-deepseek-textSecondary">{t('agentSettings.shared')}</p>
         </div>
         <button className={primaryClass} disabled={busy || !dirty || replaceEmpty} onClick={() => void save()}>{t('agentSettings.save')}</button>
       </div>

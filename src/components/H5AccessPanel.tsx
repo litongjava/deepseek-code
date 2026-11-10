@@ -171,21 +171,21 @@ const H5AccessPanel: React.FC<H5AccessPanelProps> = ({ conversationId, onOpenCha
           onClick={() => handleOpenChange(false)}
         >
           <div
-            className="bg-claude-bg border border-claude-border rounded-2xl shadow-xl w-[520px] max-h-[80vh] overflow-y-auto animate-fade-in"
+            className="bg-deepseek-bg border border-deepseek-border rounded-2xl shadow-xl w-[520px] max-h-[80vh] overflow-y-auto animate-fade-in"
             onClick={(e) => e.stopPropagation()}
           >
-            <div className="flex items-center justify-between p-5 border-b border-claude-border">
+            <div className="flex items-center justify-between p-5 border-b border-deepseek-border">
               <div>
-                <h3 className="text-[18px] font-semibold text-claude-text">
+                <h3 className="text-[18px] font-semibold text-deepseek-text">
                   {t('h5.remoteAccess') || '远程访问'}
                 </h3>
-                <p className="text-[12px] text-claude-secondary mt-0.5">
+                <p className="text-[12px] text-deepseek-secondary mt-0.5">
                   {t('h5.subtitle') || '生成临时链接，允许外部设备查看对话'}
                 </p>
               </div>
               <button
                 onClick={() => handleOpenChange(false)}
-                className="p-1.5 rounded-lg text-claude-secondary hover:text-claude-text hover:bg-claude-hover transition-colors"
+                className="p-1.5 rounded-lg text-deepseek-secondary hover:text-deepseek-text hover:bg-deepseek-hover transition-colors"
               >
                 <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round">
                   <line x1="18" y1="6" x2="6" y2="18" />
@@ -196,14 +196,14 @@ const H5AccessPanel: React.FC<H5AccessPanelProps> = ({ conversationId, onOpenCha
 
             <div className="p-5 space-y-5">
               <div>
-                <label className="block text-[12px] text-claude-secondary mb-2">
+                <label className="block text-[12px] text-deepseek-secondary mb-2">
                   {t('h5.expiryTime') || '过期时间'}
                 </label>
                 <div className="flex items-center gap-3">
                   <select
                     value={ttlMinutes}
                     onChange={(e) => setTtlMinutes(Number(e.target.value))}
-                    className="flex-1 px-3 py-2 bg-claude-input border border-claude-border rounded-lg text-claude-text text-[13px] focus:outline-none focus:border-blue-500"
+                    className="flex-1 px-3 py-2 bg-deepseek-input border border-deepseek-border rounded-lg text-deepseek-text text-[13px] focus:outline-none focus:border-blue-500"
                   >
                     {EXPIRY_OPTIONS.map((opt) => (
                       <option key={opt.value} value={opt.value}>
@@ -228,9 +228,9 @@ const H5AccessPanel: React.FC<H5AccessPanelProps> = ({ conversationId, onOpenCha
               )}
 
               {generatedToken && !isTokenExpired(generatedToken.expires_at) && !generatedToken.is_revoked && (
-                <div className="p-4 rounded-xl bg-claude-input border border-blue-500/20 space-y-4">
+                <div className="p-4 rounded-xl bg-deepseek-input border border-blue-500/20 space-y-4">
                   <div className="flex items-center justify-between">
-                    <h4 className="text-[14px] font-medium text-claude-text">
+                    <h4 className="text-[14px] font-medium text-deepseek-text">
                       {t('h5.accessLink') || '访问链接'}
                     </h4>
                     <div className="flex items-center gap-1.5">
@@ -246,7 +246,7 @@ const H5AccessPanel: React.FC<H5AccessPanelProps> = ({ conversationId, onOpenCha
                   </div>
 
                   <div className="flex items-center gap-2">
-                    <code className="flex-1 px-3 py-2 bg-claude-bg border border-claude-border rounded-lg text-[12px] text-claude-secondary truncate font-mono">
+                    <code className="flex-1 px-3 py-2 bg-deepseek-bg border border-deepseek-border rounded-lg text-[12px] text-deepseek-secondary truncate font-mono">
                       {getAccessUrl(generatedToken.token)}
                     </code>
                     <button
@@ -261,9 +261,9 @@ const H5AccessPanel: React.FC<H5AccessPanelProps> = ({ conversationId, onOpenCha
                     </button>
                   </div>
 
-                  <div className="flex items-center justify-between pt-2 border-t border-claude-border">
+                  <div className="flex items-center justify-between pt-2 border-t border-deepseek-border">
                     <div className="flex items-center gap-3">
-                      <span className="text-[12px] text-claude-secondary">
+                      <span className="text-[12px] text-deepseek-secondary">
                         {t('h5.expiresIn') || '剩余时间'}:
                       </span>
                       <span
@@ -289,13 +289,13 @@ const H5AccessPanel: React.FC<H5AccessPanelProps> = ({ conversationId, onOpenCha
               {tokens.length > 0 && (
                 <div>
                   <div className="flex items-center justify-between mb-3">
-                    <h4 className="text-[14px] font-medium text-claude-text">
+                    <h4 className="text-[14px] font-medium text-deepseek-text">
                       {t('h5.activeTokens') || '活跃令牌'} ({activeTokens.length})
                     </h4>
                     {expiredTokens.length > 0 && (
                       <button
                         onClick={handleCleanup}
-                        className="px-3 py-1 rounded-lg text-[12px] text-claude-secondary border border-claude-border hover:bg-claude-hover transition-colors"
+                        className="px-3 py-1 rounded-lg text-[12px] text-deepseek-secondary border border-deepseek-border hover:bg-deepseek-hover transition-colors"
                       >
                         清理过期令牌 ({expiredTokens.length})
                       </button>
@@ -308,12 +308,12 @@ const H5AccessPanel: React.FC<H5AccessPanelProps> = ({ conversationId, onOpenCha
                       .map((token) => (
                         <div
                           key={token.id}
-                          className="flex items-center justify-between p-3 rounded-lg border border-claude-border bg-claude-input"
+                          className="flex items-center justify-between p-3 rounded-lg border border-deepseek-border bg-deepseek-input"
                         >
                           <div className="flex-1 min-w-0">
                             <div className="flex items-center gap-2">
                               <span className="w-1.5 h-1.5 rounded-full bg-green-400" />
-                              <span className="text-[12px] text-claude-secondary truncate font-mono">
+                              <span className="text-[12px] text-deepseek-secondary truncate font-mono">
                                 {token.token.substring(0, 16)}...
                               </span>
                             </div>
@@ -322,7 +322,7 @@ const H5AccessPanel: React.FC<H5AccessPanelProps> = ({ conversationId, onOpenCha
                                 {formatTimeLeft(token.expires_at)}
                               </span>
                               {token.used_at && (
-                                <span className="text-[11px] text-claude-secondary">
+                                <span className="text-[11px] text-deepseek-secondary">
                                   {t('h5.lastUsed') || '最近使用'}: {new Date(token.used_at).toLocaleTimeString()}
                                 </span>
                               )}
@@ -351,7 +351,7 @@ const H5AccessPanel: React.FC<H5AccessPanelProps> = ({ conversationId, onOpenCha
               {tokens.length === 0 && !generatedToken && (
                 <div className="py-8 text-center">
                   <svg
-                    className="mx-auto mb-3 text-claude-secondary opacity-40"
+                    className="mx-auto mb-3 text-deepseek-secondary opacity-40"
                     width="48"
                     height="48"
                     viewBox="0 0 24 24"
@@ -364,10 +364,10 @@ const H5AccessPanel: React.FC<H5AccessPanelProps> = ({ conversationId, onOpenCha
                     <path d="M18 10l-4-4M8 14l-4 4M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
                     <path d="M12 7v3l2 2" />
                   </svg>
-                  <p className="text-[13px] text-claude-secondary">
+                  <p className="text-[13px] text-deepseek-secondary">
                     {t('h5.noTokens') || '还没有生成过访问令牌'}
                   </p>
-                  <p className="text-[12px] text-claude-secondary mt-1 opacity-60">
+                  <p className="text-[12px] text-deepseek-secondary mt-1 opacity-60">
                     {t('h5.noTokensHint') || '选择过期时间并点击"生成链接"开始'}
                   </p>
                 </div>

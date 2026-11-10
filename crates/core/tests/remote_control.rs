@@ -202,7 +202,7 @@ async fn bridge_relays_prompts_controls_and_events_then_tears_down() {
         .unwrap();
     assert_eq!(register["beta"], "environments-2025-11-01");
     assert_eq!(register["body"]["machine_name"], "test-host");
-    assert_eq!(register["body"]["metadata"]["worker_type"], "claude_code");
+    assert_eq!(register["body"]["metadata"]["worker_type"], "deepseek_code");
 }
 
 #[tokio::test]

@@ -142,20 +142,20 @@ export default function AgentPanel({ onClose }: { onClose: () => void }) {
 
   return (
     <div className="fixed inset-0 z-[200] flex items-center justify-center bg-black/40" onClick={onClose}>
-      <div className="bg-claude-bg border border-claude-border rounded-2xl shadow-2xl w-full max-w-2xl max-h-[80vh] flex flex-col overflow-hidden" onClick={e => e.stopPropagation()}>
-        <div className="flex items-center justify-between px-6 py-4 border-b border-claude-border">
-          <h2 className="text-lg font-semibold text-claude-text">Agent Worktree & IDE</h2>
-          <button onClick={onClose} className="p-1.5 hover:bg-claude-hover rounded-lg transition-colors text-claude-textSecondary hover:text-claude-text">
+      <div className="bg-deepseek-bg border border-deepseek-border rounded-2xl shadow-2xl w-full max-w-2xl max-h-[80vh] flex flex-col overflow-hidden" onClick={e => e.stopPropagation()}>
+        <div className="flex items-center justify-between px-6 py-4 border-b border-deepseek-border">
+          <h2 className="text-lg font-semibold text-deepseek-text">Agent Worktree & IDE</h2>
+          <button onClick={onClose} className="p-1.5 hover:bg-deepseek-hover rounded-lg transition-colors text-deepseek-textSecondary hover:text-deepseek-text">
             <X size={18} />
           </button>
         </div>
 
-        <div className="flex border-b border-claude-border">
+        <div className="flex border-b border-deepseek-border">
           {(['worktrees', 'agents', 'ide'] as const).map(t => (
             <button
               key={t}
               onClick={() => setTab(t)}
-              className={`flex-1 px-4 py-2.5 text-[14px] font-medium transition-colors ${tab === t ? 'text-claude-text border-b-2 border-[#C6613F]' : 'text-claude-textSecondary hover:text-claude-text'}`}
+              className={`flex-1 px-4 py-2.5 text-[14px] font-medium transition-colors ${tab === t ? 'text-deepseek-text border-b-2 border-[#C6613F]' : 'text-deepseek-textSecondary hover:text-deepseek-text'}`}
             >
               {t === 'worktrees' ? 'Worktrees' : t === 'agents' ? 'Agents' : 'IDE'}
             </button>
@@ -167,12 +167,12 @@ export default function AgentPanel({ onClose }: { onClose: () => void }) {
           {tab === 'worktrees' && (
             <div className="space-y-3">
               <div className="flex items-center justify-between mb-4">
-                <span className="text-[13px] text-claude-textSecondary">{worktrees.length} worktree(s)</span>
+                <span className="text-[13px] text-deepseek-textSecondary">{worktrees.length} worktree(s)</span>
                 <div className="flex gap-2">
-                  <button onClick={refresh} className="p-1.5 hover:bg-claude-hover rounded-lg text-claude-textSecondary hover:text-claude-text transition-colors" title="Sync">
+                  <button onClick={refresh} className="p-1.5 hover:bg-deepseek-hover rounded-lg text-deepseek-textSecondary hover:text-deepseek-text transition-colors" title="Sync">
                     <RefreshCw size={16} className={loading ? 'animate-spin' : ''} />
                   </button>
-                  <button onClick={() => syncWorktrees()} className="p-1.5 hover:bg-claude-hover rounded-lg text-claude-textSecondary hover:text-claude-text transition-colors" title="Sync from git">
+                  <button onClick={() => syncWorktrees()} className="p-1.5 hover:bg-deepseek-hover rounded-lg text-deepseek-textSecondary hover:text-deepseek-text transition-colors" title="Sync from git">
                     <GitBranch size={16} />
                   </button>
                   <button onClick={() => setShowCreate(true)} className="flex items-center gap-1.5 px-3 py-1.5 bg-[#C6613F] text-white text-[13px] font-medium rounded-lg hover:bg-[#D97757] transition-colors">
@@ -182,46 +182,46 @@ export default function AgentPanel({ onClose }: { onClose: () => void }) {
               </div>
 
               {showCreate && (
-                <div className="p-4 bg-claude-input border border-claude-border rounded-xl space-y-3">
+                <div className="p-4 bg-deepseek-input border border-deepseek-border rounded-xl space-y-3">
                   <input
                     value={newAgentName}
                     onChange={e => setNewAgentName(e.target.value)}
                     placeholder="Agent name"
-                    className="w-full px-3 py-2 bg-white dark:bg-[#2B2A29] border border-claude-border rounded-lg text-[14px] text-claude-text placeholder:text-claude-textSecondary focus:outline-none focus:border-[#C6613F]"
+                    className="w-full px-3 py-2 bg-white dark:bg-[#2B2A29] border border-deepseek-border rounded-lg text-[14px] text-deepseek-text placeholder:text-deepseek-textSecondary focus:outline-none focus:border-[#C6613F]"
                   />
                   <input
                     value={newAgentTask}
                     onChange={e => setNewAgentTask(e.target.value)}
                     placeholder="Task description"
-                    className="w-full px-3 py-2 bg-white dark:bg-[#2B2A29] border border-claude-border rounded-lg text-[14px] text-claude-text placeholder:text-claude-textSecondary focus:outline-none focus:border-[#C6613F]"
+                    className="w-full px-3 py-2 bg-white dark:bg-[#2B2A29] border border-deepseek-border rounded-lg text-[14px] text-deepseek-text placeholder:text-deepseek-textSecondary focus:outline-none focus:border-[#C6613F]"
                   />
                   <input
                     value={newAgentBranch}
                     onChange={e => setNewAgentBranch(e.target.value)}
                     placeholder="Branch prefix (optional, default: agent)"
-                    className="w-full px-3 py-2 bg-white dark:bg-[#2B2A29] border border-claude-border rounded-lg text-[14px] text-claude-text placeholder:text-claude-textSecondary focus:outline-none focus:border-[#C6613F]"
+                    className="w-full px-3 py-2 bg-white dark:bg-[#2B2A29] border border-deepseek-border rounded-lg text-[14px] text-deepseek-text placeholder:text-deepseek-textSecondary focus:outline-none focus:border-[#C6613F]"
                   />
                   <div className="flex justify-end gap-2">
-                    <button onClick={() => setShowCreate(false)} className="px-3 py-1.5 text-[13px] text-claude-textSecondary hover:text-claude-text transition-colors">Cancel</button>
+                    <button onClick={() => setShowCreate(false)} className="px-3 py-1.5 text-[13px] text-deepseek-textSecondary hover:text-deepseek-text transition-colors">Cancel</button>
                     <button onClick={handleCreateWorktree} disabled={!newAgentName.trim()} className="px-3 py-1.5 text-[13px] font-medium bg-[#C6613F] text-white rounded-lg hover:bg-[#D97757] transition-colors disabled:opacity-40">Create</button>
                   </div>
                 </div>
               )}
 
               {worktrees.length === 0 ? (
-                <div className="text-center py-8 text-claude-textSecondary text-[14px]">
+                <div className="text-center py-8 text-deepseek-textSecondary text-[14px]">
                   No worktrees. Create one to start a parallel agent.
                 </div>
               ) : worktrees.map(wt => (
-                <div key={wt.id} className="p-4 bg-claude-input border border-claude-border rounded-xl">
+                <div key={wt.id} className="p-4 bg-deepseek-input border border-deepseek-border rounded-xl">
                   <div className="flex items-center justify-between mb-2">
                     <div className="flex items-center gap-2">
                       <span className={`w-2 h-2 rounded-full ${statusColors[wt.status] || 'bg-gray-400'}`} />
-                      <span className="text-[14px] font-medium text-claude-text">{wt.branch}</span>
+                      <span className="text-[14px] font-medium text-deepseek-text">{wt.branch}</span>
                     </div>
-                    <span className="text-[12px] text-claude-textSecondary">{wt.id}</span>
+                    <span className="text-[12px] text-deepseek-textSecondary">{wt.id}</span>
                   </div>
-                  <div className="text-[12px] text-claude-textSecondary mb-3">{wt.path}</div>
+                  <div className="text-[12px] text-deepseek-textSecondary mb-3">{wt.path}</div>
                   <div className="flex gap-2">
                     {wt.status === 'Active' && (
                       <button onClick={() => handleMerge(wt.id)} className="flex items-center gap-1 px-2.5 py-1 text-[12px] font-medium text-blue-600 bg-blue-50 dark:bg-blue-900/20 rounded-lg hover:bg-blue-100 dark:hover:bg-blue-900/30 transition-colors">
@@ -240,29 +240,29 @@ export default function AgentPanel({ onClose }: { onClose: () => void }) {
           {tab === 'agents' && (
             <div className="space-y-3">
               <div className="flex items-center justify-between mb-4">
-                <span className="text-[13px] text-claude-textSecondary">{agents.length} agent(s)</span>
-                <button onClick={refresh} className="p-1.5 hover:bg-claude-hover rounded-lg text-claude-textSecondary hover:text-claude-text transition-colors">
+                <span className="text-[13px] text-deepseek-textSecondary">{agents.length} agent(s)</span>
+                <button onClick={refresh} className="p-1.5 hover:bg-deepseek-hover rounded-lg text-deepseek-textSecondary hover:text-deepseek-text transition-colors">
                   <RefreshCw size={16} className={loading ? 'animate-spin' : ''} />
                 </button>
               </div>
 
               {agents.length === 0 ? (
-                <div className="text-center py-8 text-claude-textSecondary text-[14px]">
+                <div className="text-center py-8 text-deepseek-textSecondary text-[14px]">
                   No agents. Create a worktree with an agent to get started.
                 </div>
               ) : agents.map(ag => (
-                <div key={ag.id} className="p-4 bg-claude-input border border-claude-border rounded-xl">
+                <div key={ag.id} className="p-4 bg-deepseek-input border border-deepseek-border rounded-xl">
                   <div className="flex items-center justify-between mb-2">
                     <div className="flex items-center gap-2">
                       <span className={`w-2 h-2 rounded-full ${statusColors[ag.status] || 'bg-gray-400'}`} />
-                      <span className="text-[14px] font-medium text-claude-text">{ag.name}</span>
-                      <span className="text-[12px] text-claude-textSecondary bg-claude-hover px-1.5 py-0.5 rounded">{ag.model}</span>
+                      <span className="text-[14px] font-medium text-deepseek-text">{ag.name}</span>
+                      <span className="text-[12px] text-deepseek-textSecondary bg-deepseek-hover px-1.5 py-0.5 rounded">{ag.model}</span>
                     </div>
-                    <span className="text-[12px] text-claude-textSecondary">{ag.id}</span>
+                    <span className="text-[12px] text-deepseek-textSecondary">{ag.id}</span>
                   </div>
-                  <div className="text-[13px] text-claude-textSecondary mb-2">{ag.task || 'No task description'}</div>
+                  <div className="text-[13px] text-deepseek-textSecondary mb-2">{ag.task || 'No task description'}</div>
                   {ag.result && (
-                    <div className="text-[12px] text-claude-text bg-white dark:bg-[#2B2A29] border border-claude-border rounded-lg p-2 mb-2 max-h-24 overflow-y-auto">
+                    <div className="text-[12px] text-deepseek-text bg-white dark:bg-[#2B2A29] border border-deepseek-border rounded-lg p-2 mb-2 max-h-24 overflow-y-auto">
                       {ag.result}
                     </div>
                   )}
@@ -283,11 +283,11 @@ export default function AgentPanel({ onClose }: { onClose: () => void }) {
 
           {tab === 'ide' && (
             <div className="space-y-4">
-              <div className="p-4 bg-claude-input border border-claude-border rounded-xl">
+              <div className="p-4 bg-deepseek-input border border-deepseek-border rounded-xl">
                 <div className="flex items-center justify-between mb-3">
                   <div className="flex items-center gap-2">
-                    <Monitor size={18} className="text-claude-textSecondary" />
-                    <span className="text-[14px] font-medium text-claude-text">IDE Bridge Server</span>
+                    <Monitor size={18} className="text-deepseek-textSecondary" />
+                    <span className="text-[14px] font-medium text-deepseek-text">IDE Bridge Server</span>
                   </div>
                   <button
                     onClick={handleIdeToggle}
@@ -303,16 +303,16 @@ export default function AgentPanel({ onClose }: { onClose: () => void }) {
                 {ideStatus && (
                   <div className="grid grid-cols-3 gap-3 text-center">
                     <div className="p-2 bg-white dark:bg-[#2B2A29] rounded-lg">
-                      <div className="text-[18px] font-semibold text-claude-text">{ideStatus.port || '-'}</div>
-                      <div className="text-[11px] text-claude-textSecondary">Port</div>
+                      <div className="text-[18px] font-semibold text-deepseek-text">{ideStatus.port || '-'}</div>
+                      <div className="text-[11px] text-deepseek-textSecondary">Port</div>
                     </div>
                     <div className="p-2 bg-white dark:bg-[#2B2A29] rounded-lg">
-                      <div className="text-[18px] font-semibold text-claude-text">{ideStatus.active_connections}</div>
-                      <div className="text-[11px] text-claude-textSecondary">Active</div>
+                      <div className="text-[18px] font-semibold text-deepseek-text">{ideStatus.active_connections}</div>
+                      <div className="text-[11px] text-deepseek-textSecondary">Active</div>
                     </div>
                     <div className="p-2 bg-white dark:bg-[#2B2A29] rounded-lg">
-                      <div className="text-[18px] font-semibold text-claude-text">{ideStatus.total_connections}</div>
-                      <div className="text-[11px] text-claude-textSecondary">Total</div>
+                      <div className="text-[18px] font-semibold text-deepseek-text">{ideStatus.total_connections}</div>
+                      <div className="text-[11px] text-deepseek-textSecondary">Total</div>
                     </div>
                   </div>
                 )}
@@ -320,32 +320,32 @@ export default function AgentPanel({ onClose }: { onClose: () => void }) {
 
               <div>
                 <div className="flex items-center justify-between mb-3">
-                  <span className="text-[13px] text-claude-textSecondary">Connections</span>
-                  <button onClick={refresh} className="p-1.5 hover:bg-claude-hover rounded-lg text-claude-textSecondary hover:text-claude-text transition-colors">
+                  <span className="text-[13px] text-deepseek-textSecondary">Connections</span>
+                  <button onClick={refresh} className="p-1.5 hover:bg-deepseek-hover rounded-lg text-deepseek-textSecondary hover:text-deepseek-text transition-colors">
                     <RefreshCw size={14} className={loading ? 'animate-spin' : ''} />
                   </button>
                 </div>
 
                 {ideConnections.length === 0 ? (
-                  <div className="text-center py-6 text-claude-textSecondary text-[14px]">
+                  <div className="text-center py-6 text-deepseek-textSecondary text-[14px]">
                     {ideStatus?.server_running
                       ? 'Waiting for IDE connections... Install the VS Code extension to connect.'
                       : 'Start the IDE Bridge server to accept connections.'}
                   </div>
                 ) : ideConnections.map(conn => (
-                  <div key={conn.id} className="p-3 bg-claude-input border border-claude-border rounded-xl mb-2">
+                  <div key={conn.id} className="p-3 bg-deepseek-input border border-deepseek-border rounded-xl mb-2">
                     <div className="flex items-center justify-between">
                       <div className="flex items-center gap-2">
                         <span className={`w-2 h-2 rounded-full ${statusColors[conn.status] || 'bg-gray-400'}`} />
-                        <Plug size={14} className="text-claude-textSecondary" />
-                        <span className="text-[14px] font-medium text-claude-text">{conn.ide_type}</span>
+                        <Plug size={14} className="text-deepseek-textSecondary" />
+                        <span className="text-[14px] font-medium text-deepseek-text">{conn.ide_type}</span>
                       </div>
-                      <button onClick={() => handleIdeDisconnect(conn.id)} className="p-1 hover:bg-claude-hover rounded text-claude-textSecondary hover:text-red-500 transition-colors">
+                      <button onClick={() => handleIdeDisconnect(conn.id)} className="p-1 hover:bg-deepseek-hover rounded text-deepseek-textSecondary hover:text-red-500 transition-colors">
                         <X size={14} />
                       </button>
                     </div>
                     {conn.workspace && (
-                      <div className="text-[12px] text-claude-textSecondary mt-1 ml-6">{conn.workspace}</div>
+                      <div className="text-[12px] text-deepseek-textSecondary mt-1 ml-6">{conn.workspace}</div>
                     )}
                   </div>
                 ))}

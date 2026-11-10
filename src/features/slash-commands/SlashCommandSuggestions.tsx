@@ -63,19 +63,19 @@ export default function SlashCommandSuggestions({ anchorRef, boundaryRef, comman
     <div
       ref={menuRef}
       aria-label="Slash commands"
-      className="fixed z-[120] max-h-[320px] overflow-y-auto overflow-x-hidden overscroll-contain bg-claude-bg border border-claude-border rounded-xl shadow-lg text-claude-text chat-font-scope"
+      className="fixed z-[120] max-h-[320px] overflow-y-auto overflow-x-hidden overscroll-contain bg-deepseek-bg border border-deepseek-border rounded-xl shadow-lg text-deepseek-text chat-font-scope"
       style={menuStyle}
     >
       {commands.map(command => (
         <button
           type="button"
           key={command.name}
-          className="w-full flex items-center gap-3 px-4 py-2.5 hover:bg-claude-hover transition-colors text-left"
+          className="w-full flex items-center gap-3 px-4 py-2.5 hover:bg-deepseek-hover transition-colors text-left"
           onMouseDown={event => event.preventDefault()}
           onClick={() => onSelect(command.name)}
         >
           <span className="shrink-0 text-[14px] font-mono font-semibold text-[#C6613F]">{command.name}</span>
-          <span className="min-w-0 text-[13px] text-claude-textSecondary">{command.description}</span>
+          <span className="min-w-0 text-[13px] text-deepseek-textSecondary">{command.description}</span>
         </button>
       ))}
     </div>,

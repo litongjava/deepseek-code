@@ -246,7 +246,7 @@ const ProjectsPage = () => {
 
   if (currentProject) {
     return (
-      <div className="flex-1 h-full bg-claude-bg overflow-y-auto">
+      <div className="flex-1 h-full bg-deepseek-bg overflow-y-auto">
         <div className="max-w-[800px] mx-auto px-8 py-12">
           {projectError && <p role="alert" className="my-3 text-sm text-red-500">{projectError}</p>}
           {projectToTrust && <TrustProjectDialog project={projectToTrust} onClose={() => setProjectToTrust(null)} onTrusted={project => { setProjectToTrust(null); loadProject(project.id); }} />}
@@ -259,24 +259,24 @@ const ProjectsPage = () => {
                     value={editName}
                     onChange={e => setEditName(e.target.value)}
                     onKeyDown={e => { if (e.key === 'Enter') handleRenameSave(); if (e.key === 'Escape') setEditingName(false); }}
-                    className="font-[Spectral] text-[32px] text-claude-text bg-transparent border-b-2 border-claude-accent outline-none w-full"
+                    className="font-[Spectral] text-[32px] text-deepseek-text bg-transparent border-b-2 border-deepseek-accent outline-none w-full"
                     style={{ fontWeight: 500 }}
                   />
                 </div>
               ) : (
                 <h1
-                  className="font-[Spectral] text-[32px] text-claude-text leading-tight mb-2"
+                  className="font-[Spectral] text-[32px] text-deepseek-text leading-tight mb-2"
                   style={{ fontWeight: 500 }}
                 >
                   {currentProject.name}
                 </h1>
               )}
               {currentProject.description && (
-                <p className="text-[15.5px] text-claude-textSecondary">{currentProject.description}</p>
+                <p className="text-[15.5px] text-deepseek-textSecondary">{currentProject.description}</p>
               )}
             </div>
-            <div className="flex items-center gap-1 text-claude-textSecondary mt-2 flex-shrink-0">
-              <button className="p-1 hover:text-claude-text hover:bg-black/5 dark:hover:bg-white/5 rounded-md transition-colors"><MoreVertical size={18} /></button>
+            <div className="flex items-center gap-1 text-deepseek-textSecondary mt-2 flex-shrink-0">
+              <button className="p-1 hover:text-deepseek-text hover:bg-black/5 dark:hover:bg-white/5 rounded-md transition-colors"><MoreVertical size={18} /></button>
             </div>
           </div>
 
@@ -286,18 +286,18 @@ const ProjectsPage = () => {
 
           <div className="space-y-4">
             <div
-              className="bg-claude-input border border-claude-border dark:border-[#3a3a38] shadow-[0_2px_8px_rgba(0,0,0,0.02)] hover:shadow-[0_2px_8px_rgba(0,0,0,0.08)] hover:border-[#CCC] dark:hover:border-[#5a5a58] focus-within:shadow-[0_2px_8px_rgba(0,0,0,0.08)] focus-within:border-[#CCC] dark:focus-within:border-[#5a5a58] transition-all duration-200 flex flex-col max-h-[60vh] font-sans rounded-2xl"
+              className="bg-deepseek-input border border-deepseek-border dark:border-[#3a3a38] shadow-[0_2px_8px_rgba(0,0,0,0.02)] hover:shadow-[0_2px_8px_rgba(0,0,0,0.08)] hover:border-[#CCC] dark:hover:border-[#5a5a58] focus-within:shadow-[0_2px_8px_rgba(0,0,0,0.08)] focus-within:border-[#CCC] dark:focus-within:border-[#5a5a58] transition-all duration-200 flex flex-col max-h-[60vh] font-sans rounded-2xl"
             >
               <div className="flex-1 overflow-y-auto min-h-0">
                 <div className="relative">
                   {message.match(/^\/[a-zA-Z0-9_-]+/) && (
                     <div className="pl-5 pr-4 pt-5 pb-1 text-[16px] font-sans font-[350]" style={{ minHeight: '48px', position: 'absolute', top: 0, left: 0, right: 0, pointerEvents: 'none', whiteSpace: 'pre-wrap', wordBreak: 'break-word' }} aria-hidden>
-                      {(() => { const m = message.match(/^(\/[a-zA-Z0-9_-]+)([\s\S]*)$/); return m ? <><span className="text-[#4B9EFA]">{m[1]}</span><span className="text-claude-text">{m[2]}</span></> : null; })()}
+                      {(() => { const m = message.match(/^(\/[a-zA-Z0-9_-]+)([\s\S]*)$/); return m ? <><span className="text-[#4B9EFA]">{m[1]}</span><span className="text-deepseek-text">{m[2]}</span></> : null; })()}
                     </div>
                   )}
                   <textarea
                     ref={textareaRef}
-                    className={`w-full pl-5 pr-4 pt-5 pb-1 placeholder:text-claude-textSecondary text-[16px] outline-none resize-none overflow-hidden bg-transparent font-sans font-[350] ${message.match(/^\/[a-zA-Z0-9_-]+/) ? 'text-transparent caret-claude-text' : 'text-claude-text'}`}
+                    className={`w-full pl-5 pr-4 pt-5 pb-1 placeholder:text-deepseek-textSecondary text-[16px] outline-none resize-none overflow-hidden bg-transparent font-sans font-[350] ${message.match(/^\/[a-zA-Z0-9_-]+/) ? 'text-transparent caret-deepseek-text' : 'text-deepseek-text'}`}
                     style={{ minHeight: '48px', borderRadius: '16px 16px 0 0' }}
                     placeholder={selectedSkill ? t('customize.describeSkillAction', { name: selectedSkill.name }) : t('customize.howCanIHelp')}
                     value={message}
@@ -331,23 +331,23 @@ const ProjectsPage = () => {
                   <button
                     ref={plusBtnRef}
                     onClick={() => setShowPlusMenu(prev => !prev)}
-                    className="p-2 text-claude-textSecondary hover:text-claude-text hover:bg-claude-hover rounded-lg transition-colors"
+                    className="p-2 text-deepseek-textSecondary hover:text-deepseek-text hover:bg-deepseek-hover rounded-lg transition-colors"
                   >
                     <IconPlus size={20} />
                   </button>
                   {showPlusMenu && (
-                    <div ref={plusMenuRef} className="absolute bottom-full left-0 mb-2 w-[220px] bg-claude-input border border-claude-border rounded-xl shadow-[0_4px_16px_rgba(0,0,0,0.12)] py-1.5 z-50">
-                      <button onClick={() => { setShowPlusMenu(false); fileInputRef.current?.click(); }} className="w-full flex items-center gap-3 px-4 py-2.5 text-[13px] text-claude-text hover:bg-claude-hover transition-colors">
-                        <Paperclip size={16} className="text-claude-textSecondary" />
+                    <div ref={plusMenuRef} className="absolute bottom-full left-0 mb-2 w-[220px] bg-deepseek-input border border-deepseek-border rounded-xl shadow-[0_4px_16px_rgba(0,0,0,0.12)] py-1.5 z-50">
+                      <button onClick={() => { setShowPlusMenu(false); fileInputRef.current?.click(); }} className="w-full flex items-center gap-3 px-4 py-2.5 text-[13px] text-deepseek-text hover:bg-deepseek-hover transition-colors">
+                        <Paperclip size={16} className="text-deepseek-textSecondary" />
                         {t('customize.addFiles')}
                       </button>
                       <div className="relative">
-                        <button onMouseEnter={() => setShowSkillsSubmenu(true)} onClick={() => setShowSkillsSubmenu(p => !p)} className="w-full flex items-center justify-between px-4 py-2.5 text-[13px] text-claude-text hover:bg-claude-hover transition-colors">
-                          <div className="flex items-center gap-3"><FileText size={16} className="text-claude-textSecondary" />{t('customize.skills')}</div>
-                          <ChevronDown size={14} className="text-claude-textSecondary -rotate-90" />
+                        <button onMouseEnter={() => setShowSkillsSubmenu(true)} onClick={() => setShowSkillsSubmenu(p => !p)} className="w-full flex items-center justify-between px-4 py-2.5 text-[13px] text-deepseek-text hover:bg-deepseek-hover transition-colors">
+                          <div className="flex items-center gap-3"><FileText size={16} className="text-deepseek-textSecondary" />{t('customize.skills')}</div>
+                          <ChevronDown size={14} className="text-deepseek-textSecondary -rotate-90" />
                         </button>
                         {showSkillsSubmenu && (
-                          <div className="absolute left-full bottom-0 ml-1 w-[200px] bg-claude-input border border-claude-border rounded-xl shadow-[0_4px_16px_rgba(0,0,0,0.12)] py-1.5 z-50 max-h-[300px] overflow-y-auto" onMouseLeave={() => setShowSkillsSubmenu(false)}>
+                          <div className="absolute left-full bottom-0 ml-1 w-[200px] bg-deepseek-input border border-deepseek-border rounded-xl shadow-[0_4px_16px_rgba(0,0,0,0.12)] py-1.5 z-50 max-h-[300px] overflow-y-auto" onMouseLeave={() => setShowSkillsSubmenu(false)}>
                             {enabledSkills.length > 0 ? enabledSkills.map(skill => (
                               <button key={skill.id} onClick={() => {
                                 setShowPlusMenu(false); setShowSkillsSubmenu(false);
@@ -355,10 +355,10 @@ const ProjectsPage = () => {
                                 setSelectedSkill({ name: skill.name, slug, description: skill.description });
                                 setMessage(prev => prev ? `/${slug} ${prev}` : `/${slug} `);
                                 textareaRef.current?.focus();
-                              }} className="w-full text-left px-4 py-2 text-[13px] text-claude-text hover:bg-claude-hover transition-colors truncate">{skill.name}</button>
-                            )) : <div className="px-4 py-2 text-[12px] text-claude-textSecondary italic">{t('customize.noSkillsEnabled')}</div>}
-                            <div className="border-t border-claude-border mt-1 pt-1">
-                              <button onClick={() => { setShowPlusMenu(false); window.location.hash = '#/customize'; }} className="w-full flex items-center gap-3 px-4 py-2 text-[13px] text-claude-textSecondary hover:bg-claude-hover transition-colors"><FileText size={14} />{t('customize.manageSkills')}</button>
+                              }} className="w-full text-left px-4 py-2 text-[13px] text-deepseek-text hover:bg-deepseek-hover transition-colors truncate">{skill.name}</button>
+                            )) : <div className="px-4 py-2 text-[12px] text-deepseek-textSecondary italic">{t('customize.noSkillsEnabled')}</div>}
+                            <div className="border-t border-deepseek-border mt-1 pt-1">
+                              <button onClick={() => { setShowPlusMenu(false); window.location.hash = '#/customize'; }} className="w-full flex items-center gap-3 px-4 py-2 text-[13px] text-deepseek-textSecondary hover:bg-deepseek-hover transition-colors"><FileText size={14} />{t('customize.manageSkills')}</button>
                             </div>
                           </div>
                         )}
@@ -388,24 +388,24 @@ const ProjectsPage = () => {
             </div>
 
             {currentProject.conversations && currentProject.conversations.length > 0 ? (
-              <div className="border border-claude-border rounded-[16px] overflow-hidden bg-transparent mt-2">
-                <div className="px-5 py-3 text-[13px] font-medium text-claude-textSecondary border-b border-claude-border">
+              <div className="border border-deepseek-border rounded-[16px] overflow-hidden bg-transparent mt-2">
+                <div className="px-5 py-3 text-[13px] font-medium text-deepseek-textSecondary border-b border-deepseek-border">
                   {currentProject.conversations.length} {currentProject.conversations.length > 1 ? t('sidebar.chats') : t('sidebar.chats')}
                 </div>
                 {currentProject.conversations.map((conv: any) => (
                   <div
                     key={conv.id}
                     onClick={() => navigate(`/chat/${conv.id}`)}
-                    className="px-5 py-3 flex items-center gap-3 hover:bg-claude-hover cursor-pointer border-b border-claude-border last:border-b-0 transition-colors group"
+                    className="px-5 py-3 flex items-center gap-3 hover:bg-deepseek-hover cursor-pointer border-b border-deepseek-border last:border-b-0 transition-colors group"
                   >
-                    <MessageSquare size={16} className="text-claude-textSecondary flex-shrink-0" />
-                    <span className="text-[14px] text-claude-text truncate">{conv.title}</span>
-                    <span className="text-[12px] text-claude-textSecondary ml-auto flex-shrink-0">
+                    <MessageSquare size={16} className="text-deepseek-textSecondary flex-shrink-0" />
+                    <span className="text-[14px] text-deepseek-text truncate">{conv.title}</span>
+                    <span className="text-[12px] text-deepseek-textSecondary ml-auto flex-shrink-0">
                       {new Date(conv.created_at).toLocaleDateString()}
                     </span>
                     <button
                       onClick={(e) => handleDeleteConversation(conv.id, e)}
-                      className="p-1 text-claude-textSecondary hover:text-red-500 opacity-0 group-hover:opacity-100 transition-opacity flex-shrink-0"
+                      className="p-1 text-deepseek-textSecondary hover:text-red-500 opacity-0 group-hover:opacity-100 transition-opacity flex-shrink-0"
                       title={t('common.delete')}
                     >
                       <Trash size={14} />
@@ -414,21 +414,21 @@ const ProjectsPage = () => {
                 ))}
               </div>
             ) : (
-              <div className="w-full border border-claude-border rounded-[16px] px-6 py-10 flex items-center justify-center bg-transparent mt-2">
+              <div className="w-full border border-deepseek-border rounded-[16px] px-6 py-10 flex items-center justify-center bg-transparent mt-2">
                 <span className="text-[14.5px] text-[#A1A1AA]">
                   {t('customize.startChatDesc')}
                 </span>
               </div>
             )}
 
-            <div className="w-full border border-claude-border rounded-[16px] overflow-hidden bg-transparent mt-2">
+            <div className="w-full border border-deepseek-border rounded-[16px] overflow-hidden bg-transparent mt-2">
               <div
-                className="p-5 border-b border-claude-border hover:bg-black/[0.015] dark:hover:bg-white/[0.015] transition-colors cursor-pointer group"
+                className="p-5 border-b border-deepseek-border hover:bg-black/[0.015] dark:hover:bg-white/[0.015] transition-colors cursor-pointer group"
                 onClick={() => { if (!editingInstructions) setEditingInstructions(true); }}
               >
                 <div className="flex items-center justify-between">
                   <div className="flex-1">
-                    <h3 className="font-semibold text-claude-text mb-0.5" style={{ fontSize: '15.5px' }}>{t('customize.instructions')}</h3>
+                    <h3 className="font-semibold text-deepseek-text mb-0.5" style={{ fontSize: '15.5px' }}>{t('customize.instructions')}</h3>
                     {!editingInstructions && (
                       <p className="text-[13px] text-[#A1A1AA]">
                         {currentProject.instructions
@@ -438,7 +438,7 @@ const ProjectsPage = () => {
                     )}
                   </div>
                   {!editingInstructions && (
-                    <button className="text-[#A1A1AA] hover:text-claude-text transition-colors">
+                    <button className="text-[#A1A1AA] hover:text-deepseek-text transition-colors">
                       {currentProject.instructions ? <Pencil size={18} strokeWidth={1.5} /> : <Plus size={22} strokeWidth={1.5} />}
                     </button>
                   )}
@@ -449,10 +449,10 @@ const ProjectsPage = () => {
                     onClick={() => { setEditingInstructions(false); setInstructionsText(currentProject.instructions || ''); }}
                   >
                     <div
-                      className="w-full max-w-[800px] bg-white dark:bg-[#2A2928] border border-claude-border rounded-[20px] shadow-2xl p-7"
+                      className="w-full max-w-[800px] bg-white dark:bg-[#2A2928] border border-deepseek-border rounded-[20px] shadow-2xl p-7"
                       onClick={e => e.stopPropagation()}
                     >
-                      <h2 className="text-[20px] font-bold text-claude-text mb-2">{t('customize.setInstructionsTitle')}</h2>
+                      <h2 className="text-[20px] font-bold text-deepseek-text mb-2">{t('customize.setInstructionsTitle')}</h2>
                       <p className="text-[14px] text-[#A1A1AA] mb-5" dangerouslySetInnerHTML={{ __html: t('customize.setInstructionsDesc', { name: currentProject.name }) }} />
 
                       <textarea
@@ -460,13 +460,13 @@ const ProjectsPage = () => {
                         value={instructionsText}
                         onChange={e => setInstructionsText(e.target.value)}
                         placeholder={t('customize.instructionsPlaceholder')}
-                        className="w-full h-[400px] px-4 py-3 bg-claude-bg dark:bg-[#202020] border border-claude-border rounded-[12px] text-[15px] text-claude-text resize-none outline-none focus:border-[#3A7ADA] focus:ring-1 focus:ring-[#3A7ADA] transition-colors"
+                        className="w-full h-[400px] px-4 py-3 bg-deepseek-bg dark:bg-[#202020] border border-deepseek-border rounded-[12px] text-[15px] text-deepseek-text resize-none outline-none focus:border-[#3A7ADA] focus:ring-1 focus:ring-[#3A7ADA] transition-colors"
                       />
 
                       <div className="flex justify-end gap-3 mt-5">
                         <button
                           onClick={() => { setEditingInstructions(false); setInstructionsText(currentProject.instructions || ''); }}
-                          className="px-4 py-2 text-[14px] font-medium text-claude-text hover:bg-white/5 border border-transparent hover:border-claude-border rounded-xl transition-all"
+                          className="px-4 py-2 text-[14px] font-medium text-deepseek-text hover:bg-white/5 border border-transparent hover:border-deepseek-border rounded-xl transition-all"
                         >
                           {t('customize.cancelBtn')}
                         </button>
@@ -484,12 +484,12 @@ const ProjectsPage = () => {
 
               <div className="p-5 pb-6">
                 <div className="flex items-center justify-between mb-4">
-                  <h3 className="font-semibold text-claude-text" style={{ fontSize: '15.5px' }}>
-                    {t('customize.files')} {currentProject.files?.length > 0 && <span className="text-claude-textSecondary text-[13px] ml-1">({currentProject.files.length})</span>}
+                  <h3 className="font-semibold text-deepseek-text" style={{ fontSize: '15.5px' }}>
+                    {t('customize.files')} {currentProject.files?.length > 0 && <span className="text-deepseek-textSecondary text-[13px] ml-1">({currentProject.files.length})</span>}
                   </h3>
                   <button
                     onClick={() => fileInputRef.current?.click()}
-                    className="text-[#A1A1AA] hover:text-claude-text transition-colors"
+                    className="text-[#A1A1AA] hover:text-deepseek-text transition-colors"
                   >
                     <Plus size={22} strokeWidth={1.5} />
                   </button>
@@ -503,16 +503,16 @@ const ProjectsPage = () => {
                 </div>
 
                 {uploading && (
-                  <div className="text-[13px] text-claude-textSecondary animate-pulse mb-3">{t('customize.uploading')}</div>
+                  <div className="text-[13px] text-deepseek-textSecondary animate-pulse mb-3">{t('customize.uploading')}</div>
                 )}
 
                 {currentProject.files && currentProject.files.length > 0 ? (
                   <div className="space-y-2">
                     {currentProject.files.map((f: ProjectFile) => (
-                      <div key={f.id} className="flex items-center gap-3 px-3 py-2.5 rounded-[12px] bg-black/[0.02] dark:bg-white/[0.03] group border border-transparent hover:border-claude-border transition-all">
+                      <div key={f.id} className="flex items-center gap-3 px-3 py-2.5 rounded-[12px] bg-black/[0.02] dark:bg-white/[0.03] group border border-transparent hover:border-deepseek-border transition-all">
                         <FileText size={16} className="text-[#A1A1AA] flex-shrink-0" />
                         <div className="flex-1 min-w-0">
-                          <div className="text-[13.5px] text-claude-text truncate font-medium">{f.file_name}</div>
+                          <div className="text-[13.5px] text-deepseek-text truncate font-medium">{f.file_name}</div>
                           <div className="text-[11.5px] text-[#A1A1AA]">
                             {f.file_size > 1024 * 1024 ? `${(f.file_size / 1024 / 1024).toFixed(1)} MB` : `${(f.file_size / 1024).toFixed(1)} KB`}
                           </div>
@@ -573,13 +573,13 @@ const ProjectsPage = () => {
   }
 
   return (
-    <div className="flex-1 h-full bg-claude-bg overflow-y-auto">
+    <div className="flex-1 h-full bg-deepseek-bg overflow-y-auto">
       <div className="max-w-[800px] mx-auto px-8 py-12">
         <div className="flex items-center justify-between mb-8">
-          <h1 className="font-[Spectral] text-[32px] text-claude-text" style={{ fontWeight: 500 }}>{t('projects.title')}</h1>
+          <h1 className="font-[Spectral] text-[32px] text-deepseek-text" style={{ fontWeight: 500 }}>{t('projects.title')}</h1>
           <button
             onClick={() => setIsCreating(true)}
-            className="flex items-center gap-2 px-3.5 py-1.5 bg-claude-text text-claude-bg hover:opacity-90 rounded-lg transition-opacity font-medium"
+            className="flex items-center gap-2 px-3.5 py-1.5 bg-deepseek-text text-deepseek-bg hover:opacity-90 rounded-lg transition-opacity font-medium"
             style={{ fontSize: '14px' }}
           >
             <Plus size={16} strokeWidth={2.5} />
@@ -591,14 +591,14 @@ const ProjectsPage = () => {
           <>
             <div className="relative mb-6">
               <div className="absolute inset-y-0 left-3 flex items-center pointer-events-none">
-                <Search className="h-5 w-5 text-claude-textSecondary opacity-80" />
+                <Search className="h-5 w-5 text-deepseek-textSecondary opacity-80" />
               </div>
               <input
                 type="text"
                 placeholder={t('customize.searchProjects')}
                 value={searchQuery}
                 onChange={e => setSearchQuery(e.target.value)}
-                className="w-full pl-10 pr-4 py-3 bg-white dark:bg-claude-input border border-gray-200 dark:border-claude-border rounded-xl text-claude-text placeholder-claude-textSecondary focus:outline-none focus:ring-2 focus:ring-blue-500/20 focus:border-blue-500 transition-all text-[15px]"
+                className="w-full pl-10 pr-4 py-3 bg-white dark:bg-deepseek-input border border-gray-200 dark:border-deepseek-border rounded-xl text-deepseek-text placeholder-deepseek-textSecondary focus:outline-none focus:ring-2 focus:ring-blue-500/20 focus:border-blue-500 transition-all text-[15px]"
               />
             </div>
 
@@ -607,15 +607,15 @@ const ProjectsPage = () => {
                 <span>{t('customize.sortBy')}</span>
                 <button
                   onClick={() => setSortMenuOpen(!sortMenuOpen)}
-                  className={`flex items-center gap-2 text-claude-text border border-[#3A3A3A] hover:border-[#4A4A4A] dark:border-claude-border dark:hover:bg-claude-hover rounded-[10px] px-3.5 py-1.5 transition-colors ${sortMenuOpen ? 'bg-claude-hover' : ''}`}
+                  className={`flex items-center gap-2 text-deepseek-text border border-[#3A3A3A] hover:border-[#4A4A4A] dark:border-deepseek-border dark:hover:bg-deepseek-hover rounded-[10px] px-3.5 py-1.5 transition-colors ${sortMenuOpen ? 'bg-deepseek-hover' : ''}`}
                 >
                   {sortBy === 'activity' ? t('customize.recentActivity') : sortBy === 'edited' ? t('customize.lastEdited') : t('customize.dateCreated')}
-                  <ChevronDown size={14} className="text-claude-textSecondary" />
+                  <ChevronDown size={14} className="text-deepseek-textSecondary" />
                 </button>
                 {sortMenuOpen && (
                   <>
                     <div className="fixed inset-0 z-40" onClick={() => setSortMenuOpen(false)} />
-                    <div className="absolute top-full right-0 mt-1.5 w-[200px] bg-white dark:bg-[#2A2928] border border-gray-200 dark:border-claude-border rounded-[14px] shadow-lg py-1.5 z-50">
+                    <div className="absolute top-full right-0 mt-1.5 w-[200px] bg-white dark:bg-[#2A2928] border border-gray-200 dark:border-deepseek-border rounded-[14px] shadow-lg py-1.5 z-50">
                       {[
                         { id: 'activity', label: t('customize.recentActivity') },
                         { id: 'edited', label: t('customize.lastEdited') },
@@ -627,10 +627,10 @@ const ProjectsPage = () => {
                             setSortBy(opt.id as any);
                             setSortMenuOpen(false);
                           }}
-                          className="w-full flex items-center justify-between px-4 py-2.5 text-[15px] text-claude-text hover:bg-black/5 dark:hover:bg-white/5 transition-colors"
+                          className="w-full flex items-center justify-between px-4 py-2.5 text-[15px] text-deepseek-text hover:bg-black/5 dark:hover:bg-white/5 transition-colors"
                         >
                           {opt.label}
-                          {sortBy === opt.id && <Check size={16} className="text-claude-text opacity-80" />}
+                          {sortBy === opt.id && <Check size={16} className="text-deepseek-text opacity-80" />}
                         </button>
                       ))}
                     </div>
@@ -642,23 +642,23 @@ const ProjectsPage = () => {
         )}
 
         {loading ? (
-          <div className="text-center text-claude-textSecondary text-[14px] mt-12">{t('customize.loadingProjects')}</div>
+          <div className="text-center text-deepseek-textSecondary text-[14px] mt-12">{t('customize.loadingProjects')}</div>
         ) : filteredProjects.length > 0 ? (
           <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
             {filteredProjects.map(p => (
               <div
                 key={p.id}
                 onClick={() => setSearchParams({ project: p.id })}
-                className="flex flex-col p-5 border border-claude-border rounded-[12px] bg-transparent hover:bg-black/[0.02] dark:hover:bg-white/[0.02] cursor-pointer transition-colors group min-h-[170px]"
+                className="flex flex-col p-5 border border-deepseek-border rounded-[12px] bg-transparent hover:bg-black/[0.02] dark:hover:bg-white/[0.02] cursor-pointer transition-colors group min-h-[170px]"
               >
                 <div className="flex items-center justify-between mb-2.5 relative">
                   <div className="flex items-center gap-3">
-                    <h3 className="text-[15.5px] font-medium text-claude-text truncate">{p.name}</h3>
+                    <h3 className="text-[15.5px] font-medium text-deepseek-text truncate">{p.name}</h3>
                   </div>
                   <div className="relative" onClick={(e) => e.stopPropagation()}>
                     <button
                       onClick={(e) => { e.stopPropagation(); setActiveMenu(activeMenu === p.id ? null : p.id); }}
-                      className={`p-1 text-[#A1A1AA] hover:text-claude-text hover:bg-black/5 dark:hover:bg-white/5 rounded-[6px] transition-all ${activeMenu === p.id ? 'opacity-100 bg-black/5 dark:bg-white/5' : 'opacity-0 group-hover:opacity-100'}`}
+                      className={`p-1 text-[#A1A1AA] hover:text-deepseek-text hover:bg-black/5 dark:hover:bg-white/5 rounded-[6px] transition-all ${activeMenu === p.id ? 'opacity-100 bg-black/5 dark:bg-white/5' : 'opacity-0 group-hover:opacity-100'}`}
                     >
                       <MoreVertical size={18} />
                     </button>
@@ -667,17 +667,17 @@ const ProjectsPage = () => {
                       <>
                         <div className="fixed inset-0 z-40" onClick={(e) => { e.stopPropagation(); setActiveMenu(null); }} />
                         <div className="absolute top-full right-0 mt-1 w-[180px] bg-white dark:bg-[#30302E] rounded-[16px] shadow-[0_4px_24px_rgba(0,0,0,0.15)] border border-gray-200 dark:border-[#65645F] py-1.5 z-50">
-                          <button className="w-full flex items-center gap-3 px-4 py-2.5 text-[14px] text-claude-text hover:bg-black/5 dark:hover:bg-white/5 transition-colors text-left" onClick={(e) => { e.stopPropagation(); setActiveMenu(null); }}>
-                            <Star size={16} className="text-claude-textSecondary" />
+                          <button className="w-full flex items-center gap-3 px-4 py-2.5 text-[14px] text-deepseek-text hover:bg-black/5 dark:hover:bg-white/5 transition-colors text-left" onClick={(e) => { e.stopPropagation(); setActiveMenu(null); }}>
+                            <Star size={16} className="text-deepseek-textSecondary" />
                             {t('customize.star')}
                           </button>
-                          <button className="w-full flex items-center gap-3 px-4 py-2.5 text-[14px] text-claude-text hover:bg-black/5 dark:hover:bg-white/5 transition-colors text-left" onClick={(e) => { e.stopPropagation(); setActiveMenu(null); setProjectToEdit(p); setEditDetailsName(p.name); setEditDetailsDesc(p.description || ''); }}>
-                            <Pencil size={16} className="text-claude-textSecondary" />
+                          <button className="w-full flex items-center gap-3 px-4 py-2.5 text-[14px] text-deepseek-text hover:bg-black/5 dark:hover:bg-white/5 transition-colors text-left" onClick={(e) => { e.stopPropagation(); setActiveMenu(null); setProjectToEdit(p); setEditDetailsName(p.name); setEditDetailsDesc(p.description || ''); }}>
+                            <Pencil size={16} className="text-deepseek-textSecondary" />
                             {t('customize.editDetails')}
                           </button>
-                          <div className="my-1.5 border-t border-claude-border opacity-50" />
-                          <button className="w-full flex items-center gap-3 px-4 py-2.5 text-[14px] text-claude-text hover:bg-black/5 dark:hover:bg-white/5 transition-colors text-left" onClick={(e) => { e.stopPropagation(); setActiveMenu(null); }}>
-                            <Archive size={16} className="text-claude-textSecondary" />
+                          <div className="my-1.5 border-t border-deepseek-border opacity-50" />
+                          <button className="w-full flex items-center gap-3 px-4 py-2.5 text-[14px] text-deepseek-text hover:bg-black/5 dark:hover:bg-white/5 transition-colors text-left" onClick={(e) => { e.stopPropagation(); setActiveMenu(null); }}>
+                            <Archive size={16} className="text-deepseek-textSecondary" />
                             {t('customize.archive')}
                           </button>
                           <button className="w-full flex items-center gap-3 px-4 py-2.5 text-[14px] text-[#E05A5A] hover:bg-red-500/10 transition-colors text-left" onClick={(e) => { e.stopPropagation(); setActiveMenu(null); setProjectToDelete(p); }}>
@@ -690,11 +690,11 @@ const ProjectsPage = () => {
                   </div>
                 </div>
 
-                <p className="text-[14px] text-claude-textSecondary line-clamp-3 leading-relaxed flex-1">
+                <p className="text-[14px] text-deepseek-textSecondary line-clamp-3 leading-relaxed flex-1">
                   {p.description || t('customize.noDescriptionProvided')}
                 </p>
 
-                <div className="mt-4 pt-1 flex items-center gap-4 text-[12px] text-claude-textSecondary/80">
+                <div className="mt-4 pt-1 flex items-center gap-4 text-[12px] text-deepseek-textSecondary/80">
                   <span>{t('customize.updated')} {new Date(p.updated_at).toLocaleDateString()}</span>
                   {(p.file_count ?? 0) > 0 && <span>• {p.file_count} {t('customize.files')}</span>}
                   {(p.chat_count ?? 0) > 0 && <span>• {p.chat_count} {t('sidebar.chats')}</span>}
@@ -705,13 +705,13 @@ const ProjectsPage = () => {
         ) : (
           <div className="flex flex-col items-center justify-center mt-12">
             <img src={startProjectsImg} alt="Start a project" className="w-[100px] h-auto mb-6 dark:invert opacity-90" />
-            <h2 className="text-[17px] font-medium text-claude-text mb-3">{t('customize.lookingForProject')}</h2>
-            <p className="text-[15px] text-claude-textSecondary text-center max-w-[400px] leading-relaxed mb-6">
+            <h2 className="text-[17px] font-medium text-deepseek-text mb-3">{t('customize.lookingForProject')}</h2>
+            <p className="text-[15px] text-deepseek-textSecondary text-center max-w-[400px] leading-relaxed mb-6">
               {t('customize.lookingForProjectDesc')}
             </p>
             <button
               onClick={() => setIsCreating(true)}
-              className="flex items-center gap-2 px-4 py-2 bg-transparent border border-claude-border hover:bg-claude-hover rounded-xl text-claude-text transition-colors text-[14.5px] font-medium"
+              className="flex items-center gap-2 px-4 py-2 bg-transparent border border-deepseek-border hover:bg-deepseek-hover rounded-xl text-deepseek-text transition-colors text-[14.5px] font-medium"
             >
               <Plus size={18} strokeWidth={2.5} />
               {t('customize.newProject')}
@@ -722,17 +722,17 @@ const ProjectsPage = () => {
 
       {projectToDelete && (
         <div className="fixed inset-0 z-[100] flex items-center justify-center bg-black/50 backdrop-blur-sm p-4">
-          <div className="bg-claude-input w-[460px] rounded-[16px] flex flex-col shadow-2xl relative border border-claude-border overflow-hidden">
+          <div className="bg-deepseek-input w-[460px] rounded-[16px] flex flex-col shadow-2xl relative border border-deepseek-border overflow-hidden">
             <div className="px-6 pt-6 pb-4 text-left">
-              <h3 className="text-[19px] font-semibold text-claude-text mb-3">{t('customize.deleteProjectTitle')}</h3>
-              <p className="text-[15px] text-claude-textSecondary leading-relaxed pr-4">
+              <h3 className="text-[19px] font-semibold text-deepseek-text mb-3">{t('customize.deleteProjectTitle')}</h3>
+              <p className="text-[15px] text-deepseek-textSecondary leading-relaxed pr-4">
                 {t('customize.confirmDeleteProjectMsg', { name: projectToDelete.name })}
               </p>
             </div>
             <div className="px-5 pb-5 pt-2 flex justify-end gap-3 mt-4">
               <button
                 onClick={() => setProjectToDelete(null)}
-                className="px-5 py-2 text-[14.5px] font-medium text-claude-text border border-claude-border hover:bg-claude-hover rounded-[8px] transition-colors"
+                className="px-5 py-2 text-[14.5px] font-medium text-deepseek-text border border-deepseek-border hover:bg-deepseek-hover rounded-[8px] transition-colors"
               >
                 {t('common.cancel')}
               </button>
@@ -749,28 +749,28 @@ const ProjectsPage = () => {
 
       {projectToEdit && (
         <div className="fixed inset-0 z-[100] flex items-center justify-center bg-black/50 backdrop-blur-sm p-4">
-          <div className="bg-claude-input w-[460px] rounded-[16px] flex flex-col shadow-2xl relative border border-claude-border overflow-hidden">
+          <div className="bg-deepseek-input w-[460px] rounded-[16px] flex flex-col shadow-2xl relative border border-deepseek-border overflow-hidden">
             <div className="px-6 pt-6 pb-4 text-left">
-              <h3 className="text-[19px] font-semibold text-claude-text mb-5">{t('customize.editDetails')}</h3>
+              <h3 className="text-[19px] font-semibold text-deepseek-text mb-5">{t('customize.editDetails')}</h3>
 
               <div className="space-y-4">
                 <div>
-                  <label className="block text-[14px] text-claude-textSecondary mb-2 font-medium">{t('customize.name')}</label>
+                  <label className="block text-[14px] text-deepseek-textSecondary mb-2 font-medium">{t('customize.name')}</label>
                   <input
                     type="text"
                     value={editDetailsName}
                     onChange={(e) => setEditDetailsName(e.target.value)}
-                    className="w-full px-3 py-2 bg-transparent border border-claude-border rounded-[8px] text-claude-text outline-none focus:border-[#3A7ADA] focus:ring-1 focus:ring-[#3A7ADA] transition-all text-[15px]"
+                    className="w-full px-3 py-2 bg-transparent border border-deepseek-border rounded-[8px] text-deepseek-text outline-none focus:border-[#3A7ADA] focus:ring-1 focus:ring-[#3A7ADA] transition-all text-[15px]"
                     autoFocus
                   />
                 </div>
                 <div>
-                  <label className="block text-[14px] text-claude-textSecondary mb-2 font-medium">{t('customize.description')}</label>
+                  <label className="block text-[14px] text-deepseek-textSecondary mb-2 font-medium">{t('customize.description')}</label>
                   <textarea
                     value={editDetailsDesc}
                     onChange={(e) => setEditDetailsDesc(e.target.value)}
                     rows={4}
-                    className="w-full px-3 py-2 bg-claude-bg border border-claude-border rounded-[8px] text-claude-text outline-none focus:border-[#3A7ADA] focus:ring-1 focus:ring-[#3A7ADA] transition-all resize-none text-[14.5px] leading-relaxed"
+                    className="w-full px-3 py-2 bg-deepseek-bg border border-deepseek-border rounded-[8px] text-deepseek-text outline-none focus:border-[#3A7ADA] focus:ring-1 focus:ring-[#3A7ADA] transition-all resize-none text-[14.5px] leading-relaxed"
                   />
                 </div>
               </div>
@@ -779,13 +779,13 @@ const ProjectsPage = () => {
             <div className="px-6 pb-6 pt-2 flex justify-end gap-3 mt-4">
               <button
                 onClick={() => setProjectToEdit(null)}
-                className="px-5 py-2.5 text-[14.5px] font-medium text-claude-text border border-claude-border hover:bg-claude-hover rounded-[8px] transition-colors"
+                className="px-5 py-2.5 text-[14.5px] font-medium text-deepseek-text border border-deepseek-border hover:bg-deepseek-hover rounded-[8px] transition-colors"
               >
                 {t('common.cancel')}
               </button>
               <button
                 onClick={handleSaveEditDetails}
-                className="px-5 py-2.5 text-[14.5px] font-medium bg-claude-text text-claude-bg hover:opacity-90 rounded-[8px] transition-opacity"
+                className="px-5 py-2.5 text-[14.5px] font-medium bg-deepseek-text text-deepseek-bg hover:opacity-90 rounded-[8px] transition-opacity"
               >
                 {t('common.save')}
               </button>

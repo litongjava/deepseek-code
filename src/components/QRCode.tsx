@@ -58,7 +58,7 @@ const QRCode: React.FC<QRCodeProps> = ({ text, size = 200 }) => {
     <div className="flex flex-col items-center gap-3">
       <canvas
         ref={canvasRef}
-        className="border border-claude-border rounded-lg"
+        className="border border-deepseek-border rounded-lg"
         style={{ width: size, height: size }}
       />
       <div className="flex items-center gap-2 w-full max-w-full">
@@ -66,7 +66,7 @@ const QRCode: React.FC<QRCodeProps> = ({ text, size = 200 }) => {
           type="text"
           value={text}
           readOnly
-          className="flex-1 px-3 py-2 bg-claude-input border border-claude-border rounded-lg text-claude-text text-[13px] truncate focus:outline-none"
+          className="flex-1 px-3 py-2 bg-deepseek-input border border-deepseek-border rounded-lg text-deepseek-text text-[13px] truncate focus:outline-none"
         />
         <button
           onClick={handleCopy}

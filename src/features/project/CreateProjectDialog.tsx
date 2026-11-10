@@ -28,17 +28,17 @@ export default function CreateProjectDialog({ onCreated, onClose }: {
   };
   if (created) return <TrustProjectDialog project={created} onClose={onClose} onTrusted={onCreated} />;
   return <div className="fixed inset-0 z-[220] flex items-center justify-center bg-black/40 p-4" onKeyDown={e => { if (e.key === 'Escape' && !busy) { e.stopPropagation(); onClose(); } }}>
-    <form role="dialog" aria-modal="true" aria-labelledby="create-project-title" onSubmit={e => { e.preventDefault(); create(); }} className="w-[520px] max-w-full max-h-[85vh] overflow-y-auto rounded-2xl border border-claude-border bg-claude-bg p-5 shadow-xl">
+    <form role="dialog" aria-modal="true" aria-labelledby="create-project-title" onSubmit={e => { e.preventDefault(); create(); }} className="w-[520px] max-w-full max-h-[85vh] overflow-y-auto rounded-2xl border border-deepseek-border bg-deepseek-bg p-5 shadow-xl">
       <div className="flex items-center justify-between mb-4">
-        <h2 id="create-project-title" className="text-xl font-semibold text-claude-text">{t('sidebar.createProject')}</h2>
-        <button type="button" disabled={busy} aria-label={t('projectDialogs.closeCreate')} onClick={onClose} className="text-claude-textSecondary"><X size={18} /></button>
+        <h2 id="create-project-title" className="text-xl font-semibold text-deepseek-text">{t('sidebar.createProject')}</h2>
+        <button type="button" disabled={busy} aria-label={t('projectDialogs.closeCreate')} onClick={onClose} className="text-deepseek-textSecondary"><X size={18} /></button>
       </div>
-      <input autoFocus aria-label={t('projectDialogs.name')} placeholder={defaultName || t('projectDialogs.name')} value={name} disabled={busy} onChange={e => setName(e.target.value)} className="w-full mb-4 rounded-xl border border-claude-border bg-claude-input px-4 py-3 text-sm text-claude-text outline-none focus:border-blue-500" />
+      <input autoFocus aria-label={t('projectDialogs.name')} placeholder={defaultName || t('projectDialogs.name')} value={name} disabled={busy} onChange={e => setName(e.target.value)} className="w-full mb-4 rounded-xl border border-deepseek-border bg-deepseek-input px-4 py-3 text-sm text-deepseek-text outline-none focus:border-blue-500" />
       <FolderFields folders={folders} onChange={setFolders} disabled={busy} />
       {error && <p role="alert" className="mt-3 text-sm text-red-500">{error}</p>}
       <div className="flex justify-end gap-3 mt-6">
-        <button type="button" disabled={busy} onClick={onClose} className="px-4 py-2 text-sm text-claude-textSecondary">{t('common.cancel')}</button>
-        <button type="submit" disabled={busy || !projectName || !folders.length} className="rounded-xl bg-claude-text px-4 py-2 text-sm font-medium text-claude-bg disabled:opacity-40">{busy ? t('projectDialogs.creating') : t('sidebar.createProject')}</button>
+        <button type="button" disabled={busy} onClick={onClose} className="px-4 py-2 text-sm text-deepseek-textSecondary">{t('common.cancel')}</button>
+        <button type="submit" disabled={busy || !projectName || !folders.length} className="rounded-xl bg-deepseek-text px-4 py-2 text-sm font-medium text-deepseek-bg disabled:opacity-40">{busy ? t('projectDialogs.creating') : t('sidebar.createProject')}</button>
       </div>
     </form>
   </div>;

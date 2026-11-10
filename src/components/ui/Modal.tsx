@@ -63,19 +63,19 @@ const Modal: React.FC<ModalProps> = ({
       onKeyDown={(e) => { if (e.key === 'Escape') { e.stopPropagation(); onClose(); } }}
     >
       <div
-        className={`bg-claude-input rounded-2xl shadow-xl ${sizeStyles[size]} max-h-[85vh] flex flex-col animate-fade-in ${className}`}
+        className={`bg-deepseek-input rounded-2xl shadow-xl ${sizeStyles[size]} max-h-[85vh] flex flex-col animate-fade-in ${className}`}
         onClick={(e) => e.stopPropagation()}
       >
         {/* Header */}
         {(title || showCloseButton) && (
-          <div className="flex items-center justify-between px-6 py-4 border-b border-claude-border">
+          <div className="flex items-center justify-between px-6 py-4 border-b border-deepseek-border">
             {title && (
-              <h2 className="text-[18px] font-semibold text-claude-text">{title}</h2>
+              <h2 className="text-[18px] font-semibold text-deepseek-text">{title}</h2>
             )}
             {showCloseButton && (
               <button
                 onClick={onClose}
-                className="p-1.5 text-claude-textSecondary hover:text-claude-text hover:bg-claude-hover rounded-lg transition-colors"
+                className="p-1.5 text-deepseek-textSecondary hover:text-deepseek-text hover:bg-deepseek-hover rounded-lg transition-colors"
               >
                 <X size={18} />
               </button>

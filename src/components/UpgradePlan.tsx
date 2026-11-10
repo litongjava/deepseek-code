@@ -230,7 +230,7 @@ const UpgradePlan = ({ onClose }: UpgradePlanProps) => {
   };
 
   if (loading) {
-    return <div className="flex-1 flex items-center justify-center h-full bg-claude-bg"><div className="text-[14px] text-claude-textSecondary">加载中...</div></div>;
+    return <div className="flex-1 flex items-center justify-center h-full bg-deepseek-bg"><div className="text-[14px] text-deepseek-textSecondary">加载中...</div></div>;
   }
 
   // --- Detail modal ---
@@ -259,41 +259,41 @@ const UpgradePlan = ({ onClose }: UpgradePlanProps) => {
 
     return (
       <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40" onClick={() => setDetailPlan(null)}>
-        <div className="bg-claude-input rounded-2xl w-[460px] max-h-[90vh] overflow-y-auto shadow-xl" onClick={e => e.stopPropagation()}>
+        <div className="bg-deepseek-input rounded-2xl w-[460px] max-h-[90vh] overflow-y-auto shadow-xl" onClick={e => e.stopPropagation()}>
           {/* Header */}
-          <div className={`flex items-center justify-between px-6 pt-5 pb-4 border-b border-claude-border`}>
+          <div className={`flex items-center justify-between px-6 pt-5 pb-4 border-b border-deepseek-border`}>
             <div className="flex items-center gap-3">
               <div className={`w-10 h-10 rounded-xl flex items-center justify-center ${style.bg} ${style.color}`}>
                 <Icon size={20} />
               </div>
               <div>
-                <h2 className="text-[18px] font-semibold text-claude-text">{plan.name}</h2>
-                <p className="text-[12px] text-claude-textSecondary">{plan.description}</p>
+                <h2 className="text-[18px] font-semibold text-deepseek-text">{plan.name}</h2>
+                <p className="text-[12px] text-deepseek-textSecondary">{plan.description}</p>
               </div>
             </div>
-            <button onClick={() => setDetailPlan(null)} className="text-claude-textSecondary hover:text-claude-text"><X size={20} /></button>
+            <button onClick={() => setDetailPlan(null)} className="text-deepseek-textSecondary hover:text-deepseek-text"><X size={20} /></button>
           </div>
 
           <div className="px-6 py-5">
             {/* Price + quota */}
             <div className="flex items-baseline gap-2 mb-1">
-              <span className="text-[32px] font-bold text-claude-text">{formatPrice(plan.price)}</span>
-              <span className="text-[14px] text-claude-textSecondary">/ {plan.duration_days} 天</span>
+              <span className="text-[32px] font-bold text-deepseek-text">{formatPrice(plan.price)}</span>
+              <span className="text-[14px] text-deepseek-textSecondary">/ {plan.duration_days} 天</span>
             </div>
-            <div className="text-[13px] text-claude-textSecondary mb-5">总额度 ${totalUSD.toFixed(2)}</div>
+            <div className="text-[13px] text-deepseek-textSecondary mb-5">总额度 ${totalUSD.toFixed(2)}</div>
 
             {/* Rounds table */}
             <div className={`rounded-xl p-4 mb-4 ${style.bg} border ${style.border}`}>
               <h4 className={`text-[13px] font-semibold ${style.color} mb-3`}>预估对话轮数（Opus 4.6）</h4>
               <table className="w-full text-[13px]">
                 <thead>
-                  <tr className="text-claude-textSecondary">
+                  <tr className="text-deepseek-textSecondary">
                     <th className="text-left pb-2 font-normal">额度类型</th>
                     <th className="text-right pb-2 font-normal">长对话</th>
                     <th className="text-right pb-2 font-normal">短对话</th>
                   </tr>
                 </thead>
-                <tbody className="text-claude-text">
+                <tbody className="text-deepseek-text">
                   {hasWindow && (
                     <tr className="border-t border-black/5">
                       <td className="py-2">每 5 小时</td>
@@ -315,22 +315,22 @@ const UpgradePlan = ({ onClose }: UpgradePlanProps) => {
                   </tr>
                 </tbody>
               </table>
-              <div className="mt-2 pt-2 border-t border-black/5 text-[11px] text-claude-textSecondary">
+              <div className="mt-2 pt-2 border-t border-black/5 text-[11px] text-deepseek-textSecondary">
                 Sonnet 4.6 更省额度：长对话约 {sonnetTotal} 轮 / 短对话约 {sonnetShortTotal} 轮
               </div>
             </div>
 
             {/* Estimation note */}
-            <div className="bg-claude-hover rounded-xl p-4 mb-4 text-[12px] text-claude-textSecondary leading-relaxed">
-              <p className="mb-1.5"><span className="font-medium text-claude-textSecondary">长对话</span>：多轮深度讨论、上传文件分析、写论文/代码等场景，每轮约消耗 ~70k input + ~3.5k output tokens（相当于 15 轮历史上下文或一次性发送 5 万字论文）。</p>
-              <p className="mb-1.5"><span className="font-medium text-claude-textSecondary">短对话</span>：简单问答、翻译、快速查询等场景，每轮约消耗 ~5k input + ~1k output tokens。</p>
+            <div className="bg-deepseek-hover rounded-xl p-4 mb-4 text-[12px] text-deepseek-textSecondary leading-relaxed">
+              <p className="mb-1.5"><span className="font-medium text-deepseek-textSecondary">长对话</span>：多轮深度讨论、上传文件分析、写论文/代码等场景，每轮约消耗 ~70k input + ~3.5k output tokens（相当于 15 轮历史上下文或一次性发送 5 万字论文）。</p>
+              <p className="mb-1.5"><span className="font-medium text-deepseek-textSecondary">短对话</span>：简单问答、翻译、快速查询等场景，每轮约消耗 ~5k input + ~1k output tokens。</p>
               <p>具体额度消耗取决于每一轮的实际用量，问简单问题消耗很少，不用担心不划算。大部分日常使用介于长短对话之间。</p>
             </div>
 
             {/* Features */}
             <div className="mb-5">
-              <h4 className="text-[13px] font-semibold text-claude-text mb-2">包含功能</h4>
-              <div className="grid grid-cols-2 gap-x-4 gap-y-1.5 text-[12px] text-claude-textSecondary">
+              <h4 className="text-[13px] font-semibold text-deepseek-text mb-2">包含功能</h4>
+              <div className="grid grid-cols-2 gap-x-4 gap-y-1.5 text-[12px] text-deepseek-textSecondary">
                 {[
                   'Claude Opus 4.6 深度推理',
                   'Claude Sonnet 4.6 快速响应',
@@ -358,8 +358,8 @@ const UpgradePlan = ({ onClose }: UpgradePlanProps) => {
               disabled={disabled}
               className={`w-full py-3 rounded-xl text-[15px] font-medium transition-colors ${
                 isCurrent ? 'bg-[#4B9C68]/10 text-[#4B9C68] cursor-default'
-                : disabled ? 'bg-claude-btnHover text-claude-textSecondary cursor-not-allowed'
-                : 'bg-claude-accent hover:opacity-90 text-white'
+                : disabled ? 'bg-deepseek-btnHover text-deepseek-textSecondary cursor-not-allowed'
+                : 'bg-deepseek-accent hover:opacity-90 text-white'
               }`}
             >
               {isCurrent ? '当前套餐' : blockedBySub ? '月卡有效期内无法购买' : isUpgrade ? `升级 (${formatPrice(getUpgradePrice(plan))})` : '立即购买'}
@@ -371,22 +371,22 @@ const UpgradePlan = ({ onClose }: UpgradePlanProps) => {
   };
 
   return (
-    <div className="flex-1 flex flex-col h-full overflow-y-auto bg-claude-bg">
+    <div className="flex-1 flex flex-col h-full overflow-y-auto bg-deepseek-bg">
       <div className="max-w-[1000px] w-full mx-auto px-6 py-10">
         <div className="mb-8 text-center">
-          <h1 className="text-[28px] font-serif-claude text-claude-text mb-2">选择适合您的套餐</h1>
-          <p className="text-[15px] text-claude-textSecondary">升级后即可享受更多对话额度</p>
+          <h1 className="text-[28px] font-serif-claude text-deepseek-text mb-2">选择适合您的套餐</h1>
+          <p className="text-[15px] text-deepseek-textSecondary">升级后即可享受更多对话额度</p>
         </div>
 
         {/* Plan Cards */}
         {payStep === 'select' && (
           <>
             {/* Feature banner */}
-            <div className="mb-6 px-5 py-4 rounded-2xl bg-claude-hover border border-claude-border">
-              <p className="text-[13px] text-claude-textSecondary text-center leading-relaxed mb-2">
+            <div className="mb-6 px-5 py-4 rounded-2xl bg-deepseek-hover border border-deepseek-border">
+              <p className="text-[13px] text-deepseek-textSecondary text-center leading-relaxed mb-2">
                 所有套餐功能完全相同，仅额度不同 — 支持 Claude Opus 4.6 / Sonnet 4.6 / GPT-5.4 等模型，含 Extended Thinking 深度推理、联网搜索、文档生成、代码执行、文件上传与分析
               </p>
-              <p className="text-[12px] text-claude-textSecondary/70 text-center leading-relaxed">
+              <p className="text-[12px] text-deepseek-textSecondary/70 text-center leading-relaxed">
                 额度按实际用量扣费：问简单问题消耗很少（约 $0.06~0.10/轮），深度长对话消耗较多（约 $0.30~0.50/轮），不用担心问简单问题不划算
               </p>
             </div>
@@ -404,8 +404,8 @@ const UpgradePlan = ({ onClose }: UpgradePlanProps) => {
                   <div
                     key={plan.id}
                     onClick={() => setDetailPlan(plan)}
-                    className={`relative flex flex-col p-5 rounded-2xl border-2 transition-all cursor-pointer hover:shadow-md bg-claude-input ${
-                      isCurrent ? 'border-[#4B9C68] bg-[#4B9C68]/5 dark:bg-[#4B9C68]/10' : `${style.border} hover:border-claude-textSecondary`
+                    className={`relative flex flex-col p-5 rounded-2xl border-2 transition-all cursor-pointer hover:shadow-md bg-deepseek-input ${
+                      isCurrent ? 'border-[#4B9C68] bg-[#4B9C68]/5 dark:bg-[#4B9C68]/10' : `${style.border} hover:border-deepseek-textSecondary`
                     }`}
                   >
                     {isCurrent && (
@@ -423,12 +423,12 @@ const UpgradePlan = ({ onClose }: UpgradePlanProps) => {
                         <Icon size={20} />
                       </div>
                       <div>
-                        <h3 className="text-[16px] font-semibold text-claude-text">{plan.name}</h3>
-                        <div className="text-[12px] text-claude-textSecondary">{plan.duration_days} 天</div>
+                        <h3 className="text-[16px] font-semibold text-deepseek-text">{plan.name}</h3>
+                        <div className="text-[12px] text-deepseek-textSecondary">{plan.duration_days} 天</div>
                       </div>
                     </div>
-                    <div className="text-[24px] font-bold text-claude-text mb-2">{formatPrice(plan.price)}</div>
-                    <div className="text-[12px] text-claude-textSecondary space-y-1 mb-3">
+                    <div className="text-[24px] font-bold text-deepseek-text mb-2">{formatPrice(plan.price)}</div>
+                    <div className="text-[12px] text-deepseek-textSecondary space-y-1 mb-3">
                       {hasWindow && <div>5h限额 ${plan.window_budget.toFixed(2)}{hasWeekly ? ` · 每周 $${plan.weekly_budget.toFixed(2)}` : ''}</div>}
                       {!hasWindow && hasWeekly && <div>每周 ${plan.weekly_budget.toFixed(2)}</div>}
                       {hasWeekly ? (
@@ -446,14 +446,14 @@ const UpgradePlan = ({ onClose }: UpgradePlanProps) => {
             </div>
 
             {/* Redemption Code */}
-            <div className="max-w-[480px] mx-auto rounded-2xl border border-claude-border p-6">
-              <h3 className="text-[15px] font-semibold text-claude-text mb-3">已有兑换码？</h3>
+            <div className="max-w-[480px] mx-auto rounded-2xl border border-deepseek-border p-6">
+              <h3 className="text-[15px] font-semibold text-deepseek-text mb-3">已有兑换码？</h3>
               <div className="flex gap-3 mb-2">
                 <input
                   type="text" value={redeemInput}
                   onChange={e => { setRedeemInput(formatRedeemInput(e.target.value)); setRedeemError(''); setRedeemResult(null); }}
                   placeholder="请输入兑换码"
-                  className="flex-1 px-4 py-2.5 bg-claude-input border border-claude-border rounded-lg text-[14px] text-claude-text font-mono tracking-wider focus:outline-none focus:border-claude-accent focus:shadow-sm transition-all"
+                  className="flex-1 px-4 py-2.5 bg-deepseek-input border border-deepseek-border rounded-lg text-[14px] text-deepseek-text font-mono tracking-wider focus:outline-none focus:border-deepseek-accent focus:shadow-sm transition-all"
                   maxLength={19}
                   onKeyDown={e => { if (e.key === 'Enter') handleRedeem(); }}
                 />
@@ -461,7 +461,7 @@ const UpgradePlan = ({ onClose }: UpgradePlanProps) => {
                   onClick={handleRedeem}
                   disabled={redeeming || redeemInput.replace(/[^a-zA-Z0-9]/g, '').length !== 16}
                   className={`px-5 py-2.5 text-white text-[14px] font-medium rounded-lg transition-colors disabled:opacity-50 disabled:cursor-not-allowed whitespace-nowrap ${
-                    redeeming || redeemInput.replace(/[^a-zA-Z0-9]/g, '').length !== 16 ? 'bg-claude-btnHover text-claude-textSecondary' : 'bg-claude-accent hover:opacity-90'
+                    redeeming || redeemInput.replace(/[^a-zA-Z0-9]/g, '').length !== 16 ? 'bg-deepseek-btnHover text-deepseek-textSecondary' : 'bg-deepseek-accent hover:opacity-90'
                   }`}
                 >{redeeming ? '兑换中...' : '兑换'}</button>
               </div>
@@ -484,7 +484,7 @@ const UpgradePlan = ({ onClose }: UpgradePlanProps) => {
             ? getUpgradePrice(detailPlan) : detailPlan.price) / 100).toFixed(2);
           return (
           <div className="max-w-[460px] mx-auto">
-            <div className="bg-claude-input rounded-t-2xl border border-b-0 border-claude-border px-6 py-4 flex items-center justify-between">
+            <div className="bg-deepseek-input rounded-t-2xl border border-b-0 border-deepseek-border px-6 py-4 flex items-center justify-between">
               <div className="flex items-center gap-3">
                 <div className="flex items-center gap-2">
                   <div className="w-[28px] h-[28px] bg-[#1677FF] rounded-[6px] flex items-center justify-center text-white">
@@ -496,25 +496,25 @@ const UpgradePlan = ({ onClose }: UpgradePlanProps) => {
                   <span className="text-[#1677FF] text-[16px] font-bold tracking-tight">支付宝</span>
                 </div>
                 <div className="w-px h-5 bg-[#ddd] mx-1" />
-                <span className="text-[15px] text-claude-text">我的收银台</span>
+                <span className="text-[15px] text-deepseek-text">我的收银台</span>
               </div>
             </div>
-            <div className="bg-claude-hover border-x border-claude-border">
-              <div className="bg-claude-input mx-4 mt-4 rounded-lg px-5 py-4">
+            <div className="bg-deepseek-hover border-x border-deepseek-border">
+              <div className="bg-deepseek-input mx-4 mt-4 rounded-lg px-5 py-4">
                 <div className="flex items-center justify-between mb-1">
-                  <span className="text-[13px] text-claude-textSecondary">商品名称</span>
-                  <span className="text-[14px] text-claude-text">{detailPlan.name}</span>
+                  <span className="text-[13px] text-deepseek-textSecondary">商品名称</span>
+                  <span className="text-[14px] text-deepseek-text">{detailPlan.name}</span>
                 </div>
                 <div className="flex items-center justify-between">
-                  <span className="text-[13px] text-claude-textSecondary">付款金额</span>
+                  <span className="text-[13px] text-deepseek-textSecondary">付款金额</span>
                   <div className="flex items-baseline">
                     <span className="text-[14px] text-[#FF6A00] mr-0.5">¥</span>
                     <span className="text-[24px] font-semibold text-[#FF6A00]">{displayPrice}</span>
                   </div>
                 </div>
               </div>
-              <div className="bg-claude-input mx-4 mt-3 mb-4 rounded-lg px-5 py-5 flex flex-col items-center">
-                <div className="text-[14px] text-claude-text mb-4">
+              <div className="bg-deepseek-input mx-4 mt-3 mb-4 rounded-lg px-5 py-5 flex flex-col items-center">
+                <div className="text-[14px] text-deepseek-text mb-4">
                   请使用<span className="text-[#1677FF] font-medium"> 支付宝 </span>扫描下方二维码完成支付
                 </div>
                 {qrcodeUrl ? (
@@ -529,14 +529,14 @@ const UpgradePlan = ({ onClose }: UpgradePlanProps) => {
                     <img src={qrcodeUrl} alt="支付二维码" className="w-[206px] h-[206px] rounded-lg" onError={() => setQrcodeError(true)} />
                   )
                 ) : (
-                  <div className="w-[206px] h-[206px] rounded-lg bg-claude-hover flex items-center justify-center">
-                    <div className="text-[13px] text-claude-textSecondary">加载中...</div>
+                  <div className="w-[206px] h-[206px] rounded-lg bg-deepseek-hover flex items-center justify-center">
+                    <div className="text-[13px] text-deepseek-textSecondary">加载中...</div>
                   </div>
                 )}
               </div>
             </div>
-            <div className="bg-claude-input rounded-b-2xl border border-t-0 border-claude-border px-6 py-3 flex justify-between items-center">
-              <button onClick={handleRetry} className="text-[13px] text-claude-textSecondary hover:text-claude-text">← 返回选择</button>
+            <div className="bg-deepseek-input rounded-b-2xl border border-t-0 border-deepseek-border px-6 py-3 flex justify-between items-center">
+              <button onClick={handleRetry} className="text-[13px] text-deepseek-textSecondary hover:text-deepseek-text">← 返回选择</button>
               {payUrl && <a href={payUrl} target="_blank" rel="noopener noreferrer" className="text-[13px] text-[#1677FF] hover:underline">手动打开支付页 →</a>}
             </div>
           </div>
@@ -546,15 +546,15 @@ const UpgradePlan = ({ onClose }: UpgradePlanProps) => {
         {/* Success */}
         {payStep === 'success' && (
           <div className="max-w-[400px] mx-auto">
-            <div className="rounded-2xl border border-claude-border p-8 text-center bg-transparent">
+            <div className="rounded-2xl border border-deepseek-border p-8 text-center bg-transparent">
               <div className="w-16 h-16 mx-auto bg-[#4B9C68]/10 rounded-full flex items-center justify-center mb-4">
                 <svg width="32" height="32" viewBox="0 0 24 24" fill="none" stroke="#4B9C68" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
                   <polyline points="20 6 9 17 4 12" />
                 </svg>
               </div>
-              <h3 className="text-[18px] font-semibold text-claude-text mb-2">支付成功</h3>
-              <p className="text-[14px] text-claude-textSecondary mb-6">您的套餐已激活，现在可以开始使用了</p>
-              <button onClick={onClose} className="w-full py-2.5 bg-claude-accent hover:opacity-90 text-white rounded-lg text-[14px] font-medium transition-colors">开始使用</button>
+              <h3 className="text-[18px] font-semibold text-deepseek-text mb-2">支付成功</h3>
+              <p className="text-[14px] text-deepseek-textSecondary mb-6">您的套餐已激活，现在可以开始使用了</p>
+              <button onClick={onClose} className="w-full py-2.5 bg-deepseek-accent hover:opacity-90 text-white rounded-lg text-[14px] font-medium transition-colors">开始使用</button>
             </div>
           </div>
         )}
@@ -562,10 +562,10 @@ const UpgradePlan = ({ onClose }: UpgradePlanProps) => {
         {/* Timeout */}
         {payStep === 'timeout' && (
           <div className="max-w-[400px] mx-auto">
-            <div className="rounded-2xl border border-claude-border p-8 text-center bg-transparent">
-              <h3 className="text-[16px] font-semibold text-claude-text mb-2">订单已超时</h3>
-              <p className="text-[14px] text-claude-textSecondary mb-6">支付超时，请重新下单</p>
-              <button onClick={handleRetry} className="w-full py-2.5 bg-claude-accent hover:opacity-90 text-white rounded-lg text-[14px] font-medium transition-colors">重新支付</button>
+            <div className="rounded-2xl border border-deepseek-border p-8 text-center bg-transparent">
+              <h3 className="text-[16px] font-semibold text-deepseek-text mb-2">订单已超时</h3>
+              <p className="text-[14px] text-deepseek-textSecondary mb-6">支付超时，请重新下单</p>
+              <button onClick={handleRetry} className="w-full py-2.5 bg-deepseek-accent hover:opacity-90 text-white rounded-lg text-[14px] font-medium transition-colors">重新支付</button>
             </div>
           </div>
         )}

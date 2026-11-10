@@ -81,11 +81,11 @@ const SearchModal: React.FC<SearchModalProps> = ({ isOpen, onClose, chats }) => 
       >
         {/* Search Input Area */}
         <div className="flex items-center gap-3 px-4 py-3 border-b border-gray-200/50 dark:border-gray-700/50 bg-white dark:bg-[#2D2D2A]">
-          <Search className="w-5 h-5 text-gray-400 dark:text-claude-text/60" strokeWidth={2} />
+          <Search className="w-5 h-5 text-gray-400 dark:text-deepseek-text/60" strokeWidth={2} />
           <input
             ref={inputRef}
             type="text"
-            className="flex-1 bg-transparent border-none outline-none text-[15px] text-gray-800 dark:text-claude-text placeholder-gray-400 dark:placeholder-claude-text/60 font-normal"
+            className="flex-1 bg-transparent border-none outline-none text-[15px] text-gray-800 dark:text-deepseek-text placeholder-gray-400 dark:placeholder-deepseek-text/60 font-normal"
             placeholder={t('customize.searchChatsProjects')}
             value={query}
             onChange={e => setQuery(e.target.value)}
@@ -95,7 +95,7 @@ const SearchModal: React.FC<SearchModalProps> = ({ isOpen, onClose, chats }) => 
           />
           <button
             onClick={onClose}
-            className="p-1 hover:bg-gray-100 dark:hover:bg-white/10 rounded-md transition-colors text-gray-400 dark:text-claude-text/60 hover:text-gray-600 dark:hover:text-claude-text"
+            className="p-1 hover:bg-gray-100 dark:hover:bg-white/10 rounded-md transition-colors text-gray-400 dark:text-deepseek-text/60 hover:text-gray-600 dark:hover:text-deepseek-text"
           >
             <X className="w-5 h-5" />
           </button>
@@ -116,14 +116,14 @@ const SearchModal: React.FC<SearchModalProps> = ({ isOpen, onClose, chats }) => 
                   className="flex items-center justify-between px-3 py-2.5 hover:bg-white dark:hover:bg-gray-700/50 hover:shadow-sm rounded-lg cursor-pointer group transition-all duration-200 border border-transparent hover:border-gray-100 dark:hover:border-gray-600/30"
                 >
                   <div className="flex items-center gap-3 min-w-0 flex-1 pr-4">
-                    <div className="w-5 h-5 flex items-center justify-center flex-shrink-0 text-gray-500 dark:text-claude-text/60">
+                    <div className="w-5 h-5 flex items-center justify-center flex-shrink-0 text-gray-500 dark:text-deepseek-text/60">
                       <MessageSquare className="w-4 h-4" strokeWidth={2} />
                     </div>
-                    <span className="text-[14px] text-gray-700 dark:text-claude-text truncate font-normal leading-none pt-0.5">
+                    <span className="text-[14px] text-gray-700 dark:text-deepseek-text truncate font-normal leading-none pt-0.5">
                       {chat.title || t('customize.untitledConversation')}
                     </span>
                   </div>
-                  <span className="text-[12px] text-gray-400 dark:text-claude-text/60 flex-shrink-0 font-normal">
+                  <span className="text-[12px] text-gray-400 dark:text-deepseek-text/60 flex-shrink-0 font-normal">
                     {getTimeLabel(chat.updated_at || chat.created_at, t)}
                   </span>
                 </div>

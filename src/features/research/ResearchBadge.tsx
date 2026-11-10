@@ -18,7 +18,7 @@ export default function ResearchBadge({ onToggle }: ResearchBadgeProps) {
           <X size={14} className="text-[#2E7CF6]" />
         </button>
       </span>
-      <div className="absolute top-full left-1/2 -translate-x-1/2 mt-1.5 px-2 py-1 bg-claude-tooltipBg text-claude-tooltipText rounded-md text-[11px] whitespace-nowrap opacity-0 group-hover/research:opacity-100 pointer-events-none transition-opacity">
+      <div className="absolute top-full left-1/2 -translate-x-1/2 mt-1.5 px-2 py-1 bg-deepseek-tooltipBg text-deepseek-tooltipText rounded-md text-[11px] whitespace-nowrap opacity-0 group-hover/research:opacity-100 pointer-events-none transition-opacity">
         Research mode
       </div>
     </div>

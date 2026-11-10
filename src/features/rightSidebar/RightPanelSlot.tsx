@@ -54,7 +54,7 @@ export default function RightPanelSlot({
   return (
     <div
       data-testid="right-panel-slot"
-      className={`h-full bg-claude-bg ${resizing ? '' : 'transition-all duration-300 ease-out'} flex z-20 ${narrowScreen ? 'absolute inset-y-0 right-0' : 'relative'} ${visible ? 'border-l border-claude-border' : 'pointer-events-none'}`}
+      className={`h-full bg-deepseek-bg ${resizing ? '' : 'transition-all duration-300 ease-out'} flex z-20 ${narrowScreen ? 'absolute inset-y-0 right-0' : 'relative'} ${visible ? 'border-l border-deepseek-border' : 'pointer-events-none'}`}
       style={{ width, opacity: visible ? 1 : 0, overflow: 'hidden' }}
     >
       {documentPanelDoc && !narrowScreen && (

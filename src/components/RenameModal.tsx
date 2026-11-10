@@ -31,10 +31,10 @@ const RenameModal = ({ isOpen, onClose, onSave, initialTitle }: RenameModalProps
   return createPortal(
     <div className="fixed inset-0 z-[100] flex items-center justify-center bg-black/40" onClick={onClose}>
       <div
-        className="bg-claude-input rounded-2xl shadow-xl w-[400px] p-6 animate-fade-in"
+        className="bg-deepseek-input rounded-2xl shadow-xl w-[400px] p-6 animate-fade-in"
         onClick={e => e.stopPropagation()}
       >
-        <h3 className="text-[18px] font-semibold text-claude-text mb-4">{t('common.rename')}</h3>
+        <h3 className="text-[18px] font-semibold text-deepseek-text mb-4">{t('common.rename')}</h3>
         <input
           ref={inputRef}
           type="text"
@@ -48,12 +48,12 @@ const RenameModal = ({ isOpen, onClose, onSave, initialTitle }: RenameModalProps
               onClose();
             }
           }}
-          className="w-full px-3 py-2 bg-transparent border border-claude-border rounded-lg text-claude-text focus:outline-none focus:border-blue-500 mb-6 text-[15px]"
+          className="w-full px-3 py-2 bg-transparent border border-deepseek-border rounded-lg text-deepseek-text focus:outline-none focus:border-blue-500 mb-6 text-[15px]"
         />
         <div className="flex justify-end gap-3">
           <button
             onClick={onClose}
-            className="px-4 py-2 text-[14px] font-medium text-claude-text hover:bg-claude-hover rounded-lg transition-colors"
+            className="px-4 py-2 text-[14px] font-medium text-deepseek-text hover:bg-deepseek-hover rounded-lg transition-colors"
           >
             {t('common.cancel')}
           </button>

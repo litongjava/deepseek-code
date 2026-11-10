@@ -6,7 +6,7 @@ import { applyTurnTiming, turnLabel } from './turnTiming';
 import { restoreProcessMetadata } from '../trajectory/model';
 
 vi.mock('../trajectory/WorkDetails', () => ({ default: () => <div>Answer</div> }));
-vi.mock('./ResponseFooter', () => ({ responseDividerClassName: 'h-px w-full bg-claude-border', default: () => <div>Response actions</div> }));
+vi.mock('./ResponseFooter', () => ({ responseDividerClassName: 'h-px w-full bg-deepseek-border', default: () => <div>Response actions</div> }));
 afterEach(cleanup);
 const turn = { turnId: 'one', startedAt: '2026-11-03T00:00:00Z', endedAt: '2026-11-03T00:02:08Z', elapsedMs: 128999, status: 'completed' as const };
 function list(messages: any[], loading = false) {

@@ -6,7 +6,7 @@ import { startVisiblePolling } from '../hooks/useVisiblePolling';
 interface Task { cron_id: string; description: string; prompt: string; schedule: string; state: string; output: string | null; error: string | null }
 interface Service { name: string; state: string; error: string | null }
 const command = <T,>(request: Record<string, unknown>) => invoke<T>('peripheral_command', { request });
-const field = 'w-full rounded border border-claude-border bg-claude-bg p-2';
+const field = 'w-full rounded border border-deepseek-border bg-deepseek-bg p-2';
 export default function ScheduledPromptsPanel() {
   const [projects, setProjects] = useState<Project[]>([]); const [project, setProject] = useState('');
   const [tasks, setTasks] = useState<Task[]>([]); const [services, setServices] = useState<Service[]>([]);

@@ -58,7 +58,7 @@ function formatNumber(n: number): string {
 }
 
 function MiniBarChart({ data, dataKey, color = '#C6613F' }: { data: DailyStats[]; dataKey: keyof DailyStats; color?: string }) {
-  if (data.length === 0) return <div className="h-24 flex items-center justify-center text-xs text-claude-textSecondary">暂无数据</div>;
+  if (data.length === 0) return <div className="h-24 flex items-center justify-center text-xs text-deepseek-textSecondary">暂无数据</div>;
   const values = data.map(d => d[dataKey] as number);
   const max = Math.max(...values, 1);
 
@@ -73,7 +73,7 @@ function MiniBarChart({ data, dataKey, color = '#C6613F' }: { data: DailyStats[]
               className="absolute bottom-0 w-full rounded-t-sm transition-all"
               style={{ height: `${h}%`, backgroundColor: color, opacity: 0.8 }}
             />
-            <div className="absolute bottom-full mb-1 left-1/2 -translate-x-1/2 hidden group-hover:block bg-claude-avatar text-claude-avatarText text-xs px-2 py-1 rounded whitespace-nowrap z-10">
+            <div className="absolute bottom-full mb-1 left-1/2 -translate-x-1/2 hidden group-hover:block bg-deepseek-avatar text-deepseek-avatarText text-xs px-2 py-1 rounded whitespace-nowrap z-10">
               {d.date}: {val}
             </div>
           </div>
@@ -140,13 +140,13 @@ const AnalyticsPanel = ({ onClose }: { onClose: () => void }) => {
   return (
     <div className="fixed inset-0 z-[200] bg-black/40 flex items-center justify-center" onClick={onClose}>
       <div
-        className="bg-claude-input border border-claude-border rounded-2xl shadow-2xl w-[680px] max-h-[85vh] overflow-hidden flex flex-col"
+        className="bg-deepseek-input border border-deepseek-border rounded-2xl shadow-2xl w-[680px] max-h-[85vh] overflow-hidden flex flex-col"
         onClick={e => e.stopPropagation()}
       >
-        <div className="flex items-center justify-between px-6 py-4 border-b border-claude-border">
+        <div className="flex items-center justify-between px-6 py-4 border-b border-deepseek-border">
           <div className="flex items-center gap-3">
             <BarChart3 size={22} className="text-[#C6613F]" />
-            <h2 className="text-lg font-semibold text-claude-text">使用统计</h2>
+            <h2 className="text-lg font-semibold text-deepseek-text">使用统计</h2>
           </div>
           <div className="flex items-center gap-2">
             {PERIOD_OPTIONS.map(opt => (
@@ -156,30 +156,30 @@ const AnalyticsPanel = ({ onClose }: { onClose: () => void }) => {
                 className={`px-3 py-1 text-xs rounded-full transition-colors ${
                   period === opt.days
                     ? 'bg-[#C6613F] text-white'
-                    : 'bg-claude-hover text-claude-textSecondary hover:bg-claude-btn-hover'
+                    : 'bg-deepseek-hover text-deepseek-textSecondary hover:bg-deepseek-btn-hover'
                 }`}
               >
                 {opt.label}
               </button>
             ))}
-            <button onClick={refresh} className="ml-2 p-1.5 rounded-md hover:bg-claude-hover text-claude-textSecondary">
+            <button onClick={refresh} className="ml-2 p-1.5 rounded-md hover:bg-deepseek-hover text-deepseek-textSecondary">
               <Activity size={16} />
             </button>
-            <button onClick={onClose} className="p-1.5 rounded-md hover:bg-claude-hover text-claude-textSecondary">
+            <button onClick={onClose} className="p-1.5 rounded-md hover:bg-deepseek-hover text-deepseek-textSecondary">
               <X size={16} />
             </button>
           </div>
         </div>
 
-        <div className="flex border-b border-claude-border">
+        <div className="flex border-b border-deepseek-border">
           {(['overview', 'trends', 'events'] as const).map(t => (
             <button
               key={t}
               onClick={() => setTab(t)}
               className={`flex-1 py-2.5 text-sm font-medium transition-colors ${
                 tab === t
-                  ? 'text-claude-text border-b-2 border-[#C6613F]'
-                  : 'text-claude-textSecondary hover:text-claude-text'
+                  ? 'text-deepseek-text border-b-2 border-[#C6613F]'
+                  : 'text-deepseek-textSecondary hover:text-deepseek-text'
               }`}
             >
               {t === 'overview' ? '概览' : t === 'trends' ? '趋势' : '事件流'}
@@ -189,7 +189,7 @@ const AnalyticsPanel = ({ onClose }: { onClose: () => void }) => {
 
         <div className="flex-1 overflow-y-auto p-6">
           {loading ? (
-            <div className="flex items-center justify-center py-12 text-claude-textSecondary">
+            <div className="flex items-center justify-center py-12 text-deepseek-textSecondary">
               <Activity size={20} className="animate-spin mr-2" /> 加载中...
             </div>
           ) : tab === 'overview' ? (
@@ -197,40 +197,40 @@ const AnalyticsPanel = ({ onClose }: { onClose: () => void }) => {
               <CostTracker compact />
               <div className="grid grid-cols-4 gap-3">
                 {statCards.map(card => (
-                  <div key={card.label} className="bg-claude-hover rounded-lg p-3">
+                  <div key={card.label} className="bg-deepseek-hover rounded-lg p-3">
                     <div className="flex items-center gap-2 mb-1">
                       <card.icon size={14} className={card.color} />
-                      <span className="text-xs text-claude-textSecondary">{card.label}</span>
+                      <span className="text-xs text-deepseek-textSecondary">{card.label}</span>
                     </div>
-                    <div className="text-xl font-bold text-claude-text">{card.value}</div>
+                    <div className="text-xl font-bold text-deepseek-text">{card.value}</div>
                   </div>
                 ))}
               </div>
 
               {summary && (
                 <div className="grid grid-cols-2 gap-3">
-                  <div className="bg-claude-hover rounded-lg p-4">
-                    <div className="text-xs text-claude-textSecondary mb-1">日均消息</div>
-                    <div className="text-lg font-semibold text-claude-text">{summary.avg_daily_messages.toFixed(1)}</div>
+                  <div className="bg-deepseek-hover rounded-lg p-4">
+                    <div className="text-xs text-deepseek-textSecondary mb-1">日均消息</div>
+                    <div className="text-lg font-semibold text-deepseek-text">{summary.avg_daily_messages.toFixed(1)}</div>
                   </div>
-                  <div className="bg-claude-hover rounded-lg p-4">
-                    <div className="text-xs text-claude-textSecondary mb-1">日均 Token</div>
-                    <div className="text-lg font-semibold text-claude-text">{formatNumber(Math.round(summary.avg_daily_tokens))}</div>
+                  <div className="bg-deepseek-hover rounded-lg p-4">
+                    <div className="text-xs text-deepseek-textSecondary mb-1">日均 Token</div>
+                    <div className="text-lg font-semibold text-deepseek-text">{formatNumber(Math.round(summary.avg_daily_tokens))}</div>
                   </div>
-                  <div className="bg-claude-hover rounded-lg p-4">
-                    <div className="text-xs text-claude-textSecondary mb-1">最活跃日</div>
-                    <div className="text-lg font-semibold text-claude-text">{summary.most_active_day || '-'}</div>
+                  <div className="bg-deepseek-hover rounded-lg p-4">
+                    <div className="text-xs text-deepseek-textSecondary mb-1">最活跃日</div>
+                    <div className="text-lg font-semibold text-deepseek-text">{summary.most_active_day || '-'}</div>
                   </div>
-                  <div className="bg-claude-hover rounded-lg p-4">
-                    <div className="text-xs text-claude-textSecondary mb-1">事件类型数</div>
-                    <div className="text-lg font-semibold text-claude-text">{eventCounts.length}</div>
+                  <div className="bg-deepseek-hover rounded-lg p-4">
+                    <div className="text-xs text-deepseek-textSecondary mb-1">事件类型数</div>
+                    <div className="text-lg font-semibold text-deepseek-text">{eventCounts.length}</div>
                   </div>
                 </div>
               )}
 
               {eventCounts.length > 0 && (
                 <div>
-                  <h3 className="text-sm font-medium text-claude-text mb-3">事件分布</h3>
+                  <h3 className="text-sm font-medium text-deepseek-text mb-3">事件分布</h3>
                   <div className="space-y-2">
                     {eventCounts.map(ec => {
                       const maxCount = eventCounts[0]?.count || 1;
@@ -247,16 +247,16 @@ const AnalyticsPanel = ({ onClose }: { onClose: () => void }) => {
                       };
                       return (
                         <div key={ec.event_type} className="flex items-center gap-3">
-                          <span className="text-xs text-claude-textSecondary w-20 text-right truncate">
+                          <span className="text-xs text-deepseek-textSecondary w-20 text-right truncate">
                             {labelMap[ec.event_type] || ec.event_type}
                           </span>
-                          <div className="flex-1 h-5 bg-claude-btn-hover rounded-full overflow-hidden">
+                          <div className="flex-1 h-5 bg-deepseek-btn-hover rounded-full overflow-hidden">
                             <div
                               className="h-full bg-[#C6613F] rounded-full transition-all"
                               style={{ width: `${pct}%` }}
                             />
                           </div>
-                          <span className="text-xs text-claude-textSecondary w-12 text-right">{ec.count}</span>
+                          <span className="text-xs text-deepseek-textSecondary w-12 text-right">{ec.count}</span>
                         </div>
                       );
                     })}
@@ -267,26 +267,26 @@ const AnalyticsPanel = ({ onClose }: { onClose: () => void }) => {
           ) : tab === 'trends' ? (
             <div className="space-y-6">
               <div>
-                <h3 className="text-sm font-medium text-claude-text mb-2">消息趋势</h3>
+                <h3 className="text-sm font-medium text-deepseek-text mb-2">消息趋势</h3>
                 <MiniBarChart data={dailyStats} dataKey="messages_sent" color="#3b82f6" />
               </div>
               <div>
-                <h3 className="text-sm font-medium text-claude-text mb-2">Token 消耗趋势</h3>
+                <h3 className="text-sm font-medium text-deepseek-text mb-2">Token 消耗趋势</h3>
                 <MiniBarChart data={dailyStats} dataKey="tokens_output" color="#C6613F" />
               </div>
               <div>
-                <h3 className="text-sm font-medium text-claude-text mb-2">工具调用趋势</h3>
+                <h3 className="text-sm font-medium text-deepseek-text mb-2">工具调用趋势</h3>
                 <MiniBarChart data={dailyStats} dataKey="tools_executed" color="#10b981" />
               </div>
               <div>
-                <h3 className="text-sm font-medium text-claude-text mb-2">错误趋势</h3>
+                <h3 className="text-sm font-medium text-deepseek-text mb-2">错误趋势</h3>
                 <MiniBarChart data={dailyStats} dataKey="errors" color="#ef4444" />
               </div>
             </div>
           ) : (
             <div className="space-y-1">
               {recentEvents.length === 0 ? (
-                <div className="text-center py-8 text-claude-textSecondary text-sm">暂无事件记录</div>
+                <div className="text-center py-8 text-deepseek-textSecondary text-sm">暂无事件记录</div>
               ) : (
                 recentEvents.map(ev => {
                   const labelMap: Record<string, string> = {
@@ -310,16 +310,16 @@ const AnalyticsPanel = ({ onClose }: { onClose: () => void }) => {
                     file_uploaded: 'bg-cyan-100 text-cyan-700 dark:bg-cyan-900 dark:text-cyan-300',
                   };
                   return (
-                    <div key={ev.id} className="flex items-center gap-3 py-2 px-3 rounded-lg hover:bg-claude-hover">
-                      <span className={`text-xs px-2 py-0.5 rounded-full ${colorMap[ev.event_type] || 'bg-claude-hover text-claude-textSecondary'}`}>
+                    <div key={ev.id} className="flex items-center gap-3 py-2 px-3 rounded-lg hover:bg-deepseek-hover">
+                      <span className={`text-xs px-2 py-0.5 rounded-full ${colorMap[ev.event_type] || 'bg-deepseek-hover text-deepseek-textSecondary'}`}>
                         {labelMap[ev.event_type] || ev.event_type}
                       </span>
-                      <span className="text-xs text-claude-textSecondary flex-1 truncate">
+                      <span className="text-xs text-deepseek-textSecondary flex-1 truncate">
                         {ev.properties && Object.keys(ev.properties).length > 0
                           ? Object.entries(ev.properties).map(([k, v]) => `${k}=${v}`).join(', ')
                           : '-'}
                       </span>
-                      <span className="text-xs text-claude-textSecondary/60 whitespace-nowrap">
+                      <span className="text-xs text-deepseek-textSecondary/60 whitespace-nowrap">
                         {ev.timestamp.replace('T', ' ').slice(0, 19)}
                       </span>
                     </div>

@@ -65,19 +65,19 @@ export default function SessionGitSettings({ projectId, disabled, onChange, init
     onChange(initial.current);
   };
 
-  return <div ref={menuRef} className="relative flex h-9 items-center gap-3 rounded-lg border border-claude-border bg-claude-input px-3 text-sm" aria-label={t('sessionGit.settings')}>
+  return <div ref={menuRef} className="relative flex h-9 items-center gap-3 rounded-lg border border-deepseek-border bg-deepseek-input px-3 text-sm" aria-label={t('sessionGit.settings')}>
     <button type="button" aria-label={t('sessionGit.branch')} aria-haspopup="listbox" aria-expanded={open} disabled={disabled || (!repository?.is_repository && !error)}
       onClick={() => { setOpen(!open); setSearch(''); }} title={error || t('sessionGit.branchHint')} className="flex max-w-48 items-center gap-1.5 disabled:opacity-50">
       <GitBranch size={15} /><span className="truncate">{branch || (error ? t('sessionGit.refresh') : !repository ? '…' : !repository.is_repository ? t('sessionGit.notRepository') : repository.current_branch || 'HEAD')}</span>
     </button>
-    <label className="flex items-center gap-1 cursor-pointer text-claude-textSecondary" title={t('sessionGit.worktreeHint')}>
-      <input aria-label={t('sessionGit.worktree')} type="checkbox" checked={worktree} disabled={disabled || !repository?.is_repository || !repository.branches.length} onChange={event => update(branch, event.target.checked)} className="h-3.5 w-3.5 accent-claude-accent" />worktree
+    <label className="flex items-center gap-1 cursor-pointer text-deepseek-textSecondary" title={t('sessionGit.worktreeHint')}>
+      <input aria-label={t('sessionGit.worktree')} type="checkbox" checked={worktree} disabled={disabled || !repository?.is_repository || !repository.branches.length} onChange={event => update(branch, event.target.checked)} className="h-3.5 w-3.5 accent-deepseek-accent" />worktree
     </label>
-    {open && <div className="absolute bottom-full left-0 z-50 mb-2 w-64 rounded-xl border border-claude-border bg-claude-input p-1.5 shadow-xl">
+    {open && <div className="absolute bottom-full left-0 z-50 mb-2 w-64 rounded-xl border border-deepseek-border bg-deepseek-input p-1.5 shadow-xl">
       <div role="listbox" aria-label={t('sessionGit.branch')} className="max-h-52 overflow-y-auto">
-        {repository?.branches.filter(name => name.toLowerCase().includes(search.toLowerCase())).map(name => <button type="button" role="option" aria-selected={name === branch} key={name} onClick={() => { update(name, worktree); setOpen(false); }} className="flex w-full items-center justify-between gap-2 rounded-lg px-2 py-1.5 text-left hover:bg-claude-hover"><span className="truncate">{name}</span>{name === branch && <Check size={13} className="text-claude-accent" />}</button>)}
+        {repository?.branches.filter(name => name.toLowerCase().includes(search.toLowerCase())).map(name => <button type="button" role="option" aria-selected={name === branch} key={name} onClick={() => { update(name, worktree); setOpen(false); }} className="flex w-full items-center justify-between gap-2 rounded-lg px-2 py-1.5 text-left hover:bg-deepseek-hover"><span className="truncate">{name}</span>{name === branch && <Check size={13} className="text-deepseek-accent" />}</button>)}
       </div>
-      <div className="mt-1 flex gap-1"><input autoFocus aria-label={t('sessionGit.search')} placeholder={t('sessionGit.search')} value={search} onChange={event => setSearch(event.target.value)} className="min-w-0 flex-1 rounded-lg border border-claude-border bg-claude-bg px-2 py-1.5 outline-none focus:border-claude-accent" /><button type="button" aria-label={t('sessionGit.refresh')} title={t('sessionGit.refresh')} onClick={() => setRefresh(value => value + 1)} className="p-1.5 rounded hover:bg-claude-hover"><RefreshCw size={13} /></button></div>
+      <div className="mt-1 flex gap-1"><input autoFocus aria-label={t('sessionGit.search')} placeholder={t('sessionGit.search')} value={search} onChange={event => setSearch(event.target.value)} className="min-w-0 flex-1 rounded-lg border border-deepseek-border bg-deepseek-bg px-2 py-1.5 outline-none focus:border-deepseek-accent" /><button type="button" aria-label={t('sessionGit.refresh')} title={t('sessionGit.refresh')} onClick={() => setRefresh(value => value + 1)} className="p-1.5 rounded hover:bg-deepseek-hover"><RefreshCw size={13} /></button></div>
       {error && <p role="alert" className="p-2 text-red-500">{error}</p>}
     </div>}
   </div>;

@@ -172,14 +172,14 @@ const SourcesList: React.FC<{ sources: CitationSource[] }> = ({ sources }) => {
         type="button"
         aria-controls={panelId}
         aria-expanded={expanded}
-        className="flex w-full items-center gap-2 px-3 py-2 text-claude-textSecondary hover:bg-claude-hover transition-colors select-none"
+        className="flex w-full items-center gap-2 px-3 py-2 text-deepseek-textSecondary hover:bg-deepseek-hover transition-colors select-none"
         onClick={() => setExpanded(!expanded)}
       >
         <ChevronDown
           size={14}
           className={`text-[#9CA3AF] transform transition-transform ${expanded ? 'rotate-0' : '-rotate-90'}`}
         />
-        <span className="text-[13px] font-medium text-claude-textSecondary">
+        <span className="text-[13px] font-medium text-deepseek-textSecondary">
           来源 ({sources.length})
         </span>
       </button>
@@ -195,7 +195,7 @@ const SourcesList: React.FC<{ sources: CitationSource[] }> = ({ sources }) => {
                   href={source.url}
                   target="_blank"
                   rel="noopener noreferrer"
-                  className="text-[13px] font-medium text-claude-text hover:underline line-clamp-1 block"
+                  className="text-[13px] font-medium text-deepseek-text hover:underline line-clamp-1 block"
                 >
                   {source.title || source.url}
                 </a>
@@ -352,7 +352,7 @@ const markdownComponents = {
             return (
               <h1
                 className="mt-7 mb-3 text-[25px] leading-[1.2] font-bold tracking-[-0.02em]"
-                style={{ color: 'var(--text-claude-model-body)' }}
+                style={{ color: 'var(--text-deepseek-model-body)' }}
                 {...props}
               >
                 {children}
@@ -363,7 +363,7 @@ const markdownComponents = {
             return (
               <h2
                 className="mt-6 mb-3 text-[21px] leading-[1.25] font-bold tracking-[-0.015em]"
-                style={{ color: 'var(--text-claude-model-body)' }}
+                style={{ color: 'var(--text-deepseek-model-body)' }}
                 {...props}
               >
                 {children}
@@ -374,7 +374,7 @@ const markdownComponents = {
             return (
               <h3
                 className="mt-5 mb-2.5 text-[18px] leading-[1.3] font-semibold"
-                style={{ color: 'var(--text-claude-model-body)' }}
+                style={{ color: 'var(--text-deepseek-model-body)' }}
                 {...props}
               >
                 {children}
@@ -385,7 +385,7 @@ const markdownComponents = {
             return (
               <h4
                 className="mt-4 mb-2 text-[16.8px] leading-[1.35] font-semibold"
-                style={{ color: 'var(--text-claude-model-body)' }}
+                style={{ color: 'var(--text-deepseek-model-body)' }}
                 {...props}
               >
                 {children}
@@ -396,7 +396,7 @@ const markdownComponents = {
             return (
               <h5
                 className="mt-3.5 mb-2 text-[15.8px] leading-[1.4] font-semibold"
-                style={{ color: 'var(--text-claude-model-body)' }}
+                style={{ color: 'var(--text-deepseek-model-body)' }}
                 {...props}
               >
                 {children}
@@ -407,7 +407,7 @@ const markdownComponents = {
             return (
               <h6
                 className="mt-3 mb-2 text-[15px] leading-[1.4] font-semibold uppercase tracking-[0.02em] opacity-90"
-                style={{ color: 'var(--text-claude-model-body)' }}
+                style={{ color: 'var(--text-deepseek-model-body)' }}
                 {...props}
               >
                 {children}
@@ -418,7 +418,7 @@ const markdownComponents = {
             return (
               <p
                 className="mb-2.5 text-[16.5px] leading-[1.7]"
-                style={{ color: 'var(--text-claude-model-body)' }}
+                style={{ color: 'var(--text-deepseek-model-body)' }}
                 {...props}
               >
                 {children}
@@ -427,7 +427,7 @@ const markdownComponents = {
           },
           pre: MarkdownCodeBlock,
           hr({ node, children, ...props }: any) {
-            return <hr className="my-6 border-t border-claude-border dark:border-[rgb(66,65,62)]" {...props} />;
+            return <hr className="my-6 border-t border-deepseek-border dark:border-[rgb(66,65,62)]" {...props} />;
           },
           table({ node, children, ...props }: any) {
             return (
@@ -446,10 +446,10 @@ const markdownComponents = {
             return <tr className="chat-table-row" {...props}>{children}</tr>;
           },
           th({ node, children, ...props }: any) {
-            return <th className="text-left py-2 pr-4 font-semibold" style={{ color: 'var(--text-claude-model-body)' }} {...props}>{children}</th>;
+            return <th className="text-left py-2 pr-4 font-semibold" style={{ color: 'var(--text-deepseek-model-body)' }} {...props}>{children}</th>;
           },
           td({ node, children, ...props }: any) {
-            return <td className="py-2 pr-4" style={{ color: 'var(--text-claude-model-body)' }} {...props}>{children}</td>;
+            return <td className="py-2 pr-4" style={{ color: 'var(--text-deepseek-model-body)' }} {...props}>{children}</td>;
           },
           code({ node, className, children, ...props }: any) {
             return (
@@ -469,7 +469,7 @@ const MarkdownRenderer: React.FC<MarkdownRendererProps> = ({ content, citations,
   return (
     <div
       className="markdown-body assistant-markdown text-[16.5px] leading-normal overflow-x-hidden"
-      style={{ color: 'var(--text-claude-model-body)' }}
+      style={{ color: 'var(--text-deepseek-model-body)' }}
     >
       <MarkdownStreamContext.Provider value={{ source: processed, streaming: isStreaming }}>
       <ReactMarkdown

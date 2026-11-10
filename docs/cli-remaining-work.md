@@ -12,7 +12,7 @@
 
 ## 2. 约束
 
-- `claude-code-cli-doc` 是 CLI 的**用户使用手册**，`claude-rust-desktop-docs` 是 Desktop 的用户文档；开发记录、终端证据、测试脚本一律写到 `temp/claude-code-cli-dev`。
+- `claude-code-cli-doc` 是 CLI 的**用户使用手册**，`deepseek-code-docs` 是 Desktop 的用户文档；开发记录、终端证据、测试脚本一律写到 `temp/claude-code-cli-dev`。
 - Cargo 命令串行执行，统一 `CARGO_TARGET_DIR=D:/code/project/project-harven/deepseek-code-desktop/target`。
 - 节奏：开发一个、验证一个、commit 一个。英文提交信息，沿用 `feat:`/`fix:`/`docs:` 前缀，结尾 `Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>`。不 push，不自动关机。
 - 只读参考：`D:/code/project/project-harven/claude_code_src`（下文 `reference:`）、`D:/code/project/project-harven/codex`、需求列表 `D:/code/project/project-harven/instructions.txt`。官方程序 `E:/package/claude-code/2.1.295/claude.exe`。

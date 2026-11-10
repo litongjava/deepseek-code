@@ -83,19 +83,19 @@ const FileTree: React.FC<{
 }> = ({ tree, loading, error, expandedPaths, selectedPath, onToggle, onSelect, onRefresh }) => {
   return (
     <div className="flex flex-col h-full text-[13px]">
-      <div className="flex items-center justify-between px-3 py-2 border-b border-claude-border">
-        <span className="text-[11px] font-semibold text-claude-textSecondary uppercase tracking-wide">Explorer</span>
-        <button onClick={onRefresh} className="text-[11px] text-claude-textSecondary hover:text-claude-text transition-colors px-2 py-0.5 rounded hover:bg-claude-hover">Refresh</button>
+      <div className="flex items-center justify-between px-3 py-2 border-b border-deepseek-border">
+        <span className="text-[11px] font-semibold text-deepseek-textSecondary uppercase tracking-wide">Explorer</span>
+        <button onClick={onRefresh} className="text-[11px] text-deepseek-textSecondary hover:text-deepseek-text transition-colors px-2 py-0.5 rounded hover:bg-deepseek-hover">Refresh</button>
       </div>
       <div className="flex-1 overflow-y-auto overflow-x-hidden py-1">
         {loading ? (
-          <div className="flex items-center justify-center py-8 text-claude-textSecondary text-[12px]">Loading...</div>
+          <div className="flex items-center justify-center py-8 text-deepseek-textSecondary text-[12px]">Loading...</div>
         ) : error ? (
           <div className="px-3 py-4 text-red-600 dark:text-red-400 text-[12px]">{error}</div>
         ) : tree.length === 0 ? (
-          <div className="px-3 py-4 text-claude-textSecondary text-[12px]">
+          <div className="px-3 py-4 text-deepseek-textSecondary text-[12px]">
             <p className="mb-2">No files loaded</p>
-            <button onClick={onRefresh} className="text-claude-text hover:underline">Load project files</button>
+            <button onClick={onRefresh} className="text-deepseek-text hover:underline">Load project files</button>
           </div>
         ) : (
           tree.filter(n => !n.is_dir || !IGNORED_DIRS.has(n.name)).map(node => (
@@ -119,14 +119,14 @@ const TreeNode: React.FC<{
   return (
     <div>
       <div
-        className={`flex items-center gap-1 py-0.5 pr-2 rounded cursor-pointer select-none transition-colors text-claude-text ${isSelected ? 'bg-claude-hover' : 'hover:bg-claude-hover'}`}
+        className={`flex items-center gap-1 py-0.5 pr-2 rounded cursor-pointer select-none transition-colors text-deepseek-text ${isSelected ? 'bg-deepseek-hover' : 'hover:bg-deepseek-hover'}`}
         style={{ paddingLeft: `${depth * 16 + 4}px` }}
         onClick={(e) => { e.stopPropagation(); node.is_dir ? onToggle(node.path) : onSelect(node); }}
       >
         <span className="w-4 h-4 flex-shrink-0 flex items-center justify-center">
           {node.is_dir ? (hasChildren ? (isExpanded ? <ChevronDown size={12} /> : <ChevronRight size={12} />) : null) : null}
         </span>
-        <span className="text-[11px] text-claude-textSecondary flex-shrink-0 font-mono font-bold w-5 text-center">
+        <span className="text-[11px] text-deepseek-textSecondary flex-shrink-0 font-mono font-bold w-5 text-center">
           {node.is_dir ? '📁' : (ext === 'tsx' || ext === 'ts' ? 'TS' : ext === 'jsx' || ext === 'js' ? 'JS' : ext?.toUpperCase().slice(0, 2) || '📄')}
         </span>
         <span className="text-[12px] truncate leading-none">{node.name}</span>
@@ -167,10 +167,10 @@ const TabContent: React.FC<{ doc: DocumentInfo; isDark: boolean }> = ({ doc, isD
     <div className={`flex-1 overflow-y-auto ${isCode || viewMode === 'code' ? '!p-0 overflow-hidden bg-[#FAFAFA] dark:bg-[#1E1E1E]' : viewMode === 'preview' && isRenderable ? '!p-0 !overflow-hidden' : 'px-8 py-6'}`}>
       {/* Toggle for markdown/renderable */}
       {(isMarkdown || isRenderable) && (
-        <div className="flex items-center gap-2 px-4 py-2 border-b border-claude-border">
-          <div className="flex bg-claude-btnHover rounded-lg p-0.5">
-            <button onClick={() => setViewMode('preview')} className={`p-1.5 rounded-md transition-all ${viewMode === 'preview' ? 'bg-white dark:bg-[#555] shadow-sm text-claude-text' : 'text-claude-textSecondary hover:text-claude-text'}`}><Eye size={16} /></button>
-            <button onClick={() => setViewMode('code')} className={`p-1.5 rounded-md transition-all ${viewMode === 'code' ? 'bg-white dark:bg-[#555] shadow-sm text-claude-text' : 'text-claude-textSecondary hover:text-claude-text'}`}><Code size={16} /></button>
+        <div className="flex items-center gap-2 px-4 py-2 border-b border-deepseek-border">
+          <div className="flex bg-deepseek-btnHover rounded-lg p-0.5">
+            <button onClick={() => setViewMode('preview')} className={`p-1.5 rounded-md transition-all ${viewMode === 'preview' ? 'bg-white dark:bg-[#555] shadow-sm text-deepseek-text' : 'text-deepseek-textSecondary hover:text-deepseek-text'}`}><Eye size={16} /></button>
+            <button onClick={() => setViewMode('code')} className={`p-1.5 rounded-md transition-all ${viewMode === 'code' ? 'bg-white dark:bg-[#555] shadow-sm text-deepseek-text' : 'text-deepseek-textSecondary hover:text-deepseek-text'}`}><Code size={16} /></button>
           </div>
         </div>
       )}
@@ -183,7 +183,7 @@ const TabContent: React.FC<{ doc: DocumentInfo; isDark: boolean }> = ({ doc, isD
         <div className="flex h-full font-mono text-[13px] leading-relaxed relative bg-[#FAFAFA] dark:bg-[#1E1E1E] overflow-hidden">
           <div className="flex-1 overflow-auto">
             <div className="flex min-h-full">
-              <div className="flex-none w-[40px] bg-[#FAFAFA] dark:bg-[#1E1E1E] text-right pt-4 pr-2 select-none text-claude-textSecondary opacity-50 sticky left-0">
+              <div className="flex-none w-[40px] bg-[#FAFAFA] dark:bg-[#1E1E1E] text-right pt-4 pr-2 select-none text-deepseek-textSecondary opacity-50 sticky left-0">
                 {(doc.content || '').split('\n').map((_: string, i: number) => (
                   <div key={i} style={{ lineHeight: '1.625' }}>{i + 1}</div>
                 ))}
@@ -352,10 +352,10 @@ const CodePanel: React.FC<CodePanelProps> = ({ document: initialDoc, onClose }) 
   };
 
   return (
-    <div className="flex-1 h-full flex bg-claude-input border-l border-claude-border min-w-0">
+    <div className="flex-1 h-full flex bg-deepseek-input border-l border-deepseek-border min-w-0">
       {/* File Tree Sidebar */}
       {showFileTree && (
-        <div role="region" aria-label="Document file tree" className="w-[220px] flex-shrink-0 border-r border-claude-border bg-claude-sidebar text-claude-text flex flex-col">
+        <div role="region" aria-label="Document file tree" className="w-[220px] flex-shrink-0 border-r border-deepseek-border bg-deepseek-sidebar text-deepseek-text flex flex-col">
           <FileTree
             tree={tree}
             loading={treeLoading}
@@ -372,10 +372,10 @@ const CodePanel: React.FC<CodePanelProps> = ({ document: initialDoc, onClose }) 
       {/* Main area */}
       <div className="flex-1 flex flex-col min-w-0">
         {/* Top bar: sidebar toggle + tab bar + actions */}
-        <div className="flex items-center border-b border-claude-border flex-shrink-0 bg-claude-bg">
+        <div className="flex items-center border-b border-deepseek-border flex-shrink-0 bg-deepseek-bg">
           <button
             onClick={() => setShowFileTree(!showFileTree)}
-            className="p-2 text-claude-textSecondary hover:text-claude-text hover:bg-claude-btnHover transition-colors flex-shrink-0"
+            className="p-2 text-deepseek-textSecondary hover:text-deepseek-text hover:bg-deepseek-btnHover transition-colors flex-shrink-0"
             title={showFileTree ? 'Hide file tree' : 'Show file tree'}
             aria-label={showFileTree ? 'Hide file tree' : 'Show file tree'}
             aria-expanded={showFileTree}
@@ -389,12 +389,12 @@ const CodePanel: React.FC<CodePanelProps> = ({ document: initialDoc, onClose }) 
               <div
                 key={tab.id}
                 onClick={() => setActiveTabId(tab.id)}
-                className={`group flex items-center gap-1.5 px-3 py-2 text-[13px] cursor-pointer border-r border-claude-border transition-colors flex-shrink-0 max-w-[180px] ${activeTabId === tab.id ? 'bg-claude-input text-claude-text border-b-2 border-b-blue-500' : 'text-claude-textSecondary hover:bg-claude-hover'}`}
+                className={`group flex items-center gap-1.5 px-3 py-2 text-[13px] cursor-pointer border-r border-deepseek-border transition-colors flex-shrink-0 max-w-[180px] ${activeTabId === tab.id ? 'bg-deepseek-input text-deepseek-text border-b-2 border-b-blue-500' : 'text-deepseek-textSecondary hover:bg-deepseek-hover'}`}
               >
                 <span className="truncate text-[12px]">{tab.title}</span>
                 <button
                   onClick={(e) => handleCloseTab(tab.id, e)}
-                  className="p-0.5 rounded hover:bg-claude-btnHover opacity-0 group-hover:opacity-100 transition-opacity flex-shrink-0"
+                  className="p-0.5 rounded hover:bg-deepseek-btnHover opacity-0 group-hover:opacity-100 transition-opacity flex-shrink-0"
                 >
                   <X size={12} />
                 </button>
@@ -405,20 +405,20 @@ const CodePanel: React.FC<CodePanelProps> = ({ document: initialDoc, onClose }) 
           {/* Actions */}
           <div className="flex items-center gap-1 px-2 flex-shrink-0">
             <div className="relative flex items-center">
-              <button onClick={handleCopyContent} className="h-7 flex items-center px-2 text-[12px] font-medium text-claude-text border border-claude-border border-r-0 rounded-l-lg hover:bg-claude-btnHover transition-colors">
+              <button onClick={handleCopyContent} className="h-7 flex items-center px-2 text-[12px] font-medium text-deepseek-text border border-deepseek-border border-r-0 rounded-l-lg hover:bg-deepseek-btnHover transition-colors">
                 {copied ? <Check size={14} className="mr-1" /> : <Copy size={14} className="mr-1" />}
                 {copied ? 'Copied' : 'Copy'}
               </button>
-              <button ref={copyBtnRef} onClick={() => setShowCopyMenu(!showCopyMenu)} className="h-7 px-1.5 flex items-center justify-center border border-claude-border rounded-r-lg hover:bg-claude-btnHover transition-colors text-claude-text">
+              <button ref={copyBtnRef} onClick={() => setShowCopyMenu(!showCopyMenu)} className="h-7 px-1.5 flex items-center justify-center border border-deepseek-border rounded-r-lg hover:bg-deepseek-btnHover transition-colors text-deepseek-text">
                 <ChevronDown size={14} />
               </button>
               {showCopyMenu && (
-                <div ref={copyMenuRef} className="absolute top-full right-0 mt-1 w-40 bg-white dark:bg-claude-input border border-claude-border rounded-lg shadow-lg py-1 z-50">
-                  <button onClick={handleDownload} className="w-full text-left px-4 py-2 text-[13px] text-claude-text hover:bg-claude-btnHover transition-colors">Download</button>
+                <div ref={copyMenuRef} className="absolute top-full right-0 mt-1 w-40 bg-white dark:bg-deepseek-input border border-deepseek-border rounded-lg shadow-lg py-1 z-50">
+                  <button onClick={handleDownload} className="w-full text-left px-4 py-2 text-[13px] text-deepseek-text hover:bg-deepseek-btnHover transition-colors">Download</button>
                 </div>
               )}
             </div>
-            <button onClick={onClose} className="p-1.5 text-claude-textSecondary hover:text-claude-text hover:bg-claude-btnHover rounded-lg transition-colors" title="Close panel">
+            <button onClick={onClose} className="p-1.5 text-deepseek-textSecondary hover:text-deepseek-text hover:bg-deepseek-btnHover rounded-lg transition-colors" title="Close panel">
               <X size={18} />
             </button>
           </div>

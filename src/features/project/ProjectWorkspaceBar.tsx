@@ -70,22 +70,22 @@ export default function ProjectWorkspaceBar({ projectId, onSelect, disabled = fa
   const folderName = (path: string) => path.split(/[\\/]/).filter(Boolean).pop() || path;
   const projectRepresentsFolder = folders.length === 1 && folderName(folders[0].path) === selected?.name;
   const visibleFolders = projectRepresentsFolder ? [] : folders;
-  const buttonClass = 'flex h-9 items-center gap-2 rounded-lg border border-claude-border bg-claude-input px-3 text-sm text-claude-text hover:bg-claude-hover disabled:opacity-40';
-  return <div className="mb-2 text-claude-text" data-project-workspace>
+  const buttonClass = 'flex h-9 items-center gap-2 rounded-lg border border-deepseek-border bg-deepseek-input px-3 text-sm text-deepseek-text hover:bg-deepseek-hover disabled:opacity-40';
+  return <div className="mb-2 text-deepseek-text" data-project-workspace>
     <div className="flex flex-wrap items-center gap-2">
-      <span className="flex h-9 items-center gap-1.5 rounded-lg border border-claude-border px-3 text-sm text-claude-textSecondary"><Laptop size={15} /> Local</span>
+      <span className="flex h-9 items-center gap-1.5 rounded-lg border border-deepseek-border px-3 text-sm text-deepseek-textSecondary"><Laptop size={15} /> Local</span>
       <div className="relative" ref={menuRef}>
         <button type="button" aria-label="Select project" aria-expanded={open} title={projectRepresentsFolder ? folders[0].path : selected?.name} disabled={disabled || busy} onClick={() => setOpen(!open)} className={buttonClass}><Folder size={13} />{selected?.name || 'Select project'}<ChevronDown size={12} /></button>
-        {open && <div className={`absolute left-0 ${menuPlacement === 'above' ? 'bottom-full mb-2' : 'top-full mt-2'} w-64 max-h-72 overflow-y-auto rounded-xl border border-claude-border bg-claude-input p-1.5 shadow-xl z-50`}>
-          {projects.map(project => <button type="button" key={project.id} onClick={() => { choose(project).catch(() => {}); }} className="flex w-full items-center gap-2 rounded-lg px-3 py-2 text-left text-sm hover:bg-claude-hover"><Folder size={14} /><span className="truncate">{project.name}</span>{project.id === projectId && <span className="ml-auto">✓</span>}</button>)}
-          {!projects.length && <p className="px-3 py-2 text-xs text-claude-textSecondary">No projects yet</p>}
-          <button type="button" onClick={() => { setOpen(false); setCreating(true); }} className="mt-1 flex w-full items-center gap-2 rounded-lg border-t border-claude-border px-3 py-2 text-sm hover:bg-claude-hover"><Plus size={14} /> Create project</button>
+        {open && <div className={`absolute left-0 ${menuPlacement === 'above' ? 'bottom-full mb-2' : 'top-full mt-2'} w-64 max-h-72 overflow-y-auto rounded-xl border border-deepseek-border bg-deepseek-input p-1.5 shadow-xl z-50`}>
+          {projects.map(project => <button type="button" key={project.id} onClick={() => { choose(project).catch(() => {}); }} className="flex w-full items-center gap-2 rounded-lg px-3 py-2 text-left text-sm hover:bg-deepseek-hover"><Folder size={14} /><span className="truncate">{project.name}</span>{project.id === projectId && <span className="ml-auto">✓</span>}</button>)}
+          {!projects.length && <p className="px-3 py-2 text-xs text-deepseek-textSecondary">No projects yet</p>}
+          <button type="button" onClick={() => { setOpen(false); setCreating(true); }} className="mt-1 flex w-full items-center gap-2 rounded-lg border-t border-deepseek-border px-3 py-2 text-sm hover:bg-deepseek-hover"><Plus size={14} /> Create project</button>
         </div>}
       </div>
       {children}
-      {visibleFolders.map(folder => <span key={folder.path} title={folder.path} className="flex h-9 max-w-[220px] items-center gap-1 rounded-lg border border-claude-border bg-claude-input px-3 text-sm">
+      {visibleFolders.map(folder => <span key={folder.path} title={folder.path} className="flex h-9 max-w-[220px] items-center gap-1 rounded-lg border border-deepseek-border bg-deepseek-input px-3 text-sm">
         <Folder size={13} className="shrink-0" /><span className="truncate">{folderName(folder.path)}</span>
-        <button type="button" disabled={disabled || busy || folders.length <= 1} aria-label={`Remove folder ${folder.path}`} title={folders.length <= 1 ? 'Keep at least one source folder' : 'Remove folder'} onClick={() => saveFolders(folders.filter(f => f.path !== folder.path).map(f => f.path))} className="rounded hover:bg-claude-hover disabled:opacity-25"><X size={12} /></button>
+        <button type="button" disabled={disabled || busy || folders.length <= 1} aria-label={`Remove folder ${folder.path}`} title={folders.length <= 1 ? 'Keep at least one source folder' : 'Remove folder'} onClick={() => saveFolders(folders.filter(f => f.path !== folder.path).map(f => f.path))} className="rounded hover:bg-deepseek-hover disabled:opacity-25"><X size={12} /></button>
       </span>)}
       {selected && <button type="button" aria-label="Add project folders" title="Add source folders" disabled={disabled || busy} onClick={() => setEditingFolders(folders.map(f => f.path))} className={buttonClass}><FolderPlus size={14} /></button>}
       {folders.some(f => !f.trusted) && <button type="button" disabled={disabled || busy} onClick={() => setTrusting(selected)} className="text-xs text-amber-600 underline">Trust folders</button>}
@@ -94,13 +94,13 @@ export default function ProjectWorkspaceBar({ projectId, onSelect, disabled = fa
     {creating && <CreateProjectDialog onClose={() => setCreating(false)} onCreated={choose} />}
     {trusting && <TrustProjectDialog project={trusting} onTrusted={choose} onClose={() => setTrusting(null)} />}
     {editingFolders && <div className="fixed inset-0 z-[220] flex items-center justify-center bg-black/40 p-4">
-      <div role="dialog" aria-modal="true" aria-labelledby="project-folders-title" className="w-[520px] max-w-full max-h-[85vh] overflow-y-auto rounded-2xl border border-claude-border bg-claude-bg p-5 shadow-xl">
+      <div role="dialog" aria-modal="true" aria-labelledby="project-folders-title" className="w-[520px] max-w-full max-h-[85vh] overflow-y-auto rounded-2xl border border-deepseek-border bg-deepseek-bg p-5 shadow-xl">
         <h2 id="project-folders-title" className="mb-4 text-lg font-semibold">Project folders</h2>
         <FolderFields folders={editingFolders} onChange={setEditingFolders} disabled={busy} />
         {error && <p role="alert" className="mt-3 text-sm text-red-500">{error}</p>}
         <div className="mt-5 flex justify-end gap-3">
           <button type="button" disabled={busy} onClick={() => setEditingFolders(null)} className="px-4 py-2 text-sm">Cancel</button>
-          <button type="button" disabled={busy || !editingFolders.length} onClick={() => saveFolders(editingFolders)} className="rounded-lg bg-claude-text text-claude-bg px-4 py-2 text-sm disabled:opacity-40">Save folders</button>
+          <button type="button" disabled={busy || !editingFolders.length} onClick={() => saveFolders(editingFolders)} className="rounded-lg bg-deepseek-text text-deepseek-bg px-4 py-2 text-sm disabled:opacity-40">Save folders</button>
         </div>
       </div>
     </div>}

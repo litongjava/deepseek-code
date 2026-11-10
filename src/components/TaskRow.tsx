@@ -23,25 +23,25 @@ export default function TaskRow({ task, onToggle, onEdit, onDelete, onExecute }:
   const { t, locale } = useI18n();
   const statusColor = task.is_enabled
     ? 'text-green-600 dark:text-green-400'
-    : 'text-claude-textSecondary';
+    : 'text-deepseek-textSecondary';
 
   return (
-    <div className="flex items-center gap-3 px-4 py-3 border-b border-claude-border hover:bg-claude-hover/50 transition-colors group">
+    <div className="flex items-center gap-3 px-4 py-3 border-b border-deepseek-border hover:bg-deepseek-hover/50 transition-colors group">
       <div className="flex items-center gap-2 flex-1 min-w-0">
         <div className={`w-2 h-2 rounded-full shrink-0 ${task.is_enabled ? 'bg-green-500' : 'bg-gray-400'}`} />
         <div className="flex flex-col min-w-0">
-          <span className="text-[13px] font-medium text-claude-text truncate">{task.name}</span>
-          <span className="text-[11px] text-claude-textSecondary truncate font-mono">{task.cron_expression}</span>
+          <span className="text-[13px] font-medium text-deepseek-text truncate">{task.name}</span>
+          <span className="text-[11px] text-deepseek-textSecondary truncate font-mono">{task.cron_expression}</span>
         </div>
       </div>
 
-      <div className="flex items-center gap-1 text-[11px] text-claude-textSecondary shrink-0">
+      <div className="flex items-center gap-1 text-[11px] text-deepseek-textSecondary shrink-0">
         <Clock size={12} />
         <span>{task.last_run_at ? formatLastRun(task.last_run_at, task.last_run_status, locale) : t('tasks.notRun')}</span>
       </div>
 
       <div className="flex items-center gap-0.5 shrink-0">
-        <span className={`text-[11px] px-1.5 py-0.5 rounded ${statusColor} bg-claude-hover`}>
+        <span className={`text-[11px] px-1.5 py-0.5 rounded ${statusColor} bg-deepseek-hover`}>
           {task.is_enabled ? t('tasks.enabled') : t('tasks.disabled')}
         </span>
       </div>
@@ -49,28 +49,28 @@ export default function TaskRow({ task, onToggle, onEdit, onDelete, onExecute }:
       <div className="flex items-center gap-0.5 shrink-0">
         <button
           onClick={() => onToggle(task.id, !task.is_enabled)}
-          className="p-1.5 rounded-md hover:bg-claude-btn-hover text-claude-textSecondary hover:text-claude-text transition-colors"
+          className="p-1.5 rounded-md hover:bg-deepseek-btn-hover text-deepseek-textSecondary hover:text-deepseek-text transition-colors"
           title={task.is_enabled ? t('tasks.disable') : t('tasks.enable')}
         >
           {task.is_enabled ? <ToggleRight size={16} /> : <ToggleLeft size={16} />}
         </button>
         <button
           onClick={onExecute}
-          className="p-1.5 rounded-md hover:bg-claude-btn-hover text-claude-textSecondary hover:text-green-600 transition-colors"
+          className="p-1.5 rounded-md hover:bg-deepseek-btn-hover text-deepseek-textSecondary hover:text-green-600 transition-colors"
           title={t('tasks.execute')}
         >
           <Play size={14} />
         </button>
         <button
           onClick={onEdit}
-          className="p-1.5 rounded-md hover:bg-claude-btn-hover text-claude-textSecondary hover:text-claude-text transition-colors"
+          className="p-1.5 rounded-md hover:bg-deepseek-btn-hover text-deepseek-textSecondary hover:text-deepseek-text transition-colors"
           title={t('sidebar.edit')}
         >
           <Edit size={14} />
         </button>
         <button
           onClick={onDelete}
-          className="p-1.5 rounded-md hover:bg-claude-btn-hover text-claude-textSecondary hover:text-red-500 transition-colors"
+          className="p-1.5 rounded-md hover:bg-deepseek-btn-hover text-deepseek-textSecondary hover:text-red-500 transition-colors"
           title={t('common.delete')}
         >
           <Trash2 size={14} />

@@ -24,19 +24,19 @@
   --assistant-default-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei", "Helvetica Neue", Helvetica, Arial, sans-serif;
   --assistant-code-family: 'SF Mono', 'JetBrains Mono', 'Fira Code', Consolas, 'Liberation Mono', Menlo, Courier, 'PingFang SC', 'Microsoft YaHei';
   --conversation-font-size: 14px;
-  --bg-claude-main: #FCFCFB;
-  --bg-claude-sidebar: #F5F5F3;
-  --border-claude: #D8D8D2;
+  --bg-deepseek-main: #FCFCFB;
+  --bg-deepseek-sidebar: #F5F5F3;
+  --border-deepseek: #D8D8D2;
   --border-subtle: rgba(0, 0, 0, 0.06);
-  --text-claude-main: #141413;
-  --text-claude-model-body: #141413;
-  --text-claude-secondary: #60605B;
-  --bg-claude-accent: #CC7C5E;
-  --bg-claude-hover: #EFEEEB;
-  --bg-claude-btn-hover: #EAE9E6;
-  --bg-claude-input: #FFFFFF;
-  --bg-claude-avatar: #333333;
-  --text-claude-avatar: #FFFFFF;
+  --text-deepseek-main: #141413;
+  --text-deepseek-model-body: #141413;
+  --text-deepseek-secondary: #60605B;
+  --bg-deepseek-accent: #CC7C5E;
+  --bg-deepseek-hover: #EFEEEB;
+  --bg-deepseek-btn-hover: #EAE9E6;
+  --bg-deepseek-input: #FFFFFF;
+  --bg-deepseek-avatar: #333333;
+  --text-deepseek-avatar: #FFFFFF;
   --bg-mode-tabs: #EFEEEB;
   --bg-mode-tab-active: #FCFCFB;
   --bg-tooltip: #2a2a2a;
@@ -64,19 +64,19 @@
 }
 
 .dark {
-  --bg-claude-main: #1F1F1E;
-  --bg-claude-sidebar: #1E1E1C;
-  --border-claude: #3A3A36;
+  --bg-deepseek-main: #1F1F1E;
+  --bg-deepseek-sidebar: #1E1E1C;
+  --border-deepseek: #3A3A36;
   --border-subtle: rgba(255, 255, 255, 0.04);
-  --text-claude-main: #FFFFFF;
-  --text-claude-model-body: #F5F4EF;
-  --text-claude-secondary: #B5B4AD;
-  --bg-claude-accent: #CC7C5E;
-  --bg-claude-hover: #121212;
-  --bg-claude-btn-hover: #121212;
-  --bg-claude-input: #2C2C2A;
-  --bg-claude-avatar: #D4D4D4;
-  --text-claude-avatar: #222222;
+  --text-deepseek-main: #FFFFFF;
+  --text-deepseek-model-body: #F5F4EF;
+  --text-deepseek-secondary: #B5B4AD;
+  --bg-deepseek-accent: #CC7C5E;
+  --bg-deepseek-hover: #121212;
+  --bg-deepseek-btn-hover: #121212;
+  --bg-deepseek-input: #2C2C2A;
+  --bg-deepseek-avatar: #D4D4D4;
+  --text-deepseek-avatar: #222222;
   --bg-mode-tabs: #121212;
   --bg-mode-tab-active: #1F1F1E;
   --bg-tooltip: #e8e8e8;
@@ -104,8 +104,8 @@
 /* === Enhanced Base Styles === */
 body {
   font-family: var(--chat-sans-family);
-  background-color: var(--bg-claude-main);
-  color: var(--text-claude-main);
+  background-color: var(--bg-deepseek-main);
+  color: var(--text-deepseek-main);
   -webkit-font-smoothing: antialiased;
   -moz-osx-font-smoothing: grayscale;
   text-rendering: optimizeLegibility;
@@ -147,12 +147,12 @@ button:active, a:active {
 }
 
 .sidebar-scroll:hover::-webkit-scrollbar-thumb {
-  background-color: var(--text-claude-secondary);
+  background-color: var(--text-deepseek-secondary);
   opacity: 0.5;
 }
 
 .sidebar-scroll:hover::-webkit-scrollbar-thumb:hover {
-  background-color: var(--text-claude-main);
+  background-color: var(--text-deepseek-main);
   opacity: 0.7;
 }
 
@@ -174,7 +174,7 @@ html.dark .sidebar-scroll:hover::-webkit-scrollbar-thumb:hover {
 .markdown-body p {
   margin-bottom: 0.6em;
   line-height: 1.5;
-  color: var(--text-claude-main);
+  color: var(--text-deepseek-main);
 }
 
 .markdown-body h1,
@@ -186,14 +186,14 @@ html.dark .sidebar-scroll:hover::-webkit-scrollbar-thumb:hover {
   margin-top: 1.0em;
   margin-bottom: 0.4em;
   font-weight: 600;
-  color: var(--text-claude-main);
+  color: var(--text-deepseek-main);
 }
 
 .markdown-body ul,
 .markdown-body ol {
   margin-bottom: 0.6em;
   padding-left: 1.5em;
-  color: var(--text-claude-main);
+  color: var(--text-deepseek-main);
 }
 
 .markdown-body ul { list-style-type: disc; }
@@ -202,21 +202,21 @@ html.dark .sidebar-scroll:hover::-webkit-scrollbar-thumb:hover {
 .markdown-body ol ol { list-style-type: lower-alpha; }
 
 .markdown-body pre {
-  background-color: var(--bg-claude-input);
+  background-color: var(--bg-deepseek-input);
   padding: 1em;
   border-radius: 8px;
   overflow-x: auto;
   margin-bottom: 0.6em;
   font-family: monospace;
-  border: 1px solid var(--border-claude);
+  border: 1px solid var(--border-deepseek);
 }
 
 .markdown-body code {
-  background-color: var(--bg-claude-hover);
+  background-color: var(--bg-deepseek-hover);
   padding: 0.2em 0.4em;
   border-radius: 4px;
   font-size: 0.9em;
-  color: var(--text-claude-main);
+  color: var(--text-deepseek-main);
 }
 
 .markdown-body pre code {
@@ -226,7 +226,7 @@ html.dark .sidebar-scroll:hover::-webkit-scrollbar-thumb:hover {
 }
 
 .assistant-markdown {
-  color: var(--text-claude-model-body);
+  color: var(--text-deepseek-model-body);
 }
 
 .assistant-markdown p,
@@ -243,7 +243,7 @@ html.dark .sidebar-scroll:hover::-webkit-scrollbar-thumb:hover {
 .assistant-markdown strong,
 .assistant-markdown em,
 .assistant-markdown .katex-display>.katex {
-  color: var(--text-claude-model-body);
+  color: var(--text-deepseek-model-body);
 }
 
 /* Standard inline code */
@@ -260,21 +260,21 @@ html.dark .inline-code {
 }
 
 /* Sidebar dark mode overrides */
-html.dark .bg-claude-sidebar {
+html.dark .bg-deepseek-sidebar {
   color: rgb(190, 189, 180) !important;
 }
 
-html.dark .bg-claude-sidebar button {
+html.dark .bg-deepseek-sidebar button {
   color: rgb(190, 189, 180);
 }
 
-html.dark .bg-claude-sidebar .text-claude-text {
+html.dark .bg-deepseek-sidebar .text-deepseek-text {
   color: rgb(190, 189, 180) !important;
 }
 
-html.dark .bg-claude-sidebar button:hover,
-html.dark .bg-claude-sidebar button:hover .text-claude-text,
-html.dark .bg-claude-sidebar .group:hover .text-claude-text {
+html.dark .bg-deepseek-sidebar button:hover,
+html.dark .bg-deepseek-sidebar button:hover .text-deepseek-text,
+html.dark .bg-deepseek-sidebar .group:hover .text-deepseek-text {
   color: #FFFFFF !important;
 }
 
@@ -288,7 +288,7 @@ html.dark .bg-claude-sidebar .group:hover .text-claude-text {
 
 .katex-display>.katex {
   white-space: normal !important;
-  color: var(--text-claude-main);
+  color: var(--text-deepseek-main);
 }
 
 .katex-display>.katex>.katex-html {
@@ -302,16 +302,16 @@ html.dark .bg-claude-sidebar .group:hover .text-claude-text {
 
 /* Warm accent for message highlights */
 .msg-accent-border {
-  border-left: 2px solid var(--bg-claude-accent);
+  border-left: 2px solid var(--bg-deepseek-accent);
   padding-left: 12px;
   border-radius: 0 8px 8px 0;
 }
 
 /* Clean assistant message card */
 .msg-assistant-card {
-  border: 1px solid var(--border-claude);
+  border: 1px solid var(--border-deepseek);
   border-radius: 12px;
-  background: var(--bg-claude-input);
+  background: var(--bg-deepseek-input);
   padding: 16px 20px;
   transition: border-color 0.2s ease, box-shadow 0.2s ease;
 }
@@ -374,7 +374,7 @@ html.dark .bg-claude-sidebar .group:hover .text-claude-text {
   position: absolute;
   inset: 2px;
   border-radius: 10px;
-  background: var(--bg-claude-input);
+  background: var(--bg-deepseek-input);
   z-index: 0;
 }
 .preview-generating-border > * {
@@ -451,7 +451,7 @@ html.dark * {
   content: '▍';
   display: inline;
   animation: typing-blink 1s ease-in-out infinite;
-  color: var(--bg-claude-accent);
+  color: var(--bg-deepseek-accent);
   font-weight: bold;
   margin-left: 1px;
 }
@@ -464,11 +464,11 @@ html.dark * {
 .animate-shimmer-text {
   background: linear-gradient(
     90deg,
-    var(--text-claude-main) 0%,
-    var(--bg-claude-accent) 25%,
-    var(--text-claude-main) 50%,
-    var(--bg-claude-accent) 75%,
-    var(--text-claude-main) 100%
+    var(--text-deepseek-main) 0%,
+    var(--bg-deepseek-accent) 25%,
+    var(--text-deepseek-main) 50%,
+    var(--bg-deepseek-accent) 75%,
+    var(--text-deepseek-main) 100%
   );
   background-size: 200% 100%;
   -webkit-background-clip: text;
@@ -531,8 +531,8 @@ html.dark .scan-light-wrapper::after {
   display: inline-block;
   width: 18px;
   height: 18px;
-  border: 2px solid var(--border-claude);
-  border-top-color: var(--bg-claude-accent);
+  border: 2px solid var(--border-deepseek);
+  border-top-color: var(--bg-deepseek-accent);
   border-radius: 50%;
   animation: spin-ring 0.8s linear infinite;
 }
@@ -563,7 +563,7 @@ html.dark .scan-light-wrapper::after {
   left: 0;
   right: 0;
   height: 2px;
-  background: linear-gradient(90deg, transparent, var(--bg-claude-accent), transparent);
+  background: linear-gradient(90deg, transparent, var(--bg-deepseek-accent), transparent);
   animation: code-scan 2s ease-in-out infinite;
   pointer-events: none;
 }
@@ -579,14 +579,14 @@ html.dark .scan-light-wrapper::after {
 }
 
 .chat-scroll::-webkit-scrollbar-thumb {
-  background-color: var(--bg-claude-btn-hover) !important;
+  background-color: var(--bg-deepseek-btn-hover) !important;
   border-radius: 6px !important;
   border: 4px solid transparent !important;
   background-clip: content-box !important;
 }
 
 .chat-scroll::-webkit-scrollbar-thumb:hover {
-  background-color: var(--text-claude-secondary) !important;
+  background-color: var(--text-deepseek-secondary) !important;
 }
 
 html.dark .chat-scroll::-webkit-scrollbar-thumb {
@@ -636,7 +636,7 @@ html.dark .chat-scroll::-webkit-scrollbar-thumb:hover {
   padding: 12px 16px;
   border: 0;
   font-size: 15px;
-  background: var(--bg-claude-hover);
+  background: var(--bg-deepseek-hover);
   border-radius: 12px;
 }
 
@@ -720,7 +720,7 @@ html[data-chat-font] .chat-font-scope input {
   }
 
   /* Reduce padding on mobile */
-  .px-1.text-claude-text {
+  .px-1.text-deepseek-text {
     padding-left: 0.25rem !important;
     padding-right: 0.25rem !important;
   }
@@ -797,7 +797,7 @@ html[data-chat-font] .chat-font-scope input {
 
 /* Lazy image loading placeholder */
 .lazy-image-placeholder {
-  background: linear-gradient(90deg, var(--bg-claude-hover) 25%, var(--bg-claude-sidebar) 50%, var(--bg-claude-hover) 75%);
+  background: linear-gradient(90deg, var(--bg-deepseek-hover) 25%, var(--bg-deepseek-sidebar) 50%, var(--bg-deepseek-hover) 75%);
   background-size: 200% 100%;
   animation: shimmer-loading 1.5s infinite;
 }
@@ -860,16 +860,16 @@ html.dark .glass-panel {
   --chat-weight-bold: 660;
 }
 .chat-surface {
-  --bg-claude-main: var(--chat-canvas);
-  --bg-claude-input: var(--chat-surface);
-  --bg-claude-hover: var(--chat-hover);
-  --bg-claude-btn-hover: var(--chat-hover);
+  --bg-deepseek-main: var(--chat-canvas);
+  --bg-deepseek-input: var(--chat-surface);
+  --bg-deepseek-hover: var(--chat-hover);
+  --bg-deepseek-btn-hover: var(--chat-hover);
   --msg-user-bg: var(--chat-raised);
   background-color: var(--chat-canvas);
 }
 .chat-composer.chat-composer {
   background-color: var(--chat-surface);
-  border-color: var(--border-claude);
+  border-color: var(--border-deepseek);
   box-shadow: none;
   transition: background-color 150ms ease-out, box-shadow 150ms ease-out;
 }
@@ -910,7 +910,7 @@ html.dark .glass-panel {
 .chat-table-row:nth-child(even) { background-color: var(--chat-raised); }
 .conversation-content table { font-variant-numeric: tabular-nums; }
 .chat-tool-panel, .chat-tool-group { background-color: var(--chat-raised); }
-.chat-tool-panel { --border-claude: transparent; }
+.chat-tool-panel { --border-deepseek: transparent; }
 .grid-disclosure {
   display: grid;
   grid-template-rows: 0fr;

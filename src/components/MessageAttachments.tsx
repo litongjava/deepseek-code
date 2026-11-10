@@ -80,18 +80,18 @@ const AttachmentCard: React.FC<{ attachment: Attachment; onClick: () => void }> 
     const ref = attachment.gh_ref || 'main';
     return (
       <div
-        className="relative w-28 h-28 rounded-xl border border-gray-200 dark:border-[#5B5B56] bg-white dark:bg-claude-input p-3 flex flex-col justify-between overflow-hidden shadow-sm"
+        className="relative w-28 h-28 rounded-xl border border-gray-200 dark:border-[#5B5B56] bg-white dark:bg-deepseek-input p-3 flex flex-col justify-between overflow-hidden shadow-sm"
         title={repo}
       >
         <div className="min-w-0">
-          <div className="text-[13px] font-medium text-claude-text leading-tight break-words line-clamp-2">
+          <div className="text-[13px] font-medium text-deepseek-text leading-tight break-words line-clamp-2">
             {repo}
           </div>
-          <div className="text-[11px] text-claude-textSecondary mt-1">
+          <div className="text-[11px] text-deepseek-textSecondary mt-1">
             {ref}
           </div>
         </div>
-        <div className="self-start flex items-center gap-1 px-1.5 py-0.5 text-[10px] font-medium border border-gray-200 dark:border-[#5B5B56] bg-gray-50 dark:bg-claude-input rounded text-claude-textSecondary uppercase">
+        <div className="self-start flex items-center gap-1 px-1.5 py-0.5 text-[10px] font-medium border border-gray-200 dark:border-[#5B5B56] bg-gray-50 dark:bg-deepseek-input rounded text-deepseek-textSecondary uppercase">
           <Github size={10} />
           GITHUB
         </div>
@@ -117,7 +117,7 @@ const AttachmentCard: React.FC<{ attachment: Attachment; onClick: () => void }> 
   if (isImage) {
     return (
       <div
-        className="relative w-28 h-28 rounded-xl overflow-hidden cursor-pointer border border-gray-200 hover:border-gray-300 dark:border-[#5B5B56] dark:hover:border-gray-400 group bg-white dark:bg-claude-input shadow-sm hover:opacity-90 transition-all"
+        className="relative w-28 h-28 rounded-xl overflow-hidden cursor-pointer border border-gray-200 hover:border-gray-300 dark:border-[#5B5B56] dark:hover:border-gray-400 group bg-white dark:bg-deepseek-input shadow-sm hover:opacity-90 transition-all"
         onClick={onClick}
       >
         <img
@@ -140,7 +140,7 @@ const AttachmentCard: React.FC<{ attachment: Attachment; onClick: () => void }> 
 
   return (
     <div
-      className="relative w-28 h-28 rounded-xl cursor-pointer border border-gray-200 hover:border-gray-300 dark:border-[#5B5B56] dark:hover:border-gray-400 group overflow-hidden transition-all bg-white dark:bg-claude-input p-3 flex flex-col justify-between shadow-sm"
+      className="relative w-28 h-28 rounded-xl cursor-pointer border border-gray-200 hover:border-gray-300 dark:border-[#5B5B56] dark:hover:border-gray-400 group overflow-hidden transition-all bg-white dark:bg-deepseek-input p-3 flex flex-col justify-between shadow-sm"
       onClick={onClick}
       title={`${attachment.file_name}${isTauri ? '\nClick to open in folder' : ''}`}
     >
@@ -151,20 +151,20 @@ const AttachmentCard: React.FC<{ attachment: Attachment; onClick: () => void }> 
       ) : (
         <>
           <div className="min-w-0">
-            <div className="text-[13px] font-medium text-claude-text truncate" title={attachment.file_name || 'file'}>
+            <div className="text-[13px] font-medium text-deepseek-text truncate" title={attachment.file_name || 'file'}>
               {attachment.file_name || 'file'}
             </div>
-            <div className="text-[11px] text-claude-textSecondary mt-0.5">
+            <div className="text-[11px] text-deepseek-textSecondary mt-0.5">
               {attachment.line_count ? `${attachment.line_count} lines` : (formatFileSize(attachment.file_size) || '文件')}
             </div>
           </div>
 
           <div className="flex items-center justify-between">
-            <div className="px-1.5 py-0.5 text-[10px] font-medium border border-gray-200 dark:border-[#5B5B56] bg-gray-50 dark:bg-claude-input rounded text-claude-textSecondary uppercase">
+            <div className="px-1.5 py-0.5 text-[10px] font-medium border border-gray-200 dark:border-[#5B5B56] bg-gray-50 dark:bg-deepseek-input rounded text-deepseek-textSecondary uppercase">
               {ext}
             </div>
             {isTauri && (
-              <FolderOpen size={12} className="text-claude-textSecondary opacity-0 group-hover:opacity-100 transition-opacity" />
+              <FolderOpen size={12} className="text-deepseek-textSecondary opacity-0 group-hover:opacity-100 transition-opacity" />
             )}
           </div>
         </>

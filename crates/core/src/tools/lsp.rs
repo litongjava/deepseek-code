@@ -965,7 +965,7 @@ async fn start_server(
         ..Default::default()
     };
     let initialize = async {
-        send(&mut writer,&json!({"jsonrpc":"2.0","id":1,"method":"initialize","params":{"processId":std::process::id(),"rootUri":root_uri.as_str(),"clientInfo":{"name":"claude-code-rust"},"initializationOptions":input.get("initialization_options").cloned().unwrap_or(json!({})),"capabilities":{"general":{"positionEncodings":["utf-16"]},"textDocument":{"diagnostic":{},"documentSymbol":{"hierarchicalDocumentSymbolSupport":true},"hover":{"contentFormat":["markdown","plaintext"]},"callHierarchy":{}},"workspace":{"applyEdit":false,"configuration":true,"workspaceFolders":true}},"workspaceFolders":state.workspace_folders}})).await?;
+        send(&mut writer,&json!({"jsonrpc":"2.0","id":1,"method":"initialize","params":{"processId":std::process::id(),"rootUri":root_uri.as_str(),"clientInfo":{"name":"deepseek-code"},"initializationOptions":input.get("initialization_options").cloned().unwrap_or(json!({})),"capabilities":{"general":{"positionEncodings":["utf-16"]},"textDocument":{"diagnostic":{},"documentSymbol":{"hierarchicalDocumentSymbolSupport":true},"hover":{"contentFormat":["markdown","plaintext"]},"callHierarchy":{}},"workspace":{"applyEdit":false,"configuration":true,"workspaceFolders":true}},"workspaceFolders":state.workspace_folders}})).await?;
         let initialized = response(&mut reader, &mut writer, 1, &mut state).await?;
         if let Some(encoding) = initialized["capabilities"]["positionEncoding"].as_str() {
             if encoding != "utf-16" {

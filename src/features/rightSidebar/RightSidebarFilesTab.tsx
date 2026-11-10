@@ -57,11 +57,11 @@ function WorkspaceFiles({ scope, activeFile, active }: { scope: WorkspaceScope; 
           <FilePreview file={file} active={active && file.id === activeFile?.id} diff={diffs.has(file.id)} reloadKey={revision} />
         </div>)}
       </div>
-      <div data-testid="workspace-file-tree" hidden={!visible} className={`min-h-0 overflow-auto ${activeFile ? 'w-[38%] min-w-[110px] max-w-[260px] shrink-0 border-l border-claude-border' : 'flex-1'}`}>
+      <div data-testid="workspace-file-tree" hidden={!visible} className={`min-h-0 overflow-auto ${activeFile ? 'w-[38%] min-w-[110px] max-w-[260px] shrink-0 border-l border-deepseek-border' : 'flex-1'}`}>
         {roots.map(root => <WorkspaceTree key={`${root.rootId}:${root.path}`} scope={scope} root={root} revision={revision}
           selected={activeFile?.rootId === root.rootId ? activeFile.relativePath : null} onOpen={relative => open(root, relative)} />)}
       </div>
-      {!activeFile && !visible && <p className="p-4 text-sm text-claude-textSecondary">File tree is hidden. Use “Show file tree” to browse files.</p>}
+      {!activeFile && !visible && <p className="p-4 text-sm text-deepseek-textSecondary">File tree is hidden. Use “Show file tree” to browse files.</p>}
     </div>
   </div>;
 }
@@ -80,12 +80,12 @@ function WorkspaceTree({ scope, root, revision, selected, onOpen }: { scope: Wor
   const state = tree.dirs[root.path];
   const open = (node: FsFileNode) => onOpen(node.path.slice(root.path.length + 1));
   return <section>
-    <div className="flex h-9 items-center gap-2 px-2 text-xs text-claude-textSecondary">
+    <div className="flex h-9 items-center gap-2 px-2 text-xs text-deepseek-textSecondary">
       <FolderOpen size={14} /><span className="min-w-0 flex-1 truncate" title={root.path}>{root.name}</span>
-      <button type="button" title={t('rightSidebar.filesRefresh')} aria-label={t('rightSidebar.filesRefresh')} onClick={tree.refresh} className="rounded p-1 hover:bg-claude-hover"><RefreshCw size={13} /></button>
+      <button type="button" title={t('rightSidebar.filesRefresh')} aria-label={t('rightSidebar.filesRefresh')} onClick={tree.refresh} className="rounded p-1 hover:bg-deepseek-hover"><RefreshCw size={13} /></button>
     </div>
-    {truncated && <p className="px-2 text-xs text-claude-textSecondary">Directory listing was limited.</p>}
-    {state?.status === 'error' ? <p role="alert" className="break-words p-2 text-xs text-red-600">{state.message}</p> : !state || (state.status === 'loading' && !state.entries) ? <p role="status" className="p-2 text-xs">{t('rightSidebar.filesLoading')}</p> : state.entries?.length === 0 ? <p className="p-3 text-xs text-claude-textSecondary">{t('rightSidebar.filesEmptyFolder')}</p> : <FileTree root={root.path} dirs={tree.dirs} expanded={tree.expanded} selectedPath={selected ? `${root.path}/${selected}` : null} onToggle={tree.toggle} onSetExpanded={tree.setDirExpanded} onOpenFile={open} />}
+    {truncated && <p className="px-2 text-xs text-deepseek-textSecondary">Directory listing was limited.</p>}
+    {state?.status === 'error' ? <p role="alert" className="break-words p-2 text-xs text-red-600">{state.message}</p> : !state || (state.status === 'loading' && !state.entries) ? <p role="status" className="p-2 text-xs">{t('rightSidebar.filesLoading')}</p> : state.entries?.length === 0 ? <p className="p-3 text-xs text-deepseek-textSecondary">{t('rightSidebar.filesEmptyFolder')}</p> : <FileTree root={root.path} dirs={tree.dirs} expanded={tree.expanded} selectedPath={selected ? `${root.path}/${selected}` : null} onToggle={tree.toggle} onSetExpanded={tree.setDirExpanded} onOpenFile={open} />}
   </section>;
 }
 
@@ -103,16 +103,16 @@ function FileSearch({ scope, roots, onOpen, onClose }: { scope: WorkspaceScope; 
     }, 250);
     return () => { window.clearTimeout(timer); controller.abort(); };
   }, [query, workspaceScopeKey(scope)]);
-  return <section className="max-h-[42%] shrink-0 overflow-auto border-b border-claude-border p-2" aria-label="Search project contents">
-    <div className="flex items-center gap-1"><input autoFocus aria-label="Search In Files" placeholder="Search project contents…" maxLength={256} value={query} onChange={event => setQuery(event.target.value)} className="min-w-0 flex-1 rounded bg-claude-hover px-2 py-1.5 text-xs text-claude-text" /><button type="button" aria-label="Close file search" title="Close file search" onClick={onClose}><X size={15} /></button></div>
+  return <section className="max-h-[42%] shrink-0 overflow-auto border-b border-deepseek-border p-2" aria-label="Search project contents">
+    <div className="flex items-center gap-1"><input autoFocus aria-label="Search In Files" placeholder="Search project contents…" maxLength={256} value={query} onChange={event => setQuery(event.target.value)} className="min-w-0 flex-1 rounded bg-deepseek-hover px-2 py-1.5 text-xs text-deepseek-text" /><button type="button" aria-label="Close file search" title="Close file search" onClick={onClose}><X size={15} /></button></div>
     {loading && <p role="status" className="p-2 text-xs">Searching…</p>}
     {error && <p role="alert" className="p-2 text-xs text-red-600">{error}</p>}
     {result && <>
-      <p className="py-2 text-xs text-claude-textSecondary">{result.matches.length} matches · {result.scannedFiles} files scanned{result.skippedFiles ? ` · ${result.skippedFiles} skipped` : ''}{result.truncated ? ' · Results limited' : ''}</p>
-      {result.notice && <p className="text-xs text-claude-textSecondary">{result.notice}</p>}
-      {result.matches.map((match, index) => <button type="button" key={`${match.rootId}:${match.relativePath}:${index}`} className="block w-full rounded px-2 py-1.5 text-left text-xs hover:bg-claude-hover" onClick={() => { const root = roots.find(root => root.rootId === match.rootId); if (root) onOpen(root, match.relativePath, match); }}>
-        <span className="block truncate text-claude-text">{roots.find(root => root.rootId === match.rootId)?.name}/{match.relativePath}:{match.line}:{match.startColumn}</span>
-        <span className="block truncate font-mono text-claude-textSecondary">{match.preview}</span>
+      <p className="py-2 text-xs text-deepseek-textSecondary">{result.matches.length} matches · {result.scannedFiles} files scanned{result.skippedFiles ? ` · ${result.skippedFiles} skipped` : ''}{result.truncated ? ' · Results limited' : ''}</p>
+      {result.notice && <p className="text-xs text-deepseek-textSecondary">{result.notice}</p>}
+      {result.matches.map((match, index) => <button type="button" key={`${match.rootId}:${match.relativePath}:${index}`} className="block w-full rounded px-2 py-1.5 text-left text-xs hover:bg-deepseek-hover" onClick={() => { const root = roots.find(root => root.rootId === match.rootId); if (root) onOpen(root, match.relativePath, match); }}>
+        <span className="block truncate text-deepseek-text">{roots.find(root => root.rootId === match.rootId)?.name}/{match.relativePath}:{match.line}:{match.startColumn}</span>
+        <span className="block truncate font-mono text-deepseek-textSecondary">{match.preview}</span>
       </button>)}
     </>}
   </section>;

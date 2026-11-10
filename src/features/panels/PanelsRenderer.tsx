@@ -49,7 +49,7 @@ export default function PanelsRenderer({
               className="fixed inset-0 z-[60] bg-black/20"
               onClick={() => setOpenedResearchMsgId(null)}
             />
-            <div className="fixed top-0 right-0 bottom-0 w-[440px] z-[61] bg-claude-bg border-l border-claude-border shadow-2xl flex flex-col">
+            <div className="fixed top-0 right-0 bottom-0 w-[440px] z-[61] bg-deepseek-bg border-l border-deepseek-border shadow-2xl flex flex-col">
               <ResearchPanel research={liveMsg.research as any} onClose={() => setOpenedResearchMsgId(null)} />
             </div>
           </>
@@ -84,7 +84,7 @@ export default function PanelsRenderer({
       {/* Terminal Panel */}
       {showTerminalPanel && (
         <div
-          className="fixed z-50 border border-claude-border bg-[#1e1e2e] flex flex-col shadow-2xl transition-all duration-300 ease-in-out"
+          className="fixed z-50 border border-deepseek-border bg-[#1e1e2e] flex flex-col shadow-2xl transition-all duration-300 ease-in-out"
           style={{
             top: '88px', right: '16px',
             width: 'min(800px, calc(100vw - 340px))',

@@ -215,12 +215,12 @@ const AgentNode: React.FC<{ agent: SwarmAgent; isExpanded: boolean }> = ({ agent
           <span className="text-lg">{agent.icon}</span>
           <div className="flex-1 min-w-0">
             <div className="flex items-center gap-2">
-              <span className="text-[13px] font-medium text-claude-text truncate">
+              <span className="text-[13px] font-medium text-deepseek-text truncate">
                 {agent.name}
               </span>
               <span className={`w-2 h-2 rounded-full ${stateColors[agent.state]} ${agent.state === 'executing' ? 'animate-pulse' : ''}`} />
             </div>
-            <div className="text-[11px] text-claude-textSecondary mt-0.5">
+            <div className="text-[11px] text-deepseek-textSecondary mt-0.5">
               {stateLabels[agent.state]}
             </div>
           </div>
@@ -228,7 +228,7 @@ const AgentNode: React.FC<{ agent: SwarmAgent; isExpanded: boolean }> = ({ agent
 
         {agent.assignedTask && (
           <div className="mt-2 px-2 py-1 rounded bg-black/10 dark:bg-white/5">
-            <div className="text-[11px] text-claude-textSecondary truncate">
+            <div className="text-[11px] text-deepseek-textSecondary truncate">
               {agent.assignedTask}
             </div>
           </div>
@@ -236,27 +236,27 @@ const AgentNode: React.FC<{ agent: SwarmAgent; isExpanded: boolean }> = ({ agent
 
         {agent.state !== 'idle' && agent.state !== 'completed' && agent.state !== 'failed' && (
           <div className="mt-2">
-            <div className="h-1 rounded-full bg-claude-border overflow-hidden">
+            <div className="h-1 rounded-full bg-deepseek-border overflow-hidden">
               <div
                 className="h-full rounded-full transition-all duration-500"
                 style={{ width: `${agent.progress}%`, backgroundColor: agent.color }}
               />
             </div>
-            <div className="text-[10px] text-claude-textSecondary mt-1 text-right">
+            <div className="text-[10px] text-deepseek-textSecondary mt-1 text-right">
               {Math.round(agent.progress)}%
             </div>
           </div>
         )}
 
         {isExpanded && (
-          <div className="mt-2 pt-2 border-t border-claude-border/50">
+          <div className="mt-2 pt-2 border-t border-deepseek-border/50">
             <div className="grid grid-cols-2 gap-2 text-[11px]">
-              <div className="text-claude-textSecondary">
-                <span className="text-claude-text">Duration</span>
+              <div className="text-deepseek-textSecondary">
+                <span className="text-deepseek-text">Duration</span>
                 <div>{agent.durationMs > 0 ? `${(agent.durationMs / 1000).toFixed(1)}s` : '-'}</div>
               </div>
-              <div className="text-claude-textSecondary">
-                <span className="text-claude-text">Tokens</span>
+              <div className="text-deepseek-textSecondary">
+                <span className="text-deepseek-text">Tokens</span>
                 <div>{agent.tokensUsed > 0 ? agent.tokensUsed.toLocaleString() : '-'}</div>
               </div>
             </div>
@@ -278,12 +278,12 @@ const TaskNode: React.FC<{ task: SubTask; agents: SwarmAgent[] }> = ({ task, age
   const assignedAgent = task.agentId ? agents.find(a => a.id === task.agentId) : null;
 
   return (
-    <div className="flex items-center gap-2 px-3 py-2 rounded-lg bg-claude-hover/50">
+    <div className="flex items-center gap-2 px-3 py-2 rounded-lg bg-deepseek-hover/50">
       {statusIcons[task.status]}
       <div className="flex-1 min-w-0">
-        <div className="text-[12px] text-claude-text truncate">{task.description}</div>
+        <div className="text-[12px] text-deepseek-text truncate">{task.description}</div>
         {assignedAgent && (
-          <div className="text-[10px] text-claude-textSecondary mt-0.5 flex items-center gap-1">
+          <div className="text-[10px] text-deepseek-textSecondary mt-0.5 flex items-center gap-1">
             <span>{assignedAgent.icon}</span>
             <span>{assignedAgent.name}</span>
           </div>
@@ -291,8 +291,8 @@ const TaskNode: React.FC<{ task: SubTask; agents: SwarmAgent[] }> = ({ task, age
       </div>
       {task.dependencies.length > 0 && (
         <div className="flex items-center gap-1">
-          <GitBranch size={10} className="text-claude-textSecondary" />
-          <span className="text-[10px] text-claude-textSecondary">{task.dependencies.length}</span>
+          <GitBranch size={10} className="text-deepseek-textSecondary" />
+          <span className="text-[10px] text-deepseek-textSecondary">{task.dependencies.length}</span>
         </div>
       )}
     </div>
@@ -643,11 +643,11 @@ const SwarmCollaboration: React.FC = () => {
   const progressPercent = totalAgents > 0 ? (completedAgents / totalAgents) * 100 : 0;
 
   return (
-    <div className="flex flex-col h-full bg-claude-bg">
-      <div className="flex-shrink-0 p-4 border-b border-claude-border">
+    <div className="flex flex-col h-full bg-deepseek-bg">
+      <div className="flex-shrink-0 p-4 border-b border-deepseek-border">
         <div className="flex items-center gap-2 mb-3">
           <Users size={18} className="text-[#3B82F6]" />
-          <h2 className="text-[15px] font-semibold text-claude-text">Swarm Collaboration</h2>
+          <h2 className="text-[15px] font-semibold text-deepseek-text">Swarm Collaboration</h2>
           <Sparkles size={14} className="text-[#A855F7] ml-auto" />
         </div>
 
@@ -656,14 +656,14 @@ const SwarmCollaboration: React.FC = () => {
             value={inputTask}
             onChange={(e) => setInputTask(e.target.value)}
             placeholder="Describe a complex task for swarm collaboration..."
-            className="w-full px-3 py-2 text-[13px] bg-claude-input border border-claude-border rounded-lg text-claude-text placeholder:text-claude-textSecondary/50 focus:outline-none focus:border-[#3B82F6] resize-none"
+            className="w-full px-3 py-2 text-[13px] bg-deepseek-input border border-deepseek-border rounded-lg text-deepseek-text placeholder:text-deepseek-textSecondary/50 focus:outline-none focus:border-[#3B82F6] resize-none"
             rows={3}
             disabled={!!session && session.status === 'running'}
           />
           <div className="flex items-center justify-between mt-2">
             <div className="flex items-center gap-2">
-              <Brain size={14} className="text-claude-textSecondary" />
-              <span className="text-[11px] text-claude-textSecondary">
+              <Brain size={14} className="text-deepseek-textSecondary" />
+              <span className="text-[11px] text-deepseek-textSecondary">
                 {isAnalyzing ? 'Analyzing complexity...' : inputTask ? `Complexity: ${analyzeComplexity(inputTask)}/10` : 'Enter a task to analyze'}
               </span>
             </div>
@@ -682,7 +682,7 @@ const SwarmCollaboration: React.FC = () => {
                   <>
                     <button
                       onClick={handlePauseSwarm}
-                      className="p-1.5 text-claude-textSecondary hover:text-claude-text hover:bg-claude-hover rounded-md transition-colors"
+                      className="p-1.5 text-deepseek-textSecondary hover:text-deepseek-text hover:bg-deepseek-hover rounded-md transition-colors"
                       title={isPaused ? 'Resume' : 'Pause'}
                     >
                       {isPaused ? <Play size={14} /> : <Pause size={14} />}
@@ -718,7 +718,7 @@ const SwarmCollaboration: React.FC = () => {
               <div className="flex items-center gap-3">
                 <div className="flex items-center gap-1.5">
                   <Target size={14} className="text-[#3B82F6]" />
-                  <span className="text-[12px] text-claude-text">Complexity</span>
+                  <span className="text-[12px] text-deepseek-text">Complexity</span>
                 </div>
                 <div className="flex items-center gap-1">
                   {Array.from({ length: 10 }).map((_, i) => (
@@ -734,14 +734,14 @@ const SwarmCollaboration: React.FC = () => {
                 <span className="text-[12px] font-medium text-[#3B82F6]">{session.complexity}/10</span>
               </div>
               <div className="flex items-center gap-1.5">
-                <Activity size={14} className="text-claude-textSecondary" />
-                <span className="text-[12px] text-claude-textSecondary">
+                <Activity size={14} className="text-deepseek-textSecondary" />
+                <span className="text-[12px] text-deepseek-textSecondary">
                   {completedAgents}/{totalAgents} agents done
                 </span>
               </div>
             </div>
 
-            <div className="h-1 rounded-full bg-claude-border overflow-hidden">
+            <div className="h-1 rounded-full bg-deepseek-border overflow-hidden">
               <div
                 className="h-full rounded-full bg-gradient-to-r from-[#3B82F6] to-[#10B981] transition-all duration-500"
                 style={{ width: `${progressPercent}%` }}
@@ -749,7 +749,7 @@ const SwarmCollaboration: React.FC = () => {
             </div>
 
             {showVisualization && session.status === 'running' && (
-              <div className="rounded-lg border border-claude-border overflow-hidden">
+              <div className="rounded-lg border border-deepseek-border overflow-hidden">
                 <SwarmVisualization agents={session.agents} />
               </div>
             )}
@@ -757,7 +757,7 @@ const SwarmCollaboration: React.FC = () => {
             <div>
               <button
                 onClick={() => setShowVisualization(prev => !prev)}
-                className="flex items-center gap-1.5 text-[12px] text-claude-textSecondary hover:text-claude-text transition-colors mb-2"
+                className="flex items-center gap-1.5 text-[12px] text-deepseek-textSecondary hover:text-deepseek-text transition-colors mb-2"
               >
                 {showVisualization ? <ChevronUp size={14} /> : <ChevronDown size={14} />}
                 {showVisualization ? 'Hide' : 'Show'} Agents ({totalAgents})
@@ -781,13 +781,13 @@ const SwarmCollaboration: React.FC = () => {
               <div>
                 <div className="flex items-center gap-1.5 mb-2">
                   <Split size={14} className="text-[#A855F7]" />
-                  <span className="text-[12px] font-medium text-claude-text">Task Breakdown ({session.subTasks.length})</span>
+                  <span className="text-[12px] font-medium text-deepseek-text">Task Breakdown ({session.subTasks.length})</span>
                 </div>
                 <div className="space-y-1">
                   {session.subTasks.map((task, index) => (
                     <div key={task.id} className="relative">
                       {index > 0 && (
-                        <div className="absolute left-4 -top-1 w-px h-1 bg-claude-border" />
+                        <div className="absolute left-4 -top-1 w-px h-1 bg-deepseek-border" />
                       )}
                       <TaskNode task={task} agents={session.agents} />
                     </div>
@@ -802,7 +802,7 @@ const SwarmCollaboration: React.FC = () => {
                   <CheckCircle2 size={16} className="text-emerald-400" />
                   <span className="text-[13px] font-medium text-emerald-400">Swarm Complete</span>
                 </div>
-                <div className="mt-2 text-[12px] text-claude-textSecondary">
+                <div className="mt-2 text-[12px] text-deepseek-textSecondary">
                   Duration: {((session.endTime || Date.now()) - session.startTime) / 1000}s ·
                   Agents: {totalAgents} ·
                   Tokens: {session.agents.reduce((sum, a) => sum + a.tokensUsed, 0).toLocaleString()}
@@ -816,11 +816,11 @@ const SwarmCollaboration: React.FC = () => {
       {!session && !isAnalyzing && (
         <div className="flex-1 flex items-center justify-center p-6">
           <div className="text-center max-w-xs">
-            <div className="w-16 h-16 mx-auto mb-4 rounded-full bg-claude-hover flex items-center justify-center">
+            <div className="w-16 h-16 mx-auto mb-4 rounded-full bg-deepseek-hover flex items-center justify-center">
               <Users size={28} className="text-[#3B82F6]" />
             </div>
-            <h3 className="text-[14px] font-medium text-claude-text mb-2">Swarm Collaboration</h3>
-            <p className="text-[12px] text-claude-textSecondary leading-relaxed">
+            <h3 className="text-[14px] font-medium text-deepseek-text mb-2">Swarm Collaboration</h3>
+            <p className="text-[12px] text-deepseek-textSecondary leading-relaxed">
               Enter a complex task and let multiple AI agents work together in parallel to accomplish it efficiently.
             </p>
             <div className="mt-4 space-y-2 text-left">
@@ -830,7 +830,7 @@ const SwarmCollaboration: React.FC = () => {
                 'Parallel agent execution',
                 'Real-time progress tracking',
               ].map((feature, i) => (
-                <div key={i} className="flex items-center gap-2 text-[11px] text-claude-textSecondary">
+                <div key={i} className="flex items-center gap-2 text-[11px] text-deepseek-textSecondary">
                   <ArrowRight size={12} className="text-[#3B82F6]" />
                   <span>{feature}</span>
                 </div>
