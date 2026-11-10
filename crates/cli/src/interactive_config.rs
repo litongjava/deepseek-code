@@ -4,8 +4,11 @@ use crate::terminal::input::TerminalInput;
 use crate::{args::Cli, config, session::Session};
 use anyhow::{bail, ensure, Context, Result};
 use clap::Parser;
-use deepseek_code_core::{config::ConfigManager, runtime::RuntimePaths};
-use serde_json::json;
+use deepseek_code_core::{
+    config::{ConfigManager, ProviderConfig},
+    runtime::RuntimePaths,
+};
+use serde_json::{json, Value};
 
 async fn ask(input: &mut TerminalInput, prompt: &str) -> Result<String> {
     let prompt = format!("{prompt}: ");
@@ -474,6 +477,311 @@ pub fn status(session: &Session) {
     );
 }
 
+/// The transport a saved model uses, as the list query names it.
+fn query_protocol(api: &str) -> &'static str {
+    match api {
+        "openai-responses" | "openai-codex-responses" => "responses",
+        "anthropic-messages" => "anthropic",
+        "google-generative-ai" => "gemini",
+        _ => "openai",
+    }
+}
+
+/// The address and protocol one query can use for this provider's whole list.
+/// A provider that routes each model to its own address or protocol cannot be
+/// synchronized from a single endpoint.
+fn refresh_endpoint(provider: &ProviderConfig) -> Result<(String, &'static str)> {
+    ensure!(
+        !provider.base_url.trim().is_empty(),
+        "Provider {} routes each model to its own address, so its list cannot be synchronized; refreshing it is not supported yet. Its configuration is unchanged.",
+        provider.id
+    );
+    let mut protocols: std::collections::BTreeSet<&'static str> = provider
+        .models
+        .iter()
+        .filter_map(|model| model.api.as_deref())
+        .filter(|api| !api.is_empty())
+        .map(query_protocol)
+        .collect();
+    if protocols.is_empty() {
+        protocols.insert(match provider.provider_type.as_str() {
+            "anthropic" | "claude" => "anthropic",
+            "gemini" => "gemini",
+            "responses" => "responses",
+            _ => "openai",
+        });
+    }
+    ensure!(
+        protocols.len() == 1,
+        "Provider {} serves its models over several protocols ({}), so one query cannot synchronize its list; refreshing it is not supported yet. Its configuration is unchanged.",
+        provider.id,
+        protocols.iter().copied().collect::<Vec<_>>().join(", ")
+    );
+    Ok((provider.base_url.trim().to_owned(), *protocols.iter().next().unwrap()))
+}
+
+/// The credential the saved provider already uses, in the same order as
+/// `config::select`: an inline key, the configured variable, the built-in
+/// convention, then the model family's usual variable.
+fn provider_api_key(provider: &ProviderConfig) -> Result<String> {
+    if let Some(key) = provider.api_key.as_deref().map(str::trim).filter(|key| !key.is_empty()) {
+        return Ok(key.to_owned());
+    }
+    let configured = provider.settings.get("apiKeyEnv").and_then(Value::as_str);
+    let builtin = provider
+        .settings
+        .get("builtinId")
+        .and_then(Value::as_str)
+        .map(deepseek_code_core::native_engine::provider_runtime::credential_env);
+    let first_model = provider.models.first().map(|model| model.id.as_str()).unwrap_or_default();
+    let model_default = if first_model.starts_with("deepseek") {
+        "DEEPSEEK_API_KEY".to_owned()
+    } else {
+        crate::legacy_api_config::ApiConfig::get_provider_metadata(first_model)
+            .map(|metadata| metadata.auth_env.to_owned())
+            .unwrap_or_else(|| "OPENAI_API_KEY".to_owned())
+    };
+    let name = configured.map(str::to_owned).or(builtin).unwrap_or(model_default);
+    std::env::var(&name)
+        .ok()
+        .map(|key| key.trim().to_owned())
+        .filter(|key| !key.is_empty())
+        .with_context(|| {
+            format!(
+                "The API key for {} comes from {name}, which is empty or unset; set it and run the refresh again. Nothing was changed.",
+                provider.id
+            )
+        })
+}
+
+/// Asks for the model that replaces one the endpoint no longer offers. Esc,
+/// an empty answer or `/cancel` cancels the whole refresh.
+async fn choose_replacement(
+    input: &mut TerminalInput,
+    provider: &str,
+    available: &[String],
+    gone: &str,
+) -> Result<String> {
+    if crate::terminal::picker::available() {
+        use crate::terminal::picker::{Entry, Picker};
+        let entries: Vec<Entry> = available
+            .iter()
+            .map(|model| Entry { title: model.clone(), detail: String::new() })
+            .collect();
+        let subtitle = format!("{provider} no longer offers {gone}; conversation history is kept");
+        let picker = Picker {
+            heading: "Choose a replacement model",
+            subtitle: Some(&subtitle),
+            entries: &entries,
+            search: entries.len() > 8,
+            hint: "Enter to confirm \u{b7} Esc to cancel",
+            selected: 0,
+        };
+        return match picker.run()? {
+            Some(index) => Ok(available[index].clone()),
+            None => bail!("Refresh cancelled; nothing was changed"),
+        };
+    }
+    command_eprintln!(
+        "{provider} no longer offers {gone}. Choose a replacement model; conversation history is kept:"
+    );
+    for (index, model) in available.iter().enumerate() {
+        command_eprintln!("  {:>2}. {model}", index + 1);
+    }
+    for _ in 0..3 {
+        let answer = ask(input, "Model ID or number (blank cancels)").await?;
+        if answer.is_empty() {
+            bail!("Refresh cancelled; nothing was changed");
+        }
+        if let Some(model) = answer
+            .parse::<usize>()
+            .ok()
+            .and_then(|number| number.checked_sub(1))
+            .and_then(|index| available.get(index))
+        {
+            return Ok(model.clone());
+        }
+        if available.contains(&answer) {
+            return Ok(answer);
+        }
+        command_eprintln!("  Enter a number from 1 to {} or a listed model ID.", available.len());
+    }
+    bail!("No replacement model chosen; nothing was changed")
+}
+
+/// Replaces one saved provider's model list with the endpoint's, keeping the
+/// current model and the saved default when they still exist.
+async fn refresh_provider(
+    paths: &RuntimePaths,
+    session: &mut Session,
+    input: &mut TerminalInput,
+    id: Option<&str>,
+) -> Result<()> {
+    // A malformed configuration is never overwritten; the save reloads it too.
+    let config = paths.read_config()?;
+    let target = id.unwrap_or(&session.provider_id).to_owned();
+    let provider = config
+        .providers
+        .iter()
+        .find(|provider| provider.id == target)
+        .cloned()
+        .with_context(|| {
+            let saved: Vec<&str> = config
+                .providers
+                .iter()
+                .map(|provider| provider.id.as_str())
+                .collect();
+            if saved.is_empty() {
+                "No saved providers; save one with /provider add before refreshing".to_owned()
+            } else {
+                format!(
+                    "Provider {target} is not saved (saved: {}). A provider from command-line options or environment variables has no saved model list; save it with /provider add first.",
+                    saved.join(", ")
+                )
+            }
+        })?;
+    let (base_url, protocol) = refresh_endpoint(&provider)?;
+    let key = provider_api_key(&provider)?;
+    command_eprintln!("Querying the model list from {base_url}\u{2026}");
+    let listed = tokio::select! {
+        result = tokio::time::timeout(
+            std::time::Duration::from_secs(20),
+            deepseek_code_core::native_engine::model_listing::list_models(protocol, &base_url, &key),
+        ) => match result {
+            Ok(result) => result,
+            Err(_) => bail!("The model list query timed out after 20 seconds; nothing was changed"),
+        },
+        _ = tokio::signal::ctrl_c() => bail!("Refresh cancelled; nothing was changed"),
+    };
+    let listed = match listed {
+        Ok(listed) => listed,
+        Err(error) => bail!("Could not query the model list: {error:#}\nNothing was changed."),
+    };
+    ensure!(!listed.is_empty(), "The endpoint returned no models; nothing was changed");
+
+    let api = provider
+        .models
+        .iter()
+        .find_map(|model| model.api.clone().filter(|api| !api.is_empty()));
+    let (models, sync) = deepseek_code_core::native_engine::model_listing::apply_upstream(
+        &provider.models,
+        &listed,
+        |model_id| {
+            let mut model = config::provider_template(model_id).models.remove(0);
+            model.id = model_id.to_owned();
+            model.name = model_id.to_owned();
+            model.api = api.clone();
+            model
+        },
+    );
+
+    let removed: std::collections::HashSet<&str> =
+        sync.removed.iter().map(String::as_str).collect();
+    let current_removed = target == session.provider_id && removed.contains(session.model.as_str());
+    let default = config::default_model(paths)
+        .filter(|(provider_id, _)| *provider_id == target)
+        .map(|(_, model)| model);
+    let default_removed = default
+        .as_deref()
+        .is_some_and(|model| removed.contains(model));
+    let mut gone: Vec<String> = Vec::new();
+    if current_removed {
+        gone.push(session.model.clone());
+    }
+    if default_removed {
+        if let Some(default) = &default {
+            if !gone.contains(default) {
+                gone.push(default.clone());
+            }
+        }
+    }
+    let available: Vec<String> = models
+        .iter()
+        .filter(|model| model.enabled)
+        .map(|model| model.id.clone())
+        .collect();
+    let replacement = if gone.is_empty() {
+        None
+    } else {
+        ensure!(
+            !available.is_empty(),
+            "{} no longer offers {} and no enabled model remains to replace it; nothing was changed.",
+            provider.id,
+            gone.join(" and ")
+        );
+        Some(choose_replacement(input, &provider.id, &available, &gone.join(" and ")).await?)
+    };
+
+    // Read again right before writing so a concurrent edit is never overwritten.
+    let config_path = paths.data_dir.join("config.json");
+    ensure!(
+        config_path.exists(),
+        "The configuration file was removed while refreshing; nothing was changed"
+    );
+    let mut manager = ConfigManager::new(paths.data_dir.clone());
+    manager.reload()?;
+    let latest = manager
+        .get_provider(&target)
+        .cloned()
+        .context("The provider was removed while its models were being refreshed; nothing was changed")?;
+    ensure!(
+        serde_json::to_value(&latest)? == serde_json::to_value(&provider)?,
+        "Provider {target} changed while its models were being refreshed; run the refresh again. Other configuration changes were preserved."
+    );
+    let mut updated = provider.clone();
+    updated.models = models;
+    manager.update_config(|config| {
+        if let Some(slot) = config.providers.iter_mut().find(|provider| provider.id == target) {
+            *slot = updated;
+        }
+    })?;
+
+    if current_removed {
+        let replacement = replacement
+            .as_deref()
+            .expect("a removed current model needs a replacement");
+        let selection = match select(paths, &target, replacement) {
+            Ok(selection) => selection,
+            Err(error) => {
+                // Leave the saved list and the session consistent.
+                manager.update_config(|config| {
+                    if let Some(slot) = config.providers.iter_mut().find(|provider| provider.id == target) {
+                        *slot = provider.clone();
+                    }
+                })?;
+                return Err(error.context(
+                    "The replacement model could not be selected; the previous model list was restored",
+                ));
+            }
+        };
+        session.switch(paths, selection).await?;
+        config::save_default_model(paths, &session.provider_id, &session.model)?;
+        command_eprintln!("Switched to {replacement}; conversation history preserved.");
+    } else if let Some(replacement) = replacement.as_deref() {
+        config::save_default_model(paths, &target, replacement)?;
+    }
+
+    command_eprintln!(
+        "Refreshed {target}: {} added, {} removed, {} unchanged.",
+        sync.added.len(),
+        sync.removed.len(),
+        sync.kept.len()
+    );
+    command_eprintln!(
+        "Added: {}",
+        if sync.added.is_empty() { "none".to_owned() } else { sync.added.join(", ") }
+    );
+    command_eprintln!(
+        "Removed: {}",
+        if sync.removed.is_empty() { "none".to_owned() } else { sync.removed.join(", ") }
+    );
+    command_eprintln!(
+        "Unchanged: {}",
+        if sync.kept.is_empty() { "none".to_owned() } else { sync.kept.join(", ") }
+    );
+    Ok(())
+}
+
 /// A provider offered by the first-run setup.
 struct Preset {
     id: &'static str,
@@ -841,6 +1149,22 @@ pub async fn handle(
         return Ok(true);
     }
     let argument = words.next();
+    if matches!(
+        (command, argument),
+        ("/provider", Some("refresh")) | ("/model", Some("refresh"))
+    ) {
+        let id = if command == "/provider" { words.next() } else { None };
+        ensure!(
+            words.next().is_none(),
+            if command == "/provider" {
+                "Usage: /provider refresh [ID]"
+            } else {
+                "Usage: /model refresh"
+            }
+        );
+        refresh_provider(paths, session, input, id).await?;
+        return Ok(true);
+    }
     if command == "/provider" && matches!(argument, Some("add" | "edit")) {
         if argument == Some("add") {
             if let Some(target) = words.next() {
@@ -883,7 +1207,7 @@ pub async fn handle(
     }
     ensure!(
         words.next().is_none(),
-        "Use /provider [ID|add|edit ID] or /model [ID]"
+        "Use /provider [ID|refresh [ID]|add|edit ID] or /model [ID|refresh]"
     );
     let config = paths.read_config()?;
     let providers: Vec<_> = config.providers.iter().filter(|p| p.enabled).collect();
