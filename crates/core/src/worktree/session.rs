@@ -313,9 +313,7 @@ pub fn resolve(
         path.is_absolute() && path.is_dir(),
         "Conversation worktree is unavailable; restore it before continuing"
     );
-    if super::hooks::resolve(conn, id, &path)? {
-        return Ok(Some(path));
-    }
+    if super::hooks::resolve(conn, id, &path)? { return Ok(Some(path)); }
     let common = |cwd: &Path| -> Result<PathBuf> {
         Ok(PathBuf::from(git(
             cwd,
