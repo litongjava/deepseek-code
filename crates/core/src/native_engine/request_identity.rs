@@ -1,4 +1,5 @@
 //! Task-scoped conversation identity and stable IDs for retried model requests.
+use super::provider_manager::ResolvedProvider;
 use reqwest::header::{HeaderMap, HeaderValue};
 use serde_json::{json, Value};
 use std::sync::atomic::{AtomicU32, Ordering};
@@ -40,6 +41,23 @@ pub(super) fn annotate(snapshot: &mut Value) {
     });
 }
 
+/// Only OpenCode routes by session, so it is the only endpoint that receives a
+/// conversation ID; every other provider sees request and turn IDs only.
+pub(super) fn is_opencode(provider: &ResolvedProvider) -> bool {
+    if provider
+        .provider
+        .builtin_id
+        .as_deref()
+        .is_some_and(|id| id == "opencode" || id == "opencode-go")
+    {
+        return true;
+    }
+    reqwest::Url::parse(provider.provider.base_url.trim())
+        .ok()
+        .and_then(|url| url.host_str().map(str::to_ascii_lowercase))
+        .is_some_and(|host| host == "opencode.ai" || host.ends_with(".opencode.ai"))
+}
+
 pub(super) struct RequestIdentity {
     headers: HeaderMap,
     attempt: AtomicU32,
@@ -49,7 +67,10 @@ impl RequestIdentity {
     pub(super) fn id(&self) -> &str {
         self.headers["x-request-id"].to_str().expect("generated request ID")
     }
-    pub(super) fn new(capture: Option<&super::request_context::ContextCapture>) -> Self {
+    pub(super) fn new(
+        capture: Option<&super::request_context::ContextCapture>,
+        opencode: bool,
+    ) -> Self {
         let mut headers = HeaderMap::new();
         let mut set = |name: &'static str, value: &str| {
             // Reject invalid external IDs without failing an otherwise valid request.
@@ -86,29 +107,21 @@ impl RequestIdentity {
             .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
         set("x-request-id", &request_id);
         set("x-client-request-id", &request_id);
-        let mut has_opencode_session = false;
+        let mut session = None;
         let _ = TURN.try_with(|identity| {
-            if let Some(session) = &identity.session {
-                has_opencode_session = true;
-                for name in [
-                    "x-session-id",
-                    "session-id",
-                    "thread-id",
-                    "x-dcl-session-id",
-                    "x-opencode-session",
-                ] {
-                    set(name, session);
-                }
+            if let Some(current) = &identity.session {
+                set("x-dcl-session-id", current);
+                session = Some(current.clone());
             }
             if let Some(parent) = &identity.parent {
                 set("x-parent-session-id", parent);
             }
             set("x-dcl-turn-id", &identity.turn);
         });
-        // OpenCode Go requires a routing session on every request, including
+        // OpenCode requires a routing session on every request, including
         // connection tests that run before a conversation exists.
-        if !has_opencode_session {
-            set("x-opencode-session", &request_id);
+        if opencode {
+            set("x-opencode-session", session.as_deref().unwrap_or(&request_id));
         }
         Self {
             headers,

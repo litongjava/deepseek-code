@@ -501,6 +501,12 @@ fn preset_by_id(id: &str) -> Option<&'static Preset> {
     PRESETS.iter().find(|preset| preset.id == id)
 }
 
+/// OpenCode Go advertises models over four protocols, so its preset keeps the
+/// whole catalog instead of a hand-picked subset.
+fn preset_uses_entire_catalog(preset: &Preset) -> bool {
+    preset.id == "opencode-go"
+}
+
 fn preset_key_env(preset: &Preset) -> String {
     match preset.builtin {
         Some(id) => deepseek_code_core::native_engine::provider_runtime::credential_env(id),
@@ -542,8 +548,26 @@ fn preset_provider(preset: &Preset, api_key: Option<String>) -> Result<deepseek_
             provider.base_url = entry["baseUrl"].as_str().unwrap_or_default().into();
             provider.settings.insert("builtinId".into(), json!(builtin));
             let catalog = entry["models"].as_array().cloned().unwrap_or_default();
-            provider.models = preset
-                .models
+            let wanted: Vec<&str> = if preset_uses_entire_catalog(preset) {
+                catalog
+                    .iter()
+                    .filter_map(|model| model["id"].as_str())
+                    .collect()
+            } else {
+                preset.models.to_vec()
+            };
+            // A catalog refresh that drops a model must fail loudly here rather
+            // than silently saving a shorter list.
+            let missing: Vec<_> = wanted
+                .iter()
+                .filter(|id| !catalog.iter().any(|model| model["id"] == **id))
+                .collect();
+            ensure!(
+                missing.is_empty(),
+                "Preset {} references models missing from the built-in catalog: {missing:?}",
+                preset.id
+            );
+            provider.models = wanted
                 .iter()
                 .filter_map(|id| catalog.iter().find(|model| model["id"] == *id))
                 .map(|model| {
@@ -585,6 +609,8 @@ async fn verify(paths: &RuntimePaths, provider: &str, model: &str) -> Result<()>
 
 async fn configure_preset(paths: &RuntimePaths, input: &mut TerminalInput, preset: &Preset) -> Result<Option<config::Selection>> {
     let key_env = preset_key_env(preset);
+    // Keep the chosen model across a retry with another key.
+    let mut chosen: Option<String> = None;
     loop {
         let api_key = if std::env::var_os(&key_env).is_some_and(|value| !value.is_empty()) {
             command_eprintln!("Using the API key from {key_env}.");
@@ -603,7 +629,15 @@ async fn configure_preset(paths: &RuntimePaths, input: &mut TerminalInput, prese
             Some(key)
         };
         let provider = preset_provider(preset, api_key.clone())?;
-        let model = provider.models[0].id.clone();
+        // List the available models after the key, then test the chosen one.
+        let model = match &chosen {
+            Some(model) => model.clone(),
+            None => {
+                let model = choose_default_model(input, &provider).await?;
+                chosen = Some(model.clone());
+                model
+            }
+        };
         let mut manager = ConfigManager::new(paths.data_dir.clone());
         manager.update_config(|c| {
             c.providers.retain(|p| p.id != provider.id);
@@ -621,7 +655,6 @@ async fn configure_preset(paths: &RuntimePaths, input: &mut TerminalInput, prese
                     preset.name.trim_end_matches(" (recommended)"),
                     if api_key.is_some() { " (key stored in config.json, readable only by you)" } else { "" }
                 );
-                let model = choose_default_model(input, preset).await?;
                 crate::config::save_default_model(paths, preset.id, &model)?;
                 return Ok(Some(select(paths, preset.id, &model)?));
             }
@@ -641,23 +674,51 @@ async fn configure_preset(paths: &RuntimePaths, input: &mut TerminalInput, prese
 }
 
 /// After the key works: which of the provider's models runs by default.
-async fn choose_default_model(input: &mut TerminalInput, preset: &Preset) -> Result<String> {
-    if preset.models.len() < 2 {
-        return Ok(preset.models[0].to_owned());
+async fn choose_default_model(
+    input: &mut TerminalInput,
+    provider: &deepseek_code_core::config::ProviderConfig,
+) -> Result<String> {
+    let models: Vec<_> = provider.models.iter().filter(|model| model.enabled).collect();
+    ensure!(!models.is_empty(), "This provider has no models to choose from");
+    if models.len() < 2 {
+        return Ok(models[0].id.clone());
     }
     if crate::terminal::picker::available() {
         use crate::terminal::picker::{Entry, Picker};
-        let entries: Vec<Entry> = preset.models.iter().map(|model| Entry { title: (*model).into(), detail: String::new() }).collect();
-        let picker = Picker { heading: "Choose the default model", subtitle: Some("Change it later with /model"), entries: &entries, search: false, hint: "Enter to confirm \u{b7} Esc for the first", selected: 0 };
-        return Ok(preset.models[picker.run()?.unwrap_or(0)].to_owned());
+        let entries: Vec<Entry> = models
+            .iter()
+            .map(|model| Entry {
+                title: model.id.clone(),
+                detail: if model.name == model.id { String::new() } else { model.name.clone() },
+            })
+            .collect();
+        let picker = Picker {
+            heading: "Choose the model to use",
+            subtitle: Some("Change it later with /model"),
+            entries: &entries,
+            // A gateway can list dozens of models, so let typing narrow them.
+            search: entries.len() > 8,
+            hint: "Enter to confirm \u{b7} Esc for the first",
+            selected: 0,
+        };
+        return Ok(models[picker.run()?.unwrap_or(0)].id.clone());
     }
-    command_eprintln!("\nChoose the default model:");
-    for (index, model) in preset.models.iter().enumerate() {
-        command_eprintln!("  {}. {model}", index + 1);
+    command_eprintln!("\nChoose the model to use:");
+    for (index, model) in models.iter().enumerate() {
+        command_eprintln!(
+            "  {:>2}. {}{}",
+            index + 1,
+            model.id,
+            model.api.as_deref().map(|api| format!(" ({api})")).unwrap_or_default()
+        );
     }
     let choice = ask(input, "Number [1]").await?;
-    let index = choice.parse::<usize>().ok().filter(|n| (1..=preset.models.len()).contains(n)).unwrap_or(1);
-    Ok(preset.models[index - 1].to_owned())
+    let index = choice
+        .parse::<usize>()
+        .ok()
+        .filter(|number| (1..=models.len()).contains(number))
+        .unwrap_or(1);
+    Ok(models[index - 1].id.clone())
 }
 
 /// First-run setup: pick a built-in provider (DeepSeek by default), a saved
@@ -987,14 +1048,35 @@ mod tests {
         assert_eq!(provider.settings["builtinId"], "opencode-go");
         assert_eq!(provider.settings["apiKeyEnv"], "OPENCODE_API_KEY");
         assert_eq!(preset_key_env(preset), "OPENCODE_API_KEY");
+        // The preset lists every catalog model, so /provider add can offer them.
+        let catalog = deepseek_code_core::native_engine::provider_runtime::catalog_entry(
+            "opencode-go",
+        )
+        .unwrap()["models"]
+            .as_array()
+            .unwrap()
+            .len();
+        assert_eq!(provider.models.len(), catalog);
         assert!(provider
             .models
             .iter()
             .all(|model| model.api.as_deref().is_some_and(|api| !api.is_empty())));
-        assert!(provider
+        let protocols: std::collections::BTreeSet<_> = provider
             .models
             .iter()
-            .any(|model| model.api.as_deref() == Some("openai-completions")));
+            .filter_map(|model| model.api.as_deref())
+            .collect();
+        assert_eq!(
+            protocols,
+            [
+                "anthropic-messages",
+                "google-generative-ai",
+                "openai-completions",
+                "openai-responses",
+            ]
+            .into_iter()
+            .collect()
+        );
         assert_eq!(
             provider.models.iter().find(|model| model.id == "deepseek-v4.1-flash").unwrap().api.as_deref(),
             Some("openai-completions")

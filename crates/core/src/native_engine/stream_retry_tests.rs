@@ -102,7 +102,9 @@ async fn empty_disconnect_recovers_without_duplicate_events_or_changed_identity(
             assert_eq!(requests.len(), 2);
             assert_eq!(requests[0].1, requests[1].1);
             for (index, (headers, _)) in requests.iter().enumerate() {
-                assert_eq!(headers["session-id"], "resumed-session");
+                // This provider is not OpenCode, so no session ID is disclosed.
+                assert!(!headers.contains_key("x-opencode-session"));
+                assert!(!headers.contains_key("session-id"));
                 assert_eq!(headers["x-request-id"], requests[0].0["x-request-id"]);
                 assert_eq!(headers["x-dcl-turn-id"], requests[0].0["x-dcl-turn-id"]);
                 assert_eq!(headers["x-dcl-retry-count"], index.to_string());

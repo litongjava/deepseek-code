@@ -45,6 +45,7 @@ async fn model_transports_preserve_identity_effort_and_retry_ids() {
         (None, "openai-completions", "single"),
         (Some("anthropic"), "anthropic-messages", "observed"),
         (Some("openai"), "openai-responses", "observed"),
+        (Some("opencode-go"), "openai-completions", "observed"),
     ]
     .into_iter()
     .enumerate()
@@ -127,9 +128,16 @@ async fn model_transports_preserve_identity_effort_and_retry_ids() {
                 let pair = &captured[index * 2..];
                 assert_eq!(pair.len(), 2);
                 for (attempt, (headers, body)) in pair.iter().enumerate() {
-                    assert_eq!(headers["session-id"], "session-child");
-                    assert_eq!(headers["thread-id"], "session-child");
-                    assert_eq!(headers["x-opencode-session"], "session-child");
+                    // Generic session headers are not sent to any provider.
+                    assert!(!headers.contains_key("x-session-id"));
+                    assert!(!headers.contains_key("session-id"));
+                    assert!(!headers.contains_key("thread-id"));
+                    if builtin == Some("opencode-go") {
+                        assert_eq!(headers["x-opencode-session"], "session-child");
+                    } else {
+                        assert!(!headers.contains_key("x-opencode-session"));
+                    }
+                    assert_eq!(headers["x-dcl-session-id"], "session-child");
                     assert_eq!(headers["x-parent-session-id"], "session-parent");
                     assert_eq!(headers["x-dcl-runtime"], "rust");
                     assert_eq!(headers["x-dcl-retry-count"], attempt.to_string());
@@ -169,20 +177,25 @@ async fn simultaneous_sessions_children_and_cancellation_do_not_leak_identity() 
         tasks.push(tokio::spawn(
             TurnIdentity::new(Some(session.into()), None).scope(async move {
                 barrier.wait().await;
-                assert_eq!(RequestIdentity::new(None).headers()["session-id"], session);
-                assert_eq!(
-                    RequestIdentity::new(None).headers()["x-opencode-session"],
-                    session
-                );
+                let headers = RequestIdentity::new(None, true).headers();
+                assert_eq!(headers["x-opencode-session"], session);
+                assert_eq!(headers["x-dcl-session-id"], session);
+                // A provider that is not OpenCode never receives a session ID.
+                let other = RequestIdentity::new(None, false).headers();
+                assert!(!other.contains_key("x-opencode-session"));
+                assert!(!other.contains_key("session-id"));
                 TurnIdentity::new(Some("child".into()), None)
                     .scope(async {
-                        let headers = RequestIdentity::new(None).headers();
+                        let headers = RequestIdentity::new(None, true).headers();
                         assert_eq!(headers["x-parent-session-id"], session);
-                        assert_eq!(headers["session-id"], "child");
                         assert_eq!(headers["x-opencode-session"], "child");
+                        assert!(!headers.contains_key("session-id"));
                     })
                     .await;
-                assert_eq!(RequestIdentity::new(None).headers()["session-id"], session);
+                assert_eq!(
+                    RequestIdentity::new(None, true).headers()["x-opencode-session"],
+                    session
+                );
             }),
         ));
     }
@@ -194,10 +207,55 @@ async fn simultaneous_sessions_children_and_cancellation_do_not_leak_identity() 
         TurnIdentity::new(Some("cancelled".into()), None).scope(std::future::pending::<()>()),
     )
     .await;
-    let headers = RequestIdentity::new(None).headers();
+    let headers = RequestIdentity::new(None, true).headers();
     assert!(!headers.contains_key("session-id"));
     // Outside a conversation the routing session falls back to the request ID.
     assert_eq!(headers["x-opencode-session"], headers["x-request-id"]);
+    assert!(!RequestIdentity::new(None, false)
+        .headers()
+        .contains_key("x-opencode-session"));
+}
+
+#[test]
+fn only_open_code_providers_are_routed_by_session() {
+    fn provider(builtin: Option<&str>, base_url: &str) -> ResolvedProvider {
+        let p: Provider = serde_json::from_value(json!({
+            "id": "fixture", "name": "fixture", "base_url": base_url,
+            "api_key": "test-only", "api_format": "openai", "builtin_id": builtin,
+            "enabled": true,
+            "models": [{"id":"fixture-model","name":"fixture","enabled":true,"supports_web_search":false}]
+        }))
+        .unwrap();
+        ResolvedProvider {
+            model: p.models[0].clone(),
+            provider: p,
+        }
+    }
+    assert!(is_opencode(&provider(
+        Some("opencode-go"),
+        "https://example.test/v1"
+    )));
+    assert!(is_opencode(&provider(
+        Some("opencode"),
+        "https://example.test/v1"
+    )));
+    // A custom provider that points at the OpenCode host is recognized too.
+    assert!(is_opencode(&provider(
+        None,
+        "https://opencode.ai/inference/go/openai/v1"
+    )));
+    assert!(is_opencode(&provider(None, "https://api.opencode.ai/v1")));
+    assert!(!is_opencode(&provider(
+        Some("openai"),
+        "https://api.openai.com/v1"
+    )));
+    assert!(!is_opencode(&provider(None, "https://example.com/v1")));
+    // A host that merely contains the name is not OpenCode.
+    assert!(!is_opencode(&provider(None, "https://not-opencode.ai/v1")));
+    assert!(!is_opencode(&provider(
+        None,
+        "https://opencode.ai.example.com/v1"
+    )));
 }
 
 #[test]

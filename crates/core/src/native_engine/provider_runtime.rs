@@ -343,7 +343,7 @@ pub async fn stream_with_schema_observed(
     } else {
         None
     };
-    let identity = super::request_identity::RequestIdentity::new(context_capture);
+    let identity = super::request_identity::RequestIdentity::new(context_capture, super::request_identity::is_opencode(provider));
     let response = retry_with_backoff(|| async {
         let mut request = client
             .post(&url)
