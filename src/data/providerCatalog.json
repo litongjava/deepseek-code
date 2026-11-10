@@ -13801,32 +13801,6 @@
           }
         },
         {
-          "id": "crouton-alpha-free",
-          "name": "Crouton Alpha Free",
-          "enabled": true,
-          "contextWindow": 1048576,
-          "maxTokens": 270000,
-          "inputTypes": [
-            "text",
-            "image"
-          ],
-          "api": "openai-responses",
-          "reasoning": true,
-          "baseUrl": "https://opencode.ai/inference/go/openai/v1",
-          "thinkingLevelMap": {
-            "off": null,
-            "minimal": "minimal",
-            "low": "low",
-            "medium": "medium",
-            "high": "high",
-            "xhigh": "xhigh",
-            "max": "max"
-          },
-          "compat": {
-            "sessionAffinityFormat": "openai-nosession"
-          }
-        },
-        {
           "id": "longcat-2.5-free",
           "name": "LongCat 2.5 Free",
           "enabled": true,

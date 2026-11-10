@@ -497,8 +497,8 @@ const PRESETS: &[Preset] = &[
     Preset { id: "zai-coding-cn", name: "Zhipu GLM Coding Plan (China)", builtin: Some("zai-coding-cn"), models: &["glm-5.1", "glm-4.7"], key_url: "https://open.bigmodel.cn/usercenter/apikeys" },
     Preset { id: "minimax-cn", name: "MiniMax (China)", builtin: Some("minimax-cn"), models: &["MiniMax-M3", "MiniMax-M2.7"], key_url: "https://platform.minimaxi.com/user-center/basic-information/interface-key" },
     Preset { id: "qwen-token-plan-cn", name: "Alibaba Qwen Token Plan (China)", builtin: Some("qwen-token-plan-cn"), models: &["qwen3.6-flash", "deepseek-v4-flash", "glm-5.1"], key_url: "https://bailian.console.aliyun.com/" },
-    // Saves the whole catalog (31 models over four protocols), not just these
-    // four; the first entry seeds the template and becomes the default model.
+    // Saves every catalog model over four protocols, not just these four; the
+    // first entry seeds the template and becomes the default model.
     Preset { id: "opencode-go", name: "OpenCode Go", builtin: Some("opencode-go"), models: &["deepseek-v4.1-flash", "deepseek-v4-pro", "glm-5.3", "kimi-k3"], key_url: "https://opencode.ai/auth" },
     Preset { id: "openrouter", name: "OpenRouter", builtin: Some("openrouter"), models: &["anthropic/claude-sonnet-4.5", "anthropic/claude-opus-4.6"], key_url: "https://openrouter.ai/keys" },
 ];
