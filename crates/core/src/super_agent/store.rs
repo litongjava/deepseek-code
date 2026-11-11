@@ -207,7 +207,9 @@ impl TaskStore {
                 operation_id: operation_id.into(),
                 timestamp: chrono::Utc::now().to_rfc3339(),
                 payload: json!({"spec":spec,"router_session_id":router_session_id}),
-                processed: false,
+                // The task row already is the created state; the event is the
+                // durable record of it, not a transition to apply later.
+                processed: true,
                 spec_version: 1,
                 review_round: 0,
             };
@@ -252,112 +254,78 @@ impl TaskStore {
     ) -> Result<EventAppend, StoreError> {
         validate_operation_id(&event.operation_id)?;
         self.run_tx("super-agent apply event", |tx| {
-            if let Some(existing) = event_by_operation(tx, &event.operation_id)? {
-                if existing.task_id == task_id
-                    && existing.event_type == event.event_type
-                    && existing.payload == event.payload
-                    && existing.session_id == event.session_id
-                    && existing.run_id == event.run_id
-                    && existing.causation_id == event.causation_id
-                {
-                    return Ok(EventAppend {
-                        event: existing,
-                        inserted: false,
-                    });
-                }
-                return Err(StoreError::OperationConflict {
-                    operation_id: event.operation_id.clone(),
-                    kind: format!("event:{}", existing.event_type),
-                });
-            }
-            let record = load_record_conn(tx, task_id)?
-                .ok_or_else(|| StoreError::TaskNotFound(task_id.into()))?;
-            if event.event_type == EventType::TaskCompleted {
-                let repos = load_repos_conn(tx, task_id)?;
-                let reports = load_reports_conn(tx, task_id)?;
-                let approvals = load_approvals_conn(tx, task_id)?;
-                let evidence = gate_evidence_conn(tx, &record)?;
-                if let Err(unmet) =
-                    state::completion_gate(&record, &repos, &reports, &approvals, &evidence)
-                {
-                    return Err(StoreError::Gate(unmet));
-                }
-            }
-            let transition = state::apply(&record, &event, policy)?;
-            let sequence: i64 = tx.query_row(
-                "SELECT COALESCE(MAX(sequence),0)+1 FROM sa_events WHERE task_id=?1",
-                [task_id],
-                |row| row.get(0),
-            )?;
-            let stored = Event {
-                event_id: uuid::Uuid::new_v4().to_string(),
-                task_id: task_id.into(),
-                pair_id: record.pair_id.clone(),
-                session_id: event.session_id.clone(),
-                run_id: event.run_id.clone(),
-                sequence: sequence as u64,
-                event_type: event.event_type,
-                causation_id: event.causation_id.clone(),
-                operation_id: event.operation_id.clone(),
-                timestamp: chrono::Utc::now().to_rfc3339(),
-                payload: event.payload.clone(),
-                processed: false,
-                spec_version: record.spec_version,
-                review_round: record.review_round,
-            };
-            let hash = event_hash(task_id, &event);
-            claim_operation(
-                tx,
-                &event.operation_id,
-                &format!("event:{}", event.event_type),
-                task_id,
-                &hash,
-            )?;
-            insert_event_conn(tx, &stored)?;
-            let mut updated = record;
-            updated.phase = transition.phase;
-            updated.status = transition.status;
-            updated.review_round = transition.review_round;
-            if let Some(spec) = transition.spec {
-                updated.spec = spec;
-                updated.title = updated.spec.title.clone();
-            }
-            updated.spec_version = transition.spec_version;
-            for (role, agent_status) in &transition.agent_updates {
-                match role {
-                    super::model::AgentRole::Coder => updated.coder.agent_status = *agent_status,
-                    super::model::AgentRole::Reviewer => {
-                        updated.reviewer.agent_status = *agent_status
-                    }
-                }
-            }
-            if let Some(cleanup) = transition.cleanup_status {
-                updated.cleanup_status = cleanup;
-            }
-            updated.updated_at = chrono::Utc::now().to_rfc3339();
-            update_task_conn(tx, &updated)?;
-            if !transition.invalidated.is_empty() {
-                let now = chrono::Utc::now().to_rfc3339();
-                tx.execute(
-                    "UPDATE sa_reports SET invalidated=1 WHERE task_id=?1 AND spec_version < ?2",
-                    params![task_id, transition.spec_version],
-                )?;
-                tx.execute(
-                    "UPDATE sa_approvals SET status=?2, resolved_at=?3 WHERE task_id=?1 AND status=?4 AND task_spec_version < ?5",
-                    params![
-                        task_id,
-                        ApprovalStatus::Expired.as_str(),
-                        now,
-                        ApprovalStatus::Pending.as_str(),
-                        transition.spec_version
-                    ],
-                )?;
+            let (stored, inserted) = append_event_conn(tx, task_id, &event)?;
+            if inserted {
+                apply_transition_conn(tx, &stored, policy)?;
             }
             Ok(EventAppend {
                 event: stored,
-                inserted: true,
+                inserted,
             })
         })
+    }
+
+    /// Appends a pending event without applying it. A member tool records what
+    /// happened; only the host-owned orchestrator turns it into state.
+    pub fn ingest_event(&self, task_id: &str, event: NewEvent) -> Result<EventAppend, StoreError> {
+        validate_operation_id(&event.operation_id)?;
+        self.run_tx("super-agent ingest event", |tx| {
+            let (stored, inserted) = append_event_conn(tx, task_id, &event)?;
+            Ok(EventAppend {
+                event: stored,
+                inserted,
+            })
+        })
+    }
+
+    /// Deterministically applies one pending event. Replaying a processed
+    /// event is a no-op, so two orchestrator ticks cannot apply it twice.
+    pub fn process_event(
+        &self,
+        event_id: &str,
+        policy: &StatePolicy,
+    ) -> Result<Option<TaskRecord>, StoreError> {
+        self.run_tx("super-agent process event", |tx| {
+            let event = event_by_id(tx, event_id)?
+                .ok_or_else(|| StoreError::Invalid(format!("event {event_id} not found")))?;
+            if event.processed {
+                return Ok(None);
+            }
+            let record = apply_transition_conn(tx, &event, policy)?;
+            Ok(Some(record))
+        })
+    }
+
+    /// Processes every pending event belonging to one Router, in sequence
+    /// order. The whole batch is one transaction: a rejected transition leaves
+    /// the earlier events pending rather than half-applied.
+    pub fn process_pending(
+        &self,
+        router_session: &str,
+        policy: &StatePolicy,
+    ) -> Result<Vec<TaskRecord>, StoreError> {
+        self.run_tx("super-agent process pending", |tx| {
+            let mut statement = tx.prepare(
+                "SELECT e.event_id FROM sa_events e JOIN sa_tasks t ON t.task_id=e.task_id WHERE t.router_session_id=?1 AND e.processed=0 ORDER BY e.task_id, e.sequence",
+            )?;
+            let ids = statement
+                .query_map([router_session], |row| row.get::<_, String>(0))?
+                .collect::<rusqlite::Result<Vec<_>>>()?;
+            let mut records = Vec::new();
+            for id in ids {
+                let event = event_by_id(tx, &id)?
+                    .ok_or_else(|| StoreError::Invalid(format!("event {id} not found")))?;
+                if event.processed {
+                    continue;
+                }
+                records.push(apply_transition_conn(tx, &event, policy)?);
+            }
+            Ok(records)
+        })
+    }
+
+    pub fn approval(&self, approval_id: &str) -> Result<Option<Approval>, StoreError> {
+        self.run_read(|connection| approval_by_id(connection, approval_id))
     }
 
     pub fn complete_task(
@@ -1057,6 +1025,144 @@ fn conflicting_lock(conn: &Connection, key: &str) -> Result<Option<String>, Stor
         }
     }
     Ok(None)
+}
+
+fn append_event_conn(
+    tx: &Transaction<'_>,
+    task_id: &str,
+    event: &NewEvent,
+) -> Result<(Event, bool), StoreError> {
+    if let Some(existing) = event_by_operation(tx, &event.operation_id)? {
+        if existing.task_id == task_id
+            && existing.event_type == event.event_type
+            && existing.payload == event.payload
+            && existing.session_id == event.session_id
+            && existing.run_id == event.run_id
+            && existing.causation_id == event.causation_id
+        {
+            return Ok((existing, false));
+        }
+        return Err(StoreError::OperationConflict {
+            operation_id: event.operation_id.clone(),
+            kind: format!("event:{}", existing.event_type),
+        });
+    }
+    let record =
+        load_record_conn(tx, task_id)?.ok_or_else(|| StoreError::TaskNotFound(task_id.into()))?;
+    let sequence: i64 = tx.query_row(
+        "SELECT COALESCE(MAX(sequence),0)+1 FROM sa_events WHERE task_id=?1",
+        [task_id],
+        |row| row.get(0),
+    )?;
+    let stored = Event {
+        event_id: uuid::Uuid::new_v4().to_string(),
+        task_id: task_id.into(),
+        pair_id: record.pair_id.clone(),
+        session_id: event.session_id.clone(),
+        run_id: event.run_id.clone(),
+        sequence: sequence as u64,
+        event_type: event.event_type,
+        causation_id: event.causation_id.clone(),
+        operation_id: event.operation_id.clone(),
+        timestamp: chrono::Utc::now().to_rfc3339(),
+        payload: event.payload.clone(),
+        processed: false,
+        spec_version: record.spec_version,
+        review_round: record.review_round,
+    };
+    claim_operation(
+        tx,
+        &event.operation_id,
+        &format!("event:{}", event.event_type),
+        task_id,
+        &event_hash(task_id, event),
+    )?;
+    insert_event_conn(tx, &stored)?;
+    Ok((stored, true))
+}
+
+fn apply_transition_conn(
+    tx: &Transaction<'_>,
+    event: &Event,
+    policy: &StatePolicy,
+) -> Result<TaskRecord, StoreError> {
+    let record = load_record_conn(tx, &event.task_id)?
+        .ok_or_else(|| StoreError::TaskNotFound(event.task_id.clone()))?;
+    if event.event_type == EventType::TaskCompleted {
+        let repos = load_repos_conn(tx, &event.task_id)?;
+        let reports = load_reports_conn(tx, &event.task_id)?;
+        let approvals = load_approvals_conn(tx, &event.task_id)?;
+        let evidence = gate_evidence_conn(tx, &record)?;
+        if let Err(unmet) = state::completion_gate(&record, &repos, &reports, &approvals, &evidence)
+        {
+            return Err(StoreError::Gate(unmet));
+        }
+    }
+    let draft = NewEvent {
+        session_id: event.session_id.clone(),
+        run_id: event.run_id.clone(),
+        event_type: event.event_type,
+        causation_id: event.causation_id.clone(),
+        operation_id: event.operation_id.clone(),
+        payload: event.payload.clone(),
+    };
+    let transition = state::apply(&record, &draft, policy)?;
+    let mut updated = record;
+    updated.phase = transition.phase;
+    updated.status = transition.status;
+    updated.review_round = transition.review_round;
+    if let Some(spec) = transition.spec {
+        updated.spec = spec;
+        updated.title = updated.spec.title.clone();
+    }
+    updated.spec_version = transition.spec_version;
+    for (role, agent_status) in &transition.agent_updates {
+        match role {
+            super::model::AgentRole::Coder => updated.coder.agent_status = *agent_status,
+            super::model::AgentRole::Reviewer => updated.reviewer.agent_status = *agent_status,
+        }
+    }
+    if let Some(cleanup) = transition.cleanup_status {
+        updated.cleanup_status = cleanup;
+    }
+    updated.updated_at = chrono::Utc::now().to_rfc3339();
+    update_task_conn(tx, &updated)?;
+    if !transition.invalidated.is_empty() {
+        let now = chrono::Utc::now().to_rfc3339();
+        tx.execute(
+            "UPDATE sa_reports SET invalidated=1 WHERE task_id=?1 AND spec_version < ?2",
+            params![event.task_id, transition.spec_version],
+        )?;
+        tx.execute(
+            "UPDATE sa_approvals SET status=?2, resolved_at=?3 WHERE task_id=?1 AND status=?4 AND task_spec_version < ?5",
+            params![
+                event.task_id,
+                ApprovalStatus::Expired.as_str(),
+                now,
+                ApprovalStatus::Pending.as_str(),
+                transition.spec_version
+            ],
+        )?;
+    }
+    tx.execute(
+        "UPDATE sa_events SET processed=1 WHERE event_id=?1",
+        [&event.event_id],
+    )?;
+    Ok(updated)
+}
+
+fn event_by_id(conn: &Connection, event_id: &str) -> Result<Option<Event>, StoreError> {
+    let row = conn
+        .query_row(
+            "SELECT event_id,task_id,pair_id,session_id,run_id,sequence,event_type,causation_id,operation_id,timestamp,payload_json,processed,spec_version,review_round FROM sa_events WHERE event_id=?1",
+            [event_id],
+            event_from_row,
+        )
+        .optional()?;
+    match row {
+        Some(event) => Ok(Some(event?)),
+        None => Ok(None),
+    }
 }
 
 fn validate_operation_id(value: &str) -> Result<(), StoreError> {

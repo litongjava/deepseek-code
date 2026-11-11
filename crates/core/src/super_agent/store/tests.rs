@@ -1131,3 +1131,134 @@ fn completion_rejects_an_empty_session_row_and_historical_round_events() {
         "{unmet:?}"
     );
 }
+
+#[test]
+fn ingested_events_stay_pending_until_processed_exactly_once() {
+    let (_temp, _data, store) = fixture();
+    let policy = StatePolicy::default();
+    let task = store
+        .create_task("router", spec("Pending"), "create")
+        .unwrap();
+    // The creation event is pending too; nothing has applied it yet.
+    assert_eq!(
+        store.get_task(&task.task_id).unwrap().unwrap().phase,
+        Phase::Discovering
+    );
+    let ingested = store
+        .ingest_event(
+            &task.task_id,
+            event(
+                EventType::DiscoveryCompleted,
+                "pending-discovery",
+                json!({}),
+            ),
+        )
+        .unwrap();
+    assert!(ingested.inserted);
+    assert!(!ingested.event.processed);
+    assert_eq!(
+        store.get_task(&task.task_id).unwrap().unwrap().phase,
+        Phase::Discovering,
+        "ingesting must not apply state"
+    );
+    // Re-ingesting the same operation is idempotent.
+    let replay = store
+        .ingest_event(
+            &task.task_id,
+            event(
+                EventType::DiscoveryCompleted,
+                "pending-discovery",
+                json!({}),
+            ),
+        )
+        .unwrap();
+    assert!(!replay.inserted);
+    assert_eq!(replay.event.event_id, ingested.event.event_id);
+
+    let processed = store.process_pending("router", &policy).unwrap();
+    assert_eq!(processed.len(), 1);
+    let record = store.get_task(&task.task_id).unwrap().unwrap();
+    assert_eq!(record.phase, Phase::Planning);
+    assert!(store
+        .events(&task.task_id)
+        .unwrap()
+        .iter()
+        .all(|event| event.processed));
+    // A second pass has nothing to do.
+    assert!(store.process_pending("router", &policy).unwrap().is_empty());
+
+    let mut applied = store
+        .events(&task.task_id)
+        .unwrap()
+        .into_iter()
+        .find(|event| event.operation_id == "pending-discovery")
+        .unwrap();
+    applied.processed = true;
+    // Processing the same event directly is a no-op even if called again.
+    assert!(store
+        .process_event(&ingested.event.event_id, &policy)
+        .unwrap()
+        .is_none());
+}
+
+#[test]
+fn a_pending_event_for_another_router_is_not_processed() {
+    let (_temp, _data, store) = fixture();
+    let policy = StatePolicy::default();
+    let task = store
+        .create_task("router-a", spec("Scoped"), "create")
+        .unwrap();
+    let other = store
+        .create_task("router-b", spec("Other"), "create-other")
+        .unwrap();
+    store
+        .ingest_event(
+            &task.task_id,
+            event(EventType::DiscoveryCompleted, "discovery-a", json!({})),
+        )
+        .unwrap();
+    store
+        .ingest_event(
+            &other.task_id,
+            event(EventType::DiscoveryCompleted, "discovery-b", json!({})),
+        )
+        .unwrap();
+    let processed = store.process_pending("router-a", &policy).unwrap();
+    assert_eq!(processed.len(), 1);
+    assert_eq!(
+        store.get_task(&task.task_id).unwrap().unwrap().phase,
+        Phase::Planning
+    );
+    assert_eq!(
+        store.get_task(&other.task_id).unwrap().unwrap().phase,
+        Phase::Discovering
+    );
+}
+
+#[test]
+fn a_rejected_transition_keeps_earlier_pending_events_unapplied() {
+    let (_temp, _data, store) = fixture();
+    let policy = StatePolicy::default();
+    let task = store
+        .create_task("router", spec("Reject"), "create")
+        .unwrap();
+    // IMPLEMENTATION_SUBMITTED is illegal in DISCOVERING.
+    store
+        .ingest_event(
+            &task.task_id,
+            event(EventType::ImplementationSubmitted, "too-early", json!({})),
+        )
+        .unwrap();
+    let error = store.process_pending("router", &policy).unwrap_err();
+    assert!(matches!(error, StoreError::Transition(_)));
+    assert_eq!(
+        store.get_task(&task.task_id).unwrap().unwrap().phase,
+        Phase::Discovering
+    );
+    assert!(store
+        .events(&task.task_id)
+        .unwrap()
+        .iter()
+        .filter(|event| event.event_type != EventType::TaskCreated)
+        .all(|event| !event.processed));
+}
