@@ -19,22 +19,31 @@
 //! * resize through the backend, and VEOF injected only when the live termios
 //!   says canonical mode and has a real VEOF character. Dropping the writer is
 //!   never used as EOF: portable-pty's writer would inject bytes on drop;
-//! * an RAII guard that kills and reaps exactly the process group this
-//!   transport started.
+//! * an RAII guard that terminates the whole terminal session this transport
+//!   started, then reaps its leader.
 //!
 //! Termination guarantee: portable-pty gives the child its own session with
-//! `setsid()`, so the child is both session leader and process-group leader
-//! (`pgid == pid`). [`PtyTransport::stop`] and `Drop` signal that one group.
-//! Processes that move to another process group (a job-control foreground job)
-//! or that are reparented elsewhere are **not** covered. That is why `TaskStop`
-//! integration is a later step and this module never claims a full descendant
-//! tree.
+//! `setsid()`, so the child is the session leader (`pid == pgid == sid`).
+//! [`PtyTransport::stop`] and `Drop` terminate every live process whose
+//! `/proc/<pid>/stat` session field equals that leader PID. That covers the
+//! leader's own group, the additional process groups an interactive shell
+//! creates for foreground and background jobs, and children forked while
+//! cleanup is running.
+//!
+//! A session ID is only a usable identity while the leader is unreaped: the
+//! leader's PID keeps the ID reserved, so no new session can appear under it.
+//! The leader is therefore signalled like any other member but reaped only once
+//! the session has no live members left.
+//!
+//! Boundary: a process that deliberately leaves the session (`setsid`, a
+//! daemonising double fork, a service manager) is no longer in this session and
+//! is not covered. Nothing here promises to find such a process.
 
 use anyhow::{anyhow, bail, ensure, Context, Result};
 use portable_pty::{native_pty_system, Child, CommandBuilder, ExitStatus, MasterPty, PtySize};
 use rustix::fd::OwnedFd;
 use std::{
-    ffi::{OsStr, OsString},
+    ffi::OsString,
     os::{fd::BorrowedFd, unix::ffi::OsStrExt},
     path::{Path, PathBuf},
     sync::{
@@ -105,6 +114,11 @@ pub(crate) struct ReadOutcome {
     pub eof: bool,
     pub timed_out: bool,
     pub cancelled: bool,
+    /// A stop was requested but cleanup is not confirmed yet, and this call
+    /// found nothing queued. That is **not** end of output: a live child may
+    /// still write, and a failed cleanup means the terminal may never close.
+    /// Callers must not treat this as a final read.
+    pub cleanup_pending: bool,
 }
 
 #[derive(Debug)]
@@ -156,61 +170,104 @@ impl From<anyhow::Error> for EofError {
     }
 }
 
-/// The direct PTY child and the process group it created.
+/// The direct PTY child, its session identity and the unreaped leader handle.
 ///
-/// The group is the child's own PID because portable-pty calls `setsid()` in
-/// the child. Nothing else is signalled: no current foreground group, no broad
-/// PID range. `Drop` cleans up only while [`Self::armed`], which an explicit
+/// `session` is the child's own PID, because portable-pty calls `setsid()` in
+/// the child. While the child is not reaped, that PID stays allocated and the
+/// session ID stays reserved, so "session field equals `session`" is a precise
+/// ownership test rather than a heuristic. Nothing is signalled by name or by
+/// PID range. `Drop` cleans up only while [`Self::armed`], which a successful
 /// [`Self::stop`] clears.
 struct OwnedChild {
     child: Box<dyn Child + Send + Sync>,
-    group: u32,
+    session: u32,
     finished: Option<ExitStatus>,
     armed: bool,
 }
 
 impl OwnedChild {
-    fn new(child: Box<dyn Child + Send + Sync>, group: u32) -> Self {
+    fn new(child: Box<dyn Child + Send + Sync>, session: u32) -> Self {
         Self {
             child,
-            group,
+            session,
             finished: None,
             armed: true,
         }
     }
 
     fn process_id(&self) -> u32 {
-        self.group
+        self.session
     }
 
-    /// Signal this child's original process group, then reap with a bound.
+    /// Terminate every live process in the owned terminal session, then reap the
+    /// leader.
     ///
-    /// The group is signalled *before* any `try_wait`: until the leader is
-    /// reaped its PID still names this process group, so `-pid` cannot reach an
-    /// unrelated group. This also reaches descendants that stay in the original
-    /// group after the leader exits normally (for example a background child
-    /// that ignores SIGHUP), which a "reap first, signal only if still alive"
-    /// order would miss. `armed` is cleared only after the reap succeeds, so an
-    /// error leaves cleanup enabled for `Drop` or a later explicit stop.
+    /// Each pass signals the session's members through pidfds, re-inspects the
+    /// session, and only reports success when no live member is left. That
+    /// covers foreground and background job-control groups that are separate
+    /// from the leader's group, and also a child forked while cleanup runs,
+    /// because a forked child is found by the next pass.
+    ///
+    /// The leader is never reaped before the session is empty: reaping it would
+    /// release the session ID and allow an unrelated new session to appear under
+    /// the same ID while this cleanup still enumerates it. When the bound is
+    /// exceeded, the error names the remaining PIDs and groups, and `armed`
+    /// stays set so `Drop` or a later stop retries instead of reporting a clean
+    /// shutdown.
+    ///
     /// Calling it again returns the cached status, so repeat stops are equal.
     fn stop(&mut self) -> Result<Option<ExitStatus>> {
+        self.stop_with(&ProcFs)
+    }
+
+    /// [`Self::stop`] against an injected view of the process table.
+    ///
+    /// The source parameter exists so tests can prove that an unreadable or
+    /// unparsable record is reported as uncertainty instead of being skipped as
+    /// a vanished process. Production always passes [`ProcFs`].
+    fn stop_with(&mut self, source: &dyn ProcSource) -> Result<Option<ExitStatus>> {
         if let Some(status) = &self.finished {
             return Ok(Some(status.clone()));
         }
-        if let Some(pid) = rustix::process::Pid::from_raw(self.group as i32) {
-            match rustix::process::kill_process_group(pid, rustix::process::Signal::KILL) {
-                // Signalled, or the group is already empty (for example only a
-                // zombie leader was left): reaping is safe in both cases.
-                Ok(()) | Err(rustix::io::Errno::SRCH) => {}
-                // Any other failure means the original group was not signalled.
-                // Do not reap or disarm here: reporting a successful cleanup
-                // would be false, and Drop or a later stop must retry.
-                Err(error) => {
-                    return Err(error).context("Signalling the PTY child's original process group")
-                }
-            }
-        }
+        let session = self.session;
         let deadline = Instant::now() + STOP_BOUND;
+        loop {
+            let signal_error = signal_session_with(source, session).err();
+            // If this read fails, termination cannot be established. Do not
+            // reap and do not clear `armed`.
+            let members = session_members_with(source, session)
+                .context("Reading the owned terminal session; cleanup cannot be verified")?;
+            if members.is_empty() {
+                return match self.reap(deadline) {
+                    Ok(status) => Ok(status),
+                    Err(error) => Err(match signal_error {
+                        Some(signal_error) => error.context(format!("{signal_error:#}")),
+                        None => error,
+                    }),
+                };
+            }
+            if Instant::now() >= deadline {
+                let remaining: Vec<String> = members
+                    .iter()
+                    .map(|member| format!("PID {} in group {}", member.pid, member.group))
+                    .collect();
+                let mut error = anyhow!(
+                    "The owned terminal session {session} still has {} live process(es) after {STOP_BOUND:?}: {}. The session was not terminated.",
+                    members.len(),
+                    remaining.join(", ")
+                );
+                if let Some(signal_error) = signal_error {
+                    error = error.context(format!("{signal_error:#}"));
+                }
+                // `armed` stays true: Drop or a later stop must retry.
+                return Err(error);
+            }
+            std::thread::sleep(Duration::from_millis(5));
+        }
+    }
+
+    /// Reap the leader once the session has no live members.
+    fn reap(&mut self, deadline: Instant) -> Result<Option<ExitStatus>> {
         loop {
             match self.child.try_wait() {
                 Ok(Some(status)) => {
@@ -222,8 +279,8 @@ impl OwnedChild {
                     std::thread::sleep(Duration::from_millis(5));
                 }
                 Ok(None) => bail!(
-                    "PTY child {} did not exit within {STOP_BOUND:?} after SIGKILL",
-                    self.group
+                    "The owned terminal session {} has no live processes, but its leader did not exit within {STOP_BOUND:?}",
+                    self.session
                 ),
                 Err(error) => return Err(error).context("Reaping the PTY child"),
             }
@@ -248,6 +305,19 @@ pub(crate) struct PtyTransport {
     read_fd: OwnedFd,
     write_fd: OwnedFd,
     write_gate: Mutex<()>,
+    /// Set when [`PtyTransport::stop`] begins. Blocked reads and writes observe
+    /// it within one poll slice, so writes end deterministically and reads stop
+    /// waiting for new output.
+    stop_requested: AtomicBool,
+    /// Set only after the owned session was verified empty and the leader was
+    /// reaped. Until then an empty read means "nothing queued yet", not "output
+    /// is final": a child can still be alive and write while cleanup runs.
+    cleanup_done: AtomicBool,
+    /// Test-only pause between the stop request and signalling, so a test can
+    /// inspect the pending window deterministically. Never present in a release
+    /// build.
+    #[cfg(test)]
+    stop_hook: Mutex<Option<Box<dyn FnMut() + Send>>>,
 }
 
 impl PtyTransport {
@@ -277,13 +347,18 @@ impl PtyTransport {
                     eof: false,
                     timed_out: false,
                     cancelled: true,
+                    cleanup_pending: false,
                 });
+            }
+            if self.stop_requested.load(Ordering::Acquire) {
+                return self.read_after_stop(max);
             }
             match wait_for(
                 &self.read_fd,
                 rustix::event::PollFlags::IN,
                 deadline,
                 cancelled,
+                &self.stop_requested,
             )? {
                 Waited::Cancelled => {
                     return Ok(ReadOutcome {
@@ -291,6 +366,7 @@ impl PtyTransport {
                         eof: false,
                         timed_out: false,
                         cancelled: true,
+                        cleanup_pending: false,
                     })
                 }
                 Waited::TimedOut => {
@@ -299,8 +375,14 @@ impl PtyTransport {
                         eof: false,
                         timed_out: true,
                         cancelled: false,
+                        cleanup_pending: false,
                     })
                 }
+                // A stopped transport stops waiting for new output, but it does
+                // not throw away what the terminal already queued: one
+                // nonblocking read returns that tail so a caller can still see
+                // final diagnostics before EOF.
+                Waited::Stopped => return self.read_after_stop(max),
                 Waited::Ready => {}
             }
             let mut buffer = vec![0u8; max];
@@ -311,6 +393,7 @@ impl PtyTransport {
                         eof: true,
                         timed_out: false,
                         cancelled: false,
+                        cleanup_pending: false,
                     })
                 }
                 Ok(count) => {
@@ -320,6 +403,7 @@ impl PtyTransport {
                         eof: false,
                         timed_out: false,
                         cancelled: false,
+                        cleanup_pending: false,
                     });
                 }
                 Err(rustix::io::Errno::AGAIN) | Err(rustix::io::Errno::INTR) => continue,
@@ -330,9 +414,74 @@ impl PtyTransport {
                         eof: true,
                         timed_out: false,
                         cancelled: false,
+                        cleanup_pending: false,
                     })
                 }
                 Err(error) => return Err(error).context("Reading from the PTY master"),
+            }
+        }
+    }
+
+    /// Read what the terminal had already queued, without waiting.
+    ///
+    /// This is the post-stop read path. It performs one nonblocking `read(2)`
+    /// and returns at most `max` bytes, so a caller loops until a final outcome
+    /// to collect the whole tail; `max` still bounds one call, so draining is
+    /// page-capped.
+    ///
+    /// Finality is deliberately conservative:
+    ///
+    /// * a zero-byte read or `EIO` is real terminal closure, so `eof` is true;
+    /// * `EAGAIN` while cleanup is confirmed is also final, because the session
+    ///   was verified empty and the leader reaped;
+    /// * `EAGAIN` while cleanup is still pending (or failed) is **not** final:
+    ///   `cleanup_pending` is set and `eof` stays false, because a live child may
+    ///   still write and a failed cleanup may never close the terminal.
+    fn read_after_stop(&self, max: usize) -> Result<ReadOutcome> {
+        let mut buffer = vec![0u8; max];
+        loop {
+            match rustix::io::read(&self.read_fd, &mut buffer[..]) {
+                Ok(0) => {
+                    return Ok(ReadOutcome {
+                        bytes: Vec::new(),
+                        eof: true,
+                        timed_out: false,
+                        cancelled: false,
+                        cleanup_pending: false,
+                    })
+                }
+                Ok(count) => {
+                    buffer.truncate(count);
+                    return Ok(ReadOutcome {
+                        bytes: buffer,
+                        eof: false,
+                        timed_out: false,
+                        cancelled: false,
+                        cleanup_pending: false,
+                    });
+                }
+                Err(rustix::io::Errno::AGAIN) => {
+                    let confirmed = self.cleanup_done.load(Ordering::Acquire);
+                    return Ok(ReadOutcome {
+                        bytes: Vec::new(),
+                        eof: confirmed,
+                        timed_out: false,
+                        cancelled: false,
+                        cleanup_pending: !confirmed,
+                    });
+                }
+                Err(rustix::io::Errno::INTR) => continue,
+                // The slave side is gone, which is EOF once the queue is empty.
+                Err(rustix::io::Errno::IO) => {
+                    return Ok(ReadOutcome {
+                        bytes: Vec::new(),
+                        eof: true,
+                        timed_out: false,
+                        cancelled: false,
+                        cleanup_pending: false,
+                    })
+                }
+                Err(error) => return Err(error).context("Reading buffered PTY output after stop"),
             }
         }
     }
@@ -349,6 +498,9 @@ impl PtyTransport {
     /// cancellation flag are rechecked each slice.
     fn acquire_gate<'a>(&'a self, deadline: Instant, cancelled: Option<&AtomicBool>) -> Gate<'a> {
         loop {
+            if self.stop_requested.load(Ordering::Acquire) {
+                return Gate::Stopped;
+            }
             if is_cancelled(cancelled) {
                 return Gate::Cancelled;
             }
@@ -399,6 +551,15 @@ impl PtyTransport {
                     closed: false,
                 })
             }
+            Gate::Stopped => {
+                return Ok(WriteOutcome {
+                    accepted: 0,
+                    remaining: total,
+                    timed_out: false,
+                    cancelled: false,
+                    closed: true,
+                })
+            }
         };
         let mut accepted = 0usize;
         while accepted < total {
@@ -416,6 +577,7 @@ impl PtyTransport {
                 rustix::event::PollFlags::OUT,
                 request.deadline,
                 request.cancelled,
+                &self.stop_requested,
             )? {
                 Waited::Cancelled => {
                     return Ok(WriteOutcome {
@@ -433,6 +595,17 @@ impl PtyTransport {
                         timed_out: true,
                         cancelled: false,
                         closed: false,
+                    })
+                }
+                // Stopped: the session is being torn down. Report exactly the
+                // bytes the terminal took and never write anything else.
+                Waited::Stopped => {
+                    return Ok(WriteOutcome {
+                        accepted,
+                        remaining: total - accepted,
+                        timed_out: false,
+                        cancelled: false,
+                        closed: true,
                     })
                 }
                 Waited::Ready => {}
@@ -552,9 +725,59 @@ impl PtyTransport {
         Ok(EofOutcome { byte })
     }
 
-    /// Terminate this transport's process group and return its exit status.
+    /// Terminate the owned terminal session and return the leader's exit status.
+    ///
+    /// `stop_requested` is published before cleanup begins: concurrent writes
+    /// end as `closed` with the bytes they already handed to the terminal, and
+    /// concurrent reads stop waiting for new output but still return whatever
+    /// the terminal queued. `cleanup_done` is published only after the session
+    /// was verified empty and the leader reaped, which is what makes an empty
+    /// read final. Calling `stop` again returns the cached status; a failed
+    /// cleanup is retried, not reported as success.
     pub(crate) fn stop(&self) -> Result<Option<ExitStatus>> {
-        lock(&self.child).stop()
+        self.stop_requested.store(true, Ordering::Release);
+        #[cfg(test)]
+        self.run_stop_hook();
+        let result = lock(&self.child).stop();
+        if result.is_ok() {
+            self.cleanup_done.store(true, Ordering::Release);
+        }
+        result
+    }
+
+    /// Run the test-only pause installed by [`Self::install_stop_hook`].
+    #[cfg(test)]
+    fn run_stop_hook(&self) {
+        let hook = lock(&self.stop_hook).take();
+        if let Some(mut hook) = hook {
+            hook();
+        }
+    }
+
+    /// Install a one-shot callback between "stop requested" and "cleanup
+    /// starts". Test-only: it lets a test inspect the pending window
+    /// deterministically instead of racing a millisecond.
+    #[cfg(test)]
+    fn install_stop_hook(&self, hook: Box<dyn FnMut() + Send>) {
+        *lock(&self.stop_hook) = Some(hook);
+    }
+
+    /// The terminal's current foreground process group (`tcgetpgrp`).
+    ///
+    /// This is diagnostic only. Cleanup never uses it as a containment proof:
+    /// an interactive shell keeps only one group in the foreground while other
+    /// job groups are alive in the background.
+    #[cfg(test)]
+    fn foreground_group(&self) -> Option<u32> {
+        lock(&self.master)
+            .process_group_leader()
+            .map(|pid| pid as u32)
+    }
+
+    /// The slave device path, used by tests to prove the descriptor was closed.
+    #[cfg(test)]
+    fn tty_path(&self) -> Option<PathBuf> {
+        lock(&self.master).tty_name()
     }
 }
 
@@ -620,6 +843,10 @@ pub(crate) fn spawn(spec: &SpawnSpec) -> Result<PtyTransport> {
         read_fd,
         write_fd,
         write_gate: Mutex::new(()),
+        stop_requested: AtomicBool::new(false),
+        cleanup_done: AtomicBool::new(false),
+        #[cfg(test)]
+        stop_hook: Mutex::new(None),
     })
 }
 
@@ -662,11 +889,213 @@ fn lock<T>(mutex: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
         .unwrap_or_else(|poisoned| poisoned.into_inner())
 }
 
+/// One live process observed inside the owned terminal session.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct SessionMember {
+    pid: u32,
+    group: u32,
+    start: u64,
+}
+
+/// The `/proc/<pid>/stat` fields this module needs.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ProcStat {
+    state: char,
+    group: u32,
+    session: u32,
+    start: u64,
+}
+
+/// Parse the fields of `/proc/<pid>/stat` that follow the command name.
+///
+/// The command name is parenthesised and may contain spaces, `)` or `(`, so
+/// everything is taken after the last `)`. Field 22 is the creation time in
+/// clock ticks; it is the only per-process value that distinguishes two
+/// processes that held the same PID. `None` means the record is not parsable,
+/// which callers treat as "unknown", never as "gone".
+fn parse_proc_stat(text: &str) -> Option<ProcStat> {
+    let (_, rest) = text.rsplit_once(')')?;
+    let fields: Vec<&str> = rest.split_whitespace().collect();
+    if fields.len() < 20 {
+        return None;
+    }
+    Some(ProcStat {
+        state: fields[0].chars().next()?,
+        group: fields[2].parse().ok()?,
+        session: fields[3].parse().ok()?,
+        start: fields[19].parse().ok()?,
+    })
+}
+
+/// Where the facts used for session ownership come from.
+///
+/// The production implementation reads `/proc`. Tests inject a source that
+/// fails in specific ways, so "cannot read" is proven to be distinct from "the
+/// process is gone" without weakening the real reader or falling back to
+/// process names.
+trait ProcSource {
+    /// PID entries currently listed in `/proc`.
+    fn list_pids(&self) -> Result<Vec<u32>>;
+    /// The stat fields of one process.
+    ///
+    /// `Ok(None)` means the process no longer exists (`ENOENT`), which is the
+    /// normal race against a member exiting. `Err` means its state could not be
+    /// established (permission, I/O, unparsable record); cleanup must treat
+    /// that as unknown rather than as disappearance.
+    fn stat(&self, pid: u32) -> Result<Option<ProcStat>>;
+}
+
+struct ProcFs;
+
+impl ProcSource for ProcFs {
+    fn list_pids(&self) -> Result<Vec<u32>> {
+        let entries = std::fs::read_dir("/proc")
+            .context("Listing /proc to find session members; ownership cannot be verified")?;
+        let mut pids = Vec::new();
+        for entry in entries {
+            // An entry that cannot be read is an unknown process, not an
+            // absent one: an empty-looking session could hide a live member.
+            let entry =
+                entry.context("Reading one /proc entry; session membership cannot be verified")?;
+            if let Some(pid) = entry
+                .file_name()
+                .to_str()
+                .and_then(|name| name.parse::<u32>().ok())
+            {
+                pids.push(pid);
+            }
+        }
+        Ok(pids)
+    }
+
+    fn stat(&self, pid: u32) -> Result<Option<ProcStat>> {
+        let text = match std::fs::read_to_string(format!("/proc/{pid}/stat")) {
+            Ok(text) => text,
+            // The only expected failure is that the process exited between the
+            // listing and this read.
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+            Err(error) => {
+                return Err(error).with_context(|| {
+                    format!("Reading /proc/{pid}/stat; its session cannot be verified")
+                })
+            }
+        };
+        let stat = parse_proc_stat(&text).ok_or_else(|| {
+            anyhow!("The /proc/{pid}/stat record is not readable as a process stat line")
+        })?;
+        Ok(Some(stat))
+    }
+}
+
+/// Every live process whose recorded session is exactly `session`, excluding
+/// zombies.
+///
+/// The session ID is the unreaped leader's PID, so it names no other session.
+/// Zombies are excluded because they cannot run, fork or use the terminal; the
+/// leader's own zombie is reaped by [`OwnedChild::reap`]. A process that exited
+/// between listing and reading is skipped; any other read failure is returned,
+/// because it leaves ownership unverified.
+fn session_members_with(source: &dyn ProcSource, session: u32) -> Result<Vec<SessionMember>> {
+    let mut members = Vec::new();
+    for pid in source.list_pids()? {
+        let Some(stat) = source.stat(pid)? else {
+            continue;
+        };
+        if stat.session != session {
+            continue;
+        }
+        if matches!(stat.state, 'Z' | 'X' | 'x') {
+            continue;
+        }
+        members.push(SessionMember {
+            pid,
+            group: stat.group,
+            start: stat.start,
+        });
+    }
+    members.sort_by_key(|member| member.pid);
+    Ok(members)
+}
+
+fn session_members(session: u32) -> Result<Vec<SessionMember>> {
+    session_members_with(&ProcFs, session)
+}
+
+/// Signal one observed session member through a pidfd.
+///
+/// The pidfd pins the process identity, and the identity (creation tick and
+/// session) is re-read after the open, so a PID that was recycled into another
+/// session between observation and signalling is skipped rather than killed.
+/// `Ok(false)` means the process is gone or is no longer the one observed; an
+/// identity that cannot be re-read is an error, because signalling would be
+/// based on an unverified identity.
+fn signal_member_with(
+    source: &dyn ProcSource,
+    session: u32,
+    member: &SessionMember,
+) -> Result<bool> {
+    let Some(pid) = rustix::process::Pid::from_raw(member.pid as i32) else {
+        bail!("PID {} is not a valid process ID", member.pid);
+    };
+    let pidfd = match rustix::process::pidfd_open(pid, rustix::process::PidfdFlags::empty()) {
+        Ok(pidfd) => pidfd,
+        Err(rustix::io::Errno::SRCH) => return Ok(false),
+        Err(error) => {
+            return Err(error)
+                .with_context(|| format!("Opening a descriptor for PID {}", member.pid))
+        }
+    };
+    let stat = match source.stat(member.pid) {
+        Ok(Some(stat)) => stat,
+        // Gone between the listing and the open: nothing to signal.
+        Ok(None) => return Ok(false),
+        Err(error) => {
+            return Err(error).with_context(|| {
+                format!(
+                    "Verifying PID {} before signalling; its identity is unknown",
+                    member.pid
+                )
+            })
+        }
+    };
+    if stat.start != member.start || stat.session != session {
+        return Ok(false);
+    }
+    match rustix::process::pidfd_send_signal(&pidfd, rustix::process::Signal::KILL) {
+        Ok(()) => Ok(true),
+        Err(rustix::io::Errno::SRCH) => Ok(false),
+        Err(error) => Err(error).with_context(|| format!("Signalling PID {}", member.pid)),
+    }
+}
+
+/// Signal every live process in the owned session and report how many accepted
+/// a signal. A failure names the members that could not be verified or
+/// signalled; the caller must then treat the session as unverified.
+fn signal_session_with(source: &dyn ProcSource, session: u32) -> Result<usize> {
+    let mut signalled = 0usize;
+    let mut failures = Vec::new();
+    for member in session_members_with(source, session)? {
+        match signal_member_with(source, session, &member) {
+            Ok(true) => signalled += 1,
+            Ok(false) => {}
+            Err(error) => failures.push(format!("#{error}")),
+        }
+    }
+    if !failures.is_empty() {
+        bail!(
+            "Could not signal every process in the owned terminal session {session}: {}",
+            failures.join("; ")
+        );
+    }
+    Ok(signalled)
+}
+
 /// Why a wait ended.
 enum Waited {
     Ready,
     TimedOut,
     Cancelled,
+    Stopped,
 }
 
 /// Result of trying to take the write gate within one call's own budget.
@@ -674,12 +1103,14 @@ enum Gate<'a> {
     Acquired(std::sync::MutexGuard<'a, ()>),
     TimedOut,
     Cancelled,
+    Stopped,
 }
 
-/// Wait until `fd` is ready, the deadline passes, or cancellation is observed.
+/// Wait until `fd` is ready, the deadline passes, cancellation is observed, or
+/// the transport is stopped.
 ///
-/// The loop is sliced so cancellation is noticed at most one `POLL_SLICE`
-/// after it is set, even while the terminal never becomes ready. A ready
+/// The loop is sliced so every condition is noticed at most one `POLL_SLICE`
+/// after it becomes true, even while the terminal never becomes ready. A ready
 /// descriptor may still report HUP/ERR; the caller's read or write turns that
 /// into EOF or EIO.
 fn wait_for(
@@ -687,8 +1118,12 @@ fn wait_for(
     events: rustix::event::PollFlags,
     deadline: Instant,
     cancelled: Option<&AtomicBool>,
+    stop_requested: &AtomicBool,
 ) -> Result<Waited> {
     loop {
+        if stop_requested.load(Ordering::Acquire) {
+            return Ok(Waited::Stopped);
+        }
         if is_cancelled(cancelled) {
             return Ok(Waited::Cancelled);
         }
@@ -868,7 +1303,7 @@ mod tests {
     /// stdin to the terminal. A byte appears in the output only after the child
     /// consumed it, so a test can prove that exactly the accepted prefix was
     /// consumed and that nothing wrote more bytes afterwards.
-    fn gated_reader() -> (tempfile::TempDir, PathBuf, PtyTransport) {
+    fn gated_reader() -> (SessionFixture, PathBuf) {
         let directory = tempfile::tempdir().unwrap();
         let gate = directory.path().join("gate");
         let transport = spawn(&spec(&format!(
@@ -877,7 +1312,7 @@ mod tests {
         )))
         .unwrap();
         read_until(&transport, b"READY", BUDGET);
-        (directory, gate, transport)
+        (SessionFixture::new(transport, Some(directory)), gate)
     }
 
     /// Open the gate, send a sentinel, and return everything the child echoed
@@ -925,14 +1360,7 @@ mod tests {
     }
 
     fn process_group(pid: u32) -> Option<u32> {
-        let stat = std::fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
-        // After "pid (comm)" come state, ppid, pgrp.
-        stat.rsplit_once(')')?
-            .1
-            .split_whitespace()
-            .nth(2)?
-            .parse()
-            .ok()
+        group_of_pid(pid)
     }
 
     /// A leader that exits normally, leaving a same-group background child that
@@ -987,6 +1415,251 @@ mod tests {
             std::thread::sleep(Duration::from_millis(10));
         }
         assert!(!process_alive(pid), "process {pid} is still alive");
+    }
+
+    /// Test-owned cleanup for one fixture session.
+    ///
+    /// Deliberately independent of [`signal_session`]: it still works when a
+    /// negative control temporarily breaks production cleanup. It signals only
+    /// processes whose `/proc` session field equals this fixture's own session,
+    /// each through its own pidfd, and it is disarmed as soon as a production
+    /// stop has succeeded. After that stop the leader is reaped and its session
+    /// ID could be reused, and this guard must never touch another session.
+    struct SessionGuard {
+        session: u32,
+        armed: bool,
+    }
+
+    impl SessionGuard {
+        fn new(session: u32) -> Self {
+            Self {
+                session,
+                armed: true,
+            }
+        }
+
+        fn disarm(&mut self) {
+            self.armed = false;
+        }
+    }
+
+    impl Drop for SessionGuard {
+        fn drop(&mut self) {
+            if !self.armed {
+                return;
+            }
+            for member in session_members(self.session).unwrap_or_default() {
+                let Some(pid) = rustix::process::Pid::from_raw(member.pid as i32) else {
+                    continue;
+                };
+                let Ok(pidfd) =
+                    rustix::process::pidfd_open(pid, rustix::process::PidfdFlags::empty())
+                else {
+                    continue;
+                };
+                let _ = rustix::process::pidfd_send_signal(&pidfd, rustix::process::Signal::KILL);
+            }
+        }
+    }
+
+    /// A spawned transport plus the safety net for its session.
+    ///
+    /// Fields drop in declaration order, so the transport's own cleanup runs
+    /// before the guard sweeps whatever a failed assertion left behind.
+    struct SessionFixture {
+        transport: PtyTransport,
+        guard: SessionGuard,
+        _directory: Option<tempfile::TempDir>,
+    }
+
+    impl SessionFixture {
+        fn new(transport: PtyTransport, directory: Option<tempfile::TempDir>) -> Self {
+            let guard = SessionGuard::new(transport.process_id());
+            Self {
+                transport,
+                guard,
+                _directory: directory,
+            }
+        }
+
+        /// Stop through the production path. The safety net stays armed unless
+        /// the session is verifiably empty afterwards, so a stop that reports
+        /// success while job groups survive still gets cleaned on unwind.
+        fn stop(&mut self) -> Result<Option<ExitStatus>> {
+            let status = self.transport.stop()?;
+            let verified_empty = session_members(self.transport.process_id())
+                .map(|members| members.is_empty())
+                .unwrap_or(false);
+            if verified_empty {
+                self.guard.disarm();
+            }
+            Ok(status)
+        }
+    }
+
+    /// A process table for tests, with explicitly injected failures.
+    struct FakeProc {
+        pids: Vec<u32>,
+        stats: std::collections::HashMap<u32, ProcStat>,
+        unreadable: std::collections::HashSet<u32>,
+        listing_fails: bool,
+    }
+
+    impl FakeProc {
+        fn new() -> Self {
+            Self {
+                pids: Vec::new(),
+                stats: std::collections::HashMap::new(),
+                unreadable: std::collections::HashSet::new(),
+                listing_fails: false,
+            }
+        }
+
+        fn member(mut self, pid: u32, group: u32, session: u32) -> Self {
+            self.pids.push(pid);
+            self.stats.insert(
+                pid,
+                ProcStat {
+                    state: 'S',
+                    group,
+                    session,
+                    start: 1000 + pid as u64,
+                },
+            );
+            self
+        }
+
+        fn unreadable(mut self, pid: u32) -> Self {
+            self.unreadable.insert(pid);
+            self
+        }
+    }
+
+    impl ProcSource for FakeProc {
+        fn list_pids(&self) -> Result<Vec<u32>> {
+            if self.listing_fails {
+                bail!("injected /proc listing failure");
+            }
+            Ok(self.pids.clone())
+        }
+
+        fn stat(&self, pid: u32) -> Result<Option<ProcStat>> {
+            if self.unreadable.contains(&pid) {
+                bail!("injected permission failure for PID {pid}");
+            }
+            Ok(self.stats.get(&pid).cloned())
+        }
+    }
+
+    fn session_of(pid: u32) -> Option<u32> {
+        ProcFs.stat(pid).ok().flatten().map(|stat| stat.session)
+    }
+
+    fn group_of_pid(pid: u32) -> Option<u32> {
+        ProcFs.stat(pid).ok().flatten().map(|stat| stat.group)
+    }
+
+    /// The number printed by `<marker><digits>` once the whole number has
+    /// arrived. A partial number is not a value yet.
+    fn marker_value(text: &str, marker: &str) -> Option<u32> {
+        let start = text.find(marker)? + marker.len();
+        let digits: String = text[start..]
+            .chars()
+            .take_while(|character| character.is_ascii_digit())
+            .collect();
+        digits.parse().ok()
+    }
+
+    /// Read until every marker has a complete number, or fail with what arrived.
+    fn read_until_markers(transport: &PtyTransport, markers: &[&str], budget: Duration) -> String {
+        let deadline = Instant::now() + budget;
+        let mut collected = Vec::new();
+        loop {
+            if Instant::now() >= deadline {
+                panic!(
+                    "timed out waiting for {markers:?}; collected {:?}",
+                    String::from_utf8_lossy(&collected)
+                );
+            }
+            let outcome = transport.read_bytes(4096, deadline, None).unwrap();
+            collected.extend_from_slice(&outcome.bytes);
+            let text = String::from_utf8_lossy(&collected).into_owned();
+            if markers
+                .iter()
+                .all(|marker| marker_value(&text, marker).is_some())
+            {
+                return text;
+            }
+            if outcome.eof {
+                panic!(
+                    "EOF before {markers:?}; collected {:?}",
+                    String::from_utf8_lossy(&collected)
+                );
+            }
+        }
+    }
+
+    /// A bash with job control enabled inside the PTY.
+    ///
+    /// The script reports the PID of a background command and of a background
+    /// pipeline, then blocks in a foreground command. Bash's `set -m` puts each
+    /// job in its own process group while they all stay in the session created
+    /// by portable-pty, which is exactly the layout that a leader-PG-only
+    /// cleanup misses.
+    fn job_control_fixture() -> (SessionFixture, u32, u32, u32) {
+        let directory = tempfile::tempdir().unwrap();
+        let script = "set -m\n\
+                      printf 'READY\\n'\n\
+                      sleep 30 & printf 'BG=%s\\n' \"$!\"\n\
+                      sleep 30 | cat & printf 'PIPE=%s\\n' \"$!\"\n\
+                      sleep 30\n\
+                      printf 'FG-DONE\\n'\n";
+        let transport = spawn(&SpawnSpec {
+            executable: OsString::from("/bin/bash"),
+            // Interactive job control is what gives the foreground command its
+            // own process group and the terminal (`tcsetpgrp`); a plain `-c`
+            // shell may simply exec its last command in the leader's group.
+            arguments: vec![
+                OsString::from("--noprofile"),
+                OsString::from("--norc"),
+                OsString::from("-i"),
+                OsString::from("-c"),
+                OsString::from(script),
+            ],
+            cwd: directory.path().to_path_buf(),
+            environment: vec![(OsString::from("PATH"), OsString::from("/usr/bin:/bin"))],
+            rows: 24,
+            cols: 80,
+        })
+        .unwrap();
+        let output = read_until_markers(&transport, &["BG=", "PIPE="], BUDGET);
+        let leader = transport.process_id();
+        let background = marker_value(&output, "BG=").unwrap();
+        let pipeline = marker_value(&output, "PIPE=").unwrap();
+        println!(
+            "job-control fixture: leader={leader} background={background} pipeline={pipeline}"
+        );
+        (
+            SessionFixture::new(transport, Some(directory)),
+            leader,
+            background,
+            pipeline,
+        )
+    }
+
+    /// The terminal's foreground process group once the foreground job has taken
+    /// it, bounded rather than guessed.
+    fn wait_for_foreground_group(transport: &PtyTransport, leader: u32, budget: Duration) -> u32 {
+        let deadline = Instant::now() + budget;
+        loop {
+            match transport.foreground_group() {
+                Some(group) if group != leader => return group,
+                _ if Instant::now() < deadline => {
+                    std::thread::sleep(Duration::from_millis(10));
+                }
+                other => panic!("the foreground job never took the terminal: {other:?}"),
+            }
+        }
     }
 
     #[test]
@@ -1233,7 +1906,8 @@ mod tests {
     #[test]
     fn a_blocked_write_stops_at_its_deadline_and_later_bytes_are_not_consumed() {
         let _serial = run_serial();
-        let (_directory, gate, transport) = gated_reader();
+        let (mut fixture, gate) = gated_reader();
+        let transport = &fixture.transport;
         let data = vec![b'x'; MAX_INPUT_BYTES];
         let outcome = transport
             .write_bytes(WriteRequest {
@@ -1255,14 +1929,15 @@ mod tests {
         assert_eq!(outcome.remaining, data.len() - outcome.accepted);
         // The child consumes exactly the accepted prefix; the sentinel proves
         // the queue was drained and that no writer continued afterwards.
-        consume_and_collect(&transport, &gate, outcome.accepted, b'x');
-        transport.stop().unwrap();
+        consume_and_collect(transport, &gate, outcome.accepted, b'x');
+        fixture.stop().unwrap();
     }
 
     #[test]
     fn cancellation_during_a_no_ready_write_poll_stops_without_late_bytes() {
         let _serial = run_serial();
-        let (_directory, gate, transport) = gated_reader();
+        let (mut fixture, gate) = gated_reader();
+        let transport = &fixture.transport;
         let data = vec![b'y'; MAX_INPUT_BYTES];
         let cancelled = std::sync::Arc::new(AtomicBool::new(false));
         let probe = WaitProbe::install(cancelled.clone());
@@ -1286,20 +1961,21 @@ mod tests {
             outcome.accepted > 0 && outcome.accepted < data.len(),
             "{outcome:?}"
         );
-        consume_and_collect(&transport, &gate, outcome.accepted, b'y');
-        transport.stop().unwrap();
+        consume_and_collect(transport, &gate, outcome.accepted, b'y');
+        fixture.stop().unwrap();
     }
 
     #[test]
     fn contending_writers_keep_their_own_deadline_and_cancellation() {
         let _serial = run_serial();
-        let (_directory, gate, transport) = gated_reader();
+        let (mut fixture, gate) = gated_reader();
+        let transport = &fixture.transport;
         let data = vec![b'x'; MAX_INPUT_BYTES];
         let first_cancelled = std::sync::Arc::new(AtomicBool::new(false));
         let (accepted_tx, accepted_rx) = std::sync::mpsc::channel();
         let first = std::thread::scope(|scope| {
             let first_cancel = first_cancelled.clone();
-            let transport_ref = &transport;
+            let transport_ref = transport;
             let data_ref: &[u8] = &data;
             let handle = scope.spawn(move || {
                 let mut notify = |_count: usize| {
@@ -1366,7 +2042,7 @@ mod tests {
             first.accepted > 0 && first.accepted < data.len(),
             "{first:?}"
         );
-        let consumed = consume_and_collect(&transport, &gate, first.accepted, b'x');
+        let consumed = consume_and_collect(transport, &gate, first.accepted, b'x');
         assert!(
             !consumed.contains(&b'B'),
             "the timed-out writer still reached the terminal"
@@ -1375,7 +2051,7 @@ mod tests {
             !consumed.contains(&b'C'),
             "the gate-cancelled writer still reached the terminal"
         );
-        transport.stop().unwrap();
+        fixture.stop().unwrap();
     }
 
     #[test]
@@ -1472,5 +2148,586 @@ mod tests {
         assert!(process_alive(pid));
         drop(transport);
         wait_until_gone(pid, Duration::from_secs(10));
+    }
+
+    #[test]
+    fn interactive_job_control_creates_distinct_groups_in_one_session() {
+        let _serial = run_serial();
+        let (mut fixture, leader, background, pipeline) = job_control_fixture();
+        let transport = &fixture.transport;
+
+        assert_eq!(session_of(leader), Some(leader));
+        assert_eq!(
+            session_of(background),
+            Some(leader),
+            "the background job is not in the owned session"
+        );
+        assert_eq!(
+            session_of(pipeline),
+            Some(leader),
+            "the pipeline is not in the owned session"
+        );
+
+        let background_group = group_of_pid(background).expect("a background group");
+        let pipeline_group = group_of_pid(pipeline).expect("a pipeline group");
+        assert_ne!(
+            background_group, leader,
+            "the background job stayed in the leader's group"
+        );
+        assert_ne!(
+            pipeline_group, leader,
+            "the pipeline stayed in the leader's group"
+        );
+        assert_ne!(background_group, pipeline_group);
+
+        // The foreground command is in a third group and owns the terminal.
+        let foreground = wait_for_foreground_group(transport, leader, BUDGET);
+        assert_ne!(foreground, background_group);
+        assert_ne!(foreground, pipeline_group);
+        let members = session_members(leader).unwrap();
+        assert!(
+            members.iter().any(|member| member.group == foreground),
+            "no live process backs the foreground group {foreground}: {members:?}"
+        );
+        assert!(
+            members
+                .iter()
+                .any(|member| member.group == background_group),
+            "the background group is missing from the session: {members:?}"
+        );
+
+        fixture.stop().unwrap();
+    }
+
+    #[test]
+    fn stop_cleans_foreground_and_background_job_groups() {
+        let _serial = run_serial();
+        let (mut fixture, leader, background, pipeline) = job_control_fixture();
+        let foreground = wait_for_foreground_group(&fixture.transport, leader, BUDGET);
+        assert!(
+            !session_members(leader).unwrap().is_empty(),
+            "the fixture has no session members to clean"
+        );
+
+        let first = fixture.stop().unwrap().expect("the leader was reaped");
+        wait_until_gone(leader, Duration::from_secs(5));
+        wait_until_gone(background, Duration::from_secs(5));
+        wait_until_gone(pipeline, Duration::from_secs(5));
+        let members = session_members(leader).unwrap();
+        assert!(
+            members.is_empty(),
+            "the session still has live members after stop: {members:?}"
+        );
+        assert!(
+            !members.iter().any(|member| member.group == foreground),
+            "the foreground group {foreground} survived"
+        );
+
+        let second = fixture.stop().unwrap().expect("cached status");
+        assert_eq!(first.exit_code(), second.exit_code());
+    }
+
+    #[test]
+    fn a_child_forked_during_stop_is_also_cleaned() {
+        let _serial = run_serial();
+        let transport = spawn(&SpawnSpec {
+            executable: OsString::from("/bin/bash"),
+            arguments: vec![
+                OsString::from("-c"),
+                OsString::from(
+                    "set -m\n\
+                     printf 'READY\\n'\n\
+                     while :; do sleep 30 & printf 'FORK=%s\\n' \"$!\"; wait $!; done\n",
+                ),
+            ],
+            cwd: std::env::temp_dir(),
+            environment: vec![(OsString::from("PATH"), OsString::from("/usr/bin:/bin"))],
+            rows: 24,
+            cols: 80,
+        })
+        .unwrap();
+        let mut fixture = SessionFixture::new(transport, None);
+        let transport = &fixture.transport;
+        let output = read_until_markers(transport, &["FORK="], BUDGET);
+        let leader = transport.process_id();
+        let forked = marker_value(&output, "FORK=").unwrap();
+        println!("fork fixture: leader={leader} forked={forked}");
+        assert_eq!(session_of(forked), Some(leader));
+        assert_ne!(
+            group_of_pid(forked),
+            Some(leader),
+            "the forked job is not in its own process group"
+        );
+
+        // The loop keeps starting jobs, so cleanup has to find processes that
+        // appear after its first pass.
+        fixture.stop().unwrap();
+        wait_until_gone(forked, Duration::from_secs(5));
+        wait_until_gone(leader, Duration::from_secs(5));
+        let members = session_members(leader).unwrap();
+        assert!(
+            members.is_empty(),
+            "a forked job survived stop: {members:?}"
+        );
+    }
+
+    #[test]
+    fn stopping_one_session_leaves_other_sessions_and_processes_alive() {
+        let _serial = run_serial();
+        let (mut fixture, leader, _background, _pipeline) = job_control_fixture();
+        let mut other_fixture =
+            SessionFixture::new(spawn(&spec("printf 'READY\\n'; sleep 30")).unwrap(), None);
+        let other = &other_fixture.transport;
+        read_until(other, b"READY", BUDGET);
+        let other_pid = other.process_id();
+        assert_eq!(
+            session_of(other_pid),
+            Some(other_pid),
+            "the control transport did not get its own session"
+        );
+        let mut plain = std::process::Command::new("sleep")
+            .arg("30")
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+            .unwrap();
+        let plain_pid = plain.id();
+
+        fixture.stop().unwrap();
+        wait_until_gone(leader, Duration::from_secs(5));
+        assert!(session_members(leader).unwrap().is_empty());
+        assert!(
+            process_alive(other_pid),
+            "cleanup touched the other terminal session"
+        );
+        assert!(
+            process_alive(plain_pid),
+            "cleanup touched a process outside the owned session"
+        );
+        assert_ne!(session_of(plain_pid), Some(leader));
+
+        other_fixture.stop().unwrap();
+        wait_until_gone(other_pid, Duration::from_secs(5));
+        let _ = plain.kill();
+        let _ = plain.wait();
+        wait_until_gone(plain_pid, Duration::from_secs(5));
+    }
+
+    #[test]
+    fn stop_closes_a_blocked_write_without_late_bytes() {
+        let _serial = run_serial();
+        let (fixture, _gate) = gated_reader();
+        // The guard and the transport are taken apart so that the nested scope
+        // can stop the transport while the guard stays armed for an unwinding
+        // assertion, then disarms it only after `stop` succeeded.
+        let SessionFixture {
+            transport,
+            mut guard,
+            ..
+        } = fixture;
+        let data = vec![b'z'; MAX_INPUT_BYTES];
+        let (accepted_tx, accepted_rx) = std::sync::mpsc::channel();
+        std::thread::scope(|scope| {
+            let transport_ref = &transport;
+            let data_ref: &[u8] = &data;
+            let handle = scope.spawn(move || {
+                let mut notify = |_count: usize| {
+                    let _ = accepted_tx.send(());
+                };
+                transport_ref
+                    .write_bytes(WriteRequest {
+                        data: data_ref,
+                        deadline: Instant::now() + Duration::from_secs(30),
+                        cancelled: None,
+                        on_accepted: Some(&mut notify as &mut dyn FnMut(usize)),
+                    })
+                    .unwrap()
+            });
+            accepted_rx
+                .recv_timeout(Duration::from_secs(5))
+                .expect("the write never accepted a chunk while the terminal was full");
+            let started = Instant::now();
+            transport.stop().unwrap();
+            guard.disarm();
+            let write = handle.join().unwrap();
+            let elapsed = started.elapsed();
+            assert!(write.closed, "{write:?}");
+            assert!(write.accepted > 0, "{write:?}");
+            assert_eq!(write.remaining, data.len() - write.accepted);
+            assert!(
+                elapsed < Duration::from_secs(5),
+                "stop did not close the blocked write: {elapsed:?}"
+            );
+        });
+
+        // A stopped transport still drains what the terminal queued, then
+        // reports EOF. This fixture wrote nothing after READY, so the tail is
+        // empty. A later write is refused with zero accepted bytes.
+        let mut drained = Vec::new();
+        loop {
+            let read = transport
+                .read_bytes(4096, Instant::now() + Duration::from_secs(5), None)
+                .unwrap();
+            drained.extend_from_slice(&read.bytes);
+            if read.eof {
+                break;
+            }
+        }
+        assert!(
+            drained.is_empty(),
+            "the fixture wrote no tail, but the drain returned {drained:?}"
+        );
+        let late = transport
+            .write_bytes(WriteRequest {
+                data: b"late bytes",
+                deadline: Instant::now() + Duration::from_secs(5),
+                cancelled: None,
+                on_accepted: None,
+            })
+            .unwrap();
+        assert!(late.closed, "{late:?}");
+        assert_eq!(late.accepted, 0, "{late:?}");
+        assert_eq!(late.remaining, "late bytes".len());
+    }
+
+    /// Output the child queued before it was stopped must still be readable
+    /// after stop, exactly once, and the drain must stay page-capped.
+    #[test]
+    fn buffered_output_survives_stop_and_drains_exactly_once() {
+        let _serial = run_serial();
+        let directory = tempfile::tempdir().unwrap();
+        let ready = directory.path().join("ready");
+        let script = format!(
+            "stty raw -echo\n\
+             printf 'BEGIN-'\n\
+             i=0\n\
+             while [ \"$i\" -lt 200 ]; do printf '0123456789abcdef'; i=$((i+1)); done\n\
+             printf '%s\\n' '-END'\n\
+             : > '{}'\n\
+             sleep 30\n",
+            ready.display()
+        );
+        let mut fixture = SessionFixture::new(
+            spawn(&SpawnSpec {
+                executable: OsString::from("/bin/sh"),
+                arguments: vec![OsString::from("-c"), OsString::from(script)],
+                cwd: directory.path().to_path_buf(),
+                environment: vec![(OsString::from("PATH"), OsString::from("/usr/bin:/bin"))],
+                rows: 24,
+                cols: 80,
+            })
+            .unwrap(),
+            Some(directory),
+        );
+
+        // The ready marker is a side channel, so the tail stays unread in the
+        // terminal queue when stop begins.
+        let deadline = Instant::now() + BUDGET;
+        while !ready.exists() {
+            assert!(Instant::now() < deadline, "the child never queued its tail");
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        fixture.stop().unwrap();
+
+        let mut expected = b"BEGIN-".to_vec();
+        for _ in 0..200 {
+            expected.extend_from_slice(b"0123456789abcdef");
+        }
+        expected.extend_from_slice(b"-END\n");
+
+        // Page cap: no single call returns more than it was asked for.
+        let first = fixture
+            .transport
+            .read_bytes(1024, Instant::now() + Duration::from_secs(5), None)
+            .unwrap();
+        assert_eq!(first.bytes.len(), 1024, "the queue was not page-capped");
+        assert!(
+            !first.eof,
+            "a partially drained queue must not report EOF yet"
+        );
+        let mut collected = first.bytes.clone();
+        // Drain the rest with the documented page size; the drain reports EOF
+        // only in the call that finds the queue empty.
+        loop {
+            let read = fixture
+                .transport
+                .read_bytes(4096, Instant::now() + Duration::from_secs(5), None)
+                .unwrap();
+            collected.extend_from_slice(&read.bytes);
+            if read.eof {
+                break;
+            }
+        }
+        assert_eq!(collected, expected, "the queued tail changed or repeated");
+        // Once drained, the queue stays empty: the bytes are not replayed.
+        let again = fixture
+            .transport
+            .read_bytes(4096, Instant::now() + Duration::from_secs(1), None)
+            .unwrap();
+        assert!(again.eof && again.bytes.is_empty(), "{again:?}");
+    }
+
+    #[test]
+    fn repeated_stop_is_idempotent_and_releases_the_terminal() {
+        let _serial = run_serial();
+        let mut fixture =
+            SessionFixture::new(spawn(&spec("printf 'READY\\n'; sleep 30")).unwrap(), None);
+        read_until(&fixture.transport, b"READY", BUDGET);
+        let tty = fixture
+            .transport
+            .tty_path()
+            .expect("the transport has a tty path");
+        let leader = fixture.transport.process_id();
+
+        let first = fixture.stop().unwrap().expect("the leader was reaped");
+        let second = fixture.stop().unwrap().expect("cached status");
+        assert_eq!(first.exit_code(), second.exit_code());
+        wait_until_gone(leader, Duration::from_secs(5));
+        assert!(session_members(leader).unwrap().is_empty());
+
+        // Every descriptor of this process that referred to the slave is closed
+        // by the time the transport is dropped; no pty fd outlives it.
+        drop(fixture);
+        let leaked: Vec<PathBuf> = std::fs::read_dir("/proc/self/fd")
+            .unwrap()
+            .flatten()
+            .filter_map(|entry| std::fs::read_link(entry.path()).ok())
+            .filter(|target| target == &tty)
+            .collect();
+        assert!(
+            leaked.is_empty(),
+            "the terminal {} is still open after drop",
+            tty.display()
+        );
+    }
+
+    #[test]
+    fn a_malformed_stat_record_is_unknown_not_gone() {
+        assert!(parse_proc_stat("").is_none());
+        assert!(parse_proc_stat("1234 (bash) R").is_none());
+        assert!(parse_proc_stat("1234 (bash) R 1 notanumber").is_none());
+        let stat =
+            parse_proc_stat("1234 (a b) S 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 999 20")
+                .expect("a complete record parses");
+        assert_eq!(stat.state, 'S');
+        assert_eq!(stat.group, 2);
+        assert_eq!(stat.session, 3);
+        assert_eq!(stat.start, 999);
+    }
+
+    #[test]
+    fn an_unreadable_member_is_not_treated_as_vanished() {
+        let source = FakeProc::new().member(41, 41, 41).unreadable(41);
+        let error = session_members_with(&source, 41).unwrap_err();
+        assert!(
+            format!("{error:#}").contains("injected permission failure"),
+            "{error:#}"
+        );
+    }
+
+    #[test]
+    fn a_listing_failure_is_an_error() {
+        let mut source = FakeProc::new();
+        source.listing_fails = true;
+        assert!(session_members_with(&source, 41).is_err());
+        assert!(signal_session_with(&source, 41).is_err());
+    }
+
+    #[test]
+    fn a_vanished_member_is_skipped_and_the_rest_are_reported() {
+        let source = FakeProc::new().member(10, 10, 7).member(11, 11, 7);
+        let members = session_members_with(&source, 7).unwrap();
+        assert_eq!(
+            members.iter().map(|member| member.pid).collect::<Vec<_>>(),
+            vec![10, 11]
+        );
+        // A listed PID with no stat record is the ENOENT race, not an error.
+        let mut vanished = FakeProc::new().member(10, 10, 7);
+        vanished.pids.push(99);
+        let members = session_members_with(&vanished, 7).unwrap();
+        assert_eq!(members.len(), 1);
+        assert_eq!(members[0].pid, 10);
+    }
+
+    #[test]
+    fn an_unreadable_identity_check_never_signals() {
+        // Our own PID is a real process, so the pidfd opens; the injected stat
+        // failure then has to stop the call *before* any signal is sent.
+        let me = std::process::id();
+        let source = FakeProc::new().member(me, me, me).unreadable(me);
+        let member = SessionMember {
+            pid: me,
+            group: me,
+            start: 0,
+        };
+        let error = signal_member_with(&source, me, &member).unwrap_err();
+        assert!(
+            format!("{error:#}").contains("injected permission failure"),
+            "{error:#}"
+        );
+    }
+
+    #[test]
+    fn unverified_cleanup_keeps_the_armed_identity_and_does_not_reap() {
+        let _serial = run_serial();
+        let transport = spawn(&spec("printf 'READY\\n'; sleep 30")).unwrap();
+        read_until(&transport, b"READY", BUDGET);
+        let mut source = FakeProc::new();
+        source.listing_fails = true;
+        {
+            let mut child = lock(&transport.child);
+            let error = child.stop_with(&source).unwrap_err();
+            assert!(
+                format!("{error:#}").contains("injected /proc listing failure"),
+                "{error:#}"
+            );
+            assert!(
+                child.armed,
+                "cleanup must stay armed when the session cannot be verified"
+            );
+            assert!(
+                child.finished.is_none(),
+                "an unverified cleanup must not report an exit status"
+            );
+        }
+        // The real cleanup still owns the child afterwards.
+        let mut fixture = SessionFixture::new(transport, None);
+        fixture.stop().unwrap();
+    }
+
+    /// A stop that is requested but not yet confirmed must not finalize output:
+    /// a live child can still write while cleanup runs, and only verified
+    /// cleanup (or real terminal closure) may be reported as EOF.
+    #[test]
+    fn reads_stay_open_until_cleanup_is_confirmed() {
+        let _serial = run_serial();
+        let directory = tempfile::tempdir().unwrap();
+        let gate = directory.path().join("gate");
+        let transport = spawn(&spec(&format!(
+            "stty raw -echo; printf 'READY\\n'; \
+             while [ ! -e '{}' ]; do sleep 0.01; done; \
+             printf 'TAIL-END\\n'; sleep 30",
+            gate.display()
+        )))
+        .unwrap();
+        read_until(&transport, b"READY", BUDGET);
+
+        let (entered_tx, entered_rx) = std::sync::mpsc::channel();
+        let (release_tx, release_rx) = std::sync::mpsc::channel::<()>();
+        transport.install_stop_hook(Box::new(move || {
+            let _ = entered_tx.send(());
+            let _ = release_rx.recv();
+        }));
+
+        let mut fixture = SessionFixture::new(transport, Some(directory));
+        std::thread::scope(|scope| {
+            let transport = &fixture.transport;
+            let handle = scope.spawn(move || transport.stop());
+            entered_rx
+                .recv_timeout(Duration::from_secs(5))
+                .expect("stop was never requested");
+
+            // Stop is requested and cleanup is blocked: the child is alive and
+            // writes its tail now.
+            std::fs::write(&gate, b"go").unwrap();
+            let deadline = Instant::now() + BUDGET;
+            let mut collected = Vec::new();
+            while !contains_bytes(&collected, b"TAIL-END") {
+                assert!(Instant::now() < deadline, "the tail never arrived");
+                let read = transport.read_bytes(4096, deadline, None).unwrap();
+                assert!(!read.eof, "a live child was reported as EOF: {read:?}");
+                collected.extend_from_slice(&read.bytes);
+            }
+
+            // Nothing queued right now, cleanup not confirmed: not final.
+            let pending = loop {
+                let read = transport
+                    .read_bytes(4096, Instant::now() + Duration::from_secs(1), None)
+                    .unwrap();
+                if !read.bytes.is_empty() {
+                    collected.extend_from_slice(&read.bytes);
+                    continue;
+                }
+                break read;
+            };
+            assert!(
+                !pending.eof,
+                "pending cleanup must not report EOF: {pending:?}"
+            );
+            assert!(pending.cleanup_pending, "{pending:?}");
+
+            release_tx.send(()).unwrap();
+            handle.join().unwrap().unwrap();
+        });
+
+        // Cleanup is confirmed. An empty read is now final, and the tail is not
+        // replayed by the drain.
+        let mut rest = Vec::new();
+        let final_read = loop {
+            let read = fixture
+                .transport
+                .read_bytes(4096, Instant::now() + Duration::from_secs(5), None)
+                .unwrap();
+            rest.extend_from_slice(&read.bytes);
+            if read.eof {
+                break read;
+            }
+        };
+        assert!(!final_read.cleanup_pending, "{final_read:?}");
+        assert!(
+            !contains_bytes(&rest, b"TAIL-END"),
+            "the tail was replayed: {rest:?}"
+        );
+        fixture.stop().unwrap();
+    }
+
+    #[test]
+    fn job_control_survivor_of_a_naturally_exited_leader_is_cleaned() {
+        let _serial = run_serial();
+        let transport = spawn(&SpawnSpec {
+            executable: OsString::from("/bin/bash"),
+            arguments: vec![
+                OsString::from("-c"),
+                OsString::from(
+                    "set -m\n\
+                     trap '' HUP\n\
+                     (sleep 30) & printf 'SURVIVOR=%s\\n' \"$!\"\n\
+                     printf 'READY\\n'\n\
+                     exit 0\n",
+                ),
+            ],
+            cwd: std::env::temp_dir(),
+            environment: vec![(OsString::from("PATH"), OsString::from("/usr/bin:/bin"))],
+            rows: 24,
+            cols: 80,
+        })
+        .unwrap();
+        let mut fixture = SessionFixture::new(transport, None);
+        let transport = &fixture.transport;
+        let output = read_until_markers(transport, &["SURVIVOR="], BUDGET);
+        let leader = transport.process_id();
+        let survivor = marker_value(&output, "SURVIVOR=").unwrap();
+        println!("survivor fixture: leader={leader} survivor={survivor}");
+        assert_eq!(session_of(survivor), Some(leader));
+        assert_ne!(
+            group_of_pid(survivor),
+            Some(leader),
+            "the survivor is not in a job-control group"
+        );
+
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while process_alive(leader) && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        assert!(!process_alive(leader), "the leader never exited");
+        assert!(
+            process_alive(survivor),
+            "the survivor did not outlive the leader"
+        );
+
+        fixture.stop().unwrap();
+        wait_until_gone(survivor, Duration::from_secs(5));
+        assert!(session_members(leader).unwrap().is_empty());
     }
 }
