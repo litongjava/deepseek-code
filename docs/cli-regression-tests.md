@@ -340,6 +340,20 @@ OpenCode Go 用四种协议提供模型，模型地址和协议都来自内置�
 7. 内置工作流不得被意外覆盖：在 `<数据目录>/skills/bundled` 放与内置同名的技能，确认仍执行内置定义；直接放在 `<数据目录>/skills/<同名>` 的用户技能按既有规则覆盖内置。插件命名空间技能的行为不变。
 8. 名称兼容：把 frontmatter `name` 写成 `My Skill` 或含 `(`、`&`、`'` 的名称，确认斜杠命令分别为 `/my-skill`、保留标点的旧名称，模型列表和 `Skill` 工具使用同一个名称，不存在大小写不同的第二个别名。再放两个同名的数据目录技能，确认两者都按 `skill_<hash>` 列出，重复运行结果相同。
 
+### O. 内置 skill-creator
+
+1. `dcl skills list` 在全新数据目录和已有旧占位的数据目录中只列出一个 skill-creator。旧占位必须是 `SKILL.md` 加 `agents/analyzer.md`、`agents/grader.md` 且内容未被改动才会被删除；改动过的副本、额外文件和不相关兄弟技能保持原样。
+2. 模型通过 `Skill` 工具调用 skill-creator：返回的说明含 `Base directory for this skill:` 和本次物化的临时目录；目录内有 `SKILL.md`、`scripts/init_skill.py`、`scripts/quick_validate.py`、`license.txt`、`NOTICE.md`、`references/frontmatter.md`，内容与内置字节一致。断网、未预先安装时同样可用。
+3. 在真实终端执行 `/skill-creator 创建一个处理 CSV 的技能`：走同一执行路径，命令表只出现一次 `/skill-creator`。
+4. 用没有 PyYAML 的 `python3` 运行物化后的 `scripts/init_skill.py demo --path <临时目录>`，再运行 `scripts/quick_validate.py <临时目录>/demo` 必须通过；缺少 name/description、name 含空格或 frontmatter 未闭合时必须返回非零。
+5. 自动回归：
+   ```bash
+   cargo test --locked -p deepseek-code-core --lib skills::skill_creator
+   cargo test --locked -p deepseek-code-core --lib skills::bundled_resources::tests
+   cargo test --locked -p deepseek-code-core --lib skills::bundled::tests
+   ```
+   覆盖发现恰好一次、模型和用户都可调用、迁移只删除原生占位、物化字节和完整性检查、Python 脚本在 `-S`（无 site-packages）下创建并通过验证。单元测试不能代替第 2、3 条的真实进程调用。
+
 ## 按改动范围选择场景
 
 - `terminal/editor.rs`、`terminal/live.rs` 的按键处理：A、B、E1、E2、E3
@@ -351,6 +365,7 @@ OpenCode Go 用四种协议提供模型，模型地址和协议都来自内置�
 - `worker_frontend.rs`、`background_commands.rs`：B、D、E3、E4、F
 - `memory.rs`、`display_commands.rs`、`crates/core/src/memory`：G
 - `services/customization.rs`、`prompt/`、`native_engine/tool_loop.rs`：H，以及 SDK 测试
+- `crates/core/src/skills/mod.rs` 的 bundled 安装、`bundled.rs`、`bundled_resources.rs`、`bundled_manifest.rs`、`skill_creator.rs`、`skills/bundled/`：N
 - `tools/cron_jobs.rs`、`tools/wakeup.rs`、`main.rs` 的空闲循环：I
 - `terminal/picker.rs`：F，以及 `/resume`、`/rewind`、`/mcp` 等使用选择列表的命令
 - 欢迎区生命周期、输入框与运行帧交接、`/plan` 提示：J，以及 B、C、E1、E3

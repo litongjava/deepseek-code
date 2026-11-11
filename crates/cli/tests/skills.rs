@@ -529,3 +529,101 @@ async fn data_dir_skill_is_listed_for_the_model_and_invoked_with_an_empty_claude
     assert!(executed.contains("the fixture"), "{executed}");
     server.abort();
 }
+
+#[test]
+fn skills_list_migrates_the_pristine_placeholder_and_lists_one_skill_creator() {
+    let temp = tempfile::tempdir().unwrap();
+    let data = temp.path().join("data");
+    let stub = data.join("skills/bundled/skill-creator");
+    std::fs::create_dir_all(stub.join("agents")).unwrap();
+    std::fs::write(
+        stub.join("SKILL.md"),
+        r#"---
+name: skill-creator
+description: A toolkit for creating, evaluating, and improving Claude skills
+whenToUse: When you want to build a new skill, evaluate an existing one, or generate synthetic training data for skills
+---
+
+# Skill Creator
+
+A comprehensive toolkit for creating, evaluating, and improving Claude skills.
+
+## Usage
+
+This skill provides utilities for:
+- Creating new skills from templates
+- Evaluating skill quality
+- Generating training data
+- Packaging skills for distribution
+
+## Files
+
+- `agents/` - Agent definitions for different evaluation tasks
+- `scripts/` - Utility scripts for skill development
+- `eval-viewer/` - Evaluation result visualization
+- `references/` - Schema definitions and documentation
+"#,
+    )
+    .unwrap();
+    std::fs::write(
+        stub.join("agents/analyzer.md"),
+        "# Analyzer\n\nAnalyzes skill structure and quality.",
+    )
+    .unwrap();
+    std::fs::write(
+        stub.join("agents/grader.md"),
+        "# Grader\n\nGrades skill performance.",
+    )
+    .unwrap();
+    std::fs::create_dir_all(data.join("skills/bundled/legacy-review")).unwrap();
+    std::fs::write(
+        data.join("skills/bundled/legacy-review/SKILL.md"),
+        "user sibling",
+    )
+    .unwrap();
+
+    let output = std::process::Command::new(env!("CARGO_BIN_EXE_dcl"))
+        .args(["--data-dir", data.to_str().unwrap(), "skills", "list"])
+        .env_remove("DEEPSEEK_CODE_DATA_DIR")
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let skills: Vec<Value> = serde_json::from_slice(&output.stdout).unwrap();
+    let creators: Vec<_> = skills
+        .iter()
+        .filter(|skill| skill["name"] == "skill-creator")
+        .collect();
+    assert_eq!(creators.len(), 1, "{skills:?}");
+    assert_eq!(creators[0]["source"], "bundled");
+    let files = creators[0]["files"].as_array().unwrap();
+    assert!(files.iter().any(|file| file["name"] == "scripts"));
+    assert!(files.iter().any(|file| file["name"] == "license.txt"));
+    assert!(!stub.exists());
+    assert!(data.join("skills/bundled/legacy-review/SKILL.md").exists());
+
+    let help = std::process::Command::new(env!("CARGO_BIN_EXE_dcl"))
+        .args([
+            "--data-dir",
+            data.to_str().unwrap(),
+            "skills",
+            "help",
+            "skill-creator",
+        ])
+        .env_remove("DEEPSEEK_CODE_DATA_DIR")
+        .output()
+        .unwrap();
+    assert!(
+        help.status.success(),
+        "{}",
+        String::from_utf8_lossy(&help.stderr)
+    );
+    let text = String::from_utf8_lossy(&help.stdout);
+    assert!(text.contains("name: skill-creator"));
+    assert!(text.contains("DeepSeek Code"));
+    assert!(text.contains("NOTICE.md"));
+    assert!(!text.contains("$CODEX_HOME"));
+}

@@ -66,6 +66,11 @@ pub fn commands(workspace: &Path) -> BTreeMap<String, SkillCommand> {
             include_str!("bundled/run-skill-generator.md"),
         ),
         (
+            super::skill_creator::NAME,
+            super::skill_creator::DESCRIPTION,
+            include_str!("bundled/skill-creator.md"),
+        ),
+        (
             "auto-mode-setup",
             "Prepare auto mode for your environment, plus permission rules",
             include_str!("bundled/auto-mode-setup.md"),
@@ -134,6 +139,7 @@ mod tests {
             "deep-research",
             "doctor",
             "security-review",
+            "skill-creator",
         ] {
             let command = &commands[name];
             let rendered = command
