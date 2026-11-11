@@ -27,6 +27,36 @@ pub fn try_lock_briefly(file: &fs::File) -> std::result::Result<(), fs::TryLockE
     }
 }
 
+/// An advisory lock this process took and releases explicitly when dropped.
+/// Closing the file alone is not enough: a child forked by another thread keeps
+/// the lock alive until it execs. Only the process that took the lock unlocks.
+pub struct OwnedFileLock {
+    file: fs::File,
+    owner: u32,
+}
+
+impl OwnedFileLock {
+    /// Ok(None) when another holder has the lock right now.
+    pub fn try_acquire(file: fs::File) -> std::io::Result<Option<Self>> {
+        match try_lock_file(&file) {
+            Ok(()) => Ok(Some(Self { file, owner: std::process::id() })),
+            Err(fs::TryLockError::WouldBlock) => Ok(None),
+            Err(fs::TryLockError::Error(error)) => Err(error),
+        }
+    }
+}
+
+impl Drop for OwnedFileLock {
+    fn drop(&mut self) {
+        if std::process::id() != self.owner {
+            return;
+        }
+        if let Err(error) = unlock_file(&self.file) {
+            tracing::warn!("Could not release file lock: {error}");
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct FileEntry {
     pub path: String,
