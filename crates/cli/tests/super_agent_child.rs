@@ -188,6 +188,7 @@ async fn real_child_runs_in_the_prepared_workspace_and_resumes_there() {
         extra_env: Vec::new(),
         executable_override: Some(executable.clone()),
         invocation: None,
+        member_binding: None,
     };
 
     let first = spawn_child_session(

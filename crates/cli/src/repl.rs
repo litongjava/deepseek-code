@@ -15,14 +15,19 @@ pub fn transcript(session: &Session) -> Result<Vec<crate::terminal::change_view:
 }
 
 /// The transcript of any saved conversation, for the /resume preview.
-pub fn transcript_of(session: &Session, id: &str) -> Result<Vec<crate::terminal::change_view::Line>> {
+pub fn transcript_of(
+    session: &Session,
+    id: &str,
+) -> Result<Vec<crate::terminal::change_view::Line>> {
     conversation(session, id, true, None)
 }
 
 /// After a resume, as in the reference CLI: the screen starts over with the
 /// banner and the conversation so far, one short line per tool call.
 pub fn show_resumed(session: &Session, clear: bool) -> Result<()> {
-    *crate::terminal::TURN_COMPLETION.lock().unwrap_or_else(|e| e.into_inner()) = None;
+    *crate::terminal::TURN_COMPLETION
+        .lock()
+        .unwrap_or_else(|e| e.into_inner()) = None;
     use std::io::IsTerminal;
     if !std::io::stderr().is_terminal() {
         return Ok(());
@@ -35,18 +40,25 @@ pub fn show_resumed(session: &Session, clear: bool) -> Result<()> {
     }
     let mut recorded = crate::terminal::scrollback::Scrollback::default();
     conversation(session, &session.id, false, Some(&mut recorded))?;
-    for row in recorded.all() { out.push_str(&row); out.push('\n'); }
+    for row in recorded.all() {
+        out.push_str(&row);
+        out.push('\n');
+    }
     eprint!("{out}");
     recorded.save();
     if session.waiting_for_continue() {
-        let active = crate::worker_frontend::settle_session(session).ok().flatten();
+        let active = crate::worker_frontend::settle_session(session)
+            .ok()
+            .flatten();
         command_eprintln!("{}", resumed_notice(active.as_ref()));
     }
     Ok(())
 }
 
 /// The notice after a resume must offer only what the session can do now.
-fn resumed_notice(active: Option<&deepseek_code_core::services::background_sessions::Job>) -> String {
+fn resumed_notice(
+    active: Option<&deepseek_code_core::services::background_sessions::Job>,
+) -> String {
     match active {
         None => "Session restored; waiting for input. Use /continue or send a new task to start the model.".into(),
         Some(job) => format!("Session restored. {}", crate::worker_frontend::active_worker_message(job)),
@@ -56,8 +68,13 @@ fn resumed_notice(active: Option<&deepseek_code_core::services::background_sessi
 /// Save presentation metadata against the final message, so rewind and session
 /// switching cannot accidentally display a different turn's completion status.
 pub fn save_completion(session: &Session) -> Result<()> {
-    let status = crate::terminal::TURN_COMPLETION.lock().unwrap_or_else(|e| e.into_inner()).clone();
-    let Some(status) = status else { return Ok(()); };
+    let status = crate::terminal::TURN_COMPLETION
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .clone();
+    let Some(status) = status else {
+        return Ok(());
+    };
     let messages = session.store.db.with_conn(|conn| {
         deepseek_code_core::db::message_repo::get_messages_by_conversation(conn, &session.id)
     })??;
@@ -71,23 +88,41 @@ pub fn save_completion(session: &Session) -> Result<()> {
 }
 
 fn hex_message_id(id: &str) -> String {
-    id.as_bytes().iter().map(|byte| format!("{byte:02x}")).collect()
+    id.as_bytes()
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect()
 }
 
-fn completion_for_message(data_dir: &std::path::Path, message: &deepseek_code_core::db::message_repo::MessageRow) -> Option<String> {
-    if message.role != "assistant" { return None; }
-    let path = data_dir.join("turn-completions").join(hex_message_id(&message.id));
+fn completion_for_message(
+    data_dir: &std::path::Path,
+    message: &deepseek_code_core::db::message_repo::MessageRow,
+) -> Option<String> {
+    if message.role != "assistant" {
+        return None;
+    }
+    let path = data_dir
+        .join("turn-completions")
+        .join(hex_message_id(&message.id));
     Some(match std::fs::read_to_string(path) {
         Ok(status) => status,
         // Legacy message timestamps are save times, not measured completion times.
         Err(_) => match chrono::DateTime::parse_from_rfc3339(&message.created_at) {
-            Ok(time) => format!("✻ Previous turn · saved {} · duration unavailable", time.with_timezone(&chrono::Local).format("%-I:%M %p")),
+            Ok(time) => format!(
+                "✻ Previous turn · saved {} · duration unavailable",
+                time.with_timezone(&chrono::Local).format("%-I:%M %p")
+            ),
             Err(_) => "✻ Previous turn · duration unavailable".into(),
         },
     })
 }
 
-fn conversation(session: &Session, id: &str, detailed: bool, mut recorded: Option<&mut crate::terminal::scrollback::Scrollback>) -> Result<Vec<crate::terminal::change_view::Line>> {
+fn conversation(
+    session: &Session,
+    id: &str,
+    detailed: bool,
+    mut recorded: Option<&mut crate::terminal::scrollback::Scrollback>,
+) -> Result<Vec<crate::terminal::change_view::Line>> {
     use crate::terminal::{change_view, tool_view};
     let width = crate::terminal::size().0.saturating_sub(1) as usize;
     session.store.db.with_conn(|conn| {
@@ -95,19 +130,32 @@ fn conversation(session: &Session, id: &str, detailed: bool, mut recorded: Optio
         let mut lines = Vec::new();
         let mut tool_number = 0;
         for message in &rows {
-            if detailed { separate_block(&mut lines); }
+            if detailed {
+                separate_block(&mut lines);
+            }
             let message_start = lines.len();
             if message.is_compact_boundary {
                 lines.push(change_view::muted("\u{273b} Conversation compacted"));
-                lines.extend(message.content.lines().map(|line| change_view::muted(&format!("  {line}"))));
-                if let Some(recorded) = recorded.as_deref_mut() { record_lines(recorded, &lines[message_start..], width); }
+                lines.extend(
+                    message
+                        .content
+                        .lines()
+                        .map(|line| change_view::muted(&format!("  {line}"))),
+                );
+                if let Some(recorded) = recorded.as_deref_mut() {
+                    record_lines(recorded, &lines[message_start..], width);
+                }
                 continue;
             }
             if message.role == "user" {
-                if let Some(summary) = crate::background_commands::notification_text(&message.content) {
+                if let Some(summary) =
+                    crate::background_commands::notification_text(&message.content)
+                {
                     lines.extend(summary.lines().map(change_view::body));
-                    if let Some(recorded) = recorded.as_deref_mut() { record_lines(recorded, &lines[message_start..], width); }
-                continue;
+                    if let Some(recorded) = recorded.as_deref_mut() {
+                        record_lines(recorded, &lines[message_start..], width);
+                    }
+                    continue;
                 }
                 let mut text = message.content.lines();
                 lines.push(change_view::body(&format!(
@@ -123,68 +171,149 @@ fn conversation(session: &Session, id: &str, detailed: bool, mut recorded: Optio
             }
             if detailed {
                 let time = chrono::DateTime::parse_from_rfc3339(&message.created_at)
-                    .map(|time| time.with_timezone(&chrono::Local).format("%I:%M %p").to_string())
+                    .map(|time| {
+                        time.with_timezone(&chrono::Local)
+                            .format("%I:%M %p")
+                            .to_string()
+                    })
                     .unwrap_or_default();
                 let header = format!("{time} {}", session.model);
                 lines.push(change_view::muted(&format!("{header:>width$}")));
             }
-            if let (Some(recorded), Some(thinking)) = (recorded.as_deref_mut(), message.thinking.as_deref().filter(|text| !text.trim().is_empty())) {
-                if recorded.needs_separator() { recorded.push(String::new(), None); }
+            if let (Some(recorded), Some(thinking)) = (
+                recorded.as_deref_mut(),
+                message
+                    .thinking
+                    .as_deref()
+                    .filter(|text| !text.trim().is_empty()),
+            ) {
+                if recorded.needs_separator() {
+                    recorded.push(String::new(), None);
+                }
                 let (short, full) = tool_view::thought(thinking, None);
                 let (id, rows) = recorded.block(short, full);
-                for row in rows { recorded.push(row, Some(id)); }
+                for row in rows {
+                    recorded.push(row, Some(id));
+                }
             }
-            if let Some(thinking) = message.thinking.as_deref().filter(|text| detailed && !text.trim().is_empty()) {
+            if let Some(thinking) = message
+                .thinking
+                .as_deref()
+                .filter(|text| detailed && !text.trim().is_empty())
+            {
                 separate_block(&mut lines);
                 let mut text = thinking.lines();
-                lines.push(change_view::muted(&format!("\u{2234} {}", text.next().unwrap_or_default())));
-                lines.extend(text.take(400).map(|line| change_view::muted(&format!("  {line}"))));
+                lines.push(change_view::muted(&format!(
+                    "\u{2234} {}",
+                    text.next().unwrap_or_default()
+                )));
+                lines.extend(
+                    text.take(400)
+                        .map(|line| change_view::muted(&format!("  {line}"))),
+                );
             }
             if let Some(recorded) = recorded.as_deref_mut() {
                 record_lines(recorded, &lines[message_start..], width);
             }
-            for tool in deepseek_code_core::db::message_repo::get_tool_calls_for_message(conn, &message.id)? {
-            tool_number += 1;
-            let number = Some(tool_number);
-            let input = tool
-                .input
-                .as_deref()
-                .and_then(|input| serde_json::from_str(input).ok())
-                .unwrap_or_default();
-            // Neutral on purpose: the call may have been cut off or may still be running.
-            let output = tool.output.as_deref().unwrap_or("No result recorded");
-            if let Some(recorded) = recorded.as_deref_mut() {
-                // A saved edit looks as it did live: summary and diff preview, click for the rest.
-                let change = matches!(tool.name.as_str(), "Write" | "Edit" | "MultiEdit")
-                    .then(|| change_view::change_in_workspace(output, tool.is_error, Some(&session.workspace)))
-                    .flatten()
-                    .filter(|lines| lines.len() > 1);
-                let (short, full) = if let Some(lines) = change {
-                    let short = change_view::collapsed_change(&lines);
-                    let mut full = lines;
-                    full.push(change_view::muted(tool_view::COLLAPSE_HINT));
-                    (short, full)
-                } else {
-                    let elapsed = deepseek_code_core::db::message_repo::tool_duration(conn, &tool.id)?.map(std::time::Duration::from_millis);
-                    (tool_view::finished(&tool.name, &input, output, tool.is_error, None, Some(&session.workspace)),
-                     tool_view::expanded_block(&tool.name, &input, output, tool.is_error, elapsed, Some(&session.workspace)))
-                };
-                if recorded.needs_separator() { recorded.push(String::new(), None); }
-                let (id, rows) = recorded.block(tool_view::numbered(short, number), tool_view::numbered(full, number));
-                recorded.bind_copy(id, tool_view::copy_command(&tool.name, &input), tool_view::result_text(output));
-                for row in rows { recorded.push(row, Some(id)); }
-            }
-            if detailed { separate_block(&mut lines); }
-            lines.extend(tool_view::numbered(if detailed {
-                tool_view::expanded(&tool.name, &input, output, tool.is_error, Some(&session.workspace))
-            } else {
-                tool_view::finished(&tool.name, &input, output, tool.is_error, None, Some(&session.workspace))
-            }, number));
+            for tool in
+                deepseek_code_core::db::message_repo::get_tool_calls_for_message(conn, &message.id)?
+            {
+                tool_number += 1;
+                let number = Some(tool_number);
+                let input = tool
+                    .input
+                    .as_deref()
+                    .and_then(|input| serde_json::from_str(input).ok())
+                    .unwrap_or_default();
+                // Neutral on purpose: the call may have been cut off or may still be running.
+                let output = tool.output.as_deref().unwrap_or("No result recorded");
+                if let Some(recorded) = recorded.as_deref_mut() {
+                    // A saved edit looks as it did live: summary and diff preview, click for the rest.
+                    let change = matches!(tool.name.as_str(), "Write" | "Edit" | "MultiEdit")
+                        .then(|| {
+                            change_view::change_in_workspace(
+                                output,
+                                tool.is_error,
+                                Some(&session.workspace),
+                            )
+                        })
+                        .flatten()
+                        .filter(|lines| lines.len() > 1);
+                    let (short, full) = if let Some(lines) = change {
+                        let short = change_view::collapsed_change(&lines);
+                        let mut full = lines;
+                        full.push(change_view::muted(tool_view::COLLAPSE_HINT));
+                        (short, full)
+                    } else {
+                        let elapsed =
+                            deepseek_code_core::db::message_repo::tool_duration(conn, &tool.id)?
+                                .map(std::time::Duration::from_millis);
+                        (
+                            tool_view::finished(
+                                &tool.name,
+                                &input,
+                                output,
+                                tool.is_error,
+                                None,
+                                Some(&session.workspace),
+                            ),
+                            tool_view::expanded_block(
+                                &tool.name,
+                                &input,
+                                output,
+                                tool.is_error,
+                                elapsed,
+                                Some(&session.workspace),
+                            ),
+                        )
+                    };
+                    if recorded.needs_separator() {
+                        recorded.push(String::new(), None);
+                    }
+                    let (id, rows) = recorded.block(
+                        tool_view::numbered(short, number),
+                        tool_view::numbered(full, number),
+                    );
+                    recorded.bind_copy(
+                        id,
+                        tool_view::copy_command(&tool.name, &input),
+                        tool_view::result_text(output),
+                    );
+                    for row in rows {
+                        recorded.push(row, Some(id));
+                    }
+                }
+                if detailed {
+                    separate_block(&mut lines);
+                }
+                lines.extend(tool_view::numbered(
+                    if detailed {
+                        tool_view::expanded(
+                            &tool.name,
+                            &input,
+                            output,
+                            tool.is_error,
+                            Some(&session.workspace),
+                        )
+                    } else {
+                        tool_view::finished(
+                            &tool.name,
+                            &input,
+                            output,
+                            tool.is_error,
+                            None,
+                            Some(&session.workspace),
+                        )
+                    },
+                    number,
+                ));
             }
             let answer_start = lines.len();
             let mut text = message.content.lines();
             if let Some(first) = text.next() {
-                if detailed { separate_block(&mut lines); }
+                if detailed {
+                    separate_block(&mut lines);
+                }
                 lines.push(change_view::body(&format!("\u{25cf} {first}")));
                 lines.extend(text.map(|line| change_view::body(&format!("  {line}"))));
             }
@@ -207,7 +336,11 @@ fn conversation(session: &Session, id: &str, detailed: bool, mut recorded: Optio
                     recorded.push_flow(line, if index == 0 { "● " } else { "  " }, &indent, width);
                 }
             }
-            let saved = session.paths.data_dir.join("turn-completions").join(hex_message_id(&message.id));
+            let saved = session
+                .paths
+                .data_dir
+                .join("turn-completions")
+                .join(hex_message_id(&message.id));
             // Only the final legacy message has a fallback; intermediate tool
             // messages must not be presented as completed turns.
             if saved.is_file() || rows.last().is_some_and(|last| last.id == message.id) {
@@ -215,8 +348,17 @@ fn conversation(session: &Session, id: &str, detailed: bool, mut recorded: Optio
                     separate_block(&mut lines);
                     lines.push(change_view::muted(&status));
                     if let Some(recorded) = recorded.as_deref_mut() {
-                        if recorded.needs_separator() { recorded.push(String::new(), None); }
-                        recorded.push(change_view::render(&change_view::muted(&status), width, std::env::var_os("NO_COLOR").is_none()), None);
+                        if recorded.needs_separator() {
+                            recorded.push(String::new(), None);
+                        }
+                        recorded.push(
+                            change_view::render(
+                                &change_view::muted(&status),
+                                width,
+                                std::env::var_os("NO_COLOR").is_none(),
+                            ),
+                            None,
+                        );
                     }
                 }
             }
@@ -230,11 +372,22 @@ fn rendered_answer(content: &str, width: usize, color: bool) -> Vec<String> {
     let mut markdown = crate::terminal::markdown::MarkdownStream::new(color);
     markdown.set_width(width.saturating_sub(2));
     let mut rendered = Vec::new();
-    for line in content.lines() { rendered.extend(markdown.line(line)); }
+    for line in content.lines() {
+        rendered.extend(markdown.line(line));
+    }
     rendered.extend(markdown.finish());
-    rendered.iter().enumerate().flat_map(|(index, line)| {
-        crate::terminal::markdown::wrap_styled(line, if index == 0 { "● " } else { "  " }, "  ", width)
-    }).collect()
+    rendered
+        .iter()
+        .enumerate()
+        .flat_map(|(index, line)| {
+            crate::terminal::markdown::wrap_styled(
+                line,
+                if index == 0 { "● " } else { "  " },
+                "  ",
+                width,
+            )
+        })
+        .collect()
 }
 
 #[test]
@@ -244,7 +397,9 @@ fn resumed_answers_keep_markdown_colors_and_flush_tables() {
     assert!(colored.contains("\x1b["));
     assert!(colored.contains("one"));
     assert!(!colored.contains("**bold**"));
-    assert!(!rendered_answer(content, 80, false).join("\n").contains("\x1b["));
+    assert!(!rendered_answer(content, 80, false)
+        .join("\n")
+        .contains("\x1b["));
 }
 
 #[tokio::test]
@@ -254,19 +409,49 @@ async fn all_tools_keep_numbers_in_resume_and_detailed_transcript() {
     let root = tempfile::tempdir().unwrap();
     let paths = RuntimePaths::new(root.path().join("data")).unwrap();
     let provider = serde_json::from_value(serde_json::json!({"id":"fixture","name":"Fixture","base_url":"http://127.0.0.1:1","api_key":"fixture-only","api_format":"openai","enabled":true,"models":[{"id":"fixture","name":"Fixture","enabled":true,"supports_vision":false,"supports_web_search":false}]})).unwrap();
-    let selection = crate::config::Selection { providers: vec![provider], provider_id: "fixture".into(), model: "fixture".into() };
+    let selection = crate::config::Selection {
+        providers: vec![provider],
+        provider_id: "fixture".into(),
+        model: "fixture".into(),
+    };
     let cli = crate::args::Cli::parse_from(["dcl", "--print"]);
     let store = SessionStore::new(paths.open_database().unwrap());
     let id = store.create(root.path(), "fixture", "fixture").unwrap();
-    let session = Session::open(&cli, &paths, selection, Some(&id)).await.unwrap();
+    let session = Session::open(&cli, &paths, selection, Some(&id))
+        .await
+        .unwrap();
     let names = ["Read", "Grep", "Edit", "Bash", "mcp__codegraph__explore"];
-    session.store.db.with_conn(|conn| -> Result<()> {
-        message_repo::insert_message(conn, "answer", &id, "assistant", "done", None, "2026-11-02T00:00:00Z", false, 0)?;
-        for (index, name) in names.iter().enumerate() {
-            message_repo::insert_tool_call(conn, &format!("call-{index}"), "answer", name, Some("{}"), Some("ok"), false, index as i64)?;
-        }
-        Ok(())
-    }).unwrap().unwrap();
+    session
+        .store
+        .db
+        .with_conn(|conn| -> Result<()> {
+            message_repo::insert_message(
+                conn,
+                "answer",
+                &id,
+                "assistant",
+                "done",
+                None,
+                "2026-11-02T00:00:00Z",
+                false,
+                0,
+            )?;
+            for (index, name) in names.iter().enumerate() {
+                message_repo::insert_tool_call(
+                    conn,
+                    &format!("call-{index}"),
+                    "answer",
+                    name,
+                    Some("{}"),
+                    Some("ok"),
+                    false,
+                    index as i64,
+                )?;
+            }
+            Ok(())
+        })
+        .unwrap()
+        .unwrap();
     for detailed in [false, true] {
         let lines = conversation(&session, &id, detailed, None).unwrap();
         let text = crate::terminal::change_view::plain(&lines);
@@ -274,21 +459,56 @@ async fn all_tools_keep_numbers_in_resume_and_detailed_transcript() {
             assert!(text.contains(&format!("#{} {name}", index + 1)), "{text}");
         }
     }
-    let mut display = crate::terminal::live::TurnDisplay::new(false, "ask", &paths.data_dir.join("keybindings.json"), vec![]).unwrap();
+    let mut display = crate::terminal::live::TurnDisplay::new(
+        false,
+        "ask",
+        &paths.data_dir.join("keybindings.json"),
+        vec![],
+    )
+    .unwrap();
     display.restore_numbers(&session).unwrap();
     let snapshot = serde_json::json!({"id":"request-fixture","startedAt":1000,"model":"fixture","status":"completed","inputTokens":123000,"outputTokens":22600,"usage":{"prompt_tokens":123000,"completion_tokens":22600},"systemPrompt":"must not be copied into live accounting"});
     crate::session_commands::save_live_requests(&session, &[snapshot.clone()]).unwrap();
     let live = crate::session_commands::live_requests(&session).unwrap();
     assert!(live[0].get("systemPrompt").is_none());
     let before = crate::status_commands::text(&session, "").await.unwrap();
-    assert!(before.contains("146K total  (123K input + 22.6K output)"), "{before}");
-    session.store.db.with_conn(|conn| message_repo::save_request_snapshots(conn, "answer", &serde_json::json!([snapshot]))).unwrap().unwrap();
+    assert!(
+        before.contains("146K total  (123K input + 22.6K output)"),
+        "{before}"
+    );
+    session
+        .store
+        .db
+        .with_conn(|conn| {
+            message_repo::save_request_snapshots(conn, "answer", &serde_json::json!([snapshot]))
+        })
+        .unwrap()
+        .unwrap();
     let after = crate::status_commands::text(&session, "").await.unwrap();
-    assert!(after.contains("146K total  (123K input + 22.6K output)"), "{after}");
-    for _ in 0..10 { crate::session_commands::step_effort(&session, true).await.unwrap(); }
-    assert_eq!(crate::session_commands::session_effort(&session).unwrap().as_deref(), Some("max"));
-    for _ in 0..10 { crate::session_commands::step_effort(&session, false).await.unwrap(); }
-    assert_eq!(crate::session_commands::session_effort(&session).unwrap(), None);
+    assert!(
+        after.contains("146K total  (123K input + 22.6K output)"),
+        "{after}"
+    );
+    for _ in 0..10 {
+        crate::session_commands::step_effort(&session, true)
+            .await
+            .unwrap();
+    }
+    assert_eq!(
+        crate::session_commands::session_effort(&session)
+            .unwrap()
+            .as_deref(),
+        Some("max")
+    );
+    for _ in 0..10 {
+        crate::session_commands::step_effort(&session, false)
+            .await
+            .unwrap();
+    }
+    assert_eq!(
+        crate::session_commands::session_effort(&session).unwrap(),
+        None
+    );
     session.close().await.unwrap();
 }
 
@@ -312,10 +532,21 @@ pub async fn compact(
     let context = crate::services::context(paths)?;
     let tracker = CompactionTracker::default();
     let compacted = {
-        let future = crate::hook_progress::during(&session.id, true, deepseek_code_core::services::compaction::compact_with_hooks_tracked(
-            &session.engine, &context, &session.workspace, &session.id,
-            &session.provider_id, &session.model, instructions.trim(), "manual", Some(&tracker),
-        ));
+        let future = crate::hook_progress::during(
+            &session.id,
+            true,
+            deepseek_code_core::services::compaction::compact_with_hooks_tracked(
+                &session.engine,
+                &context,
+                &session.workspace,
+                &session.id,
+                &session.provider_id,
+                &session.model,
+                instructions.trim(),
+                "manual",
+                Some(&tracker),
+            ),
+        );
         tokio::pin!(future);
         loop {
             tokio::select! {
@@ -333,7 +564,9 @@ pub async fn compact(
         // The block ends here, so a cancel after the commit drops the future
         // and stops the post-compaction hooks instead of waiting for them.
     };
-    for warning in &compacted.report.warnings { command_eprintln!("Hook: {warning}"); }
+    for warning in &compacted.report.warnings {
+        command_eprintln!("Hook: {warning}");
+    }
     Ok(compacted)
 }
 
@@ -397,7 +630,10 @@ pub async fn handle(
     let line = line.trim();
     let (command, argument) = line.split_once(char::is_whitespace).unwrap_or((line, ""));
     let command = crate::command_catalog::canonical(command);
-    if command == "/worktree" { crate::startup_options::worktree_startup::handle(argument,session).await?;return Ok(true); }
+    if command == "/worktree" {
+        crate::startup_options::worktree_startup::handle(argument, session).await?;
+        return Ok(true);
+    }
     if crate::feedback_commands::handle(command, argument, session).await? {
         return Ok(true);
     }
@@ -421,7 +657,12 @@ pub async fn handle(
             ensure!(argument.trim().is_empty(), "Usage: /subagents");
             let context = crate::services::context(paths)?;
             for entry in crate::terminal::subagents::entries(&context, &session.id)? {
-                command_println!("- {}{}  {}", entry.label, if entry.current { " (current)" } else { "" }, entry.id);
+                command_println!(
+                    "- {}{}  {}",
+                    entry.label,
+                    if entry.current { " (current)" } else { "" },
+                    entry.id
+                );
             }
         }
         "/status" => crate::status_commands::run(session, argument).await?,
@@ -458,7 +699,10 @@ pub async fn handle(
         "/context" => {
             ensure!(argument.trim().is_empty(), "Usage: /context");
             let rows = session.store.db.with_conn(|conn| {
-                deepseek_code_core::db::message_repo::get_messages_by_conversation(conn, &session.id)
+                deepseek_code_core::db::message_repo::get_messages_by_conversation(
+                    conn,
+                    &session.id,
+                )
             })??;
             let start = rows
                 .iter()
@@ -469,6 +713,29 @@ pub async fn handle(
         }
         "/permissions" => {
             crate::permission_commands::handle(argument, session).await?;
+        }
+        "/role" => {
+            use deepseek_code_core::super_agent::Role;
+            let current =
+                deepseek_code_core::super_agent::role::load(&session.store.db, &session.id)?;
+            let wanted = argument.trim();
+            if wanted.is_empty() {
+                command_eprintln!(
+                    "Role: {}. Use /role agent or /role router. The role is independent of the permission mode.",
+                    current.as_str()
+                );
+            } else {
+                let role = Role::parse(wanted)?;
+                deepseek_code_core::super_agent::role::set(&session.store.db, &session.id, role)?;
+                command_eprintln!(
+                    "Role set to {}. {}",
+                    role.as_str(),
+                    match role {
+                        Role::Router => "New tasks are scheduled through the host orchestrator; business-code editing tools are blocked.",
+                        Role::Agent => "This session behaves like a regular Agent.",
+                    }
+                );
+            }
         }
         "/rename" => {
             let title = argument.trim();
@@ -497,12 +764,20 @@ pub async fn handle(
         "/mcp" => {
             use clap::Parser;
             let mut words = crate::display_commands::split_arguments(argument)?;
-            if words.is_empty() { words.push("list".into()); }
-            let parsed = crate::args::Cli::try_parse_from(["dcl".into(), "mcp".into()].into_iter().chain(words))?;
-            let Some(crate::args::Commands::Mcp { action }) = parsed.command else { unreachable!() };
+            if words.is_empty() {
+                words.push("list".into());
+            }
+            let parsed = crate::args::Cli::try_parse_from(
+                ["dcl".into(), "mcp".into()].into_iter().chain(words),
+            )?;
+            let Some(crate::args::Commands::Mcp { action }) = parsed.command else {
+                unreachable!()
+            };
             crate::mcp(paths, &action).await?;
         }
-        "/end" | "/cancel" => command_eprintln!("No unfinished prompt. Use /multiline to compose one."),
+        "/end" | "/cancel" => {
+            command_eprintln!("No unfinished prompt. Use /multiline to compose one.")
+        }
         _ => return crate::extended_commands::handle(command, argument, paths, session).await,
     }
     Ok(true)
@@ -538,13 +813,17 @@ mod tests {
     #[test]
     fn resumed_notice_offers_only_what_the_session_can_do() {
         assert!(resumed_notice(None).contains("Use /continue or send a new task"));
-        let job = |status: &str| serde_json::from_value::<deepseek_code_core::services::background_sessions::Job>(serde_json::json!({
+        let job = |status: &str| {
+            serde_json::from_value::<deepseek_code_core::services::background_sessions::Job>(serde_json::json!({
             "id": "task-1", "parent_session_id": "s", "session_id": "s", "title": "t", "status": status,
             "supervisor_pid": null, "child_pid": null, "started_ms": 0, "heartbeat_ms": 0,
             "finished_ms": null, "exit_code": null, "error": null,
-        })).unwrap();
+        })).unwrap()
+        };
         let running = resumed_notice(Some(&job("running")));
-        assert!(running.contains("Use /continue to return") && running.contains("/tasks cancel task-1"));
+        assert!(
+            running.contains("Use /continue to return") && running.contains("/tasks cancel task-1")
+        );
         assert!(!running.contains("send a new task"));
         let stuck = resumed_notice(Some(&job("unresponsive")));
         assert!(stuck.contains("/tasks show task-1") && !stuck.contains("/continue"));
@@ -558,13 +837,24 @@ mod tests {
         let id = store.create(dir.path(), "model", "provider").unwrap();
         store.append(&id, "assistant", "Finished").unwrap();
         store.append(&id, "user", "Next turn").unwrap();
-        let messages = store.db.with_conn(|conn| deepseek_code_core::db::message_repo::get_messages_by_conversation(conn, &id)).unwrap().unwrap();
-        assert!(completion_for_message(&paths.data_dir, &messages[0]).unwrap().contains("duration unavailable"));
+        let messages = store
+            .db
+            .with_conn(|conn| {
+                deepseek_code_core::db::message_repo::get_messages_by_conversation(conn, &id)
+            })
+            .unwrap()
+            .unwrap();
+        assert!(completion_for_message(&paths.data_dir, &messages[0])
+            .unwrap()
+            .contains("duration unavailable"));
         let directory = paths.data_dir.join("turn-completions");
         std::fs::create_dir_all(&directory).unwrap();
         let status = "✻ Worked for 1m 30s · done 5:45 PM";
         std::fs::write(directory.join(hex_message_id(&messages[0].id)), status).unwrap();
-        assert_eq!(completion_for_message(&paths.data_dir, &messages[0]).as_deref(), Some(status));
+        assert_eq!(
+            completion_for_message(&paths.data_dir, &messages[0]).as_deref(),
+            Some(status)
+        );
         assert_eq!(completion_for_message(&paths.data_dir, &messages[1]), None);
     }
 
@@ -587,15 +877,29 @@ mod tests {
     }
 }
 
-fn record_lines(recorded: &mut crate::terminal::scrollback::Scrollback, lines: &[crate::terminal::change_view::Line], width: usize) {
+fn record_lines(
+    recorded: &mut crate::terminal::scrollback::Scrollback,
+    lines: &[crate::terminal::change_view::Line],
+    width: usize,
+) {
     for line in lines {
-        let text = crate::terminal::change_view::render(line, usize::MAX, std::env::var_os("NO_COLOR").is_none());
-        for row in crate::terminal::markdown::wrap_styled(&text, "", "", width) { recorded.push(row, None); }
+        let text = crate::terminal::change_view::render(
+            line,
+            usize::MAX,
+            std::env::var_os("NO_COLOR").is_none(),
+        );
+        for row in crate::terminal::markdown::wrap_styled(&text, "", "", width) {
+            recorded.push(row, None);
+        }
     }
 }
 
 fn separate_block(lines: &mut Vec<crate::terminal::change_view::Line>) {
-    if lines.last().is_some_and(|line| !crate::terminal::change_view::plain(std::slice::from_ref(line)).trim().is_empty()) {
+    if lines.last().is_some_and(|line| {
+        !crate::terminal::change_view::plain(std::slice::from_ref(line))
+            .trim()
+            .is_empty()
+    }) {
         lines.push(crate::terminal::change_view::body(""));
     }
 }
@@ -612,6 +916,8 @@ mod block_spacing_tests {
         super::separate_block(&mut lines);
         lines.push(crate::terminal::change_view::body("answer"));
         assert_eq!(lines.len(), 3);
-        assert!(crate::terminal::change_view::plain(&lines[1..2]).trim().is_empty());
+        assert!(crate::terminal::change_view::plain(&lines[1..2])
+            .trim()
+            .is_empty());
     }
 }
