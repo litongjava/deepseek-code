@@ -8,6 +8,7 @@ tokio::task_local! { static EXACT_WRITE: Option<PathBuf>; }
 tokio::task_local! { static EXACT_COMMAND: Option<String>; }
 tokio::task_local! { static EXACT_FETCH: Option<String>; }
 tokio::task_local! { static EDIT_SESSION: Option<String>; }
+tokio::task_local! { static PATCH_APPROVAL: bool; }
 tokio::task_local! { static PERMISSIONS: Option<std::sync::Arc<crate::permissions::PermissionManager>>; }
 
 pub(crate) async fn with_permissions<F: Future>(
@@ -27,6 +28,77 @@ pub(crate) async fn scope<F: Future>(directories: Vec<PathBuf>, future: F) -> F:
 
 pub(crate) async fn with_edit_session<F: Future>(session: Option<String>, future: F) -> F::Output {
     EDIT_SESSION.scope(session, future).await
+}
+
+/// The session's additional trusted directories, for tools that resolve many
+/// paths in one call. Empty outside an engine turn.
+pub(crate) fn allowed_roots() -> Vec<PathBuf> {
+    ALLOWED.try_with(Clone::clone).unwrap_or_default()
+}
+
+/// An explicit rule that covers this target as one of the shared file-edit
+/// operations. Only deny and explicit ask rules are reported: mode grants,
+/// saved approvals and allow rules belong to the tool-level decision.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum ExplicitPathRule {
+    Denied(String),
+    ConfirmationRequired(String),
+}
+
+/// Evaluate every canonical target of a multi-path edit against the session's
+/// explicit file-operation rules. ApplyPatch performs the same create, modify,
+/// remove and rename operations as `Edit`, `Write` and `MultiEdit`, so a rule
+/// written for any of those tools covers its targets; a rule written for one
+/// tool is never silently dropped under a universal `Edit` alias. Deny wins;
+/// an explicit ask is reported as confirmation-required.
+pub(crate) fn explicit_path_rule(raw_path: &str, workspace: &Path) -> Option<ExplicitPathRule> {
+    let session = EDIT_SESSION.try_with(Clone::clone).ok().flatten()?;
+    explicit_path_rule_for_session(raw_path, workspace, &session)
+}
+
+/// The same aggregation for a caller that already has the conversation id,
+/// such as the engine's pre-dispatch permission check, where the edit-session
+/// task local is not yet in scope.
+pub(crate) fn explicit_path_rule_for_session(
+    raw_path: &str,
+    workspace: &Path,
+    session: &str,
+) -> Option<ExplicitPathRule> {
+    let manager = PERMISSIONS.try_with(Clone::clone).ok().flatten()?;
+    let mut confirmation = None;
+    for tool_name in ["Edit", "Write", "MultiEdit"] {
+        let decision = manager.evaluate_permission(&crate::permissions::PermissionContext {
+            mcp_read_only: false,
+            tool_name: tool_name.into(),
+            tool_input: serde_json::json!({"file_path": raw_path}),
+            conversation_id: session.to_owned(),
+            user_id: None,
+            workspace_path: Some(workspace.to_string_lossy().into()),
+        });
+        match decision.result {
+            crate::permissions::PermissionResult::Denied(reason) => {
+                return Some(ExplicitPathRule::Denied(format!("{tool_name}: {reason}")));
+            }
+            crate::permissions::PermissionResult::RequiresConfirmation(_)
+                if decision.origin == crate::permissions::DecisionOrigin::ExplicitRule =>
+            {
+                confirmation.get_or_insert_with(|| {
+                    format!("{tool_name} requires confirmation for this path")
+                });
+            }
+            _ => {}
+        }
+    }
+    confirmation.map(ExplicitPathRule::ConfirmationRequired)
+}
+
+/// Whether the engine asked the user and the user approved this exact
+/// `ApplyPatch` call. A PreToolUse hook's automatic allow never sets it, so a
+/// rewritten patch cannot inherit approval for unrelated paths.
+pub(crate) fn patch_approval() -> bool {
+    PATCH_APPROVAL
+        .try_with(|approved| *approved)
+        .unwrap_or(false)
 }
 
 fn session_edits() -> bool {
@@ -74,10 +146,16 @@ pub(crate) async fn approved_auto_call<F: Future>(
     let fetch = (tool == "WebFetch" && approved_command)
         .then(|| input["url"].as_str().map(str::to_owned))
         .flatten();
-    EXACT_COMMAND
+    // ApplyPatch has no single path key. The approval binds the exact patch
+    // input, and the tool re-derives every affected path from it.
+    let patch = tool == "ApplyPatch" && approved_command;
+    PATCH_APPROVAL
         .scope(
-            command,
-            EXACT_FETCH.scope(fetch, EXACT_WRITE.scope(target, future)),
+            patch,
+            EXACT_COMMAND.scope(
+                command,
+                EXACT_FETCH.scope(fetch, EXACT_WRITE.scope(target, future)),
+            ),
         )
         .await
 }
@@ -124,11 +202,16 @@ pub(crate) fn carry<R>(
     let exact = EXACT_WRITE.try_with(Clone::clone).unwrap_or_default();
     let fetch = EXACT_FETCH.try_with(Clone::clone).unwrap_or_default();
     let session = EDIT_SESSION.try_with(Clone::clone).unwrap_or_default();
+    let patch = PATCH_APPROVAL
+        .try_with(|approved| *approved)
+        .unwrap_or_default();
     move || {
         PERMISSIONS.sync_scope(manager, || {
             EDIT_SESSION.sync_scope(session, || {
-                ALLOWED.sync_scope(roots, || {
-                    EXACT_FETCH.sync_scope(fetch, || EXACT_WRITE.sync_scope(exact, work))
+                PATCH_APPROVAL.sync_scope(patch, || {
+                    ALLOWED.sync_scope(roots, || {
+                        EXACT_FETCH.sync_scope(fetch, || EXACT_WRITE.sync_scope(exact, work))
+                    })
                 })
             })
         })
@@ -177,6 +260,90 @@ pub(super) fn allows(canonical: &Path) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[tokio::test]
+    async fn explicit_path_rules_cover_every_file_edit_tool_and_deny_wins() {
+        use crate::permissions::rules::PermissionAction;
+        use crate::permissions::PermissionMode;
+        use std::collections::HashMap;
+        let root = tempfile::tempdir().unwrap();
+        let target = root.path().join("target.txt");
+        std::fs::write(&target, "x").unwrap();
+        let canonical = canonical_target(&target).unwrap();
+        let manager = crate::runtime::default_permissions();
+        manager.set_mode(PermissionMode::AcceptEdits);
+        manager.set_edit_session_allowed("session", true);
+        for rule in [
+            "Edit(target.txt)",
+            "Write(target.txt)",
+            "MultiEdit(target.txt)",
+        ] {
+            manager.set_session_rules(
+                "session",
+                HashMap::from([(rule.to_string(), PermissionAction::Confirm)]),
+            );
+            let path = canonical.clone();
+            let root = root.path().to_path_buf();
+            with_permissions(
+                Some(manager.clone()),
+                with_edit_session(Some("session".into()), async move {
+                    assert!(
+                        matches!(
+                            explicit_path_rule(path.to_str().unwrap(), &root),
+                            Some(ExplicitPathRule::ConfirmationRequired(_))
+                        ),
+                        "{rule} must not be lost under an Edit alias"
+                    );
+                }),
+            )
+            .await;
+        }
+        manager.set_session_rules(
+            "session",
+            HashMap::from([
+                ("Edit(target.txt)".to_string(), PermissionAction::Confirm),
+                ("Write(target.txt)".to_string(), PermissionAction::Deny),
+            ]),
+        );
+        let path = canonical.clone();
+        let root = root.path().to_path_buf();
+        with_permissions(
+            Some(manager),
+            with_edit_session(Some("session".into()), async move {
+                assert!(matches!(
+                    explicit_path_rule(path.to_str().unwrap(), &root),
+                    Some(ExplicitPathRule::Denied(_))
+                ));
+            }),
+        )
+        .await;
+    }
+
+    #[tokio::test]
+    async fn patch_approval_is_exact_temporary_and_carried_to_blocking_work() {
+        let input = serde_json::json!({"patch": "*** Begin Patch\n*** End Patch"});
+        assert!(!patch_approval());
+        approved_auto_call("ApplyPatch", &input, ".", true, async {
+            assert!(patch_approval());
+            assert!(tokio::task::spawn_blocking(carry(patch_approval))
+                .await
+                .unwrap());
+            assert!(!tokio::spawn(async { patch_approval() }).await.unwrap());
+        })
+        .await;
+        assert!(!patch_approval());
+        approved_auto_call("ApplyPatch", &input, ".", false, async {
+            assert!(!patch_approval());
+        })
+        .await;
+        approved_auto_call("Write", &input, ".", true, async {
+            assert!(
+                !patch_approval(),
+                "another tool cannot grant patch approval"
+            );
+        })
+        .await;
+    }
+
     #[tokio::test]
     async fn local_fetch_approval_is_exact_temporary_and_carried_to_blocking_work() {
         let input = serde_json::json!({"url":"http://localhost:8080/page"});

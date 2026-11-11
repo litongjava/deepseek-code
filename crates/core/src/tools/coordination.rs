@@ -1,19 +1,63 @@
-//! Durable plans and teams; execution is delegated by the host to its existing tool loop.
+//! Durable teams; execution is delegated by the host to its existing tool loop.
+//!
+//! The duplicate model-facing project-plan entry (`plan_mode`) is retired. Its
+//! legacy records are read only by `tools::plan_import` and are never deleted.
 use anyhow::{bail, Context, Result};
 use rusqlite::{params, OptionalExtension};
 use serde_json::{json, Value};
 
 static TEAM_LOCKS: std::sync::LazyLock<
-    std::sync::Mutex<std::collections::HashMap<String, std::fs::File>>,
+    std::sync::Mutex<std::collections::HashMap<String, TeamLock>>,
 > = std::sync::LazyLock::new(|| std::sync::Mutex::new(std::collections::HashMap::new()));
-fn team_lock(cwd: &str, id: &str) -> Result<(String, std::fs::File)> {
+
+/// Where a team's execution lock lives.
+fn team_lock_path(cwd: &str, id: &str) -> Result<std::path::PathBuf> {
+    Ok(std::path::Path::new(cwd)
+        .canonicalize()?
+        .join(".claude")
+        .join(format!("team-{id}.lock")))
+}
+
+/// Owns a team's execution lock until its scope ends.
+///
+/// Closing the descriptor is not enough to release ownership: `fork` gives the
+/// child the same open file description, so a child spawned while the team was
+/// running keeps the lock held after the owner drops its `File`. Explicit
+/// unlock clears the lock on that shared description, so the next coordinator
+/// does not wait for an unrelated process to exit.
+struct TeamLock {
+    file: std::fs::File,
+    released: bool,
+}
+
+impl TeamLock {
+    fn new(file: std::fs::File) -> Self {
+        Self {
+            file,
+            released: false,
+        }
+    }
+
+    /// Releases ownership now instead of leaving it to the descriptor close.
+    fn release(&mut self) {
+        if !self.released {
+            let _ = crate::fs::unlock_file(&self.file);
+            self.released = true;
+        }
+    }
+}
+
+impl Drop for TeamLock {
+    fn drop(&mut self) {
+        self.release();
+    }
+}
+
+fn team_lock(cwd: &str, id: &str) -> Result<(String, TeamLock)> {
     if id.is_empty() || !id.bytes().all(|b| b.is_ascii_hexdigit() || b == b'-') {
         bail!("Invalid team ID");
     }
-    let path = std::path::Path::new(cwd)
-        .canonicalize()?
-        .join(".claude")
-        .join(format!("team-{id}.lock"));
+    let path = team_lock_path(cwd, id)?;
     let file = std::fs::OpenOptions::new()
         .write(true)
         .create(true)
@@ -21,13 +65,12 @@ fn team_lock(cwd: &str, id: &str) -> Result<(String, std::fs::File)> {
         .open(&path)?;
     crate::fs::try_lock_file(&file)
         .context("Team execution is active in another request or process")?;
-    Ok((path.to_string_lossy().into_owned(), file))
+    Ok((path.to_string_lossy().into_owned(), TeamLock::new(file)))
 }
 
 pub(super) fn definitions() -> Vec<super::ToolDefinition> {
     vec![
-        super::ToolDefinition{name:"team".into(),description:"Manage persistent project agent teams: create, get, list, delete, reset_task. Use run to execute pending tasks through the host's shared agent engine. Creation does not execute tasks.".into(),input_schema:json!({"type":"object","properties":{"operation":{"type":"string","enum":["create","get","list","delete","run","reset_task"]},"team_id":{"type":"string"},"task_id":{"type":"string"},"name":{"type":"string"},"tasks":{"type":"array","items":{"type":"object","properties":{"prompt":{"type":"string"},"description":{"type":"string"}},"required":["prompt"]}}},"required":["operation"]})},
-        super::ToolDefinition{name:"plan_mode".into(),description:"Maintain durable project plans: create, enter, exit, get_current, add_step, update_step, list, get, abandon, decompose. Enter asks the host to restrict execution to plan mode. Exit requests explicit user approval of the current plan before switching to ask permissions; it never grants blanket write or Bash permissions.".into(),input_schema:json!({"type":"object","properties":{"operation":{"type":"string","enum":["create","enter","exit","get_current","add_step","update_step","list","get","abandon","decompose"]},"plan_id":{"type":"string"},"step_id":{"type":"string"},"task":{"type":"string"},"steps":{"type":"array","items":{"type":"object","properties":{"description":{"type":"string"},"dependencies":{"type":"array","items":{"type":"string"}}},"required":["description"]}},"description":{"type":"string"},"dependencies":{"type":"array","items":{"type":"string"}},"status":{"type":"string","enum":["pending","blocked","ready","in_progress","completed","skipped"]},"result":{"type":"string"}},"required":["operation"]})}
+        super::ToolDefinition{name:"team".into(),description:"Manage persistent project agent teams: create, get, list, delete, reset_task. Use run to execute pending tasks through the host's shared agent engine. Creation does not execute tasks.".into(),input_schema:json!({"type":"object","properties":{"operation":{"type":"string","enum":["create","get","list","delete","run","reset_task"]},"team_id":{"type":"string"},"task_id":{"type":"string"},"name":{"type":"string"},"tasks":{"type":"array","items":{"type":"object","properties":{"prompt":{"type":"string"},"description":{"type":"string"}},"required":["prompt"]}}},"required":["operation"]})}
     ]
 }
 
@@ -67,36 +110,28 @@ fn required<'a>(input: &'a Value, key: &str) -> Result<&'a str> {
 }
 
 pub fn execute(name: &str, input: Value, cwd: &str) -> Result<Value> {
+    // The duplicate project-plan entry (`plan_mode`) is retired. Refusing an
+    // unknown name before opening the database is what makes a stale settings
+    // entry or an old transcript unable to create legacy storage.
+    if name != "team" {
+        bail!("Unknown coordination tool");
+    }
     let mut db = connection(cwd)?;
     let tx = db.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
     let operation = required(&input, "operation")?;
-    let kind = if name == "team" {
-        "team"
-    } else if name == "plan_mode" {
-        "plan"
-    } else {
-        bail!("Unknown coordination tool")
-    };
-    let id_key = if kind == "team" { "team_id" } else { "plan_id" };
+    let kind = "team";
+    let id_key = "team_id";
     let result = match operation {
         "create" => {
             let id = uuid::Uuid::new_v4().to_string();
             let timestamp = chrono::Utc::now().to_rfc3339();
-            let mut record = if kind == "team" {
-                let name = required(&input, "name")?;
-                let tasks = input["tasks"].as_array().context("tasks is required")?;
-                if tasks.is_empty() || tasks.len() > 100 {
-                    bail!("Team needs 1–100 tasks");
-                }
-                let tasks=tasks.iter().enumerate().map(|(index,task)|Ok(json!({"task_id":format!("task-{index}"),"prompt":required(task,"prompt")?,"description":task["description"].as_str().unwrap_or(""),"status":"pending","result":null,"error":null}))).collect::<Result<Vec<_>>>()?;
-                json!({"team_id":id,"name":name,"tasks":tasks,"status":"active"})
-            } else {
-                let task = required(&input, "task")?;
-                let steps = input["steps"].as_array().cloned().unwrap_or_default();
-                let steps=steps.iter().enumerate().map(|(index,step)|Ok(json!({"step_id":format!("step-{index}"),"description":required(step,"description")?,"dependencies":step.get("dependencies").cloned().unwrap_or(json!([])),"status":"pending","result":null}))).collect::<Result<Vec<_>>>()?;
-                validate_steps(&steps)?;
-                json!({"plan_id":id,"task":task,"steps":steps,"status":"draft"})
-            };
+            let name = required(&input, "name")?;
+            let tasks = input["tasks"].as_array().context("tasks is required")?;
+            if tasks.is_empty() || tasks.len() > 100 {
+                bail!("Team needs 1–100 tasks");
+            }
+            let tasks=tasks.iter().enumerate().map(|(index,task)|Ok(json!({"task_id":format!("task-{index}"),"prompt":required(task,"prompt")?,"description":task["description"].as_str().unwrap_or(""),"status":"pending","result":null,"error":null}))).collect::<Result<Vec<_>>>()?;
+            let mut record = json!({"team_id":id,"name":name,"tasks":tasks,"status":"active"});
             record["created_at"] = json!(timestamp);
             record["updated_at"] = json!(timestamp);
             put(&tx, kind, &id, &record)?;
@@ -151,118 +186,11 @@ pub fn execute(name: &str, input: Value, cwd: &str) -> Result<Value> {
             put(&tx, kind, id, &team)?;
             team
         }
-        "get_current" if kind == "plan" => {
-            let id: Option<String> = tx
-                .query_row("SELECT id FROM current_plan WHERE singleton=1", [], |row| {
-                    row.get(0)
-                })
-                .optional()?;
-            if let Some(id) = id {
-                get(&tx, kind, &id)?
-            } else {
-                Value::Null
-            }
-        }
-        "exit" if kind == "plan" => {
-            tx.execute("DELETE FROM current_plan WHERE singleton=1", [])?;
-            json!({"exited":true,"permissions_unchanged":true})
-        }
-        "enter" | "abandon" | "add_step" | "update_step" | "decompose" if kind == "plan" => {
-            let id = required(&input, id_key)?;
-            let mut plan = get(&tx, kind, id)?;
-            match operation {
-                "enter" => {
-                    if plan["status"] == "abandoned" {
-                        bail!("Plan is abandoned");
-                    }
-                    plan["status"] = json!("active");
-                    tx.execute("INSERT INTO current_plan(singleton,id) VALUES(1,?1) ON CONFLICT(singleton) DO UPDATE SET id=excluded.id",[id])?;
-                }
-                "abandon" => {
-                    plan["status"] = json!("abandoned");
-                    tx.execute("DELETE FROM current_plan WHERE id=?1", [id])?;
-                }
-                "add_step" => {
-                    let steps = plan["steps"].as_array_mut().unwrap();
-                    steps.push(json!({"step_id":uuid::Uuid::new_v4().to_string(),"description":required(&input,"description")?,"dependencies":input.get("dependencies").cloned().unwrap_or(json!([])),"status":"pending","result":null}));
-                    validate_steps(steps)?;
-                }
-                "update_step" => {
-                    let steps = plan["steps"].as_array_mut().unwrap();
-                    let step_id = required(&input, "step_id")?;
-                    let step = steps
-                        .iter_mut()
-                        .find(|step| step["step_id"] == step_id)
-                        .context("Step not found")?;
-                    for key in ["description", "dependencies", "status", "result"] {
-                        if let Some(value) = input.get(key) {
-                            step[key] = value.clone();
-                        }
-                    }
-                    validate_steps(steps)?;
-                }
-                "decompose" => {
-                    let supplied = input["steps"]
-                        .as_array()
-                        .filter(|steps| !steps.is_empty())
-                        .context("decompose requires explicit model/user-generated steps")?;
-                    if plan["steps"].as_array().unwrap().iter().any(|step| {
-                        matches!(step["status"].as_str(), Some("completed" | "in_progress"))
-                    }) {
-                        bail!("Cannot replace a plan with completed or running steps");
-                    }
-                    let steps=supplied.iter().enumerate().map(|(index,step)|Ok(json!({"step_id":format!("step-{index}"),"description":required(step,"description")?,"dependencies":step.get("dependencies").cloned().unwrap_or(json!([])),"status":"pending","result":null}))).collect::<Result<Vec<_>>>()?;
-                    validate_steps(&steps)?;
-                    plan["steps"] = json!(steps);
-                }
-                _ => unreachable!(),
-            }
-            plan["updated_at"] = json!(chrono::Utc::now().to_rfc3339());
-            put(&tx, kind, id, &plan)?;
-            plan
-        }
         "run" if kind == "team" => bail!("Team execution requires the shared agent host"),
         _ => bail!("Unsupported {kind} operation: {operation}"),
     };
     tx.commit()?;
     Ok(result)
-}
-
-fn validate_steps(steps: &[Value]) -> Result<()> {
-    for step in steps {
-        if !matches!(
-            step["status"].as_str(),
-            Some("pending" | "blocked" | "ready" | "in_progress" | "completed" | "skipped")
-        ) {
-            bail!("Invalid step status");
-        }
-        required(step, "description")?;
-        let origin = required(step, "step_id")?;
-        let mut pending = step["dependencies"]
-            .as_array()
-            .context("dependencies must be an array")?
-            .clone();
-        let mut seen = std::collections::HashSet::new();
-        while let Some(next) = pending.pop() {
-            let next = next.as_str().context("Dependency must be a step ID")?;
-            if next == origin {
-                bail!("Plan dependency cycle");
-            }
-            let target = steps
-                .iter()
-                .find(|s| s["step_id"] == next)
-                .context("Plan dependency is missing")?;
-            if seen.insert(next.to_string()) {
-                pending.extend(
-                    target["dependencies"]
-                        .as_array()
-                        .context("dependencies must be an array")?
-                        .clone(),
-                );
-            }
-        }
-    }
-    Ok(())
 }
 
 pub fn claim_team_task(cwd: &str, team_id: &str) -> Result<Option<Value>> {
@@ -336,16 +264,14 @@ pub fn finish_team_task(
     team["updated_at"] = json!(chrono::Utc::now().to_rfc3339());
     put(&tx, "team", team_id, &team)?;
     tx.commit()?;
-    let lock_key = std::path::Path::new(cwd)
-        .canonicalize()?
-        .join(".claude")
-        .join(format!("team-{team_id}.lock"))
-        .to_string_lossy()
-        .into_owned();
-    TEAM_LOCKS
+    let lock_key = team_lock_path(cwd, team_id)?.to_string_lossy().into_owned();
+    let released = TEAM_LOCKS
         .lock()
         .map_err(|_| anyhow::anyhow!("Team lock registry is poisoned"))?
         .remove(&lock_key);
+    if let Some(mut lock) = released {
+        lock.release();
+    }
     Ok(())
 }
 
@@ -383,27 +309,78 @@ mod tests {
         assert_eq!(team["tasks"][0]["result"], "inspected");
     }
     #[test]
-    fn plans_persist_and_reject_missing_or_cyclic_dependencies() {
+    fn releasing_team_ownership_survives_an_inherited_descriptor() {
         let dir = tempfile::tempdir().unwrap();
         let cwd = dir.path().to_str().unwrap();
-        let plan=execute("plan_mode",json!({"operation":"create","task":"build","steps":[{"description":"one"},{"description":"two","dependencies":["step-0"]}]}),cwd).unwrap();
-        let id = plan["plan_id"].as_str().unwrap();
-        execute("plan_mode", json!({"operation":"enter","plan_id":id}), cwd).unwrap();
-        assert_eq!(
-            execute("plan_mode", json!({"operation":"get_current"}), cwd).unwrap()["plan_id"],
-            id
-        );
-        assert!(execute("plan_mode",json!({"operation":"update_step","plan_id":id,"step_id":"step-0","dependencies":["step-1"]}),cwd).is_err());
-        let decomposed=execute("plan_mode",json!({"operation":"decompose","plan_id":id,"steps":[{"description":"A real supplied step"}]}),cwd).unwrap();
-        assert_eq!(
-            decomposed["steps"][0]["description"],
-            "A real supplied step"
-        );
-        execute("plan_mode", json!({"operation":"exit"}), cwd).unwrap();
-        assert!(
-            execute("plan_mode", json!({"operation":"get_current"}), cwd)
+        let team=execute("team",json!({"operation":"create","name":"review","tasks":[{"prompt":"inspect"},{"prompt":"verify"}]}),cwd).unwrap();
+        let id = team["team_id"].as_str().unwrap().to_owned();
+        let task = claim_team_task(cwd, &id).unwrap().unwrap();
+        // Duplicate the descriptor that owns the flock. Both descriptors share
+        // one open file description, exactly like a forked child's inherited
+        // copy, so closing the owner alone leaves the lock held. This is a
+        // deterministic shared-description proof, not a fork/exec execution.
+        let key = team_lock_path(cwd, &id)
+            .unwrap()
+            .to_string_lossy()
+            .into_owned();
+        let duplicate = {
+            let locks = TEAM_LOCKS.lock().unwrap();
+            locks
+                .get(&key)
+                .expect("the claim owns the team lock")
+                .file
+                .try_clone()
                 .unwrap()
-                .is_null()
+        };
+        assert!(
+            claim_team_task(cwd, &id).is_err(),
+            "duplicate active claims must still be denied"
         );
+
+        finish_team_task(
+            cwd,
+            &id,
+            task["task_id"].as_str().unwrap(),
+            Some("inspected"),
+            None,
+        )
+        .unwrap();
+
+        // The duplicate descriptor is still open here: releasing ownership must
+        // not depend on it closing.
+        let second = claim_team_task(cwd, &id)
+            .unwrap()
+            .expect("the second claim must not stay blocked behind an inherited descriptor");
+        finish_team_task(
+            cwd,
+            &id,
+            second["task_id"].as_str().unwrap(),
+            None,
+            Some("cancelled"),
+        )
+        .unwrap();
+        drop(duplicate);
+
+        let team = execute("team", json!({"operation":"get","team_id":&id}), cwd).unwrap();
+        assert_eq!(team["status"], "failed");
+        assert_eq!(team["tasks"][0]["result"], "inspected");
+    }
+    #[test]
+    fn retired_plan_entry_fails_before_creating_legacy_storage() {
+        let dir = tempfile::tempdir().unwrap();
+        let cwd = dir.path().to_str().unwrap();
+        for operation in ["create", "enter", "exit", "get_current", "list"] {
+            let error = execute(
+                "plan_mode",
+                json!({"operation":operation,"task":"build","steps":[]}),
+                cwd,
+            )
+            .unwrap_err();
+            assert!(
+                error.to_string().contains("Unknown coordination tool"),
+                "{operation}: {error}"
+            );
+        }
+        assert!(!dir.path().join(".claude").exists());
     }
 }

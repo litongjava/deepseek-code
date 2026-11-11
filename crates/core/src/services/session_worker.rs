@@ -15,6 +15,10 @@ use tokio::io::{AsyncBufReadExt, AsyncRead, AsyncWrite, AsyncWriteExt, BufReader
 
 pub const SUPERVISOR_ENV: &str = "DEEPSEEK_CODE_SESSION_SUPERVISOR";
 pub const HOST_ENV: &str = "DEEPSEEK_CODE_SESSION_HOST";
+/// The supervisor's own pid, given to the host it spawns. The host must be able
+/// to notice that its owner is gone even when the worker record is unreadable,
+/// and the record it inherits at startup can still be missing that pid.
+pub const SUPERVISOR_PID_ENV: &str = "DEEPSEEK_CODE_SESSION_SUPERVISOR_PID";
 const MAX_FRAME: usize = 16 * 1024 * 1024;
 
 /// Start a supervisor for one session. Inherited worker state is removed first:
@@ -35,6 +39,7 @@ fn engine_command(executable: &Path, dir: &Path, workspace: &Path) -> Command {
     jobs::strip_internal_env(&mut command);
     command
         .env(HOST_ENV, dir)
+        .env(SUPERVISOR_PID_ENV, std::process::id().to_string())
         .env_remove(SUPERVISOR_ENV)
         .current_dir(workspace);
     command
@@ -476,10 +481,14 @@ pub async fn ensure_worker(
     if let Some(worker) = current(root, session)? {
         ensure!(worker.root == root && worker.session_id == session, "Session worker metadata does not match the requested session");
         if worker.status != "stopped" {
-            if jobs::now().saturating_sub(worker.heartbeat_ms) < 10_000 {
-                return wait_ready(worker).await;
+            if jobs::now().saturating_sub(worker.heartbeat_ms) >= 10_000 {
+                recovery::recover(&worker)?;
+            } else if let Some(ready) = wait_existing(worker).await? {
+                return Ok(ready);
             }
-            recovery::recover(&worker)?;
+            // The recorded worker stopped before it was ever ready, for example
+            // because its host was just killed. Start a fresh worker instead of
+            // reporting the predecessor's shutdown as this startup's failure.
         }
     }
     let id = uuid::Uuid::new_v4().to_string();
@@ -539,6 +548,31 @@ pub async fn ensure_worker(
     });
     wait_ready(worker).await
 }
+/// Wait for an already-recorded worker to become reachable. `None` means the
+/// predecessor stopped before it was ever ready, so the caller starts a fresh
+/// worker. A wait that never resolves still fails, so a hung supervisor is not
+/// hidden.
+async fn wait_existing(worker: Worker) -> Result<Option<Worker>> {
+    let dir = directory(&worker);
+    tokio::time::timeout(Duration::from_secs(12), async {
+        loop {
+            let observed = read_worker(&dir)?;
+            if observed.status == "stopped" {
+                return Ok(None);
+            }
+            if observed.status == "running"
+                && observed.child_pid.is_some()
+                && call(&observed, &Request::Ping).await.is_ok()
+            {
+                return Ok(Some(observed));
+            }
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+    })
+    .await
+    .context("Session worker did not become ready within 12 seconds")?
+}
+
 async fn wait_ready(worker: Worker) -> Result<Worker> {
     let dir = directory(&worker);
     tokio::time::timeout(Duration::from_secs(12), async {
@@ -850,6 +884,11 @@ fn supervise(dir: &Path, worker: &mut Worker) -> Result<()> {
         use std::os::unix::process::CommandExt;
         command.process_group(0);
     }
+    // Publish ownership before the host exists. The host reads this record at
+    // startup, and a record that does not yet name its supervisor leaves it
+    // unable to notice that the owner is gone if the record is later damaged.
+    worker.supervisor_pid = Some(std::process::id());
+    jobs::save(&dir.join("worker.json"), worker)?;
     let child = command.spawn()?;
     struct Owner(std::process::Child);
     impl Drop for Owner {
@@ -879,7 +918,6 @@ fn supervise(dir: &Path, worker: &mut Worker) -> Result<()> {
         }
     }
     let mut child = Owner(child);
-    worker.supervisor_pid = Some(std::process::id());
     worker.child_pid = Some(child.0.id());
     worker.status = "running".into();
     let mut cancelling: Option<(String, std::time::Instant)> = None;
@@ -1134,6 +1172,23 @@ mod settle_tests {
         assert!(engine
             .get_envs()
             .any(|(name, value)| name == SUPERVISOR_ENV && value.is_none()));
+        // The host learns its owner out of band: the record it starts with can
+        // still lack the supervisor pid, and damage to it must not be able to
+        // hide the pid for good.
+        let pid = std::process::id().to_string();
+        assert!(
+            engine
+                .get_envs()
+                .any(|(name, value)| name == SUPERVISOR_PID_ENV
+                    && value == Some(std::ffi::OsStr::new(&pid))),
+            "the host was not told which supervisor owns it"
+        );
+        assert!(
+            supervisor_command(Path::new("fixture"), dir)
+                .get_envs()
+                .all(|(name, _)| name != SUPERVISOR_PID_ENV),
+            "only the host should receive the supervisor pid"
+        );
     }
 
     fn exited_pid() -> u32 {

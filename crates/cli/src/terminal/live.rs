@@ -4169,6 +4169,9 @@ pub struct TurnDisplay {
     tools: std::collections::HashMap<String, (Instant, Value)>,
     tool_titles: std::collections::HashMap<String, String>,
     finished: std::collections::HashMap<String, (String, Value, String, bool)>,
+    /// The input seen when each call started, kept for the whole turn so a
+    /// legacy/mirrored completion without input never erases the richer start.
+    started_inputs: std::collections::HashMap<String, Value>,
     /// Lines added and removed per file this turn, for the closing summary.
     changes: std::collections::BTreeMap<String, (u64, u64)>,
     change_details: std::collections::BTreeMap<String, Vec<change_view::Line>>,
@@ -4203,6 +4206,7 @@ impl TurnDisplay {
             tools: Default::default(),
             tool_titles: Default::default(),
             finished: Default::default(),
+            started_inputs: Default::default(),
             changes: Default::default(),
             change_details: Default::default(),
             numbers: Default::default(),
@@ -4211,11 +4215,16 @@ impl TurnDisplay {
     pub fn restore_numbers(&mut self, session: &crate::session::Session) -> anyhow::Result<()> {
         self.numbers = session.store.db.with_conn(|conn| -> anyhow::Result<_> {
             let mut numbers = std::collections::HashMap::new();
+            let mut next = 0usize;
             for message in deepseek_code_core::db::message_repo::get_messages_by_conversation(conn, &session.id)? {
                 for tool in deepseek_code_core::db::message_repo::get_tool_calls_for_message(conn, &message.id)? {
-                    let number = numbers.len() + 1;
+                    // Count every saved row, not just distinct map keys: old
+                    // records may repeat a raw provider id across messages, and
+                    // a later live call must not reuse an already shown number.
+                    next += 1;
                     let id = tool.id.strip_prefix(&format!("{}:", message.id)).unwrap_or(&tool.id).to_owned();
-                    numbers.insert(id, number);
+                    let key = if numbers.contains_key(&id) { tool.id.clone() } else { id };
+                    numbers.insert(key, next);
                 }
             }
             Ok(numbers)
@@ -4297,6 +4306,13 @@ impl TurnDisplay {
     }
     pub fn tool_started_named(&mut self, id: &str, name: &str, input: &Value, title: Option<&str>) {
         if let Some(title) = title { self.tool_titles.insert(id.into(), title.into()); }
+        // Keep the start input for the whole turn. A later mirror/legacy event
+        // with no input must not erase it, while a richer repeated start may
+        // replace an empty one.
+        let richer = input.as_object().is_none_or(|fields| !fields.is_empty());
+        if richer || !self.started_inputs.contains_key(id) {
+            self.started_inputs.insert(id.to_owned(), input.clone());
+        }
         if let Some(live) = &self.live {
             if self.tools.contains_key(id) || self.finished.contains_key(id) {
                 return;
@@ -4326,9 +4342,16 @@ impl TurnDisplay {
         output: &str,
         failed: bool,
     ) {
+        // A mirrored/legacy completion may omit the input; use the start input
+        // for deduplication and the final label so it never prints twice or bare.
+        let effective_input = if input.as_object().is_none_or(|fields| fields.is_empty()) {
+            self.started_inputs.get(id).cloned().unwrap_or_else(|| input.clone())
+        } else {
+            input.clone()
+        };
         if self.finished.get(id).is_some_and(|previous| {
             previous.0 == name
-                && previous.1 == *input
+                && previous.1 == effective_input
                 && previous.2 == output
                 && previous.3 == failed
         }) {
@@ -4336,7 +4359,7 @@ impl TurnDisplay {
         }
         self.finished.insert(
             id.to_owned(),
-            (name.into(), input.clone(), output.into(), failed),
+            (name.into(), effective_input.clone(), output.into(), failed),
         );
         let next = self.numbers.values().copied().max().unwrap_or(0) + 1;
         self.numbers.entry(id.to_owned()).or_insert(next);
@@ -4359,19 +4382,19 @@ impl TurnDisplay {
         }
         if let (Some(live), false, true) = (&self.live, failed, name == "TodoWrite") {
             // Keep the ctrl+t list current as the model updates it.
-            let todos = input["todos"].as_array().into_iter().flatten().map(|todo| (todo["content"].as_str().unwrap_or_default().to_owned(), todo["status"].as_str().unwrap_or("pending").to_owned())).collect();
+            let todos = effective_input["todos"].as_array().into_iter().flatten().map(|todo| (todo["content"].as_str().unwrap_or_default().to_owned(), todo["status"].as_str().unwrap_or("pending").to_owned())).collect();
             let _ = live.updates.send(Update::Todos(todos));
         }
         if let Some(live) = &self.live {
             let previous = self.tools.remove(id);
             let elapsed = previous.as_ref().map(|(start, _)| start.elapsed());
-            let body = format!("Input:\n{}\n\nOutput:\n{}", input, output);
+            let body = format!("Input:\n{}\n\nOutput:\n{}", effective_input, output);
             live.detail(
                 id,
                 &format!("{name} - {}", if failed { "error" } else { "completed" }),
                 &body,
             );
-            let change = matches!(name, "Write" | "Edit" | "MultiEdit")
+            let change = matches!(name, "Write" | "Edit" | "MultiEdit" | "ApplyPatch")
                 .then(|| change_view::change(output, failed))
                 .flatten();
             if let Some(lines) = change {
@@ -4394,13 +4417,7 @@ impl TurnDisplay {
                     live.finished(id, display_lines, None);
                 }
             } else {
-                // A mirrored completion can arrive without the call's input;
-                // label it with the input seen when the call started.
-                let started = previous.as_ref().map(|(_, input)| input);
-                let label_input = match started {
-                    Some(started) if input.as_object().is_none_or(|fields| fields.is_empty()) => started,
-                    _ => input,
-                };
+                let label_input = &effective_input;
                 let number = self.numbers.get(id).copied();
                 let title = self.tool_titles.get(id).map(String::as_str);
                 let short = super::tool_view::numbered(super::tool_view::titled(super::tool_view::finished(
@@ -4424,7 +4441,7 @@ impl TurnDisplay {
             }
             let _ = live.updates.send(Update::Copy(
                 self.numbers[id],
-                super::tool_view::copy_command(name, input),
+                super::tool_view::copy_command(name, &effective_input),
                 super::tool_view::named_result_text(name, output),
             ));
             if name == "ExitPlanMode" && !failed {
@@ -4437,7 +4454,7 @@ impl TurnDisplay {
             }
             live.activity("Working");
         } else {
-            self.fallback.tool_finished(id, name, input, output, failed);
+            self.fallback.tool_finished(id, name, &effective_input, output, failed);
         }
     }
     /// Lines written into the transcript as they are, such as a rejected plan.
@@ -4604,6 +4621,34 @@ mod completion_tests {
         assert!(text.find("first").unwrap() < text.find("second").unwrap());
         assert!(text.contains("before"));
         assert!(!text.contains("failed"));
+    }
+
+    #[tokio::test]
+    async fn restore_numbers_counts_every_row_when_legacy_raw_ids_repeat() {
+        use clap::Parser;
+        use deepseek_code_core::db::message_repo;
+        use deepseek_code_core::runtime::{RuntimePaths, SessionStore};
+        let root = tempfile::tempdir().unwrap();
+        let paths = RuntimePaths::new(root.path().join("data")).unwrap();
+        let provider = serde_json::from_value(serde_json::json!({"id":"fixture","name":"Fixture","base_url":"http://127.0.0.1:1","api_key":"fixture-only","api_format":"openai","enabled":true,"models":[{"id":"fixture","name":"Fixture","enabled":true,"supports_vision":false,"supports_web_search":false}]})).unwrap();
+        let selection = crate::config::Selection { providers: vec![provider], provider_id: "fixture".into(), model: "fixture".into() };
+        let cli = crate::args::Cli::parse_from(["dcl", "--print"]);
+        let store = SessionStore::new(paths.open_database().unwrap());
+        let id = store.create(root.path(), "fixture", "fixture").unwrap();
+        let session = crate::session::Session::open(&cli, &paths, selection, Some(&id)).await.unwrap();
+        session.store.db.with_conn(|conn| -> anyhow::Result<()> {
+            for (index, message) in ["answer-1", "answer-2"].iter().enumerate() {
+                message_repo::insert_message(conn, message, &id, "assistant", "", None, "2026-11-02T00:00:00Z", false, index as i64)?;
+                // Old records may repeat the provider raw id across messages.
+                message_repo::insert_tool_call(conn, &format!("{message}:same-raw"), message, "Read", Some("{}"), Some("ok"), false, 0)?;
+            }
+            Ok(())
+        }).unwrap().unwrap();
+        let mut display = TurnDisplay::new(false, "ask", &paths.data_dir.join("keybindings.json"), vec![]).unwrap();
+        display.restore_numbers(&session).unwrap();
+        assert_eq!(display.numbers.len(), 2);
+        assert_eq!(display.numbers.values().copied().max(), Some(2));
+        session.close().await.unwrap();
     }
 
     #[test]

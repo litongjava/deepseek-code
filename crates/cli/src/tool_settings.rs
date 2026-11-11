@@ -196,7 +196,8 @@ mod tests {
     #[test]
     fn names_resolve_case_and_separator_insensitively() {
         assert_eq!(resolve("list_dir").unwrap(), "ListDir");
-        assert_eq!(resolve("PLAN-MODE").unwrap(), "plan_mode");
+        // The duplicate plan entry is retired; it is no longer a catalog name.
+        assert!(resolve("PLAN-MODE").is_err());
     }
 
     #[test]
@@ -204,7 +205,7 @@ mod tests {
         let (_root, paths) = fixture();
         let rows = rows(&paths).unwrap();
         let core: Vec<&Row> = rows.iter().filter(|row| row.core).collect();
-        assert_eq!(core.len(), 14);
+        assert_eq!(core.len(), 13);
         assert!(core.iter().all(|row| row.enabled && row.on_demand));
         let list_dir = rows.iter().find(|row| row.name == "ListDir").unwrap();
         assert!(!list_dir.core && !list_dir.enabled && list_dir.on_demand);

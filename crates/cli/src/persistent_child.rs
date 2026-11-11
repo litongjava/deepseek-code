@@ -1,5 +1,5 @@
 //! Supervised idle jobs for owned children and internal command-hook feedback.
-use super::{jobs, service, ModeControl, ModeTarget, Session, Worker};
+use super::{jobs, service, CurrentTurn, ModeControl, ModeTarget, Session, Worker};
 use anyhow::{bail, Context, Result};
 use deepseek_code_core::native_engine::tool_loop::EngineEvent;
 use serde_json::json;
@@ -12,6 +12,8 @@ pub(super) async fn start_pending(
     worker: &Worker,
     sessions: &Arc<tokio::sync::Mutex<Option<Session>>>,
     active: &Arc<AtomicBool>,
+    admission_released: &Arc<tokio::sync::Notify>,
+    current_turn: &CurrentTurn,
     idle_active: &Arc<AtomicBool>,
     fatal: &Arc<AtomicBool>,
     mode_target: &ModeTarget,
@@ -41,6 +43,10 @@ pub(super) async fn start_pending(
         return Ok(());
     }
     let id = uuid::Uuid::new_v4().to_string();
+    // An automatic idle turn owns admission exactly like an explicit one, so a
+    // prompt that arrives after its completion waits for this release instead
+    // of being refused as busy.
+    *current_turn.lock().unwrap_or_else(|e| e.into_inner()) = Some(id.clone());
     if let Err(error) = service::begin_job(
         worker,
         &id,
@@ -50,6 +56,7 @@ pub(super) async fn start_pending(
             format!("Resume owned child {child} from inbox")
         },
     ) {
+        *current_turn.lock().unwrap_or_else(|e| e.into_inner()) = None;
         active.store(false, Ordering::Release);
         return Err(error);
     }
@@ -69,6 +76,7 @@ pub(super) async fn start_pending(
     })();
     if let Err(error) = publish {
         let _ = service::finish_job(worker, &id, Some(error.to_string())).await;
+        *current_turn.lock().unwrap_or_else(|e| e.into_inner()) = None;
         active.store(false, Ordering::Release);
         return Err(error);
     }
@@ -80,6 +88,8 @@ pub(super) async fn start_pending(
     let idle_active = idle_active.clone();
     let fatal = fatal.clone();
     let mode_target = mode_target.clone();
+    let current_turn = current_turn.clone();
+    let admission_released = admission_released.clone();
     tokio::spawn(async move {
         let task_worker = worker.clone();
         let task_id = id.clone();
@@ -115,6 +125,12 @@ pub(super) async fn start_pending(
         std::env::remove_var(jobs::CONTROL_ENV);
         idle_active.store(false, Ordering::Release);
         active.store(false, Ordering::Release);
+        admission_released.notify_one();
+        // Clear this turn's identity only if no newer submission replaced it.
+        let mut current = current_turn.lock().unwrap_or_else(|e| e.into_inner());
+        if current.as_deref() == Some(&id) {
+            *current = None;
+        }
     });
     Ok(())
 }

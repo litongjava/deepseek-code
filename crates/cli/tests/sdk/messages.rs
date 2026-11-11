@@ -33,7 +33,8 @@ async fn stream_json_emits_init_assistant_tool_result_and_full_result() {
         assert_eq!(results.len(), 1);
         let block = &results[0]["message"]["content"][0];
         assert_eq!(block["type"], "tool_result");
-        assert_eq!(block["tool_use_id"], "read-1");
+        // The assistant call and the result use the same occurrence identity.
+        assert_eq!(block["tool_use_id"], tool_use["message"]["content"][0]["id"]);
         assert!(block["content"].as_str().unwrap().contains("SDK_READ_SENTINEL"));
         let text = assistant.iter().find(|frame| frame["message"]["content"][0]["type"] == "text").expect("text message");
         assert_eq!(text["message"]["content"][0]["text"], "reply-2");
@@ -108,7 +109,11 @@ async fn host_denials_are_listed_in_the_result() {
         client.send(json!({"type":"control_response","response":{"subtype":"success","request_id":request["request_id"],"response":{"behavior":"deny","message":"HOST_SAYS_NO"}}})).await;
         let result = client.result().await;
         assert_eq!(result["is_error"], false, "{result}");
-        assert_eq!(result["permission_denials"], json!([{"tool_name":"Write","tool_use_id":"write-1","tool_input":{"file_path":"approval.txt","content":"ACTUAL_APPROVED_WRITE"}}]));
+        let denial = &result["permission_denials"][0];
+        assert_eq!(denial["tool_name"], "Write");
+        // The denial and the SDK permission request share one identity.
+        assert_eq!(denial["tool_use_id"], request["request"]["tool_use_id"]);
+        assert_eq!(denial["tool_input"], json!({"file_path":"approval.txt","content":"ACTUAL_APPROVED_WRITE"}));
         client.finish().await;
     }
 }

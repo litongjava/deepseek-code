@@ -288,11 +288,11 @@ async fn clear_plan_context_skips_stale_tools_and_survives_resume_on_both_protoc
                             .unwrap();
                     }
                     EngineEvent::ToolUseDone {
-                        tool_use_id,
+                        tool_name,
                         is_error,
                         output,
                         ..
-                    } if tool_use_id == "stale" => {
+                    } if tool_name == "Write" => {
                         skipped = is_error && output.contains("skipped");
                     }
                     EngineEvent::ContextReset { .. } => reset = true,

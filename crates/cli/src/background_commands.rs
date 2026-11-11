@@ -806,7 +806,7 @@ pub(crate) fn managed_shell_records(paths: &RuntimePaths, session: &str) -> Resu
 
 pub(crate) async fn shell_control(paths: &RuntimePaths, session: &str, id: &str, stop: bool) -> Result<serde_json::Value> {
     deepseek_code_core::tools::tasks::execute_for_session_async(
-        if stop { "TaskStop" } else { "TaskOutput" },
+        if stop { "TaskStop" } else { "TaskGet" },
         if stop { serde_json::json!({"task_id":id}) } else { serde_json::json!({"task_id":id,"block":false}) },
         &paths.data_dir, session,
     ).await

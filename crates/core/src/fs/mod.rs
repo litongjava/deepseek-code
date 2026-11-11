@@ -7,7 +7,7 @@ use walkdir::WalkDir;
 
 pub mod directories;
 mod file_lock;
-pub use file_lock::{lock_file, try_lock_file};
+pub use file_lock::{lock_file, try_lock_file, unlock_file};
 
 /// Takes an exclusive advisory lock, retrying briefly while it is held.
 ///

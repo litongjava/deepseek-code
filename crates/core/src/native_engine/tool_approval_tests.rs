@@ -659,7 +659,12 @@ async fn owned_child_permission_hooks_keep_exact_invocation_and_session_on_both_
             &std::fs::read(root.path().join("permission-payload.json")).unwrap(),
         )
         .unwrap();
-        assert_eq!(payload["tool_use_id"], "child-exact-id");
+        assert!(
+            payload["tool_use_id"]
+                .as_str()
+                .is_some_and(|id| id.starts_with("inv-")),
+            "{payload}"
+        );
         assert_eq!(payload["session_id"], result["session_id"]);
         assert_ne!(payload["session_id"], parent);
         server.abort();
@@ -880,4 +885,401 @@ async fn mcp_plan_capability_applies_to_normal_and_approval_checks_and_clears_on
         PermissionResult::Denied(_)
     ));
     assert!(executor.permission_hard_denial(name, &input).is_some());
+}
+
+/// A real executor whose ApplyPatch is resident, so a direct call reaches the
+/// same permission path as an engine dispatch.
+fn patch_executor(
+    root: &std::path::Path,
+    mode: crate::permissions::PermissionMode,
+    rules: &[(&str, crate::permissions::rules::PermissionAction)],
+) -> (
+    ToolLoopExecutor,
+    mpsc::Receiver<EngineEvent>,
+    Arc<crate::permissions::PermissionManager>,
+) {
+    crate::config::OrchestrationConfig::init_global().unwrap();
+    let data = root.join("data");
+    std::fs::create_dir_all(&data).unwrap();
+    std::fs::write(
+        data.join("customization.json"),
+        json!({"tool_loading":{"ApplyPatch":{"enabled":true,"on_demand":false}}}).to_string(),
+    )
+    .unwrap();
+    let provider = ResolvedProvider {
+        provider: serde_json::from_value(json!({"id":"fixture","name":"fixture","base_url":"http://127.0.0.1:1","api_key":"unused","api_format":"openai","models":[],"enabled":true})).unwrap(),
+        model: serde_json::from_value(json!({"id":"fixture","name":"fixture","enabled":true,"supports_vision":false,"supports_web_search":false})).unwrap(),
+    };
+    let (tx, rx) = mpsc::channel(16);
+    let manager = Arc::new(crate::permissions::PermissionManager::new(Arc::new(
+        crate::permissions::AuditLogger::new(16),
+    )));
+    manager.set_mode(mode);
+    manager.set_edit_session_allowed("patch-session", true);
+    if !rules.is_empty() {
+        manager.set_session_rules(
+            "patch-session",
+            rules
+                .iter()
+                .map(|(rule, action)| (rule.to_string(), action.clone()))
+                .collect(),
+        );
+    }
+    let mut executor = ToolLoopExecutor::new(
+        provider,
+        vec![],
+        None,
+        128,
+        tx,
+        root.to_string_lossy().into_owned(),
+        ReasoningMode::Standard,
+    )
+    .with_permission_manager(manager.clone())
+    .with_permission_host(true)
+    .with_search_config_path(data.join("config.json"));
+    executor.conv_id = Some("patch-session".into());
+    (executor, rx, manager)
+}
+
+async fn next_permission_request(events: &mut mpsc::Receiver<EngineEvent>) -> String {
+    loop {
+        match events.recv().await.expect("the engine event channel") {
+            EngineEvent::ToolPermission {
+                request_id,
+                tool_name,
+                ..
+            } => {
+                assert_eq!(tool_name, "ApplyPatch");
+                return request_id;
+            }
+            _ => continue,
+        }
+    }
+}
+
+/// Drains unrelated engine events for a short window and fails if another
+/// approval request appears.
+async fn assert_no_permission_request(events: &mut mpsc::Receiver<EngineEvent>) {
+    loop {
+        match tokio::time::timeout(Duration::from_millis(200), events.recv()).await {
+            Ok(Some(EngineEvent::ToolPermission { .. })) => {
+                panic!("unexpected second approval request")
+            }
+            Ok(Some(_)) => continue,
+            Ok(None) | Err(_) => break,
+        }
+    }
+}
+
+/// Emulates the engine's turn scope: `execute_scoped` installs the trusted
+/// roots and permission manager, and `run_builtin` installs the edit session.
+/// A direct `execute_tool_call` in a test otherwise has none of them.
+async fn scoped_patch_call(
+    executor: &mut ToolLoopExecutor,
+    manager: Arc<crate::permissions::PermissionManager>,
+    root: std::path::PathBuf,
+    input: &Value,
+    id: &str,
+) -> (Value, String, bool) {
+    crate::tools::path_scope::scope(
+        vec![root],
+        crate::tools::path_scope::with_permissions(
+            Some(manager),
+            crate::tools::path_scope::with_edit_session(
+                Some("patch-session".into()),
+                executor.execute_tool_call("ApplyPatch", input, id),
+            ),
+        ),
+    )
+    .await
+}
+
+const CONFIRM_TARGET_PATCH: &str = "\
+*** Begin Patch
+*** Update File: a.txt
+@@
+-one
++ONE
+*** Update File: secret.txt
+@@
+-secret
++LEAK
+*** End Patch";
+
+#[tokio::test]
+async fn apply_patch_path_confirmation_prompts_once_and_denial_changes_nothing() {
+    use crate::permissions::{rules::PermissionAction, PermissionMode};
+    let root = tempfile::tempdir().unwrap();
+    std::fs::write(root.path().join("a.txt"), "one\n").unwrap();
+    std::fs::write(root.path().join("secret.txt"), "secret\n").unwrap();
+    let (mut executor, mut events, manager) = patch_executor(
+        root.path(),
+        PermissionMode::AcceptEdits,
+        &[("Edit(secret.txt)", PermissionAction::Confirm)],
+    );
+    let mailbox = executor.permission_mailbox.clone();
+    let input = json!({"patch": CONFIRM_TARGET_PATCH});
+    let root_path = root.path().to_path_buf();
+    let task = tokio::spawn(async move {
+        let ran =
+            scoped_patch_call(&mut executor, manager, root_path, &input, "apply-denied").await;
+        (executor, ran)
+    });
+    let request =
+        tokio::time::timeout(Duration::from_secs(3), next_permission_request(&mut events))
+            .await
+            .expect("an explicit ask must reach the approval host");
+    crate::native_engine::permission_response::respond(
+        &mailbox,
+        &request,
+        PermissionResponse::Deny {
+            message: "path confirmation denied".into(),
+            interrupt: false,
+        },
+    )
+    .await
+    .unwrap();
+    let (returned, (_, output, failed)) = task.await.unwrap();
+    assert!(failed, "{output}");
+    assert!(
+        output.to_lowercase().contains("denied") || output.contains("not granted"),
+        "{output}"
+    );
+    assert_eq!(
+        std::fs::read_to_string(root.path().join("a.txt")).unwrap(),
+        "one\n"
+    );
+    assert_eq!(
+        std::fs::read_to_string(root.path().join("secret.txt")).unwrap(),
+        "secret\n"
+    );
+    assert!(returned.approved_call.is_none());
+    assert_no_permission_request(&mut events).await;
+}
+
+#[tokio::test]
+async fn apply_patch_path_confirmation_cancellation_leaves_files_unchanged() {
+    use crate::permissions::{rules::PermissionAction, PermissionMode};
+    let root = tempfile::tempdir().unwrap();
+    std::fs::write(root.path().join("a.txt"), "one\n").unwrap();
+    std::fs::write(root.path().join("secret.txt"), "secret\n").unwrap();
+    let (mut executor, mut events, manager) = patch_executor(
+        root.path(),
+        PermissionMode::AcceptEdits,
+        &[("Edit(secret.txt)", PermissionAction::Confirm)],
+    );
+    let mailbox = executor.permission_mailbox.clone();
+    let input = json!({"patch": CONFIRM_TARGET_PATCH});
+    let root_path = root.path().to_path_buf();
+    let task = tokio::spawn(async move {
+        let ran =
+            scoped_patch_call(&mut executor, manager, root_path, &input, "apply-cancelled").await;
+        (executor, ran)
+    });
+    let request =
+        tokio::time::timeout(Duration::from_secs(3), next_permission_request(&mut events))
+            .await
+            .expect("an explicit ask must reach the approval host");
+    // Dropping the host's request closes the one-shot answer channel, exactly
+    // as a cancelled SDK/terminal prompt does.
+    assert!(mailbox.lock().await.remove(&request).is_some());
+    let (returned, (_, output, failed)) = task.await.unwrap();
+    assert!(failed, "{output}");
+    assert!(output.to_lowercase().contains("cancel"), "{output}");
+    assert_eq!(
+        std::fs::read_to_string(root.path().join("a.txt")).unwrap(),
+        "one\n"
+    );
+    assert_eq!(
+        std::fs::read_to_string(root.path().join("secret.txt")).unwrap(),
+        "secret\n"
+    );
+    assert!(returned.approved_call.is_none());
+}
+
+#[tokio::test]
+async fn apply_patch_path_confirmation_approval_applies_without_a_second_prompt() {
+    use crate::permissions::{rules::PermissionAction, PermissionMode};
+    let root = tempfile::tempdir().unwrap();
+    std::fs::write(root.path().join("a.txt"), "one\n").unwrap();
+    std::fs::write(root.path().join("secret.txt"), "secret\n").unwrap();
+    let (mut executor, mut events, manager) = patch_executor(
+        root.path(),
+        PermissionMode::AcceptEdits,
+        &[("Edit(secret.txt)", PermissionAction::Confirm)],
+    );
+    let mailbox = executor.permission_mailbox.clone();
+    let input = json!({"patch": CONFIRM_TARGET_PATCH});
+    let root_path = root.path().to_path_buf();
+    let task = tokio::spawn(async move {
+        let ran =
+            scoped_patch_call(&mut executor, manager, root_path, &input, "apply-approved").await;
+        (executor, ran)
+    });
+    let request =
+        tokio::time::timeout(Duration::from_secs(3), next_permission_request(&mut events))
+            .await
+            .expect("an explicit ask must reach the approval host");
+    crate::native_engine::permission_response::respond(
+        &mailbox,
+        &request,
+        PermissionResponse::Allow {
+            updated_input: None,
+            commit: None,
+            note: None,
+        },
+    )
+    .await
+    .unwrap();
+    let (_, (_, output, failed)) = task.await.unwrap();
+    assert!(!failed, "{output}");
+    assert_eq!(
+        std::fs::read_to_string(root.path().join("a.txt")).unwrap(),
+        "ONE\n"
+    );
+    assert_eq!(
+        std::fs::read_to_string(root.path().join("secret.txt")).unwrap(),
+        "LEAK\n"
+    );
+}
+
+#[tokio::test]
+async fn apply_patch_explicit_deny_never_prompts_or_writes() {
+    use crate::permissions::{rules::PermissionAction, PermissionMode};
+    let root = tempfile::tempdir().unwrap();
+    std::fs::write(root.path().join("a.txt"), "one\n").unwrap();
+    std::fs::write(root.path().join("secret.txt"), "secret\n").unwrap();
+    let (mut executor, mut events, manager) = patch_executor(
+        root.path(),
+        PermissionMode::AcceptEdits,
+        &[("Edit(secret.txt)", PermissionAction::Deny)],
+    );
+    let input = json!({"patch": CONFIRM_TARGET_PATCH});
+    let root_path = root.path().to_path_buf();
+    let (_, output, failed) = tokio::time::timeout(
+        Duration::from_secs(3),
+        scoped_patch_call(&mut executor, manager, root_path, &input, "apply-denied"),
+    )
+    .await
+    .expect("an explicit deny must not wait for an approval host");
+    assert!(failed, "{output}");
+    assert!(
+        output.contains("cannot be changed") && output.contains("secret.txt"),
+        "{output}"
+    );
+    assert_eq!(
+        std::fs::read_to_string(root.path().join("a.txt")).unwrap(),
+        "one\n"
+    );
+    assert_eq!(
+        std::fs::read_to_string(root.path().join("secret.txt")).unwrap(),
+        "secret\n"
+    );
+    assert_no_permission_request(&mut events).await;
+}
+
+#[tokio::test]
+async fn apply_patch_move_destination_confirmation_is_aggregated_in_accept_edits() {
+    use crate::permissions::{rules::PermissionAction, PermissionMode};
+    let root = tempfile::tempdir().unwrap();
+    std::fs::write(root.path().join("move.txt"), "old\n").unwrap();
+    let (mut executor, mut events, manager) = patch_executor(
+        root.path(),
+        PermissionMode::AcceptEdits,
+        &[("Edit(moved.txt)", PermissionAction::Confirm)],
+    );
+    let mailbox = executor.permission_mailbox.clone();
+    let input = json!({"patch": "*** Begin Patch\n*** Update File: move.txt\n*** Move to: moved.txt\n*** End Patch"});
+    let root_path = root.path().to_path_buf();
+    let task = tokio::spawn(async move {
+        let ran = scoped_patch_call(&mut executor, manager, root_path, &input, "apply-move").await;
+        (executor, ran)
+    });
+    let request =
+        tokio::time::timeout(Duration::from_secs(3), next_permission_request(&mut events))
+            .await
+            .expect("the move destination's explicit ask must reach the host");
+    crate::native_engine::permission_response::respond(
+        &mailbox,
+        &request,
+        PermissionResponse::Deny {
+            message: "move destination denied".into(),
+            interrupt: false,
+        },
+    )
+    .await
+    .unwrap();
+    let (_, (_, output, failed)) = task.await.unwrap();
+    assert!(failed, "{output}");
+    assert_eq!(
+        std::fs::read_to_string(root.path().join("move.txt")).unwrap(),
+        "old\n"
+    );
+    assert!(!root.path().join("moved.txt").exists());
+}
+
+#[tokio::test]
+async fn apply_patch_write_and_multi_edit_rules_are_not_ignored_in_accept_edits() {
+    use crate::permissions::{rules::PermissionAction, PermissionMode};
+    for rule in ["Write(secret.txt)", "MultiEdit(secret.txt)"] {
+        let root = tempfile::tempdir().unwrap();
+        std::fs::write(root.path().join("secret.txt"), "secret\n").unwrap();
+        let (mut executor, mut events, manager) = patch_executor(
+            root.path(),
+            PermissionMode::AcceptEdits,
+            &[(rule, PermissionAction::Confirm)],
+        );
+        let mailbox = executor.permission_mailbox.clone();
+        let input = json!({"patch": "*** Begin Patch\n*** Update File: secret.txt\n@@\n-secret\n+LEAK\n*** End Patch"});
+        let root_path = root.path().to_path_buf();
+        let task = tokio::spawn(async move {
+            let ran =
+                scoped_patch_call(&mut executor, manager, root_path, &input, "apply-rule").await;
+            (executor, ran)
+        });
+        let request =
+            tokio::time::timeout(Duration::from_secs(3), next_permission_request(&mut events))
+                .await
+                .unwrap_or_else(|_| panic!("{rule} must reach the approval host"));
+        crate::native_engine::permission_response::respond(
+            &mailbox,
+            &request,
+            PermissionResponse::Deny {
+                message: "rule denied".into(),
+                interrupt: false,
+            },
+        )
+        .await
+        .unwrap();
+        let (_, (_, output, failed)) = task.await.unwrap();
+        assert!(failed, "{rule}: {output}");
+        assert_eq!(
+            std::fs::read_to_string(root.path().join("secret.txt")).unwrap(),
+            "secret\n",
+            "{rule}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn apply_patch_accept_edits_without_a_path_rule_still_applies() {
+    use crate::permissions::PermissionMode;
+    let root = tempfile::tempdir().unwrap();
+    std::fs::write(root.path().join("a.txt"), "one\n").unwrap();
+    let (mut executor, _events, manager) =
+        patch_executor(root.path(), PermissionMode::AcceptEdits, &[]);
+    let input =
+        json!({"patch": "*** Begin Patch\n*** Update File: a.txt\n@@\n-one\n+ONE\n*** End Patch"});
+    let root_path = root.path().to_path_buf();
+    let (_, output, failed) = tokio::time::timeout(
+        Duration::from_secs(3),
+        scoped_patch_call(&mut executor, manager, root_path, &input, "apply-allowed"),
+    )
+    .await
+    .expect("the allowed control must not ask");
+    assert!(!failed, "{output}");
+    assert_eq!(
+        std::fs::read_to_string(root.path().join("a.txt")).unwrap(),
+        "ONE\n"
+    );
 }

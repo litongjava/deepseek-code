@@ -115,7 +115,11 @@ async fn http_deny_prevents_real_write_and_once_is_not_replayed_after_resume() {
     assert_eq!(requests[0]["session_id"], session);
     assert_eq!(requests[0]["hook_event_name"], "PreToolUse");
     assert_eq!(requests[0]["tool_name"], "Write");
-    assert_eq!(requests[0]["tool_use_id"], "http-write");
+    // Hooks receive the occurrence id; the raw id is provider provenance.
+    assert!(requests[0]["tool_use_id"]
+        .as_str()
+        .is_some_and(|id| id.starts_with("inv-")));
+    assert_ne!(requests[0]["tool_use_id"], "http-write");
     assert_eq!(requests[0]["tool_input"]["file_path"], "written.txt");
     server.abort();
 }

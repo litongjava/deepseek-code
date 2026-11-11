@@ -11,6 +11,13 @@ pub mod audit;
 
 pub use manager::{PermissionManager, PermissionMode};
 
+/// Whether this path needs a separate edit-approval prompt (repository
+/// metadata, shell profiles, IDE/MCP settings). Tools without a per-path prompt
+/// refuse such paths instead of editing them silently.
+pub(crate) fn file_requires_explicit_approval(path: &str, cwd: &std::path::Path) -> bool {
+    protected_paths::requires_edit_approval(path, cwd, dirs::home_dir().as_deref())
+}
+
 /// Full Access: bypass mode that also ignores deny rules and runs commands
 /// outside the sandbox. On only while a `--full-access` launch is in bypass
 /// mode; the CLI updates it as the mode changes.
