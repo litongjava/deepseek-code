@@ -847,7 +847,8 @@ pub fn diff_snapshot(before: &SnapshotManifest, current: &SnapshotManifest) -> S
             Some(previous)
                 if previous.kind != entry.kind
                     || previous.hash != entry.hash
-                    || previous.link_target != entry.link_target =>
+                    || previous.link_target != entry.link_target
+                    || previous.mode != entry.mode =>
             {
                 changes.push(SnapshotChange {
                     path: path.clone(),
@@ -952,22 +953,35 @@ pub fn restore_snapshot(
                 }
             }
             SnapshotKind::File => {
-                if current_by_path
-                    .get(&entry.path)
-                    .is_some_and(|current| current.hash == entry.hash)
-                {
+                // A no-op decision must include the mode: a chmod-only change
+                // still has to be restored.
+                let current_entry = current_by_path.get(&entry.path);
+                let unchanged = current_entry.is_some_and(|current| {
+                    current.kind == SnapshotKind::File
+                        && current.hash == entry.hash
+                        && current.size == entry.size
+                        && current.mode == entry.mode
+                });
+                if unchanged {
                     continue;
                 }
-                let bytes = payloads
-                    .get(&entry.path)
-                    .with_context(|| format!("Snapshot copy is missing for {}", entry.path))?;
-                if std::fs::symlink_metadata(&target)
-                    .map(|metadata| metadata.is_dir())
-                    .unwrap_or(false)
-                {
-                    remove_entry(&target)?;
+                let content_matches = current_entry.is_some_and(|current| {
+                    current.kind == SnapshotKind::File
+                        && current.hash == entry.hash
+                        && current.size == entry.size
+                });
+                if !content_matches {
+                    let bytes = payloads
+                        .get(&entry.path)
+                        .with_context(|| format!("Snapshot copy is missing for {}", entry.path))?;
+                    if std::fs::symlink_metadata(&target)
+                        .map(|metadata| metadata.is_dir())
+                        .unwrap_or(false)
+                    {
+                        remove_entry(&target)?;
+                    }
+                    write_atomic(&target, bytes)?;
                 }
-                write_atomic(&target, bytes)?;
                 apply_mode(&target, entry.mode)?;
                 restored += 1;
             }
@@ -975,10 +989,11 @@ pub fn restore_snapshot(
                 let Some(link_target) = entry.link_target.as_deref() else {
                     anyhow::bail!("Snapshot symlink {} has no target", entry.path);
                 };
-                if current_by_path
-                    .get(&entry.path)
-                    .is_some_and(|current| current.link_target.as_deref() == Some(link_target))
-                {
+                let unchanged = current_by_path.get(&entry.path).is_some_and(|current| {
+                    current.kind == SnapshotKind::Symlink
+                        && current.link_target.as_deref() == Some(link_target)
+                });
+                if unchanged {
                     continue;
                 }
                 if std::fs::symlink_metadata(&target).is_ok() {
@@ -987,12 +1002,7 @@ pub fn restore_snapshot(
                 if let Some(parent) = target.parent() {
                     std::fs::create_dir_all(parent)?;
                 }
-                #[cfg(unix)]
-                std::os::unix::fs::symlink(link_target, &target)?;
-                #[cfg(windows)]
-                {
-                    let _ = std::os::windows::fs::symlink_file(link_target, &target);
-                }
+                create_symlink(link_target, &target)?;
                 restored += 1;
             }
         }
@@ -1051,6 +1061,31 @@ fn prepare_restore(
         // Never follow a link out of the source while restoring, unless the
         // manifest restores a real directory in its place first.
         ensure_no_symlink_ancestor(source, &entry.path, manifest)?;
+    }
+    // A removal may target a directory whose subtree the snapshot intentionally
+    // did not protect (dependency output, special files). Deleting it would
+    // destroy content that is neither in the snapshot nor expected to change,
+    // so refuse before touching anything.
+    let before_paths: BTreeSet<&str> = manifest
+        .entries
+        .iter()
+        .map(|entry| entry.path.as_str())
+        .collect();
+    for entry in expected_after
+        .entries
+        .iter()
+        .filter(|entry| !before_paths.contains(entry.path.as_str()))
+    {
+        for skipped in manifest.skipped.iter().chain(expected_after.skipped.iter()) {
+            let skipped_path = Path::new(skipped);
+            let removed_path = Path::new(&entry.path);
+            ensure!(
+                !skipped_path.starts_with(removed_path),
+                "Restoring would delete {} which the snapshot did not protect ({}); remove or move that content first",
+                skipped_path.display(),
+                entry.path
+            );
+        }
     }
     for entry in &manifest.entries {
         match entry.kind {
@@ -1168,6 +1203,33 @@ fn ensure_no_symlink_ancestor(
                 Err(error) => return Err(error.into()),
             }
         }
+    }
+    Ok(())
+}
+
+#[cfg(unix)]
+fn create_symlink(link_target: &str, target: &Path) -> Result<()> {
+    std::os::unix::fs::symlink(link_target, target)?;
+    Ok(())
+}
+
+/// Windows distinguishes file and directory links. The type is resolved from
+/// the link target that existed when the snapshot was taken, and a failure is
+/// propagated instead of being reported as a successful restore. Unverified on
+/// Windows.
+#[cfg(windows)]
+fn create_symlink(link_target: &str, target: &Path) -> Result<()> {
+    let original = Path::new(link_target);
+    let is_directory = original
+        .metadata()
+        .map(|metadata| metadata.is_dir())
+        .unwrap_or(false);
+    if is_directory {
+        std::os::windows::fs::symlink_dir(original, target)
+            .with_context(|| format!("Restoring directory link {}", target.display()))?;
+    } else {
+        std::os::windows::fs::symlink_file(original, target)
+            .with_context(|| format!("Restoring file link {}", target.display()))?;
     }
     Ok(())
 }
@@ -1586,6 +1648,67 @@ mod tests {
         assert_eq!(
             std::fs::metadata(&script).unwrap().permissions().mode() & 0o777,
             0o755
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_permission_only_change_is_restored_without_rewriting_bytes() {
+        use std::os::unix::fs::PermissionsExt;
+        let temp = tempfile::tempdir().unwrap();
+        let source = temp.path().join("source");
+        std::fs::create_dir(&source).unwrap();
+        let script = source.join("run.sh");
+        std::fs::write(&script, "#!/bin/sh\nexit 0\n").unwrap();
+        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let snapshot_dir = temp.path().join("snapshots/1");
+        let manifest = create_snapshot(&source, &snapshot_dir).unwrap();
+        // Same bytes, different mode: the content hash alone would skip this.
+        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o600)).unwrap();
+        let coder = current_manifest(&source).unwrap();
+        assert!(diff_snapshot(&manifest, &coder)
+            .changes
+            .iter()
+            .any(|change| change.path == "run.sh"));
+        let report = restore_snapshot(&manifest, &snapshot_dir, &source, &coder).unwrap();
+        assert_eq!(report.restored, 1);
+        assert_eq!(
+            std::fs::metadata(&script).unwrap().permissions().mode() & 0o777,
+            0o755
+        );
+        assert_eq!(
+            std::fs::read_to_string(&script).unwrap(),
+            "#!/bin/sh\nexit 0\n"
+        );
+    }
+
+    #[test]
+    fn restore_refuses_to_delete_an_skipped_subtree() {
+        let temp = tempfile::tempdir().unwrap();
+        let source = temp.path().join("source");
+        std::fs::create_dir(&source).unwrap();
+        std::fs::write(source.join("app.txt"), "app\n").unwrap();
+        let snapshot_dir = temp.path().join("snapshots/1");
+        let manifest = create_snapshot(&source, &snapshot_dir).unwrap();
+        // The Coder created a directory whose subtree contains build output
+        // that the snapshot deliberately does not protect.
+        let created = source.join("newdir/node_modules/pkg");
+        std::fs::create_dir_all(&created).unwrap();
+        std::fs::write(created.join("index.js"), "keep me\n").unwrap();
+        let coder = current_manifest(&source).unwrap();
+        assert!(coder
+            .skipped
+            .iter()
+            .any(|path| path.contains("newdir/node_modules")));
+        let error = restore_snapshot(&manifest, &snapshot_dir, &source, &coder).unwrap_err();
+        assert!(error.to_string().contains("did not protect"), "{error:#}");
+        assert_eq!(
+            std::fs::read_to_string(created.join("index.js")).unwrap(),
+            "keep me\n"
+        );
+        assert_eq!(
+            std::fs::read_to_string(source.join("app.txt")).unwrap(),
+            "app\n"
         );
     }
 
