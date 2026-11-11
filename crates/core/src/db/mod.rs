@@ -36,6 +36,41 @@ pub fn is_contention(error: &anyhow::Error) -> bool {
     })
 }
 
+/// Extended SQLite result code of the first SQLite failure in the chain.
+///
+/// The extended code distinguishes a busy writer (`5`) from the extended
+/// variants SQLite reports for the same lock; it is safe to expose.
+pub fn sqlite_extended_code(error: &anyhow::Error) -> Option<i32> {
+    error.chain().find_map(|cause| {
+        cause
+            .downcast_ref::<rusqlite::Error>()
+            .and_then(|error| match error {
+                rusqlite::Error::SqliteFailure(code, _) => Some(code.extended_code),
+                _ => None,
+            })
+    })
+}
+
+/// Names a write boundary without SQL text, bound values or user content.
+///
+/// A raw SQLite error carries only "database is locked"; the operation, the
+/// session and how long the boundary waited are what let the next interruption
+/// be attributed to one caller instead of the whole turn.
+pub fn write_boundary_context(
+    operation: &str,
+    session: &str,
+    started: std::time::Instant,
+    error: anyhow::Error,
+) -> anyhow::Error {
+    let code = sqlite_extended_code(&error)
+        .map(|code| code.to_string())
+        .unwrap_or_else(|| "none".to_owned());
+    error.context(format!(
+        "{operation} failed after {}ms (session {session}, sqlite extended code {code})",
+        started.elapsed().as_millis()
+    ))
+}
+
 const WRITE_TX_BACKOFF_START: std::time::Duration = std::time::Duration::from_millis(20);
 const WRITE_TX_BACKOFF_MAX: std::time::Duration = std::time::Duration::from_millis(400);
 
@@ -353,6 +388,35 @@ mod write_tx_tests {
             .unwrap_err();
         assert!(is_contention(&error), "{error:#}");
         assert!(format!("{error:#}").contains("deadline probe"), "{error:#}");
+        release.send(()).unwrap();
+        holder.join().unwrap();
+    }
+
+    /// The extended code identifies the failing SQLite condition without
+    /// exposing SQL text or bound values.
+    #[test]
+    fn contention_exposes_the_extended_code() {
+        let (_temp, db, path) = fixture();
+        let (holder, release) = hold_write_lock(path);
+        let error = db
+            .with_conn(|conn| {
+                conn.busy_timeout(Duration::from_millis(50)).unwrap();
+                write_tx(
+                    conn,
+                    "extended code probe",
+                    Duration::from_millis(100),
+                    |tx| {
+                        tx.execute("INSERT INTO items(x) VALUES (1)", [])?;
+                        Ok(())
+                    },
+                )
+            })
+            .unwrap()
+            .unwrap_err();
+        assert_eq!(sqlite_extended_code(&error), Some(5));
+        let text = format!("{error:#}");
+        assert!(text.contains("extended code probe"), "{text}");
+        assert!(!text.contains("INSERT INTO"), "{text}");
         release.send(()).unwrap();
         holder.join().unwrap();
     }

@@ -1345,21 +1345,27 @@ impl ToolLoopExecutor {
         let (Some(db), Some(session)) = (&self.goal_db, self.conv_id.as_deref()) else {
             return Ok(());
         };
-        let loaded = db.with_conn(|conn| -> Result<_> {
-            let mut query = conn.prepare(
-                "SELECT t.output FROM tool_calls t JOIN messages m ON m.id=t.message_id
+        let started = std::time::Instant::now();
+        let loaded = db
+            .with_conn(|conn| -> Result<_> {
+                let mut query = conn.prepare(
+                    "SELECT t.output FROM tool_calls t JOIN messages m ON m.id=t.message_id
                  WHERE m.conversation_id=?1 AND m.role='assistant'
                    AND t.name='ToolSearch' AND t.is_error=0 AND t.output IS NOT NULL
                    AND m.sort_order >= COALESCE((SELECT MAX(sort_order) FROM messages
-                       WHERE conversation_id=?1 AND is_compact_boundary=1), -1)"
-            )?;
-            let results = query.query_map([session], |row| row.get::<_, String>(0))?;
-            let mut loaded = std::collections::BTreeSet::new();
-            for result in results {
-                Self::absorb_loaded(&result?, &mut loaded);
-            }
-            Ok(loaded)
-        })??;
+                       WHERE conversation_id=?1 AND is_compact_boundary=1), -1)",
+                )?;
+                let results = query.query_map([session], |row| row.get::<_, String>(0))?;
+                let mut loaded = std::collections::BTreeSet::new();
+                for result in results {
+                    Self::absorb_loaded(&result?, &mut loaded);
+                }
+                Ok(loaded)
+            })
+            .and_then(|result| result)
+            .map_err(|error| {
+                crate::db::write_boundary_context("restore loaded tools", session, started, error)
+            })?;
         self.loaded_tools.extend(loaded);
         Ok(())
     }
@@ -1878,7 +1884,17 @@ impl ToolLoopExecutor {
             return Ok(None);
         };
         if let (Some(db), Some(session)) = (&self.goal_db, &self.conv_id) {
-            db.with_conn(|conn|content.save(conn, session, id, display, failed))??;
+            let started = std::time::Instant::now();
+            db.with_conn(|conn| content.save(conn, session, id, display, failed))
+                .and_then(|result| result)
+                .map_err(|error| {
+                    crate::db::write_boundary_context(
+                        "save MCP tool output",
+                        session,
+                        started,
+                        error,
+                    )
+                })?;
         }
         // Images and structured blocks must remain real provider content. Only
         // plain text can use the existing spill/preview representation.

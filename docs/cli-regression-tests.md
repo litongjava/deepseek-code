@@ -523,3 +523,36 @@ stream-json 宿主在一轮进行中发送的普通用户消息不再只等这�
 - `cargo test --locked -p deepseek-code-cli --test sdk recovery_interrupt::`：同一轮先报告 11/2 和一次工具拒绝再超限，在 PreCompact/PostCompact SDK 回调挂起时 interrupt；两协议提交前不保存摘要、提交后恰好一份摘要/边界/计数，不发送重试主请求，保留统计并允许下一轮。
 - SDK 全套覆盖审批、Hook、MCP 等待取消及迟到回复；同时保留 `usage_accounting`、`recovery_result_contract`、`request_usage_tests`、ContextReset、初始 Hook/hook wake 回归。
 - 第十轮的独立复现与需求证据已在 2026-11-10 的开发支持目录清理中删除。未执行平台或旧验收组合继续标记未验证。
+
+### 回合内控制请求的确定性夹具
+
+- `cargo test --locked -p deepseek-code-cli --test sdk controls::running_turn_answers_queries_and_cancels_only_queued_messages -- --exact`：`Mode::HeldText` 只在第一个流式请求上先发出该协议的第一帧（Anthropic `message_start`／OpenAI 首个 delta），随后等待测试释放的 `Notify` 才发送完成帧；控制序列在释放前执行并刻意等待超过旧的固定 2 秒，两个协议都必须回答全部控制、保持排队消息未运行，释放后恰好 2 个结果、被取消的第二个提示不出现、保留的第三个提示出现。
+- 闸门等待有 30 秒上限，超时以 `io::Error` 结束响应体使测试显式失败，不会静默回落到旧的固定延时语义；测试自身还有 60 秒看门狗，`ReleaseHeld` 在断言失败或 panic 时也会释放。
+- 旧固定延时的负向复现不保留为源码里的测试：用例原文与重建步骤见相邻开发支持目录 `session-sqlite-20261111/round04-negative-control-test.rs.txt`，临时加入后以 `--ignored`（或普通）运行应看到 `Unexpected terminal result while waiting for control_response`，这正是 2026-11-11 全量 CLI 的失败形态；负向日志为同目录 `logs/round04-sdk-negative-control.log`。一次串行基线通过不能证明旧竞态不存在。
+
+### 会话消息收件箱的 SQLite 竞争与有界轮询
+
+会话消息（`SendMessage`/`session_messages`）的引擎侧轮询发生在每个模型/工具边界。宿主同时会把完整对话写回同一个数据库，因此轮询不能因为一次写者竞争而结束整个回合。
+
+```bash
+env -u DEEPSEEK_CODE_BACKGROUND_CONTROL -u DEEPSEEK_CODE_BACKGROUND_JOB \
+    -u DEEPSEEK_CODE_WORKER_MODEL -u DEEPSEEK_CODE_WORKER_AUTO_ROUTE \
+    -u DEEPSEEK_CODE_CHILD_API_KEY -u DEEPSEEK_CODE_DATA_DIR \
+  cargo test --locked -p deepseek-code-core --lib -- \
+    services::session_messages::tests:: db::write_tx_tests::
+```
+
+- `an_empty_drain_does_not_take_the_writer_lock`：第二个真实 SQLite 连接持有 `BEGIN IMMEDIATE` 时，空收件箱轮询不等待写者、不报错。空收件箱的授权检查在只读快照中完成，仍验证消费者 generation 以及 `project()`/`resolve_workspace` 的归档、Code 模式、项目信任和来源映射。
+- `an_empty_inbox_still_enforces_project_authorization`：空收件箱下分别归档会话、改成非 Code 模式、撤销项目信任且 generation 不变，三种情况都必须像旧路径一样拒绝，且不消费任何消息。
+- `a_pending_drain_defers_under_a_held_writer_and_delivers_once_after_release`：有排队消息但写者被占用时，轮询在限定时间内返回空；队列行保持 `queued`，`consumer_generation`/`committed_at` 保持空，历史为空。释放写者后同一条消息只投递一次，状态变为 `context_committed`，历史恰好一行，再轮询为空。
+- `a_late_acknowledgement_failure_rolls_back_the_whole_poll_unit`：在消息行插入和会话计数增加之后、`session_inbox` 确认更新时让触发器失败；整个轮询事务必须回滚（历史为空、`message_count` 不变、队列状态/generation/时间戳不变）。移除触发器后恰好投递一次。早期的 `BEFORE INSERT` 失败用例保留，覆盖更早的中断点。
+- `a_nonbusy_drain_failure_names_the_operation_and_keeps_the_queue`：非竞争错误（`RAISE(ABORT)`，扩展码 1811）仍向上传播，消息保持 `queued`，后续轮询只投递一次。
+- `a_revoked_consumer_is_refused_and_the_queue_survives`：消费者被撤销时轮询拒绝，队列不丢失；新消费者只投递一次。
+- `the_poll_restores_the_borrowed_connection_timeout_on_success_and_unwind`：借用连接原来的 `busy_timeout`（例如 7000ms）在成功、错误和 panic 展开后都恢复为原值，不留下 250ms 或全局放宽的超时。
+- `db::write_tx_tests::contention_exposes_the_extended_code`：真实写者竞争下诊断包含静态操作名和 SQLite 扩展码，不含 SQL 文本或绑定值。
+
+口径说明：
+
+- 只读快照读取沿用该连接原有的 `busy_timeout`（池默认值），250ms 只是有排队消息时“获取写事务”的单次上限，不是一次轮询或整个回合的总时限；模型请求、工具执行和其他写路径不受影响。
+- 仅对 `SQLITE_BUSY`/`SQLITE_LOCKED` 的类型化错误回滚并推迟到下一个边界；所有权、信任、归档和写入错误仍作为错误返回。没有递归重试，也没有全局修改数据库超时。
+- 本轮只证明并修复了收件箱轮询这一条可复现的致命竞争路径。历史长回合退出（Super R27/R01/R28）和独立数据目录下的启动期失败仍未归因；启动期数据库打开/初始化也未加同样的操作名诊断，不能用本场景的通过结果替代。
