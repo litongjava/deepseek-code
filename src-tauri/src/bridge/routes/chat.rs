@@ -658,6 +658,7 @@ pub(super) async fn start_chat(
         }
         // Report idle only once the trajectory above is persisted.
         drop(run);
+        drop(_turn_lease);
         super::input_queue::kick(lifecycle_state, lifecycle_id);
         if let Some(event) = terminal_event {
             yield Ok::<Event, Infallible>(Event::default().data(event.to_string()));

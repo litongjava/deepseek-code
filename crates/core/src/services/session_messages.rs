@@ -415,10 +415,8 @@ impl ExecutionLease {
             .read(true)
             .write(true)
             .open(directory.join(format!("{session}.lock")))?;
-        // Admission is exclusive and immediate: a held session is refused at
-        // once rather than retried, so two overlapping submissions can never
-        // both run just because one finished inside a retry window.
-        crate::fs::try_lock_file(&file)
+        // A real owner holds the lock for a whole turn, so the short retry only absorbs momentary holds such as an execution_active probe or a forked descriptor; two overlapping turns still cannot both run.
+        crate::fs::try_lock_briefly(&file)
             .context("Session is already executing in another owner")?;
         Ok(Some(Self {
             file,
@@ -1104,6 +1102,59 @@ mod tests {
             .unwrap();
         drop(next);
         assert!(!super::execution_active(dir.path(), &id).unwrap());
+    }
+
+    /// The activity probe takes the lock only for an instant. An admission
+    /// that starts during that instant must wait for the probe instead of
+    /// being refused as if another turn were executing.
+    #[test]
+    fn probe_does_not_refuse_a_concurrent_admission() {
+        let dir = tempfile::tempdir().unwrap();
+        let id = uuid::Uuid::new_v4().to_string();
+        let path = dir
+            .path()
+            .join("session-execution-locks")
+            .join(format!("{id}.lock"));
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        // Open and lock exactly as `execution_active` does during its probe.
+        let probe = std::fs::OpenOptions::new()
+            .create(true)
+            .truncate(false)
+            .read(true)
+            .write(true)
+            .open(&path)
+            .unwrap();
+        crate::fs::try_lock_file(&probe).unwrap();
+        let release = std::thread::spawn(move || {
+            std::thread::sleep(std::time::Duration::from_millis(50));
+            crate::fs::unlock_file(&probe).unwrap();
+        });
+        let lease = super::ExecutionLease::acquire(dir.path(), &id)
+            .expect("a momentary probe must not refuse a real admission")
+            .expect("a real session id");
+        release.join().unwrap();
+        assert!(super::execution_active(dir.path(), &id).unwrap());
+        drop(lease);
+        assert!(!super::execution_active(dir.path(), &id).unwrap());
+    }
+
+    /// Retrying absorbs only momentary holders: a real turn still refuses a
+    /// second overlapping admission, and does so without a long stall.
+    #[test]
+    fn held_lease_is_still_refused_quickly() {
+        let dir = tempfile::tempdir().unwrap();
+        let id = uuid::Uuid::new_v4().to_string();
+        let first = super::ExecutionLease::acquire(dir.path(), &id)
+            .unwrap()
+            .unwrap();
+        let started = std::time::Instant::now();
+        assert!(super::ExecutionLease::acquire(dir.path(), &id).is_err());
+        assert!(
+            started.elapsed() < std::time::Duration::from_secs(1),
+            "a held session must be refused quickly, took {:?}",
+            started.elapsed()
+        );
+        drop(first);
     }
 
     /// A forked child shares the owner's open file description, so a
