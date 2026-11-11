@@ -58,6 +58,39 @@ async fn stream_json_emits_init_assistant_tool_result_and_full_result() {
 }
 
 #[tokio::test]
+async fn repeated_role_chunks_stay_one_assistant_message() {
+    let server = Server::start(false, Mode::RoleEveryChunk).await;
+    let root = tempfile::tempdir().unwrap();
+    let mut client = Client::start(root.path(), &server, &[]);
+    client.send(user("Think then answer")).await;
+    let (status, _, transcript) = client.finish_with_transcript().await;
+    assert!(status.success(), "{transcript}");
+    let frames = transcript
+        .lines()
+        .map(|line| serde_json::from_str(line).unwrap())
+        .collect::<Vec<Value>>();
+    let assistant = of_type(&frames, "assistant");
+    assert!(!assistant.is_empty(), "{frames:?}");
+    let id = &assistant[0]["message"]["id"];
+    assert!(assistant.iter().all(|frame| &frame["message"]["id"] == id), "{assistant:?}");
+    let thinking = assistant
+        .iter()
+        .filter(|frame| frame["message"]["content"][0]["type"] == "thinking")
+        .collect::<Vec<_>>();
+    assert_eq!(thinking.len(), 1, "{assistant:?}");
+    assert_eq!(thinking[0]["message"]["content"][0]["thinking"], "think-athink-b");
+    let text = assistant
+        .iter()
+        .filter(|frame| frame["message"]["content"][0]["type"] == "text")
+        .collect::<Vec<_>>();
+    assert_eq!(text.len(), 1, "{assistant:?}");
+    assert_eq!(text[0]["message"]["content"][0]["text"], "reply-1");
+    let result = of_type(&frames, "result");
+    assert_eq!(result.len(), 1, "{frames:?}");
+    assert_eq!(result[0]["num_turns"], 1);
+}
+
+#[tokio::test]
 async fn partial_messages_stream_content_block_events_in_order() {
     for anthropic in [false, true] {
         let frames = transcript(anthropic, &["--include-partial-messages", "--permission-prompt-tool", "stdio"]).await;

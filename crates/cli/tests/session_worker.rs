@@ -734,7 +734,6 @@ async fn persistent_engine_reuses_mcp_refreshes_settings_and_recovers_after_cras
             .unwrap();
     }
     assert_eq!(completed(&paths.data_dir, &crash).await.status, "failed");
-    tokio::time::sleep(Duration::from_millis(200)).await;
     let recovered = worker::ensure_worker(&paths.data_dir, executable, &session, &workspace)
         .await
         .unwrap();

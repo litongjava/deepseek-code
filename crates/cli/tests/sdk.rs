@@ -107,6 +107,7 @@ enum Mode {
     SchemaBad,
     SchemaRejected,
     ToolSearch,
+    RoleEveryChunk,
 }
 #[derive(Clone)]
 struct Fixture {
@@ -268,11 +269,33 @@ async fn respond(State(state): State<Fixture>, Json(body): Json<Value>) -> Respo
         } else {
             json!({"content":text})
         };
-        format!(
-            "data: {}\n\ndata: {}\n\ndata: [DONE]\n\n",
-            json!({"id":"fixture","choices":[{"index":0,"delta":delta,"finish_reason":null}]}),
+        // Some providers repeat "role":"assistant" in every delta chunk.
+        let deltas = if !tool && matches!(state.mode, Mode::RoleEveryChunk) {
+            let chars: Vec<char> = text.chars().collect();
+            let third = chars.len() / 3;
+            let piece = |a: usize, b: usize| chars[a..b].iter().collect::<String>();
+            vec![
+                json!({"role":"assistant","reasoning_content":"think-a"}),
+                json!({"role":"assistant","reasoning_content":"think-b"}),
+                json!({"role":"assistant","content":piece(0, third)}),
+                json!({"role":"assistant","content":piece(third, third * 2)}),
+                json!({"role":"assistant","content":piece(third * 2, chars.len())}),
+            ]
+        } else {
+            vec![delta]
+        };
+        let mut stream = String::new();
+        for delta in &deltas {
+            stream.push_str(&format!(
+                "data: {}\n\n",
+                json!({"id":"fixture","choices":[{"index":0,"delta":delta,"finish_reason":null}]})
+            ));
+        }
+        stream.push_str(&format!(
+            "data: {}\n\ndata: [DONE]\n\n",
             json!({"choices":[{"index":0,"delta":{},"finish_reason":if truncated {"length"} else if tool {"tool_calls"} else {"stop"}}],"usage":{"prompt_tokens":10,"completion_tokens":4}})
-        )
+        ));
+        stream
     };
     ([("content-type", "text/event-stream")], stream).into_response()
 }

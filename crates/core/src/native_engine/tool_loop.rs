@@ -4801,6 +4801,7 @@ impl ToolLoopExecutor {
 
             let mut sse_buffer = String::new();
             let mut has_tool_calls = false;
+            let mut message_announced = false;
             let mut assistant_content: Option<OpenAIContent> = None;
             let mut assistant_reasoning: Option<String> = None;
             let mut assistant_provider_content: Option<Value> = None;
@@ -4900,7 +4901,9 @@ impl ToolLoopExecutor {
                         };
 
                         if let Some(role) = delta.get("role").and_then(|r| r.as_str()) {
-                            if role == "assistant" {
+                            // Providers may repeat the role in every chunk; announce the message once per request.
+                            if role == "assistant" && !message_announced {
+                                message_announced = true;
                                 let _ = self
                                     .event_tx
                                     .send(EngineEvent::MessageStart {
