@@ -11,11 +11,11 @@ const EXPANDED_LINES: usize = 400;
 
 /// Describe task retrieval without exposing the internal tool name in progress.
 pub fn task_output_activity(name: &str, input: &Value) -> Option<&'static str> {
-    (name == "TaskOutput").then(|| {
-        if input["block"] == false || input["timeout"] == 0 {
-            "Reading background task output"
-        } else {
+    matches!(name, "TaskGet" | "TaskOutput").then(|| {
+        if input["block"] == true && input["timeout"] != 0 {
             "Waiting for background task to finish"
+        } else {
+            "Reading background task output"
         }
     })
 }
@@ -1220,6 +1220,32 @@ mod result_regressions {
         );
         assert_eq!(result_text(r#"{"entries":[]}"#), "(Empty directory)");
         assert!(result_text(r#"{"entries":[{"bad":true}]}"#).contains("bad"));
+    }
+
+    #[test]
+    fn task_get_progress_distinguishes_reading_from_waiting() {
+        assert_eq!(
+            task_output_activity("TaskGet", &serde_json::json!({})),
+            Some("Reading background task output")
+        );
+        assert_eq!(
+            task_output_activity("TaskGet", &serde_json::json!({"block":false})),
+            Some("Reading background task output")
+        );
+        assert_eq!(
+            task_output_activity("TaskGet", &serde_json::json!({"block":true,"timeout":0})),
+            Some("Reading background task output")
+        );
+        assert_eq!(
+            task_output_activity("TaskGet", &serde_json::json!({"block":true})),
+            Some("Waiting for background task to finish")
+        );
+        // The retired name stays displayable for old transcripts.
+        assert_eq!(
+            task_output_activity("TaskOutput", &serde_json::json!({})),
+            Some("Reading background task output")
+        );
+        assert_eq!(task_output_activity("Bash", &serde_json::json!({})), None);
     }
 
     #[test]

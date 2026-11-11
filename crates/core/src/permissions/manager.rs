@@ -502,7 +502,6 @@ impl PermissionManager {
                 | "TaskOutput"
                 | "ToolSearch"
                 | "ProposeGoal"
-                | "plan_mode"
                 | "EnterPlanMode"
                 | "ExitPlanMode"
                 | "brief"
@@ -1113,6 +1112,23 @@ mod policy_tests {
             conversation_id: "session".into(),
             user_id: None,
             workspace_path: None,
+        }
+    }
+    #[test]
+    fn legacy_task_output_keeps_task_get_read_only_authority() {
+        for mode in [
+            PermissionMode::AskPermissions,
+            PermissionMode::AcceptEdits,
+            PermissionMode::PlanMode,
+        ] {
+            let manager = manager(mode);
+            let get = manager.check_permission(&context("TaskGet"));
+            assert_eq!(get, PermissionResult::Granted, "{mode:?}");
+            assert_eq!(
+                manager.check_permission(&context("TaskOutput")),
+                get,
+                "{mode:?}"
+            );
         }
     }
     #[test]

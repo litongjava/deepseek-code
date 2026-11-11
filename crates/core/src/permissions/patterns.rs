@@ -256,7 +256,9 @@ pub fn canonical_tool_name(name: &str) -> &str {
     match name {
         "Task" => "Agent",
         "KillShell" => "TaskStop",
-        "AgentOutputTool" | "BashOutputTool" => "TaskOutput",
+        // TaskOutput is an old dispatch alias for TaskGet; rules and permission
+        // checks treat both names as TaskGet.
+        "TaskOutput" | "AgentOutputTool" | "BashOutputTool" => "TaskGet",
         name => name,
     }
 }
@@ -314,6 +316,16 @@ mod tests {
             user_id: None,
             workspace_path: Some(workspace.to_string_lossy().into()),
         }
+    }
+
+    #[test]
+    fn task_output_is_a_legacy_alias_for_task_get() {
+        assert_eq!(canonical_tool_name("TaskOutput"), "TaskGet");
+        assert_eq!(canonical_tool_name("AgentOutputTool"), "TaskGet");
+        assert_eq!(canonical_tool_name("BashOutputTool"), "TaskGet");
+        assert_eq!(canonical_rule("TaskOutput"), "TaskGet");
+        assert_eq!(canonical_rule("BashOutputTool(*)"), "TaskGet");
+        assert_eq!(canonical_rule("AgentOutputTool(Bash)"), "TaskGet(Bash)");
     }
 
     #[test]

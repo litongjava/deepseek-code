@@ -496,7 +496,7 @@ impl ToolLoopExecutor {
                     Some(updated) => updated,
                     None => input.clone(),
                 };
-                if matches!(tool, "EnterPlanMode" | "ExitPlanMode" | "plan_mode") {
+                if matches!(tool, "EnterPlanMode" | "ExitPlanMode") {
                     anyhow::ensure!(actual == *input, "Plan transitions require their original reviewed input and dedicated plan choice");
                 }
                 if edit_grant {

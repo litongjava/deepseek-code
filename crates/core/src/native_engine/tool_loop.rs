@@ -1369,11 +1369,13 @@ impl ToolLoopExecutor {
             return;
         }
         if let Some(names) = value["loaded_tools"].as_array() {
-            loaded.extend(
-                names
-                    .iter()
-                    .filter_map(|name| name.as_str().map(str::to_owned)),
-            );
+            loaded.extend(names.iter().filter_map(|name| {
+                let name = name.as_str()?;
+                // TaskOutput was folded into TaskGet and the duplicate
+                // plan_mode entry is retired. An old stored search result must
+                // not make either retired name reachable again.
+                (!matches!(name, "TaskOutput" | "plan_mode")).then(|| name.to_owned())
+            }));
         }
     }
 
@@ -1382,58 +1384,65 @@ impl ToolLoopExecutor {
     /// the user turns into on-demand loses that exposure even though the older
     /// request still lists it, so it must be searched again.
     fn loading_violation(&self, name: &str) -> Option<String> {
+        // A legacy dispatch alias follows the loading policy of the current
+        // name it was folded into; otherwise it would bypass disabled and
+        // not-loaded checks that only know about TaskGet.
+        let canonical = crate::permissions::patterns::canonical_tool_name(name);
         if self.host_tool.as_deref() == Some(name) {
             return None;
         }
         // An agent allowlist is a hard restriction, not a deferred tool: name
         // that instead of promising the tool on a later request.
-        if self
-            .allowed_tools
-            .as_ref()
-            .is_some_and(|names| !names.iter().any(|granted| granted == name))
-        {
+        if self.allowed_tools.as_ref().is_some_and(|names| {
+            !names
+                .iter()
+                .any(|granted| granted == name || granted == canonical)
+        }) {
             return Some(format!("{name} is not allowed for this agent."));
         }
         let customization = match self.customization() {
             Ok(customization) => customization,
             Err(error) => return Some(format!("Tool settings could not be read: {error:#}")),
         };
-        if !self.builtin_names().contains(name) {
+        if !self.builtin_names().contains(canonical) {
             // MCP and host names were never part of the switches, but a legacy
             // entry that turned one off still does.
             return customization
                 .is_disabled(name)
                 .then(|| format!("{name} is turned off in the tool settings."));
         }
-        let loading = customization.loading(name);
+        let loading = customization.loading(canonical);
         if !loading.enabled && !loading.on_demand {
-            return Some(format!("{name} is turned off in the tool settings."));
+            return Some(format!("{canonical} is turned off in the tool settings."));
         }
         let in_request = self
             .exposed_tools
             .as_ref()
-            .is_none_or(|names| names.contains(name));
+            .is_none_or(|names| names.contains(canonical));
         if loading.enabled {
             // A resident tool can only be called if this response carried it;
             // one enabled after the request started waits for the next.
             return (!in_request).then(|| {
-                format!("{name} is not part of this response; it becomes available from the next model request.")
+                format!("{canonical} is not part of this response; it becomes available from the next model request.")
             });
         }
         // On demand. A restricted agent with no discovery entry receives its
         // granted tools directly, which is the one case that needs no search.
         let granted_directly = self.restricted_without_discovery()
-            && self
-                .allowed_tools
-                .as_ref()
-                .is_some_and(|names| names.iter().any(|granted| granted == name));
-        if in_request && (granted_directly || self.loaded_tools.contains(name)) {
+            && self.allowed_tools.as_ref().is_some_and(|names| {
+                names
+                    .iter()
+                    .any(|granted| granted == name || granted == canonical)
+            });
+        if in_request && (granted_directly || self.loaded_tools.contains(canonical)) {
             return None;
         }
-        Some(if self.loaded_tools.contains(name) {
-            format!("{name} becomes callable from the next model request.")
+        Some(if self.loaded_tools.contains(canonical) {
+            format!("{canonical} becomes callable from the next model request.")
         } else {
-            format!("{name} is not loaded. Call ToolSearch for it and use it in the next request.")
+            format!(
+                "{canonical} is not loaded. Call ToolSearch for it and use it in the next request."
+            )
         })
     }
 
@@ -1581,6 +1590,11 @@ impl ToolLoopExecutor {
             pre_contexts: None,
             step: CallStep::Finished((input, output, true)),
         };
+        // The retired duplicate plan entry fails before hooks, permission
+        // prompts or dispatch, even if stale settings still enable it.
+        if name == "plan_mode" {
+            return finished(input.clone(), "Unknown tool: plan_mode".into());
+        }
         if !input.is_object() {
             return finished(input.clone(), format!("Invalid {name} arguments: expected a complete JSON object; resend the call with all required fields. Tool was not executed."));
         }
@@ -1674,7 +1688,7 @@ impl ToolLoopExecutor {
             && !pre.ask_permission
             && !matches!(
                 name,
-                "AskUserQuestion" | "AskUser" | "EnterPlanMode" | "ExitPlanMode" | "plan_mode"
+                "AskUserQuestion" | "AskUser" | "EnterPlanMode" | "ExitPlanMode"
             )
         {
             let can_replace_prompt = self.permission_manager.as_ref().is_none_or(|manager| {
@@ -2323,7 +2337,9 @@ impl ToolLoopExecutor {
 
             let context = crate::permissions::PermissionContext {
                 mcp_read_only: self.mcp_read_only_tools.contains(tool_name),
-                tool_name: tool_name.to_string(),
+                // A legacy dispatch alias passes the same permission checks as
+                // the current tool name it was folded into.
+                tool_name: crate::permissions::patterns::canonical_tool_name(tool_name).to_owned(),
                 tool_input: tool_input.clone(),
                 conversation_id: conv_id,
                 user_id: None,
@@ -3022,11 +3038,22 @@ impl ToolLoopExecutor {
         _tool_use_id: &str,
         provider_id: &str,
     ) -> CallStep {
-        if self
-            .allowed_tools
-            .as_ref()
-            .is_some_and(|names| !names.iter().any(|name| name == tool_name))
-        {
+        // Defense in depth: `prepare_tool_call` already rejects the retired
+        // duplicate plan entry before hooks or permission checks, so a direct
+        // call here must also fail without reaching legacy or task storage.
+        if tool_name == "plan_mode" {
+            return CallStep::Finished((
+                tool_input.clone(),
+                "Unknown tool: plan_mode".into(),
+                true,
+            ));
+        }
+        let canonical = crate::permissions::patterns::canonical_tool_name(tool_name);
+        if self.allowed_tools.as_ref().is_some_and(|names| {
+            !names
+                .iter()
+                .any(|name| name == tool_name || name == canonical)
+        }) {
             return CallStep::Finished((
                 tool_input.clone(),
                 "Tool is not allowed by this agent definition".into(),
@@ -3045,10 +3072,7 @@ impl ToolLoopExecutor {
                     .await,
             );
         }
-        if matches!(tool_name, "EnterPlanMode" | "ExitPlanMode")
-            || (tool_name == "plan_mode"
-                && matches!(tool_input["operation"].as_str(), Some("enter" | "exit")))
-        {
+        if matches!(tool_name, "EnterPlanMode" | "ExitPlanMode") {
             return CallStep::Finished(
                 self.execute_plan_transition(tool_name, tool_input, _tool_use_id)
                     .await,
@@ -3134,17 +3158,6 @@ impl ToolLoopExecutor {
                     _ => Err(anyhow::anyhow!("Team tools require an active session and runtime directory")),
                 }
             };
-            let failed = result.is_err();
-            let output = match result { Ok(value) => value.to_string(), Err(error) => error.to_string() };
-            return CallStep::Finished((tool_input.clone(), output, failed));
-        }
-        if tool_name == "plan_mode" {
-            match self.check_permission_with(tool_name, tool_input, _tool_use_id).await {
-                PermissionResult::Denied(reason) => return CallStep::Finished((tool_input.clone(), format!("Permission denied: {reason}"), true)),
-                PermissionResult::RequiresConfirmation(message) => return self.prepare_after_confirmation_with(tool_name, tool_input, _tool_use_id, provider_id, &message).await,
-                PermissionResult::Granted => {}
-            }
-            let result = crate::tools::execute_tool_async(tool_name, tool_input.clone(), &self.workspace_cwd).await;
             let failed = result.is_err();
             let output = match result { Ok(value) => value.to_string(), Err(error) => error.to_string() };
             return CallStep::Finished((tool_input.clone(), output, failed));
@@ -4419,7 +4432,7 @@ impl ToolLoopExecutor {
                 let mut tool_results: Vec<ContentBlock> = Vec::new();
                 if pending_tool_calls
                     .iter()
-                    .any(|t| matches!(t.name.as_str(), "ExitPlanMode" | "plan_mode"))
+                    .any(|t| t.name.as_str() == "ExitPlanMode")
                 {
                     for call in &mut pending_tool_calls {
                         call.concurrent = false;
@@ -5141,7 +5154,7 @@ impl ToolLoopExecutor {
                 let mut tool_images = Vec::new();
                 if pending_tool_calls
                     .iter()
-                    .any(|t| matches!(t.name.as_str(), "ExitPlanMode" | "plan_mode"))
+                    .any(|t| t.name.as_str() == "ExitPlanMode")
                 {
                     for call in &mut pending_tool_calls {
                         call.concurrent = false;

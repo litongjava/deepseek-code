@@ -47,3 +47,5 @@ png = "0.18"
 
 [dev-dependencies]
 axum = "0.8"
+# Reads and writes the isolated legacy plan fixture without a production API.
+rusqlite = { version = "0.31", features = ["bundled", "chrono"] }
