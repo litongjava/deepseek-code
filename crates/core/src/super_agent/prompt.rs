@@ -44,8 +44,8 @@ mod tests {
         assert!(prompt.contains("cannot grant permissions"));
         assert_eq!(append_router(""), ROUTER_SYSTEM_PROMPT);
         assert_eq!(
-            append_router(ROUTER_SYSTEM_PROMPT)
-                .matches("Super Agent Router")
+            append_router("Base instructions.")
+                .matches("## Super Agent Router")
                 .count(),
             1
         );

@@ -174,6 +174,19 @@ impl QueryEngine {
         super::generation::generate(provider, system, input).await
     }
 
+    /// The resolved provider/model pair this session would use, for hosts that
+    /// must pin a child session to exactly the same selection.
+    pub async fn resolved_provider(
+        &self,
+        provider_id: &str,
+        model: &str,
+    ) -> Result<crate::native_engine::provider_manager::ResolvedProvider> {
+        let manager = self.provider_manager.lock().await;
+        manager
+            .resolve_selected(provider_id, model)
+            .ok_or_else(|| anyhow!("Provider/model is unavailable: {provider_id}::{model}"))
+    }
+
     /// Tool-free summarization that also accepts histories larger than the model window.
     pub async fn generate_summary(
         &self,

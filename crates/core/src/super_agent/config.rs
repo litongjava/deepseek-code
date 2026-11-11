@@ -3,7 +3,7 @@
 //! Settings live under `superAgent` in the shared peripheral settings store so
 //! CLI and Desktop read the same values. Values are bounded before use: a bad
 //! configuration fails loudly instead of silently disabling supervision.
-use crate::config::{ModelConfig, ProviderConfig};
+use crate::native_engine::provider_manager::{ModelConfig, Provider};
 use crate::services::ServiceContext;
 use anyhow::{bail, Context, Result};
 use serde::{Deserialize, Serialize};
@@ -147,7 +147,7 @@ impl SuperAgentConfig {
         &self,
         role: AgentModelRole,
         router_model: &ModelConfig,
-        provider: &ProviderConfig,
+        provider: &Provider,
     ) -> (ModelConfig, Option<ModelFallback>) {
         let configured = match role {
             AgentModelRole::Coder => self.agents.coder.model.as_deref(),
@@ -213,7 +213,7 @@ impl ModelFallback {
 /// placeholder, and returns why the fallback was used when it is not a model.
 pub fn router_model(
     config: &SuperAgentConfig,
-    provider: &ProviderConfig,
+    provider: &Provider,
     current: &ModelConfig,
 ) -> (ModelConfig, Option<String>) {
     let Some(configured) = config
@@ -258,38 +258,32 @@ mod tests {
     use serde_json::json;
 
     fn model(id: &str, enabled: bool) -> ModelConfig {
-        ModelConfig {
-            id: id.into(),
-            name: id.into(),
-            enabled,
-            max_tokens: None,
-            supports_vision: false,
-            supports_text: true,
-            api: None,
-            supports_tools: true,
-            supports_streaming: true,
-            context_window: None,
-            cost_per_1k_input: None,
-            cost_per_1k_output: None,
-        }
+        serde_json::from_value(json!({
+            "id": id,
+            "name": id,
+            "enabled": enabled,
+            "supports_vision": false,
+            "supports_web_search": false,
+            "supports_tools": true,
+            "supports_streaming": true
+        }))
+        .unwrap()
     }
 
-    fn provider() -> ProviderConfig {
-        ProviderConfig {
-            id: "fixture".into(),
-            name: "Fixture".into(),
-            provider_type: "openai".into(),
-            api_key: None,
-            base_url: "http://127.0.0.1".into(),
-            models: vec![model("router-model", true), model("coder-model", true)],
-            enabled: true,
-            is_default: true,
-            settings: Default::default(),
-            supports_web_search: false,
-            web_search_strategy: None,
-            web_search_tested_at: None,
-            web_search_test_reason: None,
-        }
+    fn provider() -> Provider {
+        serde_json::from_value(json!({
+            "id": "fixture",
+            "name": "Fixture",
+            "base_url": "http://127.0.0.1",
+            "api_key": "secret",
+            "api_format": "openai",
+            "models": [
+                {"id":"router-model","name":"router-model","enabled":true,"supports_vision":false,"supports_web_search":false},
+                {"id":"coder-model","name":"coder-model","enabled":true,"supports_vision":false,"supports_web_search":false}
+            ],
+            "enabled": true
+        }))
+        .unwrap()
     }
 
     #[test]
