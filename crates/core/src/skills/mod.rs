@@ -8,6 +8,7 @@ pub mod import;
 mod editing;
 pub mod open_design;
 mod legacy_builtin;
+mod skill_creator;
 
 use anyhow::{anyhow, Result};
 use serde::{Deserialize, Serialize};
@@ -122,6 +123,10 @@ impl SkillsManager {
     pub async fn load_skills(&self) -> Result<Vec<Skill>> {
         let mut skills = Vec::new();
 
+        // Migrate before scanning so a removed placeholder cannot be reported
+        // as a user skill from the same directory tree.
+        self.install_bundled_skills()?;
+
         let user_skills_path = self.get_skills_path(&SkillSource::User);
         if user_skills_path.exists() {
             skills.extend(self.scan_skills_dir(&user_skills_path, SkillSource::User)?);
@@ -130,9 +135,6 @@ impl SkillsManager {
         }
 
         let bundled_skills_path = self.get_skills_path(&SkillSource::Bundled);
-        if !bundled_skills_path.exists() {
-            self.install_bundled_skills()?;
-        }
         legacy_builtin::install(&bundled_skills_path)?;
         skills.extend(self.scan_skills_dir(&bundled_skills_path, SkillSource::Bundled)?);
 
@@ -141,6 +143,16 @@ impl SkillsManager {
         skills.reverse();
         skills.retain(|skill| seen.insert(skill.id.clone()));
         skills.reverse();
+
+        // The embedded skill-creator is not written to disk. A user copy with
+        // the same name wins; otherwise the manager lists the embedded one so
+        // `dcl skills` and the Customize page show exactly one skill-creator.
+        if !skills
+            .iter()
+            .any(|skill| skill.name == skill_creator::NAME)
+        {
+            skills.push(skill_creator::manager_skill());
+        }
 
         Ok(skills)
     }
@@ -168,40 +180,7 @@ impl SkillsManager {
 
     pub fn install_bundled_skills(&self) -> Result<()> {
         let bundled_path = self.get_skills_path(&SkillSource::Bundled);
-        std::fs::create_dir_all(&bundled_path)?;
-
-        let skill_creator_md = r#"---
-name: skill-creator
-description: A toolkit for creating, evaluating, and improving Claude skills
-whenToUse: When you want to build a new skill, evaluate an existing one, or generate synthetic training data for skills
----
-
-# Skill Creator
-
-A comprehensive toolkit for creating, evaluating, and improving Claude skills.
-
-## Usage
-
-This skill provides utilities for:
-- Creating new skills from templates
-- Evaluating skill quality
-- Generating training data
-- Packaging skills for distribution
-
-## Files
-
-- `agents/` - Agent definitions for different evaluation tasks
-- `scripts/` - Utility scripts for skill development
-- `eval-viewer/` - Evaluation result visualization
-- `references/` - Schema definitions and documentation
-"#;
-
-        std::fs::create_dir_all(bundled_path.join("skill-creator").join("agents"))?;
-        std::fs::write(bundled_path.join("skill-creator").join("SKILL.md"), skill_creator_md)?;
-        std::fs::write(bundled_path.join("skill-creator").join("agents").join("analyzer.md"), "# Analyzer\n\nAnalyzes skill structure and quality.")?;
-        std::fs::write(bundled_path.join("skill-creator").join("agents").join("grader.md"), "# Grader\n\nGrades skill performance.")?;
-
-        Ok(())
+        skill_creator::install_and_migrate(&bundled_path)
     }
 
     fn scan_skills_dir(&self, base_path: &Path, source: SkillSource) -> Result<Vec<Skill>> {
@@ -457,6 +436,10 @@ This skill provides utilities for:
     }
 
     pub fn get_skill_content(&self, skill_id: &str, file_path: &str) -> Result<String> {
+        if skill_id == skill_creator::EMBEDDED_ID {
+            let bytes = skill_creator::embedded_file(file_path)?;
+            return Ok(String::from_utf8_lossy(bytes).into_owned());
+        }
         let skill_path = self.find_skill_path(skill_id)?;
         let full_path = editing::relative_file(&skill_path, file_path)?;
         let content = std::fs::read_to_string(&full_path)?;
@@ -500,6 +483,10 @@ This skill provides utilities for:
     }
 
     pub fn update_skill(&self, skill_id: &str, updates: HashMap<String, serde_json::Value>) -> Result<()> {
+        anyhow::ensure!(
+            skill_id != skill_creator::EMBEDDED_ID,
+            "The bundled skill-creator is read-only; create a user skill to customize it"
+        );
         let skill_path = self.find_skill_path(skill_id)?;
         let skill_md_path = skill_path.join("SKILL.md");
 
@@ -531,6 +518,10 @@ This skill provides utilities for:
     }
 
     pub fn delete_skill(&self, skill_id: &str) -> Result<()> {
+        anyhow::ensure!(
+            skill_id != skill_creator::EMBEDDED_ID,
+            "The bundled skill-creator is read-only"
+        );
         let skill_path = self.find_skill_path(skill_id)?;
         std::fs::remove_dir_all(skill_path)?;
         Ok(())
@@ -578,6 +569,10 @@ This skill provides utilities for:
     }
 
     pub async fn toggle_skill(&self, skill_id: &str) -> Result<bool> {
+        anyhow::ensure!(
+            skill_id != skill_creator::EMBEDDED_ID,
+            "The bundled skill-creator is read-only and stays enabled"
+        );
         let skills = self.load_skills().await?;
         let skill = skills.into_iter()
             .find(|s| s.id == skill_id)
