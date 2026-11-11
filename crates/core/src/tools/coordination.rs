@@ -19,8 +19,20 @@ fn team_lock(cwd: &str, id: &str) -> Result<(String, std::fs::File)> {
         .create(true)
         .truncate(false)
         .open(&path)?;
-    crate::fs::try_lock_file(&file)
-        .context("Team execution is active in another request or process")?;
+    // A just-released lock can stay held briefly by a child process between fork and exec.
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(1);
+    loop {
+        match crate::fs::try_lock_file(&file) {
+            Ok(()) => break,
+            Err(std::fs::TryLockError::WouldBlock) if std::time::Instant::now() < deadline => {
+                std::thread::sleep(std::time::Duration::from_millis(10));
+            }
+            Err(error) => {
+                return Err(error)
+                    .context("Team execution is active in another request or process");
+            }
+        }
+    }
     Ok((path.to_string_lossy().into_owned(), file))
 }
 
@@ -381,6 +393,46 @@ mod tests {
         let team = execute("team", json!({"operation":"get","team_id":id}), cwd).unwrap();
         assert_eq!(team["status"], "failed");
         assert_eq!(team["tasks"][0]["result"], "inspected");
+    }
+    #[cfg(unix)]
+    #[test]
+    fn claim_after_finish_survives_concurrent_process_spawns() {
+        let dir = tempfile::tempdir().unwrap();
+        let cwd = dir.path().to_str().unwrap();
+        let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let spawner = {
+            let stop = stop.clone();
+            std::thread::spawn(move || {
+                while !stop.load(std::sync::atomic::Ordering::Relaxed) {
+                    let _ = std::process::Command::new("true").status();
+                }
+            })
+        };
+        let mut failures = 0;
+        for _ in 0..40 {
+            let team = execute(
+                "team",
+                json!({"operation":"create","name":"r","tasks":[{"prompt":"a"},{"prompt":"b"}]}),
+                cwd,
+            )
+            .unwrap();
+            let id = team["team_id"].as_str().unwrap().to_owned();
+            let task = claim_team_task(cwd, &id).unwrap().unwrap();
+            finish_team_task(
+                cwd,
+                &id,
+                task["task_id"].as_str().unwrap(),
+                Some("ok"),
+                None,
+            )
+            .unwrap();
+            if claim_team_task(cwd, &id).is_err() {
+                failures += 1;
+            }
+        }
+        stop.store(true, std::sync::atomic::Ordering::Relaxed);
+        spawner.join().unwrap();
+        assert_eq!(failures, 0, "claims after finish failed {failures} times");
     }
     #[test]
     fn plans_persist_and_reject_missing_or_cyclic_dependencies() {
