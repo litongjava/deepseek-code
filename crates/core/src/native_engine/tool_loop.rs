@@ -2925,6 +2925,16 @@ impl ToolLoopExecutor {
         tool_input: &Value,
         _tool_use_id: &str,
     ) -> CallStep {
+        // Hard denials are enforced before any permission prompt. A pending
+        // Super Agent plan approval, a Router edit, or an agent tool allowlist
+        // must not become a user-confirmable prompt that could authorize it.
+        if let Some(reason) = self.permission_hard_denial(tool_name, tool_input) {
+            return CallStep::Finished((
+                tool_input.clone(),
+                format!("Permission denied: {reason}"),
+                true,
+            ));
+        }
         if self
             .allowed_tools
             .as_ref()

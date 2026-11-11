@@ -70,7 +70,7 @@ fn last_user(body: &Value) -> String {
         .to_owned()
 }
 
-fn has_tool_result_this_turn(body: &Value) -> bool {
+fn tool_results_this_turn(body: &Value) -> Vec<String> {
     let messages = body["messages"].as_array().cloned().unwrap_or_default();
     let last_user = messages
         .iter()
@@ -78,8 +78,15 @@ fn has_tool_result_this_turn(body: &Value) -> bool {
         .unwrap_or(0);
     messages[last_user.saturating_add(1)..]
         .iter()
-        .any(|message| message["role"] == "tool")
+        .filter(|message| message["role"] == "tool")
+        .filter_map(|message| message["content"].as_str().map(str::to_owned))
+        .collect()
 }
+
+fn has_tool_result_this_turn(body: &Value) -> bool {
+    !tool_results_this_turn(body).is_empty()
+}
+
 
 async fn dcl(data: &Path, session: &str, prompt: &str) -> String {
     let output = tokio::process::Command::new(env!("CARGO_BIN_EXE_dcl"))
@@ -89,6 +96,8 @@ async fn dcl(data: &Path, session: &str, prompt: &str) -> String {
             "--print",
             "--output-format",
             "text",
+            "--permission-mode",
+            "accept-edits",
             "--data-dir",
             data.to_str().unwrap(),
             "--",
@@ -150,6 +159,7 @@ async fn router_role_creates_launches_and_approves_a_real_task() {
                 let system = system_text(&body);
                 let prompt = last_user(&body);
                 let after_tool = has_tool_result_this_turn(&body);
+                let tool_results = tool_results_this_turn(&body);
                 let mode = if system.contains("Super Agent Router") {
                     "router"
                 } else if system.contains("/ Coder") {
@@ -161,6 +171,12 @@ async fn router_role_creates_launches_and_approves_a_real_task() {
                     .lock()
                     .unwrap()
                     .push(format!("{mode}:{prompt}:after_tool={after_tool}"));
+                if mode == "coder" && prompt.contains("was approved") && !tool_results.is_empty() {
+                    captured
+                        .lock()
+                        .unwrap()
+                        .push(format!("approved-tool-result={}", tool_results.join("|")));
+                }
                 let response = match mode {
                     "router" if !after_tool && prompt.starts_with("APPROVE_PLAN:") => {
                         let approval = prompt.trim_start_matches("APPROVE_PLAN:").trim();
@@ -177,7 +193,26 @@ async fn router_role_creates_launches_and_approves_a_real_task() {
                         tool_call("create-1", "CrpCreate", json!({"spec": spec})),
                         "tool_calls",
                     ),
-                    "coder" if !after_tool && prompt.contains("produce an implementation plan") => {
+                    "coder"
+                        if prompt.contains("produce an implementation plan")
+                            && !prompt.contains("was approved")
+                            && tool_results.is_empty() =>
+                    {
+                        // This must be denied before the host approves the plan.
+                        stream(
+                            tool_call(
+                                "blocked-bash",
+                                "Bash",
+                                json!({"command":"touch blocked-before-approval.txt"}),
+                            ),
+                            "tool_calls",
+                        )
+                    }
+                    "coder"
+                        if prompt.contains("produce an implementation plan")
+                            && !prompt.contains("was approved")
+                            && tool_results.len() == 1 =>
+                    {
                         stream(
                             tool_call(
                                 "plan-1",
@@ -198,7 +233,15 @@ async fn router_role_creates_launches_and_approves_a_real_task() {
                             "tool_calls",
                         )
                     }
-                    "coder" if !after_tool && prompt.contains("was approved") => {
+                    "coder" if prompt.contains("was approved") && tool_results.is_empty() => {
+                        // The host approved the plan; this read-only shell call
+                        // proves the plan gate released without needing a prompt.
+                        stream(
+                            tool_call("approved-bash", "Bash", json!({"command":"true"})),
+                            "tool_calls",
+                        )
+                    }
+                    "coder" if prompt.contains("was approved") => {
                         stream(json!({"content":"implementation acknowledged"}), "stop")
                     }
                     _ => stream(json!({"content":"done"}), "stop"),
@@ -294,7 +337,7 @@ async fn router_role_creates_launches_and_approves_a_real_task() {
     );
     let report = orchestrator.tick(&router).await.unwrap();
     assert_eq!(report.blocked, Vec::<String>::new(), "{report:?}");
-    wait_for_jobs(&data, &router, 1).await;
+    wait_for_jobs(&data, &router, 1, &seen).await;
     let coder = store
         .get_task(&task_id)
         .unwrap()
@@ -349,7 +392,7 @@ async fn router_role_creates_launches_and_approves_a_real_task() {
             .any(|line| line.contains("(resumed)")),
         "{report:?}"
     );
-    wait_for_jobs(&data, &router, 2).await;
+    wait_for_jobs(&data, &router, 2, &seen).await;
     let task = store.get_task(&task_id).unwrap().unwrap();
     assert_eq!(task.coder.session_id.as_deref(), Some(coder.as_str()));
     assert_eq!(task.phase, Phase::Implementing);
@@ -362,6 +405,28 @@ async fn router_role_creates_launches_and_approves_a_real_task() {
         .unwrap();
     let coder_workspace = PathBuf::from(coder_row.workspace_path.unwrap());
     assert!(coder_workspace.join("file.txt").is_file());
+    assert!(
+        !coder_workspace.join("blocked-before-approval.txt").exists(),
+        "a Coder shell command before plan approval must not run"
+    );
+    let approved_results = seen
+        .lock()
+        .unwrap()
+        .iter()
+        .filter(|line| line.starts_with("approved-tool-result="))
+        .cloned()
+        .collect::<Vec<_>>();
+    assert!(
+        !approved_results.is_empty(),
+        "the approved Coder shell call produced no result: {:#?}",
+        seen.lock().unwrap()
+    );
+    assert!(
+        approved_results
+            .iter()
+            .all(|line| !line.contains("blocked until the host approves")),
+        "the plan gate did not release after approval: {approved_results:#?}"
+    );
     assert!(
         !project.join("file.txt").exists(),
         "the child must not write into the parent workspace"
@@ -392,7 +457,12 @@ async fn router_role_creates_launches_and_approves_a_real_task() {
     server.abort();
 }
 
-async fn wait_for_jobs(data: &Path, router: &str, expected: usize) {
+async fn wait_for_jobs(
+    data: &Path,
+    router: &str,
+    expected: usize,
+    seen: &Arc<Mutex<Vec<String>>>,
+) {
     for _ in 0..400 {
         if let Ok(jobs) =
             deepseek_code_core::services::background_sessions::list(data, Some(router))
@@ -421,5 +491,52 @@ async fn wait_for_jobs(data: &Path, router: &str, expected: usize) {
         }
         tokio::time::sleep(Duration::from_millis(250)).await;
     }
-    panic!("child jobs did not finish");
+    let jobs = deepseek_code_core::services::background_sessions::list(data, Some(router))
+        .unwrap_or_default();
+    let transcript = jobs
+        .iter()
+        .find(|job| matches!(job.status.as_str(), "starting" | "running" | "unresponsive"))
+        .and_then(|job| {
+            let context = deepseek_code_core::services::session_messages::context(data).ok()?;
+            let rows = context
+                .db
+                .with_conn(|conn| deepseek_code_core::db::message_repo::get_messages_by_conversation(conn, &job.session_id))
+                .ok()?
+                .ok()?;
+            let calls = context
+                .db
+                .with_conn(|conn| -> anyhow::Result<Vec<(String, Option<String>, Option<String>, bool)>> {
+                    let rows = deepseek_code_core::db::message_repo::get_messages_by_conversation(
+                        conn,
+                        &job.session_id,
+                    )?;
+                    let mut calls = Vec::new();
+                    for row in rows {
+                        for call in deepseek_code_core::db::message_repo::get_tool_calls_for_message(
+                            conn, &row.id,
+                        )? {
+                            calls.push((call.name, call.input, call.output, call.is_error));
+                        }
+                    }
+                    Ok(calls)
+                })
+                .ok()?
+                .ok()?;
+            Some((
+                rows.into_iter()
+                    .rev()
+                    .take(8)
+                    .map(|row| (row.role, row.content))
+                    .collect::<Vec<_>>(),
+                calls,
+            ))
+        });
+    panic!(
+        "child jobs did not finish; jobs={:#?}; requests={:#?}; transcript={:#?}",
+        jobs.iter()
+            .map(|job| (job.session_id.clone(), job.status.clone(), job.error.clone()))
+            .collect::<Vec<_>>(),
+        seen.lock().unwrap(),
+        transcript
+    );
 }
