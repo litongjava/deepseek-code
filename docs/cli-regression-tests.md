@@ -454,3 +454,20 @@ OpenCode Go 用四种协议提供模型，模型地址和协议都来自内置�
 - `cargo test --locked -p deepseek-code-core --lib native_engine::tool_loop::delegation` 与 `cargo test --locked -p deepseek-code-core --test delegation`：原有 Agent 委派和后台子会话行为不变（分别 22 与 4 项）。
 - 非 Git 快照场景包含在 `super_agent::isolation`：用户自己的 `manifest.json`、文件与目录互换、可执行权限、快照目录位于源目录内或其符号链接别名的拒绝、损坏或缺失 payload 时先校验后恢复（当前文件保持不变）、被跳过条目（依赖目录等）在清单中如实记录而不是声称已保护。
 - 当前无法自动化的部分：真实多仓库任务的合并与清理、Router 与 `/crp` 交互、Desktop 角色切换、Windows 上的路径与符号链接行为，均在后续轮次实现并单独验收。
+
+### Super Agent 第 3 阶段：角色、Router 工具与 CRP 启动
+
+本轮覆盖角色与工具授权、任务持久化事件和 Coder/Reviewer 启动。审核、集成、Watcher、`/crp` 页面和 Desktop 入口属于后续阶段，不能按完整流程验收。
+
+- `cargo test --locked -p deepseek-code-core --lib super_agent`：设置校验、角色持久化、CRP 工具授权、事件待处理/确定性处理、启动器与编排器共 93 项。重点检查：
+  - 角色默认 Agent，按会话持久化；`--role` 只在显式传入时覆盖，恢复会话时沿用已保存角色；角色与权限模式互不影响。
+  - Router 会话的工具表中没有 `Edit`、`Write`、`MultiEdit`、`NotebookEdit`，但仍保留只读工具和 `Bash`；执行层同样拒绝这些工具（计划文件的既有例外保留），伪造调用不能绕过。
+  - `CrpCreate`/`CrpList`/`CrpShow`/`CrpSend`/`CrpUpdateSpec`/`CrpAnswer` 只对 Router 开放且只作用于本 Router 的任务；`CrpAnswer` 只能回答存在、待处理、规格版本与权限策略版本都匹配的审批，重复回答同一 operation 返回原结果。
+  - `CrpSubmit`/`CrpProposeTask` 只对任务当前 Coder/Reviewer 开放；Coder 只能提交 plan/implementation/integration，Reviewer 只能提交 review/harness；报告正文与当前 `spec_version`/`review_round` 不符会被拒绝。成员工具只写待处理事件，不直接改变任务状态。
+  - `ingest_event` 与 `process_pending` 分离：未处理事件不改变任务；重复处理同一事件是 no-op；非法事件让整批处理失败且不留下半应用状态；只处理本 Router 的待处理事件。
+  - 编排器一次 tick 依次准备环境、以计划模式启动 Coder、按 `manual`/`auto` 策略创建或自动批准计划审批、批准后恢复同一 Coder；重复 tick 不产生重复会话、Job 或审批。配置的 Coder 模型不存在时回退 Router 模型并记录警告。
+  - Reviewer 使用按 `submitted_commit` 固定的独立工作树，与 Coder 可写工作树不同。
+- `cargo test --locked -p deepseek-code-cli --test super_agent_router`：真实 `dcl` Router 会话调用 `CrpCreate`；宿主 tick 启动真实 `dcl` Coder，其本地模型 mock 调用 `CrpSubmit(plan)`；tick 生成审批；第二次真实 `dcl` 会话调用 `CrpAnswer`；tick 恢复同一 Coder。仅使用本地 mock，检查任务归属、阶段从 PLANNING 变为 IMPLEMENTING、会话 ID 不变、子进程工作目录为任务工作树、父工作目录无写入且没有重复活动子进程。
+- `cargo test --locked -p deepseek-code-cli --test super_agent_child`：现有 Agent 子会话的真实工作目录与恢复行为不变。
+- 现有回归：`cargo test --locked -p deepseek-code-core --lib native_engine::tool_loop::delegation`、`cargo test --locked -p deepseek-code-core --test delegation`、`cargo test --locked -p deepseek-code-cli`。
+- 当前无法自动化的部分：`/role` 交互渲染、等待用户输入时的手工恢复、参考文档第 13 节的完整配置项（本轮只读取 `router`、`agents`、`approvals.plan`、`review.maxRounds`、`scheduler` 中已被使用的字段）、Windows 下的工作树与进程行为、真实多仓库与审核/集成流程。
