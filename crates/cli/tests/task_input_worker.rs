@@ -386,6 +386,70 @@ async fn wait_output(root: &Path, session: &str, id: &str, marker: &str) -> Valu
     }
 }
 
+/// The worker refuses a graceful shutdown while a managed shell owner is still
+/// registered. `TaskStop` only requests cancellation: the owner publishes the
+/// terminal task record, drops the shell future (which signals the OS tree),
+/// and then releases that process-wide ownership. The shell tree can therefore
+/// be gone while the record is already terminal but the owner has not finished
+/// its bookkeeping, so this exact refusal is transient *after* an explicit
+/// `TaskStop`.
+///
+/// This waits for the owner-published terminal record, then retries only that
+/// documented refusal within the fixture deadline. Any other error fails
+/// immediately, and the caller's PID/start-time assertions remain the evidence
+/// that the tree itself is gone.
+const OWNER_STILL_ACTIVE: &str = "Session worker owns running background shell tasks";
+
+async fn shutdown_after_terminal_stop(
+    root: &Path,
+    session: &str,
+    id: &str,
+    observed: &[(u32, Option<u64>)],
+) -> Value {
+    fn tree(observed: &[(u32, Option<u64>)]) -> String {
+        let running: Vec<u32> = observed
+            .iter()
+            .filter(|(pid, started)| !gone(*pid, *started))
+            .map(|(pid, _)| *pid)
+            .collect();
+        format!("; shell tree still running: {running:?}")
+    }
+
+    let deadline = Instant::now() + READY;
+    let mut task = task_get(root, session, id);
+    while !matches!(
+        task["status"].as_str(),
+        Some("completed" | "failed" | "cancelled")
+    ) {
+        assert!(
+            Instant::now() < deadline,
+            "task {id} did not reach a terminal state within {READY:?} after TaskStop: \
+             {task}{}",
+            tree(observed)
+        );
+        tokio::time::sleep(Duration::from_millis(20)).await;
+        task = task_get(root, session, id);
+    }
+
+    loop {
+        let error = match worker::shutdown(root, session).await {
+            Ok(()) => return task,
+            Err(error) => error,
+        };
+        let message = format!("{error:#}");
+        if !message.contains(OWNER_STILL_ACTIVE) {
+            panic!("worker shutdown failed after TaskStop {id} with an unrelated error: {message}");
+        }
+        assert!(
+            Instant::now() < deadline,
+            "worker still refused shutdown after TaskStop {id} within {READY:?}; \
+             task={task}{} last error: {message}",
+            tree(observed)
+        );
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+}
+
 struct Cleanup(Vec<u32>);
 impl Drop for Cleanup {
     fn drop(&mut self) {
@@ -529,12 +593,20 @@ async fn worker_owns_pipe_input_across_turns_and_stops_the_exact_tree() {
     completed(&paths.data_dir, &stop_job).await;
     wait_gone(descendant, descendant_started, "stopped descendant").await;
     wait_gone(shell, shell_started, "stopped shell").await;
-    let stopped = task_get(&paths.data_dir, &session, &id);
+
+    // The tree is gone, but the owner releases its shutdown registration only
+    // after publishing the terminal record and dropping the shell future.
+    let stopped = shutdown_after_terminal_stop(
+        &paths.data_dir,
+        &session,
+        &id,
+        &[(shell, shell_started), (descendant, descendant_started)],
+    )
+    .await;
     assert_eq!(stopped["status"], "cancelled", "{stopped}");
 
-    // Now shutdown is allowed and the worker's own processes exit.
+    // Now the worker's own processes exit.
     let (engine_started, supervisor_started) = (start_time(engine), start_time(supervisor));
-    worker::shutdown(&paths.data_dir, &session).await.unwrap();
     wait_gone(engine, engine_started, "stopped engine").await;
     wait_gone(supervisor, supervisor_started, "stopped supervisor").await;
 }
@@ -596,8 +668,10 @@ async fn a_second_session_cannot_write_the_workers_shell() {
     assert_eq!(observed["status"], "running", "{observed}");
     assert_eq!(observed["stdout"], "", "{observed}");
 
-    tasks::execute_for_session("TaskStop", json!({"task_id":id}), &paths.data_dir, &session)
-        .unwrap();
+    let stop =
+        tasks::execute_for_session("TaskStop", json!({"task_id":id}), &paths.data_dir, &session)
+            .unwrap();
+    assert_eq!(stop["cancellation_requested"], true, "{stop}");
     let deadline = Instant::now() + READY;
     while !gone(descendant, descendant_started) || !gone(shell, shell_started) {
         assert!(
@@ -606,5 +680,14 @@ async fn a_second_session_cannot_write_the_workers_shell() {
         );
         tokio::time::sleep(Duration::from_millis(20)).await;
     }
-    worker::shutdown(&paths.data_dir, &session).await.unwrap();
+    // The tree is gone, but shutdown is refused until the owner finishes its
+    // bookkeeping; retry only that documented refusal under the same deadline.
+    let stopped = shutdown_after_terminal_stop(
+        &paths.data_dir,
+        &session,
+        &id,
+        &[(shell, shell_started), (descendant, descendant_started)],
+    )
+    .await;
+    assert_eq!(stopped["status"], "cancelled", "{stopped}");
 }
