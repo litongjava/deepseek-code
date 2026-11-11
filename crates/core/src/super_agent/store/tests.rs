@@ -76,6 +76,13 @@ fn finalizing(store: &TaskStore) -> TaskRecord {
     let reviewer = sessions
         .create(store.data_dir(), "fixture", "fixture")
         .unwrap();
+    // A durable member must also have a real transcript.
+    sessions
+        .append(&coder, "user", "implement the task")
+        .unwrap();
+    sessions
+        .append(&reviewer, "user", "review the task")
+        .unwrap();
     store
         .set_sessions(&task.task_id, Some(&coder), Some(&reviewer))
         .unwrap();
@@ -1069,5 +1076,58 @@ fn concurrent_path_locks_on_separate_connections_allow_exactly_one_holder() {
             .count(),
         3,
         "{results:?}"
+    );
+}
+
+#[test]
+fn completion_rejects_an_empty_session_row_and_historical_round_events() {
+    let (_temp, _data, store) = fixture();
+    let policy = StatePolicy::default();
+    let record = finalizing(&store);
+    let coder = record.coder.session_id.clone().unwrap();
+    let sessions = crate::runtime::SessionStore::new(store.db().clone());
+
+    // Replace the coder with a fresh conversation row that has no messages.
+    let empty = sessions
+        .create(store.data_dir(), "fixture", "fixture")
+        .unwrap();
+    store
+        .set_sessions(&record.task_id, Some(&empty), None)
+        .unwrap();
+    let unmet = gate_unmet(store.complete_task(&record.task_id, "complete-empty", &policy));
+    assert!(
+        unmet.iter().any(|item| matches!(
+            item,
+            Unmet::SessionUnverified {
+                role: AgentRole::Coder
+            }
+        )),
+        "{unmet:?}"
+    );
+
+    store
+        .set_sessions(&record.task_id, Some(&coder), None)
+        .unwrap();
+    // Move the current contract to the next round; the existing events belong
+    // to round 0 and must no longer satisfy the trace requirement.
+    store
+        .db()
+        .with_conn(|conn| {
+            conn.execute(
+                "UPDATE sa_tasks SET review_round=1 WHERE task_id=?1",
+                [&record.task_id],
+            )
+        })
+        .unwrap()
+        .unwrap();
+    let unmet = gate_unmet(store.complete_task(&record.task_id, "complete-round", &policy));
+    assert!(
+        unmet.iter().any(|item| matches!(
+            item,
+            Unmet::TraceMissing {
+                event: EventType::ImplementationSubmitted
+            }
+        )),
+        "{unmet:?}"
     );
 }

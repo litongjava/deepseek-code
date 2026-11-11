@@ -1,60 +1,60 @@
 //! Peripheral services shared by CLI and Desktop. Hosts supply credentials/devices.
-pub mod git_snapshot;
-pub mod github_connector;
-pub mod turn_context;
-pub mod lifecycle;
-pub mod deep_research;
-pub mod compaction;
-pub mod plans;
-pub mod plan_approval;
-pub mod permission_authority;
-pub mod session_workspace;
-pub mod session_trust;
-pub mod session_permission_mode;
-pub mod session_goals;
-pub mod goal_proposals;
+pub mod agent_import;
+pub mod agents;
+pub mod anthropic_auth;
+pub mod async_hooks;
 pub mod background_sessions;
-pub mod session_worker;
-pub mod session_parking;
-pub mod session_messages;
-pub mod input_queue;
 pub mod batch;
 pub mod checkpoints;
-pub mod tool_hooks;
-pub mod hook_progress;
-pub mod async_hooks;
-pub mod hook_callbacks;
-pub mod session_hooks;
-pub mod session_environment;
-pub mod shell_settings;
-pub mod wsl;
-pub mod teams;
-pub mod lifecycle_events;
-pub mod anthropic_auth;
-pub mod design;
-pub mod ide;
-pub mod usage;
-pub mod model_pricing;
-pub mod team;
-pub mod team_server;
-pub mod voice;
-pub mod generation;
-pub mod customization;
-pub mod dream;
-pub mod magic_docs;
-pub mod agents;
-pub mod agent_import;
-pub mod diagnostics;
-pub mod runtime_status;
-pub mod doctor;
 pub mod cli_resources;
+pub mod compaction;
+pub mod customization;
+pub mod deep_research;
+pub mod design;
+pub mod diagnostics;
+pub mod doctor;
+pub mod dream;
 pub mod feedback;
+pub mod generation;
+pub mod git_snapshot;
+pub mod github_connector;
+pub mod goal_proposals;
+pub mod hook_callbacks;
+pub mod hook_progress;
+pub mod ide;
+pub mod input_queue;
+pub mod lifecycle;
+pub mod lifecycle_events;
+pub mod magic_docs;
+pub mod model_pricing;
+pub mod permission_authority;
+pub mod plan_approval;
+pub mod plans;
+pub mod plugins;
+pub mod runtime_status;
+pub mod session_environment;
+pub mod session_goals;
+pub mod session_hooks;
+pub mod session_import;
+pub mod session_messages;
+pub mod session_parking;
+pub mod session_permission_mode;
+pub mod session_trust;
+pub mod session_worker;
+pub mod session_workspace;
+pub mod shell_settings;
 pub mod statusline;
 pub mod statusline_setup;
-pub mod worktree_diff;
+pub mod team;
+pub mod team_server;
+pub mod teams;
+pub mod tool_hooks;
+pub mod turn_context;
 pub mod updates;
-pub mod plugins;
-pub mod session_import;
+pub mod usage;
+pub mod voice;
+pub mod worktree_diff;
+pub mod wsl;
 
 use crate::{db::DbManager, runtime::RuntimePaths};
 use anyhow::{ensure, Context, Result};
@@ -62,8 +62,8 @@ use rusqlite::{Connection, OptionalExtension};
 use serde::{de::DeserializeOwned, Serialize};
 use std::sync::Arc;
 
-pub mod workspace_files;
 pub mod subagents;
+pub mod workspace_files;
 
 pub trait Credentials: Send + Sync {
     fn get(&self, name: &str) -> Result<String>;
@@ -178,6 +178,27 @@ pub fn migrate(conn: &Connection) -> Result<()> {
     conn.execute_batch("CREATE TABLE IF NOT EXISTS magic_auto_inputs(document_id TEXT PRIMARY KEY,input TEXT NOT NULL,FOREIGN KEY(document_id) REFERENCES magic_documents(id) ON DELETE CASCADE);
         CREATE TABLE IF NOT EXISTS legacy_magic_imports(path TEXT PRIMARY KEY,payload TEXT NOT NULL,document_id TEXT NOT NULL,FOREIGN KEY(document_id) REFERENCES magic_documents(id) ON DELETE CASCADE);
         INSERT OR IGNORE INTO peripheral_migrations(version) VALUES(9);")?;
+    let applied: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM peripheral_migrations WHERE version=10",
+        [],
+        |row| row.get(0),
+    )?;
+    if applied == 0 {
+        // Events written before this version keep the schema defaults; the
+        // completion gate only trusts events bound to the current contract.
+        let _ = conn.execute(
+            "ALTER TABLE sa_events ADD COLUMN spec_version INTEGER NOT NULL DEFAULT 1",
+            [],
+        );
+        let _ = conn.execute(
+            "ALTER TABLE sa_events ADD COLUMN review_round INTEGER NOT NULL DEFAULT 0",
+            [],
+        );
+        conn.execute(
+            "INSERT OR IGNORE INTO peripheral_migrations(version) VALUES(10)",
+            [],
+        )?;
+    }
     Ok(())
 }
 

@@ -561,6 +561,16 @@ pub struct Event {
     pub payload: Value,
     #[serde(default)]
     pub processed: bool,
+    /// The specification version and review round the event belongs to. Gate
+    /// evidence only counts events from the task's current contract.
+    #[serde(default = "default_spec_version")]
+    pub spec_version: u32,
+    #[serde(default)]
+    pub review_round: u32,
+}
+
+fn default_spec_version() -> u32 {
+    1
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

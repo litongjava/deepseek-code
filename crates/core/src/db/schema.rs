@@ -471,6 +471,8 @@ CREATE TABLE IF NOT EXISTS sa_events (
     timestamp TEXT NOT NULL,
     payload_json TEXT NOT NULL,
     processed INTEGER NOT NULL DEFAULT 0,
+    spec_version INTEGER NOT NULL DEFAULT 1,
+    review_round INTEGER NOT NULL DEFAULT 0,
     UNIQUE(task_id, sequence)
 );
 CREATE INDEX IF NOT EXISTS idx_sa_events_task_sequence ON sa_events(task_id, sequence);

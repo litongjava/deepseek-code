@@ -208,6 +208,8 @@ impl TaskStore {
                 timestamp: chrono::Utc::now().to_rfc3339(),
                 payload: json!({"spec":spec,"router_session_id":router_session_id}),
                 processed: false,
+                spec_version: 1,
+                review_round: 0,
             };
             insert_event_conn(tx, &event)?;
             Ok(record)
@@ -300,6 +302,8 @@ impl TaskStore {
                 timestamp: chrono::Utc::now().to_rfc3339(),
                 payload: event.payload.clone(),
                 processed: false,
+                spec_version: record.spec_version,
+                review_round: record.review_round,
             };
             let hash = event_hash(task_id, &event);
             claim_operation(
@@ -427,7 +431,7 @@ impl TaskStore {
     pub fn events(&self, task_id: &str) -> Result<Vec<Event>, StoreError> {
         self.run_read(|tx| {
             let mut statement = tx.prepare(
-                "SELECT event_id,task_id,pair_id,session_id,run_id,sequence,event_type,causation_id,operation_id,timestamp,payload_json,processed FROM sa_events WHERE task_id=?1 ORDER BY sequence",
+                "SELECT event_id,task_id,pair_id,session_id,run_id,sequence,event_type,causation_id,operation_id,timestamp,payload_json,processed,spec_version,review_round FROM sa_events WHERE task_id=?1 ORDER BY sequence",
             )?;
             let events = statement
                 .query_map([task_id], event_from_row)?
@@ -874,21 +878,36 @@ fn gate_evidence_conn(conn: &Connection, record: &TaskRecord) -> Result<GateEvid
         if id.is_empty() {
             continue;
         }
-        let archived: Option<i64> = conn
+        // A durable member is an existing, unarchived Code session with a
+        // real transcript. An empty conversation row is not execution proof.
+        let row: Option<(i64, i64, String)> = conn
             .query_row(
-                "SELECT archived FROM conversations WHERE id=?1",
+                "SELECT archived, (SELECT COUNT(*) FROM messages WHERE conversation_id=conversations.id), workspace_mode FROM conversations WHERE id=?1",
                 [id],
-                |row| row.get(0),
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
             )
             .optional()?;
-        if archived == Some(0) {
-            evidence.verified_sessions.insert(id.to_owned());
+        if let Some((0, messages, mode)) = row {
+            if messages > 0 && mode == "code" {
+                evidence.verified_sessions.insert(id.to_owned());
+            }
         }
     }
-    let mut statement =
-        conn.prepare("SELECT DISTINCT event_type FROM sa_events WHERE task_id=?1")?;
+    // Only events from the task's current specification version and review
+    // round count as execution evidence. Historical rounds stay in the trace
+    // without satisfying the current gate.
+    let mut statement = conn.prepare(
+        "SELECT DISTINCT event_type FROM sa_events WHERE task_id=?1 AND spec_version=?2 AND review_round=?3",
+    )?;
     let rows = statement
-        .query_map([&record.task_id], |row| row.get::<_, String>(0))?
+        .query_map(
+            params![
+                &record.task_id,
+                record.spec_version as i64,
+                record.review_round as i64
+            ],
+            |row| row.get::<_, String>(0),
+        )?
         .collect::<rusqlite::Result<Vec<_>>>()?;
     for row in rows {
         if let Ok(event) = EventType::parse(&row) {
@@ -1313,7 +1332,7 @@ fn update_task_conn(conn: &Connection, record: &TaskRecord) -> Result<(), StoreE
 
 fn insert_event_conn(conn: &Connection, event: &Event) -> Result<(), StoreError> {
     conn.execute(
-        "INSERT INTO sa_events(event_id,task_id,pair_id,session_id,run_id,sequence,event_type,causation_id,operation_id,timestamp,payload_json,processed) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12)",
+        "INSERT INTO sa_events(event_id,task_id,pair_id,session_id,run_id,sequence,event_type,causation_id,operation_id,timestamp,payload_json,processed,spec_version,review_round) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14)",
         params![
             event.event_id,
             event.task_id,
@@ -1326,7 +1345,9 @@ fn insert_event_conn(conn: &Connection, event: &Event) -> Result<(), StoreError>
             event.operation_id,
             event.timestamp,
             serde_json::to_string(&event.payload)?,
-            event.processed as i64
+            event.processed as i64,
+            event.spec_version as i64,
+            event.review_round as i64
         ],
     )?;
     Ok(())
@@ -1352,6 +1373,8 @@ fn event_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<StoredEvent> {
             timestamp: row.get(9)?,
             payload: serde_json::from_str(&payload)?,
             processed: row.get::<_, i64>(11)? != 0,
+            spec_version: row.get::<_, i64>(12)? as u32,
+            review_round: row.get::<_, i64>(13)? as u32,
         })
     })())
 }
@@ -1359,7 +1382,7 @@ fn event_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<StoredEvent> {
 fn event_by_operation(conn: &Connection, operation_id: &str) -> Result<Option<Event>, StoreError> {
     let row = conn
         .query_row(
-            "SELECT event_id,task_id,pair_id,session_id,run_id,sequence,event_type,causation_id,operation_id,timestamp,payload_json,processed FROM sa_events WHERE operation_id=?1",
+            "SELECT event_id,task_id,pair_id,session_id,run_id,sequence,event_type,causation_id,operation_id,timestamp,payload_json,processed,spec_version,review_round FROM sa_events WHERE operation_id=?1",
             [operation_id],
             event_from_row,
         )
