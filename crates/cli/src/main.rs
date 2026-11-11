@@ -58,6 +58,7 @@ mod voice;
 #[allow(dead_code)]
 mod terminal;
 mod repl;
+mod observe;
 mod output;
 mod compaction;
 mod skill_commands;
@@ -704,6 +705,8 @@ async fn run(cli: &Cli) -> Result<()> {
             if let Err(error) = remote.command("", &paths, &session, &mut input).await { command_eprintln!("Remote Control: {error:#}"); }
         }
         let mut last_config_error = String::new();
+        // Read-only view of a turn a direct print/json owner still executes.
+        let mut execution_observer = observe::Observer::default();
         terminal::tips::start_session(&paths.data_dir);
         // Lets other sessions see this one is open while it is idle.
         let mut presence: Option<(String, deepseek_code_core::services::session_messages::PresenceLease)> = None;
@@ -827,6 +830,23 @@ async fn run(cli: &Cli) -> Result<()> {
                     }
                 },
                 _ = background_refresh.tick() => {
+                    // While a resumed session is owned elsewhere, show the public
+                    // text/tool progress that owner publishes. The observer never
+                    // takes the lease, submits input or runs a tool.
+                    if session.waiting_for_continue() {
+                        match execution_observer.poll(&session) {
+                            // Observing never opens the automatic-wake path: a
+                            // queued notification waits for explicit input.
+                            Ok((_, lines)) => {
+                                if let Some(reader) = input.as_ref() {
+                                    for line in lines { reader.notice(line); }
+                                }
+                            }
+                            Err(error) => {
+                                if let Some(reader) = input.as_ref() { reader.notice(format!("Observation: {error:#}")); }
+                            }
+                        }
+                    }
                     match deepseek_code_core::services::lifecycle_events::check_configuration(&session.hook_service_context(), &session.workspace, &session.id).await {
                         Ok(()) => last_config_error.clear(),
                         Err(error) => { let text = format!("{error:#}"); if last_config_error != text { input.as_ref().expect("interactive reader").notice(text.clone()); last_config_error = text; } }

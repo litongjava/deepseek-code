@@ -240,16 +240,59 @@ pub fn receiver_active(root: &Path, session: &str) -> Result<bool> {
         Err(e) => return Err(e.into()),
     };
     match crate::fs::try_lock_file(&file) {
-        Ok(()) => Ok(false),
+        Ok(()) => {
+            #[cfg(test)]
+            lock_observer::inspect(&file);
+            // Same obligation as the presence probe.
+            if let Err(error) = crate::fs::unlock_file(&file) {
+                tracing::warn!("Could not release message receiver probe lock: {error}");
+            }
+            Ok(false)
+        }
+        // A held lock belongs to the real consumer; the probe must not unlock it.
         Err(std::fs::TryLockError::WouldBlock) => Ok(true),
         Err(std::fs::TryLockError::Error(e)) => Err(e.into()),
     }
 }
+/// Releases a lock this process owns, now rather than at descriptor close.
+///
+/// `flock` ownership belongs to the open file description, so a duplicated or
+/// inherited descriptor keeps the lock alive after the owner drops its `File`.
+/// Only the process that took the lock may release it: a forked child inherits
+/// the owner PID value alongside the descriptor and must not unlock a parent
+/// that is still alive. Descriptor close remains the fallback for abnormal exit.
+fn release_owned(file: &File, owner: u32) {
+    if std::process::id() != owner {
+        return;
+    }
+    if let Err(error) = crate::fs::unlock_file(file) {
+        // Reported without panicking; this also runs from `Drop`.
+        tracing::warn!("Could not release session lock: {error}");
+    }
+}
+
+/// Releases an acquisition path's lock if it returns an error before the owning
+/// RAII type is built, so a failed attach cannot leave the lock held through a
+/// duplicated descriptor.
+struct OwnedLockGuard<'a> {
+    file: &'a File,
+    owner: u32,
+    armed: bool,
+}
+
+impl Drop for OwnedLockGuard<'_> {
+    fn drop(&mut self) {
+        if self.armed {
+            release_owned(self.file, self.owner);
+        }
+    }
+}
+
 /// Held by an interactive frontend for as long as a session is open, so other
-/// sessions can tell an open but idle recipient from a closed one. The lock
-/// is released by the OS when the process exits, so it never goes stale.
+/// sessions can tell an open but idle recipient from a closed one.
 pub struct PresenceLease {
-    _file: File,
+    file: File,
+    owner: u32,
 }
 impl PresenceLease {
     pub fn acquire(root: &Path, session: &str) -> Result<Self> {
@@ -264,7 +307,19 @@ impl PresenceLease {
             .open(directory.join(format!("{session}.lock")))?;
         crate::fs::try_lock_briefly(&file)
             .context("Session is already open in another frontend")?;
-        Ok(Self { _file: file })
+        // Nothing fallible remains, so ownership can be handed over directly.
+        Ok(Self {
+            file,
+            owner: std::process::id(),
+        })
+    }
+}
+
+impl Drop for PresenceLease {
+    fn drop(&mut self) {
+        // A close-only release would keep the session apparently open while any
+        // duplicated or forked descriptor for the same description survives.
+        release_owned(&self.file, self.owner);
     }
 }
 
@@ -284,7 +339,18 @@ pub fn session_open(root: &Path, session: &str) -> Result<bool> {
         Err(e) => return Err(e.into()),
     };
     match crate::fs::try_lock_file(&file) {
-        Ok(()) => Ok(false),
+        Ok(()) => {
+            #[cfg(test)]
+            lock_observer::inspect(&file);
+            // Release the probe's own lock before returning: leaving it to the
+            // descriptor close would report a session with no owner as open for
+            // as long as an inherited or duplicated descriptor survives.
+            if let Err(error) = crate::fs::unlock_file(&file) {
+                tracing::warn!("Could not release session presence probe lock: {error}");
+            }
+            Ok(false)
+        }
+        // A held lock belongs to the real owner; the probe must not unlock it.
         Err(std::fs::TryLockError::WouldBlock) => Ok(true),
         Err(std::fs::TryLockError::Error(e)) => Err(e.into()),
     }
@@ -308,7 +374,15 @@ pub fn execution_active(root: &Path, session: &str) -> Result<bool> {
         Err(error) => return Err(error.into()),
     };
     match crate::fs::try_lock_file(&file) {
-        Ok(()) => Ok(false),
+        Ok(()) => {
+            // Release the probe's own lock before returning. Leaving it to the
+            // descriptor close would keep the session apparently owned for as
+            // long as any descriptor forked during the probe survives.
+            if let Err(error) = crate::fs::unlock_file(&file) {
+                tracing::warn!("Could not release execution probe lock: {error}");
+            }
+            Ok(false)
+        }
         Err(std::fs::TryLockError::WouldBlock) => Ok(true),
         Err(std::fs::TryLockError::Error(error)) => Err(error.into()),
     }
@@ -316,9 +390,17 @@ pub fn execution_active(root: &Path, session: &str) -> Result<bool> {
 
 /// Cross-engine/process execution ownership, including Desktop private sessions.
 pub struct ExecutionLease {
-    _file: File,
+    file: File,
+    /// The process that took the lease. A forked child inherits both the
+    /// descriptor and this value, so its copy must not unlock an owner that is
+    /// still alive in the parent.
+    owner: u32,
 }
 impl ExecutionLease {
+    /// Exclusive admission for one session. Every caller - a frontend turn, an
+    /// engine without a host and a Desktop private session - competes for the
+    /// same lock, so a second top-level turn is rejected before it can start a
+    /// turn record or a model request.
     pub fn acquire(root: &Path, session: &str) -> Result<Option<Self>> {
         if uuid::Uuid::parse_str(session).is_err() {
             return Ok(None);
@@ -333,14 +415,71 @@ impl ExecutionLease {
             .read(true)
             .write(true)
             .open(directory.join(format!("{session}.lock")))?;
+        // Admission is exclusive and immediate: a held session is refused at
+        // once rather than retried, so two overlapping submissions can never
+        // both run just because one finished inside a retry window.
         crate::fs::try_lock_file(&file)
             .context("Session is already executing in another owner")?;
-        Ok(Some(Self { _file: file }))
+        Ok(Some(Self {
+            file,
+            owner: std::process::id(),
+        }))
+    }
+}
+
+impl Drop for ExecutionLease {
+    fn drop(&mut self) {
+        // A child inherits the descriptor and the lock's shared open file
+        // description; its copy must not release the parent's live ownership.
+        if std::process::id() != self.owner {
+            return;
+        }
+        if let Err(error) = crate::fs::unlock_file(&self.file) {
+            // Descriptor close still follows; report without panicking in Drop.
+            tracing::warn!("Could not release session execution lock: {error}");
+        }
+    }
+}
+
+/// Logical lifetime of one message consumer, shared by the `Consumer` and every
+/// `Target` cloned from it.
+///
+/// The generation row in SQLite is the cross-process guard, but its removal is
+/// best effort: a transient database error must not leave a released handle able
+/// to commit queued messages. This in-memory flag is the same-process guard, and
+/// the lock it is held under also serializes a running drain against release, so
+/// a commit can never overlap the end of ownership.
+struct ConsumerLifetime {
+    alive: std::sync::Mutex<bool>,
+}
+
+impl ConsumerLifetime {
+    fn new() -> Self {
+        Self {
+            alive: std::sync::Mutex::new(true),
+        }
+    }
+
+    /// Runs `work` only while the consumer is still valid. The lock is held for
+    /// the whole drain, so release waits for a drain that already started.
+    fn run<T>(&self, work: impl FnOnce() -> Result<T>) -> Result<T> {
+        let alive = self.alive.lock().unwrap_or_else(|error| error.into_inner());
+        ensure!(*alive, "Message consumer ownership changed");
+        work()
+    }
+
+    /// Ends the lifetime, waiting for an in-flight drain to finish.
+    fn end(&self) {
+        let mut alive = self.alive.lock().unwrap_or_else(|error| error.into_inner());
+        *alive = false;
     }
 }
 
 pub struct Consumer {
-    _file: File,
+    file: File,
+    /// Process that attached; a forked child must not release it.
+    owner: u32,
+    lifetime: Arc<ConsumerLifetime>,
     pub target: Target,
 }
 #[derive(Clone)]
@@ -348,15 +487,32 @@ pub struct Target {
     context: ServiceContext,
     session: String,
     generation: String,
+    lifetime: Arc<ConsumerLifetime>,
 }
 impl Drop for Consumer {
     fn drop(&mut self) {
+        // A forked child inherits the descriptor and this owner value. Its copy
+        // must not remove the live parent's consumer row, release its lock or end
+        // its lifetime, so the ownership check comes before any cleanup.
+        if std::process::id() != self.owner {
+            return;
+        }
+        // Invalidate before the database cleanup: a copied `Target` must be
+        // rejected even if that cleanup fails, and a drain that is already
+        // running finishes here before ownership ends.
+        self.lifetime.end();
+        // Remove this generation's row while the lock is still owned. The delete
+        // is generation-scoped, so a late cleanup cannot remove a newer
+        // consumer's row.
         let _ = self.target.context.db.with_conn(|conn| {
             conn.execute(
                 "DELETE FROM session_inbox_consumers WHERE session_id=?1 AND generation=?2",
                 params![self.target.session, self.target.generation],
             )
         });
+        // Then release explicitly: a duplicated or inherited descriptor would
+        // otherwise keep the session with no live consumer looking active.
+        release_owned(&self.file, self.owner);
     }
 }
 impl Consumer {
@@ -385,14 +541,30 @@ impl Consumer {
         crate::fs::try_lock_file(&file).context(
             "This session already has an active message consumer; finish its existing turn first",
         )?;
+        #[cfg(test)]
+        lock_observer::inspect(&file);
+        // Ownership was acquired here; if the attach fails below, release it
+        // explicitly instead of leaving it to descriptor close.
+        let owner = std::process::id();
+        let mut guard = OwnedLockGuard {
+            file: &file,
+            owner,
+            armed: true,
+        };
         let generation = uuid::Uuid::new_v4().to_string();
         context.db.with_conn(|conn|->Result<_>{schema(conn)?;project(conn,root,session)?;conn.execute("INSERT INTO session_inbox_consumers(session_id,generation,pid) VALUES(?1,?2,?3) ON CONFLICT(session_id) DO UPDATE SET generation=excluded.generation,pid=excluded.pid",params![session,generation,std::process::id()])?;Ok(())})??;
+        guard.armed = false;
+        drop(guard);
+        let lifetime = Arc::new(ConsumerLifetime::new());
         Ok(Some(Self {
-            _file: file,
+            file,
+            owner,
+            lifetime: lifetime.clone(),
             target: Target {
                 context,
                 session: session.into(),
                 generation,
+                lifetime,
             },
         }))
     }
@@ -404,6 +576,10 @@ impl Target {
         if limit == 0 {
             return Ok(Vec::new());
         }
+        self.lifetime.run(|| self.drain_owned(limit))
+    }
+
+    fn drain_owned(&self, limit: usize) -> Result<Vec<String>> {
         self.context.db.with_conn(|conn|->Result<_>{
             let tx=rusqlite::Transaction::new_unchecked(conn,rusqlite::TransactionBehavior::Immediate)?;
             let generation:Option<String>=tx.query_row("SELECT generation FROM session_inbox_consumers WHERE session_id=?1",[&self.session],|r|r.get(0)).optional()?;
@@ -472,6 +648,37 @@ pub fn session_peers(context: &ServiceContext, session: &str) -> Result<Vec<serd
     })?
 }
 
+/// Test-only observer for a lock the code has just acquired.
+///
+/// The descriptor is locked but not yet released at this point, which is exactly
+/// where a `fork` in another thread would inherit it. A test installs a hook to
+/// duplicate the real descriptor, so release on the success and error paths can
+/// be checked without forking a threaded process.
+#[cfg(test)]
+mod lock_observer {
+    use std::cell::RefCell;
+    use std::fs::File;
+
+    type Hook = Box<dyn FnMut(&File) + Send>;
+
+    thread_local! {
+        static HOOK: RefCell<Option<Hook>> = const { RefCell::new(None) };
+    }
+
+    pub(super) fn install(hook: Hook) {
+        HOOK.with(|slot| *slot.borrow_mut() = Some(hook));
+    }
+
+    /// Called with the caller's locked descriptor before it is released.
+    pub(super) fn inspect(file: &File) {
+        HOOK.with(|slot| {
+            if let Some(mut hook) = slot.borrow_mut().take() {
+                hook(file);
+            }
+        });
+    }
+}
+
 #[cfg(test)]
 mod tests {
     #[test]
@@ -518,6 +725,481 @@ mod tests {
         assert!(session_open(dir.path(), &id).unwrap());
         drop(lease);
         assert!(!session_open(dir.path(), &id).unwrap());
+    }
+
+    /// `dup` gives a second descriptor for the same open file description, so
+    /// the presence lock survives the owner's `File` being dropped. Only an
+    /// explicit release lets a new frontend open the session at once, while the
+    /// old duplicate is still alive.
+    #[test]
+    fn presence_release_is_immediate_even_while_a_duplicated_descriptor_is_open() {
+        let dir = tempfile::tempdir().unwrap();
+        let id = uuid::Uuid::new_v4().to_string();
+        let lease = PresenceLease::acquire(dir.path(), &id).unwrap();
+        assert!(session_open(dir.path(), &id).unwrap());
+        let duplicate = lease.file.try_clone().unwrap();
+        drop(lease);
+        assert!(
+            !session_open(dir.path(), &id).unwrap(),
+            "the presence lock outlived its owner through the duplicated descriptor"
+        );
+        let next = PresenceLease::acquire(dir.path(), &id)
+            .expect("a new frontend may open the session while the old duplicate is alive");
+        drop(next);
+        drop(duplicate);
+        assert!(!session_open(dir.path(), &id).unwrap());
+    }
+
+    /// A live presence owner stays exclusive: a second acquire must still fail.
+    #[test]
+    fn a_live_presence_owner_stays_exclusive() {
+        let dir = tempfile::tempdir().unwrap();
+        let id = uuid::Uuid::new_v4().to_string();
+        let lease = PresenceLease::acquire(dir.path(), &id).unwrap();
+        assert!(PresenceLease::acquire(dir.path(), &id).is_err());
+        drop(lease);
+        drop(PresenceLease::acquire(dir.path(), &id).expect("released owner is free"));
+        assert!(!session_open(dir.path(), &id).unwrap());
+    }
+
+    /// The same duplicated-descriptor exposure applies to a message consumer.
+    /// Release must be explicit and ordered so a newer consumer's generation row
+    /// survives the older generation's cleanup.
+    #[test]
+    fn consumer_release_is_immediate_and_preserves_a_newer_generation() {
+        let (_temp, context, store, _sender, recipient) = fixture();
+        let owner = Consumer::attach(&context.paths.data_dir, &recipient)
+            .unwrap()
+            .unwrap();
+        assert!(receiver_active(&context.paths.data_dir, &recipient).unwrap());
+        let duplicate = owner.file.try_clone().unwrap();
+        let stale = owner.target.clone();
+        drop(owner);
+        assert!(
+            !receiver_active(&context.paths.data_dir, &recipient).unwrap(),
+            "the consumer lock outlived its owner through the duplicated descriptor"
+        );
+        let resumed = Consumer::attach(&context.paths.data_dir, &recipient)
+            .expect("a new consumer is admitted while the old duplicate is alive")
+            .expect("a real session id");
+        // The old generation is no longer the consumer, even though a stale
+        // `Target` handle still exists.
+        assert!(stale.drain(8).is_err());
+        let current: String = context
+            .db
+            .with_conn(|conn| {
+                Ok::<String, anyhow::Error>(conn.query_row(
+                    "SELECT generation FROM session_inbox_consumers WHERE session_id=?1",
+                    [&recipient],
+                    |row| row.get(0),
+                )?)
+            })
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            current, resumed.target.generation,
+            "the old generation's cleanup removed the newer consumer row"
+        );
+        assert!(resumed.target.drain(8).unwrap().is_empty());
+        drop(duplicate);
+        drop(resumed);
+        let _ = store;
+        assert!(!receiver_active(&context.paths.data_dir, &recipient).unwrap());
+    }
+
+    fn generation_row(context: &ServiceContext, session: &str) -> Option<String> {
+        context
+            .db
+            .with_conn(|conn| {
+                Ok::<Option<String>, anyhow::Error>(
+                    conn.query_row(
+                        "SELECT generation FROM session_inbox_consumers WHERE session_id=?1",
+                        [session],
+                        |row| row.get(0),
+                    )
+                    .optional()?,
+                )
+            })
+            .unwrap()
+            .unwrap()
+    }
+
+    /// A forked child carries a copy of the same descriptor but a different PID.
+    /// Its copy must neither remove the live parent's consumer row nor release
+    /// the parent's lock, so the ownership check precedes all cleanup.
+    #[test]
+    fn a_copied_consumer_does_not_clean_up_the_live_owner() {
+        let (_temp, context, _store, _sender, recipient) = fixture();
+        let mut owner = Consumer::attach(&context.paths.data_dir, &recipient)
+            .unwrap()
+            .unwrap();
+        let generation = owner.target.generation.clone();
+        let parent_target = owner.target.clone();
+        // The parent keeps its own descriptor after the child copies it.
+        let parent_descriptor = owner.file.try_clone().unwrap();
+        // Simulate the child's copy without an unsafe `fork` in this threaded
+        // process: same descriptor and generation, foreign owner identity.
+        owner.owner = std::process::id().wrapping_add(1);
+        drop(owner);
+        assert_eq!(
+            generation_row(&context, &recipient).as_deref(),
+            Some(generation.as_str()),
+            "a copied owner removed the live consumer's generation row"
+        );
+        assert!(
+            parent_target.drain(8).is_ok(),
+            "a copied handle ended the live parent's lifetime"
+        );
+        drop(parent_target);
+
+        // The parent's own release still frees the session and its row.
+        release_owned(&parent_descriptor, std::process::id());
+        drop(parent_descriptor);
+        let real = Consumer::attach(&context.paths.data_dir, &recipient)
+            .expect("the parent's release freed the session")
+            .expect("a real session id");
+        let real_generation = real.target.generation.clone();
+        assert_ne!(real_generation, generation);
+        drop(real);
+        assert_eq!(
+            generation_row(&context, &recipient),
+            None,
+            "the real owner's release must remove its own row"
+        );
+    }
+
+    /// A failed generation-row cleanup must not leave the released handle usable:
+    /// the in-memory lifetime ends at release, independently of the database.
+    #[test]
+    fn a_stale_target_cannot_commit_after_release_when_cleanup_fails() {
+        let (_temp, context, store, sender, recipient) = fixture();
+        send(&context, &sender, &recipient, "stays queued").unwrap();
+        let owner = Consumer::attach(&context.paths.data_dir, &recipient)
+            .unwrap()
+            .unwrap();
+        let stale = owner.target.clone();
+        // A transient database error during Drop leaves the generation row behind.
+        context
+            .db
+            .with_conn(|conn| {
+                conn.execute_batch(
+                    "CREATE TRIGGER reject_consumer_delete BEFORE DELETE ON session_inbox_consumers \
+                     BEGIN SELECT RAISE(ABORT,'fixture cleanup failure'); END;",
+                )
+            })
+            .unwrap()
+            .unwrap();
+        drop(owner);
+        assert!(
+            generation_row(&context, &recipient).is_some(),
+            "the injected failure must leave the generation row behind"
+        );
+        assert!(!receiver_active(&context.paths.data_dir, &recipient).unwrap());
+        assert!(
+            stale.drain(8).is_err(),
+            "a stale target committed after the consumer was released"
+        );
+        // The denied drain leaves the queue and the transcript untouched.
+        assert_eq!(
+            inbox(&context, &recipient, false).unwrap()[0].state,
+            "queued"
+        );
+        assert!(store.history(&recipient).unwrap().is_empty());
+        context
+            .db
+            .with_conn(|conn| conn.execute_batch("DROP TRIGGER reject_consumer_delete"))
+            .unwrap()
+            .unwrap();
+        context
+            .db
+            .with_conn(|conn| {
+                conn.execute(
+                    "DELETE FROM session_inbox_consumers WHERE session_id=?1",
+                    [&recipient],
+                )
+            })
+            .unwrap()
+            .unwrap();
+    }
+
+    /// Release waits for a drain that already started, and once it returns no
+    /// stale handle may commit.
+    #[test]
+    fn release_waits_for_an_in_flight_drain_and_then_rejects_it() {
+        let (_temp, context, _store, _sender, recipient) = fixture();
+        let owner = Consumer::attach(&context.paths.data_dir, &recipient)
+            .unwrap()
+            .unwrap();
+        let stale = owner.target.clone();
+        // Hold the same lock a running drain holds. The bounded wait below only
+        // checks that release did not overtake it; the correctness assertion is
+        // the rejected drain after the release completed.
+        let in_flight = stale
+            .lifetime
+            .alive
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        let (started_tx, started_rx) = std::sync::mpsc::channel();
+        let (done_tx, done_rx) = std::sync::mpsc::channel();
+        let dropper = std::thread::spawn(move || {
+            started_tx.send(()).unwrap();
+            drop(owner);
+            done_tx.send(()).unwrap();
+        });
+        started_rx.recv().unwrap();
+        assert!(
+            done_rx
+                .recv_timeout(std::time::Duration::from_millis(250))
+                .is_err(),
+            "release must wait for an in-flight drain"
+        );
+        drop(in_flight);
+        done_rx
+            .recv_timeout(std::time::Duration::from_secs(10))
+            .expect("release completes once the drain let go");
+        dropper.join().unwrap();
+        assert!(
+            stale.drain(8).is_err(),
+            "a stale target committed after the release completed"
+        );
+    }
+
+    /// A failed attach after a successful lock acquisition must release the lock
+    /// explicitly. The observer duplicates the real descriptor at the moment a
+    /// `fork` could have, and the injected trigger makes the DB step fail.
+    #[test]
+    fn a_failed_consumer_attach_releases_the_lock_before_descriptor_close() {
+        let (_temp, context, _store, _sender, recipient) = fixture();
+        // A successful attach creates the consumer table the trigger targets.
+        drop(
+            Consumer::attach(&context.paths.data_dir, &recipient)
+                .unwrap()
+                .unwrap(),
+        );
+        context
+            .db
+            .with_conn(|conn| {
+                conn.execute_batch(
+                    "CREATE TRIGGER reject_consumer BEFORE INSERT ON session_inbox_consumers \
+                     BEGIN SELECT RAISE(ABORT,'fixture failure'); END;",
+                )
+            })
+            .unwrap()
+            .unwrap();
+        let (send, receive) = std::sync::mpsc::channel();
+        lock_observer::install(Box::new(move |file| {
+            send.send(file.try_clone().unwrap()).unwrap();
+        }));
+        let error = match Consumer::attach(&context.paths.data_dir, &recipient) {
+            Ok(_) => panic!("the injected trigger must fail the attach"),
+            Err(error) => error,
+        };
+        assert!(format!("{error:#}").contains("fixture failure"), "{error:#}");
+        let duplicate = receive
+            .try_recv()
+            .expect("the attach never took the lock");
+        assert!(
+            !receiver_active(&context.paths.data_dir, &recipient).unwrap(),
+            "a failed attach left the lock held through a duplicated descriptor"
+        );
+        assert_eq!(
+            generation_row(&context, &recipient),
+            None,
+            "a failed attach must not leave a consumer row"
+        );
+        context
+            .db
+            .with_conn(|conn| conn.execute_batch("DROP TRIGGER reject_consumer"))
+            .unwrap()
+            .unwrap();
+        // A real consumer is admitted at once, while the duplicate is alive.
+        let owner = Consumer::attach(&context.paths.data_dir, &recipient)
+            .expect("the failed attach released the lock")
+            .expect("a real session id");
+        drop(owner);
+        drop(duplicate);
+        assert!(!receiver_active(&context.paths.data_dir, &recipient).unwrap());
+    }
+
+    /// A probe that successfully takes the lock must release it before returning
+    /// false: otherwise an inherited/duplicated descriptor keeps the session
+    /// looking open with no owner.
+    #[test]
+    fn a_completed_presence_probe_leaves_no_lock_for_a_duplicated_descriptor() {
+        let dir = tempfile::tempdir().unwrap();
+        let id = uuid::Uuid::new_v4().to_string();
+        // The probe only opens an existing file; it never creates one.
+        drop(PresenceLease::acquire(dir.path(), &id).unwrap());
+        let (send, receive) = std::sync::mpsc::channel();
+        lock_observer::install(Box::new(move |file| {
+            send.send(file.try_clone().unwrap()).unwrap();
+        }));
+        assert!(!session_open(dir.path(), &id).unwrap());
+        let duplicate = receive
+            .try_recv()
+            .expect("the probe never took the lock");
+        assert!(
+            !session_open(dir.path(), &id).unwrap(),
+            "the probe's lock outlived it through a duplicated descriptor"
+        );
+        let owner = PresenceLease::acquire(dir.path(), &id)
+            .expect("a real frontend may open the session after the probe released");
+        drop(owner);
+        drop(duplicate);
+    }
+
+    /// The message-receiver probe has the same obligation.
+    #[test]
+    fn a_completed_receiver_probe_leaves_no_lock_for_a_duplicated_descriptor() {
+        let dir = tempfile::tempdir().unwrap();
+        let id = uuid::Uuid::new_v4().to_string();
+        let path = lock_path(dir.path(), &id).unwrap();
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(&path, b"").unwrap();
+        let (send, receive) = std::sync::mpsc::channel();
+        lock_observer::install(Box::new(move |file| {
+            send.send(file.try_clone().unwrap()).unwrap();
+        }));
+        assert!(!receiver_active(dir.path(), &id).unwrap());
+        let duplicate = receive
+            .try_recv()
+            .expect("the probe never took the lock");
+        assert!(
+            !receiver_active(dir.path(), &id).unwrap(),
+            "the probe's lock outlived it through a duplicated descriptor"
+        );
+        let owner = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(&path)
+            .unwrap();
+        crate::fs::try_lock_file(&owner)
+            .expect("a real consumer may attach after the probe released");
+        crate::fs::unlock_file(&owner).unwrap();
+        drop(owner);
+        drop(duplicate);
+    }
+
+    #[test]
+    fn admission_is_exclusive_in_one_process_and_available_after_release() {
+        let dir = tempfile::tempdir().unwrap();
+        let id = uuid::Uuid::new_v4().to_string();
+        let first = super::ExecutionLease::acquire(dir.path(), &id)
+            .unwrap()
+            .unwrap();
+        assert!(super::execution_active(dir.path(), &id).unwrap());
+        // A second independent top-level turn cannot share the admitted one,
+        // even inside the same process, and the refusal is immediate.
+        assert!(super::ExecutionLease::acquire(dir.path(), &id).is_err());
+        // Probing must not disturb a genuine owner: the probe takes the lock,
+        // reports the session active and releases only its own probe lock.
+        assert!(super::execution_active(dir.path(), &id).unwrap());
+        assert!(super::ExecutionLease::acquire(dir.path(), &id).is_err());
+        drop(first);
+        // Release is explicit, so the freed session is observable at once.
+        assert!(!super::execution_active(dir.path(), &id).unwrap());
+        // Sequential turns still succeed once the owner released the session.
+        let next = super::ExecutionLease::acquire(dir.path(), &id)
+            .unwrap()
+            .unwrap();
+        drop(next);
+        assert!(!super::execution_active(dir.path(), &id).unwrap());
+    }
+
+    /// A forked child shares the owner's open file description, so a
+    /// close-only release would keep the session locked until that child
+    /// exited. The disposable child is a separate process; no unsafe `fork`
+    /// runs in this threaded test process.
+    #[cfg(all(unix, not(target_os = "android")))]
+    #[test]
+    fn a_lease_releases_immediately_even_while_a_child_holds_the_inherited_descriptor() {
+        use std::io::{BufRead, BufReader};
+        use std::process::{Command, Stdio};
+
+        let dir = tempfile::tempdir().unwrap();
+        let id = uuid::Uuid::new_v4().to_string();
+        let lease = super::ExecutionLease::acquire(dir.path(), &id)
+            .unwrap()
+            .unwrap();
+        // Clear close-on-exec so the child keeps the locked descriptor past exec,
+        // as a fork between acquire and release would.
+        rustix::io::fcntl_setfd(&lease.file, rustix::io::FdFlags::empty()).unwrap();
+        let mut child = Command::new("sh")
+            .arg("-c")
+            .arg("echo ready; exec sleep 30")
+            .stdout(Stdio::piped())
+            .spawn()
+            .unwrap();
+        let mut ready = String::new();
+        BufReader::new(child.stdout.take().unwrap())
+            .read_line(&mut ready)
+            .unwrap();
+        assert_eq!(ready.trim(), "ready", "the child inherited the descriptor");
+        assert!(super::execution_active(dir.path(), &id).unwrap());
+
+        drop(lease);
+        // Immediate, with the child still alive: this is the behaviour that a
+        // close-only release cannot provide.
+        assert!(
+            !super::execution_active(dir.path(), &id).unwrap(),
+            "the session stayed locked by the child's inherited descriptor"
+        );
+        let next = super::ExecutionLease::acquire(dir.path(), &id)
+            .expect("the released session is free while the child is still alive")
+            .expect("a real session id");
+        drop(next);
+
+        child.kill().unwrap();
+        child.wait().unwrap();
+    }
+
+    /// The activity probe takes the lock to test it; that temporary ownership
+    /// must not survive the probe through an inherited descriptor either.
+    #[cfg(all(unix, not(target_os = "android")))]
+    #[test]
+    fn a_completed_activity_probe_leaves_no_lock_for_an_inherited_descriptor() {
+        use std::io::{BufRead, BufReader};
+        use std::process::{Command, Stdio};
+
+        let dir = tempfile::tempdir().unwrap();
+        let id = uuid::Uuid::new_v4().to_string();
+        let path = dir
+            .path()
+            .join("session-execution-locks")
+            .join(format!("{id}.lock"));
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        // Emulate the probe's own acquisition, then inherit it into a child.
+        let probe = std::fs::OpenOptions::new()
+            .create(true)
+            .truncate(false)
+            .read(true)
+            .write(true)
+            .open(&path)
+            .unwrap();
+        crate::fs::try_lock_file(&probe).unwrap();
+        rustix::io::fcntl_setfd(&probe, rustix::io::FdFlags::empty()).unwrap();
+        let mut child = Command::new("sh")
+            .arg("-c")
+            .arg("echo ready; exec sleep 30")
+            .stdout(Stdio::piped())
+            .spawn()
+            .unwrap();
+        let mut ready = String::new();
+        BufReader::new(child.stdout.take().unwrap())
+            .read_line(&mut ready)
+            .unwrap();
+        assert_eq!(ready.trim(), "ready");
+        // This is what the probe does before returning.
+        crate::fs::unlock_file(&probe).unwrap();
+        drop(probe);
+
+        assert!(
+            !super::execution_active(dir.path(), &id).unwrap(),
+            "the probe's lock outlived it through the child"
+        );
+
+        child.kill().unwrap();
+        child.wait().unwrap();
     }
 
     use super::*;

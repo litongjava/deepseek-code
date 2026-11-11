@@ -266,7 +266,12 @@ pub struct ToolLoopExecutor {
     message_inbox: Option<crate::services::session_messages::Target>,
     require_pending_peer_message: bool,
     require_hook_wake: bool,
-    pub(super) execution_lease: Option<crate::services::session_messages::ExecutionLease>,
+    /// Session ownership for this attempt. The executor retains the token for
+    /// its whole lifetime - including the tail after public MessageStop - and
+    /// releases it only when the executor (or its task) is dropped. A host
+    /// that acquired the lease passes a shared `Arc` instead.
+    pub(super) execution_lease:
+        Option<std::sync::Arc<crate::services::session_messages::ExecutionLease>>,
     message_deliveries: usize,
     pending_plan_reset: Option<(String, String)>,
     allowed_directories: Vec<std::path::PathBuf>,
@@ -2521,21 +2526,25 @@ impl ToolLoopExecutor {
     }
 
     async fn execute_inner(&mut self) -> Result<(String, Option<String>)> {
-        let _execution_owner = if self.execution_lease.is_some() {
-            self.execution_lease.take()
-        } else {
-            match (
+        // Ownership belongs to this executor for its whole lifetime, not just
+        // this future: the engine may keep the executor while it performs the
+        // cleanup after MessageStop. A host that already acquired shares the
+        // same lease; otherwise the attempt acquires it here, before any model
+        // work. The field is intentionally never taken, so cancellation of
+        // this future or the outer task still releases it by dropping the
+        // executor.
+        if self.execution_lease.is_none() {
+            if let (Some(root), Some(session)) = (
                 self.search_config_path
                     .as_deref()
                     .and_then(std::path::Path::parent),
                 self.conv_id.as_deref(),
             ) {
-                (Some(root), Some(session)) => {
+                self.execution_lease =
                     crate::services::session_messages::ExecutionLease::acquire(root, session)?
-                }
-                _ => None,
+                        .map(std::sync::Arc::new);
             }
-        };
+        }
         let mut async_hook_guard = crate::services::async_hooks::TurnGuard(self.conv_id.clone());
         if self.require_hook_wake {
             let root = self
@@ -2898,15 +2907,6 @@ impl ToolLoopExecutor {
         }
         tracing::info!(module = "ToolLoop", "[E4.5] Model check COMPLETED");
 
-        tracing::info!(module = "ToolLoop", "[E5] Sending MessageStart event...");
-        let _ = self
-            .event_tx
-            .send(EngineEvent::MessageStart {
-            model: self.provider.model.id.clone(),
-            })
-            .await;
-        tracing::info!(module = "ToolLoop", "[E5] MessageStart sent");
-
         tracing::info!(
             module = "ToolLoop",
             "[E6] API format: {:?}",
@@ -2915,6 +2915,17 @@ impl ToolLoopExecutor {
 
         let user_skill = self.prepare_user_skill().await;
         let api_request = matches!(user_skill, Ok(None));
+        // A skill answered without a model request is the whole logical
+        // response. Requests answered by a provider emit their start inside the
+        // loop, once per response rather than once per stream chunk.
+        if matches!(user_skill, Ok(Some(_))) {
+            let _ = self
+                .event_tx
+                .send(EngineEvent::MessageStart {
+                    model: self.provider.model.id.clone(),
+                })
+                .await;
+        }
         let loop_result = match user_skill {
             Err(error) => Err(error),
             Ok(Some(text)) => Ok((text, Some("end_turn".into()))),
@@ -4042,6 +4053,17 @@ impl ToolLoopExecutor {
                 }
             };
 
+            // One start per logical response, announced once the provider has
+            // accepted the request. Chunk-level roles repeat on many
+            // OpenAI-compatible streams, and a request that fails before any
+            // response must not count as a round; send-layer retries stay
+            // inside this same response.
+            let _ = self
+                .event_tx
+                .send(EngineEvent::MessageStart {
+                    model: self.provider.model.id.clone(),
+                })
+                .await;
             let mut sse_buffer = String::new();
             let mut has_tool_use = false;
             let mut assistant_blocks: Vec<ContentBlock> = Vec::new();
@@ -4121,14 +4143,6 @@ impl ToolLoopExecutor {
                     match event_type {
                         "message_start" => {
                             if let Some(message) = event.get("message") {
-                                if let Some(model) = message.get("model").and_then(|m| m.as_str()) {
-                                    let _ = self
-                                        .event_tx
-                                        .send(EngineEvent::MessageStart {
-                                        model: model.to_string(),
-                                        })
-                                        .await;
-                                }
                                 if let Some(usage) = message.get("usage") {
                                     if let Some(input_tokens) =
                                         usage.get("input_tokens").and_then(|v| v.as_f64())
@@ -4799,9 +4813,19 @@ impl ToolLoopExecutor {
                 }
             };
 
+            // One start per logical response, announced once the provider has
+            // accepted the request. Compatible providers repeat
+            // "role":"assistant" in every chunk; those are deltas of the same
+            // response. A request that fails before any response is not a
+            // round, and send-layer retries do not create a second start.
+            let _ = self
+                .event_tx
+                .send(EngineEvent::MessageStart {
+                    model: self.provider.model.id.clone(),
+                })
+                .await;
             let mut sse_buffer = String::new();
             let mut has_tool_calls = false;
-            let mut message_announced = false;
             let mut assistant_content: Option<OpenAIContent> = None;
             let mut assistant_reasoning: Option<String> = None;
             let mut assistant_provider_content: Option<Value> = None;
@@ -4899,19 +4923,6 @@ impl ToolLoopExecutor {
                             Some(d) => d,
                             None => continue,
                         };
-
-                        if let Some(role) = delta.get("role").and_then(|r| r.as_str()) {
-                            // Providers may repeat the role in every chunk; announce the message once per request.
-                            if role == "assistant" && !message_announced {
-                                message_announced = true;
-                                let _ = self
-                                    .event_tx
-                                    .send(EngineEvent::MessageStart {
-                                    model: self.provider.model.id.clone(),
-                                    })
-                                    .await;
-                            }
-                        }
 
                         if let Some(content) = delta.get("content").and_then(|c| c.as_str()) {
                             if !content.is_empty() {
