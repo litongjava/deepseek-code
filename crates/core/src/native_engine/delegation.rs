@@ -822,6 +822,7 @@ impl ToolLoopExecutor {
                         mode: "background".into(),
                     }
                 }),
+                member_binding: None,
             },
         )
         .await?;

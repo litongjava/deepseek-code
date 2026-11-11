@@ -313,7 +313,9 @@ pub fn resolve(
         path.is_absolute() && path.is_dir(),
         "Conversation worktree is unavailable; restore it before continuing"
     );
-    if super::hooks::resolve(conn, id, &path)? { return Ok(Some(path)); }
+    if super::hooks::resolve(conn, id, &path)? {
+        return Ok(Some(path));
+    }
     let common = |cwd: &Path| -> Result<PathBuf> {
         Ok(PathBuf::from(git(
             cwd,
@@ -456,6 +458,95 @@ pub fn prepare_task_worktree(
         task_branch,
         target_branch,
         base_commit: commit,
+    })
+}
+
+/// A read-only validation checkout pinned at one commit for the Reviewer.
+/// It never contains the Coder's working-tree changes.
+pub fn prepare_review_worktree(source: &Path, commit: &str, task_id: &str) -> Result<TaskWorktree> {
+    ensure!(
+        !task_id.is_empty()
+            && task_id.len() <= 110
+            && task_id
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_')),
+        "Invalid task ID for a review worktree"
+    );
+    let repo = PathBuf::from(git(source, &["rev-parse", "--show-toplevel"])?);
+    let repo_canonical = repo.canonicalize()?;
+    let relative = source
+        .canonicalize()?
+        .strip_prefix(&repo_canonical)?
+        .to_path_buf();
+    let common = PathBuf::from(git(
+        source,
+        &["rev-parse", "--path-format=absolute", "--git-common-dir"],
+    )?);
+    let common = common.canonicalize().unwrap_or(common);
+    let branch = format!("agent/{task_id}-review");
+    let path = common
+        .join("desktop-worktrees")
+        .join(format!("{task_id}-review"));
+    let resolved = git(
+        &repo,
+        &["rev-parse", "--verify", &format!("{commit}^{{commit}}")],
+    )?;
+    if path.exists() {
+        // Recovery may reuse an existing review checkout only at the same
+        // commit; a stale checkout is never silently accepted.
+        let head = git(&path, &["rev-parse", "HEAD"])?;
+        ensure!(
+            head == resolved,
+            "Existing review worktree is at {head}, expected {resolved}"
+        );
+    } else {
+        let branch_exists = command(
+            &repo,
+            &[
+                "show-ref",
+                "--verify",
+                "--quiet",
+                &format!("refs/heads/{branch}"),
+            ],
+        )?;
+        let branch_at = if branch_exists.status.success() {
+            git(&repo, &["rev-parse", &format!("refs/heads/{branch}")])?
+        } else {
+            String::new()
+        };
+        ensure!(
+            branch_at.is_empty() || branch_at == resolved,
+            "Review branch {branch} already exists at a different commit"
+        );
+        std::fs::create_dir_all(path.parent().context("Invalid review worktree path")?)?;
+        if branch_at.is_empty() {
+            git(
+                &repo,
+                &[
+                    "worktree",
+                    "add",
+                    "-b",
+                    &branch,
+                    &path.to_string_lossy(),
+                    &resolved,
+                ],
+            )?;
+        } else {
+            git(
+                &repo,
+                &["worktree", "add", &path.to_string_lossy(), &resolved],
+            )?;
+        }
+    }
+    let working_path = path.join(relative);
+    Ok(TaskWorktree {
+        repo_root: repo,
+        common_dir: common,
+        worktree_root: path,
+        working_path,
+        task_branch: branch,
+        target_branch: String::new(),
+        base_commit: resolved,
     })
 }
 

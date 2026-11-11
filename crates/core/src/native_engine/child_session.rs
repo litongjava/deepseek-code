@@ -68,6 +68,9 @@ pub struct ChildSpawn {
     /// the matching standalone CLI path.
     pub executable_override: Option<PathBuf>,
     pub invocation: Option<ChildInvocation>,
+    /// Bind this child as the current Coder or Reviewer of a task before its
+    /// process starts, so the first turn already has member tools.
+    pub member_binding: Option<(String, crate::super_agent::MemberRole)>,
 }
 
 #[derive(Debug, Clone)]
@@ -324,6 +327,19 @@ pub async fn spawn_child_session(
     ownership.updated_at = now;
     ownership.last_error = None;
     save_owner(&context, &session_id, &ownership)?;
+
+    if let Some((task_id, member)) = &spawn.member_binding {
+        let store = crate::super_agent::TaskStore::new(context.db.clone(), spawn.data_dir.clone());
+        match member {
+            crate::super_agent::MemberRole::Coder => {
+                store.set_sessions(task_id, Some(&session_id), None)
+            }
+            crate::super_agent::MemberRole::Reviewer => {
+                store.set_sessions(task_id, None, Some(&session_id))
+            }
+        }
+        .map_err(|error| anyhow::anyhow!(error.to_string()))?;
+    }
 
     let mut invocation = match &spawn.invocation {
         Some(invocation) => record_child_invocation(
@@ -645,6 +661,7 @@ mod tests {
             extra_env: Vec::new(),
             executable_override: None,
             invocation: None,
+            member_binding: None,
         }
     }
 
