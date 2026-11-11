@@ -2315,7 +2315,10 @@ async fn run_review_loop_with(
             let error = launcher
                 .resume_coder_for_delivery(
                     &task,
-                    &deepseek_code_core::super_agent::launcher::coder_delivery_prompt(&task, &plan),
+                    &deepseek_code_core::super_agent::launcher::coder_delivery_prompt(
+                        &task,
+                        &plan.repositories[0],
+                    ),
                     &identity,
                 )
                 .await
@@ -3299,4 +3302,1056 @@ async fn a_bound_receipt_swapped_to_another_job_is_rejected() {
     assert_eq!(evidence["status"], json!("BLOCKED"));
     assert_eq!(evidence["integration_status"], json!("PREPARED"));
     write_evidence("round-34-delivery-bound-job-swap", &evidence);
+}
+
+/// Actual delivery to two independent real Git repositories through real
+/// `dcl` children against the local mock model. Both repositories are seeded
+/// at the host-approved delivery boundary; every delivery is a real child Bash
+/// command, and the two target branches are delivered one after the other.
+#[cfg(unix)]
+mod two_repository_cli {
+    use super::*;
+
+    struct CliRepo {
+        repository_id: String,
+        root: PathBuf,
+        worktree: PathBuf,
+        checkout: Option<PathBuf>,
+        branch: String,
+        base: String,
+        reviewed: String,
+    }
+
+    struct TwoRepoCliFixture {
+        _temp: tempfile::TempDir,
+        data: PathBuf,
+        context: ServiceContext,
+        router: String,
+        task_id: String,
+        coder: String,
+        repos: Vec<CliRepo>,
+        /// Fixture-owned file each real delivery Bash command appends to.
+        marker: PathBuf,
+    }
+
+    #[derive(Default)]
+    struct TwoRepoMockState {
+        requests: Mutex<Vec<Value>>,
+        released: Mutex<HashSet<String>>,
+        turns: Mutex<std::collections::HashMap<String, usize>>,
+        /// Delivery turns whose tool result came back, one entry per marker.
+        runs: Mutex<Vec<String>>,
+        /// Fixture-owned execution log appended by the real Bash command.
+        marker: PathBuf,
+        /// Hold the second repository's turn after its command ran.
+        hold_b: bool,
+        /// Make the second repository's real Bash command fail.
+        fail_b: bool,
+    }
+
+    impl TwoRepoMockState {
+        fn release(&self, key: &str) {
+            self.released.lock().unwrap().insert(key.to_owned());
+        }
+
+        fn released(&self, key: &str) -> bool {
+            self.released.lock().unwrap().contains(key)
+        }
+
+        fn next_step(&self, key: String) -> usize {
+            let mut turns = self.turns.lock().unwrap();
+            let step = turns.entry(key).or_insert(0);
+            let current = *step;
+            *step += 1;
+            current
+        }
+
+        fn note_run(&self, marker: &str) {
+            self.runs.lock().unwrap().push(marker.to_owned());
+        }
+
+        fn record(&self, prompt: &str, last: Option<&str>) {
+            self.requests.lock().unwrap().push(json!({
+                "role": "coder",
+                "prompt": prompt,
+                "last_tool_result": last,
+            }));
+        }
+    }
+
+    async fn two_repo_handler(
+        state: Arc<TwoRepoMockState>,
+        body: Value,
+    ) -> ([(&'static str, &'static str); 1], String) {
+        let prompt = current_instruction(&body);
+        let last = last_tool_result(&body);
+        state.record(&prompt, last.as_deref());
+        let mut hasher = std::collections::hash_map::DefaultHasher::new();
+        std::hash::Hash::hash(&prompt, &mut hasher);
+        let step = state.next_step(format!("{:x}", std::hash::Hasher::finish(&hasher)));
+        let second = prompt.contains("repository repo-2");
+        let response = if prompt.contains("deliver the host-verified integration") {
+            if step >= 1 {
+                // The Bash tool result came back for this delivery turn.
+                state.note_run(if second { "repo-2" } else { "repo-1" });
+            }
+            match step {
+                0 => {
+                    // The real child Bash command itself records its execution in
+                    // fixture-owned storage, so a replay cannot hide behind the
+                    // model request count.
+                    let marker = state.marker.display();
+                    let command = if second && state.fail_b {
+                        format!(
+                            "printf '%s\\n' 'repo-2' >> '{marker}'\nprintf 'delivery failed for repo-2\\n' >&2; false"
+                        )
+                    } else if second {
+                        format!(
+                            "printf '%s\\n' 'repo-2' >> '{marker}'\npwd && {}",
+                            delivery_command_from_prompt(&prompt)
+                        )
+                    } else {
+                        format!(
+                            "printf '%s\\n' 'repo-1' >> '{marker}'\npwd && {}",
+                            delivery_command_from_prompt(&prompt)
+                        )
+                    };
+                    stream(
+                        tool_call(
+                            "delivery-bash",
+                            "Bash",
+                            json!({"shell":"sh","command":command,"timeout":60000}),
+                        ),
+                        "tool_calls",
+                    )
+                }
+                _ => {
+                    if second && state.hold_b && !state.fail_b {
+                        for _ in 0..2400 {
+                            if state.released("delivery-hold-b") {
+                                break;
+                            }
+                            tokio::time::sleep(Duration::from_millis(25)).await;
+                        }
+                        assert!(
+                            state.released("delivery-hold-b"),
+                            "the mock waited too long to release the second delivery"
+                        );
+                    }
+                    stream(json!({"content":"delivery complete"}), "stop")
+                }
+            }
+        } else {
+            stream(json!({"content":"unused"}), "stop")
+        };
+        ([("content-type", "text/event-stream")], response)
+    }
+
+    impl TwoRepoCliFixture {
+        fn new() -> Self {
+            let temp = tempfile::tempdir().unwrap();
+            let marker = temp.path().join("delivery-executions.log");
+            let data = temp.path().join("data");
+            std::fs::create_dir_all(&data).unwrap();
+            let context = ServiceContext::open(
+                RuntimePaths::new(data.clone()).unwrap(),
+                Arc::new(EnvironmentCredentials),
+            )
+            .unwrap();
+            let router = SessionStore::new(context.db.clone())
+                .create(temp.path(), "router-model", "fixture")
+                .unwrap();
+            role::set(&context.db, &router, Role::Router).unwrap();
+            let repos = vec![
+                Self::repo(temp.path(), "repo one", "develop", "repo-1", 0, false),
+                // The second target is checked out in a linked worktree whose
+                // path contains spaces, and uses a different branch.
+                Self::repo(temp.path(), "repo two", "integration", "repo-2", 1, true),
+            ];
+            let spec = TaskSpec {
+                title: "Two repository real delivery".into(),
+                workspace: temp.path().to_path_buf(),
+                targets: repos
+                    .iter()
+                    .map(|repo| repo.root.to_string_lossy().into_owned())
+                    .collect(),
+                goal: "Deliver both repositories through the same Coder".into(),
+                requirements: vec!["Keep both repositories valid".into()],
+                acceptance_criteria: vec![deepseek_code_core::super_agent::AcceptanceCriterion {
+                    id: "AC-001".into(),
+                    description: "Both targets advance to the approved commit".into(),
+                }],
+                constraints: vec![],
+                out_of_scope: vec![],
+                target_branch: Some("develop".into()),
+                repository_target_branches: repos
+                    .iter()
+                    .map(|repo| {
+                        (
+                            repo.root.to_string_lossy().into_owned(),
+                            repo.branch.clone(),
+                        )
+                    })
+                    .collect(),
+            };
+            let store = TaskStore::new(context.db.clone(), data.clone());
+            let task = store.create_task(&router, spec, "create").unwrap();
+            for (index, repo) in repos.iter().enumerate() {
+                let common = PathBuf::from(git(
+                    &repo.root,
+                    &["rev-parse", "--path-format=absolute", "--git-common-dir"],
+                ))
+                .canonicalize()
+                .unwrap();
+                store
+                    .save_repo(&deepseek_code_core::super_agent::RepoTarget {
+                        task_id: task.task_id.clone(),
+                        repository_id: repo.repository_id.clone(),
+                        repo_root: repo.root.clone(),
+                        git_common_dir: common,
+                        target_path: repo.root.clone(),
+                        target_branch: repo.branch.clone(),
+                        task_branch: format!("agent/{index}"),
+                        worktree_path: repo.worktree.clone(),
+                        working_path: repo.worktree.clone(),
+                        base_commit: repo.base.clone(),
+                        submitted_commit: Some(repo.reviewed.clone()),
+                        reviewed_commit: Some(repo.reviewed.clone()),
+                        integrated_commit: Some(repo.reviewed.clone()),
+                        integration_status:
+                            deepseek_code_core::super_agent::IntegrationStatus::Prepared,
+                        verification_status:
+                            deepseek_code_core::super_agent::VerificationStatus::Passed,
+                        source_state: vec![],
+                    })
+                    .unwrap();
+            }
+            Self::record_evidence(&store, &task, &repos);
+            let workspace = data
+                .join("super-agent")
+                .join(&task.task_id)
+                .join("workspace");
+            std::fs::create_dir_all(&workspace).unwrap();
+            for repo in &repos {
+                let link = workspace.join(&repo.repository_id);
+                if !link.exists() {
+                    std::os::unix::fs::symlink(&repo.worktree, &link).unwrap();
+                }
+            }
+            let coder = SessionStore::new(context.db.clone())
+                .create(&workspace, "router-model", "fixture")
+                .unwrap();
+            // The Coder is a Router child, as a real launch would have made it.
+            let now = chrono::Utc::now().to_rfc3339();
+            context
+                .save_setting(
+                    &format!(
+                        "{}{}",
+                        deepseek_code_core::native_engine::child_session::OWNER_KEY_PREFIX,
+                        coder
+                    ),
+                    &deepseek_code_core::native_engine::child_session::ChildOwnership {
+                        parent_session_id: router.clone(),
+                        agent_type: "general".into(),
+                        description: "super agent member".into(),
+                        mode: "background".into(),
+                        status: "completed".into(),
+                        job_id: Some("fixture-coder-job".into()),
+                        created_at: now.clone(),
+                        updated_at: now,
+                        last_error: None,
+                    },
+                )
+                .unwrap();
+            // The runtime plan gate requires a durable approved plan for this
+            // exact spec version and permission policy before any Coder Bash.
+            let approval = store
+                .request_approval(
+                    "fixture-plan-approval",
+                    &task.task_id,
+                    deepseek_code_core::super_agent::store::ApprovalDraft {
+                        source_session_id: coder.clone(),
+                        parent_session_id: router.clone(),
+                        request_type: deepseek_code_core::super_agent::ApprovalType::Plan,
+                        request: json!({
+                            "task_id": task.task_id,
+                            "spec_version": task.spec_version,
+                            "round": task.review_round,
+                        }),
+                        task_spec_version: task.spec_version,
+                        permission_policy_version: task.permission_policy_version,
+                    },
+                )
+                .unwrap();
+            store
+                .resolve_approval(
+                    "fixture-plan-approval-resolved",
+                    &approval.approval_id,
+                    deepseek_code_core::super_agent::ApprovalStatus::Approved,
+                    Some("fixture approved the plan"),
+                )
+                .unwrap();
+            store
+                .set_sessions(&task.task_id, Some(&coder), None)
+                .unwrap();
+            assert_eq!(
+                store.get_task(&task.task_id).unwrap().unwrap().phase,
+                Phase::DeliveryPending
+            );
+            Self {
+                _temp: temp,
+                data,
+                context,
+                router,
+                task_id: task.task_id,
+                coder,
+                repos,
+                marker: marker.clone(),
+            }
+        }
+
+        fn repo(
+            project: &Path,
+            name: &str,
+            branch: &str,
+            repository_id: &str,
+            index: usize,
+            checked_out: bool,
+        ) -> CliRepo {
+            let root = project.join(name);
+            std::fs::create_dir_all(&root).unwrap();
+            git(&root, &["init", "-q", "-b", "main"]);
+            git(&root, &["config", "user.email", "test@example.invalid"]);
+            git(&root, &["config", "user.name", "Test"]);
+            git(&root, &["config", "commit.gpgsign", "false"]);
+            std::fs::write(root.join("base.txt"), "base\n").unwrap();
+            git(&root, &["add", "."]);
+            git(&root, &["commit", "-q", "-m", "base"]);
+            let base = git(&root, &["rev-parse", "HEAD"]);
+            git(&root, &["branch", branch, &base]);
+            let common = PathBuf::from(git(
+                &root,
+                &["rev-parse", "--path-format=absolute", "--git-common-dir"],
+            ));
+            let worktree = common
+                .join("desktop-worktrees")
+                .join(format!("task-{index}"));
+            git(
+                &root,
+                &[
+                    "worktree",
+                    "add",
+                    "-q",
+                    "-b",
+                    &format!("agent/{index}"),
+                    &worktree.to_string_lossy(),
+                    "main",
+                ],
+            );
+            std::fs::write(worktree.join("reviewed.txt"), "value=1\n").unwrap();
+            git(&worktree, &["add", "."]);
+            git(&worktree, &["commit", "-q", "-m", "reviewed"]);
+            let reviewed = git(&worktree, &["rev-parse", "HEAD"]);
+            let checkout = if checked_out {
+                let path = common.join(format!("target checkout {index}"));
+                git(
+                    &root,
+                    &["worktree", "add", "-q", &path.to_string_lossy(), branch],
+                );
+                Some(path.canonicalize().unwrap())
+            } else {
+                None
+            };
+            CliRepo {
+                repository_id: repository_id.into(),
+                root: root.canonicalize().unwrap(),
+                worktree: worktree.canonicalize().unwrap(),
+                checkout,
+                branch: branch.into(),
+                base,
+                reviewed,
+            }
+        }
+
+        fn record_evidence(
+            store: &TaskStore,
+            task: &deepseek_code_core::super_agent::TaskRecord,
+            repos: &[CliRepo],
+        ) {
+            let reviewed_versions: Vec<Value> = repos
+                .iter()
+                .map(|repo| {
+                    json!({
+                        "repository_id": repo.repository_id,
+                        "commit": repo.reviewed,
+                    })
+                })
+                .collect();
+            let review = store
+                .add_report(
+                    &format!("{}-review", task.task_id),
+                    &task.task_id,
+                    deepseek_code_core::super_agent::ReportKind::Review,
+                    task.spec_version,
+                    task.review_round,
+                    json!({
+                        "verdict": "APPROVED",
+                        "spec_version": task.spec_version,
+                        "round": task.review_round,
+                        "stage": "IMPLEMENTATION",
+                        "reviewed_versions": reviewed_versions,
+                        "acceptance_results": [],
+                    }),
+                )
+                .unwrap();
+            let harness = store
+                .add_report(
+                    &format!("{}-harness", task.task_id),
+                    &task.task_id,
+                    deepseek_code_core::super_agent::ReportKind::Harness,
+                    task.spec_version,
+                    task.review_round,
+                    json!({
+                        "spec_version": task.spec_version,
+                        "round": task.review_round,
+                        "stage": "IMPLEMENTATION",
+                        "findings": [],
+                    }),
+                )
+                .unwrap();
+            let entries: Vec<Value> = repos
+                .iter()
+                .map(|repo| {
+                    let tree = git(
+                        &repo.root,
+                        &["rev-parse", &format!("{}^{{tree}}", repo.reviewed)],
+                    );
+                    json!({
+                        "repository_id": repo.repository_id,
+                        "target_branch": repo.branch,
+                        "target_ref": format!("refs/heads/{}", repo.branch),
+                        "baseline_commit": repo.base,
+                        "reviewed_commit": repo.reviewed,
+                        "integrated_commit": repo.reviewed,
+                        "integrated_tree": tree,
+                        "tree_changed": false,
+                        "content_review_reused": true,
+                        "reason": "fixture preparation",
+                    })
+                })
+                .collect();
+            store
+                .db()
+                .with_conn(|conn| {
+                    conn.execute(
+                        "UPDATE sa_tasks SET phase='REVIEWING', status='RUNNING' WHERE task_id=?1",
+                        [&task.task_id],
+                    )
+                })
+                .unwrap()
+                .unwrap();
+            let policy = deepseek_code_core::super_agent::state::StatePolicy::default();
+            store
+                .apply_event(
+                    &task.task_id,
+                    deepseek_code_core::super_agent::NewEvent {
+                        session_id: None,
+                        run_id: None,
+                        event_type: EventType::ReviewCompleted,
+                        causation_id: None,
+                        operation_id: format!("{}-decision", task.task_id),
+                        payload: json!({
+                            "verdict": "APPROVED",
+                            "stage": "IMPLEMENTATION",
+                            "review_report_id": review.report_id,
+                            "harness_report_id": harness.report_id,
+                            "harness_blocked": false,
+                        }),
+                    },
+                    &policy,
+                )
+                .unwrap();
+            store
+                .apply_event(
+                    &task.task_id,
+                    deepseek_code_core::super_agent::NewEvent {
+                        session_id: None,
+                        run_id: None,
+                        event_type: EventType::IntegrationPrepared,
+                        causation_id: None,
+                        operation_id: format!("{}-prepared", task.task_id),
+                        payload: json!({"repositories": entries, "tree_changed": false}),
+                    },
+                    &policy,
+                )
+                .unwrap();
+        }
+
+        fn store(&self) -> TaskStore {
+            TaskStore::new(self.context.db.clone(), self.data.clone())
+        }
+
+        fn task(&self) -> deepseek_code_core::super_agent::TaskRecord {
+            self.store().get_task(&self.task_id).unwrap().unwrap()
+        }
+
+        fn prepare_plan(&self) -> deepseek_code_core::super_agent::delivery::DeliveryPlan {
+            match deepseek_code_core::super_agent::delivery::prepare_delivery(
+                &self.store(),
+                &self.task(),
+            )
+            .unwrap()
+            {
+                deepseek_code_core::super_agent::delivery::DeliveryPreflight::Planned(plan) => plan,
+                other => panic!("expected a prepared delivery plan, got {other:?}"),
+            }
+        }
+
+        fn config() -> deepseek_code_core::super_agent::config::SuperAgentConfig {
+            let mut config =
+                deepseek_code_core::super_agent::config::parse(&json!({"agents":{}})).unwrap();
+            config.delivery.enabled = true;
+            config
+        }
+
+        fn provider(
+            address: std::net::SocketAddr,
+        ) -> deepseek_code_core::native_engine::provider_manager::ResolvedProvider {
+            deepseek_code_core::native_engine::provider_manager::ResolvedProvider {
+                provider: serde_json::from_value(json!({
+                    "id":"fixture","name":"Fixture","base_url":format!("http://{address}"),
+                    "api_key":"fixture-key","api_format":"openai","models":[],"enabled":true
+                }))
+                .unwrap(),
+                model: serde_json::from_value(json!({
+                    "id":"router-model","name":"router-model","enabled":true,
+                    "supports_vision":false,"supports_web_search":false
+                }))
+                .unwrap(),
+            }
+        }
+
+        async fn serve(
+            &self,
+            hold_b: bool,
+            fail_b: bool,
+        ) -> (Arc<TwoRepoMockState>, Orchestrator, std::net::SocketAddr) {
+            let state = Arc::new(TwoRepoMockState {
+                hold_b,
+                fail_b,
+                marker: self.marker.clone(),
+                ..Default::default()
+            });
+            let handler_state = state.clone();
+            let app = axum::Router::new().route(
+                "/v1/chat/completions",
+                axum::routing::post(move |axum::Json(body): axum::Json<Value>| {
+                    let state = handler_state.clone();
+                    async move { two_repo_handler(state, body).await }
+                }),
+            );
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let address = listener.local_addr().unwrap();
+            tokio::spawn(async move {
+                axum::serve(listener, app).await.unwrap();
+            });
+            std::fs::write(
+                self.data.join("config.json"),
+                serde_json::to_vec(&json!({
+                    "providers":[{
+                        "id":"fixture","name":"Fixture","provider_type":"openai","api_key":"fixture-key",
+                        "base_url":format!("http://{address}"),
+                        "models":[{
+                            "id":"router-model","name":"router-model","enabled":true,"max_tokens":8192,
+                            "supports_tools":true,"supports_streaming":true,
+                            "context_window":128000,"cost_per_1k_input":null,"cost_per_1k_output":null
+                        }],
+                        "enabled":true,"is_default":true,"settings":{},
+                        "supports_web_search":false,"web_search_strategy":null,
+                        "web_search_tested_at":null,"web_search_test_reason":null
+                    }],
+                    "default_provider_id":"fixture"
+                }))
+                .unwrap(),
+            )
+            .unwrap();
+            let orchestrator = self.reopen_with(&self.context, address);
+            (state, orchestrator, address)
+        }
+
+        fn reopen_with(
+            &self,
+            context: &ServiceContext,
+            address: std::net::SocketAddr,
+        ) -> Orchestrator {
+            Orchestrator::new(
+                context.clone(),
+                Self::config(),
+                Self::provider(address),
+                "bypass".into(),
+                Some(PathBuf::from(env!("CARGO_BIN_EXE_dcl"))),
+            )
+        }
+
+        fn target(&self, index: usize) -> String {
+            let repo = &self.repos[index];
+            git(
+                &repo.root,
+                &["rev-parse", &format!("refs/heads/{}", repo.branch)],
+            )
+        }
+
+        fn observation(
+            &self,
+            store: &TaskStore,
+            plan: &deepseek_code_core::super_agent::delivery::DeliveryPlan,
+            index: usize,
+        ) -> bool {
+            store
+                .repository_delivery_observation(
+                    &self.task_id,
+                    &plan.operation_id,
+                    &self.repos[index].repository_id,
+                )
+                .unwrap()
+                .is_some()
+        }
+
+        fn completed(&self, store: &TaskStore) -> bool {
+            store
+                .events(&self.task_id)
+                .unwrap()
+                .iter()
+                .any(|event| event.event_type == EventType::IntegrationCompleted)
+        }
+
+        fn integration_completed_count(&self, store: &TaskStore) -> usize {
+            store
+                .events(&self.task_id)
+                .unwrap()
+                .iter()
+                .filter(|event| event.event_type == EventType::IntegrationCompleted)
+                .count()
+        }
+
+        fn executions(&self) -> Vec<String> {
+            std::fs::read_to_string(&self.marker)
+                .unwrap_or_default()
+                .lines()
+                .map(str::trim)
+                .filter(|line| !line.is_empty())
+                .map(str::to_owned)
+                .collect()
+        }
+
+        fn assert_executed_once(&self, label: &str) {
+            let lines = self.executions();
+            assert_eq!(
+                lines
+                    .iter()
+                    .filter(|line| line.as_str() == "repo-1")
+                    .count(),
+                1,
+                "{label}: repository repo-1 ran {} times: {lines:?}",
+                lines
+                    .iter()
+                    .filter(|line| line.as_str() == "repo-1")
+                    .count()
+            );
+            assert_eq!(
+                lines
+                    .iter()
+                    .filter(|line| line.as_str() == "repo-2")
+                    .count(),
+                1,
+                "{label}: repository repo-2 ran {} times: {lines:?}",
+                lines
+                    .iter()
+                    .filter(|line| line.as_str() == "repo-2")
+                    .count()
+            );
+            assert_eq!(lines.len(), 2, "{label}: unexpected executions: {lines:?}");
+        }
+
+        /// Durable tool-call rows for the delivery Bash invocations. The
+        /// provider reuses the raw `delivery-bash` id for both turns of the
+        /// same Coder session, so the stored row IDs must still be distinct.
+        fn delivery_tool_call_ids(&self) -> Vec<String> {
+            let marker = self.marker.to_string_lossy().into_owned();
+            self.context
+                .db
+                .with_conn(|conn| -> anyhow::Result<Vec<String>> {
+                    let messages =
+                        deepseek_code_core::db::message_repo::get_messages_by_conversation(
+                            conn,
+                            &self.coder,
+                        )?;
+                    let mut ids = Vec::new();
+                    for message in messages {
+                        for call in
+                            deepseek_code_core::db::message_repo::get_tool_calls_for_message(
+                                conn,
+                                &message.id,
+                            )?
+                        {
+                            if call.name == "Bash"
+                                && call
+                                    .input
+                                    .as_deref()
+                                    .is_some_and(|input| input.contains(&marker))
+                            {
+                                ids.push(call.id);
+                            }
+                        }
+                    }
+                    Ok(ids)
+                })
+                .unwrap()
+                .unwrap()
+        }
+
+        fn assert_distinct_delivery_invocations(&self) {
+            let ids = self.delivery_tool_call_ids();
+            assert_eq!(
+                ids.len(),
+                2,
+                "expected one durable invocation per repository: {ids:?}"
+            );
+            let unique: HashSet<&String> = ids.iter().collect();
+            assert_eq!(
+                unique.len(),
+                2,
+                "the durable invocation IDs were reused: {ids:?}"
+            );
+        }
+
+        fn delivery_runs(&self, state: &TwoRepoMockState, marker: &str) -> usize {
+            state
+                .runs
+                .lock()
+                .unwrap()
+                .iter()
+                .filter(|run| run.as_str() == marker)
+                .count()
+        }
+
+        async fn wait_for_delivery_run(&self, state: &TwoRepoMockState, marker: &str) {
+            for _ in 0..2400 {
+                if self.delivery_runs(state, marker) > 0 {
+                    return;
+                }
+                tokio::time::sleep(Duration::from_millis(25)).await;
+            }
+            panic!("the delivery command for {marker} did not run");
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn two_git_repositories_are_delivered_sequentially_by_the_same_coder() {
+        let fixture = TwoRepoCliFixture::new();
+        let plan = fixture.prepare_plan();
+        let (state, orchestrator, _address) = fixture.serve(true, false).await;
+
+        // Repository A: real child, real command, then observation only.
+        let first = orchestrator.tick(&fixture.router).await.unwrap();
+        assert_eq!(first.blocked, Vec::<String>::new(), "{first:?}");
+        wait_idle(&fixture.data, &fixture.router, 1).await;
+        let second = orchestrator.tick(&fixture.router).await.unwrap();
+        assert_eq!(second.blocked, Vec::<String>::new(), "{second:?}");
+        assert_eq!(fixture.target(0), fixture.repos[0].reviewed);
+        assert_eq!(
+            fixture
+                .executions()
+                .iter()
+                .filter(|line| line.as_str() == "repo-1")
+                .count(),
+            1,
+            "repository A's real command did not run exactly once: {:?}",
+            fixture.executions()
+        );
+        assert!(
+            !fixture.executions().iter().any(|line| line == "repo-2"),
+            "repository B ran before its turn"
+        );
+        assert!(
+            fixture.observation(&fixture.store(), &plan, 0),
+            "repository A was not observed after its real delivery"
+        );
+        assert!(
+            !fixture.observation(&fixture.store(), &plan, 1),
+            "repository B was observed before its child ran"
+        );
+        assert!(!fixture.completed(&fixture.store()));
+        assert_eq!(
+            fixture.task().repositories[1].integration_status,
+            deepseek_code_core::super_agent::IntegrationStatus::Prepared
+        );
+
+        // Repository B: the child moves its target, then the model is held.
+        let third = orchestrator.tick(&fixture.router).await.unwrap();
+        assert_eq!(third.blocked, Vec::<String>::new(), "{third:?}");
+        fixture.wait_for_delivery_run(&state, "repo-2").await;
+        assert_eq!(fixture.target(1), fixture.repos[1].reviewed);
+        let while_held = orchestrator.tick(&fixture.router).await.unwrap();
+        assert_eq!(while_held.blocked, Vec::<String>::new(), "{while_held:?}");
+        assert!(
+            !fixture.completed(&fixture.store()),
+            "a running second child must not complete the task"
+        );
+        assert_eq!(jobs(&fixture.data, &fixture.router).len(), 2);
+
+        state.release("delivery-hold-b");
+        wait_idle(&fixture.data, &fixture.router, 2).await;
+        let final_report = orchestrator.tick(&fixture.router).await.unwrap();
+        assert_eq!(
+            final_report.blocked,
+            Vec::<String>::new(),
+            "{final_report:?}"
+        );
+
+        let task = fixture.task();
+        assert_eq!(task.phase, Phase::Finalizing);
+        assert_eq!(task.status, Status::Running);
+        assert!(fixture.completed(&fixture.store()));
+        for repo in &task.repositories {
+            assert_eq!(
+                repo.integration_status,
+                deepseek_code_core::super_agent::IntegrationStatus::Completed
+            );
+        }
+        assert_eq!(fixture.target(0), fixture.repos[0].reviewed);
+        assert_eq!(fixture.target(1), fixture.repos[1].reviewed);
+        let checkout = fixture.repos[1].checkout.as_ref().unwrap();
+        assert_eq!(
+            git(checkout, &["rev-parse", "HEAD"]),
+            fixture.repos[1].reviewed
+        );
+        assert_eq!(git(checkout, &["status", "--porcelain"]), "");
+        assert_eq!(fixture.delivery_runs(&state, "repo-1"), 1);
+        assert_eq!(fixture.delivery_runs(&state, "repo-2"), 1);
+        fixture.assert_executed_once("successful two-repository delivery");
+        fixture.assert_distinct_delivery_invocations();
+        let jobs = jobs(&fixture.data, &fixture.router);
+        assert_eq!(jobs.len(), 2, "each repository must have its own job");
+        assert!(jobs.iter().all(|job| job.session_id == fixture.coder));
+        assert_ne!(jobs[0].id, jobs[1].id);
+        assert!(!fixture
+            .store()
+            .events(&fixture.task_id)
+            .unwrap()
+            .iter()
+            .any(|event| event.event_type == EventType::TaskCompleted));
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_running_second_repository_is_adopted_after_the_host_reopens() {
+        let fixture = TwoRepoCliFixture::new();
+        let plan = fixture.prepare_plan();
+        let (state, orchestrator, address) = fixture.serve(true, false).await;
+
+        // Repository A is delivered by its own real child.
+        let first = orchestrator.tick(&fixture.router).await.unwrap();
+        assert_eq!(first.blocked, Vec::<String>::new(), "{first:?}");
+        wait_idle(&fixture.data, &fixture.router, 1).await;
+        let second = orchestrator.tick(&fixture.router).await.unwrap();
+        assert_eq!(second.blocked, Vec::<String>::new(), "{second:?}");
+        assert!(fixture.observation(&fixture.store(), &plan, 0));
+        assert_eq!(fixture.target(0), fixture.repos[0].reviewed);
+
+        // B's real child executes its Git command, then is held at the model
+        // completion, so a durable write exists before any observation.
+        let third = orchestrator.tick(&fixture.router).await.unwrap();
+        assert_eq!(third.blocked, Vec::<String>::new(), "{third:?}");
+        fixture.wait_for_delivery_run(&state, "repo-2").await;
+        assert_eq!(fixture.target(1), fixture.repos[1].reviewed);
+        let jobs_before = jobs(&fixture.data, &fixture.router);
+        assert_eq!(jobs_before.len(), 2);
+        let dispatch_before = fixture
+            .store()
+            .repository_dispatch(&fixture.task_id, &plan.operation_id, "repo-2")
+            .unwrap()
+            .expect("B dispatch receipt");
+        let job_id_b = dispatch_before.job_id.clone().expect("B job id");
+        assert_eq!(
+            jobs_before.iter().filter(|job| job.id == job_id_b).count(),
+            1,
+            "the receipt did not name the running B job"
+        );
+        assert!(fixture.observation(&fixture.store(), &plan, 0));
+        assert!(!fixture.observation(&fixture.store(), &plan, 1));
+        assert!(!fixture.completed(&fixture.store()));
+        assert_eq!(fixture.delivery_runs(&state, "repo-2"), 1);
+
+        // Drop the host and reopen from the same persisted database while B is
+        // still running. The new host must adopt the exact typed job instead of
+        // launching anything or trusting a member report.
+        drop(orchestrator);
+        let reopened_context = ServiceContext::open(
+            RuntimePaths::new(fixture.data.clone()).unwrap(),
+            Arc::new(EnvironmentCredentials),
+        )
+        .unwrap();
+        let reopened_store = TaskStore::new(reopened_context.db.clone(), fixture.data.clone());
+        let reopened = fixture.reopen_with(&reopened_context, address);
+        let adopting = reopened.tick(&fixture.router).await.unwrap();
+        assert_eq!(adopting.blocked, Vec::<String>::new(), "{adopting:?}");
+        assert_eq!(
+            jobs(&fixture.data, &fixture.router).len(),
+            jobs_before.len(),
+            "the reopened host started another child"
+        );
+        assert!(
+            !fixture.completed(&reopened_store),
+            "a running adopted child completed the task"
+        );
+        assert!(!fixture.observation(&reopened_store, &plan, 1));
+        assert_eq!(
+            reopened_store
+                .repository_dispatch(&fixture.task_id, &plan.operation_id, "repo-2")
+                .unwrap(),
+            Some(dispatch_before.clone()),
+            "the reopened host rewrote B's dispatch receipt"
+        );
+        assert_eq!(
+            fixture.target(1),
+            fixture.repos[1].reviewed,
+            "the real write disappeared across the reopen"
+        );
+
+        // Release the held child: the reopened host observes the real success.
+        state.release("delivery-hold-b");
+        wait_idle(&fixture.data, &fixture.router, 2).await;
+        let finished = reopened.tick(&fixture.router).await.unwrap();
+        assert_eq!(finished.blocked, Vec::<String>::new(), "{finished:?}");
+
+        let task = reopened_store.get_task(&fixture.task_id).unwrap().unwrap();
+        assert_eq!(task.phase, Phase::Finalizing);
+        assert_eq!(task.status, Status::Running);
+        for repo in &task.repositories {
+            assert_eq!(
+                repo.integration_status,
+                deepseek_code_core::super_agent::IntegrationStatus::Completed
+            );
+        }
+        assert_eq!(fixture.target(0), fixture.repos[0].reviewed);
+        assert_eq!(fixture.target(1), fixture.repos[1].reviewed);
+        assert_eq!(fixture.integration_completed_count(&reopened_store), 1);
+        assert_eq!(
+            reopened_store
+                .repository_dispatch(&fixture.task_id, &plan.operation_id, "repo-2")
+                .unwrap(),
+            Some(dispatch_before.clone()),
+            "finalizing rewrote B's dispatch receipt"
+        );
+
+        // Extra ticks and another reopen emit exactly one global completion and
+        // never task completion or cleanup in this increment.
+        let extra = reopened.tick(&fixture.router).await.unwrap();
+        assert_eq!(extra.blocked, Vec::<String>::new(), "{extra:?}");
+        assert_eq!(fixture.integration_completed_count(&reopened_store), 1);
+        let second_context = ServiceContext::open(
+            RuntimePaths::new(fixture.data.clone()).unwrap(),
+            Arc::new(EnvironmentCredentials),
+        )
+        .unwrap();
+        let second_store = TaskStore::new(second_context.db.clone(), fixture.data.clone());
+        let second = fixture.reopen_with(&second_context, address);
+        let second_tick = second.tick(&fixture.router).await.unwrap();
+        assert_eq!(second_tick.blocked, Vec::<String>::new(), "{second_tick:?}");
+        assert_eq!(
+            fixture.integration_completed_count(&second_store),
+            1,
+            "the global completion event was duplicated"
+        );
+        assert!(
+            !second_store
+                .events(&fixture.task_id)
+                .unwrap()
+                .iter()
+                .any(|event| matches!(
+                    event.event_type,
+                    EventType::TaskCompleted | EventType::CleanupCompleted
+                )),
+            "this increment must not complete or clean the task"
+        );
+
+        fixture.assert_executed_once("running second repository adopted after reopen");
+        fixture.assert_distinct_delivery_invocations();
+        assert_eq!(fixture.delivery_runs(&state, "repo-1"), 1);
+        assert_eq!(fixture.delivery_runs(&state, "repo-2"), 1);
+        let jobs_after = jobs(&fixture.data, &fixture.router);
+        assert_eq!(jobs_after.len(), 2, "each repository must have its own job");
+        assert!(jobs_after.iter().all(|job| job.session_id == fixture.coder));
+        assert_ne!(jobs_after[0].id, jobs_after[1].id);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_failed_second_repository_keeps_the_first_delivery_after_reopen() {
+        let fixture = TwoRepoCliFixture::new();
+        let plan = fixture.prepare_plan();
+        let (state, orchestrator, _address) = fixture.serve(false, true).await;
+
+        let first = orchestrator.tick(&fixture.router).await.unwrap();
+        assert_eq!(first.blocked, Vec::<String>::new(), "{first:?}");
+        wait_idle(&fixture.data, &fixture.router, 1).await;
+        let second = orchestrator.tick(&fixture.router).await.unwrap();
+        assert_eq!(second.blocked, Vec::<String>::new(), "{second:?}");
+        assert!(fixture.observation(&fixture.store(), &plan, 0));
+
+        let third = orchestrator.tick(&fixture.router).await.unwrap();
+        assert_eq!(third.blocked, Vec::<String>::new(), "{third:?}");
+        wait_idle(&fixture.data, &fixture.router, 2).await;
+        let failed = orchestrator.tick(&fixture.router).await.unwrap();
+        assert!(
+            failed.blocked.iter().any(|reason| {
+                reason.contains("repo-2") && reason.contains("approved integrated commit")
+            }),
+            "the failing repository was not named: {failed:?}"
+        );
+        let task = fixture.task();
+        assert_eq!(task.status, Status::Blocked);
+        assert_eq!(task.phase, Phase::DeliveryPending);
+        assert_eq!(
+            task.repositories[0].integration_status,
+            deepseek_code_core::super_agent::IntegrationStatus::Completed
+        );
+        assert_eq!(
+            task.repositories[1].integration_status,
+            deepseek_code_core::super_agent::IntegrationStatus::Prepared
+        );
+        assert!(fixture.observation(&fixture.store(), &plan, 0));
+        assert!(!fixture.observation(&fixture.store(), &plan, 1));
+        assert!(!fixture.completed(&fixture.store()));
+        assert_eq!(fixture.target(0), fixture.repos[0].reviewed);
+        assert_eq!(fixture.target(1), fixture.repos[1].base);
+        assert_eq!(fixture.delivery_runs(&state, "repo-1"), 1);
+        fixture.assert_executed_once("failed second repository");
+        fixture.assert_distinct_delivery_invocations();
+
+        // A reopened host performs no delivery work for the blocked task: no
+        // completed repository is replayed and no target is touched.
+        let jobs_before = jobs(&fixture.data, &fixture.router).len();
+        let reopened_context = ServiceContext::open(
+            RuntimePaths::new(fixture.data.clone()).unwrap(),
+            Arc::new(EnvironmentCredentials),
+        )
+        .unwrap();
+        let reopened_store = TaskStore::new(reopened_context.db.clone(), fixture.data.clone());
+        let reopened = fixture.reopen_with(&reopened_context, "127.0.0.1:1".parse().unwrap());
+        let after = reopened.tick(&fixture.router).await.unwrap();
+        assert_eq!(after.blocked, Vec::<String>::new(), "{after:?}");
+        assert_eq!(jobs(&fixture.data, &fixture.router).len(), jobs_before);
+        assert!(fixture.observation(&reopened_store, &plan, 0));
+        assert_eq!(fixture.target(0), fixture.repos[0].reviewed);
+        assert_eq!(fixture.target(1), fixture.repos[1].base);
+        assert_eq!(
+            reopened_store
+                .get_task(&fixture.task_id)
+                .unwrap()
+                .unwrap()
+                .status,
+            Status::Blocked
+        );
+        assert_eq!(fixture.delivery_runs(&state, "repo-1"), 1);
+    }
 }

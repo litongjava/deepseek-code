@@ -3,13 +3,13 @@ use crate::native_engine::provider_manager::ResolvedProvider;
 use crate::runtime::{RuntimePaths, SessionStore};
 use crate::super_agent::config::SuperAgentConfig;
 use crate::super_agent::crp::{self, ToolRuntime};
-use crate::super_agent::role::{self, Role};
-use crate::super_agent::store::{ApprovalDraft, TaskStore};
 use crate::super_agent::delivery::{
     DeliveryDestination, DeliveryDispatch, DeliveryOperationIdentity, DeliveryPlan,
     DeliveryTargetPlan,
 };
 use crate::super_agent::launcher::DeliveryJobBinding;
+use crate::super_agent::role::{self, Role};
+use crate::super_agent::store::{ApprovalDraft, TaskStore};
 use crate::super_agent::{EventType, NewEvent, TaskSpec};
 use serde_json::{json, Value};
 use std::path::{Path, PathBuf};
@@ -1411,9 +1411,11 @@ fn a_contradictory_receipt_or_operation_is_rejected() {
     // genuine legacy record.
     let mut changed = operation.clone();
     changed.delivery = None;
-    assert!(delivery_operation_mismatch(&task, &plan, &dispatch, &changed)
-        .expect("an incomplete typed record must be rejected")
-        .contains("purpose"));
+    assert!(
+        delivery_operation_mismatch(&task, &plan, &dispatch, &changed)
+            .expect("an incomplete typed record must be rejected")
+            .contains("purpose")
+    );
 }
 
 #[test]
@@ -1426,7 +1428,10 @@ fn a_genuine_legacy_record_is_adopted_only_through_the_unique_plan() {
     let legacy = legacy_delivery_operation(&task, &legacy_dispatch);
     // A legacy receipt, a single-repository persisted plan and a genuinely
     // legacy operation (no typed field) are accepted together.
-    assert_eq!(delivery_context_mismatch(&task, &plan, &legacy_dispatch), None);
+    assert_eq!(
+        delivery_context_mismatch(&task, &plan, &legacy_dispatch),
+        None
+    );
     assert_eq!(
         delivery_operation_mismatch(&task, &plan, &legacy_dispatch, &legacy),
         None
@@ -1442,9 +1447,11 @@ fn a_genuine_legacy_record_is_adopted_only_through_the_unique_plan() {
     let mut second = plan.repositories[0].clone();
     second.repository_id = "repo-2".into();
     multi.repositories.push(second);
-    assert!(delivery_operation_mismatch(&task, &multi, &legacy_dispatch, &legacy)
-        .expect("a multi-repository legacy record must be rejected")
-        .contains("legacy"));
+    assert!(
+        delivery_operation_mismatch(&task, &multi, &legacy_dispatch, &legacy)
+            .expect("a multi-repository legacy record must be rejected")
+            .contains("legacy")
+    );
 
     // A typed operation never satisfies a legacy receipt, and a legacy
     // operation never satisfies a typed receipt: a rollback cannot shed the
@@ -1611,24 +1618,26 @@ fn repository_plan(task: &TaskRecord, repositories: &[(&str, &str, &str)]) -> De
         repositories: repositories
             .iter()
             .enumerate()
-            .map(|(index, (repository_id, old_oid, new_oid))| DeliveryTargetPlan {
-                repository_id: (*repository_id).into(),
-                repo_root: PathBuf::from(format!("/fixture/{repository_id}")),
-                git_common_dir: PathBuf::from(format!("/fixture/{repository_id}/.git")),
-                target_branch: "develop".into(),
-                target_ref: "refs/heads/develop".into(),
-                destination: DeliveryDestination::RefOnly,
-                baseline_commit: (*old_oid).into(),
-                reviewed_commit: (*new_oid).into(),
-                integrated_commit: (*new_oid).into(),
-                integrated_tree: "tree".into(),
-                old_oid: (*old_oid).into(),
-                new_oid: (*new_oid).into(),
-                review_stage: crate::super_agent::model::ReviewStage::Implementation,
-                lock_key: format!("branch:/fixture/{repository_id}/.git:refs/heads/develop"),
-                lock_operation_id: format!("lock-{index}"),
-                attempt: 1,
-            })
+            .map(
+                |(index, (repository_id, old_oid, new_oid))| DeliveryTargetPlan {
+                    repository_id: (*repository_id).into(),
+                    repo_root: PathBuf::from(format!("/fixture/{repository_id}")),
+                    git_common_dir: PathBuf::from(format!("/fixture/{repository_id}/.git")),
+                    target_branch: "develop".into(),
+                    target_ref: "refs/heads/develop".into(),
+                    destination: DeliveryDestination::RefOnly,
+                    baseline_commit: (*old_oid).into(),
+                    reviewed_commit: (*new_oid).into(),
+                    integrated_commit: (*new_oid).into(),
+                    integrated_tree: "tree".into(),
+                    old_oid: (*old_oid).into(),
+                    new_oid: (*new_oid).into(),
+                    review_stage: crate::super_agent::model::ReviewStage::Implementation,
+                    lock_key: format!("branch:/fixture/{repository_id}/.git:refs/heads/develop"),
+                    lock_operation_id: format!("lock-{index}"),
+                    attempt: 1,
+                },
+            )
             .collect(),
     }
 }
@@ -1790,8 +1799,10 @@ fn a_bound_receipt_must_name_its_own_job_operation_and_durable_identity() {
     );
     let launcher = fixture.launcher();
     let orchestrator = fixture.orchestrator(json!({"agents":{}}));
-    let identity_a = DeliveryOperationIdentity::for_target(&plan, &plan.repositories[0], "coder-session");
-    let identity_b = DeliveryOperationIdentity::for_target(&plan, &plan.repositories[1], "coder-session");
+    let identity_a =
+        DeliveryOperationIdentity::for_target(&plan, &plan.repositories[0], "coder-session");
+    let identity_b =
+        DeliveryOperationIdentity::for_target(&plan, &plan.repositories[1], "coder-session");
     let job_a = uuid::Uuid::new_v4().to_string();
     let job_b = uuid::Uuid::new_v4().to_string();
     let operation_a = typed_operation(&launcher, &task, &plan, &plan.repositories[0], &job_a);
@@ -1839,12 +1850,7 @@ fn a_bound_receipt_must_name_its_own_job_operation_and_durable_identity() {
     launcher
         .context
         .db
-        .with_conn(|conn| {
-            conn.execute(
-                "DELETE FROM peripheral_settings WHERE key=?1",
-                [&key_a],
-            )
-        })
+        .with_conn(|conn| conn.execute("DELETE FROM peripheral_settings WHERE key=?1", [&key_a]))
         .unwrap()
         .unwrap();
     let reason = orchestrator
@@ -1935,7 +1941,8 @@ fn a_bound_legacy_receipt_is_only_adopted_through_its_genuine_job() {
     let plan = repository_plan(&task, &[("repo-1", "old", "new")]);
     let launcher = fixture.launcher();
     let orchestrator = fixture.orchestrator(json!({"agents":{}}));
-    let identity = DeliveryOperationIdentity::for_target(&plan, &plan.repositories[0], "coder-session");
+    let identity =
+        DeliveryOperationIdentity::for_target(&plan, &plan.repositories[0], "coder-session");
     let legacy_job = uuid::Uuid::new_v4().to_string();
     let typed_job = uuid::Uuid::new_v4().to_string();
     legacy_operation(&launcher, &task, &legacy_job);
@@ -1973,4 +1980,1031 @@ fn a_bound_legacy_receipt_is_only_adopted_through_its_genuine_job() {
         reason.contains("no launch operation") || reason.contains("does not match the receipt"),
         "{reason}"
     );
+}
+
+#[cfg(unix)]
+mod two_repository_delivery {
+    use super::*;
+
+    /// Two independent real Git repositories whose approved integration is already
+    /// recorded. Delivery runs through the real launcher using a supervisor
+    /// script: it executes the production worker entry for the real job and a
+    /// no-op child for the launched command, so these tests exercise the
+    /// sequential per-repository state machine without a model.
+    struct DeliveryRepoFixture {
+        repository_id: String,
+        root: PathBuf,
+        worktree: PathBuf,
+        branch: String,
+        base: String,
+        reviewed: String,
+    }
+
+    struct TwoRepoDeliveryFixture {
+        _temp: tempfile::TempDir,
+        data: PathBuf,
+        context: ServiceContext,
+        router: String,
+        task_id: String,
+        repos: Vec<DeliveryRepoFixture>,
+        supervisor: PathBuf,
+    }
+
+    impl TwoRepoDeliveryFixture {
+        fn new() -> Self {
+            let temp = tempfile::tempdir().unwrap();
+            let data = temp.path().join("data");
+            let context = ServiceContext::open(
+                RuntimePaths::new(data.clone()).unwrap(),
+                Arc::new(crate::services::EnvironmentCredentials),
+            )
+            .unwrap();
+            let router = SessionStore::new(context.db.clone())
+                .create(temp.path(), "router-model", "fixture")
+                .unwrap();
+            role::set(&context.db, &router, Role::Router).unwrap();
+            let repos = vec![
+                Self::repo(temp.path(), "repo one", "develop", "repo-1", 0),
+                // Paths contain spaces and the two targets use different branches.
+                Self::repo(temp.path(), "repo two", "integration", "repo-2", 1),
+            ];
+            let spec = TaskSpec {
+                title: "Two repository delivery".into(),
+                workspace: temp.path().to_path_buf(),
+                targets: repos
+                    .iter()
+                    .map(|repo| repo.root.to_string_lossy().into_owned())
+                    .collect(),
+                goal: "Deliver both repositories".into(),
+                requirements: vec![],
+                acceptance_criteria: vec![crate::super_agent::model::AcceptanceCriterion {
+                    id: "AC-001".into(),
+                    description: "Both targets advance".into(),
+                }],
+                constraints: vec![],
+                out_of_scope: vec![],
+                target_branch: Some("develop".into()),
+                repository_target_branches: repos
+                    .iter()
+                    .map(|repo| {
+                        (
+                            repo.root.to_string_lossy().into_owned(),
+                            repo.branch.clone(),
+                        )
+                    })
+                    .collect(),
+            };
+            let store = TaskStore::new(context.db.clone(), data.clone());
+            let task = store.create_task(&router, spec, "create").unwrap();
+            for (index, repo) in repos.iter().enumerate() {
+                let common = PathBuf::from(git(
+                    &repo.root,
+                    &["rev-parse", "--path-format=absolute", "--git-common-dir"],
+                ))
+                .canonicalize()
+                .unwrap();
+                store
+                    .save_repo(&crate::super_agent::RepoTarget {
+                        task_id: task.task_id.clone(),
+                        repository_id: repo.repository_id.clone(),
+                        repo_root: repo.root.clone(),
+                        git_common_dir: common,
+                        target_path: repo.root.clone(),
+                        target_branch: repo.branch.clone(),
+                        task_branch: format!("agent/{index}"),
+                        worktree_path: repo.worktree.clone(),
+                        working_path: repo.worktree.clone(),
+                        base_commit: repo.base.clone(),
+                        submitted_commit: Some(repo.reviewed.clone()),
+                        reviewed_commit: Some(repo.reviewed.clone()),
+                        integrated_commit: Some(repo.reviewed.clone()),
+                        integration_status: crate::super_agent::IntegrationStatus::Prepared,
+                        verification_status: crate::super_agent::VerificationStatus::Passed,
+                        source_state: vec![],
+                    })
+                    .unwrap();
+            }
+            let policy = Orchestrator::new(
+                context.clone(),
+                Self::config(),
+                Self::provider(),
+                "bypass".into(),
+                Some(executable()),
+            )
+            .policy();
+            // The task only reaches the delivery phase after the host-approved
+            // implementation review and integration preparation; both are applied
+            // through the real state machine so the seeded state is valid.
+            store
+                .db()
+                .with_conn(|conn| {
+                    conn.execute(
+                        "UPDATE sa_tasks SET phase='REVIEWING', status='RUNNING' WHERE task_id=?1",
+                        [&task.task_id],
+                    )
+                })
+                .unwrap()
+                .unwrap();
+            Self::record_evidence(&store, &task, &repos, &policy);
+            let workspace = data
+                .join("super-agent")
+                .join(&task.task_id)
+                .join("workspace");
+            std::fs::create_dir_all(&workspace).unwrap();
+            let coder = SessionStore::new(context.db.clone())
+                .create(&workspace, "router-model", "fixture")
+                .unwrap();
+            // The real Coder is a Router child; record that ownership so the
+            // delivery resume passes the same parent check a live task would.
+            crate::native_engine::child_session::record_adopted_ownership(
+                &context,
+                &coder,
+                &router,
+                "completed",
+                "fixture-coder-job",
+            )
+            .unwrap();
+            store
+                .set_sessions(&task.task_id, Some(&coder), None)
+                .unwrap();
+            assert_eq!(
+                store.get_task(&task.task_id).unwrap().unwrap().phase,
+                Phase::DeliveryPending,
+                "the seeded review and integration did not reach the delivery phase"
+            );
+            // The same executable plays both roles, exactly like `dcl`: with the
+            // worker variable set it is the real production supervisor entry; as
+            // the launched child it records one invocation and exits without
+            // touching the repositories.
+            use std::os::unix::fs::PermissionsExt;
+            let supervisor = temp.path().join("dcl-fixture.sh");
+            let test_binary = std::env::current_exe().unwrap();
+            std::fs::write(
+            &supervisor,
+            format!(
+                "#!/bin/sh\nif [ -n \"$DEEPSEEK_CODE_BACKGROUND_JOB\" ]; then\n  exec '{}' --exact 'services::background_sessions::tests::run_worker_entry' --ignored --nocapture\nfi\necho run >> '{}'\nexit 0\n",
+                test_binary.display(),
+                temp.path().join("child-launches.log").display()
+            ),
+        )
+        .unwrap();
+            std::fs::set_permissions(&supervisor, std::fs::Permissions::from_mode(0o755)).unwrap();
+            Self {
+                _temp: temp,
+                data,
+                context,
+                router,
+                task_id: task.task_id,
+                repos,
+                supervisor,
+            }
+        }
+
+        fn repo(
+            project: &Path,
+            name: &str,
+            branch: &str,
+            repository_id: &str,
+            index: usize,
+        ) -> DeliveryRepoFixture {
+            let root = project.join(name);
+            std::fs::create_dir_all(&root).unwrap();
+            git(&root, &["init", "-q", "-b", "main"]);
+            git(&root, &["config", "user.email", "test@example.invalid"]);
+            git(&root, &["config", "user.name", "Test"]);
+            git(&root, &["config", "commit.gpgsign", "false"]);
+            std::fs::write(root.join("base.txt"), "base\n").unwrap();
+            git(&root, &["add", "."]);
+            git(&root, &["commit", "-q", "-m", "base"]);
+            let base = git(&root, &["rev-parse", "HEAD"]);
+            git(&root, &["branch", branch, &base]);
+            let common = PathBuf::from(git(
+                &root,
+                &["rev-parse", "--path-format=absolute", "--git-common-dir"],
+            ));
+            let worktree = common
+                .join("desktop-worktrees")
+                .join(format!("task-{index}"));
+            git(
+                &root,
+                &[
+                    "worktree",
+                    "add",
+                    "-q",
+                    "-b",
+                    &format!("agent/{index}"),
+                    &worktree.to_string_lossy(),
+                    "main",
+                ],
+            );
+            std::fs::write(worktree.join("reviewed.txt"), "value=1\n").unwrap();
+            git(&worktree, &["add", "."]);
+            git(&worktree, &["commit", "-q", "-m", "reviewed"]);
+            let reviewed = git(&worktree, &["rev-parse", "HEAD"]);
+            DeliveryRepoFixture {
+                repository_id: repository_id.into(),
+                root: root.canonicalize().unwrap(),
+                worktree: worktree.canonicalize().unwrap(),
+                branch: branch.into(),
+                base,
+                reviewed,
+            }
+        }
+
+        fn record_evidence(
+            store: &TaskStore,
+            task: &TaskRecord,
+            repos: &[DeliveryRepoFixture],
+            policy: &crate::super_agent::state::StatePolicy,
+        ) {
+            let reviewed_versions: Vec<Value> = repos
+                .iter()
+                .map(|repo| {
+                    json!({
+                        "repository_id": repo.repository_id,
+                        "commit": repo.reviewed,
+                    })
+                })
+                .collect();
+            let review = store
+                .add_report(
+                    &format!("{}-review", task.task_id),
+                    &task.task_id,
+                    crate::super_agent::model::ReportKind::Review,
+                    task.spec_version,
+                    task.review_round,
+                    json!({
+                        "verdict": "APPROVED",
+                        "spec_version": task.spec_version,
+                        "round": task.review_round,
+                        "stage": "IMPLEMENTATION",
+                        "reviewed_versions": reviewed_versions,
+                        "acceptance_results": [],
+                    }),
+                )
+                .unwrap();
+            let harness = store
+                .add_report(
+                    &format!("{}-harness", task.task_id),
+                    &task.task_id,
+                    crate::super_agent::model::ReportKind::Harness,
+                    task.spec_version,
+                    task.review_round,
+                    json!({
+                        "spec_version": task.spec_version,
+                        "round": task.review_round,
+                        "stage": "IMPLEMENTATION",
+                        "findings": [],
+                    }),
+                )
+                .unwrap();
+            let entries: Vec<Value> = repos
+                .iter()
+                .map(|repo| {
+                    let tree = git(
+                        &repo.root,
+                        &["rev-parse", &format!("{}^{{tree}}", repo.reviewed)],
+                    );
+                    json!({
+                        "repository_id": repo.repository_id,
+                        "target_branch": repo.branch,
+                        "target_ref": format!("refs/heads/{}", repo.branch),
+                        "baseline_commit": repo.base,
+                        "reviewed_commit": repo.reviewed,
+                        "integrated_commit": repo.reviewed,
+                        "integrated_tree": tree,
+                        "tree_changed": false,
+                        "content_review_reused": true,
+                        "reason": "fixture preparation",
+                    })
+                })
+                .collect();
+            store
+                .apply_event(
+                    &task.task_id,
+                    NewEvent {
+                        session_id: None,
+                        run_id: None,
+                        event_type: EventType::ReviewCompleted,
+                        causation_id: None,
+                        operation_id: format!("{}-decision", task.task_id),
+                        payload: json!({
+                            "verdict": "APPROVED",
+                            "stage": "IMPLEMENTATION",
+                            "review_report_id": review.report_id,
+                            "harness_report_id": harness.report_id,
+                            "harness_blocked": false,
+                        }),
+                    },
+                    policy,
+                )
+                .unwrap();
+            store
+                .apply_event(
+                    &task.task_id,
+                    NewEvent {
+                        session_id: None,
+                        run_id: None,
+                        event_type: EventType::IntegrationPrepared,
+                        causation_id: None,
+                        operation_id: format!("{}-prepared", task.task_id),
+                        payload: json!({"repositories": entries, "tree_changed": false}),
+                    },
+                    policy,
+                )
+                .unwrap();
+        }
+
+        fn store(&self) -> TaskStore {
+            TaskStore::new(self.context.db.clone(), self.data.clone())
+        }
+
+        fn task(&self) -> TaskRecord {
+            self.store().get_task(&self.task_id).unwrap().unwrap()
+        }
+
+        fn prepare_plan(&self) -> DeliveryPlan {
+            match crate::super_agent::delivery::prepare_delivery(&self.store(), &self.task())
+                .unwrap()
+            {
+                crate::super_agent::delivery::DeliveryPreflight::Planned(plan) => plan,
+                other => panic!("expected a prepared delivery plan, got {other:?}"),
+            }
+        }
+
+        fn set_target(&self, index: usize, oid: &str) {
+            let repo = &self.repos[index];
+            git(
+                &repo.root,
+                &["update-ref", &format!("refs/heads/{}", repo.branch), oid],
+            );
+        }
+
+        /// Moves one target to an unrelated commit from an isolated worktree, as an
+        /// external process would after the host observed it.
+        fn move_target_elsewhere(&self, index: usize) -> String {
+            let repo = &self.repos[index];
+            let path = self._temp.path().join(format!("move-{index}"));
+            git(
+                &repo.root,
+                &[
+                    "worktree",
+                    "add",
+                    "-q",
+                    &path.to_string_lossy(),
+                    &repo.branch,
+                ],
+            );
+            git(&path, &["commit", "-q", "--allow-empty", "-m", "elsewhere"]);
+            let head = git(&path, &["rev-parse", "HEAD"]);
+            git(
+                &repo.root,
+                &["worktree", "remove", "--force", &path.to_string_lossy()],
+            );
+            head
+        }
+
+        /// Checks out one target branch in a linked worktree. It must run before
+        /// [`Self::prepare_plan`] so the recorded plan expects a checkout.
+        fn checkout_target(&self, index: usize) -> PathBuf {
+            let repo = &self.repos[index];
+            let path = self._temp.path().join(format!("target checkout {index}"));
+            git(
+                &repo.root,
+                &[
+                    "worktree",
+                    "add",
+                    "-q",
+                    &path.to_string_lossy(),
+                    &repo.branch,
+                ],
+            );
+            path.canonicalize().unwrap()
+        }
+
+        fn target_plan<'a>(&self, plan: &'a DeliveryPlan, index: usize) -> &'a DeliveryTargetPlan {
+            plan.repositories
+                .iter()
+                .find(|target| target.repository_id == self.repos[index].repository_id)
+                .unwrap()
+        }
+
+        fn record_observation(&self, plan: &DeliveryPlan, index: usize) {
+            let target = plan
+                .repositories
+                .iter()
+                .find(|target| target.repository_id == self.repos[index].repository_id)
+                .unwrap();
+            self.store()
+                .record_repository_delivery_observed(
+                    &crate::super_agent::delivery::RepositoryDeliveryObservation {
+                        task_id: plan.task_id.clone(),
+                        spec_version: plan.spec_version,
+                        review_round: plan.review_round,
+                        plan_operation_id: plan.operation_id.clone(),
+                        repository_id: target.repository_id.clone(),
+                        old_oid: target.old_oid.clone(),
+                        new_oid: target.new_oid.clone(),
+                        target_ref: target.target_ref.clone(),
+                        coder_session_id: self.task().coder.session_id.unwrap(),
+                        attempt: target.attempt,
+                        verified: true,
+                        observed_at: "2026-01-01T00:00:00Z".into(),
+                    },
+                )
+                .unwrap();
+        }
+
+        fn config() -> SuperAgentConfig {
+            let mut config: SuperAgentConfig =
+                crate::super_agent::config::parse(&json!({"agents":{}})).unwrap();
+            config.delivery.enabled = true;
+            config
+        }
+
+        fn provider() -> ResolvedProvider {
+            let mut provider: ResolvedProvider = ResolvedProvider {
+                provider: serde_json::from_value(json!({
+                    "id":"fixture","name":"Fixture","base_url":"http://127.0.0.1:1",
+                    "api_key":"fixture-key","api_format":"openai","models":[],"enabled":true
+                }))
+                .unwrap(),
+                model: serde_json::from_value(json!({
+                    "id":"router-model","name":"router-model","enabled":true,
+                    "supports_vision":false,"supports_web_search":false
+                }))
+                .unwrap(),
+            };
+            provider.provider.models = vec![provider.model.clone()];
+            provider
+        }
+
+        fn orchestrator(&self) -> Orchestrator {
+            Orchestrator::new(
+                self.context.clone(),
+                Self::config(),
+                Self::provider(),
+                "bypass".into(),
+                Some(self.supervisor.clone()),
+            )
+        }
+
+        fn completed(&self) -> bool {
+            self.store()
+                .events(&self.task_id)
+                .unwrap()
+                .iter()
+                .any(|event| event.event_type == EventType::IntegrationCompleted)
+        }
+
+        fn observation(&self, plan: &DeliveryPlan, index: usize) -> bool {
+            self.store()
+                .repository_delivery_observation(
+                    &self.task_id,
+                    &plan.operation_id,
+                    &self.repos[index].repository_id,
+                )
+                .unwrap()
+                .is_some()
+        }
+
+        async fn wait_settled(&self) {
+            for _ in 0..800 {
+                let jobs =
+                    crate::services::background_sessions::list(&self.data, Some(&self.router))
+                        .unwrap_or_default();
+                if !jobs.is_empty()
+                    && jobs.iter().all(|job| {
+                        !matches!(job.status.as_str(), "starting" | "running" | "unresponsive")
+                    })
+                {
+                    return;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+            }
+            panic!("the delivery job did not settle");
+        }
+    }
+
+    #[tokio::test]
+    async fn delivery_advances_two_repositories_one_at_a_time() {
+        let fixture = TwoRepoDeliveryFixture::new();
+        let plan = fixture.prepare_plan();
+        // A is delivered externally; B stays at its approved baseline.
+        fixture.set_target(0, &fixture.repos[0].reviewed);
+        let orchestrator = fixture.orchestrator();
+
+        let first = orchestrator.tick(&fixture.router).await.unwrap();
+        assert_eq!(first.blocked, Vec::<String>::new(), "{first:?}");
+        let task = fixture.task();
+        assert_eq!(
+            task.phase,
+            Phase::DeliveryPending,
+            "one delivered repository must not finish the task"
+        );
+        assert!(
+            fixture.observation(&plan, 0),
+            "the delivered repository has no durable observation"
+        );
+        assert!(
+            !fixture.observation(&plan, 1),
+            "the pending repository was observed without a delivery"
+        );
+        assert_eq!(
+            task.repositories[0].integration_status,
+            crate::super_agent::IntegrationStatus::Completed
+        );
+        assert_eq!(
+            task.repositories[1].integration_status,
+            crate::super_agent::IntegrationStatus::Prepared
+        );
+        assert!(
+            !fixture.completed(),
+            "a partial delivery emitted the global event"
+        );
+        assert!(
+            crate::services::background_sessions::list(&fixture.data, Some(&fixture.router))
+                .unwrap_or_default()
+                .is_empty(),
+            "an already delivered repository started a child"
+        );
+
+        // B reaches its approved commit as its own child would have left it.
+        fixture.set_target(1, &fixture.repos[1].reviewed);
+        let second = orchestrator.tick(&fixture.router).await.unwrap();
+        assert_eq!(second.blocked, Vec::<String>::new(), "{second:?}");
+        let task = fixture.task();
+        assert_eq!(task.phase, Phase::Finalizing);
+        assert_eq!(task.status, Status::Running);
+        for repo in &task.repositories {
+            assert_eq!(
+                repo.integration_status,
+                crate::super_agent::IntegrationStatus::Completed
+            );
+        }
+        assert!(
+            fixture.completed(),
+            "the complete delivery was not recorded"
+        );
+        assert!(!fixture
+            .store()
+            .events(&fixture.task_id)
+            .unwrap()
+            .iter()
+            .any(|event| event.event_type == EventType::TaskCompleted));
+        assert_eq!(
+            git(
+                &fixture.repos[0].root,
+                &[
+                    "rev-parse",
+                    &format!("refs/heads/{}", fixture.repos[0].branch)
+                ]
+            ),
+            fixture.repos[0].reviewed
+        );
+        assert_eq!(
+            git(
+                &fixture.repos[1].root,
+                &[
+                    "rev-parse",
+                    &format!("refs/heads/{}", fixture.repos[1].branch)
+                ]
+            ),
+            fixture.repos[1].reviewed
+        );
+    }
+
+    #[tokio::test]
+    async fn a_failed_second_repository_preserves_the_first_delivery() {
+        let fixture = TwoRepoDeliveryFixture::new();
+        let plan = fixture.prepare_plan();
+        fixture.set_target(0, &fixture.repos[0].reviewed);
+        fixture.record_observation(&plan, 0);
+        let orchestrator = fixture.orchestrator();
+
+        // B's real child starts and finishes without moving its target.
+        let first = orchestrator.tick(&fixture.router).await.unwrap();
+        assert_eq!(first.blocked, Vec::<String>::new(), "{first:?}");
+        fixture.wait_settled().await;
+        let second = orchestrator.tick(&fixture.router).await.unwrap();
+        assert!(
+            second.blocked.iter().any(|reason| {
+                reason.contains(&fixture.repos[1].repository_id)
+                    && reason.contains("approved integrated commit")
+            }),
+            "the failing repository was not named: {second:?}"
+        );
+        let task = fixture.task();
+        assert_eq!(task.status, Status::Blocked);
+        assert_eq!(task.phase, Phase::DeliveryPending);
+        assert_eq!(
+            task.repositories[0].integration_status,
+            crate::super_agent::IntegrationStatus::Completed,
+            "A's completed progress was lost"
+        );
+        assert_eq!(
+            task.repositories[1].integration_status,
+            crate::super_agent::IntegrationStatus::Prepared
+        );
+        assert!(fixture.observation(&plan, 0), "A's observation was removed");
+        assert!(
+            !fixture.observation(&plan, 1),
+            "the failed repository was observed as delivered"
+        );
+        assert!(!fixture.completed(), "a failed delivery emitted completion");
+        // A's real commit is preserved; B's target is untouched.
+        assert_eq!(
+            git(
+                &fixture.repos[0].root,
+                &[
+                    "rev-parse",
+                    &format!("refs/heads/{}", fixture.repos[0].branch)
+                ]
+            ),
+            fixture.repos[0].reviewed
+        );
+        assert_eq!(
+            git(
+                &fixture.repos[1].root,
+                &[
+                    "rev-parse",
+                    &format!("refs/heads/{}", fixture.repos[1].branch)
+                ]
+            ),
+            fixture.repos[1].base
+        );
+        // Repeated ticks do not invent a retry.
+        let jobs = crate::services::background_sessions::list(&fixture.data, Some(&fixture.router))
+            .unwrap_or_default()
+            .len();
+        let _ = orchestrator.tick(&fixture.router).await.unwrap();
+        assert_eq!(
+            crate::services::background_sessions::list(&fixture.data, Some(&fixture.router))
+                .unwrap_or_default()
+                .len(),
+            jobs,
+            "a blocked failed repository started another child"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_repository_that_drifts_after_observation_blocks_final_completion() {
+        let fixture = TwoRepoDeliveryFixture::new();
+        let plan = fixture.prepare_plan();
+        fixture.set_target(0, &fixture.repos[0].reviewed);
+        fixture.record_observation(&plan, 0);
+        fixture.set_target(1, &fixture.repos[1].reviewed);
+        // A moved again after the host observed it; the approved evidence is not
+        // refreshed and no new observation replaces the old one.
+        let elsewhere = fixture.move_target_elsewhere(0);
+        let orchestrator = fixture.orchestrator();
+
+        let report = orchestrator.tick(&fixture.router).await.unwrap();
+        assert!(
+            report.blocked.iter().any(|reason| {
+                reason.contains(&fixture.repos[0].repository_id)
+                    && reason.contains("fresh verification")
+                    && reason.contains("approved integrated commit")
+            }),
+            "the drifted repository was not named: {report:?}"
+        );
+        let task = fixture.task();
+        assert_eq!(task.status, Status::Blocked);
+        assert_eq!(task.phase, Phase::DeliveryPending);
+        assert!(!fixture.completed(), "stale evidence completed the task");
+        assert!(fixture.observation(&plan, 0));
+        assert!(
+            fixture.observation(&plan, 1),
+            "B's genuine delivery was not observed"
+        );
+        assert_eq!(
+            git(
+                &fixture.repos[0].root,
+                &[
+                    "rev-parse",
+                    &format!("refs/heads/{}", fixture.repos[0].branch)
+                ]
+            ),
+            elsewhere,
+            "the failed final verification rewrote the real target"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_task_missing_a_planned_repository_cannot_deliver() {
+        let fixture = TwoRepoDeliveryFixture::new();
+        let plan = fixture.prepare_plan();
+        fixture
+            .store()
+            .db()
+            .with_conn(|conn| {
+                conn.execute(
+                    "DELETE FROM sa_task_repos WHERE task_id=?1 AND repository_id=?2",
+                    [&fixture.task_id, &fixture.repos[1].repository_id],
+                )
+            })
+            .unwrap()
+            .unwrap();
+        let orchestrator = fixture.orchestrator();
+
+        let report = orchestrator.tick(&fixture.router).await.unwrap();
+        assert!(
+            report.blocked.iter().any(|reason| {
+                reason.contains("no longer lists repository")
+                    && reason.contains(&fixture.repos[1].repository_id)
+            }),
+            "a narrowed task must not deliver the full plan: {report:?}"
+        );
+        assert!(
+            !fixture.observation(&plan, 0) && !fixture.observation(&plan, 1),
+            "a partially listed task produced observations"
+        );
+        assert!(!fixture.completed());
+        assert!(
+            crate::services::background_sessions::list(&fixture.data, Some(&fixture.router))
+                .unwrap_or_default()
+                .is_empty(),
+            "a partially listed task started a child"
+        );
+    }
+
+    /// Asserts a blocked pending B: named repository, no child, A's observation
+    /// and delivered ref intact, B still prepared, and no global event.
+    fn assert_blocked_b_without_dispatch(
+        fixture: &TwoRepoDeliveryFixture,
+        plan: &DeliveryPlan,
+        report: &crate::super_agent::orchestrator::TickReport,
+        expected: &[&str],
+        label: &str,
+    ) {
+        for needle in expected {
+            assert!(
+                report.blocked.iter().any(|reason| {
+                    reason.contains(&fixture.repos[1].repository_id) && reason.contains(needle)
+                }),
+                "{label}: the block did not name B with {needle:?}: {report:?}"
+            );
+        }
+        assert!(
+            crate::services::background_sessions::list(&fixture.data, Some(&fixture.router))
+                .unwrap_or_default()
+                .is_empty(),
+            "{label}: a child was started for an unready B"
+        );
+        assert!(
+            fixture.observation(plan, 0),
+            "{label}: A's durable observation was removed"
+        );
+        assert!(
+            !fixture.observation(plan, 1),
+            "{label}: the blocked B was observed as delivered"
+        );
+        assert_eq!(
+            git(
+                &fixture.repos[0].root,
+                &[
+                    "rev-parse",
+                    &format!("refs/heads/{}", fixture.repos[0].branch)
+                ]
+            ),
+            fixture.repos[0].reviewed,
+            "{label}: A's delivered ref changed"
+        );
+        let task = fixture.task();
+        assert_eq!(
+            task.status,
+            Status::Blocked,
+            "{label}: the task was not blocked"
+        );
+        assert_eq!(task.phase, Phase::DeliveryPending);
+        assert_eq!(
+            task.repositories[0].integration_status,
+            crate::super_agent::IntegrationStatus::Completed,
+            "{label}: A's completed progress was lost"
+        );
+        assert_eq!(
+            task.repositories[1].integration_status,
+            crate::super_agent::IntegrationStatus::Prepared
+        );
+        assert!(
+            !fixture.completed(),
+            "{label}: a global completion event was written"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_pending_repository_with_a_dirty_checkout_blocks_before_dispatch() {
+        let fixture = TwoRepoDeliveryFixture::new();
+        // The plan records B as checked out, then the checkout becomes dirty.
+        let checkout = fixture.checkout_target(1);
+        let plan = fixture.prepare_plan();
+        let target_b = fixture.target_plan(&plan, 1).clone();
+        assert!(
+            matches!(target_b.destination, DeliveryDestination::CheckedOut { .. }),
+            "the fixture did not record B as checked out"
+        );
+        fixture.set_target(0, &fixture.repos[0].reviewed);
+        fixture.record_observation(&plan, 0);
+        std::fs::write(checkout.join("base.txt"), "dirty\n").unwrap();
+        let plans_before = fixture.store().delivery_plans(&fixture.task_id).unwrap();
+        let orchestrator = fixture.orchestrator();
+
+        let report = orchestrator.tick(&fixture.router).await.unwrap();
+        assert_blocked_b_without_dispatch(
+            &fixture,
+            &plan,
+            &report,
+            &["uncommitted or untracked"],
+            "dirty B checkout",
+        );
+        assert_eq!(
+            fixture.store().delivery_plans(&fixture.task_id).unwrap(),
+            plans_before,
+            "the blocked attempt rewrote the immutable plan"
+        );
+        assert_eq!(
+            fixture.store().lock_holder(&target_b.lock_key).unwrap(),
+            Some((fixture.task_id.clone(), target_b.lock_operation_id.clone())),
+            "the blocked attempt changed B's cooperative ownership"
+        );
+        assert_eq!(
+            git(
+                &fixture.repos[1].root,
+                &[
+                    "rev-parse",
+                    &format!("refs/heads/{}", fixture.repos[1].branch)
+                ]
+            ),
+            fixture.repos[1].base,
+            "the blocked attempt moved B's target"
+        );
+        assert_eq!(
+            std::fs::read_to_string(checkout.join("base.txt")).unwrap(),
+            "dirty\n",
+            "the blocked attempt touched the dirty checkout"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_pending_repository_whose_ref_moved_blocks_before_dispatch() {
+        let fixture = TwoRepoDeliveryFixture::new();
+        let plan = fixture.prepare_plan();
+        let target_b = fixture.target_plan(&plan, 1).clone();
+        fixture.set_target(0, &fixture.repos[0].reviewed);
+        fixture.record_observation(&plan, 0);
+        // An external process moves B after A's observation.
+        let elsewhere = fixture.move_target_elsewhere(1);
+        assert_ne!(elsewhere, fixture.repos[1].base);
+        let plans_before = fixture.store().delivery_plans(&fixture.task_id).unwrap();
+        let orchestrator = fixture.orchestrator();
+
+        let report = orchestrator.tick(&fixture.router).await.unwrap();
+        assert_blocked_b_without_dispatch(
+            &fixture,
+            &plan,
+            &report,
+            &["moved", "approved plan is stale"],
+            "moved B ref",
+        );
+        assert_eq!(
+            fixture.store().delivery_plans(&fixture.task_id).unwrap(),
+            plans_before,
+            "the blocked attempt rewrote the immutable plan"
+        );
+        let stored = fixture
+            .store()
+            .delivery_plan(&fixture.task_id, &plan.operation_id)
+            .unwrap()
+            .expect("persisted plan");
+        let stored_b = fixture.target_plan(&stored, 1);
+        assert_eq!(
+            stored_b.old_oid, fixture.repos[1].base,
+            "the blocked attempt refreshed B's approved baseline"
+        );
+        assert_eq!(
+            stored_b.new_oid, fixture.repos[1].reviewed,
+            "the blocked attempt replaced B's approved commit"
+        );
+        assert_eq!(
+            git(
+                &fixture.repos[1].root,
+                &[
+                    "rev-parse",
+                    &format!("refs/heads/{}", fixture.repos[1].branch)
+                ]
+            ),
+            elsewhere,
+            "the blocked attempt moved B's target"
+        );
+        assert_eq!(
+            fixture.store().lock_holder(&target_b.lock_key).unwrap(),
+            Some((fixture.task_id.clone(), target_b.lock_operation_id.clone())),
+            "the blocked attempt changed B's cooperative ownership"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_pending_repository_without_cooperative_ownership_blocks_before_dispatch() {
+        // B's own lock was released after A was observed.
+        {
+            let fixture = TwoRepoDeliveryFixture::new();
+            let plan = fixture.prepare_plan();
+            let target_b = fixture.target_plan(&plan, 1).clone();
+            fixture.set_target(0, &fixture.repos[0].reviewed);
+            fixture.record_observation(&plan, 0);
+            assert!(fixture
+                .store()
+                .unlock(
+                    &target_b.lock_key,
+                    &fixture.task_id,
+                    &target_b.lock_operation_id
+                )
+                .unwrap());
+            let plans_before = fixture.store().delivery_plans(&fixture.task_id).unwrap();
+            let orchestrator = fixture.orchestrator();
+
+            let report = orchestrator.tick(&fixture.router).await.unwrap();
+            assert_blocked_b_without_dispatch(
+                &fixture,
+                &plan,
+                &report,
+                &["is not owned by this delivery"],
+                "released B lock",
+            );
+            assert_eq!(
+                fixture.store().lock_holder(&target_b.lock_key).unwrap(),
+                None,
+                "the blocked attempt reacquired B's released lock"
+            );
+            assert_eq!(
+                fixture.store().delivery_plans(&fixture.task_id).unwrap(),
+                plans_before,
+                "the blocked attempt rewrote the immutable plan"
+            );
+            assert_eq!(
+                git(
+                    &fixture.repos[1].root,
+                    &[
+                        "rev-parse",
+                        &format!("refs/heads/{}", fixture.repos[1].branch)
+                    ]
+                ),
+                fixture.repos[1].base,
+                "the blocked attempt moved B's target"
+            );
+        }
+
+        // Another task holds B's lock; it is named and never stolen.
+        {
+            let fixture = TwoRepoDeliveryFixture::new();
+            let plan = fixture.prepare_plan();
+            let target_b = fixture.target_plan(&plan, 1).clone();
+            fixture.set_target(0, &fixture.repos[0].reviewed);
+            fixture.record_observation(&plan, 0);
+            assert!(fixture
+                .store()
+                .unlock(
+                    &target_b.lock_key,
+                    &fixture.task_id,
+                    &target_b.lock_operation_id
+                )
+                .unwrap());
+            fixture
+                .store()
+                .try_lock("other:operation", &target_b.lock_key, "other-task")
+                .unwrap();
+            let plans_before = fixture.store().delivery_plans(&fixture.task_id).unwrap();
+            let orchestrator = fixture.orchestrator();
+
+            let report = orchestrator.tick(&fixture.router).await.unwrap();
+            assert_blocked_b_without_dispatch(
+                &fixture,
+                &plan,
+                &report,
+                &["held by task other-task"],
+                "stolen B lock",
+            );
+            assert_eq!(
+                fixture.store().lock_holder(&target_b.lock_key).unwrap(),
+                Some(("other-task".to_owned(), "other:operation".to_owned())),
+                "the blocked attempt stole the other task's lock"
+            );
+            assert_eq!(
+                fixture.store().delivery_plans(&fixture.task_id).unwrap(),
+                plans_before,
+                "the blocked attempt rewrote the immutable plan"
+            );
+            assert_eq!(
+                git(
+                    &fixture.repos[1].root,
+                    &[
+                        "rev-parse",
+                        &format!("refs/heads/{}", fixture.repos[1].branch)
+                    ]
+                ),
+                fixture.repos[1].base,
+                "the blocked attempt moved B's target"
+            );
+        }
+    }
 }

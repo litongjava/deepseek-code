@@ -292,38 +292,41 @@ impl Orchestrator {
         Ok(())
     }
 
-    /// Delivers one prepared repository to its target branch through the
-    /// original Coder session and records only host-verified facts.
+    /// Every prepared Git repository is delivered to its target branch through
+    /// the original Coder session, one repository at a time, and only
+    /// host-verified per-repository observations are recorded.
     ///
-    /// Delivery is deliberately limited to exactly one Git repository and no
-    /// non-Git target. Multi-repository work stays explicitly pending rather
-    /// than partially running before the recovery/completion increment.
+    /// Delivery supports one or more Git repositories and no non-Git target.
+    /// Each tick advances at most one unfinished repository, in the persisted
+    /// plan order. The task-wide completion is recorded only after a fresh
+    /// all-target verification and every planned repository's durable
+    /// observation exist.
     async fn deliver(
         &self,
         store: &TaskStore,
         task: &TaskRecord,
         report: &mut TickReport,
     ) -> Result<TaskRecord> {
-        if task.repositories.len() != 1 || !task.non_git_targets.is_empty() {
+        if task.repositories.is_empty() || !task.non_git_targets.is_empty() {
             report.warnings.push(format!(
-                "{}: delivery currently supports exactly one Git repository and no non-Git target; the task stays in {}",
+                "{}: delivery supports one or more Git repositories and no non-Git target; the task stays in {}",
                 task.task_id,
                 task.phase.as_str()
             ));
             return Ok(task.clone());
         }
         // An already recorded immutable plan is authoritative. Re-running the
-        // preflight after the Coder moved the target would compare the moved
-        // ref with a stale baseline and block an already-delivered task, so the
-        // plan is loaded instead of recomputed once it exists.
+        // preflight after the Coder moved a target would compare the moved ref
+        // with a stale baseline and block an already-delivered repository, so
+        // the plan is loaded instead of recomputed once it exists. Its whole
+        // repository set is still validated below; a caller can never narrow it
+        // to a singleton.
         let existing_plan = store
             .delivery_plans(&task.task_id)
             .map_err(store_error)?
             .into_iter()
             .filter(|plan| {
-                plan.spec_version == task.spec_version
-                    && plan.review_round == task.review_round
-                    && plan.repositories.len() == 1
+                plan.spec_version == task.spec_version && plan.review_round == task.review_round
             })
             .max_by(|left, right| {
                 left.created_at
@@ -331,22 +334,7 @@ impl Orchestrator {
                     .then(left.operation_id.cmp(&right.operation_id))
             });
         let plan = match existing_plan {
-            Some(plan) => {
-                let current = task.repositories[0].integrated_commit.as_deref();
-                if current != Some(plan.repositories[0].new_oid.as_str()) {
-                    let reason = format!(
-                        "{}: the recorded delivery plan targets {} but the task integrated commit is {current:?}; a new plan is required",
-                        task.task_id, plan.repositories[0].new_oid
-                    );
-                    self.block_task(store, &task.task_id, &reason, "delivery-plan-mismatch")?;
-                    report.blocked.push(format!("{}: {reason}", task.task_id));
-                    return store
-                        .get_task(&task.task_id)
-                        .map_err(store_error)?
-                        .context("Task disappeared");
-                }
-                plan
-            }
+            Some(plan) => plan,
             None => match crate::super_agent::delivery::prepare_delivery(store, task)? {
                 crate::super_agent::delivery::DeliveryPreflight::Planned(plan) => plan,
                 crate::super_agent::delivery::DeliveryPreflight::NotApplicable => {
@@ -378,125 +366,174 @@ impl Orchestrator {
             return self.block_delivery(store, &task.task_id, &reason, "delivery-binding", report);
         }
 
-        // A dispatch already exists: reconcile only against it. Never prepare a
-        // second plan or start a second child for the same immutable evidence.
-        if let Some(dispatch) = store
-            .repository_dispatch(
-                &task.task_id,
-                &plan.operation_id,
-                &plan.repositories[0].repository_id,
-            )
-            .map_err(store_error)?
-        {
+        // Repositories are advanced in the persisted plan order. Exactly one
+        // unfinished repository is acted on per tick, so a job for B is never
+        // started while A's real child is still running, and a repository that
+        // already carries a durable observation is never replayed.
+        for target in &plan.repositories {
+            if let Some(observation) = store
+                .repository_delivery_observation(
+                    &task.task_id,
+                    &plan.operation_id,
+                    &target.repository_id,
+                )
+                .map_err(store_error)?
+            {
+                // The observation is evidence, not permission for a new side
+                // effect. A contradictory receipt still blocks.
+                if let Some(reason) =
+                    delivery_observation_mismatch(task, &plan, target, &observation)
+                {
+                    return self.block_delivery(
+                        store,
+                        &task.task_id,
+                        &reason,
+                        "delivery-observation-mismatch",
+                        report,
+                    );
+                }
+                if let Some(dispatch) = store
+                    .repository_dispatch(&task.task_id, &plan.operation_id, &target.repository_id)
+                    .map_err(store_error)?
+                {
+                    if let Some(reason) = delivery_context_mismatch(task, &plan, &dispatch) {
+                        return self.block_delivery(
+                            store,
+                            &task.task_id,
+                            &reason,
+                            "delivery-identity",
+                            report,
+                        );
+                    }
+                    if let Some(job_id) = &dispatch.job_id {
+                        if let Some(reason) =
+                            self.bound_delivery_mismatch(task, &plan, &dispatch, job_id)?
+                        {
+                            return self.block_delivery(
+                                store,
+                                &task.task_id,
+                                &reason,
+                                "delivery-bound-identity",
+                                report,
+                            );
+                        }
+                    }
+                }
+                continue;
+            }
+            // A receipt is reconciled only for this repository; never for the
+            // whole plan at once.
+            if let Some(dispatch) = store
+                .repository_dispatch(&task.task_id, &plan.operation_id, &target.repository_id)
+                .map_err(store_error)?
+            {
+                return self
+                    .reconcile_delivery(store, task, &plan, target, &dispatch, report)
+                    .await;
+            }
+            // No child was ever started for this repository. A target that
+            // already matches the approved content is recorded as an
+            // observation instead of being rewritten.
+            if verify_target_delivery(task, &plan, target)?.verified {
+                self.record_target_observation(store, task, &plan, target)?;
+                return self.finalize_delivery(store, task, &plan, None, true, report);
+            }
+            // Carrying the plan is not ownership: this repository's live Git
+            // state and its cooperative lock are re-read before any child.
+            match crate::super_agent::delivery::revalidate_repository_for_dispatch(
+                store,
+                task,
+                &plan,
+                &target.repository_id,
+            )? {
+                crate::super_agent::delivery::DispatchRevalidation::Ready => {}
+                crate::super_agent::delivery::DispatchRevalidation::ReintegrationNeeded(reason) => {
+                    return self.block_delivery(
+                        store,
+                        &task.task_id,
+                        &reason,
+                        "delivery-reintegration",
+                        report,
+                    );
+                }
+                crate::super_agent::delivery::DispatchRevalidation::Blocked(reason) => {
+                    return self.block_delivery(
+                        store,
+                        &task.task_id,
+                        &reason,
+                        "delivery-blocked",
+                        report,
+                    );
+                }
+            }
+
+            // The dispatch receipt is durable before the child is started. It
+            // is keyed by the real repository and binds the approved old/new
+            // OIDs and attempt, so two repositories of one plan never share an
+            // operation or a reserved job even though both continue the same
+            // Coder session.
+            let coder_session_id = task
+                .coder
+                .session_id
+                .clone()
+                .context("Task has no Coder session to deliver the integration")?;
+            let identity = DeliveryOperationIdentity::for_target(&plan, target, &coder_session_id);
+            identity.validate_for(task, &plan, target)?;
+            store
+                .begin_repository_dispatch(&crate::super_agent::delivery::DeliveryDispatch {
+                    task_id: task.task_id.clone(),
+                    spec_version: task.spec_version,
+                    review_round: task.review_round,
+                    plan_operation_id: plan.operation_id.clone(),
+                    coder_session_id: coder_session_id.clone(),
+                    purpose: identity.purpose_key(),
+                    repository_id: Some(target.repository_id.clone()),
+                    old_oid: Some(target.old_oid.clone()),
+                    new_oid: Some(target.new_oid.clone()),
+                    attempt: target.attempt,
+                    job_id: None,
+                    created_at: chrono::Utc::now().to_rfc3339(),
+                })
+                .map_err(store_error)?;
+            let instruction = coder_delivery_prompt(task, target);
+            let outcome = self
+                .launcher()
+                .resume_coder_for_delivery(task, &instruction, &identity)
+                .await?;
+            store
+                .set_repository_dispatch_job(
+                    &task.task_id,
+                    &plan.operation_id,
+                    &target.repository_id,
+                    &outcome.job_id,
+                )
+                .map_err(store_error)?;
             return self
-                .reconcile_delivery(store, task, &plan, &dispatch, report)
+                .observe_delivery_job(
+                    store,
+                    task,
+                    &plan,
+                    target,
+                    &outcome.job_id,
+                    outcome.in_progress,
+                    report,
+                )
                 .await;
         }
-
-        // No child has been started for this plan yet. A target that already
-        // matches the approved content is recorded as an observation instead of
-        // being rewritten.
-        let observed = crate::super_agent::delivery::verify_delivery(task, &plan)?;
-        if observed.complete {
-            return self.finish_delivery(store, task, &plan, None, true, report);
-        }
-        // Carrying the plan is not ownership: an explicitly released or stolen
-        // branch must block before any child is started.
-        if let Some(reason) =
-            crate::super_agent::delivery::delivery_ownership(store, &plan)?.reason()
-        {
-            return self.block_delivery(
-                store,
-                &task.task_id,
-                &reason,
-                "delivery-ownership",
-                report,
-            );
-        }
-        match crate::super_agent::delivery::revalidate_for_dispatch(task, &plan)? {
-            crate::super_agent::delivery::DispatchRevalidation::Ready => {}
-            crate::super_agent::delivery::DispatchRevalidation::ReintegrationNeeded(reason) => {
-                return self.block_delivery(
-                    store,
-                    &task.task_id,
-                    &reason,
-                    "delivery-reintegration",
-                    report,
-                );
-            }
-            crate::super_agent::delivery::DispatchRevalidation::Blocked(reason) => {
-                return self.block_delivery(
-                    store,
-                    &task.task_id,
-                    &reason,
-                    "delivery-blocked",
-                    report,
-                );
-            }
-        }
-
-        // The dispatch receipt is durable before the child is started. It is
-        // keyed by the real repository and binds the approved old/new OIDs and
-        // the explicit attempt, not only the plan operation ID. The launcher
-        // resume carries the same typed identity, so repositories A and B of one
-        // plan can never share an operation or a reserved job.
-        let target = &plan.repositories[0];
-        let coder_session_id = task
-            .coder
-            .session_id
-            .clone()
-            .context("Task has no Coder session to deliver the integration")?;
-        let identity =
-            DeliveryOperationIdentity::for_target(&plan, target, &coder_session_id);
-        identity.validate_for(task, &plan, target)?;
-        store
-            .begin_repository_dispatch(&crate::super_agent::delivery::DeliveryDispatch {
-                task_id: task.task_id.clone(),
-                spec_version: task.spec_version,
-                review_round: task.review_round,
-                plan_operation_id: plan.operation_id.clone(),
-                coder_session_id: coder_session_id.clone(),
-                purpose: identity.purpose_key(),
-                repository_id: Some(target.repository_id.clone()),
-                old_oid: Some(target.old_oid.clone()),
-                new_oid: Some(target.new_oid.clone()),
-                attempt: target.attempt,
-                job_id: None,
-                created_at: chrono::Utc::now().to_rfc3339(),
-            })
-            .map_err(store_error)?;
-        let instruction = coder_delivery_prompt(task, &plan);
-        let outcome = self
-            .launcher()
-            .resume_coder_for_delivery(task, &instruction, &identity)
-            .await?;
-        store
-            .set_repository_dispatch_job(
-                &task.task_id,
-                &plan.operation_id,
-                &target.repository_id,
-                &outcome.job_id,
-            )
-            .map_err(store_error)?;
-        self.observe_delivery_job(
-            store,
-            task,
-            &plan,
-            &outcome.job_id,
-            outcome.in_progress,
-            report,
-        )
-        .await
+        // Every planned repository already has a durable observation; only the
+        // fresh all-target verification decides the task-wide completion.
+        self.finalize_delivery(store, task, &plan, None, false, report)
     }
 
-    /// Reconciles an already dispatched delivery. Only the recorded plan and
-    /// the real target decide the result; the preflight is never re-run after
-    /// the side effect.
+    /// Reconciles an already dispatched repository delivery. Only the recorded
+    /// plan, the named target and the real Git state decide the result; the
+    /// preflight is never re-run after the side effect.
     async fn reconcile_delivery(
         &self,
         store: &TaskStore,
         task: &TaskRecord,
         plan: &crate::super_agent::delivery::DeliveryPlan,
+        target: &crate::super_agent::delivery::DeliveryTargetPlan,
         dispatch: &crate::super_agent::delivery::DeliveryDispatch,
         report: &mut TickReport,
     ) -> Result<TaskRecord> {
@@ -536,7 +573,7 @@ impl Orchestrator {
                 );
             }
             return self
-                .observe_delivery_job(store, task, plan, &job_id, false, report)
+                .observe_delivery_job(store, task, plan, target, &job_id, false, report)
                 .await;
         }
         // The receipt exists but no job was bound: the previous host stopped
@@ -627,8 +664,9 @@ impl Orchestrator {
                             // The adopted job must carry this operation's own
                             // durable delivery identity, not merely the same
                             // Coder session.
-                            if let Some(reason) =
-                                self.launcher().delivery_binding_mismatch(operation, &job.id)?
+                            if let Some(reason) = self
+                                .launcher()
+                                .delivery_binding_mismatch(operation, &job.id)?
                             {
                                 return self.block_delivery(
                                     store,
@@ -642,12 +680,14 @@ impl Orchestrator {
                                 .set_repository_dispatch_job(
                                     &task.task_id,
                                     &plan.operation_id,
-                                    &plan.repositories[0].repository_id,
+                                    &target.repository_id,
                                     &job.id,
                                 )
                                 .map_err(store_error)?;
                             return self
-                                .observe_delivery_job(store, task, plan, &job.id, false, report)
+                                .observe_delivery_job(
+                                    store, task, plan, target, &job.id, false, report,
+                                )
                                 .await;
                         }
                         // The reservation reached disk but no child was ever
@@ -723,8 +763,9 @@ impl Orchestrator {
                 }
                 // The handle's job must carry this operation's durable
                 // delivery identity before it is bound to the receipt.
-                if let Some(reason) =
-                    self.launcher().delivery_binding_mismatch(operation, &handle.job_id)?
+                if let Some(reason) = self
+                    .launcher()
+                    .delivery_binding_mismatch(operation, &handle.job_id)?
                 {
                     return self.block_delivery(
                         store,
@@ -739,42 +780,34 @@ impl Orchestrator {
                     .set_repository_dispatch_job(
                         &task.task_id,
                         &plan.operation_id,
-                        &plan.repositories[0].repository_id,
+                        &target.repository_id,
                         &job_id,
                     )
                     .map_err(store_error)?;
                 return self
-                    .observe_delivery_job(store, task, plan, &job_id, false, report)
+                    .observe_delivery_job(store, task, plan, target, &job_id, false, report)
                     .await;
             }
         }
         // No launch was ever recorded for this operation. If the real target
-        // already proves the delivery, record that observation instead of
-        // running the command again.
-        if recorded.is_none() {
-            let observed = crate::super_agent::delivery::verify_delivery(task, plan)?;
-            if observed.complete {
-                return self.finish_delivery(store, task, plan, None, true, report);
-            }
+        // already proves this repository's delivery, record that observation
+        // instead of running the command again.
+        if recorded.is_none() && verify_target_delivery(task, plan, target)?.verified {
+            self.record_target_observation(store, task, plan, target)?;
+            return self.finalize_delivery(store, task, plan, None, true, report);
         }
         // The receipt exists but no job was recorded: the previous host stopped
         // before the launcher returned one. This is still a first launch, so it
-        // needs current ownership.
-        if let Some(reason) =
-            crate::super_agent::delivery::delivery_ownership(store, plan)?.reason()
-        {
-            return self.block_delivery(
-                store,
-                &task.task_id,
-                &reason,
-                "delivery-ownership",
-                report,
-            );
-        }
+        // needs current ownership, which the targeted revalidation proves.
         // A genuinely fresh launch repeats the live baseline/checkout
         // preflight. An adopted operation was handled above and is never
         // re-validated against the old OID that its own write already moved.
-        match crate::super_agent::delivery::revalidate_for_dispatch(task, plan)? {
+        match crate::super_agent::delivery::revalidate_repository_for_dispatch(
+            store,
+            task,
+            plan,
+            &target.repository_id,
+        )? {
             crate::super_agent::delivery::DispatchRevalidation::Ready => {}
             crate::super_agent::delivery::DispatchRevalidation::ReintegrationNeeded(reason) => {
                 return self.block_delivery(
@@ -795,7 +828,7 @@ impl Orchestrator {
                 );
             }
         }
-        let instruction = coder_delivery_prompt(task, plan);
+        let instruction = coder_delivery_prompt(task, target);
         let outcome = self
             .launcher()
             .resume_coder_for_delivery(task, &instruction, &identity)
@@ -804,7 +837,7 @@ impl Orchestrator {
             .set_repository_dispatch_job(
                 &task.task_id,
                 &plan.operation_id,
-                &plan.repositories[0].repository_id,
+                &target.repository_id,
                 &outcome.job_id,
             )
             .map_err(store_error)?;
@@ -812,6 +845,7 @@ impl Orchestrator {
             store,
             task,
             plan,
+            target,
             &outcome.job_id,
             outcome.in_progress,
             report,
@@ -965,18 +999,20 @@ impl Orchestrator {
                 )));
             }
         }
-        self.launcher().delivery_binding_mismatch(&operation, job_id)
+        self.launcher()
+            .delivery_binding_mismatch(&operation, job_id)
     }
 
     /// Reads the dispatched job without ever inferring success from a member
     /// report. A running child is never declared finished, even if the target
     /// temporarily matches; only a stopped child is verified against the
-    /// pinned plan and the current checkout.
+    /// pinned plan and the named repository's current checkout.
     async fn observe_delivery_job(
         &self,
         store: &TaskStore,
         task: &TaskRecord,
         plan: &crate::super_agent::delivery::DeliveryPlan,
+        target: &crate::super_agent::delivery::DeliveryTargetPlan,
         job_id: &str,
         in_progress: bool,
         report: &mut TickReport,
@@ -987,7 +1023,8 @@ impl Orchestrator {
         match crate::services::background_sessions::inspect(&self.context.paths.data_dir, job_id)? {
             crate::services::background_sessions::JobSnapshot::Unreadable(reason) => {
                 let error = format!(
-                    "Delivery background task {job_id} has unreadable state ({reason}); the original files were preserved"
+                    "Delivery background task {job_id} for repository {} has unreadable state ({reason}); the original files were preserved",
+                    target.repository_id
                 );
                 self.block_task(store, &task.task_id, &error, "delivery-job-unreadable")?;
                 report.blocked.push(format!("{}: {error}", task.task_id));
@@ -998,7 +1035,8 @@ impl Orchestrator {
             }
             crate::services::background_sessions::JobSnapshot::Missing => {
                 let error = format!(
-                    "Delivery background task {job_id} produced no state; the target was not verified"
+                    "Delivery background task {job_id} for repository {} produced no state; the target was not verified",
+                    target.repository_id
                 );
                 self.block_task(store, &task.task_id, &error, "delivery-job-missing")?;
                 report.blocked.push(format!("{}: {error}", task.task_id));
@@ -1011,23 +1049,27 @@ impl Orchestrator {
                 if matches!(job.status.as_str(), "starting" | "running" | "unresponsive") {
                     return Ok(task.clone());
                 }
-                let verification = crate::super_agent::delivery::verify_delivery(task, plan)?;
-                if verification.complete {
-                    return self.finish_delivery(store, task, plan, Some(job_id), false, report);
+                let verification = verify_target_delivery(task, plan, target)?;
+                if verification.verified {
+                    // Only this repository's own observation is durable now;
+                    // the task-wide fact still needs every other repository.
+                    self.record_target_observation(store, task, plan, target)?;
+                    return self.finalize_delivery(store, task, plan, Some(job_id), false, report);
                 }
-                let detail = if verification.failures.is_empty() {
+                let detail = if verification.reason.is_empty() {
                     "the target does not contain the approved content".to_owned()
                 } else {
-                    verification.failures.join("; ")
+                    verification.reason
                 };
                 let reason = if job.status == "completed" {
                     format!(
-                        "The Coder delivery job {job_id} finished but the target branch was not delivered: {detail}"
+                        "The Coder delivery job {job_id} for repository {} finished but its target branch was not delivered: {detail}",
+                        target.repository_id
                     )
                 } else {
                     format!(
-                        "The Coder delivery job {job_id} ended {}: {detail}",
-                        job.status
+                        "The Coder delivery job {job_id} for repository {} ended {}: {detail}",
+                        target.repository_id, job.status
                     )
                 };
                 self.block_task(store, &task.task_id, &reason, "delivery-not-applied")?;
@@ -1040,9 +1082,85 @@ impl Orchestrator {
         }
     }
 
-    /// Persists the host-verified delivery observation. Each planned repository
-    /// gets its own durable observation first; only then may the whole task be
-    /// marked delivered. It never emits task completion or cleanup.
+    /// Records one repository's host-verified observation. It never marks the
+    /// whole task delivered; the global fact is gated by
+    /// [`Self::finalize_delivery`].
+    fn record_target_observation(
+        &self,
+        store: &TaskStore,
+        task: &TaskRecord,
+        plan: &crate::super_agent::delivery::DeliveryPlan,
+        target: &crate::super_agent::delivery::DeliveryTargetPlan,
+    ) -> Result<()> {
+        let coder_session_id = task
+            .coder
+            .session_id
+            .clone()
+            .context("Task has no Coder session to record the delivery")?;
+        store
+            .record_repository_delivery_observed(
+                &crate::super_agent::delivery::RepositoryDeliveryObservation {
+                    task_id: plan.task_id.clone(),
+                    spec_version: plan.spec_version,
+                    review_round: plan.review_round,
+                    plan_operation_id: plan.operation_id.clone(),
+                    repository_id: target.repository_id.clone(),
+                    old_oid: target.old_oid.clone(),
+                    new_oid: target.new_oid.clone(),
+                    target_ref: target.target_ref.clone(),
+                    coder_session_id,
+                    attempt: target.attempt,
+                    verified: true,
+                    observed_at: chrono::Utc::now().to_rfc3339(),
+                },
+            )
+            .map_err(store_error)?;
+        Ok(())
+    }
+
+    /// Turns per-repository observations into the task-wide delivered fact.
+    ///
+    /// It waits while another planned repository is unfinished. Once every
+    /// repository has its own durable observation it re-reads all real targets:
+    /// a repository that drifted after its observation blocks instead of being
+    /// refreshed, and no task-wide event is emitted from partial or stale
+    /// evidence.
+    fn finalize_delivery(
+        &self,
+        store: &TaskStore,
+        task: &TaskRecord,
+        plan: &crate::super_agent::delivery::DeliveryPlan,
+        job_id: Option<&str>,
+        observed_without_dispatch: bool,
+        report: &mut TickReport,
+    ) -> Result<TaskRecord> {
+        if !store
+            .delivery_plan_observations_complete(plan)
+            .map_err(store_error)?
+        {
+            return Ok(task.clone());
+        }
+        let verification = crate::super_agent::delivery::verify_delivery(task, plan)?;
+        if !verification.complete {
+            let reason = format!(
+                "The delivery plan {} cannot be completed because a fresh verification of every planned repository failed: {}",
+                plan.operation_id,
+                verification.failures.join("; ")
+            );
+            return self.block_delivery(
+                store,
+                &task.task_id,
+                &reason,
+                "delivery-final-verification",
+                report,
+            );
+        }
+        self.finish_delivery(store, task, plan, job_id, observed_without_dispatch, report)
+    }
+
+    /// Persists the host-verified task-wide delivery fact. Every planned
+    /// repository already has its own durable observation; this only marks the
+    /// task delivered and never emits task completion or cleanup.
     fn finish_delivery(
         &self,
         store: &TaskStore,
@@ -1052,31 +1170,6 @@ impl Orchestrator {
         observed_without_dispatch: bool,
         report: &mut TickReport,
     ) -> Result<TaskRecord> {
-        let coder_session_id = task
-            .coder
-            .session_id
-            .clone()
-            .context("Task has no Coder session to record the delivery")?;
-        for target in &plan.repositories {
-            store
-                .record_repository_delivery_observed(
-                    &crate::super_agent::delivery::RepositoryDeliveryObservation {
-                        task_id: plan.task_id.clone(),
-                        spec_version: plan.spec_version,
-                        review_round: plan.review_round,
-                        plan_operation_id: plan.operation_id.clone(),
-                        repository_id: target.repository_id.clone(),
-                        old_oid: target.old_oid.clone(),
-                        new_oid: target.new_oid.clone(),
-                        target_ref: target.target_ref.clone(),
-                        coder_session_id: coder_session_id.clone(),
-                        attempt: target.attempt,
-                        verified: true,
-                        observed_at: chrono::Utc::now().to_rfc3339(),
-                    },
-                )
-                .map_err(store_error)?;
-        }
         let repositories: Vec<serde_json::Value> = plan
             .repositories
             .iter()
@@ -2062,6 +2155,56 @@ fn delivery_context_mismatch(
         ));
     }
     None
+}
+
+/// A durable repository observation is only usable while it still describes
+/// the persisted plan's exact target and the task's current Coder. Anything
+/// else is a contradiction, not an upgrade or a refresh.
+fn delivery_observation_mismatch(
+    task: &TaskRecord,
+    plan: &crate::super_agent::delivery::DeliveryPlan,
+    target: &crate::super_agent::delivery::DeliveryTargetPlan,
+    observation: &crate::super_agent::delivery::RepositoryDeliveryObservation,
+) -> Option<String> {
+    let matches = observation.verified
+        && observation.task_id == plan.task_id
+        && observation.spec_version == plan.spec_version
+        && observation.review_round == plan.review_round
+        && observation.plan_operation_id == plan.operation_id
+        && observation.repository_id == target.repository_id
+        && observation.old_oid == target.old_oid
+        && observation.new_oid == target.new_oid
+        && observation.target_ref == target.target_ref
+        && observation.attempt == target.attempt
+        && task.coder.session_id.as_deref() == Some(observation.coder_session_id.as_str());
+    if matches {
+        return None;
+    }
+    Some(format!(
+        "{}: the recorded delivery observation does not match the persisted plan target or the current Coder session; refusing to treat it as evidence",
+        target.repository_id
+    ))
+}
+
+/// Verifies one repository of a complete plan. The full plan membership is
+/// still validated by [`crate::super_agent::delivery::verify_delivery`], so a
+/// caller cannot narrow the check to a singleton.
+fn verify_target_delivery(
+    task: &TaskRecord,
+    plan: &crate::super_agent::delivery::DeliveryPlan,
+    target: &crate::super_agent::delivery::DeliveryTargetPlan,
+) -> Result<crate::super_agent::delivery::DeliveryTargetVerification> {
+    let verification = crate::super_agent::delivery::verify_delivery(task, plan)?;
+    verification
+        .repositories
+        .into_iter()
+        .find(|entry| entry.repository_id == target.repository_id)
+        .with_context(|| {
+            format!(
+                "The delivery verification did not cover repository {}",
+                target.repository_id
+            )
+        })
 }
 
 /// The identity a receipt's repository and the persisted plan imply.

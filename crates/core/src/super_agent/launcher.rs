@@ -1522,14 +1522,14 @@ pub fn coder_implementation_prompt(task: &TaskRecord) -> String {
     )
 }
 
-/// Instruction for stage 5B2a delivery. It names the exact approved commit,
-/// the current target object and one bounded command built from the persisted
-/// plan. The Coder performs the write; the host only schedules and verifies.
+/// Instruction for stage 5B2a delivery. It names the exact approved commit for
+/// one repository, the current target object and one bounded command built from
+/// the persisted plan. The Coder performs the write; the host only schedules
+/// and verifies.
 pub fn coder_delivery_prompt(
     task: &TaskRecord,
-    plan: &crate::super_agent::delivery::DeliveryPlan,
+    target: &crate::super_agent::delivery::DeliveryTargetPlan,
 ) -> String {
-    let target = &plan.repositories[0];
     let destination = match &target.destination {
         crate::super_agent::delivery::DeliveryDestination::CheckedOut { path } => {
             format!("the checked-out target worktree {}", path.display())
