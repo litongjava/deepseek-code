@@ -152,6 +152,46 @@ async fn completed(root: &Path, id: &str) -> jobs::Job {
     .expect("job did not finish")
 }
 
+/// End-to-end coverage of the common case: a submission that follows a
+/// published completion is admitted with no pause between turns. This exercises
+/// the real protocol path; it does not force the host's finalization window, so
+/// it is not a deterministic reproduction of that race. Completion is published
+/// before the host releases admission, and the host waits for the release.
+#[tokio::test]
+async fn turns_submitted_right_after_completion_are_admitted() {
+    let temp = tempfile::tempdir().unwrap();
+    let workspace = temp.path().join("workspace");
+    std::fs::create_dir(&workspace).unwrap();
+    let paths = RuntimePaths::new(temp.path().join("data")).unwrap();
+    let store = SessionStore::new(paths.open_database().unwrap());
+    let session = store.create(&workspace, "fixture", "cli-runtime").unwrap();
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let endpoint = format!("http://{}", listener.local_addr().unwrap());
+    let app = Router::new().route(
+        "/v1/chat/completions",
+        post(|| async {
+            (
+                [("content-type", "text/event-stream")],
+                "data: {\"choices\":[{\"index\":0,\"delta\":{\"content\":\"done\"},\"finish_reason\":null}]}\n\ndata: {\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"stop\"}]}\n\ndata: [DONE]\n\n",
+            )
+        }),
+    );
+    let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+    let executable = temp.path().join(if cfg!(windows) { "immediate.exe" } else { "immediate" });
+    std::fs::copy(test_cli_executable(), &executable).unwrap();
+    let host = worker::ensure_worker(&paths.data_dir, &executable, &session, &workspace)
+        .await
+        .unwrap();
+    let _cleanup = Cleanup(vec![host.supervisor_pid.unwrap()]);
+    for index in 0..3 {
+        let id = submit(&host, &endpoint, &format!("turn {index}"), "fixture", 128).await;
+        let job = completed(&paths.data_dir, &id).await;
+        assert_eq!(job.status, "completed", "turn {index}: {:?}", job.error);
+    }
+    worker::shutdown(&paths.data_dir, &session).await.unwrap();
+    server.abort();
+}
+
 #[tokio::test]
 async fn bash_session_grant_survives_live_reconnect_but_not_revoke_or_cold_restart() {
     let temp = tempfile::tempdir().unwrap();
@@ -346,7 +386,7 @@ async fn submit_in_mode(
     {
         environment.push(("DEEPSEEK_CODE_WORKER_MODEL".into(),json!({"id":base,"name":base,"enabled":true,"supports_vision":false,"supports_web_search":false,"context_window":1_000_000,"max_tokens":max_tokens}).to_string()));
     }
-    worker::call(
+    let result = worker::call(
         host,
         &worker::Request::Submit {
             id: id.clone(),
@@ -355,9 +395,40 @@ async fn submit_in_mode(
             environment,
         },
     )
-    .await
-    .unwrap();
+    .await;
+    if let Err(error) = result {
+        // Distinguish the two admission states: the previous turn is still
+        // recorded as active (its finalization has not removed `active.json`)
+        // from the recorder already being cleared while admission is still held.
+        panic!(
+            "submit failed: {error:#}\n{}",
+            admission_diagnostics(host, &id)
+        );
+    }
     id
+}
+
+/// What the worker directory says about admission at the moment a submit failed.
+fn admission_diagnostics(host: &worker::Worker, id: &str) -> String {
+    let dir = worker::directory(host);
+    let active = std::fs::read(dir.join("active.json"))
+        .map(|bytes| String::from_utf8_lossy(&bytes).into_owned())
+        .unwrap_or_else(|error| format!("<{error}>"));
+    let recorded = std::fs::read(dir.join("active.json"))
+        .ok()
+        .and_then(|bytes| serde_json::from_slice::<String>(&bytes).ok())
+        .and_then(|active| jobs::get(&host.root, &active).ok())
+        .map(|job| format!("status={} finished_ms={:?}", job.status, job.finished_ms))
+        .unwrap_or_else(|| "<none>".into());
+    let this = jobs::get(&host.root, id)
+        .map(|job| format!("status={} finished_ms={:?}", job.status, job.finished_ms))
+        .unwrap_or_else(|error| format!("<{error}>"));
+    let stderr = std::fs::read_to_string(dir.join("stderr.log")).unwrap_or_default();
+    let tail: Vec<&str> = stderr.lines().rev().take(8).collect();
+    format!(
+        "active.json={active} recorded_job={recorded} this_job={this} stderr_tail={:?}",
+        tail
+    )
 }
 
 fn assert_no_secret(path: &Path) {
