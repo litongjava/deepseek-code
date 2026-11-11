@@ -5,6 +5,11 @@ use crate::super_agent::config::SuperAgentConfig;
 use crate::super_agent::crp::{self, ToolRuntime};
 use crate::super_agent::role::{self, Role};
 use crate::super_agent::store::{ApprovalDraft, TaskStore};
+use crate::super_agent::delivery::{
+    DeliveryDestination, DeliveryDispatch, DeliveryOperationIdentity, DeliveryPlan,
+    DeliveryTargetPlan,
+};
+use crate::super_agent::launcher::DeliveryJobBinding;
 use crate::super_agent::{EventType, NewEvent, TaskSpec};
 use serde_json::{json, Value};
 use std::path::{Path, PathBuf};
@@ -135,6 +140,21 @@ impl Fixture {
             "bypass".into(),
             Some(executable()),
         )
+    }
+
+    fn launcher(&self) -> crate::super_agent::launcher::Launcher {
+        let config: SuperAgentConfig =
+            crate::super_agent::config::parse(&json!({"agents":{}})).unwrap();
+        let mut provider = self.provider();
+        provider.provider.models = vec![provider.model.clone()];
+        crate::super_agent::launcher::Launcher {
+            context: self.context.clone(),
+            config,
+            provider,
+            permission_mode: "bypass".into(),
+            executable_override: Some(executable()),
+            gate: None,
+        }
     }
 
     fn runtime_for(&self, session: &str) -> ToolRuntime {
@@ -1075,13 +1095,18 @@ fn delivery_identities() -> (
             attempt: 1,
         }],
     };
+    let identity = crate::super_agent::delivery::DeliveryOperationIdentity::for_target(
+        &plan,
+        &plan.repositories[0],
+        "coder-session",
+    );
     let dispatch = crate::super_agent::delivery::DeliveryDispatch {
         task_id: task.task_id.clone(),
         spec_version: task.spec_version,
         review_round: task.review_round,
         plan_operation_id: plan.operation_id.clone(),
         coder_session_id: "coder-session".into(),
-        purpose: "delivery".into(),
+        purpose: identity.purpose_key(),
         repository_id: Some("repo-1".into()),
         old_oid: Some("old".into()),
         new_oid: Some("new".into()),
@@ -1094,8 +1119,14 @@ fn delivery_identities() -> (
 
 fn delivery_operation(
     task: &TaskRecord,
+    plan: &crate::super_agent::delivery::DeliveryPlan,
     dispatch: &crate::super_agent::delivery::DeliveryDispatch,
 ) -> crate::super_agent::launcher::LaunchOperation {
+    let identity = crate::super_agent::delivery::DeliveryOperationIdentity::for_target(
+        plan,
+        &plan.repositories[0],
+        &dispatch.coder_session_id,
+    );
     crate::super_agent::launcher::LaunchOperation {
         operation_id: format!("{}:coder:resume", task.task_id),
         task_id: task.task_id.clone(),
@@ -1103,7 +1134,8 @@ fn delivery_operation(
         kind: "resume".into(),
         spec_version: task.spec_version,
         review_round: task.review_round,
-        purpose: "delivery".into(),
+        purpose: identity.purpose_key(),
+        delivery: Some(identity),
         workspace: task.spec.workspace.clone(),
         session_id: dispatch.coder_session_id.clone(),
         job_id: "job-1".into(),
@@ -1123,6 +1155,38 @@ fn delivery_operation(
     }
 }
 
+fn legacy_delivery_operation(
+    task: &TaskRecord,
+    dispatch: &crate::super_agent::delivery::DeliveryDispatch,
+) -> crate::super_agent::launcher::LaunchOperation {
+    crate::super_agent::launcher::LaunchOperation {
+        operation_id: format!("{}:coder:resume", task.task_id),
+        task_id: task.task_id.clone(),
+        role: "coder".into(),
+        kind: "resume".into(),
+        spec_version: task.spec_version,
+        review_round: task.review_round,
+        purpose: crate::super_agent::delivery::LEGACY_DELIVERY_PURPOSE.into(),
+        delivery: None,
+        workspace: task.spec.workspace.clone(),
+        session_id: dispatch.coder_session_id.clone(),
+        job_id: "job-1".into(),
+        resume_session: Some(dispatch.coder_session_id.clone()),
+        prompt: "deliver".into(),
+        model: "fixture-model".into(),
+        permission_mode: "bypass".into(),
+        warning: None,
+        allow_workspace_move: false,
+        state: "completed".into(),
+        created_at: "2026-01-01T00:00:00Z".into(),
+        updated_at: "2026-01-01T00:00:00Z".into(),
+        last_job_status: None,
+        last_error: None,
+        consumed_at: None,
+        handle: None,
+    }
+}
+
 fn delivery_handle(
     operation: &crate::super_agent::launcher::LaunchOperation,
 ) -> crate::super_agent::launcher::LaunchRecord {
@@ -1132,6 +1196,7 @@ fn delivery_handle(
         job_id: operation.job_id.clone(),
         workspace: operation.workspace.clone(),
         model: operation.model.clone(),
+        delivery: operation.delivery.clone(),
         warning: None,
         created_at: "2026-01-01T00:00:00Z".into(),
     }
@@ -1162,7 +1227,7 @@ fn delivery_job(
 #[test]
 fn a_matching_delivery_identity_is_accepted() {
     let (_fixture, task, plan, dispatch) = delivery_identities();
-    let operation = delivery_operation(&task, &dispatch);
+    let operation = delivery_operation(&task, &plan, &dispatch);
     let handle = delivery_handle(&operation);
     let job = delivery_job(&task, &operation);
     assert_eq!(delivery_context_mismatch(&task, &plan, &dispatch), None);
@@ -1183,7 +1248,7 @@ fn a_matching_delivery_identity_is_accepted() {
 #[test]
 fn a_contradictory_receipt_or_operation_is_rejected() {
     let (_fixture, task, plan, dispatch) = delivery_identities();
-    let operation = delivery_operation(&task, &dispatch);
+    let operation = delivery_operation(&task, &plan, &dispatch);
 
     let rejected = |plan: &crate::super_agent::delivery::DeliveryPlan,
                     dispatch: &crate::super_agent::delivery::DeliveryDispatch| {
@@ -1297,12 +1362,109 @@ fn a_contradictory_receipt_or_operation_is_rejected() {
             .expect("a contradictory plan must be rejected")
             .contains("other-task")
     );
+
+    // Every typed identity fact is part of the adoption decision. Editing the
+    // stored identity under the same key is a contradiction, not a new launch.
+    let base = operation.delivery.clone().expect("typed identity");
+    for mutate in [
+        |identity: &mut crate::super_agent::delivery::DeliveryOperationIdentity| {
+            identity.repository_id = "repo-2".into()
+        },
+        |identity: &mut crate::super_agent::delivery::DeliveryOperationIdentity| {
+            identity.plan_operation_id = "other-plan".into()
+        },
+        |identity: &mut crate::super_agent::delivery::DeliveryOperationIdentity| {
+            identity.evidence_event_id = "other-evidence".into()
+        },
+        |identity: &mut crate::super_agent::delivery::DeliveryOperationIdentity| {
+            identity.review_event_id = "other-review".into()
+        },
+        |identity: &mut crate::super_agent::delivery::DeliveryOperationIdentity| {
+            identity.content_fingerprint = "other-fingerprint".into()
+        },
+        |identity: &mut crate::super_agent::delivery::DeliveryOperationIdentity| {
+            identity.old_oid = "other-old".into()
+        },
+        |identity: &mut crate::super_agent::delivery::DeliveryOperationIdentity| {
+            identity.new_oid = "other-new".into()
+        },
+        |identity: &mut crate::super_agent::delivery::DeliveryOperationIdentity| {
+            identity.attempt += 1
+        },
+        |identity: &mut crate::super_agent::delivery::DeliveryOperationIdentity| {
+            identity.coder_session_id = "other-coder".into()
+        },
+        |identity: &mut crate::super_agent::delivery::DeliveryOperationIdentity| {
+            identity.version += 1
+        },
+    ] {
+        let mut changed = operation.clone();
+        let mut identity = base.clone();
+        mutate(&mut identity);
+        changed.delivery = Some(identity);
+        assert!(
+            delivery_operation_mismatch(&task, &plan, &dispatch, &changed).is_some(),
+            "a contradictory typed delivery identity must be rejected"
+        );
+    }
+    // A typed record whose identity field was removed is incomplete, not a
+    // genuine legacy record.
+    let mut changed = operation.clone();
+    changed.delivery = None;
+    assert!(delivery_operation_mismatch(&task, &plan, &dispatch, &changed)
+        .expect("an incomplete typed record must be rejected")
+        .contains("purpose"));
+}
+
+#[test]
+fn a_genuine_legacy_record_is_adopted_only_through_the_unique_plan() {
+    let (_fixture, task, plan, typed_dispatch) = delivery_identities();
+    let legacy_dispatch = crate::super_agent::delivery::DeliveryDispatch {
+        purpose: crate::super_agent::delivery::LEGACY_DELIVERY_PURPOSE.into(),
+        ..typed_dispatch.clone()
+    };
+    let legacy = legacy_delivery_operation(&task, &legacy_dispatch);
+    // A legacy receipt, a single-repository persisted plan and a genuinely
+    // legacy operation (no typed field) are accepted together.
+    assert_eq!(delivery_context_mismatch(&task, &plan, &legacy_dispatch), None);
+    assert_eq!(
+        delivery_operation_mismatch(&task, &plan, &legacy_dispatch, &legacy),
+        None
+    );
+    let handle = delivery_handle(&legacy);
+    assert_eq!(
+        delivery_handle_mismatch(&legacy, &legacy_dispatch, &handle),
+        None
+    );
+
+    // A multi-repository plan cannot be bound by an ambiguous old receipt.
+    let mut multi = plan.clone();
+    let mut second = plan.repositories[0].clone();
+    second.repository_id = "repo-2".into();
+    multi.repositories.push(second);
+    assert!(delivery_operation_mismatch(&task, &multi, &legacy_dispatch, &legacy)
+        .expect("a multi-repository legacy record must be rejected")
+        .contains("legacy"));
+
+    // A typed operation never satisfies a legacy receipt, and a legacy
+    // operation never satisfies a typed receipt: a rollback cannot shed the
+    // required identity proof.
+    let typed = delivery_operation(&task, &plan, &typed_dispatch);
+    assert!(delivery_operation_mismatch(&task, &plan, &legacy_dispatch, &typed).is_some());
+    assert!(delivery_operation_mismatch(&task, &plan, &typed_dispatch, &legacy).is_some());
+
+    // A record created by the new code always carries the typed purpose and
+    // identity, so it cannot be mistaken for a legacy one merely because one
+    // field is missing; the launcher reads it only from the typed key.
+    let mut incomplete = typed.clone();
+    incomplete.delivery = None;
+    assert!(delivery_operation_mismatch(&task, &plan, &typed_dispatch, &incomplete).is_some());
 }
 
 #[test]
 fn a_handle_or_actual_job_that_points_elsewhere_is_rejected() {
-    let (_fixture, task, _plan, dispatch) = delivery_identities();
-    let operation = delivery_operation(&task, &dispatch);
+    let (_fixture, task, plan, dispatch) = delivery_identities();
+    let operation = delivery_operation(&task, &plan, &dispatch);
     let handle = delivery_handle(&operation);
     let job = delivery_job(&task, &operation);
 
@@ -1434,4 +1596,381 @@ fn a_malformed_or_unreadable_delivery_job_blocks_without_binding() {
         DeliveryJobCheck::Valid(_) => panic!("an unreadable job must block"),
     }
     assert_eq!(std::fs::read(&state).unwrap(), broken);
+}
+
+fn repository_plan(task: &TaskRecord, repositories: &[(&str, &str, &str)]) -> DeliveryPlan {
+    DeliveryPlan {
+        operation_id: "bound-plan".into(),
+        task_id: task.task_id.clone(),
+        spec_version: task.spec_version,
+        review_round: task.review_round,
+        evidence_event_id: "evidence".into(),
+        review_event_id: "review".into(),
+        content_fingerprint: "fingerprint".into(),
+        created_at: "2026-01-01T00:00:00Z".into(),
+        repositories: repositories
+            .iter()
+            .enumerate()
+            .map(|(index, (repository_id, old_oid, new_oid))| DeliveryTargetPlan {
+                repository_id: (*repository_id).into(),
+                repo_root: PathBuf::from(format!("/fixture/{repository_id}")),
+                git_common_dir: PathBuf::from(format!("/fixture/{repository_id}/.git")),
+                target_branch: "develop".into(),
+                target_ref: "refs/heads/develop".into(),
+                destination: DeliveryDestination::RefOnly,
+                baseline_commit: (*old_oid).into(),
+                reviewed_commit: (*new_oid).into(),
+                integrated_commit: (*new_oid).into(),
+                integrated_tree: "tree".into(),
+                old_oid: (*old_oid).into(),
+                new_oid: (*new_oid).into(),
+                review_stage: crate::super_agent::model::ReviewStage::Implementation,
+                lock_key: format!("branch:/fixture/{repository_id}/.git:refs/heads/develop"),
+                lock_operation_id: format!("lock-{index}"),
+                attempt: 1,
+            })
+            .collect(),
+    }
+}
+
+fn typed_operation(
+    launcher: &crate::super_agent::launcher::Launcher,
+    task: &TaskRecord,
+    plan: &DeliveryPlan,
+    target: &DeliveryTargetPlan,
+    job_id: &str,
+) -> crate::super_agent::launcher::LaunchOperation {
+    let identity = DeliveryOperationIdentity::for_target(plan, target, "coder-session");
+    let operation = crate::super_agent::launcher::LaunchOperation {
+        operation_id: format!("{}:coder:resume", task.task_id),
+        task_id: task.task_id.clone(),
+        role: "coder".into(),
+        kind: "resume".into(),
+        spec_version: task.spec_version,
+        review_round: task.review_round,
+        purpose: identity.purpose_key(),
+        delivery: Some(identity.clone()),
+        workspace: task.spec.workspace.clone(),
+        session_id: "coder-session".into(),
+        job_id: job_id.into(),
+        resume_session: Some("coder-session".into()),
+        prompt: "deliver".into(),
+        model: "fixture-model".into(),
+        permission_mode: "bypass".into(),
+        warning: None,
+        allow_workspace_move: false,
+        state: "completed".into(),
+        created_at: "2026-01-01T00:00:00Z".into(),
+        updated_at: "2026-01-01T00:00:00Z".into(),
+        last_job_status: None,
+        last_error: None,
+        consumed_at: None,
+        handle: Some(crate::super_agent::launcher::LaunchRecord {
+            role: "coder".into(),
+            session_id: "coder-session".into(),
+            job_id: job_id.into(),
+            workspace: task.spec.workspace.clone(),
+            model: "fixture-model".into(),
+            delivery: Some(identity),
+            warning: None,
+            created_at: "2026-01-01T00:00:00Z".into(),
+        }),
+    };
+    let key = launcher.operation_key_for(
+        task,
+        crate::super_agent::MemberRole::Coder,
+        LaunchKind::Resume,
+        &operation.purpose,
+    );
+    launcher.context.save_setting(&key, &operation).unwrap();
+    operation
+}
+
+fn legacy_operation(
+    launcher: &crate::super_agent::launcher::Launcher,
+    task: &TaskRecord,
+    job_id: &str,
+) -> crate::super_agent::launcher::LaunchOperation {
+    let operation = crate::super_agent::launcher::LaunchOperation {
+        operation_id: format!("{}:coder:resume", task.task_id),
+        task_id: task.task_id.clone(),
+        role: "coder".into(),
+        kind: "resume".into(),
+        spec_version: task.spec_version,
+        review_round: task.review_round,
+        purpose: "delivery".into(),
+        delivery: None,
+        workspace: task.spec.workspace.clone(),
+        session_id: "coder-session".into(),
+        job_id: job_id.into(),
+        resume_session: Some("coder-session".into()),
+        prompt: "deliver".into(),
+        model: "fixture-model".into(),
+        permission_mode: "bypass".into(),
+        warning: None,
+        allow_workspace_move: false,
+        state: "completed".into(),
+        created_at: "2026-01-01T00:00:00Z".into(),
+        updated_at: "2026-01-01T00:00:00Z".into(),
+        last_job_status: None,
+        last_error: None,
+        consumed_at: None,
+        handle: None,
+    };
+    let key = launcher.operation_key_for(
+        task,
+        crate::super_agent::MemberRole::Coder,
+        LaunchKind::Resume,
+        "delivery",
+    );
+    launcher.context.save_setting(&key, &operation).unwrap();
+    operation
+}
+
+fn binding_path(data: &Path, job_id: &str) -> PathBuf {
+    data.join("background-tasks")
+        .join(job_id)
+        .join("delivery-identity.json")
+}
+
+fn write_binding(data: &Path, job_id: &str, identity: &DeliveryOperationIdentity) {
+    let path = binding_path(data, job_id);
+    std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+    std::fs::write(
+        &path,
+        serde_json::to_vec(&DeliveryJobBinding {
+            version: 1,
+            job_id: job_id.to_owned(),
+            session_id: identity.coder_session_id.clone(),
+            identity: identity.clone(),
+        })
+        .unwrap(),
+    )
+    .unwrap();
+}
+
+fn bound_dispatch(
+    plan: &DeliveryPlan,
+    target: &DeliveryTargetPlan,
+    identity: &DeliveryOperationIdentity,
+    job_id: &str,
+) -> DeliveryDispatch {
+    DeliveryDispatch {
+        task_id: plan.task_id.clone(),
+        spec_version: plan.spec_version,
+        review_round: plan.review_round,
+        plan_operation_id: plan.operation_id.clone(),
+        coder_session_id: identity.coder_session_id.clone(),
+        purpose: identity.purpose_key(),
+        repository_id: Some(target.repository_id.clone()),
+        old_oid: Some(target.old_oid.clone()),
+        new_oid: Some(target.new_oid.clone()),
+        attempt: target.attempt,
+        job_id: Some(job_id.to_owned()),
+        created_at: "2026-01-01T00:00:00Z".into(),
+    }
+}
+
+fn delivery_task(fixture: &Fixture) -> TaskRecord {
+    let mut task = fixture.task();
+    task.phase = Phase::DeliveryPending;
+    task.status = Status::Running;
+    task.review_round = 1;
+    task.coder.session_id = Some("coder-session".into());
+    task
+}
+
+#[test]
+fn a_bound_receipt_must_name_its_own_job_operation_and_durable_identity() {
+    let fixture = Fixture::new();
+    let task = delivery_task(&fixture);
+    let plan = repository_plan(
+        &task,
+        &[("repo-1", "a-old", "a-new"), ("repo-2", "b-old", "b-new")],
+    );
+    let launcher = fixture.launcher();
+    let orchestrator = fixture.orchestrator(json!({"agents":{}}));
+    let identity_a = DeliveryOperationIdentity::for_target(&plan, &plan.repositories[0], "coder-session");
+    let identity_b = DeliveryOperationIdentity::for_target(&plan, &plan.repositories[1], "coder-session");
+    let job_a = uuid::Uuid::new_v4().to_string();
+    let job_b = uuid::Uuid::new_v4().to_string();
+    let operation_a = typed_operation(&launcher, &task, &plan, &plan.repositories[0], &job_a);
+    typed_operation(&launcher, &task, &plan, &plan.repositories[1], &job_b);
+    write_binding(&fixture.data, &job_a, &identity_a);
+    write_binding(&fixture.data, &job_b, &identity_b);
+    let dispatch_a = bound_dispatch(&plan, &plan.repositories[0], &identity_a, &job_a);
+    let dispatch_b = bound_dispatch(&plan, &plan.repositories[1], &identity_b, &job_b);
+
+    // Each repository's own receipt and job are accepted.
+    assert_eq!(
+        orchestrator
+            .bound_delivery_mismatch(&task, &plan, &dispatch_a, &job_a)
+            .unwrap(),
+        None
+    );
+    assert_eq!(
+        orchestrator
+            .bound_delivery_mismatch(&task, &plan, &dispatch_b, &job_b)
+            .unwrap(),
+        None
+    );
+
+    // A receipt that names repository A but the job reserved for repository B
+    // shares the same Coder and Router, and is still refused.
+    let reason = orchestrator
+        .bound_delivery_mismatch(&task, &plan, &dispatch_a, &job_b)
+        .unwrap()
+        .expect("a swapped job must be refused");
+    assert!(
+        reason.contains("reserved") && reason.contains(&job_a),
+        "{reason}"
+    );
+
+    let key_a = launcher.operation_key_for(
+        &task,
+        crate::super_agent::MemberRole::Coder,
+        LaunchKind::Resume,
+        &identity_a.purpose_key(),
+    );
+    let stored: Value = launcher.context.setting(&key_a).unwrap().unwrap();
+    let stored_binding = std::fs::read(binding_path(&fixture.data, &job_a)).unwrap();
+
+    // A bound receipt whose operation record is missing has no proof.
+    launcher
+        .context
+        .db
+        .with_conn(|conn| {
+            conn.execute(
+                "DELETE FROM peripheral_settings WHERE key=?1",
+                [&key_a],
+            )
+        })
+        .unwrap()
+        .unwrap();
+    let reason = orchestrator
+        .bound_delivery_mismatch(&task, &plan, &dispatch_a, &job_a)
+        .unwrap()
+        .expect("a receipt without its operation must be refused");
+    assert!(reason.contains("no launch operation"), "{reason}");
+    launcher.context.save_setting(&key_a, &stored).unwrap();
+
+    // A typed operation whose identity field was removed is incomplete, not
+    // legacy, and cannot be observed.
+    let mut stripped = serde_json::to_value(&operation_a).unwrap();
+    stripped.as_object_mut().unwrap().remove("delivery");
+    launcher.context.save_setting(&key_a, &stripped).unwrap();
+    let reason = orchestrator
+        .bound_delivery_mismatch(&task, &plan, &dispatch_a, &job_a)
+        .unwrap()
+        .expect("a typed operation without its identity must be refused");
+    assert!(
+        reason.contains("does not match the receipt") && reason.contains("purpose"),
+        "{reason}"
+    );
+    launcher.context.save_setting(&key_a, &stored).unwrap();
+
+    // Changing the operation's repository, plan, evidence, OIDs, attempt or
+    // session is a contradiction, and the stored row is preserved.
+    for mutate in [
+        |value: &mut Value| value["delivery"]["repository_id"] = json!("repo-2"),
+        |value: &mut Value| value["delivery"]["plan_operation_id"] = json!("other-plan"),
+        |value: &mut Value| value["delivery"]["evidence_event_id"] = json!("other-evidence"),
+        |value: &mut Value| value["delivery"]["old_oid"] = json!("other-old"),
+        |value: &mut Value| value["delivery"]["new_oid"] = json!("other-new"),
+        |value: &mut Value| value["delivery"]["attempt"] = json!(2),
+        |value: &mut Value| value["delivery"]["coder_session_id"] = json!("other-coder"),
+    ] {
+        let mut changed = stored.clone();
+        mutate(&mut changed);
+        launcher.context.save_setting(&key_a, &changed).unwrap();
+        let reason = orchestrator
+            .bound_delivery_mismatch(&task, &plan, &dispatch_a, &job_a)
+            .unwrap()
+            .expect("a contradictory operation must be refused");
+        assert!(!reason.is_empty());
+        launcher.context.save_setting(&key_a, &stored).unwrap();
+    }
+
+    // The job's own durable binding must match the operation, not only the
+    // Coder session.
+    std::fs::remove_file(binding_path(&fixture.data, &job_a)).unwrap();
+    let reason = orchestrator
+        .bound_delivery_mismatch(&task, &plan, &dispatch_a, &job_a)
+        .unwrap()
+        .expect("a typed job without its binding must be refused");
+    assert!(reason.contains("no durable delivery identity"), "{reason}");
+    write_binding(&fixture.data, &job_a, &identity_b);
+    let reason = orchestrator
+        .bound_delivery_mismatch(&task, &plan, &dispatch_a, &job_a)
+        .unwrap()
+        .expect("a job bound to another identity must be refused");
+    assert!(reason.contains("carries delivery identity"), "{reason}");
+    std::fs::write(binding_path(&fixture.data, &job_a), &stored_binding).unwrap();
+
+    // The handle must point at the same reserved job as the operation.
+    let mut moved = stored.clone();
+    moved["job_id"] = json!(job_b);
+    launcher.context.save_setting(&key_a, &moved).unwrap();
+    let reason = orchestrator
+        .bound_delivery_mismatch(&task, &plan, &dispatch_a, &job_b)
+        .unwrap()
+        .expect("a contradictory handle must be refused");
+    assert!(reason.contains("recorded delivery child"), "{reason}");
+
+    // Everything rejected above left the original rows byte-identical.
+    assert_eq!(
+        launcher.context.setting::<Value>(&key_a).unwrap().unwrap()["task_id"],
+        json!(task.task_id)
+    );
+    assert_eq!(
+        std::fs::read(binding_path(&fixture.data, &job_a)).unwrap(),
+        stored_binding
+    );
+}
+
+#[test]
+fn a_bound_legacy_receipt_is_only_adopted_through_its_genuine_job() {
+    let fixture = Fixture::new();
+    let task = delivery_task(&fixture);
+    let plan = repository_plan(&task, &[("repo-1", "old", "new")]);
+    let launcher = fixture.launcher();
+    let orchestrator = fixture.orchestrator(json!({"agents":{}}));
+    let identity = DeliveryOperationIdentity::for_target(&plan, &plan.repositories[0], "coder-session");
+    let legacy_job = uuid::Uuid::new_v4().to_string();
+    let typed_job = uuid::Uuid::new_v4().to_string();
+    legacy_operation(&launcher, &task, &legacy_job);
+    let legacy_dispatch = DeliveryDispatch {
+        purpose: "delivery".into(),
+        ..bound_dispatch(&plan, &plan.repositories[0], &identity, &legacy_job)
+    };
+
+    // A genuine legacy operation, a legacy receipt uniquely bound by the
+    // single-repository plan and an existing job without any typed binding
+    // are adopted together.
+    assert_eq!(
+        orchestrator
+            .bound_delivery_mismatch(&task, &plan, &legacy_dispatch, &legacy_job)
+            .unwrap(),
+        None
+    );
+
+    // A legacy receipt cannot be pointed at a job that carries a typed
+    // identity, and a typed receipt cannot reuse the legacy operation.
+    write_binding(&fixture.data, &legacy_job, &identity);
+    let reason = orchestrator
+        .bound_delivery_mismatch(&task, &plan, &legacy_dispatch, &legacy_job)
+        .unwrap()
+        .expect("a legacy receipt cannot adopt a typed job");
+    assert!(reason.contains("mix identities"), "{reason}");
+    std::fs::remove_file(binding_path(&fixture.data, &legacy_job)).unwrap();
+
+    let typed_dispatch = bound_dispatch(&plan, &plan.repositories[0], &identity, &typed_job);
+    let reason = orchestrator
+        .bound_delivery_mismatch(&task, &plan, &typed_dispatch, &legacy_job)
+        .unwrap()
+        .expect("a typed receipt cannot adopt the legacy operation");
+    assert!(
+        reason.contains("no launch operation") || reason.contains("does not match the receipt"),
+        "{reason}"
+    );
 }

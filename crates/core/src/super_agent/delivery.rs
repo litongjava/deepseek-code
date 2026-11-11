@@ -20,11 +20,165 @@ use crate::super_agent::model::{
 };
 use crate::super_agent::store::{LockOutcome, StoreError, TaskStore};
 use crate::worktree::session::{command, git};
-use anyhow::{Context, Result};
+use anyhow::{ensure, Context, Result};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
+
+/// Current version of the repository delivery execution identity. Bump it when
+/// the identity fields or their meaning change; a record of another version is
+/// never silently adopted.
+pub const DELIVERY_IDENTITY_VERSION: u32 = 1;
+
+/// The legacy evidence purpose used by deliveries recorded before the typed
+/// identity existed. It is still accepted for reading and for one uniquely
+/// bound single-repository recovery, never for a new dispatch.
+pub const LEGACY_DELIVERY_PURPOSE: &str = "delivery";
+
+fn is_lower_hex(value: &str) -> bool {
+    !value.is_empty() && value.bytes().all(|byte| matches!(byte, b'0'..=b'9' | b'a'..=b'f'))
+}
+
+/// The complete execution identity of one repository delivery.
+///
+/// Every field is a durable host fact. The struct is stored as-is in launch
+/// operations, handles and receipts, so a reviewer can inspect all of it; the
+/// derived purpose is a stable, collision-resistant key, never a concatenation
+/// of unescaped identifiers.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DeliveryOperationIdentity {
+    /// Required. A typed record that lost this field is incomplete and must
+    /// fail to deserialize; only the outer `Option` being `None` means legacy.
+    pub version: u32,
+    pub task_id: String,
+    pub spec_version: u32,
+    pub review_round: u32,
+    /// The immutable approved plan this execution belongs to.
+    pub plan_operation_id: String,
+    pub evidence_event_id: String,
+    pub review_event_id: String,
+    pub content_fingerprint: String,
+    pub repository_id: String,
+    pub old_oid: String,
+    pub new_oid: String,
+    pub attempt: u32,
+    /// The original Coder session is the only session allowed to execute it.
+    pub coder_session_id: String,
+}
+
+impl DeliveryOperationIdentity {
+    /// Derives the execution identity from the persisted plan target and the
+    /// original Coder session. Callers never supply these fields separately.
+    pub fn for_target(
+        plan: &DeliveryPlan,
+        target: &DeliveryTargetPlan,
+        coder_session_id: &str,
+    ) -> Self {
+        Self {
+            version: DELIVERY_IDENTITY_VERSION,
+            task_id: plan.task_id.clone(),
+            spec_version: plan.spec_version,
+            review_round: plan.review_round,
+            plan_operation_id: plan.operation_id.clone(),
+            evidence_event_id: plan.evidence_event_id.clone(),
+            review_event_id: plan.review_event_id.clone(),
+            content_fingerprint: plan.content_fingerprint.clone(),
+            repository_id: target.repository_id.clone(),
+            old_oid: target.old_oid.clone(),
+            new_oid: target.new_oid.clone(),
+            attempt: target.attempt,
+            coder_session_id: coder_session_id.to_owned(),
+        }
+    }
+
+    /// Deterministic, collision-resistant evidence purpose. Two repositories of
+    /// the same plan (even with identical OIDs) and two attempts differ.
+    pub fn purpose_key(&self) -> String {
+        let canonical = serde_json::to_vec(self)
+            .expect("a delivery operation identity always serializes");
+        let digest = Sha256::digest(canonical);
+        format!(
+            "{LEGACY_DELIVERY_PURPOSE}.v{}.{}",
+            self.version,
+            digest
+                .iter()
+                .map(|byte| format!("{byte:02x}"))
+                .collect::<String>()
+        )
+    }
+
+    /// Checks every identity field against the persisted plan, its target and
+    /// the current Coder. Historical records are not authorization: callers
+    /// still re-read the live Git state separately.
+    pub fn validate_for(
+        &self,
+        task: &TaskRecord,
+        plan: &DeliveryPlan,
+        target: &DeliveryTargetPlan,
+    ) -> Result<()> {
+        ensure!(
+            self.version == DELIVERY_IDENTITY_VERSION,
+            "delivery identity version {} is not supported (expected {DELIVERY_IDENTITY_VERSION})",
+            self.version
+        );
+        ensure!(
+            self.task_id == task.task_id
+                && self.task_id == plan.task_id
+                && self.spec_version == task.spec_version
+                && self.spec_version == plan.spec_version
+                && self.review_round == task.review_round
+                && self.review_round == plan.review_round,
+            "delivery identity does not match the current task {} spec {} round {}",
+            task.task_id,
+            task.spec_version,
+            task.review_round
+        );
+        ensure!(
+            self.plan_operation_id == plan.operation_id
+                && self.evidence_event_id == plan.evidence_event_id
+                && self.review_event_id == plan.review_event_id
+                && self.content_fingerprint == plan.content_fingerprint,
+            "delivery identity does not match the persisted approved plan {}",
+            plan.operation_id
+        );
+        ensure!(
+            self.repository_id == target.repository_id
+                && self.old_oid == target.old_oid
+                && self.new_oid == target.new_oid
+                && self.attempt == target.attempt,
+            "delivery identity does not match the approved repository {}, old/new OIDs and attempt",
+            target.repository_id
+        );
+        ensure!(
+            task.coder.session_id.as_deref() == Some(self.coder_session_id.as_str()),
+            "delivery identity belongs to Coder session {}, not the task's {:?}",
+            self.coder_session_id,
+            task.coder.session_id
+        );
+        Ok(())
+    }
+}
+
+/// True for the legacy evidence purpose and for well-formed typed delivery
+/// purposes. An arbitrary purpose is never accepted as a delivery.
+pub fn is_delivery_purpose(purpose: &str) -> bool {
+    if purpose == LEGACY_DELIVERY_PURPOSE {
+        return true;
+    }
+    let prefix = format!("{LEGACY_DELIVERY_PURPOSE}.v{DELIVERY_IDENTITY_VERSION}.");
+    purpose
+        .strip_prefix(&prefix)
+        .is_some_and(|digest| digest.len() == 64 && is_lower_hex(digest))
+}
+
+/// True when the purpose belongs to the typed delivery namespace, including a
+/// malformed or unsupported version. A resume must not bypass the typed
+/// identity by choosing such a purpose directly.
+pub fn is_delivery_purpose_namespace(purpose: &str) -> bool {
+    purpose == LEGACY_DELIVERY_PURPOSE
+        || purpose.starts_with(&format!("{LEGACY_DELIVERY_PURPOSE}."))
+}
 
 /// Where the prepared delivery has to write the new object ID.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

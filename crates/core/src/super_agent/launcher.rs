@@ -20,6 +20,10 @@ use crate::services::background_sessions::{self, JobSnapshot};
 use crate::services::ServiceContext;
 use crate::super_agent::config::{AgentModelRole, ModelFallback, SuperAgentConfig};
 use crate::super_agent::crp;
+use crate::super_agent::delivery::{
+    is_delivery_purpose, is_delivery_purpose_namespace, DeliveryOperationIdentity,
+    DELIVERY_IDENTITY_VERSION,
+};
 use crate::super_agent::role::MemberRole;
 use crate::super_agent::store::TaskStore;
 use crate::super_agent::{Phase, TaskRecord};
@@ -40,10 +44,33 @@ pub struct LaunchRecord {
     pub job_id: String,
     pub workspace: PathBuf,
     pub model: String,
+    /// The repository delivery execution identity this handle belongs to.
+    /// Absent for every other launch kind and for genuine legacy records.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub delivery: Option<DeliveryOperationIdentity>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub warning: Option<String>,
     pub created_at: String,
 }
+
+/// Durable typed delivery identity stored next to the actual reserved
+/// background job, before its supervisor is started. The operation record
+/// alone is not proof that the *job* belongs to this delivery: two Coder
+/// resumes of one plan share the Coder, workspace and Router, so the job's own
+/// files must carry the identity that was reserved for it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DeliveryJobBinding {
+    /// Required. A typed sidecar without a version is incomplete and fails to
+    /// deserialize instead of silently becoming the current format.
+    pub version: u32,
+    pub job_id: String,
+    pub session_id: String,
+    pub identity: DeliveryOperationIdentity,
+}
+
+/// The job-directory file that carries [`DeliveryJobBinding`]. It is written
+/// atomically before the child is spawned and validated at every adoption.
+const DELIVERY_BINDING_FILE: &str = "delivery-identity.json";
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct LaunchOutcome {
@@ -94,6 +121,12 @@ pub struct LaunchOperation {
     /// review's reservation or prompt.
     #[serde(default)]
     pub purpose: String,
+    /// The complete repository delivery identity. It is the reserved-job
+    /// metadata: it is durable before the background job id it carries is
+    /// spawned. `None` for other launch kinds and for genuine legacy delivery
+    /// records written before the typed identity existed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub delivery: Option<DeliveryOperationIdentity>,
     pub workspace: PathBuf,
     pub session_id: String,
     pub job_id: String,
@@ -144,6 +177,8 @@ struct LaunchDraft<'a> {
     kind: LaunchKind,
     /// Evidence identity within the spec/round; see `LaunchOperation::purpose`.
     purpose: &'a str,
+    /// A typed repository delivery identity, when this is a delivery resume.
+    delivery: Option<&'a DeliveryOperationIdentity>,
     workspace: PathBuf,
     resume_session: Option<String>,
     prompt: String,
@@ -210,6 +245,7 @@ impl Launcher {
             member: MemberRole::Coder,
             kind: LaunchKind::Initial,
             purpose: "",
+            delivery: None,
             workspace,
             resume_session: None,
             prompt: coder_plan_prompt(task),
@@ -227,6 +263,10 @@ impl Launcher {
         instruction: &str,
         purpose: &str,
     ) -> Result<LaunchOutcome> {
+        ensure!(
+            !is_delivery_purpose_namespace(purpose),
+            "A delivery resume must use resume_coder_for_delivery with a validated repository identity, not purpose {purpose:?}"
+        );
         let session = task
             .coder
             .session_id
@@ -239,6 +279,96 @@ impl Launcher {
             member: MemberRole::Coder,
             kind: LaunchKind::Resume,
             purpose,
+            delivery: None,
+            workspace,
+            resume_session: Some(session),
+            prompt: instruction.to_owned(),
+            model: model.id,
+            warning,
+            allow_workspace_move: false,
+        })
+        .await
+    }
+
+    /// Continues the same Coder session for one repository delivery.
+    ///
+    /// The typed identity is the only way to address a delivery resume: the
+    /// caller cannot supply a purpose that disagrees with the identity, and two
+    /// repositories of one plan (or two attempts) receive distinct durable
+    /// operations and reserved job IDs.
+    pub async fn resume_coder_for_delivery(
+        &self,
+        task: &TaskRecord,
+        instruction: &str,
+        identity: &DeliveryOperationIdentity,
+    ) -> Result<LaunchOutcome> {
+        ensure!(
+            identity.version == DELIVERY_IDENTITY_VERSION,
+            "Delivery identity version {} is not supported",
+            identity.version
+        );
+        ensure!(
+            identity.task_id == task.task_id
+                && identity.spec_version == task.spec_version
+                && identity.review_round == task.review_round,
+            "Delivery identity for task {} spec {} round {} does not match the current task {} spec {} round {}",
+            identity.task_id,
+            identity.spec_version,
+            identity.review_round,
+            task.task_id,
+            task.spec_version,
+            task.review_round
+        );
+        let session = task
+            .coder
+            .session_id
+            .clone()
+            .context("Task has no Coder session to resume")?;
+        ensure!(
+            identity.coder_session_id == session,
+            "Delivery identity belongs to Coder session {}, not the task's {session}",
+            identity.coder_session_id
+        );
+        // The identity must match the persisted approved plan and its target.
+        // A caller cannot manufacture a repository, OID, attempt or plan that
+        // the host never approved and thereby authorize a child.
+        let store = self.store();
+        let plans = store
+            .delivery_plans(&task.task_id)
+            .map_err(|error| anyhow!(error.to_string()))?;
+        let plan = plans
+            .iter()
+            .find(|plan| plan.operation_id == identity.plan_operation_id)
+            .with_context(|| {
+                format!(
+                    "Delivery identity references plan {}, which is not recorded for task {}",
+                    identity.plan_operation_id, task.task_id
+                )
+            })?;
+        let target = plan
+            .repositories
+            .iter()
+            .find(|target| target.repository_id == identity.repository_id)
+            .with_context(|| {
+                format!(
+                    "Delivery identity references repository {}, which is not part of the recorded plan {}",
+                    identity.repository_id, plan.operation_id
+                )
+            })?;
+        identity.validate_for(task, plan, target)?;
+        let purpose = identity.purpose_key();
+        ensure!(
+            is_delivery_purpose(&purpose),
+            "Derived delivery purpose is malformed"
+        );
+        let workspace = canonical(self.task_workspace(task)?)?;
+        let (model, warning) = self.resolve_model(AgentModelRole::Coder);
+        self.run(LaunchDraft {
+            task,
+            member: MemberRole::Coder,
+            kind: LaunchKind::Resume,
+            purpose: &purpose,
+            delivery: Some(identity),
             workspace,
             resume_session: Some(session),
             prompt: instruction.to_owned(),
@@ -264,6 +394,7 @@ impl Launcher {
                 member: MemberRole::Reviewer,
                 kind: LaunchKind::Initial,
                 purpose: "",
+                delivery: None,
                 workspace: operation.workspace.clone(),
                 resume_session: None,
                 prompt: operation.prompt.clone(),
@@ -284,6 +415,7 @@ impl Launcher {
             member: MemberRole::Reviewer,
             kind: LaunchKind::Initial,
             purpose: "",
+            delivery: None,
             workspace,
             resume_session: None,
             prompt: reviewer_prompt(task, &request),
@@ -321,6 +453,7 @@ impl Launcher {
             member: MemberRole::Reviewer,
             kind: LaunchKind::Resume,
             purpose: "implementation",
+            delivery: None,
             workspace,
             resume_session: Some(session),
             prompt: reviewer_prompt(task, &request),
@@ -360,6 +493,7 @@ impl Launcher {
             member: MemberRole::Reviewer,
             kind: LaunchKind::Resume,
             purpose: "final-delivery",
+            delivery: None,
             workspace,
             resume_session: Some(session),
             prompt: reviewer_final_prompt(task, &request),
@@ -368,6 +502,141 @@ impl Launcher {
             allow_workspace_move: true,
         })
         .await
+    }
+
+    /// Reads the typed delivery identity stored on one actual job. A missing
+    /// job directory is `None`; an unreadable file is an error so callers block
+    /// instead of treating damage as absence.
+    pub fn delivery_job_binding(&self, job_id: &str) -> Result<Option<DeliveryJobBinding>> {
+        let directory = background_sessions::directory(&self.context.paths.data_dir, job_id)?;
+        let path = directory.join(DELIVERY_BINDING_FILE);
+        let bytes = match std::fs::read(&path) {
+            Ok(bytes) => bytes,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+            Err(error) => {
+                return Err(anyhow!(
+                    "Reading delivery identity {}: {error}",
+                    path.display()
+                ))
+            }
+        };
+        let binding = serde_json::from_slice::<DeliveryJobBinding>(&bytes).with_context(|| {
+            format!(
+                "Parsing delivery identity {}; the original bytes were preserved",
+                path.display()
+            )
+        })?;
+        Ok(Some(binding))
+    }
+
+    /// Verifies that an actual job carries the typed identity its operation
+    /// reserved. A typed record without its durable job binding is incomplete
+    /// and blocks; a legacy record must not silently gain a typed binding.
+    pub fn delivery_binding_mismatch(
+        &self,
+        operation: &LaunchOperation,
+        job_id: &str,
+    ) -> Result<Option<String>> {
+        let binding = self.delivery_job_binding(job_id).map_err(|error| {
+            anyhow!(
+                "The delivery identity of background task {job_id} cannot be read ({error:#}); the original files were preserved"
+            )
+        })?;
+        match (operation.delivery.as_ref(), binding) {
+            (Some(identity), Some(binding)) => {
+                if binding.version != DELIVERY_IDENTITY_VERSION
+                    || binding.job_id != job_id
+                    || binding.session_id != operation.session_id
+                    || &binding.identity != identity
+                {
+                    return Ok(Some(format!(
+                        "Background task {job_id} carries delivery identity job {} session {} repository {} plan {} old/new {}/{} attempt {}, not the reserved repository {} plan {} old/new {}/{} attempt {}; refusing to adopt it",
+                        binding.job_id,
+                        binding.session_id,
+                        binding.identity.repository_id,
+                        binding.identity.plan_operation_id,
+                        binding.identity.old_oid,
+                        binding.identity.new_oid,
+                        binding.identity.attempt,
+                        identity.repository_id,
+                        identity.plan_operation_id,
+                        identity.old_oid,
+                        identity.new_oid,
+                        identity.attempt
+                    )));
+                }
+                Ok(None)
+            }
+            (Some(_), None) => Ok(Some(format!(
+                "Background task {job_id} is reserved by a typed delivery operation but carries no durable delivery identity; refusing to adopt it without proof"
+            ))),
+            (None, Some(binding)) => Ok(Some(format!(
+                "Background task {job_id} carries typed delivery identity for repository {} but the launch operation has none; refusing to mix identities",
+                binding.identity.repository_id
+            ))),
+            (None, None) => Ok(None),
+        }
+    }
+
+    /// Writes the typed identity next to the reserved job before the supervisor
+    /// starts. Replaying the same identity is idempotent; a different one is a
+    /// contradiction and never overwrites the existing file.
+    fn write_delivery_job_binding(
+        &self,
+        operation: &LaunchOperation,
+        identity: &DeliveryOperationIdentity,
+    ) -> Result<()> {
+        let directory =
+            background_sessions::directory(&self.context.paths.data_dir, &operation.job_id)?;
+        std::fs::create_dir_all(&directory)?;
+        let binding = DeliveryJobBinding {
+            version: DELIVERY_IDENTITY_VERSION,
+            job_id: operation.job_id.clone(),
+            session_id: operation.session_id.clone(),
+            identity: identity.clone(),
+        };
+        let path = directory.join(DELIVERY_BINDING_FILE);
+        if let Some(existing) = self.delivery_job_binding(&operation.job_id)? {
+            if existing == binding {
+                return Ok(());
+            }
+            return Err(anyhow!(
+                "Background task {} already carries a different delivery identity; the original file was preserved",
+                operation.job_id
+            ));
+        }
+        let bytes = serde_json::to_vec(&binding)?;
+        // Publish without clobbering: write our own staging file, then create
+        // the destination link atomically. If another host won the race, the
+        // destination is never overwritten; compare after losing.
+        let temporary = directory.join(format!(
+            "{DELIVERY_BINDING_FILE}.tmp-{}",
+            uuid::Uuid::new_v4()
+        ));
+        std::fs::write(&temporary, &bytes)?;
+        let published = std::fs::hard_link(&temporary, &path);
+        // Only our own staging file is removed; the published file stays.
+        let _ = std::fs::remove_file(&temporary);
+        match published {
+            Ok(()) => Ok(()),
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
+                let existing = self
+                    .delivery_job_binding(&operation.job_id)?
+                    .context("The concurrently published delivery identity disappeared")?;
+                if existing == binding {
+                    Ok(())
+                } else {
+                    Err(anyhow!(
+                        "Background task {} already carries a different delivery identity; the original file was preserved",
+                        operation.job_id
+                    ))
+                }
+            }
+            Err(error) => Err(anyhow!(
+                "Publishing delivery identity {}: {error}",
+                path.display()
+            )),
+        }
     }
 
     fn resolve_model(
@@ -521,6 +790,12 @@ impl Launcher {
                 job.id
             );
         }
+        // The job's own durable files must carry the identity this operation
+        // reserved, not merely a matching Coder, workspace or instruction.
+        if let Some(reason) = self.delivery_binding_mismatch(&operation, &job.id)? {
+            self.record_error(&key_of(&operation), &anyhow!("{reason}"))?;
+            return Err(anyhow!("{reason}"));
+        }
         let progressed = job.launched
             || job.supervisor_pid.is_some()
             || job.child_pid.is_some()
@@ -543,6 +818,7 @@ impl Launcher {
             job_id: job.id.clone(),
             workspace: operation.workspace.clone(),
             model: operation.model.clone(),
+            delivery: operation.delivery.clone(),
             warning: operation.warning.clone(),
             created_at: now.clone(),
         };
@@ -566,6 +842,11 @@ impl Launcher {
         let prepared = self.prepare(draft, &operation).await?;
         self.mark_state(&key, "session")?;
         self.gate("after-session")?;
+        // The typed identity is durable on the reserved job before any process
+        // starts, so every later adoption can prove which delivery owns it.
+        if let Some(identity) = operation.delivery.as_ref() {
+            self.write_delivery_job_binding(&operation, identity)?;
+        }
         let handle = match launch_prepared_child(prepared) {
             Ok(handle) => handle,
             Err(error) if background_sessions::is_launch_in_progress(&error) => {
@@ -593,6 +874,7 @@ impl Launcher {
             job_id: handle.job_id.clone(),
             workspace: handle.workspace.clone(),
             model: operation.model.clone(),
+            delivery: operation.delivery.clone(),
             warning: operation.warning.clone(),
             created_at: now.clone(),
         };
@@ -639,13 +921,76 @@ impl Launcher {
                 member.as_str()
             );
         }
-        // Keep the durable job state fresh so a host can see launched, running
-        // and finished jobs after reopening the database.
-        let status =
-            match background_sessions::inspect(&self.context.paths.data_dir, &operation.job_id)? {
-                JobSnapshot::Present(job) => Some(job.status),
-                _ => None,
-            };
+        // Read the actual job, but persist nothing until every immutable fact
+        // is proven. A cached return is an adoption, not a read-only status
+        // probe: a contradictory record must stay exactly as recorded.
+        let snapshot =
+            background_sessions::inspect(&self.context.paths.data_dir, &operation.job_id)?;
+        let job = match snapshot {
+            JobSnapshot::Present(job) => Some(job),
+            JobSnapshot::Unreadable(reason) if operation.delivery.is_some() => {
+                return Err(anyhow!(
+                    "Background task {} has unreadable state ({reason}); the original files were preserved",
+                    operation.job_id
+                ))
+            }
+            _ => None,
+        };
+        if operation.delivery.is_some() {
+            // The sidecar is self-consistency only. The actual background task
+            // must still be the one this operation reserved for this Coder
+            // under this Router.
+            let job = job.as_ref().with_context(|| {
+                format!(
+                    "Typed delivery operation {} has no background task {}; refusing to reuse its recorded handle",
+                    operation.operation_id, operation.job_id
+                )
+            })?;
+            ensure!(
+                job.id == operation.job_id,
+                "Background task {} is not the reserved delivery job {}",
+                job.id,
+                operation.job_id
+            );
+            ensure!(
+                job.session_id == operation.session_id,
+                "Background task {} belongs to another child session than the reserved {}",
+                job.id,
+                operation.session_id
+            );
+            ensure!(
+                job.parent_session_id == task.router_session_id,
+                "Background task {} belongs to another Router session than {}",
+                job.id,
+                task.router_session_id
+            );
+        }
+        let record = operation
+            .handle
+            .clone()
+            .context("Completed launch operation has no recorded handle")?;
+        // The handle must describe this exact operation; a handle copied from
+        // another repository, session, job or workspace is never returned.
+        ensure!(
+            record.role == operation.role
+                && record.session_id == operation.session_id
+                && record.job_id == operation.job_id
+                && record.delivery == operation.delivery
+                && same_path(&record.workspace, &operation.workspace),
+            "The recorded {} handle for job {} session {} identity {:?} does not match the reserved operation job {} session {} identity {:?}; refusing to reuse it",
+            record.role,
+            record.job_id,
+            record.session_id,
+            record.delivery,
+            operation.job_id,
+            operation.session_id,
+            operation.delivery
+        );
+        if let Some(reason) = self.delivery_binding_mismatch(&operation, &operation.job_id)? {
+            return Err(anyhow!("{reason}"));
+        }
+        // Only now may truthful observation be persisted.
+        let status = job.as_ref().map(|job| job.status.clone());
         if status != operation.last_job_status {
             operation = self.update_operation(&key_of(&operation), |stored| {
                 stored.last_job_status = status;
@@ -658,28 +1003,33 @@ impl Launcher {
                 stored.state = "completed".into();
             })?;
         }
-        let record = operation
-            .handle
-            .clone()
-            .context("Completed launch operation has no recorded handle")?;
         Ok(outcome_from_record(&operation, record, false, false))
     }
 
     fn new_operation(&self, draft: &LaunchDraft<'_>) -> LaunchOperation {
         let now = chrono::Utc::now().to_rfc3339();
         LaunchOperation {
-            operation_id: format!(
-                "{}:{}:{}",
-                draft.task.task_id,
-                draft.member.as_str(),
-                draft.kind.as_str()
-            ),
+            // A typed delivery operation's ID is its full unique storage key,
+            // so two repositories of one plan never share an operation identity
+            // even when only the opaque purpose differs. Other launch kinds
+            // keep their historical ID exactly.
+            operation_id: if draft.delivery.is_some() {
+                operation_key(draft.task, draft.member, draft.kind, draft.purpose)
+            } else {
+                format!(
+                    "{}:{}:{}",
+                    draft.task.task_id,
+                    draft.member.as_str(),
+                    draft.kind.as_str()
+                )
+            },
             task_id: draft.task.task_id.clone(),
             role: draft.member.as_str().into(),
             kind: draft.kind.as_str().into(),
             spec_version: draft.task.spec_version,
             review_round: draft.task.review_round,
             purpose: draft.purpose.to_owned(),
+            delivery: draft.delivery.cloned(),
             workspace: draft.workspace.clone(),
             // A resume continues an existing member; its durable identity is
             // that session. Only an initial launch reserves a new one.
@@ -715,6 +1065,18 @@ impl Launcher {
             "Reserved launch operation {} does not match this task, member, specification, round and evidence stage",
             operation.operation_id
         );
+        ensure!(
+            operation.delivery.as_ref() == draft.delivery,
+            "Reserved launch operation {} belongs to a different delivery identity; refusing to reuse it",
+            operation.operation_id
+        );
+        if let Some(identity) = draft.delivery {
+            ensure!(
+                operation.purpose == identity.purpose_key(),
+                "Reserved launch operation {} is not keyed by its delivery identity",
+                operation.operation_id
+            );
+        }
         ensure!(
             same_path(&operation.workspace, &draft.workspace),
             "Task workspace changed from {} to {}; start a new operation",

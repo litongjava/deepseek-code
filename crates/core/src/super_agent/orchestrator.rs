@@ -9,6 +9,7 @@
 use crate::native_engine::provider_manager::ResolvedProvider;
 use crate::services::ServiceContext;
 use crate::super_agent::config::{PlanApprovalPolicy, SuperAgentConfig};
+use crate::super_agent::delivery::{DeliveryOperationIdentity, LEGACY_DELIVERY_PURPOSE};
 use crate::super_agent::discovery::DiscoveryOptions;
 use crate::super_agent::isolation::{prepare_environment, TargetPlan};
 use crate::super_agent::launcher::{
@@ -436,20 +437,26 @@ impl Orchestrator {
 
         // The dispatch receipt is durable before the child is started. It is
         // keyed by the real repository and binds the approved old/new OIDs and
-        // the explicit attempt, not only the plan operation ID.
+        // the explicit attempt, not only the plan operation ID. The launcher
+        // resume carries the same typed identity, so repositories A and B of one
+        // plan can never share an operation or a reserved job.
         let target = &plan.repositories[0];
+        let coder_session_id = task
+            .coder
+            .session_id
+            .clone()
+            .context("Task has no Coder session to deliver the integration")?;
+        let identity =
+            DeliveryOperationIdentity::for_target(&plan, target, &coder_session_id);
+        identity.validate_for(task, &plan, target)?;
         store
             .begin_repository_dispatch(&crate::super_agent::delivery::DeliveryDispatch {
                 task_id: task.task_id.clone(),
                 spec_version: task.spec_version,
                 review_round: task.review_round,
                 plan_operation_id: plan.operation_id.clone(),
-                coder_session_id: task
-                    .coder
-                    .session_id
-                    .clone()
-                    .context("Task has no Coder session to deliver the integration")?,
-                purpose: "delivery".into(),
+                coder_session_id: coder_session_id.clone(),
+                purpose: identity.purpose_key(),
                 repository_id: Some(target.repository_id.clone()),
                 old_oid: Some(target.old_oid.clone()),
                 new_oid: Some(target.new_oid.clone()),
@@ -461,7 +468,7 @@ impl Orchestrator {
         let instruction = coder_delivery_prompt(task, &plan);
         let outcome = self
             .launcher()
-            .resume_coder(task, &instruction, "delivery")
+            .resume_coder_for_delivery(task, &instruction, &identity)
             .await?;
         store
             .set_repository_dispatch_job(
@@ -516,6 +523,18 @@ impl Orchestrator {
                 DeliveryJobCheck::Blocked(blocked) => return Ok(blocked),
                 DeliveryJobCheck::Valid(_) => {}
             }
+            // A job of the same Coder and Router is still not proof: the
+            // receipt must name the exact job this delivery's typed operation
+            // reserved, and that job must carry the same durable binding.
+            if let Some(reason) = self.bound_delivery_mismatch(task, plan, dispatch, &job_id)? {
+                return self.block_delivery(
+                    store,
+                    &task.task_id,
+                    &reason,
+                    "delivery-bound-identity",
+                    report,
+                );
+            }
             return self
                 .observe_delivery_job(store, task, plan, &job_id, false, report)
                 .await;
@@ -524,11 +543,23 @@ impl Orchestrator {
         // between reserving the launch operation and recording its job. The
         // launcher's operation record is authoritative, so an already reserved
         // or running child is adopted instead of launched again.
+        let identity = delivery_identity(plan, dispatch).with_context(|| {
+            format!(
+                "The delivery receipt {} cannot be mapped to a repository identity",
+                dispatch.plan_operation_id
+            )
+        })?;
+        let legacy = dispatch.purpose == LEGACY_DELIVERY_PURPOSE;
+        let purpose = if legacy {
+            LEGACY_DELIVERY_PURPOSE.to_owned()
+        } else {
+            identity.purpose_key()
+        };
         let key = self.launcher().operation_key_for(
             task,
             crate::super_agent::role::MemberRole::Coder,
             LaunchKind::Resume,
-            "delivery",
+            &purpose,
         );
         let recorded = match self.launcher().load_operation(&key) {
             Ok(value) => value,
@@ -545,6 +576,22 @@ impl Orchestrator {
                 );
             }
         };
+        // A genuine legacy receipt is only recoverable through its original
+        // reserved child. It is never upgraded to a new typed operation and
+        // never causes a replacement child to be reserved.
+        if legacy && recorded.is_none() {
+            let reason = format!(
+                "The legacy delivery receipt for plan {} has no matching launch record {key}; refusing to reserve or start a replacement child",
+                plan.operation_id
+            );
+            return self.block_delivery(
+                store,
+                &task.task_id,
+                &reason,
+                "delivery-legacy-operation-missing",
+                report,
+            );
+        }
         if let Some(operation) = recorded.as_ref() {
             // A matching storage key is not proof that the contents belong to
             // this delivery. Validate every immutable identity before any
@@ -577,6 +624,20 @@ impl Orchestrator {
                         let progressed =
                             job.launched || job.supervisor_pid.is_some() || job.child_pid.is_some();
                         if progressed {
+                            // The adopted job must carry this operation's own
+                            // durable delivery identity, not merely the same
+                            // Coder session.
+                            if let Some(reason) =
+                                self.launcher().delivery_binding_mismatch(operation, &job.id)?
+                            {
+                                return self.block_delivery(
+                                    store,
+                                    &task.task_id,
+                                    &reason,
+                                    "delivery-job-binding",
+                                    report,
+                                );
+                            }
                             store
                                 .set_repository_dispatch_job(
                                     &task.task_id,
@@ -591,9 +652,35 @@ impl Orchestrator {
                         }
                         // The reservation reached disk but no child was ever
                         // authorized; the launcher's own recovery continues it.
+                        if legacy {
+                            let reason = format!(
+                                "The legacy delivery launch record {key} reserved job {} but no child was ever authorized; refusing to start a replacement child",
+                                operation.job_id
+                            );
+                            return self.block_delivery(
+                                store,
+                                &task.task_id,
+                                &reason,
+                                "delivery-legacy-operation-unauthorized",
+                                report,
+                            );
+                        }
                     }
                     // A missing job continues the launcher's reservation; an
                     // unreadable one was already blocked by the check.
+                    DeliveryJobCheck::Valid(_) if legacy => {
+                        let reason = format!(
+                            "The legacy delivery launch record {key} has no existing background job for reserved id {}; refusing to start a replacement child",
+                            operation.job_id
+                        );
+                        return self.block_delivery(
+                            store,
+                            &task.task_id,
+                            &reason,
+                            "delivery-legacy-job-missing",
+                            report,
+                        );
+                    }
                     DeliveryJobCheck::Valid(_) => {}
                 }
             }
@@ -616,7 +703,36 @@ impl Orchestrator {
                     report,
                 )? {
                     DeliveryJobCheck::Blocked(blocked) => return Ok(blocked),
+                    DeliveryJobCheck::Valid(
+                        crate::services::background_sessions::JobSnapshot::Present(_),
+                    ) => {}
+                    DeliveryJobCheck::Valid(_) if legacy => {
+                        let reason = format!(
+                            "The legacy delivery handle records job {} but that background job no longer exists; refusing to start a replacement child",
+                            handle.job_id
+                        );
+                        return self.block_delivery(
+                            store,
+                            &task.task_id,
+                            &reason,
+                            "delivery-legacy-job-missing",
+                            report,
+                        );
+                    }
                     DeliveryJobCheck::Valid(_) => {}
+                }
+                // The handle's job must carry this operation's durable
+                // delivery identity before it is bound to the receipt.
+                if let Some(reason) =
+                    self.launcher().delivery_binding_mismatch(operation, &handle.job_id)?
+                {
+                    return self.block_delivery(
+                        store,
+                        &task.task_id,
+                        &reason,
+                        "delivery-job-binding",
+                        report,
+                    );
                 }
                 let job_id = handle.job_id.clone();
                 store
@@ -682,7 +798,7 @@ impl Orchestrator {
         let instruction = coder_delivery_prompt(task, plan);
         let outcome = self
             .launcher()
-            .resume_coder(task, &instruction, "delivery")
+            .resume_coder_for_delivery(task, &instruction, &identity)
             .await?;
         store
             .set_repository_dispatch_job(
@@ -784,6 +900,72 @@ impl Orchestrator {
             .get_task(task_id)
             .map_err(store_error)?
             .context("Task disappeared")
+    }
+
+    /// Proves that a receipt which already names a job is bound to that exact
+    /// delivery. A job of the same Coder and Router is insufficient: the
+    /// receipt must be the operation's reserved job and the job's own durable
+    /// files must carry the same typed identity. The records are read, never
+    /// rewritten.
+    fn bound_delivery_mismatch(
+        &self,
+        task: &TaskRecord,
+        plan: &crate::super_agent::delivery::DeliveryPlan,
+        dispatch: &crate::super_agent::delivery::DeliveryDispatch,
+        job_id: &str,
+    ) -> Result<Option<String>> {
+        let legacy = dispatch.purpose == LEGACY_DELIVERY_PURPOSE;
+        let Some(identity) = delivery_identity(plan, dispatch) else {
+            return Ok(Some(format!(
+                "The delivery receipt for plan {} cannot be mapped to one repository identity and approved attempt",
+                plan.operation_id
+            )));
+        };
+        let purpose = if legacy {
+            LEGACY_DELIVERY_PURPOSE.to_owned()
+        } else {
+            identity.purpose_key()
+        };
+        let key = self.launcher().operation_key_for(
+            task,
+            crate::super_agent::role::MemberRole::Coder,
+            LaunchKind::Resume,
+            &purpose,
+        );
+        let operation = match self.launcher().load_operation(&key) {
+            Ok(Some(operation)) => operation,
+            Ok(None) => {
+                return Ok(Some(format!(
+                    "The delivery receipt binds job {job_id} but no launch operation {key} is recorded; refusing to observe a job without its reservation"
+                )))
+            }
+            Err(error) => {
+                return Ok(Some(format!(
+                    "The delivery launch record {key} cannot be read ({error:#}); the original record was preserved"
+                )))
+            }
+        };
+        if let Some(reason) = delivery_operation_mismatch(task, plan, dispatch, &operation) {
+            return Ok(Some(reason));
+        }
+        if operation.job_id != job_id {
+            return Ok(Some(format!(
+                "The delivery receipt binds job {job_id} but the recorded delivery operation reserved {}; refusing to observe a different child",
+                operation.job_id
+            )));
+        }
+        if let Some(handle) = operation.handle.as_ref() {
+            if let Some(reason) = delivery_handle_mismatch(&operation, dispatch, handle) {
+                return Ok(Some(reason));
+            }
+            if handle.job_id != job_id {
+                return Ok(Some(format!(
+                    "The delivery receipt binds job {job_id} but the recorded delivery handle points at {}; refusing to observe a different child",
+                    handle.job_id
+                )));
+            }
+        }
+        self.launcher().delivery_binding_mismatch(&operation, job_id)
     }
 
     /// Reads the dispatched job without ever inferring success from a member
@@ -1843,6 +2025,15 @@ fn delivery_context_mismatch(
             plan.operation_id
         ));
     }
+    // A typed receipt must carry the exact purpose derived from its own plan
+    // target; a receipt cannot relabel another repository's or attempt's key.
+    let purpose_matches = if dispatch.purpose == LEGACY_DELIVERY_PURPOSE {
+        true
+    } else {
+        DeliveryOperationIdentity::for_target(plan, target, &dispatch.coder_session_id)
+            .purpose_key()
+            == dispatch.purpose
+    };
     if plan.task_id != task.task_id
         || plan.spec_version != task.spec_version
         || plan.review_round != task.review_round
@@ -1850,7 +2041,7 @@ fn delivery_context_mismatch(
         || dispatch.spec_version != task.spec_version
         || dispatch.review_round != task.review_round
         || dispatch.plan_operation_id != plan.operation_id
-        || dispatch.purpose != "delivery"
+        || !purpose_matches
         || coder != Some(dispatch.coder_session_id.as_str())
     {
         return Some(format!(
@@ -1873,6 +2064,29 @@ fn delivery_context_mismatch(
     None
 }
 
+/// The identity a receipt's repository and the persisted plan imply.
+fn delivery_identity(
+    plan: &crate::super_agent::delivery::DeliveryPlan,
+    dispatch: &crate::super_agent::delivery::DeliveryDispatch,
+) -> Option<DeliveryOperationIdentity> {
+    let repository_id = dispatch.repository_id.as_deref()?;
+    let target = plan
+        .repositories
+        .iter()
+        .find(|target| target.repository_id == repository_id)?;
+    if dispatch.old_oid.as_deref() != Some(target.old_oid.as_str())
+        || dispatch.new_oid.as_deref() != Some(target.new_oid.as_str())
+        || dispatch.attempt != target.attempt
+    {
+        return None;
+    }
+    Some(DeliveryOperationIdentity::for_target(
+        plan,
+        target,
+        &dispatch.coder_session_id,
+    ))
+}
+
 /// A launch record found under the delivery key is only usable when its
 /// contents identify the same task, evidence and original Coder session.
 fn delivery_operation_mismatch(
@@ -1889,7 +2103,6 @@ fn delivery_operation_mismatch(
         || operation.spec_version != plan.spec_version
         || operation.review_round != task.review_round
         || operation.review_round != plan.review_round
-        || operation.purpose != "delivery"
         || operation.session_id != dispatch.coder_session_id
         || operation.resume_session.as_deref() != Some(dispatch.coder_session_id.as_str())
     {
@@ -1912,10 +2125,71 @@ fn delivery_operation_mismatch(
             dispatch.coder_session_id
         ));
     }
+    if dispatch.purpose == LEGACY_DELIVERY_PURPOSE {
+        // A genuine legacy record has no typed fields and may only satisfy a
+        // single-repository plan. Removing a field from a typed record makes it
+        // incomplete, not legacy, and it is never upgraded in place.
+        if plan.repositories.len() != 1
+            || operation.purpose != LEGACY_DELIVERY_PURPOSE
+            || operation.delivery.is_some()
+        {
+            return Some(format!(
+                "The recorded delivery launch for task {} under purpose {:?} is not a genuine single-repository legacy record of plan {}; refusing to adopt it",
+                task.task_id, operation.purpose, plan.operation_id
+            ));
+        }
+        return None;
+    }
+    let identity = delivery_identity(plan, dispatch)?;
+    if operation.purpose != dispatch.purpose || operation.delivery.as_ref() != Some(&identity) {
+        return Some(format!(
+            "The recorded delivery launch identity for task {} purpose {:?} repository {} plan {} evidence {} old/new {} attempt {} session {} does not match the receipt purpose {:?} for repository {} plan {} evidence {} old/new {} attempt {} session {}; refusing to adopt it",
+            operation.task_id,
+            operation.purpose,
+            operation
+                .delivery
+                .as_ref()
+                .map(|value| value.repository_id.as_str())
+                .unwrap_or(""),
+            operation
+                .delivery
+                .as_ref()
+                .map(|value| value.plan_operation_id.as_str())
+                .unwrap_or(""),
+            operation
+                .delivery
+                .as_ref()
+                .map(|value| value.evidence_event_id.as_str())
+                .unwrap_or(""),
+            operation
+                .delivery
+                .as_ref()
+                .map(|value| format!("{}/{}", value.old_oid, value.new_oid))
+                .unwrap_or_default(),
+            operation
+                .delivery
+                .as_ref()
+                .map(|value| value.attempt)
+                .unwrap_or(0),
+            operation
+                .delivery
+                .as_ref()
+                .map(|value| value.coder_session_id.as_str())
+                .unwrap_or(""),
+            dispatch.purpose,
+            identity.repository_id,
+            identity.plan_operation_id,
+            identity.evidence_event_id,
+            format!("{}/{}", identity.old_oid, identity.new_oid),
+            identity.attempt,
+            identity.coder_session_id
+        ));
+    }
     None
 }
 
-/// A recorded handle must point at this delivery's reserved job and Coder.
+/// A recorded handle must point at this delivery's reserved job, Coder and
+/// typed identity.
 fn delivery_handle_mismatch(
     operation: &crate::super_agent::launcher::LaunchOperation,
     dispatch: &crate::super_agent::delivery::DeliveryDispatch,
@@ -1925,10 +2199,17 @@ fn delivery_handle_mismatch(
         || handle.session_id != dispatch.coder_session_id
         || handle.session_id != operation.session_id
         || handle.job_id != operation.job_id
+        || handle.delivery != operation.delivery
     {
         return Some(format!(
-            "The recorded delivery child {} belongs to session {} role {}, not to the reserved job {} for Coder session {}; refusing to adopt it",
-            handle.job_id, handle.session_id, handle.role, operation.job_id, operation.session_id
+            "The recorded delivery child {} belongs to session {} role {} identity {:?}, not to the reserved job {} for Coder session {} identity {:?}; refusing to adopt it",
+            handle.job_id,
+            handle.session_id,
+            handle.role,
+            handle.delivery,
+            operation.job_id,
+            operation.session_id,
+            operation.delivery
         ));
     }
     None

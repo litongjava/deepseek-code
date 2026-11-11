@@ -280,6 +280,8 @@ enum DeliveryMode {
     SpawnCrash,
     /// A crashed delivery's saved operation contradicts this task/evidence.
     RecoveryMismatch,
+    /// A bound receipt is redirected to another real job of the same Coder.
+    BoundJobSwap,
 }
 
 impl DeliveryMode {
@@ -300,6 +302,7 @@ impl DeliveryMode {
             Self::StaleReceipt => "stale-receipt",
             Self::SpawnCrash => "spawn-crash",
             Self::RecoveryMismatch => "recovery-mismatch",
+            Self::BoundJobSwap => "bound-job-swap",
         }
     }
 }
@@ -1205,24 +1208,36 @@ fn operation_prompts(context: &ServiceContext, task_id: &str) -> Vec<Value> {
         .unwrap()
 }
 
+/// The durable storage key of one repository's typed delivery operation.
+fn delivery_operation_key(
+    task: &deepseek_code_core::super_agent::TaskRecord,
+    plan: &deepseek_code_core::super_agent::delivery::DeliveryPlan,
+    coder: &str,
+) -> String {
+    let identity = deepseek_code_core::super_agent::delivery::DeliveryOperationIdentity::for_target(
+        plan,
+        &plan.repositories[0],
+        coder,
+    );
+    format!(
+        "super-agent.launch-op.{}.coder.resume.{}.{}.{}",
+        task.task_id,
+        task.spec_version,
+        task.review_round,
+        identity.purpose_key()
+    )
+}
+
 /// Rewrites the delivery launch operation under its real key. The key is not
 /// derived from the edited contents, so the stored record disagrees with the
 /// key it was found under.
-fn tamper_delivery_operation(
-    context: &ServiceContext,
-    task: &deepseek_code_core::super_agent::TaskRecord,
-    edit: impl FnOnce(&mut Value),
-) {
-    let key = format!(
-        "super-agent.launch-op.{}.coder.resume.{}.{}.delivery",
-        task.task_id, task.spec_version, task.review_round
-    );
+fn tamper_delivery_operation(context: &ServiceContext, key: &str, edit: impl FnOnce(&mut Value)) {
     let mut operation = context
-        .setting::<Value>(&key)
+        .setting::<Value>(key)
         .unwrap()
         .expect("delivery launch operation");
     edit(&mut operation);
-    context.save_setting(&key, &operation).unwrap();
+    context.save_setting(key, &operation).unwrap();
 }
 
 /// Bytes of the worktree's real index file. A denied delivery must not rewrite
@@ -2204,8 +2219,9 @@ async fn run_review_loop_with(
         }
         let mut moved_target = None;
         if delivery == DeliveryMode::StaleReceipt {
-            // A previous host persisted the receipt but never launched, then
-            // the target moved. The fresh launch must not happen.
+            // A previous host persisted a valid typed receipt but never
+            // launched, then the target moved. The fresh launch must not
+            // happen: the live drift check has to reject the stale plan.
             let prepared =
                 match deepseek_code_core::super_agent::delivery::prepare_delivery(&store, &task)
                     .unwrap()
@@ -2215,6 +2231,12 @@ async fn run_review_loop_with(
                     }
                     other => panic!("expected a prepared plan, got {other:?}"),
                 };
+            let identity =
+                deepseek_code_core::super_agent::delivery::DeliveryOperationIdentity::for_target(
+                    &prepared,
+                    &prepared.repositories[0],
+                    &coder,
+                );
             store
                 .begin_repository_dispatch(
                     &deepseek_code_core::super_agent::delivery::DeliveryDispatch {
@@ -2223,7 +2245,7 @@ async fn run_review_loop_with(
                         review_round: task.review_round,
                         plan_operation_id: prepared.operation_id.clone(),
                         coder_session_id: coder.clone(),
-                        purpose: "delivery".into(),
+                        purpose: identity.purpose_key(),
                         repository_id: Some(prepared.repositories[0].repository_id.clone()),
                         old_oid: Some(prepared.repositories[0].old_oid.clone()),
                         new_oid: Some(prepared.repositories[0].new_oid.clone()),
@@ -2266,6 +2288,12 @@ async fn run_review_loop_with(
                     }
                     other => panic!("expected a prepared plan, got {other:?}"),
                 };
+            let identity =
+                deepseek_code_core::super_agent::delivery::DeliveryOperationIdentity::for_target(
+                    &plan,
+                    &plan.repositories[0],
+                    &coder,
+                );
             store
                 .begin_repository_dispatch(
                     &deepseek_code_core::super_agent::delivery::DeliveryDispatch {
@@ -2274,7 +2302,7 @@ async fn run_review_loop_with(
                         review_round: task.review_round,
                         plan_operation_id: plan.operation_id.clone(),
                         coder_session_id: coder.clone(),
-                        purpose: "delivery".into(),
+                        purpose: identity.purpose_key(),
                         repository_id: Some(plan.repositories[0].repository_id.clone()),
                         old_oid: Some(plan.repositories[0].old_oid.clone()),
                         new_oid: Some(plan.repositories[0].new_oid.clone()),
@@ -2285,10 +2313,10 @@ async fn run_review_loop_with(
                 )
                 .unwrap();
             let error = launcher
-                .resume_coder(
+                .resume_coder_for_delivery(
                     &task,
                     &deepseek_code_core::super_agent::launcher::coder_delivery_prompt(&task, &plan),
-                    "delivery",
+                    &identity,
                 )
                 .await
                 .expect_err("the injected crash must stop the launcher");
@@ -2319,7 +2347,11 @@ async fn run_review_loop_with(
             let delivery_op = operation_prompts(&context, &task_id)
                 .into_iter()
                 .find(|operation| {
-                    operation["role"] == "coder" && operation["purpose"] == "delivery"
+                    operation["role"] == "coder"
+                        && operation["kind"] == "resume"
+                        && operation["purpose"].as_str().is_some_and(|purpose| {
+                            purpose == "delivery" || purpose.starts_with("delivery.")
+                        })
                 })
                 .expect("delivery launch operation");
             assert_eq!(delivery_op["resume_session"], json!(coder));
@@ -2371,9 +2403,13 @@ async fn run_review_loop_with(
 
         if delivery == DeliveryMode::StaleReceipt {
             let moved = moved_target.expect("the target was moved externally");
+            // The typed receipt and plan are valid, so recovery reaches the
+            // live drift check and refuses the stale plan before any launch.
             assert!(
-                report.blocked.iter().any(|reason| reason.contains("moved")),
-                "a moved target must block: {report:?}"
+                report.blocked.iter().any(|reason| {
+                    reason.contains("moved") && reason.contains("the approved plan is stale")
+                }),
+                "a moved target must block dispatch: {report:?}"
             );
             assert_eq!(
                 jobs(&fixture.data, &router).len(),
@@ -2484,7 +2520,10 @@ async fn run_review_loop_with(
             let delivery_op = operation_prompts(&context, &task_id)
                 .into_iter()
                 .find(|operation| {
-                    operation["role"] == "coder" && operation["purpose"] == "delivery"
+                    operation["role"] == "coder"
+                        && operation["purpose"].as_str().is_some_and(
+                            deepseek_code_core::super_agent::delivery::is_delivery_purpose,
+                        )
                 })
                 .expect("delivery operation");
             assert_eq!(delivery_op["permission_mode"], json!("bypass"));
@@ -2604,6 +2643,7 @@ async fn run_review_loop_with(
                 DeliveryMode::Interrupted
                     | DeliveryMode::SpawnCrash
                     | DeliveryMode::RecoveryMismatch
+                    | DeliveryMode::BoundJobSwap
             ) {
                 // The host is replaced after the Coder moved Git but before any
                 // completion observation. `Interrupted` also drops the recorded
@@ -2633,9 +2673,56 @@ async fn run_review_loop_with(
                     // The record is found under its correct storage key, but its
                     // contents belong to another task. Contents, not the key,
                     // are the immutable identity.
-                    tamper_delivery_operation(&reopened, &task, |operation| {
+                    let plan = reopened_store
+                        .delivery_plans(&task_id)
+                        .unwrap()
+                        .pop()
+                        .expect("delivery plan");
+                    let key = delivery_operation_key(&task, &plan, &coder);
+                    tamper_delivery_operation(&reopened, &key, |operation| {
                         operation["task_id"] = json!("task-999");
                     });
+                }
+                let mut swapped_from = None;
+                if delivery == DeliveryMode::BoundJobSwap {
+                    // Redirect the already-bound receipt to a different real
+                    // job of the same Coder and Router: the plan-mode launch.
+                    // A job of the same session is not proof that it belongs to
+                    // this delivery.
+                    let plan = reopened_store
+                        .delivery_plans(&task_id)
+                        .unwrap()
+                        .pop()
+                        .expect("delivery plan");
+                    let receipt = reopened_store
+                        .repository_dispatch(
+                            &task_id,
+                            &plan.operation_id,
+                            &plan.repositories[0].repository_id,
+                        )
+                        .unwrap()
+                        .expect("bound dispatch receipt");
+                    let delivery_job = receipt.job_id.clone().expect("bound delivery job");
+                    let other_job = jobs(&fixture.data, &router)
+                        .into_iter()
+                        .find(|job| job.session_id == coder && job.id != delivery_job)
+                        .map(|job| job.id)
+                        .expect("another real job of the same Coder");
+                    reopened
+                        .db
+                        .with_conn(|conn| {
+                            conn.execute(
+                                "UPDATE sa_repository_dispatches SET job_id=?3 WHERE task_id=?1 AND plan_operation_id=?2",
+                                [
+                                    task_id.as_str(),
+                                    plan.operation_id.as_str(),
+                                    other_job.as_str(),
+                                ],
+                            )
+                        })
+                        .unwrap()
+                        .unwrap();
+                    swapped_from = Some((delivery_job, other_job, plan));
                 }
                 let reopened_orchestrator = Orchestrator::new(
                     reopened.clone(),
@@ -2705,14 +2792,91 @@ async fn run_review_loop_with(
                     );
                     // The contradictory record is preserved byte-for-byte for
                     // inspection; recovery never rewrites it to bypass the check.
-                    let key = format!(
-                        "super-agent.launch-op.{}.coder.resume.{}.{}.delivery",
-                        task_id, task.spec_version, task.review_round
-                    );
+                    let plan = reopened_store
+                        .delivery_plans(&task_id)
+                        .unwrap()
+                        .pop()
+                        .expect("delivery plan");
+                    let key = delivery_operation_key(&task, &plan, &coder);
                     let preserved = reopened.setting::<Value>(&key).unwrap().unwrap();
                     assert_eq!(preserved["task_id"], json!("task-999"));
                     assert_eq!(preserved["handle"], Value::Null);
                     // Release the exact hostile child and let it exit.
+                    state.release("delivery-hold");
+                    wait_idle(&fixture.data, &router, jobs_before_recovery).await;
+                    active_store = reopened_store;
+                    active_orchestrator = reopened_orchestrator;
+                } else if delivery == DeliveryMode::BoundJobSwap {
+                    let (delivery_job, other_job, plan) =
+                        swapped_from.expect("the swapped receipt identity");
+                    // The receipt points at a real job of the same Coder, but
+                    // not at the job this delivery's typed operation reserved.
+                    // A same-session job is never proof of this delivery.
+                    assert!(
+                        report.blocked.iter().any(|reason| {
+                            reason.contains(&other_job)
+                                && reason.contains("refusing to observe a different child")
+                        }),
+                        "a swapped bound job must block: {report:?}"
+                    );
+                    assert_eq!(
+                        jobs(&fixture.data, &router).len(),
+                        jobs_before_recovery,
+                        "the swapped receipt launched a child"
+                    );
+                    assert_eq!(
+                        delivery_tool_calls(&state),
+                        calls_before_recovery,
+                        "the swapped receipt reran the delivery command"
+                    );
+                    let blocked = reopened_store.get_task(&task_id).unwrap().unwrap();
+                    assert_eq!(blocked.status, Status::Blocked);
+                    assert_eq!(blocked.phase, Phase::DeliveryPending);
+                    assert_eq!(
+                        blocked.repositories[0].integration_status,
+                        deepseek_code_core::super_agent::IntegrationStatus::Prepared,
+                        "the borrowed job must not be observed as delivery"
+                    );
+                    // The rejected observation rewrites neither record: the
+                    // receipt still names the swapped job, and the reserved
+                    // operation still names its own child.
+                    let receipt = reopened_store
+                        .repository_dispatch(
+                            &task_id,
+                            &plan.operation_id,
+                            &plan.repositories[0].repository_id,
+                        )
+                        .unwrap()
+                        .expect("dispatch receipt");
+                    assert_eq!(
+                        receipt.job_id.as_deref(),
+                        Some(other_job.as_str()),
+                        "the rejected observation rewrote the receipt"
+                    );
+                    let key = delivery_operation_key(&task, &plan, &coder);
+                    let operation = reopened
+                        .setting::<Value>(&key)
+                        .unwrap()
+                        .expect("delivery launch operation");
+                    assert_eq!(
+                        operation["job_id"],
+                        json!(delivery_job),
+                        "the rejected observation rewrote the reserved job"
+                    );
+                    assert_eq!(operation["handle"]["job_id"], json!(delivery_job));
+                    assert_eq!(
+                        git(&fixture.repo, &["rev-parse", "develop"]),
+                        integrated,
+                        "the rejected observation changed the target"
+                    );
+                    assert!(!events(&reopened_store, &task_id)
+                        .iter()
+                        .any(|event| matches!(
+                            event.event_type,
+                            EventType::IntegrationCompleted
+                                | EventType::TaskCompleted
+                                | EventType::CleanupCompleted
+                        )));
                     state.release("delivery-hold");
                     wait_idle(&fixture.data, &router, jobs_before_recovery).await;
                     active_store = reopened_store;
@@ -2760,7 +2924,8 @@ async fn run_review_loop_with(
                 }
             }
 
-            if delivery != DeliveryMode::RecoveryMismatch {
+            if delivery != DeliveryMode::RecoveryMismatch && delivery != DeliveryMode::BoundJobSwap
+            {
                 let report = active_orchestrator.tick(&router).await.unwrap();
                 assert_unblocked(&report, &active_store, &task_id, &state);
                 assert_eq!(jobs(&fixture.data, &router).len(), settled_jobs + 1);
@@ -3122,4 +3287,16 @@ async fn a_contradictory_delivery_operation_is_rejected_before_adoption() {
     assert_eq!(evidence["status"], json!("BLOCKED"));
     assert_eq!(evidence["integration_status"], json!("PREPARED"));
     write_evidence("round-19-delivery-recovery-mismatch", &evidence);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_bound_receipt_swapped_to_another_job_is_rejected() {
+    let (_fixture, _context, task_id, _state, evidence) =
+        run_review_loop_with(false, DeliveryMode::BoundJobSwap).await;
+    assert!(!task_id.is_empty());
+    assert_eq!(evidence["delivery"], json!("bound-job-swap"));
+    assert_eq!(evidence["phase"], json!("DELIVERY_PENDING"));
+    assert_eq!(evidence["status"], json!("BLOCKED"));
+    assert_eq!(evidence["integration_status"], json!("PREPARED"));
+    write_evidence("round-34-delivery-bound-job-swap", &evidence);
 }

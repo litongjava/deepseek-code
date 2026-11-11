@@ -13,6 +13,11 @@ use crate::runtime::{RuntimePaths, SessionStore};
 use crate::services::background_sessions;
 use crate::services::EnvironmentCredentials;
 use crate::super_agent::config::SuperAgentConfig;
+use crate::super_agent::delivery::{
+    DeliveryDestination, DeliveryOperationIdentity, DeliveryPlan, DeliveryTargetPlan,
+};
+use crate::super_agent::launcher::DeliveryJobBinding;
+use crate::super_agent::model::ReviewStage;
 use crate::super_agent::role::{self as roles, Role};
 use crate::super_agent::store::TaskStore;
 use crate::super_agent::{IntegrationStatus, RepoTarget, TaskRecord, TaskSpec, VerificationStatus};
@@ -767,5 +772,700 @@ fn review_and_integration_operations_are_identified_by_evidence_stage() {
     assert!(
         launcher.load_operation(&final_delivery).unwrap().is_none(),
         "the final review adopted the implementation review operation"
+    );
+}
+
+fn delivery_plan_for(fixture: &Fixture, repositories: &[(&str, &str, &str)]) -> DeliveryPlan {
+    let task = fixture.task();
+    DeliveryPlan {
+        operation_id: "launcher-test-plan".into(),
+        task_id: task.task_id.clone(),
+        spec_version: task.spec_version,
+        review_round: task.review_round,
+        evidence_event_id: "evidence".into(),
+        review_event_id: "review".into(),
+        content_fingerprint: "fingerprint".into(),
+        created_at: "2026-01-01T00:00:00Z".into(),
+        repositories: repositories
+            .iter()
+            .enumerate()
+            .map(|(index, (repository_id, old_oid, new_oid))| DeliveryTargetPlan {
+                repository_id: (*repository_id).into(),
+                repo_root: fixture.project.clone(),
+                git_common_dir: fixture.project.join(".git"),
+                target_branch: "main".into(),
+                target_ref: "refs/heads/main".into(),
+                destination: DeliveryDestination::RefOnly,
+                baseline_commit: (*old_oid).into(),
+                reviewed_commit: (*new_oid).into(),
+                integrated_commit: (*new_oid).into(),
+                integrated_tree: "tree".into(),
+                old_oid: (*old_oid).into(),
+                new_oid: (*new_oid).into(),
+                review_stage: ReviewStage::Implementation,
+                lock_key: format!(
+                    "branch:{}:refs/heads/main",
+                    fixture.project.join(".git").display()
+                ),
+                lock_operation_id: format!("lock-{index}"),
+                attempt: 1,
+            })
+            .collect(),
+    }
+}
+
+fn binding_path(fixture: &Fixture, job_id: &str) -> PathBuf {
+    background_sessions::directory(&fixture.data, job_id)
+        .unwrap()
+        .join("delivery-identity.json")
+}
+
+#[tokio::test]
+async fn two_repository_deliveries_get_distinct_operations_and_jobs() {
+    let fixture = Fixture::new();
+    let task = fixture.task();
+    let initial = fixture.launcher().launch_coder(&task).await.unwrap();
+    let plan = delivery_plan_for(
+        &fixture,
+        &[("repo-1", "a-old", "a-new"), ("repo-2", "b-old", "b-new")],
+    );
+    fixture.store.save_delivery_plan(&plan).unwrap();
+    let identity_a = DeliveryOperationIdentity::for_target(
+        &plan,
+        &plan.repositories[0],
+        &initial.session_id,
+    );
+    let identity_b = DeliveryOperationIdentity::for_target(
+        &plan,
+        &plan.repositories[1],
+        &initial.session_id,
+    );
+    let task = fixture.task();
+
+    // The same full two-repository plan yields different operations and jobs
+    // for A and B while both continue the same Coder session.
+    let a = fixture
+        .launcher()
+        .resume_coder_for_delivery(&task, "deliver repository A", &identity_a)
+        .await
+        .unwrap();
+    assert!(a.fresh);
+    assert_eq!(a.session_id, initial.session_id);
+    assert_ne!(a.job_id, initial.job_id);
+    let launcher = fixture.launcher();
+    let key_a = launcher.operation_key_for(
+        &task,
+        MemberRole::Coder,
+        LaunchKind::Resume,
+        &identity_a.purpose_key(),
+    );
+    let key_b = launcher.operation_key_for(
+        &task,
+        MemberRole::Coder,
+        LaunchKind::Resume,
+        &identity_b.purpose_key(),
+    );
+    assert_ne!(key_a, key_b);
+    let operation_a = launcher.load_operation(&key_a).unwrap().unwrap();
+    assert_eq!(operation_a.operation_id, key_a);
+    assert_eq!(operation_a.delivery, Some(identity_a.clone()));
+    assert_eq!(operation_a.job_id, a.job_id);
+    assert_eq!(
+        launcher
+            .delivery_job_binding(&a.job_id)
+            .unwrap()
+            .unwrap()
+            .identity,
+        identity_a
+    );
+
+    // Replaying A returns A's own job and never starts a second child.
+    let replay = fixture
+        .reopen()
+        .resume_coder_for_delivery(&task, "deliver repository A", &identity_a)
+        .await
+        .unwrap();
+    assert!(!replay.fresh);
+    assert_eq!(replay.job_id, a.job_id);
+    assert_eq!(replay.session_id, initial.session_id);
+
+    let b = fixture
+        .reopen()
+        .resume_coder_for_delivery(&task, "deliver repository B", &identity_b)
+        .await
+        .unwrap();
+    assert!(b.fresh);
+    assert_eq!(b.session_id, initial.session_id);
+    assert_ne!(b.job_id, a.job_id);
+    let operation_b = launcher.load_operation(&key_b).unwrap().unwrap();
+    assert_eq!(operation_b.operation_id, key_b);
+    assert_ne!(operation_a.operation_id, operation_b.operation_id);
+    assert_eq!(operation_b.delivery, Some(identity_b.clone()));
+    assert_eq!(
+        launcher
+            .delivery_job_binding(&b.job_id)
+            .unwrap()
+            .unwrap()
+            .identity,
+        identity_b
+    );
+
+    assert_eq!(fixture.child_runs(), 3);
+    assert_eq!(fixture.jobs_for(&initial.session_id).len(), 3);
+}
+
+#[tokio::test]
+async fn forged_delivery_identity_never_starts_a_child() {
+    let fixture = Fixture::new();
+    let task = fixture.task();
+    let initial = fixture.launcher().launch_coder(&task).await.unwrap();
+    let plan = delivery_plan_for(&fixture, &[("repo-1", "old", "new")]);
+    fixture.store.save_delivery_plan(&plan).unwrap();
+    let real = DeliveryOperationIdentity::for_target(
+        &plan,
+        &plan.repositories[0],
+        &initial.session_id,
+    );
+    let cases: Vec<fn(&mut DeliveryOperationIdentity)> = vec![
+        |identity| identity.repository_id = "repo-9".into(),
+        |identity| identity.old_oid = "forged-old".into(),
+        |identity| identity.new_oid = "forged-new".into(),
+        |identity| identity.attempt += 1,
+        |identity| identity.plan_operation_id = "forged-plan".into(),
+        |identity| identity.evidence_event_id = "forged-evidence".into(),
+        |identity| identity.review_event_id = "forged-review".into(),
+        |identity| identity.content_fingerprint = "forged".into(),
+        |identity| identity.coder_session_id = "other-coder".into(),
+        |identity| identity.version += 1,
+    ];
+    for mutate in cases {
+        let mut forged = real.clone();
+        mutate(&mut forged);
+        let error = fixture
+            .launcher()
+            .resume_coder_for_delivery(&fixture.task(), "deliver", &forged)
+            .await
+            .unwrap_err();
+        assert!(!format!("{error:#}").is_empty());
+        // No operation, binding or child was created for the forged identity.
+        let key = fixture.launcher().operation_key_for(
+            &fixture.task(),
+            MemberRole::Coder,
+            LaunchKind::Resume,
+            &forged.purpose_key(),
+        );
+        assert!(
+            fixture.launcher().load_operation(&key).unwrap().is_none(),
+            "a forged identity reserved an operation"
+        );
+        assert_eq!(fixture.child_runs(), 1, "{error:#}");
+    }
+}
+
+#[tokio::test]
+async fn a_typed_delivery_without_its_job_binding_is_never_adopted() {
+    let fixture = Fixture::new();
+    let task = fixture.task();
+    let initial = fixture.launcher().launch_coder(&task).await.unwrap();
+    let plan = delivery_plan_for(&fixture, &[("repo-1", "old", "new")]);
+    fixture.store.save_delivery_plan(&plan).unwrap();
+    let identity = DeliveryOperationIdentity::for_target(
+        &plan,
+        &plan.repositories[0],
+        &initial.session_id,
+    );
+    let task = fixture.task();
+    let error = fixture
+        .launcher_with_gate(Some(crash_gate("after-spawn")))
+        .resume_coder_for_delivery(&task, "deliver", &identity)
+        .await
+        .unwrap_err();
+    assert_crash(error, "after-spawn");
+    assert_eq!(fixture.child_runs(), 2);
+    let key = fixture.launcher().operation_key_for(
+        &task,
+        MemberRole::Coder,
+        LaunchKind::Resume,
+        &identity.purpose_key(),
+    );
+    let operation = fixture.launcher().load_operation(&key).unwrap().unwrap();
+    let binding = binding_path(&fixture, &operation.job_id);
+    let bytes = std::fs::read(&binding).unwrap();
+    std::fs::remove_file(&binding).unwrap();
+
+    // The reserved child exists but its proof is gone: recovery blocks and
+    // does not start a replacement.
+    let error = fixture
+        .reopen()
+        .resume_coder_for_delivery(&task, "deliver", &identity)
+        .await
+        .unwrap_err();
+    assert!(
+        format!("{error:#}").contains("no durable delivery identity"),
+        "{error:#}"
+    );
+    assert_eq!(fixture.child_runs(), 2);
+    let preserved = fixture.launcher().load_operation(&key).unwrap().unwrap();
+    assert_eq!(preserved.job_id, operation.job_id);
+    assert_eq!(preserved.delivery, Some(identity.clone()));
+
+    // The cached-handle path applies the same proof.
+    std::fs::write(&binding, &bytes).unwrap();
+    let done = fixture
+        .reopen()
+        .resume_coder_for_delivery(&task, "deliver", &identity)
+        .await
+        .unwrap();
+    assert_eq!(done.job_id, operation.job_id);
+    assert_eq!(fixture.child_runs(), 2);
+    std::fs::remove_file(&binding).unwrap();
+    let error = fixture
+        .reopen()
+        .resume_coder_for_delivery(&task, "deliver", &identity)
+        .await
+        .unwrap_err();
+    assert!(
+        format!("{error:#}").contains("no durable delivery identity"),
+        "{error:#}"
+    );
+    assert_eq!(fixture.child_runs(), 2);
+}
+
+#[tokio::test]
+async fn a_contradictory_delivery_binding_is_never_overwritten() {
+    let fixture = Fixture::new();
+    let task = fixture.task();
+    let initial = fixture.launcher().launch_coder(&task).await.unwrap();
+    let plan = delivery_plan_for(
+        &fixture,
+        &[("repo-1", "a-old", "a-new"), ("repo-2", "b-old", "b-new")],
+    );
+    fixture.store.save_delivery_plan(&plan).unwrap();
+    let identity_a = DeliveryOperationIdentity::for_target(
+        &plan,
+        &plan.repositories[0],
+        &initial.session_id,
+    );
+    let identity_b = DeliveryOperationIdentity::for_target(
+        &plan,
+        &plan.repositories[1],
+        &initial.session_id,
+    );
+    let task = fixture.task();
+    fixture
+        .launcher_with_gate(Some(crash_gate("after-reservation")))
+        .resume_coder_for_delivery(&task, "deliver", &identity_a)
+        .await
+        .unwrap_err();
+    let key = fixture.launcher().operation_key_for(
+        &task,
+        MemberRole::Coder,
+        LaunchKind::Resume,
+        &identity_a.purpose_key(),
+    );
+    let operation = fixture.launcher().load_operation(&key).unwrap().unwrap();
+
+    // Another record already occupies the job directory's identity file. The
+    // retry must refuse instead of overwriting it.
+    let binding = binding_path(&fixture, &operation.job_id);
+    std::fs::create_dir_all(binding.parent().unwrap()).unwrap();
+    let contradictory = serde_json::to_vec(&DeliveryJobBinding {
+        version: 1,
+        job_id: operation.job_id.clone(),
+        session_id: initial.session_id.clone(),
+        identity: identity_b.clone(),
+    })
+    .unwrap();
+    std::fs::write(&binding, &contradictory).unwrap();
+
+    let error = fixture
+        .reopen()
+        .resume_coder_for_delivery(&task, "deliver", &identity_a)
+        .await
+        .unwrap_err();
+    assert!(
+        format!("{error:#}").contains("different delivery identity"),
+        "{error:#}"
+    );
+    assert_eq!(std::fs::read(&binding).unwrap(), contradictory);
+    assert_eq!(fixture.child_runs(), 1);
+    let preserved = fixture.launcher().load_operation(&key).unwrap().unwrap();
+    assert_eq!(preserved.job_id, operation.job_id);
+    assert!(preserved.handle.is_none());
+
+    // No staging file was left behind beside the preserved record.
+    let leftovers = std::fs::read_dir(binding.parent().unwrap())
+        .unwrap()
+        .filter_map(|entry| entry.ok())
+        .filter(|entry| {
+            entry
+                .file_name()
+                .to_string_lossy()
+                .starts_with("delivery-identity.json.tmp-")
+        })
+        .count();
+    assert_eq!(leftovers, 0);
+}
+
+#[tokio::test]
+async fn concurrent_same_identity_binding_publish_is_idempotent() {
+    let fixture = Fixture::new();
+    let task = fixture.task();
+    let plan = delivery_plan_for(&fixture, &[("repo-1", "old", "new")]);
+    let identity = DeliveryOperationIdentity::for_target(&plan, &plan.repositories[0], "coder");
+    let operation = LaunchOperation {
+        operation_id: "op".into(),
+        task_id: task.task_id.clone(),
+        role: "coder".into(),
+        kind: "resume".into(),
+        spec_version: task.spec_version,
+        review_round: task.review_round,
+        purpose: identity.purpose_key(),
+        delivery: Some(identity.clone()),
+        workspace: fixture.project.clone(),
+        session_id: "coder".into(),
+        job_id: uuid::Uuid::new_v4().to_string(),
+        resume_session: Some("coder".into()),
+        prompt: "deliver".into(),
+        model: "router-model".into(),
+        permission_mode: "bypass".into(),
+        warning: None,
+        allow_workspace_move: false,
+        state: "reserved".into(),
+        created_at: "2026-01-01T00:00:00Z".into(),
+        updated_at: "2026-01-01T00:00:00Z".into(),
+        last_job_status: None,
+        last_error: None,
+        consumed_at: None,
+        handle: None,
+    };
+    let first = fixture.launcher();
+    let second = fixture.reopen();
+    let left_operation = operation.clone();
+    let right_operation = operation.clone();
+    let left_identity = identity.clone();
+    let right_identity = identity.clone();
+    std::thread::scope(|scope| {
+        scope.spawn(move || {
+            first
+                .write_delivery_job_binding(&left_operation, &left_identity)
+                .unwrap();
+        });
+        scope.spawn(move || {
+            second
+                .write_delivery_job_binding(&right_operation, &right_identity)
+                .unwrap();
+        });
+    });
+    let binding = fixture
+        .launcher()
+        .delivery_job_binding(&operation.job_id)
+        .unwrap()
+        .unwrap();
+    assert_eq!(binding.identity, identity);
+    let directory = background_sessions::directory(&fixture.data, &operation.job_id).unwrap();
+    let leftovers = std::fs::read_dir(&directory)
+        .unwrap()
+        .filter_map(|entry| entry.ok())
+        .filter(|entry| {
+            entry
+                .file_name()
+                .to_string_lossy()
+                .starts_with("delivery-identity.json.tmp-")
+        })
+        .count();
+    assert_eq!(leftovers, 0);
+}
+
+#[tokio::test]
+async fn a_tampered_cached_handle_is_never_returned() {
+    let fixture = Fixture::new();
+    let task = fixture.task();
+    let initial = fixture.launcher().launch_coder(&task).await.unwrap();
+    let plan = delivery_plan_for(&fixture, &[("repo-1", "old", "new")]);
+    fixture.store.save_delivery_plan(&plan).unwrap();
+    let identity = DeliveryOperationIdentity::for_target(
+        &plan,
+        &plan.repositories[0],
+        &initial.session_id,
+    );
+    let task = fixture.task();
+    let outcome = fixture
+        .launcher()
+        .resume_coder_for_delivery(&task, "deliver", &identity)
+        .await
+        .unwrap();
+    let key = fixture.launcher().operation_key_for(
+        &task,
+        MemberRole::Coder,
+        LaunchKind::Resume,
+        &identity.purpose_key(),
+    );
+    let stored: serde_json::Value = fixture.launcher().context.setting(&key).unwrap().unwrap();
+    assert!(stored["handle"].is_object());
+
+    let mutations: Vec<fn(&mut serde_json::Value)> = vec![
+        |value| value["handle"]["job_id"] = json!("other-job"),
+        |value| value["handle"]["session_id"] = json!("other-session"),
+        |value| value["handle"]["role"] = json!("reviewer"),
+        |value| value["handle"]["workspace"] = json!("/elsewhere"),
+        |value| value["handle"]["delivery"]["repository_id"] = json!("repo-2"),
+        |value| value["handle"]["delivery"]["attempt"] = json!(7),
+    ];
+    for mutate in mutations {
+        let mut changed = stored.clone();
+        mutate(&mut changed);
+        fixture.launcher().context.save_setting(&key, &changed).unwrap();
+        let error = fixture
+            .reopen()
+            .resume_coder_for_delivery(&task, "deliver", &identity)
+            .await
+            .unwrap_err();
+        assert!(
+            format!("{error:#}").contains("does not match the reserved operation"),
+            "{error:#}"
+        );
+        assert_eq!(fixture.child_runs(), 2);
+        // A rejected adoption is not an observation: no status, timestamp or
+        // state may be persisted. The contradictory record is byte-equivalent.
+        let preserved: serde_json::Value =
+            fixture.launcher().context.setting(&key).unwrap().unwrap();
+        assert_eq!(preserved, changed);
+    }
+    fixture.launcher().context.save_setting(&key, &stored).unwrap();
+    let cached = fixture
+        .reopen()
+        .resume_coder_for_delivery(&task, "deliver", &identity)
+        .await
+        .unwrap();
+    assert_eq!(cached.job_id, outcome.job_id);
+}
+
+#[tokio::test]
+async fn a_genuine_legacy_delivery_record_is_recovered_without_a_new_child() {
+    let fixture = Fixture::new();
+    let task = fixture.task();
+    let initial = fixture.launcher().launch_coder(&task).await.unwrap();
+    let instruction = "deliver the pre-typed integration";
+    let task = fixture.task();
+    let workspace = canonical(fixture.launcher().task_workspace(&task).unwrap()).unwrap();
+    let draft = || LaunchDraft {
+        task: &task,
+        member: MemberRole::Coder,
+        kind: LaunchKind::Resume,
+        purpose: "delivery",
+        delivery: None,
+        workspace: workspace.clone(),
+        resume_session: Some(initial.session_id.clone()),
+        prompt: instruction.to_owned(),
+        model: "router-model".into(),
+        warning: None,
+        allow_workspace_move: false,
+    };
+    // The old code path: purpose `delivery` with no typed identity.
+    let error = fixture
+        .launcher_with_gate(Some(crash_gate("after-spawn")))
+        .run(draft())
+        .await
+        .unwrap_err();
+    assert_crash(error, "after-spawn");
+    assert_eq!(fixture.child_runs(), 2);
+    let key = fixture.launcher().operation_key_for(
+        &task,
+        MemberRole::Coder,
+        LaunchKind::Resume,
+        "delivery",
+    );
+    let recorded = fixture.launcher().load_operation(&key).unwrap().unwrap();
+    assert_eq!(recorded.purpose, "delivery");
+    assert_eq!(recorded.delivery, None);
+    assert!(recorded.handle.is_none());
+
+    // A reopened host recovers the genuine legacy record through its existing
+    // job: same identity, no second child, no typed upgrade.
+    let recovered = fixture.reopen().run(draft()).await.unwrap();
+    assert!(recovered.fresh);
+    assert_eq!(recovered.job_id, recorded.job_id);
+    assert_eq!(fixture.child_runs(), 2);
+    let after = fixture.launcher().load_operation(&key).unwrap().unwrap();
+    assert_eq!(after.state, "completed");
+    assert_eq!(after.purpose, "delivery");
+    assert_eq!(after.delivery, None);
+    assert_eq!(after.job_id, recorded.job_id);
+    assert_eq!(after.handle.as_ref().unwrap().delivery, None);
+    assert!(fixture
+        .launcher()
+        .delivery_job_binding(&recorded.job_id)
+        .unwrap()
+        .is_none());
+}
+
+#[tokio::test]
+async fn a_cached_typed_delivery_with_a_swapped_job_owner_is_never_returned() {
+    let fixture = Fixture::new();
+    let task = fixture.task();
+    let initial = fixture.launcher().launch_coder(&task).await.unwrap();
+    let plan = delivery_plan_for(&fixture, &[("repo-1", "old", "new")]);
+    fixture.store.save_delivery_plan(&plan).unwrap();
+    let identity = DeliveryOperationIdentity::for_target(
+        &plan,
+        &plan.repositories[0],
+        &initial.session_id,
+    );
+    let task = fixture.task();
+    fixture
+        .launcher()
+        .resume_coder_for_delivery(&task, "deliver", &identity)
+        .await
+        .unwrap();
+    let key = fixture.launcher().operation_key_for(
+        &task,
+        MemberRole::Coder,
+        LaunchKind::Resume,
+        &identity.purpose_key(),
+    );
+    let stored: serde_json::Value = fixture.launcher().context.setting(&key).unwrap().unwrap();
+    let job_id = stored["job_id"].as_str().unwrap().to_owned();
+    // Let the real supervisor and worker settle first, so the fixture cannot
+    // rewrite the durable state after the mutation below.
+    assert_eq!(fixture.child_runs(), 2);
+    let directory = background_sessions::directory(&fixture.data, &job_id).unwrap();
+    let state_path = directory.join("state.json");
+    let original_state = std::fs::read(&state_path).unwrap();
+
+    for field in ["session_id", "parent_session_id"] {
+        let mut state: serde_json::Value = serde_json::from_slice(&original_state).unwrap();
+        state[field] = json!("someone-else");
+        std::fs::write(&state_path, serde_json::to_vec(&state).unwrap()).unwrap();
+        let error = fixture
+            .reopen()
+            .resume_coder_for_delivery(&task, "deliver", &identity)
+            .await
+            .unwrap_err();
+        assert!(
+            format!("{error:#}").contains("another"),
+            "{error:#}"
+        );
+        assert_eq!(fixture.child_runs(), 2);
+        // The rejected adoption persists nothing.
+        let preserved: serde_json::Value =
+            fixture.launcher().context.setting(&key).unwrap().unwrap();
+        assert_eq!(preserved, stored);
+        std::fs::write(&state_path, &original_state).unwrap();
+    }
+}
+
+#[tokio::test]
+async fn a_cached_typed_delivery_without_its_actual_job_is_never_returned() {
+    let fixture = Fixture::new();
+    let task = fixture.task();
+    let initial = fixture.launcher().launch_coder(&task).await.unwrap();
+    let plan = delivery_plan_for(&fixture, &[("repo-1", "old", "new")]);
+    fixture.store.save_delivery_plan(&plan).unwrap();
+    let identity = DeliveryOperationIdentity::for_target(
+        &plan,
+        &plan.repositories[0],
+        &initial.session_id,
+    );
+    let task = fixture.task();
+    fixture
+        .launcher()
+        .resume_coder_for_delivery(&task, "deliver", &identity)
+        .await
+        .unwrap();
+    let key = fixture.launcher().operation_key_for(
+        &task,
+        MemberRole::Coder,
+        LaunchKind::Resume,
+        &identity.purpose_key(),
+    );
+    let stored: serde_json::Value = fixture.launcher().context.setting(&key).unwrap().unwrap();
+    let job_id = stored["job_id"].as_str().unwrap().to_owned();
+    assert_eq!(fixture.child_runs(), 2);
+    std::fs::remove_dir_all(background_sessions::directory(&fixture.data, &job_id).unwrap())
+        .unwrap();
+
+    let error = fixture
+        .reopen()
+        .resume_coder_for_delivery(&task, "deliver", &identity)
+        .await
+        .unwrap_err();
+    assert!(
+        format!("{error:#}").contains("no background task"),
+        "{error:#}"
+    );
+    assert_eq!(fixture.child_runs(), 2);
+    let preserved: serde_json::Value = fixture.launcher().context.setting(&key).unwrap().unwrap();
+    assert_eq!(preserved, stored);
+}
+
+#[tokio::test]
+async fn a_typed_record_without_its_required_version_blocks() {
+    let fixture = Fixture::new();
+    let task = fixture.task();
+    let initial = fixture.launcher().launch_coder(&task).await.unwrap();
+    let plan = delivery_plan_for(&fixture, &[("repo-1", "old", "new")]);
+    fixture.store.save_delivery_plan(&plan).unwrap();
+    let identity = DeliveryOperationIdentity::for_target(
+        &plan,
+        &plan.repositories[0],
+        &initial.session_id,
+    );
+    let task = fixture.task();
+    fixture
+        .launcher()
+        .resume_coder_for_delivery(&task, "deliver", &identity)
+        .await
+        .unwrap();
+    let key = fixture.launcher().operation_key_for(
+        &task,
+        MemberRole::Coder,
+        LaunchKind::Resume,
+        &identity.purpose_key(),
+    );
+    let stored: serde_json::Value = fixture.launcher().context.setting(&key).unwrap().unwrap();
+    let job_id = stored["job_id"].as_str().unwrap().to_owned();
+
+    // The operation's nested identity lost its mandatory version. It must not
+    // be read as an older supported format or as a legacy operation.
+    let mut without_version = stored.clone();
+    without_version["delivery"]
+        .as_object_mut()
+        .unwrap()
+        .remove("version");
+    fixture
+        .launcher()
+        .context
+        .save_setting(&key, &without_version)
+        .unwrap();
+    let error = fixture
+        .reopen()
+        .resume_coder_for_delivery(&task, "deliver", &identity)
+        .await
+        .unwrap_err();
+    assert!(format!("{error:#}").contains("version"), "{error:#}");
+    assert_eq!(fixture.child_runs(), 2);
+    let preserved: serde_json::Value = fixture.launcher().context.setting(&key).unwrap().unwrap();
+    assert_eq!(preserved, without_version);
+
+    // The sidecar's mandatory version is required as well.
+    fixture.launcher().context.save_setting(&key, &stored).unwrap();
+    let path = binding_path(&fixture, &job_id);
+    let bytes = std::fs::read(&path).unwrap();
+    let mut binding: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+    binding.as_object_mut().unwrap().remove("version");
+    std::fs::write(&path, serde_json::to_vec(&binding).unwrap()).unwrap();
+    let error = fixture
+        .reopen()
+        .resume_coder_for_delivery(&task, "deliver", &identity)
+        .await
+        .unwrap_err();
+    assert!(format!("{error:#}").contains("version"), "{error:#}");
+    assert_eq!(fixture.child_runs(), 2);
+    let preserved: serde_json::Value = fixture.launcher().context.setting(&key).unwrap().unwrap();
+    assert_eq!(preserved, stored);
+    assert_eq!(
+        serde_json::from_slice::<serde_json::Value>(&std::fs::read(&path).unwrap()).unwrap(),
+        binding
     );
 }

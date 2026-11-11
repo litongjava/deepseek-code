@@ -940,9 +940,11 @@ impl TaskStore {
                 "{repository_id}: a repository dispatch must record the approved new OID"
             ))
         })?;
-        if dispatch.purpose != "delivery" {
+        // Only the legacy purpose or a well-formed typed delivery purpose is
+        // accepted; arbitrary purposes are never treated as a delivery.
+        if !crate::super_agent::delivery::is_delivery_purpose(&dispatch.purpose) {
             return Err(StoreError::Invalid(format!(
-                "{repository_id}: delivery dispatch purpose {:?} is not supported",
+                "{repository_id}: delivery dispatch purpose {:?} is not a supported delivery identity",
                 dispatch.purpose
             )));
         }
