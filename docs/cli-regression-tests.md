@@ -471,3 +471,21 @@ OpenCode Go 用四种协议提供模型，模型地址和协议都来自内置�
 - `cargo test --locked -p deepseek-code-cli --test super_agent_child`：现有 Agent 子会话的真实工作目录与恢复行为不变。
 - 现有回归：`cargo test --locked -p deepseek-code-core --lib native_engine::tool_loop::delegation`、`cargo test --locked -p deepseek-code-core --test delegation`、`cargo test --locked -p deepseek-code-cli`。
 - 当前无法自动化的部分：`/role` 交互渲染、等待用户输入时的手工恢复、参考文档第 13 节的完整配置项（本轮只读取 `router`、`agents`、`approvals.plan`、`review.maxRounds`、`scheduler` 中已被使用的字段）、Windows 下的工作树与进程行为、真实多仓库与审核/集成流程。
+
+### Super Agent 第 4 阶段：审核请求、Reviewer 查询与报告配对
+
+本轮覆盖提交版本固定、Reviewer 独立工作区、只读会话查询、报告配对和退回重审。集成、Watcher、`/crp` 页面、Desktop 入口和完整端到端仍未实现，不能按完整流程验收。
+
+- `cargo test --locked -p deepseek-code-core --lib super_agent`：设置、角色、CRP、审核请求、Reviewer 查询、隔离和编排共 110 项。重点检查：
+  - 任务规格的 `workspace` 与每个目标必须位于 Router 持久化工作区和 `settings.json` 的 `permissions.additionalDirectories` 之内；自称的规格工作区或外部目标在创建任何工作树/快照/子进程之前被拒绝，显式授权目录则被接受。
+  - 实现提交时检查任务工作树 `git status --porcelain` 为空并固定实际 `HEAD`；有未提交修改时任务阻塞且不启动 Reviewer。Round 增加后会重新固定新 `HEAD`，并使用 `agent/<task>-review-<round>` 的独立工作树。
+  - `review_request` 记录当前 `spec_version`/`review_round`、实际提交版本、事件序号范围、Coder 当前/历史/递归子会话、证据引用和 Harness 版本；非 Git 目标记录内容差异并生成独立审核快照。
+  - Reviewer 只能查询本任务 Coder 会话树；`SessionMessages`/`SessionEvents` 使用稳定游标分页，输出脱敏；`ArtifactRead` 只接受报告 ID 或任务 artifacts 目录中的普通文件，拒绝遍历、符号链接和跨任务路径。
+  - `CrpSubmit` 的 `payload` 暴露 plan/implementation/review/harness/integration 五种类型化 schema；Review 报告必须匹配当前阶段（`IMPLEMENTATION`/`FINAL_DELIVERY`）。Review 与 Harness 报告都到达后才作结论，与到达顺序无关；缺少任一份不推进任务。
+  - `CHANGES_REQUESTED` 增加轮次并把具体 issues 发回同一 Coder 会话；新实现提交后同一 Reviewer 会话被恢复并使用新的审核请求。`BLOCKED` 或达到配置阈值的 Harness 故障创建 `DELIVERY_BLOCKER` 审批；仅效率类建议不阻塞。
+  - 启动前写入持久化 launch intent；存在未完成的 intent 时拒绝重复启动/恢复，避免崩溃后重复 Job 或重复指令。
+  - 支持的配置路径为 `settings.json` 的 `superAgent` 对象（camelCase 字段，例如 `review.maxRounds`、`review.blockingSeverity`、`review.maxTaskProposals`）；测试验证非默认值实际生效。
+- `cargo test --locked -p deepseek-code-core --lib services::session_messages::tests`：消息投递按 operation 幂等；重复 tool_use_id 或投递后崩溃重试只产生一条收件箱消息。
+- `cargo test --locked -p deepseek-code-core --lib native_engine::tool_approval`：Coder 计划批准前 Write/Bash 在运行时被拒绝，计划文件仍可写；规格/策略不匹配的旧审批不能放行；当前审批放行，ExitPlanMode 切换到 Router 继承的权限模式。
+- `cargo test --locked -p deepseek-code-cli --test super_agent_router`：现有真实 Router/Coder 计划审批流程保持通过（仅本地 mock）。
+- 当前无法自动化的部分：真实 Reviewer 模型进程的完整退回→修复→复审循环、非 Git 多目标端到端、Watcher、`/crp`、Desktop 和 Windows 行为；这些属于后续阶段，不能由本轮单元/编排测试替代。
