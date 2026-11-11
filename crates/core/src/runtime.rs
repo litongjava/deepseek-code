@@ -209,6 +209,7 @@ impl SessionStore {
             // Acquire the writer before reading project state, avoiding a stale WAL snapshot upgrade.
             let tx = rusqlite::Transaction::new_unchecked(conn, rusqlite::TransactionBehavior::Immediate)?;
             ensure!(!tx.query_row("SELECT EXISTS(SELECT 1 FROM conversations WHERE id=?1)", [&id], |row| row.get::<_,bool>(0))?, "Session ID already exists; use --resume to continue it");
+            // Reuse only a single-folder project; per-session --add-dir projects stay private to their session.
             let project = project_repo::list_projects(&tx)?.into_iter().find(|p| {
                 !p.is_archived
                     && p.workspace_path
@@ -216,6 +217,7 @@ impl SessionStore {
                         .and_then(|s| std::fs::canonicalize(s).ok())
                         .as_ref()
                         == Some(&workspace)
+                    && p.folders.len() == 1
                     && p.folders.iter().all(|f| f.trusted)
             });
             let now = chrono::Utc::now().to_rfc3339();
