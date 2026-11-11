@@ -210,10 +210,10 @@ fn json_truthy(value: &Value) -> bool {
 #[path = "tool_hook_http.rs"]
 mod http;
 pub use http::HttpHook;
-#[path = "tool_hook_prompt.rs"]
-mod prompt;
 #[path = "tool_hook_agent.rs"]
 pub(crate) mod agent;
+#[path = "tool_hook_prompt.rs"]
+mod prompt;
 
 #[path = "tool_hook_once.rs"]
 mod once;
@@ -228,8 +228,14 @@ mod lifecycle_tests;
 
 #[derive(Debug)]
 pub enum HookPermissionResponse {
-    Allow { updated_input: Option<Value>, updated_permissions: Option<Value> },
-    Deny { message: String, interrupt: bool },
+    Allow {
+        updated_input: Option<Value>,
+        updated_permissions: Option<Value>,
+    },
+    Deny {
+        message: String,
+        interrupt: bool,
+    },
 }
 
 #[derive(Debug, Deserialize)]
@@ -321,9 +327,13 @@ impl HookRunner {
         let mut allowed_http_urls: Option<Vec<String>> = None;
         let mut http_env_vars: Option<Vec<String>> = None;
         for (source, settings) in configs {
-            for (field, target) in [("allowedHttpHookUrls", &mut allowed_http_urls), ("httpHookAllowedEnvVars", &mut http_env_vars)] {
+            for (field, target) in [
+                ("allowedHttpHookUrls", &mut allowed_http_urls),
+                ("httpHookAllowedEnvVars", &mut http_env_vars),
+            ] {
                 if let Some(value) = settings.get(field) {
-                    let entries: Vec<String> = serde_json::from_value(value.clone()).with_context(|| format!("{field} must be an array of strings"))?;
+                    let entries: Vec<String> = serde_json::from_value(value.clone())
+                        .with_context(|| format!("{field} must be an array of strings"))?;
                     target.get_or_insert_with(Vec::new).extend(entries);
                 }
             }
@@ -415,9 +425,13 @@ impl HookRunner {
                             let config: HttpHook = serde_json::from_value(hook.clone())?;
                             config.validate()?;
                             hook["command"] = json!(config.url());
-                            if hook.get("timeout").is_none() { hook["timeout"] = json!(600); }
+                            if hook.get("timeout").is_none() {
+                                hook["timeout"] = json!(600);
+                            }
                             Some(config)
-                        } else { None };
+                        } else {
+                            None
+                        };
                         let hook: CommandConfig = serde_json::from_value(hook)?;
                         ensure!(
                             !hook.command.trim().is_empty(),
@@ -510,8 +524,16 @@ impl HookRunner {
     }
 
     /// Worktree hooks return a filesystem path, not tool-permission JSON.
-    pub async fn run_worktree(&self, event: HookEvent, session: &str, mut payload: Value) -> Result<Option<String>> {
-        ensure!(matches!(event, HookEvent::WorktreeCreate | HookEvent::WorktreeRemove), "Invalid worktree hook event");
+    pub async fn run_worktree(
+        &self,
+        event: HookEvent,
+        session: &str,
+        mut payload: Value,
+    ) -> Result<Option<String>> {
+        ensure!(
+            matches!(event, HookEvent::WorktreeCreate | HookEvent::WorktreeRemove),
+            "Invalid worktree hook event"
+        );
         payload["session_id"] = json!(session);
         payload["cwd"] = json!(self.workspace);
         payload["hook_event_name"] = json!(event.name());
@@ -535,11 +557,20 @@ impl HookRunner {
             if event == HookEvent::WorktreeCreate && path.is_none() && !stdout.trim().is_empty() {
                 path = Some(if stdout.trim().starts_with('{') {
                     let value: Value = serde_json::from_str(stdout.trim())?;
-                    value["hookSpecificOutput"]["worktreePath"].as_str().context("WorktreeCreate JSON must provide hookSpecificOutput.worktreePath")?.to_owned()
-                } else { stdout.trim().to_owned() });
+                    value["hookSpecificOutput"]["worktreePath"]
+                        .as_str()
+                        .context(
+                            "WorktreeCreate JSON must provide hookSpecificOutput.worktreePath",
+                        )?
+                        .to_owned()
+                } else {
+                    stdout.trim().to_owned()
+                });
             }
         }
-        if event == HookEvent::WorktreeCreate { ensure!(path.is_some(), "WorktreeCreate returned no path"); }
+        if event == HookEvent::WorktreeCreate {
+            ensure!(path.is_some(), "WorktreeCreate returned no path");
+        }
         Ok(path)
     }
 
@@ -656,8 +687,10 @@ impl HookRunner {
             let mut pending: FuturesUnordered<futures::future::BoxFuture<'_, Result<HookOutcome>>> =
                 FuturesUnordered::new();
             for hook in self.hooks.iter().filter(|hook| hook.event == event) {
-                if !(matches!(event, HookEvent::TeammateIdle | HookEvent::TaskCreated | HookEvent::TaskCompleted)
-                    || matches_tool(&hook.matcher, &name)?)
+                if !(matches!(
+                    event,
+                    HookEvent::TeammateIdle | HookEvent::TaskCreated | HookEvent::TaskCompleted
+                ) || matches_tool(&hook.matcher, &name)?)
                     || !hook.condition_matches(event, &input, &self.workspace)
                 {
                     continue;
@@ -818,7 +851,10 @@ impl HookRunner {
                         true,
                         async {
                             let input = self.transcript_input(session_id, input, transcript);
-                            let mut outcome = parse_json_output(event, callbacks.invoke(&callback, input).await?)?;
+                            let mut outcome = parse_json_output(
+                                event,
+                                callbacks.invoke(&callback, input).await?,
+                            )?;
                             outcome.observe_mcp_output(callback_order);
                             Ok(outcome)
                         }
@@ -899,9 +935,17 @@ fn parse_hook_output(
         });
     }
     if hook.http.is_some() {
-        if code == 0 { parse_json_output(hook.event, serde_json::from_str(stdout)?) }
-        else { Ok(HookOutcome { warnings: vec![stderr.into()], ..Default::default() }) }
-    } else { parse_output(hook.event, code, stdout, stderr) }
+        if code == 0 {
+            parse_json_output(hook.event, serde_json::from_str(stdout)?)
+        } else {
+            Ok(HookOutcome {
+                warnings: vec![stderr.into()],
+                ..Default::default()
+            })
+        }
+    } else {
+        parse_output(hook.event, code, stdout, stderr)
+    }
 }
 
 fn parse_output(event: HookEvent, exit: i32, stdout: &str, stderr: &str) -> Result<HookOutcome> {
@@ -1038,22 +1082,43 @@ fn parse_json_output(event: HookEvent, output: Value) -> Result<HookOutcome> {
         return Ok(result);
     }
     if event == HookEvent::PermissionRequest {
-        if let Some(message) = string_field(&output, "systemMessage")? { result.warnings.push(message.into()); }
+        if let Some(message) = string_field(&output, "systemMessage")? {
+            result.warnings.push(message.into());
+        }
         if let Some(specific) = output.get("hookSpecificOutput") {
             ensure!(specific.is_object(), "hookSpecificOutput must be an object");
-            ensure!(string_field(specific, "hookEventName")? == Some(event.name()), "Hook returned an incorrect hookEventName");
+            ensure!(
+                string_field(specific, "hookEventName")? == Some(event.name()),
+                "Hook returned an incorrect hookEventName"
+            );
             if let Some(decision) = specific.get("decision") {
-                ensure!(decision.is_object(), "PermissionRequest decision must be an object");
+                ensure!(
+                    decision.is_object(),
+                    "PermissionRequest decision must be an object"
+                );
                 result.permission_response = Some(match string_field(decision, "behavior")? {
                     Some("allow") => {
-                        let updated_input = decision.get("updatedInput").map(|value| {
-                            ensure!(value.is_object(), "Hook updatedInput must be an object"); Ok(value.clone())
-                        }).transpose()?;
-                        HookPermissionResponse::Allow { updated_input, updated_permissions: decision.get("updatedPermissions").cloned() }
+                        let updated_input = decision
+                            .get("updatedInput")
+                            .map(|value| {
+                                ensure!(value.is_object(), "Hook updatedInput must be an object");
+                                Ok(value.clone())
+                            })
+                            .transpose()?;
+                        HookPermissionResponse::Allow {
+                            updated_input,
+                            updated_permissions: decision.get("updatedPermissions").cloned(),
+                        }
                     }
                     Some("deny") => HookPermissionResponse::Deny {
-                        message: string_field(decision, "message")?.unwrap_or("Permission denied by hook").into(),
-                        interrupt: decision.get("interrupt").map(|value| value.as_bool().context("Hook interrupt must be boolean")).transpose()?.unwrap_or(false),
+                        message: string_field(decision, "message")?
+                            .unwrap_or("Permission denied by hook")
+                            .into(),
+                        interrupt: decision
+                            .get("interrupt")
+                            .map(|value| value.as_bool().context("Hook interrupt must be boolean"))
+                            .transpose()?
+                            .unwrap_or(false),
                     },
                     _ => bail!("Invalid PermissionRequest behavior"),
                 });
@@ -1062,11 +1127,20 @@ fn parse_json_output(event: HookEvent, output: Value) -> Result<HookOutcome> {
         return Ok(result);
     }
     if event == HookEvent::PermissionDenied {
-        if let Some(message) = string_field(&output, "systemMessage")? { result.warnings.push(message.into()); }
+        if let Some(message) = string_field(&output, "systemMessage")? {
+            result.warnings.push(message.into());
+        }
         if let Some(specific) = output.get("hookSpecificOutput") {
             ensure!(specific.is_object(), "hookSpecificOutput must be an object");
-            ensure!(string_field(specific, "hookEventName")? == Some(event.name()), "Hook returned an incorrect hookEventName");
-            if let Some(retry) = specific.get("retry") { result.retry = retry.as_bool().context("PermissionDenied retry must be boolean")?; }
+            ensure!(
+                string_field(specific, "hookEventName")? == Some(event.name()),
+                "Hook returned an incorrect hookEventName"
+            );
+            if let Some(retry) = specific.get("retry") {
+                result.retry = retry
+                    .as_bool()
+                    .context("PermissionDenied retry must be boolean")?;
+            }
         }
         // This notification cannot mutate input, permit execution or stop a turn.
         return Ok(result);
@@ -1111,7 +1185,10 @@ fn parse_json_output(event: HookEvent, output: Value) -> Result<HookOutcome> {
             result.additional_context.push(context.into());
         }
         if let Some(updated) = specific.get("updatedMCPToolOutput") {
-            ensure!(event == HookEvent::PostToolUse, "updatedMCPToolOutput requires PostToolUse");
+            ensure!(
+                event == HookEvent::PostToolUse,
+                "updatedMCPToolOutput requires PostToolUse"
+            );
             if json_truthy(updated) {
                 result.updated_mcp_tool_output = Some(updated.clone());
             }
@@ -1224,7 +1301,9 @@ fn prepare_command(
     #[cfg(windows)]
     resume_command(child.id().context("Hook has no process ID")?)?;
     let _progress = super::hook_progress::Running::start(
-        input["session_id"].as_str().unwrap_or(""), hook.status_message.as_deref());
+        input["session_id"].as_str().unwrap_or(""),
+        hook.status_message.as_deref(),
+    );
     let mut stdin = child.stdin.take().context("Hook stdin unavailable")?;
     let stdout = child.stdout.take().context("Hook stdout unavailable")?;
     let stderr = child.stderr.take().context("Hook stderr unavailable")?;
@@ -1370,10 +1449,29 @@ mod tests {
             json!({"hookSpecificOutput":{"decision":{"behavior":"allow"}}}),
             json!({"hookSpecificOutput":{"hookEventName":"PermissionRequest","decision":{"behavior":"allow","updatedInput":[]}}}),
             json!({"hookSpecificOutput":{"hookEventName":"PermissionRequest","decision":{"behavior":"deny","interrupt":"true"}}}),
-        ] { assert!(parse_output(HookEvent::PermissionRequest,0,&output.to_string(),"").is_err()); }
+        ] {
+            assert!(
+                parse_output(HookEvent::PermissionRequest, 0, &output.to_string(), "").is_err()
+            );
+        }
         let allow = json!({"hookSpecificOutput":{"hookEventName":"PermissionRequest","decision":{"behavior":"allow","updatedInput":{}}}});
-        assert!(matches!(parse_output(HookEvent::PermissionRequest,0,&allow.to_string(),"").unwrap().permission_response,Some(HookPermissionResponse::Allow {..})));
-        for exit in [1,2] {assert!(parse_output(HookEvent::PermissionRequest,exit,&allow.to_string(),"failure").unwrap().permission_response.is_none());}
+        assert!(matches!(
+            parse_output(HookEvent::PermissionRequest, 0, &allow.to_string(), "")
+                .unwrap()
+                .permission_response,
+            Some(HookPermissionResponse::Allow { .. })
+        ));
+        for exit in [1, 2] {
+            assert!(parse_output(
+                HookEvent::PermissionRequest,
+                exit,
+                &allow.to_string(),
+                "failure"
+            )
+            .unwrap()
+            .permission_response
+            .is_none());
+        }
     }
 
     #[tokio::test]
@@ -1383,7 +1481,11 @@ mod tests {
         let commands = if cfg!(windows) {
             vec!["[IO.File]::WriteAllText('slow-started','yes'); Start-Sleep -Seconds 30".into(), "[Console]::Out.Write('{invalid')".into(), format!("while (-not [IO.File]::Exists('slow-started')) {{Start-Sleep -Milliseconds 20}}; [Console]::Out.Write('{allow}')")]
         } else {
-            vec!["printf yes > slow-started; sleep 30".into(), "printf '%s' '{invalid'".into(), format!("while [ ! -f slow-started ]; do sleep 0.02; done; printf '%s' '{allow}'")]
+            vec![
+                "printf yes > slow-started; sleep 30".into(),
+                "printf '%s' '{invalid'".into(),
+                format!("while [ ! -f slow-started ]; do sleep 0.02; done; printf '%s' '{allow}'"),
+            ]
         };
         let runner = HookRunner {
             workspace: root.path().into(),
@@ -1452,9 +1554,28 @@ mod tests {
     #[test]
     fn permission_denied_output_is_only_retry_advice() {
         let outcome = parse_output(HookEvent::PermissionDenied, 0, r#"{"decision":"approve","continue":false,"hookSpecificOutput":{"hookEventName":"PermissionDenied","retry":true,"updatedInput":{"file_path":"unsafe"},"permissionDecision":"allow"}}"#, "").unwrap();
-        assert!(outcome.retry); assert!(!outcome.blocked); assert!(!outcome.prevent_continuation); assert!(outcome.updated_input.is_none()); assert!(!outcome.ask_permission);
-        for text in [r#"{"hookSpecificOutput":{"hookEventName":"PermissionDenied","retry":"true"}}"#, r#"{"hookSpecificOutput":{"hookEventName":"PreToolUse","retry":true}}"#, "{invalid"] { assert!(parse_output(HookEvent::PermissionDenied,0,text,"").is_err()); }
-        assert!(!parse_output(HookEvent::PermissionDenied,1,r#"{"hookSpecificOutput":{"hookEventName":"PermissionDenied","retry":true}}"#,"failed").unwrap().retry);
+        assert!(outcome.retry);
+        assert!(!outcome.blocked);
+        assert!(!outcome.prevent_continuation);
+        assert!(outcome.updated_input.is_none());
+        assert!(!outcome.ask_permission);
+        for text in [
+            r#"{"hookSpecificOutput":{"hookEventName":"PermissionDenied","retry":"true"}}"#,
+            r#"{"hookSpecificOutput":{"hookEventName":"PreToolUse","retry":true}}"#,
+            "{invalid",
+        ] {
+            assert!(parse_output(HookEvent::PermissionDenied, 0, text, "").is_err());
+        }
+        assert!(
+            !parse_output(
+                HookEvent::PermissionDenied,
+                1,
+                r#"{"hookSpecificOutput":{"hookEventName":"PermissionDenied","retry":true}}"#,
+                "failed"
+            )
+            .unwrap()
+            .retry
+        );
     }
 
     #[test]

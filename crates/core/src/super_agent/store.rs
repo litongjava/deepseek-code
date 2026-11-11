@@ -582,9 +582,9 @@ impl TaskStore {
                     && stored_task == approval.task_id
                     && stored_hash == hash
                 {
-                    return approval_by_operation(tx, operation_id)?.ok_or_else(|| {
-                        StoreError::Invalid("approval resolution is missing".into())
-                    });
+                    // The operation row records this exact resolution; the
+                    // approval row already holds its durable outcome.
+                    return Ok(approval);
                 }
                 return Err(StoreError::OperationConflict {
                     operation_id: operation_id.into(),

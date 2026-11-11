@@ -343,7 +343,9 @@ pub fn get(root: &Path, session: &str, id: &str) -> Result<Checkpoint> {
 /// Lines added and removed by a change, as its diff counts them.
 pub fn line_counts(change: &Change) -> Result<(usize, usize)> {
     let text = |value: &Option<String>| -> Result<String> {
-        Ok(bytes(value)?.map(|bytes| String::from_utf8_lossy(&bytes).into_owned()).unwrap_or_default())
+        Ok(bytes(value)?
+            .map(|bytes| String::from_utf8_lossy(&bytes).into_owned())
+            .unwrap_or_default())
     };
     let (before, after) = (text(&change.before)?, text(&change.after)?);
     let patch = diffy::create_patch(&before, &after);
@@ -515,10 +517,16 @@ mod tests {
         let change = Change {
             path: "app.py".into(),
             before: Some(STANDARD.encode("def greet():\n    return \"hi\"\n")),
-            after: Some(STANDARD.encode("def greet():\n    return \"hello\"\n\n\ndef bye():\n    return \"bye\"\n")),
+            after: Some(STANDARD.encode(
+                "def greet():\n    return \"hello\"\n\n\ndef bye():\n    return \"bye\"\n",
+            )),
         };
         assert_eq!(line_counts(&change).unwrap(), (5, 1));
-        let created = Change { path: "new.txt".into(), before: None, after: Some(STANDARD.encode("a\nb\n")) };
+        let created = Change {
+            path: "new.txt".into(),
+            before: None,
+            after: Some(STANDARD.encode("a\nb\n")),
+        };
         assert_eq!(line_counts(&created).unwrap(), (2, 0));
     }
     fn fixture() -> (tempfile::TempDir, tempfile::TempDir, String) {

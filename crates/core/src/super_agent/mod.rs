@@ -4,9 +4,11 @@
 //! and are shared by the CLI and Desktop hosts. Model-facing orchestration is
 //! layered on top and never decides task state itself.
 pub mod config;
+pub mod crp;
 pub mod discovery;
 pub mod isolation;
 pub mod model;
+pub mod prompt;
 pub mod role;
 pub mod state;
 pub mod store;

@@ -296,11 +296,7 @@ fn apply_rules_edit(edit: &mut FileEdit, index: usize, operation: &str, patterns
         .entry("permissions")
         .or_insert_with(|| json!({}));
     let permissions = permissions.as_object_mut().expect("permissions object");
-    let mut existing = string_rules(
-        permissions
-            .get(key)
-            .unwrap_or(&Value::Null),
-    );
+    let mut existing = string_rules(permissions.get(key).unwrap_or(&Value::Null));
     let before = existing.clone();
     match operation {
         "replaceRules" => {
@@ -337,7 +333,11 @@ fn apply_directories_edit(edit: &mut FileEdit, add: bool, directories: &[PathBuf
         .entry("permissions")
         .or_insert_with(|| json!({}));
     let permissions = permissions.as_object_mut().expect("permissions object");
-    let mut existing = string_rules(permissions.get("additionalDirectories").unwrap_or(&Value::Null));
+    let mut existing = string_rules(
+        permissions
+            .get("additionalDirectories")
+            .unwrap_or(&Value::Null),
+    );
     let before = existing.clone();
     if add {
         for directory in directories {
@@ -347,7 +347,11 @@ fn apply_directories_edit(edit: &mut FileEdit, add: bool, directories: &[PathBuf
             }
         }
     } else {
-        existing.retain(|entry| !directories.iter().any(|directory| Path::new(entry) == *directory));
+        existing.retain(|entry| {
+            !directories
+                .iter()
+                .any(|directory| Path::new(entry) == *directory)
+        });
     }
     if existing != before || (!add && existing.is_empty()) {
         if existing.is_empty() {
@@ -522,9 +526,7 @@ impl Updates {
         }
         // Validate destinations before touching any file or runtime state.
         for update in &prepared {
-            if update.destination() != Destination::Session
-                && self.settings.is_none()
-            {
+            if update.destination() != Destination::Session && self.settings.is_none() {
                 bail!("Persisted permission updates require a settings scope");
             }
             if let Some(scope) = &self.settings {
@@ -551,7 +553,9 @@ impl Updates {
             .collect::<Result<Vec<_>>>()?;
         let mut edits: Vec<FileEdit> = Vec::new();
         for update in &prepared {
-            let Some(scope) = &self.settings else { continue };
+            let Some(scope) = &self.settings else {
+                continue;
+            };
             let Some(path) = scope.file(update.destination())? else {
                 continue;
             };
@@ -657,7 +661,10 @@ pub fn load_settings(
     let mut loaded = LoadedPermissions::default();
     let sources = [
         (data_dir.join("settings.json"), true),
-        (workspace.join(".claude").join("settings.json"), project_trusted),
+        (
+            workspace.join(".claude").join("settings.json"),
+            project_trusted,
+        ),
         (
             workspace.join(".claude").join("settings.local.json"),
             project_trusted,
@@ -670,7 +677,10 @@ pub fn load_settings(
         let edit = match read_settings(&path) {
             Ok(edit) => edit,
             Err(error) => {
-                tracing::warn!("Ignoring invalid permission settings {}: {error:#}", path.display());
+                tracing::warn!(
+                    "Ignoring invalid permission settings {}: {error:#}",
+                    path.display()
+                );
                 continue;
             }
         };
@@ -685,7 +695,10 @@ pub fn load_settings(
             for rule in string_rules(permissions.get(key).unwrap_or(&Value::Null)) {
                 let rule = crate::permissions::patterns::canonical_rule(&rule);
                 if crate::permissions::patterns::validate(&rule).is_err() {
-                    tracing::warn!("Ignoring invalid permission rule {rule} in {}", path.display());
+                    tracing::warn!(
+                        "Ignoring invalid permission rule {rule} in {}",
+                        path.display()
+                    );
                     continue;
                 }
                 match loaded.rules.get(&rule) {
@@ -697,7 +710,11 @@ pub fn load_settings(
                 }
             }
         }
-        for directory in string_rules(permissions.get("additionalDirectories").unwrap_or(&Value::Null)) {
+        for directory in string_rules(
+            permissions
+                .get("additionalDirectories")
+                .unwrap_or(&Value::Null),
+        ) {
             let path = PathBuf::from(directory);
             if !loaded.directories.contains(&path) {
                 loaded.directories.push(path);
@@ -713,9 +730,9 @@ pub fn load_settings(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::collections::HashMap;
     use crate::permissions::{AuditLogger, PermissionContext, PermissionMode, PermissionResult};
     use serde_json::json;
+    use std::collections::HashMap;
     fn patch(operation: &str, behavior: &str) -> Value {
         json!({"type":operation,"destination":"session","behavior":behavior,"rules":[{"toolName":"Write"}]})
     }
@@ -882,7 +899,11 @@ mod tests {
         let user = scope.data_dir.join("settings.json");
         std::fs::write(&user, b"\xEF\xBB\xBF{\n  \"theme\": \"dark\",\n  \"permissions\": {\"allow\": [\"Read\"]}\n}\n").unwrap();
         let local = scope.workspace.join(".claude").join("settings.local.json");
-        std::fs::write(&local, json!({"permissions":{"deny":["Bash(rm *)"]}}).to_string()).unwrap();
+        std::fs::write(
+            &local,
+            json!({"permissions":{"deny":["Bash(rm *)"]}}).to_string(),
+        )
+        .unwrap();
         let manager = Arc::new(PermissionManager::new(Arc::new(AuditLogger::new(16))));
         manager.set_mode(PermissionMode::AskPermissions);
         let updates = Updates::new(manager.clone(), "one".into()).with_settings(scope.clone());
@@ -907,7 +928,10 @@ mod tests {
             .iter()
             .any(|entry| entry == &json!(scope.workspace.to_string_lossy())));
         let local_value: Value = serde_json::from_slice(&std::fs::read(&local).unwrap()).unwrap();
-        assert_eq!(local_value["permissions"]["deny"], json!(["Bash(rm *)", "Edit"]));
+        assert_eq!(
+            local_value["permissions"]["deny"],
+            json!(["Bash(rm *)", "Edit"])
+        );
         assert_eq!(local_value["permissions"]["defaultMode"], "dontAsk");
         assert_eq!(manager.get_mode(), PermissionMode::DontAsk);
         assert!(!manager.session_directories("one").is_empty());
@@ -938,7 +962,11 @@ mod tests {
                 {"type":"addRules","destination":"projectSettings","behavior":"allow","rules":[{"toolName":"Write"}]}
             ]))
             .is_err());
-        assert!(!scope.workspace.join(".claude").join("settings.json").exists());
+        assert!(!scope
+            .workspace
+            .join(".claude")
+            .join("settings.json")
+            .exists());
 
         std::fs::create_dir_all(scope.workspace.join(".claude")).unwrap();
         std::fs::create_dir_all(&scope.data_dir).unwrap();
@@ -955,7 +983,10 @@ mod tests {
         let loaded = load_settings(&scope.data_dir, &scope.workspace, true).unwrap();
         assert_eq!(loaded.rules.get("Write"), Some(&PermissionAction::Deny));
         assert_eq!(loaded.rules.get("Edit"), Some(&PermissionAction::Allow));
-        assert_eq!(loaded.rules.get("Bash(rm *)"), Some(&PermissionAction::Deny));
+        assert_eq!(
+            loaded.rules.get("Bash(rm *)"),
+            Some(&PermissionAction::Deny)
+        );
         assert_eq!(loaded.directories.len(), 1);
     }
 
@@ -965,15 +996,28 @@ mod tests {
         let workspace = temp.path();
         std::fs::create_dir_all(workspace.join(".claude")).unwrap();
         let path = workspace.join(".claude").join("settings.local.json");
-        std::fs::write(&path, json!({"env":{"A":"1"},"permissions":{"allow":["Read"]}}).to_string()).unwrap();
-        assert_eq!(add_local_allow_rule(workspace, "WebFetch(domain:example.com)").unwrap(), path);
+        std::fs::write(
+            &path,
+            json!({"env":{"A":"1"},"permissions":{"allow":["Read"]}}).to_string(),
+        )
+        .unwrap();
+        assert_eq!(
+            add_local_allow_rule(workspace, "WebFetch(domain:example.com)").unwrap(),
+            path
+        );
         add_local_allow_rule(workspace, "WebFetch(domain:example.com)").unwrap();
         assert!(add_local_allow_rule(workspace, "Bash(").is_err());
         let saved: Value = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
         assert_eq!(saved["env"]["A"], "1");
-        assert_eq!(saved["permissions"]["allow"], json!(["Read", "WebFetch(domain:example.com)"]));
+        assert_eq!(
+            saved["permissions"]["allow"],
+            json!(["Read", "WebFetch(domain:example.com)"])
+        );
         let loaded = load_settings(&temp.path().join("data"), workspace, true).unwrap();
-        assert_eq!(loaded.rules.get("WebFetch(domain:example.com)"), Some(&PermissionAction::Allow));
+        assert_eq!(
+            loaded.rules.get("WebFetch(domain:example.com)"),
+            Some(&PermissionAction::Allow)
+        );
     }
 }
 
@@ -1010,14 +1054,15 @@ mod concurrency_tests {
         for thread in threads {
             thread.join().unwrap();
         }
-        let value: Value = serde_json::from_slice(
-            &std::fs::read(scope.data_dir.join("settings.json")).unwrap(),
-        )
-        .unwrap();
+        let value: Value =
+            serde_json::from_slice(&std::fs::read(scope.data_dir.join("settings.json")).unwrap())
+                .unwrap();
         let rules = value["permissions"]["allow"].as_array().unwrap();
         for index in 0..8 {
             assert!(
-                rules.iter().any(|rule| rule == &json!(format!("Tool{index}"))),
+                rules
+                    .iter()
+                    .any(|rule| rule == &json!(format!("Tool{index}"))),
                 "{value}"
             );
         }

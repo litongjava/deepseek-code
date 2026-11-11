@@ -1,23 +1,26 @@
-use anyhow::Context;
+use crate::cache::FileCache;
 use crate::cost_tracker::{BudgetCheckResult, CostTracker};
 use crate::db::DbManager;
+use crate::mcp::McpToolRegistry;
 use crate::native_engine::provider_manager::ProviderManager;
 use crate::native_engine::tool_loop::{EngineEvent, ToolLoopExecutor};
-use crate::mcp::McpToolRegistry;
-use crate::permissions::{PermissionContext, PermissionManager, PermissionResult, audit::{AuditAction, AuditEntry}};
+use crate::permissions::{
+    audit::{AuditAction, AuditEntry},
+    PermissionContext, PermissionManager, PermissionResult,
+};
 use crate::prefetch::PrefetchEngine;
 use crate::skills::SkillsManager;
-use crate::cache::FileCache;
+use anyhow::Context;
 use anyhow::{anyhow, Result};
 use chrono::Utc;
+use futures::FutureExt;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Instant;
-use tokio::sync::{mpsc, Mutex, oneshot};
-use futures::FutureExt;
+use tokio::sync::{mpsc, oneshot, Mutex};
 use uuid::Uuid;
 
 #[path = "idle_children.rs"]
@@ -35,9 +38,26 @@ pub enum ReasoningMode {
 
 pub fn analyze_complexity(message: &str) -> ReasoningMode {
     let msg_lower = message.to_lowercase();
-    let has_code = msg_lower.contains("function") || msg_lower.contains("class ") || msg_lower.contains("def ") || msg_lower.contains("import ") || msg_lower.contains("const ") || msg_lower.contains("let ") || msg_lower.contains("fn ");
-    let has_file_op = msg_lower.contains("file") || msg_lower.contains("编辑") || msg_lower.contains("修改") || msg_lower.contains("删除") || msg_lower.contains("write") || msg_lower.contains("read") || msg_lower.contains("目录");
-    let has_danger = msg_lower.contains("delete") || msg_lower.contains("rm ") || msg_lower.contains("drop ") || msg_lower.contains("删除") || msg_lower.contains("格式化") || msg_lower.contains("format");
+    let has_code = msg_lower.contains("function")
+        || msg_lower.contains("class ")
+        || msg_lower.contains("def ")
+        || msg_lower.contains("import ")
+        || msg_lower.contains("const ")
+        || msg_lower.contains("let ")
+        || msg_lower.contains("fn ");
+    let has_file_op = msg_lower.contains("file")
+        || msg_lower.contains("编辑")
+        || msg_lower.contains("修改")
+        || msg_lower.contains("删除")
+        || msg_lower.contains("write")
+        || msg_lower.contains("read")
+        || msg_lower.contains("目录");
+    let has_danger = msg_lower.contains("delete")
+        || msg_lower.contains("rm ")
+        || msg_lower.contains("drop ")
+        || msg_lower.contains("删除")
+        || msg_lower.contains("格式化")
+        || msg_lower.contains("format");
     let is_long = message.len() > 200;
 
     if has_danger {
@@ -138,28 +158,79 @@ pub struct QueryEngine {
 impl QueryEngine {
     /// No tools, automatic memory ingestion, detached tasks, or conversation mutations.
     /// Dropping this future cancels the underlying HTTP/runtime request.
-    pub async fn generate_text(&self, provider_id: &str, model: &str, system: &str, input: &str) -> Result<String> {
-        let provider = self.provider_manager.lock().await.resolve_selected(provider_id, model)
+    pub async fn generate_text(
+        &self,
+        provider_id: &str,
+        model: &str,
+        system: &str,
+        input: &str,
+    ) -> Result<String> {
+        let provider = self
+            .provider_manager
+            .lock()
+            .await
+            .resolve_selected(provider_id, model)
             .ok_or_else(|| anyhow!("Provider/model is unavailable: {provider_id}::{model}"))?;
         super::generation::generate(provider, system, input).await
     }
 
     /// Tool-free summarization that also accepts histories larger than the model window.
-    pub async fn generate_summary(&self, session: Option<&str>, provider_id: &str, model: &str, system: &str, input: &str) -> Result<String> {
-        let provider = self.provider_manager.lock().await.resolve_selected(provider_id, model)
+    pub async fn generate_summary(
+        &self,
+        session: Option<&str>,
+        provider_id: &str,
+        model: &str,
+        system: &str,
+        input: &str,
+    ) -> Result<String> {
+        let provider = self
+            .provider_manager
+            .lock()
+            .await
+            .resolve_selected(provider_id, model)
             .ok_or_else(|| anyhow!("Provider/model is unavailable: {provider_id}::{model}"))?;
-        let mut checkpoint = session.map(|id| crate::services::compaction::checkpoint::Checkpoint::open(&self.db_manager, id, &provider, system)).transpose()?;
+        let mut checkpoint = session
+            .map(|id| {
+                crate::services::compaction::checkpoint::Checkpoint::open(
+                    &self.db_manager,
+                    id,
+                    &provider,
+                    system,
+                )
+            })
+            .transpose()?;
         super::generation::summarize(provider, system, input, checkpoint.as_mut()).await
     }
-    pub async fn generate_compaction(&self, session: &str, provider_id: &str, model: &str, system: &str, input: &str, instructions: &str) -> Result<crate::services::compaction::GeneratedSummary> {
-        let provider = self.provider_manager.lock().await.resolve_selected(provider_id, model)
+    pub async fn generate_compaction(
+        &self,
+        session: &str,
+        provider_id: &str,
+        model: &str,
+        system: &str,
+        input: &str,
+        instructions: &str,
+    ) -> Result<crate::services::compaction::GeneratedSummary> {
+        let provider = self
+            .provider_manager
+            .lock()
+            .await
+            .resolve_selected(provider_id, model)
             .ok_or_else(|| anyhow!("Provider/model is unavailable: {provider_id}::{model}"))?;
-        let history = crate::runtime::SessionStore::new(self.db_manager.clone()).model_history(session, &provider.provider.api_format)?;
+        let history = crate::runtime::SessionStore::new(self.db_manager.clone())
+            .model_history(session, &provider.provider.api_format)?;
         crate::services::compaction::native::validate_history(&history, &provider)?;
         if crate::services::compaction::native::supports(&provider) {
-            return crate::services::compaction::native::generate(&self.db_manager, session, &provider, instructions).await;
+            return crate::services::compaction::native::generate(
+                &self.db_manager,
+                session,
+                &provider,
+                instructions,
+            )
+            .await;
         }
-        self.generate_summary(Some(session), provider_id, model, system, input).await.map(Into::into)
+        self.generate_summary(Some(session), provider_id, model, system, input)
+            .await
+            .map(Into::into)
     }
     pub fn new(
         provider_manager: Arc<Mutex<ProviderManager>>,
@@ -207,14 +278,17 @@ impl QueryEngine {
     }
 
     pub fn set_permission_host_available(&self, available: bool) {
-        self.permission_host_available.store(available, std::sync::atomic::Ordering::Relaxed);
+        self.permission_host_available
+            .store(available, std::sync::atomic::Ordering::Relaxed);
     }
 
     pub fn set_auto_manual_interactive(&self, interactive: bool) {
-        self.auto_manual_interactive.store(interactive, std::sync::atomic::Ordering::Relaxed);
+        self.auto_manual_interactive
+            .store(interactive, std::sync::atomic::Ordering::Relaxed);
     }
     pub fn set_local_goal_frontend(&self, enabled: bool) {
-        self.local_goal_frontend.store(enabled, std::sync::atomic::Ordering::Relaxed);
+        self.local_goal_frontend
+            .store(enabled, std::sync::atomic::Ordering::Relaxed);
     }
 
     pub async fn check_tool_permission(
@@ -236,22 +310,44 @@ impl QueryEngine {
     }
 
     /// Apply an enabled skill to the normal conversation executor and stream real results.
-    pub async fn execute_skill(&self, skill_id: &str, request: ChatRequest) -> Result<mpsc::Receiver<EngineEvent>> {
-        let manager = self.skills_manager.as_ref().context("Skills manager not configured")?;
+    pub async fn execute_skill(
+        &self,
+        skill_id: &str,
+        request: ChatRequest,
+    ) -> Result<mpsc::Receiver<EngineEvent>> {
+        let manager = self
+            .skills_manager
+            .as_ref()
+            .context("Skills manager not configured")?;
         let content = {
             let manager = manager.lock().await;
-            let skill = manager.get_skill_by_id(skill_id).await?.filter(|s| s.enabled).context("Skill not found or disabled")?;
+            let skill = manager
+                .get_skill_by_id(skill_id)
+                .await?
+                .filter(|s| s.enabled)
+                .context("Skill not found or disabled")?;
             skill.content.context("Skill has no content")?
         };
         // Kept after the user's message for the rest of the session.
-        let root = self.provider_manager.lock().await.config_path().parent().context("Missing runtime directory")?.to_path_buf();
+        let root = self
+            .provider_manager
+            .lock()
+            .await
+            .config_path()
+            .parent()
+            .context("Missing runtime directory")?
+            .to_path_buf();
         let (session, messages) = (request.conversation_id.clone(), request.messages.clone());
-        tokio::task::spawn_blocking(move || crate::services::turn_context::attach_to_last(&root, &session, &messages, vec![content])).await??;
+        tokio::task::spawn_blocking(move || {
+            crate::services::turn_context::attach_to_last(&root, &session, &messages, vec![content])
+        })
+        .await??;
         self.send_message(request).await
     }
 
     pub async fn confirm_tool_permission(&self, conversation_id: &str, tool_name: &str) {
-        self.permission_manager.confirm_permission(conversation_id, tool_name);
+        self.permission_manager
+            .confirm_permission(conversation_id, tool_name);
     }
 
     pub async fn set_permission_mode(&self, mode: crate::permissions::PermissionMode) {
@@ -266,13 +362,19 @@ impl QueryEngine {
         }
     }
 
-    pub async fn sync_providers(&self, providers: Vec<crate::native_engine::provider_manager::Provider>) {
+    pub async fn sync_providers(
+        &self,
+        providers: Vec<crate::native_engine::provider_manager::Provider>,
+    ) {
         let mut pm = self.provider_manager.lock().await;
         let config_path = pm.config_path().clone();
         *pm = ProviderManager::from_providers(providers, config_path);
     }
 
-    pub async fn resolve_provider(&self, model_id: &str) -> Option<crate::native_engine::provider_manager::ResolvedProvider> {
+    pub async fn resolve_provider(
+        &self,
+        model_id: &str,
+    ) -> Option<crate::native_engine::provider_manager::ResolvedProvider> {
         let pm = self.provider_manager.lock().await;
         pm.resolve_provider(model_id).await
     }
@@ -287,40 +389,56 @@ impl QueryEngine {
         states.insert(conv_id.to_string(), state);
     }
 
-    pub async fn load_conversation_state(&self, conv_id: &str) -> Result<Option<ConversationState>> {
+    pub async fn load_conversation_state(
+        &self,
+        conv_id: &str,
+    ) -> Result<Option<ConversationState>> {
         let db = self.db_manager.clone();
         let conv_id_clone = conv_id.to_string();
 
-        let result = tokio::task::spawn_blocking(move || -> anyhow::Result<Option<ConversationState>> {
-            db.with_conn(|conn| {
-                let messages = crate::db::message_repo::get_messages_by_conversation(conn, &conv_id_clone)?;
-                let conv = crate::db::conversation_repo::get_conversation(conn, &conv_id_clone)?;
+        let result =
+            tokio::task::spawn_blocking(move || -> anyhow::Result<Option<ConversationState>> {
+                db.with_conn(|conn| {
+                    let messages = crate::db::message_repo::get_messages_by_conversation(
+                        conn,
+                        &conv_id_clone,
+                    )?;
+                    let conv =
+                        crate::db::conversation_repo::get_conversation(conn, &conv_id_clone)?;
 
-                if messages.is_empty() && conv.is_none() {
-                    return Ok(None);
-                }
+                    if messages.is_empty() && conv.is_none() {
+                        return Ok(None);
+                    }
 
-                let model = conv.as_ref().and_then(|c| c.model.as_deref()).unwrap_or("");
+                    let model = conv.as_ref().and_then(|c| c.model.as_deref()).unwrap_or("");
 
-                let start = messages.iter().rposition(|msg| msg.is_compact_boundary).unwrap_or(0);
-                let messages_json: Vec<Value> = messages.into_iter().skip(start).map(|msg| {
-                    serde_json::json!({
-                        "role": msg.role,
-                        "content": msg.content,
-                    })
-                }).collect();
+                    let start = messages
+                        .iter()
+                        .rposition(|msg| msg.is_compact_boundary)
+                        .unwrap_or(0);
+                    let messages_json: Vec<Value> = messages
+                        .into_iter()
+                        .skip(start)
+                        .map(|msg| {
+                            serde_json::json!({
+                                "role": msg.role,
+                                "content": msg.content,
+                            })
+                        })
+                        .collect();
 
-                Ok(Some(ConversationState {
-                    conversation_id: conv_id_clone,
-                    model: model.to_string(),
-                    messages: messages_json,
-                    system_prompt: None,
-                    last_activity: Utc::now().to_rfc3339(),
-                    turn_count: 0,
-                    status: ConversationStatus::Idle,
-                }))
-            })?
-        }).await??;
+                    Ok(Some(ConversationState {
+                        conversation_id: conv_id_clone,
+                        model: model.to_string(),
+                        messages: messages_json,
+                        system_prompt: None,
+                        last_activity: Utc::now().to_rfc3339(),
+                        turn_count: 0,
+                        status: ConversationStatus::Idle,
+                    }))
+                })?
+            })
+            .await??;
 
         if let Some(state) = &result {
             self.update_conversation_state(conv_id, state.clone()).await;
@@ -339,7 +457,10 @@ impl QueryEngine {
                 let result = db.with_conn(|conn| {
                     let tx = crate::db::write_transaction(&conn)?;
 
-                    let existing = crate::db::conversation_repo::get_conversation(&tx, &state_clone.conversation_id)?;
+                    let existing = crate::db::conversation_repo::get_conversation(
+                        &tx,
+                        &state_clone.conversation_id,
+                    )?;
                     if existing.is_none() {
                         crate::db::conversation_repo::insert_conversation(
                             &tx,
@@ -377,7 +498,8 @@ impl QueryEngine {
                     Ok(())
                 });
                 result?
-            }).await??;
+            })
+            .await??;
         }
         Ok(())
     }
@@ -392,7 +514,8 @@ impl QueryEngine {
         request: ChatRequest,
         save_response: bool,
     ) -> Result<mpsc::Receiver<EngineEvent>> {
-        self.send_with_origin(request, save_response, false, None).await
+        self.send_with_origin(request, save_response, false, None)
+            .await
     }
 
     /// Internal hook feedback: no user prompt hooks, skill invocation or authority.
@@ -401,7 +524,8 @@ impl QueryEngine {
         request: ChatRequest,
         save_response: bool,
     ) -> Result<mpsc::Receiver<EngineEvent>> {
-        self.send_with_origin(request, save_response, true, None).await
+        self.send_with_origin(request, save_response, true, None)
+            .await
     }
 
     /// Transfer ownership acquired before a host's durable input handoff.
@@ -411,7 +535,8 @@ impl QueryEngine {
         save_response: bool,
         lease: crate::services::session_messages::ExecutionLease,
     ) -> Result<mpsc::Receiver<EngineEvent>> {
-        self.send_with_origin(request, save_response, false, Some(lease)).await
+        self.send_with_origin(request, save_response, false, Some(lease))
+            .await
     }
 
     async fn send_with_origin(
@@ -441,36 +566,84 @@ impl QueryEngine {
                 )
             });
         let conv_id = request.conversation_id.clone();
-        let plugin_root=self.provider_manager.lock().await.config_path().parent().context("Missing runtime directory")?.to_path_buf();
-        let plugin_context=crate::services::ServiceContext{paths:crate::runtime::RuntimePaths::new(plugin_root)?,db:self.db_manager.clone(),credentials:Arc::new(crate::services::EnvironmentCredentials)};
-        if let Some(router) = plugin_context.setting::<crate::performance::RouterConfig>("performance.router")? {
+        let plugin_root = self
+            .provider_manager
+            .lock()
+            .await
+            .config_path()
+            .parent()
+            .context("Missing runtime directory")?
+            .to_path_buf();
+        let plugin_context = crate::services::ServiceContext {
+            paths: crate::runtime::RuntimePaths::new(plugin_root)?,
+            db: self.db_manager.clone(),
+            credentials: Arc::new(crate::services::EnvironmentCredentials),
+        };
+        if let Some(router) =
+            plugin_context.setting::<crate::performance::RouterConfig>("performance.router")?
+        {
             // Route only a fresh plain-text turn; never switch models mid tool conversation.
-            if router.enabled && request.provider_id.is_none() && request.messages.len() == 1 && request.messages[0]["role"] == "user"
-                && request.messages[0]["content"].as_str().is_some_and(crate::performance::simple_turn) {
+            if router.enabled
+                && request.provider_id.is_none()
+                && request.messages.len() == 1
+                && request.messages[0]["role"] == "user"
+                && request.messages[0]["content"]
+                    .as_str()
+                    .is_some_and(crate::performance::simple_turn)
+            {
                 let manager = self.provider_manager.lock().await;
-                if manager.resolve_selected(&router.provider_id, &router.model_id).is_some() {
+                if manager
+                    .resolve_selected(&router.provider_id, &router.model_id)
+                    .is_some()
+                {
                     request.provider_id = Some(router.provider_id);
                     request.model = router.model_id;
-                } else { anyhow::bail!("Configured simple-turn routing target is unavailable"); }
+                } else {
+                    anyhow::bail!("Configured simple-turn routing target is unavailable");
+                }
             }
         }
-        let plugins=crate::services::plugins::list(&plugin_context)?;
-        if plugins.iter().any(|p|p.enabled) {
-            request.system_prompt.get_or_insert_with(String::new).push_str(&format!("\nAvailable PluginRun commands: {}\n{}",serde_json::to_string(&plugins.iter().filter(|p|p.enabled).collect::<Vec<_>>())?,crate::services::plugins::prompt_hooks(&plugin_context)?));
+        let plugins = crate::services::plugins::list(&plugin_context)?;
+        if plugins.iter().any(|p| p.enabled) {
+            request
+                .system_prompt
+                .get_or_insert_with(String::new)
+                .push_str(&format!(
+                    "\nAvailable PluginRun commands: {}\n{}",
+                    serde_json::to_string(
+                        &plugins.iter().filter(|p| p.enabled).collect::<Vec<_>>()
+                    )?,
+                    crate::services::plugins::prompt_hooks(&plugin_context)?
+                ));
         }
         let agent = crate::services::agents::for_session(&self.db_manager, &conv_id)?;
         if let Some(definition) = &agent {
-            request.system_prompt.get_or_insert_with(String::new).push_str(&format!("\nAgent role ({}):\n{}", definition.id, definition.system_prompt));
+            request
+                .system_prompt
+                .get_or_insert_with(String::new)
+                .push_str(&format!(
+                    "\nAgent role ({}):\n{}",
+                    definition.id, definition.system_prompt
+                ));
         }
         let db = self.db_manager.clone();
         let project_conv_id = conv_id.clone();
         let workspaces_root = self.workspaces_dir.clone();
         let requested_workspace = request.workspace_path.clone();
-        let (workspace, project, prompt_profile) = tokio::task::spawn_blocking(move || db.with_conn(|conn| {
-            let (workspace, project) = super::workspace::resolve_workspace(conn, &workspaces_root, &project_conv_id, requested_workspace.as_deref())?;
-            let profile = super::workspace::conversation_prompt_profile(conn, &project_conv_id)?;
-            Ok::<_, anyhow::Error>((workspace, project, profile))
-        })).await???;
+        let (workspace, project, prompt_profile) = tokio::task::spawn_blocking(move || {
+            db.with_conn(|conn| {
+                let (workspace, project) = super::workspace::resolve_workspace(
+                    conn,
+                    &workspaces_root,
+                    &project_conv_id,
+                    requested_workspace.as_deref(),
+                )?;
+                let profile =
+                    super::workspace::conversation_prompt_profile(conn, &project_conv_id)?;
+                Ok::<_, anyhow::Error>((workspace, project, profile))
+            })
+        })
+        .await???;
         crate::services::lifecycle_events::check_configuration(
             &plugin_context,
             &workspace,
@@ -479,19 +652,31 @@ impl QueryEngine {
         .await?;
         let customization = crate::services::customization::load(&plugin_context.paths.data_dir)?;
         request.system_prompt = Some(crate::prompt::compose_customized(
-            request.system_prompt.as_deref(), &request.model, prompt_profile, Some(&workspace), &customization.system_prompt,
+            request.system_prompt.as_deref(),
+            &request.model,
+            prompt_profile,
+            Some(&workspace),
+            &customization.system_prompt,
         ));
         let snapshot_root = plugin_context.paths.data_dir.clone();
         let snapshot_session = conv_id.clone();
         let snapshot_workspace = workspace.clone();
-        let git_snapshot = tokio::task::spawn_blocking(move || crate::services::git_snapshot::for_session(&snapshot_root, &snapshot_session, &snapshot_workspace)).await?;
+        let git_snapshot = tokio::task::spawn_blocking(move || {
+            crate::services::git_snapshot::for_session(
+                &snapshot_root,
+                &snapshot_session,
+                &snapshot_workspace,
+            )
+        })
+        .await?;
         let workspace_path = workspace.to_string_lossy().into_owned();
         let mut discovered_skills = crate::services::plugins::skill_commands(&plugin_context)?;
         discovered_skills.extend(crate::skills::discovery::discover(&workspace)?);
         let mut pending_user_skill = None;
         // Blocks kept after this turn's user message for the rest of the session;
         // a skill's block also records the skill for after a compaction.
-        let mut turn_blocks: Vec<(String, Option<crate::services::turn_context::InvokedSkill>)> = Vec::new();
+        let mut turn_blocks: Vec<(String, Option<crate::services::turn_context::InvokedSkill>)> =
+            Vec::new();
         if let Some((command, arguments)) = skill_invocation.filter(|_| !hook_wake) {
             let content = if let Some(skill) = discovered_skills.get(&command) {
                 let embedded =
@@ -500,27 +685,66 @@ impl QueryEngine {
                     true
                 } else {
                     let template = skill.render_template(&arguments, &conv_id)?;
-                    skill.context.as_deref() == Some("fork") || crate::skills::invocation::parse(&template)?.iter().any(|part| matches!(part, crate::skills::invocation::Segment::Shell(_)))
+                    skill.context.as_deref() == Some("fork")
+                        || crate::skills::invocation::parse(&template)?
+                            .iter()
+                            .any(|part| {
+                                matches!(part, crate::skills::invocation::Segment::Shell(_))
+                            })
                 };
                 if requires_execution {
-                    pending_user_skill = Some(serde_json::json!({"skill":command,"args":arguments}));
+                    pending_user_skill =
+                        Some(serde_json::json!({"skill":command,"args":arguments}));
                     None
                 } else {
                     let content = skill.render(&arguments, &conv_id)?;
-                    Some((content.clone(), crate::services::turn_context::InvokedSkill { name: command.clone(), path: skill.path.display().to_string(), content }))
+                    Some((
+                        content.clone(),
+                        crate::services::turn_context::InvokedSkill {
+                            name: command.clone(),
+                            path: skill.path.display().to_string(),
+                            content,
+                        },
+                    ))
                 }
             } else if let Some(manager) = &self.skills_manager {
                 let skills = manager.lock().await.list_enabled_skills().await?;
-                let matches: Vec<_> = skills.into_iter().filter(|skill| skill.id == command || skill.name.to_lowercase().split_whitespace().collect::<Vec<_>>().join("-") == command).collect();
-                anyhow::ensure!(matches.len() <= 1, "Ambiguous skill command; use its full skill ID");
+                let matches: Vec<_> = skills
+                    .into_iter()
+                    .filter(|skill| {
+                        skill.id == command
+                            || skill
+                                .name
+                                .to_lowercase()
+                                .split_whitespace()
+                                .collect::<Vec<_>>()
+                                .join("-")
+                                == command
+                    })
+                    .collect();
+                anyhow::ensure!(
+                    matches.len() <= 1,
+                    "Ambiguous skill command; use its full skill ID"
+                );
                 matches.into_iter().next().and_then(|skill| {
                     let content = format!("{}\n\nUser arguments: {arguments}", skill.content?);
-                    Some((content.clone(), crate::services::turn_context::InvokedSkill { name: command.clone(), path: format!("skill:{}", skill.id), content }))
+                    Some((
+                        content.clone(),
+                        crate::services::turn_context::InvokedSkill {
+                            name: command.clone(),
+                            path: format!("skill:{}", skill.id),
+                            content,
+                        },
+                    ))
                 })
-            } else { None };
+            } else {
+                None
+            };
             // Hosts reject unknown slash commands; ordinary Desktop or multiline
             // messages may legitimately begin with a literal filesystem path.
-            if let Some((content, skill)) = content { turn_blocks.push((content, Some(skill))); }
+            if let Some((content, skill)) = content {
+                turn_blocks.push((content, Some(skill)));
+            }
         }
         let available_skills = discovered_skills.values().filter(|skill| skill.model_invocable()).map(|skill| serde_json::json!({"name":skill.name,"description":skill.description,"context":skill.context})).collect::<Vec<_>>();
         if !available_skills.is_empty() {
@@ -580,10 +804,16 @@ impl QueryEngine {
         let instructions_workspace = workspace.clone();
         let instructions_user_dir = plugin_context.paths.data_dir.clone();
         let instructions = tokio::task::spawn_blocking(move || {
-            crate::project_instructions::load_all(Some(&instructions_user_dir), &instructions_workspace)
+            crate::project_instructions::load_all(
+                Some(&instructions_user_dir),
+                &instructions_workspace,
+            )
         })
         .await??;
-        let instruction_files: Vec<_> = instructions.iter().map(|item| (item.path.clone(), item.sha256.clone())).collect();
+        let instruction_files: Vec<_> = instructions
+            .iter()
+            .map(|item| (item.path.clone(), item.sha256.clone()))
+            .collect();
         crate::services::lifecycle_events::instructions(
             &plugin_context,
             &hooks,
@@ -599,8 +829,14 @@ impl QueryEngine {
         let turn_messages = request.messages.clone();
         let turn_context = tokio::task::spawn_blocking(move || {
             for (block, skill) in turn_blocks {
-                if let Some(entry) = crate::services::turn_context::for_last(&turn_messages, vec![block]) {
-                    crate::services::turn_context::save(&turn_root, &turn_session, &crate::services::turn_context::Entry { skill, ..entry })?;
+                if let Some(entry) =
+                    crate::services::turn_context::for_last(&turn_messages, vec![block])
+                {
+                    crate::services::turn_context::save(
+                        &turn_root,
+                        &turn_session,
+                        &crate::services::turn_context::Entry { skill, ..entry },
+                    )?;
                 }
             }
             crate::services::turn_context::load(&turn_root, &turn_session)
@@ -609,8 +845,15 @@ impl QueryEngine {
         // Skills whose message a compaction removed follow, as in the reference CLI.
         let context_reminders: Vec<String> = crate::project_instructions::reminder(&instructions)
             .into_iter()
-            .chain(git_snapshot.as_deref().map(crate::services::git_snapshot::reminder))
-            .chain(crate::services::turn_context::invoked_skills_reminder(&turn_context, &request.messages))
+            .chain(
+                git_snapshot
+                    .as_deref()
+                    .map(crate::services::git_snapshot::reminder),
+            )
+            .chain(crate::services::turn_context::invoked_skills_reminder(
+                &turn_context,
+                &request.messages,
+            ))
             .collect();
         let allowed_directories = project
             .as_ref()
@@ -623,21 +866,48 @@ impl QueryEngine {
             })
             .unwrap_or_default();
         if let Some(project) = project {
-            let folders = project.folders.iter().map(|f| f.path.as_str()).collect::<Vec<_>>();
-            let mut context = format!("\nProject: {}\nProject source folders (the first is the working directory):\n{}", project.name, serde_json::to_string(&folders)?);
-            if let Some(instructions) = project.instructions.as_deref().map(str::trim).filter(|text| !text.is_empty()) {
+            let folders = project
+                .folders
+                .iter()
+                .map(|f| f.path.as_str())
+                .collect::<Vec<_>>();
+            let mut context = format!(
+                "\nProject: {}\nProject source folders (the first is the working directory):\n{}",
+                project.name,
+                serde_json::to_string(&folders)?
+            );
+            if let Some(instructions) = project
+                .instructions
+                .as_deref()
+                .map(str::trim)
+                .filter(|text| !text.is_empty())
+            {
                 context.push_str(&format!("\nProject instructions:\n{instructions}"));
             }
-            request.system_prompt.get_or_insert_with(String::new).push_str(&context);
+            request
+                .system_prompt
+                .get_or_insert_with(String::new)
+                .push_str(&context);
         }
-        let team_context=crate::services::team::model_context(&plugin_context,&workspace)?;
-        request.system_prompt.get_or_insert_with(String::new).push_str(&team_context);
+        let team_context = crate::services::team::model_context(&plugin_context, &workspace)?;
+        request
+            .system_prompt
+            .get_or_insert_with(String::new)
+            .push_str(&team_context);
         let model = request.model.clone();
 
-        tracing::info!(module = "EngineCore", "send_message: conv_id={}, model={}, workspace={}", conv_id, model, workspace_path);
+        tracing::info!(
+            module = "EngineCore",
+            "send_message: conv_id={}, model={}, workspace={}",
+            conv_id,
+            model,
+            workspace_path
+        );
 
         if let Some(ref tracker) = self.cost_tracker {
-            let estimated_tokens = request.messages.iter()
+            let estimated_tokens = request
+                .messages
+                .iter()
                 .filter_map(|m| m.get("content").and_then(|c| c.as_str()))
                 .map(|c| (c.len() as u64) / 4)
                 .sum::<u64>();
@@ -651,15 +921,19 @@ impl QueryEngine {
                 BudgetCheckResult::Warning(msg, usage, limit) => {
                     tracing::warn!(module = "EngineCore", "Budget warning: {}", msg);
                     let (warn_tx, warn_rx) = mpsc::channel::<EngineEvent>(10);
-                    let _ = warn_tx.send(EngineEvent::BudgetWarning {
-                        message: msg,
-                        usage,
-                        limit,
-                    }).await;
-                    let _ = warn_tx.send(EngineEvent::MessageStop {
-                        full_text: String::new(),
-                        stop_reason: Some("budget_warning".to_string()),
-                    }).await;
+                    let _ = warn_tx
+                        .send(EngineEvent::BudgetWarning {
+                            message: msg,
+                            usage,
+                            limit,
+                        })
+                        .await;
+                    let _ = warn_tx
+                        .send(EngineEvent::MessageStop {
+                            full_text: String::new(),
+                            stop_reason: Some("budget_warning".to_string()),
+                        })
+                        .await;
                     return Ok(warn_rx);
                 }
                 BudgetCheckResult::WithinBudget => {}
@@ -667,7 +941,9 @@ impl QueryEngine {
         }
 
         let reasoning_mode = request.reasoning_mode.clone().unwrap_or_else(|| {
-            let first_user_msg = request.messages.iter()
+            let first_user_msg = request
+                .messages
+                .iter()
                 .find(|m| m.get("role").and_then(|r| r.as_str()) == Some("user"))
                 .and_then(|m| m.get("content"))
                 .and_then(|c| c.as_str())
@@ -675,12 +951,25 @@ impl QueryEngine {
             analyze_complexity(first_user_msg)
         });
 
-        tracing::info!(module = "EngineCore", "Reasoning mode: {:?}", reasoning_mode);
+        tracing::info!(
+            module = "EngineCore",
+            "Reasoning mode: {:?}",
+            reasoning_mode
+        );
 
         let mut provider = {
             let pm = self.provider_manager.lock().await;
-            let resolved = if let Some(id) = request.provider_id.as_deref() { pm.resolve_selected(id, &model) } else { pm.resolve_provider(&model).await };
-            tracing::info!(module = "EngineCore", "resolve_provider({}): {:?}", model, resolved.as_ref().map(|p| &p.provider.id));
+            let resolved = if let Some(id) = request.provider_id.as_deref() {
+                pm.resolve_selected(id, &model)
+            } else {
+                pm.resolve_provider(&model).await
+            };
+            tracing::info!(
+                module = "EngineCore",
+                "resolve_provider({}): {:?}",
+                model,
+                resolved.as_ref().map(|p| &p.provider.id)
+            );
             resolved.ok_or_else(|| anyhow!("No provider found for model: {}", model))?
         };
 
@@ -689,7 +978,11 @@ impl QueryEngine {
 
         let state = ConversationState {
             conversation_id: conv_id.clone(),
-            model: request.provider_id.as_ref().map(|id| format!("{}::{}", id, model)).unwrap_or_else(|| model.clone()),
+            model: request
+                .provider_id
+                .as_ref()
+                .map(|id| format!("{}::{}", id, model))
+                .unwrap_or_else(|| model.clone()),
             messages: request.messages.clone(),
             system_prompt: request.system_prompt.clone(),
             last_activity: Utc::now().to_rfc3339(),
@@ -700,33 +993,79 @@ impl QueryEngine {
         tracing::info!(module = "EngineCore", "Conversation state updated");
 
         if let Some(effort) = request.effort.as_deref() {
-            if !["off", "low", "medium", "high", "xhigh", "max"].contains(&effort) { anyhow::bail!("Invalid effort"); }
+            if !["off", "low", "medium", "high", "xhigh", "max"].contains(&effort) {
+                anyhow::bail!("Invalid effort");
+            }
         }
         provider.model.effort = request.effort.clone();
         validate_model_input(&provider.model, &request.messages)?;
         let configured_max = provider.model.max_tokens.unwrap_or(8192);
-        let mut max_tokens = request.max_tokens.unwrap_or(configured_max).min(configured_max);
-        if max_tokens == 0 { anyhow::bail!("max_tokens must be positive"); }
+        let mut max_tokens = request
+            .max_tokens
+            .unwrap_or(configured_max)
+            .min(configured_max);
+        if max_tokens == 0 {
+            anyhow::bail!("max_tokens must be positive");
+        }
         if let Some(context) = provider.model.context_window {
-            let estimated = crate::native_engine::token_counter::TokenCounter::estimate(&request.messages) as u64;
+            let estimated =
+                crate::native_engine::token_counter::TokenCounter::estimate(&request.messages)
+                    as u64;
             if estimated + max_tokens as u64 > context as u64 {
                 // Shrink the output budget to what the window still holds; only
                 // fail when too little is left for a useful answer.
                 let remaining = (context as u64).saturating_sub(estimated);
-                if remaining < 4096 { anyhow::bail!("Input plus output budget exceeds the configured context window; compact the conversation or lower max output tokens"); }
+                if remaining < 4096 {
+                    anyhow::bail!("Input plus output budget exceeds the configured context window; compact the conversation or lower max output tokens");
+                }
                 max_tokens = remaining as u32;
             }
         }
 
-        let search_config_path = self.provider_manager.lock().await.config_path()
-            .parent().unwrap_or(std::path::Path::new(".")).join("config.json");
-        let learning = if plugin_context.setting::<bool>("learning.enabled")?.unwrap_or(false) {
-            Some(crate::learning::TurnObservation::new(plugin_context.clone(), conv_id.clone()))
-        } else { None };
+        let search_config_path = self
+            .provider_manager
+            .lock()
+            .await
+            .config_path()
+            .parent()
+            .unwrap_or(std::path::Path::new("."))
+            .join("config.json");
+        // Super Agent identity is durable, so a resumed session keeps its role
+        // and a task member keeps its member tools. A stale call is rejected at
+        // execution even when the schema no longer offers it.
+        let super_agent_role =
+            crate::super_agent::role::load(&self.db_manager, &conv_id).unwrap_or_default();
+        let super_agent_member = crate::super_agent::role::membership(&self.db_manager, &conv_id)
+            .ok()
+            .flatten()
+            .map(|(_, role)| role);
+        let data_dir = self
+            .workspaces_dir
+            .parent()
+            .unwrap_or(&self.workspaces_dir)
+            .to_path_buf();
+        let system_prompt = if super_agent_role.is_router() {
+            Some(crate::super_agent::prompt::append_router(
+                request.system_prompt.as_deref().unwrap_or_default(),
+            ))
+        } else {
+            request.system_prompt.clone()
+        };
+        let learning = if plugin_context
+            .setting::<bool>("learning.enabled")?
+            .unwrap_or(false)
+        {
+            Some(crate::learning::TurnObservation::new(
+                plugin_context.clone(),
+                conv_id.clone(),
+            ))
+        } else {
+            None
+        };
         let mut executor = ToolLoopExecutor::new(
             provider,
             request.messages,
-            request.system_prompt,
+            system_prompt,
             max_tokens,
             event_tx.clone(),
             workspace_path.clone(),
@@ -750,23 +1089,48 @@ impl QueryEngine {
         .with_hooks(hooks)
         .with_goal_state(self.db_manager.clone())
         .with_context_boundary(request.context_boundary)
-        .with_allowed_tools(agent.and_then(|d|d.tools))
+        .with_allowed_tools(agent.and_then(|d| d.tools))
         .with_prompt_profile(prompt_profile)
         .with_context_reminders(context_reminders)
         .with_turn_context(turn_context)
         .with_memex(crate::memory::MemExClient::with_path(
-            self.workspaces_dir.parent().unwrap_or(&self.workspaces_dir).join("memory.sqlite3"), None,
+            self.workspaces_dir
+                .parent()
+                .unwrap_or(&self.workspaces_dir)
+                .join("memory.sqlite3"),
+            None,
         ))
         .with_bundled_resources(self.bundled_resources.clone())
         .with_search_config_path(search_config_path)
         .with_conv_id(conv_id.clone())
+        .with_super_agent(
+            super_agent_role,
+            super_agent_member,
+            crate::super_agent::crp::ToolRuntime {
+                db: self.db_manager.clone(),
+                data_dir,
+                session_id: conv_id.clone(),
+            },
+        )
         .with_answer_waiters(self.answer_waiters.clone())
         .with_permission_mailbox(self.permission_mailbox.clone())
         .with_permission_manager(self.permission_manager.clone())
-        .with_auto_manual_interactive(self.auto_manual_interactive.load(std::sync::atomic::Ordering::Relaxed))
-        .with_permission_host(self.permission_host_available.load(std::sync::atomic::Ordering::Relaxed))
-        .with_local_goal_frontend(self.local_goal_frontend.load(std::sync::atomic::Ordering::Relaxed))
-        .with_prefetch_engine(Arc::new(PrefetchEngine::new(self.file_cache.clone(), workspace_path.clone())));
+        .with_auto_manual_interactive(
+            self.auto_manual_interactive
+                .load(std::sync::atomic::Ordering::Relaxed),
+        )
+        .with_permission_host(
+            self.permission_host_available
+                .load(std::sync::atomic::Ordering::Relaxed),
+        )
+        .with_local_goal_frontend(
+            self.local_goal_frontend
+                .load(std::sync::atomic::Ordering::Relaxed),
+        )
+        .with_prefetch_engine(Arc::new(PrefetchEngine::new(
+            self.file_cache.clone(),
+            workspace_path.clone(),
+        )));
 
         if let Some(ref registry) = self.mcp_registry {
             executor = executor.with_mcp_registry(registry.clone());
@@ -782,11 +1146,19 @@ impl QueryEngine {
         let provider_manager_title = self.provider_manager.clone();
         let db_title = self.db_manager.clone();
 
-        tracing::info!(module = "EngineCore", "Spawning executor task for conv_id={}", conv_id_clone);
+        tracing::info!(
+            module = "EngineCore",
+            "Spawning executor task for conv_id={}",
+            conv_id_clone
+        );
 
         let executor_handle = tokio::spawn(async move {
             let mut learning = learning;
-            tracing::info!(module = "EngineCore", "Executor task STARTED for {}", conv_id_clone);
+            tracing::info!(
+                module = "EngineCore",
+                "Executor task STARTED for {}",
+                conv_id_clone
+            );
 
             // 使用 catch_unwind 捕获 panic
             let exec_result = tokio::select! {
@@ -807,12 +1179,21 @@ impl QueryEngine {
                     } else {
                         "Unknown panic".to_string()
                     };
-                    tracing::error!(module = "EngineCore", "Executor PANIC for {}: {}", conv_id_clone, panic_msg);
-                    let _ = event_tx.send(EngineEvent::Error(format!("Engine panic: {}", panic_msg))).await;
-                    let _ = event_tx.send(EngineEvent::MessageStop {
-                        full_text: String::new(),
-                        stop_reason: Some("panic".to_string()),
-                    }).await;
+                    tracing::error!(
+                        module = "EngineCore",
+                        "Executor PANIC for {}: {}",
+                        conv_id_clone,
+                        panic_msg
+                    );
+                    let _ = event_tx
+                        .send(EngineEvent::Error(format!("Engine panic: {}", panic_msg)))
+                        .await;
+                    let _ = event_tx
+                        .send(EngineEvent::MessageStop {
+                            full_text: String::new(),
+                            stop_reason: Some("panic".to_string()),
+                        })
+                        .await;
                     return;
                 }
             };
@@ -824,27 +1205,51 @@ impl QueryEngine {
             drop(learning);
             match exec_result {
                 Ok((full_text, _stop_reason)) => {
-                    tracing::info!(module = "EngineCore", "Executor completed for {}, full_text_len={}", conv_id_clone, full_text.len());
+                    tracing::info!(
+                        module = "EngineCore",
+                        "Executor completed for {}, full_text_len={}",
+                        conv_id_clone,
+                        full_text.len()
+                    );
                     if save_response && !full_text.is_empty() {
                         let conv_id = conv_id_clone.clone();
                         let _ = tokio::task::spawn_blocking(move || {
                             db.with_conn(|conn| {
                                 let msg_id = Uuid::new_v4().to_string();
                                 let now = Utc::now().to_rfc3339();
-                                let sort_order = crate::db::message_repo::get_messages_by_conversation(conn, &conv_id)
+                                let sort_order =
+                                    crate::db::message_repo::get_messages_by_conversation(
+                                        conn, &conv_id,
+                                    )
                                     .unwrap_or_default()
                                     .len() as i64;
                                 crate::db::message_repo::insert_message(
-                                    conn, &msg_id, &conv_id, "assistant", &full_text, None, &now, false, sort_order,
+                                    conn,
+                                    &msg_id,
+                                    &conv_id,
+                                    "assistant",
+                                    &full_text,
+                                    None,
+                                    &now,
+                                    false,
+                                    sort_order,
                                 )?;
-                                crate::db::conversation_repo::increment_message_count(conn, &conv_id)?;
+                                crate::db::conversation_repo::increment_message_count(
+                                    conn, &conv_id,
+                                )?;
                                 Ok::<(), anyhow::Error>(())
                             })
-                        }).await;
+                        })
+                        .await;
                     }
                 }
                 Err(e) => {
-                    tracing::error!(module = "QueryEngine", "Error in turn for {}: {}", conv_id_clone, crate::performance::request_diagnostic(&e));
+                    tracing::error!(
+                        module = "QueryEngine",
+                        "Error in turn for {}: {}",
+                        conv_id_clone,
+                        crate::performance::request_diagnostic(&e)
+                    );
                     // Note: execute() already sends EngineEvent::Error + MessageStop to event_tx,
                     // so the frontend will receive a proper error message instead of channel closed.
                     let mut states = conversation_states_clone.lock().await;
@@ -856,7 +1261,12 @@ impl QueryEngine {
             }
 
             let mut turns = active_turns_clone.lock().await;
-            if turns.get(&conv_id_clone).is_some_and(|turn| !turn.event_tx.same_channel(&event_tx)) { return; }
+            if turns
+                .get(&conv_id_clone)
+                .is_some_and(|turn| !turn.event_tx.same_channel(&event_tx))
+            {
+                return;
+            }
             if let Some(turn) = turns.get_mut(&conv_id_clone) {
                 turn.cancelled = true;
             }
@@ -864,7 +1274,11 @@ impl QueryEngine {
 
             let mut states = conversation_states_clone.lock().await;
             if let Some(state) = states.get_mut(&conv_id_clone) {
-                state.status = if successful_turn { ConversationStatus::Completed } else { ConversationStatus::Error };
+                state.status = if successful_turn {
+                    ConversationStatus::Completed
+                } else {
+                    ConversationStatus::Error
+                };
                 state.last_activity = Utc::now().to_rfc3339();
                 let current_turn_count = state.turn_count;
                 state.turn_count += 1;
@@ -874,7 +1288,10 @@ impl QueryEngine {
                     let title_model = state.model.clone();
                     let pm = provider_manager_title.clone();
                     let db_t = db_title.clone();
-                    let title_identity = super::request_identity::TurnIdentity::new(Some(title_conv_id.clone()), None);
+                    let title_identity = super::request_identity::TurnIdentity::new(
+                        Some(title_conv_id.clone()),
+                        None,
+                    );
                     tokio::spawn(title_identity.scope(async move {
                         tracing::info!(module = "EngineCore", "Auto-generating title for conv_id={}", title_conv_id);
                         let title_conv_id_inner = title_conv_id.clone();
@@ -1019,11 +1436,14 @@ impl QueryEngine {
 
         {
             let mut turns = self.active_turns.lock().await;
-            turns.insert(conv_id.clone(), ActiveTurn {
-                event_tx: event_tx_for_turn,
-                executor_handle: Some(executor_handle),
-                cancelled: false,
-            });
+            turns.insert(
+                conv_id.clone(),
+                ActiveTurn {
+                    event_tx: event_tx_for_turn,
+                    executor_handle: Some(executor_handle),
+                    cancelled: false,
+                },
+            );
         }
 
         Ok(event_rx)
@@ -1048,8 +1468,14 @@ impl QueryEngine {
             }
         }
         crate::services::async_hooks::cancel(conv_id).await;
-        self.answer_waiters.lock().await.retain(|_, sender| !sender.is_closed());
-        self.permission_mailbox.lock().await.retain(|_, sender| !sender.is_closed());
+        self.answer_waiters
+            .lock()
+            .await
+            .retain(|_, sender| !sender.is_closed());
+        self.permission_mailbox
+            .lock()
+            .await
+            .retain(|_, sender| !sender.is_closed());
 
         let mut states = self.conversation_states.lock().await;
         if let Some(state) = states.get_mut(conv_id) {
@@ -1077,53 +1503,119 @@ impl QueryEngine {
             .retain(|_, child| child.parent != session);
     }
 
-    pub async fn resume_with_permission(&self, request_id: &str, response: super::permission_response::PermissionResponse) -> Result<()> {
+    pub async fn resume_with_permission(
+        &self,
+        request_id: &str,
+        response: super::permission_response::PermissionResponse,
+    ) -> Result<()> {
         super::permission_response::respond(&self.permission_mailbox, request_id, response).await
     }
 
-    pub async fn permission_completion(&self, request_id: &str) -> tokio::sync::watch::Receiver<bool> {
+    pub async fn permission_completion(
+        &self,
+        request_id: &str,
+    ) -> tokio::sync::watch::Receiver<bool> {
         super::permission_response::completion(&self.permission_mailbox, request_id).await
     }
 
     pub async fn pending_questions(&self, session: &str) -> Vec<Value> {
         let waiters = self.answer_waiters.lock().await;
-        super::permission_response::pending_owners(session).into_iter()
+        super::permission_response::pending_owners(session)
+            .into_iter()
             .filter(|(id, _)| waiters.get(id).is_some_and(|sender| !sender.is_closed()))
-            .map(|(id, owner)| serde_json::json!({"request_id":id,"session_id":owner.session_id,
+            .map(|(id, owner)| {
+                serde_json::json!({"request_id":id,"session_id":owner.session_id,
                 "tool_use_id":owner.tool_use_id,"kind":owner.kind,"tool_input":owner.input,
-                "planApprovalRequest":owner.plan})).collect()
+                "planApprovalRequest":owner.plan})
+            })
+            .collect()
     }
 
     /// Scope Desktop responses to the emitting session, including delegated children.
     /// Validate first; malformed or stale submissions must not consume a live waiter.
-    pub async fn resume_scoped_answer(&self, session: &str, request_id: &str, tool_use_id: &str, answer: String, permission: bool) -> Result<Value> {
+    pub async fn resume_scoped_answer(
+        &self,
+        session: &str,
+        request_id: &str,
+        tool_use_id: &str,
+        answer: String,
+        permission: bool,
+    ) -> Result<Value> {
         let owner = super::permission_response::request_owner(request_id)
             .ok_or_else(|| anyhow!("Request expired or already completed"))?;
-        anyhow::ensure!(owner.session_id == session && owner.tool_use_id == tool_use_id,
-            "Request session or tool ownership mismatch");
-        anyhow::ensure!((owner.kind == "permission") == permission, "Incorrect response endpoint for request");
+        anyhow::ensure!(
+            owner.session_id == session && owner.tool_use_id == tool_use_id,
+            "Request session or tool ownership mismatch"
+        );
+        anyhow::ensure!(
+            (owner.kind == "permission") == permission,
+            "Incorrect response endpoint for request"
+        );
         if let Some(request) = &owner.plan {
-            let manager = owner.manager.as_ref().ok_or_else(|| anyhow!("Plan authority unavailable"))?;
-            let root = owner.root.as_ref().ok_or_else(|| anyhow!("Plan storage unavailable"))?;
+            let manager = owner
+                .manager
+                .as_ref()
+                .ok_or_else(|| anyhow!("Plan authority unavailable"))?;
+            let root = owner
+                .root
+                .as_ref()
+                .ok_or_else(|| anyhow!("Plan storage unavailable"))?;
             let context = crate::services::session_messages::context(root)?;
-            let bypass = crate::services::session_permission_mode::plan_returns_to_bypass(&context.db, session, manager)?;
-            crate::services::plan_approval::parse_response(&answer, request, bypass, manager.bypass_available())?;
-            anyhow::ensure!(manager.get_mode() == crate::permissions::PermissionMode::PlanMode, "Plan mode changed during review");
-            anyhow::ensure!(crate::services::plans::read(root, session)?.as_deref() == Some(request.plan.as_str()), "Plan changed during review; request approval again");
+            let bypass = crate::services::session_permission_mode::plan_returns_to_bypass(
+                &context.db,
+                session,
+                manager,
+            )?;
+            crate::services::plan_approval::parse_response(
+                &answer,
+                request,
+                bypass,
+                manager.bypass_available(),
+            )?;
+            anyhow::ensure!(
+                manager.get_mode() == crate::permissions::PermissionMode::PlanMode,
+                "Plan mode changed during review"
+            );
+            anyhow::ensure!(
+                crate::services::plans::read(root, session)?.as_deref()
+                    == Some(request.plan.as_str()),
+                "Plan changed during review; request approval again"
+            );
         }
         let mut outcome = owner.outcome.subscribe();
         if permission {
             let response = if answer == "allow_session" {
-                anyhow::ensure!(super::permission_response::can_allow_bash_session(owner.tool_name.as_deref().unwrap_or_default(), &owner.input), "Session Bash approval is unavailable for this request");
-                super::permission_response::PermissionResponse::AllowBashForSession { updated_input: None, note: None }
-            } else { super::permission_response::PermissionResponse::Text(answer) };
-            super::permission_response::respond(&self.permission_mailbox, request_id, response).await?;
+                anyhow::ensure!(
+                    super::permission_response::can_allow_bash_session(
+                        owner.tool_name.as_deref().unwrap_or_default(),
+                        &owner.input
+                    ),
+                    "Session Bash approval is unavailable for this request"
+                );
+                super::permission_response::PermissionResponse::AllowBashForSession {
+                    updated_input: None,
+                    note: None,
+                }
+            } else {
+                super::permission_response::PermissionResponse::Text(answer)
+            };
+            super::permission_response::respond(&self.permission_mailbox, request_id, response)
+                .await?;
             return Ok(serde_json::json!({"ok":true,"status":"submitted"}));
         }
         {
             let mut waiters = self.answer_waiters.lock().await;
-            anyhow::ensure!(waiters.get(request_id).is_some_and(|sender| !sender.is_closed()), "Request expired or already completed");
-            waiters.remove(request_id).unwrap().send(answer).map_err(|_| anyhow!("Request cancelled before delivery"))?;
+            anyhow::ensure!(
+                waiters
+                    .get(request_id)
+                    .is_some_and(|sender| !sender.is_closed()),
+                "Request expired or already completed"
+            );
+            waiters
+                .remove(request_id)
+                .unwrap()
+                .send(answer)
+                .map_err(|_| anyhow!("Request cancelled before delivery"))?;
         }
         if owner.plan.is_some() {
             loop {
@@ -1131,7 +1623,10 @@ impl QueryEngine {
                     let result = result.map_err(|error| anyhow!(error))?;
                     return Ok(serde_json::json!({"ok":true,"status":"applied","result":result}));
                 }
-                outcome.changed().await.map_err(|_| anyhow!("Plan approval cancelled before commit"))?;
+                outcome
+                    .changed()
+                    .await
+                    .map_err(|_| anyhow!("Plan approval cancelled before commit"))?;
             }
         }
         Ok(serde_json::json!({"ok":true,"status":"submitted"}))
@@ -1139,12 +1634,17 @@ impl QueryEngine {
 
     pub async fn resume_with_answer(&self, conv_id: &str, answer: String) -> Result<()> {
         if self.permission_mailbox.lock().await.contains_key(conv_id) {
-            return super::permission_response::respond(&self.permission_mailbox, conv_id,
-                super::permission_response::PermissionResponse::Text(answer)).await;
+            return super::permission_response::respond(
+                &self.permission_mailbox,
+                conv_id,
+                super::permission_response::PermissionResponse::Text(answer),
+            )
+            .await;
         }
         let mut waiters = self.answer_waiters.lock().await;
         if let Some(tx) = waiters.remove(conv_id) {
-            tx.send(answer).map_err(|_| anyhow!("Failed to send answer: receiver already dropped"))?;
+            tx.send(answer)
+                .map_err(|_| anyhow!("Failed to send answer: receiver already dropped"))?;
             Ok(())
         } else {
             anyhow::bail!("No pending AskUserQuestion for conversation {}", conv_id)
@@ -1173,12 +1673,17 @@ impl QueryEngine {
         };
 
         let mut history = self.tool_call_history.lock().await;
-        history.entry(conv_id.to_string())
+        history
+            .entry(conv_id.to_string())
             .or_insert_with(Vec::new)
             .push(record);
 
         let _audit_entry = AuditEntry::new(
-            if is_error { AuditAction::ToolCancelled } else { AuditAction::ToolExecuted },
+            if is_error {
+                AuditAction::ToolCancelled
+            } else {
+                AuditAction::ToolExecuted
+            },
             tool_name,
             conv_id,
         )
@@ -1194,7 +1699,10 @@ impl QueryEngine {
         tracing::info!(
             module = "Audit",
             "Tool: {} | Conv: {} | Error: {} | Duration: {}ms",
-            tool_name, conv_id, is_error, elapsed.as_millis()
+            tool_name,
+            conv_id,
+            is_error,
+            elapsed.as_millis()
         );
     }
 
@@ -1209,7 +1717,8 @@ impl QueryEngine {
 
     pub async fn list_active_conversations(&self) -> Vec<String> {
         let states = self.conversation_states.lock().await;
-        states.values()
+        states
+            .values()
             .filter(|s| s.status == ConversationStatus::Active)
             .map(|s| s.conversation_id.clone())
             .collect()
@@ -1220,7 +1729,8 @@ impl QueryEngine {
         let mut removed_count = 0;
 
         let mut states = self.conversation_states.lock().await;
-        let inactive_ids: Vec<String> = states.iter()
+        let inactive_ids: Vec<String> = states
+            .iter()
             .filter(|(_, s)| {
                 if let Ok(last_activity) = chrono::DateTime::parse_from_rfc3339(&s.last_activity) {
                     let duration = now.signed_duration_since(last_activity);
@@ -1247,14 +1757,21 @@ mod scoped_answer_tests;
 
 pub type NativeEngine = QueryEngine;
 
-fn validate_model_input(model: &crate::native_engine::provider_manager::ModelConfig, messages: &[Value]) -> Result<()> {
+fn validate_model_input(
+    model: &crate::native_engine::provider_manager::ModelConfig,
+    messages: &[Value],
+) -> Result<()> {
     for message in messages.iter().filter(|m| m["role"] == "user") {
         let content = &message["content"];
-        if content.as_str().is_some_and(|s| !s.is_empty()) && !model.supports_text { anyhow::bail!("Selected model does not accept Text input"); }
+        if content.as_str().is_some_and(|s| !s.is_empty()) && !model.supports_text {
+            anyhow::bail!("Selected model does not accept Text input");
+        }
         if let Some(parts) = content.as_array() {
             for part in parts {
                 match part["type"].as_str().unwrap_or("") {
-                    "text" | "input_text" if !model.supports_text => anyhow::bail!("Selected model does not accept Text input"),
+                    "text" | "input_text" if !model.supports_text => {
+                        anyhow::bail!("Selected model does not accept Text input")
+                    }
                     _ => {}
                 }
             }
@@ -1269,12 +1786,20 @@ mod provider_input_tests {
     #[test]
     fn provider_input_capabilities_are_enforced() {
         let mut model: crate::native_engine::provider_manager::ModelConfig = serde_json::from_value(serde_json::json!({"id":"m","name":"M","enabled":true,"max_tokens":32000,"supports_vision":false,"supports_web_search":false})).unwrap();
-        assert!(validate_model_input(&model,&[serde_json::json!({"role":"user","content":"hello"})]).is_ok());
+        assert!(validate_model_input(
+            &model,
+            &[serde_json::json!({"role":"user","content":"hello"})]
+        )
+        .is_ok());
         // Stale capability metadata must not prevent the endpoint from deciding.
         for kind in ["image", "image_url", "input_image"] {
             assert!(validate_model_input(&model,&[serde_json::json!({"role":"user","content":[{"type":kind,"image_url":{"url":"data:image/png;base64,AA=="}}]})]).is_ok());
         }
         model.supports_text = false;
-        assert!(validate_model_input(&model,&[serde_json::json!({"role":"user","content":"hello"})]).is_err());
+        assert!(validate_model_input(
+            &model,
+            &[serde_json::json!({"role":"user","content":"hello"})]
+        )
+        .is_err());
     }
 }

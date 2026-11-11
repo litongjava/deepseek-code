@@ -1066,7 +1066,10 @@ async fn a_loaded_tool_still_asks_for_approval_and_a_denial_leaves_no_trace() {
         .unwrap();
     assert_eq!(text, "done");
     server.abort();
-    assert!(!target.exists(), "the denied write must not create the file");
+    assert!(
+        !target.exists(),
+        "the denied write must not create the file"
+    );
     let mut denied = Vec::new();
     while let Ok(event) = rx.try_recv() {
         if let EngineEvent::ToolUseDone {
@@ -1172,7 +1175,10 @@ async fn cancelling_an_approval_stops_the_turn_without_running_the_tool() {
     assert!(task.await.unwrap_err().is_cancelled());
     tokio::time::sleep(Duration::from_millis(200)).await;
     server.abort();
-    assert!(!target.exists(), "a cancelled approval must not run the tool");
+    assert!(
+        !target.exists(),
+        "a cancelled approval must not run the tool"
+    );
     assert_eq!(
         captured.lock().await.len(),
         2,
@@ -1364,8 +1370,14 @@ async fn every_attempt_of_a_request_shares_one_tool_schema_and_estimation() {
         let first = request_tool_names(&requests[0], format);
         let second = request_tool_names(&requests[1], format);
         let third = request_tool_names(&requests[3], format);
-        assert!(!first.contains(&"ListDir".to_owned()), "{format}: {first:?}");
-        assert!(second.contains(&"ListDir".to_owned()), "{format}: {second:?}");
+        assert!(
+            !first.contains(&"ListDir".to_owned()),
+            "{format}: {first:?}"
+        );
+        assert!(
+            second.contains(&"ListDir".to_owned()),
+            "{format}: {second:?}"
+        );
         assert!(third.contains(&"ListDir".to_owned()), "{format}: {third:?}");
         assert!(
             requests[3].to_string().contains("needle.txt"),
@@ -1435,7 +1447,10 @@ async fn every_attempt_of_a_request_shares_one_tool_schema_and_estimation() {
             .iter()
             .filter(|snapshot| !snapshot["contextUsage"].is_null())
             .collect();
-        assert!(!estimated.is_empty(), "{format}: request 2 was not estimated");
+        assert!(
+            !estimated.is_empty(),
+            "{format}: request 2 was not estimated"
+        );
         for snapshot in &estimated {
             assert_eq!(
                 snapshot["contextUsage"], expected,
@@ -1503,12 +1518,7 @@ async fn a_settings_change_while_a_loaded_tool_is_called_follows_the_current_swi
                                 }
                                 _ => std::fs::write(dir.join("customization.json"), b"{").unwrap(),
                             }
-                            tool_call_events(
-                                "openai",
-                                "list-1",
-                                "ListDir",
-                                json!({"path":"."}),
-                            )
+                            tool_call_events("openai", "list-1", "ListDir", json!({"path":"."}))
                         }
                         _ => text_events("openai", "done"),
                     };
@@ -1567,8 +1577,7 @@ async fn a_settings_change_while_a_loaded_tool_is_called_follows_the_current_swi
                     "the rejected call must not run"
                 );
                 assert!(
-                    !request_tool_names(&requests[2], "openai")
-                        .contains(&"ListDir".to_owned()),
+                    !request_tool_names(&requests[2], "openai").contains(&"ListDir".to_owned()),
                     "the next request must drop the tool"
                 );
             }
@@ -1580,16 +1589,12 @@ async fn a_settings_change_while_a_loaded_tool_is_called_follows_the_current_swi
                     requests[2].to_string().contains("marker.txt"),
                     "an enabled tool keeps running"
                 );
-                assert!(request_tool_names(&requests[2], "openai")
-                    .contains(&"ListDir".to_owned()));
+                assert!(request_tool_names(&requests[2], "openai").contains(&"ListDir".to_owned()));
             }
             _ => {
                 assert!(result.is_err(), "a damaged file must fail the request");
                 assert_eq!(rejected.len(), 1, "{rejected:?}");
-                assert!(
-                    rejected[0].contains("could not be read"),
-                    "{rejected:?}"
-                );
+                assert!(rejected[0].contains("could not be read"), "{rejected:?}");
                 assert_eq!(
                     requests.len(),
                     2,

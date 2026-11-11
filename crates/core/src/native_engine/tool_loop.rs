@@ -89,11 +89,11 @@ mod durable_input_tests;
 mod goal_proposal_tests;
 
 #[cfg(test)]
-#[path = "tool_loading_tests.rs"]
-mod tool_loading_tests;
-#[cfg(test)]
 #[path = "tool_loading_policy_tests.rs"]
 mod tool_loading_policy_tests;
+#[cfg(test)]
+#[path = "tool_loading_tests.rs"]
+mod tool_loading_tests;
 
 #[cfg(test)]
 #[path = "tool_loading_restore_tests.rs"]
@@ -268,6 +268,10 @@ pub struct ToolLoopExecutor {
     /// A tool the host is running itself (a bundled skill may drive one), which
     /// the loading gate must not refuse.
     host_tool: Option<String>,
+    /// Durable Super Agent identity of this session, resolved by the host.
+    super_agent_role: crate::super_agent::Role,
+    super_agent_member: Option<crate::super_agent::MemberRole>,
+    super_agent: Option<crate::super_agent::crp::ToolRuntime>,
 }
 
 #[derive(Debug, Clone)]
@@ -392,7 +396,7 @@ fn uses_independent_deepseek_search(provider: &ResolvedProvider) -> bool {
         "deepseek_native" | "deepseek" => true,
         "auto" | "" => {
             provider.model.id.to_ascii_lowercase().contains("deepseek")
-            || provider.provider.builtin_id.as_deref() == Some("deepseek")
+                || provider.provider.builtin_id.as_deref() == Some("deepseek")
                 || reqwest::Url::parse(&provider.provider.base_url)
                     .ok()
                     .and_then(|url| url.host_str().map(String::from))
@@ -461,7 +465,7 @@ fn collect_file_tool_paths(value: &Value, out: &mut Vec<String>) {
                     .unwrap_or_else(|| function["arguments"].clone());
                 if let Some(path) = arguments["file_path"].as_str() {
                     out.push(path.to_owned());
-            }
+                }
             }
             map.values()
                 .for_each(|item| collect_file_tool_paths(item, out));
@@ -523,7 +527,7 @@ fn ask_user_questions(input: &Value) -> Result<Vec<Value>> {
                 .filter(|q| !q.trim().is_empty())
                 .ok_or_else(|| anyhow!("Each question needs question text"))?
                 .to_owned();
-        anyhow::ensure!(seen.insert(text), "Question texts must be unique");
+            anyhow::ensure!(seen.insert(text), "Question texts must be unique");
             let options = question["options"]
                 .as_array()
                 .ok_or_else(|| anyhow!("Each question needs options"))?;
@@ -540,7 +544,7 @@ fn ask_user_questions(input: &Value) -> Result<Vec<Value>> {
             if question["multiSelect"].is_null() {
                 question["multiSelect"] = json!(false);
             }
-        Ok(question)
+            Ok(question)
         })
         .collect()
 }
@@ -878,6 +882,9 @@ impl ToolLoopExecutor {
             exposed_tools: None,
             builtin_names: Default::default(),
             host_tool: None,
+            super_agent_role: crate::super_agent::Role::Agent,
+            super_agent_member: None,
+            super_agent: None,
         }
     }
 
@@ -1095,7 +1102,7 @@ impl ToolLoopExecutor {
             | "git_status" | "git_diff" | "git_log" => true,
             "Bash" => {
                 !self.skill_shell_active
-                && input["run_in_background"] != true
+                    && input["run_in_background"] != true
                     && input["command"]
                         .as_str()
                         .is_some_and(crate::permissions::shell_read_only::is_read_only)
@@ -1232,7 +1239,7 @@ impl ToolLoopExecutor {
                  WHERE m.conversation_id=?1 AND m.role='assistant'
                    AND t.name='ToolSearch' AND t.is_error=0 AND t.output IS NOT NULL
                    AND m.sort_order >= COALESCE((SELECT MAX(sort_order) FROM messages
-                       WHERE conversation_id=?1 AND is_compact_boundary=1), -1)"
+                       WHERE conversation_id=?1 AND is_compact_boundary=1), -1)",
             )?;
             let results = query.query_map([session], |row| row.get::<_, String>(0))?;
             let mut loaded = std::collections::BTreeSet::new();
@@ -1615,8 +1622,8 @@ impl ToolLoopExecutor {
             for context in contexts.drain(..) {
                 output.push('\n');
                 output.push_str(&context);
+            }
         }
-                }
         let event = if failed {
             HookEvent::PostToolUseFailure
         } else {
@@ -1724,7 +1731,7 @@ impl ToolLoopExecutor {
             return Ok(None);
         };
         if let (Some(db), Some(session)) = (&self.goal_db, &self.conv_id) {
-            db.with_conn(|conn|content.save(conn, session, id, display, failed))??;
+            db.with_conn(|conn| content.save(conn, session, id, display, failed))??;
         }
         // Images and structured blocks must remain real provider content. Only
         // plain text can use the existing spill/preview representation.
@@ -1750,6 +1757,20 @@ impl ToolLoopExecutor {
 
     pub fn with_conv_id(mut self, conv_id: String) -> Self {
         self.conv_id = Some(conv_id);
+        self
+    }
+
+    /// Identity used to authorize Super Agent tools. Passing a runtime also
+    /// makes the CRP tools reachable; the role decides which schemas appear.
+    pub fn with_super_agent(
+        mut self,
+        role: crate::super_agent::Role,
+        member: Option<crate::super_agent::MemberRole>,
+        runtime: crate::super_agent::crp::ToolRuntime,
+    ) -> Self {
+        self.super_agent_role = role;
+        self.super_agent_member = member;
+        self.super_agent = Some(runtime);
         self
     }
 
@@ -1869,7 +1890,7 @@ impl ToolLoopExecutor {
         tokio::time::timeout(
             std::time::Duration::from_millis(100),
             tokio::task::spawn_blocking(move || {
-            crate::tools::tasks::display_title(&root, &session, &input)
+                crate::tools::tasks::display_title(&root, &session, &input)
             }),
         )
         .await
@@ -2105,6 +2126,21 @@ impl ToolLoopExecutor {
                 }),
         );
         tools.retain(|tool| allowed(&tool.name));
+        if self.super_agent_role.is_router() {
+            tools.retain(|tool| !crate::super_agent::crp::is_forbidden_router_tool(&tool.name));
+        }
+        if self.super_agent.is_some() {
+            let names: std::collections::HashSet<String> =
+                tools.iter().map(|tool| tool.name.clone()).collect();
+            tools.extend(
+                crate::super_agent::crp::definitions(
+                    self.super_agent_role,
+                    self.super_agent_member,
+                )
+                .into_iter()
+                .filter(|tool| !names.contains(&tool.name)),
+            );
+        }
         Ok(tools)
     }
 
@@ -2514,14 +2550,14 @@ impl ToolLoopExecutor {
             .scope(crate::performance::retry_events::scope(
                 self.event_tx.clone(),
                 crate::tools::background_shell::scope(
-            context,
+                    context,
                     crate::tools::path_scope::with_permissions(
                         self.permission_manager.clone(),
                         crate::tools::path_scope::scope(directories, self.execute_scoped()),
                     ),
                 ),
             ))
-        .await;
+            .await;
         if result.is_ok() {
             async_hook_guard.0 = None;
         }
@@ -2657,7 +2693,7 @@ impl ToolLoopExecutor {
                     .map(|blocks| {
                         blocks
                             .iter()
-                    .filter_map(|block| block.get("text").and_then(Value::as_str))
+                            .filter_map(|block| block.get("text").and_then(Value::as_str))
                             .collect::<Vec<_>>()
                             .join("\n")
                     })
@@ -2757,7 +2793,7 @@ impl ToolLoopExecutor {
         let _ = self
             .event_tx
             .send(EngineEvent::MessageStart {
-            model: self.provider.model.id.clone(),
+                model: self.provider.model.id.clone(),
             })
             .await;
         tracing::info!(module = "ToolLoop", "[E5] MessageStart sent");
@@ -2774,14 +2810,14 @@ impl ToolLoopExecutor {
             Err(error) => Err(error),
             Ok(Some(text)) => Ok((text, Some("end_turn".into()))),
             Ok(None) => match self.provider.provider.api_format {
-            ApiFormat::Anthropic => {
-                tracing::info!(module = "ToolLoop", "[E6.1] Starting Anthropic loop...");
-                self.execute_anthropic_loop().await
-            }
-            ApiFormat::OpenAI => {
-                tracing::info!(module = "ToolLoop", "[E6.2] Starting OpenAI loop...");
-                self.execute_openai_loop().await
-            }
+                ApiFormat::Anthropic => {
+                    tracing::info!(module = "ToolLoop", "[E6.1] Starting Anthropic loop...");
+                    self.execute_anthropic_loop().await
+                }
+                ApiFormat::OpenAI => {
+                    tracing::info!(module = "ToolLoop", "[E6.2] Starting OpenAI loop...");
+                    self.execute_openai_loop().await
+                }
             },
         };
 
@@ -2819,13 +2855,26 @@ impl ToolLoopExecutor {
         }
         let loop_result = loop_result.and_then(|(mut text, stop_reason)| {
             if let Some(schema) = &self.response_schema {
-                if !matches!(stop_reason.as_deref(),Some("stream_error"|"error"|"interrupted"|"failed"|"cancelled"|"max_iterations"|"max_tokens"|"length"|"incomplete")) {
-                    crate::structured_output::validate_result(schema,&text)?;
+                if !matches!(
+                    stop_reason.as_deref(),
+                    Some(
+                        "stream_error"
+                            | "error"
+                            | "interrupted"
+                            | "failed"
+                            | "cancelled"
+                            | "max_iterations"
+                            | "max_tokens"
+                            | "length"
+                            | "incomplete"
+                    )
+                ) {
+                    crate::structured_output::validate_result(schema, &text)?;
                     // Hand back the bare JSON even when the model fenced it.
                     text = crate::structured_output::strip_code_fence(&text).to_string();
                 }
             }
-            Ok((text,stop_reason))
+            Ok((text, stop_reason))
         });
         match &loop_result {
             Ok((full_text, stop_reason)) => {
@@ -2858,8 +2907,8 @@ impl ToolLoopExecutor {
                 let _ = self
                     .event_tx
                     .send(EngineEvent::MessageStop {
-                    full_text: full_text.clone(),
-                    stop_reason: stop_reason.clone(),
+                        full_text: full_text.clone(),
+                        stop_reason: stop_reason.clone(),
                     })
                     .await;
                 tracing::info!(module = "ToolLoop", "[E7] MessageStop sent (success)");
@@ -2886,6 +2935,26 @@ impl ToolLoopExecutor {
                 "Tool is not allowed by this agent definition".into(),
                 true,
             ));
+        }
+        if crate::super_agent::crp::handles(tool_name) {
+            // Authority is verified from durable records inside the tool, so a
+            // stale or forged call is rejected even if it bypassed the schema.
+            let output = match &self.super_agent {
+                Some(runtime) => {
+                    match crate::super_agent::crp::execute(
+                        runtime,
+                        tool_name,
+                        tool_input.clone(),
+                        _tool_use_id,
+                    ) {
+                        Ok(value) => value.to_string(),
+                        Err(error) => format!("Error: {error:#}"),
+                    }
+                }
+                None => "Error: Super Agent tools are unavailable in this session".into(),
+            };
+            let is_error = output.starts_with("Error:");
+            return CallStep::Finished((tool_input.clone(), output, is_error));
         }
         if self.is_plan_document_tool(tool_name, tool_input)
             || (self
@@ -2953,7 +3022,7 @@ impl ToolLoopExecutor {
                     return self
                         .prepare_after_confirmation(tool_name, tool_input, _tool_use_id, &message)
                         .await
-        }
+                }
                 PermissionResult::Granted => {}
             }
             let result = if tool_name == "TeamSpawn" {
@@ -2973,97 +3042,251 @@ impl ToolLoopExecutor {
                         std::path::Path::new(&self.workspace_cwd),
                         Some(&self.provider.model.id),
                     ),
-                    _ => Err(anyhow::anyhow!("Team tools require an active session and runtime directory")),
+                    _ => Err(anyhow::anyhow!(
+                        "Team tools require an active session and runtime directory"
+                    )),
                 }
             };
             let failed = result.is_err();
-            let output = match result { Ok(value) => value.to_string(), Err(error) => error.to_string() };
+            let output = match result {
+                Ok(value) => value.to_string(),
+                Err(error) => error.to_string(),
+            };
             return CallStep::Finished((tool_input.clone(), output, failed));
         }
         if tool_name == "plan_mode" {
-            match self.check_permission(tool_name, tool_input, _tool_use_id).await {
-                PermissionResult::Denied(reason) => return CallStep::Finished((tool_input.clone(), format!("Permission denied: {reason}"), true)),
-                PermissionResult::RequiresConfirmation(message) => return self.prepare_after_confirmation(tool_name, tool_input, _tool_use_id, &message).await,
+            match self
+                .check_permission(tool_name, tool_input, _tool_use_id)
+                .await
+            {
+                PermissionResult::Denied(reason) => {
+                    return CallStep::Finished((
+                        tool_input.clone(),
+                        format!("Permission denied: {reason}"),
+                        true,
+                    ))
+                }
+                PermissionResult::RequiresConfirmation(message) => {
+                    return self
+                        .prepare_after_confirmation(tool_name, tool_input, _tool_use_id, &message)
+                        .await
+                }
                 PermissionResult::Granted => {}
             }
-            let result = crate::tools::execute_tool_async(tool_name, tool_input.clone(), &self.workspace_cwd).await;
+            let result = crate::tools::execute_tool_async(
+                tool_name,
+                tool_input.clone(),
+                &self.workspace_cwd,
+            )
+            .await;
             let failed = result.is_err();
-            let output = match result { Ok(value) => value.to_string(), Err(error) => error.to_string() };
+            let output = match result {
+                Ok(value) => value.to_string(),
+                Err(error) => error.to_string(),
+            };
             return CallStep::Finished((tool_input.clone(), output, failed));
         }
         if tool_name == "ListAgents" {
-            let result = match (self.search_config_path.as_deref().and_then(std::path::Path::parent), self.conv_id.as_deref()) {
-                (Some(root), Some(session)) => crate::services::session_messages::context(root).and_then(|context| crate::tools::agent_messages::list_agents(&context, session)),
+            let result = match (
+                self.search_config_path
+                    .as_deref()
+                    .and_then(std::path::Path::parent),
+                self.conv_id.as_deref(),
+            ) {
+                (Some(root), Some(session)) => crate::services::session_messages::context(root)
+                    .and_then(|context| {
+                        crate::tools::agent_messages::list_agents(&context, session)
+                    }),
                 _ => Err(anyhow!("ListAgents needs an interactive session")),
             };
-            return CallStep::Finished((tool_input.clone(), match &result { Ok(value) => value.to_string(), Err(error) => format!("Error: {error:#}") }, result.is_err()));
+            return CallStep::Finished((
+                tool_input.clone(),
+                match &result {
+                    Ok(value) => value.to_string(),
+                    Err(error) => format!("Error: {error:#}"),
+                },
+                result.is_err(),
+            ));
         }
         if tool_name == "SendMessage" && tool_input["notify_when_idle"] == true {
-            return CallStep::Finished((tool_input.clone(), "Error: notify_when_idle is not supported by this runtime yet; send without it.".into(), true));
+            return CallStep::Finished((
+                tool_input.clone(),
+                "Error: notify_when_idle is not supported by this runtime yet; send without it."
+                    .into(),
+                true,
+            ));
         }
         // Like the reference CLI, a bare {to, message} is a send.
         let normalized_message;
         let tool_input = if tool_name == "SendMessage" && tool_input["operation"].is_null() {
             let mut input = tool_input.clone();
             input["operation"] = json!("send");
-            if let Some(object) = input.as_object_mut() { object.remove("summary"); object.remove("notify_when_idle"); }
+            if let Some(object) = input.as_object_mut() {
+                object.remove("summary");
+                object.remove("notify_when_idle");
+            }
             normalized_message = input;
             &normalized_message
-        } else { tool_input };
+        } else {
+            tool_input
+        };
         if tool_name == "SendMessage" {
-            match self.check_permission(tool_name, tool_input, _tool_use_id).await {
-                PermissionResult::Denied(reason) => return CallStep::Finished((tool_input.clone(), format!("Team message access denied: {reason}"), true)),
-                PermissionResult::RequiresConfirmation(message) => return self.prepare_after_confirmation(tool_name, tool_input, _tool_use_id, &message).await,
+            match self
+                .check_permission(tool_name, tool_input, _tool_use_id)
+                .await
+            {
+                PermissionResult::Denied(reason) => {
+                    return CallStep::Finished((
+                        tool_input.clone(),
+                        format!("Team message access denied: {reason}"),
+                        true,
+                    ))
+                }
+                PermissionResult::RequiresConfirmation(message) => {
+                    return self
+                        .prepare_after_confirmation(tool_name, tool_input, _tool_use_id, &message)
+                        .await
+                }
                 PermissionResult::Granted => {}
             }
-            let result = match (self.search_config_path.as_deref().and_then(std::path::Path::parent), self.conv_id.as_deref()) {
-                (Some(root), Some(session)) => crate::services::session_messages::context(root).and_then(|context| crate::tools::agent_messages::execute_live(&context, session, tool_input.clone())),
-                _ => Err(anyhow::anyhow!("Session-local message routing is unavailable")),
+            let result = match (
+                self.search_config_path
+                    .as_deref()
+                    .and_then(std::path::Path::parent),
+                self.conv_id.as_deref(),
+            ) {
+                (Some(root), Some(session)) => crate::services::session_messages::context(root)
+                    .and_then(|context| {
+                        crate::tools::agent_messages::execute_live(
+                            &context,
+                            session,
+                            tool_input.clone(),
+                        )
+                    }),
+                _ => Err(anyhow::anyhow!(
+                    "Session-local message routing is unavailable"
+                )),
             };
             let failed = result.is_err();
             let mut result = result;
-            if matches!(tool_input["operation"].as_str(), Some("send" | "shutdown_request" | "shutdown_response" | "plan_approval_response")) {
+            if matches!(
+                tool_input["operation"].as_str(),
+                Some("send" | "shutdown_request" | "shutdown_response" | "plan_approval_response")
+            ) {
                 if let Ok(value) = &mut result {
-                    let targets: Vec<String> = value["delivered"].as_array().map(|items| items.iter().filter_map(|item| item["session_id"].as_str().map(str::to_owned)).collect()).unwrap_or_default();
+                    let targets: Vec<String> = value["delivered"]
+                        .as_array()
+                        .map(|items| {
+                            items
+                                .iter()
+                                .filter_map(|item| item["session_id"].as_str().map(str::to_owned))
+                                .collect()
+                        })
+                        .unwrap_or_default();
                     let mut resumes = Vec::new();
                     for recipient in targets {
-                        let owned={let registry=self.owned_children.lock().unwrap_or_else(|e|e.into_inner());registry.get(&recipient).is_some_and(|entry|Some(entry.parent.as_str())==self.conv_id.as_deref())};
-                        if !owned { continue; }
-                        match Box::pin(self.resume_owned_child(&recipient,None,true)).await {
-                            Ok(resumed)=>{resumes.push(json!({"session_id":recipient,"status":"resumed_in_owner_turn","resume":resumed}));},
-                            Err(error)=>{resumes.push(json!({"session_id":recipient,"status":"needs_resume","reason":error.to_string()}));}
+                        let owned = {
+                            let registry = self
+                                .owned_children
+                                .lock()
+                                .unwrap_or_else(|e| e.into_inner());
+                            registry.get(&recipient).is_some_and(|entry| {
+                                Some(entry.parent.as_str()) == self.conv_id.as_deref()
+                            })
+                        };
+                        if !owned {
+                            continue;
+                        }
+                        match Box::pin(self.resume_owned_child(&recipient, None, true)).await {
+                            Ok(resumed) => {
+                                resumes.push(json!({"session_id":recipient,"status":"resumed_in_owner_turn","resume":resumed}));
+                            }
+                            Err(error) => {
+                                resumes.push(json!({"session_id":recipient,"status":"needs_resume","reason":error.to_string()}));
+                            }
                         }
                     }
-                    if !resumes.is_empty() { value["resumes"] = json!(resumes); value["delivery"] = json!("resumed_in_owner_turn"); }
+                    if !resumes.is_empty() {
+                        value["resumes"] = json!(resumes);
+                        value["delivery"] = json!("resumed_in_owner_turn");
+                    }
                 }
             }
-            let output = match result { Ok(value) => value.to_string(), Err(error) => error.to_string() };
+            let output = match result {
+                Ok(value) => value.to_string(),
+                Err(error) => error.to_string(),
+            };
             return CallStep::Finished((tool_input.clone(), output, failed));
         }
         if tool_name == "Agent" {
-            let normalized = if tool_name == "Agent" { delegation::normalize_agent_input(tool_input, self.delegation_depth == 0 && self.conv_id.is_some()) } else { tool_input.clone() };
-            let result = Box::pin(self.execute_delegated_invocation(&normalized, _tool_use_id)).await;
+            let normalized = if tool_name == "Agent" {
+                delegation::normalize_agent_input(
+                    tool_input,
+                    self.delegation_depth == 0 && self.conv_id.is_some(),
+                )
+            } else {
+                tool_input.clone()
+            };
+            let result =
+                Box::pin(self.execute_delegated_invocation(&normalized, _tool_use_id)).await;
             let failed = result.is_err();
-            let output = match result { Ok(value) => value.to_string(), Err(error) => format!("Delegation failed: {error}") };
+            let output = match result {
+                Ok(value) => value.to_string(),
+                Err(error) => format!("Delegation failed: {error}"),
+            };
             return CallStep::Finished((tool_input.clone(), output, failed));
         }
         if tool_name == "AskUserQuestion" {
-            return CallStep::Finished(self.execute_ask_user_question(tool_input, _tool_use_id).await);
+            return CallStep::Finished(
+                self.execute_ask_user_question(tool_input, _tool_use_id)
+                    .await,
+            );
         }
         if tool_name == "ProposeGoal" {
             let result = (|| -> Result<Value> {
                 anyhow::ensure!(self.goal_proposals_available(), "ProposeGoal is only available in an attached local main session outside plan mode");
-                crate::services::goal_proposals::propose(self.goal_db.as_ref().unwrap(), self.conv_id.as_deref().unwrap(), self.search_config_path.as_deref().unwrap().parent().unwrap(), std::path::Path::new(&self.workspace_cwd), self.permission_manager.as_ref().unwrap(), tool_input)
+                crate::services::goal_proposals::propose(
+                    self.goal_db.as_ref().unwrap(),
+                    self.conv_id.as_deref().unwrap(),
+                    self.search_config_path
+                        .as_deref()
+                        .unwrap()
+                        .parent()
+                        .unwrap(),
+                    std::path::Path::new(&self.workspace_cwd),
+                    self.permission_manager.as_ref().unwrap(),
+                    tool_input,
+                )
             })();
             let failed = result.is_err();
-            return CallStep::Finished((tool_input.clone(), match result { Ok(value) => value.to_string(), Err(error) => error.to_string() }, failed));
+            return CallStep::Finished((
+                tool_input.clone(),
+                match result {
+                    Ok(value) => value.to_string(),
+                    Err(error) => error.to_string(),
+                },
+                failed,
+            ));
         }
 
         if matches!(tool_name, "memory_search" | "memory_ingest") {
-            match self.check_permission(tool_name, tool_input, _tool_use_id).await {
-                PermissionResult::Denied(reason) => return CallStep::Finished((tool_input.clone(), format!("Permission denied: {reason}"), true)),
-                PermissionResult::RequiresConfirmation(message) => return self.prepare_after_confirmation(tool_name, tool_input, _tool_use_id, &message).await,
-                PermissionResult::Granted => {},
+            match self
+                .check_permission(tool_name, tool_input, _tool_use_id)
+                .await
+            {
+                PermissionResult::Denied(reason) => {
+                    return CallStep::Finished((
+                        tool_input.clone(),
+                        format!("Permission denied: {reason}"),
+                        true,
+                    ))
+                }
+                PermissionResult::RequiresConfirmation(message) => {
+                    return self
+                        .prepare_after_confirmation(tool_name, tool_input, _tool_use_id, &message)
+                        .await
+                }
+                PermissionResult::Granted => {}
             }
         }
         // Route memory_search and memory_ingest directly to MemEx backend
@@ -3342,7 +3565,7 @@ impl ToolLoopExecutor {
                         } else {
                             output_str =
                                 serde_json::to_string_pretty(&result.value).unwrap_or_default();
-                            }
+                        }
                     }
                     Err(e) => {
                         output_str = format!("Error: {}", e);
@@ -3542,11 +3765,11 @@ impl ToolLoopExecutor {
         let _ = self
             .event_tx
             .send(EngineEvent::AskUser {
-            request_id: request_id.clone(),
-            tool_use_id: tool_use_id.to_owned(),
-            tool_input: question,
-            question: text,
-            options,
+                request_id: request_id.clone(),
+                tool_use_id: tool_use_id.to_owned(),
+                tool_input: question,
+                question: text,
+                options,
             })
             .await;
         match self.wait_for_user_answer(rx).await {
@@ -3781,11 +4004,11 @@ impl ToolLoopExecutor {
                             .collect::<std::result::Result<_, _>>()?;
                         let (compressed, metadata) = compressor
                             .compress(
-                            conv_values,
-                            // The client adds the base prompt separately; keep existing system messages intact.
-                            None,
-                            level,
-                            Some(&self.provider),
+                                conv_values,
+                                // The client adds the base prompt separately; keep existing system messages intact.
+                                None,
+                                level,
+                                Some(&self.provider),
                             )
                             .await;
                         if metadata.was_compressed {
@@ -3925,8 +4148,8 @@ impl ToolLoopExecutor {
                         let _ = self
                             .event_tx
                             .send(EngineEvent::MessageStop {
-                            full_text: full_text.clone(),
-                            stop_reason: Some("stream_error".to_string()),
+                                full_text: full_text.clone(),
+                                stop_reason: Some("stream_error".to_string()),
                             })
                             .await;
                         drop(stream);
@@ -3946,7 +4169,10 @@ impl ToolLoopExecutor {
 
                     request_trace.observe_anthropic(&event);
                     if event["usage"].is_object() || event["message"]["usage"].is_object() {
-                        let _ = self.event_tx.send(EngineEvent::RequestSnapshot(request_trace.started())).await;
+                        let _ = self
+                            .event_tx
+                            .send(EngineEvent::RequestSnapshot(request_trace.started()))
+                            .await;
                     }
                     let event_type = event.get("type").and_then(|t| t.as_str()).unwrap_or("");
 
@@ -3957,7 +4183,7 @@ impl ToolLoopExecutor {
                                     let _ = self
                                         .event_tx
                                         .send(EngineEvent::MessageStart {
-                                        model: model.to_string(),
+                                            model: model.to_string(),
                                         })
                                         .await;
                                 }
@@ -4094,11 +4320,11 @@ impl ToolLoopExecutor {
                                 let _ = self
                                     .event_tx
                                     .send(EngineEvent::ToolUseStart {
-                                    tool_use_id: id.clone(),
-                                    tool_name: name.clone(),
-                                    tool_input: input.clone(),
-                                    text_before: full_text.clone(),
-                                    display_title: self.task_display_title(&name, &input).await,
+                                        tool_use_id: id.clone(),
+                                        tool_name: name.clone(),
+                                        tool_input: input.clone(),
+                                        text_before: full_text.clone(),
+                                        display_title: self.task_display_title(&name, &input).await,
                                     })
                                     .await;
 
@@ -4165,12 +4391,12 @@ impl ToolLoopExecutor {
             // failure. The send layer knows the real HTTP attempt count.
             let stream_failure =
                 (!interrupted && snapshot["status"] == "stream_error").then(|| {
-                crate::performance::RequestFailure::stream_incomplete(
-                    http_attempts.attempts(),
+                    crate::performance::RequestFailure::stream_incomplete(
+                        http_attempts.attempts(),
                         http_attempts.status(),
-                    !full_text.is_empty() || !assistant_blocks.is_empty(),
-                )
-            });
+                        !full_text.is_empty() || !assistant_blocks.is_empty(),
+                    )
+                });
             if let Some(failure) = &stream_failure {
                 snapshot["failure"] = failure.as_json();
                 snapshot["error"] = json!(failure.diagnostic());
@@ -4251,7 +4477,7 @@ impl ToolLoopExecutor {
                         for block in &mut assistant_blocks {
                             if let ContentBlock::ToolUse { id, input, .. } = block {
                                 if id == &tc.id {
-                                // Keep the rejected call paired with its error in valid API history.
+                                    // Keep the rejected call paired with its error in valid API history.
                                     *input = if actual_input.is_object() {
                                         actual_input.clone()
                                     } else {
@@ -4271,11 +4497,11 @@ impl ToolLoopExecutor {
                         let _ = self
                             .event_tx
                             .send(EngineEvent::ToolUseDone {
-                            tool_use_id: tc.id.clone(),
-                            tool_name: tc.name.clone(),
-                            tool_input: actual_input,
-                            output: output_str.clone(),
-                            is_error,
+                                tool_use_id: tc.id.clone(),
+                                tool_name: tc.name.clone(),
+                                tool_input: actual_input,
+                                output: output_str.clone(),
+                                is_error,
                             })
                             .await;
                         let content = mcp.map(|value| value.content).unwrap_or_else(|| {
@@ -4375,8 +4601,8 @@ impl ToolLoopExecutor {
                 let _ = self
                     .event_tx
                     .send(EngineEvent::MessageStop {
-                    full_text: full_text.clone(),
-                    stop_reason: Some("max_iterations".to_string()),
+                        full_text: full_text.clone(),
+                        stop_reason: Some("max_iterations".to_string()),
                     })
                     .await;
                 break;
@@ -4506,29 +4732,29 @@ impl ToolLoopExecutor {
                             provider_content: compacted.native,
                         }];
                     } else {
-                    let compressor = ContextCompressor::new(None);
-                    let context_window = ContextWindow {
-                        model_id: model_id.clone(),
-                        total_tokens: estimated as u64,
-                        reserved_for_completion: (self.max_tokens as u64) * 2,
-                        context_window: model_context_limit as u64,
-                    };
-                    let level = compressor.determine_compression_level(&context_window);
-                    if level != CompressionLevel::None {
+                        let compressor = ContextCompressor::new(None);
+                        let context_window = ContextWindow {
+                            model_id: model_id.clone(),
+                            total_tokens: estimated as u64,
+                            reserved_for_completion: (self.max_tokens as u64) * 2,
+                            context_window: model_context_limit as u64,
+                        };
+                        let level = compressor.determine_compression_level(&context_window);
+                        if level != CompressionLevel::None {
                             let conv_values: Vec<Value> = conversation_messages
                                 .iter()
                                 .map(serde_json::to_value)
                                 .collect::<std::result::Result<_, _>>()?;
                             let (compressed, metadata) = compressor
                                 .compress(
-                            conv_values,
-                            // The client adds the base prompt separately; keep existing system messages intact.
-                            None,
-                            level,
-                            Some(&self.provider),
+                                    conv_values,
+                                    // The client adds the base prompt separately; keep existing system messages intact.
+                                    None,
+                                    level,
+                                    Some(&self.provider),
                                 )
                                 .await;
-                        if metadata.was_compressed {
+                            if metadata.was_compressed {
                                 conversation_messages = compressed
                                     .into_iter()
                                     .map(serde_json::from_value)
@@ -4540,8 +4766,8 @@ impl ToolLoopExecutor {
                                     metadata.compressed_count,
                                     metadata.token_reduction
                                 );
+                            }
                         }
-                    }
                     }
                 }
             }
@@ -4666,8 +4892,8 @@ impl ToolLoopExecutor {
                         let _ = self
                             .event_tx
                             .send(EngineEvent::MessageStop {
-                            full_text: full_text.clone(),
-                            stop_reason: Some("stream_error".to_string()),
+                                full_text: full_text.clone(),
+                                stop_reason: Some("stream_error".to_string()),
                             })
                             .await;
                         drop(stream);
@@ -4696,7 +4922,10 @@ impl ToolLoopExecutor {
                     }
                     // Usage-only final chunks have no choices and must still be recorded.
                     if let Some(usage) = event.get("usage").filter(|usage| usage.is_object()) {
-                        let _ = self.event_tx.send(EngineEvent::RequestSnapshot(request_trace.started())).await;
+                        let _ = self
+                            .event_tx
+                            .send(EngineEvent::RequestSnapshot(request_trace.started()))
+                            .await;
                         if let Some(tokens) = usage.get("prompt_tokens").and_then(|v| v.as_f64()) {
                             crate::metrics::TOKENS_CONSUMED.inc_by(tokens);
                         }
@@ -4723,7 +4952,7 @@ impl ToolLoopExecutor {
                                 let _ = self
                                     .event_tx
                                     .send(EngineEvent::MessageStart {
-                                    model: self.provider.model.id.clone(),
+                                        model: self.provider.model.id.clone(),
                                     })
                                     .await;
                             }
@@ -4802,7 +5031,7 @@ impl ToolLoopExecutor {
                                 let _ = self
                                     .event_tx
                                     .send(EngineEvent::MessageDelta {
-                                    stop_reason: Some(finish.to_string()),
+                                        stop_reason: Some(finish.to_string()),
                                     })
                                     .await;
                             }
@@ -4826,14 +5055,14 @@ impl ToolLoopExecutor {
             // failure. The send layer knows the real HTTP attempt count.
             let stream_failure =
                 (!interrupted && snapshot["status"] == "stream_error").then(|| {
-                crate::performance::RequestFailure::stream_incomplete(
-                    http_attempts.attempts(),
+                    crate::performance::RequestFailure::stream_incomplete(
+                        http_attempts.attempts(),
                         http_attempts.status(),
-                    !full_text.is_empty()
-                        || assistant_content.is_some()
-                        || !assistant_tool_calls.is_empty(),
-                )
-            });
+                        !full_text.is_empty()
+                            || assistant_content.is_some()
+                            || !assistant_tool_calls.is_empty(),
+                    )
+                });
             if let Some(failure) = &stream_failure {
                 snapshot["failure"] = failure.as_json();
                 snapshot["error"] = json!(failure.diagnostic());
@@ -4912,11 +5141,11 @@ impl ToolLoopExecutor {
                     let _ = self
                         .event_tx
                         .send(EngineEvent::ToolUseStart {
-                        tool_use_id: id.clone(),
-                        tool_name: name.clone(),
-                        tool_input: input.clone(),
-                        text_before: full_text.clone(),
-                        display_title: self.task_display_title(name, &input).await,
+                            tool_use_id: id.clone(),
+                            tool_name: name.clone(),
+                            tool_input: input.clone(),
+                            text_before: full_text.clone(),
+                            display_title: self.task_display_title(name, &input).await,
                         })
                         .await;
 
@@ -4924,12 +5153,12 @@ impl ToolLoopExecutor {
 
                     assistant_tool_calls.push(
                         crate::native_engine::openai_client::OpenAIToolCall {
-                        id: id.clone(),
-                        call_type: "function".to_string(),
-                        function: crate::native_engine::openai_client::FunctionCall {
-                            name: name.clone(),
-                            arguments: args_str.clone(),
-                        },
+                            id: id.clone(),
+                            call_type: "function".to_string(),
+                            function: crate::native_engine::openai_client::FunctionCall {
+                                name: name.clone(),
+                                arguments: args_str.clone(),
+                            },
                         },
                     );
 
@@ -4971,11 +5200,11 @@ impl ToolLoopExecutor {
                         let _ = self
                             .event_tx
                             .send(EngineEvent::ToolUseDone {
-                            tool_use_id: tc.id.clone(),
-                            tool_name: tc.name.clone(),
-                            tool_input: actual_input,
-                            output: output_str.clone(),
-                            is_error,
+                                tool_use_id: tc.id.clone(),
+                                tool_name: tc.name.clone(),
+                                tool_input: actual_input,
+                                output: output_str.clone(),
+                                is_error,
                             })
                             .await;
                         if let Some(content) = &mcp {
@@ -5113,8 +5342,8 @@ impl ToolLoopExecutor {
                 let _ = self
                     .event_tx
                     .send(EngineEvent::MessageStop {
-                    full_text: full_text.clone(),
-                    stop_reason: Some("max_iterations".to_string()),
+                        full_text: full_text.clone(),
+                        stop_reason: Some("max_iterations".to_string()),
                     })
                     .await;
                 break;
@@ -5132,38 +5361,38 @@ impl ToolLoopExecutor {
             .iter()
             .enumerate()
             .filter_map(|(index, msg)| {
-            let role = msg.get("role")?.as_str()?;
-            let content = msg.get("content")?;
+                let role = msg.get("role")?.as_str()?;
+                let content = msg.get("content")?;
 
-            let anthropic_content = if content.is_string() {
-                AnthropicContent::Text(content.as_str()?.to_string())
-            } else if content.is_array() {
+                let anthropic_content = if content.is_string() {
+                    AnthropicContent::Text(content.as_str()?.to_string())
+                } else if content.is_array() {
                     let blocks: Vec<ContentBlock> = content
                         .as_array()?
                         .iter()
                         .filter_map(|block| {
-                    let block_type = block.get("type")?.as_str()?;
-                    match block_type {
-                        "text" => {
-                            let text = block.get("text")?.as_str()?.to_string();
-                            Some(ContentBlock::Text { text })
-                        }
-                        "image_url" => {
-                            let url = block.get("image_url")?.get("url")?.as_str()?;
+                            let block_type = block.get("type")?.as_str()?;
+                            match block_type {
+                                "text" => {
+                                    let text = block.get("text")?.as_str()?.to_string();
+                                    Some(ContentBlock::Text { text })
+                                }
+                                "image_url" => {
+                                    let url = block.get("image_url")?.get("url")?.as_str()?;
                                     let (media_type, data) =
                                         url.strip_prefix("data:")?.split_once(";base64,")?;
-                            Some(ContentBlock::Image {
+                                    Some(ContentBlock::Image {
                                         source:
                                             crate::native_engine::anthropic_client::ImageSource {
                                                 source_type: "base64".into(),
                                                 media_type: media_type.into(),
                                                 data: data.into(),
-                                },
-                            })
-                        }
-                        "image" => {
-                            let source = block.get("source")?;
-                            Some(ContentBlock::Image {
+                                            },
+                                    })
+                                }
+                                "image" => {
+                                    let source = block.get("source")?;
+                                    Some(ContentBlock::Image {
                                         source:
                                             crate::native_engine::anthropic_client::ImageSource {
                                                 source_type: source
@@ -5174,53 +5403,53 @@ impl ToolLoopExecutor {
                                                     .get("media_type")?
                                                     .as_str()?
                                                     .to_string(),
-                                    data: source.get("data")?.as_str()?.to_string(),
-                                },
-                            })
-                        }
+                                                data: source.get("data")?.as_str()?.to_string(),
+                                            },
+                                    })
+                                }
                                 "tool_result" => Some(ContentBlock::ToolResult {
-                                tool_use_id: block.get("tool_use_id")?.as_str()?.to_string(),
-                                content: block.get("content")?.clone(),
-                                is_error: block.get("is_error").and_then(|v| v.as_bool()),
+                                    tool_use_id: block.get("tool_use_id")?.as_str()?.to_string(),
+                                    content: block.get("content")?.clone(),
+                                    is_error: block.get("is_error").and_then(|v| v.as_bool()),
                                 }),
-                        "tool_use" => Some(ContentBlock::ToolUse {
-                            id: block.get("id")?.as_str()?.to_string(),
-                            name: block.get("name")?.as_str()?.to_string(),
-                            input: block.get("input")?.clone(),
-                        }),
-                        _ => None,
-                    }
+                                "tool_use" => Some(ContentBlock::ToolUse {
+                                    id: block.get("id")?.as_str()?.to_string(),
+                                    name: block.get("name")?.as_str()?.to_string(),
+                                    input: block.get("input")?.clone(),
+                                }),
+                                _ => None,
+                            }
                         })
                         .collect();
-                AnthropicContent::Blocks(blocks)
-            } else {
-                return None;
-            };
-            let (before, after) = &additions[index];
+                    AnthropicContent::Blocks(blocks)
+                } else {
+                    return None;
+                };
+                let (before, after) = &additions[index];
                 let anthropic_content = if before.is_empty() && after.is_empty() {
                     anthropic_content
                 } else {
-                // One text block per addition, around the message's own content.
+                    // One text block per addition, around the message's own content.
                     let mut blocks: Vec<ContentBlock> = before
                         .iter()
                         .map(|text| ContentBlock::Text { text: text.clone() })
                         .collect();
-                match anthropic_content {
-                    AnthropicContent::Text(text) => blocks.push(ContentBlock::Text { text }),
-                    AnthropicContent::Blocks(rest) => blocks.extend(rest),
-                }
+                    match anthropic_content {
+                        AnthropicContent::Text(text) => blocks.push(ContentBlock::Text { text }),
+                        AnthropicContent::Blocks(rest) => blocks.extend(rest),
+                    }
                     blocks.extend(
                         after
                             .iter()
                             .map(|text| ContentBlock::Text { text: text.clone() }),
                     );
-                AnthropicContent::Blocks(blocks)
-            };
+                    AnthropicContent::Blocks(blocks)
+                };
 
-            Some(AnthropicMessage {
-                role: role.to_string(),
-                content: anthropic_content,
-            })
+                Some(AnthropicMessage {
+                    role: role.to_string(),
+                    content: anthropic_content,
+                })
             })
             .collect())
     }
@@ -5233,19 +5462,19 @@ impl ToolLoopExecutor {
             .iter()
             .enumerate()
             .filter_map(|(index, msg)| {
-            let role = msg.get("role")?.as_str()?;
-            let content = msg.get("content")?;
+                let role = msg.get("role")?.as_str()?;
+                let content = msg.get("content")?;
 
-            let openai_content = if content.is_string() {
-                OpenAIContent::Text(content.as_str()?.to_string())
-            } else if content.is_array() {
+                let openai_content = if content.is_string() {
+                    OpenAIContent::Text(content.as_str()?.to_string())
+                } else if content.is_array() {
                     let parts: Vec<crate::native_engine::openai_client::OpenAIContentPart> =
                         content
                             .as_array()?
                             .iter()
                             .filter_map(|part| {
-                    let part_type = part.get("type")?.as_str()?;
-                    match part_type {
+                                let part_type = part.get("type")?.as_str()?;
+                                match part_type {
                         "text" => {
                             Some(crate::native_engine::openai_client::OpenAIContentPart::Text {
                                 text: part.get("text")?.as_str()?.to_string(),
@@ -5263,17 +5492,17 @@ impl ToolLoopExecutor {
                     }
                             })
                             .collect();
-                OpenAIContent::Multi(parts)
-            } else {
-                return None;
-            };
-            let (before, after) = &additions[index];
+                    OpenAIContent::Multi(parts)
+                } else {
+                    return None;
+                };
+                let (before, after) = &additions[index];
                 let openai_content = if before.is_empty() && after.is_empty() {
                     openai_content
                 } else {
-                // Plain-string content stays a string: some compatible servers
-                // accept only strings for user messages.
-                match openai_content {
+                    // Plain-string content stays a string: some compatible servers
+                    // accept only strings for user messages.
+                    match openai_content {
                         OpenAIContent::Text(text) => OpenAIContent::Text(
                             before
                                 .iter()
@@ -5283,7 +5512,7 @@ impl ToolLoopExecutor {
                                 .collect::<Vec<_>>()
                                 .join("\n\n"),
                         ),
-                    OpenAIContent::Multi(rest) => {
+                        OpenAIContent::Multi(rest) => {
                             let part = |text: &String| {
                                 crate::native_engine::openai_client::OpenAIContentPart::Text {
                                     text: text.clone(),
@@ -5297,9 +5526,9 @@ impl ToolLoopExecutor {
                                     .chain(after.iter().map(part))
                                     .collect(),
                             )
+                        }
                     }
-                }
-            };
+                };
 
                 let tool_calls = msg
                     .get("tool_calls")
@@ -5315,11 +5544,11 @@ impl ToolLoopExecutor {
                     .and_then(|r| r.as_str())
                     .map(String::from);
 
-            Some(OpenAIMessage {
-                role: role.to_string(),
-                content: openai_content,
-                tool_calls,
-                tool_call_id,
+                Some(OpenAIMessage {
+                    role: role.to_string(),
+                    content: openai_content,
+                    tool_calls,
+                    tool_call_id,
                     reasoning_content,
                     provider_content: msg.get("provider_content").cloned(),
                 })

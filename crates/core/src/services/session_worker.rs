@@ -96,7 +96,8 @@ pub struct Reply {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub edit_session: Option<bool>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub launch_rules: Option<std::collections::HashMap<String, crate::permissions::rules::PermissionAction>>,
+    pub launch_rules:
+        Option<std::collections::HashMap<String, crate::permissions::rules::PermissionAction>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub runtime_status: Option<super::runtime_status::RuntimeStatus>,
 }
@@ -474,7 +475,10 @@ pub async fn ensure_worker(
     let _lock = recovery::startup_lock(&base)?;
     recovery::repair(root, session)?;
     if let Some(worker) = current(root, session)? {
-        ensure!(worker.root == root && worker.session_id == session, "Session worker metadata does not match the requested session");
+        ensure!(
+            worker.root == root && worker.session_id == session,
+            "Session worker metadata does not match the requested session"
+        );
         if worker.status != "stopped" {
             if jobs::now().saturating_sub(worker.heartbeat_ms) < 10_000 {
                 return wait_ready(worker).await;
@@ -623,9 +627,12 @@ pub fn job_execution_session(root: &Path, job: &Job) -> Result<String> {
     match fs::read(path) {
         Ok(bytes) => {
             let id: String = serde_json::from_slice(&bytes)?;
-            ensure!(uuid::Uuid::parse_str(&id).is_ok(), "Invalid owned child job target");
+            ensure!(
+                uuid::Uuid::parse_str(&id).is_ok(),
+                "Invalid owned child job target"
+            );
             Ok(id)
-        },
+        }
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(job.session_id.clone()),
         Err(error) => Err(error.into()),
     }
@@ -718,12 +725,27 @@ pub async fn runtime_status(root: &Path, session: &str) -> WorkerRuntimeStatus {
     report
 }
 
-pub async fn set_permission_mode(root: &Path, session: &str, job_id: &str, mode: &str) -> Result<()> {
+pub async fn set_permission_mode(
+    root: &Path,
+    session: &str,
+    job_id: &str,
+    mode: &str,
+) -> Result<()> {
     ensure!(matches!(super::session_permission_mode::parse(mode)?, crate::permissions::PermissionMode::AskPermissions | crate::permissions::PermissionMode::AcceptEdits | crate::permissions::PermissionMode::PlanMode | crate::permissions::PermissionMode::DontAsk | crate::permissions::PermissionMode::Auto), "Live mode switching supports ask, accept-edits, plan, dont-ask and configured auto; bypass requires explicit configuration");
     let worker = current(root, session)?.context("Session has no persistent worker")?;
     let job = jobs::get(root, job_id)?;
-    ensure!(job.session_id == session && job.finished_ms.is_none(), "Mode change must target the active job in this session");
-    call(&worker, &Request::SetPermissionMode { job_id: job_id.into(), mode: mode.into() }).await?;
+    ensure!(
+        job.session_id == session && job.finished_ms.is_none(),
+        "Mode change must target the active job in this session"
+    );
+    call(
+        &worker,
+        &Request::SetPermissionMode {
+            job_id: job_id.into(),
+            mode: mode.into(),
+        },
+    )
+    .await?;
     Ok(())
 }
 
@@ -733,12 +755,28 @@ pub async fn permission_mode(root: &Path, session: &str, job_id: &str) -> Result
 
 /// Inspect/revoke the living owner only; never persist or restore a grant.
 pub async fn bash_session(root: &Path, session: &str, revoke: bool) -> Result<Option<bool>> {
-    let Some(worker) = current(root, session)? else { return Ok(None); };
-    if worker.status == "stopped" || worker.child_pid.is_some_and(process_exited) { return Ok(None); }
-    ensure!(worker.session_id == session && worker.root == root, "Permission owner mismatch");
-    let reply = tokio::time::timeout(Duration::from_millis(1200), call(&worker, &Request::BashSession { revoke })).await??;
-    ensure!(reply.permission_session_id.as_deref() == Some(session), "Permission response targets another session");
-    Ok(Some(reply.bash_session.context("Worker does not support session Bash permissions")?))
+    let Some(worker) = current(root, session)? else {
+        return Ok(None);
+    };
+    if worker.status == "stopped" || worker.child_pid.is_some_and(process_exited) {
+        return Ok(None);
+    }
+    ensure!(
+        worker.session_id == session && worker.root == root,
+        "Permission owner mismatch"
+    );
+    let reply = tokio::time::timeout(
+        Duration::from_millis(1200),
+        call(&worker, &Request::BashSession { revoke }),
+    )
+    .await??;
+    ensure!(
+        reply.permission_session_id.as_deref() == Some(session),
+        "Permission response targets another session"
+    );
+    Ok(Some(reply.bash_session.context(
+        "Worker does not support session Bash permissions",
+    )?))
 }
 
 pub async fn edit_session(root: &Path, session: &str, revoke: bool) -> Result<Option<bool>> {
@@ -901,9 +939,9 @@ fn supervise(dir: &Path, worker: &mut Worker) -> Result<()> {
                         .transpose()?
                         .flatten();
                     // A bare "No" to an approval stops the turn like Esc does.
-                    let declined = error
-                        .as_deref()
-                        .is_some_and(|error| error.contains("Tool permission interrupted the turn"));
+                    let declined = error.as_deref().is_some_and(|error| {
+                        error.contains("Tool permission interrupted the turn")
+                    });
                     job.status = if cancel || (declined && exited.is_none()) {
                         "cancelled"
                     } else if exited.is_some() || error.is_some() {
@@ -1125,8 +1163,9 @@ mod settle_tests {
             }
         }
         let supervisor = supervisor_command(Path::new("fixture"), dir);
-        assert!(supervisor.get_envs().any(|(name, value)| name == SUPERVISOR_ENV
-            && value == Some(dir.as_os_str())));
+        assert!(supervisor
+            .get_envs()
+            .any(|(name, value)| name == SUPERVISOR_ENV && value == Some(dir.as_os_str())));
         let engine = engine_command(Path::new("fixture"), dir, Path::new("workspace"));
         assert!(engine
             .get_envs()
@@ -1152,9 +1191,19 @@ mod settle_tests {
         let dir = jobs::directory(root, &id).unwrap();
         fs::create_dir_all(&dir).unwrap();
         let job = Job {
-            id, foreground: false, parent_session_id: session.into(), session_id: session.into(),
-            title: "fixture".into(), status: status.into(), supervisor_pid: Some(pid), child_pid: Some(pid),
-            started_ms: jobs::now(), heartbeat_ms, finished_ms: None, exit_code: None, error: None,
+            id,
+            foreground: false,
+            parent_session_id: session.into(),
+            session_id: session.into(),
+            title: "fixture".into(),
+            status: status.into(),
+            supervisor_pid: Some(pid),
+            child_pid: Some(pid),
+            started_ms: jobs::now(),
+            heartbeat_ms,
+            finished_ms: None,
+            exit_code: None,
+            error: None,
         };
         jobs::save(&dir.join("state.json"), &job).unwrap();
         job
@@ -1175,17 +1224,35 @@ mod settle_tests {
         let alive = job(dir.path(), &session, std::process::id(), "running", 0);
         let settled = settle_session(dir.path(), &session).unwrap();
         let active = settled.active.unwrap();
-        assert_eq!((active.id.as_str(), active.status.as_str()), (alive.id.as_str(), "unresponsive"));
-        assert!(jobs::get(dir.path(), &alive.id).unwrap().finished_ms.is_none());
+        assert_eq!(
+            (active.id.as_str(), active.status.as_str()),
+            (alive.id.as_str(), "unresponsive")
+        );
+        assert!(jobs::get(dir.path(), &alive.id)
+            .unwrap()
+            .finished_ms
+            .is_none());
 
         // Exited processes need no wait for the heartbeat to expire.
         let crashed = job(dir.path(), &session, exited_pid(), "running", jobs::now());
         settle_session(dir.path(), &session).unwrap();
         assert_eq!(jobs::get(dir.path(), &crashed.id).unwrap().status, "failed");
 
-        let running = job(dir.path(), &session, std::process::id(), "running", jobs::now());
-        let active = settle_session(dir.path(), &session).unwrap().active.unwrap();
-        assert_eq!((active.id.as_str(), active.status.as_str()), (running.id.as_str(), "running"));
+        let running = job(
+            dir.path(),
+            &session,
+            std::process::id(),
+            "running",
+            jobs::now(),
+        );
+        let active = settle_session(dir.path(), &session)
+            .unwrap()
+            .active
+            .unwrap();
+        assert_eq!(
+            (active.id.as_str(), active.status.as_str()),
+            (running.id.as_str(), "running")
+        );
 
         let other = uuid::Uuid::new_v4().to_string();
         assert!(settle_session(dir.path(), &other).unwrap().active.is_none());

@@ -188,14 +188,21 @@ mod tests {
         let temp = tempfile::tempdir().unwrap();
         let paths = crate::runtime::RuntimePaths::new(temp.path().join("data")).unwrap();
         let store = crate::runtime::SessionStore::new(paths.open_database().unwrap());
-        let session = store.create(temp.path(), "deepseek-flash", "cli-runtime").unwrap();
+        let session = store
+            .create(temp.path(), "deepseek-flash", "cli-runtime")
+            .unwrap();
         let message = store.append(&session, "assistant", "reply").unwrap();
         // Saturday 2026-10-24 is off-peak: half of 2000*0.30 + 10000*0.006 + 100*1.20 per million.
-        let started = chrono::DateTime::parse_from_rfc3339("2026-10-24T12:00:00Z").unwrap().timestamp_millis();
+        let started = chrono::DateTime::parse_from_rfc3339("2026-10-24T12:00:00Z")
+            .unwrap()
+            .timestamp_millis();
         store.db.with_conn(|conn|crate::db::request_repo::save_request(conn,&message,&json!({"id":"request1","providerId":"cli-runtime","model":"deepseek-flash","startedAt":started,"inputTokens":2000,"outputTokens":100,"cacheReadTokens":10000,"cacheWriteTokens":0,"usage":{"input_tokens":2000,"output_tokens":100,"cache_read_input_tokens":10000}}))).unwrap().unwrap();
         let result = session_cost(&store.db, &session, &AppConfig::default()).unwrap();
         let total = result["total_usd"].as_f64().unwrap();
-        assert!((total - (2000.0 * 0.30 + 10000.0 * 0.006 + 100.0 * 1.20) / 2_000_000.0).abs() < 1e-12, "{result}");
+        assert!(
+            (total - (2000.0 * 0.30 + 10000.0 * 0.006 + 100.0 * 1.20) / 2_000_000.0).abs() < 1e-12,
+            "{result}"
+        );
         assert_eq!(result["estimated_requests"], 1);
     }
 }

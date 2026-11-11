@@ -248,11 +248,7 @@ mod tests {
         let second = temp.path().join("second-bin");
         std::fs::create_dir_all(&bin).unwrap();
         std::fs::create_dir_all(&second).unwrap();
-        let name = if cfg!(windows) {
-            "dcl.exe"
-        } else {
-            "dcl"
-        };
+        let name = if cfg!(windows) { "dcl.exe" } else { "dcl" };
         std::fs::write(bin.join(name), b"Not an executable; must never be launched").unwrap();
         std::fs::write(second.join(name), b"Not an executable either").unwrap();
         fn contents(root: &Path) -> std::collections::BTreeMap<std::path::PathBuf, Vec<u8>> {
@@ -323,7 +319,8 @@ mod tests {
     fn actual_database_integrity_is_checked() {
         let temp = tempfile::tempdir().unwrap();
         let paths = RuntimePaths::new(temp.path().to_owned()).unwrap();
-        let connection = rusqlite::Connection::open(temp.path().join(crate::runtime::DATABASE_FILE)).unwrap();
+        let connection =
+            rusqlite::Connection::open(temp.path().join(crate::runtime::DATABASE_FILE)).unwrap();
         connection
             .execute("CREATE TABLE fixture (id INTEGER)", [])
             .unwrap();

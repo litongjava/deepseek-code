@@ -52,9 +52,19 @@ pub struct GithubConnector {
 impl GithubConnector {
     /// OAuth credentials come from `GITHUB_CLIENT_ID` / `GITHUB_CLIENT_SECRET`.
     pub fn new(data_dir: PathBuf) -> Self {
-        let client_id = std::env::var("GITHUB_CLIENT_ID").ok().filter(|v| !v.trim().is_empty());
-        let client_secret = std::env::var("GITHUB_CLIENT_SECRET").ok().filter(|v| !v.trim().is_empty());
-        Self::with_endpoints(data_dir, "https://api.github.com", "https://github.com", client_id, client_secret)
+        let client_id = std::env::var("GITHUB_CLIENT_ID")
+            .ok()
+            .filter(|v| !v.trim().is_empty());
+        let client_secret = std::env::var("GITHUB_CLIENT_SECRET")
+            .ok()
+            .filter(|v| !v.trim().is_empty());
+        Self::with_endpoints(
+            data_dir,
+            "https://api.github.com",
+            "https://github.com",
+            client_id,
+            client_secret,
+        )
     }
 
     pub fn with_endpoints(
@@ -85,7 +95,9 @@ impl GithubConnector {
 
     pub fn token(&self) -> Option<StoredToken> {
         let text = std::fs::read_to_string(self.token_path()).ok()?;
-        serde_json::from_str::<StoredToken>(&text).ok().filter(|t| !t.access_token.is_empty())
+        serde_json::from_str::<StoredToken>(&text)
+            .ok()
+            .filter(|t| !t.access_token.is_empty())
     }
 
     fn save_token(&self, token: &StoredToken) -> Result<()> {
@@ -147,11 +159,19 @@ impl GithubConnector {
     pub async fn complete_oauth(&self, code: &str, state: &str) -> Result<StoredToken> {
         let redirect_uri = {
             let mut states = self.pending_states.lock().unwrap();
-            let (created, redirect) = states.remove(state).context("Unknown or expired OAuth state")?;
-            ensure!(created.elapsed() < STATE_LIFETIME, "OAuth state expired; connect again");
+            let (created, redirect) = states
+                .remove(state)
+                .context("Unknown or expired OAuth state")?;
+            ensure!(
+                created.elapsed() < STATE_LIFETIME,
+                "OAuth state expired; connect again"
+            );
             redirect
         };
-        let secret = self.client_secret.clone().context("GitHub OAuth is not configured")?;
+        let secret = self
+            .client_secret
+            .clone()
+            .context("GitHub OAuth is not configured")?;
         let response: Value = self
             .http
             .post(format!("{}/login/oauth/access_token", self.oauth_base))
@@ -161,12 +181,18 @@ impl GithubConnector {
             .await?
             .json()
             .await?;
-        let access_token = response["access_token"].as_str().map(str::to_string).with_context(|| {
-            format!(
-                "GitHub refused the authorization: {}",
-                response["error_description"].as_str().or(response["error"].as_str()).unwrap_or("unknown error")
-            )
-        })?;
+        let access_token = response["access_token"]
+            .as_str()
+            .map(str::to_string)
+            .with_context(|| {
+                format!(
+                    "GitHub refused the authorization: {}",
+                    response["error_description"]
+                        .as_str()
+                        .or(response["error"].as_str())
+                        .unwrap_or("unknown error")
+                )
+            })?;
         self.connect_with_token(&access_token).await
     }
 
@@ -174,7 +200,10 @@ impl GithubConnector {
     pub async fn connect_with_token(&self, access_token: &str) -> Result<StoredToken> {
         let access_token = access_token.trim();
         ensure!(!access_token.is_empty(), "Token is empty");
-        let user = self.api(access_token, "/user").await.context("GitHub rejected the token")?;
+        let user = self
+            .api(access_token, "/user")
+            .await
+            .context("GitHub rejected the token")?;
         let token = StoredToken {
             access_token: access_token.to_string(),
             login: user["login"].as_str().map(str::to_string),
@@ -186,7 +215,9 @@ impl GithubConnector {
     }
 
     fn require_token(&self) -> Result<String> {
-        self.token().map(|t| t.access_token).context("GitHub is not connected")
+        self.token()
+            .map(|t| t.access_token)
+            .context("GitHub is not connected")
     }
 
     async fn api(&self, token: &str, path: &str) -> Result<Value> {
@@ -200,14 +231,24 @@ impl GithubConnector {
         let status = response.status();
         let body: Value = response.json().await.unwrap_or(Value::Null);
         if !status.is_success() {
-            bail!("GitHub API {} for {}: {}", status.as_u16(), path, body["message"].as_str().unwrap_or(""));
+            bail!(
+                "GitHub API {} for {}: {}",
+                status.as_u16(),
+                path,
+                body["message"].as_str().unwrap_or("")
+            );
         }
         Ok(body)
     }
 
     pub async fn repos(&self, page: u32) -> Result<Value> {
         let token = self.require_token()?;
-        let repos = self.api(&token, &format!("/user/repos?sort=updated&per_page=30&page={}", page.max(1))).await?;
+        let repos = self
+            .api(
+                &token,
+                &format!("/user/repos?sort=updated&per_page=30&page={}", page.max(1)),
+            )
+            .await?;
         Ok(Value::Array(
             repos.as_array().into_iter().flatten().map(|r| json!({
                 "id": r["id"], "name": r["name"], "full_name": r["full_name"], "description": r["description"],
@@ -216,26 +257,61 @@ impl GithubConnector {
         ))
     }
 
-    pub async fn contents(&self, owner: &str, repo: &str, path: &str, git_ref: &str) -> Result<Value> {
+    pub async fn contents(
+        &self,
+        owner: &str,
+        repo: &str,
+        path: &str,
+        git_ref: &str,
+    ) -> Result<Value> {
         let token = self.require_token()?;
-        let mut api_path = format!("/repos/{}/{}/contents/{}", segment(owner)?, segment(repo)?, encode_path(path));
+        let mut api_path = format!(
+            "/repos/{}/{}/contents/{}",
+            segment(owner)?,
+            segment(repo)?,
+            encode_path(path)
+        );
         if !git_ref.is_empty() {
             api_path.push_str(&format!("?ref={}", urlencoding::encode(git_ref)));
         }
         self.api(&token, &api_path).await
     }
 
-    async fn resolved_tree(&self, token: &str, owner: &str, repo: &str, git_ref: &str) -> Result<(String, Value)> {
+    async fn resolved_tree(
+        &self,
+        token: &str,
+        owner: &str,
+        repo: &str,
+        git_ref: &str,
+    ) -> Result<(String, Value)> {
         let (owner, repo) = (segment(owner)?, segment(repo)?);
         let git_ref = if git_ref.is_empty() {
             let info = self.api(token, &format!("/repos/{owner}/{repo}")).await?;
-            info["default_branch"].as_str().unwrap_or("main").to_string()
+            info["default_branch"]
+                .as_str()
+                .unwrap_or("main")
+                .to_string()
         } else {
             git_ref.to_string()
         };
-        let branch = self.api(token, &format!("/repos/{owner}/{repo}/branches/{}", urlencoding::encode(&git_ref))).await?;
-        let sha = branch["commit"]["commit"]["tree"]["sha"].as_str().context("Tree not found for this branch")?;
-        let tree = self.api(token, &format!("/repos/{owner}/{repo}/git/trees/{sha}?recursive=1")).await?;
+        let branch = self
+            .api(
+                token,
+                &format!(
+                    "/repos/{owner}/{repo}/branches/{}",
+                    urlencoding::encode(&git_ref)
+                ),
+            )
+            .await?;
+        let sha = branch["commit"]["commit"]["tree"]["sha"]
+            .as_str()
+            .context("Tree not found for this branch")?;
+        let tree = self
+            .api(
+                token,
+                &format!("/repos/{owner}/{repo}/git/trees/{sha}?recursive=1"),
+            )
+            .await?;
         Ok((git_ref, tree))
     }
 
@@ -253,7 +329,9 @@ impl GithubConnector {
         selections: &[Selection],
     ) -> Result<Value> {
         let token = self.require_token()?;
-        let (owner, repo) = repo_full_name.split_once('/').context("Repository must be owner/name")?;
+        let (owner, repo) = repo_full_name
+            .split_once('/')
+            .context("Repository must be owner/name")?;
         let (owner, repo) = (segment(owner)?, segment(repo)?);
         ensure!(!selections.is_empty(), "Select at least one file or folder");
         let (git_ref, tree) = self.resolved_tree(&token, owner, repo, git_ref).await?;
@@ -262,14 +340,28 @@ impl GithubConnector {
             .into_iter()
             .flatten()
             .filter(|entry| entry["type"] == "blob")
-            .filter_map(|entry| Some((entry["path"].as_str()?, entry["sha"].as_str()?, entry["size"].as_u64().unwrap_or(0))))
+            .filter_map(|entry| {
+                Some((
+                    entry["path"].as_str()?,
+                    entry["sha"].as_str()?,
+                    entry["size"].as_u64().unwrap_or(0),
+                ))
+            })
             .collect();
         let mut seen = HashSet::new();
         let mut wanted = Vec::new();
         for selection in selections {
-            let prefix = if selection.path.is_empty() { String::new() } else { format!("{}/", selection.path) };
+            let prefix = if selection.path.is_empty() {
+                String::new()
+            } else {
+                format!("{}/", selection.path)
+            };
             for &(path, sha, size) in &blobs {
-                let matches = if selection.is_folder { prefix.is_empty() || path.starts_with(&prefix) } else { path == selection.path };
+                let matches = if selection.is_folder {
+                    prefix.is_empty() || path.starts_with(&prefix)
+                } else {
+                    path == selection.path
+                };
                 if matches && seen.insert(path) {
                     wanted.push((path, sha, size));
                 }
@@ -286,8 +378,13 @@ impl GithubConnector {
                 let root = root.clone();
                 async move {
                     let target = root.join(safe_relative(path)?);
-                    let blob = self.api(&token, &format!("/repos/{owner}/{repo}/git/blobs/{sha}")).await?;
-                    let encoded = blob["content"].as_str().context("Blob has no content")?.replace('\n', "");
+                    let blob = self
+                        .api(&token, &format!("/repos/{owner}/{repo}/git/blobs/{sha}"))
+                        .await?;
+                    let encoded = blob["content"]
+                        .as_str()
+                        .context("Blob has no content")?
+                        .replace('\n', "");
                     let bytes = base64::engine::general_purpose::STANDARD.decode(encoded)?;
                     if let Some(parent) = target.parent() {
                         std::fs::create_dir_all(parent)?;
@@ -314,14 +411,23 @@ impl GithubConnector {
 /// Owner and repository names: one URL path segment, no traversal.
 fn segment(value: &str) -> Result<&str> {
     ensure!(
-        !value.is_empty() && value != "." && value != ".." && value.chars().all(|c| c.is_ascii_alphanumeric() || "-_.".contains(c)),
+        !value.is_empty()
+            && value != "."
+            && value != ".."
+            && value
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || "-_.".contains(c)),
         "Invalid GitHub owner or repository name: {value}"
     );
     Ok(value)
 }
 
 fn encode_path(path: &str) -> String {
-    path.split('/').filter(|part| !part.is_empty()).map(|part| urlencoding::encode(part).into_owned()).collect::<Vec<_>>().join("/")
+    path.split('/')
+        .filter(|part| !part.is_empty())
+        .map(|part| urlencoding::encode(part).into_owned())
+        .collect::<Vec<_>>()
+        .join("/")
 }
 
 /// Repository paths are written under the target folder only.
@@ -341,7 +447,11 @@ fn safe_relative(path: &str) -> Result<PathBuf> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use axum::{extract::Path as UrlPath, routing::{get, post}, Json, Router};
+    use axum::{
+        extract::Path as UrlPath,
+        routing::{get, post},
+        Json, Router,
+    };
 
     async fn mock_github() -> String {
         let app = Router::new()
@@ -388,7 +498,10 @@ mod tests {
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
-            let mode = std::fs::metadata(dir.path().join(TOKEN_FILE)).unwrap().permissions().mode();
+            let mode = std::fs::metadata(dir.path().join(TOKEN_FILE))
+                .unwrap()
+                .permissions()
+                .mode();
             assert_eq!(mode & 0o777, 0o600);
         }
         let repos = github.repos(1).await.unwrap();
@@ -397,19 +510,61 @@ mod tests {
 
         let workspace = dir.path().join("workspace");
         let result = github
-            .materialize(&workspace, "octo/demo", "", &[Selection { path: "src".into(), is_folder: true }, Selection { path: "README.md".into(), is_folder: false }])
+            .materialize(
+                &workspace,
+                "octo/demo",
+                "",
+                &[
+                    Selection {
+                        path: "src".into(),
+                        is_folder: true,
+                    },
+                    Selection {
+                        path: "README.md".into(),
+                        is_folder: false,
+                    },
+                ],
+            )
             .await
             .unwrap();
         assert_eq!(result["fileCount"], 2);
         let root = workspace.join("github/octo/demo");
-        assert_eq!(std::fs::read_to_string(root.join("README.md")).unwrap(), "hello");
-        assert_eq!(std::fs::read_to_string(root.join("src/main.rs")).unwrap(), "main");
+        assert_eq!(
+            std::fs::read_to_string(root.join("README.md")).unwrap(),
+            "hello"
+        );
+        assert_eq!(
+            std::fs::read_to_string(root.join("src/main.rs")).unwrap(),
+            "main"
+        );
 
         // A whole-repository selection reports the unsafe path instead of writing outside.
-        let all = github.materialize(&workspace, "octo/demo", "main", &[Selection { path: String::new(), is_folder: true }]).await.unwrap();
+        let all = github
+            .materialize(
+                &workspace,
+                "octo/demo",
+                "main",
+                &[Selection {
+                    path: String::new(),
+                    is_folder: true,
+                }],
+            )
+            .await
+            .unwrap();
         assert_eq!(all["skipped"], 1);
         assert!(!workspace.join("github/octo/escape.txt").exists());
-        assert!(github.materialize(&workspace, "octo/../x", "", &[Selection { path: "a".into(), is_folder: false }]).await.is_err());
+        assert!(github
+            .materialize(
+                &workspace,
+                "octo/../x",
+                "",
+                &[Selection {
+                    path: "a".into(),
+                    is_folder: false
+                }]
+            )
+            .await
+            .is_err());
 
         github.disconnect().unwrap();
         assert_eq!(github.status()["connected"], false);
@@ -420,18 +575,39 @@ mod tests {
         let base = mock_github().await;
         let dir = tempfile::tempdir().unwrap();
         let without = GithubConnector::with_endpoints(dir.path().into(), &base, &base, None, None);
-        assert!(without.auth_url("http://127.0.0.1:30085/api/github/callback").is_err());
+        assert!(without
+            .auth_url("http://127.0.0.1:30085/api/github/callback")
+            .is_err());
 
-        let github = GithubConnector::with_endpoints(dir.path().into(), &base, &base, Some("id".into()), Some("secret".into()));
-        let auth = github.auth_url("http://127.0.0.1:30085/api/github/callback").unwrap();
+        let github = GithubConnector::with_endpoints(
+            dir.path().into(),
+            &base,
+            &base,
+            Some("id".into()),
+            Some("secret".into()),
+        );
+        let auth = github
+            .auth_url("http://127.0.0.1:30085/api/github/callback")
+            .unwrap();
         let state = auth["state"].as_str().unwrap().to_string();
-        assert!(auth["url"].as_str().unwrap().contains("redirect_uri=http%3A%2F%2F127.0.0.1%3A30085%2Fapi%2Fgithub%2Fcallback"));
+        assert!(auth["url"]
+            .as_str()
+            .unwrap()
+            .contains("redirect_uri=http%3A%2F%2F127.0.0.1%3A30085%2Fapi%2Fgithub%2Fcallback"));
         assert!(github.complete_oauth("ok", "forged").await.is_err());
         assert!(github.complete_oauth("bad", &state).await.is_err());
         // A state is single-use.
-        let again = github.auth_url("http://127.0.0.1:30085/api/github/callback").unwrap();
-        let token = github.complete_oauth("ok", again["state"].as_str().unwrap()).await.unwrap();
+        let again = github
+            .auth_url("http://127.0.0.1:30085/api/github/callback")
+            .unwrap();
+        let token = github
+            .complete_oauth("ok", again["state"].as_str().unwrap())
+            .await
+            .unwrap();
         assert_eq!(token.login.as_deref(), Some("octo"));
-        assert!(github.complete_oauth("ok", again["state"].as_str().unwrap()).await.is_err());
+        assert!(github
+            .complete_oauth("ok", again["state"].as_str().unwrap())
+            .await
+            .is_err());
     }
 }

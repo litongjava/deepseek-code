@@ -90,6 +90,14 @@ fn row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Message> {
 }
 const SELECT: &str =
     "SELECT id,sender,recipient,content,created_at,state,read,blocked_reason FROM session_inbox";
+fn super_agent_pair(conn: &Connection, first: &str, second: &str) -> rusqlite::Result<bool> {
+    conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM sa_tasks WHERE (router_session_id=?1 AND (coder_session_id=?2 OR reviewer_session_id=?2)) OR (router_session_id=?2 AND (coder_session_id=?1 OR reviewer_session_id=?1)) OR (coder_session_id=?1 AND reviewer_session_id=?2) OR (coder_session_id=?2 AND reviewer_session_id=?1))",
+        params![first, second],
+        |row| row.get(0),
+    )
+}
+
 pub fn send(
     context: &ServiceContext,
     sender: &str,
@@ -107,7 +115,11 @@ pub fn send(
     context.db.with_conn(|conn|->Result<_>{
         schema(conn)?;let tx=rusqlite::Transaction::new_unchecked(conn,rusqlite::TransactionBehavior::Immediate)?;
         let source=project(&tx,&context.paths.data_dir,sender)?;
-        ensure!(source==project(&tx,&context.paths.data_dir,recipient)?,"Recipient belongs to another project");
+        let recipient_source=project(&tx,&context.paths.data_dir,recipient)?;
+        // A Super Agent task deliberately pairs a Router with sessions in
+        // isolated workspaces. The durable task record is the authorization for
+        // exactly those pairs; arbitrary cross-project messages stay rejected.
+        ensure!(source==recipient_source||super_agent_pair(&tx,sender,recipient)?,"Recipient belongs to another project");
         let (count,bytes):(i64,i64)=tx.query_row("SELECT COUNT(*),COALESCE(SUM(length(CAST(content AS BLOB))),0) FROM session_inbox WHERE recipient=?1 AND state='queued'",[recipient],|r|Ok((r.get(0)?,r.get(1)?)))?;
         ensure!(count<MAX_PENDING && bytes+content.len() as i64<=MAX_PENDING_BYTES,"Recipient inbox is full; inspect pending messages before sending more");
         let message=Message{id:uuid::Uuid::new_v4().to_string(),sender:sender.into(),recipient:recipient.into(),content:content.into(),created_at:chrono::Utc::now().to_rfc3339(),state:"queued".into(),read:false,blocked_reason:None};
@@ -333,8 +345,7 @@ impl ExecutionLease {
             .read(true)
             .write(true)
             .open(directory.join(format!("{session}.lock")))?;
-        crate::fs::try_lock_file(&file)
-            .context("Session is already executing in another owner")?;
+        crate::fs::try_lock_file(&file).context("Session is already executing in another owner")?;
         Ok(Some(Self { _file: file }))
     }
 }

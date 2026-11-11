@@ -21,9 +21,17 @@ fn rates(model: &str) -> Option<Rates> {
         || model.starts_with("deepseek-v4.1-flash")
         || model.starts_with("deepseek-v4-flash")
     {
-        Some(Rates { cache_hit: 0.006, cache_miss: 0.30, output: 1.20 })
+        Some(Rates {
+            cache_hit: 0.006,
+            cache_miss: 0.30,
+            output: 1.20,
+        })
     } else if model.starts_with("deepseek-v4-pro") {
-        Some(Rates { cache_hit: 0.044, cache_miss: 1.32, output: 3.96 })
+        Some(Rates {
+            cache_hit: 0.044,
+            cache_miss: 1.32,
+            output: 3.96,
+        })
     } else {
         None
     }
@@ -80,36 +88,94 @@ mod tests {
     use serde_json::json;
 
     fn at(text: &str) -> Option<i64> {
-        Some(DateTime::parse_from_rfc3339(text).unwrap().timestamp_millis())
+        Some(
+            DateTime::parse_from_rfc3339(text)
+                .unwrap()
+                .timestamp_millis(),
+        )
     }
 
     #[test]
     fn deepseek_prices_split_cache_hits_and_peak_hours() {
         let anthropic = json!({"input_tokens":1_000_000,"cache_read_input_tokens":1_000_000});
         // Friday 02:00 UTC is peak.
-        let peak = list_price("deepseek-flash", at("2026-10-23T02:00:00Z"), Some(1_000_000), Some(1_000_000), Some(1_000_000), Some(0), &anthropic).unwrap();
+        let peak = list_price(
+            "deepseek-flash",
+            at("2026-10-23T02:00:00Z"),
+            Some(1_000_000),
+            Some(1_000_000),
+            Some(1_000_000),
+            Some(0),
+            &anthropic,
+        )
+        .unwrap();
         assert!((peak - (0.006 + 0.30 + 1.20)).abs() < 1e-9);
         // Saturday is off-peak at half price.
-        let weekend = list_price("deepseek-flash", at("2026-10-24T02:00:00Z"), Some(1_000_000), Some(1_000_000), Some(1_000_000), Some(0), &anthropic).unwrap();
+        let weekend = list_price(
+            "deepseek-flash",
+            at("2026-10-24T02:00:00Z"),
+            Some(1_000_000),
+            Some(1_000_000),
+            Some(1_000_000),
+            Some(0),
+            &anthropic,
+        )
+        .unwrap();
         assert!((weekend - peak / 2.0).abs() < 1e-9);
         // Friday 04:00 UTC falls between the peak windows.
-        let gap = list_price("deepseek-v4-flash", at("2026-10-23T04:00:00Z"), Some(1_000_000), Some(0), Some(0), Some(0), &anthropic).unwrap();
+        let gap = list_price(
+            "deepseek-v4-flash",
+            at("2026-10-23T04:00:00Z"),
+            Some(1_000_000),
+            Some(0),
+            Some(0),
+            Some(0),
+            &anthropic,
+        )
+        .unwrap();
         assert!((gap - 0.15).abs() < 1e-9);
     }
 
     #[test]
     fn openai_prompt_tokens_include_cached_input() {
         let openai = json!({"prompt_tokens":1_000_000,"completion_tokens":0,"prompt_cache_hit_tokens":400_000});
-        let cost = list_price("deepseek-v4-pro", at("2026-10-23T07:00:00Z"), Some(1_000_000), Some(0), Some(400_000), None, &openai).unwrap();
+        let cost = list_price(
+            "deepseek-v4-pro",
+            at("2026-10-23T07:00:00Z"),
+            Some(1_000_000),
+            Some(0),
+            Some(400_000),
+            None,
+            &openai,
+        )
+        .unwrap();
         assert!((cost - (0.4 * 0.044 + 0.6 * 1.32)).abs() < 1e-9);
         let explicit = json!({"prompt_tokens":1_000_000,"prompt_cache_miss_tokens":100_000});
-        let cost = list_price("cli::deepseek-v4-pro", at("2026-10-23T07:00:00Z"), Some(1_000_000), Some(0), Some(900_000), None, &explicit).unwrap();
+        let cost = list_price(
+            "cli::deepseek-v4-pro",
+            at("2026-10-23T07:00:00Z"),
+            Some(1_000_000),
+            Some(0),
+            Some(900_000),
+            None,
+            &explicit,
+        )
+        .unwrap();
         assert!((cost - (0.9 * 0.044 + 0.1 * 1.32)).abs() < 1e-9);
     }
 
     #[test]
     fn unknown_models_and_missing_counters_stay_unpriced() {
         assert!(list_price("gpt-x", None, Some(1), Some(1), None, None, &json!({})).is_none());
-        assert!(list_price("deepseek-flash", None, None, Some(1), None, None, &json!({})).is_none());
+        assert!(list_price(
+            "deepseek-flash",
+            None,
+            None,
+            Some(1),
+            None,
+            None,
+            &json!({})
+        )
+        .is_none());
     }
 }

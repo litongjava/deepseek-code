@@ -11,12 +11,12 @@ use std::{
     time::Duration,
 };
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
-mod legacy;
-mod official;
-mod materialized;
 mod claude_code;
-pub use materialized::{skill_commands, command_hooks, sync_mcp};
+mod legacy;
+mod materialized;
+mod official;
 pub use legacy::import_legacy;
+pub use materialized::{command_hooks, skill_commands, sync_mcp};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PluginCommand {
@@ -80,9 +80,15 @@ fn safe_path(path: &str) -> bool {
 }
 impl Bundle {
     pub fn validate(&self) -> Result<()> {
-        ensure!(self.lsp_servers.len() <= 32, "Too many plugin language servers");
+        ensure!(
+            self.lsp_servers.len() <= 32,
+            "Too many plugin language servers"
+        );
         for (name, config) in &self.lsp_servers {
-            ensure!(valid_name(name) && config.is_object(), "Invalid language server configuration");
+            ensure!(
+                valid_name(name) && config.is_object(),
+                "Invalid language server configuration"
+            );
             crate::tools::validate_lsp_configuration(config)?;
         }
         ensure!(valid_name(&self.id), "Invalid plugin ID");
@@ -94,19 +100,49 @@ impl Bundle {
             "Plugin limits exceeded"
         );
         ensure!(
-            self.files.keys().chain(self.binary_files.keys()).all(|name| safe_path(name)),
+            self.files
+                .keys()
+                .chain(self.binary_files.keys())
+                .all(|name| safe_path(name)),
             "Plugin path escapes package"
         );
         ensure!(
-            self.files.values().chain(self.binary_files.values()).map(String::len).sum::<usize>() <= 35_000_000,
+            self.files
+                .values()
+                .chain(self.binary_files.values())
+                .map(String::len)
+                .sum::<usize>()
+                <= 35_000_000,
             "Plugin files exceed package size limit"
         );
-        ensure!(self.executable_files.iter().all(|path| safe_path(path) && (self.files.contains_key(path) || self.binary_files.contains_key(path))), "Invalid executable plugin path");
-        ensure!(self.skill_paths.iter().chain(&self.command_paths).all(|path| safe_path(path)), "Plugin feature path escapes package");
+        ensure!(
+            self.executable_files.iter().all(|path| safe_path(path)
+                && (self.files.contains_key(path) || self.binary_files.contains_key(path))),
+            "Invalid executable plugin path"
+        );
+        ensure!(
+            self.skill_paths
+                .iter()
+                .chain(&self.command_paths)
+                .all(|path| safe_path(path)),
+            "Plugin feature path escapes package"
+        );
         ensure!(self.mcp_servers.len() <= 32, "Too many plugin MCP servers");
         for (name, config) in &self.mcp_servers {
-            ensure!(valid_name(name) && config.is_object() && config["command"].as_str().is_some_and(|v| !v.is_empty()), "Invalid stdio MCP server");
-            ensure!(config.get("url").is_none() && config.get("type").and_then(Value::as_str).is_none_or(|v| v == "stdio"), "Only stdio plugin MCP servers are supported");
+            ensure!(
+                valid_name(name)
+                    && config.is_object()
+                    && config["command"].as_str().is_some_and(|v| !v.is_empty()),
+                "Invalid stdio MCP server"
+            );
+            ensure!(
+                config.get("url").is_none()
+                    && config
+                        .get("type")
+                        .and_then(Value::as_str)
+                        .is_none_or(|v| v == "stdio"),
+                "Only stdio plugin MCP servers are supported"
+            );
         }
         for (name, command) in &self.commands {
             ensure!(
@@ -262,7 +298,10 @@ pub fn list(context: &ServiceContext) -> Result<Vec<Installed>> {
                 (!b.lifecycle_hooks.is_empty(), "command_hooks"),
                 (!b.mcp_servers.is_empty(), "stdio_mcp"),
                 (!b.commands.is_empty(), "script_commands"),
-            ].into_iter().filter_map(|(enabled, name)| enabled.then(|| name.to_string())).collect();
+            ]
+            .into_iter()
+            .filter_map(|(enabled, name)| enabled.then(|| name.to_string()))
+            .collect();
             Ok(Installed {
                 id: b.id,
                 version: b.version,

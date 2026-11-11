@@ -43,7 +43,11 @@ fn estimate_tokens(text: &str) -> usize {
 
 pub fn key(content: &Value) -> String {
     let digest = ring::digest::digest(&ring::digest::SHA256, content.to_string().as_bytes());
-    digest.as_ref().iter().map(|byte| format!("{byte:02x}")).collect()
+    digest
+        .as_ref()
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect()
 }
 
 /// Key and occurrence of each user message, in order; None for other roles.
@@ -76,28 +80,48 @@ pub fn load(root: &Path, session: &str) -> Result<Vec<Entry>> {
     };
     text.lines()
         .filter(|line| !line.trim().is_empty())
-        .map(|line| serde_json::from_str(line).with_context(|| format!("Parsing {}", path.display())))
+        .map(|line| {
+            serde_json::from_str(line).with_context(|| format!("Parsing {}", path.display()))
+        })
         .collect()
 }
 
 /// An entry placing `blocks` after the last user message of `messages`.
 pub fn for_last(messages: &[Value], blocks: Vec<String>) -> Option<Entry> {
     let (key, occurrence) = locate(messages).into_iter().rev().flatten().next()?;
-    Some(Entry { key, occurrence, blocks, skill: None })
+    Some(Entry {
+        key,
+        occurrence,
+        blocks,
+        skill: None,
+    })
 }
 
 pub fn save(root: &Path, session: &str, entry: &Entry) -> Result<()> {
     let path = file(root, session);
     if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent).with_context(|| format!("Creating {}", parent.display()))?;
+        std::fs::create_dir_all(parent)
+            .with_context(|| format!("Creating {}", parent.display()))?;
     }
-    let mut out = std::fs::OpenOptions::new().create(true).append(true).open(&path).with_context(|| format!("Opening {}", path.display()))?;
-    writeln!(out, "{}", serde_json::to_string(entry)?).with_context(|| format!("Writing {}", path.display()))
+    let mut out = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&path)
+        .with_context(|| format!("Opening {}", path.display()))?;
+    writeln!(out, "{}", serde_json::to_string(entry)?)
+        .with_context(|| format!("Writing {}", path.display()))
 }
 
 /// Record blocks for the last user message of `messages`.
-pub fn attach_to_last(root: &Path, session: &str, messages: &[Value], blocks: Vec<String>) -> Result<Option<Entry>> {
-    let Some(entry) = for_last(messages, blocks) else { return Ok(None) };
+pub fn attach_to_last(
+    root: &Path,
+    session: &str,
+    messages: &[Value],
+    blocks: Vec<String>,
+) -> Result<Option<Entry>> {
+    let Some(entry) = for_last(messages, blocks) else {
+        return Ok(None);
+    };
     save(root, session, &entry)?;
     Ok(Some(entry))
 }
@@ -128,18 +152,27 @@ pub fn invoked_skills_reminder(entries: &[Entry], messages: &[Value]) -> Option<
     let mut sections = Vec::new();
     for entry in entries.iter().rev() {
         let Some(skill) = &entry.skill else { continue };
-        if present.contains(&(entry.key.clone(), entry.occurrence)) || !seen.insert(skill.name.clone()) {
+        if present.contains(&(entry.key.clone(), entry.occurrence))
+            || !seen.insert(skill.name.clone())
+        {
             continue;
         }
         let mut content = skill.content.trim().to_owned();
         if estimate_tokens(&content) > SKILL_MAX_TOKENS {
             let mut end = SKILL_MAX_TOKENS * 4;
-            while !content.is_char_boundary(end) { end -= 1; }
+            while !content.is_char_boundary(end) {
+                end -= 1;
+            }
             content.truncate(end);
             content.push_str("\n\n[... skill content truncated for compaction; use Read on the skill path if you need the full text]");
         }
-        let section = format!("### Skill: {}\nPath: {}\n\n{content}", skill.name, skill.path);
-        if total + estimate_tokens(&section) > SKILLS_TOTAL_TOKENS { continue; }
+        let section = format!(
+            "### Skill: {}\nPath: {}\n\n{content}",
+            skill.name, skill.path
+        );
+        if total + estimate_tokens(&section) > SKILLS_TOTAL_TOKENS {
+            continue;
+        }
         total += estimate_tokens(&section);
         sections.push(section);
     }
@@ -167,29 +200,75 @@ mod tests {
         ];
         attach_to_last(root.path(), "s", &later, vec!["skill two".into()]).unwrap();
         let entries = load(root.path(), "s").unwrap();
-        assert_eq!(resolve(&entries, &later), vec![vec!["hook one".to_string()], vec![], vec!["skill two".to_string()]]);
+        assert_eq!(
+            resolve(&entries, &later),
+            vec![
+                vec!["hook one".to_string()],
+                vec![],
+                vec!["skill two".to_string()]
+            ]
+        );
         assert!(load(root.path(), "other").unwrap().is_empty());
-        assert!(attach_to_last(root.path(), "s", &[json!({"role":"assistant","content":"x"})], vec!["x".into()]).unwrap().is_none());
+        assert!(attach_to_last(
+            root.path(),
+            "s",
+            &[json!({"role":"assistant","content":"x"})],
+            vec!["x".into()]
+        )
+        .unwrap()
+        .is_none());
     }
 
     #[test]
     fn skills_reappear_only_once_their_message_is_compacted_away() {
-        let skill = |name: &str, content: &str| Some(InvokedSkill { name: name.into(), path: format!("/s/{name}/SKILL.md"), content: content.into() });
-        let history = vec![json!({"role":"user","content":"/lint"}), json!({"role":"assistant","content":"ok"}), json!({"role":"user","content":"/fmt"})];
+        let skill = |name: &str, content: &str| {
+            Some(InvokedSkill {
+                name: name.into(),
+                path: format!("/s/{name}/SKILL.md"),
+                content: content.into(),
+            })
+        };
+        let history = vec![
+            json!({"role":"user","content":"/lint"}),
+            json!({"role":"assistant","content":"ok"}),
+            json!({"role":"user","content":"/fmt"}),
+        ];
         let mut entries = vec![
-            Entry { skill: skill("lint", "old lint rules"), ..for_last(&history[..1], vec!["old lint rules".into()]).unwrap() },
+            Entry {
+                skill: skill("lint", "old lint rules"),
+                ..for_last(&history[..1], vec!["old lint rules".into()]).unwrap()
+            },
             for_last(&history[..1], vec!["hook".into()]).unwrap(),
-            Entry { skill: skill("fmt", "fmt rules"), ..for_last(&history, vec![]).unwrap() },
+            Entry {
+                skill: skill("fmt", "fmt rules"),
+                ..for_last(&history, vec![]).unwrap()
+            },
         ];
         assert!(invoked_skills_reminder(&entries, &history).is_none());
-        let compacted = vec![json!({"role":"user","content":"Summary of the earlier conversation"})];
-        entries.push(Entry { skill: skill("lint", "new lint rules"), ..for_last(&history[..1], vec![]).unwrap() });
+        let compacted =
+            vec![json!({"role":"user","content":"Summary of the earlier conversation"})];
+        entries.push(Entry {
+            skill: skill("lint", "new lint rules"),
+            ..for_last(&history[..1], vec![]).unwrap()
+        });
         let reminder = invoked_skills_reminder(&entries, &compacted).unwrap();
-        assert!(reminder.starts_with("<system-reminder>\nThe following skills were invoked EARLIER"));
-        let (lint, fmt) = (reminder.find("### Skill: lint\nPath: /s/lint/SKILL.md\n\nnew lint rules").unwrap(), reminder.find("### Skill: fmt").unwrap());
+        assert!(
+            reminder.starts_with("<system-reminder>\nThe following skills were invoked EARLIER")
+        );
+        let (lint, fmt) = (
+            reminder
+                .find("### Skill: lint\nPath: /s/lint/SKILL.md\n\nnew lint rules")
+                .unwrap(),
+            reminder.find("### Skill: fmt").unwrap(),
+        );
         assert!(lint < fmt, "newest first");
         assert!(!reminder.contains("old lint rules") && !reminder.contains("hook"));
-        let huge = vec![Entry { skill: skill("big", &"x".repeat(SKILL_MAX_TOKENS * 8)), ..for_last(&history[..1], vec![]).unwrap() }];
-        assert!(invoked_skills_reminder(&huge, &compacted).unwrap().contains("skill content truncated"));
+        let huge = vec![Entry {
+            skill: skill("big", &"x".repeat(SKILL_MAX_TOKENS * 8)),
+            ..for_last(&history[..1], vec![]).unwrap()
+        }];
+        assert!(invoked_skills_reminder(&huge, &compacted)
+            .unwrap()
+            .contains("skill content truncated"));
     }
 }

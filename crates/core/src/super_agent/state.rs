@@ -326,7 +326,7 @@ pub fn apply(
                 transition.status = Status::Running;
             }
         }
-        EventType::NewTaskProposed => {
+        EventType::NewTaskProposed | EventType::MessageSent => {
             if record.status.is_terminal() {
                 return Err(invalid(record, &event_type, "task is already terminal"));
             }

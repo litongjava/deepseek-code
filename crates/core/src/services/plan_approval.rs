@@ -58,7 +58,14 @@ pub struct ApprovalOption {
 }
 
 impl ApprovalRequest {
-    pub fn new(session: &str, request: &str, tool: &str, plan: &str, path: &std::path::Path, bypass: bool) -> Self {
+    pub fn new(
+        session: &str,
+        request: &str,
+        tool: &str,
+        plan: &str,
+        path: &std::path::Path,
+        bypass: bool,
+    ) -> Self {
         Self {
             kind: "plan_approval".into(),
             version: 1,
@@ -70,13 +77,20 @@ impl ApprovalRequest {
             plan: plan.into(),
             plan_file_path: path.to_string_lossy().into_owned(),
             status: "pending".into(),
-            choices: ["ask", "auto", "bypass"].into_iter().flat_map(|mode| {
-                ["keep", "clear"].into_iter().map(move |context| ApprovalOption {
-                    mode: mode.into(), context: context.into(),
-                    enabled: mode != "bypass" || bypass,
-                    disabled_reason: (mode == "bypass" && !bypass).then(|| "Bypass is unavailable for this execution host".into()),
+            choices: ["ask", "auto", "bypass"]
+                .into_iter()
+                .flat_map(|mode| {
+                    ["keep", "clear"]
+                        .into_iter()
+                        .map(move |context| ApprovalOption {
+                            mode: mode.into(),
+                            context: context.into(),
+                            enabled: mode != "bypass" || bypass,
+                            disabled_reason: (mode == "bypass" && !bypass)
+                                .then(|| "Bypass is unavailable for this execution host".into()),
+                        })
                 })
-            }).collect(),
+                .collect(),
         }
     }
 }
@@ -99,29 +113,67 @@ struct ApprovalResponse {
 
 /// Validate against the server-owned pending request, never a client-supplied request.
 /// Legacy CLI answers retain their original accept-edits and bypass semantics.
-pub fn parse_response(answer: &str, request: &ApprovalRequest, bypass: bool, bypass_available: bool) -> Result<Choice> {
+pub fn parse_response(
+    answer: &str,
+    request: &ApprovalRequest,
+    bypass: bool,
+    bypass_available: bool,
+) -> Result<Choice> {
     let value = if answer.trim_start().starts_with('{') {
         Some(serde_json::from_str::<serde_json::Value>(answer)?)
     } else {
         None
     };
-    let Some(value) = value.filter(|value| value.get("type").is_some() || value.get("version").is_some()) else {
+    let Some(value) =
+        value.filter(|value| value.get("type").is_some() || value.get("version").is_some())
+    else {
         return parse_for_mode(answer, bypass);
     };
     let response: ApprovalResponse = serde_json::from_value(value)?;
-    anyhow::ensure!(request.kind == "plan_approval" && request.version == 1 && request.status == "pending", "Plan approval request is not pending or supported");
-    anyhow::ensure!(response.kind == "plan_approval_response" && response.version == 1, "Unsupported plan approval response version or type");
-    anyhow::ensure!(response.session_id == request.session_id && response.request_id == request.request_id && response.tool_use_id == request.tool_use_id, "Plan approval request ownership mismatch");
-    anyhow::ensure!(response.plan_version == request.plan_version, "Plan review version is stale; request approval again");
+    anyhow::ensure!(
+        request.kind == "plan_approval" && request.version == 1 && request.status == "pending",
+        "Plan approval request is not pending or supported"
+    );
+    anyhow::ensure!(
+        response.kind == "plan_approval_response" && response.version == 1,
+        "Unsupported plan approval response version or type"
+    );
+    anyhow::ensure!(
+        response.session_id == request.session_id
+            && response.request_id == request.request_id
+            && response.tool_use_id == request.tool_use_id,
+        "Plan approval request ownership mismatch"
+    );
+    anyhow::ensure!(
+        response.plan_version == request.plan_version,
+        "Plan review version is stale; request approval again"
+    );
     if response.action == "revise" {
-        anyhow::ensure!(response.mode.is_none() && response.context.is_none(), "Feedback cannot also approve a permission mode");
+        anyhow::ensure!(
+            response.mode.is_none() && response.context.is_none(),
+            "Feedback cannot also approve a permission mode"
+        );
         return Ok(Choice::Revise(response.feedback.unwrap_or_default()));
     }
-    anyhow::ensure!(response.action == "approve" && response.feedback.is_none(), "Invalid plan approval action");
+    anyhow::ensure!(
+        response.action == "approve" && response.feedback.is_none(),
+        "Invalid plan approval action"
+    );
     let mode = response.mode.context("Approval mode is required")?;
-    let context = response.context.context("Approval context policy is required")?;
-    anyhow::ensure!(request.choices.iter().any(|choice| choice.enabled && choice.mode == mode && choice.context == context), "Plan approval choice is unavailable");
-    anyhow::ensure!(mode != "bypass" || bypass_available, "Bypass launch authority is unavailable");
+    let context = response
+        .context
+        .context("Approval context policy is required")?;
+    anyhow::ensure!(
+        request
+            .choices
+            .iter()
+            .any(|choice| choice.enabled && choice.mode == mode && choice.context == context),
+        "Plan approval choice is unavailable"
+    );
+    anyhow::ensure!(
+        mode != "bypass" || bypass_available,
+        "Bypass launch authority is unavailable"
+    );
     Ok(match (mode.as_str(), context.as_str()) {
         ("ask", "keep") => Choice::Manual,
         ("ask", "clear") => Choice::ClearManual,

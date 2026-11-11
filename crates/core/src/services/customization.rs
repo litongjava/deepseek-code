@@ -90,7 +90,10 @@ pub struct ToolLoading {
 
 /// The switches used when the user has no override for this built-in tool.
 pub fn default_loading(name: &str) -> ToolLoading {
-    ToolLoading { enabled: is_core_tool(name), on_demand: true }
+    ToolLoading {
+        enabled: is_core_tool(name),
+        on_demand: true,
+    }
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
@@ -135,7 +138,11 @@ pub fn save(data_dir: &Path, customization: &Customization, builtin: &[String]) 
 
 /// Saves only the prompt half. The tool half stays byte-for-byte as it was, so
 /// saving a prompt never migrates a legacy tool entry or writes a draft.
-pub fn save_prompt(data_dir: &Path, prompt: &SystemPrompt, builtin: &[String]) -> Result<Customization> {
+pub fn save_prompt(
+    data_dir: &Path,
+    prompt: &SystemPrompt,
+    builtin: &[String],
+) -> Result<Customization> {
     let mut next = load(data_dir)?;
     next.system_prompt = prompt.clone();
     write(data_dir, &next, builtin)?;
@@ -145,7 +152,11 @@ pub fn save_prompt(data_dir: &Path, prompt: &SystemPrompt, builtin: &[String]) -
 /// Saves only the tool half. A built-in switch the payload does not mention
 /// keeps its effective value, so a legacy entry is folded into the switches
 /// instead of being lost; legacy names are then dropped from `disabled_tools`.
-pub fn save_tools(data_dir: &Path, submitted: &Customization, builtin: &[String]) -> Result<Customization> {
+pub fn save_tools(
+    data_dir: &Path,
+    submitted: &Customization,
+    builtin: &[String],
+) -> Result<Customization> {
     let mut next = load(data_dir)?;
     for name in builtin {
         if let Some(explicit) = submitted.tool_loading.get(name) {
@@ -157,7 +168,8 @@ pub fn save_tools(data_dir: &Path, submitted: &Customization, builtin: &[String]
     // Both lists are folded, so a legacy name neither the page nor the file
     // mentions is never turned back on by accident. Names outside the catalog
     // keep their old meaning and are carried through unchanged.
-    next.disabled_tools.extend(submitted.disabled_tools.iter().cloned());
+    next.disabled_tools
+        .extend(submitted.disabled_tools.iter().cloned());
     next.disabled_tools.sort();
     next.disabled_tools.dedup();
     let next = next.migrate(builtin);
@@ -167,7 +179,9 @@ pub fn save_tools(data_dir: &Path, submitted: &Customization, builtin: &[String]
 
 fn valid_name(name: &str) -> bool {
     let mut chars = name.chars();
-    chars.next().is_some_and(|first| first.is_ascii_alphabetic())
+    chars
+        .next()
+        .is_some_and(|first| first.is_ascii_alphabetic())
         && name.len() <= 64
         && chars.all(|ch| ch.is_ascii_alphanumeric() || ch == '_' || ch == '-')
         && !name.starts_with("mcp__")
@@ -176,18 +190,48 @@ fn valid_name(name: &str) -> bool {
 impl Customization {
     pub fn validate(&self, builtin: &[String]) -> Result<()> {
         ensure!(
-            self.system_prompt.mode != PromptMode::Replace || !self.system_prompt.text.trim().is_empty(),
+            self.system_prompt.mode != PromptMode::Replace
+                || !self.system_prompt.text.trim().is_empty(),
             "The replacement system prompt cannot be empty"
         );
         let mut seen = std::collections::HashSet::new();
         for tool in &self.custom_tools {
-            ensure!(valid_name(&tool.name), "Invalid tool name: {}. Use letters, digits, _ and -, starting with a letter", tool.name);
-            ensure!(!builtin.contains(&tool.name), "{} is already a built-in tool", tool.name);
-            ensure!(seen.insert(tool.name.as_str()), "Duplicate tool name: {}", tool.name);
-            ensure!(!tool.description.trim().is_empty(), "{} needs a description", tool.name);
-            ensure!(!tool.command.trim().is_empty(), "{} needs a command", tool.name);
-            ensure!(tool.input_schema["type"] == "object", "{}: the input schema must be a JSON object schema", tool.name);
-            ensure!(tool.timeout_secs.is_none_or(|secs| (1..=MAX_TIMEOUT_SECS).contains(&secs)), "{}: the timeout must be 1 to {MAX_TIMEOUT_SECS} seconds", tool.name);
+            ensure!(
+                valid_name(&tool.name),
+                "Invalid tool name: {}. Use letters, digits, _ and -, starting with a letter",
+                tool.name
+            );
+            ensure!(
+                !builtin.contains(&tool.name),
+                "{} is already a built-in tool",
+                tool.name
+            );
+            ensure!(
+                seen.insert(tool.name.as_str()),
+                "Duplicate tool name: {}",
+                tool.name
+            );
+            ensure!(
+                !tool.description.trim().is_empty(),
+                "{} needs a description",
+                tool.name
+            );
+            ensure!(
+                !tool.command.trim().is_empty(),
+                "{} needs a command",
+                tool.name
+            );
+            ensure!(
+                tool.input_schema["type"] == "object",
+                "{}: the input schema must be a JSON object schema",
+                tool.name
+            );
+            ensure!(
+                tool.timeout_secs
+                    .is_none_or(|secs| (1..=MAX_TIMEOUT_SECS).contains(&secs)),
+                "{}: the timeout must be 1 to {MAX_TIMEOUT_SECS} seconds",
+                tool.name
+            );
         }
         Ok(())
     }
@@ -205,7 +249,10 @@ impl Customization {
             return *explicit;
         }
         if self.is_disabled(name) {
-            return ToolLoading { enabled: false, on_demand: true };
+            return ToolLoading {
+                enabled: false,
+                on_demand: true,
+            };
         }
         default_loading(name)
     }
@@ -218,7 +265,9 @@ impl Customization {
     }
 
     pub fn custom_tool(&self, name: &str) -> Option<&CustomTool> {
-        self.custom_tools.iter().find(|tool| tool.enabled && tool.name == name)
+        self.custom_tools
+            .iter()
+            .find(|tool| tool.enabled && tool.name == name)
     }
 
     /// Writes each built-in's effective switches explicitly and drops their
@@ -242,7 +291,11 @@ impl Customization {
         tools
             .into_iter()
             .map(|mut tool| {
-                if let Some(description) = self.tool_descriptions.get(&tool.name).filter(|text| !text.trim().is_empty()) {
+                if let Some(description) = self
+                    .tool_descriptions
+                    .get(&tool.name)
+                    .filter(|text| !text.trim().is_empty())
+                {
                     tool.description = description.clone();
                 }
                 tool
@@ -253,11 +306,16 @@ impl Customization {
     /// The advertised tools, then the user's own enabled ones.
     pub fn apply(&self, tools: Vec<ToolDefinition>) -> Vec<ToolDefinition> {
         let mut tools = self.described(tools);
-        tools.extend(self.custom_tools.iter().filter(|tool| tool.enabled).map(|tool| ToolDefinition {
-            name: tool.name.clone(),
-            description: tool.description.clone(),
-            input_schema: tool.input_schema.clone(),
-        }));
+        tools.extend(
+            self.custom_tools
+                .iter()
+                .filter(|tool| tool.enabled)
+                .map(|tool| ToolDefinition {
+                    name: tool.name.clone(),
+                    description: tool.description.clone(),
+                    input_schema: tool.input_schema.clone(),
+                }),
+        );
         tools
     }
 }
@@ -270,7 +328,11 @@ pub async fn run_custom_tool(tool: &CustomTool, input: &Value, cwd: &str) -> Res
     let mut command = if cfg!(windows) {
         let mut command = tokio::process::Command::new("powershell");
         // Read the JSON payload and files as UTF-8, not the ANSI code page.
-        command.args(["-NoProfile", "-Command", &crate::tools::powershell_command(&tool.command)]);
+        command.args([
+            "-NoProfile",
+            "-Command",
+            &crate::tools::powershell_command(&tool.command),
+        ]);
         command
     } else {
         let mut command = tokio::process::Command::new("sh");
@@ -294,7 +356,9 @@ pub async fn run_custom_tool(tool: &CustomTool, input: &Value, cwd: &str) -> Res
     let output = tokio::time::timeout(Duration::from_secs(seconds), child.wait_with_output())
         .await
         .map_err(|_| anyhow::anyhow!("Tool {} timed out after {seconds}s", tool.name))??;
-    let text = |bytes: &[u8]| String::from_utf8_lossy(&bytes[..bytes.len().min(MAX_OUTPUT_BYTES)]).into_owned();
+    let text = |bytes: &[u8]| {
+        String::from_utf8_lossy(&bytes[..bytes.len().min(MAX_OUTPUT_BYTES)]).into_owned()
+    };
     ensure!(
         output.status.success(),
         "Tool {} failed with {}: {}",
@@ -321,21 +385,39 @@ mod tests {
     }
 
     fn definition(name: &str) -> ToolDefinition {
-        ToolDefinition { name: name.into(), description: "original".into(), input_schema: json!({"type":"object"}) }
+        ToolDefinition {
+            name: name.into(),
+            description: "original".into(),
+            input_schema: json!({"type":"object"}),
+        }
     }
 
     #[test]
     fn apply_edits_descriptions_and_adds_tools() {
         let mut customization = Customization::default();
-        customization.tool_descriptions.insert("Read".into(), "edited".into());
-        customization.tool_descriptions.insert("Grep".into(), "  ".into());
+        customization
+            .tool_descriptions
+            .insert("Read".into(), "edited".into());
+        customization
+            .tool_descriptions
+            .insert("Grep".into(), "  ".into());
         customization.custom_tools.push(tool("shout", "cat"));
         let mut off = tool("quiet", "cat");
         off.enabled = false;
         customization.custom_tools.push(off);
         let tools = customization.apply(vec![definition("Read"), definition("Grep")]);
-        let summary: Vec<_> = tools.iter().map(|tool| (tool.name.as_str(), tool.description.as_str())).collect();
-        assert_eq!(summary, [("Read", "edited"), ("Grep", "original"), ("shout", "Test tool")]);
+        let summary: Vec<_> = tools
+            .iter()
+            .map(|tool| (tool.name.as_str(), tool.description.as_str()))
+            .collect();
+        assert_eq!(
+            summary,
+            [
+                ("Read", "edited"),
+                ("Grep", "original"),
+                ("shout", "Test tool")
+            ]
+        );
         assert!(customization.custom_tool("shout").is_some());
         assert!(customization.custom_tool("quiet").is_none());
     }
@@ -345,16 +427,51 @@ mod tests {
         assert_eq!(
             CORE_TOOLS,
             [
-                "Bash", "Read", "Write", "Edit", "Grep", "Glob", "Skill", "ToolSearch",
-                "AskUserQuestion", "EnterPlanMode", "ExitPlanMode", "plan_mode", "TaskOutput", "TaskStop",
+                "Bash",
+                "Read",
+                "Write",
+                "Edit",
+                "Grep",
+                "Glob",
+                "Skill",
+                "ToolSearch",
+                "AskUserQuestion",
+                "EnterPlanMode",
+                "ExitPlanMode",
+                "plan_mode",
+                "TaskOutput",
+                "TaskStop",
             ]
         );
         for name in CORE_TOOLS {
-            assert_eq!(default_loading(name), ToolLoading { enabled: true, on_demand: true }, "{name}");
+            assert_eq!(
+                default_loading(name),
+                ToolLoading {
+                    enabled: true,
+                    on_demand: true
+                },
+                "{name}"
+            );
         }
-        for name in ["ListDir", "MultiEdit", "WebFetch", "Agent", "Workflow", "memory_search", "computer_use", "ProposeGoal"] {
+        for name in [
+            "ListDir",
+            "MultiEdit",
+            "WebFetch",
+            "Agent",
+            "Workflow",
+            "memory_search",
+            "computer_use",
+            "ProposeGoal",
+        ] {
             assert!(!is_core_tool(name), "{name}");
-            assert_eq!(default_loading(name), ToolLoading { enabled: false, on_demand: true }, "{name}");
+            assert_eq!(
+                default_loading(name),
+                ToolLoading {
+                    enabled: false,
+                    on_demand: true
+                },
+                "{name}"
+            );
         }
         // A tool added later keeps the non-core default.
         assert!(!is_core_tool("SomeFutureTool"));
@@ -368,16 +485,40 @@ mod tests {
         assert!(!customization.exposes("WebFetch", &none));
         // Legacy "disabled" no longer blocks discovery.
         customization.disabled_tools.push("Grep".into());
-        assert_eq!(customization.loading("Grep"), ToolLoading { enabled: false, on_demand: true });
+        assert_eq!(
+            customization.loading("Grep"),
+            ToolLoading {
+                enabled: false,
+                on_demand: true
+            }
+        );
         assert!(!customization.exposes("Grep", &none));
         let loaded: BTreeSet<String> = ["Grep".to_owned()].into_iter().collect();
         assert!(customization.exposes("Grep", &loaded));
         // Both off means unavailable even after a load.
-        customization.tool_loading.insert("Grep".into(), ToolLoading { enabled: false, on_demand: false });
+        customization.tool_loading.insert(
+            "Grep".into(),
+            ToolLoading {
+                enabled: false,
+                on_demand: false,
+            },
+        );
         assert!(!customization.exposes("Grep", &loaded));
         // Turning discovery off leaves a loaded tool in place.
-        customization.tool_loading.insert("WebFetch".into(), ToolLoading { enabled: true, on_demand: false });
-        assert_eq!(customization.loading("WebFetch"), ToolLoading { enabled: true, on_demand: false });
+        customization.tool_loading.insert(
+            "WebFetch".into(),
+            ToolLoading {
+                enabled: true,
+                on_demand: false,
+            },
+        );
+        assert_eq!(
+            customization.loading("WebFetch"),
+            ToolLoading {
+                enabled: true,
+                on_demand: false
+            }
+        );
         assert!(customization.exposes("WebFetch", &none));
     }
 
@@ -404,7 +545,13 @@ mod tests {
         };
         save(dir.path(), &legacy, &builtin).unwrap();
         let saved = load(dir.path()).unwrap();
-        assert_eq!(saved.tool_loading["Grep"], ToolLoading { enabled: false, on_demand: true });
+        assert_eq!(
+            saved.tool_loading["Grep"],
+            ToolLoading {
+                enabled: false,
+                on_demand: true
+            }
+        );
         assert_eq!(saved.disabled_tools, ["mcp__old__tool"]);
         // A second save changes nothing.
         save(dir.path(), &saved, &builtin).unwrap();
@@ -419,10 +566,16 @@ mod tests {
             "tool_descriptions":{"Glob":"search with the old name"}});
         std::fs::write(path(dir.path()), legacy.to_string()).unwrap();
 
-        let prompt = SystemPrompt { mode: PromptMode::Append, text: "Be brief".into() };
+        let prompt = SystemPrompt {
+            mode: PromptMode::Append,
+            text: "Be brief".into(),
+        };
         let saved = save_prompt(dir.path(), &prompt, &builtin).unwrap();
         assert_eq!(saved.system_prompt, prompt);
-        assert!(saved.tool_loading.is_empty(), "a prompt save must not migrate");
+        assert!(
+            saved.tool_loading.is_empty(),
+            "a prompt save must not migrate"
+        );
         assert_eq!(saved.disabled_tools, ["Write", "Glob", "mcp__old__tool"]);
         assert_eq!(load(dir.path()).unwrap(), saved);
     }
@@ -437,15 +590,36 @@ mod tests {
 
         // The page only touched Glob and kept the old description.
         let submitted = Customization {
-            tool_descriptions: BTreeMap::from([("Glob".to_owned(), "search with the old name".to_owned())]),
+            tool_descriptions: BTreeMap::from([(
+                "Glob".to_owned(),
+                "search with the old name".to_owned(),
+            )]),
             disabled_tools: vec!["mcp__old__tool".into()],
-            tool_loading: BTreeMap::from([("Glob".to_owned(), ToolLoading { enabled: true, on_demand: true })]),
+            tool_loading: BTreeMap::from([(
+                "Glob".to_owned(),
+                ToolLoading {
+                    enabled: true,
+                    on_demand: true,
+                },
+            )]),
             ..Default::default()
         };
         let saved = save_tools(dir.path(), &submitted, &builtin).unwrap();
         // Write was never mentioned, so its legacy value survives as a switch.
-        assert_eq!(saved.tool_loading["Write"], ToolLoading { enabled: false, on_demand: true });
-        assert_eq!(saved.tool_loading["Glob"], ToolLoading { enabled: true, on_demand: true });
+        assert_eq!(
+            saved.tool_loading["Write"],
+            ToolLoading {
+                enabled: false,
+                on_demand: true
+            }
+        );
+        assert_eq!(
+            saved.tool_loading["Glob"],
+            ToolLoading {
+                enabled: true,
+                on_demand: true
+            }
+        );
         assert_eq!(saved.disabled_tools, ["mcp__old__tool"]);
         assert_eq!(saved.tool_descriptions["Glob"], "search with the old name");
         assert_eq!(load(dir.path()).unwrap(), saved);
@@ -455,7 +629,10 @@ mod tests {
         assert_eq!(again, saved);
 
         // A later prompt save leaves these switches alone.
-        let prompt = SystemPrompt { mode: PromptMode::Replace, text: "Only this".into() };
+        let prompt = SystemPrompt {
+            mode: PromptMode::Replace,
+            text: "Only this".into(),
+        };
         let after = save_prompt(dir.path(), &prompt, &builtin).unwrap();
         assert_eq!(after.tool_loading, saved.tool_loading);
         assert_eq!(after.disabled_tools, saved.disabled_tools);
@@ -465,7 +642,10 @@ mod tests {
     fn invalid_settings_are_rejected_and_never_saved() {
         let dir = tempfile::tempdir().unwrap();
         let builtin = vec!["Read".to_owned()];
-        let with = |tool: CustomTool| Customization { custom_tools: vec![tool], ..Default::default() };
+        let with = |tool: CustomTool| Customization {
+            custom_tools: vec![tool],
+            ..Default::default()
+        };
         let mut no_schema = tool("ok", "cat");
         no_schema.input_schema = json!({"type":"string"});
         let mut long = tool("ok", "cat");
@@ -478,8 +658,23 @@ mod tests {
             (with(tool("ok", " ")), "needs a command"),
             (with(no_schema), "JSON object schema"),
             (with(long), "timeout"),
-            (Customization { custom_tools: vec![tool("a", "x"), tool("a", "y")], ..Default::default() }, "Duplicate"),
-            (Customization { system_prompt: SystemPrompt { mode: PromptMode::Replace, text: " ".into() }, ..Default::default() }, "cannot be empty"),
+            (
+                Customization {
+                    custom_tools: vec![tool("a", "x"), tool("a", "y")],
+                    ..Default::default()
+                },
+                "Duplicate",
+            ),
+            (
+                Customization {
+                    system_prompt: SystemPrompt {
+                        mode: PromptMode::Replace,
+                        text: " ".into(),
+                    },
+                    ..Default::default()
+                },
+                "cannot be empty",
+            ),
         ] {
             let error = save(dir.path(), &bad, &builtin).unwrap_err().to_string();
             assert!(error.contains(message), "{error}");
@@ -492,7 +687,10 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         assert_eq!(load(dir.path()).unwrap(), Customization::default());
         let saved = Customization {
-            system_prompt: SystemPrompt { mode: PromptMode::Append, text: "Be brief".into() },
+            system_prompt: SystemPrompt {
+                mode: PromptMode::Append,
+                text: "Be brief".into(),
+            },
             disabled_tools: vec!["Write".into()],
             custom_tools: vec![tool("shout", "cat")],
             ..Default::default()
@@ -509,14 +707,29 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let cwd = dir.path().to_str().unwrap();
         let input = json!({"text":"hello"});
-        let stdin = run_custom_tool(&tool("a", "cat"), &input, cwd).await.unwrap();
+        let stdin = run_custom_tool(&tool("a", "cat"), &input, cwd)
+            .await
+            .unwrap();
         assert_eq!(stdin["stdout"], input.to_string());
-        let env = run_custom_tool(&tool("a", "printf %s \"$TOOL_INPUT\"; pwd >&2"), &input, cwd).await.unwrap();
+        let env = run_custom_tool(
+            &tool("a", "printf %s \"$TOOL_INPUT\"; pwd >&2"),
+            &input,
+            cwd,
+        )
+        .await
+        .unwrap();
         assert_eq!(env["stdout"], input.to_string());
-        let failed = run_custom_tool(&tool("a", "echo nope >&2; exit 3"), &input, cwd).await.unwrap_err().to_string();
+        let failed = run_custom_tool(&tool("a", "echo nope >&2; exit 3"), &input, cwd)
+            .await
+            .unwrap_err()
+            .to_string();
         assert!(failed.contains("nope"), "{failed}");
         let mut slow = tool("a", "sleep 30");
         slow.timeout_secs = Some(1);
-        assert!(run_custom_tool(&slow, &input, cwd).await.unwrap_err().to_string().contains("timed out"));
+        assert!(run_custom_tool(&slow, &input, cwd)
+            .await
+            .unwrap_err()
+            .to_string()
+            .contains("timed out"));
     }
 }

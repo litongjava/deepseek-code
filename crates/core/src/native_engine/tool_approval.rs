@@ -27,6 +27,18 @@ impl ToolLoopExecutor {
         input: &Value,
         pre_tool_hook: bool,
     ) -> Option<String> {
+        // Router sessions never change business code. The plan document keeps
+        // its separate checked scope, which is the documented exception.
+        if tool != "SandboxNetwork"
+            && !self.is_plan_document_tool(tool, input)
+            && (self.super_agent_role.is_router())
+            && crate::super_agent::crp::is_forbidden_router_tool(tool)
+        {
+            return Some(
+                "Router sessions cannot edit business code; delegate the change to a Coder task"
+                    .into(),
+            );
+        }
         // A sandboxed command's host question belongs to its Bash call, which
         // already passed this check.
         if tool != "SandboxNetwork"

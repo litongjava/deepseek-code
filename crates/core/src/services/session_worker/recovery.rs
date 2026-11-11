@@ -24,8 +24,7 @@ pub(super) fn lifetime_lock(dir: &Path, name: &str) -> Result<fs::File> {
         .read(true)
         .write(true)
         .open(dir.join(name))?;
-    crate::fs::try_lock_file(&lock)
-        .context("Session worker process is already running")?;
+    crate::fs::try_lock_file(&lock).context("Session worker process is already running")?;
     ensure!(
         !dir.join("retired.json").exists(),
         "Session worker generation was retired; refusing delayed startup"
@@ -225,7 +224,9 @@ pub(super) fn job_abandoned(job: &Job) -> bool {
 pub(super) fn fail_abandoned_job(root: &Path, mut job: Job) -> Result<()> {
     let path = jobs::directory(root, &job.id)?.join("state.json");
     job.status = "failed".into();
-    job.error = Some("Worker exited unexpectedly; previous task outcome is unknown and was not replayed".into());
+    job.error = Some(
+        "Worker exited unexpectedly; previous task outcome is unknown and was not replayed".into(),
+    );
     job.finished_ms = Some(jobs::now());
     job.heartbeat_ms = jobs::now();
     jobs::save(&path, &job)
