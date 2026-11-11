@@ -380,7 +380,11 @@ impl Orchestrator {
         // A dispatch already exists: reconcile only against it. Never prepare a
         // second plan or start a second child for the same immutable evidence.
         if let Some(dispatch) = store
-            .delivery_dispatch(&task.task_id, &plan.operation_id)
+            .repository_dispatch(
+                &task.task_id,
+                &plan.operation_id,
+                &plan.repositories[0].repository_id,
+            )
             .map_err(store_error)?
         {
             return self
@@ -430,9 +434,12 @@ impl Orchestrator {
             }
         }
 
-        // The dispatch receipt is durable before the child is started.
+        // The dispatch receipt is durable before the child is started. It is
+        // keyed by the real repository and binds the approved old/new OIDs and
+        // the explicit attempt, not only the plan operation ID.
+        let target = &plan.repositories[0];
         store
-            .begin_delivery_dispatch(&crate::super_agent::delivery::DeliveryDispatch {
+            .begin_repository_dispatch(&crate::super_agent::delivery::DeliveryDispatch {
                 task_id: task.task_id.clone(),
                 spec_version: task.spec_version,
                 review_round: task.review_round,
@@ -443,6 +450,10 @@ impl Orchestrator {
                     .clone()
                     .context("Task has no Coder session to deliver the integration")?,
                 purpose: "delivery".into(),
+                repository_id: Some(target.repository_id.clone()),
+                old_oid: Some(target.old_oid.clone()),
+                new_oid: Some(target.new_oid.clone()),
+                attempt: target.attempt,
                 job_id: None,
                 created_at: chrono::Utc::now().to_rfc3339(),
             })
@@ -453,7 +464,12 @@ impl Orchestrator {
             .resume_coder(task, &instruction, "delivery")
             .await?;
         store
-            .set_delivery_dispatch_job(&task.task_id, &plan.operation_id, &outcome.job_id)
+            .set_repository_dispatch_job(
+                &task.task_id,
+                &plan.operation_id,
+                &target.repository_id,
+                &outcome.job_id,
+            )
             .map_err(store_error)?;
         self.observe_delivery_job(
             store,
@@ -562,9 +578,10 @@ impl Orchestrator {
                             job.launched || job.supervisor_pid.is_some() || job.child_pid.is_some();
                         if progressed {
                             store
-                                .set_delivery_dispatch_job(
+                                .set_repository_dispatch_job(
                                     &task.task_id,
                                     &plan.operation_id,
+                                    &plan.repositories[0].repository_id,
                                     &job.id,
                                 )
                                 .map_err(store_error)?;
@@ -603,7 +620,12 @@ impl Orchestrator {
                 }
                 let job_id = handle.job_id.clone();
                 store
-                    .set_delivery_dispatch_job(&task.task_id, &plan.operation_id, &job_id)
+                    .set_repository_dispatch_job(
+                        &task.task_id,
+                        &plan.operation_id,
+                        &plan.repositories[0].repository_id,
+                        &job_id,
+                    )
                     .map_err(store_error)?;
                 return self
                     .observe_delivery_job(store, task, plan, &job_id, false, report)
@@ -663,7 +685,12 @@ impl Orchestrator {
             .resume_coder(task, &instruction, "delivery")
             .await?;
         store
-            .set_delivery_dispatch_job(&task.task_id, &plan.operation_id, &outcome.job_id)
+            .set_repository_dispatch_job(
+                &task.task_id,
+                &plan.operation_id,
+                &plan.repositories[0].repository_id,
+                &outcome.job_id,
+            )
             .map_err(store_error)?;
         self.observe_delivery_job(
             store,
@@ -831,9 +858,9 @@ impl Orchestrator {
         }
     }
 
-    /// Persists the host-verified delivery observation. It marks each planned
-    /// repository `COMPLETED` and appends the delivery event in one
-    /// transaction, but never emits task completion or cleanup.
+    /// Persists the host-verified delivery observation. Each planned repository
+    /// gets its own durable observation first; only then may the whole task be
+    /// marked delivered. It never emits task completion or cleanup.
     fn finish_delivery(
         &self,
         store: &TaskStore,
@@ -843,6 +870,31 @@ impl Orchestrator {
         observed_without_dispatch: bool,
         report: &mut TickReport,
     ) -> Result<TaskRecord> {
+        let coder_session_id = task
+            .coder
+            .session_id
+            .clone()
+            .context("Task has no Coder session to record the delivery")?;
+        for target in &plan.repositories {
+            store
+                .record_repository_delivery_observed(
+                    &crate::super_agent::delivery::RepositoryDeliveryObservation {
+                        task_id: plan.task_id.clone(),
+                        spec_version: plan.spec_version,
+                        review_round: plan.review_round,
+                        plan_operation_id: plan.operation_id.clone(),
+                        repository_id: target.repository_id.clone(),
+                        old_oid: target.old_oid.clone(),
+                        new_oid: target.new_oid.clone(),
+                        target_ref: target.target_ref.clone(),
+                        coder_session_id: coder_session_id.clone(),
+                        attempt: target.attempt,
+                        verified: true,
+                        observed_at: chrono::Utc::now().to_rfc3339(),
+                    },
+                )
+                .map_err(store_error)?;
+        }
         let repositories: Vec<serde_json::Value> = plan
             .repositories
             .iter()
@@ -1766,6 +1818,31 @@ fn delivery_context_mismatch(
     dispatch: &crate::super_agent::delivery::DeliveryDispatch,
 ) -> Option<String> {
     let coder = task.coder.session_id.as_deref();
+    let Some(repository_id) = dispatch.repository_id.as_deref() else {
+        return Some(format!(
+            "The delivery receipt {} for task {} does not name the repository it delivers; refusing to adopt or observe it",
+            dispatch.plan_operation_id, dispatch.task_id
+        ));
+    };
+    let Some(target) = plan
+        .repositories
+        .iter()
+        .find(|target| target.repository_id == repository_id)
+    else {
+        return Some(format!(
+            "The delivery receipt names repository {repository_id}, which is not part of plan {}; refusing to adopt or observe it",
+            plan.operation_id
+        ));
+    };
+    if dispatch.old_oid.as_deref() != Some(target.old_oid.as_str())
+        || dispatch.new_oid.as_deref() != Some(target.new_oid.as_str())
+        || dispatch.attempt != target.attempt
+    {
+        return Some(format!(
+            "The delivery receipt for repository {repository_id} does not match the approved old/new OIDs or attempt of plan {}; refusing to adopt or observe it",
+            plan.operation_id
+        ));
+    }
     if plan.task_id != task.task_id
         || plan.spec_version != task.spec_version
         || plan.review_round != task.review_round

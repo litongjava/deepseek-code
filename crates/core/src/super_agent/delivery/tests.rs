@@ -1447,6 +1447,7 @@ fn command_target(
         review_stage: ReviewStage::Implementation,
         lock_key: "branch:test:refs/heads/develop".into(),
         lock_operation_id: "lock".into(),
+        attempt: 1,
     }
 }
 
@@ -1625,6 +1626,8 @@ fn the_checked_out_delivery_command_refuses_a_switched_checkout() {
 fn a_delivery_dispatch_is_recorded_once_and_rejects_conflicting_facts() {
     let fixture = Fixture::new();
     let plan = fixture.plan();
+    // The legacy table has no repository, OID or attempt columns, so this
+    // entry point is exercised with a genuinely legacy-shaped receipt.
     let dispatch = DeliveryDispatch {
         task_id: fixture.task.task_id.clone(),
         spec_version: plan.spec_version,
@@ -1632,6 +1635,10 @@ fn a_delivery_dispatch_is_recorded_once_and_rejects_conflicting_facts() {
         plan_operation_id: plan.operation_id.clone(),
         coder_session_id: "coder-session".into(),
         purpose: "delivery".into(),
+        repository_id: None,
+        old_oid: None,
+        new_oid: None,
+        attempt: 0,
         job_id: None,
         created_at: "2026-01-01T00:00:00Z".into(),
     };
@@ -1661,6 +1668,30 @@ fn a_delivery_dispatch_is_recorded_once_and_rejects_conflicting_facts() {
         .store
         .set_delivery_dispatch_job(&dispatch.task_id, &plan.operation_id, "job-2")
         .is_err());
+    // A repository-scoped identity must not be silently written through the
+    // legacy path, which would drop its OIDs and attempt on reread.
+    let mut scoped = dispatch.clone();
+    scoped.repository_id = Some(plan.repositories[0].repository_id.clone());
+    scoped.old_oid = Some(plan.repositories[0].old_oid.clone());
+    scoped.new_oid = Some(plan.repositories[0].new_oid.clone());
+    scoped.attempt = plan.repositories[0].attempt;
+    let error = fixture
+        .store
+        .begin_delivery_dispatch(&scoped)
+        .expect_err("the legacy entry point must reject repository-scoped facts");
+    assert!(
+        error.to_string().contains("begin_repository_dispatch"),
+        "{error}"
+    );
+    // The rejected call did not overwrite the recorded legacy receipt.
+    assert_eq!(
+        fixture
+            .store
+            .delivery_dispatch(&dispatch.task_id, &plan.operation_id)
+            .unwrap()
+            .unwrap(),
+        bound
+    );
     let mut other_session = dispatch.clone();
     other_session.coder_session_id = "another-coder".into();
     assert!(fixture
@@ -1698,6 +1729,28 @@ fn recording_a_delivery_marks_the_repository_and_is_idempotent() {
         .unwrap();
     let operation = "orchestrator:delivery-completed:test";
     let payload = json!({"complete": true});
+    fixture
+        .store
+        .set_sessions(&fixture.task.task_id, Some("coder-session"), None)
+        .unwrap();
+    let target = &plan.repositories[0];
+    fixture
+        .store
+        .record_repository_delivery_observed(&RepositoryDeliveryObservation {
+            task_id: plan.task_id.clone(),
+            spec_version: plan.spec_version,
+            review_round: plan.review_round,
+            plan_operation_id: plan.operation_id.clone(),
+            repository_id: target.repository_id.clone(),
+            old_oid: target.old_oid.clone(),
+            new_oid: target.new_oid.clone(),
+            target_ref: target.target_ref.clone(),
+            coder_session_id: "coder-session".into(),
+            attempt: target.attempt,
+            verified: true,
+            observed_at: "2026-01-01T00:00:00Z".into(),
+        })
+        .unwrap();
     let first = fixture
         .store
         .record_delivery_completed(&plan, operation, payload.clone())
@@ -1890,4 +1943,1112 @@ fn a_failed_status_inspection_never_fast_forwards() {
     );
     assert_eq!(git_run(&checkout, &["rev-parse", "HEAD"]), target.old_oid);
     assert_eq!(fixture.repos[0]._fixture.target(), target.old_oid);
+}
+
+fn repo_fixture<'a>(fixture: &'a Fixture, repository_id: &str) -> &'a RepoFixture {
+    &fixture
+        .repos
+        .iter()
+        .find(|data| data.repo.repository_id == repository_id)
+        .expect("fixture repository")
+        ._fixture
+}
+
+fn set_delivery_pending(store: &TaskStore, task_id: &str) {
+    store
+        .db()
+        .with_conn(|conn| -> rusqlite::Result<usize> {
+            conn.execute(
+                "UPDATE sa_tasks SET phase='DELIVERY_PENDING', status='RUNNING' WHERE task_id=?1",
+                [task_id],
+            )
+        })
+        .unwrap()
+        .unwrap();
+}
+
+fn repository_observation(
+    plan: &DeliveryPlan,
+    target: &DeliveryTargetPlan,
+) -> RepositoryDeliveryObservation {
+    RepositoryDeliveryObservation {
+        task_id: plan.task_id.clone(),
+        spec_version: plan.spec_version,
+        review_round: plan.review_round,
+        plan_operation_id: plan.operation_id.clone(),
+        repository_id: target.repository_id.clone(),
+        old_oid: target.old_oid.clone(),
+        new_oid: target.new_oid.clone(),
+        target_ref: target.target_ref.clone(),
+        coder_session_id: "coder-session".into(),
+        attempt: target.attempt,
+        verified: true,
+        observed_at: "2026-01-01T00:00:00Z".into(),
+    }
+}
+
+fn repository_dispatch_for(plan: &DeliveryPlan, target: &DeliveryTargetPlan) -> DeliveryDispatch {
+    DeliveryDispatch {
+        task_id: plan.task_id.clone(),
+        spec_version: plan.spec_version,
+        review_round: plan.review_round,
+        plan_operation_id: plan.operation_id.clone(),
+        coder_session_id: "coder-session".into(),
+        purpose: "delivery".into(),
+        repository_id: Some(target.repository_id.clone()),
+        old_oid: Some(target.old_oid.clone()),
+        new_oid: Some(target.new_oid.clone()),
+        attempt: target.attempt,
+        job_id: None,
+        created_at: "2026-01-01T00:00:00Z".into(),
+    }
+}
+
+fn synthetic_plan(task: &TaskRecord, repositories: &[(&str, &str, &str)]) -> DeliveryPlan {
+    DeliveryPlan {
+        operation_id: format!("synthetic-plan-{}", task.task_id),
+        task_id: task.task_id.clone(),
+        spec_version: task.spec_version,
+        review_round: task.review_round,
+        evidence_event_id: "synthetic-evidence".into(),
+        review_event_id: "synthetic-review".into(),
+        content_fingerprint: "synthetic-fingerprint".into(),
+        created_at: "2026-01-01T00:00:00Z".into(),
+        repositories: repositories
+            .iter()
+            .enumerate()
+            .map(
+                |(index, (repository_id, old_oid, new_oid))| DeliveryTargetPlan {
+                    repository_id: (*repository_id).into(),
+                    repo_root: PathBuf::from(format!("/synthetic/{repository_id}")),
+                    git_common_dir: PathBuf::from(format!("/synthetic/{repository_id}/.git")),
+                    target_branch: "develop".into(),
+                    target_ref: "refs/heads/develop".into(),
+                    destination: DeliveryDestination::RefOnly,
+                    baseline_commit: (*old_oid).into(),
+                    reviewed_commit: (*new_oid).into(),
+                    integrated_commit: (*new_oid).into(),
+                    integrated_tree: "synthetic-tree".into(),
+                    old_oid: (*old_oid).into(),
+                    new_oid: (*new_oid).into(),
+                    review_stage: ReviewStage::Implementation,
+                    lock_key: format!("branch:/synthetic/{repository_id}/.git:refs/heads/develop"),
+                    lock_operation_id: format!("synthetic-lock-{index}"),
+                    attempt: 1,
+                },
+            )
+            .collect(),
+    }
+}
+
+#[test]
+fn repository_scoped_dispatches_are_independent_idempotent_and_conflict_safe() {
+    let fixture = Fixture::with(2, false, None);
+    fixture
+        .store
+        .set_sessions(&fixture.task.task_id, Some("coder-session"), None)
+        .unwrap();
+    let plan = fixture.plan();
+    let target_a = plan
+        .repositories
+        .iter()
+        .find(|target| target.repository_id == "repo-1")
+        .unwrap()
+        .clone();
+    let target_b = plan
+        .repositories
+        .iter()
+        .find(|target| target.repository_id == "repo-2")
+        .unwrap()
+        .clone();
+    let dispatch_a = repository_dispatch_for(&plan, &target_a);
+    let dispatch_b = repository_dispatch_for(&plan, &target_b);
+
+    // Both repositories of one plan have their own durable receipt.
+    assert_eq!(
+        fixture
+            .store
+            .begin_repository_dispatch(&dispatch_a)
+            .unwrap(),
+        dispatch_a
+    );
+    assert_eq!(
+        fixture
+            .store
+            .begin_repository_dispatch(&dispatch_b)
+            .unwrap(),
+        dispatch_b
+    );
+    // Same facts replay idempotently instead of appending another dispatch.
+    assert_eq!(
+        fixture
+            .store
+            .begin_repository_dispatch(&dispatch_a)
+            .unwrap(),
+        dispatch_a
+    );
+    let bound_a = fixture
+        .store
+        .set_repository_dispatch_job(
+            &dispatch_a.task_id,
+            &dispatch_a.plan_operation_id,
+            &target_a.repository_id,
+            "job-a",
+        )
+        .unwrap();
+    assert_eq!(bound_a.job_id.as_deref(), Some("job-a"));
+    // Binding A's job did not touch B's independent receipt.
+    assert_eq!(
+        fixture
+            .store
+            .repository_dispatch(
+                &dispatch_b.task_id,
+                &dispatch_b.plan_operation_id,
+                &target_b.repository_id,
+            )
+            .unwrap()
+            .unwrap()
+            .job_id,
+        None
+    );
+    let bound_b = fixture
+        .store
+        .set_repository_dispatch_job(
+            &dispatch_b.task_id,
+            &dispatch_b.plan_operation_id,
+            &target_b.repository_id,
+            "job-b",
+        )
+        .unwrap();
+    assert_eq!(bound_b.job_id.as_deref(), Some("job-b"));
+    assert_eq!(
+        fixture
+            .store
+            .set_repository_dispatch_job(
+                &dispatch_a.task_id,
+                &dispatch_a.plan_operation_id,
+                &target_a.repository_id,
+                "job-a",
+            )
+            .unwrap()
+            .job_id
+            .as_deref(),
+        Some("job-a")
+    );
+    assert!(fixture
+        .store
+        .set_repository_dispatch_job(
+            &dispatch_a.task_id,
+            &dispatch_a.plan_operation_id,
+            &target_a.repository_id,
+            "job-a-other",
+        )
+        .is_err());
+
+    // Every key identity fact is checked; the recorded receipt stays intact.
+    for mutate in [
+        |dispatch: &mut DeliveryDispatch| dispatch.old_oid = Some("other-old".into()),
+        |dispatch: &mut DeliveryDispatch| dispatch.new_oid = Some("other-new".into()),
+        |dispatch: &mut DeliveryDispatch| dispatch.attempt += 1,
+        |dispatch: &mut DeliveryDispatch| dispatch.coder_session_id = "other-coder".into(),
+        |dispatch: &mut DeliveryDispatch| dispatch.job_id = Some("other-job".into()),
+        |dispatch: &mut DeliveryDispatch| dispatch.repository_id = None,
+    ] {
+        let mut changed = dispatch_a.clone();
+        mutate(&mut changed);
+        assert!(
+            fixture.store.begin_repository_dispatch(&changed).is_err(),
+            "a conflicting dispatch identity must be rejected"
+        );
+        let stored = fixture
+            .store
+            .repository_dispatch(
+                &dispatch_a.task_id,
+                &dispatch_a.plan_operation_id,
+                &target_a.repository_id,
+            )
+            .unwrap()
+            .unwrap();
+        assert_eq!(stored.old_oid, Some(target_a.old_oid.clone()));
+        assert_eq!(stored.new_oid, Some(target_a.new_oid.clone()));
+        assert_eq!(stored.attempt, target_a.attempt);
+        assert_eq!(stored.job_id.as_deref(), Some("job-a"));
+    }
+
+    // The same OID in two different repositories remains two identities.
+    let mut same_oid_plan = plan.clone();
+    same_oid_plan.operation_id = format!("{}.same-oid", plan.operation_id);
+    for target in &mut same_oid_plan.repositories {
+        target.old_oid = target_a.old_oid.clone();
+        target.new_oid = target_a.new_oid.clone();
+    }
+    fixture.store.save_delivery_plan(&same_oid_plan).unwrap();
+    for target in &same_oid_plan.repositories {
+        let dispatch = repository_dispatch_for(&same_oid_plan, target);
+        fixture.store.begin_repository_dispatch(&dispatch).unwrap();
+    }
+    let stored_one = fixture
+        .store
+        .repository_dispatch(
+            &same_oid_plan.task_id,
+            &same_oid_plan.operation_id,
+            "repo-1",
+        )
+        .unwrap()
+        .unwrap();
+    let stored_two = fixture
+        .store
+        .repository_dispatch(
+            &same_oid_plan.task_id,
+            &same_oid_plan.operation_id,
+            "repo-2",
+        )
+        .unwrap()
+        .unwrap();
+    assert_eq!(stored_one.old_oid, stored_two.old_oid);
+    assert_eq!(stored_one.new_oid, stored_two.new_oid);
+    assert_ne!(stored_one.repository_id, stored_two.repository_id);
+}
+
+#[test]
+fn a_legacy_single_repository_receipt_binds_only_through_the_plan() {
+    let temp = tempfile::tempdir().unwrap();
+    let data = temp.path().join("data");
+    let (task, plan) = {
+        let paths = crate::runtime::RuntimePaths::new(data.clone()).unwrap();
+        let store = TaskStore::new(paths.open_database().unwrap(), data.clone());
+        let spec = TaskSpec {
+            title: "Legacy delivery".into(),
+            workspace: temp.path().to_path_buf(),
+            targets: vec![],
+            goal: "Keep the legacy receipt readable".into(),
+            requirements: vec![],
+            acceptance_criteria: vec![],
+            constraints: vec![],
+            out_of_scope: vec![],
+            target_branch: None,
+            repository_target_branches: Default::default(),
+        };
+        let created = store.create_task("router", spec, "create-legacy").unwrap();
+        store
+            .set_sessions(&created.task_id, Some("coder-session"), None)
+            .unwrap();
+        let task = store.get_task(&created.task_id).unwrap().unwrap();
+        let plan = synthetic_plan(&task, &[("repo-1", "old-1", "new-1")]);
+        store.save_delivery_plan(&plan).unwrap();
+        // A receipt written by the old single-repository schema.
+        store
+            .begin_delivery_dispatch(&DeliveryDispatch {
+                task_id: plan.task_id.clone(),
+                spec_version: plan.spec_version,
+                review_round: plan.review_round,
+                plan_operation_id: plan.operation_id.clone(),
+                coder_session_id: "coder-session".into(),
+                purpose: "delivery".into(),
+                repository_id: None,
+                old_oid: None,
+                new_oid: None,
+                attempt: 0,
+                job_id: None,
+                created_at: "2026-01-01T00:00:00Z".into(),
+            })
+            .unwrap();
+        store
+            .set_delivery_dispatch_job(&plan.task_id, &plan.operation_id, "legacy-job")
+            .unwrap();
+        // Model a database created before the repository-scoped tables existed.
+        store
+            .db()
+            .with_conn(|conn| -> rusqlite::Result<()> {
+                conn.execute_batch(
+                    "DROP TABLE sa_repository_dispatches; DROP TABLE sa_repository_delivery_observations;",
+                )
+            })
+            .unwrap()
+            .unwrap();
+        (task, plan)
+    };
+
+    // Opening the same old database with the new code recreates the tables and
+    // still reads the legacy receipt through the complete immutable plan.
+    let paths = crate::runtime::RuntimePaths::new(data.clone()).unwrap();
+    let reopened = TaskStore::new(paths.open_database().unwrap(), data.clone());
+    let bound = reopened
+        .repository_dispatch(&task.task_id, &plan.operation_id, "repo-1")
+        .unwrap()
+        .unwrap();
+    assert_eq!(bound.repository_id.as_deref(), Some("repo-1"));
+    assert_eq!(bound.old_oid.as_deref(), Some("old-1"));
+    assert_eq!(bound.new_oid.as_deref(), Some("new-1"));
+    assert_eq!(bound.attempt, 1);
+    assert_eq!(bound.job_id.as_deref(), Some("legacy-job"));
+    // The legacy row is read, never migrated or duplicated.
+    let migrated: i64 = reopened
+        .db()
+        .with_conn(|conn| {
+            conn.query_row("SELECT COUNT(*) FROM sa_repository_dispatches", [], |row| {
+                row.get(0)
+            })
+        })
+        .unwrap()
+        .unwrap();
+    assert_eq!(migrated, 0);
+
+    // A legacy receipt for a multi-repository plan is not guessed.
+    let spec = TaskSpec {
+        title: "Legacy multi".into(),
+        workspace: temp.path().to_path_buf(),
+        targets: vec![],
+        goal: "A legacy receipt cannot identify a repository".into(),
+        requirements: vec![],
+        acceptance_criteria: vec![],
+        constraints: vec![],
+        out_of_scope: vec![],
+        target_branch: None,
+        repository_target_branches: Default::default(),
+    };
+    let other = reopened
+        .create_task("router", spec, "create-legacy-multi")
+        .unwrap();
+    reopened
+        .set_sessions(&other.task_id, Some("coder-session"), None)
+        .unwrap();
+    let other = reopened.get_task(&other.task_id).unwrap().unwrap();
+    let multi = synthetic_plan(
+        &other,
+        &[("repo-1", "old-1", "new-1"), ("repo-2", "old-2", "new-2")],
+    );
+    reopened.save_delivery_plan(&multi).unwrap();
+    reopened
+        .begin_delivery_dispatch(&DeliveryDispatch {
+            task_id: multi.task_id.clone(),
+            spec_version: multi.spec_version,
+            review_round: multi.review_round,
+            plan_operation_id: multi.operation_id.clone(),
+            coder_session_id: "coder-session".into(),
+            purpose: "delivery".into(),
+            repository_id: None,
+            old_oid: None,
+            new_oid: None,
+            attempt: 0,
+            job_id: None,
+            created_at: "2026-01-01T00:00:00Z".into(),
+        })
+        .unwrap();
+    assert!(reopened
+        .repository_dispatch(&multi.task_id, &multi.operation_id, "repo-1")
+        .is_err());
+
+    // A recovered host can bind the launcher's existing job to an old receipt
+    // that never recorded one. The uniquely bound old row is updated in place;
+    // no second repository-scoped identity is created and no side effect is
+    // replayed.
+    let spec = TaskSpec {
+        title: "Legacy recovery".into(),
+        workspace: temp.path().to_path_buf(),
+        targets: vec![],
+        goal: "Bind the existing delivery job".into(),
+        requirements: vec![],
+        acceptance_criteria: vec![],
+        constraints: vec![],
+        out_of_scope: vec![],
+        target_branch: None,
+        repository_target_branches: Default::default(),
+    };
+    let recovered = reopened
+        .create_task("router", spec, "create-legacy-recovery")
+        .unwrap();
+    reopened
+        .set_sessions(&recovered.task_id, Some("coder-session"), None)
+        .unwrap();
+    let recovered = reopened.get_task(&recovered.task_id).unwrap().unwrap();
+    let recovered_plan = synthetic_plan(&recovered, &[("repo-1", "old-r", "new-r")]);
+    reopened.save_delivery_plan(&recovered_plan).unwrap();
+    reopened
+        .begin_delivery_dispatch(&DeliveryDispatch {
+            task_id: recovered_plan.task_id.clone(),
+            spec_version: recovered_plan.spec_version,
+            review_round: recovered_plan.review_round,
+            plan_operation_id: recovered_plan.operation_id.clone(),
+            coder_session_id: "coder-session".into(),
+            purpose: "delivery".into(),
+            repository_id: None,
+            old_oid: None,
+            new_oid: None,
+            attempt: 0,
+            job_id: None,
+            created_at: "2026-01-01T00:00:00Z".into(),
+        })
+        .unwrap();
+    // Replaying the identity does not create a new row beside the old receipt.
+    let normalized = reopened
+        .begin_repository_dispatch(&repository_dispatch_for(
+            &recovered_plan,
+            &recovered_plan.repositories[0],
+        ))
+        .unwrap();
+    assert_eq!(normalized.job_id, None);
+    let bound = reopened
+        .set_repository_dispatch_job(
+            &recovered_plan.task_id,
+            &recovered_plan.operation_id,
+            "repo-1",
+            "recovered-job",
+        )
+        .unwrap();
+    assert_eq!(bound.job_id.as_deref(), Some("recovered-job"));
+    assert_eq!(
+        reopened
+            .repository_dispatch(
+                &recovered_plan.task_id,
+                &recovered_plan.operation_id,
+                "repo-1",
+            )
+            .unwrap()
+            .unwrap()
+            .job_id
+            .as_deref(),
+        Some("recovered-job")
+    );
+    let imported: i64 = reopened
+        .db()
+        .with_conn(|conn| {
+            conn.query_row(
+                "SELECT COUNT(*) FROM sa_repository_dispatches WHERE task_id=?1 AND plan_operation_id=?2",
+                rusqlite::params![
+                    recovered_plan.task_id,
+                    recovered_plan.operation_id
+                ],
+                |row| row.get(0),
+            )
+        })
+        .unwrap()
+        .unwrap();
+    assert_eq!(imported, 0);
+}
+
+#[test]
+fn repository_observations_bind_the_plan_and_never_complete_the_task() {
+    let fixture = Fixture::with(2, false, None);
+    fixture
+        .store
+        .set_sessions(&fixture.task.task_id, Some("coder-session"), None)
+        .unwrap();
+    set_delivery_pending(&fixture.store, &fixture.task.task_id);
+    let plan = fixture.plan();
+    let target_a = plan
+        .repositories
+        .iter()
+        .find(|target| target.repository_id == "repo-1")
+        .unwrap()
+        .clone();
+    let target_b = plan
+        .repositories
+        .iter()
+        .find(|target| target.repository_id == "repo-2")
+        .unwrap()
+        .clone();
+
+    let has_global = |store: &TaskStore| {
+        store
+            .events(&plan.task_id)
+            .unwrap()
+            .iter()
+            .any(|event| event.event_type == EventType::IntegrationCompleted)
+    };
+    assert!(!has_global(&fixture.store));
+    assert!(fixture
+        .store
+        .record_repository_delivery_observed(&repository_observation(&plan, &target_a))
+        .unwrap());
+    assert!(
+        !has_global(&fixture.store),
+        "one repository's observation must not emit the global event"
+    );
+    let after_a = fixture.store.get_task(&plan.task_id).unwrap().unwrap();
+    assert_eq!(
+        after_a.phase,
+        crate::super_agent::model::Phase::DeliveryPending
+    );
+    let repo_a = after_a
+        .repositories
+        .iter()
+        .find(|repo| repo.repository_id == "repo-1")
+        .unwrap();
+    let repo_b = after_a
+        .repositories
+        .iter()
+        .find(|repo| repo.repository_id == "repo-2")
+        .unwrap();
+    assert_eq!(repo_a.integration_status, IntegrationStatus::Completed);
+    assert_eq!(repo_b.integration_status, IntegrationStatus::Prepared);
+    assert!(!fixture
+        .store
+        .delivery_plan_observations_complete(&plan)
+        .unwrap());
+
+    // Only A's observation exists, so the task-wide completion is refused.
+    assert!(fixture
+        .store
+        .record_delivery_completed(
+            &plan,
+            "orchestrator:delivery:only-a",
+            json!({"complete": true}),
+        )
+        .is_err());
+    assert!(!has_global(&fixture.store));
+
+    // B's own observation gates the global completion.
+    assert!(fixture
+        .store
+        .record_repository_delivery_observed(&repository_observation(&plan, &target_b))
+        .unwrap());
+    assert!(fixture
+        .store
+        .delivery_plan_observations_complete(&plan)
+        .unwrap());
+    let append = fixture
+        .store
+        .record_delivery_completed(
+            &plan,
+            "orchestrator:delivery:complete",
+            json!({"complete": true}),
+        )
+        .unwrap();
+    assert!(append.inserted);
+    assert!(has_global(&fixture.store));
+}
+
+#[test]
+fn a_caller_truncated_or_substituted_plan_cannot_complete_delivery() {
+    let fixture = Fixture::with(2, false, None);
+    fixture
+        .store
+        .set_sessions(&fixture.task.task_id, Some("coder-session"), None)
+        .unwrap();
+    set_delivery_pending(&fixture.store, &fixture.task.task_id);
+    let plan = fixture.plan();
+    let target_a = plan
+        .repositories
+        .iter()
+        .find(|target| target.repository_id == "repo-1")
+        .unwrap()
+        .clone();
+    let target_b = plan
+        .repositories
+        .iter()
+        .find(|target| target.repository_id == "repo-2")
+        .unwrap()
+        .clone();
+    assert!(fixture
+        .store
+        .record_repository_delivery_observed(&repository_observation(&plan, &target_a))
+        .unwrap());
+
+    let events_before = fixture.store.events(&plan.task_id).unwrap().len();
+    let task_before = fixture.store.get_task(&plan.task_id).unwrap().unwrap();
+    let statuses_before: Vec<(String, IntegrationStatus)> = task_before
+        .repositories
+        .iter()
+        .map(|repo| (repo.repository_id.clone(), repo.integration_status))
+        .collect();
+    let has_global = |store: &TaskStore| {
+        store
+            .events(&plan.task_id)
+            .unwrap()
+            .iter()
+            .any(|event| event.event_type == EventType::IntegrationCompleted)
+    };
+
+    // The persisted plan is [repo-1, repo-2] and only repo-1 is observed. A
+    // caller that reuses the operation ID but narrows the repository list must
+    // not gate the task-wide completion.
+    let mut truncated = plan.clone();
+    truncated
+        .repositories
+        .retain(|target| target.repository_id == "repo-1");
+    assert!(!fixture
+        .store
+        .delivery_plan_observations_complete(&truncated)
+        .unwrap());
+    assert!(fixture
+        .store
+        .record_delivery_completed(
+            &truncated,
+            "orchestrator:delivery:truncated",
+            json!({"complete": true}),
+        )
+        .is_err());
+
+    // A substituted target identity is refused the same way.
+    let mut substituted = plan.clone();
+    substituted
+        .repositories
+        .iter_mut()
+        .find(|target| target.repository_id == "repo-1")
+        .unwrap()
+        .new_oid = "substituted-commit".into();
+    assert!(!fixture
+        .store
+        .delivery_plan_observations_complete(&substituted)
+        .unwrap());
+    assert!(fixture
+        .store
+        .record_delivery_completed(
+            &substituted,
+            "orchestrator:delivery:substituted",
+            json!({"complete": true}),
+        )
+        .is_err());
+
+    // A global operation ID that belongs to another task is never replayed as
+    // this task's completion.
+    let competing = fixture.competing_task();
+    fixture
+        .store
+        .ingest_event(
+            &competing.task_id,
+            NewEvent {
+                session_id: None,
+                run_id: None,
+                event_type: EventType::IntegrationCompleted,
+                causation_id: None,
+                operation_id: "shared-delivery-operation".into(),
+                payload: json!({"complete": true}),
+            },
+        )
+        .unwrap();
+
+    // Every refused call left the task, repository statuses, observations and
+    // events untouched.
+    let task_after = fixture.store.get_task(&plan.task_id).unwrap().unwrap();
+    assert_eq!(
+        task_after.phase,
+        crate::super_agent::model::Phase::DeliveryPending
+    );
+    assert_eq!(
+        task_after
+            .repositories
+            .iter()
+            .map(|repo| (repo.repository_id.clone(), repo.integration_status))
+            .collect::<Vec<_>>(),
+        statuses_before
+    );
+    assert_eq!(
+        fixture.store.events(&plan.task_id).unwrap().len(),
+        events_before
+    );
+    assert!(!has_global(&fixture.store));
+    assert!(fixture
+        .store
+        .repository_delivery_observation(&plan.task_id, &plan.operation_id, "repo-2")
+        .unwrap()
+        .is_none());
+
+    // Both repositories observed: the legitimate full plan is the only one
+    // that may complete, and the foreign operation ID is still refused.
+    assert!(fixture
+        .store
+        .record_repository_delivery_observed(&repository_observation(&plan, &target_b))
+        .unwrap());
+    assert!(fixture
+        .store
+        .delivery_plan_observations_complete(&plan)
+        .unwrap());
+    let error = fixture
+        .store
+        .record_delivery_completed(
+            &plan,
+            "shared-delivery-operation",
+            json!({"complete": true}),
+        )
+        .expect_err("another task's operation ID must not be adopted");
+    assert!(error.to_string().contains(&competing.task_id), "{error}");
+    assert!(
+        fixture
+            .store
+            .record_delivery_completed(
+                &plan,
+                "orchestrator:delivery:complete",
+                json!({"complete": true}),
+            )
+            .unwrap()
+            .inserted
+    );
+}
+
+#[test]
+fn repository_observations_reject_wrong_identity_and_survive_reopen() {
+    let fixture = Fixture::with(2, false, None);
+    fixture
+        .store
+        .set_sessions(&fixture.task.task_id, Some("coder-session"), None)
+        .unwrap();
+    set_delivery_pending(&fixture.store, &fixture.task.task_id);
+    let plan = fixture.plan();
+    let target_a = plan
+        .repositories
+        .iter()
+        .find(|target| target.repository_id == "repo-1")
+        .unwrap()
+        .clone();
+    let target_b = plan
+        .repositories
+        .iter()
+        .find(|target| target.repository_id == "repo-2")
+        .unwrap()
+        .clone();
+    let observed = repository_observation(&plan, &target_a);
+    assert!(fixture
+        .store
+        .record_repository_delivery_observed(&observed)
+        .unwrap());
+
+    for mutate in [
+        |observation: &mut RepositoryDeliveryObservation| {
+            observation.repository_id = "repo-9".into()
+        },
+        |observation: &mut RepositoryDeliveryObservation| observation.old_oid = "other-old".into(),
+        |observation: &mut RepositoryDeliveryObservation| observation.new_oid = "other-new".into(),
+        |observation: &mut RepositoryDeliveryObservation| observation.attempt += 1,
+        |observation: &mut RepositoryDeliveryObservation| {
+            observation.plan_operation_id = "other-plan".into()
+        },
+        |observation: &mut RepositoryDeliveryObservation| {
+            observation.coder_session_id = "other-coder".into()
+        },
+        |observation: &mut RepositoryDeliveryObservation| observation.verified = false,
+    ] {
+        let mut wrong = observed.clone();
+        mutate(&mut wrong);
+        assert!(
+            fixture
+                .store
+                .record_repository_delivery_observed(&wrong)
+                .is_err(),
+            "a wrong observation identity must be rejected"
+        );
+        let stored = fixture
+            .store
+            .repository_delivery_observation(&plan.task_id, &plan.operation_id, "repo-1")
+            .unwrap()
+            .unwrap();
+        assert_eq!(stored, observed);
+    }
+
+    // The observation is durable: a real reopen reads it back, still without
+    // a task-wide completion event.
+    let Fixture {
+        _temp,
+        data,
+        store,
+        task: _task,
+        repos: _repos,
+        changed: _changed,
+        decision: _decision,
+    } = fixture;
+    drop(store);
+    let paths = crate::runtime::RuntimePaths::new(data.clone()).unwrap();
+    let reopened = TaskStore::new(paths.open_database().unwrap(), data);
+    let stored = reopened
+        .repository_delivery_observation(&plan.task_id, &plan.operation_id, "repo-1")
+        .unwrap()
+        .unwrap();
+    assert_eq!(stored, observed);
+    assert!(!reopened
+        .events(&plan.task_id)
+        .unwrap()
+        .iter()
+        .any(|event| event.event_type == EventType::IntegrationCompleted));
+
+    // A retry after a restart generates a new timestamp. The identity facts
+    // are unchanged, so it is idempotent and keeps the first observed_at.
+    let mut replay = observed.clone();
+    replay.observed_at = "2026-02-02T00:00:00Z".into();
+    assert!(!reopened
+        .record_repository_delivery_observed(&replay)
+        .unwrap());
+    let kept = reopened
+        .repository_delivery_observation(&plan.task_id, &plan.operation_id, "repo-1")
+        .unwrap()
+        .unwrap();
+    assert_eq!(kept.observed_at, observed.observed_at);
+
+    // The restarted host can still observe B and complete the task.
+    assert!(reopened
+        .record_repository_delivery_observed(&repository_observation(&plan, &target_b))
+        .unwrap());
+    assert!(reopened.delivery_plan_observations_complete(&plan).unwrap());
+    assert!(
+        reopened
+            .record_delivery_completed(
+                &plan,
+                "orchestrator:delivery:after-restart",
+                json!({"complete": true}),
+            )
+            .unwrap()
+            .inserted
+    );
+}
+
+#[test]
+fn targeted_revalidation_allows_another_repository_to_be_delivered() {
+    let fixture = Fixture::with(2, false, None);
+    let plan = fixture.plan();
+    let target_a = plan
+        .repositories
+        .iter()
+        .find(|target| target.repository_id == "repo-1")
+        .unwrap()
+        .clone();
+    let target_b = plan
+        .repositories
+        .iter()
+        .find(|target| target.repository_id == "repo-2")
+        .unwrap()
+        .clone();
+    // A has already been delivered and its lock was released.
+    repo_fixture(&fixture, "repo-1").set_target(&target_a.new_oid);
+    assert!(fixture
+        .store
+        .unlock(
+            &target_a.lock_key,
+            &plan.task_id,
+            &target_a.lock_operation_id
+        )
+        .unwrap());
+
+    // B is still exactly at its approved baseline and owned, so it is ready.
+    assert_eq!(
+        revalidate_repository_for_dispatch(
+            &fixture.store,
+            &fixture.task,
+            &plan,
+            &target_b.repository_id,
+        )
+        .unwrap(),
+        DispatchRevalidation::Ready
+    );
+    // The whole-plan validator still reports A's real movement; the targeted
+    // entry point is not a general bypass.
+    assert!(matches!(
+        revalidate_for_dispatch(&fixture.task, &plan).unwrap(),
+        DispatchRevalidation::ReintegrationNeeded(_)
+    ));
+}
+
+#[test]
+fn targeted_revalidation_blocks_b_repository_drift_dirty_and_new_checkouts() {
+    // B drifted after the plan was recorded.
+    {
+        let fixture = Fixture::with(2, false, None);
+        let plan = fixture.plan();
+        let target_a = plan
+            .repositories
+            .iter()
+            .find(|target| target.repository_id == "repo-1")
+            .unwrap()
+            .clone();
+        repo_fixture(&fixture, "repo-1").set_target(&target_a.new_oid);
+        repo_fixture(&fixture, "repo-2").advance_develop("base.txt", "b moved\n");
+        match revalidate_repository_for_dispatch(&fixture.store, &fixture.task, &plan, "repo-2")
+            .unwrap()
+        {
+            DispatchRevalidation::ReintegrationNeeded(reason) => {
+                assert!(reason.contains("moved"), "{reason}")
+            }
+            other => panic!("expected reintegration for B, got {other:?}"),
+        }
+    }
+
+    // B's planned checkout became dirty.
+    {
+        let fixture = Fixture::with(2, false, None);
+        let checkout = repo_fixture(&fixture, "repo-2").checkout_target();
+        let plan = fixture.plan();
+        let target_a = plan
+            .repositories
+            .iter()
+            .find(|target| target.repository_id == "repo-1")
+            .unwrap()
+            .clone();
+        let target_b = plan
+            .repositories
+            .iter()
+            .find(|target| target.repository_id == "repo-2")
+            .unwrap()
+            .clone();
+        assert!(matches!(
+            target_b.destination,
+            DeliveryDestination::CheckedOut { .. }
+        ));
+        repo_fixture(&fixture, "repo-1").set_target(&target_a.new_oid);
+        std::fs::write(checkout.join("base.txt"), "dirty\n").unwrap();
+        match revalidate_repository_for_dispatch(&fixture.store, &fixture.task, &plan, "repo-2")
+            .unwrap()
+        {
+            DispatchRevalidation::Blocked(reason) => {
+                assert!(reason.contains("uncommitted or untracked"), "{reason}")
+            }
+            other => panic!("expected a dirty checkout block, got {other:?}"),
+        }
+    }
+
+    // A checkout appeared after a RefOnly plan.
+    {
+        let fixture = Fixture::with(2, false, None);
+        let plan = fixture.plan();
+        let target_a = plan
+            .repositories
+            .iter()
+            .find(|target| target.repository_id == "repo-1")
+            .unwrap()
+            .clone();
+        let target_b = plan
+            .repositories
+            .iter()
+            .find(|target| target.repository_id == "repo-2")
+            .unwrap()
+            .clone();
+        assert_eq!(target_b.destination, DeliveryDestination::RefOnly);
+        repo_fixture(&fixture, "repo-1").set_target(&target_a.new_oid);
+        repo_fixture(&fixture, "repo-2").checkout_target();
+        match revalidate_repository_for_dispatch(&fixture.store, &fixture.task, &plan, "repo-2")
+            .unwrap()
+        {
+            DispatchRevalidation::Blocked(reason) => {
+                assert!(reason.contains("now checked out"), "{reason}")
+            }
+            other => panic!("expected a new checkout block, got {other:?}"),
+        }
+    }
+}
+
+#[test]
+fn targeted_revalidation_requires_b_repository_lock_ownership() {
+    let fixture = Fixture::with(2, false, None);
+    let plan = fixture.plan();
+    let target_a = plan
+        .repositories
+        .iter()
+        .find(|target| target.repository_id == "repo-1")
+        .unwrap()
+        .clone();
+    let target_b = plan
+        .repositories
+        .iter()
+        .find(|target| target.repository_id == "repo-2")
+        .unwrap()
+        .clone();
+    repo_fixture(&fixture, "repo-1").set_target(&target_a.new_oid);
+
+    // Releasing A's lock does not affect B's ownership.
+    assert!(fixture
+        .store
+        .unlock(
+            &target_a.lock_key,
+            &plan.task_id,
+            &target_a.lock_operation_id
+        )
+        .unwrap());
+    assert_eq!(
+        revalidate_repository_for_dispatch(
+            &fixture.store,
+            &fixture.task,
+            &plan,
+            &target_b.repository_id,
+        )
+        .unwrap(),
+        DispatchRevalidation::Ready
+    );
+
+    // Releasing B's own lock blocks: a released lock is not ownership.
+    assert!(fixture
+        .store
+        .unlock(
+            &target_b.lock_key,
+            &plan.task_id,
+            &target_b.lock_operation_id
+        )
+        .unwrap());
+    match revalidate_repository_for_dispatch(
+        &fixture.store,
+        &fixture.task,
+        &plan,
+        &target_b.repository_id,
+    )
+    .unwrap()
+    {
+        DispatchRevalidation::Blocked(reason) => {
+            assert!(reason.contains("is not owned"), "{reason}")
+        }
+        other => panic!("expected an unowned lock block, got {other:?}"),
+    }
+
+    // A different task holding B's lock is named, never stolen.
+    fixture
+        .store
+        .try_lock("other:operation", &target_b.lock_key, "other-task")
+        .unwrap();
+    match revalidate_repository_for_dispatch(
+        &fixture.store,
+        &fixture.task,
+        &plan,
+        &target_b.repository_id,
+    )
+    .unwrap()
+    {
+        DispatchRevalidation::Blocked(reason) => {
+            assert!(reason.contains("other-task"), "{reason}")
+        }
+        other => panic!("expected a held-lock block, got {other:?}"),
+    }
+}
+
+#[test]
+fn targeted_revalidation_uses_the_persisted_immutable_plan() {
+    let fixture = Fixture::with(2, false, None);
+    let plan = fixture.plan();
+    let target_a = plan
+        .repositories
+        .iter()
+        .find(|target| target.repository_id == "repo-1")
+        .unwrap()
+        .clone();
+    repo_fixture(&fixture, "repo-1").set_target(&target_a.new_oid);
+    let moved = repo_fixture(&fixture, "repo-2").advance_develop("base.txt", "b moved\n");
+
+    // Refreshing the supplied old OID to the real target's current value must
+    // not turn a real drift into Ready.
+    let mut tampered = plan.clone();
+    tampered
+        .repositories
+        .iter_mut()
+        .find(|target| target.repository_id == "repo-2")
+        .unwrap()
+        .old_oid = moved.clone();
+    match revalidate_repository_for_dispatch(&fixture.store, &fixture.task, &tampered, "repo-2")
+        .unwrap()
+    {
+        DispatchRevalidation::Blocked(reason) => {
+            assert!(reason.contains("persisted immutable plan"), "{reason}")
+        }
+        other => panic!("a tampered plan must be blocked, got {other:?}"),
+    }
+
+    // A fake single-repository task cannot bypass the complete plan identity.
+    // The persisted plan still names repo-1, which the fake task dropped, so
+    // the plan binding rejects it before any Git is re-read.
+    let mut fake = fixture.task.clone();
+    fake.repositories
+        .retain(|repo| repo.repository_id == "repo-2");
+    match revalidate_repository_for_dispatch(&fixture.store, &fake, &plan, "repo-2").unwrap() {
+        DispatchRevalidation::Blocked(reason) => {
+            assert!(
+                reason.contains("repo-1") || reason.contains("repository set"),
+                "the block must name the missing repository identity: {reason}"
+            )
+        }
+        other => panic!("a fake single-repository task must be blocked, got {other:?}"),
+    }
 }

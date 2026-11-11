@@ -1056,7 +1056,24 @@ fn delivery_identities() -> (
         review_event_id: "review-event".into(),
         content_fingerprint: "fingerprint".into(),
         created_at: "2026-01-01T00:00:00Z".into(),
-        repositories: Vec::new(),
+        repositories: vec![crate::super_agent::delivery::DeliveryTargetPlan {
+            repository_id: "repo-1".into(),
+            repo_root: PathBuf::from("/repo"),
+            git_common_dir: PathBuf::from("/repo/.git"),
+            target_branch: "develop".into(),
+            target_ref: "refs/heads/develop".into(),
+            destination: crate::super_agent::delivery::DeliveryDestination::RefOnly,
+            baseline_commit: "old".into(),
+            reviewed_commit: "reviewed".into(),
+            integrated_commit: "new".into(),
+            integrated_tree: "tree".into(),
+            old_oid: "old".into(),
+            new_oid: "new".into(),
+            review_stage: crate::super_agent::model::ReviewStage::Implementation,
+            lock_key: "branch:/repo/.git:refs/heads/develop".into(),
+            lock_operation_id: "lock-op".into(),
+            attempt: 1,
+        }],
     };
     let dispatch = crate::super_agent::delivery::DeliveryDispatch {
         task_id: task.task_id.clone(),
@@ -1065,6 +1082,10 @@ fn delivery_identities() -> (
         plan_operation_id: plan.operation_id.clone(),
         coder_session_id: "coder-session".into(),
         purpose: "delivery".into(),
+        repository_id: Some("repo-1".into()),
+        old_oid: Some("old".into()),
+        new_oid: Some("new".into()),
+        attempt: 1,
         job_id: None,
         created_at: "2026-01-01T00:00:00Z".into(),
     };
@@ -1205,6 +1226,28 @@ fn a_contradictory_receipt_or_operation_is_rejected() {
     let mut changed = dispatch.clone();
     changed.coder_session_id = "other-coder".into();
     assert!(rejected(&plan, &changed).contains("other-coder"));
+
+    // The receipt must name a real repository of the complete plan and the
+    // approved old/new OIDs and attempt.
+    let mut changed = dispatch.clone();
+    changed.repository_id = None;
+    assert!(rejected(&plan, &changed).contains("does not name the repository"));
+
+    let mut changed = dispatch.clone();
+    changed.repository_id = Some("repo-2".into());
+    assert!(rejected(&plan, &changed).contains("repo-2"));
+
+    let mut changed = dispatch.clone();
+    changed.old_oid = Some("other-old".into());
+    assert!(rejected(&plan, &changed).contains("approved old/new OIDs"));
+
+    let mut changed = dispatch.clone();
+    changed.new_oid = Some("other-new".into());
+    assert!(rejected(&plan, &changed).contains("approved old/new OIDs"));
+
+    let mut changed = dispatch.clone();
+    changed.attempt += 1;
+    assert!(rejected(&plan, &changed).contains("approved old/new OIDs"));
 
     // The operation is found under the right key but its contents belong to
     // another task, evidence stage or session.

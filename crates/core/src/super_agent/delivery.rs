@@ -62,6 +62,10 @@ pub struct DeliveryTargetPlan {
     /// Cooperative ownership key: `branch:<common-dir>:<full-ref>`.
     pub lock_key: String,
     pub lock_operation_id: String,
+    /// Explicit delivery attempt within the immutable content identity. Zero
+    /// only for a plan recorded before repository-scoped attempts existed.
+    #[serde(default)]
+    pub attempt: u32,
 }
 
 /// The persisted delivery plan. It is derived only from host facts: the
@@ -105,6 +109,8 @@ impl DeliveryPlan {
 }
 
 fn target_facts_equal(left: &DeliveryTargetPlan, right: &DeliveryTargetPlan) -> bool {
+    // The attempt number is bookkeeping: a legacy plan has zero and a new plan
+    // starts at one without changing the approved content.
     left.repository_id == right.repository_id
         && left.repo_root == right.repo_root
         && left.git_common_dir == right.git_common_dir
@@ -319,9 +325,41 @@ pub struct DeliveryDispatch {
     pub coder_session_id: String,
     /// Evidence identity passed to the launcher, e.g. `delivery`.
     pub purpose: String,
+    /// The repository this receipt delivers. `None` only for a receipt recorded
+    /// before repository-scoped delivery identities existed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub repository_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub old_oid: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub new_oid: Option<String>,
+    /// Explicit attempt within the immutable content identity; zero only for a
+    /// legacy receipt.
+    #[serde(default)]
+    pub attempt: u32,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub job_id: Option<String>,
     pub created_at: String,
+}
+
+/// One repository's host-verified delivery observation. It is durable evidence
+/// that this repository reached the approved integrated commit under the
+/// persisted plan. It never marks the whole task delivered.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RepositoryDeliveryObservation {
+    pub task_id: String,
+    pub spec_version: u32,
+    pub review_round: u32,
+    pub plan_operation_id: String,
+    pub repository_id: String,
+    pub old_oid: String,
+    pub new_oid: String,
+    pub target_ref: String,
+    pub coder_session_id: String,
+    pub attempt: u32,
+    /// Only a real host verification may be recorded.
+    pub verified: bool,
+    pub observed_at: String,
 }
 
 /// Quotes one shell word for a POSIX shell. Delivery paths can contain spaces
@@ -397,79 +435,223 @@ pub fn revalidate_for_dispatch(
                 target.repository_id
             )));
         };
-        let actual = match resolve_ref(repo, &target.target_ref) {
-            Ok(actual) => actual,
-            Err(error) => {
-                return Ok(DispatchRevalidation::Blocked(format!(
-                    "{}: cannot resolve the target reference: {error:#}",
-                    target.repository_id
-                )))
-            }
-        };
-        if actual != target.old_oid {
-            return Ok(DispatchRevalidation::ReintegrationNeeded(format!(
-                "{}: target branch {} moved from the planned {} to {actual}; the approved plan is stale and requires a new integration",
-                target.repository_id, target.target_branch, target.old_oid
-            )));
+        match revalidate_target(repo, target)? {
+            DispatchRevalidation::Ready => {}
+            other => return Ok(other),
         }
-        let checkouts = match current_target_checkouts(&repo.repo_root, &target.target_ref) {
-            Ok(checkouts) => checkouts,
-            Err(error) => {
+    }
+    Ok(DispatchRevalidation::Ready)
+}
+
+/// Validates one named repository of a complete plan before dispatching it.
+///
+/// Another repository may already be at its approved `new_oid`; that is not
+/// drift for this repository. The named repository's identity, OID, checkout
+/// topology, cleanliness and cooperative lock ownership are all re-read now; a
+/// persisted observation is never used as authorization.
+pub fn revalidate_repository_for_dispatch(
+    store: &TaskStore,
+    task: &TaskRecord,
+    plan: &DeliveryPlan,
+    repository_id: &str,
+) -> Result<DispatchRevalidation> {
+    if plan.task_id != task.task_id
+        || plan.spec_version != task.spec_version
+        || plan.review_round != task.review_round
+    {
+        return Ok(DispatchRevalidation::Blocked(
+            "the delivery plan does not belong to the current task version".into(),
+        ));
+    }
+    // The persisted immutable plan is the authority. A caller cannot pass a
+    // refreshed old OID (or another plan) and turn a real target drift into a
+    // ready dispatch.
+    let Some(persisted) = store.delivery_plan(&task.task_id, &plan.operation_id)? else {
+        return Ok(DispatchRevalidation::Blocked(format!(
+            "the delivery plan {} is not recorded for this task",
+            plan.operation_id
+        )));
+    };
+    if !persisted.same_facts(plan) {
+        return Ok(DispatchRevalidation::Blocked(format!(
+            "the supplied delivery plan {} is not the persisted immutable plan",
+            plan.operation_id
+        )));
+    }
+    // `same_facts` treats attempt numbers and cooperative lock identities as
+    // bookkeeping. Everything below reads the persisted plan, so a caller that
+    // tampers with another target's attempt or lock identity cannot influence
+    // this decision; the named target is compared exactly (including attempt
+    // and lock identity) before its live Git state is read.
+    if let Some(reason) = verify_plan_binding(store, task, &persisted)? {
+        return Ok(DispatchRevalidation::Blocked(reason));
+    }
+    let planned: BTreeSet<&str> = persisted
+        .repositories
+        .iter()
+        .map(|target| target.repository_id.as_str())
+        .collect();
+    let current: BTreeSet<&str> = task
+        .repositories
+        .iter()
+        .map(|repo| repo.repository_id.as_str())
+        .collect();
+    if planned != current {
+        return Ok(DispatchRevalidation::Blocked(format!(
+            "the delivery plan repository set {planned:?} does not match the task's {current:?}"
+        )));
+    }
+    let Some(target) = persisted
+        .repositories
+        .iter()
+        .find(|target| target.repository_id == repository_id)
+    else {
+        return Ok(DispatchRevalidation::Blocked(format!(
+            "the delivery plan does not contain repository {repository_id}"
+        )));
+    };
+    // The named target's attempt and cooperative lock identity are part of the
+    // persisted plan too, not caller-supplied bookkeeping.
+    if plan
+        .repositories
+        .iter()
+        .find(|supplied| supplied.repository_id == repository_id)
+        != Some(target)
+    {
+        return Ok(DispatchRevalidation::Blocked(format!(
+            "{repository_id}: the supplied target identity is not the persisted immutable target"
+        )));
+    }
+    let Some(repo) = task
+        .repositories
+        .iter()
+        .find(|repo| repo.repository_id == repository_id)
+    else {
+        return Ok(DispatchRevalidation::Blocked(format!(
+            "the task no longer lists repository {repository_id}"
+        )));
+    };
+    if repo.reviewed_commit.as_deref() != Some(target.reviewed_commit.as_str())
+        || repo.integrated_commit.as_deref() != Some(target.new_oid.as_str())
+        || repo.target_branch != target.target_branch
+    {
+        return Ok(DispatchRevalidation::Blocked(format!(
+            "{repository_id}: the task's reviewed/integrated commits or target branch no longer match the approved plan"
+        )));
+    }
+    let common = match canonical_common_dir(&repo.repo_root) {
+        Ok(common) => common,
+        Err(error) => {
+            return Ok(DispatchRevalidation::Blocked(format!(
+                "{repository_id}: cannot identify the repository: {error:#}"
+            )))
+        }
+    };
+    if common != target.git_common_dir {
+        return Ok(DispatchRevalidation::Blocked(format!(
+            "{repository_id}: the repository at {} belongs to {} but the plan recorded {}",
+            repo.repo_root.display(),
+            common.display(),
+            target.git_common_dir.display()
+        )));
+    }
+    let holder = store.lock_holder(&target.lock_key)?;
+    let owned = holder
+        .as_ref()
+        .is_some_and(|(holder_task, holder_operation)| {
+            holder_task == &task.task_id && holder_operation == &target.lock_operation_id
+        });
+    if !owned {
+        return Ok(DispatchRevalidation::Blocked(match holder {
+            Some((task, operation)) => format!(
+                "{repository_id}: the cooperative branch ownership {} is held by task {task} operation {operation}",
+                target.lock_key
+            ),
+            None => format!(
+                "{repository_id}: the cooperative branch ownership {} is not owned by this delivery",
+                target.lock_key
+            ),
+        }));
+    }
+    revalidate_target(repo, target)
+}
+
+fn revalidate_target(
+    repo: &RepoTarget,
+    target: &DeliveryTargetPlan,
+) -> Result<DispatchRevalidation> {
+    let actual = match resolve_ref(repo, &target.target_ref) {
+        Ok(actual) => actual,
+        Err(error) => {
+            return Ok(DispatchRevalidation::Blocked(format!(
+                "{}: cannot resolve the target reference: {error:#}",
+                target.repository_id
+            )))
+        }
+    };
+    if actual != target.old_oid {
+        return Ok(DispatchRevalidation::ReintegrationNeeded(format!(
+            "{}: target branch {} moved from the planned {} to {actual}; the approved plan is stale and requires a new integration",
+            target.repository_id, target.target_branch, target.old_oid
+        )));
+    }
+    let checkouts = match current_target_checkouts(&repo.repo_root, &target.target_ref) {
+        Ok(checkouts) => checkouts,
+        Err(error) => {
+            return Ok(DispatchRevalidation::Blocked(format!(
+                "{}: {error}",
+                target.repository_id
+            )))
+        }
+    };
+    match &target.destination {
+        DeliveryDestination::RefOnly => {
+            if let Some(entry) = checkouts.first() {
                 return Ok(DispatchRevalidation::Blocked(format!(
-                    "{}: {error}",
+                    "{}: the target branch is now checked out at {}; re-run the preflight before delivering so the working tree is not bypassed",
+                    target.repository_id,
+                    entry.path.display()
+                )));
+            }
+        }
+        DeliveryDestination::CheckedOut { path } => {
+            if checkouts.len() != 1 {
+                return Ok(DispatchRevalidation::Blocked(format!(
+                    "{}: expected one checkout of {} at {}, found {}",
+                    target.repository_id,
+                    target.target_branch,
+                    path.display(),
+                    checkouts.len()
+                )));
+            }
+            let entry = &checkouts[0];
+            let planned = path.canonicalize().unwrap_or_else(|_| path.clone());
+            let current = entry
+                .path
+                .canonicalize()
+                .unwrap_or_else(|_| entry.path.clone());
+            if current != planned {
+                return Ok(DispatchRevalidation::Blocked(format!(
+                    "{}: the target checkout moved from {} to {}",
+                    target.repository_id,
+                    path.display(),
+                    current.display()
+                )));
+            }
+            if let Err(reason) = validate_delivery_checkout(
+                &DeliveryTargetPlan {
+                    old_oid: target.old_oid.clone(),
+                    new_oid: target.old_oid.clone(),
+                    ..target.clone()
+                },
+                entry,
+            ) {
+                // A clean checkout at the captured baseline is required;
+                // the temporary plan above only rewrites the HEAD target.
+                return Ok(DispatchRevalidation::Blocked(format!(
+                    "{}: {reason}",
                     target.repository_id
-                )))
-            }
-        };
-        match &target.destination {
-            DeliveryDestination::RefOnly => {
-                if let Some(entry) = checkouts.first() {
-                    return Ok(DispatchRevalidation::Blocked(format!(
-                        "{}: the target branch is now checked out at {}; re-run the preflight before delivering so the working tree is not bypassed",
-                        target.repository_id,
-                        entry.path.display()
-                    )));
-                }
-            }
-            DeliveryDestination::CheckedOut { path } => {
-                if checkouts.len() != 1 {
-                    return Ok(DispatchRevalidation::Blocked(format!(
-                        "{}: expected one checkout of {} at {}, found {}",
-                        target.repository_id,
-                        target.target_branch,
-                        path.display(),
-                        checkouts.len()
-                    )));
-                }
-                let entry = &checkouts[0];
-                let planned = path.canonicalize().unwrap_or_else(|_| path.clone());
-                let current = entry
-                    .path
-                    .canonicalize()
-                    .unwrap_or_else(|_| entry.path.clone());
-                if current != planned {
-                    return Ok(DispatchRevalidation::Blocked(format!(
-                        "{}: the target checkout moved from {} to {}",
-                        target.repository_id,
-                        path.display(),
-                        current.display()
-                    )));
-                }
-                if let Err(reason) = validate_delivery_checkout(
-                    &DeliveryTargetPlan {
-                        old_oid: target.old_oid.clone(),
-                        new_oid: target.old_oid.clone(),
-                        ..target.clone()
-                    },
-                    entry,
-                ) {
-                    // A clean checkout at the captured baseline is required;
-                    // the temporary plan above only rewrites the HEAD target.
-                    return Ok(DispatchRevalidation::Blocked(format!(
-                        "{}: {reason}",
-                        target.repository_id
-                    )));
-                }
+                )));
             }
         }
     }
@@ -1157,6 +1339,13 @@ pub fn prepare_delivery_observed<F: FnMut()>(
     // the task's repository order.
     let mut sorted_targets: Vec<&TargetWork> = targets.iter().collect();
     sorted_targets.sort_by(|left, right| left.key.cmp(&right.key));
+    // A new plan records this attempt; a loaded plan keeps the attempt that is
+    // already bound to its lock identities.
+    let current_attempt = if existing_plan.is_some() {
+        0
+    } else {
+        store.current_delivery_attempt(&task.task_id, &fingerprint)?
+    };
     let mut lock_operations: BTreeMap<String, (String, String)> = BTreeMap::new();
     if let Some(existing) = &existing_plan {
         for target in &existing.repositories {
@@ -1166,13 +1355,12 @@ pub fn prepare_delivery_observed<F: FnMut()>(
             );
         }
     } else {
-        let attempt = store.current_delivery_attempt(&task.task_id, &fingerprint)?;
         for (index, target) in sorted_targets.iter().enumerate() {
             lock_operations.insert(
                 target.repo.repository_id.clone(),
                 (
                     target.key.clone(),
-                    format!("{operation_id}.attempt.{attempt}.lock.{index}"),
+                    format!("{operation_id}.attempt.{current_attempt}.lock.{index}"),
                 ),
             );
         }
@@ -1399,6 +1587,15 @@ pub fn prepare_delivery_observed<F: FnMut()>(
                 review_stage: decision.stage,
                 lock_key: target.key.clone(),
                 lock_operation_id: target.lock_operation_id.clone(),
+                attempt: existing_plan
+                    .as_ref()
+                    .and_then(|plan| {
+                        plan.repositories
+                            .iter()
+                            .find(|planned| planned.repository_id == target.repo.repository_id)
+                    })
+                    .map(|planned| planned.attempt)
+                    .unwrap_or(current_attempt),
             })
             .collect(),
     };

@@ -4,7 +4,7 @@
 //! table makes those identifiers globally idempotent: replaying the same request
 //! returns the original result, while reusing an identifier for a different
 //! task, kind or payload is an explicit conflict.
-use super::delivery::{DeliveryDispatch, DeliveryPlan};
+use super::delivery::{DeliveryDispatch, DeliveryPlan, RepositoryDeliveryObservation};
 use super::model::{
     AgentStatus, Approval, ApprovalStatus, ApprovalType, CleanupStatus, Event, EventType,
     GateEvidence, HarnessAnalysisReport, ImplementationReport, IntegrationReport,
@@ -817,14 +817,26 @@ impl TaskStore {
         })
     }
 
-    /// Records the delivery dispatch intent before any child is started.
-    /// Replaying the same plan returns the stored receipt; different delivery
-    /// facts under the same plan are an explicit conflict, never a silent
-    /// second dispatch.
+    /// Records a legacy single-repository delivery dispatch receipt.
+    ///
+    /// The old table has no columns for a repository identity, so this entry
+    /// point accepts only a legacy-shaped receipt. A caller that carries
+    /// repository/OID/attempt facts must use [`TaskStore::begin_repository_dispatch`],
+    /// which persists and validates them; silently dropping those fields here
+    /// would make a replay look different from what was stored.
     pub fn begin_delivery_dispatch(
         &self,
         dispatch: &DeliveryDispatch,
     ) -> Result<DeliveryDispatch, StoreError> {
+        if dispatch.repository_id.is_some()
+            || dispatch.old_oid.is_some()
+            || dispatch.new_oid.is_some()
+            || dispatch.attempt != 0
+        {
+            return Err(StoreError::Invalid(
+                "begin_delivery_dispatch records only a legacy single-repository receipt without repository scope; use begin_repository_dispatch to persist repository, OIDs and attempt".into(),
+            ));
+        }
         self.run_tx("super-agent begin delivery dispatch", |tx| {
             let existing = load_delivery_dispatch_conn(
                 tx,
@@ -906,6 +918,350 @@ impl TaskStore {
         self.run_read(|tx| load_delivery_dispatch_conn(tx, task_id, plan_operation_id))
     }
 
+    /// Records one repository's delivery dispatch intent before any child is
+    /// started. The identity is keyed by the repository, so repositories A and
+    /// B of the same plan never collide. Replaying the same facts returns the
+    /// stored receipt; a different repository, OID, attempt or session is an
+    /// explicit conflict and the old receipt is preserved.
+    pub fn begin_repository_dispatch(
+        &self,
+        dispatch: &DeliveryDispatch,
+    ) -> Result<DeliveryDispatch, StoreError> {
+        let repository_id = dispatch.repository_id.clone().ok_or_else(|| {
+            StoreError::Invalid("a repository dispatch must name its repository".into())
+        })?;
+        let old_oid = dispatch.old_oid.clone().ok_or_else(|| {
+            StoreError::Invalid(format!(
+                "{repository_id}: a repository dispatch must record the approved old OID"
+            ))
+        })?;
+        let new_oid = dispatch.new_oid.clone().ok_or_else(|| {
+            StoreError::Invalid(format!(
+                "{repository_id}: a repository dispatch must record the approved new OID"
+            ))
+        })?;
+        if dispatch.purpose != "delivery" {
+            return Err(StoreError::Invalid(format!(
+                "{repository_id}: delivery dispatch purpose {:?} is not supported",
+                dispatch.purpose
+            )));
+        }
+        self.run_tx("super-agent begin repository dispatch", |tx| {
+            let plan = load_repository_dispatch_plan(tx, dispatch)?;
+            validate_repository_dispatch_conn(
+                tx,
+                &plan,
+                dispatch,
+                &repository_id,
+                &old_oid,
+                &new_oid,
+            )?;
+            if let Some(existing) = load_repository_dispatch_conn(
+                tx,
+                &dispatch.task_id,
+                &dispatch.plan_operation_id,
+                &repository_id,
+            )? {
+                if existing.spec_version != dispatch.spec_version
+                    || existing.review_round != dispatch.review_round
+                    || existing.coder_session_id != dispatch.coder_session_id
+                    || existing.purpose != dispatch.purpose
+                    || existing.old_oid.as_deref() != Some(old_oid.as_str())
+                    || existing.new_oid.as_deref() != Some(new_oid.as_str())
+                    || existing.attempt != dispatch.attempt
+                    || existing
+                        .job_id
+                        .as_ref()
+                        .zip(dispatch.job_id.as_ref())
+                        .is_some_and(|(left, right)| left != right)
+                {
+                    return Err(StoreError::Invalid(format!(
+                        "repository dispatch for {} and {repository_id} was already recorded with different facts",
+                        dispatch.plan_operation_id
+                    )));
+                }
+                return Ok(existing);
+            }
+            // A receipt written before repository-scoped tables existed is the
+            // sole identity for this repository when the complete immutable
+            // plan uniquely binds it. Do not create a second, conflicting row.
+            if let Some(legacy) = legacy_repository_dispatch_conn(
+                tx,
+                &dispatch.task_id,
+                &dispatch.plan_operation_id,
+                &repository_id,
+            )? {
+                if legacy.spec_version != dispatch.spec_version
+                    || legacy.review_round != dispatch.review_round
+                    || legacy.coder_session_id != dispatch.coder_session_id
+                    || legacy.purpose != dispatch.purpose
+                    || legacy
+                        .job_id
+                        .as_ref()
+                        .zip(dispatch.job_id.as_ref())
+                        .is_some_and(|(left, right)| left != right)
+                {
+                    return Err(StoreError::Invalid(format!(
+                        "legacy repository dispatch for {} and {repository_id} conflicts with the requested identity",
+                        dispatch.plan_operation_id
+                    )));
+                }
+                return Ok(legacy);
+            }
+            tx.execute(
+                "INSERT INTO sa_repository_dispatches(task_id,plan_operation_id,repository_id,spec_version,review_round,coder_session_id,purpose,old_oid,new_oid,attempt,job_id,created_at) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12)",
+                params![
+                    dispatch.task_id,
+                    dispatch.plan_operation_id,
+                    repository_id,
+                    dispatch.spec_version,
+                    dispatch.review_round,
+                    dispatch.coder_session_id,
+                    dispatch.purpose,
+                    old_oid,
+                    new_oid,
+                    dispatch.attempt,
+                    dispatch.job_id,
+                    dispatch.created_at
+                ],
+            )?;
+            Ok(dispatch.clone())
+        })
+    }
+
+    /// Binds the reserved background job to an already recorded repository
+    /// dispatch. The same job is idempotent; a different one is a conflict.
+    /// A uniquely bound legacy single-repository receipt is updated in place,
+    /// so a host that stopped before recording its job can recover it without
+    /// creating a second identity or replaying the side effect.
+    pub fn set_repository_dispatch_job(
+        &self,
+        task_id: &str,
+        plan_operation_id: &str,
+        repository_id: &str,
+        job_id: &str,
+    ) -> Result<DeliveryDispatch, StoreError> {
+        self.run_tx("super-agent record repository delivery job", |tx| {
+            let (mut dispatch, legacy) = match load_repository_dispatch_conn(
+                tx,
+                task_id,
+                plan_operation_id,
+                repository_id,
+            )? {
+                Some(dispatch) => (dispatch, false),
+                None => match legacy_repository_dispatch_conn(
+                    tx,
+                    task_id,
+                    plan_operation_id,
+                    repository_id,
+                )? {
+                    Some(dispatch) => (dispatch, true),
+                    None => {
+                        return Err(StoreError::Invalid(format!(
+                            "{repository_id}: repository dispatch was not recorded before the child"
+                        )))
+                    }
+                },
+            };
+            if let Some(existing) = &dispatch.job_id {
+                if existing == job_id {
+                    return Ok(dispatch);
+                }
+                return Err(StoreError::Invalid(format!(
+                    "repository dispatch for {plan_operation_id} and {repository_id} already bound job {existing}, not {job_id}"
+                )));
+            }
+            if legacy {
+                tx.execute(
+                    "UPDATE sa_delivery_dispatches SET job_id=?3 WHERE task_id=?1 AND plan_operation_id=?2",
+                    params![task_id, plan_operation_id, job_id],
+                )?;
+            } else {
+                tx.execute(
+                    "UPDATE sa_repository_dispatches SET job_id=?4 WHERE task_id=?1 AND plan_operation_id=?2 AND repository_id=?3",
+                    params![task_id, plan_operation_id, repository_id, job_id],
+                )?;
+            }
+            dispatch.job_id = Some(job_id.to_owned());
+            Ok(dispatch)
+        })
+    }
+
+    /// Reads the repository-scoped dispatch. A receipt recorded by the old
+    /// single-repository schema is read only when the complete immutable plan
+    /// uniquely binds it; no row is migrated or guessed.
+    pub fn repository_dispatch(
+        &self,
+        task_id: &str,
+        plan_operation_id: &str,
+        repository_id: &str,
+    ) -> Result<Option<DeliveryDispatch>, StoreError> {
+        self.run_read(|tx| {
+            if let Some(found) =
+                load_repository_dispatch_conn(tx, task_id, plan_operation_id, repository_id)?
+            {
+                return Ok(Some(found));
+            }
+            legacy_repository_dispatch_conn(tx, task_id, plan_operation_id, repository_id)
+        })
+    }
+
+    /// Records one repository's host-verified delivery observation. It binds
+    /// the persisted approved plan and its exact target, marks only that
+    /// repository `COMPLETED`, and never appends a task-wide completion event.
+    /// The same facts replay idempotently; conflicting facts are rejected and
+    /// the old observation is preserved.
+    pub fn record_repository_delivery_observed(
+        &self,
+        observation: &RepositoryDeliveryObservation,
+    ) -> Result<bool, StoreError> {
+        if !observation.verified {
+            return Err(StoreError::Invalid(
+                "a repository delivery observation must be host-verified".into(),
+            ));
+        }
+        self.run_tx("super-agent record repository delivery", |tx| {
+            let plan = load_delivery_plan_conn(
+                tx,
+                &observation.task_id,
+                &observation.plan_operation_id,
+            )?
+            .ok_or_else(|| {
+                StoreError::Invalid(format!(
+                    "the approved delivery plan {} for task {} is not recorded",
+                    observation.plan_operation_id, observation.task_id
+                ))
+            })?;
+            if plan.spec_version != observation.spec_version
+                || plan.review_round != observation.review_round
+            {
+                return Err(StoreError::Invalid(format!(
+                    "{}: the observation does not match the persisted plan version",
+                    observation.repository_id
+                )));
+            }
+            let Some(target) = plan
+                .repositories
+                .iter()
+                .find(|target| target.repository_id == observation.repository_id)
+            else {
+                return Err(StoreError::Invalid(format!(
+                    "{}: the persisted plan does not contain this repository",
+                    observation.repository_id
+                )));
+            };
+            if target.old_oid != observation.old_oid
+                || target.new_oid != observation.new_oid
+                || target.target_ref != observation.target_ref
+                || target.attempt != observation.attempt
+            {
+                return Err(StoreError::Invalid(format!(
+                    "{}: the observation does not match the approved target OIDs or attempt",
+                    observation.repository_id
+                )));
+            }
+            let record = load_record_conn(tx, &observation.task_id)?
+                .ok_or_else(|| StoreError::TaskNotFound(observation.task_id.clone()))?;
+            if record.spec_version != observation.spec_version
+                || record.review_round != observation.review_round
+                || record.coder.session_id.as_deref()
+                    != Some(observation.coder_session_id.as_str())
+            {
+                return Err(StoreError::Invalid(format!(
+                    "{}: the observation does not match the current task version or Coder session",
+                    observation.repository_id
+                )));
+            }
+            if let Some(existing) = load_repository_observation_conn(
+                tx,
+                &observation.task_id,
+                &observation.plan_operation_id,
+                &observation.repository_id,
+            )? {
+                // The first observation time is durable evidence. A retry after
+                // a restart is idempotent when every identity fact matches,
+                // even though the caller generated a new timestamp.
+                if existing.task_id == observation.task_id
+                    && existing.spec_version == observation.spec_version
+                    && existing.review_round == observation.review_round
+                    && existing.plan_operation_id == observation.plan_operation_id
+                    && existing.repository_id == observation.repository_id
+                    && existing.old_oid == observation.old_oid
+                    && existing.new_oid == observation.new_oid
+                    && existing.target_ref == observation.target_ref
+                    && existing.coder_session_id == observation.coder_session_id
+                    && existing.attempt == observation.attempt
+                    && existing.verified == observation.verified
+                {
+                    return Ok(false);
+                }
+                return Err(StoreError::Invalid(format!(
+                    "{}: a repository delivery observation is already recorded with different facts",
+                    observation.repository_id
+                )));
+            }
+            if record.phase != Phase::DeliveryPending {
+                return Err(StoreError::Invalid(format!(
+                    "a repository delivery can only be observed while the task is DELIVERY_PENDING, found {}",
+                    record.phase.as_str()
+                )));
+            }
+            tx.execute(
+                "INSERT INTO sa_repository_delivery_observations(task_id,plan_operation_id,repository_id,spec_version,review_round,coder_session_id,old_oid,new_oid,target_ref,attempt,observed_at) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11)",
+                params![
+                    observation.task_id,
+                    observation.plan_operation_id,
+                    observation.repository_id,
+                    observation.spec_version,
+                    observation.review_round,
+                    observation.coder_session_id,
+                    observation.old_oid,
+                    observation.new_oid,
+                    observation.target_ref,
+                    observation.attempt,
+                    observation.observed_at
+                ],
+            )?;
+            let updated = tx.execute(
+                "UPDATE sa_task_repos SET integration_status=?3 WHERE task_id=?1 AND repository_id=?2 AND integrated_commit=?4",
+                params![
+                    observation.task_id,
+                    observation.repository_id,
+                    IntegrationStatus::Completed.as_str(),
+                    observation.new_oid
+                ],
+            )?;
+            if updated != 1 {
+                return Err(StoreError::Invalid(format!(
+                    "{}: the recorded integrated commit is no longer {}",
+                    observation.repository_id, observation.new_oid
+                )));
+            }
+            Ok(true)
+        })
+    }
+
+    pub fn repository_delivery_observation(
+        &self,
+        task_id: &str,
+        plan_operation_id: &str,
+        repository_id: &str,
+    ) -> Result<Option<RepositoryDeliveryObservation>, StoreError> {
+        self.run_read(|tx| {
+            load_repository_observation_conn(tx, task_id, plan_operation_id, repository_id)
+        })
+    }
+
+    /// True only when every repository of the immutable plan has a durable,
+    /// host-verified observation matching the approved target. This is the
+    /// gate for recording a task-wide delivery completion.
+    pub fn delivery_plan_observations_complete(
+        &self,
+        plan: &DeliveryPlan,
+    ) -> Result<bool, StoreError> {
+        self.run_read(|tx| delivery_plan_observations_complete_conn(tx, plan))
+    }
+
     /// Current holder of one cooperative lock, or `None`. It never acquires.
     pub fn lock_holder(&self, lock_key: &str) -> Result<Option<(String, String)>, StoreError> {
         let lock_key = normalize_lock_key(lock_key)?;
@@ -937,6 +1293,14 @@ impl TaskStore {
         }
         self.run_tx("super-agent record delivered target", |tx| {
             if let Some(existing) = event_by_operation(tx, operation_id)? {
+                // An operation ID is global. A replay may only return this
+                // task's own event, never another task's completed delivery.
+                if existing.task_id != plan.task_id {
+                    return Err(StoreError::Invalid(format!(
+                        "delivery operation {operation_id} belongs to task {}, not {}",
+                        existing.task_id, plan.task_id
+                    )));
+                }
                 return Ok(EventAppend {
                     event: existing,
                     inserted: false,
@@ -965,14 +1329,39 @@ impl TaskStore {
                     inserted: false,
                 });
             }
-            let record = load_record_conn(tx, &plan.task_id)?
-                .ok_or_else(|| StoreError::TaskNotFound(plan.task_id.clone()))?;
-            if record.spec_version != plan.spec_version
-                || record.review_round != plan.review_round
+            // A task-wide delivery completion requires the persisted immutable
+            // plan, and every repository in that plan, to have its own durable
+            // host-verified observation. The caller cannot narrow the set.
+            let Some(persisted) = load_delivery_plan_conn(tx, &plan.task_id, &plan.operation_id)?
+            else {
+                return Err(StoreError::Invalid(format!(
+                    "the delivery plan {} for task {} is not recorded",
+                    plan.operation_id, plan.task_id
+                )));
+            };
+            if !caller_plan_matches_persisted(&persisted, plan) {
+                return Err(StoreError::Invalid(format!(
+                    "the supplied plan {} is not the persisted immutable plan for task {}",
+                    plan.operation_id, plan.task_id
+                )));
+            }
+            if !delivery_plan_observations_complete_conn(tx, &persisted)? {
+                return Err(StoreError::Invalid(format!(
+                    "cannot complete delivery of plan {} before every planned repository has a host-verified observation",
+                    plan.operation_id
+                )));
+            }
+            let record = load_record_conn(tx, &persisted.task_id)?
+                .ok_or_else(|| StoreError::TaskNotFound(persisted.task_id.clone()))?;
+            if record.spec_version != persisted.spec_version
+                || record.review_round != persisted.review_round
             {
                 return Err(StoreError::Invalid(format!(
                     "delivery plan describes spec version {} round {} but the task is {} round {}",
-                    plan.spec_version, plan.review_round, record.spec_version, record.review_round
+                    persisted.spec_version,
+                    persisted.review_round,
+                    record.spec_version,
+                    record.review_round
                 )));
             }
             if record.phase != Phase::DeliveryPending {
@@ -981,11 +1370,13 @@ impl TaskStore {
                     record.phase.as_str()
                 )));
             }
-            for target in &plan.repositories {
+            // Use the authoritative targets for the update, never a caller
+            // subset that could leave other repositories unmarked.
+            for target in &persisted.repositories {
                 let updated = tx.execute(
                     "UPDATE sa_task_repos SET integration_status=?3 WHERE task_id=?1 AND repository_id=?2 AND integrated_commit=?4",
                     params![
-                        plan.task_id,
+                        persisted.task_id,
                         target.repository_id,
                         IntegrationStatus::Completed.as_str(),
                         target.new_oid
@@ -1000,7 +1391,7 @@ impl TaskStore {
             }
             let (event, inserted) = append_event_conn(
                 tx,
-                &plan.task_id,
+                &persisted.task_id,
                 &NewEvent {
                     session_id: None,
                     run_id: None,
@@ -1872,12 +2263,267 @@ fn load_delivery_dispatch_conn(
                     plan_operation_id: plan_operation_id.to_owned(),
                     coder_session_id: row.get(2)?,
                     purpose: row.get(3)?,
+                    repository_id: None,
+                    old_oid: None,
+                    new_oid: None,
+                    attempt: 0,
                     job_id: row.get(4)?,
                     created_at: row.get(5)?,
                 })
             },
         )
         .optional()?)
+}
+
+fn load_repository_dispatch_conn(
+    conn: &Connection,
+    task_id: &str,
+    plan_operation_id: &str,
+    repository_id: &str,
+) -> Result<Option<DeliveryDispatch>, StoreError> {
+    Ok(conn
+        .query_row(
+            "SELECT spec_version,review_round,coder_session_id,purpose,old_oid,new_oid,attempt,job_id,created_at FROM sa_repository_dispatches WHERE task_id=?1 AND plan_operation_id=?2 AND repository_id=?3",
+            params![task_id, plan_operation_id, repository_id],
+            |row| {
+                Ok(DeliveryDispatch {
+                    task_id: task_id.to_owned(),
+                    spec_version: row.get::<_, i64>(0)? as u32,
+                    review_round: row.get::<_, i64>(1)? as u32,
+                    plan_operation_id: plan_operation_id.to_owned(),
+                    coder_session_id: row.get(2)?,
+                    purpose: row.get(3)?,
+                    repository_id: Some(repository_id.to_owned()),
+                    old_oid: row.get(4)?,
+                    new_oid: row.get(5)?,
+                    attempt: row.get::<_, i64>(6)? as u32,
+                    job_id: row.get(7)?,
+                    created_at: row.get(8)?,
+                })
+            },
+        )
+        .optional()?)
+}
+
+fn load_delivery_plan_conn(
+    conn: &Connection,
+    task_id: &str,
+    operation_id: &str,
+) -> Result<Option<DeliveryPlan>, StoreError> {
+    let encoded: Option<String> = conn
+        .query_row(
+            "SELECT plan_json FROM sa_delivery_plans WHERE task_id=?1 AND operation_id=?2",
+            params![task_id, operation_id],
+            |row| row.get(0),
+        )
+        .optional()?;
+    encoded
+        .map(|json| serde_json::from_str(&json).map_err(StoreError::from))
+        .transpose()
+}
+
+fn load_repository_observation_conn(
+    conn: &Connection,
+    task_id: &str,
+    plan_operation_id: &str,
+    repository_id: &str,
+) -> Result<Option<RepositoryDeliveryObservation>, StoreError> {
+    Ok(conn
+        .query_row(
+            "SELECT spec_version,review_round,coder_session_id,old_oid,new_oid,target_ref,attempt,observed_at FROM sa_repository_delivery_observations WHERE task_id=?1 AND plan_operation_id=?2 AND repository_id=?3",
+            params![task_id, plan_operation_id, repository_id],
+            |row| {
+                Ok(RepositoryDeliveryObservation {
+                    task_id: task_id.to_owned(),
+                    spec_version: row.get::<_, i64>(0)? as u32,
+                    review_round: row.get::<_, i64>(1)? as u32,
+                    plan_operation_id: plan_operation_id.to_owned(),
+                    repository_id: repository_id.to_owned(),
+                    coder_session_id: row.get(2)?,
+                    old_oid: row.get(3)?,
+                    new_oid: row.get(4)?,
+                    target_ref: row.get(5)?,
+                    attempt: row.get::<_, i64>(6)? as u32,
+                    verified: true,
+                    observed_at: row.get(7)?,
+                })
+            },
+        )
+        .optional()?)
+}
+
+/// A legacy receipt may bind only when the complete immutable plan has exactly
+/// one repository and names the requested one. A multi-repository legacy
+/// receipt is never guessed or migrated.
+fn legacy_repository_dispatch_conn(
+    conn: &Connection,
+    task_id: &str,
+    plan_operation_id: &str,
+    repository_id: &str,
+) -> Result<Option<DeliveryDispatch>, StoreError> {
+    let Some(legacy) = load_delivery_dispatch_conn(conn, task_id, plan_operation_id)? else {
+        return Ok(None);
+    };
+    let Some(plan) = load_delivery_plan_conn(conn, task_id, plan_operation_id)? else {
+        return Err(StoreError::Invalid(format!(
+            "legacy delivery receipt {plan_operation_id} has no immutable plan and cannot be bound"
+        )));
+    };
+    if plan.repositories.len() != 1 {
+        return Err(StoreError::Invalid(format!(
+            "legacy delivery receipt {plan_operation_id} is not bound to a single-repository plan; refusing to guess its repository"
+        )));
+    }
+    let target = &plan.repositories[0];
+    if target.repository_id != repository_id || legacy.purpose != "delivery" {
+        return Err(StoreError::Invalid(format!(
+            "legacy delivery receipt {plan_operation_id} cannot be bound to repository {repository_id}"
+        )));
+    }
+    if legacy.spec_version != plan.spec_version || legacy.review_round != plan.review_round {
+        return Err(StoreError::Invalid(format!(
+            "legacy delivery receipt {plan_operation_id} does not match the immutable plan version"
+        )));
+    }
+    let record = load_record_conn(conn, task_id)?
+        .ok_or_else(|| StoreError::TaskNotFound(task_id.to_owned()))?;
+    if record.spec_version != plan.spec_version
+        || record.review_round != plan.review_round
+        || record.coder.session_id.as_deref() != Some(legacy.coder_session_id.as_str())
+    {
+        return Err(StoreError::Invalid(format!(
+            "legacy delivery receipt {plan_operation_id} does not match the current task version or Coder session"
+        )));
+    }
+    Ok(Some(DeliveryDispatch {
+        repository_id: Some(target.repository_id.clone()),
+        old_oid: Some(target.old_oid.clone()),
+        new_oid: Some(target.new_oid.clone()),
+        attempt: target.attempt,
+        ..legacy
+    }))
+}
+
+/// The caller must present the same immutable plan that is persisted. A
+/// caller-truncated, extended or substituted plan can never gate a task-wide
+/// fact, so this compares the whole repository vector (including each target's
+/// attempt and cooperative lock identity).
+fn caller_plan_matches_persisted(persisted: &DeliveryPlan, plan: &DeliveryPlan) -> bool {
+    persisted.operation_id == plan.operation_id
+        && persisted.task_id == plan.task_id
+        && persisted.spec_version == plan.spec_version
+        && persisted.review_round == plan.review_round
+        && persisted.evidence_event_id == plan.evidence_event_id
+        && persisted.review_event_id == plan.review_event_id
+        && persisted.content_fingerprint == plan.content_fingerprint
+        && persisted.repositories == plan.repositories
+}
+
+fn delivery_plan_observations_complete_conn(
+    conn: &Connection,
+    plan: &DeliveryPlan,
+) -> Result<bool, StoreError> {
+    // The persisted plan is authoritative: never infer the repository set from
+    // the caller, or a subset could gate a global completion for the rest.
+    let Some(persisted) = load_delivery_plan_conn(conn, &plan.task_id, &plan.operation_id)? else {
+        return Ok(false);
+    };
+    if !caller_plan_matches_persisted(&persisted, plan) || persisted.repositories.is_empty() {
+        return Ok(false);
+    }
+    let Some(record) = load_record_conn(conn, &persisted.task_id)? else {
+        return Ok(false);
+    };
+    if record.spec_version != persisted.spec_version
+        || record.review_round != persisted.review_round
+    {
+        return Ok(false);
+    }
+    for target in &persisted.repositories {
+        let Some(observation) = load_repository_observation_conn(
+            conn,
+            &persisted.task_id,
+            &persisted.operation_id,
+            &target.repository_id,
+        )?
+        else {
+            return Ok(false);
+        };
+        if !observation.verified
+            || observation.spec_version != persisted.spec_version
+            || observation.review_round != persisted.review_round
+            || observation.old_oid != target.old_oid
+            || observation.new_oid != target.new_oid
+            || observation.target_ref != target.target_ref
+            || observation.attempt != target.attempt
+            // The observation must still belong to the task's current Coder.
+            || record.coder.session_id.as_deref()
+                != Some(observation.coder_session_id.as_str())
+        {
+            return Ok(false);
+        }
+    }
+    Ok(true)
+}
+
+fn load_repository_dispatch_plan(
+    conn: &Connection,
+    dispatch: &DeliveryDispatch,
+) -> Result<DeliveryPlan, StoreError> {
+    load_delivery_plan_conn(conn, &dispatch.task_id, &dispatch.plan_operation_id)?.ok_or_else(
+        || {
+            StoreError::Invalid(format!(
+                "the approved delivery plan {} for task {} is not recorded",
+                dispatch.plan_operation_id, dispatch.task_id
+            ))
+        },
+    )
+}
+
+fn validate_repository_dispatch_conn(
+    conn: &Connection,
+    plan: &DeliveryPlan,
+    dispatch: &DeliveryDispatch,
+    repository_id: &str,
+    old_oid: &str,
+    new_oid: &str,
+) -> Result<(), StoreError> {
+    if plan.task_id != dispatch.task_id
+        || plan.spec_version != dispatch.spec_version
+        || plan.review_round != dispatch.review_round
+    {
+        return Err(StoreError::Invalid(format!(
+            "the delivery plan {} does not belong to task {} spec {} round {}",
+            plan.operation_id, dispatch.task_id, dispatch.spec_version, dispatch.review_round
+        )));
+    }
+    let Some(target) = plan
+        .repositories
+        .iter()
+        .find(|target| target.repository_id == repository_id)
+    else {
+        return Err(StoreError::Invalid(format!(
+            "the delivery plan {} does not contain repository {repository_id}",
+            plan.operation_id
+        )));
+    };
+    if target.old_oid != old_oid || target.new_oid != new_oid || target.attempt != dispatch.attempt
+    {
+        return Err(StoreError::Invalid(format!(
+            "{repository_id}: the dispatch identity does not match the approved plan"
+        )));
+    }
+    let record = load_record_conn(conn, &dispatch.task_id)?
+        .ok_or_else(|| StoreError::TaskNotFound(dispatch.task_id.clone()))?;
+    if record.spec_version != dispatch.spec_version
+        || record.review_round != dispatch.review_round
+        || record.coder.session_id.as_deref() != Some(dispatch.coder_session_id.as_str())
+    {
+        return Err(StoreError::Invalid(format!(
+            "{repository_id}: the dispatch does not match the current task version or Coder session"
+        )));
+    }
+    Ok(())
 }
 
 fn event_by_operation(conn: &Connection, operation_id: &str) -> Result<Option<Event>, StoreError> {

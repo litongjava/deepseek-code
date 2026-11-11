@@ -545,4 +545,35 @@ CREATE TABLE IF NOT EXISTS sa_delivery_dispatches (
     created_at TEXT NOT NULL,
     PRIMARY KEY(task_id, plan_operation_id)
 );
+
+CREATE TABLE IF NOT EXISTS sa_repository_dispatches (
+    task_id TEXT NOT NULL,
+    plan_operation_id TEXT NOT NULL,
+    repository_id TEXT NOT NULL,
+    spec_version INTEGER NOT NULL,
+    review_round INTEGER NOT NULL,
+    coder_session_id TEXT NOT NULL,
+    purpose TEXT NOT NULL,
+    old_oid TEXT NOT NULL,
+    new_oid TEXT NOT NULL,
+    attempt INTEGER NOT NULL,
+    job_id TEXT,
+    created_at TEXT NOT NULL,
+    PRIMARY KEY(task_id, plan_operation_id, repository_id)
+);
+
+CREATE TABLE IF NOT EXISTS sa_repository_delivery_observations (
+    task_id TEXT NOT NULL,
+    plan_operation_id TEXT NOT NULL,
+    repository_id TEXT NOT NULL,
+    spec_version INTEGER NOT NULL,
+    review_round INTEGER NOT NULL,
+    coder_session_id TEXT NOT NULL,
+    old_oid TEXT NOT NULL,
+    new_oid TEXT NOT NULL,
+    target_ref TEXT NOT NULL,
+    attempt INTEGER NOT NULL,
+    observed_at TEXT NOT NULL,
+    PRIMARY KEY(task_id, plan_operation_id, repository_id)
+);
 "#;

@@ -2216,7 +2216,7 @@ async fn run_review_loop_with(
                     other => panic!("expected a prepared plan, got {other:?}"),
                 };
             store
-                .begin_delivery_dispatch(
+                .begin_repository_dispatch(
                     &deepseek_code_core::super_agent::delivery::DeliveryDispatch {
                         task_id: task_id.clone(),
                         spec_version: 1,
@@ -2224,6 +2224,10 @@ async fn run_review_loop_with(
                         plan_operation_id: prepared.operation_id.clone(),
                         coder_session_id: coder.clone(),
                         purpose: "delivery".into(),
+                        repository_id: Some(prepared.repositories[0].repository_id.clone()),
+                        old_oid: Some(prepared.repositories[0].old_oid.clone()),
+                        new_oid: Some(prepared.repositories[0].new_oid.clone()),
+                        attempt: prepared.repositories[0].attempt,
                         job_id: None,
                         created_at: "2026-01-01T00:00:00Z".into(),
                     },
@@ -2263,7 +2267,7 @@ async fn run_review_loop_with(
                     other => panic!("expected a prepared plan, got {other:?}"),
                 };
             store
-                .begin_delivery_dispatch(
+                .begin_repository_dispatch(
                     &deepseek_code_core::super_agent::delivery::DeliveryDispatch {
                         task_id: task_id.clone(),
                         spec_version: 1,
@@ -2271,6 +2275,10 @@ async fn run_review_loop_with(
                         plan_operation_id: plan.operation_id.clone(),
                         coder_session_id: coder.clone(),
                         purpose: "delivery".into(),
+                        repository_id: Some(plan.repositories[0].repository_id.clone()),
+                        old_oid: Some(plan.repositories[0].old_oid.clone()),
+                        new_oid: Some(plan.repositories[0].new_oid.clone()),
+                        attempt: plan.repositories[0].attempt,
                         job_id: None,
                         created_at: "2026-01-01T00:00:00Z".into(),
                     },
@@ -2325,7 +2333,11 @@ async fn run_review_loop_with(
                 .pop()
                 .expect("delivery plan");
             let receipt = store
-                .delivery_dispatch(&task_id, &plan.operation_id)
+                .repository_dispatch(
+                    &task_id,
+                    &plan.operation_id,
+                    &plan.repositories[0].repository_id,
+                )
                 .unwrap()
                 .expect("dispatch receipt");
             assert_eq!(receipt.coder_session_id, coder);
@@ -2665,7 +2677,11 @@ async fn run_review_loop_with(
                         .pop()
                         .expect("delivery plan");
                     let receipt = reopened_store
-                        .delivery_dispatch(&task_id, &plan.operation_id)
+                        .repository_dispatch(
+                            &task_id,
+                            &plan.operation_id,
+                            &plan.repositories[0].repository_id,
+                        )
                         .unwrap()
                         .expect("dispatch receipt");
                     assert_eq!(
@@ -2727,7 +2743,11 @@ async fn run_review_loop_with(
                         .pop()
                         .expect("delivery plan");
                     let rebound = reopened_store
-                        .delivery_dispatch(&task_id, &plan.operation_id)
+                        .repository_dispatch(
+                            &task_id,
+                            &plan.operation_id,
+                            &plan.repositories[0].repository_id,
+                        )
                         .unwrap()
                         .expect("rebound dispatch receipt");
                     assert_eq!(
