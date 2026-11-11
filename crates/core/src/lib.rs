@@ -2,6 +2,7 @@
 
 pub mod engine;
 pub mod tools;
+pub mod toolscript;
 pub mod research;
 pub mod prompt;
 pub mod mcp;

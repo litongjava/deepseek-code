@@ -348,6 +348,34 @@ env -u DEEPSEEK_CODE_DATA_DIR -u DEEPSEEK_CODE_BACKGROUND_CONTROL -u DEEPSEEK_CO
 
 `ApplyPatch` 只做进程内失败一致性：受控失败会回滚已写文件，但进程崩溃没有日志恢复，不能当作跨文件原子操作验收。Linux 上的单元与 CLI 证据不代表 Windows 的 ACL/只读属性行为。
 
+## ToolScript 嵌入式 JS 基础（J1–J3）
+
+`crates/core/src/toolscript/` 是 ToolScript 的引擎基础，使用锁定版本 `rquickjs 0.14.0` 在进程内执行真实 QuickJS。它目前只暴露 Rust API 和 `tools.call` 的 fake callback 测试，**没有**注册模型可见工具，也没有接入 `ToolLoopExecutor` 的权限、Hook、历史、事件或持久化。完整契约与限制见 `docs/toolscript-foundation.md`。
+
+改动该目录或 `crates/core/Cargo.toml` 的 `rquickjs` 依赖后运行：
+
+```bash
+cargo test --locked -p deepseek-code-core --lib toolscript::
+cargo check --locked -p deepseek-code-core --lib
+cargo check --locked -p deepseek-code-cli
+cargo check --locked -p deepseek-code-desktop --all-targets
+git diff --check
+```
+
+33 个用例使用真实 QuickJS 和 fake host callback，覆盖：顺序调用、`Promise.all` 顺序与峰值并发、条件/变换、结构化工具错误与脚本抛出、Unicode、非 JSON/循环参数、脚本结果限制、CPU 死循环的 QuickJS interrupt hook、外部线程取消、栈溢出、内存压力、等待中的 host future 取消/超时、脚本结束时未 await 调用的 Drop 与无迟到副作用、日志/参数/结果/并发/待定调用上限，以及 `require`/`process`/`fetch`/timer 全局不存在。以下回归专门证明本轮边界：
+
+- `private_prelude_bindings_are_not_visible_to_user_code`：用户 body 与 prelude 分属两个脚本，`rawCall`、`config`、`normalizeResult`、内部 globals 都是 `undefined`。
+- `monkeypatched_intrinsics_cannot_change_arguments_or_bypass_validation`：改写 `JSON.stringify`、`JSON.parse`、`Object.keys`、`Object.getPrototypeOf`、`Number.isFinite`、`Array.isArray` 后，Rust 仍收到原始参数并拒绝循环值。
+- `function_constructor_and_dynamic_import_expose_no_host_or_io`：`Function` 构造函数看不到 host helper；没有 module loader/动态 import 的 I/O 能力。
+- `cancellation_during_a_waiting_host_call_drops_the_future`、`host_call_timeout_drops_the_future`、`unawaited_call_is_abandoned_without_a_late_effect`：断言真实 host `Drop` guard，而不只是计数器，并在返回后等待确认没有迟到副作用。
+- `numeric_boundary_preserves_values_in_arguments`、`numeric_boundary_preserves_values_in_script_results`：覆盖 `±2^53`、`i64` 边界、`2^63`、`2^64`、`1e20`、`-0` 与分数字面量。`2^63` 必须保持浮点值，不能被 `i64::MAX as f64` 饱和成 `9223372036854775807`；旧代码负向复现见 `round02-negative-numeric-02.log`。
+- `sparse_array_holes_are_rejected_despite_inherited_values`：`Array.prototype[0]=7` 加 `new Array(1)` 与 `[1, , 3]` 都被拒绝，dense 数组通过；旧代码把 hole 读成继承的 `[7]`，负向复现见 `round02-negative-sparse-01.log`。
+- `getter_mutation_cannot_resurrect_an_argument_hole_from_the_prototype`、`getter_mutation_cannot_resurrect_a_result_hole_from_the_prototype`：index 0 的 getter 删除 index 1 后，边界在每次读取前重新做 native own-property 检查，不会回退到 `Array.prototype[1]`；参数场景要求 host 未收到调用。旧代码负向复现见 `round02-negative-getter-01.log`。
+- `proxy_values_are_rejected_before_traps_or_enumeration`：数组和对象 proxy 都在结构遍历前按 class id 拒绝，`get`/`ownKeys`/`getOwnPropertyDescriptor` trap 计数为 0。
+- `out_of_range_numeric_property_on_an_array_is_ignored`：`"4294967295"`（`2^32-1`）不是数组索引，只是普通自有属性，不当作 hole；负向复现见 `round02-negative-indexrange-01.log`。
+
+数组 own-property 检查使用 QuickJS 的 native `JS_GetOwnProperty`（空 descriptor），不经过 `in`、`Object.keys` 或任何可被脚本替换的 intrinsic；边界仍会先做一次 own-key 连续性扫描，再在每次读取前逐 index 复查。这些用例只证明 JS 引擎、边界和限制，不证明权限、Hook、历史、持久化或真实执行器分发。Android（返回 `UnsupportedPlatform`，未构建）、Windows、macOS 未验证；阻塞式非 async host handler 不能被抢占；`run` 是 `!Send`，集成时必须由专用 current-thread executor 持有 VM。
+
 ## 按改动范围选择场景
 
 - `terminal/editor.rs`、`terminal/live.rs` 的按键处理：A、B、E1、E2、E3
@@ -379,7 +407,7 @@ env -u DEEPSEEK_CODE_DATA_DIR -u DEEPSEEK_CODE_BACKGROUND_CONTROL -u DEEPSEEK_CO
   契约：只有 `Bash interaction:"pipe"` 且 `run_in_background:true` 才创建管道；普通 Bash、前台和 `detach` 仍然使用 null stdin，结果中也不出现 `interaction` 字段。`interaction` 缺省以外的值、缺少后台标志、以及非 POSIX 平台都在创建任务记录之前被拒绝（平台错误不会留下 pending managed shell）。管道是普通 FIFO，不是终端：没有 PTY、resize 或终端信号语义。
   `TaskInput` 是原生内置工具（默认按需加载，不在核心工具集），接受 `task_id` 与 UTF-8 `data` 和/或 `eof`，`timeout` 为等待锁与管道容量的毫秒数（默认 10000，最大 60000），单次最多 64 KiB。返回 `input_mode:"pipe"`、`bytes_written`（操作系统管道已接受的字节，不代表进程已消费）、`bytes_remaining`、`eof`、`stdin_closed`、`already_closed`、`write_complete`、`timed_out`；写超时或写失败（含 broken pipe）都以结构化结果报告已接受字节，绝不自动重试。重复 EOF 幂等；写后 EOF、已退出、已取消、非交互任务和外部会话都会给出明确错误且不改动任务。
   权限：`TaskInput` 不是只读工具，plan 模式直接拒绝，Ask/AcceptEdits 需要确认，Bypass 允许；真实 CLI 的 `cli_task_input_is_refused_in_plan_mode` 验证拒绝结果确实到达模型。所有权以调用方会话的任务库为准，任务 ID 本身不构成授权。
-  持久 worker 与逐调用记录（第 20 轮）：真实 worker 用例 `cargo test --locked -p deepseek-code-cli --test task_input_worker`（本地 mock、`worker::ensure_worker`、真实 engine 进程）：第一轮启动不读 stdin 的 shell（脚本写入 shell 与 descendant 的 PID，descendant 只循环、不读 stdin），第二轮由同一个存活 worker 执行 `TaskInput` 并读到 shell 回显；断言 shell 属于 engine 的进程树、descendant 是 shell 的子进程。生命周期按既有策略：shell 运行时 `worker::shutdown` 明确拒绝（"background shell tasks"），随后 `TaskStop` 结束两个精确 PID（PID + 启动时间判定，避免 PID 复用），最后优雅关闭 worker，engine 与 supervisor 均退出。`a_second_session_cannot_write_the_workers_shell` 证明他人会话无法写入且不改变任务。
+  持久 worker 与逐调用记录（第 20 轮）：真实 worker 用例 `cargo test --locked -p deepseek-code-cli --test task_input_worker`（本地 mock、`worker::ensure_worker`、真实 engine 进程）：第一轮启动不读 stdin 的 shell（脚本写入 shell 与 descendant 的 PID，descendant 只循环、不读 stdin），第二轮由同一个存活 worker 执行 `TaskInput` 并读到 shell 回显；断言 shell 属于 engine 的进程树、descendant 是 shell 的子进程。生命周期按既有策略：shell 运行时 `worker::shutdown` 明确拒绝（"background shell tasks"），随后 `TaskStop` 结束两个精确 PID（PID + 启动时间判定，避免 PID 复用），最后优雅关闭 worker，engine 与 supervisor 均退出。`TaskStop` 只请求取消：owner 先发布终态任务记录、结束 shell future，之后才释放进程级 `ACTIVE` 计数，所以操作系统里的进程消失不等于该计数已释放。两个 worker 用例在显式 `TaskStop` 后都先等终态记录，再在 READY 内只重试上述 documented `background shell tasks` 拒绝；其他错误立即失败，超时诊断包含任务状态和仍存活的 shell 树。该等待/重试只存在于测试 fixture，不改变产品的 `has_active`、权限或关闭策略。`a_second_session_cannot_write_the_workers_shell` 证明他人会话无法写入且不改变任务。
   逐调用记录与钩子（`crates/cli/tests/task_input.rs`）：真实 CLI + 本地 mock 在两轮模型请求中故意复用同一个 provider tool-call id，断言 3 条 `tool_calls` 行（id 为 `<assistant_message>:inv-...`、互不覆盖）、各自 `input`/`output` 与该次调用一致（`bytes_written` 分别等于各自的 UTF-8 字节数，只有 EOF 调用 `stdin_closed:true`，`task_id` 相同）。PreToolUse/PostToolUse 各触发 3 次，钩子的 `tool_use_id` 与持久行中的 `inv-...` occurrence 完全一致（不是 provider id）；PostToolUse 的 `tool_response` 与对应调用的 `bytes_written`/`eof` 对应。`cli_task_input_pre_hook_denial_writes_no_stdin_bytes` 用 PreToolUse deny 证明拒绝发生在写入之前：模型收到 `FIXTURE_DENIED`、无 `bytes_written` 字段、持久行 `is_error=1`、shell 的 `cat` 输出为空。
   拥有者存活（第 21 轮改为内核租约）：`background_shell::start`（后台管理 shell 与前台提升为后台的两条路径）在任务解析出的目录里创建 `owner.lock`，并在拥有者任务整个生命周期内持有排他 `flock`；PID 仍写入 `owner.pid`，仅供诊断和旧记录使用。租约绑定在打开的文件描述上，进程退出或关闭描述符时由内核释放，因此 PID 复用无法冒充它。`owner.lock` 先在与同目录的临时文件上取锁，再用 `hard_link` 发布，链接不会覆盖已有记录——第二个拥有者会得到 "already has a live owner lease"，不能替换存活身份；这也消除了“先发布任务、后取租约”期间被并发探针抢锁的窗口。探针使用共享 `flock`，所以探针之间不会互相误判。真实 shell 不继承该描述符（Linux 下核对 `/proc/<shell pid>/fd`）。
   `OwnerProbe` 区分四种状态：`Held`（持有租约）、`Gone`（租约已释放，或旧记录 PID 确认退出）、`LegacyPid`（只有存活 PID 的旧记录，无法证明是同一进程）、`Unreadable`（缺失/格式错误/无法读取）。`TaskInput` 只接受 `Held`，其余一律拒绝并说明原因（`owner_lost` 结构化结果的 `bytes_written` 保留已接受字节）；`TaskGet` 仍可读，`task_status` 仅对确认已死的拥有者报 `unresponsive`，缺失或格式错误的身份按 heartbeat 维持原有可读行为。
