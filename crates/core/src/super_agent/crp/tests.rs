@@ -476,6 +476,44 @@ fn router_and_member_can_exchange_messages_through_the_session_queue() {
     assert_eq!(inbox.len(), 1);
     assert_eq!(inbox[0].content, "Please focus on tests");
 
+    // A crash between delivery and event recording is repeated from the same
+    // operation: the member sees one message and the task records one event.
+    let delivered = crate::services::session_messages::send_once(
+        &context,
+        "crp-send:send-retry",
+        &fixture.router,
+        &fixture.coder,
+        "crash retry",
+    )
+    .unwrap();
+    for _ in 0..2 {
+        let sent = execute(
+            &fixture.runtime,
+            "CrpSend",
+            json!({"task_id": task.task_id, "to":"coder", "content":"crash retry"}),
+            "send-retry",
+        )
+        .unwrap();
+        assert_eq!(sent["message_id"], delivered.id);
+    }
+    let inbox = crate::services::session_messages::inbox(&context, &fixture.coder, false).unwrap();
+    assert_eq!(
+        inbox
+            .iter()
+            .filter(|message| message.content == "crash retry")
+            .count(),
+        1
+    );
+    let events = fixture.store().events(&task.task_id).unwrap();
+    assert_eq!(
+        events
+            .iter()
+            .filter(|event| event.event_type == EventType::MessageSent
+                && event.payload["message_id"] == delivered.id)
+            .count(),
+        1
+    );
+
     // An unknown member is rejected instead of guessing a recipient.
     let error = execute(
         &fixture.runtime,

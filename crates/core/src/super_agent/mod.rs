@@ -11,6 +11,7 @@ pub mod launcher;
 pub mod model;
 pub mod orchestrator;
 pub mod prompt;
+pub mod review;
 pub mod role;
 pub mod state;
 pub mod store;

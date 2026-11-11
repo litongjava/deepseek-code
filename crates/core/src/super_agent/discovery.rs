@@ -455,6 +455,59 @@ fn authorize(path: &Path, options: &DiscoveryOptions) -> Result<()> {
     anyhow::bail!("Target {} is outside the authorized roots", path.display())
 }
 
+/// Resolves a model-supplied path without following a symlink out of the
+/// authorized roots. A path that does not exist yet is resolved from its
+/// deepest existing ancestor, and `..` components remaining in the missing
+/// suffix are rejected instead of being collapsed optimistically.
+pub fn resolve_authorized_path(path: &Path, roots: &[PathBuf]) -> Result<PathBuf> {
+    ensure!(
+        path.is_absolute(),
+        "Path must be absolute: {}",
+        path.display()
+    );
+    let resolved = resolve_with_missing_components(path)?;
+    let mut usable = 0;
+    for root in roots {
+        let Ok(root) = root.canonicalize() else {
+            continue;
+        };
+        usable += 1;
+        if resolved.starts_with(&root) {
+            return Ok(resolved);
+        }
+    }
+    ensure!(usable > 0, "No authorized root is available");
+    anyhow::bail!(
+        "Path {} is outside the Router's authorized workspace and granted directories",
+        resolved.display()
+    )
+}
+
+fn resolve_with_missing_components(path: &Path) -> Result<PathBuf> {
+    let mut existing = path.to_path_buf();
+    let mut missing = Vec::new();
+    while !existing.exists() {
+        let name = existing
+            .file_name()
+            .with_context(|| format!("Path {} has no existing ancestor", path.display()))?;
+        ensure!(
+            name != ".." && name != ".",
+            "Path {} contains an unresolved parent component",
+            path.display()
+        );
+        missing.push(name.to_os_string());
+        existing = existing
+            .parent()
+            .with_context(|| format!("Path {} has no existing ancestor", path.display()))?
+            .to_path_buf();
+    }
+    let mut resolved = existing.canonicalize()?;
+    for component in missing.iter().rev() {
+        resolved.push(component);
+    }
+    Ok(resolved)
+}
+
 fn git_ok(run: GitRunner<'_>, cwd: &Path, args: &[&str]) -> Result<String> {
     let output = run(cwd, args)?;
     ensure!(

@@ -30,7 +30,7 @@ pub struct LaunchRecord {
     pub created_at: String,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct LaunchOutcome {
     pub session_id: String,
     pub job_id: String,
@@ -38,6 +38,16 @@ pub struct LaunchOutcome {
     pub model: String,
     pub warning: Option<String>,
     pub resumed: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct LaunchIntent {
+    role: String,
+    workspace: PathBuf,
+    /// `pending` before the process is started, `completed` after the result is
+    /// recorded, `failed` when the launch returned before a process existed.
+    state: String,
+    at: String,
 }
 
 #[derive(Clone)]
@@ -117,6 +127,8 @@ impl Launcher {
             &prompt,
             model.id,
             warning,
+            &initial_intent_key(&task.task_id, MemberRole::Coder),
+            false,
         )
         .await
     }
@@ -142,6 +154,8 @@ impl Launcher {
             instruction,
             model.id,
             warning,
+            &resume_intent_key(task, MemberRole::Coder),
+            false,
         )
         .await
     }
@@ -150,8 +164,9 @@ impl Launcher {
     /// It never sees the Coder's writable worktree.
     pub async fn launch_reviewer(&self, task: &TaskRecord) -> Result<LaunchOutcome> {
         let workspace = self.prepare_review_workspace(task)?;
+        let request = crate::super_agent::review::build_review_request(&self.store(), task)?;
         let (model, warning) = self.resolve_model(AgentModelRole::Reviewer);
-        let prompt = reviewer_prompt(task);
+        let prompt = reviewer_prompt(task, &request);
         self.spawn(
             task,
             MemberRole::Reviewer,
@@ -160,6 +175,34 @@ impl Launcher {
             &prompt,
             model.id,
             warning,
+            &initial_intent_key(&task.task_id, MemberRole::Reviewer),
+            false,
+        )
+        .await
+    }
+
+    /// Continues the same Reviewer for a new review round after the Coder
+    /// resubmitted a corrected implementation.
+    pub async fn resume_reviewer(&self, task: &TaskRecord) -> Result<LaunchOutcome> {
+        let session = task
+            .reviewer
+            .session_id
+            .clone()
+            .context("Task has no Reviewer session to resume")?;
+        let workspace = self.prepare_review_workspace(task)?;
+        let request = crate::super_agent::review::build_review_request(&self.store(), task)?;
+        let (model, warning) = self.resolve_model(AgentModelRole::Reviewer);
+        let prompt = reviewer_prompt(task, &request);
+        self.spawn(
+            task,
+            MemberRole::Reviewer,
+            &workspace,
+            Some(&session),
+            &prompt,
+            model.id,
+            warning,
+            &resume_intent_key(task, MemberRole::Reviewer),
+            true,
         )
         .await
     }
@@ -186,6 +229,8 @@ impl Launcher {
         prompt: &str,
         model: String,
         warning: Option<String>,
+        intent_key: &str,
+        allow_workspace_move: bool,
     ) -> Result<LaunchOutcome> {
         // A recorded launch for the same member and workspace is not repeated:
         // a tick must never create a duplicate session or job.
@@ -207,6 +252,27 @@ impl Launcher {
                 });
             }
         }
+        // The intent is written before the process starts. If a crash happens
+        // after the spawn but before the record/marker is saved, the next tick
+        // must not start a second process or repeat the instruction.
+        if let Some(intent) = self.context.setting::<LaunchIntent>(intent_key)? {
+            if intent.state != "failed" {
+                anyhow::bail!(
+                    "A previous {} launch (state {}) was recorded but not completed; inspect its session/job before retrying",
+                    intent.role,
+                    intent.state
+                );
+            }
+        }
+        self.context.save_setting(
+            intent_key,
+            &LaunchIntent {
+                role: member.as_str().into(),
+                workspace: workspace.to_path_buf(),
+                state: "pending".into(),
+                at: chrono::Utc::now().to_rfc3339(),
+            },
+        )?;
         let mut extra_env = Vec::new();
         if let Some(warning) = &warning {
             // The member records the fallback in its own transcript evidence.
@@ -215,7 +281,7 @@ impl Launcher {
                 warning.clone(),
             ));
         }
-        let handle: ChildHandle = spawn_child_session(
+        let spawned = spawn_child_session(
             ChildLaunchConfig {
                 provider: self.provider.clone(),
                 permission_mode: self.permission_mode.clone(),
@@ -237,9 +303,25 @@ impl Launcher {
                 executable_override: self.executable_override.clone(),
                 invocation: None,
                 member_binding: resume.is_none().then(|| (task.task_id.clone(), member)),
+                allow_workspace_move,
             },
         )
-        .await?;
+        .await;
+        let handle: ChildHandle = match spawned {
+            Ok(handle) => handle,
+            Err(error) => {
+                self.context.save_setting(
+                    intent_key,
+                    &LaunchIntent {
+                        role: member.as_str().into(),
+                        workspace: workspace.to_path_buf(),
+                        state: "failed".into(),
+                        at: chrono::Utc::now().to_rfc3339(),
+                    },
+                )?;
+                return Err(error);
+            }
+        };
         let record = LaunchRecord {
             role: member.as_str().into(),
             session_id: handle.session_id.clone(),
@@ -250,6 +332,15 @@ impl Launcher {
             created_at: chrono::Utc::now().to_rfc3339(),
         };
         self.save_record(&task.task_id, &record)?;
+        self.context.save_setting(
+            intent_key,
+            &LaunchIntent {
+                role: member.as_str().into(),
+                workspace: handle.workspace.clone(),
+                state: "completed".into(),
+                at: chrono::Utc::now().to_rfc3339(),
+            },
+        )?;
         Ok(LaunchOutcome {
             session_id: handle.session_id,
             job_id: handle.job_id,
@@ -261,10 +352,6 @@ impl Launcher {
     }
 
     fn prepare_review_workspace(&self, task: &TaskRecord) -> Result<PathBuf> {
-        ensure!(
-            !task.repositories.is_empty(),
-            "Reviewing a non-Git task needs the snapshot evidence path, which is not implemented yet"
-        );
         let mut roots = Vec::new();
         for repo in &task.repositories {
             let commit = repo
@@ -275,6 +362,7 @@ impl Launcher {
                 &repo.repo_root,
                 commit,
                 &task.task_id,
+                task.review_round,
             )?;
             ensure!(
                 worktree.base_commit == commit,
@@ -282,6 +370,15 @@ impl Launcher {
             );
             roots.push(worktree.worktree_root);
         }
+        for target in &task.non_git_targets {
+            roots.push(crate::super_agent::review::prepare_non_git_review(
+                &self.context.paths.data_dir,
+                &task.task_id,
+                task.review_round,
+                target,
+            )?);
+        }
+        ensure!(!roots.is_empty(), "The task has no reviewable target");
         if roots.len() == 1 {
             return Ok(roots.remove(0));
         }
@@ -291,7 +388,7 @@ impl Launcher {
             .data_dir
             .join("super-agent")
             .join(&task.task_id)
-            .join("review-workspace");
+            .join(format!("review-workspace-{}", task.review_round));
         std::fs::create_dir_all(&workspace)?;
         for (index, root) in roots.iter().enumerate() {
             let link = workspace.join(format!("review-{}", index + 1));
@@ -305,6 +402,20 @@ impl Launcher {
 
 fn launch_key(task_id: &str, role: &str) -> String {
     format!("super-agent.launch.{task_id}.{role}")
+}
+
+fn initial_intent_key(task_id: &str, role: MemberRole) -> String {
+    format!("super-agent.launch-intent.{task_id}.{}", role.as_str())
+}
+
+fn resume_intent_key(task: &TaskRecord, role: MemberRole) -> String {
+    format!(
+        "super-agent.launch-intent.{}.{}.resume.{}.{}",
+        task.task_id,
+        role.as_str(),
+        task.spec_version,
+        task.review_round
+    )
 }
 
 #[cfg(unix)]
@@ -360,7 +471,7 @@ pub fn coder_implementation_prompt(task: &TaskRecord) -> String {
     )
 }
 
-pub fn reviewer_prompt(task: &TaskRecord) -> String {
+pub fn reviewer_prompt(task: &TaskRecord, review_request: &serde_json::Value) -> String {
     let versions: Vec<String> = task
         .repositories
         .iter()
@@ -370,8 +481,9 @@ pub fn reviewer_prompt(task: &TaskRecord) -> String {
                 .map(|commit| format!("{} at {commit}", repo.repository_id))
         })
         .collect();
+    let request = serde_json::to_string_pretty(review_request).unwrap_or_default();
     format!(
-        "Task {}: {}\n\nReview the submitted implementation ({}). Verify every acceptance criterion against the code, then submit CrpSubmit(kind=\"review\") and CrpSubmit(kind=\"harness\").",
+        "Task {}: {}\n\nThe host pinned the submitted implementation ({}). Review every acceptance criterion independently. Use SessionMetadata, SessionMessages, SessionEvents, SessionChildren and ArtifactRead to inspect the Coder session tree; they are read-only and scoped to this task. Then submit CrpSubmit(kind=\"review\") and CrpSubmit(kind=\"harness\"). Both reports are required before the host decides the outcome.\n\nreview_request:\n```json\n{request}\n```",
         task.task_id,
         task.title,
         versions.join(", ")

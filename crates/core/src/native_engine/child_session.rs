@@ -71,6 +71,9 @@ pub struct ChildSpawn {
     /// Bind this child as the current Coder or Reviewer of a task before its
     /// process starts, so the first turn already has member tools.
     pub member_binding: Option<(String, crate::super_agent::MemberRole)>,
+    /// A host may move a reviewer to a new round-scoped checkout. Ordinary
+    /// Agent-tool children keep the default refusal.
+    pub allow_workspace_move: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -192,12 +195,24 @@ pub async fn spawn_child_session(
                 .context("Child session has no recorded workspace")?;
             let stored = canonical_directory(Path::new(stored))?;
             if let Some(requested) = &requested_workspace {
-                ensure!(
-                    &stored == requested,
-                    "A resumed child keeps its existing workspace at {}; refusing to move it to {}",
-                    stored.display(),
-                    requested.display()
-                );
+                if &stored != requested {
+                    ensure!(
+                        spawn.allow_workspace_move,
+                        "A resumed child keeps its existing workspace at {}; refusing to move it to {}",
+                        stored.display(),
+                        requested.display()
+                    );
+                    context.db.with_conn(|conn| -> Result<usize> {
+                        Ok(conn.execute(
+                            "UPDATE conversations SET workspace_path=?1, updated_at=?2 WHERE id=?3",
+                            rusqlite::params![
+                                requested.to_string_lossy(),
+                                chrono::Utc::now().to_rfc3339(),
+                                session
+                            ],
+                        )?)
+                    })??;
+                }
             }
             (session.to_owned(), true)
         }
@@ -662,6 +677,7 @@ mod tests {
             executable_override: None,
             invocation: None,
             member_binding: None,
+            allow_workspace_move: false,
         }
     }
 

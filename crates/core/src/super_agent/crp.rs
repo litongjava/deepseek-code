@@ -52,7 +52,9 @@ impl ToolRuntime {
 }
 
 pub fn handles(name: &str) -> bool {
-    ROUTER_TOOL_NAMES.contains(&name) || MEMBER_TOOL_NAMES.contains(&name)
+    ROUTER_TOOL_NAMES.contains(&name)
+        || MEMBER_TOOL_NAMES.contains(&name)
+        || crate::super_agent::review::handles(name)
 }
 
 pub fn is_forbidden_router_tool(name: &str) -> bool {
@@ -61,6 +63,171 @@ pub fn is_forbidden_router_tool(name: &str) -> bool {
 
 fn text(description: &str, properties: Value, required: &[&str]) -> Value {
     json!({"type":"object","properties":properties,"required":required,"additionalProperties":false,"description":description})
+}
+
+fn report_payload_schema(kind: ReportKind) -> Value {
+    let common = json!({
+        "spec_version":{"type":"integer","minimum":1},
+        "round":{"type":"integer","minimum":0}
+    });
+    let mut properties = common.as_object().cloned().unwrap_or_default();
+    match kind {
+        ReportKind::Plan => {
+            for (name, schema) in [
+                ("understanding", json!({"type":"string"})),
+                ("scope", json!({"type":"array","items":{"type":"string"}})),
+                ("steps", json!({"type":"array","items":{"type":"string"}})),
+                (
+                    "verification",
+                    json!({"type":"array","items":{"type":"string"}}),
+                ),
+                ("risks", json!({"type":"array","items":{"type":"string"}})),
+            ] {
+                properties.insert(name.into(), schema);
+            }
+            json!({
+                "type":"object",
+                "properties":properties,
+                "required":["spec_version","understanding"],
+                "additionalProperties":false
+            })
+        }
+        ReportKind::Implementation => {
+            properties.insert("summary".into(), json!({"type":"string"}));
+            properties.insert(
+                "tests".into(),
+                json!({"type":"array","items":{"type":"object","properties":{
+                    "command":{"type":"string"},
+                    "passed":{"type":"boolean"},
+                    "evidence_ref":{"type":"string"}
+                },"required":["command","passed"],"additionalProperties":false}}),
+            );
+            properties.insert(
+                "commits".into(),
+                json!({"type":"array","items":{"type":"string"}}),
+            );
+            json!({
+                "type":"object",
+                "properties":properties,
+                "required":["spec_version","summary"],
+                "additionalProperties":false
+            })
+        }
+        ReportKind::Review => {
+            properties.insert(
+                "verdict".into(),
+                json!({"type":"string","enum":["APPROVED","CHANGES_REQUESTED","BLOCKED"]}),
+            );
+            properties.insert(
+                "stage".into(),
+                json!({"type":"string","enum":["IMPLEMENTATION","FINAL_DELIVERY"]}),
+            );
+            properties.insert(
+                "reviewed_versions".into(),
+                json!({"type":"array","items":{"type":"object","properties":{
+                    "repository_id":{"type":"string"},
+                    "commit":{"type":"string"},
+                    "snapshot_ref":{"type":"string"}
+                },"required":["repository_id"],"additionalProperties":false}}),
+            );
+            properties.insert(
+                "acceptance_results".into(),
+                json!({"type":"array","items":{"type":"object","properties":{
+                    "criterion":{"type":"string"},
+                    "passed":{"type":"boolean"},
+                    "evidence":{"type":"array","items":{"type":"string"}}
+                },"required":["criterion","passed"],"additionalProperties":false}}),
+            );
+            properties.insert(
+                "issues".into(),
+                json!({"type":"array","items":{"type":"object","properties":{
+                    "severity":{"type":"string","enum":["LOW","MEDIUM","HIGH","CRITICAL"]},
+                    "location":{"type":"string"},
+                    "description":{"type":"string"},
+                    "expected":{"type":"string"}
+                },"required":["severity","location","description"],"additionalProperties":false}}),
+            );
+            properties.insert(
+                "verification".into(),
+                json!({"type":"array","items":{"type":"string"}}),
+            );
+            properties.insert(
+                "limitations".into(),
+                json!({"type":"array","items":{"type":"string"}}),
+            );
+            json!({
+                "type":"object",
+                "properties":properties,
+                "required":["verdict","spec_version","stage","reviewed_versions","acceptance_results"],
+                "additionalProperties":false
+            })
+        }
+        ReportKind::Harness => {
+            properties.insert(
+                "findings".into(),
+                json!({"type":"array","items":{"type":"object","properties":{
+                    "category":{"type":"string","enum":["MODEL","HARNESS","TOOL","ENVIRONMENT","REQUIREMENT_AMBIGUITY"]},
+                    "severity":{"type":"string","enum":["LOW","MEDIUM","HIGH","CRITICAL"]},
+                    "phenomenon":{"type":"string"},
+                    "evidence":{"type":"array","items":{"type":"string"}},
+                    "impact":{"type":"string"},
+                    "probable_cause":{"type":"string"},
+                    "confidence":{"type":"number","minimum":0,"maximum":1},
+                    "suggestion":{"type":"string"},
+                    "validation":{"type":"string"},
+                    "create_task":{"type":"boolean"}
+                },"required":["category","severity","phenomenon"],"additionalProperties":false}}),
+            );
+            properties.insert(
+                "notes".into(),
+                json!({"type":"array","items":{"type":"string"}}),
+            );
+            json!({
+                "type":"object",
+                "properties":properties,
+                "required":["spec_version"],
+                "additionalProperties":false
+            })
+        }
+        ReportKind::Integration => {
+            properties.insert(
+                "targets".into(),
+                json!({"type":"array","items":{"type":"object","properties":{
+                    "repository_id":{"type":"string"},
+                    "target_branch":{"type":"string"},
+                    "before_commit":{"type":"string"},
+                    "after_commit":{"type":"string"},
+                    "conflict":{"type":"boolean"},
+                    "tests_passed":{"type":"boolean"},
+                    "issues":{"type":"array","items":{"type":"string"}}
+                },"required":["repository_id","target_branch"],"additionalProperties":false}}),
+            );
+            json!({
+                "type":"object",
+                "properties":properties,
+                "required":["spec_version","targets"],
+                "additionalProperties":false
+            })
+        }
+    }
+}
+
+fn submit_schema() -> Value {
+    json!({
+        "type":"object",
+        "properties":{
+            "kind":{"type":"string","enum":["plan","implementation","review","harness","integration"]},
+            "payload":{"oneOf":[
+                report_payload_schema(ReportKind::Plan),
+                report_payload_schema(ReportKind::Implementation),
+                report_payload_schema(ReportKind::Review),
+                report_payload_schema(ReportKind::Harness),
+                report_payload_schema(ReportKind::Integration)
+            ]}
+        },
+        "required":["kind","payload"],
+        "additionalProperties":false
+    })
 }
 
 pub fn definitions(role: Role, member: Option<MemberRole>) -> Vec<ToolDefinition> {
@@ -151,15 +318,8 @@ pub fn definitions(role: Role, member: Option<MemberRole>) -> Vec<ToolDefinition
     if member.is_some() {
         definitions.push(ToolDefinition {
             name: "CrpSubmit".into(),
-            description: "Submit the task report for the current role. Coder: plan, implementation, integration. Reviewer: review, harness. The payload must be the typed report body; the host validates it and records the event without applying state.".into(),
-            input_schema: text(
-                "Submit a task report",
-                json!({
-                    "kind":{"type":"string","enum":["plan","implementation","review","harness","integration"]},
-                    "payload":{"type":"object"}
-                }),
-                &["kind","payload"],
-            ),
+            description: "Submit the task report for the current role. Coder: plan, implementation, integration. Reviewer: review, harness. The payload must match the typed schema for that kind; the host validates it and records the event without applying state.".into(),
+            input_schema: submit_schema(),
         });
         definitions.push(ToolDefinition {
             name: "CrpProposeTask".into(),
@@ -170,6 +330,9 @@ pub fn definitions(role: Role, member: Option<MemberRole>) -> Vec<ToolDefinition
                 &["proposal"],
             ),
         });
+    }
+    if member == Some(MemberRole::Reviewer) {
+        definitions.extend(crate::super_agent::review::definitions());
     }
     definitions
 }
@@ -188,6 +351,9 @@ pub fn execute(
     tool_use_id: &str,
 ) -> Result<Value> {
     ensure!(input.is_object(), "Tool input must be an object");
+    if crate::super_agent::review::handles(name) {
+        return crate::super_agent::review::execute(runtime, name, input);
+    }
     let context = runtime.context()?;
     match name {
         "CrpCreate" => create(runtime, &context, input, tool_use_id),
@@ -373,8 +539,14 @@ fn send(
         other => anyhow::bail!("Unknown member {other}; use coder or reviewer"),
     }?;
     let content = input["content"].as_str().context("content is required")?;
-    let message =
-        crate::services::session_messages::send(context, &runtime.session_id, &recipient, content)?;
+    let operation_id = operation(tool_use_id, "crp-send")?;
+    let message = crate::services::session_messages::send_once(
+        context,
+        &operation_id,
+        &runtime.session_id,
+        &recipient,
+        content,
+    )?;
     let append: EventAppend = store
         .ingest_event(
             task_id,
@@ -383,7 +555,7 @@ fn send(
                 run_id: None,
                 event_type: EventType::MessageSent,
                 causation_id: None,
-                operation_id: operation(tool_use_id, "crp-send")?,
+                operation_id,
                 payload: json!({"to":to,"message_id":message.id,"bytes":content.len()}),
             },
         )
@@ -521,6 +693,24 @@ fn submit(runtime: &ToolRuntime, input: Value, tool_use_id: &str) -> Result<Valu
     };
     let payload = input["payload"].clone();
     ensure!(payload.is_object(), "payload must be an object");
+    if report_kind == ReportKind::Review {
+        let expected = match task.phase {
+            Phase::Reviewing => crate::super_agent::ReviewStage::Implementation,
+            Phase::FinalReview => crate::super_agent::ReviewStage::FinalDelivery,
+            other => anyhow::bail!(
+                "A review report is not accepted while the task is {}",
+                other.as_str()
+            ),
+        };
+        let body: crate::super_agent::TaskReviewReport =
+            serde_json::from_value(payload.clone()).context("Invalid review report body")?;
+        ensure!(
+            body.stage == expected,
+            "Review stage {} does not match the current review stage {}",
+            body.stage.as_str(),
+            expected.as_str()
+        );
+    }
     let report = store
         .add_report(
             &operation(tool_use_id, "crp-report")?,
@@ -540,9 +730,11 @@ fn submit(runtime: &ToolRuntime, input: Value, tool_use_id: &str) -> Result<Valu
                 payload["verdict"].is_string(),
                 "Review reports must include a verdict"
             );
-            EventType::ReviewCompleted
+            // The host decides the outcome only after both the review and the
+            // harness reports are present; this event is a durable submission.
+            EventType::ReviewSubmitted
         }
-        ReportKind::Harness => EventType::HarnessAnalysisCompleted,
+        ReportKind::Harness => EventType::HarnessSubmitted,
     };
     let mut payload = json!({"report_id":report.report_id,"to":member.as_str()});
     if let Some(verdict) = payload_value(&report.body)["verdict"].as_str() {

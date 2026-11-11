@@ -823,6 +823,7 @@ impl ToolLoopExecutor {
                     }
                 }),
                 member_binding: None,
+                allow_workspace_move: false,
             },
         )
         .await?;

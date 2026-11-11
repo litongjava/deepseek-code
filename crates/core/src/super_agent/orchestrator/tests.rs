@@ -452,3 +452,436 @@ fn approval_draft_requires_the_current_contract() {
         .unwrap();
     assert_eq!(approval.task_spec_version, task.spec_version + 1);
 }
+
+fn external_repository(root: &Path) -> PathBuf {
+    std::fs::create_dir_all(root).unwrap();
+    git(root, &["init", "-q", "-b", "main"]);
+    git(root, &["config", "user.email", "test@example.invalid"]);
+    git(root, &["config", "user.name", "Test"]);
+    std::fs::write(root.join("file.txt"), "outside\n").unwrap();
+    git(root, &["add", "."]);
+    git(root, &["commit", "-q", "-m", "initial"]);
+    git(root, &["switch", "-q", "-c", "develop"]);
+    root.canonicalize().unwrap()
+}
+
+#[tokio::test]
+async fn a_self_declared_external_workspace_is_rejected_before_any_mutation() {
+    let fixture = Fixture::new();
+    let outside = tempfile::tempdir().unwrap();
+    let repo = external_repository(&outside.path().join("repo"));
+    let mut spec = fixture.spec();
+    spec.workspace = outside.path().to_path_buf();
+    spec.targets = vec![repo.to_string_lossy().into_owned()];
+    let task = fixture
+        .store()
+        .create_task(&fixture.router, spec, "create-external")
+        .unwrap();
+    let orchestrator = fixture.orchestrator(json!({}));
+    let report = orchestrator.tick(&fixture.router).await.unwrap();
+    assert!(!report.blocked.is_empty(), "{report:?}");
+    let task = fixture.store().get_task(&task.task_id).unwrap().unwrap();
+    assert!(task.repositories.is_empty());
+    assert!(task.non_git_targets.is_empty());
+    assert!(task.coder.session_id.is_none());
+    assert!(!fixture.data.join("super-agent").join(&task.task_id).exists());
+    assert_eq!(
+        std::fs::read_to_string(repo.join("file.txt")).unwrap(),
+        "outside\n"
+    );
+}
+
+#[tokio::test]
+async fn an_explicitly_granted_additional_directory_is_accepted() {
+    let fixture = Fixture::new();
+    let outside = tempfile::tempdir().unwrap();
+    let repo = external_repository(&outside.path().join("repo"));
+    std::fs::write(
+        fixture.data.join("settings.json"),
+        serde_json::to_vec(&json!({
+            "permissions": {"additionalDirectories": [outside.path().to_string_lossy()]}
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+    let mut spec = fixture.spec();
+    spec.workspace = outside.path().to_path_buf();
+    spec.targets = vec![repo.to_string_lossy().into_owned()];
+    let task = fixture
+        .store()
+        .create_task(&fixture.router, spec, "create-granted")
+        .unwrap();
+    let orchestrator = fixture.orchestrator(json!({}));
+    let report = orchestrator.tick(&fixture.router).await.unwrap();
+    assert_eq!(report.blocked, Vec::<String>::new(), "{report:?}");
+    let task = fixture.store().get_task(&task.task_id).unwrap().unwrap();
+    assert_eq!(task.repositories.len(), 1);
+    assert!(task.coder.session_id.is_some(), "{task:?}");
+}
+
+async fn reviewing_task(fixture: &Fixture) -> (TaskRecord, String) {
+    let task = fixture.task();
+    let orchestrator = fixture.orchestrator(json!({}));
+    let report = orchestrator.tick(&fixture.router).await.unwrap();
+    assert_eq!(report.blocked, Vec::<String>::new(), "{report:?}");
+    let store = fixture.store();
+    let policy = StatePolicy::default();
+    for (event_type, payload) in [
+        (
+            EventType::ApprovalRequested,
+            json!({"request_type":"PLAN"}),
+        ),
+        (
+            EventType::ApprovalResolved,
+            json!({"request_type":"PLAN","decision":"APPROVED"}),
+        ),
+        (EventType::ImplementationSubmitted, json!({})),
+    ] {
+        store
+            .apply_event(
+                &task.task_id,
+                NewEvent {
+                    session_id: None,
+                    run_id: None,
+                    event_type,
+                    causation_id: None,
+                    operation_id: format!("fixture-{}", event_type.as_str()),
+                    payload,
+                },
+                &policy,
+            )
+            .unwrap();
+    }
+    let task = store.get_task(&task.task_id).unwrap().unwrap();
+    assert_eq!(task.phase, Phase::Reviewing);
+    let report = orchestrator.tick(&fixture.router).await.unwrap();
+    assert_eq!(report.blocked, Vec::<String>::new(), "{report:?}");
+    let task = store.get_task(&task.task_id).unwrap().unwrap();
+    let reviewer = task.reviewer.session_id.clone().unwrap();
+    assert!(report.launched.iter().any(|line| line.contains("reviewer")), "{report:?}");
+    (task, reviewer)
+}
+
+fn submit_review(fixture: &Fixture, reviewer: &str, task: &TaskRecord, verdict: &str) {
+    let value = crp::execute(
+        &fixture.runtime_for(reviewer),
+        "CrpSubmit",
+        json!({"kind":"review","payload":{
+            "verdict": verdict,
+            "spec_version": task.spec_version,
+            "round": task.review_round,
+            "stage": "IMPLEMENTATION",
+            "reviewed_versions": [],
+            "acceptance_results": [],
+            "issues": [{"severity":"LOW","location":"file.txt","description":"missing test","expected":"add a test"}],
+            "verification": [],
+            "limitations": []
+        }}),
+        &format!("review-{verdict}-{}", task.review_round),
+    )
+    .unwrap();
+    assert_eq!(value["kind"], "REVIEW");
+}
+
+fn submit_harness(fixture: &Fixture, reviewer: &str, task: &TaskRecord, findings: Value) {
+    crp::execute(
+        &fixture.runtime_for(reviewer),
+        "CrpSubmit",
+        json!({"kind":"harness","payload":{
+            "spec_version": task.spec_version,
+            "round": task.review_round,
+            "findings": findings,
+            "notes": []
+        }}),
+        &format!("harness-{}", task.review_round),
+    )
+    .unwrap();
+}
+
+#[tokio::test]
+async fn a_review_waits_for_the_harness_report_in_either_arrival_order() {
+    for review_first in [true, false] {
+        let fixture = Fixture::new();
+        let (task, reviewer) = reviewing_task(&fixture).await;
+        let orchestrator = fixture.orchestrator(json!({}));
+        if review_first {
+            submit_review(&fixture, &reviewer, &task, "APPROVED");
+            let report = orchestrator.tick(&fixture.router).await.unwrap();
+            assert_eq!(report.blocked, Vec::<String>::new(), "{report:?}");
+            let current = fixture.store().get_task(&task.task_id).unwrap().unwrap();
+            assert_eq!(current.phase, Phase::Reviewing);
+            assert!(!fixture.store().events(&task.task_id).unwrap().iter().any(
+                |event| event.event_type == EventType::ReviewCompleted
+            ));
+            submit_harness(&fixture, &reviewer, &task, json!([]));
+        } else {
+            submit_harness(&fixture, &reviewer, &task, json!([]));
+            let report = orchestrator.tick(&fixture.router).await.unwrap();
+            assert_eq!(report.blocked, Vec::<String>::new(), "{report:?}");
+            let current = fixture.store().get_task(&task.task_id).unwrap().unwrap();
+            assert_eq!(current.phase, Phase::Reviewing);
+            submit_review(&fixture, &reviewer, &task, "APPROVED");
+        }
+        let report = orchestrator.tick(&fixture.router).await.unwrap();
+        assert_eq!(report.blocked, Vec::<String>::new(), "{report:?}");
+        let current = fixture.store().get_task(&task.task_id).unwrap().unwrap();
+        assert_eq!(current.phase, Phase::Integrating);
+        assert!(fixture.store().events(&task.task_id).unwrap().iter().any(
+            |event| event.event_type == EventType::ReviewCompleted
+                && event.payload["verdict"] == "APPROVED"
+        ));
+    }
+}
+
+#[tokio::test]
+async fn changes_requested_resumes_the_same_coder_with_round_and_issues() {
+    let fixture = Fixture::new();
+    let (task, reviewer) = reviewing_task(&fixture).await;
+    let original_coder = task.coder.session_id.clone().unwrap();
+    submit_review(&fixture, &reviewer, &task, "CHANGES_REQUESTED");
+    submit_harness(&fixture, &reviewer, &task, json!([]));
+    let orchestrator = fixture.orchestrator(json!({}));
+    let report = orchestrator.tick(&fixture.router).await.unwrap();
+    assert_eq!(report.blocked, Vec::<String>::new(), "{report:?}");
+    let current = fixture.store().get_task(&task.task_id).unwrap().unwrap();
+    assert_eq!(current.phase, Phase::Implementing);
+    assert_eq!(current.review_round, task.review_round + 1);
+    assert_eq!(current.coder.session_id.as_deref(), Some(original_coder.as_str()));
+    assert!(report
+        .launched
+        .iter()
+        .any(|line| line.contains("(changes)")), "{report:?}");
+    let marker = format!(
+        "super-agent.resume-changes.{}.{}.{}",
+        task.task_id, task.spec_version, current.review_round
+    );
+    assert!(fixture.context.setting::<Value>(&marker).unwrap().is_some());
+
+    // The corrected implementation is pinned again and the same Reviewer is
+    // resumed for the new round.
+    let worktree = current.repositories[0].working_path.clone();
+    std::fs::write(worktree.join("file.txt"), "fixed\n").unwrap();
+    git(&worktree, &["add", "."]);
+    git(&worktree, &["commit", "-qm", "fix review issues"]);
+    crp::execute(
+        &fixture.runtime_for(&original_coder),
+        "CrpSubmit",
+        json!({"kind":"implementation","payload":{
+            "spec_version": current.spec_version,
+            "round": current.review_round,
+            "summary": "fixed"
+        }}),
+        "implementation-round-1",
+    )
+    .unwrap();
+    let report = orchestrator.tick(&fixture.router).await.unwrap();
+    assert_eq!(report.blocked, Vec::<String>::new(), "{report:?}");
+    let reviewing = fixture.store().get_task(&task.task_id).unwrap().unwrap();
+    assert_eq!(reviewing.phase, Phase::Reviewing);
+    assert_eq!(reviewing.reviewer.session_id, current.reviewer.session_id);
+    assert!(report
+        .launched
+        .iter()
+        .any(|line| line.contains("reviewer") && line.contains("round 1")), "{report:?}");
+    let reviewer_marker = format!(
+        "super-agent.reviewer-resume.{}.{}.{}",
+        task.task_id, reviewing.spec_version, reviewing.review_round
+    );
+    assert!(fixture
+        .context
+        .setting::<Value>(&reviewer_marker)
+        .unwrap()
+        .is_some());
+}
+
+#[tokio::test]
+async fn a_blocking_harness_finding_creates_a_delivery_blocker_approval() {
+    let fixture = Fixture::new();
+    let (task, reviewer) = reviewing_task(&fixture).await;
+    submit_review(&fixture, &reviewer, &task, "APPROVED");
+    submit_harness(
+        &fixture,
+        &reviewer,
+        &task,
+        json!([{
+            "category":"HARNESS",
+            "severity":"CRITICAL",
+            "phenomenon":"The harness lost tool output",
+            "create_task": true
+        }]),
+    );
+    let orchestrator = fixture.orchestrator(json!({}));
+    let report = orchestrator.tick(&fixture.router).await.unwrap();
+    assert_eq!(report.blocked, Vec::<String>::new(), "{report:?}");
+    let current = fixture.store().get_task(&task.task_id).unwrap().unwrap();
+    assert_eq!(current.status, Status::Blocked);
+    let approvals = fixture.store().approvals(&task.task_id).unwrap();
+    assert!(approvals.iter().any(|approval| {
+        approval.request_type == crate::super_agent::ApprovalType::DeliveryBlocker
+            && approval.status == crate::super_agent::ApprovalStatus::Pending
+    }));
+    assert!(fixture.store().events(&task.task_id).unwrap().iter().any(
+        |event| event.event_type == EventType::NewTaskProposed
+    ));
+}
+
+#[tokio::test]
+async fn efficiency_findings_do_not_block_an_approved_review() {
+    let fixture = Fixture::new();
+    let (task, reviewer) = reviewing_task(&fixture).await;
+    submit_review(&fixture, &reviewer, &task, "APPROVED");
+    submit_harness(
+        &fixture,
+        &reviewer,
+        &task,
+        json!([{
+            "category":"MODEL",
+            "severity":"CRITICAL",
+            "phenomenon":"The model searched twice"
+        }]),
+    );
+    let orchestrator = fixture.orchestrator(json!({}));
+    let report = orchestrator.tick(&fixture.router).await.unwrap();
+    assert_eq!(report.blocked, Vec::<String>::new(), "{report:?}");
+    let current = fixture.store().get_task(&task.task_id).unwrap().unwrap();
+    assert_eq!(current.phase, Phase::Integrating);
+}
+
+fn transition_to_reviewing(fixture: &Fixture, task_id: &str) {
+    let store = fixture.store();
+    let policy = StatePolicy::default();
+    for (event_type, payload) in [
+        (
+            EventType::ApprovalRequested,
+            json!({"request_type":"PLAN"}),
+        ),
+        (
+            EventType::ApprovalResolved,
+            json!({"request_type":"PLAN","decision":"APPROVED"}),
+        ),
+        (EventType::ImplementationSubmitted, json!({})),
+    ] {
+        store
+            .apply_event(
+                task_id,
+                NewEvent {
+                    session_id: None,
+                    run_id: None,
+                    event_type,
+                    causation_id: None,
+                    operation_id: format!("transition-{}", event_type.as_str()),
+                    payload,
+                },
+                &policy,
+            )
+            .unwrap();
+    }
+}
+
+#[tokio::test]
+async fn a_dirty_submission_is_refused_before_the_commit_is_pinned() {
+    let fixture = Fixture::new();
+    let task = fixture.task();
+    let orchestrator = fixture.orchestrator(json!({}));
+    let report = orchestrator.tick(&fixture.router).await.unwrap();
+    assert_eq!(report.blocked, Vec::<String>::new(), "{report:?}");
+    let task = fixture.store().get_task(&task.task_id).unwrap().unwrap();
+    let worktree = task.repositories[0].working_path.clone();
+    std::fs::write(worktree.join("file.txt"), "uncommitted\n").unwrap();
+    transition_to_reviewing(&fixture, &task.task_id);
+    let report = orchestrator.tick(&fixture.router).await.unwrap();
+    assert!(
+        report
+            .blocked
+            .iter()
+            .any(|line| line.contains("uncommitted changes")),
+        "{report:?}"
+    );
+    let task = fixture.store().get_task(&task.task_id).unwrap().unwrap();
+    assert_eq!(task.status, Status::Blocked);
+    assert!(task.repositories[0].submitted_commit.is_none());
+    assert!(task.reviewer.session_id.is_none());
+}
+
+#[tokio::test]
+async fn a_pending_launch_intent_blocks_a_duplicate_resume() {
+    let fixture = Fixture::new();
+    let task = fixture.task();
+    let orchestrator = fixture.orchestrator(json!({}));
+    let report = orchestrator.tick(&fixture.router).await.unwrap();
+    assert_eq!(report.blocked, Vec::<String>::new(), "{report:?}");
+    let task = fixture.store().get_task(&task.task_id).unwrap().unwrap();
+    let jobs_before = fixture.launch_jobs(&task);
+    let policy = StatePolicy::default();
+    let approval = fixture
+        .store()
+        .request_approval(
+            "fixture-plan",
+            &task.task_id,
+            ApprovalDraft {
+                source_session_id: task.coder.session_id.clone().unwrap(),
+                parent_session_id: fixture.router.clone(),
+                request_type: crate::super_agent::ApprovalType::Plan,
+                request: json!({"round": task.review_round}),
+                task_spec_version: task.spec_version,
+                permission_policy_version: task.permission_policy_version,
+            },
+        )
+        .unwrap();
+    fixture
+        .store()
+        .resolve_approval(
+            "fixture-plan-answer",
+            &approval.approval_id,
+            crate::super_agent::ApprovalStatus::Approved,
+            None,
+        )
+        .unwrap();
+    for (event_type, payload) in [
+        (
+            EventType::ApprovalRequested,
+            json!({"request_type":"PLAN"}),
+        ),
+        (
+            EventType::ApprovalResolved,
+            json!({"request_type":"PLAN","decision":"APPROVED"}),
+        ),
+    ] {
+        fixture
+            .store()
+            .apply_event(
+                &task.task_id,
+                NewEvent {
+                    session_id: None,
+                    run_id: None,
+                    event_type,
+                    causation_id: None,
+                    operation_id: format!("approval-{}", event_type.as_str()),
+                    payload,
+                },
+                &policy,
+            )
+            .unwrap();
+    }
+    let key = format!(
+        "super-agent.launch-intent.{}.coder.resume.{}.{}",
+        task.task_id, task.spec_version, task.review_round
+    );
+    fixture
+        .context
+        .save_setting(
+            &key,
+            &json!({"role":"coder","workspace":task.repositories[0].working_path,"state":"pending","at":"now"}),
+        )
+        .unwrap();
+    let report = orchestrator.tick(&fixture.router).await.unwrap();
+    assert!(
+        report
+            .blocked
+            .iter()
+            .any(|line| line.contains("launch")),
+        "{report:?}"
+    );
+    let task = fixture.store().get_task(&task.task_id).unwrap().unwrap();
+    assert_eq!(fixture.launch_jobs(&task), jobs_before);
+}

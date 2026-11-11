@@ -5,6 +5,7 @@
 //! configuration fails loudly instead of silently disabling supervision.
 use crate::native_engine::provider_manager::{ModelConfig, Provider};
 use crate::services::ServiceContext;
+use crate::super_agent::model::Severity;
 use anyhow::{bail, Context, Result};
 use serde::{Deserialize, Serialize};
 
@@ -69,11 +70,19 @@ impl Default for ApprovalsConfig {
 #[serde(default, rename_all = "camelCase")]
 pub struct ReviewConfig {
     pub max_rounds: u32,
+    /// Lowest Harness-category severity that blocks delivery.
+    pub blocking_severity: Severity,
+    /// At most this many Harness findings with `create_task` become proposals.
+    pub max_task_proposals: usize,
 }
 
 impl Default for ReviewConfig {
     fn default() -> Self {
-        Self { max_rounds: 5 }
+        Self {
+            max_rounds: 5,
+            blocking_severity: Severity::High,
+            max_task_proposals: 5,
+        }
     }
 }
 
@@ -104,8 +113,16 @@ pub struct SuperAgentConfig {
 }
 
 impl SuperAgentConfig {
+    /// Reads the supported user configuration from `settings.json` under the
+    /// `superAgent` key, falling back to the legacy peripheral setting. The
+    /// JSON shape mirrors `SuperAgentConfig` with camelCase field names.
     pub fn load(context: &ServiceContext) -> Result<Self> {
-        let config: Self = context.setting(SETTINGS_KEY)?.unwrap_or_default();
+        let from_file = settings_file_config(&context.paths.data_dir)?;
+        let config: Self = match from_file {
+            Some(value) => serde_json::from_value(value)
+                .context("Invalid superAgent configuration in settings.json")?,
+            None => context.setting(SETTINGS_KEY)?.unwrap_or_default(),
+        };
         config.validate()?;
         Ok(config)
     }
@@ -128,6 +145,10 @@ impl SuperAgentConfig {
         anyhow::ensure!(
             (1..=20).contains(&self.review.max_rounds),
             "superAgent review.maxRounds must be between 1 and 20"
+        );
+        anyhow::ensure!(
+            self.review.max_task_proposals <= 20,
+            "superAgent review.maxTaskProposals must be at most 20"
         );
         anyhow::ensure!(
             (1..=16).contains(&self.scheduler.max_concurrent_pairs),
@@ -245,6 +266,18 @@ pub fn router_model(
 
 /// Parses and validates a raw settings value. Kept separate from loading so a
 /// test can prove rejection without a database.
+fn settings_file_config(data_dir: &std::path::Path) -> Result<Option<serde_json::Value>> {
+    let path = data_dir.join("settings.json");
+    let text = match std::fs::read_to_string(&path) {
+        Ok(text) => text,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(error).with_context(|| format!("Reading {}", path.display())),
+    };
+    let value: serde_json::Value = serde_json::from_str(&text)
+        .with_context(|| format!("Invalid JSON in {}", path.display()))?;
+    Ok(value.get(SETTINGS_KEY).cloned().filter(|value| !value.is_null()))
+}
+
 pub fn parse(value: &serde_json::Value) -> Result<SuperAgentConfig> {
     let config: SuperAgentConfig =
         serde_json::from_value(value.clone()).context("Invalid superAgent settings")?;
@@ -294,6 +327,38 @@ mod tests {
         assert_eq!(config.review.max_rounds, 5);
         assert_eq!(config.scheduler.max_concurrent_pairs, 3);
         assert!(config.agents.coder.model.is_none());
+    }
+
+    #[test]
+    fn supported_settings_file_sets_non_default_values() {
+        let temp = tempfile::tempdir().unwrap();
+        let data = temp.path().join("data");
+        std::fs::create_dir_all(&data).unwrap();
+        std::fs::write(
+            data.join("settings.json"),
+            serde_json::to_vec(&json!({
+                "superAgent": {
+                    "agents": {"coder": {"model": "coder-model"}, "reviewer": {"model": "reviewer-model"}},
+                    "approvals": {"plan": "auto"},
+                    "review": {"maxRounds": 7, "blockingSeverity": "LOW", "maxTaskProposals": 2},
+                    "scheduler": {"maxConcurrentPairs": 1, "maxSpawnedTasksPerTask": 2}
+                }
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+        let context = ServiceContext::open(
+            crate::runtime::RuntimePaths::new(data).unwrap(),
+            std::sync::Arc::new(crate::services::EnvironmentCredentials),
+        )
+        .unwrap();
+        let config = SuperAgentConfig::load(&context).unwrap();
+        assert_eq!(config.approvals.plan, PlanApprovalPolicy::Auto);
+        assert_eq!(config.review.max_rounds, 7);
+        assert_eq!(config.review.blocking_severity, Severity::Low);
+        assert_eq!(config.review.max_task_proposals, 2);
+        assert_eq!(config.scheduler.max_concurrent_pairs, 1);
+        assert_eq!(config.agents.coder.model.as_deref(), Some("coder-model"));
     }
 
     #[test]

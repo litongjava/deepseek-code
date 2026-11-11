@@ -70,6 +70,15 @@ pub struct SnapshotManifest {
     /// dependency trees, non-UTF-8 names and unsupported file types. A restore
     /// leaves them untouched rather than pretending they were captured.
     pub skipped: Vec<String>,
+    /// Lossless relative-path bytes aligned with `skipped`. The human-readable
+    /// list alone cannot protect a non-UTF-8 ancestor during restore.
+    #[serde(default)]
+    pub skipped_raw: Vec<Vec<u8>>,
+    /// True when at least one skipped path could not be represented losslessly
+    /// on this platform. A destructive directory replacement is refused rather
+    /// than guessing which subtree is unprotected.
+    #[serde(default)]
+    pub skipped_unmapped: bool,
     pub truncated: bool,
 }
 
@@ -486,9 +495,14 @@ fn link_directory(target: &Path, link: &Path) -> Result<()> {
     Ok(())
 }
 
-fn walk(source: &Path, copy_to: Option<&Path>) -> Result<(Vec<SnapshotEntry>, Vec<String>, bool)> {
+fn walk(
+    source: &Path,
+    copy_to: Option<&Path>,
+) -> Result<(Vec<SnapshotEntry>, Vec<String>, Vec<Vec<u8>>, bool, bool)> {
     let mut entries = Vec::new();
     let mut skipped = Vec::new();
+    let mut skipped_raw = Vec::new();
+    let mut skipped_unmapped = false;
     let mut truncated = false;
     let mut total_bytes = 0u64;
     let mut stack = vec![source.to_path_buf()];
@@ -502,6 +516,10 @@ fn walk(source: &Path, copy_to: Option<&Path>) -> Result<(Vec<SnapshotEntry>, Ve
             let name = child.file_name().to_string_lossy().into_owned();
             if SNAPSHOT_SKIP.contains(&name.as_str()) {
                 skipped.push(relative_string(source, &path));
+                match path_bytes(&path.strip_prefix(source).unwrap_or(&path)) {
+                    Some(bytes) => skipped_raw.push(bytes),
+                    None => skipped_unmapped = true,
+                }
                 continue;
             }
             let metadata = std::fs::symlink_metadata(&path)?;
@@ -512,6 +530,10 @@ fn walk(source: &Path, copy_to: Option<&Path>) -> Result<(Vec<SnapshotEntry>, Ve
             };
             let Some(relative_string) = relative.to_str().map(str::to_owned) else {
                 skipped.push(format!("non-UTF-8 path {}", relative.display()));
+                match path_bytes(relative) {
+                    Some(bytes) => skipped_raw.push(bytes),
+                    None => skipped_unmapped = true,
+                }
                 continue;
             };
             if entries.len() >= MAX_SNAPSHOT_ENTRIES {
@@ -570,6 +592,10 @@ fn walk(source: &Path, copy_to: Option<&Path>) -> Result<(Vec<SnapshotEntry>, Ve
                 }
             } else {
                 skipped.push(relative_string);
+                match path_bytes(relative) {
+                    Some(bytes) => skipped_raw.push(bytes),
+                    None => skipped_unmapped = true,
+                }
             }
         }
         if truncated {
@@ -578,7 +604,8 @@ fn walk(source: &Path, copy_to: Option<&Path>) -> Result<(Vec<SnapshotEntry>, Ve
     }
     entries.sort_by(|left, right| left.path.cmp(&right.path));
     skipped.sort();
-    Ok((entries, skipped, truncated))
+    skipped_raw.sort();
+    Ok((entries, skipped, skipped_raw, truncated, skipped_unmapped))
 }
 
 fn relative_string(source: &Path, path: &Path) -> String {
@@ -586,6 +613,28 @@ fn relative_string(source: &Path, path: &Path) -> String {
         .unwrap_or(path)
         .to_string_lossy()
         .into_owned()
+}
+
+#[cfg(unix)]
+fn path_bytes(path: &Path) -> Option<Vec<u8>> {
+    use std::os::unix::ffi::OsStrExt;
+    Some(path.as_os_str().as_bytes().to_vec())
+}
+
+#[cfg(windows)]
+fn path_bytes(path: &Path) -> Option<Vec<u8>> {
+    path.to_str().map(|value| value.as_bytes().to_vec())
+}
+
+#[cfg(unix)]
+fn path_from_bytes(bytes: &[u8]) -> Option<PathBuf> {
+    use std::os::unix::ffi::OsStringExt;
+    Some(PathBuf::from(std::ffi::OsString::from_vec(bytes.to_vec())))
+}
+
+#[cfg(windows)]
+fn path_from_bytes(bytes: &[u8]) -> Option<PathBuf> {
+    String::from_utf8(bytes.to_vec()).ok().map(PathBuf::from)
 }
 
 #[cfg(unix)]
@@ -676,7 +725,8 @@ pub fn create_snapshot(source: &Path, snapshot_dir: &Path) -> Result<SnapshotMan
         // `manifest.json` is preserved instead of being overwritten.
         let payload = created.join("payload");
         std::fs::create_dir_all(&payload)?;
-        let (entries, skipped, truncated) = walk(&source, Some(&payload))?;
+        let (entries, skipped, skipped_raw, truncated, skipped_unmapped) =
+            walk(&source, Some(&payload))?;
         ensure!(
             !truncated,
             "Target exceeds snapshot limits ({} entries or {} bytes)",
@@ -688,6 +738,8 @@ pub fn create_snapshot(source: &Path, snapshot_dir: &Path) -> Result<SnapshotMan
             created_at: chrono::Utc::now().to_rfc3339(),
             entries,
             skipped,
+            skipped_raw,
+            skipped_unmapped,
             truncated,
         };
         write_manifest(snapshot_dir, &manifest)?;
@@ -816,12 +868,14 @@ fn write_manifest(snapshot_dir: &Path, manifest: &SnapshotManifest) -> Result<()
 pub fn current_manifest(source: &Path) -> Result<SnapshotManifest> {
     let source = source.canonicalize()?;
     ensure!(source.is_dir(), "Snapshot source must be a directory");
-    let (entries, skipped, truncated) = walk(&source, None)?;
+    let (entries, skipped, skipped_raw, truncated, skipped_unmapped) = walk(&source, None)?;
     Ok(SnapshotManifest {
         source,
         created_at: String::new(),
         entries,
         skipped,
+        skipped_raw,
+        skipped_unmapped,
         truncated,
     })
 }
@@ -978,7 +1032,7 @@ pub fn restore_snapshot(
                         .map(|metadata| metadata.is_dir())
                         .unwrap_or(false)
                     {
-                        remove_entry(&target)?;
+                        remove_for_replacement(&target)?;
                     }
                     write_atomic(&target, bytes)?;
                 }
@@ -997,7 +1051,7 @@ pub fn restore_snapshot(
                     continue;
                 }
                 if std::fs::symlink_metadata(&target).is_ok() {
-                    remove_entry(&target)?;
+                    remove_for_replacement(&target)?;
                 }
                 if let Some(parent) = target.parent() {
                     std::fs::create_dir_all(parent)?;
@@ -1065,25 +1119,53 @@ fn prepare_restore(
     // A removal may target a directory whose subtree the snapshot intentionally
     // did not protect (dependency output, special files). Deleting it would
     // destroy content that is neither in the snapshot nor expected to change,
-    // so refuse before touching anything.
+    // so refuse before touching anything. The check covers every destructive
+    // replacement, not only paths absent from the original manifest: a task can
+    // turn an original file into a directory (or the reverse).
     let before_paths: BTreeSet<&str> = manifest
         .entries
         .iter()
         .map(|entry| entry.path.as_str())
         .collect();
+    let mut destructive: BTreeSet<PathBuf> = BTreeSet::new();
+    for entry in &manifest.entries {
+        let target = source.join(&entry.path);
+        let Ok(metadata) = std::fs::symlink_metadata(&target) else {
+            continue;
+        };
+        let real_directory = metadata.is_dir() && !metadata.file_type().is_symlink();
+        if real_directory
+            && matches!(entry.kind, SnapshotKind::File | SnapshotKind::Symlink)
+        {
+            destructive.insert(PathBuf::from(&entry.path));
+        }
+    }
     for entry in expected_after
         .entries
         .iter()
         .filter(|entry| !before_paths.contains(entry.path.as_str()))
     {
-        for skipped in manifest.skipped.iter().chain(expected_after.skipped.iter()) {
-            let skipped_path = Path::new(skipped);
-            let removed_path = Path::new(&entry.path);
+        let target = source.join(&entry.path);
+        let Ok(metadata) = std::fs::symlink_metadata(&target) else {
+            continue;
+        };
+        if metadata.is_dir() && !metadata.file_type().is_symlink() {
+            destructive.insert(PathBuf::from(&entry.path));
+        }
+    }
+    let (skipped_paths, skipped_unmapped) = skipped_paths(manifest, expected_after);
+    for removed_path in &destructive {
+        ensure!(
+            !skipped_unmapped,
+            "Restoring would replace directory {} which contains skipped entries that cannot be mapped safely; remove or move that content first",
+            removed_path.display()
+        );
+        for skipped_path in &skipped_paths {
             ensure!(
-                !skipped_path.starts_with(removed_path),
+                !(skipped_path == removed_path || skipped_path.starts_with(removed_path)),
                 "Restoring would delete {} which the snapshot did not protect ({}); remove or move that content first",
                 skipped_path.display(),
-                entry.path
+                removed_path.display()
             );
         }
     }
@@ -1119,6 +1201,35 @@ fn prepare_restore(
         }
     }
     Ok(payloads)
+}
+
+fn skipped_paths(
+    manifest: &SnapshotManifest,
+    expected_after: &SnapshotManifest,
+) -> (Vec<PathBuf>, bool) {
+    let mut paths = Vec::new();
+    let mut unmapped = manifest.skipped_unmapped || expected_after.skipped_unmapped;
+    let manifests = [manifest, expected_after];
+    for manifest in manifests {
+        if manifest.skipped_raw.is_empty() {
+            // A manifest written before lossless skipped evidence existed can
+            // only be interpreted through its display strings. A non-UTF-8
+            // marker cannot be mapped to the real ancestor, so it stays unsafe.
+            unmapped |= manifest
+                .skipped
+                .iter()
+                .any(|path| path.starts_with("non-UTF-8 path "));
+            paths.extend(manifest.skipped.iter().map(PathBuf::from));
+            continue;
+        }
+        for bytes in &manifest.skipped_raw {
+            match path_from_bytes(bytes) {
+                Some(path) => paths.push(path),
+                None => unmapped = true,
+            }
+        }
+    }
+    (paths, unmapped)
 }
 
 #[cfg(unix)]
@@ -1268,6 +1379,19 @@ fn remove_entry(path: &Path) -> Result<()> {
     let metadata = std::fs::symlink_metadata(path)?;
     if metadata.is_dir() && !metadata.file_type().is_symlink() {
         std::fs::remove_dir(path)?;
+    } else {
+        std::fs::remove_file(path)?;
+    }
+    Ok(())
+}
+
+/// Removes a path that a preflighted restore is replacing. A directory is
+/// removed recursively only after `prepare_restore` proved that it contains no
+/// skipped or unprotected subtree.
+fn remove_for_replacement(path: &Path) -> Result<()> {
+    let metadata = std::fs::symlink_metadata(path)?;
+    if metadata.is_dir() && !metadata.file_type().is_symlink() {
+        std::fs::remove_dir_all(path)?;
     } else {
         std::fs::remove_file(path)?;
     }
@@ -1710,6 +1834,65 @@ mod tests {
             std::fs::read_to_string(source.join("app.txt")).unwrap(),
             "app\n"
         );
+    }
+
+    #[test]
+    fn restore_refuses_to_replace_a_file_with_a_directory_holding_skipped_content() {
+        let temp = tempfile::tempdir().unwrap();
+        let source = temp.path().join("source");
+        std::fs::create_dir(&source).unwrap();
+        std::fs::write(source.join("a"), "original\n").unwrap();
+        std::fs::write(source.join("app.txt"), "app\n").unwrap();
+        let snapshot_dir = temp.path().join("snapshots/1");
+        let manifest = create_snapshot(&source, &snapshot_dir).unwrap();
+        // The task replaced the original file with a directory whose subtree
+        // contains build output the snapshot deliberately skipped.
+        std::fs::remove_file(source.join("a")).unwrap();
+        let skipped = source.join("a/node_modules/pkg/keep.txt");
+        std::fs::create_dir_all(skipped.parent().unwrap()).unwrap();
+        std::fs::write(&skipped, "keep me\n").unwrap();
+        let coder = current_manifest(&source).unwrap();
+        let error = restore_snapshot(&manifest, &snapshot_dir, &source, &coder).unwrap_err();
+        assert!(error.to_string().contains("did not protect"), "{error:#}");
+        assert_eq!(std::fs::read_to_string(&skipped).unwrap(), "keep me\n");
+        assert!(source.join("a").is_dir());
+        assert_eq!(
+            std::fs::read_to_string(source.join("app.txt")).unwrap(),
+            "app\n"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn restore_refuses_to_replace_a_file_with_non_utf8_skipped_content() {
+        use std::os::unix::ffi::OsStringExt;
+        let temp = tempfile::tempdir().unwrap();
+        let source = temp.path().join("source");
+        std::fs::create_dir(&source).unwrap();
+        std::fs::write(source.join("a"), "original\n").unwrap();
+        let snapshot_dir = temp.path().join("snapshots/1");
+        let manifest = create_snapshot(&source, &snapshot_dir).unwrap();
+        std::fs::remove_file(source.join("a")).unwrap();
+        let raw = source
+            .join("a")
+            .join(std::ffi::OsString::from_vec(b"raw-\xff-name".to_vec()));
+        std::fs::create_dir_all(raw.parent().unwrap()).unwrap();
+        std::fs::write(&raw, "raw bytes\n").unwrap();
+        let coder = current_manifest(&source).unwrap();
+        assert!(coder.skipped_unmapped == false);
+        assert!(!coder.skipped_raw.is_empty());
+        let error = restore_snapshot(&manifest, &snapshot_dir, &source, &coder).unwrap_err();
+        assert!(error.to_string().contains("did not protect"), "{error:#}");
+        assert_eq!(std::fs::read(&raw).unwrap(), b"raw bytes\n");
+
+        // A manifest written before lossless evidence existed cannot map the
+        // real ancestor. The restore must refuse rather than guess.
+        let mut legacy = coder.clone();
+        legacy.skipped_raw.clear();
+        legacy.skipped_unmapped = true;
+        let error = restore_snapshot(&manifest, &snapshot_dir, &source, &legacy).unwrap_err();
+        assert!(error.to_string().contains("cannot be mapped safely"), "{error:#}");
+        assert_eq!(std::fs::read(&raw).unwrap(), b"raw bytes\n");
     }
 
     #[test]

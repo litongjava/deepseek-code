@@ -463,7 +463,12 @@ pub fn prepare_task_worktree(
 
 /// A read-only validation checkout pinned at one commit for the Reviewer.
 /// It never contains the Coder's working-tree changes.
-pub fn prepare_review_worktree(source: &Path, commit: &str, task_id: &str) -> Result<TaskWorktree> {
+pub fn prepare_review_worktree(
+    source: &Path,
+    commit: &str,
+    task_id: &str,
+    round: u32,
+) -> Result<TaskWorktree> {
     ensure!(
         !task_id.is_empty()
             && task_id.len() <= 110
@@ -483,10 +488,10 @@ pub fn prepare_review_worktree(source: &Path, commit: &str, task_id: &str) -> Re
         &["rev-parse", "--path-format=absolute", "--git-common-dir"],
     )?);
     let common = common.canonicalize().unwrap_or(common);
-    let branch = format!("agent/{task_id}-review");
+    let branch = format!("agent/{task_id}-review-{round}");
     let path = common
         .join("desktop-worktrees")
-        .join(format!("{task_id}-review"));
+        .join(format!("{task_id}-review-{round}"));
     let resolved = git(
         &repo,
         &["rev-parse", "--verify", &format!("{commit}^{{commit}}")],
