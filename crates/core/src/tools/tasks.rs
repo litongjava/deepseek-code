@@ -98,6 +98,11 @@ pub async fn execute_for_session_async(
     session: &str,
 ) -> Result<Value> {
     uuid::Uuid::parse_str(session).context("Invalid task session ID")?;
+    // The legacy TaskOutput name kept its old default: wait for completion.
+    let mut input = input;
+    if name == "TaskOutput" && input.get("block").is_none() {
+        input["block"] = json!(true);
+    }
     if matches!(name, "TaskGet" | "TaskOutput" | "TaskStop") {
         if let Some(id) = input["task_id"]
             .as_str()
@@ -163,30 +168,25 @@ pub async fn execute_for_session_async(
                 // The output files and the optional SQLite report are read on
                 // the blocking pool. An explicit wait deadline bounds the whole
                 // retrieval, so a slow disk or busy database cannot outlive it.
-                // timeout:0 is a no-wait request: report the status already
-                // observed instead of starting a possibly blocked read.
-                let bounded = block && !timeout.is_zero();
-                let fetch = !(block && timeout.is_zero());
-                let snapshot = if fetch {
-                    let (root, id) = (root.to_owned(), id.to_owned());
-                    Some(tokio::task::spawn_blocking(move || {
-                        job_snapshot(&root, &id)
-                    }))
-                } else {
-                    None
-                };
-                let snapshot = match snapshot {
-                    Some(snapshot) if bounded => {
-                        match tokio::time::timeout_at(deadline, snapshot).await {
-                            Ok(result) => Some(result??),
-                            Err(_) => {
-                                timed_out = true;
-                                None
-                            }
+                // A wait that used its whole deadline still gets a short bounded
+                // read, so the caller sees output already written; a busy disk or
+                // database still cannot hold the call open for long.
+                let (read_root, read_id) = (root.to_owned(), id.to_owned());
+                let snapshot = tokio::task::spawn_blocking(move || {
+                    job_snapshot(&read_root, &read_id)
+                });
+                let snapshot = if block {
+                    let read_deadline = deadline
+                        .max(tokio::time::Instant::now() + std::time::Duration::from_secs(2));
+                    match tokio::time::timeout_at(read_deadline, snapshot).await {
+                        Ok(result) => Some(result??),
+                        Err(_) => {
+                            timed_out = true;
+                            None
                         }
                     }
-                    Some(snapshot) => Some(snapshot.await??),
-                    None => None,
+                } else {
+                    Some(snapshot.await??)
                 };
                 let (status, mut value) = match snapshot {
                     Some(value) => {
@@ -1179,9 +1179,10 @@ mod tests {
             "{\"type\":\"result\",\"result\":\"available report\"}\n",
         )
         .unwrap();
-        // A writer holding the shared database must not make the retrieval
-        // outlive an explicit wait deadline. The job's own status is still
-        // reported; only the supplementary report remains unavailable.
+        // A writer holding the shared database must not hold the retrieval
+        // open beyond the wait deadline plus a short bounded read. The job's
+        // own status is still reported; only the supplementary report remains
+        // unavailable.
         let lock =
             rusqlite::Connection::open(root.path().join(crate::runtime::DATABASE_FILE)).unwrap();
         lock.execute_batch("BEGIN EXCLUSIVE").unwrap();
@@ -1197,13 +1198,13 @@ mod tests {
         let elapsed = started.elapsed();
         lock.execute_batch("ROLLBACK").unwrap();
         assert!(elapsed >= Duration::from_millis(400), "{elapsed:?}");
-        assert!(elapsed < Duration::from_secs(2), "{elapsed:?}");
+        assert!(elapsed < Duration::from_secs(3), "{elapsed:?}");
         assert_eq!(value["status"], "completed");
         assert_eq!(value["retrieval_status"], "timeout");
     }
 
     #[tokio::test]
-    async fn background_job_task_get_timeout_zero_does_not_start_a_blocked_read() {
+    async fn background_job_task_get_timeout_zero_read_is_bounded() {
         use std::time::{Duration, SystemTime, UNIX_EPOCH};
         let root = tempfile::tempdir().unwrap();
         let session = uuid::Uuid::new_v4().to_string();
@@ -1219,6 +1220,7 @@ mod tests {
         let lock =
             rusqlite::Connection::open(root.path().join(crate::runtime::DATABASE_FILE)).unwrap();
         lock.execute_batch("BEGIN EXCLUSIVE").unwrap();
+        // timeout:0 still reads the snapshot, bounded by a short read deadline.
         let started = tokio::time::Instant::now();
         let value = execute_for_session_async(
             "TaskGet",
@@ -1230,7 +1232,7 @@ mod tests {
         .unwrap();
         let elapsed = started.elapsed();
         lock.execute_batch("ROLLBACK").unwrap();
-        assert!(elapsed < Duration::from_millis(200), "{elapsed:?}");
+        assert!(elapsed < Duration::from_secs(3), "{elapsed:?}");
         assert_eq!(value["status"], "running");
         assert_eq!(value["retrieval_status"], "timeout");
     }

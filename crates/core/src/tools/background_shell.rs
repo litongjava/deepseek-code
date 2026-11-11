@@ -455,6 +455,8 @@ pub(super) async fn control_async(
     }
     let name = name.to_owned();
     let (block, timeout) = wait_policy(input)?;
+    // timeout:0 reads the current snapshot without waiting.
+    let wait = block && !timeout.is_zero();
     let deadline = tokio::time::Instant::now() + timeout;
     let mut snapshot_input = input.clone();
     snapshot_input["block"] = json!(false);
@@ -485,7 +487,7 @@ pub(super) async fn control_async(
             name.clone(),
         );
         let snapshot = tokio::task::spawn_blocking(move || control(&name, &input, &root, &session));
-        let snapshot = if block && managed_directory {
+        let snapshot = if wait && managed_directory {
             match tokio::time::timeout_at(deadline, snapshot).await {
                 Ok(result) => result??,
                 Err(_) => {
@@ -500,7 +502,7 @@ pub(super) async fn control_async(
             return Ok(None);
         };
         value["block"] = json!(block);
-        if terminal(&value["status"]) || !block {
+        if terminal(&value["status"]) || !wait {
             return Ok(Some(value));
         }
         if tokio::time::Instant::now() >= deadline {
@@ -639,8 +641,13 @@ mod tests {
             )
             .await
             .unwrap();
-            assert_eq!(value["retrieval_status"], "timeout");
-            if timeout != 0 {
+            if timeout == 0 {
+                // A zero timeout reads the current snapshot without waiting.
+                assert_eq!(value["retrieval_status"], "not_ready");
+                assert_eq!(value["status"], "running");
+                assert_eq!(value["stdout"], "partial output");
+            } else {
+                assert_eq!(value["retrieval_status"], "timeout");
                 assert_eq!(value["status"], "running");
                 assert_eq!(value["stdout"], "partial output");
             }
@@ -1116,6 +1123,83 @@ mod tests {
                 assert!(observed["result"].as_str().unwrap().contains("timed_out"));
             }
         }
+    }
+    #[tokio::test]
+    async fn zero_timeout_returns_a_finished_shell_snapshot() {
+        crate::config::OrchestrationConfig::init_global().unwrap();
+        let root = tempfile::tempdir().unwrap();
+        let session = uuid::Uuid::new_v4().to_string();
+        let mut command = Command::new("node");
+        command.args(["-e", "console.log('zero-timeout-output')"]);
+        let task = scope(Some((root.path().into(), session.clone())), async {
+            start(
+                command,
+                Some(Duration::from_secs(30)),
+                "node",
+                "fixture",
+                "node fixture",
+                None,
+            )
+            .unwrap()
+        })
+        .await;
+        let id = task["task_id"].as_str().unwrap().to_owned();
+        let finished = output(root.path(), &session, &id, true).await;
+        assert_eq!(finished["status"], "completed");
+        let value = super::super::tasks::execute_for_session_async(
+            "TaskGet",
+            json!({"task_id":id,"block":true,"timeout":0}),
+            root.path(),
+            &session,
+        )
+        .await
+        .unwrap();
+        assert_eq!(value["status"], "completed", "{value}");
+        assert!(
+            value["stdout"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("zero-timeout-output"),
+            "{value}"
+        );
+    }
+    #[tokio::test]
+    async fn legacy_task_output_waits_by_default() {
+        crate::config::OrchestrationConfig::init_global().unwrap();
+        let root = tempfile::tempdir().unwrap();
+        let session = uuid::Uuid::new_v4().to_string();
+        let mut command = Command::new("node");
+        command.args(["-e", "setTimeout(()=>console.log('legacy-late-output'),300)"]);
+        let task = scope(Some((root.path().into(), session.clone())), async {
+            start(
+                command,
+                Some(Duration::from_secs(30)),
+                "node",
+                "fixture",
+                "node fixture",
+                None,
+            )
+            .unwrap()
+        })
+        .await;
+        let id = task["task_id"].as_str().unwrap().to_owned();
+        let value = super::super::tasks::execute_for_session_async(
+            "TaskOutput",
+            json!({"task_id":id}),
+            root.path(),
+            &session,
+        )
+        .await
+        .unwrap();
+        assert_eq!(value["status"], "completed", "{value}");
+        assert_eq!(value["retrieval_status"], "success", "{value}");
+        assert!(
+            value["stdout"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("legacy-late-output"),
+            "{value}"
+        );
     }
 }
 
