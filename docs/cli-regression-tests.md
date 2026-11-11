@@ -325,6 +325,21 @@ OpenCode Go 用四种协议提供模型，模型地址和协议都来自内置�
     - 计时口径：脚本用独立 PreCompact 标记观察钩子开始，以本次命令之后的完成提示为终点，使用单调时钟；明确记录这是不含更早规划的阶段区间。输入等待单独记录，首个摘要 HTTP 请求和压缩后的主请求都不能充当操作起点。8 秒前/后置钩子另有独立下限检查，故意漏算该阶段的时长必须失败。延迟 Enter 的受控探针要求启动等待被单独记录且耗时判定通过。
     `safe_budget_respected` 使用与引擎相同口径的完整请求体估算（含系统指令、按消息分组向上取整），只检查摘要路径的请求。所有场景的日志记录每个请求实际收到的注入类型与请求体哈希，不根据预算猜测。`compaction-review2-20261108/harness_negative_probe.py` 与 `harness_negative_probe2.py` 用受控假对象回放“重启未就绪”“忽略 Escape”“缺少必需检查”“存在假检查”“没有必需项”和“场景报错”，要求判定器一律返回非零；它们不替代真实重启或真实复用的场景。`compaction-review3-20261108/negative_probe_post_cancel.py` 让后续请求到达服务器但永不返回，要求汇总器因缺少完整回复、持久化与输入恢复而失败，同时证明请求确实已到达。`compaction-review4-20261108/harness_semantic_probe2.py` 把错误窗口、错误消息数、错误会话 ID、缺时区、额外正文、缺正文、错误耗时和丢失空格的路径逐个注入同一组检查函数，要求全部被拒绝，并用正确样本确认仍然通过。
 
+### N. 技能目录发现与优先级
+
+模型可见的技能列表、`Skill` 工具和斜杠列表共用 `skills::discovery::discover(data_dir, workspace)`。阅读顺序（后者覆盖前者）是：内置工作流（`bundled.rs`）、`CLAUDE_CONFIG_DIR`（未设置时为 `~/.claude`）、`<数据目录>/skills`、`<工作区>/.claude`。同一名称只列一次；项目覆盖用户，数据目录覆盖 Claude 兼容用户目录。`<数据目录>/skills/bundled` 和 `mcp` 仍会列出（斜杠列表原本就显示它们），但不会覆盖已发现的内置或 Claude 用户同名技能；`<数据目录>/skills/<名称>` 的直接用户技能仍按“用户覆盖内置”处理。发现过程只读，不创建 `<数据目录>/skills`，不跟随符号链接。
+
+数据目录技能的名称沿用 round 01 之前的斜杠命令规则：取 frontmatter `name`（缺省时为技能所在目录名）转小写、空白折叠为 `-`，其他标点保留。因此 `My Skill` 仍是 `/my-skill`，`R&D (team)'s check` 仍是 `/r&d-(team)'s-check`；多层集合也只使用技能自身名称，不加集合前缀。两个数据目录技能归一化后同名时，两者都改用按 `SKILL.md` 路径计算的稳定 `skill_<hash>`（只有哈希碰撞时才按排序后的路径追加 `-2`、`-3`），不会按文件系统顺序只保留其中一个。`~/.claude`、项目与插件技能的名称规则不变。
+
+1. 自动化：`cargo test --locked -p deepseek-code-core --lib discovery::tests`、`cargo test --locked -p deepseek-code-core --lib data_dir_skill`、`cargo test --locked -p deepseek-code-core --lib runtime_discovery_keeps_pre_round_01_slash_names_for_mixed_case_and_spaces`、`cargo test --locked -p deepseek-code-core --lib runtime_discovery_keeps_punctuation_that_skill_creation_allows`、`cargo test --locked -p deepseek-code-core --lib runtime_discovery_disambiguates_shared_data_dir_names_with_stable_ids`、`cargo test --locked -p deepseek-code-cli --bin dcl slash_list`、`cargo test --locked -p deepseek-code-cli --test skills`。真实进程用例确认 `CLAUDE_CONFIG_DIR` 指向空目录时，首个请求的 `Available skills` 含数据目录技能（名称已小写化），第二请求的工具结果给出真实技能目录。`discovery::tests` 中的 `installed_placeholder_and_legacy_builtins_are_visible_to_both_views` 还确认首次生成的 `skill-creator` 占位与 legacy builtins 同时出现在模型列表和斜杠列表中。
+2. 真实终端：用空的 `CLAUDE_CONFIG_DIR` 和独立数据目录，把 `skills/<名称>/SKILL.md` 只放在数据目录，运行 `dcl --data-dir <目录> --print "/<名称> 参数"`。确认斜杠命令展开、`dcl skills list` 显示该技能；再让模型自行调用 `Skill`，确认工具名与斜杠名称一致，返回的说明包含实际数据目录路径，`references/...` 等相对路径可解析。
+3. 同名覆盖：在数据目录、`CLAUDE_CONFIG_DIR` 和工作区 `.claude/skills` 放同名技能，确认列表只有一项且三处内容按“项目 > 数据目录 > CLAUDE 用户”选择；移除高层副本后依次落到下一层。
+4. 开关：`enabled: false` 不出现在列表和工具中；`disable-model-invocation: true` 不在模型列表、`Skill` 工具也不能调用，但斜杠命令仍可用；`user-invocable: false` 仍只供模型调用。
+5. 容错：在同一目录放一个格式错误的 `SKILL.md` 和一个有效技能，确认有效技能仍可用，无效文件只产生路径诊断（运行日志），不会回显文件内容；`<数据目录>/skills` 不存在时发现过程不创建它。
+6. `--data-dir` 与 `DEEPSEEK_CODE_DATA_DIR`：两者选中的非默认数据目录都生效，模型列表和工具使用同一位置，不回退到 `~/.deepseek-code` 或 `~/.claude`。
+7. 内置工作流不得被意外覆盖：在 `<数据目录>/skills/bundled` 放与内置同名的技能，确认仍执行内置定义；直接放在 `<数据目录>/skills/<同名>` 的用户技能按既有规则覆盖内置。插件命名空间技能的行为不变。
+8. 名称兼容：把 frontmatter `name` 写成 `My Skill` 或含 `(`、`&`、`'` 的名称，确认斜杠命令分别为 `/my-skill`、保留标点的旧名称，模型列表和 `Skill` 工具使用同一个名称，不存在大小写不同的第二个别名。再放两个同名的数据目录技能，确认两者都按 `skill_<hash>` 列出，重复运行结果相同。
+
 ## 按改动范围选择场景
 
 - `terminal/editor.rs`、`terminal/live.rs` 的按键处理：A、B、E1、E2、E3
@@ -359,6 +374,7 @@ OpenCode Go 用四种协议提供模型，模型地址和协议都来自内置�
 - `native_engine/generation.rs`、`services/compaction.rs`、`services/compaction/`：L，以及 E5
 - `native_engine/tool_call_ids.rs`（发给模型的请求体）：E1、E6；确认只改写超长调用 ID，未提供 `tool_calls`、`content` 等字段的消息不会被补成 `null`
 - `extended_commands.rs` 的复制（`/copy`、`/copy-session-id`、鼠标选择）：在没有 `xclip`、`wl-copy` 的 tmux 中执行 `/copy-session-id`，显示 `Copied session ID to clipboard`，`tmux show-buffer` 内容为会话 ID；在有 `xclip` 的桌面终端中复制后能粘贴。再跑 E
+- `skills/discovery.rs`、`native_engine/skill_tool.rs`、`native_engine/engine_core.rs` 的技能发现与模型列表、`cli/skill_commands.rs`：N
 - 其他范围：至少跑 E
 
 ## Shell 配置回归

@@ -108,6 +108,16 @@ Desktop 的自动压缩、手动压缩和局部摘要都调用 `crates/core` 的
 3. 摘要失败时不写入压缩边界：会话保持原样，界面显示失败阶段、预算和“原始历史保留”，重新发送不会重复执行已完成的工具调用。
 4. 恢复期间取消（停止当前回复）后历史不变；再次压缩时已完成的分段直接复用，进度显示复用计数。
 
+### D4. 技能目录（共享 core 路径）
+
+Desktop 的模型技能列表和 `Skill` 工具与 CLI 共用 `crates/core` 的发现入口，改动 `skills/discovery.rs`、`native_engine/engine_core.rs` 的技能列表或 `native_engine/skill_tool.rs` 时，除 `docs/cli-regression-tests.md` 的 N 节外，在桌面窗口确认：
+
+1. 用独立数据目录启动 Desktop，`CLAUDE_CONFIG_DIR` 指向空目录，只在 `<数据目录>/skills/<名称>/SKILL.md` 放一个技能，发送普通请求：模型的 `Available skills` 含该名称。
+2. 让模型调用 `Skill`：工具成功，说明中的技能目录是数据目录下的真实路径，引用 `references/...` 可读取。
+3. 同名技能放在工作区 `.claude/skills`、数据目录和 `~/.claude`：项目优先，其次数据目录，最后 Claude 用户；模型列表只出现一项，技能面板/斜杠名称一致。
+4. `enabled: false` 与 `disable-model-invocation` 的显示和调用行为与 CLI 一致。
+5. `<数据目录>/skills/bundled`、`mcp` 中的同名副本不覆盖内置工作流。
+
 ### E. 浏览器和手机（dcd-server）
 
 用独立数据目录启动：`DEEPSEEK_CODE_DATA_DIR=<测试目录>/data target/debug/dcd-server --port 30185 --web-dir dist`（先 `npm run build`）。
@@ -163,4 +173,5 @@ Desktop 的自动压缩、手动压缩和局部摘要都调用 `crates/core` 的
 - `crates/core` 的摘要实现（`native_engine/generation.rs`、`services/compaction*`）：D3，以及 `cli-regression-tests.md` 的 L 节
 - 语音输入（`VoiceInput`、`peripheral.rs` 的 `voice_transcribe`）：Desktop 中配置音频转写后端，录音 5 秒后停止并转写，文本正确；录音以二进制传给后端（无 JSON 数字数组）。浏览器的 HTTP 页面点击麦克风弹出“需要 HTTPS”。
 - `features/trajectory/`（工具调用分组）：D6
+- `crates/core` 的技能发现、模型技能列表和 `Skill` 工具：D4，以及 `cli-regression-tests.md` 的 N 节
 - 其他范围：至少跑 D1
