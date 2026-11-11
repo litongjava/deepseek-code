@@ -2928,7 +2928,17 @@ impl ToolLoopExecutor {
         // Hard denials are enforced before any permission prompt. A pending
         // Super Agent plan approval, a Router edit, or an agent tool allowlist
         // must not become a user-confirmable prompt that could authorize it.
-        if let Some(reason) = self.permission_hard_denial(tool_name, tool_input) {
+        // A pre-tool hook that already allowed this exact call keeps the
+        // existing prompt-mode semantics, but not the hard gates above.
+        let hook_allowed = self.approved_call.as_ref().is_some_and(|approval| {
+            approval.pre_tool_hook
+                && approval.tool == tool_name
+                && approval.input == *tool_input
+                && approval.id == _tool_use_id
+        });
+        if let Some(reason) =
+            self.permission_hard_denial_for(tool_name, tool_input, hook_allowed)
+        {
             return CallStep::Finished((
                 tool_input.clone(),
                 format!("Permission denied: {reason}"),
