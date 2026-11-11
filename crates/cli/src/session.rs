@@ -36,6 +36,10 @@ pub struct Session {
     pub(crate) sdk_permissions: Option<Arc<crate::sdk::Permissions>>,
     pub(crate) sdk_interrupt: Option<tokio::sync::watch::Receiver<bool>>,
     pub(crate) sdk_content: Option<Value>,
+    /// Stream-json user frames steered into the running turn, keyed by their
+    /// handoff message id, replayed when the engine delivers them.
+    pub(crate) sdk_steered_replays:
+        Arc<std::sync::Mutex<std::collections::HashMap<String, Value>>>,
     pub(crate) initial_hook_message: Option<String>,
     pub(crate) sdk_overrides: crate::sdk_initialization::Overrides,
     pub(crate) sdk_hooks: Option<crate::sdk_hooks::Runtime>,
@@ -481,6 +485,7 @@ impl Session {
             sdk_permissions: None,
             sdk_interrupt: None,
             sdk_content: None,
+            sdk_steered_replays: Default::default(),
             sdk_overrides: Default::default(),
             sdk_hooks: None,
             sdk_mcp,
@@ -1646,23 +1651,43 @@ impl Session {
                         progress.set_activity("Composing");
                     },
                     EngineEvent::QueuedInput(delivered) => {
-                        // Kept separate from approval notes and their authorization semantics.
-                        if let Some(tool) = tools.last() {
-                            let inputs = queued_inputs_by_tool.entry(tool.id.clone()).or_default();
-                            inputs.push(delivered.clone());
-                            self.store.db.with_conn(|conn| -> Result<()> {
-                                let tx = deepseek_code_core::db::write_transaction(conn)?;
-                                let call_id = format!("{assistant_id}:{}", tool.id);
-                                message_repo::update_message_content(&tx, &assistant_id, &text)?;
-                                message_repo::insert_tool_call(&tx, &call_id, &assistant_id, &tool.name, tool.input.as_deref(), tool.output.as_deref(), tool.is_error, tool.sort_order)?;
-                                deepseek_code_core::services::input_queue::save_delivered(&tx, &call_id, inputs)?;
-                                tx.commit()?;
-                                Ok(())
-                            })??;
+                        // A stream-json host frame steered into this turn is
+                        // replayed with its UUID when the model receives it,
+                        // rather than when the host sent it.
+                        let replay = self
+                            .sdk_steered_replays
+                            .lock()
+                            .unwrap_or_else(|error| error.into_inner())
+                            .remove(&delivered.origin);
+                        if cli.replay_user_messages {
+                            if let Some(mut envelope) = replay {
+                                envelope["session_id"] = json!(self.id);
+                                emit_json(&envelope)?;
+                            }
                         }
-                        let text = delivered.text;
-                        if let Some(index) = pending_inputs.iter().position(|pending| *pending == text) { pending_inputs.remove(index); }
-                        progress.queued_delivered(&text);
+                        // Kept separate from approval notes and their authorization semantics.
+                        // A durable steer item already has its own transcript row,
+                        // saved by the handoff, and the stream-json `queued_input`
+                        // event reports its delivery; only input with no row of its
+                        // own is attached to the preceding tool result.
+                        if !delivered.origin.starts_with("queue-input-") {
+                            if let Some(tool) = tools.last() {
+                                let inputs = queued_inputs_by_tool.entry(tool.id.clone()).or_default();
+                                inputs.push(delivered.clone());
+                                self.store.db.with_conn(|conn| -> Result<()> {
+                                    let tx = deepseek_code_core::db::write_transaction(conn)?;
+                                    let call_id = format!("{assistant_id}:{}", tool.id);
+                                    message_repo::update_message_content(&tx, &assistant_id, &text)?;
+                                    message_repo::insert_tool_call(&tx, &call_id, &assistant_id, &tool.name, tool.input.as_deref(), tool.output.as_deref(), tool.is_error, tool.sort_order)?;
+                                    deepseek_code_core::services::input_queue::save_delivered(&tx, &call_id, inputs)?;
+                                    tx.commit()?;
+                                    Ok(())
+                                })??;
+                            }
+                            let text = delivered.text;
+                            if let Some(index) = pending_inputs.iter().position(|pending| *pending == text) { pending_inputs.remove(index); }
+                            progress.queued_delivered(&text);
+                        }
                     },
                     EngineEvent::ToolUseStart { tool_use_id, tool_name, tool_input, display_title, .. } => {
                         tool_started.entry(tool_use_id.clone()).or_insert_with(std::time::Instant::now);
@@ -1759,7 +1784,10 @@ impl Session {
                         if let Some(old) = snapshots.iter_mut().find(|s| s["id"] == snapshot["id"]) { *old = snapshot; } else { snapshots.push(snapshot); }
                     }
                     EngineEvent::QueuedInput(delivered) => {
-                        if let Some(tool) = tools.last() { queued_inputs_by_tool.entry(tool.id.clone()).or_default().push(delivered); }
+                        // Durable deliveries already have their own transcript row.
+                        if !delivered.origin.starts_with("queue-input-") {
+                            if let Some(tool) = tools.last() { queued_inputs_by_tool.entry(tool.id.clone()).or_default().push(delivered); }
+                        }
                     }
                     _ => {}
                 }
