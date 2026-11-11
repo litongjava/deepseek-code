@@ -615,10 +615,16 @@ fn startup_failure(error: Option<&str>, dir: &Path) -> String {
 
 pub fn begin_job(worker: &Worker, id: &str, prompt: &str) -> Result<Job> {
     let active = directory(worker).join("active.json");
-    ensure!(
-        !active.exists(),
-        "Session worker is already executing a turn"
-    );
+    if active.exists() {
+        // A finished job's marker is stale: its owner is only about to remove it.
+        let finished = fs::read(&active)
+            .ok()
+            .and_then(|bytes| serde_json::from_slice::<String>(&bytes).ok())
+            .and_then(|old| jobs::directory(&worker.root, &old).ok())
+            .and_then(|dir| jobs::read_job(&dir).ok())
+            .is_some_and(|job| job.finished_ms.is_some());
+        ensure!(finished, "Session worker is already executing a turn");
+    }
     let dir = jobs::directory(&worker.root, id)?;
     ensure!(
         !dir.exists(),
@@ -659,12 +665,26 @@ pub fn job_execution_session(root: &Path, job: &Job) -> Result<String> {
         Err(error) => Err(error.into()),
     }
 }
+/// Remove the active marker only while it still belongs to `id`, so an old
+/// turn finishing cannot delete the marker of a turn another frontend started.
+fn release_active(worker: &Worker, id: &str) -> Result<()> {
+    let active = directory(worker).join("active.json");
+    if fs::read(&active)
+        .ok()
+        .and_then(|bytes| serde_json::from_slice::<String>(&bytes).ok())
+        .as_deref()
+        == Some(id)
+    {
+        fs::remove_file(active)?;
+    }
+    Ok(())
+}
 pub async fn finish_job(worker: &Worker, id: &str, error: Option<String>) -> Result<()> {
     let dir = jobs::directory(&worker.root, id)?;
     jobs::save(&dir.join("completion.json"), &error)?;
     for _ in 0..100 {
         if jobs::read_job(&dir)?.finished_ms.is_some() {
-            fs::remove_file(directory(worker).join("active.json"))?;
+            release_active(worker, id)?;
             return Ok(());
         }
         tokio::time::sleep(Duration::from_millis(50)).await;
@@ -1289,5 +1309,81 @@ mod runtime_status_tests {
             assert!(report.tools.is_none());
             server.abort();
         }
+    }
+}
+
+#[cfg(test)]
+mod active_marker_tests {
+    use super::*;
+    fn new_worker(root: &Path) -> Worker {
+        Worker {
+            id: uuid::Uuid::new_v4().to_string(),
+            session_id: uuid::Uuid::new_v4().to_string(),
+            root: root.into(),
+            workspace: root.into(),
+            executable: std::env::current_exe().unwrap(),
+            endpoint: String::new(),
+            status: "running".into(),
+            supervisor_pid: None,
+            child_pid: None,
+            heartbeat_ms: jobs::now(),
+            active_job: None,
+            error: None,
+        }
+    }
+    fn prepare(root: &Path) -> Worker {
+        let worker = new_worker(root);
+        fs::create_dir_all(directory(&worker)).unwrap();
+        jobs::save(&directory(&worker).join("worker.json"), &worker).unwrap();
+        worker
+    }
+    fn finish(worker: &Worker, id: &str) {
+        let dir = jobs::directory(&worker.root, id).unwrap();
+        let mut job = jobs::read_job(&dir).unwrap();
+        job.finished_ms = Some(jobs::now());
+        job.status = "completed".into();
+        jobs::save(&dir.join("state.json"), &job).unwrap();
+    }
+    fn active(worker: &Worker) -> String {
+        serde_json::from_slice(&fs::read(directory(worker).join("active.json")).unwrap()).unwrap()
+    }
+
+    #[test]
+    fn next_turn_starts_once_previous_job_finished() {
+        let root = tempfile::tempdir().unwrap();
+        let worker = prepare(root.path());
+        let first = uuid::Uuid::new_v4().to_string();
+        let second = uuid::Uuid::new_v4().to_string();
+        begin_job(&worker, &first, "a").unwrap();
+        finish(&worker, &first);
+        begin_job(&worker, &second, "b").unwrap();
+        assert_eq!(active(&worker), second);
+    }
+
+    #[test]
+    fn running_job_still_blocks_next_turn() {
+        let root = tempfile::tempdir().unwrap();
+        let worker = prepare(root.path());
+        begin_job(&worker, &uuid::Uuid::new_v4().to_string(), "a").unwrap();
+        let error = begin_job(&worker, &uuid::Uuid::new_v4().to_string(), "b").unwrap_err();
+        assert!(
+            error.to_string().contains("already executing a turn"),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn release_keeps_another_turns_marker() {
+        let root = tempfile::tempdir().unwrap();
+        let worker = prepare(root.path());
+        let first = uuid::Uuid::new_v4().to_string();
+        let second = uuid::Uuid::new_v4().to_string();
+        begin_job(&worker, &first, "a").unwrap();
+        finish(&worker, &first);
+        begin_job(&worker, &second, "b").unwrap();
+        release_active(&worker, &first).unwrap();
+        assert_eq!(active(&worker), second);
+        release_active(&worker, &second).unwrap();
+        assert!(!directory(&worker).join("active.json").exists());
     }
 }
