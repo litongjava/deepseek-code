@@ -698,8 +698,8 @@
     {
       "skill": "skill-creator",
       "path": "INSTRUCTIONS.md",
-      "bytes": 15523,
-      "sha256": "3a1f79226350246fa12a99e9fec7a920c0a358f1be983f315cb4aa9a48dae1f1",
+      "bytes": 15796,
+      "sha256": "d42217caa24426926f1c922f79d06e76e07e4829609b73985fd9bea55803f41f",
       "bundleHash": "9212bda2d6b4806521ddd18abacfd0e2"
     },
     {
@@ -712,8 +712,8 @@
     {
       "skill": "skill-creator",
       "path": "SKILL.md",
-      "bytes": 15802,
-      "sha256": "511b49e6c3a45328aba0d3af4a71140d687e64c2f836643d60b71317623ca537",
+      "bytes": 16075,
+      "sha256": "faf67a2ef6224ae743a11cba73e8d1fd384f379d5d70437c3daabeb23d2a099b",
       "bundleHash": "9212bda2d6b4806521ddd18abacfd0e2"
     },
     {

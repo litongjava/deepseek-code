@@ -158,12 +158,12 @@ impl SkillsManager {
     }
 
     /// Install first-run bundled and legacy built-in files without scanning.
-    /// Listing stays on the read-only discovery path.
+    /// Listing stays on the read-only discovery path. The pristine
+    /// `skill-creator` placeholder migration runs here too, because every
+    /// listing path calls this method before reading the data directory.
     pub fn ensure_installed(&self) -> Result<()> {
         let bundled = self.get_skills_path(&SkillSource::Bundled);
-        if !bundled.exists() {
-            self.install_bundled_skills()?;
-        }
+        self.install_bundled_skills()?;
         legacy_builtin::install(&bundled)
     }
 

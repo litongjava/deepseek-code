@@ -996,26 +996,99 @@ mod tests {
     }
 
     #[test]
+    fn runtime_discovery_does_not_let_a_modified_bundled_skill_creator_shadow_the_embedded_one() {
+        let temp = tempfile::tempdir().unwrap();
+        let workspace = temp.path().join("project");
+        std::fs::create_dir_all(&workspace).unwrap();
+        let data = temp.path().join("data");
+        write_skill(
+            &data.join("skills").join("bundled"),
+            "skill-creator",
+            "---\nname: skill-creator\ndescription: Modified bundled copy\n---\nMODIFIED_BUNDLED_CREATOR",
+        );
+        let (found, invalid) = discover_runtime_from(None, &data, &workspace);
+        assert!(invalid.is_empty(), "{invalid:?}");
+        let creators: Vec<_> = found
+            .values()
+            .filter(|command| command.name == "skill-creator")
+            .collect();
+        assert_eq!(creators.len(), 1, "{found:?}");
+        assert_eq!(
+            creators[0].path.parent(),
+            Some(Path::new("__embedded_cli_skills__"))
+        );
+        assert!(!creators[0].content.contains("MODIFIED_BUNDLED_CREATOR"));
+    }
+
+    #[test]
+    fn runtime_discovery_lets_a_direct_user_skill_override_the_embedded_skill_creator() {
+        let temp = tempfile::tempdir().unwrap();
+        let workspace = temp.path().join("project");
+        std::fs::create_dir_all(&workspace).unwrap();
+        let data = temp.path().join("data");
+        write_skill(
+            &data.join("skills"),
+            "skill-creator",
+            "---\nname: skill-creator\ndescription: User skill-creator copy\n---\nUSER_SKILL_CREATOR",
+        );
+        let (found, invalid) = discover_runtime_from(None, &data, &workspace);
+        assert!(invalid.is_empty(), "{invalid:?}");
+        let creators: Vec<_> = found
+            .values()
+            .filter(|command| command.name == "skill-creator")
+            .collect();
+        assert_eq!(creators.len(), 1, "{found:?}");
+        assert!(creators[0].content.contains("USER_SKILL_CREATOR"));
+        assert!(creators[0].path.starts_with(data.join("skills")));
+    }
+
+    #[test]
     fn installed_placeholder_and_legacy_builtins_are_visible_to_both_views() {
         let temp = tempfile::tempdir().unwrap();
         let workspace = temp.path().join("project");
         std::fs::create_dir_all(&workspace).unwrap();
         let data = temp.path().join("data");
+        // An earlier release wrote this placeholder; installing must migrate it
+        // before the resolver reads the data directory.
+        let stub = data.join("skills/bundled/skill-creator");
+        std::fs::create_dir_all(stub.join("agents")).unwrap();
+        std::fs::write(
+            stub.join("SKILL.md"),
+            crate::skills::skill_creator::STUB_SKILL_MD,
+        )
+        .unwrap();
+        std::fs::write(
+            stub.join("agents/analyzer.md"),
+            crate::skills::skill_creator::STUB_ANALYZER,
+        )
+        .unwrap();
+        std::fs::write(
+            stub.join("agents/grader.md"),
+            crate::skills::skill_creator::STUB_GRADER,
+        )
+        .unwrap();
         crate::skills::SkillsManager::with_path(data.join("skills"))
             .ensure_installed()
             .unwrap();
+        // Installation must remove the placeholder and must not write it again.
+        assert!(!stub.exists());
         let (found, invalid) = discover_runtime_from(None, &data, &workspace);
         assert!(invalid.is_empty(), "{invalid:?}");
-        // First-run placeholders are managed copies, but their names are free,
-        // so the same name reaches the model listing and the slash list.
-        for name in [
-            "skill-creator",
-            "commit",
-            "review",
-            "test",
-            "document",
-            "build",
-        ] {
+        // The embedded skill-creator reaches the model listing and the slash
+        // list as exactly one entry; it has no data-directory copy.
+        let creators: Vec<_> = found
+            .values()
+            .filter(|command| command.name == "skill-creator")
+            .collect();
+        assert_eq!(creators.len(), 1, "{found:?}");
+        assert!(creators[0].model_invocable());
+        assert!(creators[0].user_invocable);
+        assert_eq!(
+            creators[0].path.parent(),
+            Some(Path::new("__embedded_cli_skills__"))
+        );
+        // The five legacy built-ins keep their previous data-directory entries.
+        for name in ["commit", "review", "test", "document", "build"] {
             let skill = &found[name];
             assert!(skill.model_invocable(), "{name} must stay model-invocable");
             assert!(skill.user_invocable, "{name} must stay user-invocable");

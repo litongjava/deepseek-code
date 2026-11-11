@@ -331,7 +331,7 @@ OpenCode Go 用四种协议提供模型，模型地址和协议都来自内置�
 
 数据目录技能的名称沿用 round 01 之前的斜杠命令规则：取 frontmatter `name`（缺省时为技能所在目录名）转小写、空白折叠为 `-`，其他标点保留。因此 `My Skill` 仍是 `/my-skill`，`R&D (team)'s check` 仍是 `/r&d-(team)'s-check`；多层集合也只使用技能自身名称，不加集合前缀。两个数据目录技能归一化后同名时，两者都改用按 `SKILL.md` 路径计算的稳定 `skill_<hash>`（只有哈希碰撞时才按排序后的路径追加 `-2`、`-3`），不会按文件系统顺序只保留其中一个。`~/.claude`、项目与插件技能的名称规则不变。
 
-1. 自动化：`cargo test --locked -p deepseek-code-core --lib discovery::tests`、`cargo test --locked -p deepseek-code-core --lib data_dir_skill`、`cargo test --locked -p deepseek-code-core --lib runtime_discovery_keeps_pre_round_01_slash_names_for_mixed_case_and_spaces`、`cargo test --locked -p deepseek-code-core --lib runtime_discovery_keeps_punctuation_that_skill_creation_allows`、`cargo test --locked -p deepseek-code-core --lib runtime_discovery_disambiguates_shared_data_dir_names_with_stable_ids`、`cargo test --locked -p deepseek-code-cli --bin dcl slash_list`、`cargo test --locked -p deepseek-code-cli --test skills`。真实进程用例确认 `CLAUDE_CONFIG_DIR` 指向空目录时，首个请求的 `Available skills` 含数据目录技能（名称已小写化），第二请求的工具结果给出真实技能目录。`discovery::tests` 中的 `installed_placeholder_and_legacy_builtins_are_visible_to_both_views` 还确认首次生成的 `skill-creator` 占位与 legacy builtins 同时出现在模型列表和斜杠列表中。
+1. 自动化：`cargo test --locked -p deepseek-code-core --lib discovery::tests`、`cargo test --locked -p deepseek-code-core --lib data_dir_skill`、`cargo test --locked -p deepseek-code-core --lib runtime_discovery_keeps_pre_round_01_slash_names_for_mixed_case_and_spaces`、`cargo test --locked -p deepseek-code-core --lib runtime_discovery_keeps_punctuation_that_skill_creation_allows`、`cargo test --locked -p deepseek-code-core --lib runtime_discovery_disambiguates_shared_data_dir_names_with_stable_ids`、`cargo test --locked -p deepseek-code-cli --bin dcl slash_list`、`cargo test --locked -p deepseek-code-cli --test skills`。真实进程用例确认 `CLAUDE_CONFIG_DIR` 指向空目录时，首个请求的 `Available skills` 含数据目录技能（名称已小写化），第二请求的工具结果给出真实技能目录。`discovery::tests` 中的 `installed_placeholder_and_legacy_builtins_are_visible_to_both_views` 还确认 `ensure_installed` 不再写出 `skill-creator` 占位，内置 `skill-creator` 只在模型列表和斜杠列表中各出现一次，五个 legacy builtins 仍按原样可见。
 2. 真实终端：用空的 `CLAUDE_CONFIG_DIR` 和独立数据目录，把 `skills/<名称>/SKILL.md` 只放在数据目录，运行 `dcl --data-dir <目录> --print "/<名称> 参数"`。确认斜杠命令展开、`dcl skills list` 显示该技能；再让模型自行调用 `Skill`，确认工具名与斜杠名称一致，返回的说明包含实际数据目录路径，`references/...` 等相对路径可解析。
 3. 同名覆盖：在数据目录、`CLAUDE_CONFIG_DIR` 和工作区 `.claude/skills` 放同名技能，确认列表只有一项且三处内容按“项目 > 数据目录 > CLAUDE 用户”选择；移除高层副本后依次落到下一层。
 4. 开关：`enabled: false` 不出现在列表和工具中；`disable-model-invocation: true` 不在模型列表、`Skill` 工具也不能调用，但斜杠命令仍可用；`user-invocable: false` 仍只供模型调用。
@@ -365,7 +365,8 @@ OpenCode Go 用四种协议提供模型，模型地址和协议都来自内置�
 - `worker_frontend.rs`、`background_commands.rs`：B、D、E3、E4、F
 - `memory.rs`、`display_commands.rs`、`crates/core/src/memory`：G
 - `services/customization.rs`、`prompt/`、`native_engine/tool_loop.rs`：H，以及 SDK 测试
-- `crates/core/src/skills/mod.rs` 的 bundled 安装、`bundled.rs`、`bundled_resources.rs`、`bundled_manifest.rs`、`skill_creator.rs`、`skills/bundled/`：N
+- `crates/core/src/skills/discovery.rs`、`crates/core/src/native_engine/engine_core.rs` 的技能列表、`crates/core/src/native_engine/skill_tool.rs`：N
+- `crates/core/src/skills/mod.rs` 的 bundled 安装、`bundled.rs`、`bundled_resources.rs`、`bundled_manifest.rs`、`skill_creator.rs`、`skills/bundled/`：O（安装与 `ensure_installed` 的旧占位迁移见 N、O 两节）
 - `tools/cron_jobs.rs`、`tools/wakeup.rs`、`main.rs` 的空闲循环：I
 - `terminal/picker.rs`：F，以及 `/resume`、`/rewind`、`/mcp` 等使用选择列表的命令
 - 欢迎区生命周期、输入框与运行帧交接、`/plan` 提示：J，以及 B、C、E1、E3
