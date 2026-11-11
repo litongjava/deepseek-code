@@ -127,12 +127,7 @@ pub fn import_legacy(context: &ServiceContext, source: &Path, preview: bool) -> 
         "Legacy plugin has no executable commands"
     );
     let bundle = Bundle {
-        binary_files: BTreeMap::new(),
-        executable_files: Vec::new(),
-        skill_paths: Vec::new(),
-        command_paths: Vec::new(),
-        lifecycle_hooks: BTreeMap::new(),
-        mcp_servers: BTreeMap::new(),
+        binary_files: BTreeMap::new(), executable_files: Vec::new(), skill_paths: Vec::new(), command_paths: Vec::new(), lifecycle_hooks: BTreeMap::new(), mcp_servers: BTreeMap::new(),
         id: manifest.name.clone(),
         version: manifest.version.clone(),
         description: manifest.description.clone().unwrap_or_default(),

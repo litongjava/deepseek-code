@@ -714,9 +714,9 @@ mod tests {
         let dir = Path::new("fixture-batch");
         let command = supervisor_command(Path::new("fixture"), dir, &[]);
         let envs: Vec<_> = command.get_envs().collect();
-        assert!(envs.iter().any(
-            |(name, value)| *name == background_sessions::WORKER_MODEL_ENV && value.is_none()
-        ));
+        assert!(envs.iter().any(|(name, value)| *name
+            == background_sessions::WORKER_MODEL_ENV
+            && value.is_none()));
         assert!(envs.iter().any(|(name, value)| *name
             == background_sessions::WORKER_AUTO_ROUTE_ENV
             && value.is_none()));

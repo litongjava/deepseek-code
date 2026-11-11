@@ -1087,9 +1087,8 @@ mod tests {
         assert!(envs
             .iter()
             .any(|(name, value)| *name == CONTROL_ENV && value.is_none()));
-        assert!(envs
-            .iter()
-            .any(|(name, value)| *name == WORKER_ENV && *value == Some(dir.as_os_str())));
+        assert!(envs.iter().any(|(name, value)| *name == WORKER_ENV
+            && *value == Some(dir.as_os_str())));
         // Delegation passes a deliberate snapshot; it is applied after the strip.
         assert!(envs.iter().any(|(name, value)| *name == WORKER_MODEL_ENV
             && *value == Some(std::ffi::OsStr::new("explicit-model"))));

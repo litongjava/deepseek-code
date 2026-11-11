@@ -28,8 +28,7 @@ pub(super) fn language_servers(claude_home: &Path) -> Vec<Value> {
             continue;
         };
         let (name, marketplace) = id.split_once('@').unwrap_or((id.as_str(), ""));
-        let declared =
-            declared_servers(&root, &plugins.join("marketplaces").join(marketplace), name);
+        let declared = declared_servers(&root, &plugins.join("marketplaces").join(marketplace), name);
         for (server, mut config) in declared {
             official::replace_plugin_root(&mut config, &root.to_string_lossy().replace('\\', "/"));
             config["name"] = Value::String(format!("deepseek-code:{id}:{server}"));
@@ -55,30 +54,17 @@ fn declared_servers(root: &Path, marketplace: &Path, name: &str) -> BTreeMap<Str
                 let _ = official::merge(&root, &declaration, &mut files, &mut servers, 0);
             }
         }
-        if let Some(declaration) = read(&root.join(".claude-plugin/plugin.json"))
-            .and_then(|manifest| manifest.get("lspServers").cloned())
-        {
+        if let Some(declaration) = read(&root.join(".claude-plugin/plugin.json")).and_then(|manifest| manifest.get("lspServers").cloned()) {
             let _ = official::merge(&root, &declaration, &mut files, &mut servers, 0);
         }
     }
     if servers.is_empty() {
         // Official LSP plugins declare their servers inline in the marketplace.
-        let entry =
-            read(&marketplace.join(".claude-plugin/marketplace.json")).and_then(|catalog| {
-                catalog["plugins"]
-                    .as_array()?
-                    .iter()
-                    .find(|plugin| plugin["name"] == name)
-                    .cloned()
-            });
-        if let Some(Value::Object(inline)) =
-            entry.as_ref().and_then(|entry| entry.get("lspServers"))
-        {
-            servers.extend(
-                inline
-                    .iter()
-                    .map(|(name, config)| (name.clone(), config.clone())),
-            );
+        let entry = read(&marketplace.join(".claude-plugin/marketplace.json")).and_then(|catalog| {
+            catalog["plugins"].as_array()?.iter().find(|plugin| plugin["name"] == name).cloned()
+        });
+        if let Some(Value::Object(inline)) = entry.as_ref().and_then(|entry| entry.get("lspServers")) {
+            servers.extend(inline.iter().map(|(name, config)| (name.clone(), config.clone())));
         }
     }
     servers
@@ -103,28 +89,16 @@ mod tests {
         ]}).to_string()).unwrap();
         let disabled = plugins.join("cache/claude-plugins-official/gopls-lsp/1.0.0");
         std::fs::create_dir_all(&disabled).unwrap();
-        std::fs::write(
-            plugins.join("installed_plugins.json"),
-            json!({"version":2,"plugins":{
-                "rust-analyzer-lsp@claude-plugins-official":[{"installPath":install}],
-                "gopls-lsp@claude-plugins-official":[{"installPath":disabled}]
-            }})
-            .to_string(),
-        )
-        .unwrap();
-        std::fs::write(
-            home.path().join("settings.json"),
-            json!({"enabledPlugins":{"gopls-lsp@claude-plugins-official":false}}).to_string(),
-        )
-        .unwrap();
+        std::fs::write(plugins.join("installed_plugins.json"), json!({"version":2,"plugins":{
+            "rust-analyzer-lsp@claude-plugins-official":[{"installPath":install}],
+            "gopls-lsp@claude-plugins-official":[{"installPath":disabled}]
+        }}).to_string()).unwrap();
+        std::fs::write(home.path().join("settings.json"), json!({"enabledPlugins":{"gopls-lsp@claude-plugins-official":false}}).to_string()).unwrap();
         let servers = language_servers(home.path());
         assert_eq!(servers.len(), 1, "{servers:?}");
         assert_eq!(servers[0]["command"], "rust-analyzer");
         assert_eq!(servers[0]["extensionToLanguage"][".rs"], "rust");
-        assert_eq!(
-            servers[0]["name"],
-            "deepseek-code:rust-analyzer-lsp@claude-plugins-official:rust-analyzer"
-        );
+        assert_eq!(servers[0]["name"], "deepseek-code:rust-analyzer-lsp@claude-plugins-official:rust-analyzer");
         assert!(language_servers(&home.path().join("missing")).is_empty());
     }
 }

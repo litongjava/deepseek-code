@@ -278,17 +278,8 @@ pub async fn host(
             let memory = super::dream::client(&context);
             for document in list(&context, &root)?.into_iter().filter(|d| d.auto_update) {
                 let memories = memory.search(&document.title, Some(5)).await?;
-                let memory_contents: Vec<String> =
-                    memories.into_iter().map(|m| m.content).collect();
-                let Some(input) = super::magic_context::collect(
-                    &context,
-                    &root,
-                    project_id.as_deref(),
-                    memory_contents.clone(),
-                )?
-                else {
-                    continue;
-                };
+                let memory_contents: Vec<String> = memories.into_iter().map(|m| m.content).collect();
+                let Some(input) = super::magic_context::collect(&context, &root, project_id.as_deref(), memory_contents.clone())? else { continue; };
                 let previous: Option<String> = context.db.with_conn(|c| {
                     c.query_row(
                         "SELECT input FROM magic_auto_inputs WHERE document_id=?1",
@@ -307,17 +298,7 @@ pub async fn host(
                         .db
                         .with_conn(|c| crate::db::project_repo::require_trusted(c, id))??;
                 }
-                if super::magic_context::collect(
-                    &context,
-                    &root,
-                    project_id.as_deref(),
-                    memory_contents,
-                )?
-                .as_deref()
-                    != Some(&input)
-                {
-                    continue;
-                }
+                if super::magic_context::collect(&context, &root, project_id.as_deref(), memory_contents)?.as_deref() != Some(&input) { continue; }
                 // Disabling a document during generation revokes automatic apply.
                 if list(&context, &root)?
                     .iter()

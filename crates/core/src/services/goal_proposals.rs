@@ -59,11 +59,7 @@ fn update<T>(
 ) -> Result<T> {
     db.with_conn(|conn| update_conn(conn, session, f))?
 }
-fn update_conn<T>(
-    conn: &Connection,
-    session: &str,
-    f: impl FnOnce(&Connection, &mut State) -> Result<T>,
-) -> Result<T> {
+fn update_conn<T>(conn: &Connection, session: &str, f: impl FnOnce(&Connection, &mut State) -> Result<T>) -> Result<T> {
     let tx = crate::db::write_transaction(conn)?;
     let mut state = read(&tx, session)?;
     let result = f(&tx, &mut state)?;
@@ -150,10 +146,7 @@ impl Frontend {
             let result = update_conn(conn, &self.session, |conn, state| {
                 // Expired consent must not be revived by a recovered heartbeat.
                 prune(conn, &self.session, state)?;
-                let frontend = state
-                    .frontend
-                    .as_mut()
-                    .filter(|f| f.id == self.id)
+                let frontend = state.frontend.as_mut().filter(|f| f.id == self.id)
                     .context("Goal proposal frontend ownership changed")?;
                 frontend.touched_ms = now();
                 Ok(state.pending.as_ref().filter(|p| !p.approved).cloned())
@@ -600,14 +593,9 @@ mod tests {
         assert!(!recovered.approved);
         assert!(frontend.heartbeat.load(Ordering::Relaxed) > 0);
         assert!(f.activate().unwrap().is_none());
-        let timeout: u64 =
-            f.db.with_conn(|conn| conn.query_row("PRAGMA busy_timeout", [], |row| row.get(0)))
-                .unwrap()
-                .unwrap();
+        let timeout: u64 = f.db.with_conn(|conn| conn.query_row("PRAGMA busy_timeout", [], |row| row.get(0))).unwrap().unwrap();
         assert_eq!(timeout, 5000);
-        assert!(!crate::db::is_contention(&anyhow::anyhow!(
-            "database is locked"
-        )));
+        assert!(!crate::db::is_contention(&anyhow::anyhow!("database is locked")));
     }
     #[test]
     fn recovered_heartbeat_cannot_revive_expired_consent() {
