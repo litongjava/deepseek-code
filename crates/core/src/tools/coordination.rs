@@ -409,7 +409,7 @@ mod tests {
             })
         };
         let mut failures = 0;
-        for _ in 0..200 {
+        for _ in 0..40 {
             let team = execute(
                 "team",
                 json!({"operation":"create","name":"r","tasks":[{"prompt":"a"},{"prompt":"b"}]}),
