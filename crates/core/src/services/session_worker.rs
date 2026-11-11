@@ -477,9 +477,21 @@ pub async fn ensure_worker(
         ensure!(worker.root == root && worker.session_id == session, "Session worker metadata does not match the requested session");
         if worker.status != "stopped" {
             if jobs::now().saturating_sub(worker.heartbeat_ms) < 10_000 {
-                return wait_ready(worker).await;
+                // A crashed engine leaves its supervisor finishing up; once it has
+                // stopped, start a new worker instead of reporting the old exit.
+                if !worker.child_pid.is_some_and(recovery::exited) {
+                    match wait_ready(worker.clone()).await {
+                        Ok(ready) => return Ok(ready),
+                        Err(error) if read_worker(&directory(&worker))?.status != "stopped" => {
+                            return Err(error)
+                        }
+                        Err(_) => {}
+                    }
+                }
+                wait_stopped(&worker).await?;
+            } else {
+                recovery::recover(&worker)?;
             }
-            recovery::recover(&worker)?;
         }
     }
     let id = uuid::Uuid::new_v4().to_string();
@@ -561,6 +573,23 @@ async fn wait_ready(worker: Worker) -> Result<Worker> {
     })
     .await
     .context("Session worker did not become ready within 12 seconds")?
+}
+
+/// Waits, bounded, for a supervisor whose engine exited to record "stopped" and exit.
+async fn wait_stopped(worker: &Worker) -> Result<()> {
+    let dir = directory(worker);
+    tokio::time::timeout(Duration::from_secs(10), async {
+        loop {
+            if read_worker(&dir)?.status == "stopped"
+                && worker.supervisor_pid.is_none_or(recovery::exited)
+            {
+                return Ok::<_, anyhow::Error>(());
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+    })
+    .await
+    .context("Previous session worker did not stop within 10 seconds")?
 }
 
 /// The supervisor records its own error; when it only observed the host exit,

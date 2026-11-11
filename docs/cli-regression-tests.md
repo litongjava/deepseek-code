@@ -37,7 +37,7 @@ Windows 上，`tools::linux_env::tests::unpack_copies_hard_links_keeps_symlinks_
 
 测试进程会继承执行它的宿主会话环境。`DEEPSEEK_CODE_DATA_DIR` 会让独立进程用例写到宿主的数据目录，运行前先清除。
 
-有少数用例依赖真实的进程启动或固定超时，在机器同时进行编译或其他测试时会偶发超时：`services::hook_progress::tests::real_hook_success_failure_timeout_and_cancel_clear_status`（钩子 2 秒超时）、`crates/cli/tests/session_worker.rs` 中崩溃恢复相关用例（重启 Worker 的等待窗口）。这类失败应先单独重跑同一用例确认；单独通过且代码未涉及时按负载问题处理，不要为了让它通过而放宽产品超时。2026-11-07 的两次全量运行各出现一次，均在单独重跑时通过。
+有少数用例依赖真实的进程启动或固定超时，在机器同时进行编译或其他测试时会偶发超时：`services::hook_progress::tests::real_hook_success_failure_timeout_and_cancel_clear_status`（钩子 2 秒超时）。这类失败应先单独重跑同一用例确认；单独通过且代码未涉及时按负载问题处理，不要为了让它通过而放宽产品超时。2026-11-07 的两次全量运行各出现一次，均在单独重跑时通过。
 
 2026-11-07 之前，`lifecycle_events`、`peripheral`、`standalone` 的管道输入用例和 `teams` 在本机失败：它们断言整段消息内容，而用户主目录下的 `~/.claude/CLAUDE.md` 被当作项目说明注入首个用户消息。现在说明文件的祖先查找在用户主目录处停止，用户级说明只来自数据目录，因此这些用例不再依赖开发机的个人配置。若再次出现类似失败，先检查断言中是否多出了某段说明文件内容，再确认该文件是否位于项目目录与用户主目录之间。
 
