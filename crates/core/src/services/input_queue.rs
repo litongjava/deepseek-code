@@ -143,6 +143,40 @@ pub fn take_where(
     })?
 }
 
+/// Steer items the host enqueued but the turn never handed to the model are
+/// cancelled and returned in arrival order. A handed-off item was delivered and
+/// keeps its transcript row; an item another path already cancelled stays
+/// cancelled. Hosts use this to run leftovers as their next turn exactly once.
+pub fn cancel_undelivered(
+    db: &DbManager,
+    session: &str,
+    ids: &[i64],
+) -> Result<Vec<QueueItem>> {
+    db.with_conn(|conn| -> Result<Vec<QueueItem>> {
+        let tx = crate::db::write_transaction(conn)?;
+        let mut undelivered = Vec::new();
+        for &id in ids {
+            let Ok(item) = get_item(&tx, session, id) else {
+                continue;
+            };
+            if !matches!(item.state, QueueState::Queued | QueueState::Claimed) {
+                continue;
+            }
+            tx.execute(
+                "UPDATE session_input_queue SET state='cancelled',revision=revision+1 WHERE id=?1",
+                [id],
+            )?;
+            undelivered.push(QueueItem {
+                state: QueueState::Cancelled,
+                revision: item.revision + 1,
+                ..item
+            });
+        }
+        tx.commit()?;
+        Ok(undelivered)
+    })?
+}
+
 /// Whether a message `wanted` selects is queued.
 pub fn any(db: &DbManager, session: &str, wanted: impl Fn(&str) -> bool) -> Result<bool> {
     db.with_conn(|conn| -> Result<bool> {
@@ -461,6 +495,33 @@ mod durable_tests {
             claim_next(&db, "a", QueueMode::Steer).unwrap().unwrap().id,
             steered.id
         );
+    }
+
+    #[test]
+    fn undelivered_steer_items_are_cancelled_and_delivered_ones_stay() {
+        let temp = tempfile::tempdir().unwrap();
+        let db = DbManager::new(temp.path().join("db.sqlite")).unwrap();
+        db.init().unwrap();
+        let first = enqueue(&db, "a", "one", json!("one"), QueueMode::Steer).unwrap();
+        let second = enqueue(&db, "a", "two", json!("two"), QueueMode::Steer).unwrap();
+        let claimed = claim(&db, "a", first.id, first.revision).unwrap();
+        handoff(&db, "a", claimed.id, claimed.revision, |_, _, _| Ok(())).unwrap();
+        let undelivered = cancel_undelivered(&db, "a", &[first.id, second.id]).unwrap();
+        assert_eq!(undelivered.len(), 1);
+        assert_eq!(undelivered[0].id, second.id);
+        assert_eq!(undelivered[0].state, QueueState::Cancelled);
+        let rows = list(&db, "a").unwrap();
+        assert_eq!(
+            rows.iter().find(|row| row.id == first.id).unwrap().state,
+            QueueState::Handoff
+        );
+        assert_eq!(
+            rows.iter().find(|row| row.id == second.id).unwrap().state,
+            QueueState::Cancelled
+        );
+        assert!(cancel_undelivered(&db, "a", &[first.id, second.id])
+            .unwrap()
+            .is_empty());
     }
 
     #[test]

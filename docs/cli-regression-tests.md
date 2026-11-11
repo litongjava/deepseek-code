@@ -325,6 +325,18 @@ OpenCode Go 用四种协议提供模型，模型地址和协议都来自内置�
     - 计时口径：脚本用独立 PreCompact 标记观察钩子开始，以本次命令之后的完成提示为终点，使用单调时钟；明确记录这是不含更早规划的阶段区间。输入等待单独记录，首个摘要 HTTP 请求和压缩后的主请求都不能充当操作起点。8 秒前/后置钩子另有独立下限检查，故意漏算该阶段的时长必须失败。延迟 Enter 的受控探针要求启动等待被单独记录且耗时判定通过。
     `safe_budget_respected` 使用与引擎相同口径的完整请求体估算（含系统指令、按消息分组向上取整），只检查摘要路径的请求。所有场景的日志记录每个请求实际收到的注入类型与请求体哈希，不根据预算猜测。`compaction-review2-20261108/harness_negative_probe.py` 与 `harness_negative_probe2.py` 用受控假对象回放“重启未就绪”“忽略 Escape”“缺少必需检查”“存在假检查”“没有必需项”和“场景报错”，要求判定器一律返回非零；它们不替代真实重启或真实复用的场景。`compaction-review3-20261108/negative_probe_post_cancel.py` 让后续请求到达服务器但永不返回，要求汇总器因缺少完整回复、持久化与输入恢复而失败，同时证明请求确实已到达。`compaction-review4-20261108/harness_semantic_probe2.py` 把错误窗口、错误消息数、错误会话 ID、缺时区、额外正文、缺正文、错误耗时和丢失空格的路径逐个注入同一组检查函数，要求全部被拒绝，并用正确样本确认仍然通过。
 
+### 第十一轮：SDK 回合内引导（mid-turn steering）
+
+stream-json 宿主在一轮进行中发送的普通用户消息不再只等这一轮结束，而是通过 `services/input_queue` 的 Steer 模式在下一个工具边界交给正在运行的回合；REPL 与 Desktop 的既有路径不变。全部使用本地模拟模型与临时数据目录。
+
+- `cargo test --locked -p deepseek-code-cli --test sdk steering::`：6 项。工具运行中发送第二条消息后，第二条消息出现在工具结果之后的第二个模型请求里，回合继续；两条消息按到达顺序各出现一次；模型直接给出最终回答时该消息作为下一轮恰好运行一次；`/status` 等斜杠命令不进入运行中的回合；`interrupt` 保留尚未交付的消息并在下一轮运行；`--replay-user-messages` 在交付时以原 `uuid` 回显用户信封，且交付事件、持久化消息各一次。
+- `cargo test --locked -p deepseek-code-core --lib services::input_queue`：包含 `undelivered_steer_items_are_cancelled_and_delivered_ones_stay`，确认未交付项被取消并返回、已 handoff 项保留。
+- `cargo test --locked -p deepseek-code-core --lib durable_steer_handoff_waits_for_boundary_and_pause_preserves_next_turn`：原有边界与暂停语义不变。
+- `cargo test --locked -p deepseek-code-cli --test sdk`：包含 `controls::running_turn_answers_queries_and_cancels_only_queued_messages`（运行中发消息后 `cancel_async_message` 取消尚未开始的引导消息）与 `hook_callbacks::sdk_eof_during_model_or_callback_cannot_continue_automatically_allowed_write`（宿主断开且仍需 Hook/MCP 回调时，排队消息连同引导消息一起丢弃，只发一个错误 `result`）。
+- 真实模型（本地不接受真实密钥的步骤不在此列）：用 `--input-format stream-json` 保持 stdin 打开，先发送要求三次 `sleep` 工具调用的消息，8 秒后发送“跳过剩余 sleep”的消息。预期 `queued_input` 事件在第一次工具结果之后出现，第二个模型请求包含该文本，剩余调用可以不再执行。2026-11-10 的基线与本地模拟证据在相邻开发支持目录 `steer-20261110/`。
+
+事件形状（与 REPL/Desktop 共用的 `queued_input` 行）：`{"type":"queued_input","text":"…","content":"…","origin":"queue-input-<id>"}`。`origin` 是持久队列项的 handoff 标识；引导消息自己的 `messages` 行已由 handoff 保存，故不再作为工具附件重复写入。REPL/Desktop 的 legacy 队列项保持原有 `origin`（`user`、`task_notification`）并继续依附最近工具结果。
+
 ## 按改动范围选择场景
 
 - `terminal/editor.rs`、`terminal/live.rs` 的按键处理：A、B、E1、E2、E3
@@ -339,13 +351,14 @@ OpenCode Go 用四种协议提供模型，模型地址和协议都来自内置�
 - `tools/cron_jobs.rs`、`tools/wakeup.rs`、`main.rs` 的空闲循环：I
 - `terminal/picker.rs`：F，以及 `/resume`、`/rewind`、`/mcp` 等使用选择列表的命令
 - 欢迎区生命周期、输入框与运行帧交接、`/plan` 提示：J，以及 B、C、E1、E3
-- `session.rs`：B、D、E
+- `session.rs`：B、D、E；SDK 输入路径另见“第十一轮：SDK 回合内引导”
 - `services/session_worker*`、`services/background_sessions.rs`：D、E4，以及 `cargo test --locked -p deepseek-code-core --test worker_environment`（普通子进程不继承 worker 的控制变量）
 - `tools/mod.rs` 的 shell 启动、`services/tool_hooks.rs`、`mcp/mod.rs` 的 stdio 启动：`worker_environment`，并按 E4 复核后台与分离命令
 - `runtime.rs`、`db/message_repo.rs`（发给模型的历史）：D2、E5，以及 SDK 测试
 - `db/mod.rs`（`write_tx`）：`cargo test --locked -p deepseek-code-core --lib db::write_tx`（重试、非争用不重试、超时报 label、失败不留半行）与 `cargo test --locked -p deepseek-code-core --test session_concurrency`。真实争用复验：用 `VACUUM INTO` 复制数据库，`DEEPSEEK_CODE_DATA_DIR` 指向副本，另一个进程 `BEGIN IMMEDIATE` 占锁 8 秒，期间跑一轮带工具调用的请求，确认回合完成、日志有重试告警、工具行与快照完整；再占锁 40 秒，确认回合以带 label 的错误结束（不是裸 `database is locked`），且没有半成品工具行。
 - `db/message_repo.rs` 的请求快照去重（`request_blobs` / `*Ref`）：`cargo test --locked -p deepseek-code-core --lib db::message_repo`（同头只存一份、往返字段一致、旧内联行可读、缺 blob 不伪造、不修改调用方数据）、`cargo test --locked -p deepseek-code-core --test compaction_status_regressions` 与 `cargo test --locked -p deepseek-code-cli --bin dcl status_commands_tests`。历史数据不会自动回填：要缩小现有库需另跑一次性回填脚本并 `VACUUM`，验证方法是回填前后比较 `requests_json` 总字节、`request_blobs` 行数，并抽 3 条消息确认 `get_request_snapshots` 往返一致。
-- `services/input_queue.rs`：B、E4
+- `services/input_queue.rs`：B、E4，以及“第十一轮：SDK 回合内引导”的全部自动用例
+- `sdk.rs`（SDK stream-json 输入与回合控制）：E6、SDK 全套，以及“第十一轮：SDK 回合内引导”
 - 权限相关：E2，以及 `added_directory_survives_worker_resume_without_granting_other_sessions`（`bypass` 模式可以读工作区外的文件，其他模式受目录范围限制）
 - Provider、模型请求：E1、E6、M（OpenCode Go 的预设、URL 纠正、失败提示与会话头）
 - `scripts/sync-opencode-go-catalog.mjs`、`src/data/providerCatalog.json`：M，以及 `npm run test:run -- modelCapabilities`

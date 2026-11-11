@@ -3,6 +3,8 @@
 mod interrupt_usage;
 #[path = "sdk/recovery_interrupt.rs"]
 mod recovery_interrupt;
+#[path = "sdk/steering.rs"]
+mod steering;
 use axum::{
     extract::State,
     http::StatusCode,
@@ -96,6 +98,7 @@ enum Mode {
     ReadThenTruncated,
     ReadThenText,
     SlowText,
+    SlowTool,
     Tool,
     SchemaGood,
     SchemaBad,
@@ -145,6 +148,7 @@ async fn respond(State(state): State<Fixture>, Json(body): Json<Value>) -> Respo
         || matches!(state.mode, Mode::Tool | Mode::TruncatedTool)
         || matches!(state.mode, Mode::ReadThenTruncated) && count == 1
         || matches!(state.mode, Mode::ReadThenText) && count == 1
+        || matches!(state.mode, Mode::SlowTool) && count == 1
         || matches!(
             state.mode,
             Mode::Approval | Mode::ProtectedApproval | Mode::DelayedApproval | Mode::Question
@@ -194,6 +198,12 @@ async fn respond(State(state): State<Fixture>, Json(body): Json<Value>) -> Respo
                     "write-1",
                     "Write",
                     json!({"file_path":if matches!(state.mode, Mode::ProtectedApproval) {".bashrc"} else {"approval.txt"},"content":"ACTUAL_APPROVED_WRITE"}),
+                )
+            } else if matches!(state.mode, Mode::SlowTool) {
+                (
+                    "bash-1",
+                    "Bash",
+                    json!({"command":"sleep 2; echo STEER_TOOL","description":"Hold the tool open for a mid-turn message"}),
                 )
             } else {
                 ("read-1", "Read", json!({"file_path":"fixture.txt"}))
@@ -245,6 +255,8 @@ async fn respond(State(state): State<Fixture>, Json(body): Json<Value>) -> Respo
                 Mode::Approval | Mode::ProtectedApproval | Mode::DelayedApproval
             ) {
                 json!({"tool_calls":[{"index":0,"id":"write-1","type":"function","function":{"name":"Write","arguments":json!({"file_path":if matches!(state.mode, Mode::ProtectedApproval) {".bashrc"} else {"approval.txt"},"content":"ACTUAL_APPROVED_WRITE"}).to_string()}}]})
+            } else if matches!(state.mode, Mode::SlowTool) {
+                json!({"tool_calls":[{"index":0,"id":"bash-1","type":"function","function":{"name":"Bash","arguments":json!({"command":"sleep 2; echo STEER_TOOL","description":"Hold the tool open for a mid-turn message"}).to_string()}}]})
             } else {
                 json!({"tool_calls":[{"index":0,"id":"read-1","type":"function","function":{"name":"Read","arguments":"{\"file_path\":\"fixture.txt\"}"}}]})
             }
@@ -514,6 +526,15 @@ impl Client {
     }
     async fn send(&mut self, value: Value) {
         self.raw(&format!("{value}\n")).await;
+    }
+    /// The next line the CLI prints, whatever it is; used to observe ordering.
+    async fn next_frame(&mut self) -> Value {
+        let line = tokio::time::timeout(Duration::from_secs(20), self.output.next_line())
+            .await
+            .expect("CLI produced no frame")
+            .unwrap()
+            .expect("CLI ended before the expected frame");
+        serde_json::from_str(&line).unwrap_or_else(|_| panic!("Non-JSON stdout: {line}"))
     }
     async fn raw(&mut self, text: &str) {
         let input = self.input.as_mut().unwrap();
