@@ -55,6 +55,8 @@ pub(crate) mod image_generation;
 pub(crate) mod output_page;
 pub(crate) mod path_scope;
 pub(crate) mod provider_search;
+#[cfg(target_os = "linux")]
+pub(crate) mod pty_transport;
 mod shell_discovery;
 pub(crate) mod shell_input;
 mod web;
