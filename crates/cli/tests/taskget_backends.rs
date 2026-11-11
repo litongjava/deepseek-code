@@ -618,33 +618,44 @@ async fn background_agent_task_get_reports_real_child_progress_report_and_comple
     );
 }
 
-/// Insert an assistant turn into a real session database, as a resumed child
-/// would already have from an earlier turn.
-fn seed_assistant_turn(data: &std::path::Path, session: &str, text: &str) {
-    let conn =
+/// Insert a genuine prior assistant turn ahead of the child session's current
+/// turn.
+///
+/// Message history is ordered by `sort_order`; `created_at` is descriptive only
+/// (`job_report` in core selects `ORDER BY sort_order DESC`). "Prior" therefore
+/// means a lower `sort_order`, not an older timestamp. Appending at
+/// `MAX(sort_order)+1` after the child has written its current turn would place
+/// the seed *after* that turn and make it the reported final message.
+///
+/// The row is written at the front in one transaction that shifts the existing
+/// rows up, so the result does not depend on when the seed physically runs
+/// relative to the child's own writes. A child insert after the commit takes
+/// `MAX(sort_order)+1`, which is still later than this row.
+fn seed_prior_assistant_turn(data: &std::path::Path, session: &str, text: &str) {
+    let mut conn =
         rusqlite::Connection::open(data.join(deepseek_code_core::runtime::DATABASE_FILE)).unwrap();
     conn.busy_timeout(Duration::from_secs(10)).unwrap();
-    let order: i64 = conn
-        .query_row(
-            "SELECT COALESCE(MAX(sort_order),0)+1 FROM messages WHERE conversation_id=?1",
-            [session],
-            |row| row.get(0),
-        )
-        .unwrap();
     let mut attempts = 0;
     loop {
-        let result = conn.execute(
-            "INSERT INTO messages (id, conversation_id, role, content, thinking, created_at, is_compact_boundary, sort_order) VALUES (?1,?2,'assistant',?3,NULL,?4,0,?5)",
-            rusqlite::params![
-                uuid::Uuid::new_v4().to_string(),
-                session,
-                text,
-                "2026-01-01T00:00:00Z",
-                order
-            ],
-        );
+        let result = (|| -> rusqlite::Result<()> {
+            let tx = conn.transaction()?;
+            tx.execute(
+                "UPDATE messages SET sort_order = sort_order + 1 WHERE conversation_id=?1",
+                [session],
+            )?;
+            tx.execute(
+                "INSERT INTO messages (id, conversation_id, role, content, thinking, created_at, is_compact_boundary, sort_order) VALUES (?1,?2,'assistant',?3,NULL,?4,0,0)",
+                rusqlite::params![
+                    uuid::Uuid::new_v4().to_string(),
+                    session,
+                    text,
+                    "2026-01-01T00:00:00Z"
+                ],
+            )?;
+            tx.commit()
+        })();
         match result {
-            Ok(_) => break,
+            Ok(()) => return,
             Err(error)
                 if error.sqlite_error_code() == Some(rusqlite::ErrorCode::DatabaseBusy)
                     && attempts < 40 =>
@@ -652,7 +663,7 @@ fn seed_assistant_turn(data: &std::path::Path, session: &str, text: &str) {
                 attempts += 1;
                 std::thread::sleep(Duration::from_millis(50));
             }
-            Err(error) => panic!("could not seed an assistant turn: {error}"),
+            Err(error) => panic!("could not seed a prior assistant turn: {error}"),
         }
     }
 }
@@ -831,19 +842,23 @@ async fn agent_paging_respond(
                 .expect("child session ID")
                 .to_owned();
             fixture.store("paged_agent", started.clone());
-            let data = fixture.state.data.clone();
-            tokio::task::spawn_blocking(move || {
-                seed_assistant_turn(&data, &child, "PRIOR-ASSISTANT-HISTORY");
-            })
-            .await
-            .unwrap();
             let job_id = started["agent_id"]
                 .as_str()
                 .expect("agent job ID")
                 .to_owned();
+            // Wait until the child's current turn really exists, then seed the
+            // prior turn. Doing it in this order exercises the case that the old
+            // `MAX(sort_order)+1` seed got wrong: a prior turn written after the
+            // current one must still sort before it.
             if let Err(error) = wait_for_running_progress(&fixture.state.data, &job_id).await {
                 panic!("{error}");
             }
+            let data = fixture.state.data.clone();
+            tokio::task::spawn_blocking(move || {
+                seed_prior_assistant_turn(&data, &child, "PRIOR-ASSISTANT-HISTORY");
+            })
+            .await
+            .unwrap();
             tool_call_frame(
                 "call-page-1",
                 "TaskGet",
@@ -949,7 +964,9 @@ async fn background_agent_task_get_pages_while_a_prior_assistant_turn_exists() {
         "the completed read lost the child report: {completed}"
     );
 
-    // The seeded turn really was in the child session while the job ran.
+    // The seeded turn really was in the child session while the job ran, and it
+    // really sorts before the current turn: history order is `sort_order`, not
+    // `created_at`.
     let conn = rusqlite::Connection::open(
         fixture
             .data
@@ -964,6 +981,40 @@ async fn background_agent_task_get_pages_while_a_prior_assistant_turn_exists() {
         )
         .unwrap();
     assert_eq!(seeded, 1);
+    let seeded_order: i64 = conn
+        .query_row(
+            "SELECT sort_order FROM messages WHERE conversation_id=?1 AND content='PRIOR-ASSISTANT-HISTORY'",
+            [child_session],
+            |row| row.get(0),
+        )
+        .unwrap();
+    let current_order: i64 = conn
+        .query_row(
+            "SELECT sort_order FROM messages WHERE conversation_id=?1 AND role='assistant' AND content LIKE 'child-progress%'",
+            [child_session],
+            |row| row.get(0),
+        )
+        .unwrap();
+    let (newest_order, newest_content): (i64, String) = conn
+        .query_row(
+            "SELECT sort_order, content FROM messages WHERE conversation_id=?1 AND role='assistant' AND content<>'' ORDER BY sort_order DESC LIMIT 1",
+            [child_session],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .unwrap();
+    eprintln!("ordering: seeded={seeded_order} current={current_order} newest={newest_order}");
+    assert!(
+        seeded_order < current_order,
+        "the seeded prior turn does not sort before the current turn: seeded={seeded_order} current={current_order}"
+    );
+    assert_eq!(
+        newest_order, current_order,
+        "the newest assistant row is not the child's current turn: newest={newest_order} current={current_order}"
+    );
+    assert!(
+        newest_content.contains("child-final-marker"),
+        "the newest assistant row is not the child's final report: {newest_content:?}"
+    );
 
     // The paged prefix is a prefix of the real append-only event text.
     let raw = std::fs::read_to_string(
