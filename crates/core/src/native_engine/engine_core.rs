@@ -487,7 +487,10 @@ impl QueryEngine {
         let git_snapshot = tokio::task::spawn_blocking(move || crate::services::git_snapshot::for_session(&snapshot_root, &snapshot_session, &snapshot_workspace)).await?;
         let workspace_path = workspace.to_string_lossy().into_owned();
         let mut discovered_skills = crate::services::plugins::skill_commands(&plugin_context)?;
-        discovered_skills.extend(crate::skills::discovery::discover(&workspace)?);
+        discovered_skills.extend(crate::skills::discovery::discover(
+            &plugin_context.paths.data_dir,
+            &workspace,
+        )?);
         let mut pending_user_skill = None;
         // Blocks kept after this turn's user message for the rest of the session;
         // a skill's block also records the skill for after a compaction.

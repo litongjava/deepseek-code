@@ -3,7 +3,7 @@ use anyhow::{ensure, Context, Result};
 use serde::Serialize;
 use serde_json::Value;
 use std::{
-    collections::BTreeMap,
+    collections::{BTreeMap, BTreeSet},
     path::{Path, PathBuf},
 };
 
@@ -74,14 +74,47 @@ impl SkillCommand {
     }
 }
 
-pub fn discover(workspace: &Path) -> Result<BTreeMap<String, SkillCommand>> {
-    let user = std::env::var_os("CLAUDE_CONFIG_DIR")
-        .map(PathBuf::from)
-        .or_else(|| dirs::home_dir().map(|home| home.join(".claude")));
-    Ok(discover_available_from(user.as_deref(), workspace).0)
+/// One resolver for the model-visible listing, the `Skill` tool and the CLI
+/// slash list. Precedence, lowest to highest: embedded workflows,
+/// `CLAUDE_CONFIG_DIR` (or `~/.claude`), `<data dir>/skills`,
+/// `<workspace>/.claude`. The data directory is the native user scope, so it
+/// overrides the Claude-compatible user root while the project still wins.
+/// Data-directory names keep the pre-round-01 lowercase slugs (see
+/// [`scan_data_dir`]); the other roots keep their existing spelling.
+pub fn discover(data_dir: &Path, workspace: &Path) -> Result<BTreeMap<String, SkillCommand>> {
+    let user = user_config_dir();
+    Ok(discover_runtime_from(user.as_deref(), data_dir, workspace).0)
 }
 
-/// Tolerant runtime discovery. Invalid files never override valid definitions.
+fn user_config_dir() -> Option<PathBuf> {
+    std::env::var_os("CLAUDE_CONFIG_DIR")
+        .map(PathBuf::from)
+        .or_else(|| dirs::home_dir().map(|home| home.join(".claude")))
+}
+
+/// Explicit roots for tests; same precedence as [`discover`].
+pub fn discover_runtime_from(
+    user_config: Option<&Path>,
+    data_dir: &Path,
+    workspace: &Path,
+) -> (BTreeMap<String, SkillCommand>, Vec<PathBuf>) {
+    let mut commands = super::bundled::commands(workspace);
+    let mut invalid = Vec::new();
+    if let Some(user) = user_config {
+        let _ = scan_config_impl(user, &mut commands, Some(&mut invalid));
+    }
+    let _ = scan_data_dir(&data_dir.join("skills"), &mut commands, Some(&mut invalid));
+    let _ = scan_config_impl(
+        &workspace.join(".claude"),
+        &mut commands,
+        Some(&mut invalid),
+    );
+    log_invalid(&invalid);
+    (commands, invalid)
+}
+
+/// Tolerant runtime discovery without a data directory (diagnostics only).
+/// Invalid files never override valid definitions.
 /// Errors retain paths only: parser messages may contain credential values.
 pub fn discover_available_from(
     user_config: Option<&Path>,
@@ -96,7 +129,12 @@ pub fn discover_available_from(
     {
         let _ = scan_config_impl(&config, &mut commands, Some(&mut invalid));
     }
-    for path in &invalid {
+    log_invalid(&invalid);
+    (commands, invalid)
+}
+
+fn log_invalid(invalid: &[PathBuf]) {
+    for path in invalid {
         let safe: String = path
             .to_string_lossy()
             .chars()
@@ -105,7 +143,6 @@ pub fn discover_available_from(
             .collect();
         tracing::warn!(path = %safe, category = "invalid_or_unreadable_skill", "Skipping invalid skill; run /doctor");
     }
-    (commands, invalid)
 }
 
 /// Explicit roots allow fixture tests without reading or running personal skills.
@@ -255,124 +292,54 @@ fn scan_config_impl(
         if !root.exists() {
             continue;
         }
-        let mut paths = Vec::new();
-        for entry in walkdir::WalkDir::new(&root)
-            .follow_links(false)
-            .max_depth(16)
-        {
-            let entry = match entry {
-                Ok(entry) => entry,
+        for path in collect_paths(&root, skill_format, invalid.as_deref_mut())? {
+            let invalid_path = path.clone();
+            match parse_definition(&root, &path, skill_format, false) {
+                Ok(Some(command)) => {
+                    commands.insert(command.name.clone(), command);
+                }
+                Ok(None) => {}
                 Err(error) => {
                     if let Some(invalid) = invalid.as_mut() {
-                        invalid.push(error.path().unwrap_or(&root).to_path_buf());
-                        continue;
+                        invalid.push(invalid_path);
+                    } else {
+                        return Err(error);
                     }
-                    return Err(error).with_context(|| format!("Scanning {}", root.display()));
                 }
-            };
-            if !entry.file_type().is_file() {
-                continue;
-            }
-            let filename = entry.file_name().to_string_lossy();
-            if (skill_format && filename == "SKILL.md")
-                || (!skill_format
-                    && entry
-                        .path()
-                        .extension()
-                        .is_some_and(|extension| extension == "md"))
-            {
-                paths.push(entry.into_path());
             }
         }
-        paths.sort();
-        for path in paths {
-            let invalid_path = path.clone();
-            let parsed = (|| -> Result<()> {
-                ensure!(
-                    std::fs::metadata(&path)?.len() <= 1024 * 1024,
-                    "Skill file exceeds 1 MiB: {}",
-                    path.display()
-                );
-                let text = std::fs::read_to_string(&path)
-                    .with_context(|| format!("Reading UTF-8 skill {}", path.display()))?;
-                let (metadata, content) = frontmatter(&text)
-                    .with_context(|| format!("Parsing skill {}", path.display()))?;
-                if boolean(&metadata, "enabled", true)? == false {
-                    return Ok(());
-                }
-                let relative = path.strip_prefix(&root)?;
-                let stem = if skill_format {
-                    relative
-                        .parent()
-                        .context("Skill must be in a named directory")?
-                        .to_path_buf()
-                } else {
-                    relative.with_extension("")
-                };
-                let mut parts = stem
-                    .iter()
-                    .map(|v| v.to_string_lossy().into_owned())
-                    .collect::<Vec<_>>();
-                // A plugin checkout inside a user skill directory has its own
-                // namespace and source root; structural `skills/` is not a command
-                // namespace. Ordinary nested skill collections retain their paths.
-                if skill_format {
-                    if let Some(plugin_parts) = local_plugin_name(&root, &path)? {
-                        parts = plugin_parts;
-                    }
-                }
-                ensure!(
-                    !parts.is_empty(),
-                    "Skill must be in a named directory: {}",
-                    path.display()
-                );
-                if let Some(name) = metadata.get("name").and_then(Value::as_str) {
-                    *parts.last_mut().unwrap() = name.into();
-                }
-                let name = parts.join(":");
-                ensure!(
-                    name.chars()
-                        .all(|c| c.is_alphanumeric() || matches!(c, '-' | '_' | ':' | '.')),
-                    "Invalid skill command name: {name}"
-                );
-                let command = SkillCommand {
-                    name: name.clone(),
-                    description: metadata
-                        .get("description")
-                        .and_then(Value::as_str)
-                        .unwrap_or("Run local skill instructions")
-                        .split_whitespace()
-                        .collect::<Vec<_>>()
-                        .join(" "),
-                    path,
-                    content,
-                    user_invocable: boolean(
-                        &metadata,
-                        "user-invocable",
-                        boolean(&metadata, "userInvocable", true)?,
-                    )?,
-                    disable_model_invocation: boolean(
-                        &metadata,
-                        "disable-model-invocation",
-                        false,
-                    )?,
-                    context: metadata
-                        .get("context")
-                        .and_then(Value::as_str)
-                        .map(str::to_owned),
-                    shell: metadata
-                        .get("shell")
-                        .and_then(Value::as_str)
-                        .map(str::to_owned),
-                    agent: metadata
-                        .get("agent")
-                        .and_then(Value::as_str)
-                        .map(str::to_owned),
-                };
-                commands.insert(name, command);
-                Ok(())
-            })();
-            if let Err(error) = parsed {
+    }
+    Ok(())
+}
+
+/// Read-only scan of `<data dir>/skills`. Names keep the pre-round-01 slash
+/// spelling: the lowercase slug of the skill's own name, or its path-stable id
+/// when that slug is empty, unusable or shared with another data-dir skill.
+/// Managed subdirectories (`bundled`, `mcp`) stay visible, as they already were
+/// in the slash list, but never replace an embedded workflow or a Claude-user
+/// definition of the same name.
+fn scan_data_dir(
+    root: &Path,
+    commands: &mut BTreeMap<String, SkillCommand>,
+    mut invalid: Option<&mut Vec<PathBuf>>,
+) -> Result<()> {
+    if !root.exists() {
+        return Ok(());
+    }
+    let mut entries = Vec::new();
+    for path in collect_paths(root, true, invalid.as_deref_mut())? {
+        let invalid_path = path.clone();
+        let managed = path
+            .strip_prefix(root)
+            .ok()
+            .and_then(|relative| relative.components().next())
+            .is_some_and(|component| {
+                matches!(component.as_os_str().to_str(), Some("bundled" | "mcp"))
+            });
+        match parse_definition(root, &path, true, true) {
+            Ok(Some(command)) => entries.push((command, managed)),
+            Ok(None) => {}
+            Err(error) => {
                 if let Some(invalid) = invalid.as_mut() {
                     invalid.push(invalid_path);
                 } else {
@@ -381,7 +348,202 @@ fn scan_config_impl(
             }
         }
     }
+    let mut counts = BTreeMap::new();
+    for (command, _) in &entries {
+        *counts.entry(command.name.clone()).or_insert(0usize) += 1;
+    }
+    let mut used = BTreeSet::new();
+    for (mut command, managed) in entries {
+        let shared = counts.get(&command.name).is_some_and(|count| *count > 1);
+        let usable = !command.name.is_empty()
+            && !command.name.contains('/')
+            && !command.name.chars().any(char::is_control);
+        if shared || !usable {
+            command.name = legacy_skill_id(&command.path, &used);
+        }
+        if managed && commands.contains_key(&command.name) {
+            continue;
+        }
+        used.insert(command.name.clone());
+        commands.insert(command.name.clone(), command);
+    }
     Ok(())
+}
+
+/// Pre-round-01 slash names in the data directory: the skill name lowercased,
+/// with whitespace collapsed to `-`. Other punctuation is kept so commands that
+/// earlier releases listed, such as `/r&d-(team)'s-check`, still resolve.
+fn legacy_data_dir_name(raw: &str) -> String {
+    raw.to_lowercase()
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join("-")
+}
+
+/// The id the data-directory manager used before round 01. Entries are visited
+/// in sorted path order, so the result never depends on filesystem enumeration
+/// order; only an actual hash collision appends a counter.
+fn legacy_skill_id(path: &Path, used: &BTreeSet<String>) -> String {
+    use std::collections::hash_map::DefaultHasher;
+    use std::hash::{Hash, Hasher};
+    let mut hasher = DefaultHasher::new();
+    path.to_string_lossy().hash(&mut hasher);
+    let base = format!("skill_{:x}", hasher.finish());
+    if !used.contains(&base) {
+        return base;
+    }
+    let mut suffix = 2;
+    loop {
+        let candidate = format!("{base}-{suffix}");
+        if !used.contains(&candidate) {
+            return candidate;
+        }
+        suffix += 1;
+    }
+}
+
+fn collect_paths(
+    root: &Path,
+    skill_format: bool,
+    invalid: Option<&mut Vec<PathBuf>>,
+) -> Result<Vec<PathBuf>> {
+    let mut invalid = invalid;
+    let mut paths = Vec::new();
+    for entry in walkdir::WalkDir::new(root)
+        .follow_links(false)
+        .max_depth(16)
+    {
+        let entry = match entry {
+            Ok(entry) => entry,
+            Err(error) => {
+                if let Some(invalid) = invalid.as_mut() {
+                    invalid.push(error.path().unwrap_or(root).to_path_buf());
+                    continue;
+                }
+                return Err(error).with_context(|| format!("Scanning {}", root.display()));
+            }
+        };
+        if !entry.file_type().is_file() {
+            continue;
+        }
+        let filename = entry.file_name().to_string_lossy();
+        if (skill_format && filename == "SKILL.md")
+            || (!skill_format
+                && entry
+                    .path()
+                    .extension()
+                    .is_some_and(|extension| extension == "md"))
+        {
+            paths.push(entry.into_path());
+        }
+    }
+    paths.sort();
+    Ok(paths)
+}
+
+/// `root` is the naming root for config-scope relative names and local plugin
+/// metadata. Data-directory skills use the pre-round-01 slash spelling instead:
+/// the lowercase slug of the skill's own name (see [`legacy_data_dir_name`]).
+fn parse_definition(
+    root: &Path,
+    path: &Path,
+    skill_format: bool,
+    data_dir: bool,
+) -> Result<Option<SkillCommand>> {
+    ensure!(
+        std::fs::metadata(path)?.len() <= 1024 * 1024,
+        "Skill file exceeds 1 MiB: {}",
+        path.display()
+    );
+    let text = std::fs::read_to_string(path)
+        .with_context(|| format!("Reading UTF-8 skill {}", path.display()))?;
+    let (metadata, content) =
+        frontmatter(&text).with_context(|| format!("Parsing skill {}", path.display()))?;
+    if boolean(&metadata, "enabled", true)? == false {
+        return Ok(None);
+    }
+    let name = if data_dir {
+        let raw = metadata
+            .get("name")
+            .and_then(Value::as_str)
+            .map(str::to_owned)
+            .or_else(|| {
+                path.parent()
+                    .and_then(Path::file_name)
+                    .map(|name| name.to_string_lossy().into_owned())
+            })
+            .unwrap_or_default();
+        legacy_data_dir_name(&raw)
+    } else {
+        let relative = path.strip_prefix(root)?;
+        let stem = if skill_format {
+            relative
+                .parent()
+                .context("Skill must be in a named directory")?
+                .to_path_buf()
+        } else {
+            relative.with_extension("")
+        };
+        let mut parts = stem
+            .iter()
+            .map(|part| part.to_string_lossy().into_owned())
+            .collect::<Vec<_>>();
+        // A plugin checkout inside a user skill directory has its own
+        // namespace and source root; structural `skills/` is not a command
+        // namespace. Ordinary nested skill collections retain their paths.
+        if skill_format {
+            if let Some(plugin_parts) = local_plugin_name(root, path)? {
+                parts = plugin_parts;
+            }
+        }
+        ensure!(
+            !parts.is_empty(),
+            "Skill must be in a named directory: {}",
+            path.display()
+        );
+        if let Some(name) = metadata.get("name").and_then(Value::as_str) {
+            *parts.last_mut().unwrap() = name.into();
+        }
+        let name = parts.join(":");
+        ensure!(
+            !name.is_empty()
+                && name
+                    .chars()
+                    .all(|c| c.is_alphanumeric() || matches!(c, '-' | '_' | ':' | '.')),
+            "Invalid skill command name: {name}"
+        );
+        name
+    };
+    Ok(Some(SkillCommand {
+        name: name.clone(),
+        description: metadata
+            .get("description")
+            .and_then(Value::as_str)
+            .unwrap_or("Run local skill instructions")
+            .split_whitespace()
+            .collect::<Vec<_>>()
+            .join(" "),
+        path: path.to_path_buf(),
+        content,
+        user_invocable: boolean(
+            &metadata,
+            "user-invocable",
+            boolean(&metadata, "userInvocable", true)?,
+        )?,
+        disable_model_invocation: boolean(&metadata, "disable-model-invocation", false)?,
+        context: metadata
+            .get("context")
+            .and_then(Value::as_str)
+            .map(str::to_owned),
+        shell: metadata
+            .get("shell")
+            .and_then(Value::as_str)
+            .map(str::to_owned),
+        agent: metadata
+            .get("agent")
+            .and_then(Value::as_str)
+            .map(str::to_owned),
+    }))
 }
 
 fn local_plugin_name(scan_root: &Path, skill_file: &Path) -> Result<Option<Vec<String>>> {
@@ -660,5 +822,317 @@ mod tests {
             .render("production", "id")
             .unwrap()
             .contains("Run production"));
+    }
+
+    fn write_skill(config: &Path, relative: &str, body: &str) {
+        let directory = config.join(relative);
+        std::fs::create_dir_all(&directory).unwrap();
+        std::fs::write(directory.join("SKILL.md"), body).unwrap();
+    }
+
+    #[test]
+    fn runtime_discovery_lists_data_dir_skills_with_the_real_directory() {
+        let temp = tempfile::tempdir().unwrap();
+        let user = temp.path().join("user");
+        std::fs::create_dir_all(&user).unwrap();
+        let workspace = temp.path().join("project");
+        std::fs::create_dir_all(&workspace).unwrap();
+        let data = temp.path().join("data");
+        write_skill(
+            &data.join("skills"),
+            "data-dir-check",
+            "---\nname: data-dir-check\ndescription: Data directory fixture\n---\nRead references/setup.md, then inspect $ARGUMENTS",
+        );
+        let (found, invalid) = discover_runtime_from(Some(&user), &data, &workspace);
+        assert!(invalid.is_empty(), "{invalid:?}");
+        let skill = &found["data-dir-check"];
+        assert_eq!(skill.path, data.join("skills/data-dir-check/SKILL.md"));
+        let rendered = skill.render_template("the target", "session-id").unwrap();
+        assert!(rendered.contains("the target"));
+        assert!(rendered.contains(
+            &data
+                .join("skills/data-dir-check")
+                .to_string_lossy()
+                .replace('\\', "/")
+        ));
+        assert!(rendered.contains("references/setup.md"));
+    }
+
+    #[test]
+    fn runtime_discovery_prefers_project_then_data_dir_then_claude_user_and_lists_one_entry() {
+        let temp = tempfile::tempdir().unwrap();
+        let user = temp.path().join("user");
+        let workspace = temp.path().join("project");
+        let data = temp.path().join("data");
+        for (root, label) in [
+            (&user, "CLAUDE_USER"),
+            (&data.join("skills"), "DATA_DIR"),
+            (&workspace.join(".claude/skills"), "PROJECT"),
+        ] {
+            write_skill(
+                root,
+                "shared",
+                &format!("---\nname: shared\ndescription: {label}\n---\n{label}"),
+            );
+        }
+        let (found, _) = discover_runtime_from(Some(&user), &data, &workspace);
+        assert_eq!(
+            found
+                .values()
+                .filter(|skill| skill.name == "shared")
+                .count(),
+            1
+        );
+        assert_eq!(found["shared"].description, "PROJECT");
+        assert!(found["shared"].path.starts_with(&workspace));
+
+        std::fs::remove_dir_all(workspace.join(".claude/skills/shared")).unwrap();
+        let (found, _) = discover_runtime_from(Some(&user), &data, &workspace);
+        assert_eq!(found["shared"].description, "DATA_DIR");
+        assert!(found["shared"].path.starts_with(&data));
+    }
+
+    #[test]
+    fn runtime_discovery_honors_enabled_and_model_invocation_switches() {
+        let temp = tempfile::tempdir().unwrap();
+        let workspace = temp.path().join("project");
+        std::fs::create_dir_all(&workspace).unwrap();
+        let data = temp.path().join("data");
+        let skills = data.join("skills");
+        write_skill(
+            &skills,
+            "disabled",
+            "---\nname: disabled\nenabled: false\n---\nHidden",
+        );
+        write_skill(
+            &skills,
+            "model-hidden",
+            "---\nname: model-hidden\ndisable-model-invocation: true\n---\nManual only",
+        );
+        write_skill(
+            &skills,
+            "manual-only",
+            "---\nname: manual-only\nuser-invocable: false\n---\nModel only",
+        );
+        let (found, invalid) = discover_runtime_from(None, &data, &workspace);
+        assert!(invalid.is_empty(), "{invalid:?}");
+        assert!(!found.contains_key("disabled"));
+        let hidden = &found["model-hidden"];
+        assert!(!hidden.model_invocable());
+        assert!(hidden.user_invocable);
+        assert!(hidden.render_template("", "id").is_ok());
+        let manual = &found["manual-only"];
+        assert!(manual.model_invocable());
+        assert!(!manual.user_invocable);
+        assert!(manual.render_template("", "id").is_err());
+    }
+
+    #[test]
+    fn runtime_discovery_skips_an_invalid_data_dir_skill_beside_a_valid_one() {
+        let temp = tempfile::tempdir().unwrap();
+        let workspace = temp.path().join("project");
+        std::fs::create_dir_all(&workspace).unwrap();
+        let data = temp.path().join("data");
+        let skills = data.join("skills");
+        write_skill(
+            &skills,
+            "good",
+            "---\nname: good\ndescription: Good fixture\n---\nUseful",
+        );
+        let invalid_path = skills.join("bad/SKILL.md");
+        write_skill(
+            &skills,
+            "bad",
+            "---\nname: bad\nenabled: NOT_A_BOOL\n---\nBroken",
+        );
+        let (found, invalid) = discover_runtime_from(None, &data, &workspace);
+        assert!(found.contains_key("good"));
+        assert!(!found.contains_key("bad"));
+        assert_eq!(invalid, vec![invalid_path]);
+    }
+
+    #[test]
+    fn runtime_discovery_lists_managed_data_dirs_without_shadowing_embedded_workflows() {
+        let temp = tempfile::tempdir().unwrap();
+        let workspace = temp.path().join("project");
+        std::fs::create_dir_all(&workspace).unwrap();
+        let data = temp.path().join("data");
+        let skills = data.join("skills");
+        write_skill(
+            &skills.join("bundled"),
+            "doctor",
+            "---\nname: doctor\n---\nMANAGED_DOCTOR",
+        );
+        write_skill(
+            &skills.join("bundled"),
+            "legacy-commit",
+            "---\nname: commit\ndescription: Commit fixture\n---\nCommit instructions",
+        );
+        write_skill(
+            &skills.join("mcp"),
+            "mcp-fixture",
+            "---\nname: mcp-fixture\ndescription: MCP fixture\n---\nMCP instructions",
+        );
+        write_skill(
+            &skills,
+            "code-review",
+            "---\nname: code-review\ndescription: User review\n---\nUSER_OVERRIDE",
+        );
+        let (found, invalid) = discover_runtime_from(None, &data, &workspace);
+        assert!(invalid.is_empty(), "{invalid:?}");
+        // A managed copy must not replace the embedded workflow.
+        assert_eq!(
+            found["doctor"].path.parent(),
+            Some(Path::new("__embedded_cli_skills__"))
+        );
+        assert!(!found["doctor"].content.contains("MANAGED_DOCTOR"));
+        // Managed directories are still listed when their name is free.
+        assert!(found.contains_key("commit"));
+        assert!(found.contains_key("mcp-fixture"));
+        assert!(found["commit"].model_invocable());
+        assert!(found["commit"].user_invocable);
+        // A direct user skill keeps the normal user-overrides-embedded rule.
+        assert!(found["code-review"].content.contains("USER_OVERRIDE"));
+    }
+
+    #[test]
+    fn installed_placeholder_and_legacy_builtins_are_visible_to_both_views() {
+        let temp = tempfile::tempdir().unwrap();
+        let workspace = temp.path().join("project");
+        std::fs::create_dir_all(&workspace).unwrap();
+        let data = temp.path().join("data");
+        crate::skills::SkillsManager::with_path(data.join("skills"))
+            .ensure_installed()
+            .unwrap();
+        let (found, invalid) = discover_runtime_from(None, &data, &workspace);
+        assert!(invalid.is_empty(), "{invalid:?}");
+        // First-run placeholders are managed copies, but their names are free,
+        // so the same name reaches the model listing and the slash list.
+        for name in [
+            "skill-creator",
+            "commit",
+            "review",
+            "test",
+            "document",
+            "build",
+        ] {
+            let skill = &found[name];
+            assert!(skill.model_invocable(), "{name} must stay model-invocable");
+            assert!(skill.user_invocable, "{name} must stay user-invocable");
+            assert!(skill.path.starts_with(data.join("skills")), "{name}");
+        }
+    }
+
+    #[test]
+    fn runtime_discovery_does_not_create_the_data_skills_directory() {
+        let temp = tempfile::tempdir().unwrap();
+        let workspace = temp.path().join("project");
+        std::fs::create_dir_all(&workspace).unwrap();
+        let data = temp.path().join("data");
+        std::fs::create_dir_all(&data).unwrap();
+        let (found, _) = discover_runtime_from(None, &data, &workspace);
+        assert!(!data.join("skills").exists());
+        assert!(found.contains_key("doctor"));
+    }
+
+    fn legacy_id(path: &Path) -> String {
+        use std::collections::hash_map::DefaultHasher;
+        use std::hash::{Hash, Hasher};
+        let mut hasher = DefaultHasher::new();
+        path.to_string_lossy().hash(&mut hasher);
+        format!("skill_{:x}", hasher.finish())
+    }
+
+    #[test]
+    fn runtime_discovery_keeps_pre_round_01_slash_names_for_mixed_case_and_spaces() {
+        let temp = tempfile::tempdir().unwrap();
+        let workspace = temp.path().join("project");
+        std::fs::create_dir_all(&workspace).unwrap();
+        let data = temp.path().join("data");
+        write_skill(
+            &data.join("skills"),
+            "My Skill",
+            "---\nname: My Skill\ndescription: Mixed case fixture\n---\nInspect $ARGUMENTS",
+        );
+        // Nested collections were also reachable by the skill's own name.
+        write_skill(
+            &data.join("skills/collection"),
+            "Deep Nested",
+            "---\nname: Deep Nested\ndescription: Nested fixture\n---\nNested",
+        );
+        let (found, invalid) = discover_runtime_from(None, &data, &workspace);
+        assert!(invalid.is_empty(), "{invalid:?}");
+        let keys = found.keys().collect::<Vec<_>>();
+        assert!(found.contains_key("my-skill"), "{keys:?}");
+        assert!(!found.contains_key("My-Skill"), "{keys:?}");
+        assert_eq!(
+            found["my-skill"].path,
+            data.join("skills/My Skill/SKILL.md")
+        );
+        assert!(found.contains_key("deep-nested"), "{keys:?}");
+        assert!(!found.contains_key("collection:deep-nested"), "{keys:?}");
+    }
+
+    #[test]
+    fn runtime_discovery_keeps_punctuation_that_skill_creation_allows() {
+        let temp = tempfile::tempdir().unwrap();
+        let workspace = temp.path().join("project");
+        std::fs::create_dir_all(&workspace).unwrap();
+        let data = temp.path().join("data");
+        write_skill(
+            &data.join("skills"),
+            "Punctuation",
+            "---\nname: R&D (team)'s check\ndescription: Punctuation fixture\n---\nCheck",
+        );
+        let (found, invalid) = discover_runtime_from(None, &data, &workspace);
+        assert!(invalid.is_empty(), "{invalid:?}");
+        let name = "r&d-(team)'s-check";
+        let keys = found.keys().collect::<Vec<_>>();
+        assert!(found.contains_key(name), "{keys:?}");
+        assert_eq!(found[name].path, data.join("skills/Punctuation/SKILL.md"));
+        assert_eq!(found.keys().filter(|key| key.starts_with("r&d")).count(), 1);
+    }
+
+    #[test]
+    fn runtime_discovery_disambiguates_shared_data_dir_names_with_stable_ids() {
+        let temp = tempfile::tempdir().unwrap();
+        let workspace = temp.path().join("project");
+        std::fs::create_dir_all(&workspace).unwrap();
+        let data = temp.path().join("data");
+        let skills = data.join("skills");
+        for directory in ["first-skill", "second-skill"] {
+            write_skill(
+                &skills,
+                directory,
+                "---\nname: Shared Skill\ndescription: Shared fixture\n---\nShared body",
+            );
+        }
+        let first = discover_runtime_from(None, &data, &workspace).0;
+        let second = discover_runtime_from(None, &data, &workspace).0;
+        let first_path = skills.join("first-skill/SKILL.md");
+        let second_path = skills.join("second-skill/SKILL.md");
+        assert!(!first.contains_key("shared-skill"));
+        for path in [&first_path, &second_path] {
+            let id = legacy_id(path);
+            let keys = first.keys().collect::<Vec<_>>();
+            assert!(first.contains_key(&id), "{id} missing: {keys:?}");
+            assert_eq!(first[&id].path, *path);
+            assert_eq!(second[&id].path, *path);
+        }
+        assert_eq!(
+            first
+                .keys()
+                .filter(|name| name.starts_with("skill_"))
+                .count(),
+            2
+        );
+        let ids = |found: &BTreeMap<String, SkillCommand>| {
+            found
+                .keys()
+                .filter(|name| name.starts_with("skill_"))
+                .cloned()
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(ids(&first), ids(&second));
     }
 }

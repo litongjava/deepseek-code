@@ -145,6 +145,16 @@ impl SkillsManager {
         Ok(skills)
     }
 
+    /// Install first-run bundled and legacy built-in files without scanning.
+    /// Listing stays on the read-only discovery path.
+    pub fn ensure_installed(&self) -> Result<()> {
+        let bundled = self.get_skills_path(&SkillSource::Bundled);
+        if !bundled.exists() {
+            self.install_bundled_skills()?;
+        }
+        legacy_builtin::install(&bundled)
+    }
+
     fn scan_skills_subdirs(&self, base_path: &Path) -> Result<Vec<Skill>> {
         let mut skills = Vec::new();
 
