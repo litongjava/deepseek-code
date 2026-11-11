@@ -174,8 +174,7 @@ impl ToolLoopExecutor {
     }
 
     async fn plan_transition(&mut self, tool_name: &str, input: &Value, id: &str) -> Result<Value> {
-        let entering = tool_name == "EnterPlanMode"
-            || (tool_name == "plan_mode" && input["operation"] == "enter");
+        let entering = tool_name == "EnterPlanMode";
         match self.check_permission(tool_name, input, id).await {
             PermissionResult::Denied(reason) => anyhow::bail!("{reason}"),
             PermissionResult::RequiresConfirmation(_) if entering => {
@@ -199,22 +198,6 @@ impl ToolLoopExecutor {
             .ok_or_else(|| anyhow!("Plan session unavailable"))?;
         let path = plans::path(&root, &session)?;
         if entering {
-            if tool_name == "plan_mode" {
-                let mut plan = crate::tools::coordination::execute(
-                    tool_name,
-                    input.clone(),
-                    &self.workspace_cwd,
-                )?;
-                plan["mode"] = json!("plan");
-                plan["planFilePath"] = json!(path);
-                crate::services::session_permission_mode::set(
-                    &crate::services::session_messages::context(&root)?.db,
-                    &session,
-                    &manager,
-                    PermissionMode::PlanMode,
-                )?;
-                return Ok(plan);
-            }
             crate::services::session_permission_mode::set(
                 &crate::services::session_messages::context(&root)?.db,
                 &session,
@@ -238,22 +221,6 @@ impl ToolLoopExecutor {
                 plan.as_str()
                     .ok_or_else(|| anyhow!("plan must be Markdown text"))?,
             )?;
-        } else if tool_name == "plan_mode" {
-            let current = crate::tools::coordination::execute(
-                "plan_mode",
-                json!({"operation":"get_current"}),
-                &self.workspace_cwd,
-            )?;
-            if !current.is_null() {
-                plans::save(
-                    &root,
-                    &session,
-                    &format!(
-                        "# Implementation plan\n\n```json\n{}\n```\n",
-                        serde_json::to_string_pretty(&current)?
-                    ),
-                )?;
-            }
         }
         let plan = plans::read(&root, &session)?
             .filter(|plan| !plan.trim().is_empty())
@@ -273,17 +240,6 @@ impl ToolLoopExecutor {
         if let Some(team) = crate::services::teams::team_for_session(&root, &session)? {
             if team.lead_session_id != session {
                 use crate::services::teams::{self, PlanDecision};
-                let legacy_warning = if tool_name == "plan_mode" {
-                    crate::tools::coordination::execute(
-                        "plan_mode",
-                        json!({"operation":"exit"}),
-                        &self.workspace_cwd,
-                    )
-                    .err()
-                    .map(|e| format!("Legacy plan state could not be updated: {e:#}"))
-                } else {
-                    None
-                };
                 return match teams::plan_decision(&root, &team.name, &session)? {
                     PlanDecision::Approved { feedback } => {
                         let context = crate::services::session_messages::context(&root)?;
@@ -303,7 +259,7 @@ impl ToolLoopExecutor {
                             "planFilePath":path,
                             "plan":plan,
                             "allowedPrompts":allowed_prompts,
-                            "warning":legacy_warning,
+
                             "message":"Plan approved by the team leader. Existing deny and confirmation rules remain in force."
                         }))
                     }
@@ -466,22 +422,9 @@ impl ToolLoopExecutor {
         if returning_bypass {
             crate::permissions::set_full_access(manager.full_access_available());
         }
-        // The old project-wide plan record is a compatibility mirror, never the
-        // authority for permission changes. Update only after approval commits.
-        let legacy_warning = if tool_name == "plan_mode" {
-            crate::tools::coordination::execute(
-                "plan_mode",
-                json!({"operation":"exit"}),
-                &self.workspace_cwd,
-            )
-            .err()
-            .map(|e| format!("Legacy plan state could not be updated: {e:#}"))
-        } else {
-            None
-        };
         Ok(
             json!({"approved":true,"mode":if returning_bypass {"bypass"} else if mode == PermissionMode::AskPermissions {"ask"} else if mode == PermissionMode::Auto {"auto"} else {"accept_edits"},"clearContext":clear,"planFilePath":path,"plan":plan,"allowedPrompts":allowed_prompts,
-            "warning":legacy_warning,"message":if returning_bypass {"Plan approved. bypass mode restored."} else {"Plan approved under the selected permission mode. Existing deny and confirmation rules remain in force."}}),
+            "message":if returning_bypass {"Plan approved. bypass mode restored."} else {"Plan approved under the selected permission mode. Existing deny and confirmation rules remain in force."}}),
         )
         }.await;
         crate::native_engine::permission_response::finish_answer(
@@ -502,7 +445,7 @@ mod tests {
     #[tokio::test]
     async fn enter_plan_confirmation_and_child_authority_are_isolated() {
         crate::config::OrchestrationConfig::init_global().unwrap();
-        for name in ["EnterPlanMode", "plan_mode"] {
+        for name in ["EnterPlanMode"] {
             for answer in [Some("yes"), Some("no"), None] {
                 let root = tempfile::tempdir().unwrap();
                 let parent = crate::runtime::default_permissions();
@@ -538,12 +481,7 @@ mod tests {
                 .with_conv_id("child".into())
                 .with_search_config_path(root.path().join("settings.json"))
                 .with_permission_manager(child.clone());
-                let input = if name == "plan_mode" {
-                    let plan = crate::tools::coordination::execute("plan_mode", json!({"operation":"create","task":"legacy test","steps":[{"description":"Inspect"}]}), &executor.workspace_cwd).unwrap();
-                    json!({"operation":"enter","plan_id":plan["plan_id"]})
-                } else {
-                    json!({})
-                };
+                let input = json!({});
                 let waiters = executor.get_answer_waiters();
                 let task = tokio::spawn(async move {
                     executor
@@ -568,15 +506,6 @@ mod tests {
                 }
                 let (_, output, failed) = task.await.unwrap();
                 assert_eq!(failed, answer != Some("yes"), "{output}");
-                if name == "plan_mode" {
-                    let current = crate::tools::coordination::execute(
-                        "plan_mode",
-                        json!({"operation":"get_current"}),
-                        &root.path().to_string_lossy(),
-                    )
-                    .unwrap();
-                    assert_eq!(current.is_null(), failed);
-                }
                 assert_eq!(parent.get_mode(), PermissionMode::AskPermissions);
                 assert_eq!(
                     child.get_mode(),
@@ -622,7 +551,6 @@ mod tests {
             None,
             Some("changed"),
             Some("always_allow"),
-            Some("legacy"),
         ] {
             let root = tempfile::tempdir().unwrap();
             let context = crate::services::session_messages::context(root.path()).unwrap();
@@ -677,23 +605,8 @@ mod tests {
             assert!(denied);
             assert!(rx.try_recv().is_err());
             manager.set_session_rules("plan-session", Default::default());
-            if answer == Some("legacy") {
-                let plan = crate::tools::coordination::execute("plan_mode", json!({"operation":"create","task":"修复","steps":[{"description":"Run tests"}]}), &executor.workspace_cwd).unwrap();
-                executor
-                    .execute_tool_call(
-                        "plan_mode",
-                        &json!({"operation":"enter","plan_id":plan["plan_id"]}),
-                        "legacy-enter",
-                    )
-                    .await;
-            }
             let waiters = executor.get_answer_waiters();
             let task = tokio::spawn(async move {
-                if answer == Some("legacy") {
-                    return executor
-                        .execute_tool_call("plan_mode", &json!({"operation":"exit"}), "exit")
-                        .await;
-                }
                 executor
                     .execute_tool_call(
                         "ExitPlanMode",
@@ -724,14 +637,7 @@ mod tests {
             let sender = waiters.lock().await.remove(&request_id).unwrap();
             if let Some(answer) = answer {
                 sender
-                    .send(
-                        if matches!(answer, "changed" | "legacy") {
-                            "yes"
-                        } else {
-                            answer
-                        }
-                        .into(),
-                    )
+                    .send(if answer == "changed" { "yes" } else { answer }.into())
                     .unwrap();
             } else {
                 drop(sender);
@@ -740,14 +646,10 @@ mod tests {
                 .await
                 .unwrap()
                 .unwrap();
-            assert_eq!(
-                failed,
-                !matches!(answer, Some("yes" | "legacy" | "no")),
-                "{output}"
-            );
+            assert_eq!(failed, !matches!(answer, Some("yes" | "no")), "{output}");
             assert_eq!(
                 manager.get_mode(),
-                if matches!(answer, Some("yes" | "legacy")) {
+                if matches!(answer, Some("yes")) {
                     PermissionMode::AskPermissions
                 } else {
                     PermissionMode::PlanMode

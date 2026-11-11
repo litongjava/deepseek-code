@@ -43,6 +43,7 @@ mod workflow_commands;
 mod interactive_config;
 mod args;
 mod migration;
+mod task_commands;
 mod config;
 mod tool_settings;
 mod tools_menu;
@@ -234,6 +235,12 @@ async fn run(cli: &Cli) -> Result<()> {
         None => deepseek_code_core::runtime::resolve_default_data_dir()?,
     };
     let paths = RuntimePaths::new(absolute(data_dir)?)?;
+    // Explicit task maintenance runs before any other startup work so it never
+    // creates logs, environment state or task storage on its own, and never
+    // imports anything automatically.
+    if let Some(Commands::Tasks { action }) = &cli.command {
+        return task_commands::run(&paths, action);
+    }
     let _resource_sampler = resource_sampling::start(&paths.data_dir);
     // Engine code that has no RuntimePaths (e.g. the task tools) and child
     // processes resolve the data directory from the environment.

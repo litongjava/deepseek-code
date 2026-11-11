@@ -760,6 +760,113 @@ async fn persistent_engine_reuses_mcp_refreshes_settings_and_recovers_after_cras
     server.abort();
 }
 
+/// A frontend can start waiting for a recorded worker exactly when that
+/// worker's supervisor notices its host exited. Before this fix the wait
+/// returned the predecessor's "stopped" record as a startup failure, so the
+/// caller never started a replacement.
+///
+/// The stop is published only after `ensure_worker` has taken its startup lock
+/// plus a one-second margin, which reproduces the observed "stops just before
+/// readiness" race. This is a timing fixture, not a handshake with the exact
+/// predecessor-record read: on an extremely slow start the stop could still be
+/// observed first, and the replacement assertion would then hold without
+/// exercising the new wait branch. The original source fails this fixture
+/// because it reports the predecessor's stop as a startup failure.
+#[tokio::test]
+async fn ensure_worker_replaces_a_predecessor_that_stops_before_ready() {
+    let temp = tempfile::tempdir().unwrap();
+    let workspace = temp.path().join("workspace");
+    std::fs::create_dir_all(&workspace).unwrap();
+    let paths = RuntimePaths::new(temp.path().join("data")).unwrap();
+    let store = SessionStore::new(paths.open_database().unwrap());
+    let session = store.create(&workspace, "fixture", "cli-runtime").unwrap();
+    let executable = temp.path().join(if cfg!(windows) {
+        "recovery-fixture.exe"
+    } else {
+        "recovery-fixture"
+    });
+    std::fs::copy(test_cli_executable(), &executable).unwrap();
+    let base = paths.data_dir.join("session-workers").join(&session);
+    let id = uuid::Uuid::new_v4().to_string();
+    let dir = base.join(&id);
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(base.join("current.json"), serde_json::to_vec(&id).unwrap()).unwrap();
+    let heartbeat = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_millis() as u64;
+    let record = |status: &str| {
+        json!({
+            "id": id, "session_id": session, "root": paths.data_dir,
+            "workspace": workspace, "executable": executable, "endpoint": "fixture",
+            "status": status, "supervisor_pid": null, "child_pid": null,
+            "heartbeat_ms": heartbeat, "active_job": null, "error": null
+        })
+    };
+    // Publish records the way the supervisor does, so a reader never sees
+    // half-written JSON.
+    let publish = |path: std::path::PathBuf, value: Value| {
+        let temporary = path.with_extension("json.tmp");
+        std::fs::write(&temporary, serde_json::to_vec(&value).unwrap()).unwrap();
+        std::fs::rename(&temporary, &path).unwrap();
+    };
+    publish(dir.join("worker.json"), record("starting"));
+    let done = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let finished = done.clone();
+    let stopped = record("stopped");
+    let (startup_lock, stop_dir) = (base.join("startup.lock"), dir.clone());
+    let (stop_data, stop_executable, stop_session, stop_workspace) = (
+        paths.data_dir.clone(),
+        executable.clone(),
+        session.clone(),
+        workspace.clone(),
+    );
+    let stopper = std::thread::spawn(move || {
+        let deadline = std::time::Instant::now() + Duration::from_secs(10);
+        while !startup_lock.exists() {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "ensure_worker never took its startup lock"
+            );
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        // Seeing the lock means startup has begun. A one-second margin from
+        // here reproduces the recorded race; it is a timing fixture, not a
+        // deterministic signal that the predecessor record was already read.
+        std::thread::sleep(Duration::from_secs(1));
+        assert!(
+            !done.load(std::sync::atomic::Ordering::SeqCst),
+            "ensure_worker returned before the predecessor stopped"
+        );
+        publish(stop_dir.join("worker.json"), stopped);
+    });
+    let assembling = tokio::spawn(async move {
+        let result =
+            worker::ensure_worker(&stop_data, &stop_executable, &stop_session, &stop_workspace)
+                .await;
+        finished.store(true, std::sync::atomic::Ordering::SeqCst);
+        result
+    });
+    let fresh = assembling
+        .await
+        .unwrap()
+        .expect("a predecessor that stops before readiness must be replaced");
+    stopper.join().unwrap();
+    let mut cleanup = Cleanup(vec![fresh.supervisor_pid.unwrap()]);
+    assert_ne!(fresh.id, id);
+    assert_eq!(fresh.status, "running");
+    // Ownership: the live worker is reused rather than duplicated, and the
+    // predecessor's record is preserved.
+    let again = worker::ensure_worker(&paths.data_dir, &executable, &session, &workspace)
+        .await
+        .unwrap();
+    assert_eq!(again.id, fresh.id);
+    assert_eq!(again.child_pid, fresh.child_pid);
+    assert_eq!(worker::read_worker(&dir).unwrap().status, "stopped");
+    worker::shutdown(&paths.data_dir, &session).await.unwrap();
+    cleanup.0.clear();
+}
+
 #[path = "support/session_worker_launch_rules.rs"]
 mod launch_rules;
 
