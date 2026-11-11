@@ -104,12 +104,23 @@ impl Default for SchedulerConfig {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(default, rename_all = "camelCase")]
+pub struct DeliveryConfig {
+    /// Stage 5B2a: move the user's target branch through the same Coder
+    /// session and verify it from real Git state. Off by default until the
+    /// multi-repository and completion stages are accepted, so the existing
+    /// prepared-but-undelivered flow keeps its exact behaviour.
+    pub enabled: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(default, rename_all = "camelCase")]
 pub struct SuperAgentConfig {
     pub router: AgentSelection,
     pub agents: AgentsConfig,
     pub approvals: ApprovalsConfig,
     pub review: ReviewConfig,
     pub scheduler: SchedulerConfig,
+    pub delivery: DeliveryConfig,
 }
 
 impl SuperAgentConfig {
@@ -275,7 +286,10 @@ fn settings_file_config(data_dir: &std::path::Path) -> Result<Option<serde_json:
     };
     let value: serde_json::Value = serde_json::from_str(&text)
         .with_context(|| format!("Invalid JSON in {}", path.display()))?;
-    Ok(value.get(SETTINGS_KEY).cloned().filter(|value| !value.is_null()))
+    Ok(value
+        .get(SETTINGS_KEY)
+        .cloned()
+        .filter(|value| !value.is_null()))
 }
 
 pub fn parse(value: &serde_json::Value) -> Result<SuperAgentConfig> {

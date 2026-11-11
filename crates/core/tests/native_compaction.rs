@@ -17,6 +17,7 @@ use deepseek_code_core::{
 };
 use serde_json::{json, Value};
 use std::sync::{Arc, Mutex};
+use tokio::sync::Notify;
 
 const PNG: &str =
     "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+jRZkAAAAASUVORK5CYII=";
@@ -29,16 +30,20 @@ fn window() -> Value {
     ])
 }
 
-async fn fixture(
-    mode: u8,
-) -> (
-    tempfile::TempDir,
-    SessionStore,
-    String,
-    NativeEngine,
-    Arc<Mutex<Vec<Value>>>,
-    tokio::task::JoinHandle<()>,
-) {
+struct Fixture {
+    dir: tempfile::TempDir,
+    store: SessionStore,
+    id: String,
+    engine: NativeEngine,
+    seen: Arc<Mutex<Vec<Value>>>,
+    /// Set once the mock has validated and recorded a compaction request.
+    arrived: Arc<Notify>,
+    /// Mode 6 holds its 502 response until the test releases it.
+    released: Arc<Notify>,
+    server: tokio::task::JoinHandle<()>,
+}
+
+async fn fixture(mode: u8) -> Fixture {
     deepseek_code_core::config::OrchestrationConfig::init_global().unwrap();
     let dir = tempfile::tempdir().unwrap();
     let paths = RuntimePaths::new(dir.path().join("data")).unwrap();
@@ -62,15 +67,23 @@ async fn fixture(
         .append(&id, "assistant", "Tests remain pending")
         .unwrap();
     let seen = Arc::new(Mutex::new(Vec::new()));
+    let arrived = Arc::new(Notify::new());
+    let released = Arc::new(Notify::new());
     let captured = seen.clone();
+    let request_arrived = arrived.clone();
+    let response_released = released.clone();
     let app = Router::new().route("/tools/codex/v1/responses/compact", post(move |headers: HeaderMap, Json(body): Json<Value>| {
         let seen = captured.clone();
+        let arrived = request_arrived.clone();
+        let released = response_released.clone();
         async move {
             assert_eq!(headers["authorization"], "Bearer gateway-key");
             assert!(body.get("tools").is_none() && body.get("stream").is_none());
             seen.lock().unwrap().push(body);
+            arrived.notify_one();
             if mode == 2 { std::future::pending::<()>().await; }
-            if mode == 1 { return (StatusCode::BAD_GATEWAY, Json(json!({"error":"incomplete"}))); }
+            if mode == 6 { released.notified().await; }
+            if mode == 1 || mode == 6 { return (StatusCode::BAD_GATEWAY, Json(json!({"error":"incomplete"}))); }
             (StatusCode::OK, Json(json!({"object":"response.compaction","output":window(),"usage":{"input_tokens":150,"output_tokens":77}})))
         }
     }));
@@ -141,12 +154,12 @@ async fn fixture(
         permissions,
         Arc::new(FileCache::new()),
     );
-    (dir, store, id, engine, seen, server)
+    Fixture { dir, store, id, engine, seen, arrived, released, server }
 }
 
 #[tokio::test]
 async fn running_responses_turn_uses_native_compaction_before_local_truncation() {
-    let (dir, store, id, engine, seen, server) = fixture(3).await;
+    let Fixture { dir, store, id, engine, seen, server, .. } = fixture(3).await;
     let original = "Detailed evidence ".repeat(2200);
     store.append(&id, "assistant", &original).unwrap();
     store.append(&id, "user", "Continue").unwrap();
@@ -171,7 +184,7 @@ async fn running_responses_turn_uses_native_compaction_before_local_truncation()
 
 #[tokio::test]
 async fn model_invokes_image_tool_and_receives_persisted_actual_image() {
-    let (dir, store, id, engine, seen, server) = fixture(4).await;
+    let Fixture { dir, store, id, engine, seen, server, .. } = fixture(4).await;
     let assistant_id = uuid::Uuid::new_v4().to_string();
     let request: ChatRequest = serde_json::from_value(json!({"conversation_id":id,"messages":store.model_history(&id,&ApiFormat::OpenAI).unwrap(),"model":"gpt-6-astra","provider_id":"gateway","workspace_path":dir.path()})).unwrap();
     let mut events = engine.send_message(request).await.unwrap();
@@ -228,7 +241,7 @@ async fn model_invokes_image_tool_and_receives_persisted_actual_image() {
 
 #[tokio::test]
 async fn native_window_survives_reload_fork_and_actual_next_request_without_rewriting() {
-    let (dir, store, id, engine, seen, server) = fixture(0).await;
+    let Fixture { dir, store, id, engine, seen, server, .. } = fixture(0).await;
     compaction::compact(
         &engine,
         &store.db,
@@ -288,37 +301,122 @@ async fn native_window_survives_reload_fork_and_actual_next_request_without_rewr
     server.abort();
 }
 
+fn opaque_state_count(store: &SessionStore) -> i64 {
+    store
+        .db
+        .with_conn(|conn| {
+            conn.query_row(
+                "SELECT COUNT(*) FROM peripheral_settings WHERE key LIKE 'compaction.native.%'",
+                [],
+                |r| r.get::<_, i64>(0),
+            )
+        })
+        .unwrap()
+        .unwrap()
+}
+
 #[tokio::test]
 async fn failure_and_cancellation_never_commit_opaque_state() {
-    for mode in [1, 2] {
-        let (_dir, store, id, engine, seen, server) = fixture(mode).await;
+    // Mode 1: the gateway answers with a real HTTP 502. The watchdog only keeps
+    // a regression from hanging the suite; it is not part of the assertion.
+    {
+        let Fixture { dir: _dir, store, id, engine, seen, server, .. } = fixture(1).await;
+        let data = _dir.path().join("data");
+        assert!(data.is_dir());
+        assert!(data.join(deepseek_code_core::runtime::DATABASE_FILE).is_file());
         let before = store.history(&id).unwrap();
-        let result = tokio::time::timeout(
-            std::time::Duration::from_millis(200),
+        let error = tokio::time::timeout(
+            std::time::Duration::from_secs(10),
             compaction::compact(&engine, &store.db, &id, "gateway", "gpt-6-astra", ""),
         )
-        .await;
-        if mode == 1 {
-            assert!(result.unwrap().is_err());
-        } else {
-            assert!(result.is_err());
-        }
+        .await
+        .expect("the mock 502 response should arrive within the watchdog")
+        .expect_err("a gateway 502 must fail the compaction");
+        let message = error.to_string();
+        assert!(message.contains("HTTP 502"), "unexpected error: {message}");
+        assert!(!message.contains("Elapsed"), "unexpected timeout: {message}");
         assert_eq!(store.history(&id).unwrap(), before);
         assert_eq!(seen.lock().unwrap().len(), 1);
-        let count = store
-            .db
-            .with_conn(|conn| {
-                conn.query_row(
-                    "SELECT COUNT(*) FROM peripheral_settings WHERE key LIKE 'compaction.native.%'",
-                    [],
-                    |r| r.get::<_, i64>(0),
-                )
-            })
-            .unwrap()
-            .unwrap();
-        assert_eq!(count, 0);
+        assert_eq!(opaque_state_count(&store), 0);
+        assert!(data.join(deepseek_code_core::runtime::DATABASE_FILE).is_file());
         server.abort();
     }
+
+    // Mode 2: the mock never answers. Cancellation happens only after it has
+    // validated and recorded the request, so the request count is exact.
+    {
+        let Fixture { dir: _dir, store, id, engine, seen, arrived, server, .. } = fixture(2).await;
+        let data = _dir.path().join("data");
+        assert!(data.is_dir());
+        assert!(data.join(deepseek_code_core::runtime::DATABASE_FILE).is_file());
+        let before = store.history(&id).unwrap();
+        let mut request = Box::pin(compaction::compact(
+            &engine,
+            &store.db,
+            &id,
+            "gateway",
+            "gpt-6-astra",
+            "",
+        ));
+        tokio::select! {
+            _ = &mut request => panic!("compaction ended before its request reached the mock"),
+            result = tokio::time::timeout(std::time::Duration::from_secs(10), arrived.notified()) => {
+                assert!(result.is_ok(), "the mock never received the compaction request");
+            }
+        }
+        // Drop the whole future, not just the Pin borrow: the pending response
+        // must be abandoned without committing anything.
+        drop(request);
+        assert_eq!(store.history(&id).unwrap(), before);
+        assert_eq!(seen.lock().unwrap().len(), 1);
+        assert_eq!(opaque_state_count(&store), 0);
+        assert!(data.join(deepseek_code_core::runtime::DATABASE_FILE).is_file());
+        server.abort();
+    }
+}
+
+/// The old test allowed only 200 ms for the whole error response. Hold a
+/// genuine 502 past that window to show the old check reports a timeout even
+/// though the request had arrived and the released answer is a real error.
+#[tokio::test]
+async fn an_error_response_slower_than_200ms_would_misjudge_the_old_window() {
+    let Fixture { dir: _dir, store, id, engine, seen, arrived, released, server, .. } =
+        fixture(6).await;
+    let data = _dir.path().join("data");
+    assert!(data.is_dir());
+    assert!(data.join(deepseek_code_core::runtime::DATABASE_FILE).is_file());
+    let before = store.history(&id).unwrap();
+    let mut request = Box::pin(compaction::compact(
+        &engine,
+        &store.db,
+        &id,
+        "gateway",
+        "gpt-6-astra",
+        "",
+    ));
+    tokio::select! {
+        _ = &mut request => panic!("compaction ended before its request reached the mock"),
+        result = tokio::time::timeout(std::time::Duration::from_secs(10), arrived.notified()) => {
+            assert!(result.is_ok(), "the mock never received the compaction request");
+        }
+    }
+    assert!(
+        tokio::time::timeout(std::time::Duration::from_millis(200), &mut request)
+            .await
+            .is_err(),
+        "the old 200 ms window unexpectedly covered the delayed response"
+    );
+    released.notify_one();
+    let error = tokio::time::timeout(std::time::Duration::from_secs(10), request)
+        .await
+        .expect("the released 502 response should arrive")
+        .expect_err("a gateway 502 must fail the compaction");
+    assert!(error.to_string().contains("HTTP 502"), "{error}");
+    assert_eq!(store.history(&id).unwrap(), before);
+    assert_eq!(seen.lock().unwrap().len(), 1);
+    assert_eq!(opaque_state_count(&store), 0);
+    assert!(data.join(deepseek_code_core::runtime::DATABASE_FILE).is_file());
+    server.abort();
 }
 
 /// A real compaction exchange replaces the history that carried a successful
@@ -326,7 +424,7 @@ async fn failure_and_cancellation_never_commit_opaque_state() {
 /// authorization; a fresh search loads the tool again for the next request.
 #[tokio::test]
 async fn a_compacted_search_record_cannot_authorize_and_a_fresh_search_restores_it() {
-    let (dir, store, id, engine, seen, server) = fixture(5).await;
+    let Fixture { dir, store, id, engine, seen, server, .. } = fixture(5).await;
     std::fs::write(dir.path().join("item.txt"), "listing").unwrap();
     let assistant = uuid::Uuid::new_v4().to_string();
     store.append(&id, "assistant", "").unwrap();

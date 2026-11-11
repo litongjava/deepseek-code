@@ -711,6 +711,26 @@ fn submit(runtime: &ToolRuntime, input: Value, tool_use_id: &str) -> Result<Valu
             expected.as_str()
         );
     }
+    if report_kind == ReportKind::Harness {
+        // The harness report carries the same stage identity as the review it
+        // supports; an implementation-stage analysis must never be attached to
+        // a final-delivery review.
+        let expected = match task.phase {
+            Phase::Reviewing => Some(crate::super_agent::ReviewStage::Implementation),
+            Phase::FinalReview => Some(crate::super_agent::ReviewStage::FinalDelivery),
+            _ => None,
+        };
+        if let Some(expected) = expected {
+            let body: crate::super_agent::HarnessAnalysisReport =
+                serde_json::from_value(payload.clone()).context("Invalid harness report body")?;
+            ensure!(
+                body.stage == expected,
+                "Harness stage {} does not match the current review stage {}",
+                body.stage.as_str(),
+                expected.as_str()
+            );
+        }
+    }
     let report = store
         .add_report(
             &operation(tool_use_id, "crp-report")?,
@@ -724,7 +744,10 @@ fn submit(runtime: &ToolRuntime, input: Value, tool_use_id: &str) -> Result<Valu
     let event_type = match report_kind {
         ReportKind::Plan => EventType::PlanSubmitted,
         ReportKind::Implementation => EventType::ImplementationSubmitted,
-        ReportKind::Integration => EventType::IntegrationCompleted,
+        // A Coder integration submission is a claim about its isolated task
+        // worktree. The host verifies real Git state and records preparation
+        // separately; this event must not report delivery.
+        ReportKind::Integration => EventType::IntegrationSubmitted,
         ReportKind::Review => {
             ensure!(
                 payload["verdict"].is_string(),

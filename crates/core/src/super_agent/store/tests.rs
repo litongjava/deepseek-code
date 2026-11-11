@@ -109,13 +109,18 @@ fn finalizing(store: &TaskStore) -> TaskRecord {
             "review-1",
             json!({"verdict":"APPROVED"}),
         ),
-        (EventType::IntegrationCompleted, "integration", json!({})),
-        (EventType::HarnessAnalysisCompleted, "harness", json!({})),
+        (
+            EventType::IntegrationPrepared,
+            "integration-prepared",
+            json!({"repositories":[{"repository_id":"repo-code","tree_changed":true}]}),
+        ),
         (
             EventType::ReviewCompleted,
             "review-final",
-            json!({"verdict":"APPROVED"}),
+            json!({"verdict":"APPROVED","stage":"FINAL_DELIVERY"}),
         ),
+        (EventType::HarnessAnalysisCompleted, "harness", json!({})),
+        (EventType::IntegrationCompleted, "integration", json!({})),
     ] {
         store
             .apply_event(
@@ -379,13 +384,18 @@ fn an_unmet_gate_leaves_the_task_untouched() {
             "review",
             json!({"verdict":"APPROVED"}),
         ),
-        (EventType::IntegrationCompleted, "integration", json!({})),
-        (EventType::HarnessAnalysisCompleted, "harness", json!({})),
+        (
+            EventType::IntegrationPrepared,
+            "integration-prepared",
+            json!({"repositories":[{"repository_id":"repo-code","tree_changed":true}]}),
+        ),
         (
             EventType::ReviewCompleted,
             "review-final",
-            json!({"verdict":"APPROVED"}),
+            json!({"verdict":"APPROVED","stage":"FINAL_DELIVERY"}),
         ),
+        (EventType::HarnessAnalysisCompleted, "harness", json!({})),
+        (EventType::IntegrationCompleted, "integration", json!({})),
     ] {
         store
             .apply_event(
@@ -898,6 +908,7 @@ fn completion_rejects_an_unverified_non_git_snapshot() {
             diff_ref: Some("diff-1".into()),
             status: NonGitStatus::Completed,
             lock_key: format!("path:{}", data.join("scripts").display()),
+            submission: None,
         })
         .unwrap();
     let unmet = gate_unmet(store.complete_task(&record.task_id, "complete", &policy));
@@ -907,6 +918,254 @@ fn completion_rejects_an_unverified_non_git_snapshot() {
             .any(|item| matches!(item, Unmet::NonGitManifestInvalid { .. })),
         "{unmet:?}"
     );
+}
+
+fn non_git_spec(target: &std::path::Path) -> TaskSpec {
+    TaskSpec {
+        title: "Pinned non-Git delivery".into(),
+        workspace: target.parent().unwrap().to_path_buf(),
+        targets: vec![target.to_string_lossy().into_owned()],
+        goal: "Deliver the reviewed bytes".into(),
+        requirements: vec!["Keep the target readable".into()],
+        acceptance_criteria: vec![AcceptanceCriterion {
+            id: "AC-001".into(),
+            description: "The reviewed file is delivered".into(),
+        }],
+        constraints: vec![],
+        out_of_scope: vec![],
+        target_branch: None,
+        repository_target_branches: Default::default(),
+    }
+}
+
+fn final_delivery_review(target: &std::path::Path, snapshot_ref: &str) -> Value {
+    json!({
+        "verdict": "APPROVED",
+        "spec_version": 1,
+        "round": 0,
+        "stage": "FINAL_DELIVERY",
+        "reviewed_versions": [{
+            "repository_id": crate::super_agent::state::non_git_repository_id(target),
+            "snapshot_ref": snapshot_ref
+        }],
+        "acceptance_results": [{
+            "criterion": "AC-001",
+            "passed": true,
+            "evidence": ["compared the pinned payload with the delivered bytes"]
+        }],
+        "issues": [],
+        "verification": ["read the pinned submission"],
+        "limitations": []
+    })
+}
+
+#[test]
+fn completion_with_a_real_pinned_non_git_target_requires_the_reviewed_bytes() {
+    let (temp, data, store) = fixture();
+    let policy = StatePolicy::default();
+    let target_dir = temp.path().join("scripts");
+    std::fs::create_dir_all(&target_dir).unwrap();
+    std::fs::write(target_dir.join("run.txt"), "value=1\n").unwrap();
+    let target_dir = target_dir.canonicalize().unwrap();
+
+    let task = store
+        .create_task("router", non_git_spec(&target_dir), "create")
+        .unwrap();
+    let baseline = data
+        .join("super-agent")
+        .join(&task.task_id)
+        .join("snapshots")
+        .join("1");
+    let manifest = crate::super_agent::isolation::create_snapshot(&target_dir, &baseline).unwrap();
+    store
+        .save_non_git_target(&NonGitTarget {
+            task_id: task.task_id.clone(),
+            path: target_dir.clone(),
+            snapshot_dir: baseline,
+            snapshot_manifest_json: serde_json::to_string(&manifest).unwrap(),
+            diff_ref: None,
+            status: NonGitStatus::Prepared,
+            lock_key: format!("path:{}", target_dir.display()),
+            submission: None,
+        })
+        .unwrap();
+
+    let sessions = crate::runtime::SessionStore::new(store.db().clone());
+    let coder = sessions.create(&target_dir, "fixture", "fixture").unwrap();
+    let reviewer = sessions.create(&target_dir, "fixture", "fixture").unwrap();
+    sessions
+        .append(&coder, "user", "implement the task")
+        .unwrap();
+    sessions
+        .append(&reviewer, "user", "review the task")
+        .unwrap();
+    store
+        .set_sessions(&task.task_id, Some(&coder), Some(&reviewer))
+        .unwrap();
+
+    for (event_type, operation, payload) in [
+        (EventType::DiscoveryCompleted, "discovery", json!({})),
+        (EventType::PlanSubmitted, "plan", json!({})),
+        (
+            EventType::ApprovalRequested,
+            "approval-request",
+            json!({"request_type":"PLAN"}),
+        ),
+        (
+            EventType::ApprovalResolved,
+            "approval-resolve",
+            json!({"request_type":"PLAN","decision":"APPROVED"}),
+        ),
+        (
+            EventType::ImplementationSubmitted,
+            "implementation",
+            json!({}),
+        ),
+        (
+            EventType::ReviewCompleted,
+            "review-1",
+            json!({"verdict":"APPROVED"}),
+        ),
+        (
+            EventType::ReviewCompleted,
+            "review-final",
+            json!({"verdict":"APPROVED","stage":"FINAL_DELIVERY"}),
+        ),
+        (EventType::HarnessAnalysisCompleted, "harness", json!({})),
+    ] {
+        store
+            .apply_event(
+                &task.task_id,
+                event(event_type, operation, payload),
+                &policy,
+            )
+            .unwrap();
+    }
+    let task = store.get_task(&task.task_id).unwrap().unwrap();
+    assert_eq!(task.phase, Phase::Finalizing);
+
+    // Pin the real submitted bytes through the production submission route.
+    let initial = store.non_git_targets(&task.task_id).unwrap().remove(0);
+    let mut pinned =
+        crate::super_agent::review::record_non_git_changes(&store, &task, &initial).unwrap();
+    pinned.status = NonGitStatus::Completed;
+    store.save_non_git_target(&pinned).unwrap();
+    let submission = pinned.submission.clone().expect("pinned submission");
+    let payload = submission.directory.join("payload").join("run.txt");
+
+    store
+        .add_report(
+            "implementation-report",
+            &task.task_id,
+            ReportKind::Implementation,
+            1,
+            0,
+            json!({"spec_version":1,"round":0,"summary":"wrote the reviewed bytes"}),
+        )
+        .unwrap();
+    store
+        .add_report(
+            "harness-report",
+            &task.task_id,
+            ReportKind::Harness,
+            1,
+            0,
+            json!({"spec_version":1,"round":0,"findings":[]}),
+        )
+        .unwrap();
+    store
+        .add_report(
+            "review-report",
+            &task.task_id,
+            ReportKind::Review,
+            1,
+            0,
+            final_delivery_review(&target_dir, &submission.artifact_id),
+        )
+        .unwrap();
+
+    // 1. A user edit after the review is not silently treated as approved and
+    // is never overwritten.
+    std::fs::write(target_dir.join("run.txt"), "user edit after review\n").unwrap();
+    let unmet = gate_unmet(store.complete_task(&task.task_id, "complete-edited", &policy));
+    let mismatch = unmet.iter().find_map(|item| match item {
+        Unmet::NonGitManifestInvalid { reason, .. } => Some(reason.clone()),
+        _ => None,
+    });
+    assert!(
+        mismatch
+            .as_deref()
+            .is_some_and(|reason| reason.contains("no longer matches the reviewed submission")),
+        "the gate must report the changed target: {unmet:?}"
+    );
+    let record = store.get_task(&task.task_id).unwrap().unwrap();
+    assert_ne!(record.status, Status::Completed);
+    assert_eq!(
+        std::fs::read_to_string(target_dir.join("run.txt")).unwrap(),
+        "user edit after review\n",
+        "a rejected completion must not restore or erase user bytes"
+    );
+    assert_eq!(
+        std::fs::read_to_string(&payload).unwrap(),
+        "value=1\n",
+        "the pinned artifact must stay unchanged"
+    );
+
+    // 2. Restoring the reviewed bytes is not enough if the review approved a
+    // different snapshot identity.
+    std::fs::write(target_dir.join("run.txt"), "value=1\n").unwrap();
+    std::thread::sleep(std::time::Duration::from_millis(20));
+    let stale = store
+        .add_report(
+            "review-stale",
+            &task.task_id,
+            ReportKind::Review,
+            1,
+            0,
+            final_delivery_review(&target_dir, "non-git-older-submission"),
+        )
+        .unwrap();
+    let unmet = gate_unmet(store.complete_task(&task.task_id, "complete-stale", &policy));
+    assert!(
+        unmet.iter().any(|item| matches!(
+            item,
+            Unmet::VersionMismatch { repository_id, .. }
+                if repository_id == &crate::super_agent::state::non_git_repository_id(&target_dir)
+        )),
+        "a stale snapshot identity must not approve the current target: {unmet:?}"
+    );
+    assert_ne!(
+        store.get_task(&task.task_id).unwrap().unwrap().status,
+        Status::Completed
+    );
+    assert_ne!(stale.report_id, submission.artifact_id);
+
+    // 3. The exact reviewed version and identity complete the real transition.
+    std::thread::sleep(std::time::Duration::from_millis(20));
+    store
+        .add_report(
+            "review-current",
+            &task.task_id,
+            ReportKind::Review,
+            1,
+            0,
+            final_delivery_review(&target_dir, &submission.artifact_id),
+        )
+        .unwrap();
+    let completed = store
+        .complete_task(&task.task_id, "complete-valid", &policy)
+        .unwrap();
+    assert_eq!(completed.status, Status::Completed);
+    assert_eq!(completed.phase, Phase::Finalizing);
+    assert_eq!(
+        std::fs::read_to_string(target_dir.join("run.txt")).unwrap(),
+        "value=1\n"
+    );
+    assert!(store
+        .events(&task.task_id)
+        .unwrap()
+        .iter()
+        .any(|event| event.event_type == EventType::TaskCompleted));
 }
 
 fn separate_store(data: &std::path::Path) -> TaskStore {

@@ -185,6 +185,8 @@ async fn real_child_runs_in_the_prepared_workspace_and_resumes_there() {
         system_prompt_append: None,
         title: "cwd probe".into(),
         resume_session: resume.map(str::to_owned),
+        reserved_session_id: None,
+        reserved_job_id: None,
         extra_env: Vec::new(),
         executable_override: Some(executable.clone()),
         invocation: None,

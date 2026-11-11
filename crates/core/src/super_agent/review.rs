@@ -5,16 +5,18 @@
 //! time; a session ID supplied by the model never widens its own scope.
 use crate::db::{conversation_repo, message_repo};
 use crate::services::{feedback, subagents};
+use crate::super_agent::isolation::{SnapshotKind, SnapshotManifest};
 use crate::super_agent::model::{
-    ReportKind, ReviewStage, TaskRecord, TaskReviewReport,
+    NonGitSubmission, ReportKind, ReviewStage, TaskRecord, TaskReviewReport,
 };
 use crate::super_agent::role::{self, MemberRole};
 use crate::super_agent::store::{StoreError, TaskStore};
 use crate::tools::ToolDefinition;
 use anyhow::{ensure, Context, Result};
 use serde_json::{json, Value};
+use sha2::{Digest, Sha256};
 use std::collections::{BTreeSet, VecDeque};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 const DEFAULT_LIMIT: usize = 20;
 const MAX_LIMIT: usize = 100;
@@ -527,11 +529,28 @@ pub fn build_review_request(store: &TaskStore, task: &TaskRecord) -> Result<Valu
         .non_git_targets
         .iter()
         .map(|target| {
+            let submission = target.submission.as_ref();
             json!({
                 "target": target.path,
                 "snapshot_dir": target.snapshot_dir,
                 "diff_ref": target.diff_ref,
-                "status": target.status.as_str()
+                "status": target.status.as_str(),
+                // The Reviewer must echo this immutable content identity in
+                // `reviewed_versions[].snapshot_ref`. It changes whenever the
+                // submitted bytes or the review round change.
+                "snapshot_ref": submission.map(|submission| submission.artifact_id.clone()),
+                "submission": submission.map(|submission| json!({
+                    "artifact_id": submission.artifact_id,
+                    "source_path": submission.source_path,
+                    "spec_version": submission.spec_version,
+                    "review_round": submission.review_round,
+                    "content_hash": submission.content_hash,
+                    "complete": submission.complete,
+                    "skipped": submission.skipped,
+                    "skipped_unmapped": submission.skipped_unmapped,
+                    "preserves_mode": submission.preserves_mode,
+                    "platform": submission.platform
+                }))
             })
         })
         .collect();
@@ -577,19 +596,447 @@ pub fn build_review_request(store: &TaskStore, task: &TaskRecord) -> Result<Valu
     }))
 }
 
-/// Computes and records the non-Git changes artifact when an implementation is
-/// submitted. The Reviewer sees a copy, not the Coder's mutable snapshot.
+/// Final-delivery review request. It binds the immutable integrated versions
+/// the host verified, so the Reviewer cannot be pointed at an earlier
+/// implementation commit.
+pub fn build_final_review_request(store: &TaskStore, task: &TaskRecord) -> Result<Value> {
+    let mut request = build_review_request(store, task)?;
+    let versions: Vec<Value> = task
+        .repositories
+        .iter()
+        .map(|repo| {
+            json!({
+                "repository_id": repo.repository_id,
+                "integrated_commit": repo.integrated_commit,
+                "reviewed_commit": repo.reviewed_commit,
+                "target_branch": repo.target_branch
+            })
+        })
+        .collect();
+    let integration: Vec<Value> = task
+        .repositories
+        .iter()
+        .map(|repo| {
+            json!({
+                "repository_id": repo.repository_id,
+                "integrated_commit": repo.integrated_commit,
+                "reviewed_commit": repo.reviewed_commit,
+                "target_branch": repo.target_branch,
+                "integration_status": repo.integration_status.as_str()
+            })
+        })
+        .collect();
+    let inner = request
+        .get_mut("review_request")
+        .and_then(Value::as_object_mut)
+        .context("Review request shape is invalid")?;
+    inner.insert("repository_versions".into(), json!(versions));
+    inner.insert("integration".into(), json!(integration));
+    inner.insert(
+        "review_stage".into(),
+        json!(ReviewStage::FinalDelivery.as_str()),
+    );
+    if let Some(runtime) = inner.get_mut("runtime").and_then(Value::as_object_mut) {
+        runtime.insert(
+            "review_stage".into(),
+            json!(ReviewStage::FinalDelivery.as_str()),
+        );
+    }
+    Ok(request)
+}
+
+fn hex(bytes: impl AsRef<[u8]>) -> String {
+    bytes
+        .as_ref()
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect()
+}
+
+#[cfg(unix)]
+fn path_identity(path: &Path) -> Vec<u8> {
+    use std::os::unix::ffi::OsStrExt;
+    path.as_os_str().as_bytes().to_vec()
+}
+
+#[cfg(not(unix))]
+fn path_identity(path: &Path) -> Vec<u8> {
+    path.to_string_lossy().as_bytes().to_vec()
+}
+
+/// Content identity over the sorted manifest, so enumeration order and the
+/// original target never influence it.
+fn manifest_content_hash(manifest: &SnapshotManifest) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(b"deepseek-code.non-git.content.v1\0");
+    let mut entries: Vec<_> = manifest.entries.iter().collect();
+    entries.sort_by(|left, right| left.path.cmp(&right.path));
+    for entry in entries {
+        hasher.update(entry.path.as_bytes());
+        hasher.update([0]);
+        let kind: &[u8] = match entry.kind {
+            SnapshotKind::File => b"file",
+            SnapshotKind::Directory => b"directory",
+            SnapshotKind::Symlink => b"symlink",
+        };
+        hasher.update(kind);
+        hasher.update([0]);
+        hasher.update(entry.hash.as_bytes());
+        hasher.update([0]);
+        hasher.update(entry.size.to_le_bytes());
+        hasher.update(entry.mode.unwrap_or(u32::MAX).to_le_bytes());
+        if let Some(target) = &entry.link_target {
+            hasher.update(target.as_bytes());
+        }
+        hasher.update([0xff]);
+    }
+    for skipped in &manifest.skipped {
+        hasher.update(b"skipped\0");
+        hasher.update(skipped.as_bytes());
+    }
+    hasher.update(if manifest.truncated {
+        b"truncated".as_slice()
+    } else {
+        b"complete".as_slice()
+    });
+    hex(hasher.finalize())
+}
+
+/// Stable, collision-resistant identity: task, canonical target path, spec
+/// version, review round and submitted content. It never uses the basename or
+/// enumeration order, so equal final components stay separate.
+fn submission_artifact_id(
+    task_id: &str,
+    source: &Path,
+    spec_version: u32,
+    review_round: u32,
+    content_hash: &str,
+) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(b"deepseek-code.non-git.identity.v1\0");
+    hasher.update(task_id.as_bytes());
+    hasher.update([0]);
+    hasher.update(path_identity(source));
+    hasher.update([0]);
+    hasher.update(spec_version.to_le_bytes());
+    hasher.update(review_round.to_le_bytes());
+    hasher.update(content_hash.as_bytes());
+    let identity = hex(hasher.finalize());
+    format!(
+        "non-git-{}-s{spec_version}-r{review_round}-{}",
+        &identity[..24],
+        &content_hash[..24]
+    )
+}
+
+/// Compares the protected snapshot content and metadata, including explicitly
+/// skipped paths. Used to decide whether the current target still matches an
+/// already pinned submission; it does not perform integrity verification.
+fn same_submission_content(left: &SnapshotManifest, right: &SnapshotManifest) -> bool {
+    left.entries == right.entries
+        && left.skipped == right.skipped
+        && left.skipped_raw == right.skipped_raw
+        && left.skipped_unmapped == right.skipped_unmapped
+        && left.truncated == right.truncated
+}
+
+fn submission_scope(data_dir: &Path, task_id: &str) -> PathBuf {
+    data_dir
+        .join("super-agent")
+        .join(task_id)
+        .join("submissions")
+}
+
+fn validate_submission_artifact_id(value: &str) -> Result<()> {
+    ensure!(
+        !value.is_empty()
+            && value.len() <= 128
+            && value != "."
+            && value != ".."
+            && !value.starts_with('.')
+            && value
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.')),
+        "Invalid non-Git submission artifact ID"
+    );
+    Ok(())
+}
+
+/// Verifies a pinned artifact against its durable identity: scope, metadata,
+/// manifest and payload. It never reads the mutable working target.
+fn verify_submission_dir(scope: &Path, submission: &NonGitSubmission) -> Result<SnapshotManifest> {
+    validate_submission_artifact_id(&submission.artifact_id)?;
+    ensure!(
+        submission.source_path.is_absolute(),
+        "Pinned non-Git source path must be absolute"
+    );
+    let scope = scope.canonicalize().with_context(|| {
+        format!(
+            "Task submission directory is unavailable: {}",
+            scope.display()
+        )
+    })?;
+    let directory = submission.directory.canonicalize().with_context(|| {
+        format!(
+            "Pinned non-Git submission is missing: {}",
+            submission.directory.display()
+        )
+    })?;
+    ensure!(
+        directory.parent() == Some(scope.as_path()),
+        "Pinned non-Git submission is outside the task's artifact scope"
+    );
+    ensure!(
+        directory.file_name().and_then(|name| name.to_str())
+            == Some(submission.artifact_id.as_str()),
+        "Pinned non-Git submission directory does not match its artifact ID"
+    );
+    let metadata = std::fs::read(directory.join("submission.json")).with_context(|| {
+        format!(
+            "Pinned non-Git submission metadata is missing for {}",
+            submission.artifact_id
+        )
+    })?;
+    let stored: NonGitSubmission =
+        serde_json::from_slice(&metadata).context("Parsing pinned non-Git submission metadata")?;
+    ensure!(
+        stored == *submission,
+        "Pinned non-Git submission metadata differs from the durable record"
+    );
+    let manifest = crate::super_agent::isolation::verify_snapshot_payload(&directory)?;
+    ensure!(
+        manifest.source == submission.source_path,
+        "Pinned non-Git submission describes a different target"
+    );
+    ensure!(
+        !manifest.skipped_unmapped,
+        "Pinned non-Git submission contains paths that cannot be represented"
+    );
+    let content_hash = manifest_content_hash(&manifest);
+    ensure!(
+        content_hash == submission.content_hash,
+        "Pinned non-Git submission content no longer matches its identity"
+    );
+    let expected = submission_artifact_id(
+        &submission.task_id,
+        &submission.source_path,
+        submission.spec_version,
+        submission.review_round,
+        &content_hash,
+    );
+    ensure!(
+        expected == submission.artifact_id,
+        "Pinned non-Git submission identity is inconsistent"
+    );
+    Ok(manifest)
+}
+
+/// Verifies the current round's pinned non-Git submission without reading the
+/// mutable target. The returned manifest is the exact reviewed content.
+pub fn verify_pinned_submission(
+    data_dir: &Path,
+    task: &TaskRecord,
+    target: &crate::super_agent::NonGitTarget,
+) -> Result<SnapshotManifest> {
+    let submission = target
+        .submission
+        .as_ref()
+        .context("The non-Git target has no pinned review submission")?;
+    ensure!(
+        submission.task_id == task.task_id,
+        "Pinned non-Git submission belongs to another task"
+    );
+    ensure!(
+        submission.spec_version == task.spec_version
+            && submission.review_round == task.review_round,
+        "Pinned non-Git submission belongs to spec version {} round {}, current is {} round {}",
+        submission.spec_version,
+        submission.review_round,
+        task.spec_version,
+        task.review_round
+    );
+    let source = target
+        .path
+        .canonicalize()
+        .unwrap_or_else(|_| target.path.clone());
+    ensure!(
+        submission.source_path == source,
+        "Pinned non-Git submission belongs to a different target"
+    );
+    let scope = submission_scope(data_dir, &task.task_id);
+    verify_submission_dir(&scope, submission)
+}
+
+/// Delivery freshness: the working target must still equal the pinned content.
+/// A mismatch is reported to the gate; the target is never rewritten.
+pub fn submission_matches_target(
+    target: &crate::super_agent::NonGitTarget,
+    manifest: &SnapshotManifest,
+) -> Result<bool> {
+    let current = crate::super_agent::isolation::current_manifest(&target.path)?;
+    Ok(same_submission_content(&current, manifest))
+}
+
+fn read_submission_metadata(directory: &Path) -> Result<NonGitSubmission> {
+    let bytes = std::fs::read(directory.join("submission.json")).with_context(|| {
+        format!(
+            "Pinned non-Git submission metadata is missing in {}",
+            directory.display()
+        )
+    })?;
+    serde_json::from_slice(&bytes).context("Parsing pinned non-Git submission metadata")
+}
+
+/// Copies the current target into a new pinned artifact. The copy is staged
+/// under a hidden directory and published by rename only after the payload,
+/// manifest and metadata are complete.
+fn pin_submission_snapshot(
+    data_dir: &Path,
+    task: &TaskRecord,
+    target: &crate::super_agent::NonGitTarget,
+) -> Result<NonGitSubmission> {
+    let source = target
+        .path
+        .canonicalize()
+        .with_context(|| format!("Non-Git target is unavailable: {}", target.path.display()))?;
+    ensure!(source.is_dir(), "Non-Git target must be a directory");
+    let scope = submission_scope(data_dir, &task.task_id);
+    std::fs::create_dir_all(&scope)?;
+    let staging = scope.join(format!(".staging-{}", uuid::Uuid::new_v4()));
+    let result = (|| -> Result<NonGitSubmission> {
+        crate::super_agent::isolation::create_snapshot(&source, &staging)?;
+        // Full payload verification before anything is published; this also
+        // rejects absolute or escaping symlinks that would resolve to the
+        // mutable original after copying.
+        let manifest = crate::super_agent::isolation::verify_snapshot_payload(&staging)?;
+        ensure!(
+            !manifest.truncated,
+            "Non-Git target exceeds snapshot limits; the submission is incomplete"
+        );
+        ensure!(
+            !manifest.skipped_unmapped,
+            "Non-Git target contains paths that cannot be represented on this platform"
+        );
+        let content_hash = manifest_content_hash(&manifest);
+        let artifact_id = submission_artifact_id(
+            &task.task_id,
+            &source,
+            task.spec_version,
+            task.review_round,
+            &content_hash,
+        );
+        let directory = scope.join(&artifact_id);
+        if directory.exists() {
+            // Same content identity: reuse the published artifact and its
+            // original immutable metadata. A retry after publishing but before
+            // the durable record must not manufacture a new timestamp.
+            let existing = read_submission_metadata(&directory)?;
+            ensure!(
+                existing.artifact_id == artifact_id
+                    && existing.task_id == task.task_id
+                    && existing.source_path == source
+                    && existing.spec_version == task.spec_version
+                    && existing.review_round == task.review_round
+                    && existing.content_hash == content_hash,
+                "An existing non-Git submission with the same identity has different metadata"
+            );
+            ensure!(
+                existing.directory.canonicalize().ok() == directory.canonicalize().ok(),
+                "An existing non-Git submission points at a different directory"
+            );
+            let canonical_scope = scope.canonicalize()?;
+            verify_submission_dir(&canonical_scope, &existing)?;
+            let _ = std::fs::remove_dir_all(&staging);
+            return Ok(existing);
+        }
+        let submission = NonGitSubmission {
+            artifact_id,
+            task_id: task.task_id.clone(),
+            source_path: source.clone(),
+            directory: directory.clone(),
+            spec_version: task.spec_version,
+            review_round: task.review_round,
+            content_hash,
+            created_at: chrono::Utc::now().to_rfc3339(),
+            platform: std::env::consts::OS.into(),
+            preserves_mode: cfg!(unix),
+            complete: manifest.is_complete(),
+            skipped: manifest.skipped.clone(),
+            skipped_unmapped: manifest.skipped_unmapped,
+        };
+        std::fs::write(
+            staging.join("submission.json"),
+            serde_json::to_vec_pretty(&submission)?,
+        )?;
+        match std::fs::rename(&staging, &directory) {
+            Ok(()) => Ok(submission),
+            // A concurrent writer may have published the identical artifact
+            // between the existence check and the rename. Reuse it.
+            Err(_) if directory.exists() => {
+                let existing = read_submission_metadata(&directory)?;
+                ensure!(
+                    existing.artifact_id == submission.artifact_id
+                        && existing.task_id == submission.task_id
+                        && existing.source_path == submission.source_path
+                        && existing.spec_version == submission.spec_version
+                        && existing.review_round == submission.review_round
+                        && existing.content_hash == submission.content_hash,
+                    "A concurrent non-Git submission has different metadata"
+                );
+                let canonical_scope = scope.canonicalize()?;
+                verify_submission_dir(&canonical_scope, &existing)?;
+                let _ = std::fs::remove_dir_all(&staging);
+                Ok(existing)
+            }
+            Err(error) => Err(error.into()),
+        }
+    })();
+    if result.is_err() {
+        let _ = std::fs::remove_dir_all(&staging);
+    }
+    result
+}
+
+/// Computes and records the non-Git changes artifact and pins the submitted
+/// content. Repeating the call with unchanged content reuses the same artifact.
 pub fn record_non_git_changes(
     store: &TaskStore,
     task: &TaskRecord,
     target: &crate::super_agent::NonGitTarget,
 ) -> Result<crate::super_agent::NonGitTarget> {
-    let before: crate::super_agent::isolation::SnapshotManifest =
-        serde_json::from_str(&target.snapshot_manifest_json)
-            .context("Stored non-Git snapshot manifest is invalid")?;
+    let before: SnapshotManifest = serde_json::from_str(&target.snapshot_manifest_json)
+        .context("Stored non-Git snapshot manifest is invalid")?;
     let current = crate::super_agent::isolation::current_manifest(&target.path)?;
-    let diff = crate::super_agent::isolation::diff_snapshot(&before, &current);
-    let name = format!("changes-{}-round-{}.json", task.task_id, task.review_round);
+    let current_round = target.submission.as_ref().is_some_and(|submission| {
+        submission.task_id == task.task_id
+            && submission.spec_version == task.spec_version
+            && submission.review_round == task.review_round
+    });
+    let (submission, pinned) = if current_round {
+        // A corrupt existing artifact is a hard error; never silently replace
+        // evidence the Reviewer may already have read.
+        let manifest = verify_pinned_submission(store.data_dir(), task, target)
+            .context("The existing pinned non-Git review submission is invalid")?;
+        if same_submission_content(&current, &manifest) {
+            (
+                target
+                    .submission
+                    .clone()
+                    .context("Pinned submission disappeared")?,
+                manifest,
+            )
+        } else {
+            let submission = pin_submission_snapshot(store.data_dir(), task, target)?;
+            let manifest = crate::super_agent::isolation::load_snapshot(&submission.directory)?;
+            (submission, manifest)
+        }
+    } else {
+        let submission = pin_submission_snapshot(store.data_dir(), task, target)?;
+        let manifest = crate::super_agent::isolation::load_snapshot(&submission.directory)?;
+        (submission, manifest)
+    };
+    let diff = crate::super_agent::isolation::diff_snapshot(&before, &pinned);
+    let name = format!("changes-{}.json", submission.artifact_id);
     let bytes = serde_json::to_vec_pretty(&diff)?;
     let path = store
         .write_artifact(&task.task_id, &name, &bytes)
@@ -601,41 +1048,53 @@ pub fn record_non_git_changes(
             .unwrap_or(name),
     );
     updated.status = crate::super_agent::NonGitStatus::InProgress;
+    updated.submission = Some(submission);
     store.save_non_git_target(&updated).map_err(store_error)?;
     Ok(updated)
 }
 
-/// A read-only copy of the submitted non-Git content for the Reviewer.
+/// The Reviewer's read-only copy of the pinned submission. It never reopens
+/// the mutable target, so edits made after submission cannot change the
+/// reviewed bytes.
 pub fn prepare_non_git_review(
     data_dir: &Path,
     task_id: &str,
     round: u32,
     target: &crate::super_agent::NonGitTarget,
-) -> Result<std::path::PathBuf> {
-    let directory = data_dir
-        .join("super-agent")
-        .join(task_id)
-        .join(format!("review-{round}-snapshots"));
-    std::fs::create_dir_all(&directory)?;
-    let snapshot = directory.join(
-        target
-            .path
-            .file_name()
-            .map(|name| name.to_string_lossy().into_owned())
-            .unwrap_or_else(|| "target".into()),
+) -> Result<PathBuf> {
+    let submission = target.submission.as_ref().context(
+        "The non-Git target has no pinned review submission; submit the implementation first",
+    )?;
+    ensure!(
+        submission.task_id == task_id,
+        "Pinned non-Git submission belongs to another task"
     );
-    if snapshot.exists() {
-        let manifest = crate::super_agent::isolation::load_snapshot(&snapshot)?;
-        let current = crate::super_agent::isolation::current_manifest(&target.path)?;
-        if manifest.entries == current.entries {
-            return Ok(snapshot.join("payload"));
-        }
-        anyhow::bail!(
-            "The recorded review copy differs from the submitted non-Git target; start a new review round"
-        );
-    }
-    crate::super_agent::isolation::create_snapshot(&target.path, &snapshot)?;
-    Ok(snapshot.join("payload"))
+    ensure!(
+        submission.review_round == round,
+        "The pinned non-Git submission belongs to review round {}, not round {round}",
+        submission.review_round
+    );
+    let scope = submission_scope(data_dir, task_id);
+    let manifest = verify_submission_dir(&scope, submission).with_context(|| {
+        format!(
+            "Pinned non-Git review snapshot for {} is unavailable",
+            target.path.display()
+        )
+    })?;
+    ensure!(
+        !manifest.truncated,
+        "Pinned non-Git review snapshot is incomplete"
+    );
+    let directory = submission.directory.canonicalize()?;
+    let payload = directory
+        .join("payload")
+        .canonicalize()
+        .context("Pinned non-Git review payload is missing")?;
+    ensure!(
+        payload.starts_with(&directory),
+        "Pinned non-Git review payload escaped its artifact"
+    );
+    Ok(payload)
 }
 
 pub fn verify_submitted_versions(task: &TaskRecord) -> Result<()> {

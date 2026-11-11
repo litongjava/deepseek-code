@@ -455,6 +455,7 @@ CREATE TABLE IF NOT EXISTS sa_non_git_targets (
     diff_ref TEXT,
     status TEXT NOT NULL DEFAULT 'PREPARED',
     lock_key TEXT NOT NULL,
+    submission_json TEXT,
     PRIMARY KEY(task_id, path)
 );
 
@@ -513,5 +514,35 @@ CREATE TABLE IF NOT EXISTS sa_locks (
     task_id TEXT NOT NULL,
     owner_operation_id TEXT NOT NULL,
     acquired_at TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS sa_delivery_plans (
+    operation_id TEXT PRIMARY KEY,
+    task_id TEXT NOT NULL,
+    spec_version INTEGER NOT NULL,
+    review_round INTEGER NOT NULL,
+    created_at TEXT NOT NULL,
+    plan_json TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_sa_delivery_plans_task ON sa_delivery_plans(task_id, spec_version, review_round);
+
+CREATE TABLE IF NOT EXISTS sa_delivery_attempts (
+    task_id TEXT NOT NULL,
+    content_fingerprint TEXT NOT NULL,
+    attempt INTEGER NOT NULL,
+    created_at TEXT NOT NULL,
+    PRIMARY KEY(task_id, content_fingerprint)
+);
+
+CREATE TABLE IF NOT EXISTS sa_delivery_dispatches (
+    task_id TEXT NOT NULL,
+    plan_operation_id TEXT NOT NULL,
+    spec_version INTEGER NOT NULL,
+    review_round INTEGER NOT NULL,
+    coder_session_id TEXT NOT NULL,
+    purpose TEXT NOT NULL,
+    job_id TEXT,
+    created_at TEXT NOT NULL,
+    PRIMARY KEY(task_id, plan_operation_id)
 );
 "#;

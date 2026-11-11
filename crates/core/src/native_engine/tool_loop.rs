@@ -41,7 +41,7 @@ use crate::streaming::sse_parser::{
     consume_sse_payloads, merge_tool_args, recover_malformed_tool_input,
 };
 use crate::tools::get_tool_definitions;
-use anyhow::{anyhow, Result};
+use anyhow::{anyhow, Context as _, Result};
 use futures::StreamExt;
 use serde_json::{json, Value};
 use std::collections::HashMap;
@@ -547,6 +547,381 @@ fn ask_user_questions(input: &Value) -> Result<Vec<Value>> {
             Ok(question)
         })
         .collect()
+}
+
+/// The saved foreground-shell working directory of one session, staged for a
+/// host-authorized workspace move.
+///
+/// Candidates are listed and validated before any rename. Only the exact plain
+/// session file and the exact WSL-suffixed file that `safe_cwd` creates are
+/// staged; stale backups and other sessions are never touched. A staging
+/// failure restores every entry staged so far and reports both the original
+/// error and any rollback problem. Committing removes the backups; after a
+/// committed database move a cleanup failure is reported but never restores a
+/// cache that no longer matches the database. This is not a claim of
+/// crash-atomicity across the database and filesystem.
+pub struct ShellCwdReset {
+    backups: Vec<(std::path::PathBuf, std::path::PathBuf)>,
+}
+
+/// Filesystem operations used while staging the saved shell state. Tests inject
+/// deterministic failures through this seam instead of relying on permissions
+/// or timing.
+pub(crate) trait ShellCwdFs {
+    /// Returns every entry name in `directory`, or `None` when the directory
+    /// does not exist. Every entry is read before the caller mutates anything.
+    fn list(&self, directory: &std::path::Path) -> Result<Option<Vec<std::ffi::OsString>>>;
+    fn rename(&self, from: &std::path::Path, to: &std::path::Path) -> std::io::Result<()>;
+    fn link(&self, from: &std::path::Path, to: &std::path::Path) -> std::io::Result<()>;
+    fn remove_file(&self, path: &std::path::Path) -> std::io::Result<()>;
+    fn exists(&self, path: &std::path::Path) -> bool;
+}
+
+#[derive(Default)]
+pub(crate) struct RealShellCwdFs;
+
+impl ShellCwdFs for RealShellCwdFs {
+    fn list(&self, directory: &std::path::Path) -> Result<Option<Vec<std::ffi::OsString>>> {
+        let entries = match std::fs::read_dir(directory) {
+            Ok(entries) => entries,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+            Err(error) => {
+                return Err(error).with_context(|| {
+                    format!(
+                        "Cannot list the shell state directory {}",
+                        directory.display()
+                    )
+                })
+            }
+        };
+        let mut names = Vec::new();
+        for entry in entries {
+            names.push(
+                entry
+                    .with_context(|| {
+                        format!("Cannot read a shell state entry in {}", directory.display())
+                    })?
+                    .file_name(),
+            );
+        }
+        Ok(Some(names))
+    }
+
+    fn rename(&self, from: &std::path::Path, to: &std::path::Path) -> std::io::Result<()> {
+        std::fs::rename(from, to)
+    }
+
+    fn link(&self, from: &std::path::Path, to: &std::path::Path) -> std::io::Result<()> {
+        std::fs::hard_link(from, to)
+    }
+
+    fn remove_file(&self, path: &std::path::Path) -> std::io::Result<()> {
+        std::fs::remove_file(path)
+    }
+
+    fn exists(&self, path: &std::path::Path) -> bool {
+        // An unreadable destination is treated as present: rolling back must
+        // never overwrite state that might have been recreated.
+        path.try_exists().unwrap_or(true)
+    }
+}
+
+/// Mirrors the production state name: `safe_cwd` uses
+/// `Path::with_extension("wsl-<16 lowercase hex>")` only for a plain session
+/// id. An id containing a dot would share that WSL name with another session,
+/// so only the unambiguous plain form is accepted (conversation ids are UUIDs).
+fn shell_state_name_is_ours(session: &str, name: &std::ffi::OsStr) -> bool {
+    if name == std::ffi::OsStr::new(session) {
+        return true;
+    }
+    if std::path::Path::new(session).extension().is_some() {
+        return false;
+    }
+    let Some(text) = name.to_str() else {
+        return false;
+    };
+    let Some(hash) = text
+        .strip_prefix(session)
+        .and_then(|rest| rest.strip_prefix(".wsl-"))
+    else {
+        return false;
+    };
+    hash.len() == 16
+        && hash
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+}
+
+/// Restores one staged file without overwriting an active state that was
+/// created again while the move was in flight. A hard link is the no-clobber
+/// primitive: it fails atomically if the destination appeared. There is no
+/// overwrite-capable fallback; an unavailable filesystem reports an explicit
+/// recovery error and keeps the staged copy.
+fn restore_shell_state(
+    fs: &dyn ShellCwdFs,
+    original: &std::path::Path,
+    backup: &std::path::Path,
+) -> Result<()> {
+    let conflict = || {
+        anyhow!(
+            "the active shell state was created again; refusing to overwrite it (staged copy at {})",
+            backup.display()
+        )
+    };
+    if fs.exists(original) {
+        return Err(conflict());
+    }
+    match fs.link(backup, original) {
+        Ok(()) => fs.remove_file(backup).with_context(|| {
+            format!(
+                "the shell state {} was restored but its staged duplicate {} could not be removed",
+                original.display(),
+                backup.display()
+            )
+        }),
+        Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => Err(conflict()),
+        Err(link_error) => Err(anyhow!(
+            "Cannot restore the shell state {} without replacing it: the filesystem cannot create a no-clobber link ({link_error}); the staged copy remains at {}",
+            original.display(),
+            backup.display()
+        )),
+    }
+}
+
+impl ShellCwdReset {
+    pub fn prepare(data_dir: &std::path::Path, session: &str) -> Result<Self> {
+        Self::prepare_with(&RealShellCwdFs, data_dir, session)
+    }
+
+    pub(crate) fn prepare_with(
+        fs: &dyn ShellCwdFs,
+        data_dir: &std::path::Path,
+        session: &str,
+    ) -> Result<Self> {
+        anyhow::ensure!(
+            !session.is_empty()
+                && session != "."
+                && session != ".."
+                && !session.contains(['/', '\\']),
+            "Invalid session ID for shell state"
+        );
+        let directory = data_dir.join("shell-cwd");
+        let Some(names) = fs.list(&directory)? else {
+            return Ok(Self {
+                backups: Vec::new(),
+            });
+        };
+        let mut candidates: Vec<_> = names
+            .into_iter()
+            .filter(|name| shell_state_name_is_ours(session, name))
+            .map(|name| directory.join(name))
+            .collect();
+        // A stable order makes which entry fails deterministic; the directory
+        // is not read again after the first rename.
+        candidates.sort();
+        let mut reset = Self {
+            backups: Vec::new(),
+        };
+        for original in candidates {
+            let name = original
+                .file_name()
+                .map(|name| name.to_string_lossy().into_owned())
+                .unwrap_or_default();
+            let backup = original.with_file_name(format!("{name}.stale-{}", uuid::Uuid::new_v4()));
+            if let Err(error) = fs.rename(&original, &backup) {
+                let primary = anyhow::Error::new(error).context(format!(
+                    "Cannot stage the shell state {}",
+                    original.display()
+                ));
+                let rollback = reset.rollback(fs);
+                return Err(if rollback.is_empty() {
+                    primary
+                } else {
+                    primary.context(format!(
+                        "rolling back the staged shell state also failed: {}",
+                        rollback.join("; ")
+                    ))
+                });
+            }
+            reset.backups.push((original, backup));
+        }
+        Ok(reset)
+    }
+
+    /// Undoes every staged rename, attempting all of them. Failures are
+    /// returned as text; each failed backup stays where it is.
+    fn rollback(&mut self, fs: &dyn ShellCwdFs) -> Vec<String> {
+        let staged = std::mem::take(&mut self.backups);
+        let mut failures = Vec::new();
+        for (original, backup) in staged {
+            if let Err(error) = restore_shell_state(fs, &original, &backup) {
+                let kept = if fs.exists(&backup) {
+                    format!("; the staged copy remains at {}", backup.display())
+                } else {
+                    String::new()
+                };
+                failures.push(format!("{}: {error:#}{kept}", original.display()));
+            }
+        }
+        failures
+    }
+
+    /// Puts every staged file back after the database move failed.
+    pub fn restore(self) -> Result<()> {
+        self.restore_with(&RealShellCwdFs)
+    }
+
+    pub(crate) fn restore_with(mut self, fs: &dyn ShellCwdFs) -> Result<()> {
+        let failures = self.rollback(fs);
+        if failures.is_empty() {
+            Ok(())
+        } else {
+            Err(anyhow!(
+                "the shell state could not be fully restored: {}",
+                failures.join("; ")
+            ))
+        }
+    }
+
+    /// Drops the staged caches after the database move committed. It never
+    /// renames a cache back into place.
+    pub fn commit(self) -> Result<()> {
+        self.commit_with(&RealShellCwdFs)
+    }
+
+    pub(crate) fn commit_with(mut self, fs: &dyn ShellCwdFs) -> Result<()> {
+        let staged = std::mem::take(&mut self.backups);
+        let mut failures = Vec::new();
+        for (_, backup) in staged {
+            if let Err(error) = fs.remove_file(&backup) {
+                failures.push(format!("{}: {error}", backup.display()));
+            }
+        }
+        if failures.is_empty() {
+            Ok(())
+        } else {
+            Err(anyhow!(
+                "the workspace move was committed, but the staged shell state could not be removed: {}",
+                failures.join("; ")
+            ))
+        }
+    }
+}
+
+/// Deterministic filesystem failures for the shell-state tests. Production
+/// always uses `RealShellCwdFs`.
+#[cfg(test)]
+pub(crate) mod shell_cwd_faults {
+    use super::{RealShellCwdFs, ShellCwdFs};
+
+    #[derive(Default)]
+    pub(crate) struct FaultyFs {
+        inner: RealShellCwdFs,
+        fail_list: bool,
+        /// Fails every rename once this many renames have succeeded.
+        fail_rename_after: Option<usize>,
+        /// Fails links whose destination has one of these file names.
+        fail_link_names: Vec<String>,
+        /// Written to the destination before an injected link failure, to model
+        /// an active state created at exactly that moment.
+        link_failure_destination: Option<String>,
+        fail_all_removals: bool,
+        renames: std::cell::Cell<usize>,
+    }
+
+    impl FaultyFs {
+        pub(crate) fn failing_list() -> Self {
+            Self {
+                fail_list: true,
+                ..Self::default()
+            }
+        }
+
+        pub(crate) fn failing_renames_after(limit: usize) -> Self {
+            Self {
+                fail_rename_after: Some(limit),
+                ..Self::default()
+            }
+        }
+
+        pub(crate) fn failing_links(mut self, names: &[&str]) -> Self {
+            self.fail_link_names = names.iter().map(|name| (*name).to_owned()).collect();
+            self
+        }
+
+        pub(crate) fn failing_links_after_creating_destination(
+            mut self,
+            names: &[&str],
+            content: &str,
+        ) -> Self {
+            self = self.failing_links(names);
+            self.link_failure_destination = Some(content.to_owned());
+            self
+        }
+
+        pub(crate) fn failing_removals(mut self) -> Self {
+            self.fail_all_removals = true;
+            self
+        }
+
+        fn named(path: &std::path::Path) -> String {
+            path.file_name()
+                .map(|name| name.to_string_lossy().into_owned())
+                .unwrap_or_default()
+        }
+    }
+
+    impl ShellCwdFs for FaultyFs {
+        fn list(
+            &self,
+            directory: &std::path::Path,
+        ) -> anyhow::Result<Option<Vec<std::ffi::OsString>>> {
+            if self.fail_list {
+                anyhow::bail!("injected shell state listing failure");
+            }
+            self.inner.list(directory)
+        }
+
+        fn rename(&self, from: &std::path::Path, to: &std::path::Path) -> std::io::Result<()> {
+            let count = self.renames.get() + 1;
+            self.renames.set(count);
+            if self.fail_rename_after.is_some_and(|limit| count > limit) {
+                return Err(std::io::Error::other("injected rename failure"));
+            }
+            self.inner.rename(from, to)
+        }
+
+        fn link(&self, from: &std::path::Path, to: &std::path::Path) -> std::io::Result<()> {
+            if self
+                .fail_link_names
+                .iter()
+                .any(|name| name == &Self::named(to))
+            {
+                if let Some(content) = &self.link_failure_destination {
+                    if !self.inner.exists(to) {
+                        std::fs::write(to, content).map_err(|error| {
+                            std::io::Error::other(format!(
+                                "injected destination write failure: {error}"
+                            ))
+                        })?;
+                    }
+                }
+                return Err(std::io::Error::other("injected link failure"));
+            }
+            self.inner.link(from, to)
+        }
+
+        fn remove_file(&self, path: &std::path::Path) -> std::io::Result<()> {
+            if self.fail_all_removals {
+                return Err(std::io::Error::other("injected removal failure"));
+            }
+            self.inner.remove_file(path)
+        }
+
+        fn exists(&self, path: &std::path::Path) -> bool {
+            self.inner.exists(path)
+        }
+    }
 }
 
 /// Bash keeps its working directory per session in a file the tool reads and
@@ -5658,5 +6033,317 @@ fn ask_user_questions_accept_the_reference_and_legacy_shapes() {
         json!({"questions":[{"question":"Q?","options":[option("A"),option("B")]},{"question":"Q?","options":[option("A"),option("B")]}]}),
     ] {
         assert!(ask_user_questions(&invalid).is_err(), "{invalid}");
+    }
+}
+
+#[cfg(test)]
+mod shell_cwd_tests {
+    use super::shell_cwd_faults::FaultyFs;
+    use super::ShellCwdReset;
+
+    fn names(directory: &std::path::Path) -> Vec<String> {
+        let mut names: Vec<String> = std::fs::read_dir(directory)
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
+            .collect();
+        names.sort();
+        names
+    }
+
+    fn stale_names(directory: &std::path::Path) -> Vec<String> {
+        names(directory)
+            .into_iter()
+            .filter(|name| name.contains(".stale-"))
+            .collect()
+    }
+
+    fn read(directory: &std::path::Path, name: &str) -> String {
+        std::fs::read_to_string(directory.join(name)).unwrap()
+    }
+
+    fn write(directory: &std::path::Path, name: &str, content: &str) {
+        std::fs::write(directory.join(name), content).unwrap();
+    }
+
+    #[test]
+    fn an_authorized_move_stages_only_that_sessions_shell_cwd() {
+        let temp = tempfile::tempdir().unwrap();
+        let directory = temp.path().join("shell-cwd");
+        std::fs::create_dir_all(&directory).unwrap();
+        write(&directory, "session-a", "/old/review-1");
+        write(&directory, "session-a.wsl-0123456789abcdef", "/old/wsl");
+        let untouched = [
+            ("session-a.stale-6f1c2d3e", "/old/stale"),
+            ("session-a.wsl-0123456789ABCDEF", "/upper"),
+            ("session-a.wsl-0123456789abcde", "/short"),
+            ("session-a.wsl-0123456789abcdef0", "/long"),
+            ("session-a.wsl-0123456789abcdeg", "/non-hex"),
+            ("session-b", "/other/workspace"),
+            ("session-b.wsl-0123456789abcdef", "/other/wsl"),
+        ];
+        for (name, content) in untouched {
+            write(&directory, name, content);
+        }
+
+        let reset = ShellCwdReset::prepare(temp.path(), "session-a").unwrap();
+        assert!(!directory.join("session-a").exists());
+        assert!(!directory.join("session-a.wsl-0123456789abcdef").exists());
+        for (name, content) in untouched {
+            assert_eq!(read(&directory, name), content, "{name} must not be staged");
+        }
+        reset.commit().unwrap();
+        let mut expected: Vec<String> =
+            untouched.iter().map(|(name, _)| name.to_string()).collect();
+        expected.sort();
+        assert_eq!(names(&directory), expected);
+
+        // A missing state directory means "no state", not an error.
+        ShellCwdReset::prepare(&temp.path().join("missing"), "session-a")
+            .unwrap()
+            .commit()
+            .unwrap();
+        assert!(ShellCwdReset::prepare(temp.path(), "../escape").is_err());
+        assert!(ShellCwdReset::prepare(temp.path(), "").is_err());
+    }
+
+    #[test]
+    fn a_failed_move_restores_the_exact_shell_state() {
+        let temp = tempfile::tempdir().unwrap();
+        let directory = temp.path().join("shell-cwd");
+        std::fs::create_dir_all(&directory).unwrap();
+        write(&directory, "session-a", "/old/review-1");
+        write(&directory, "session-a.wsl-0123456789abcdef", "/old/wsl");
+        write(&directory, "session-b", "/other/workspace");
+
+        let reset = ShellCwdReset::prepare(temp.path(), "session-a").unwrap();
+        reset.restore().unwrap();
+
+        assert_eq!(read(&directory, "session-a"), "/old/review-1");
+        assert_eq!(
+            read(&directory, "session-a.wsl-0123456789abcdef"),
+            "/old/wsl"
+        );
+        assert_eq!(read(&directory, "session-b"), "/other/workspace");
+        assert!(
+            stale_names(&directory).is_empty(),
+            "staged files left behind: {:?}",
+            stale_names(&directory)
+        );
+    }
+
+    #[test]
+    fn a_second_staging_failure_restores_every_staged_entry() {
+        let temp = tempfile::tempdir().unwrap();
+        let directory = temp.path().join("shell-cwd");
+        std::fs::create_dir_all(&directory).unwrap();
+        write(&directory, "session-a", "/old/review-1");
+        write(&directory, "session-a.wsl-0123456789abcdef", "/old/wsl");
+        write(&directory, "session-b", "/other/workspace");
+
+        // The first (plain) rename succeeds; the WSL rename fails.
+        let fs = FaultyFs::failing_renames_after(1);
+        let error = ShellCwdReset::prepare_with(&fs, temp.path(), "session-a")
+            .err()
+            .expect("the second staging rename must fail");
+        let text = format!("{error:#}");
+        assert!(text.contains("Cannot stage the shell state"), "{text}");
+
+        assert_eq!(read(&directory, "session-a"), "/old/review-1");
+        assert_eq!(
+            read(&directory, "session-a.wsl-0123456789abcdef"),
+            "/old/wsl"
+        );
+        assert_eq!(read(&directory, "session-b"), "/other/workspace");
+        assert!(
+            stale_names(&directory).is_empty(),
+            "the first staged entry was not rolled back: {:?}",
+            stale_names(&directory)
+        );
+    }
+
+    #[test]
+    fn a_staging_failure_reports_rollback_failures_and_keeps_the_backup() {
+        let temp = tempfile::tempdir().unwrap();
+        let directory = temp.path().join("shell-cwd");
+        std::fs::create_dir_all(&directory).unwrap();
+        write(&directory, "session-a", "/old/review-1");
+        write(&directory, "session-a.wsl-0123456789abcdef", "/old/wsl");
+        write(&directory, "session-b", "/other/workspace");
+
+        // The plain rename succeeds, the WSL rename fails, and restoring the
+        // plain entry fails too (link and rename both injected).
+        let fs = FaultyFs::failing_renames_after(1).failing_links(&["session-a"]);
+        let error = ShellCwdReset::prepare_with(&fs, temp.path(), "session-a")
+            .err()
+            .expect("the second staging rename must fail");
+        let text = format!("{error:#}");
+        assert!(text.contains("Cannot stage the shell state"), "{text}");
+        assert!(
+            text.contains("rolling back the staged shell state also failed"),
+            "{text}"
+        );
+        assert!(text.contains("the staged copy remains at"), "{text}");
+
+        assert!(!directory.join("session-a").exists());
+        let stale = stale_names(&directory);
+        assert_eq!(stale.len(), 1, "remaining backups: {stale:?}");
+        assert_eq!(read(&directory, &stale[0]), "/old/review-1");
+        assert_eq!(
+            read(&directory, "session-a.wsl-0123456789abcdef"),
+            "/old/wsl"
+        );
+        assert_eq!(read(&directory, "session-b"), "/other/workspace");
+    }
+
+    #[test]
+    fn a_listing_failure_leaves_every_shell_state_untouched() {
+        let temp = tempfile::tempdir().unwrap();
+        let directory = temp.path().join("shell-cwd");
+        std::fs::create_dir_all(&directory).unwrap();
+        write(&directory, "session-a", "/old/review-1");
+        write(&directory, "session-a.wsl-0123456789abcdef", "/old/wsl");
+        write(&directory, "session-b", "/other/workspace");
+
+        let fs = FaultyFs::failing_list();
+        let error = ShellCwdReset::prepare_with(&fs, temp.path(), "session-a")
+            .err()
+            .expect("a listing failure must abort preparation");
+        assert!(
+            format!("{error:#}").contains("injected shell state listing failure"),
+            "{error:#}"
+        );
+        assert_eq!(read(&directory, "session-a"), "/old/review-1");
+        assert_eq!(
+            read(&directory, "session-a.wsl-0123456789abcdef"),
+            "/old/wsl"
+        );
+        assert_eq!(read(&directory, "session-b"), "/other/workspace");
+        assert!(stale_names(&directory).is_empty());
+    }
+
+    #[test]
+    fn one_failed_restore_still_attempts_the_remaining_entries() {
+        let temp = tempfile::tempdir().unwrap();
+        let directory = temp.path().join("shell-cwd");
+        std::fs::create_dir_all(&directory).unwrap();
+        write(&directory, "session-a", "/old/review-1");
+        write(&directory, "session-a.wsl-0123456789abcdef", "/old/wsl");
+
+        let reset = ShellCwdReset::prepare(temp.path(), "session-a").unwrap();
+        let fs = FaultyFs::default().failing_links(&["session-a"]);
+        let error = reset
+            .restore_with(&fs)
+            .err()
+            .expect("the plain entry cannot be restored");
+        let text = format!("{error:#}");
+        assert!(text.contains("could not be fully restored"), "{text}");
+
+        assert!(!directory.join("session-a").exists());
+        let stale = stale_names(&directory);
+        assert_eq!(stale.len(), 1, "remaining backups: {stale:?}");
+        assert_eq!(read(&directory, &stale[0]), "/old/review-1");
+        assert_eq!(
+            read(&directory, "session-a.wsl-0123456789abcdef"),
+            "/old/wsl",
+            "the independent WSL state is still restored"
+        );
+    }
+
+    #[test]
+    fn a_recreated_active_state_is_not_overwritten_by_restore() {
+        let temp = tempfile::tempdir().unwrap();
+        let directory = temp.path().join("shell-cwd");
+        std::fs::create_dir_all(&directory).unwrap();
+        write(&directory, "session-a", "/old/review-1");
+        write(&directory, "session-a.wsl-0123456789abcdef", "/old/wsl");
+
+        let reset = ShellCwdReset::prepare(temp.path(), "session-a").unwrap();
+        write(&directory, "session-a", "/new/review-2");
+        let error = reset
+            .restore()
+            .err()
+            .expect("an active state created again must not be overwritten");
+        let text = format!("{error:#}");
+        assert!(text.contains("created again"), "{text}");
+        assert!(text.contains("refusing to overwrite"), "{text}");
+
+        assert_eq!(
+            read(&directory, "session-a"),
+            "/new/review-2",
+            "the recreated active state survives"
+        );
+        let stale = stale_names(&directory);
+        assert_eq!(stale.len(), 1, "the exact previous bytes stay recoverable");
+        assert_eq!(read(&directory, &stale[0]), "/old/review-1");
+        assert_eq!(
+            read(&directory, "session-a.wsl-0123456789abcdef"),
+            "/old/wsl"
+        );
+    }
+
+    #[test]
+    fn a_link_failure_never_replaces_a_state_created_at_that_moment() {
+        let temp = tempfile::tempdir().unwrap();
+        let directory = temp.path().join("shell-cwd");
+        std::fs::create_dir_all(&directory).unwrap();
+        write(&directory, "session-a", "/old/review-1");
+        write(&directory, "session-a.wsl-0123456789abcdef", "/old/wsl");
+
+        let reset = ShellCwdReset::prepare(temp.path(), "session-a").unwrap();
+        // The no-clobber link fails, and a new active state appears at exactly
+        // that moment. There is no overwrite-capable fallback to reach.
+        let fs = FaultyFs::default()
+            .failing_links_after_creating_destination(&["session-a"], "/new/review-2");
+        let error = reset
+            .restore_with(&fs)
+            .err()
+            .expect("a failed no-clobber link must be reported");
+        let text = format!("{error:#}");
+        assert!(text.contains("cannot create a no-clobber link"), "{text}");
+
+        assert_eq!(
+            read(&directory, "session-a"),
+            "/new/review-2",
+            "the state created at that moment is never replaced"
+        );
+        let stale = stale_names(&directory);
+        assert_eq!(stale.len(), 1, "the exact previous bytes stay recoverable");
+        assert_eq!(read(&directory, &stale[0]), "/old/review-1");
+        assert_eq!(
+            read(&directory, "session-a.wsl-0123456789abcdef"),
+            "/old/wsl",
+            "the independent WSL state is still restored"
+        );
+    }
+
+    #[test]
+    fn a_commit_cleanup_failure_never_restores_the_cache() {
+        let temp = tempfile::tempdir().unwrap();
+        let directory = temp.path().join("shell-cwd");
+        std::fs::create_dir_all(&directory).unwrap();
+        write(&directory, "session-a", "/old/review-1");
+        write(&directory, "session-a.wsl-0123456789abcdef", "/old/wsl");
+        write(&directory, "session-b", "/other/workspace");
+
+        let reset = ShellCwdReset::prepare(temp.path(), "session-a").unwrap();
+        let fs = FaultyFs::default().failing_removals();
+        let error = reset
+            .commit_with(&fs)
+            .err()
+            .expect("the staged caches cannot be removed");
+        let text = format!("{error:#}");
+        assert!(text.contains("workspace move was committed"), "{text}");
+
+        let stale = stale_names(&directory);
+        assert_eq!(stale.len(), 2, "both removals were attempted: {stale:?}");
+        for name in &stale {
+            assert!(text.contains(name), "{name} is not reported: {text}");
+        }
+        assert!(!directory.join("session-a").exists());
+        assert!(!directory.join("session-a.wsl-0123456789abcdef").exists());
+        let mut contents: Vec<String> = stale.iter().map(|name| read(&directory, name)).collect();
+        contents.sort();
+        assert_eq!(contents, vec!["/old/review-1", "/old/wsl"]);
+        assert_eq!(read(&directory, "session-b"), "/other/workspace");
     }
 }

@@ -5,7 +5,9 @@
 //! layered on top and never decides task state itself.
 pub mod config;
 pub mod crp;
+pub mod delivery;
 pub mod discovery;
+pub mod integration;
 pub mod isolation;
 pub mod launcher;
 pub mod model;

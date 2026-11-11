@@ -4,16 +4,57 @@ use rusqlite::{params, OptionalExtension};
 use serde_json::{json, Value};
 
 static TEAM_LOCKS: std::sync::LazyLock<
-    std::sync::Mutex<std::collections::HashMap<String, std::fs::File>>,
+    std::sync::Mutex<std::collections::HashMap<String, TeamLock>>,
 > = std::sync::LazyLock::new(|| std::sync::Mutex::new(std::collections::HashMap::new()));
-fn team_lock(cwd: &str, id: &str) -> Result<(String, std::fs::File)> {
+
+/// Where a team's execution lock lives.
+fn team_lock_path(cwd: &str, id: &str) -> Result<std::path::PathBuf> {
+    Ok(std::path::Path::new(cwd)
+        .canonicalize()?
+        .join(".claude")
+        .join(format!("team-{id}.lock")))
+}
+
+/// Owns a team's execution lock until its scope ends.
+///
+/// Closing the descriptor is not enough to release ownership: `fork` gives the
+/// child the same open file description, so a child spawned while the team was
+/// running keeps the lock held after the owner drops its `File`. Explicit
+/// unlock clears the lock on that shared description, so the next coordinator
+/// does not wait for an unrelated process to exit.
+struct TeamLock {
+    file: std::fs::File,
+    released: bool,
+}
+
+impl TeamLock {
+    fn new(file: std::fs::File) -> Self {
+        Self {
+            file,
+            released: false,
+        }
+    }
+
+    /// Releases ownership now instead of leaving it to the descriptor close.
+    fn release(&mut self) {
+        if !self.released {
+            let _ = crate::fs::unlock_file(&self.file);
+            self.released = true;
+        }
+    }
+}
+
+impl Drop for TeamLock {
+    fn drop(&mut self) {
+        self.release();
+    }
+}
+
+fn team_lock(cwd: &str, id: &str) -> Result<(String, TeamLock)> {
     if id.is_empty() || !id.bytes().all(|b| b.is_ascii_hexdigit() || b == b'-') {
         bail!("Invalid team ID");
     }
-    let path = std::path::Path::new(cwd)
-        .canonicalize()?
-        .join(".claude")
-        .join(format!("team-{id}.lock"));
+    let path = team_lock_path(cwd, id)?;
     let file = std::fs::OpenOptions::new()
         .write(true)
         .create(true)
@@ -21,7 +62,7 @@ fn team_lock(cwd: &str, id: &str) -> Result<(String, std::fs::File)> {
         .open(&path)?;
     crate::fs::try_lock_file(&file)
         .context("Team execution is active in another request or process")?;
-    Ok((path.to_string_lossy().into_owned(), file))
+    Ok((path.to_string_lossy().into_owned(), TeamLock::new(file)))
 }
 
 pub(super) fn definitions() -> Vec<super::ToolDefinition> {
@@ -336,16 +377,14 @@ pub fn finish_team_task(
     team["updated_at"] = json!(chrono::Utc::now().to_rfc3339());
     put(&tx, "team", team_id, &team)?;
     tx.commit()?;
-    let lock_key = std::path::Path::new(cwd)
-        .canonicalize()?
-        .join(".claude")
-        .join(format!("team-{team_id}.lock"))
-        .to_string_lossy()
-        .into_owned();
-    TEAM_LOCKS
+    let lock_key = team_lock_path(cwd, team_id)?.to_string_lossy().into_owned();
+    let released = TEAM_LOCKS
         .lock()
         .map_err(|_| anyhow::anyhow!("Team lock registry is poisoned"))?
         .remove(&lock_key);
+    if let Some(mut lock) = released {
+        lock.release();
+    }
     Ok(())
 }
 
@@ -379,6 +418,63 @@ mod tests {
         )
         .unwrap();
         let team = execute("team", json!({"operation":"get","team_id":id}), cwd).unwrap();
+        assert_eq!(team["status"], "failed");
+        assert_eq!(team["tasks"][0]["result"], "inspected");
+    }
+    #[test]
+    fn releasing_team_ownership_survives_an_inherited_descriptor() {
+        let dir = tempfile::tempdir().unwrap();
+        let cwd = dir.path().to_str().unwrap();
+        let team=execute("team",json!({"operation":"create","name":"review","tasks":[{"prompt":"inspect"},{"prompt":"verify"}]}),cwd).unwrap();
+        let id = team["team_id"].as_str().unwrap().to_owned();
+        let task = claim_team_task(cwd, &id).unwrap().unwrap();
+        // Duplicate the descriptor that owns the flock. Both descriptors share
+        // one open file description, exactly like a forked child's inherited
+        // copy, so closing the owner alone leaves the lock held. This is a
+        // deterministic shared-description proof, not a fork/exec execution.
+        let key = team_lock_path(cwd, &id)
+            .unwrap()
+            .to_string_lossy()
+            .into_owned();
+        let duplicate = {
+            let locks = TEAM_LOCKS.lock().unwrap();
+            locks
+                .get(&key)
+                .expect("the claim owns the team lock")
+                .file
+                .try_clone()
+                .unwrap()
+        };
+        assert!(
+            claim_team_task(cwd, &id).is_err(),
+            "duplicate active claims must still be denied"
+        );
+
+        finish_team_task(
+            cwd,
+            &id,
+            task["task_id"].as_str().unwrap(),
+            Some("inspected"),
+            None,
+        )
+        .unwrap();
+
+        // The duplicate descriptor is still open here: releasing ownership must
+        // not depend on it closing.
+        let second = claim_team_task(cwd, &id)
+            .unwrap()
+            .expect("the second claim must not stay blocked behind an inherited descriptor");
+        finish_team_task(
+            cwd,
+            &id,
+            second["task_id"].as_str().unwrap(),
+            None,
+            Some("cancelled"),
+        )
+        .unwrap();
+        drop(duplicate);
+
+        let team = execute("team", json!({"operation":"get","team_id":&id}), cwd).unwrap();
         assert_eq!(team["status"], "failed");
         assert_eq!(team["tasks"][0]["result"], "inspected");
     }

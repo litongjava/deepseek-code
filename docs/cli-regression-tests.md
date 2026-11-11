@@ -92,6 +92,22 @@ cargo test --locked --no-fail-fast -p deepseek-code-cli --test teams --test sess
 
 若出现 `is not loaded. Call ToolSearch`，先确认场景是否需要显式加载工具或增加模型搜索步骤；不要把未执行工具导致的后续空结果误判为 Worker 或消息传递失效。
 
+## Worker 生命周期：旧代重建、锁释放与下一轮准入
+
+修改 `crates/core/src/services/session_worker.rs`、`crates/core/src/services/session_worker/recovery.rs`、`crates/cli/src/persistent_worker.rs` 或 `crates/cli/src/persistent_child.rs` 后，执行：
+
+```bash
+cargo test --locked -p deepseek-code-core --lib services::session_worker
+cargo test --locked -p deepseek-code-cli --bin dcl admission_tests
+cargo test --locked -p deepseek-code-cli --test session_worker
+```
+
+三处行为必须分别验证，不能互相替代：
+
+1. 旧代在就绪前停止时重建。`ensure_worker` 对最近有心跳的旧代只等待，不直接调用 `wait_ready`；旧代在等待中变成 `stopped` 时返回 `None`，由持有 startup lock 的调用方创建新代，新代仍走原 `wait_ready`，因此真正的启动失败不会被无限重试掩盖。用例 `ensure_worker_replaces_a_predecessor_that_stops_before_ready` 在 startup lock 出现后等待 1 秒再发布 `stopped`，覆盖“旧代仍在启动”分支；这是时间门控的复现，不是对某次内部读取顺序的证明。把该分支改回旧的直接 `wait_ready` 后，该用例必须报 `session host exited before becoming ready`。
+2. 恢复锁按所有权生命周期释放。`startup.lock` 与 `repair` 中的代际锁用 `fs::unlock_file` 显式释放，而不是只依赖描述符关闭；`flock` 归属打开文件描述，fork 出的子进程持有同一描述符时，仅关闭不会释放锁。用例 `recovery_releases_the_startup_lock_for_a_retained_descriptor` 与 `a_failed_recovery_releases_the_lifetime_locks_it_took` 保留真实描述符副本，旧语义（只在 `Drop` 关闭）下两者都会因 `WouldBlock` 失败。这不覆盖 SIGKILL 或异常退出的边界，那里仍只有描述符关闭兜底。
+3. 完成与下一轮准入交接。`persistent_worker` 只对本宿主已准入且持久记录证明已完成的一轮等待释放事件；真正运行中的一轮立即拒绝，等待超时返回未提交且不排队、不重放。`admission_tests` 共 4 项，其中 2 项使用暂停时钟（旧实现 25 x 10 ms 窗口后仍必须继续等待；超时后不写入、不启动第二轮）；另 2 项是同步状态与身份断言。真实协议路径由 `turns_submitted_right_after_completion_are_admitted` 连续 3 轮覆盖，它不强制收尾窗口，因此不是该竞态的确定性复现。
+
 ## 真实终端的测试方法
 
 真实终端指在伪终端里启动 `dcl`，发送按键，再检查屏幕内容。Linux 上使用开发目录的工具：
@@ -483,9 +499,47 @@ OpenCode Go 用四种协议提供模型，模型地址和协议都来自内置�
   - Reviewer 只能查询本任务 Coder 会话树；`SessionMessages`/`SessionEvents` 使用稳定游标分页，输出脱敏；`ArtifactRead` 只接受报告 ID 或任务 artifacts 目录中的普通文件，拒绝遍历、符号链接和跨任务路径。
   - `CrpSubmit` 的 `payload` 暴露 plan/implementation/review/harness/integration 五种类型化 schema；Review 报告必须匹配当前阶段（`IMPLEMENTATION`/`FINAL_DELIVERY`）。Review 与 Harness 报告都到达后才作结论，与到达顺序无关；缺少任一份不推进任务。
   - `CHANGES_REQUESTED` 增加轮次并把具体 issues 发回同一 Coder 会话；新实现提交后同一 Reviewer 会话被恢复并使用新的审核请求。`BLOCKED` 或达到配置阈值的 Harness 故障创建 `DELIVERY_BLOCKER` 审批；仅效率类建议不阻塞。
-  - 启动前写入持久化 launch intent；存在未完成的 intent 时拒绝重复启动/恢复，避免崩溃后重复 Job 或重复指令。
+  - 初始启动和每次恢复按 task/member/spec/round 持久化一个操作，并在任何外部进程之前预定会话与 Job UUID；重新打开数据库后按该身份继续或接管，不新建第二个会话/Job，也不重发已消费的指令。
+  - 保留 Job 在 `Command::spawn` 之前发布 `worker.claim`（独占执行令牌），spawn 成功后才写不可变的 `spawn.json`；`state.json` 在启动前由宿主写入预约，之后只由真实 supervisor 写入。快速子进程写出的 `completed`/`failed` 不得被宿主的旧 `starting` 快照覆盖。
+  - 接管已推进的 Job 之前，必须校验父会话、子会话、启动参数和规范化工作目录；不匹配时保留原始文件并明确失败，不得因为状态已是 `launched`/`running`/`completed` 而提前返回。
+- `cargo test --locked -p deepseek-code-core --lib services::background_sessions`：真实 supervisor（测试二进制以 `--exact --ignored` 调用生产 `run_worker_from_env`）加真实子进程。覆盖：终端状态在宿主发布后仍保留、spawn 后宿主中断的接管、重复 supervisor 因 claim 令牌不符而不执行子进程、身份/参数/工作目录不匹配在任意已推进状态下被拒绝、匹配的已推进 Job 被接管且不启动新进程。
   - 支持的配置路径为 `settings.json` 的 `superAgent` 对象（camelCase 字段，例如 `review.maxRounds`、`review.blockingSeverity`、`review.maxTaskProposals`）；测试验证非默认值实际生效。
 - `cargo test --locked -p deepseek-code-core --lib services::session_messages::tests`：消息投递按 operation 幂等；重复 tool_use_id 或投递后崩溃重试只产生一条收件箱消息。
 - `cargo test --locked -p deepseek-code-core --lib native_engine::tool_approval`：Coder 计划批准前 Write/Bash 在运行时被拒绝，计划文件仍可写；规格/策略不匹配的旧审批不能放行；当前审批放行，ExitPlanMode 切换到 Router 继承的权限模式。
 - `cargo test --locked -p deepseek-code-cli --test super_agent_router`：真实 Router/Coder 计划审批流程（仅本地 mock）。Coder 在批准前尝试 `Bash` 被硬拒绝且不创建文件；提交计划并获批后，同一会话执行只读 `Bash` 得到正常结果，证明计划门禁只阻止未批准的执行。
 - 当前无法自动化的部分：真实 Reviewer 模型进程的完整退回→修复→复审循环、非 Git 多目标端到端、Watcher、`/crp`、Desktop 和 Windows 行为；这些属于后续阶段，不能由本轮单元/编排测试替代。
+
+### Super Agent 第 5A 阶段：集成准备与 shell 状态暂存回滚
+
+工作区迁移会暂存会话已保存的前台 shell 工作目录。候选文件必须在任何重命名之前全部列出并校验，只接受精确的会话文件名和 `safe_cwd` 生成的精确 WSL 名（`<session>.wsl-` 加 16 位小写十六进制）；`.stale-*`、格式不合法的后缀和其他会话的文件都不能被选中。暂存第 N 个文件失败时，必须尝试恢复此前所有已暂存文件，并同时报告原始错误和每个回滚失败/保留的备份路径。
+
+- `cargo test --locked -p deepseek-code-core --lib native_engine::tool_loop::shell_cwd_tests`：9 项。覆盖第二个有效重命名被注入失败后第一个文件恢复、回滚也失败时保留备份并报告路径、恢复遇到新建的活动状态时拒绝覆盖、hard link 失败且目的地在同一时刻被创建时绝不替换、恢复/清理逐个尝试并汇总失败、清理失败发生在数据库提交之后不回滚缓存、stale/大写/长度错误/非十六进制后缀与其他会话不被选中。
+- `cargo test --locked -p deepseek-code-core --lib native_engine::workspace::tests`：12 项。除原有成功迁移、事务中止恢复和托管工作树拒绝外，新增真实 `shell-cwd` 不是目录时数据库完全不变，以及提交后的清理失败保持新工作区且不恢复旧缓存。
+- `cargo test --locked -p deepseek-code-core --lib native_engine::child_session::tests`：7 项，恢复既有工作目录行为不变。
+- `cargo test --locked -p deepseek-code-cli --test super_agent_review_loop`：3 项。真实最终审核阶段仍在集成提交的隔离检出中读取 `pwd`、文件内容和 `HEAD`，目标分支保持基线，未产生交付/完成/清理事件。
+- 未验证：不支持 hard link 的文件系统只会得到明确错误并保留备份（没有覆盖式回退，可选可用性降级未实现）；进程崩溃时文件系统与数据库之间不承诺原子性；Windows 未运行。负向对照使用旧实现和新实现各自编译的独立探针，记录在开发支持目录的 `round13-evidence/negative-control/`。
+
+### Super Agent 第 5B1 阶段：交付预检与分支所有权
+
+本阶段只生成并持久化交付计划、取得协作式分支所有权，不写目标分支、不产生 `INTEGRATION_COMPLETED`、不清理工作树。目标必须是任务保存的精确 `refs/heads/<branch>`，不能回退到 `main`；基线、已审核提交必须都是集成提交的祖先，集成提交和树对象必须与主机验证过的 `INTEGRATION_PREPARED` 事实一致。计划只从主机事件和主机决定的已批准 Review+Harness 生成，模型报告里的成功布尔值不是证据。交付后验证每次都用 `git worktree list --porcelain -z` 重新发现当前目标分支的检出拓扑，不能因为计划当时是 `RefOnly` 就跳过检出检查。
+
+- `cargo test --locked -p deepseek-code-core --lib super_agent::delivery`：44 项。覆盖非 `main` 目标、未检出分支的 CAS 计划、带空格路径的 linked worktree 检出、脏/未跟踪/锁定/缺失工作树、非 Git-only 任务、旧/新内容对实现阶段或最终交付阶段复用的选择、基线移动返回 reintegration、外部任务竞争同一分支、按规范锁键排序的多仓库获取、部分获取失败只释放本次新锁、SQLite 触发器拒绝保存计划时释放新锁并保持 Git 不变且同一内容用新 attempt 重试成功、陈旧 spec/round 或仓库集合不能通过交付验证、部分多仓库交付结果与“代理声明不覆盖真实目标 OID”。第 16 轮新增：交付命令的 CAS/快进语义、忽略文件冲突中止、切换分支拒绝、派发收据幂等与冲突、交付观察记录幂等、所有权读取（释放后不再是持有者并报告实际持有者）、计划绑定的主机证据检查，以及“读取失败不得写入”的注入测试（伪造 `git` 使 `worktree list` 或 `status` 失败，断言没有调用 `update-ref`/`merge` 且目标不变）。
+  - 交付后重新发现检出：`RefOnly` 计划之后新建的 linked checkout 若索引/工作树仍是旧内容（例如 `D  reviewed.txt`）必须失败（父评审反例）；干净且 HEAD 等于批准提交的新检出可以成功；真正未检出的目标仍可通过；锁定、重复（fixture 用 `worktree add --force` 制造）、外来仓库、计划中的检出被删除、移动或切换到别的分支都给出明确原因而不是虚构成功；两个仓库其中一个的当前检出失败时保留另一个已验证结果。
+- `cargo test --locked -p deepseek-code-core --lib super_agent::integration::tests`、`super_agent::state::tests`、`super_agent::store::tests`、`super_agent::launcher::tests`、`super_agent::orchestrator::tests`、`super_agent::crp::tests`：9/15/23/13/16/7 项，5A 准备、状态门禁、存储、启动和编排行为不变。
+- `cargo test --locked -p deepseek-code-core --lib native_engine::workspace::tests`、`native_engine::tool_loop::shell_cwd_tests`、`native_engine::child_session::tests`：12/9/7 项，第 13 轮的 shell 缓存修复保持。
+- `cargo test --locked -p deepseek-code-cli --test super_agent_review_loop`：3 项旧场景（默认关闭交付）仍在 `DELIVERY_PENDING`/`PREPARED` 停止，目标分支不变。
+- 未验证：真正快进/`update-ref` 目标分支和 Coder 交付指令属于 5B2；协作式 `branch:` 锁不能阻止任意外部 `git` 命令；进程崩溃与数据库之间的原子性未承诺；Windows 未运行。证据日志在开发支持目录 `round15-evidence/`，每次尝试使用独立文件名。已成功持久化并显式释放的交付计划目前无法用同一证据重新取得所有权（通用 `TaskStore::try_lock` 的 `Released` 语义），该限制保留到 5B2 处理。
+
+### Super Agent 第 5B2a 阶段：单仓库交付经同一 Coder 执行
+
+交付默认关闭，只有 `settings.json` 的 `superAgent.delivery.enabled=true` 才启用，因此 0–5A/5B1 的既有流程和三个真实 CLI 场景保持原行为。启用后，处于 `DELIVERY_PENDING` 且恰好一个 Git 仓库、没有非 Git 目标的任务会把主机验证过的集成提交交给**原 Coder 会话**落地：已检出的目标分支在该真实工作树执行 `git merge --ff-only --no-overwrite-ignore`，未检出的目标执行带旧值的 `git update-ref` CAS。命令在派发前由主机按持久化计划生成，路径用单引号引用；每个 Git 读操作都必须成功，`worktree list`/`status` 读取失败时绝不继续写入。主机只负责调度与验证，真正写操作由 Coder 完成，且从不 push。
+
+- 派发前持久化 `sa_delivery_dispatches` 收据（task/spec/round、计划 operation、Coder 会话、purpose，随后绑定 job）。重复 tick 复用同一计划、收据和启动操作，不会重复派发；收据事实冲突会明确失败。
+- 已持久化的计划是权威：主机不再用移动后的目标重算基线。每次先检查计划仍绑定当前 `INTEGRATION_PREPARED`/`REVIEW_COMPLETED` 证据和 reviewed/integrated 提交，再检查 `branch:` 锁仍由本任务和本次 lock operation 持有；释放或被其他任务持有则阻塞，不派发、不写 Git、不窃取锁。
+- 有 job 收据时只做只读观察：运行中的子进程即使目标暂时匹配也不会被判定为完成；子进程停止后才按固定计划验证真实 ref 和当前检出。读取 job 时必须先验证实际文件的 job id、Coder session 和 Router parent，身份不符或状态不可读会明确阻塞并保留文件，不能把该 job 的状态当作交付证据。
+- 收据存在但尚未绑定 job 时，宿主读取 launcher 的持久化 operation；其内容必须先通过 task/spec/round/purpose、Coder role/resume kind 和原 Coder session 校验，之后才允许接管已保留或运行中的 job、绑定收据或观察状态。仅仅命中相同存储 key 不构成证据；矛盾记录、畸形 job ID、读取错误和不可解析状态都产生明确阻塞原因，原记录和文件保持不变，不会新起子进程或覆盖收据。
+- 只有主机验证通过才在同一事务内把仓库标为 `COMPLETED` 并追加 `INTEGRATION_COMPLETED`（`complete:true`），任务进入 `FINALIZING`；不产生 `TASK_COMPLETED`/清理。失败、脏检出、错误 OID 或成员伪造的成功消息都保持未交付并阻塞。
+- 多仓库或 Git+非 Git 混合目标明确不派发，任务留在 `DELIVERY_PENDING` 并在 tick 报告中给出警告。
+- `cargo test --locked -p deepseek-code-cli --test super_agent_review_loop`：13 项。除原有场景外还有：未检出目标 CAS 成功；带空格路径的 linked checkout 原地快进成功；交付命令失败但成员声称成功时不交付并阻塞；计划已释放且他人持锁时不派发；持久化 `deny Bash` 规则下交付子进程收到真实 `Permission denied: Explicit tool deny rule`；交付前通过 `session_permission_mode` 把 Router 父会话改为 `DontAsk`（Orchestrator 仍以 `bypass` 构造，且不写 Coder 专属 deny）时，恢复的原 Coder 在 Bash 调用上收到真实 `Permission denied: dontAsk mode: ...`，目标、索引与文件逐字节不变、无完成事件、Coder 身份不变；Git 已被移动但宿主尚未观察时重开新 context/store/orchestrator 不重复派发、不在子进程运行时完成、停止后只观察一次；launcher `after-spawn` 崩溃边界（operation 已保留、job 已运行、handle 未写入、receipt 无 job）由新宿主按保留的 job 身份接管，不按旧基线重新校验、不重启子进程；同一崩溃边界下把 operation 的 `task_id` 改成另一个任务（仍写在其正确 key 下）时，新宿主在绑定收据或观察前明确阻塞，零重启、零重复命令、目标保持子进程真实写入后的提交、矛盾记录原样保留；receipt 已保存但从未启动且目标被外部移动时零子进程并明确阻塞。真实集成报告由显式 fixture gate 持有：任务仍为 `INTEGRATING` 时重复 tick 必须复用同一 integration job/operation 且命令次数不变，释放后才允许进入最终审核。每个成功场景验证同一 Coder 会话、真实 Bash 工作目录、目标提交、逐字节内容、交付命令只执行一次、重复 tick 与重开数据库不重复派发。
+- 预取观察者：`cargo test --locked -p deepseek-code-core --lib prefetch::`：2 项。`git status` 预取在独立任务中执行且可能与同一工作树的 `git add/commit` 重叠；观察者必须使用 `GIT_OPTIONAL_LOCKS=0`，否则 Git 会刷新并重写索引（短暂持有 `index.lock`），导致写入方报 `index.lock: File exists`。测试用“内容相同但 mtime 变化”使 stat 缓存失效：对照组证明普通 `git status` 会改写索引，观察者组要求索引字节完全不变且状态仍被缓存；负向对照（去掉环境变量）失败，修复后通过。
+- 未验证：多仓库交付、部分恢复、完成门禁、清理、Watcher/UI；上述“实时父策略”证明引擎按持久化父模式拒绝 Bash，不是操作系统级沙箱拒绝；外部 `git` 与协作锁之间的竞态仍不具原子性；Windows 未运行。

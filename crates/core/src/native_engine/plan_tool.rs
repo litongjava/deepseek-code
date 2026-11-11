@@ -986,6 +986,7 @@ mod tests {
                 finished_ms: None,
                 exit_code: None,
                 error: None,
+                launched: true,
             };
             background_sessions::save(&directory.join("state.json"), &job).unwrap();
             let log = root.path().join("worker.log");

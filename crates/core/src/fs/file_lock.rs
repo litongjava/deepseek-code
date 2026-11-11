@@ -35,6 +35,26 @@ pub fn lock_file(file: &File) -> io::Result<()> {
     file.lock()
 }
 
+/// Releases ownership now instead of leaving it to the descriptor close.
+///
+/// Close is not sufficient. `flock` ownership belongs to the open file
+/// description, and `fork` gives the child that same description through its
+/// inherited descriptor. A child that outlives the owner keeps the lock held
+/// after the owner drops its `File`, so a freshly opened contender keeps
+/// blocking until the child exits. An explicit unlock clears the lock on the
+/// shared description, so the next owner gets the session at once.
+pub fn unlock_file(file: &File) -> io::Result<()> {
+    #[cfg(target_os = "android")]
+    loop {
+        match rustix::fs::flock(file, rustix::fs::FlockOperation::Unlock) {
+            Err(rustix::io::Errno::INTR) => continue,
+            result => return result.map_err(io::Error::from),
+        }
+    }
+    #[cfg(not(target_os = "android"))]
+    file.unlock()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

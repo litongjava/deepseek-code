@@ -1129,7 +1129,7 @@ mod failure_tests {
         std::fs::create_dir_all(&directory).unwrap();
         let mut job = jobs::Job { id: id.clone(), foreground: false, parent_session_id: parent.clone(), session_id: parent.clone(),
             title: "idle child".into(), status: "completed".into(), supervisor_pid: None, child_pid: None,
-            started_ms: 1, heartbeat_ms: 2, finished_ms: Some(2), exit_code: Some(0), error: None };
+            started_ms: 1, heartbeat_ms: 2, finished_ms: Some(2), exit_code: Some(0), error: None, launched: true };
         let source_id = uuid::Uuid::new_v4().to_string();
         let source_directory = paths.data_dir.join("background-tasks").join(&source_id);
         std::fs::create_dir_all(&source_directory).unwrap();
@@ -1198,6 +1198,7 @@ mod failure_tests {
             finished_ms: Some(2),
             exit_code: Some(0),
             error: None,
+            launched: true,
         };
         assert!(authorize_attachment(&job, &parent).is_ok());
         assert!(authorize_attachment(&job, &child).is_ok());
@@ -1291,6 +1292,7 @@ mod failure_tests {
             finished_ms: None,
             exit_code: None,
             error: None,
+            launched: true,
         };
         std::fs::write(
             directory.join("state.json"),
@@ -1349,6 +1351,7 @@ mod failure_tests {
             finished_ms: None,
             exit_code: None,
             error: None,
+            launched: true,
         };
         std::fs::write(
             directory.join("state.json"),

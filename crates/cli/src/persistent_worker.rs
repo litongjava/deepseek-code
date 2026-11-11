@@ -34,6 +34,92 @@ struct ModeControl {
 type ModeTarget = Arc<std::sync::Mutex<Option<ModeControl>>>;
 type BashTarget = Arc<std::sync::Mutex<Option<Arc<deepseek_code_core::permissions::PermissionManager>>>>;
 
+/// The turn this host admitted, if any. Kept next to the admission flag so a
+/// submission can tell "the turn that just finished is still releasing
+/// admission" from "a turn is still running". The durable job record alone
+/// cannot tell those apart: the supervisor publishes a turn's completion before
+/// this host has removed `active.json` and cleared the in-memory flag.
+type CurrentTurn = Arc<std::sync::Mutex<Option<String>>>;
+
+/// How long a submission waits for a turn that is already durably finished to
+/// release admission. Only bookkeeping remains by then in the normal case, but
+/// expiry does **not** prove the host is stuck: scheduling and disk I/O can
+/// delay it. A timed-out submission is unsubmitted and is answered with the
+/// existing busy error; it is never queued, and no second turn is admitted while
+/// admission is still held. Published completion therefore does not by itself
+/// guarantee that the next prompt is accepted immediately.
+const ADMISSION_GRACE: Duration = Duration::from_secs(2);
+
+/// The admission decision for one submission.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Admission {
+    /// Ownership is free: the submission may take it.
+    Admit,
+    /// An admitted turn is still running, or admission was taken and its job is
+    /// not recorded yet. Refuse now; never queue behind it.
+    Busy,
+    /// The admitted turn has finished durably but this host has not released
+    /// admission. Wait for the release event, then re-check.
+    Finalizing,
+    /// A finalizing host did not release within the grace. The prompt stays
+    /// unsubmitted and is refused; this is not proof that the host is stuck.
+    Expired,
+}
+
+/// Decides what a submission should do about the turn this host admitted.
+///
+/// Only a turn that this host admitted *and* whose durable record proves it
+/// finished may be waited for. A running turn - or the window in which
+/// admission was taken but its job is not recorded yet - is refused at once, so
+/// two turns can never overlap. `active.json` is deliberately not consulted: the
+/// supervisor removes it at a different moment than this host releases
+/// admission, which is what made the previous fixed-window drain unreliable.
+fn admission_state(
+    active: bool,
+    current: Option<&str>,
+    finished: impl FnOnce(&str) -> bool,
+) -> Admission {
+    if !active {
+        Admission::Admit
+    } else if current.is_some_and(finished) {
+        Admission::Finalizing
+    } else {
+        Admission::Busy
+    }
+}
+
+/// Waits for a *provably finished* turn's admission release, bounded by `grace`.
+///
+/// The host notifies on the actual release, so this waits for the event rather
+/// than polling a fixed window. Returning [`Admission::Expired`] means admission
+/// is still held: the caller must refuse the prompt, which then stays
+/// unsubmitted and is never replayed. Only a free flag yields
+/// [`Admission::Admit`].
+async fn await_admission(
+    active: &AtomicBool,
+    current: Option<&str>,
+    release: &tokio::sync::Notify,
+    finished: impl FnOnce(&str) -> bool,
+    grace: Duration,
+) -> Admission {
+    match admission_state(active.load(Ordering::Acquire), current, finished) {
+        Admission::Finalizing => {
+            let _ = tokio::time::timeout(grace, async {
+                while active.load(Ordering::Acquire) {
+                    release.notified().await;
+                }
+            })
+            .await;
+            if active.load(Ordering::Acquire) {
+                Admission::Expired
+            } else {
+                Admission::Admit
+            }
+        }
+        settled => settled,
+    }
+}
+
 #[path = "persistent_child.rs"]
 mod child;
 
@@ -43,6 +129,15 @@ pub async fn run_from_env() -> Result<bool> {
     };
     std::env::remove_var(service::HOST_ENV);
     let dir = PathBuf::from(value);
+    // The supervisor names itself out of band. The worker record is written by
+    // the supervisor only after this process starts, so at startup it can still
+    // hold no supervisor pid, and later damage to it can hide that pid for good.
+    // Without a pid the orphan check below can never fire and this process would
+    // keep the session locked after its owner is gone.
+    let supervisor_pid = std::env::var(service::SUPERVISOR_PID_ENV)
+        .ok()
+        .and_then(|value| value.parse::<u32>().ok());
+    std::env::remove_var(service::SUPERVISOR_PID_ENV);
     let _lifetime = service::host_lifetime_lock(&dir)?;
     let worker = service::read_worker(&dir)?;
     let _resource_sampler = crate::resource_sampling::start(&worker.root);
@@ -57,11 +152,13 @@ pub async fn run_from_env() -> Result<bool> {
     let status_target: StatusTarget = Arc::new(std::sync::Mutex::new(None));
     let bash_target: BashTarget = Arc::new(std::sync::Mutex::new(None));
     let active = Arc::new(AtomicBool::new(false));
+    let current_turn: CurrentTurn = Arc::new(std::sync::Mutex::new(None));
+    let admission_released = Arc::new(tokio::sync::Notify::new());
     let idle_child_active = Arc::new(AtomicBool::new(false));
     let fatal = Arc::new(AtomicBool::new(false));
     let mut idle = Instant::now();
     let mut tick = tokio::time::interval(Duration::from_secs(1));
-    let mut owner_pid = worker.supervisor_pid;
+    let mut owner_pid = supervisor_pid.or(worker.supervisor_pid);
     let mut orphaned_since = None::<Instant>;
     loop {
         tokio::select! {
@@ -84,7 +181,7 @@ pub async fn run_from_env() -> Result<bool> {
                 if should_expire(turn_active, shell_active, fatal.load(Ordering::Acquire), idle.elapsed()) {break;}
                 if (turn_active && !idle_child_active.load(Ordering::Acquire)) || shell_active {idle=Instant::now();}
                 if !turn_active && !fatal.load(Ordering::Acquire) {
-                    if let Err(error) = child::start_pending(&worker, &session, &active, &idle_child_active, &fatal, &mode_target).await {
+                    if let Err(error) = child::start_pending(&worker, &session, &active, &admission_released, &current_turn, &idle_child_active, &fatal, &mode_target).await {
                         eprintln!("Owned child wake unavailable: {error:#}");
                     }
                 }
@@ -94,15 +191,18 @@ pub async fn run_from_env() -> Result<bool> {
                 let parsed=tokio::time::timeout(Duration::from_secs(5),service::read_request(stream)).await;
                 let Ok(Ok((stream,request)))=parsed else{continue};
                 if matches!(&request,Request::Submit{..}|Request::Shutdown) {
-                        // The supervisor publishes completion just before the host
-                        // acknowledges it. Briefly drain that handoff, never queue
-                        // a request behind a genuinely running turn.
-                        if active.load(Ordering::Acquire) {
-                            let finished=std::fs::read(dir.join("active.json")).ok()
-                                .and_then(|bytes|serde_json::from_slice::<String>(&bytes).ok())
-                                .and_then(|id|jobs::get(&worker.root,&id).ok())
-                                .is_some_and(|job|job.finished_ms.is_some());
-                            if finished {for _ in 0..25 {if !active.load(Ordering::Acquire){break;}tokio::time::sleep(Duration::from_millis(10)).await;}}
+                        // The supervisor publishes a turn's completion before this
+                        // host releases admission, so a caller reacting to that
+                        // publication may be early rather than wrong. Wait for the
+                        // actual release of a turn proven finished; a running turn
+                        // is refused at once.
+                        let current=current_turn.lock().unwrap_or_else(|e|e.into_inner()).clone();
+                        let admission=await_admission(&active,current.as_deref(),&admission_released,|id|jobs::get(&worker.root,id).is_ok_and(|job|job.finished_ms.is_some()),ADMISSION_GRACE).await;
+                        // A submission that outlives the grace is not queued and not
+                        // replayed: it is answered as unsubmitted, exactly as any
+                        // other refusal, and the turn keeps its admission.
+                        if admission==Admission::Expired && matches!(&request,Request::Submit{..}) {
+                            let _=service::reply(stream,&Reply::error("Session worker is busy; prompt was not submitted")).await;continue;
                         }
                 }
                 match request {
@@ -154,10 +254,12 @@ pub async fn run_from_env() -> Result<bool> {
                         if active.compare_exchange(false,true,Ordering::AcqRel,Ordering::Acquire).is_err() {
                             let _=service::reply(stream,&Reply::error("Session worker is busy; prompt was not submitted")).await;continue;
                         }
+                        *current_turn.lock().unwrap_or_else(|e|e.into_inner())=Some(id.clone());
                         if let Err(error)=service::begin_job(&worker,&id,&prompt) {
+                            *current_turn.lock().unwrap_or_else(|e|e.into_inner())=None;
                             active.store(false,Ordering::Release);let _=service::reply(stream,&Reply::error(error)).await;continue;
                         }
-                        let worker=worker.clone();let sessions=session.clone();let active=active.clone();let fatal=fatal.clone();let turn_id=id.clone();let mode_target=mode_target.clone();let status_target=status_target.clone();let bash_target=bash_target.clone();
+                        let worker=worker.clone();let sessions=session.clone();let active=active.clone();let fatal=fatal.clone();let turn_id=id.clone();let mode_target=mode_target.clone();let status_target=status_target.clone();let bash_target=bash_target.clone();let current_turn=current_turn.clone();let admission_released=admission_released.clone();
                         tokio::spawn(async move {
                             let task_worker=worker.clone();let task_id=turn_id.clone();let task_mode_target=mode_target.clone();
                             let result=tokio::spawn(async move {execute(&task_worker,&task_id,arguments,environment,sessions,task_mode_target,status_target,bash_target).await}).await;
@@ -168,6 +270,15 @@ pub async fn run_from_env() -> Result<bool> {
                             service::set_event_sink(None);
                             std::env::remove_var(jobs::CONTROL_ENV);
                             active.store(false,Ordering::Release);
+                            admission_released.notify_one();
+                            // Clear this turn's identity only while it still names
+                            // this turn. Admission is already open here, so a newer
+                            // submission can have replaced the identity in between;
+                            // that record must survive this cleanup.
+                            {
+                                let mut current=current_turn.lock().unwrap_or_else(|e|e.into_inner());
+                                if current.as_deref()==Some(&turn_id) { *current=None; }
+                            }
                         });
                         // A lost acknowledgement never causes replay: the job ID is durable.
                         let _=service::reply(stream,&Reply::ok(Some(id))).await;
@@ -342,4 +453,191 @@ fn idle_expiry_keeps_managed_servers_alive_but_not_fatal_workers() {
     assert!(should_expire(false, false, false, Duration::from_secs(301)));
     assert!(should_expire(false, true, true, Duration::from_secs(301)));
     assert!(!should_expire(false, false, false, Duration::from_secs(299)));
+}
+#[cfg(test)]
+mod admission_tests {
+    use super::*;
+
+    /// One virtual interval of the previous implementation's drain loop.
+    const TICK: Duration = Duration::from_millis(10);
+    /// How many intervals that loop probed: 25 x 10 ms = 250 ms.
+    const OLD_POLL_STEPS: usize = 25;
+
+    fn finished(_: &str) -> bool {
+        true
+    }
+
+    /// Advances `ticks` virtual 10 ms intervals, yielding after each one so a
+    /// loop that creates a fresh `sleep` per iteration is actually polled
+    /// through every interval. Advancing in one jump would let such a loop
+    /// create all its sleeps "after" the deadline instead of over it.
+    async fn advance_ticks(ticks: usize) {
+        for _ in 0..ticks {
+            tokio::time::advance(TICK).await;
+            tokio::task::yield_now().await;
+        }
+    }
+
+    /// Reads the decision the waiter sent, advancing one virtual tick per
+    /// attempt. The bound is virtual time, so this cannot spin forever and uses
+    /// no wall clock.
+    async fn settled<T>(rx: &mut tokio::sync::mpsc::Receiver<T>, ticks: usize) -> Option<T> {
+        for _ in 0..ticks {
+            if let Ok(value) = rx.try_recv() {
+                return Some(value);
+            }
+            tokio::time::advance(TICK).await;
+            tokio::task::yield_now().await;
+        }
+        rx.try_recv().ok()
+    }
+
+    /// A running turn is refused at once, and so is the window in which
+    /// admission was taken but its job is not recorded yet. Waiting would let a
+    /// second turn overlap the first.
+    #[test]
+    fn only_a_provably_finished_admitted_turn_is_waited_for() {
+        assert_eq!(
+            admission_state(true, Some("running"), |_| false),
+            Admission::Busy
+        );
+        assert_eq!(admission_state(true, None, finished), Admission::Busy);
+        assert_eq!(
+            admission_state(true, Some("finished"), finished),
+            Admission::Finalizing
+        );
+        assert_eq!(
+            admission_state(false, Some("finished"), finished),
+            Admission::Admit
+        );
+        assert_eq!(admission_state(false, None, finished), Admission::Admit);
+    }
+
+    /// The defect being fixed: the old fixed window gave up after 25 x 10 ms and
+    /// the submission was refused as busy even though the turn had finished
+    /// durably. Virtual time is advanced one interval at a time so the old loop
+    /// would really be polled through its 25 sleeps; the wait must still be
+    /// running afterwards. Only the real release may end it.
+    #[tokio::test(start_paused = true)]
+    async fn a_finalizing_turn_is_still_waited_for_past_the_old_poll_window() {
+        let active = Arc::new(AtomicBool::new(true));
+        let release = Arc::new(tokio::sync::Notify::new());
+        let (started_tx, started_rx) = tokio::sync::oneshot::channel();
+        let (done_tx, mut done_rx) = tokio::sync::mpsc::channel::<Admission>(1);
+        let flag = active.clone();
+        let signal = release.clone();
+        let waiter = tokio::spawn(async move {
+            let _ = started_tx.send(());
+            let decision = await_admission(
+                &flag,
+                Some("finished-job"),
+                &signal,
+                finished,
+                ADMISSION_GRACE,
+            )
+            .await;
+            let _ = done_tx.send(decision).await;
+        });
+        started_rx.await.unwrap();
+        // Let the waiter register its grace wait before virtual time moves.
+        tokio::task::yield_now().await;
+        tokio::task::yield_now().await;
+
+        // 44 ticks = 440 ms virtual: past the old 250 ms window, still well
+        // inside the 2 s grace.
+        advance_ticks(OLD_POLL_STEPS + 19).await;
+        assert!(
+            done_rx.try_recv().is_err(),
+            "the submission stopped waiting while the turn still held admission"
+        );
+        assert!(
+            active.load(Ordering::Acquire),
+            "waiting must not release another turn's admission"
+        );
+
+        // The host's real release is the only thing that ends the wait.
+        active.store(false, Ordering::Release);
+        release.notify_one();
+        assert_eq!(settled(&mut done_rx, 10).await, Some(Admission::Admit));
+        waiter.await.unwrap();
+    }
+
+    /// A finalization that outlives the grace leaves the prompt unsubmitted: no
+    /// second turn is admitted and nothing else is touched. Expiry is reached in
+    /// virtual time with no external I/O. A later real release then admits the
+    /// next submission, which is the only path that can start a turn - a
+    /// timed-out prompt is never queued and never replayed.
+    #[tokio::test(start_paused = true)]
+    async fn an_expired_finalization_is_unsubmitted_and_a_later_release_admits() {
+        let active = Arc::new(AtomicBool::new(true));
+        let release = Arc::new(tokio::sync::Notify::new());
+        let (started_tx, started_rx) = tokio::sync::oneshot::channel();
+        let (done_tx, mut done_rx) = tokio::sync::mpsc::channel::<Admission>(1);
+        let flag = active.clone();
+        let signal = release.clone();
+        let grace = Duration::from_millis(30);
+        let waiter = tokio::spawn(async move {
+            let _ = started_tx.send(());
+            let decision =
+                await_admission(&flag, Some("finished-job"), &signal, finished, grace).await;
+            let _ = done_tx.send(decision).await;
+        });
+        started_rx.await.unwrap();
+        tokio::task::yield_now().await;
+        tokio::task::yield_now().await;
+        assert_eq!(settled(&mut done_rx, 10).await, Some(Admission::Expired));
+        assert!(
+            active.load(Ordering::Acquire),
+            "expiry must not release the turn's admission"
+        );
+        // Taking admission is the only side effect that follows `Admit`; it fails
+        // here, so the prompt was not submitted and no turn started.
+        assert!(
+            active
+                .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+                .is_err(),
+            "a timed-out finalization admitted a second turn"
+        );
+        waiter.await.unwrap();
+
+        // The host's real release admits the next submission.
+        active.store(false, Ordering::Release);
+        release.notify_one();
+        assert_eq!(
+            await_admission(
+                &active,
+                Some("finished-job"),
+                &release,
+                finished,
+                ADMISSION_GRACE
+            )
+            .await,
+            Admission::Admit
+        );
+        assert!(
+            active
+                .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+                .is_ok(),
+            "a released turn must admit the next submission"
+        );
+    }
+
+    /// A host with nothing running admits immediately, without waiting out any
+    /// window and without consulting `active.json`.
+    #[tokio::test]
+    async fn an_already_released_host_admits_immediately() {
+        let active = AtomicBool::new(false);
+        let release = tokio::sync::Notify::new();
+        assert_eq!(
+            await_admission(
+                &active,
+                None,
+                &release,
+                |_| panic!("must not consult the job"),
+                ADMISSION_GRACE
+            )
+            .await,
+            Admission::Admit
+        );
+    }
 }

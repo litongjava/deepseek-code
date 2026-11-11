@@ -469,6 +469,18 @@ pub fn prepare_review_worktree(
     task_id: &str,
     round: u32,
 ) -> Result<TaskWorktree> {
+    prepare_pinned_review_worktree(source, commit, task_id, &round.to_string())
+}
+
+/// A read-only validation checkout pinned at one commit, named by an explicit
+/// label. The final-delivery checkout uses a label distinct from the
+/// implementation review round, so both can exist for the same round.
+pub fn prepare_pinned_review_worktree(
+    source: &Path,
+    commit: &str,
+    task_id: &str,
+    label: &str,
+) -> Result<TaskWorktree> {
     ensure!(
         !task_id.is_empty()
             && task_id.len() <= 110
@@ -476,6 +488,14 @@ pub fn prepare_review_worktree(
                 .bytes()
                 .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_')),
         "Invalid task ID for a review worktree"
+    );
+    ensure!(
+        !label.is_empty()
+            && label.len() <= 64
+            && label
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_')),
+        "Invalid review worktree label"
     );
     let repo = PathBuf::from(git(source, &["rev-parse", "--show-toplevel"])?);
     let repo_canonical = repo.canonicalize()?;
@@ -488,10 +508,10 @@ pub fn prepare_review_worktree(
         &["rev-parse", "--path-format=absolute", "--git-common-dir"],
     )?);
     let common = common.canonicalize().unwrap_or(common);
-    let branch = format!("agent/{task_id}-review-{round}");
+    let branch = format!("agent/{task_id}-review-{label}");
     let path = common
         .join("desktop-worktrees")
-        .join(format!("{task_id}-review-{round}"));
+        .join(format!("{task_id}-review-{label}"));
     let resolved = git(
         &repo,
         &["rev-parse", "--verify", &format!("{commit}^{{commit}}")],

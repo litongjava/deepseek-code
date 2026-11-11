@@ -63,6 +63,12 @@ pub struct ChildSpawn {
     /// Continue this session instead of creating a new one. Its ownership
     /// record (or a durable subagent invocation) must name the same parent.
     pub resume_session: Option<String>,
+    /// A host may reserve the new session's UUID before any side effect. A
+    /// retry adopts that exact row instead of creating a second session.
+    pub reserved_session_id: Option<String>,
+    /// A host may reserve the background job UUID. The reserved job is published
+    /// before its supervisor starts and is adopted by later attempts.
+    pub reserved_job_id: Option<String>,
     pub extra_env: Vec<(String, String)>,
     /// Host-supplied executable, mainly for tests and hosts that already know
     /// the matching standalone CLI path.
@@ -113,6 +119,38 @@ pub async fn spawn_child_session(
     config: ChildLaunchConfig,
     spawn: ChildSpawn,
 ) -> Result<ChildHandle> {
+    let prepared = prepare_child_session(config, spawn).await?;
+    launch_prepared_child(prepared)
+}
+
+/// Everything prepared before the external process starts. The split lets a
+/// host persist its launch intent between session allocation and process
+/// creation and reconcile either side of a crash.
+pub(crate) struct PreparedChildLaunch {
+    context: ServiceContext,
+    parent_session_id: String,
+    session_id: String,
+    resumed: bool,
+    workspace: PathBuf,
+    description: String,
+    agent_type: String,
+    arguments: Vec<String>,
+    environment: Vec<(String, String)>,
+    executable: PathBuf,
+    title: String,
+    member_binding: Option<(String, crate::super_agent::MemberRole)>,
+    invocation: Option<ChildInvocation>,
+    reserved_job_id: Option<String>,
+    ownership: ChildOwnership,
+}
+
+/// Validates the parent, allocates or adopts the child session, and builds the
+/// launch. This function performs no external process side effect, so a host
+/// may stop after it and recover against the durable session identity.
+pub(crate) async fn prepare_child_session(
+    config: ChildLaunchConfig,
+    spawn: ChildSpawn,
+) -> Result<PreparedChildLaunch> {
     ensure!(
         !config.provider.provider.id.trim().is_empty(),
         "Child provider is required"
@@ -202,15 +240,21 @@ pub async fn spawn_child_session(
                         stored.display(),
                         requested.display()
                     );
-                    context.db.with_conn(|conn| -> Result<usize> {
-                        Ok(conn.execute(
-                            "UPDATE conversations SET workspace_path=?1, updated_at=?2 WHERE id=?3",
-                            rusqlite::params![
-                                requested.to_string_lossy(),
-                                chrono::Utc::now().to_rfc3339(),
-                                session
-                            ],
-                        )?)
+                    // The engine derives the prompt and tool directory from the
+                    // session's project. Rewriting only `workspace_path` would
+                    // leave the resumed member executing in the previous
+                    // checkout, so rebind the project for this session alone.
+                    // The saved foreground-shell cwd belongs to the previous
+                    // checkout and takes precedence over the new workspace, so
+                    // it is staged with the move: restored if the database
+                    // rebind fails, dropped when it commits.
+                    context.db.with_conn(|conn| -> Result<()> {
+                        super::workspace::move_conversation_workspace(
+                            conn,
+                            &context.paths.data_dir,
+                            session,
+                            requested,
+                        )
                     })??;
                 }
             }
@@ -222,17 +266,70 @@ pub async fn spawn_child_session(
             let initial = requested_workspace
                 .clone()
                 .unwrap_or_else(|| spawn.parent_workspace.clone());
-            let child = sessions.create(
-                &initial,
-                &config.provider.model.id,
-                &config.provider.provider.id,
-            )?;
-            crate::services::permission_authority::record_user(
-                &context.db,
-                &child,
-                &json!(spawn.prompt),
-            )?;
-            agents::bind(&context.db, &child, &definition)?;
+            let child = match spawn.reserved_session_id.as_deref() {
+                Some(id) => {
+                    // The host reserved this identity before any side effect. A
+                    // retry that finds the row adopts exactly that session
+                    // instead of creating a second one.
+                    let initial = canonical_directory(&initial)?;
+                    match sessions.create_with_id(
+                        &initial,
+                        &config.provider.model.id,
+                        &config.provider.provider.id,
+                        id,
+                    ) {
+                        Ok(_) => {
+                            crate::services::permission_authority::record_user(
+                                &context.db,
+                                id,
+                                &json!(spawn.prompt),
+                            )?;
+                            agents::bind(&context.db, id, &definition)?;
+                            id.to_owned()
+                        }
+                        Err(error) => {
+                            let existing = context.db.with_conn(|conn| {
+                                crate::db::conversation_repo::get_conversation(conn, id)
+                            })??;
+                            let Some(row) = existing else {
+                                return Err(error);
+                            };
+                            ensure!(!row.archived, "Reserved child session is archived");
+                            let stored = row
+                                .workspace_path
+                                .as_deref()
+                                .context("Reserved child session has no workspace")?;
+                            ensure!(
+                                canonical_directory(Path::new(stored))? == initial,
+                                "Reserved child session {id} belongs to another workspace"
+                            );
+                            // A previous attempt of this exact reservation created
+                            // the row; restore only metadata that may be missing.
+                            crate::services::permission_authority::ensure_user(
+                                &context.db,
+                                id,
+                                &json!(spawn.prompt),
+                            )?;
+                            agents::bind(&context.db, id, &definition)?;
+                            id.to_owned()
+                        }
+                    }
+                }
+                None => {
+                    let child = sessions.create(
+                        &initial,
+                        &config.provider.model.id,
+                        &config.provider.provider.id,
+                    )?;
+                    crate::services::permission_authority::record_user(
+                        &context.db,
+                        &child,
+                        &json!(spawn.prompt),
+                    )?;
+                    agents::bind(&context.db, &child, &definition)?;
+                    child
+                }
+            };
             (child, false)
         }
     };
@@ -314,7 +411,7 @@ pub async fn spawn_child_session(
         spawn.title.clone()
     };
     let now = chrono::Utc::now().to_rfc3339();
-    let mut ownership = match &spawn.resume_session {
+    let ownership = match &spawn.resume_session {
         Some(_) => owner_record(&context, &session_id)?.unwrap_or(ChildOwnership {
             parent_session_id: spawn.parent_session_id.clone(),
             agent_type: definition.id.clone(),
@@ -338,13 +435,54 @@ pub async fn spawn_child_session(
             last_error: None,
         },
     };
+    Ok(PreparedChildLaunch {
+        context,
+        parent_session_id: spawn.parent_session_id.clone(),
+        session_id,
+        resumed,
+        workspace,
+        description,
+        agent_type: definition.id,
+        arguments,
+        environment,
+        executable,
+        title,
+        member_binding: spawn.member_binding,
+        invocation: spawn.invocation,
+        reserved_job_id: spawn.reserved_job_id,
+        ownership,
+    })
+}
+
+/// Starts the prepared child. A reserved job ID makes this step idempotent:
+/// concurrent hosts serialize on the spawn lock, and a job that already
+/// launched is adopted rather than started again.
+pub(crate) fn launch_prepared_child(prepared: PreparedChildLaunch) -> Result<ChildHandle> {
+    let PreparedChildLaunch {
+        context,
+        parent_session_id,
+        session_id,
+        resumed,
+        workspace,
+        description,
+        agent_type,
+        arguments,
+        environment,
+        executable,
+        title,
+        member_binding,
+        invocation,
+        reserved_job_id,
+        mut ownership,
+    } = prepared;
     ownership.status = "starting".into();
-    ownership.updated_at = now;
+    ownership.updated_at = chrono::Utc::now().to_rfc3339();
     ownership.last_error = None;
     save_owner(&context, &session_id, &ownership)?;
 
-    if let Some((task_id, member)) = &spawn.member_binding {
-        let store = crate::super_agent::TaskStore::new(context.db.clone(), spawn.data_dir.clone());
+    if let Some((task_id, member)) = &member_binding {
+        let store =
+            crate::super_agent::TaskStore::new(context.db.clone(), context.paths.data_dir.clone());
         match member {
             crate::super_agent::MemberRole::Coder => {
                 store.set_sessions(task_id, Some(&session_id), None)
@@ -356,10 +494,10 @@ pub async fn spawn_child_session(
         .map_err(|error| anyhow::anyhow!(error.to_string()))?;
     }
 
-    let mut invocation = match &spawn.invocation {
+    let mut invocation = match &invocation {
         Some(invocation) => record_child_invocation(
             &context,
-            &spawn.parent_session_id,
+            &parent_session_id,
             &session_id,
             &invocation.description,
             Some(&invocation.tool_use_id),
@@ -368,22 +506,40 @@ pub async fn spawn_child_session(
         None => None,
     };
 
-    let job = background_sessions::spawn(
-        &spawn.data_dir,
-        &executable,
-        background_sessions::Launch {
-            executable: executable.clone(),
-            arguments,
-            cwd: workspace.clone(),
-        },
-        &spawn.parent_session_id,
-        &session_id,
-        &title,
-        &environment,
-    );
+    let launch = background_sessions::Launch {
+        executable: executable.clone(),
+        arguments,
+        cwd: workspace.clone(),
+    };
+    let job = match reserved_job_id.as_deref() {
+        Some(id) => background_sessions::spawn_reserved(
+            &context.paths.data_dir,
+            &executable,
+            launch,
+            &parent_session_id,
+            &session_id,
+            &title,
+            &environment,
+            id,
+        ),
+        None => background_sessions::spawn(
+            &context.paths.data_dir,
+            &executable,
+            launch,
+            &parent_session_id,
+            &session_id,
+            &title,
+            &environment,
+        ),
+    };
     let job = match job {
         Ok(job) => job,
         Err(error) => {
+            if background_sessions::is_launch_in_progress(&error) {
+                // Another host owns the spawn section. Keep the reserved
+                // identity instead of recording a false failure.
+                return Err(error);
+            }
             ownership.status = "failed".into();
             ownership.updated_at = chrono::Utc::now().to_rfc3339();
             ownership.last_error = Some(format!("{error:#}"));
@@ -406,11 +562,45 @@ pub async fn spawn_child_session(
         job_id: job.id,
         session_id,
         description,
-        agent_type: definition.id,
+        agent_type,
         workspace,
         resumed,
         status: job.status,
     })
+}
+
+/// Repairs the ownership record of a child that a previous host started but
+/// did not finish recording.
+pub(crate) fn record_adopted_ownership(
+    context: &ServiceContext,
+    session: &str,
+    parent: &str,
+    status: &str,
+    job_id: &str,
+) -> Result<()> {
+    if let Some(owner) = owner_record(context, session)? {
+        ensure!(
+            owner.parent_session_id == parent,
+            "Child belongs to another owner"
+        );
+        return Ok(());
+    }
+    let now = chrono::Utc::now().to_rfc3339();
+    save_owner(
+        context,
+        session,
+        &ChildOwnership {
+            parent_session_id: parent.into(),
+            agent_type: "general".into(),
+            description: "super agent member".into(),
+            mode: "background".into(),
+            status: status.into(),
+            job_id: Some(job_id.into()),
+            created_at: now.clone(),
+            updated_at: now,
+            last_error: None,
+        },
+    )
 }
 
 /// Arguments and environment shared by every child launch. Preserves the
@@ -673,6 +863,8 @@ mod tests {
             system_prompt_append: None,
             title: "fixture".into(),
             resume_session: None,
+            reserved_session_id: None,
+            reserved_job_id: None,
             extra_env: Vec::new(),
             executable_override: None,
             invocation: None,

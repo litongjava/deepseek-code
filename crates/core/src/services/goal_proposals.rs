@@ -720,6 +720,7 @@ mod tests {
                     .then_some(now() as u64),
                 exit_code: None,
                 error: None,
+                launched: true,
             };
             std::fs::write(
                 directory.join("state.json"),

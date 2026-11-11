@@ -199,6 +199,23 @@ pub fn migrate(conn: &Connection) -> Result<()> {
             [],
         )?;
     }
+    let applied: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM peripheral_migrations WHERE version=11",
+        [],
+        |row| row.get(0),
+    )?;
+    if applied == 0 {
+        // Older task rows simply have no pinned non-Git submission; a task that
+        // needs one records it on the next submission.
+        let _ = conn.execute(
+            "ALTER TABLE sa_non_git_targets ADD COLUMN submission_json TEXT",
+            [],
+        );
+        conn.execute(
+            "INSERT OR IGNORE INTO peripheral_migrations(version) VALUES(11)",
+            [],
+        )?;
+    }
     Ok(())
 }
 

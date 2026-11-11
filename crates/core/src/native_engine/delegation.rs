@@ -813,6 +813,8 @@ impl ToolLoopExecutor {
                 system_prompt_append: None,
                 title: format!("Agent: {description}"),
                 resume_session: None,
+                reserved_session_id: None,
+                reserved_job_id: None,
                 extra_env: Vec::new(),
                 executable_override: None,
                 invocation: tool_use_id.map(|tool_use_id| {

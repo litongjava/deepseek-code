@@ -321,6 +321,7 @@ pub fn prepare_environment(
                     diff_ref: None,
                     status: NonGitStatus::Prepared,
                     lock_key,
+                    submission: None,
                 };
                 non_git_targets.push(record);
             }
@@ -733,6 +734,19 @@ pub fn create_snapshot(source: &Path, snapshot_dir: &Path) -> Result<SnapshotMan
             MAX_SNAPSHOT_ENTRIES,
             MAX_SNAPSHOT_BYTES
         );
+        // `fs::copy` preserves file permissions, but `create_dir_all` uses the
+        // process umask. Apply the recorded modes deepest-first so a copied
+        // snapshot matches its manifest and a later mode check is meaningful.
+        #[cfg(unix)]
+        for entry in entries.iter().rev() {
+            if let Some(mode) = entry.mode {
+                use std::os::unix::fs::PermissionsExt;
+                std::fs::set_permissions(
+                    payload.join(&entry.path),
+                    std::fs::Permissions::from_mode(mode),
+                )?;
+            }
+        }
         let manifest = SnapshotManifest {
             source: source.clone(),
             created_at: chrono::Utc::now().to_rfc3339(),
@@ -850,6 +864,229 @@ pub fn load_snapshot(snapshot_dir: &Path) -> Result<SnapshotManifest> {
     let bytes = std::fs::read(&path)
         .with_context(|| format!("Reading snapshot manifest {}", path.display()))?;
     serde_json::from_slice(&bytes).context("Parsing snapshot manifest")
+}
+
+struct PayloadEntry {
+    path: PathBuf,
+    kind: SnapshotKind,
+    size: u64,
+    mode: Option<u32>,
+    link_target: Option<String>,
+}
+
+fn normalize_path(path: &Path) -> PathBuf {
+    let mut normalized = PathBuf::new();
+    for component in path.components() {
+        match component {
+            Component::ParentDir => {
+                normalized.pop();
+            }
+            Component::CurDir => {}
+            other => normalized.push(other.as_os_str()),
+        }
+    }
+    normalized
+}
+
+fn walk_payload(payload: &Path) -> Result<BTreeMap<String, PayloadEntry>> {
+    let mut entries = BTreeMap::new();
+    let mut stack = vec![payload.to_path_buf()];
+    while let Some(directory) = stack.pop() {
+        let mut children = std::fs::read_dir(&directory)
+            .with_context(|| format!("Reading {}", directory.display()))?
+            .collect::<std::io::Result<Vec<_>>>()?;
+        children.sort_by_key(|entry| entry.file_name());
+        for child in children {
+            let path = child.path();
+            let relative = path
+                .strip_prefix(payload)
+                .with_context(|| format!("Payload entry escaped {}", payload.display()))?;
+            let relative = relative
+                .to_str()
+                .with_context(|| format!("Payload path is not UTF-8: {}", relative.display()))?
+                .to_owned();
+            let parent = path.parent().context("payload entry has no parent")?;
+            let real_parent = parent.canonicalize()?;
+            ensure!(
+                real_parent.starts_with(payload),
+                "Payload entry {relative} escapes the payload"
+            );
+            let metadata = std::fs::symlink_metadata(&path)?;
+            let file_type = metadata.file_type();
+            let (kind, link_target) = if file_type.is_symlink() {
+                let target = std::fs::read_link(&path)?;
+                let text = target.to_string_lossy().into_owned();
+                (SnapshotKind::Symlink, Some(text))
+            } else if file_type.is_dir() {
+                stack.push(path.clone());
+                (SnapshotKind::Directory, None)
+            } else if file_type.is_file() {
+                (SnapshotKind::File, None)
+            } else {
+                anyhow::bail!("Payload entry {relative} has an unsupported file type");
+            };
+            entries.insert(
+                relative,
+                PayloadEntry {
+                    path,
+                    kind,
+                    size: metadata.len(),
+                    mode: unix_mode(&metadata),
+                    link_target,
+                },
+            );
+        }
+    }
+    Ok(entries)
+}
+
+/// A symlink in a pinned review payload may only resolve to another path in
+/// the same payload. Absolute links are rejected because the copied link text
+/// would still point at the mutable original, even though the manifest hash of
+/// the link text matches. Chains are followed with a bound and must end at a
+/// manifest entry (or at a broken in-payload path, which exposes no bytes).
+fn verify_payload_link(
+    payload: &Path,
+    manifest: &SnapshotManifest,
+    entry_path: &str,
+) -> Result<()> {
+    let mut current = PathBuf::from(entry_path);
+    for _ in 0..32 {
+        let link_path = payload.join(&current);
+        let metadata = std::fs::symlink_metadata(&link_path)?;
+        if !metadata.file_type().is_symlink() {
+            let kind = if metadata.file_type().is_dir() {
+                SnapshotKind::Directory
+            } else if metadata.file_type().is_file() {
+                SnapshotKind::File
+            } else {
+                anyhow::bail!("Symlink {entry_path} resolves to an unsupported file type");
+            };
+            let listed = manifest.entries.iter().any(|candidate| {
+                candidate.kind == kind && Path::new(&candidate.path) == current.as_path()
+            });
+            ensure!(
+                listed,
+                "Symlink {entry_path} resolves to a path not bound by the pinned manifest"
+            );
+            return Ok(());
+        }
+        let target = std::fs::read_link(&link_path)?;
+        ensure!(
+            !target.is_absolute(),
+            "Symlink {entry_path} is absolute and would resolve to mutable source after copying"
+        );
+        let parent = current.parent().unwrap_or_else(|| Path::new(""));
+        let candidate = normalize_path(&payload.join(parent).join(target));
+        ensure!(
+            candidate.starts_with(payload),
+            "Symlink {entry_path} escapes the pinned payload"
+        );
+        // Lexical containment is not enough: an intermediate directory in the
+        // payload could itself be a symlink to the outside. Resolve the real
+        // location when it exists and require it to stay inside as well.
+        if let Ok(real) = candidate.canonicalize() {
+            ensure!(
+                real.starts_with(payload),
+                "Symlink {entry_path} resolves outside the pinned payload"
+            );
+        }
+        current = candidate
+            .strip_prefix(payload)
+            .expect("candidate was checked to start with the payload")
+            .to_path_buf();
+        if std::fs::symlink_metadata(&candidate).is_err() {
+            // A broken link that stays inside the payload cannot expose any
+            // mutable bytes; preserve it as recorded.
+            return Ok(());
+        }
+    }
+    anyhow::bail!("Symlink {entry_path} chain is too deep")
+}
+
+/// Verifies the stored manifest and the actual payload without touching the
+/// original source. Unlike [`verify_snapshot`], a deleted or edited target does
+/// not invalidate the artifact; callers that need delivery freshness compare
+/// the manifest with [`current_manifest`] themselves.
+///
+/// The payload must match the manifest exactly: no missing or extra entries,
+/// the same file types, the same bytes and sizes, the captured Unix mode bits
+/// and only in-payload symlinks. A file replaced by a symlink, an extra file or
+/// an executable-bit change is rejected.
+pub fn verify_snapshot_payload(snapshot_dir: &Path) -> Result<SnapshotManifest> {
+    let manifest = load_snapshot(snapshot_dir)?;
+    ensure!(!manifest.truncated, "snapshot was truncated");
+    let root = snapshot_dir.canonicalize()?;
+    let payload = root.join("payload").canonicalize().with_context(|| {
+        format!(
+            "Snapshot payload is missing in {}",
+            snapshot_dir.display()
+        )
+    })?;
+    ensure!(
+        payload.starts_with(&root),
+        "Snapshot payload escaped its directory"
+    );
+    let mut expected = BTreeMap::new();
+    for entry in &manifest.entries {
+        ensure!(
+            super::discovery::is_plain_relative_path(&entry.path),
+            "snapshot entry {} is not a plain path",
+            entry.path
+        );
+        ensure!(
+            expected.insert(entry.path.as_str(), entry).is_none(),
+            "snapshot manifest lists {} twice",
+            entry.path
+        );
+    }
+    let actual = walk_payload(&payload)?;
+    for (path, entry) in &expected {
+        let found = actual
+            .get(*path)
+            .with_context(|| format!("Payload entry {path} is missing"))?;
+        ensure!(
+            found.kind == entry.kind,
+            "Payload entry {path} has the wrong file type"
+        );
+        #[cfg(unix)]
+        ensure!(
+            entry.kind == SnapshotKind::Symlink || found.mode == entry.mode,
+            "Payload entry {path} has different permission bits"
+        );
+        match entry.kind {
+            SnapshotKind::Directory => {}
+            SnapshotKind::File => {
+                ensure!(
+                    found.size == entry.size,
+                    "Payload entry {path} has a different size"
+                );
+                ensure!(
+                    hash_file(&found.path)? == entry.hash,
+                    "payload hash mismatch for {path}"
+                );
+            }
+            SnapshotKind::Symlink => {
+                let text = found
+                    .link_target
+                    .as_deref()
+                    .context("payload symlink has no target")?;
+                ensure!(
+                    entry.link_target.as_deref() == Some(text)
+                        && hash_bytes(text.as_bytes()) == entry.hash,
+                    "symlink payload mismatch for {path}"
+                );
+                verify_payload_link(&payload, &manifest, path)?;
+            }
+        }
+    }
+    for path in actual.keys() {
+        ensure!(
+            expected.contains_key(path.as_str()),
+            "Payload contains an entry not bound by the manifest: {path}"
+        );
+    }
+    Ok(manifest)
 }
 
 fn write_manifest(snapshot_dir: &Path, manifest: &SnapshotManifest) -> Result<()> {

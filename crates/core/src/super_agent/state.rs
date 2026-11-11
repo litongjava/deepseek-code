@@ -251,6 +251,37 @@ pub fn apply(
         EventType::ReviewCompleted => {
             let verdict =
                 verdict(&event.payload).map_err(|reason| payload_error(&event_type, reason))?;
+            // A decision belongs to exactly one review stage. An implementation
+            // review can never decide the final delivery review, even at the
+            // same spec version and review round.
+            let expected_stage = match record.phase {
+                Phase::Reviewing => super::model::ReviewStage::Implementation,
+                Phase::FinalReview => super::model::ReviewStage::FinalDelivery,
+                _ => super::model::ReviewStage::Implementation,
+            };
+            let stage = event.payload["stage"]
+                .as_str()
+                .map(super::model::ReviewStage::parse)
+                .transpose()
+                .map_err(|error| payload_error(&event_type, error.to_string()))?;
+            if stage.is_some() && stage != Some(expected_stage) {
+                return Err(invalid(
+                    record,
+                    &event_type,
+                    &format!(
+                        "review stage {} does not match {}",
+                        stage.expect("stage was checked to be present").as_str(),
+                        expected_stage.as_str()
+                    ),
+                ));
+            }
+            if record.phase == Phase::FinalReview && stage.is_none() {
+                return Err(invalid(
+                    record,
+                    &event_type,
+                    "the final delivery review must declare stage FINAL_DELIVERY",
+                ));
+            }
             transition
                 .agent_updates
                 .push((AgentRole::Reviewer, AgentStatus::Idle));
@@ -280,7 +311,15 @@ pub fn apply(
                 },
                 Phase::FinalReview => match verdict {
                     ReviewVerdict::Approved => {
-                        transition.phase = Phase::Finalizing;
+                        // A non-Git-only task has no target branch to deliver;
+                        // its pinned snapshot is already the delivered content.
+                        // A Git target still needs the separately verified
+                        // delivery step, so it waits in DELIVERY_PENDING.
+                        transition.phase = if record.has_git_targets() {
+                            Phase::DeliveryPending
+                        } else {
+                            Phase::Finalizing
+                        };
                         transition.status = Status::Running;
                     }
                     ReviewVerdict::ChangesRequested | ReviewVerdict::Blocked => {
@@ -311,18 +350,47 @@ pub fn apply(
                     Phase::Reviewing,
                     Phase::FinalReview,
                     Phase::Integrating,
+                    Phase::DeliveryPending,
                     Phase::Finalizing,
                 ],
             )?;
             require_status(record, &event_type, &[Status::Running, Status::WaitingUser])?;
         }
-        EventType::IntegrationCompleted => {
+        EventType::IntegrationSubmitted => {
+            // A member claim only. The host verifies real Git state before any
+            // phase advance; this event must never move the task.
             require_phase(record, &event_type, &[Phase::Integrating])?;
             require_status(record, &event_type, &[Status::Running])?;
+            transition
+                .agent_updates
+                .push((AgentRole::Coder, AgentStatus::Idle));
+        }
+        EventType::IntegrationPrepared => {
+            require_phase(record, &event_type, &[Phase::Integrating])?;
+            require_status(record, &event_type, &[Status::Running])?;
+            let changed = event.payload["repositories"]
+                .as_array()
+                .is_some_and(|repositories| {
+                    repositories
+                        .iter()
+                        .any(|repository| repository["tree_changed"].as_bool() == Some(true))
+                });
+            transition.phase = if changed {
+                Phase::FinalReview
+            } else {
+                // Content is unchanged and already reviewed. Nothing has been
+                // delivered to the user's target branch yet.
+                Phase::DeliveryPending
+            };
+            transition.status = Status::Running;
+        }
+        EventType::IntegrationCompleted => {
+            require_phase(record, &event_type, &[Phase::DeliveryPending])?;
+            require_status(record, &event_type, &[Status::Running, Status::WaitingUser])?;
             if event.payload["complete"].as_bool() == Some(false) {
                 transition.status = Status::Blocked;
             } else {
-                transition.phase = Phase::FinalReview;
+                transition.phase = Phase::Finalizing;
                 transition.status = Status::Running;
             }
         }
@@ -717,15 +785,22 @@ pub fn completion_gate(
                 .iter()
                 .find(|version| version.repository_id == id)
                 .and_then(|version| nonempty(&version.snapshot_ref));
+            // Only the exact pinned submission content identity can approve a
+            // non-Git target. A reused path with different bytes is not proof.
+            let approved = target
+                .submission
+                .as_ref()
+                .map(|submission| submission.artifact_id.trim())
+                .filter(|value| !value.is_empty());
             if reviewed.is_none() {
                 unmet.push(Unmet::DeliveryVersionMissing {
                     repository_id: id,
                     version: "snapshot".into(),
                 });
-            } else if reviewed != nonempty(&target.diff_ref) {
+            } else if reviewed != approved {
                 unmet.push(Unmet::VersionMismatch {
                     repository_id: id,
-                    expected: target.diff_ref.clone(),
+                    expected: approved.map(str::to_owned),
                     found: reviewed.map(str::to_owned),
                 });
             }
@@ -789,6 +864,7 @@ pub fn completion_gate(
                 reason: verification
                     .error
                     .clone()
+                    .or_else(|| verification.submission_error.clone())
                     .unwrap_or_else(|| "snapshot contents failed verification".into()),
             }),
             None => unmet.push(Unmet::NonGitManifestInvalid {
@@ -1038,12 +1114,23 @@ mod tests {
         assert_eq!(state.phase, Phase::Integrating);
         step(
             &mut state,
-            event(EventType::IntegrationCompleted, json!({})),
+            event(
+                EventType::IntegrationPrepared,
+                json!({"repositories":[{"repository_id":"repo-code","tree_changed":true}]}),
+            ),
         );
         assert_eq!(state.phase, Phase::FinalReview);
         step(
             &mut state,
-            event(EventType::ReviewCompleted, json!({"verdict":"APPROVED"})),
+            event(
+                EventType::ReviewCompleted,
+                json!({"verdict":"APPROVED","stage":"FINAL_DELIVERY"}),
+            ),
+        );
+        assert_eq!(state.phase, Phase::DeliveryPending);
+        step(
+            &mut state,
+            event(EventType::IntegrationCompleted, json!({})),
         );
         assert_eq!(state.phase, Phase::Finalizing);
         step(&mut state, event(EventType::TaskCompleted, json!({})));
@@ -1061,6 +1148,135 @@ mod tests {
         )
         .unwrap();
         assert_eq!(error.status, Status::Blocked);
+    }
+
+    #[test]
+    fn integration_submission_is_a_claim_and_preparation_is_a_host_fact() {
+        let policy = StatePolicy::default();
+        let mut state = record(Phase::Integrating, Status::Running);
+        state.repositories = vec![repo()];
+
+        // A Coder integration submission must never move the task.
+        let claimed = apply(
+            &state,
+            &event(EventType::IntegrationSubmitted, json!({})),
+            &policy,
+        )
+        .unwrap();
+        assert_eq!(claimed.phase, Phase::Integrating);
+        assert_eq!(claimed.status, Status::Running);
+
+        // Unchanged content reuses the content review and waits for delivery.
+        let unchanged = apply(
+            &state,
+            &event(
+                EventType::IntegrationPrepared,
+                json!({"repositories":[{"repository_id":"repo-code","tree_changed":false}]}),
+            ),
+            &policy,
+        )
+        .unwrap();
+        assert_eq!(unchanged.phase, Phase::DeliveryPending);
+
+        // Changed content needs a new final-delivery review.
+        let changed = apply(
+            &state,
+            &event(
+                EventType::IntegrationPrepared,
+                json!({"repositories":[{"repository_id":"repo-code","tree_changed":true}]}),
+            ),
+            &policy,
+        )
+        .unwrap();
+        assert_eq!(changed.phase, Phase::FinalReview);
+
+        // Delivery completion is never reachable straight from preparation.
+        assert!(apply(
+            &state,
+            &event(EventType::IntegrationCompleted, json!({})),
+            &policy
+        )
+        .is_err());
+        let pending = record(Phase::DeliveryPending, Status::Running);
+        assert_eq!(
+            apply(
+                &pending,
+                &event(EventType::IntegrationCompleted, json!({})),
+                &policy
+            )
+            .unwrap()
+            .phase,
+            Phase::Finalizing
+        );
+    }
+
+    #[test]
+    fn final_review_requires_its_own_stage_and_never_delivers_directly() {
+        let policy = StatePolicy::default();
+        let mut state = record(Phase::FinalReview, Status::Running);
+        state.repositories = vec![repo()];
+
+        // No declared stage: an implementation decision cannot be reused.
+        assert!(apply(
+            &state,
+            &event(EventType::ReviewCompleted, json!({"verdict":"APPROVED"})),
+            &policy
+        )
+        .is_err());
+        // Declared implementation stage: explicitly rejected.
+        assert!(apply(
+            &state,
+            &event(
+                EventType::ReviewCompleted,
+                json!({"verdict":"APPROVED","stage":"IMPLEMENTATION"}),
+            ),
+            &policy
+        )
+        .is_err());
+
+        let approved = apply(
+            &state,
+            &event(
+                EventType::ReviewCompleted,
+                json!({"verdict":"APPROVED","stage":"FINAL_DELIVERY"}),
+            ),
+            &policy,
+        )
+        .unwrap();
+        // Approved integrated content is not delivered content.
+        assert_eq!(approved.phase, Phase::DeliveryPending);
+
+        // The implementation phase cannot accept a final-delivery stage.
+        let mut reviewing = record(Phase::Reviewing, Status::Running);
+        reviewing.repositories = vec![repo()];
+        assert!(apply(
+            &reviewing,
+            &event(
+                EventType::ReviewCompleted,
+                json!({"verdict":"APPROVED","stage":"FINAL_DELIVERY"}),
+            ),
+            &policy
+        )
+        .is_err());
+
+        // A non-Git-only task has no target branch to deliver, so its approved
+        // final review finalizes directly instead of waiting for a fictitious
+        // Git integration event.
+        let mut non_git = record(Phase::FinalReview, Status::Running);
+        non_git.repositories.clear();
+        assert_eq!(
+            apply(
+                &non_git,
+                &event(
+                    EventType::ReviewCompleted,
+                    json!({"verdict":"APPROVED","stage":"FINAL_DELIVERY"}),
+                ),
+                &policy
+            )
+            .unwrap()
+            .phase,
+            Phase::Finalizing
+        );
     }
 
     fn repo() -> RepoTarget {
@@ -1381,6 +1597,7 @@ mod tests {
             diff_ref: None,
             status: NonGitStatus::Prepared,
             lock_key: "path:/workspace/scripts".into(),
+            submission: None,
         }];
         let unmet = gate(&non_git, &non_git.repositories, &reports, &[]).unwrap_err();
         assert!(unmet
@@ -1655,6 +1872,7 @@ mod tests {
         let mut state = record(Phase::Finalizing, Status::Running);
         state.repositories.clear();
         let path = std::path::PathBuf::from("/workspace/scripts");
+        let artifact_id = "non-git-test-content-1".to_string();
         state.non_git_targets = vec![NonGitTarget {
             task_id: "task-001".into(),
             path: path.clone(),
@@ -1663,12 +1881,27 @@ mod tests {
             diff_ref: Some("diff-1".into()),
             status: NonGitStatus::Completed,
             lock_key: "path:/workspace/scripts".into(),
+            submission: Some(NonGitSubmission {
+                artifact_id: artifact_id.clone(),
+                task_id: "task-001".into(),
+                source_path: path.clone(),
+                directory: format!("/data/super-agent/task-001/submissions/{artifact_id}").into(),
+                spec_version: 1,
+                review_round: 0,
+                content_hash: "content".into(),
+                created_at: "2026-01-01T00:00:00Z".into(),
+                platform: "linux".into(),
+                preserves_mode: true,
+                complete: true,
+                skipped: vec![],
+                skipped_unmapped: false,
+            }),
         }];
         let mut review = approved_review("integrated");
         review.reviewed_versions = vec![ReviewedVersion {
             repository_id: non_git_repository_id(&path),
             commit: None,
-            snapshot_ref: Some("diff-1".into()),
+            snapshot_ref: Some(artifact_id.clone()),
         }];
         let mut reports = reports_ok();
         reports[0].body = serde_json::to_value(review).unwrap();
@@ -1688,9 +1921,39 @@ mod tests {
                 payload_verified: true,
                 skipped: vec!["node_modules".into()],
                 error: None,
+                submission_valid: true,
+                submission_matches_target: true,
+                submission_error: None,
             },
         );
         completion_gate(&state, &[], &reports, &[], &evidence).unwrap();
+
+        // A review that approved older bytes cannot validate a newer pinned
+        // submission just because the same paths exist.
+        let mut stale_reports = reports.clone();
+        let mut stale_body: TaskReviewReport =
+            serde_json::from_value(stale_reports[0].body.clone()).unwrap();
+        stale_body.reviewed_versions[0].snapshot_ref = Some("non-git-older-content".into());
+        stale_reports[0].body = serde_json::to_value(stale_body).unwrap();
+        let unmet = completion_gate(&state, &[], &stale_reports, &[], &evidence).unwrap_err();
+        assert!(
+            unmet
+                .iter()
+                .any(|item| matches!(item, Unmet::VersionMismatch { .. })),
+            "{unmet:?}"
+        );
+
+        // A working target edited after the pinned submission is not delivery.
+        let mut changed = evidence.clone();
+        changed
+            .non_git_manifests
+            .get_mut(&path.display().to_string())
+            .unwrap()
+            .submission_matches_target = false;
+        let unmet = completion_gate(&state, &[], &reports, &[], &changed).unwrap_err();
+        assert!(unmet
+            .iter()
+            .any(|item| matches!(item, Unmet::NonGitManifestInvalid { .. })));
 
         let mut corrupt = evidence;
         corrupt

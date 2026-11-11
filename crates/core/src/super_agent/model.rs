@@ -39,6 +39,9 @@ pub enum Phase {
     Reviewing,
     Integrating,
     FinalReview,
+    /// Prepared content is verified, but the user's target branch has not been
+    /// changed yet. Delivery is a later, separately verified step.
+    DeliveryPending,
     Finalizing,
 }
 text_enum!(Phase {
@@ -48,6 +51,7 @@ text_enum!(Phase {
     Reviewing => "REVIEWING",
     Integrating => "INTEGRATING",
     FinalReview => "FINAL_REVIEW",
+    DeliveryPending => "DELIVERY_PENDING",
     Finalizing => "FINALIZING",
 });
 
@@ -172,12 +176,17 @@ pub enum IntegrationStatus {
     #[default]
     Pending,
     InProgress,
+    /// The isolated task worktree contains the merged target content and the
+    /// host verified it. The user's target branch is still untouched.
+    Prepared,
+    /// The target reference was verified to contain the approved content.
     Completed,
     Failed,
 }
 text_enum!(IntegrationStatus {
     Pending => "PENDING",
     InProgress => "IN_PROGRESS",
+    Prepared => "PREPARED",
     Completed => "COMPLETED",
     Failed => "FAILED",
 });
@@ -429,6 +438,37 @@ pub struct RepoTarget {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct NonGitSubmission {
+    /// Collision-resistant identity derived from the canonical target path,
+    /// task, spec version, review round and the submitted content.
+    pub artifact_id: String,
+    pub task_id: String,
+    /// Canonical target path at submission time. Later edits to the working
+    /// target never change this identity.
+    pub source_path: PathBuf,
+    /// Directory holding `payload/`, `manifest.json` and `submission.json`.
+    pub directory: PathBuf,
+    pub spec_version: u32,
+    pub review_round: u32,
+    /// SHA-256 over the sorted manifest entries (content and metadata).
+    pub content_hash: String,
+    pub created_at: String,
+    /// Host platform that produced the snapshot.
+    pub platform: String,
+    /// True when Unix permission bits were captured in the manifest.
+    #[serde(default)]
+    pub preserves_mode: bool,
+    /// True only when every target entry is represented in the manifest.
+    #[serde(default)]
+    pub complete: bool,
+    /// Paths intentionally outside the snapshot (build output, dependencies).
+    #[serde(default)]
+    pub skipped: Vec<String>,
+    #[serde(default)]
+    pub skipped_unmapped: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct NonGitTarget {
     pub task_id: String,
     pub path: PathBuf,
@@ -439,6 +479,10 @@ pub struct NonGitTarget {
     #[serde(default)]
     pub status: NonGitStatus,
     pub lock_key: String,
+    /// Immutable review snapshot pinned when the implementation is submitted.
+    /// The Reviewer reads this artifact, never the mutable working target.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub submission: Option<NonGitSubmission>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -495,6 +539,14 @@ pub enum EventType {
     HarnessSubmitted,
     ReviewCompleted,
     HarnessAnalysisCompleted,
+    /// The Coder claims it merged the target reference in its task worktree.
+    /// A claim only; no phase advance.
+    IntegrationSubmitted,
+    /// The host verified the prepared content against real Git state.
+    IntegrationPrepared,
+    /// The user's target reference was verified to contain the approved
+    /// content. Reserved for the delivery increment; never emitted for a
+    /// preparation claim.
     IntegrationCompleted,
     NewTaskProposed,
     MessageSent,
@@ -520,6 +572,8 @@ text_enum!(EventType {
     HarnessSubmitted => "HARNESS_SUBMITTED",
     ReviewCompleted => "REVIEW_COMPLETED",
     HarnessAnalysisCompleted => "HARNESS_ANALYSIS_COMPLETED",
+    IntegrationSubmitted => "INTEGRATION_SUBMITTED",
+    IntegrationPrepared => "INTEGRATION_PREPARED",
     IntegrationCompleted => "INTEGRATION_COMPLETED",
     NewTaskProposed => "NEW_TASK_PROPOSED",
     MessageSent => "MESSAGE_SENT",
@@ -683,6 +737,10 @@ pub struct HarnessAnalysisReport {
     pub spec_version: u32,
     #[serde(default)]
     pub round: u32,
+    /// Which review stage this analysis belongs to. Missing in legacy bodies,
+    /// which were all implementation-stage analyses.
+    #[serde(default)]
+    pub stage: ReviewStage,
     #[serde(default)]
     pub findings: Vec<HarnessFinding>,
     #[serde(default)]
@@ -956,11 +1014,21 @@ pub struct NonGitVerification {
     /// Entries the snapshot could not protect (build output, non-UTF-8 names).
     pub skipped: Vec<String>,
     pub error: Option<String>,
+    /// A submission snapshot exists, is inside the task scope and its manifest
+    /// and payload are intact.
+    pub submission_valid: bool,
+    /// The working target still equals the pinned submission content.
+    pub submission_matches_target: bool,
+    pub submission_error: Option<String>,
 }
 
 impl NonGitVerification {
     pub fn complete(&self) -> bool {
-        self.valid && self.source_matches && self.payload_verified
+        self.valid
+            && self.source_matches
+            && self.payload_verified
+            && self.submission_valid
+            && self.submission_matches_target
     }
 }
 

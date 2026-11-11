@@ -4,11 +4,13 @@
 //! table makes those identifiers globally idempotent: replaying the same request
 //! returns the original result, while reusing an identifier for a different
 //! task, kind or payload is an explicit conflict.
+use super::delivery::{DeliveryDispatch, DeliveryPlan};
 use super::model::{
     AgentStatus, Approval, ApprovalStatus, ApprovalType, CleanupStatus, Event, EventType,
     GateEvidence, HarnessAnalysisReport, ImplementationReport, IntegrationReport,
-    IntegrationStatus, NewEvent, NonGitStatus, NonGitTarget, Phase, PlanReport, RepoTarget, Report,
-    ReportKind, SessionRef, Status, TaskRecord, TaskReviewReport, TaskSpec, VerificationStatus,
+    IntegrationStatus, NewEvent, NonGitStatus, NonGitSubmission, NonGitTarget, Phase, PlanReport,
+    RepoTarget, Report, ReportKind, SessionRef, Status, TaskRecord, TaskReviewReport, TaskSpec,
+    VerificationStatus,
 };
 use super::state::{self, StateError, StatePolicy};
 use crate::db::DbManager;
@@ -256,7 +258,7 @@ impl TaskStore {
         self.run_tx("super-agent apply event", |tx| {
             let (stored, inserted) = append_event_conn(tx, task_id, &event)?;
             if inserted {
-                apply_transition_conn(tx, &stored, policy)?;
+                apply_transition_conn(tx, &self.data_dir, &stored, policy)?;
             }
             Ok(EventAppend {
                 event: stored,
@@ -291,7 +293,7 @@ impl TaskStore {
             if event.processed {
                 return Ok(None);
             }
-            let record = apply_transition_conn(tx, &event, policy)?;
+            let record = apply_transition_conn(tx, &self.data_dir, &event, policy)?;
             Ok(Some(record))
         })
     }
@@ -318,7 +320,7 @@ impl TaskStore {
                 if event.processed {
                     continue;
                 }
-                records.push(apply_transition_conn(tx, &event, policy)?);
+                records.push(apply_transition_conn(tx, &self.data_dir, &event, policy)?);
             }
             Ok(records)
         })
@@ -699,6 +701,319 @@ impl TaskStore {
         })
     }
 
+    /// Records a host-verified delivery plan. The operation ID is deterministic
+    /// for one evidence version, so replaying the same plan is a no-op while a
+    /// different plan under the same ID is rejected instead of silently
+    /// refreshing the captured old OID.
+    pub fn save_delivery_plan(&self, plan: &DeliveryPlan) -> Result<(), StoreError> {
+        let encoded = serde_json::to_string(plan)?;
+        self.run_tx("super-agent save delivery plan", |tx| {
+            let existing: Option<String> = tx
+                .query_row(
+                    "SELECT plan_json FROM sa_delivery_plans WHERE operation_id=?1",
+                    [&plan.operation_id],
+                    |row| row.get(0),
+                )
+                .optional()?;
+            if let Some(existing) = existing {
+                if existing == encoded {
+                    return Ok(());
+                }
+                return Err(StoreError::Invalid(format!(
+                    "delivery plan {} is already recorded with different facts",
+                    plan.operation_id
+                )));
+            }
+            tx.execute(
+                "INSERT INTO sa_delivery_plans(operation_id,task_id,spec_version,review_round,created_at,plan_json) VALUES(?1,?2,?3,?4,?5,?6)",
+                params![
+                    plan.operation_id,
+                    plan.task_id,
+                    plan.spec_version,
+                    plan.review_round,
+                    plan.created_at,
+                    encoded
+                ],
+            )?;
+            Ok(())
+        })
+    }
+
+    pub fn delivery_plan(
+        &self,
+        task_id: &str,
+        operation_id: &str,
+    ) -> Result<Option<DeliveryPlan>, StoreError> {
+        self.run_read(|tx| {
+            let encoded: Option<String> = tx
+                .query_row(
+                    "SELECT plan_json FROM sa_delivery_plans WHERE task_id=?1 AND operation_id=?2",
+                    params![task_id, operation_id],
+                    |row| row.get(0),
+                )
+                .optional()?;
+            encoded
+                .map(|json| serde_json::from_str(&json).map_err(StoreError::from))
+                .transpose()
+        })
+    }
+
+    pub fn delivery_plans(&self, task_id: &str) -> Result<Vec<DeliveryPlan>, StoreError> {
+        self.run_read(|tx| {
+            let mut statement = tx.prepare(
+                "SELECT plan_json FROM sa_delivery_plans WHERE task_id=?1 ORDER BY created_at,operation_id",
+            )?;
+            let encoded = statement
+                .query_map([task_id], |row| row.get::<_, String>(0))?
+                .collect::<rusqlite::Result<Vec<_>>>()?;
+            encoded
+                .into_iter()
+                .map(|json| serde_json::from_str(&json).map_err(StoreError::from))
+                .collect()
+        })
+    }
+
+    /// The durable attempt number for one content identity. It starts at 1 and
+    /// is advanced only after an attempt that did not leave a plan, so a
+    /// conflicted lock can be retried with fresh operation IDs without
+    /// refreshing the immutable content evidence.
+    pub fn current_delivery_attempt(
+        &self,
+        task_id: &str,
+        content_fingerprint: &str,
+    ) -> Result<u32, StoreError> {
+        self.run_tx("super-agent delivery attempt", |tx| {
+            tx.execute(
+                "INSERT INTO sa_delivery_attempts(task_id,content_fingerprint,attempt,created_at) VALUES(?1,?2,1,?3) ON CONFLICT(task_id,content_fingerprint) DO NOTHING",
+                params![task_id, content_fingerprint, chrono::Utc::now().to_rfc3339()],
+            )?;
+            let attempt: i64 = tx.query_row(
+                "SELECT attempt FROM sa_delivery_attempts WHERE task_id=?1 AND content_fingerprint=?2",
+                params![task_id, content_fingerprint],
+                |row| row.get(0),
+            )?;
+            Ok(attempt as u32)
+        })
+    }
+
+    /// Consumes the current attempt because it ended without a durable plan.
+    /// The content fingerprint and plan operation ID are unchanged.
+    pub fn advance_delivery_attempt(
+        &self,
+        task_id: &str,
+        content_fingerprint: &str,
+    ) -> Result<u32, StoreError> {
+        self.run_tx("super-agent advance delivery attempt", |tx| {
+            tx.execute(
+                "INSERT INTO sa_delivery_attempts(task_id,content_fingerprint,attempt,created_at) VALUES(?1,?2,2,?3) ON CONFLICT(task_id,content_fingerprint) DO UPDATE SET attempt=attempt+1",
+                params![task_id, content_fingerprint, chrono::Utc::now().to_rfc3339()],
+            )?;
+            let attempt: i64 = tx.query_row(
+                "SELECT attempt FROM sa_delivery_attempts WHERE task_id=?1 AND content_fingerprint=?2",
+                params![task_id, content_fingerprint],
+                |row| row.get(0),
+            )?;
+            Ok(attempt as u32)
+        })
+    }
+
+    /// Records the delivery dispatch intent before any child is started.
+    /// Replaying the same plan returns the stored receipt; different delivery
+    /// facts under the same plan are an explicit conflict, never a silent
+    /// second dispatch.
+    pub fn begin_delivery_dispatch(
+        &self,
+        dispatch: &DeliveryDispatch,
+    ) -> Result<DeliveryDispatch, StoreError> {
+        self.run_tx("super-agent begin delivery dispatch", |tx| {
+            let existing = load_delivery_dispatch_conn(
+                tx,
+                &dispatch.task_id,
+                &dispatch.plan_operation_id,
+            )?;
+            if let Some(existing) = existing {
+                if existing.spec_version != dispatch.spec_version
+                    || existing.review_round != dispatch.review_round
+                    || existing.coder_session_id != dispatch.coder_session_id
+                    || existing.purpose != dispatch.purpose
+                    || existing
+                        .job_id
+                        .as_ref()
+                        .zip(dispatch.job_id.as_ref())
+                        .is_some_and(|(left, right)| left != right)
+                {
+                    return Err(StoreError::Invalid(format!(
+                        "delivery dispatch for {} was already recorded with different facts",
+                        dispatch.plan_operation_id
+                    )));
+                }
+                return Ok(existing);
+            }
+            tx.execute(
+                "INSERT INTO sa_delivery_dispatches(task_id,plan_operation_id,spec_version,review_round,coder_session_id,purpose,job_id,created_at) VALUES(?1,?2,?3,?4,?5,?6,?7,?8)",
+                params![
+                    dispatch.task_id,
+                    dispatch.plan_operation_id,
+                    dispatch.spec_version,
+                    dispatch.review_round,
+                    dispatch.coder_session_id,
+                    dispatch.purpose,
+                    dispatch.job_id,
+                    dispatch.created_at
+                ],
+            )?;
+            Ok(dispatch.clone())
+        })
+    }
+
+    /// Binds the reserved background job to an already recorded dispatch. The
+    /// same job is idempotent; a different one is a conflict.
+    pub fn set_delivery_dispatch_job(
+        &self,
+        task_id: &str,
+        plan_operation_id: &str,
+        job_id: &str,
+    ) -> Result<DeliveryDispatch, StoreError> {
+        self.run_tx("super-agent record delivery job", |tx| {
+            let dispatch = load_delivery_dispatch_conn(tx, task_id, plan_operation_id)?
+                .ok_or_else(|| {
+                    StoreError::Invalid("delivery dispatch was not recorded before the child".into())
+                })?;
+            if let Some(existing) = &dispatch.job_id {
+                if existing == job_id {
+                    return Ok(dispatch);
+                }
+                return Err(StoreError::Invalid(format!(
+                    "delivery dispatch for {plan_operation_id} already bound job {existing}, not {job_id}"
+                )));
+            }
+            tx.execute(
+                "UPDATE sa_delivery_dispatches SET job_id=?3 WHERE task_id=?1 AND plan_operation_id=?2",
+                params![task_id, plan_operation_id, job_id],
+            )?;
+            Ok(DeliveryDispatch {
+                job_id: Some(job_id.to_owned()),
+                ..dispatch
+            })
+        })
+    }
+
+    pub fn delivery_dispatch(
+        &self,
+        task_id: &str,
+        plan_operation_id: &str,
+    ) -> Result<Option<DeliveryDispatch>, StoreError> {
+        self.run_read(|tx| load_delivery_dispatch_conn(tx, task_id, plan_operation_id))
+    }
+
+    /// Current holder of one cooperative lock, or `None`. It never acquires.
+    pub fn lock_holder(&self, lock_key: &str) -> Result<Option<(String, String)>, StoreError> {
+        let lock_key = normalize_lock_key(lock_key)?;
+        self.run_read(|tx| {
+            Ok(tx
+                .query_row(
+                    "SELECT task_id,owner_operation_id FROM sa_locks WHERE lock_key=?1",
+                    [&lock_key],
+                    |row| Ok((row.get(0)?, row.get(1)?)),
+                )
+                .optional()?)
+        })
+    }
+
+    /// Records a host-verified delivery in one transaction: every planned
+    /// repository becomes `COMPLETED` and the delivery observation event is
+    /// appended. A replay of the same event is a no-op. This never emits
+    /// `TASK_COMPLETED`; completion stays a separate gate.
+    pub fn record_delivery_completed(
+        &self,
+        plan: &DeliveryPlan,
+        operation_id: &str,
+        payload: Value,
+    ) -> Result<EventAppend, StoreError> {
+        if payload["complete"].as_bool() != Some(true) {
+            return Err(StoreError::Invalid(
+                "a recorded delivery must be complete".into(),
+            ));
+        }
+        self.run_tx("super-agent record delivered target", |tx| {
+            if let Some(existing) = event_by_operation(tx, operation_id)? {
+                return Ok(EventAppend {
+                    event: existing,
+                    inserted: false,
+                });
+            }
+            // Only one delivery observation exists for a spec version and
+            // round. A different operation replaying the same fact returns the
+            // recorded event instead of appending a second one.
+            let recorded: Option<String> = tx
+                .query_row(
+                    "SELECT event_id FROM sa_events WHERE task_id=?1 AND event_type=?2 AND spec_version=?3 AND review_round=?4 ORDER BY sequence LIMIT 1",
+                    params![
+                        plan.task_id,
+                        EventType::IntegrationCompleted.as_str(),
+                        plan.spec_version,
+                        plan.review_round
+                    ],
+                    |row| row.get(0),
+                )
+                .optional()?;
+            if let Some(event_id) = recorded {
+                let event = event_by_id(tx, &event_id)?
+                    .ok_or_else(|| StoreError::Invalid("delivery event disappeared".into()))?;
+                return Ok(EventAppend {
+                    event,
+                    inserted: false,
+                });
+            }
+            let record = load_record_conn(tx, &plan.task_id)?
+                .ok_or_else(|| StoreError::TaskNotFound(plan.task_id.clone()))?;
+            if record.spec_version != plan.spec_version
+                || record.review_round != plan.review_round
+            {
+                return Err(StoreError::Invalid(format!(
+                    "delivery plan describes spec version {} round {} but the task is {} round {}",
+                    plan.spec_version, plan.review_round, record.spec_version, record.review_round
+                )));
+            }
+            if record.phase != Phase::DeliveryPending {
+                return Err(StoreError::Invalid(format!(
+                    "delivery can only be recorded while the task is DELIVERY_PENDING, found {}",
+                    record.phase.as_str()
+                )));
+            }
+            for target in &plan.repositories {
+                let updated = tx.execute(
+                    "UPDATE sa_task_repos SET integration_status=?3 WHERE task_id=?1 AND repository_id=?2 AND integrated_commit=?4",
+                    params![
+                        plan.task_id,
+                        target.repository_id,
+                        IntegrationStatus::Completed.as_str(),
+                        target.new_oid
+                    ],
+                )?;
+                if updated != 1 {
+                    return Err(StoreError::Invalid(format!(
+                        "{}: the recorded integrated commit is no longer {}",
+                        target.repository_id, target.new_oid
+                    )));
+                }
+            }
+            let (event, inserted) = append_event_conn(
+                tx,
+                &plan.task_id,
+                &NewEvent {
+                    session_id: None,
+                    run_id: None,
+                    event_type: EventType::IntegrationCompleted,
+                    causation_id: None,
+                    operation_id: operation_id.to_owned(),
+                    payload: payload.clone(),
+                },
+            )?;
+            Ok(EventAppend { event, inserted })
+        })
+    }
+
     pub fn save_repo(&self, repo: &RepoTarget) -> Result<(), StoreError> {
         self.run_tx("super-agent save repository", |tx| {
             upsert_repo_conn(tx, repo)
@@ -812,6 +1127,24 @@ fn validate_report_body(
             let parsed: HarnessAnalysisReport =
                 serde_json::from_value(body.clone()).map_err(invalid)?;
             check(parsed.spec_version, parsed.round)?;
+            // A harness report carries a review-stage identity. Only the
+            // matching stage may be recorded while a review is being decided,
+            // so an implementation-stage analysis can never satisfy the final
+            // delivery review. Legacy bodies default to IMPLEMENTATION.
+            let expected = match record.phase {
+                Phase::Reviewing => Some(super::model::ReviewStage::Implementation),
+                Phase::FinalReview => Some(super::model::ReviewStage::FinalDelivery),
+                _ => None,
+            };
+            if let Some(expected) = expected {
+                if parsed.stage != expected {
+                    return Err(StoreError::Invalid(format!(
+                        "Harness report stage {} does not match the current review stage {}",
+                        parsed.stage.as_str(),
+                        expected.as_str()
+                    )));
+                }
+            }
         }
         ReportKind::Implementation => {
             let parsed: ImplementationReport =
@@ -833,7 +1166,11 @@ fn validate_report_body(
 
 /// Collects the durable facts the pure gate cannot read, inside the same
 /// transaction that will commit the completion.
-fn gate_evidence_conn(conn: &Connection, record: &TaskRecord) -> Result<GateEvidence, StoreError> {
+fn gate_evidence_conn(
+    conn: &Connection,
+    data_dir: &Path,
+    record: &TaskRecord,
+) -> Result<GateEvidence, StoreError> {
     let mut evidence = GateEvidence::default();
     for session in [
         record.coder.session_id.as_deref(),
@@ -909,6 +1246,31 @@ fn gate_evidence_conn(conn: &Connection, record: &TaskRecord) -> Result<GateEvid
                 }
             }
         }
+        // The immutable submission artifact the Reviewer read, plus the fact
+        // that the working target still equals it. A later edit blocks delivery
+        // instead of being treated as already approved.
+        match super::review::verify_pinned_submission(data_dir, record, target) {
+            Ok(manifest) => {
+                verification.submission_valid = true;
+                match super::review::submission_matches_target(target, &manifest) {
+                    Ok(true) => verification.submission_matches_target = true,
+                    Ok(false) => {
+                        verification.submission_error = Some(
+                            "the working target no longer matches the reviewed submission".into(),
+                        )
+                    }
+                    Err(error) => {
+                        verification.submission_error = Some(format!(
+                        "cannot compare the working target with the reviewed submission: {error:#}"
+                    ))
+                    }
+                }
+            }
+            Err(error) => {
+                verification.submission_error =
+                    Some(format!("the reviewed submission is invalid: {error:#}"));
+            }
+        }
         evidence.non_git_manifests.insert(path, verification);
     }
     Ok(evidence)
@@ -940,8 +1302,14 @@ fn upsert_repo_conn(conn: &Connection, repo: &RepoTarget) -> Result<(), StoreErr
 }
 
 fn upsert_non_git_conn(conn: &Connection, target: &NonGitTarget) -> Result<(), StoreError> {
+    let submission = target
+        .submission
+        .as_ref()
+        .map(serde_json::to_string)
+        .transpose()
+        .map_err(|error| StoreError::Invalid(format!("Invalid non-Git submission: {error}")))?;
     conn.execute(
-        "INSERT INTO sa_non_git_targets(task_id,path,snapshot_dir,snapshot_manifest_json,diff_ref,status,lock_key) VALUES(?1,?2,?3,?4,?5,?6,?7) ON CONFLICT(task_id,path) DO UPDATE SET snapshot_dir=excluded.snapshot_dir,snapshot_manifest_json=excluded.snapshot_manifest_json,diff_ref=excluded.diff_ref,status=excluded.status,lock_key=excluded.lock_key",
+        "INSERT INTO sa_non_git_targets(task_id,path,snapshot_dir,snapshot_manifest_json,diff_ref,status,lock_key,submission_json) VALUES(?1,?2,?3,?4,?5,?6,?7,?8) ON CONFLICT(task_id,path) DO UPDATE SET snapshot_dir=excluded.snapshot_dir,snapshot_manifest_json=excluded.snapshot_manifest_json,diff_ref=excluded.diff_ref,status=excluded.status,lock_key=excluded.lock_key,submission_json=excluded.submission_json",
         params![
             target.task_id,
             target.path.to_string_lossy(),
@@ -949,7 +1317,8 @@ fn upsert_non_git_conn(conn: &Connection, target: &NonGitTarget) -> Result<(), S
             target.snapshot_manifest_json,
             target.diff_ref,
             target.status.as_str(),
-            target.lock_key
+            target.lock_key,
+            submission
         ],
     )?;
     Ok(())
@@ -1083,6 +1452,7 @@ fn append_event_conn(
 
 fn apply_transition_conn(
     tx: &Transaction<'_>,
+    data_dir: &Path,
     event: &Event,
     policy: &StatePolicy,
 ) -> Result<TaskRecord, StoreError> {
@@ -1092,7 +1462,7 @@ fn apply_transition_conn(
         let repos = load_repos_conn(tx, &event.task_id)?;
         let reports = load_reports_conn(tx, &event.task_id)?;
         let approvals = load_approvals_conn(tx, &event.task_id)?;
-        let evidence = gate_evidence_conn(tx, &record)?;
+        let evidence = gate_evidence_conn(tx, data_dir, &record)?;
         if let Err(unmet) = state::completion_gate(&record, &repos, &reports, &approvals, &evidence)
         {
             return Err(StoreError::Gate(unmet));
@@ -1485,6 +1855,31 @@ fn event_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<StoredEvent> {
     })())
 }
 
+fn load_delivery_dispatch_conn(
+    conn: &Connection,
+    task_id: &str,
+    plan_operation_id: &str,
+) -> Result<Option<DeliveryDispatch>, StoreError> {
+    Ok(conn
+        .query_row(
+            "SELECT spec_version,review_round,coder_session_id,purpose,job_id,created_at FROM sa_delivery_dispatches WHERE task_id=?1 AND plan_operation_id=?2",
+            params![task_id, plan_operation_id],
+            |row| {
+                Ok(DeliveryDispatch {
+                    task_id: task_id.to_owned(),
+                    spec_version: row.get::<_, i64>(0)? as u32,
+                    review_round: row.get::<_, i64>(1)? as u32,
+                    plan_operation_id: plan_operation_id.to_owned(),
+                    coder_session_id: row.get(2)?,
+                    purpose: row.get(3)?,
+                    job_id: row.get(4)?,
+                    created_at: row.get(5)?,
+                })
+            },
+        )
+        .optional()?)
+}
+
 fn event_by_operation(conn: &Connection, operation_id: &str) -> Result<Option<Event>, StoreError> {
     let row = conn
         .query_row(
@@ -1570,7 +1965,7 @@ fn load_repos_conn(conn: &Connection, task_id: &str) -> Result<Vec<RepoTarget>, 
 
 fn load_non_git_conn(conn: &Connection, task_id: &str) -> Result<Vec<NonGitTarget>, StoreError> {
     let mut statement = conn.prepare(
-        "SELECT path,snapshot_dir,snapshot_manifest_json,diff_ref,status,lock_key FROM sa_non_git_targets WHERE task_id=?1 ORDER BY path",
+        "SELECT path,snapshot_dir,snapshot_manifest_json,diff_ref,status,lock_key,submission_json FROM sa_non_git_targets WHERE task_id=?1 ORDER BY path",
     )?;
     let raw = statement
         .query_map([task_id], |row| {
@@ -1581,12 +1976,30 @@ fn load_non_git_conn(conn: &Connection, task_id: &str) -> Result<Vec<NonGitTarge
                 row.get::<_, Option<String>>(3)?,
                 row.get::<_, String>(4)?,
                 row.get::<_, String>(5)?,
+                row.get::<_, Option<String>>(6)?,
             ))
         })?
         .collect::<rusqlite::Result<Vec<_>>>()?;
     raw.into_iter()
         .map(
-            |(path, snapshot_dir, snapshot_manifest_json, diff_ref, status, lock_key)| {
+            |(
+                path,
+                snapshot_dir,
+                snapshot_manifest_json,
+                diff_ref,
+                status,
+                lock_key,
+                submission,
+            )| {
+                let submission = submission
+                    .map(|raw| {
+                        serde_json::from_str::<NonGitSubmission>(&raw).map_err(|error| {
+                            StoreError::Invalid(format!(
+                                "Invalid non-Git submission for {path}: {error}"
+                            ))
+                        })
+                    })
+                    .transpose()?;
                 Ok(NonGitTarget {
                     task_id: task_id.into(),
                     path: path.into(),
@@ -1596,6 +2009,7 @@ fn load_non_git_conn(conn: &Connection, task_id: &str) -> Result<Vec<NonGitTarge
                     status: NonGitStatus::parse(&status)
                         .map_err(|error| StoreError::Invalid(error.to_string()))?,
                     lock_key,
+                    submission,
                 })
             },
         )
