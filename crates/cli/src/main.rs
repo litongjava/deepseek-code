@@ -1,4 +1,5 @@
 mod request_attempts;
+mod signals;
 // Local command output shares the terminal's display-only history.
 macro_rules! command_eprintln {
     ($($arg:tt)*) => {{
@@ -179,6 +180,15 @@ async fn async_main() -> std::process::ExitCode {
         Ok(false) => {},
         Err(error) => { eprintln!("Session host failed: {error:#}"); return std::process::ExitCode::FAILURE; },
     }
+    // Register Ctrl-C, SIGTERM and SIGHUP before any turn can start, so a
+    // termination signal always reaches the turn's own cancellation instead of
+    // killing the process before its owned work is cleaned up. A failed
+    // registration stops startup: running with a partial handler set could
+    // silently ignore a termination signal.
+    if let Err(error) = signals::install() {
+        eprintln!("Error: {error}");
+        return std::process::ExitCode::FAILURE;
+    }
     let mut cli = Cli::parse_with_mode_source();
     if cli.agent_teams {
         std::env::set_var("DEEPSEEK_CODE_EXPERIMENTAL_AGENT_TEAMS", "1");
@@ -188,6 +198,14 @@ async fn async_main() -> std::process::ExitCode {
     debug_logging::install(cli.verbose);
     let result = Box::pin(run(&cli)).await;
     terminal::release_handoff();
+    // A termination signal ends the process nonzero even when the interrupted
+    // command or prompt swallowed the turn's cancellation error.
+    if signals::terminating() {
+        if result.is_ok() {
+            eprintln!("Interrupted.");
+        }
+        return std::process::ExitCode::FAILURE;
+    }
     if let Err(error) = result {
         if !worker_frontend::already_presented(&error) {
             if let Err(output_error) = output::report_startup_error(&cli, &error) {
@@ -259,7 +277,7 @@ async fn run(cli: &Cli) -> Result<()> {
             return services::print(&serde_json::json!({"up_to_date":update.is_none(),"update":update}));
         }
         Some(Commands::StressTest { concurrency, iterations, endpoint, allow_remote }) => {
-            return tokio::select! {result=deepseek_code_core::services::diagnostics::stress(*concurrency,*iterations,endpoint.clone(),*allow_remote)=>services::print(&result?), _=tokio::signal::ctrl_c()=>anyhow::bail!("Diagnostics cancelled")};
+            return tokio::select! {result=deepseek_code_core::services::diagnostics::stress(*concurrency,*iterations,endpoint.clone(),*allow_remote)=>services::print(&result?), _=crate::signals::interrupted()=>anyhow::bail!("Diagnostics cancelled")};
         }
         Some(Commands::Learning { action }) => return migration::learning(&paths, action).await,
         Some(Commands::Performance { action }) => return migration::performance(&paths, action).await,
@@ -291,7 +309,7 @@ async fn run(cli: &Cli) -> Result<()> {
                 }
             };
         }
-        Some(Commands::Ssh { config, operation, yes }) => return tokio::select! { result=migration::ssh(config,operation,*yes)=>result, _=tokio::signal::ctrl_c()=>anyhow::bail!("SSH operation cancelled") },
+        Some(Commands::Ssh { config, operation, yes }) => return tokio::select! { result=migration::ssh(config,operation,*yes)=>result, _=crate::signals::interrupted()=>anyhow::bail!("SSH operation cancelled") },
         Some(Commands::Lsp { action, language, yes }) => {
             let workspace = cli.path.clone().map_or_else(std::env::current_dir, Ok)?;
             return lsp_commands::command(&paths, &workspace, action.as_deref(), language.as_deref(), *yes).await;
@@ -308,7 +326,7 @@ async fn run(cli: &Cli) -> Result<()> {
             let code = remote_host::run(listening, args, &workspace, &paths.data_dir).await?;
             std::process::exit(code);
         },
-        Some(Commands::Remote { request, yes }) => return tokio::select! { result=migration::remote(request,*yes)=>result, _=tokio::signal::ctrl_c()=>anyhow::bail!("Remote operation cancelled") },
+        Some(Commands::Remote { request, yes }) => return tokio::select! { result=migration::remote(request,*yes)=>result, _=crate::signals::interrupted()=>anyhow::bail!("Remote operation cancelled") },
         Some(Commands::Agents { action }) => {
             let context = services::context(&paths)?;
             match action {
@@ -566,7 +584,7 @@ async fn run(cli: &Cli) -> Result<()> {
             }
             Ok::<(), anyhow::Error>(())
         };
-        return tokio::select! { result = hook_progress::during(&id, true, work) => result, _ = tokio::signal::ctrl_c() => anyhow::bail!("Setup hooks interrupted") };
+        return tokio::select! { result = hook_progress::during(&id, true, work) => result, _ = crate::signals::interrupted() => anyhow::bail!("Setup hooks interrupted") };
     }
     let _exit_cleanup = terminal::screen_mode::ExitCleanup(
         !single && !sdk_stream && io::stdin().is_terminal() && io::stderr().is_terminal()
@@ -626,7 +644,7 @@ async fn run(cli: &Cli) -> Result<()> {
             let context = session.hook_service_context();
             let outcome = tokio::select! {
                 result = hook_progress::during(&session.id, true, deepseek_code_core::services::lifecycle_events::setup(&context, &session.workspace, &session.id, trigger, false)) => result,
-                _ = tokio::signal::ctrl_c() => anyhow::bail!("Setup hooks interrupted"),
+                _ = crate::signals::interrupted() => anyhow::bail!("Setup hooks interrupted"),
             }?;
             for warning in outcome { eprintln!("Setup hook: {warning}"); }
         }
@@ -715,6 +733,9 @@ async fn run(cli: &Cli) -> Result<()> {
             terminal::SCROLL_SPEED.store(speed, std::sync::atomic::Ordering::Relaxed);
         }
         'repl: loop {
+            if crate::signals::terminating() {
+                break 'repl;
+            }
             resource_sampling::session(&session.id);
             terminal::title::apply(&session.id);
             let idle_deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(60);
@@ -929,6 +950,8 @@ async fn run(cli: &Cli) -> Result<()> {
                     }
                     input.as_ref().expect("interactive reader").set_permission_mode(session.permission_mode());
                 },
+                // Idle Ctrl-C discards a draft and otherwise ends the prompt;
+                // SIGTERM/SIGHUP always stop the prompt after cleanup.
                 _ = tokio::signal::ctrl_c() => {
                     if composer.is_pending() {
                         composer.cancel();
@@ -937,6 +960,7 @@ async fn run(cli: &Cli) -> Result<()> {
                     }
                     break 'repl;
                 },
+                _ = crate::signals::termination() => break 'repl,
             } };
             let line = match composer.push(line) {
                 terminal::prompt::Input::Pending => continue,

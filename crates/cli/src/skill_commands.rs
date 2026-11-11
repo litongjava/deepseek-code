@@ -36,7 +36,7 @@ pub async fn finish_background(
     let outcome: anyhow::Result<()> = async {
         loop {
             tokio::select! {
-                _ = tokio::signal::ctrl_c() => {
+                _ = crate::signals::interrupted() => {
                     background_sessions::cancel(&session.paths.data_dir, &job.id)?;
                     anyhow::bail!("Skill task interrupted; cancellation requested");
                 },
@@ -61,7 +61,7 @@ pub async fn finish_background(
                         let answering=async { let answer=if let Some(answer)=background_sessions::worker_answer(&session.paths.data_dir,&session.id,&question.request_id,&question.kind,&message).await? {answer}
                             else if let Some(input)=terminal.as_mut() { input.read_answer(&message).await?.ok_or_else(||anyhow::anyhow!("Skill task input closed"))? }
                             else { anyhow::bail!("Skill task requires permission or input; use an interactive session or explicitly configure the permission mode"); }; Ok::<_,anyhow::Error>(answer) };
-                        let answer=tokio::select! { answer=answering=>answer?, _=tokio::signal::ctrl_c()=>anyhow::bail!("Skill task interrupted while waiting for permission") };
+                        let answer=tokio::select! { answer=answering=>answer?, _=crate::signals::interrupted()=>anyhow::bail!("Skill task interrupted while waiting for permission") };
                         background_sessions::answer_question(&session.paths.data_dir,&job.id,&session.id,&question.request_id,&answer)?;
                     }
                     if drained && !matches!(state.status.as_str(),"starting"|"running") {

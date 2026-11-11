@@ -222,7 +222,7 @@ async fn pick(paths: &RuntimePaths, session: &mut Session) -> Result<bool> {
         let part = if action == "from" { compaction::Part::From } else { compaction::Part::UpTo };
         let (branch, count) = tokio::select! {
             result = compaction::summarize_part(&session.engine, &session.store.db, &session.id, &checkpoint.message_id, part, &session.provider_id, &session.model) => result?,
-            _ = tokio::signal::ctrl_c() => anyhow::bail!("Summary interrupted; the conversation is unchanged"),
+            _ = crate::signals::interrupted() => anyhow::bail!("Summary interrupted; the conversation is unchanged"),
         };
         crate::background_commands::copy_settings(session, &branch)?;
         session.resume_saved(paths, &branch).await?;

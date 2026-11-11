@@ -30,7 +30,7 @@ pub async fn run(address: &str, token: Option<&str>) -> Result<()> {
     eprintln!("Connecting to {address}…");
     let mut channel = tokio::select! {
         channel = peer::connect(address, &token) => channel?,
-        _ = tokio::signal::ctrl_c() => bail!("Connection cancelled"),
+        _ = crate::signals::interrupted() => bail!("Connection cancelled"),
     };
     let hello = tokio::time::timeout(peer::HANDSHAKE_TIMEOUT, channel.recv())
         .await

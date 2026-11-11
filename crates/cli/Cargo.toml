@@ -47,3 +47,7 @@ png = "0.18"
 
 [dev-dependencies]
 axum = "0.8"
+# Paused/virtual time for the admission-window regression tests. This unions a
+# feature onto the existing `tokio` dependency for test builds only; it changes
+# no version and no product API.
+tokio = { version = "1", features = ["test-util"] }

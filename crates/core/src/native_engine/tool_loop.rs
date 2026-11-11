@@ -284,6 +284,13 @@ struct PendingToolCall {
     concurrent: bool,
 }
 
+/// Everything one request sends: the tool definitions and the system prompt,
+/// both built from the same settings and catalog snapshot.
+struct PreparedRequest {
+    tools: Vec<crate::tools::ToolDefinition>,
+    system_prompt: Option<String>,
+}
+
 /// Consecutive concurrency-safe calls form one batch; any other call is a batch of its own.
 fn tool_batches(calls: &[PendingToolCall]) -> Vec<&[PendingToolCall]> {
     let mut batches = Vec::new();
@@ -607,6 +614,28 @@ pub fn builtin_tool_catalog() -> Vec<crate::tools::ToolDefinition> {
     tools.sort_by(|a, b| a.name.cmp(&b.name));
     tools.dedup_by(|a, b| a.name == b.name);
     tools
+}
+
+/// The first sentence of a tool description, whitespace collapsed and bounded,
+/// for the runtime tool directory.
+fn one_sentence_purpose(description: &str) -> String {
+    let line = description
+        .lines()
+        .map(str::trim)
+        .find(|line| !line.is_empty())
+        .unwrap_or_default();
+    let sentence = line
+        .split(". ")
+        .next()
+        .unwrap_or(line)
+        .trim_end_matches('.')
+        .trim();
+    let mut text = sentence.split_whitespace().collect::<Vec<_>>().join(" ");
+    if text.chars().count() > 180 {
+        text = text.chars().take(180).collect::<String>().trim_end().to_owned();
+        text.push('…');
+    }
+    text
 }
 
 async fn execute_builtin_tool(
@@ -1091,8 +1120,7 @@ impl ToolLoopExecutor {
     /// Whether a call only reads, so it may run alongside neighbouring calls.
     fn is_concurrency_safe(&self, name: &str, input: &Value) -> bool {
         match name {
-            "Read" | "Glob" | "Grep" | "ListDir" | "WebFetch" | "WebSearch" | "ToolSearch"
-            | "git_status" | "git_diff" | "git_log" => true,
+            "Read" | "Glob" | "Grep" | "ListDir" | "WebFetch" | "WebSearch" | "ToolSearch" => true,
             "Bash" => {
                 !self.skill_shell_active
                 && input["run_in_background"] != true
@@ -1323,6 +1351,128 @@ impl ToolLoopExecutor {
         })
     }
 
+    /// Whether the current agent may use this tool at all.
+    fn tool_is_allowed(&self, name: &str) -> bool {
+        self.allowed_tools
+            .as_ref()
+            .is_none_or(|names| names.iter().any(|granted| granted == name))
+    }
+
+    /// The single eligibility rule for ToolSearch discovery. The runtime tool
+    /// directory and the search itself both use it, with the same per-request
+    /// snapshot, so the names the model is told about and the names it can load
+    /// cannot disagree within one request.
+    fn tool_is_searchable(
+        &self,
+        tool: &crate::tools::ToolDefinition,
+        customization: &crate::services::customization::Customization,
+        exposed: &std::collections::HashSet<String>,
+    ) -> bool {
+        let loading = customization.loading(&tool.name);
+        loading.on_demand
+            && !loading.enabled
+            && !exposed.contains(&tool.name)
+            && self.tool_is_allowed(&tool.name)
+    }
+
+    /// Why an explicitly named tool was not loaded, in the order the checks run.
+    fn unavailable_reason(
+        &self,
+        tool: &crate::tools::ToolDefinition,
+        customization: &crate::services::customization::Customization,
+        exposed: &std::collections::HashSet<String>,
+    ) -> &'static str {
+        let loading = customization.loading(&tool.name);
+        if exposed.contains(&tool.name) {
+            "already available in this request"
+        } else if !self.tool_is_allowed(&tool.name) {
+            "not allowed for this agent"
+        } else if !loading.on_demand {
+            "disabled by tool settings"
+        } else if loading.enabled {
+            "already resident in every request"
+        } else {
+            "not loadable in this request"
+        }
+    }
+
+    /// The catalog entries this request can still load: built-ins only, after
+    /// the same gating the request itself uses. The catalog already applies the
+    /// depth, agent and external-program availability rules.
+    fn searchable_tool_catalog(
+        &self,
+        customization: &crate::services::customization::Customization,
+        catalog: &[crate::tools::ToolDefinition],
+        exposed: &std::collections::HashSet<String>,
+    ) -> Vec<crate::tools::ToolDefinition> {
+        catalog
+            .iter()
+            .filter(|tool| self.tool_is_searchable(tool, customization, exposed))
+            .cloned()
+            .collect()
+    }
+
+    /// The directory the model reads for one request. It is built from the same
+    /// catalog, settings and prepared definitions as the tool list sent with
+    /// that request, so a hot settings change cannot make the two disagree.
+    fn tool_directory(
+        &self,
+        customization: &crate::services::customization::Customization,
+        catalog: &[crate::tools::ToolDefinition],
+        prepared: &[crate::tools::ToolDefinition],
+    ) -> String {
+        let exposed: std::collections::HashSet<String> =
+            prepared.iter().map(|tool| tool.name.clone()).collect();
+        let mut lines = vec!["# Tool directory".to_string()];
+        // Whether discovery is actually callable comes from the definitions
+        // sent with this request, not from the user's switches.
+        if !exposed.contains("ToolSearch") {
+            lines.push(
+                "ToolSearch is not available in this request, so no built-in tools can be loaded through it."
+                    .to_string(),
+            );
+            return lines.join("\n");
+        }
+        let mut tools = self.searchable_tool_catalog(customization, catalog, &exposed);
+        tools.sort_by(|a, b| {
+            a.name
+                .to_ascii_lowercase()
+                .cmp(&b.name.to_ascii_lowercase())
+                .then_with(|| a.name.cmp(&b.name))
+        });
+        if tools.is_empty() {
+            lines.push(
+                "No built-in tools are available for ToolSearch to load in this request."
+                    .to_string(),
+            );
+            return lines.join("\n");
+        }
+        lines.push(
+            "ToolSearch can load only the built-in tools listed here, and only those not already supplied in the current request. Pass complete names separated by commas or spaces; a tool not listed here cannot be loaded this way.".to_string(),
+        );
+        lines.extend(tools.into_iter().map(|tool| {
+            format!(
+                "- `{}`: {}",
+                tool.name,
+                one_sentence_purpose(&tool.description)
+            )
+        }));
+        lines.join("\n")
+    }
+
+    /// The system prompt actually sent with this request: the configured prompt
+    /// followed by the directory built for the same request.
+    fn request_system_prompt(&self, directory: &str) -> Option<String> {
+        let base = self
+            .system_prompt
+            .as_deref()
+            .filter(|text| !text.trim().is_empty());
+        Some(match base {
+            Some(base) => format!("{base}\n\n{directory}"),
+            None => directory.to_owned(),
+        })
+    }
+
     /// ToolSearch loads real definitions instead of only printing them: the
     /// tools in the result can be called from the next request on. Matching and
     /// the returned schemas use the same description overrides as the request.
@@ -1353,23 +1503,39 @@ impl ToolLoopExecutor {
             .unwrap_or_else(|| self.loaded_tools.iter().cloned().collect());
         let needle = query.to_lowercase();
         // Complete tool names separated by commas or whitespace select tools.
-        // Other queries retain keyword matching, so "git diff" finds git_diff.
+        // Other queries retain keyword matching, so "web fetch" finds WebFetch.
         let normalize = |text: &str| text.to_lowercase().replace(['_', '-'], " ");
-        let selections: Vec<String> = needle
-            .strip_prefix("select:")
-            .unwrap_or(&needle)
+        // Keep the spelling the model sent so a report names it back exactly.
+        let body = if needle.starts_with("select:") {
+            query.split_once(':').map_or(query, |(_, rest)| rest)
+        } else {
+            query
+        };
+        let selections: Vec<String> = body
             .split(|ch: char| ch.is_whitespace() || ch == ',')
             .filter(|name| !name.is_empty())
             .map(str::to_owned)
             .collect();
-        let selected = (needle.starts_with("select:")
+        let names_a_tool =
+            |token: &str| catalog.iter().any(|tool| tool.name.eq_ignore_ascii_case(token));
+        // A `select:` prefix, a list where every token names a tool, or a
+        // comma-separated list naming at least one tool is an explicit
+        // enumeration: every requested name is loaded or reported, never
+        // silently dropped.
+        let explicit = needle.starts_with("select:")
             || (!selections.is_empty()
-                && selections.iter().all(|name| {
-                    catalog
-                        .iter()
-                        .any(|tool| tool.name.eq_ignore_ascii_case(name))
-                })))
-        .then_some(selections);
+                && (selections.iter().all(|token| names_a_tool(token))
+                    || (query.contains(',') && selections.iter().any(|token| names_a_tool(token)))));
+        if explicit {
+            return self.load_selected_tools(
+                tool_input,
+                query,
+                &selections,
+                &catalog,
+                &customization,
+                &exposed,
+            );
+        }
         let keywords: Vec<String> = normalize(&needle)
             .split(|ch: char| ch.is_whitespace() || ch == ',')
             .filter(|word| !word.is_empty())
@@ -1377,24 +1543,9 @@ impl ToolLoopExecutor {
             .collect();
         let mut hits: Vec<(u8, crate::tools::ToolDefinition)> = catalog
             .iter()
-            .filter(|tool| {
-                let loading = customization.loading(&tool.name);
-                loading.on_demand
-                    && !loading.enabled
-                    && !exposed.contains(&tool.name)
-                    && self
-                        .allowed_tools
-                        .as_ref()
-                        .is_none_or(|names| names.iter().any(|granted| granted == &tool.name))
-            })
+            .filter(|tool| self.tool_is_searchable(tool, &customization, &exposed))
             .filter_map(|tool| {
                 let name = tool.name.to_lowercase();
-                if let Some(selected) = &selected {
-                    return selected
-                        .iter()
-                        .position(|wanted| *wanted == name)
-                        .map(|index| (index.min(u8::MAX as usize) as u8, tool.clone()));
-                }
                 let spaced_name = normalize(&tool.name);
                 let description = normalize(&tool.description);
                 let score = if name == needle || spaced_name == normalize(&needle) {
@@ -1423,9 +1574,30 @@ impl ToolLoopExecutor {
             .collect();
         // Stable, so tools of equal rank keep the catalog order.
         hits.sort_by_key(|(score, _)| *score);
+        // Keyword discovery stays bounded; an explicit selection does not.
+        let limited = hits.len() > 5;
         let loaded: Vec<crate::tools::ToolDefinition> =
             hits.into_iter().take(5).map(|(_, tool)| tool).collect();
         if loaded.is_empty() {
+            // A whitespace-separated list can mix eligible names with unknown
+            // or removed ones; keyword matching then finds nothing because one
+            // token matches no tool. When a token is exactly a current catalog
+            // name, treat the query as an explicit list so the valid tools load
+            // and the rest are reported. Matching case-sensitively keeps
+            // natural-language queries such as "read file" on the keyword path.
+            let names_a_catalog_tool_exactly = selections
+                .iter()
+                .any(|token| catalog.iter().any(|tool| tool.name == token.as_str()));
+            if names_a_catalog_tool_exactly {
+                return self.load_selected_tools(
+                    tool_input,
+                    query,
+                    &selections,
+                    &catalog,
+                    &customization,
+                    &exposed,
+                );
+            }
             let already = catalog
                 .iter()
                 .any(|tool| tool.name.to_lowercase() == needle && exposed.contains(&tool.name));
@@ -1441,11 +1613,81 @@ impl ToolLoopExecutor {
             self.loaded_tools.insert(tool.name.clone());
         }
         let names: Vec<&str> = loaded.iter().map(|tool| tool.name.as_str()).collect();
+        let mut content = format!("Loaded {}. These tools can be called after this result; a call in the same batch runs before they load.", names.join(", "));
+        if limited {
+            content.push_str(
+                " Showing the 5 best matches; name the remaining tools explicitly to load them.",
+            );
+        }
         let result = json!({
             "success": true,
             "loaded_tools": names,
             "tools": loaded,
-            "content": format!("Loaded {}. These tools can be called after this result; a call in the same batch runs before they load.", names.join(", ")),
+            "content": content,
+        });
+        (tool_input.clone(), result.to_string(), false)
+    }
+
+    /// Loads every explicitly named tool that is currently eligible. Names are
+    /// deduplicated case-insensitively and kept in request order; unknown,
+    /// disabled and denied names are reported instead of being dropped.
+    fn load_selected_tools(
+        &mut self,
+        tool_input: &Value,
+        query: &str,
+        selections: &[String],
+        catalog: &[crate::tools::ToolDefinition],
+        customization: &crate::services::customization::Customization,
+        exposed: &std::collections::HashSet<String>,
+    ) -> (Value, String, bool) {
+        let mut loaded: Vec<crate::tools::ToolDefinition> = Vec::new();
+        let mut unknown: Vec<String> = Vec::new();
+        let mut unavailable: Vec<Value> = Vec::new();
+        let mut seen = std::collections::HashSet::new();
+        for token in selections {
+            if !seen.insert(token.to_lowercase()) {
+                continue;
+            }
+            match catalog
+                .iter()
+                .find(|tool| tool.name.eq_ignore_ascii_case(token))
+            {
+                None => unknown.push(token.clone()),
+                Some(tool) if self.tool_is_searchable(tool, customization, exposed) => {
+                    loaded.push(tool.clone())
+                }
+                Some(tool) => unavailable.push(json!({
+                    "name": tool.name,
+                    "reason": self.unavailable_reason(tool, customization, exposed),
+                })),
+            }
+        }
+        for tool in &loaded {
+            self.loaded_tools.insert(tool.name.clone());
+        }
+        let names: Vec<&str> = loaded.iter().map(|tool| tool.name.as_str()).collect();
+        let mut content = if names.is_empty() {
+            format!("No requested tool could be loaded for \"{query}\".")
+        } else {
+            format!("Loaded {}. These tools can be called after this result; a call in the same batch runs before they load.", names.join(", "))
+        };
+        if !unknown.is_empty() {
+            content.push_str(&format!(" Unknown tools, not loaded: {}.", unknown.join(", ")));
+        }
+        for entry in &unavailable {
+            content.push_str(&format!(
+                " {} was not loaded: {}.",
+                entry["name"].as_str().unwrap_or_default(),
+                entry["reason"].as_str().unwrap_or_default()
+            ));
+        }
+        let result = json!({
+            "success": !names.is_empty(),
+            "loaded_tools": names,
+            "tools": loaded,
+            "unknown": unknown,
+            "unavailable": unavailable,
+            "content": content,
         });
         (tool_input.clone(), result.to_string(), false)
     }
@@ -2063,19 +2305,39 @@ impl ToolLoopExecutor {
             .is_some_and(|names| !names.iter().any(|name| name == "ToolSearch"))
     }
 
+    /// Builds the tool list and the system prompt for one request from a single
+    /// settings and catalog snapshot, so the schemas the model receives and the
+    /// directory it reads describe the same state. Execution still re-reads the
+    /// settings and rechecks permission when a tool is actually called.
+    fn prepare_request(&self) -> Result<PreparedRequest> {
+        let customization = self.customization()?;
+        let catalog = customization.described(self.builtin_catalog());
+        let tools = self.prepare_tool_definitions(&customization, catalog.clone());
+        let directory = self.tool_directory(&customization, &catalog, &tools);
+        let system_prompt = self.request_system_prompt(&directory);
+        Ok(PreparedRequest {
+            tools,
+            system_prompt,
+        })
+    }
+
+    fn tool_definitions(&self) -> Result<Vec<crate::tools::ToolDefinition>> {
+        let customization = self.customization()?;
+        let catalog = customization.described(self.builtin_catalog());
+        Ok(self.prepare_tool_definitions(&customization, catalog))
+    }
+
     /// What the next request carries: core tools, the tools that are on demand
     /// and already loaded, then MCP and the user's own tools. The same defaults
     /// apply whether or not a settings file exists.
-    fn tool_definitions(&self) -> Result<Vec<crate::tools::ToolDefinition>> {
-        let customization = self.customization()?;
+    fn prepare_tool_definitions(
+        &self,
+        customization: &crate::services::customization::Customization,
+        catalog: Vec<crate::tools::ToolDefinition>,
+    ) -> Vec<crate::tools::ToolDefinition> {
         let restricted = self.restricted_without_discovery();
-        let allowed = |name: &str| {
-            self.allowed_tools
-                .as_ref()
-                .is_none_or(|names| names.iter().any(|granted| granted == name))
-        };
-        let mut tools: Vec<_> = self
-            .builtin_catalog()
+        let allowed = |name: &str| self.tool_is_allowed(name);
+        let mut tools: Vec<_> = catalog
             .into_iter()
             .filter(|tool| {
                 customization.exposes(&tool.name, &self.loaded_tools)
@@ -2105,7 +2367,7 @@ impl ToolLoopExecutor {
                 }),
         );
         tools.retain(|tool| allowed(&tool.name));
-        Ok(tools)
+        tools
     }
 
     pub fn with_prefetch_engine(mut self, engine: Arc<PrefetchEngine>) -> Self {
@@ -3805,10 +4067,10 @@ impl ToolLoopExecutor {
                 }
             }
 
-            // Rebuilt per request: a tool loaded after the last answer joins
-            // from here, and the snapshot, the estimate and the client share
-            // this one list.
-            let tools = self.tool_definitions()?;
+            // One snapshot per request: the definitions, the request snapshot
+            // and the tool directory all come from the same settings and
+            // catalog read, so a hot change cannot make them disagree.
+            let PreparedRequest { tools, system_prompt } = self.prepare_request()?;
             self.exposed_tools = Some(tools.iter().map(|tool| tool.name.clone()).collect());
             self.streaming_tool_args.clear();
             let mut request_trace = RequestTrace::new(json!({
@@ -3823,7 +4085,7 @@ impl ToolLoopExecutor {
                 "contextWindow": self.provider.model.context_window.map(|n| n as usize).unwrap_or_else(|| TokenCounter::get_model_context_limit(&self.provider.model.id)),
                 "reservedForCompletion": (self.max_tokens as u64) * 2,
                 "effort": self.provider.model.effort,
-                "systemPrompt": self.system_prompt,
+                "systemPrompt": system_prompt.as_deref(),
                 "systemMessages": conversation_messages.iter().filter(|m| m.role == "system").collect::<Vec<_>>(),
                 "tools": tools,
                 "contextBoundary": self.context_boundary(),
@@ -3842,7 +4104,7 @@ impl ToolLoopExecutor {
                 .send_message_stream_with_thinking_counted(
                     &self.provider,
                     conversation_messages.clone(),
-                    self.system_prompt.as_deref(),
+                    system_prompt.as_deref(),
                     tools.clone(),
                     self.max_tokens,
                     enable_thinking,
@@ -4546,10 +4808,10 @@ impl ToolLoopExecutor {
                 }
             }
 
-            // Rebuilt per request: a tool loaded after the last answer joins
-            // from here, and the snapshot, the estimate and the client share
-            // this one list.
-            let tools = self.tool_definitions()?;
+            // One snapshot per request: the definitions, the request snapshot
+            // and the tool directory all come from the same settings and
+            // catalog read, so a hot change cannot make them disagree.
+            let PreparedRequest { tools, system_prompt } = self.prepare_request()?;
             self.exposed_tools = Some(tools.iter().map(|tool| tool.name.clone()).collect());
             self.streaming_tool_args.clear();
             let mut request_trace = RequestTrace::new(json!({
@@ -4564,7 +4826,7 @@ impl ToolLoopExecutor {
                 "contextWindow": self.provider.model.context_window.map(|n| n as usize).unwrap_or_else(|| TokenCounter::get_model_context_limit(&self.provider.model.id)),
                 "reservedForCompletion": (self.max_tokens as u64) * 2,
                 "effort": self.provider.model.effort,
-                "systemPrompt": self.system_prompt,
+                "systemPrompt": system_prompt.as_deref(),
                 "systemMessages": conversation_messages.iter().filter(|m| m.role == "system").collect::<Vec<_>>(),
                 "tools": tools,
                 "contextBoundary": self.context_boundary(),
@@ -4583,7 +4845,7 @@ impl ToolLoopExecutor {
                 .send_message_stream_counted(
                     &self.provider,
                     conversation_messages.clone(),
-                    self.system_prompt.as_deref(),
+                    system_prompt.as_deref(),
                     tools.clone(),
                     self.max_tokens,
                     Some(&context_capture),

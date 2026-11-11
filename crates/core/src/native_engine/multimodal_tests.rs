@@ -117,7 +117,13 @@ async fn first_send_raw_cli_images_reach_actual_model_requests() {
         server.abort();
         assert_eq!(result.unwrap().0, "done");
         let request = captured.recv().await.unwrap();
-        assert_content(&request["messages"][0]["content"], anthropic);
+        let user = request["messages"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|message| message["role"] == "user")
+            .expect("the request carries the user message");
+        assert_content(&user["content"], anthropic);
     }
 }
 

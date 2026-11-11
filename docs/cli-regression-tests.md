@@ -90,6 +90,8 @@ grep -rn "crossterm::terminal::size\|[^:]terminal::size()" crates/cli/src --incl
 cargo test --locked --no-fail-fast -p deepseek-code-cli --test teams --test session_messages --test session_worker --test worktree_startup
 ```
 
+准入交棒的自动回归在 `--bin dcl` 中（暂停 Tokio 时钟，不依赖墙钟）：`persistent_worker::admission_tests` 覆盖“只有确实已完成的回合才等待”“超过旧 250ms 轮询窗口仍在等待”“宽限到期按未提交拒绝且不释放他人准入、之后的真实释放才准入”“空闲 host 立即准入”。真实协议路径由 `--test session_worker` 的 `turns_submitted_right_after_completion_are_admitted` 覆盖（连续三个回合紧跟完成提交，各只请求一次）。
+
 若出现 `is not loaded. Call ToolSearch`，先确认场景是否需要显式加载工具或增加模型搜索步骤；不要把未执行工具导致的后续空结果误判为 Worker 或消息传递失效。
 
 ## 真实终端的测试方法
@@ -113,11 +115,11 @@ cargo test --locked --no-fail-fast -p deepseek-code-cli --test teams --test sess
 
 ### 文件锁的平台一致性
 
-共用引擎的文件锁通过 `fs::try_lock_file`、`fs::lock_file` 获取，短暂竞争使用 `fs::try_lock_briefly`。Android 使用系统 `flock`，其他平台沿用标准库；关闭持有文件后由系统释放所有权。
+共用引擎的文件锁通过 `fs::try_lock_file`、`fs::lock_file` 获取，短暂竞争使用 `fs::try_lock_briefly`，逻辑结束时用 `fs::unlock_file` 显式释放。Android 使用系统 `flock`，其他平台沿用标准库。
 
-1. `cargo test --locked -p deepseek-code-core --lib fs::file_lock`：首次获取成功，第二个独立句柄返回 `WouldBlock`，失败的探测不会释放原锁，持有者关闭后可以重新获取。
+1. `cargo test --locked -p deepseek-code-core --lib fs::file_lock`：首次获取成功，第二个独立句柄返回 `WouldBlock`，失败的探测不会释放原锁，持有者释放后可以重新获取。`an_inherited_descriptor_keeps_a_close_only_lock_but_explicit_unlock_frees_it` 用真实子进程继承描述符证明：只关闭持有者不会立即释放（`flock` 属于打开文件描述），显式解锁才会。该区别存在后，进程内其他线程 `fork` 期间“关闭即释放”不再保证即时，因此原有测试改为通过生产路径显式解锁；排他性断言保持不变。
 2. 在 Android 真机运行同一锁测试，并用首次创建的会话发消息。真实存在的竞争者仍被拒绝，正常会话可以开始问答。
-3. 回归会话执行租约、presence、一次性 hook、设置写入和 worker 恢复测试，确认调用方统一使用共用锁入口；不要将不支持的锁调用等同于已有执行者。
+3. 回归会话执行租约、presence、一次性 hook、设置写入和 worker 恢复测试，确认调用方统一使用共用锁入口；不要将不支持的锁调用等同于已有执行者。`services::session_worker::recovery` 的 `recovery_releases_the_startup_lock_for_a_retained_descriptor` 和 `a_failed_recovery_releases_the_lifetime_locks_it_took` 覆盖启动/恢复锁在成功和失败路径上的显式释放，包括保留描述符的情况，并且不释放其他进程持有的锁。
 
 ### A. 输入框换行
 
@@ -165,11 +167,13 @@ cargo test --locked --no-fail-fast -p deepseek-code-cli --test teams --test sess
 1. **只关前端，worker 还活着**：`--resume` 显示任务仍在运行和任务 ID；`/continue` 立刻接回同一个任务，命令不重新执行，结束后输出结果。
 2. **前端和 worker 都被杀**：`--resume` 提示已恢复中断状态；`/continue` 开始新请求。模型收到的结果说明工具没有执行完，不能把它当成成功。原来的任务记录变为 `failed`，原请求不重放。
 3. **带 `--permission-mode` 恢复已崩溃的会话**：不再报告 `active background work`。
-3a. **只有 supervisor 被杀**：worker 主进程约 5 秒内自行退出，之后可以恢复。
+3a. **只有 supervisor 被杀**：worker 主进程约 5 秒内自行退出，之后可以恢复。supervisor 在启动 host 之前就把自己的 PID 写进 worker 记录，并通过内部环境变量把同一个 PID 交给 host，因此即使记录在 host 的第一个 tick 之前就损坏，host 仍能识别“owner 已退出”并自行退出，不会因为记录不可读而永久占用会话。host 读到该变量后立即从自己的环境里移除，不传给子进程。
 4. **worker 长时间无响应但进程还在**：`/continue` 不接回，提示用 `/tasks show ID` 查看，并给出任务 ID。
-5. **会话被占用时发送普通消息**：报错包含任务 ID 和 `/continue`，消息没有提交。
+5. **会话被占用时发送普通消息**：报错包含任务 ID 和 `/continue`，消息没有提交。已完成但仍在收尾的回合不算占用：发布完成早于 host 释放准入，所以紧跟完成之后的提交会等待真正的释放事件再准入；超过宽限仍未释放时按“未提交”返回 busy，不排队、不重叠。真正运行的回合（包括空闲子代理唤醒的回合）立即拒绝。
 6. **没有活动任务**：显示 `Session restored; waiting for input`，`/continue` 正常继续，通知只在继续后才唤醒模型。
 7. 恢复后的历史里，没有结果的工具调用显示 `No result recorded`。
+
+启动/恢复锁在逻辑结束时显式解锁：`flock` 属于打开文件描述，`fork` 出的子进程会通过继承的描述符共享它，所以只关闭自己的 `File` 并不能保证锁立即释放。只有取得锁的进程（记录取得时的 PID）才会解锁，子进程不会误放父进程仍持有的锁。同一原因，`fs::file_lock` 中“关闭即释放”的旧断言在会 `fork` 的测试进程里并不可靠，现已改为通过生产路径显式解锁；关闭与显式解锁的确定性对比由 `an_inherited_descriptor_keeps_a_close_only_lock_but_explicit_unlock_frees_it` 覆盖。
 
 ### F. /tasks
 
@@ -210,7 +214,9 @@ cargo test --locked --no-fail-fast -p deepseek-code-cli --test teams --test sess
 17. Responses 真实进程重启：用隔离数据目录 `config.json` 配置 Responses 适配供应商（模型 `api` 为 `openai-responses`，内置供应商 ID 为 `openai`），真实 `dcl` 进程搜索加载后退出，`--resume` 新进程的首个 Responses 请求应包含此前加载的工具。不要用 `--base-url` 覆盖，它会清除内置供应商 ID。
 18. 命令改开关：在隔离数据目录执行 `dcl config set tools.<name>.enabled|on_demand true|false`，`dcl config show` 的 `tools` 项与文件内容一致；下一次模型请求的工具集合按新开关变化（两个都关的工具不出现也搜不到，只开启用的工具直接出现在请求里）。同一次写入把 `disabled_tools` 里的内置名折算成开关，非内置名保留。交互终端执行 `/tools`，用 `Space` 改“启用”、`Tab` 改“按需加载”，关闭面板后文件与面板一致；非终端下 `/tools` 打印文本清单。`crates/cli/src/tool_settings.rs` 的单元测试覆盖只改一个开关、双关、迁移保留非内置名和非法输入。
 
-19. 搜索匹配：多个关键词分开匹配，`_`、`-` 视为空格，例如 `git diff` 首先加载 `git_diff`；任一关键词都匹配不到时不加载；`select:git_status,ListDir` 只按名称精确加载，并保持给出的顺序。 完整工具名支持逗号、空白和混合分隔（例如 `WebSearch WebFetch`、`WebSearch,WebFetch`），忽略大小写、去重并保持顺序；`select:` 同样支持两种分隔。名称识别基于完整目录，禁用、已暴露及代理未允许的工具仍不加载。
+19. 搜索匹配：多个关键词分开匹配，`_`、`-` 视为空格，例如 `web fetch` 首先加载 `WebFetch`；任一关键词都匹配不到时不加载；`select:WebSearch,ListDir` 只按名称精确加载，并保持给出的顺序。 完整工具名支持逗号、空白和混合分隔（例如 `WebSearch WebFetch`、`WebSearch,WebFetch`、`ListDir,WebSearch WebFetch,ListDir`），忽略大小写、去重并保持顺序；`select:` 同样支持两种分隔。显式选择不设数量上限：请求 7 个及以上合格名称时全部加载，未知、禁用、代理未允许或已在请求中的名称逐项报告，不会被静默丢弃；只有关键词发现仍最多返回 5 个，并提示可显式点名其余工具。空格分隔的名单夹带未知名或已删除名时，只要关键词搜索没有任何命中、且至少一个 token 区分大小写地等于当前目录中的工具名，就按显式名单加载合格名称，并把其余名称报告为未知或不可用；自然语言关键词查询（如 `web fetch`、`read notebook`）以及小写完整名不受此兜底影响。名称识别基于完整目录，禁用、已暴露及代理未允许的工具仍不加载。已删除的 `git_status`、`git_diff`、`git_log`、`git_add`、`git_commit`、`smart_project_scan` 不在目录中，按名称或关键词搜索都不会加载。自动回归：`cargo test --locked -p deepseek-code-core --lib tool_loading_tests::explicit_selection_loads_every_eligible_name_and_reports_the_rest`、`tool_loading_tests::space_separated_names_load_when_mixed_with_unknown_or_removed_names`、`tool_loading_tests::keyword_searches_are_not_turned_into_name_lists` 与 `tool_loading_tests::search_selects_complete_names_with_commas_and_whitespace`。
+
+20. 工具目录：每次真实请求的系统提示词（OpenAI 的 system 消息、Anthropic 的 `system`、Responses 的 `instructions`）包含当前可加载的内置工具名和一句话用途，并说明 `ToolSearch` 只能加载这里列出的内置工具。目录与本次请求的工具 schema 来自同一份设置和目录快照，描述覆盖一致。常驻、已加载、两个开关都关、代理未允许、MCP 和自定义工具不出现；加载工具或改开关后，下一次请求的目录随之变化。是否声称可加载取决于本次请求是否真的有可调用的 `ToolSearch`：两个开关都关或按需但尚未加载时，目录说明它不可用且不列出可加载名称；有 `ToolSearch` 但没有可加载工具时如实说明；受限代理没有 `ToolSearch` 时仍只直接暴露已授权的按需工具。已删除的 Git 工具和 `smart_project_scan` 不在目录中，直接调用返回 `Unknown tool`；Git 命令仍可通过 `Bash` 在临时仓库中执行。自动回归：`cargo test --locked -p deepseek-code-core --lib tool_loading_tests::every_transport_sends_a_dynamic_directory_of_searchable_builtins`、`tool_loading_tests::a_request_without_callable_tool_search_does_not_promise_loading`、`tool_loading_tests::an_empty_directory_is_reported_truthfully`、`tool_loading_tests::removed_git_tools_cannot_be_restored_configured_or_called` 与 `tools::directory_edit_regressions::git_commands_run_through_bash_after_the_native_tools_are_removed`。
 
 自动回归：`cargo test --locked -p deepseek-code-core --lib tool_loading_tests`。
 provider mock 直接驱动公开 executor，覆盖 Anthropic、Chat Completions、Responses：
@@ -220,6 +226,41 @@ provider mock 直接驱动公开 executor，覆盖 Anthropic、Chat Completions�
 恢复回归另从关闭后重新打开的 SQLite 读取成功 ToolSearch 工具行，传入只有显示文本的历史；
 验证首个真实请求恢复工具、当前开关及代理限制仍生效，错误/非助手/其他会话/压缩边界前记录不授予加载资格。
 这些 core 结果不能代替终端 `/tools` 同会话联动或 Desktop 原生界面验收。
+
+### N. 外部代理（Codex / Claude Code / dcl）
+
+`tools/external_agents.rs` 的会话、线程身份与最终回答契约。自动化使用本机真实 Codex（0.163.0）与本地 Responses mock、隔离的 `CODEX_HOME` 和假密钥：
+
+```bash
+cargo test --locked -p deepseek-code-core --lib tools::external_agents::tests
+python3 -I codex-real/dcl_codex_harness.py --binary target/debug/dcl --out <新目录>
+```
+
+1. 会话 ID 规范化：`session_id` 接受大写、无连字符、`{…}` 和 `urn:uuid:` 等等价写法，启动前统一为小写带连字符 UUID；argv（`--resume` / `resume <id>`）和之后的一致性比较使用同一个规范值。非法 ID 在启动进程前报错。真实 Codex 的 D1/D2/D3 场景都应只有 2 次请求、两次结果报告同一线程 ID，且不出现 “not the requested session”。
+2. 线程冲突：JSONL 中第一个 `thread.started` 的 ID 被保留；再出现语义不同的 ID 时失败并报告两个 ID，同一 UUID 的不同写法可以接受。续接时请求的 ID 出现在最后，也不能覆盖先前的冲突。可恢复的 `error` 事件之后仍正常 `turn.completed` 且退出码为 0，不算失败。
+3. 最终消息：优先使用 JSONL 的 `agent_message`；没有时读取 `--output-last-message` 文件。两者都没有的空回答仍然成功，并带 `note: Codex completed without a final message`；文件无法读取时明确报错，不伪造回答。非零退出或缺少 `turn.completed` 仍然是失败，即使文件里有内容。
+
+### O. 终止信号清理（SIGTERM / SIGHUP）
+
+`crates/cli/src/signals.rs` 在运行时启动后、任何一轮开始前注册 Ctrl-C、SIGTERM、SIGHUP。三种信号都走已有的协作取消：当前回合的 engine 任务被 abort 并等待结束，前台 Bash、hook、外部代理的进程树由 `ProcessTree` 的 Drop 结束；之后进程以非零状态退出，不能是“被信号直接杀死”。三者共用同一个通知通道：等待者在开始等待后收到一次通知，之后的回合仍可再次被打断。Windows 只有 Ctrl-C，但也通过同一通道发布，每次 Ctrl-C 都会唤醒当前等待者。
+
+注册失败（例如某个信号无法安装）时启动直接报错并以非零状态退出，不会带着部分安装继续运行。原因是 Tokio 在丢弃某个 `Signal` 时不会恢复该信号的默认处理；部分安装后只监听 Ctrl-C 可能让 SIGTERM 被静默忽略。自动化用注入的失败验证注册在第一个错误处停止并返回错误，不安装真实 OS 处理器。
+
+1. 前台 Bash：模型调用 Bash 运行 `sh -c 'sleep 30 & wait'`，确认 sleep 子进程存在后给 dcl 发 SIGTERM 或 SIGHUP；dcl 必须非零退出且不是被该信号终止，sleep 及其 shell 全部消失。
+2. 外部代理：本地假 `codex`（PATH 前置，`customization.json` 中 `Codex` 启用且常驻）启动 `sleep 30 & wait` 进程组；发 SIGTERM 后 dcl 与假 codex、sleep 都不能残留。该用例只检查它自己观察到的 pid，不使用按名称的全局 kill。
+3. 真实 Codex 0.163.0：第二模型复验脚本的 B3（SIGTERM）连续 3 次都必须先观察到 `shell_child_seen`，退出码非零，`shell_child_survivors` 与 `codex_survivors` 为空。B1（超时）与 B2（SIGINT）保持通过。补充脚本 `round09-sighup-real-codex.py`（开发支持目录）用同样结构验证 SIGHUP；它不是原复验脚本的一部分。
+4. Ctrl-C 语义不变：运行中仍只取消当前回合；REPL 空闲时仍清空未发送的多行草稿并继续，不会退出。SIGTERM/SIGHUP 在空闲或运行中都应结束提示符并以非零状态退出。
+5. 只结束本会话拥有的活动工作：故意的 `run_in_background`/`detach` 后台任务和无关进程不受影响，没有全局 kill。
+6. Windows 手工验证（本轮未执行，需在真实控制台完成）：`--print` 模式让模型运行一个前台 `sleep`/`Start-Sleep`，按 Ctrl-C 后回合取消、进程非零退出、子进程消失；在交互 REPL 中运行长工具时按 Ctrl-C 只取消该轮，空闲且有未发送多行草稿时按 Ctrl-C 只丢弃草稿并继续。这两次 Ctrl-C 都必须被观察到，不能只在第一次生效。
+
+自动回归：
+
+```bash
+cargo test --locked -p deepseek-code-cli --test interrupt_signals
+cargo test --locked -p deepseek-code-cli --bin dcl -- signals::
+```
+
+`interrupt_signals` 的三个用例分别覆盖 Bash+SIGTERM、Bash+SIGHUP、Codex+SIGTERM；把 `signals.rs` 临时改回只处理 Ctrl-C 时三者都失败（dcl 被信号终止并留下子进程），用于确认测试确实覆盖该缺陷。`signals::tests` 另外覆盖平台无关的通知语义：多个等待者同时唤醒、旧信号不唤醒新等待者、终止信号在等待者出现前到达仍被记住、Ctrl-C 不触发进程退出，以及注入的部分注册失败会在第一个错误处停止。
 
 ### I. 定时任务
 
@@ -342,6 +383,9 @@ OpenCode Go 用四种协议提供模型，模型地址和协议都来自内置�
 - `session.rs`：B、D、E
 - `services/session_worker*`、`services/background_sessions.rs`：D、E4，以及 `cargo test --locked -p deepseek-code-core --test worker_environment`（普通子进程不继承 worker 的控制变量）
 - `tools/mod.rs` 的 shell 启动、`services/tool_hooks.rs`、`mcp/mod.rs` 的 stdio 启动：`worker_environment`，并按 E4 复核后台与分离命令
+- `tools/external_agents.rs`：N
+- `crates/cli/src/signals.rs`、`crates/cli/src/main.rs` 的信号处理：O，以及 B（运行中排队与撤回）、E3（`Esc` 中断当前一轮）
+- `crates/cli/src/session.rs`、`worker_frontend.rs`、`sdk.rs`、`compaction.rs` 的取消分支：O，以及 L 的取消场景和 SDK 测试
 - `runtime.rs`、`db/message_repo.rs`（发给模型的历史）：D2、E5，以及 SDK 测试
 - `db/mod.rs`（`write_tx`）：`cargo test --locked -p deepseek-code-core --lib db::write_tx`（重试、非争用不重试、超时报 label、失败不留半行）与 `cargo test --locked -p deepseek-code-core --test session_concurrency`。真实争用复验：用 `VACUUM INTO` 复制数据库，`DEEPSEEK_CODE_DATA_DIR` 指向副本，另一个进程 `BEGIN IMMEDIATE` 占锁 8 秒，期间跑一轮带工具调用的请求，确认回合完成、日志有重试告警、工具行与快照完整；再占锁 40 秒，确认回合以带 label 的错误结束（不是裸 `database is locked`），且没有半成品工具行。
 - `db/message_repo.rs` 的请求快照去重（`request_blobs` / `*Ref`）：`cargo test --locked -p deepseek-code-core --lib db::message_repo`（同头只存一份、往返字段一致、旧内联行可读、缺 blob 不伪造、不修改调用方数据）、`cargo test --locked -p deepseek-code-core --test compaction_status_regressions` 与 `cargo test --locked -p deepseek-code-cli --bin dcl status_commands_tests`。历史数据不会自动回填：要缩小现有库需另跑一次性回填脚本并 `VACUUM`，验证方法是回填前后比较 `requests_json` 总字节、`request_blobs` 行数，并抽 3 条消息确认 `get_request_snapshots` 往返一致。
@@ -379,7 +423,7 @@ OpenCode Go 用四种协议提供模型，模型地址和协议都来自内置�
 1. Auto 模式执行普通 Bash 和复合读取命令时不弹审批，也不请求分类器；PreToolUse 修改命令后，以最终输入执行并传给 PostToolUse，工具调用 ID 保持一致。
 2. Ask 模式为普通 Bash 选择 `Allow for Session`，同一会话下一条普通 Bash 直接执行；危险规则命中的命令仍单独审批，菜单不提供会话授权。
 3. `/permissions bash-session show` 显示已授权，`revoke` 后显示未授权；Worker 重连保留授权，冷启动、其他会话不继承授权。显式拒绝规则保持优先。
-4. `git_add` 请求 12 个路径时，折叠结果显示成功摘要、3 个路径和 `+9 lines (click to expand)`；实际点击后能看到第 12 个路径，复制内容为完整文本。
+4. 让模型执行一次返回 12 行的 `Grep`：折叠结果显示前几行和 `+N lines (click to expand)`；实际点击后能看到最后一行，复制内容为完整文本。
 5. 后台任务运行时，`TaskOutput(任务名称)` 在等待结果前出现；恢复历史后仍显示名称。
 6. 工具运行期间用独立 SQLite 连接持有写事务 3 秒：前台不弹锁库提示，继续显示工具结果并保留已有建议；持续锁超过 5 秒才提示状态延迟。释放锁后正常结束，过期建议不能获批；任务目录中没有新增 `cancel` 文件。
 7. 空标准输入失败后允许保留诊断日志，但不能创建会话数据库或配置；损坏的配置文件不能被覆盖。

@@ -39,7 +39,7 @@ pub async fn run(session: &Session, command: &str) -> Result<()> {
     let child = child.spawn().with_context(|| format!("Cannot start {}", shell.program))?;
     let output = tokio::select! {
         output = child.wait_with_output() => output?,
-        _ = tokio::signal::ctrl_c() => anyhow::bail!("Command interrupted"),
+        _ = crate::signals::interrupted() => anyhow::bail!("Command interrupted"),
     };
     let stdout =
         crate::terminal::tool_view::plain_terminal_text(&String::from_utf8_lossy(&output.stdout));

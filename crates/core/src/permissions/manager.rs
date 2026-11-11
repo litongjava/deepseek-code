@@ -510,9 +510,6 @@ impl PermissionManager {
                 | "ListAgents"
                 | "CronList"
                 | "ReportFindings"
-                | "git_status"
-                | "git_diff"
-                | "git_log"
         )
     }
 
@@ -1138,14 +1135,8 @@ mod policy_tests {
     }
 
     #[test]
-    fn plan_allows_ordinary_commands_and_git_tools_but_preserves_boundaries() {
+    fn plan_allows_ordinary_commands_but_preserves_boundaries() {
         let manager = manager(PermissionMode::PlanMode);
-        for tool in ["git_status", "git_diff", "git_log"] {
-            assert_eq!(
-                manager.check_permission(&context(tool)),
-                PermissionResult::Granted
-            );
-        }
         for tool in ["Bash", "PowerShell"] {
             for command in [
                 "git status",
@@ -1180,20 +1171,13 @@ mod policy_tests {
         ));
         manager.set_session_rules(
             "session",
-            HashMap::from([
-                ("Bash".into(), PermissionAction::Confirm),
-                ("git_status".into(), PermissionAction::Deny),
-            ]),
+            HashMap::from([("Bash".into(), PermissionAction::Confirm)]),
         );
         let mut shell = context("Bash");
         shell.tool_input = serde_json::json!({"command":"cargo test"});
         assert!(matches!(
             manager.check_permission(&shell),
             PermissionResult::RequiresConfirmation(_)
-        ));
-        assert!(matches!(
-            manager.check_permission(&context("git_status")),
-            PermissionResult::Denied(_)
         ));
         shell.tool_input = serde_json::json!({"command":"codegraph init --yes /srv/reference-library"});
         assert!(matches!(manager.check_permission(&shell), PermissionResult::RequiresConfirmation(_)));

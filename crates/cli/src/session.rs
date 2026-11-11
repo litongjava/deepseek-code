@@ -539,7 +539,7 @@ impl Session {
         self.lifecycle_owned = true;
         let outcome = tokio::select! {
             result = crate::hook_progress::during(&self.id, true, session_hooks::start_with_output(&context, &self.workspace, &self.id, source, &self.model)) => result,
-            _ = tokio::signal::ctrl_c() => anyhow::bail!("SessionStart hooks interrupted"),
+            _ = crate::signals::interrupted() => anyhow::bail!("SessionStart hooks interrupted"),
             _ = deepseek_code_core::services::background_sessions::wait_for_cancellation() => anyhow::bail!("SessionStart hooks cancelled"),
         };
         match outcome {
@@ -837,7 +837,7 @@ impl Session {
         let hook_interactive = input.is_some() && cli.output_format == OutputFormat::Text;
         let prepared = tokio::select! {
             prepared = crate::hook_progress::during(&hook_session, hook_interactive, crate::skill_commands::prepare_invocation(cli, self, prompt, input)) => prepared?,
-            _ = tokio::signal::ctrl_c() => bail!("Skill invocation cancelled"),
+            _ = crate::signals::interrupted() => bail!("Skill invocation cancelled"),
         };
         let expanded;
         let prompt = match prepared {
@@ -1262,7 +1262,13 @@ impl Session {
             },
             _ = &mut worker_cancel => bail!("Background task cancelled before model request"),
             result = crate::hook_progress::during(&self.id, interactive_display, request) => result?,
-            _ = tokio::signal::ctrl_c() => bail!("Interrupted before model request"),
+            _ = crate::signals::interrupted() => {
+                // The engine may have spawned its executor before the request
+                // future completed; cancel it so the turn and its owned tools
+                // are cleaned up instead of left running.
+                self.engine.cancel_turn(&self.id).await;
+                bail!("Interrupted before model request");
+            },
         };
         let mut progress = crate::terminal::live::TurnDisplay::new(interactive_display, self.permission_mode(), &self.paths.data_dir.join("keybindings.json"), self.store.history(&self.id)?.iter().filter(|row|row["role"]=="user").filter_map(|row|row["content"].as_str().map(str::to_owned)).filter(|text| !crate::background_commands::is_notification(text)).collect())?.with_workspace(&self.workspace);
         progress.restore_numbers(self)?;
@@ -1318,7 +1324,7 @@ impl Session {
                     event = events.recv() => event.context("Engine stream closed before completion")?,
                     _ = &mut worker_cancel => bail!("Background task cancelled"),
                     _ = remote_interrupts.next() => bail!("Interrupted by Remote Control"),
-                    _ = tokio::signal::ctrl_c() => bail!("Interrupted"),
+                    _ = crate::signals::interrupted() => bail!("Interrupted"),
                     _ = refresh.tick() => {
                         progress.tick();
                         if background_transcript {
@@ -1898,7 +1904,7 @@ impl Session {
                             Some(crate::terminal::live::Action::Submit(prompt) | crate::terminal::live::Action::Queue(prompt)) => if let Some(reader)=input.as_mut() { reader.queue_prompt(prompt); },
                             Some(_) => progress.notice("Finishing the current side question; another can be sent from the next prompt."),
                         },
-                        _ = tokio::signal::ctrl_c() => break,
+                        _ = crate::signals::interrupted() => break,
                     }
                 }
             }
@@ -2038,14 +2044,14 @@ async fn wait_answer(session: &Session, progress: &mut crate::terminal::live::Tu
                     Some(crate::terminal::live::Action::SideQuestion(question))=>if let Some(reader)=input.as_mut(){reader.queue_prompt(format!("/btw {question}"));},
                     Some(crate::terminal::live::Action::Draft(draft))=>if let Some(reader)=input.as_ref(){reader.restore_draft(draft);},
                 },
-                _=tokio::signal::ctrl_c()=>bail!("Interrupted"),
+                _=crate::signals::interrupted()=>bail!("Interrupted"),
             }
         }
     }
 }
 
 async fn read_answer(reader: &mut TerminalInput) -> Result<String> {
-    tokio::select! { answer = reader.read_answer("") => answer?.context("Input closed"), _ = tokio::signal::ctrl_c() => bail!("Interrupted") }
+    tokio::select! { answer = reader.read_answer("") => answer?.context("Input closed"), _ = crate::signals::interrupted() => bail!("Interrupted") }
 }
 
 pub(crate) fn emit_json(value: &Value) -> Result<()> {

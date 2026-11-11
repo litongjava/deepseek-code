@@ -53,7 +53,7 @@ pub async fn handle(command: &str, argument: &str, paths: &RuntimePaths) -> Resu
             );
             let notes = tokio::select! {
                 notes = cli_resources::release_notes(&paths.data_dir, argument == "refresh") => notes?,
-                _ = tokio::signal::ctrl_c() => anyhow::bail!("Release notes request cancelled"),
+                _ = crate::signals::interrupted() => anyhow::bail!("Release notes request cancelled"),
             };
             command_eprintln!(
                 "Official Claude Code release notes · {} · fetched {}\n{}",

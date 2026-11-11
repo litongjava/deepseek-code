@@ -36,7 +36,7 @@ async fn authorize(
     if confirmation {
         let answer = tokio::select! {
             line = input.read_answer("Allow this status line operation? [y/N] ") => line?.context("Input closed")?,
-            _ = tokio::signal::ctrl_c() => bail!("Status line setup cancelled"),
+            _ = crate::signals::interrupted() => bail!("Status line setup cancelled"),
         };
         ensure!(
             matches!(answer.trim().to_ascii_lowercase().as_str(), "y" | "yes"),
@@ -138,7 +138,7 @@ pub async fn handle(argument: &str, session: &Session, input: &mut TerminalInput
         let request = request.to_string();
         let result = tokio::select! {
             result = deepseek_code_core::native_engine::generation::generate(provider, setup::SYSTEM, &request) => result?,
-            _ = tokio::signal::ctrl_c() => bail!("Status line setup cancelled; settings unchanged"),
+            _ = crate::signals::interrupted() => bail!("Status line setup cancelled; settings unchanged"),
         };
         let proposal = setup::parse_proposal(&result)?;
         command_eprintln!(

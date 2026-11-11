@@ -172,7 +172,15 @@ async fn a_tool_with_both_switches_off_is_neither_discoverable_nor_callable() {
     let (_, output, _) = executor
         .execute_tool_call("ToolSearch", &json!({"query":"computer_use"}), "search")
         .await;
-    assert!(output.contains("No tool"), "{output}");
+    // An explicit name is reported with its reason instead of a generic miss.
+    assert!(output.contains("disabled by tool settings"), "{output}");
+    let value: Value = serde_json::from_str(&output).unwrap();
+    assert_eq!(value["success"], false);
+    assert_eq!(value["loaded_tools"], json!([]));
+    assert_eq!(
+        value["unavailable"],
+        json!([{"name":"computer_use","reason":"disabled by tool settings"}])
+    );
     let (_, output, failed) = executor
         .execute_tool_call("computer_use", &json!({"action_type":"Screenshot"}), "use")
         .await;
@@ -277,6 +285,46 @@ fn only_a_paired_tool_search_result_restores_the_tools_of_this_session() {
         openai_result("c1", &loaded(&["WebSearch"]))
     ])
     .contains(&"WebSearch".to_owned()));
+}
+
+/// Stored history and old settings cannot resurrect a removed model tool: it is
+/// no longer in the catalog, so it is neither restored nor sent, and a direct
+/// call is rejected instead of being routed elsewhere.
+#[tokio::test]
+async fn removed_git_tools_cannot_be_restored_configured_or_called() {
+    let temp = tempfile::tempdir().unwrap();
+    let removed = ["git_status", "git_diff", "git_log", "git_add", "git_commit", "smart_project_scan"];
+    // A stored successful ToolSearch result still names them, alongside a real
+    // tool that must keep restoring.
+    let stored = ["git_status", "git_add", "ListDir"];
+    let mut restored = executor(temp.path());
+    restored.messages = vec![
+        json!({"role":"assistant","content":"","tool_calls":[{"id":"old","type":"function","function":{"name":"ToolSearch","arguments":"{\"query\":\"select:git_status,git_add\"}"}}]}),
+        json!({"role":"tool","tool_call_id":"old","content":json!({"success":true,"loaded_tools":stored,"tools":[]}).to_string()}),
+    ];
+    restored.restore_loaded_tools();
+    let sent = names(&restored);
+    for name in removed {
+        assert!(!sent.contains(&name.to_owned()), "{name} was restored: {sent:?}");
+    }
+    assert!(sent.contains(&"ListDir".to_owned()), "{sent:?}");
+
+    // An old settings file that enables them is equally inert.
+    write_switches(
+        temp.path(),
+        &removed.iter().map(|name| (*name, true, false)).collect::<Vec<_>>(),
+    );
+    let mut executor = executor(temp.path());
+    executor.exposed_tools = Some(names(&executor).into_iter().collect());
+    let sent = names(&executor);
+    for name in removed {
+        assert!(!sent.contains(&name.to_owned()), "{name} was sent: {sent:?}");
+        let (_, output, failed) = executor
+            .execute_tool_call(name, &json!({"path":"."}), "removed")
+            .await;
+        assert!(failed, "{name}: {output}");
+        assert!(output.contains("Unknown tool"), "{name}: {output}");
+    }
 }
 
 /// The probe states from the second audit: a call from the wrong role, a result
@@ -604,8 +652,53 @@ fn text_events(format: &str, text: &str) -> Vec<Value> {
     }
 }
 
-fn request_tool_names(body: &Value, format: &str) -> Vec<String> {
-    body["tools"]
+/// The system prompt a provider actually received, in each protocol's shape.
+fn request_system_prompt(body: &Value, format: &str) -> String {
+    match format {
+        "openai" => body["messages"]
+            .as_array()
+            .and_then(|messages| messages.iter().find(|message| message["role"] == "system"))
+            .and_then(|message| message["content"].as_str())
+            .unwrap_or_default()
+            .to_owned(),
+        "responses" => body["instructions"].as_str().unwrap_or_default().to_owned(),
+        _ => body["system"].as_str().unwrap_or_default().to_owned(),
+    }
+}
+
+fn write_directory_switches(root: &std::path::Path, websearch_on_demand: bool) {
+    use crate::services::customization::{CustomTool, Customization, ToolLoading};
+    let mut tool_loading = std::collections::BTreeMap::new();
+    for (name, enabled, on_demand) in [
+        ("WebFetch", true, false),
+        ("computer_use", false, false),
+        ("ListDir", false, true),
+        ("WebSearch", false, websearch_on_demand),
+    ] {
+        tool_loading.insert(name.to_owned(), ToolLoading { enabled, on_demand });
+    }
+    let customization = Customization {
+        tool_loading,
+        tool_descriptions: [(
+            "ListDir".to_owned(),
+            "Directory listing from the shared snapshot.".to_owned(),
+        )]
+        .into_iter()
+        .collect(),
+        custom_tools: vec![CustomTool {
+            name: "private_tool".into(),
+            description: "A user tool supplied separately from the built-in catalog.".into(),
+            input_schema: json!({"type":"object","properties":{}}),
+            command: "true".into(),
+            enabled: true,
+            timeout_secs: None,
+        }],
+        ..Default::default()
+    };
+    crate::services::customization::save(root, &customization, &[]).unwrap();
+}
+
+fn request_tool_names(body: &Value, format: &str) -> Vec<String> {    body["tools"]
         .as_array()
         .map(|tools| {
             tools
@@ -930,6 +1023,524 @@ async fn every_transport_adds_a_searched_tool_to_the_next_request() {
             "{format}"
         );
         assert!(requests[2].to_string().contains("needle.txt"), "{format}");
+    }
+}
+
+/// The real request payloads on all three transports carry a directory built
+/// from the current switches, and it changes on the next request after a load
+/// or a settings change. Resident, disabled, removed, MCP and custom tools are
+/// not listed.
+#[tokio::test]
+async fn every_transport_sends_a_dynamic_directory_of_searchable_builtins() {
+    use axum::{http::header, routing::post, Json, Router};
+    let _ = crate::config::OrchestrationConfig::init_global();
+    for format in ["anthropic", "openai", "responses"] {
+        let root = tempfile::tempdir().unwrap();
+        write_directory_switches(root.path(), true);
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let base = format!("http://{}", listener.local_addr().unwrap());
+        let captured = Arc::new(Mutex::new(Vec::<Value>::new()));
+        let requests = captured.clone();
+        let dir = root.path().to_path_buf();
+        let app = Router::new().route(
+            request_path(format),
+            post(move |Json(body): Json<Value>| {
+                let requests = requests.clone();
+                let dir = dir.clone();
+                async move {
+                    let step = {
+                        let mut seen = requests.lock().await;
+                        seen.push(body);
+                        seen.len() - 1
+                    };
+                    let events = match step {
+                        0 => {
+                            // The user disables WebSearch while the search result
+                            // is being produced, before the next request is built.
+                            write_directory_switches(&dir, false);
+                            tool_call_events(
+                                format,
+                                "search-1",
+                                "ToolSearch",
+                                json!({"query":"ListDir"}),
+                            )
+                        }
+                        _ => text_events(format, "done"),
+                    };
+                    (
+                        [(header::CONTENT_TYPE, "text/event-stream")],
+                        sse_stream(format, events),
+                    )
+                }
+            }),
+        );
+        let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        let (tx, _rx) = mpsc::channel(64);
+        let mut executor = ToolLoopExecutor::new(
+            wire_provider(&base, format),
+            vec![json!({"role":"user","content":"Find the files"})],
+            Some("BASE SYSTEM".into()),
+            512,
+            tx,
+            root.path().to_string_lossy().into_owned(),
+            ReasoningMode::Standard,
+        )
+        .with_search_config_path(root.path().join("config.json"));
+        let (text, _) = tokio::time::timeout(Duration::from_secs(20), executor.execute())
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(text, "done", "{format}");
+        server.abort();
+        let requests = captured.lock().await;
+        assert_eq!(requests.len(), 2, "{format}");
+
+        let first = request_system_prompt(&requests[0], format);
+        assert!(first.contains("BASE SYSTEM"), "{format}: {first}");
+        assert_eq!(
+            first.matches("# Tool directory").count(),
+            1,
+            "{format}: {first}"
+        );
+        assert!(
+            first.contains("can load only the built-in tools listed here"),
+            "{format}: {first}"
+        );
+        assert!(first.contains("`ListDir`"), "{format}: {first}");
+        assert!(
+            first.contains("`ListDir`: Directory listing from the shared snapshot"),
+            "{format}: the directory uses the configured override: {first}"
+        );
+        assert!(first.contains("`WebSearch`"), "{format}: {first}");
+        assert!(first.contains("`MultiEdit`"), "{format}: {first}");
+        for absent in [
+            "`Bash`",
+            "`WebFetch`",
+            "`computer_use`",
+            "`private_tool`",
+            "`git_status`",
+            "`git_diff`",
+        ] {
+            assert!(!first.contains(absent), "{format}: {absent} in {first}");
+        }
+        assert!(!request_tool_names(&requests[0], format).contains(&"ListDir".to_owned()));
+
+        let second = request_system_prompt(&requests[1], format);
+        assert!(second.contains("BASE SYSTEM"), "{format}: {second}");
+        assert!(
+            !second.contains("`ListDir`"),
+            "{format}: a loaded tool must leave the directory: {second}"
+        );
+        assert!(
+            !second.contains("`WebSearch`"),
+            "{format}: a disabled tool must leave the directory: {second}"
+        );
+        assert!(second.contains("`MultiEdit`"), "{format}: {second}");
+        assert!(request_tool_names(&requests[1], format).contains(&"ListDir".to_owned()));
+        // The loaded schema carries the same override the directory used:
+        // both were built from one settings snapshot.
+        assert!(
+            requests[1]["tools"]
+                .to_string()
+                .contains("Directory listing from the shared snapshot"),
+            "{format}: {second}"
+        );
+    }
+}
+
+/// An empty searchable set is reported instead of an empty or misleading list,
+/// and a request without ToolSearch says so.
+#[tokio::test]
+async fn an_empty_directory_is_reported_truthfully() {
+    use axum::{http::header, routing::post, Json, Router};
+    let _ = crate::config::OrchestrationConfig::init_global();
+    for (allowed, expected) in [
+        (
+            vec!["Bash", "ToolSearch"],
+            "No built-in tools are available for ToolSearch to load",
+        ),
+        (
+            vec!["Bash"],
+            "ToolSearch is not available in this request",
+        ),
+    ] {
+        let root = tempfile::tempdir().unwrap();
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let base = format!("http://{}", listener.local_addr().unwrap());
+        let captured = Arc::new(Mutex::new(Vec::<Value>::new()));
+        let requests = captured.clone();
+        let app = Router::new().route(
+            "/v1/chat/completions",
+            post(move |Json(body): Json<Value>| {
+                let requests = requests.clone();
+                async move {
+                    requests.lock().await.push(body);
+                    (
+                        [(header::CONTENT_TYPE, "text/event-stream")],
+                        sse_stream("openai", text_events("openai", "done")),
+                    )
+                }
+            }),
+        );
+        let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        let (tx, _rx) = mpsc::channel(64);
+        let mut executor = ToolLoopExecutor::new(
+            wire_provider(&base, "openai"),
+            vec![json!({"role":"user","content":"hello"})],
+            Some("BASE SYSTEM".into()),
+            512,
+            tx,
+            root.path().to_string_lossy().into_owned(),
+            ReasoningMode::Standard,
+        )
+        .with_search_config_path(root.path().join("config.json"))
+        .with_allowed_tools(Some(
+            allowed.iter().map(|name| (*name).to_owned()).collect(),
+        ));
+        let (text, _) = tokio::time::timeout(Duration::from_secs(20), executor.execute())
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(text, "done");
+        server.abort();
+        let requests = captured.lock().await;
+        let system = request_system_prompt(&requests[0], "openai");
+        assert!(system.contains(expected), "{system}");
+        assert!(!system.contains("- `"), "{system}");
+    }
+}
+
+/// The next request's tool result as the model reads it, for the OpenAI wire
+/// format used by the selection tests.
+fn openai_tool_result(body: &Value) -> Value {
+    body["messages"]
+        .as_array()
+        .expect("messages")
+        .iter()
+        .find(|message| message["role"] == "tool")
+        .and_then(|message| message["content"].as_str())
+        .and_then(|text| serde_json::from_str(text).ok())
+        .expect("the tool result in the next request")
+}
+
+/// Drives one real OpenAI-compatible wire turn whose model calls
+/// `ToolSearch(query)`, returning the captured request bodies. The caller
+/// supplies the tool switches for the fixture data directory.
+async fn tool_search_requests_over_the_wire(
+    root: &std::path::Path,
+    switches: &[(&str, bool, bool)],
+    query: &str,
+) -> Vec<Value> {
+    use axum::{http::header, routing::post, Json, Router};
+    let _ = crate::config::OrchestrationConfig::init_global();
+    write_switches(root, switches);
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let base = format!("http://{}", listener.local_addr().unwrap());
+    let captured = Arc::new(Mutex::new(Vec::<Value>::new()));
+    let requests = captured.clone();
+    let query = query.to_owned();
+    let app = Router::new().route(
+        "/v1/chat/completions",
+        post(move |Json(body): Json<Value>| {
+            let requests = requests.clone();
+            let query = query.clone();
+            async move {
+                let step = {
+                    let mut seen = requests.lock().await;
+                    seen.push(body);
+                    seen.len() - 1
+                };
+                let events = match step {
+                    0 => tool_call_events("openai", "search", "ToolSearch", json!({"query":query})),
+                    _ => text_events("openai", "done"),
+                };
+                (
+                    [(header::CONTENT_TYPE, "text/event-stream")],
+                    sse_stream("openai", events),
+                )
+            }
+        }),
+    );
+    let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+    let (tx, _rx) = mpsc::channel(64);
+    let mut executor = ToolLoopExecutor::new(
+        wire_provider(&base, "openai"),
+        vec![json!({"role":"user","content":"Load the tools"})],
+        None,
+        512,
+        tx,
+        root.to_string_lossy().into_owned(),
+        ReasoningMode::Standard,
+    )
+    .with_search_config_path(root.join("config.json"));
+    let (text, _) = tokio::time::timeout(Duration::from_secs(20), executor.execute())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(text, "done");
+    server.abort();
+    let bodies = captured.lock().await.clone();
+    bodies
+}
+
+/// An explicit selection loads every eligible name it lists, however the names
+/// are separated, and reports unknown or disabled names instead of dropping
+/// them. Keyword discovery keeps its own five-result bound.
+#[tokio::test]
+async fn explicit_selection_loads_every_eligible_name_and_reports_the_rest() {
+    use axum::{http::header, routing::post, Json, Router};
+    let _ = crate::config::OrchestrationConfig::init_global();
+    let root = tempfile::tempdir().unwrap();
+    let selected = [
+        "ListDir",
+        "MultiEdit",
+        "WebFetch",
+        "WebSearch",
+        "TaskCreate",
+        "TaskGet",
+        "TaskList",
+    ];
+    write_switches(
+        root.path(),
+        &[
+            ("ListDir", false, true),
+            ("MultiEdit", false, true),
+            ("WebFetch", false, true),
+            ("WebSearch", false, true),
+            ("TaskCreate", false, true),
+            ("TaskGet", false, true),
+            ("TaskList", false, true),
+            ("TaskUpdate", false, false),
+        ],
+    );
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let base = format!("http://{}", listener.local_addr().unwrap());
+    let captured = Arc::new(Mutex::new(Vec::<Value>::new()));
+    let requests = captured.clone();
+    let app = Router::new().route(
+        "/v1/chat/completions",
+        post(move |Json(body): Json<Value>| {
+            let requests = requests.clone();
+            async move {
+                let step = {
+                    let mut seen = requests.lock().await;
+                    seen.push(body);
+                    seen.len() - 1
+                };
+                // Commas, whitespace, a mixed form and a duplicate spelling.
+                let query = "select:ListDir, MultiEdit,WebFetch WebSearch,TaskCreate,TaskGet,TaskList,TaskUpdate,NoSuchTool,listdir";
+                let events = match step {
+                    0 => tool_call_events("openai", "select-many", "ToolSearch", json!({"query":query})),
+                    _ => text_events("openai", "done"),
+                };
+                (
+                    [(header::CONTENT_TYPE, "text/event-stream")],
+                    sse_stream("openai", events),
+                )
+            }
+        }),
+    );
+    let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+    let (tx, _rx) = mpsc::channel(64);
+    let mut executor = ToolLoopExecutor::new(
+        wire_provider(&base, "openai"),
+        vec![json!({"role":"user","content":"Load the tools"})],
+        None,
+        512,
+        tx,
+        root.path().to_string_lossy().into_owned(),
+        ReasoningMode::Standard,
+    )
+    .with_search_config_path(root.path().join("config.json"));
+    let (text, _) = tokio::time::timeout(Duration::from_secs(20), executor.execute())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(text, "done");
+    server.abort();
+
+    let requests = captured.lock().await;
+    assert_eq!(requests.len(), 2, "one search request and one follow-up");
+    let first = request_system_prompt(&requests[0], "openai");
+    for name in selected {
+        assert!(first.contains(&format!("`{name}`")), "{name}: {first}");
+    }
+    assert!(!first.contains("`TaskUpdate`"), "{first}");
+    assert!(!first.contains("`NoSuchTool`"), "{first}");
+
+    let second = request_tool_names(&requests[1], "openai");
+    for name in selected {
+        assert!(second.contains(&name.to_owned()), "{name}: {second:?}");
+    }
+    assert!(!second.contains(&"TaskUpdate".to_owned()), "{second:?}");
+    assert!(!second.contains(&"NoSuchTool".to_owned()), "{second:?}");
+
+    let result = openai_tool_result(&requests[1]);
+    assert_eq!(
+        result["loaded_tools"],
+        json!(["ListDir", "MultiEdit", "WebFetch", "WebSearch", "TaskCreate", "TaskGet", "TaskList"]),
+        "{result}"
+    );
+    assert_eq!(result["unknown"], json!(["NoSuchTool"]), "{result}");
+    assert_eq!(
+        result["unavailable"],
+        json!([{"name":"TaskUpdate","reason":"disabled by tool settings"}]),
+        "{result}"
+    );
+
+    // Every loaded tool left the next directory; the remaining searchable
+    // built-ins are still advertised.
+    let directory = request_system_prompt(&requests[1], "openai");
+    assert!(directory.contains("# Tool directory"), "{directory}");
+    assert!(directory.contains("- `"), "{directory}");
+    for name in selected {
+        assert!(
+            !directory.contains(&format!("`{name}`")),
+            "{name} stayed in the directory: {directory}"
+        );
+    }
+    assert!(!directory.contains("`TaskUpdate`"), "{directory}");
+}
+
+/// A whitespace-separated list that also names an unknown, removed or disabled
+/// tool still loads every eligible name. Keyword matching finds nothing, so an
+/// exact-case name token switches to an explicit selection; the next real HTTP
+/// request carries the loaded schemas and the result reports the rest.
+#[tokio::test]
+async fn space_separated_names_load_when_mixed_with_unknown_or_removed_names() {
+    const ELIGIBLE: [&str; 7] = [
+        "ListDir",
+        "MultiEdit",
+        "WebFetch",
+        "WebSearch",
+        "TaskCreate",
+        "TaskGet",
+        "TaskList",
+    ];
+    let switches = [
+        ("ListDir", false, true),
+        ("MultiEdit", false, true),
+        ("WebFetch", false, true),
+        ("WebSearch", false, true),
+        ("TaskCreate", false, true),
+        ("TaskGet", false, true),
+        ("TaskList", false, true),
+        ("TaskUpdate", false, false),
+    ];
+    let cases: [(&str, String, Vec<&str>, Value, Value); 3] = [
+        (
+            "space plus unknown",
+            format!("{} NoSuchTool", ELIGIBLE.join(" ")),
+            ELIGIBLE.to_vec(),
+            json!(["NoSuchTool"]),
+            json!([]),
+        ),
+        (
+            "space plus removed",
+            "ListDir git_status".into(),
+            vec!["ListDir"],
+            json!(["git_status"]),
+            json!([]),
+        ),
+        (
+            "space plus disabled",
+            "ListDir TaskUpdate".into(),
+            vec!["ListDir"],
+            json!([]),
+            json!([{"name":"TaskUpdate","reason":"disabled by tool settings"}]),
+        ),
+    ];
+    for (label, query, expected_loaded, expected_unknown, expected_unavailable) in cases {
+        let root = tempfile::tempdir().unwrap();
+        let requests = tool_search_requests_over_the_wire(root.path(), &switches, &query).await;
+        assert_eq!(requests.len(), 2, "{label}: one search and one follow-up");
+        let second = request_tool_names(&requests[1], "openai");
+        for name in &expected_loaded {
+            assert!(
+                second.contains(&name.to_string()),
+                "{label}: {name} missing from the next request: {second:?}"
+            );
+        }
+        for absent in ["NoSuchTool", "git_status", "TaskUpdate"] {
+            assert!(
+                !second.contains(&absent.to_owned()),
+                "{label}: {absent} stayed out of the next request: {second:?}"
+            );
+        }
+        let result = openai_tool_result(&requests[1]);
+        assert_eq!(
+            result["loaded_tools"],
+            json!(expected_loaded),
+            "{label}: {result}"
+        );
+        assert_eq!(result["unknown"], expected_unknown, "{label}: {result}");
+        assert_eq!(
+            result["unavailable"], expected_unavailable,
+            "{label}: {result}"
+        );
+        assert_eq!(
+            result["success"],
+            !expected_loaded.is_empty(),
+            "{label}: {result}"
+        );
+    }
+}
+
+/// Discovery is advertised only when ToolSearch is actually in the request:
+/// both switches off, and on-demand-only but not yet loaded, both send a
+/// truthful directory and no callable ToolSearch.
+#[tokio::test]
+async fn a_request_without_callable_tool_search_does_not_promise_loading() {
+    use axum::{http::header, routing::post, Json, Router};
+    let _ = crate::config::OrchestrationConfig::init_global();
+    for (label, enabled, on_demand) in [("both off", false, false), ("on demand only", false, true)] {
+        let root = tempfile::tempdir().unwrap();
+        write_switches(root.path(), &[("ToolSearch", enabled, on_demand)]);
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let base = format!("http://{}", listener.local_addr().unwrap());
+        let captured = Arc::new(Mutex::new(Vec::<Value>::new()));
+        let requests = captured.clone();
+        let app = Router::new().route(
+            "/v1/chat/completions",
+            post(move |Json(body): Json<Value>| {
+                let requests = requests.clone();
+                async move {
+                    requests.lock().await.push(body);
+                    (
+                        [(header::CONTENT_TYPE, "text/event-stream")],
+                        sse_stream("openai", text_events("openai", "done")),
+                    )
+                }
+            }),
+        );
+        let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        let (tx, _rx) = mpsc::channel(64);
+        let mut executor = ToolLoopExecutor::new(
+            wire_provider(&base, "openai"),
+            vec![json!({"role":"user","content":"hello"})],
+            None,
+            512,
+            tx,
+            root.path().to_string_lossy().into_owned(),
+            ReasoningMode::Standard,
+        )
+        .with_search_config_path(root.path().join("config.json"));
+        let (text, _) = tokio::time::timeout(Duration::from_secs(20), executor.execute())
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(text, "done", "{label}");
+        server.abort();
+        let requests = captured.lock().await;
+        let sent = request_tool_names(&requests[0], "openai");
+        assert!(!sent.contains(&"ToolSearch".to_owned()), "{label}: {sent:?}");
+        assert!(sent.contains(&"Bash".to_owned()), "{label}: {sent:?}");
+        let system = request_system_prompt(&requests[0], "openai");
+        assert!(
+            system.contains("ToolSearch is not available in this request"),
+            "{label}: {system}"
+        );
+        assert!(!system.contains("- `"), "{label}: {system}");
     }
 }
 
@@ -1614,40 +2225,124 @@ async fn search_matches_separate_keywords_and_exact_selections() {
             .filter_map(|name| name.as_str().map(str::to_owned))
             .collect()
     };
-    // Words in a different form than the snake_case name still find it first.
+    // Words in a different form than the name still find it first.
     let (_, output, _) = executor
-        .execute_tool_call("ToolSearch", &json!({"query":"git diff"}), "words")
+        .execute_tool_call("ToolSearch", &json!({"query":"web fetch"}), "words")
         .await;
     assert_eq!(
         loaded(&output).first().map(String::as_str),
-        Some("git_diff"),
+        Some("WebFetch"),
         "{output}"
     );
     // An exact selection loads only the named tools, in the requested order.
     let (_, output, _) = executor
         .execute_tool_call(
             "ToolSearch",
-            &json!({"query":"select:git_status, ListDir"}),
+            &json!({"query":"select:WebSearch, ListDir"}),
             "select",
         )
         .await;
-    assert_eq!(loaded(&output), vec!["git_status", "ListDir"], "{output}");
+    assert_eq!(loaded(&output), vec!["WebSearch", "ListDir"], "{output}");
     // A word that matches nothing keeps the whole query from matching.
     let (_, output, _) = executor
-        .execute_tool_call("ToolSearch", &json!({"query":"git zzqx"}), "miss")
+        .execute_tool_call("ToolSearch", &json!({"query":"web zzqx"}), "miss")
         .await;
     assert!(loaded(&output).is_empty(), "{output}");
+    // Removed model tools are not part of the catalog and cannot be loaded by
+    // name, keyword or an exact selection. Another tool may still match a
+    // generic keyword, but never one of the removed names.
+    for query in [
+        "git_status",
+        "git diff",
+        "select:git_add,git_commit",
+        "smart_project_scan",
+    ] {
+        let (_, output, _) = executor
+            .execute_tool_call("ToolSearch", &json!({"query":query}), "removed")
+            .await;
+        let names = loaded(&output);
+        for removed in [
+            "git_status",
+            "git_diff",
+            "git_log",
+            "git_add",
+            "git_commit",
+            "smart_project_scan",
+        ] {
+            assert!(
+                !names.contains(&removed.to_owned()),
+                "{query} loaded {removed}: {output}"
+            );
+        }
+    }
+}
+
+/// Keyword discovery keeps its previous behaviour, including when a query
+/// contains tool-name words in ordinary prose or in the wrong case. The list
+/// fallback only applies when keyword matching finds nothing and a token is an
+/// exact-case catalog name, so these queries must stay keyword searches.
+#[tokio::test]
+async fn keyword_searches_are_not_turned_into_name_lists() {
+    for (query, first) in [
+        ("web fetch", "WebFetch"),
+        ("read notebook", "NotebookEdit"),
+        ("read file", "NotebookEdit"),
+        ("task list", "TaskList"),
+    ] {
+        let temp = tempfile::tempdir().unwrap();
+        let mut executor = executor(temp.path());
+        executor.exposed_tools = Some(names(&executor).into_iter().collect());
+        let (_, output, _) = executor
+            .execute_tool_call("ToolSearch", &json!({"query":query}), "keyword")
+            .await;
+        let value: Value = serde_json::from_str(&output).unwrap();
+        let loaded: Vec<&str> = value["loaded_tools"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|name| name.as_str())
+            .collect();
+        assert_eq!(loaded.first().copied(), Some(first), "{query}: {output}");
+        // Keyword results never report per-name unknown or unavailable entries.
+        assert!(value.get("unknown").is_none(), "{query}: {output}");
+        assert!(value.get("unavailable").is_none(), "{query}: {output}");
+        // Keyword discovery keeps its five-result bound.
+        assert!(loaded.len() <= 5, "{query}: {output}");
+    }
+    // No keyword hit and no exact-case catalog name: the query stays an
+    // ordinary failed search. Lowercase complete names deliberately do not
+    // trigger the list fallback.
+    for query in ["read zzqx", "listdir git_status"] {
+        let temp = tempfile::tempdir().unwrap();
+        let mut executor = executor(temp.path());
+        executor.exposed_tools = Some(names(&executor).into_iter().collect());
+        let (_, output, _) = executor
+            .execute_tool_call("ToolSearch", &json!({"query":query}), "miss")
+            .await;
+        let value: Value = serde_json::from_str(&output).unwrap();
+        assert_eq!(value["loaded_tools"], json!([]), "{query}: {output}");
+        assert_eq!(value["success"], false, "{query}: {output}");
+        assert!(value.get("unknown").is_none(), "{query}: {output}");
+        assert!(
+            value["content"]
+                .as_str()
+                .unwrap()
+                .contains("No tool available on demand matches"),
+            "{query}: {output}"
+        );
+    }
 }
 
 #[tokio::test]
 async fn search_selects_complete_names_with_commas_and_whitespace() {
-    for query in [
-        "WebSearch WebFetch",
-        "WebSearch,WebFetch",
-        "  WebSearch, \tWebFetch  ",
-        "websearch WEBFETCH WebSearch",
-        "select:WebSearch WebFetch",
-        "select:WebSearch, WebFetch,WebSearch",
+    for (query, expected) in [
+        ("WebSearch WebFetch", vec!["WebSearch", "WebFetch"]),
+        ("WebSearch,WebFetch", vec!["WebSearch", "WebFetch"]),
+        ("  WebSearch, \tWebFetch  ", vec!["WebSearch", "WebFetch"]),
+        ("websearch WEBFETCH WebSearch", vec!["WebSearch", "WebFetch"]),
+        ("ListDir,WebSearch WebFetch,ListDir", vec!["ListDir", "WebSearch", "WebFetch"]),
+        ("select:WebSearch WebFetch", vec!["WebSearch", "WebFetch"]),
+        ("select:WebSearch, WebFetch,WebSearch", vec!["WebSearch", "WebFetch"]),
     ] {
         let temp = tempfile::tempdir().unwrap();
         let mut executor = executor(temp.path());
@@ -1659,10 +2354,10 @@ async fn search_selects_complete_names_with_commas_and_whitespace() {
         assert!(!error, "{query}: {output}");
         assert_eq!(
             value["loaded_tools"],
-            json!(["WebSearch", "WebFetch"]),
+            json!(expected),
             "{query}"
         );
-        for name in ["WebSearch", "WebFetch"] {
+        for name in expected {
             assert!(
                 names(&executor).contains(&name.to_owned()),
                 "{query}: {name}"

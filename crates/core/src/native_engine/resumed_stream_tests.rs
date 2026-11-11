@@ -166,7 +166,7 @@ async fn first_request_after_resume_is_compressed_for_both_protocols() {
             for required in [&system, "workspace rules", "permission rules"] {
                 assert!(
                     instructions.contains(required),
-                    "Missing instruction: {required}"
+                    "Missing instruction: {required}\n{instructions}"
                 );
             }
         }

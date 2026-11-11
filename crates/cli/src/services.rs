@@ -90,7 +90,7 @@ pub async fn team(context: &ServiceContext, action: &TeamCommands) -> Result<()>
             );
             axum::serve(listener, router)
                 .with_graceful_shutdown(async {
-                    let _ = tokio::signal::ctrl_c().await;
+                    let _ = crate::signals::interrupted().await;
                 })
                 .await?;
             Ok(())
@@ -108,9 +108,9 @@ pub async fn services(context: &ServiceContext, action: &ServiceCommands) -> Res
                 anyhow::ensure!(config.enabled, "Enable AutoDream with memory dream-config first");
                 deepseek_code_core::services::generation::Generator::saved(&context.paths, &config.provider, &config.model)?;
                 let lease = lifecycle::Lease::acquire(context, name)?;
-                return tokio::select! { result=deepseek_code_core::services::dream::host(context.clone(),*interval,lease)=>result, _=tokio::signal::ctrl_c()=>Ok(()) };
+                return tokio::select! { result=deepseek_code_core::services::dream::host(context.clone(),*interval,lease)=>result, _=crate::signals::interrupted()=>Ok(()) };
             }
-            tokio::select! {result=lifecycle::run_team_sync(context.clone(),*interval)=>result,_=tokio::signal::ctrl_c()=>Ok(())}
+            tokio::select! {result=lifecycle::run_team_sync(context.clone(),*interval)=>result,_=crate::signals::interrupted()=>Ok(())}
         }
         ServiceCommands::Stop { name } => {
             lifecycle::stop(context, name)?;

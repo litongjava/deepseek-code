@@ -49,7 +49,7 @@ async fn handle_command(command: &str, argument: &str, paths: &RuntimePaths) -> 
             if let Err(error) = anthropic_auth::open_browser(&flow.authorization_url) {
                 command_eprintln!("{error}; open the URL manually.");
             }
-            let status = tokio::select! {r=design::finish_login(&paths.data_dir,flow)=>r?,_=tokio::signal::ctrl_c()=>anyhow::bail!("Design login cancelled")};
+            let status = tokio::select! {r=design::finish_login(&paths.data_dir,flow)=>r?,_=crate::signals::interrupted()=>anyhow::bail!("Design login cancelled")};
             command_eprintln!("Design authorized: {}", status.authenticated);
         }
         "/design" => {
@@ -78,21 +78,21 @@ async fn handle_command(command: &str, argument: &str, paths: &RuntimePaths) -> 
                 "setup"=>{
                     let option=words.next();ensure!((option.is_none()||option==Some("--browser"))&&words.next().is_none(),"Usage: /design-sync setup [--browser]");
                     command_eprintln!("Installing pinned Design converter dependencies{}.",if option.is_some(){" and Chromium"}else{""});
-                    let directory=tokio::select!{r=design::setup_converter(&paths.data_dir,option.is_some())=>r?,_=tokio::signal::ctrl_c()=>anyhow::bail!("Design converter setup cancelled")};
+                    let directory=tokio::select!{r=design::setup_converter(&paths.data_dir,option.is_some())=>r?,_=crate::signals::interrupted()=>anyhow::bail!("Design converter setup cancelled")};
                     command_eprintln!("Converter installed: {}",directory.display());
                 },
                 "build"=>{
                     let recipe_path=argument.trim().strip_prefix("build").unwrap().trim().trim_matches('"');
                     let recipe:design::ConvertRecipe=serde_json::from_slice(&std::fs::read(recipe_path)?)?;
                     command_eprintln!("Running Design converter and validators; logs are saved under design-conversions.");
-                    let result=tokio::select!{r=design::convert(&paths.data_dir,&recipe)=>r?,_=tokio::signal::ctrl_c()=>anyhow::bail!("Design conversion cancelled")};
+                    let result=tokio::select!{r=design::convert(&paths.data_dir,&recipe)=>r?,_=crate::signals::interrupted()=>anyhow::bail!("Design conversion cancelled")};
                     command_eprintln!("{}",serde_json::to_string_pretty(&result)?);
                 },
                 "remote-plan"=>{let id=words.next().context("Missing plan ID")?;show(&design::remote_plan(&paths.data_dir,id).await?)?;},
                 "snapshot"=>{let project=words.next().context("Missing project ID")?;let destination=words.next().context("Missing destination filename")?.trim_matches('"');design::download_sidecar(&paths.data_dir,project,std::path::Path::new(destination)).await?;command_eprintln!("Remote sidecar saved to {destination}");},
                 "plan"=>{let project=words.next().context("Usage: /design-sync plan PROJECT_ID BUNDLE_DIRECTORY")?;let directory=words.next().context("Missing bundle directory")?.trim().trim_matches('"');show(&design::plan(&paths.data_dir,project,std::path::Path::new(directory))?)?;},
                 "show"=>{let id=words.next().context("Missing plan ID")?;show(&design::load_plan(&paths.data_dir,id)?)?;},
-                "upload"=>{let id=words.next().context("Missing plan ID")?;ensure!(words.next()==Some("--verified-bundle"),"Review /design-sync show ID and validate the prebuilt bundle, then use /design-sync upload ID --verified-bundle");let plan=tokio::select!{r=design::upload(&paths.data_dir,id)=>r?,_=tokio::signal::ctrl_c()=>anyhow::bail!("Design upload interrupted; inspect remote state and plan before retrying")};show(&plan)?;ensure!(plan.status=="files_uploaded","Design upload failed");},
+                "upload"=>{let id=words.next().context("Missing plan ID")?;ensure!(words.next()==Some("--verified-bundle"),"Review /design-sync show ID and validate the prebuilt bundle, then use /design-sync upload ID --verified-bundle");let plan=tokio::select!{r=design::upload(&paths.data_dir,id)=>r?,_=crate::signals::interrupted()=>anyhow::bail!("Design upload interrupted; inspect remote state and plan before retrying")};show(&plan)?;ensure!(plan.status=="files_uploaded","Design upload failed");},
                 _=>command_eprintln!("/design-sync setup [--browser]\n/design-sync build RECIPE_JSON\n/design-sync plan PROJECT_ID BUNDLE_DIRECTORY\n/design-sync show PLAN_ID\n/design-sync upload PLAN_ID --verified-bundle\nUse /design-sync build RECIPE_JSON to run the bundled Node converter (recipe.converter optionally overrides it) with browser validation. For re-sync, snapshot PROJECT FILE, rebuild with that remote snapshot, then remote-plan PLAN_ID before uploading. Review pending visual grades before --verified-bundle."),
             }
         }

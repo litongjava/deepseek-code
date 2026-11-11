@@ -34,7 +34,7 @@ async fn login_account(paths: &RuntimePaths) -> Result<()> {
     }
     tokio::select! {
         result = flow.finish(&paths.data_dir) => { result?; },
-        _ = tokio::signal::ctrl_c() => anyhow::bail!("Login cancelled; callback listener closed"),
+        _ = crate::signals::interrupted() => anyhow::bail!("Login cancelled; callback listener closed"),
     }
     install_provider(paths)
 }
@@ -137,7 +137,7 @@ pub async fn handle(
                 command_eprintln!("Checking Anthropic fast-mode account eligibility (extra usage billing may apply)…");
                 tokio::select! {
                     result = anthropic_auth::check_fast_eligibility(&selected.provider.api_key, &selected.provider.base_url, &selected.model.id) => result?,
-                    _ = tokio::signal::ctrl_c() => anyhow::bail!("Fast-mode check cancelled; setting unchanged"),
+                    _ = crate::signals::interrupted() => anyhow::bail!("Fast-mode check cancelled; setting unchanged"),
                 }
                 session.set_fast(true).await?;
             } else if argument == "off" {

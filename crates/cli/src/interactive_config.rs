@@ -14,7 +14,7 @@ async fn ask(input: &mut TerminalInput, prompt: &str) -> Result<String> {
     let prompt = format!("{prompt}: ");
     let line = tokio::select! {
         line = input.read_answer(&prompt) => line?.context("Input closed")?,
-        _ = tokio::signal::ctrl_c() => bail!("Cancelled"),
+        _ = crate::signals::interrupted() => bail!("Cancelled"),
     };
     ensure!(line.trim() != "/cancel", "Cancelled");
     Ok(line.trim().into())
@@ -651,7 +651,7 @@ async fn refresh_provider(
             Ok(result) => result,
             Err(_) => bail!("The model list query timed out after 20 seconds; nothing was changed"),
         },
-        _ = tokio::signal::ctrl_c() => bail!("Refresh cancelled; nothing was changed"),
+        _ = crate::signals::interrupted() => bail!("Refresh cancelled; nothing was changed"),
     };
     let listed = match listed {
         Ok(listed) => listed,
@@ -1142,7 +1142,7 @@ pub async fn handle(
         let started = std::time::Instant::now();
         let response = tokio::select! {
             result = session.engine.generate_text(&session.provider_id, &session.model, "This is a connection test. Reply only OK.", "Reply OK.") => result?,
-            _ = tokio::signal::ctrl_c() => bail!("Test cancelled"),
+            _ = crate::signals::interrupted() => bail!("Test cancelled"),
         };
         command_eprintln!(
             "Connection test passed in {:.2}s. Response: {}",

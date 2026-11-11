@@ -124,8 +124,7 @@ impl ToolLoopExecutor {
         let path_keys: &[&str] = match tool {
             "Write" | "Edit" | "Read" | "MultiEdit" => &["file_path"],
             "NotebookEdit" => &["notebook_path", "path"],
-            "ListDir" | "Grep" | "Glob" | "smart_project_scan" | "git_status" | "git_diff"
-            | "git_log" | "git_commit" | "git_add" => &["path"],
+            "ListDir" | "Grep" | "Glob" => &["path"],
             "Bash" | "Shell" => &["cwd"],
             "LSP" | "lsp" => &["filePath", "path"],
             "worktree" | "EnterWorktree" => &["path", "name"],
