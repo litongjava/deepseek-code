@@ -38,7 +38,12 @@ async fn sdk_callbacks_run_before_first_turn_and_rewrite_actual_tool_input() {
         answer(&mut client, &startup, json!({"hookSpecificOutput":{"hookEventName":"SessionStart","additionalContext":"SDK_START_CONTEXT"}})).await;
         let pre = client.frame("control_request").await;
         assert_eq!(pre["request"]["callback_id"], "pre");
-        assert_eq!(pre["request"]["tool_use_id"], "write-1");
+        assert!(
+            pre["request"]["tool_use_id"]
+                .as_str()
+                .is_some_and(|id| id.starts_with("inv-")),
+            "{pre}"
+        );
         assert_eq!(
             pre["request"]["input"]["tool_input"]["file_path"],
             "approval.txt"
@@ -46,7 +51,10 @@ async fn sdk_callbacks_run_before_first_turn_and_rewrite_actual_tool_input() {
         answer(&mut client, &pre, json!({"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"allow","updatedInput":{"file_path":"callback.txt","content":"CALLBACK_WRITE"}}})).await;
         let post = client.frame("control_request").await;
         assert_eq!(post["request"]["callback_id"], "post");
-        assert_eq!(post["request"]["tool_use_id"], "write-1");
+        assert_eq!(
+            post["request"]["tool_use_id"],
+            pre["request"]["tool_use_id"]
+        );
         assert_eq!(
             post["request"]["input"]["tool_input"]["file_path"],
             "callback.txt"
@@ -274,7 +282,12 @@ async fn sdk_callback_registration_is_inherited_by_owned_child_with_child_identi
             child["request"]["input"]["session_id"],
             parent["request"]["input"]["session_id"]
         );
-        assert_eq!(child["request"]["tool_use_id"], "write-1");
+        assert!(
+            child["request"]["tool_use_id"]
+                .as_str()
+                .is_some_and(|id| id.starts_with("inv-")),
+            "{child}"
+        );
         answer(&mut client, &child, json!({"hookSpecificOutput":{"hookEventName":"PreToolUse","updatedInput":{"file_path":"child-callback.txt","content":"CHILD_CALLBACK"}}})).await;
         assert_eq!(client.result().await["is_error"], false);
         assert!(root.path().join("child-callback.txt").exists());

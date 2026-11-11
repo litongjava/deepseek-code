@@ -31,6 +31,9 @@ pub struct TurnProgress {
     usage: ReportedUsage,
     tools: HashMap<String, Instant>,
     tool_titles: HashMap<String, String>,
+    /// The input seen at start, retained so a completion without input keeps
+    /// the call's command/path label.
+    inputs: HashMap<String, Value>,
     numbers: HashMap<String, usize>,
     finished_tools: HashMap<String, (String, Value, String, bool)>,
     agents: HashMap<String, Instant>,
@@ -71,6 +74,7 @@ impl TurnProgress {
             usage: ReportedUsage::default(),
             tools: HashMap::new(),
             tool_titles: HashMap::new(),
+            inputs: HashMap::new(),
             numbers: HashMap::new(),
             finished_tools: HashMap::new(),
             agents: HashMap::new(),
@@ -114,6 +118,10 @@ impl TurnProgress {
         self.tool_started_named(id, name, input, None);
     }
     pub fn tool_started_named(&mut self, id: &str, name: &str, input: &Value, title: Option<&str>) {
+        let richer = input.as_object().is_none_or(|fields| !fields.is_empty());
+        if richer || !self.inputs.contains_key(id) {
+            self.inputs.insert(id.to_owned(), input.clone());
+        }
         if self.tools.contains_key(id) || self.finished_tools.contains_key(id) {
             return;
         }
@@ -141,11 +149,18 @@ impl TurnProgress {
         output: &str,
         failed: bool,
     ) {
+        // A mirrored/legacy completion may omit the input; use the start input
+        // for both deduplication and the label so it never prints twice or bare.
+        let effective_input = if input.as_object().is_none_or(|fields| fields.is_empty()) {
+            self.inputs.get(id).cloned().unwrap_or_else(|| input.clone())
+        } else {
+            input.clone()
+        };
         // The pipeline can mirror ToolUseDone with PipelineToolResult. Each
         // unique tool call gets one completion line and retains its timing.
         if self.finished_tools.get(id).is_some_and(|previous| {
             previous.0 == name
-                && previous.1 == *input
+                && previous.1 == effective_input
                 && previous.2 == output
                 && previous.3 == failed
         }) {
@@ -153,15 +168,15 @@ impl TurnProgress {
         }
         self.finished_tools.insert(
             id.into(),
-            (name.into(), input.clone(), output.into(), failed),
+            (name.into(), effective_input.clone(), output.into(), failed),
         );
         let elapsed = self.tools.remove(id).map(|start| start.elapsed());
         let next = self.numbers.values().copied().max().unwrap_or(0) + 1;
         let number = format!("#{} ", self.numbers.entry(id.to_owned()).or_insert(next));
-        if let Some(call) = super::tool_view::mcp_call(name, input) {
+        if let Some(call) = super::tool_view::mcp_call(name, &effective_input) {
             self.notice_with_wrap(&format!("  {number}{call}"), true);
         }
-        let label = self.tool_titles.get(id).map(|title| super::tool_view::display_label(name, input, self.workspace.as_deref(), Some(title)));
+        let label = self.tool_titles.get(id).map(|title| super::tool_view::display_label(name, &effective_input, self.workspace.as_deref(), Some(title)));
         self.notice(&format!("  {number}{}", tool_result_summary(label.as_deref().unwrap_or(name), output, failed, elapsed).trim_start()));
         self.set_activity("Working");
     }
@@ -905,6 +920,33 @@ mod tests {
         progress.set_activity("Another task");
         progress.tool_finished("one", "Other", &revised, "changed", true);
         assert_eq!(progress.activity, "Another task");
+    }
+
+    #[test]
+    fn missing_input_completion_keeps_the_start_input_and_does_not_repeat() {
+        let mut progress = TurnProgress::new(false);
+        let input = serde_json::json!({"command":"printf 'RICH'"});
+        progress.tool_started("inv-1", "Bash", &input);
+        progress.tool_finished("inv-1", "Bash", &serde_json::json!({}), "RICH", false);
+        assert_eq!(progress.finished_tools.len(), 1);
+        assert_eq!(progress.finished_tools["inv-1"].1, input);
+        // A later mirrored completion with the missing input is the same call.
+        progress.tool_finished("inv-1", "Bash", &serde_json::json!({}), "RICH", false);
+        assert_eq!(progress.finished_tools.len(), 1);
+        assert_eq!(progress.finished_tools["inv-1"].1, input);
+    }
+
+    #[test]
+    fn distinct_occurrence_identities_get_distinct_numbers() {
+        let mut progress = TurnProgress::new(false);
+        for (index, id) in ["inv-scope-1", "inv-scope-2", "inv-scope-3"].iter().enumerate() {
+            progress.tool_started(id, "Bash", &serde_json::json!({"command":format!("printf '{index}'")}));
+            progress.tool_finished(id, "Bash", &serde_json::json!({"command":format!("printf '{index}'")}), "ok", false);
+        }
+        assert_eq!(progress.numbers["inv-scope-1"], 1);
+        assert_eq!(progress.numbers["inv-scope-2"], 2);
+        assert_eq!(progress.numbers["inv-scope-3"], 3);
+        assert_eq!(progress.finished_tools.len(), 3);
     }
 
 }

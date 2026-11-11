@@ -1725,7 +1725,19 @@ impl Session {
                             }
                         }
                         let position = tools.iter().position(|tool| tool.id == tool_use_id);
-                        let row = message_repo::ToolCallRow { id: tool_use_id, message_id: String::new(), name: tool_name, input: Some(tool_input.to_string()), output: Some(output), is_error, sort_order: position.unwrap_or(tools.len()) as i64 };
+                        // A legacy/mirrored completion can omit the input. Keep
+                        // the richer input already seen for this occurrence
+                        // instead of erasing the command/path.
+                        let incoming = tool_input.to_string();
+                        let input = if tool_input.as_object().is_none_or(|fields| fields.is_empty()) {
+                            position
+                                .and_then(|position| tools[position].input.clone())
+                                .filter(|input| input != "{}" && input != "null")
+                                .unwrap_or(incoming)
+                        } else {
+                            incoming
+                        };
+                        let row = message_repo::ToolCallRow { id: tool_use_id, message_id: String::new(), name: tool_name, input: Some(input), output: Some(output), is_error, sort_order: position.unwrap_or(tools.len()) as i64 };
                         if let Some(position) = position { tools[position] = row; } else { tools.push(row); }
                     },
                     EngineEvent::RequestSnapshot(snapshot) => {
@@ -2136,8 +2148,19 @@ impl BackgroundTranscript {
         });
         let row = &mut tools[index];
         if let Some(name) = name { row.name = name.clone(); }
-        // Late start/delta events must not overwrite a completed call's input.
-        if row.output.is_none() || result.is_some() { row.input = Some(input); }
+        // Late start/delta events must not overwrite a completed call's input,
+        // and a legacy completion without input must not erase the richer
+        // input already seen for this occurrence.
+        let rich = |text: &str| {
+            serde_json::from_str::<Value>(text)
+                .ok()
+                .is_some_and(|value| value.as_object().is_some_and(|fields| !fields.is_empty()))
+        };
+        let incoming_rich = rich(&input);
+        let existing_rich = row.input.as_deref().is_some_and(rich);
+        if (row.output.is_none() || result.is_some()) && (incoming_rich || !existing_rich) {
+            row.input = Some(input);
+        }
         if let Some((output, is_error)) = result {
             row.output = Some(output.clone());
             row.is_error = is_error;
@@ -2198,6 +2221,155 @@ mod background_transcript_tests {
             assert_eq!(calls.len(), 1);
             assert_eq!(calls[0].id, format!("{assistant}:call"));
             assert_eq!(calls[0].output.as_deref(), Some("complete"));
+        }).unwrap();
+    }
+
+    #[test]
+    fn five_occurrences_persist_five_rows_and_a_mirror_updates_one() {
+        let temp = tempfile::tempdir().unwrap();
+        let context = deepseek_code_core::services::session_messages::context(temp.path()).unwrap();
+        let store = deepseek_code_core::runtime::SessionStore::new(context.db.clone());
+        let session = store.create(temp.path(), "fixture", "fixture").unwrap();
+        let assistant = store.append(&session, "assistant", "").unwrap();
+        let mut live = BackgroundTranscript::default();
+        let mut tools = Vec::new();
+        for index in 0..5 {
+            let (name, input) = if index < 3 {
+                ("Bash", json!({"command":format!("printf 'RESULT_{index}'")}))
+            } else {
+                ("Read", json!({"file_path":format!("file-{index}.txt")}))
+            };
+            live.observe(
+                &EngineEvent::ToolUseDone {
+                    tool_use_id: format!("inv-scope-{index}"),
+                    tool_name: name.into(),
+                    tool_input: input,
+                    output: format!("OUT_{index}"),
+                    is_error: false,
+                },
+                &mut tools,
+            );
+        }
+        // A mirrored completion of the same occurrence is not a new execution.
+        live.observe(
+            &EngineEvent::ToolUseDone {
+                tool_use_id: "inv-scope-0".into(),
+                tool_name: "Bash".into(),
+                tool_input: json!({"command":"printf 'RESULT_0'"}),
+                output: "OUT_0".into(),
+                is_error: false,
+            },
+            &mut tools,
+        );
+        // A changed completion updates its own row without adding one.
+        live.observe(
+            &EngineEvent::ToolUseDone {
+                tool_use_id: "inv-scope-1".into(),
+                tool_name: "Bash".into(),
+                tool_input: json!({"command":"printf 'RESULT_1'"}),
+                output: "UPDATED_1".into(),
+                is_error: false,
+            },
+            &mut tools,
+        );
+        live.flush(&context.db, &session, &assistant, "", "", &tools).unwrap();
+        context.db.with_conn(|conn| {
+            let calls = message_repo::get_tool_calls_for_message(conn, &assistant).unwrap();
+            assert_eq!(calls.len(), 5);
+            assert_eq!(calls[0].input.as_deref(), Some(r#"{"command":"printf 'RESULT_0'"}"#));
+            assert_eq!(calls[1].output.as_deref(), Some("UPDATED_1"));
+            assert_eq!(calls[3].input.as_deref(), Some(r#"{"file_path":"file-3.txt"}"#));
+        }).unwrap();
+    }
+
+    #[test]
+    fn legacy_missing_input_completion_keeps_the_start_input() {
+        let temp = tempfile::tempdir().unwrap();
+        let context = deepseek_code_core::services::session_messages::context(temp.path()).unwrap();
+        let store = deepseek_code_core::runtime::SessionStore::new(context.db.clone());
+        let session = store.create(temp.path(), "fixture", "fixture").unwrap();
+        let assistant = store.append(&session, "assistant", "").unwrap();
+        let mut live = BackgroundTranscript::default();
+        let mut tools = Vec::new();
+        live.observe(
+            &EngineEvent::ToolUseStart {
+                tool_use_id: "inv-scope-1".into(),
+                tool_name: "Bash".into(),
+                tool_input: json!({"command":"printf 'RICH_INPUT'"}),
+                text_before: String::new(),
+                display_title: None,
+            },
+            &mut tools,
+        );
+        live.observe(
+            &EngineEvent::ToolUseDone {
+                tool_use_id: "inv-scope-1".into(),
+                tool_name: "Bash".into(),
+                tool_input: json!({}),
+                output: "RICH_INPUT".into(),
+                is_error: false,
+            },
+            &mut tools,
+        );
+        live.flush(&context.db, &session, &assistant, "", "", &tools).unwrap();
+        context.db.with_conn(|conn| {
+            let calls = message_repo::get_tool_calls_for_message(conn, &assistant).unwrap();
+            assert_eq!(calls.len(), 1);
+            assert_eq!(calls[0].input.as_deref(), Some(r#"{"command":"printf 'RICH_INPUT'"}"#));
+        }).unwrap();
+    }
+
+    #[test]
+    fn mirrored_pipeline_completion_updates_one_row_with_the_changed_input() {
+        let temp = tempfile::tempdir().unwrap();
+        let context = deepseek_code_core::services::session_messages::context(temp.path()).unwrap();
+        let store = deepseek_code_core::runtime::SessionStore::new(context.db.clone());
+        let session = store.create(temp.path(), "fixture", "fixture").unwrap();
+        let assistant = store.append(&session, "assistant", "").unwrap();
+        let mut live = BackgroundTranscript::default();
+        let mut tools = Vec::new();
+        live.observe(
+            &EngineEvent::ToolUseDone {
+                tool_use_id: "inv-scope-1".into(),
+                tool_name: "Bash".into(),
+                tool_input: json!({"command":"printf 'ORIGINAL'"}),
+                output: "ORIGINAL".into(),
+                is_error: false,
+            },
+            &mut tools,
+        );
+        // Desktop mirrors the same execution through PipelineToolResult.
+        live.observe(
+            &EngineEvent::PipelineToolResult {
+                tool_use_id: "inv-scope-1".into(),
+                tool_name: "Bash".into(),
+                tool_input: json!({"command":"printf 'ORIGINAL'"}),
+                output: "ORIGINAL".into(),
+                is_error: false,
+                completed_count: 1,
+                total_count: 1,
+            },
+            &mut tools,
+        );
+        // A changed completion updates the same occurrence instead of adding one.
+        live.observe(
+            &EngineEvent::PipelineToolResult {
+                tool_use_id: "inv-scope-1".into(),
+                tool_name: "Bash".into(),
+                tool_input: json!({"command":"printf 'REVISED'"}),
+                output: "REVISED".into(),
+                is_error: false,
+                completed_count: 1,
+                total_count: 1,
+            },
+            &mut tools,
+        );
+        live.flush(&context.db, &session, &assistant, "", "", &tools).unwrap();
+        context.db.with_conn(|conn| {
+            let calls = message_repo::get_tool_calls_for_message(conn, &assistant).unwrap();
+            assert_eq!(calls.len(), 1);
+            assert_eq!(calls[0].input.as_deref(), Some(r#"{"command":"printf 'REVISED'"}"#));
+            assert_eq!(calls[0].output.as_deref(), Some("REVISED"));
         }).unwrap();
     }
 }
@@ -2266,6 +2438,7 @@ pub(crate) fn event_json_with(event: &EngineEvent, summaries: bool) -> Option<Va
         EngineEvent::ToolUseDone {
             tool_use_id,
             tool_name,
+            tool_input,
             output,
             is_error,
             ..
@@ -2273,11 +2446,14 @@ pub(crate) fn event_json_with(event: &EngineEvent, summaries: bool) -> Option<Va
         | EngineEvent::PipelineToolResult {
             tool_use_id,
             tool_name,
+            tool_input,
             output,
             is_error,
             ..
         } => {
-            json!({"type":"tool_result","id":tool_use_id,"name":tool_name,"output":output,"is_error":is_error})
+            // The completion carries the authoritative post-hook input. Without
+            // it a mirrored/worker completion renders a bare tool name.
+            json!({"type":"tool_result","id":tool_use_id,"name":tool_name,"input":tool_input,"output":output,"is_error":is_error})
         }
         EngineEvent::AskUser {
             request_id,
@@ -2403,6 +2579,36 @@ mod event_tests {
             &EngineEvent::Text("contents".into()),
             &saved
         ));
+    }
+
+    #[test]
+    fn tool_result_json_carries_the_authoritative_input() {
+        let done = EngineEvent::ToolUseDone {
+            tool_use_id: "inv-scope-1".into(),
+            tool_name: "Bash".into(),
+            tool_input: json!({"command":"printf 'hello'"}),
+            output: "hello".into(),
+            is_error: false,
+        };
+        let value = super::event_json(&done).unwrap();
+        assert_eq!(value["type"], "tool_result");
+        assert_eq!(value["id"], "inv-scope-1");
+        assert_eq!(value["input"]["command"], "printf 'hello'");
+        // The worker frontend reads `input` from this exact JSON transport.
+        assert_eq!(value["input"], json!({"command":"printf 'hello'"}));
+        let pipeline = EngineEvent::PipelineToolResult {
+            tool_use_id: "inv-scope-2".into(),
+            tool_name: "Read".into(),
+            tool_input: json!({"file_path":"file.txt"}),
+            output: "content".into(),
+            is_error: false,
+            completed_count: 1,
+            total_count: 1,
+        };
+        assert_eq!(
+            super::event_json(&pipeline).unwrap()["input"]["file_path"],
+            "file.txt"
+        );
     }
 
     #[tokio::test]

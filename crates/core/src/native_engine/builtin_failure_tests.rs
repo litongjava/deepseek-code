@@ -32,6 +32,7 @@ async fn builtin_errors_are_failures_in_serial_and_parallel_paths() {
             ReasoningMode::Standard,
         );
         let call = PendingToolCall {
+            provider_id: "fixture-call".into(),
             id: "fixture-call".into(),
             name: name.into(),
             input,

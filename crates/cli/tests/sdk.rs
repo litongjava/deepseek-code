@@ -28,7 +28,7 @@ fn permission_hook_settings(root: &Path, case: &str) {
     let response = if case == "no-decision" {json!({})} else {json!({"hookSpecificOutput":{"hookEventName":"PermissionRequest","decision":{"behavior":"allow","updatedInput":{"file_path":"hook.txt","content":"HOOK_WINNER"},"updatedPermissions":[{"type":"addRules","destination":"session","behavior":"allow","rules":[{"toolName":"Write"}]}]}}})};
     let seconds = if case == "host" {3} else {1};
     let command = if cfg!(windows) {
-        format!("$v=[Console]::In.ReadToEnd() | ConvertFrom-Json; if ($v.tool_use_id -ne 'write-1' -or $v.tool_name -ne 'Write') {{exit 7}}; [IO.File]::WriteAllText('hook-started','yes'); Start-Sleep -Seconds {seconds}; [IO.File]::WriteAllText('hook-finished','yes'); [Console]::Out.Write('{}')", response.to_string().replace('\'', "''"))
+        format!("$v=[Console]::In.ReadToEnd() | ConvertFrom-Json; if (-not $v.tool_use_id.ToString().StartsWith('inv-') -or $v.tool_name -ne 'Write') {{exit 7}}; [IO.File]::WriteAllText('hook-started','yes'); Start-Sleep -Seconds {seconds}; [IO.File]::WriteAllText('hook-finished','yes'); [Console]::Out.Write('{}')", response.to_string().replace('\'', "''"))
     } else { format!("read input; printf yes > hook-started; sleep {seconds}; printf yes > hook-finished; printf '%s' '{}'", response.to_string().replace('\'', "'\\''")) };
     std::fs::create_dir_all(root.join("data")).unwrap();
     std::fs::write(root.join("data/settings.json"), json!({"hooks":{"PermissionRequest":[{"matcher":"Write","hooks":[{"type":"command","shell":if cfg!(windows) {"powershell"} else {"sh"},"command":command}]}]}}).to_string()).unwrap();
@@ -44,7 +44,10 @@ async fn permission_request_hooks_race_sdk_and_cancel_only_the_losing_request() 
             let mut client = Client::start(root.path(), &server, &["--permission-mode", "ask"]);
             client.send(user("Write the fixture file")).await;
             let request = client.frame("control_request").await;
-            assert_eq!(request["request"]["tool_use_id"], "write-1");
+            // The permission prompt carries the occurrence identity, not the
+            // provider's raw fixture id.
+            assert!(!request["request"]["tool_use_id"].as_str().unwrap_or_default().is_empty());
+            assert_ne!(request["request"]["tool_use_id"], "write-1");
             assert!(!root.path().join("hook-finished").exists(), "hook must not delay SDK prompt publication");
             if winner == "hook" {
                 let cancel = client.frame("control_cancel_request").await;
@@ -768,7 +771,8 @@ async fn sdk_question_answers_reach_model_and_history_without_rewriting_question
         client.send(user("Ask my preference")).await;
         let request = client.frame("control_request").await;
         assert_eq!(request["request"]["tool_name"], "AskUserQuestion");
-        assert_eq!(request["request"]["tool_use_id"], "question-1");
+        assert!(!request["request"]["tool_use_id"].as_str().unwrap_or_default().is_empty());
+        assert_ne!(request["request"]["tool_use_id"], "question-1");
         assert_eq!(
             request["request"]["input"]["questions"][0]["multiSelect"],
             true
@@ -942,7 +946,8 @@ async fn controls_replay_and_live_permission_decisions_use_actual_engine() {
         assert_eq!(client.frame("user").await["uuid"], "retained-user-uuid");
         let permission = client.frame("control_request").await;
         assert_eq!(permission["request"]["tool_name"], "Write");
-        assert_eq!(permission["request"]["tool_use_id"], "write-1");
+        assert!(!permission["request"]["tool_use_id"].as_str().unwrap_or_default().is_empty());
+        assert_ne!(permission["request"]["tool_use_id"], "write-1");
         assert!(!root.path().join("approval.txt").exists());
         let mut updated = permission["request"]["input"].clone();
         if mutate {
@@ -1209,7 +1214,8 @@ async fn dont_ask_control_denies_write_without_sdk_permission_request() {
             let denials = frame["permission_denials"].as_array().unwrap();
             assert_eq!(denials.len(), 1, "{frame}");
             assert_eq!(denials[0]["tool_name"], "Write");
-            assert_eq!(denials[0]["tool_use_id"], "write-1");
+            assert!(!denials[0]["tool_use_id"].as_str().unwrap_or_default().is_empty());
+            assert_ne!(denials[0]["tool_use_id"], "write-1");
             break;
         }
     }
