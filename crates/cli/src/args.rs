@@ -838,6 +838,25 @@ pub enum PluginCommands {
 #[cfg(test)]
 mod tests {
     #[test]
+    fn role_is_optional_validated_and_defaults_to_no_override() {
+        use clap::Parser;
+        assert!(super::Cli::try_parse_from(["dcl"]).unwrap().role.is_none());
+        assert!(matches!(
+            super::Cli::try_parse_from(["dcl", "--role", "router"])
+                .unwrap()
+                .role,
+            Some(super::RoleArg::Router)
+        ));
+        assert!(matches!(
+            super::Cli::try_parse_from(["dcl", "--resume", "id", "--role", "agent"])
+                .unwrap()
+                .role,
+            Some(super::RoleArg::Agent)
+        ));
+        assert!(super::Cli::try_parse_from(["dcl", "--role", "supervisor"]).is_err());
+    }
+
+    #[test]
     fn yolo_is_full_access_and_keeps_explicit_worker_modes() {
         let mut cli = super::Cli::try_parse_with_mode_source(["dcl", "--yolo"]).unwrap();
         cli.normalize();
