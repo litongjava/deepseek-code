@@ -31,6 +31,13 @@ pub async fn handle(
                 crate::worker_frontend::attach(cli, session, &job.id, input).await?;
                 return Ok(Outcome::Handled);
             }
+            if crate::observe::execution_lease_active(session)? {
+                // A direct print/json owner still holds the session. Observing it
+                // here keeps the resume gate closed and submits nothing.
+                command_eprintln!("{}", crate::observe::running_notice(session)?);
+                command_eprintln!("Progress appears here as it is published; this terminal does not send a request while that turn owns the session.");
+                return Ok(Outcome::Handled);
+            }
             session.allow_automatic_wake();
             if !wake_for_notifications(cli, session, input).await? {
                 session.turn(cli, "Continue the unfinished work in this conversation. Review the saved progress first and do not repeat completed operations.", input).await?;
@@ -806,7 +813,7 @@ pub(crate) fn managed_shell_records(paths: &RuntimePaths, session: &str) -> Resu
 
 pub(crate) async fn shell_control(paths: &RuntimePaths, session: &str, id: &str, stop: bool) -> Result<serde_json::Value> {
     deepseek_code_core::tools::tasks::execute_for_session_async(
-        if stop { "TaskStop" } else { "TaskOutput" },
+        if stop { "TaskStop" } else { "TaskGet" },
         if stop { serde_json::json!({"task_id":id}) } else { serde_json::json!({"task_id":id,"block":false}) },
         &paths.data_dir, session,
     ).await

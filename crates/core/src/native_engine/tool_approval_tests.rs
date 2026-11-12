@@ -659,7 +659,12 @@ async fn owned_child_permission_hooks_keep_exact_invocation_and_session_on_both_
             &std::fs::read(root.path().join("permission-payload.json")).unwrap(),
         )
         .unwrap();
-        assert_eq!(payload["tool_use_id"], "child-exact-id");
+        assert!(
+            payload["tool_use_id"]
+                .as_str()
+                .is_some_and(|id| id.starts_with("inv-")),
+            "{payload}"
+        );
         assert_eq!(payload["session_id"], result["session_id"]);
         assert_ne!(payload["session_id"], parent);
         server.abort();
@@ -970,6 +975,7 @@ async fn router_tool_visibility_and_execution_guard_are_enforced_at_runtime() {
             "CrpSubmit",
             &json!({"kind":"implementation","payload":{}}),
             "forged",
+            "forged",
         )
         .await;
     let CallStep::Finished((_, output, is_error)) = step else {
@@ -1082,7 +1088,12 @@ async fn router_tool_visibility_and_execution_guard_are_enforced_at_runtime() {
         .is_none());
     // A member cannot invoke router tools even if it names one directly.
     let step = member_executor
-        .execute_tool_call_inner("CrpCreate", &json!({"spec":{}}), "forged-router")
+        .execute_tool_call_inner(
+            "CrpCreate",
+            &json!({"spec":{}}),
+            "forged-router",
+            "forged-router",
+        )
         .await;
     let CallStep::Finished((_, output, is_error)) = step else {
         panic!("unexpected call step");
@@ -1108,7 +1119,7 @@ async fn an_agent_session_has_no_super_agent_tools_and_cannot_forge_them() {
         "{names:?}"
     );
     let step = executor
-        .execute_tool_call_inner("CrpCreate", &json!({"spec":{}}), "forged")
+        .execute_tool_call_inner("CrpCreate", &json!({"spec":{}}), "forged", "forged")
         .await;
     let CallStep::Finished((_, output, is_error)) = step else {
         panic!("unexpected call step");

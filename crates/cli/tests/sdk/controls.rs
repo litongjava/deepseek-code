@@ -5,6 +5,41 @@ fn control(id: &str, request: Value) -> Value {
     json!({"type":"control_request","request_id":id,"request":request})
 }
 
+/// Releases the gated first response even when an assertion above fails, so a
+/// failed run tears down instead of leaving the fixture waiting forever.
+struct GateGuard(Arc<tokio::sync::Semaphore>);
+
+impl GateGuard {
+    fn release(&self) {
+        self.0.add_permits(1);
+    }
+}
+
+impl Drop for GateGuard {
+    fn drop(&mut self) {
+        self.0.add_permits(1);
+    }
+}
+
+/// Wait until the endpoint has recorded the streaming request. Its response is
+/// still withheld, so the turn is provably running.
+async fn wait_for_running_request(server: &Server) {
+    tokio::time::timeout(Duration::from_secs(10), async {
+        while !server
+            .fixture
+            .requests
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|body| body["stream"] == true)
+        {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("the running turn never reached the model endpoint");
+}
+
 async fn answer(client: &mut Client, id: &str, request: Value) -> Value {
     client.send(control(id, request)).await;
     let frame = client.frame("control_response").await;
@@ -64,10 +99,11 @@ async fn idle_status_settings_and_thinking_controls_report_real_state() {
 async fn running_turn_answers_queries_and_cancels_only_queued_messages() {
     for anthropic in [false, true] {
         let root = tempfile::tempdir().unwrap();
-        let server = Server::start(anthropic, Mode::SlowText).await;
+        let server = Server::start(anthropic, Mode::GatedText).await;
         let mut client = Client::start(root.path(), &server, &[]);
+        let gate = GateGuard(server.fixture.gate.clone());
         client.send(user("first")).await;
-        client.frame("message_start").await;
+        wait_for_running_request(&server).await;
         let mut queued = user("QUEUED_SECOND_SENTINEL");
         queued["uuid"] = json!("queued-2");
         client.send(queued).await;
@@ -86,6 +122,10 @@ async fn running_turn_answers_queries_and_cancels_only_queued_messages() {
         assert_eq!(cancel["response"]["cancelled"], true, "{cancel}");
         let again = answer(&mut client, "cancel-again", json!({"subtype":"cancel_async_message","message_uuid":"queued-2"})).await;
         assert_eq!(again["response"]["cancelled"], false);
+        // Every control above was answered while the first response was still
+        // open; release it and assert the protocol frame the turn now emits.
+        gate.release();
+        assert_eq!(client.frame("message_start").await["type"], "message_start");
         let (status, results) = client.finish().await;
         assert!(status.success());
         assert_eq!(results.len(), 2, "the cancelled message never runs: {results:?}");

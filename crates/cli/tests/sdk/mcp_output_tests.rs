@@ -274,6 +274,7 @@ async fn mcp_batches_keep_ids_images_errors_and_hook_serialization() {
                 anthropic,
                 mode: Mode::Text,
                 requests: Arc::new(Mutex::new(Vec::new())),
+                gate: Arc::new(tokio::sync::Semaphore::new(0)),
             };
             let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
             let url = format!("http://{}", listener.local_addr().unwrap());
@@ -342,15 +343,21 @@ async fn mcp_batches_keep_ids_images_errors_and_hook_serialization() {
             }
             assert_eq!(post_count, if hooks { 2 } else { 0 });
             assert_eq!(results.len(), 2);
-            let first = results.iter().find(|r| r["id"] == "batch-0").unwrap();
-            let second = results.iter().find(|r| r["id"] == "batch-1").unwrap();
+            let first = results.iter().find(|r| r["name"] == "mcp__first__echo").unwrap();
+            let second = results.iter().find(|r| r["name"] == "mcp__second__echo").unwrap();
             assert_eq!(first["is_error"], false);
             assert_eq!(second["is_error"], !hooks);
             let requests = server.fixture.requests.lock().unwrap();
             let messages = requests[1]["messages"].as_array().unwrap();
             if hooks {
-                assert_eq!(first["output"], "REPLACED_batch-0");
-                assert_eq!(second["output"], "REPLACED_batch-1");
+                // Hooks receive the occurrence id; the tool_result event and
+                // its persistence use the same occurrence identity.
+                let first_id = first["id"].as_str().unwrap();
+                let second_id = second["id"].as_str().unwrap();
+                assert_eq!(first["output"], format!("REPLACED_{first_id}"));
+                assert_eq!(second["output"], format!("REPLACED_{second_id}"));
+                assert_ne!(first_id, "batch-0");
+                assert_ne!(second_id, "batch-1");
                 assert!(!requests[1].to_string().contains(PNG));
             } else {
                 assert!(requests[1].to_string().contains(PNG));

@@ -105,6 +105,90 @@ fn status_name(status: TurnStatus) -> &'static str {
     }
 }
 
+impl TurnRecord {
+    /// The owner disappeared before reporting an endpoint. The stored status
+    /// stays `cancelled` (the schema has no separate value); an explicit
+    /// cancellation always records `ended_at` and `elapsed_ms`, so a missing
+    /// endpoint is the durable marker.
+    pub fn interrupted(&self) -> bool {
+        self.status == TurnStatus::Cancelled
+            && self.ended_at.is_none()
+            && self.elapsed_ms.is_none()
+    }
+}
+
+/// The newest turn of a conversation, whatever its state.
+pub fn latest_turn(
+    conn: &Connection,
+    conversation_id: &str,
+) -> rusqlite::Result<Option<TurnRecord>> {
+    conn.query_row(
+        "SELECT id,started_at,ended_at,elapsed_ms,status FROM execution_turns WHERE conversation_id=?1 ORDER BY started_at DESC LIMIT 1",
+        [conversation_id],
+        read_record,
+    )
+    .optional()
+}
+
+/// The turn a live owner is executing, if it published one.
+pub fn running_turn(
+    conn: &Connection,
+    conversation_id: &str,
+) -> rusqlite::Result<Option<TurnRecord>> {
+    conn.query_row(
+        "SELECT id,started_at,ended_at,elapsed_ms,status FROM execution_turns WHERE conversation_id=?1 AND status='running' ORDER BY started_at DESC LIMIT 1",
+        [conversation_id],
+        read_record,
+    )
+    .optional()
+}
+
+pub fn get_turn(conn: &Connection, turn_id: &str) -> rusqlite::Result<Option<TurnRecord>> {
+    conn.query_row(
+        "SELECT id,started_at,ended_at,elapsed_ms,status FROM execution_turns WHERE id=?1",
+        [turn_id],
+        read_record,
+    )
+    .optional()
+}
+
+/// Assistant segments published for one turn, oldest first.
+pub fn turn_messages(conn: &Connection, turn_id: &str) -> rusqlite::Result<Vec<String>> {
+    let mut stmt = conn.prepare_cached(
+        "SELECT m.id FROM message_turns t JOIN messages m ON m.id=t.message_id WHERE t.turn_id=?1 ORDER BY m.sort_order ASC",
+    )?;
+    let rows = stmt.query_map([turn_id], |row| row.get(0))?;
+    rows.collect()
+}
+
+/// Marks turns whose owner disappeared. The schema has no separate status, so
+/// a settlement is `cancelled` with no measured endpoint: `Interrupted` is the
+/// durable meaning of that combination. Guessing wall time would report idle
+/// time as work time. The caller must first establish that no process holds the
+/// execution lease.
+pub fn settle_interrupted(conn: &Connection, conversation_id: &str) -> Result<Vec<TurnRecord>> {
+    let running: Vec<TurnRecord> = {
+        let mut stmt = conn.prepare_cached(
+            "SELECT id,started_at,ended_at,elapsed_ms,status FROM execution_turns WHERE conversation_id=?1 AND status='running'",
+        )?;
+        let rows = stmt.query_map([conversation_id], read_record)?;
+        rows.collect::<rusqlite::Result<Vec<_>>>()?
+    };
+    for record in &running {
+        conn.execute(
+            "UPDATE execution_turns SET ended_at=NULL, elapsed_ms=NULL, status='cancelled' WHERE id=?1 AND status='running'",
+            [&record.turn_id],
+        )?;
+    }
+    let mut settled = running;
+    for record in &mut settled {
+        record.status = TurnStatus::Cancelled;
+        record.ended_at = None;
+        record.elapsed_ms = None;
+    }
+    Ok(settled)
+}
+
 pub fn terminal_status(stop_reason: Option<&str>, failed: bool) -> TurnStatus {
     match stop_reason {
         Some("cancelled" | "interrupted") => TurnStatus::Cancelled,

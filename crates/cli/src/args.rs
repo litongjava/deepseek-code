@@ -315,6 +315,11 @@ pub enum Commands {
         #[command(subcommand)]
         action: crate::migration::CronCommands,
     },
+    /// Explicit maintenance commands for session task storage.
+    Tasks {
+        #[command(subcommand)]
+        action: TasksCommands,
+    },
     /// Internal: run a Workflow script started by the Workflow tool.
     #[command(hide = true)]
     WorkflowRun {
@@ -470,6 +475,34 @@ pub enum Commands {
     Init {
         #[arg(short, long)]
         name: Option<String>,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+pub enum TasksCommands {
+    /// Import one legacy workspace plan into a session's task store.
+    ///
+    /// The legacy database is opened read-only; only the selected plan is
+    /// imported, explicitly, into the session named by --session. Exit codes:
+    /// 0 created or unchanged (including --dry-run), 1 conflict or error,
+    /// 2 invalid arguments.
+    #[command(group = clap::ArgGroup::new("selector").required(true).multiple(false))]
+    ImportPlan {
+        /// Workspace that owns .claude/coordination.sqlite3.
+        #[arg(long)]
+        workspace: PathBuf,
+        /// Target session UUID that will own the imported tasks.
+        #[arg(long)]
+        session: String,
+        /// Import this legacy plan ID.
+        #[arg(long, group = "selector")]
+        plan: Option<String>,
+        /// Import the workspace's current plan.
+        #[arg(long, group = "selector")]
+        current: bool,
+        /// Validate and report the planned import without writing anything.
+        #[arg(long)]
+        dry_run: bool,
     },
 }
 

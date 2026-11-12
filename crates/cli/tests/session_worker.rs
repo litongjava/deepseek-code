@@ -61,7 +61,11 @@ async fn live_mode_change_applies_to_tool_after_inflight_model_request() {
     assert_eq!(completed(&paths.data_dir,&id).await.status,"completed");
     assert!(!workspace.join("must-not-exist.txt").exists());
     let (_,_,events)=jobs::events_since(&paths.data_dir,&id,&session,0).unwrap();
-    assert!(events.iter().any(|event|event["type"]=="tool_result" && event["id"]=="mode-write" && event["is_error"]==true));
+    let started = events.iter().find(|event| event["type"] == "tool_start" && event["name"] == "Write")
+        .expect("the denied Write call starts");
+    let occurrence = started["id"].as_str().unwrap();
+    assert!(!occurrence.is_empty());
+    assert!(events.iter().any(|event|event["type"]=="tool_result" && event["id"]==occurrence && event["is_error"]==true));
     worker::shutdown(&paths.data_dir,&session).await.unwrap();
     server.abort();
 }
@@ -805,7 +809,6 @@ async fn persistent_engine_reuses_mcp_refreshes_settings_and_recovers_after_cras
             .unwrap();
     }
     assert_eq!(completed(&paths.data_dir, &crash).await.status, "failed");
-    tokio::time::sleep(Duration::from_millis(200)).await;
     let recovered = worker::ensure_worker(&paths.data_dir, executable, &session, &workspace)
         .await
         .unwrap();
@@ -838,9 +841,12 @@ async fn persistent_engine_reuses_mcp_refreshes_settings_and_recovers_after_cras
 /// caller never started a replacement.
 ///
 /// The stop is published only after `ensure_worker` has taken its startup lock
-/// and waited a wide margin. That reliably reaches the "predecessor still
-/// starting" branch on this host, but it is a timing-based reproduction rather
-/// than proof that a particular internal read happened before the publish.
+/// plus a one-second margin, which reproduces the observed "stops just before
+/// readiness" race. This is a timing fixture, not a handshake with the exact
+/// predecessor-record read: on an extremely slow start the stop could still be
+/// observed first, and the replacement assertion would then hold without
+/// exercising the new wait branch. The original source fails this fixture
+/// because it reports the predecessor's stop as a startup failure.
 #[tokio::test]
 async fn ensure_worker_replaces_a_predecessor_that_stops_before_ready() {
     let temp = tempfile::tempdir().unwrap();
@@ -899,8 +905,9 @@ async fn ensure_worker_replaces_a_predecessor_that_stops_before_ready() {
             );
             std::thread::sleep(Duration::from_millis(5));
         }
-        // The lock is taken before the predecessor record is read; a second is
-        // far more than those local reads need, even on a busy host.
+        // Seeing the lock means startup has begun. A one-second margin from
+        // here reproduces the recorded race; it is a timing fixture, not a
+        // deterministic signal that the predecessor record was already read.
         std::thread::sleep(Duration::from_secs(1));
         assert!(
             !done.load(std::sync::atomic::Ordering::SeqCst),

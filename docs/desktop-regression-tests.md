@@ -68,6 +68,7 @@ npm run tauri -- dev
 18. 离开自定义页后重新进入，并关闭测试 Desktop 进程后重新启动：提示词和工具读回各自已保存的值；未保存的工具改动不应落盘。草稿保留仅指提示词与工具入口之间连续切换，不保证离开自定义页或重启后保留。
 19. 按需加载后的权限：先搜索加载一个需要审批的工具，拒绝审批时工具不执行且无副作用；审批等待期间取消本轮不会继续请求。
 20. 以上 1–19 项须用**本次构建**的 Desktop 与 Bridge 在真实 WebView2 中执行。旧单开关界面的历史验证结果只作为历史记录保留，不能替代本项。
+21. Skills 入口的示例技能 skill-creator 显示后端返回的文件树：`SKILL.md`、`scripts/`、`references/`、`license.txt`、`NOTICE.md`；展开 `scripts` 有 `init_skill.py` 和 `quick_validate.py`，打开文件能看到内容。不得出现旧占位或硬编码的 `agents/`、`eval-viewer/` 等不存在的文件。旧数据目录中未修改的占位会被移除，改动过的副本原样保留。
 
 2026-11-07 在 Windows 的真实 Tauri WebView2 中完成 B11、B12（**当时编号**：单开关工具页时代的自定义工具与提示词项，不等同于本清单现在的编号，也不构成双开关页面与加载策略的验收证据）。使用现有 `target/debug/dcd.exe`、当前 Vite 前端源码和独立数据目录，通过 dsb 鼠标点击保存、原生选择框及输入控件操作；同时核对真实后端生成的 `customization.json`。两个方向的隔离、空替换提示词不阻塞工具保存、草稿保留、提示隔离、页面重开和进程重启读回均通过。相关两个组件测试文件共 16 项通过，`npx tsc --noEmit` 通过。本轮未重新构建或替换可执行文件，也未验证模型调用或其他平台。详细记录与 dsb 脚本原位于 `dev-support/deepseek-code/customize-native-20261107/`，已在 2026-11-10 的开发支持目录清理中删除，本轮结论只保留在此处。
 
@@ -88,6 +89,7 @@ npm run tauri -- dev
 4. 模型设置和供应商设置保存。
 5. Skills、MCP、插件页面可以打开和切换。
 6. 让模型连续执行 3 条命令、写一句话、再执行 2 条命令：显示 `Ran commands · 3`、正文、`Ran commands · 2`，完成后都收起；执行中的分组展开并实时更新；展开后按顺序列出每次调用，点击行可看输出；深色主题同样清晰。
+7. 排队后续消息：回合进行中排队一条消息，回合结束后该消息自动开始执行，队列未进入暂停状态（不出现 409 或“Queued turn failed admission”）。
 
 ### D2. 请求失败诊断（共享 core 路径）
 
@@ -107,6 +109,16 @@ Desktop 的自动压缩、手动压缩和局部摘要都调用 `crates/core` 的
 2. 手动压缩（输入框上方的压缩入口）显示同一套进度；压缩完成后历史记录仍可回看。
 3. 摘要失败时不写入压缩边界：会话保持原样，界面显示失败阶段、预算和“原始历史保留”，重新发送不会重复执行已完成的工具调用。
 4. 恢复期间取消（停止当前回复）后历史不变；再次压缩时已完成的分段直接复用，进度显示复用计数。
+
+### D4. 技能目录（共享 core 路径）
+
+Desktop 的模型技能列表和 `Skill` 工具与 CLI 共用 `crates/core` 的发现入口，改动 `skills/discovery.rs`、`native_engine/engine_core.rs` 的技能列表或 `native_engine/skill_tool.rs` 时，除 `docs/cli-regression-tests.md` 的 N 节外，在桌面窗口确认：
+
+1. 用独立数据目录启动 Desktop，`CLAUDE_CONFIG_DIR` 指向空目录，只在 `<数据目录>/skills/<名称>/SKILL.md` 放一个技能，发送普通请求：模型的 `Available skills` 含该名称。
+2. 让模型调用 `Skill`：工具成功，说明中的技能目录是数据目录下的真实路径，引用 `references/...` 可读取。
+3. 同名技能放在工作区 `.claude/skills`、数据目录和 `~/.claude`：项目优先，其次数据目录，最后 Claude 用户；模型列表只出现一项，技能面板/斜杠名称一致。
+4. `enabled: false` 与 `disable-model-invocation` 的显示和调用行为与 CLI 一致。
+5. `<数据目录>/skills/bundled`、`mcp` 中的同名副本不覆盖内置工作流。
 
 ### E. 浏览器和手机（dcd-server）
 
@@ -145,7 +157,7 @@ Desktop 的自动压缩、手动压缩和局部摘要都调用 `crates/core` 的
 3. 权限菜单显示当前会话 Bash 授权状态；点击撤销后读回未授权。其他会话和应用冷启动不继承授权。
 4. 审批接口失败时保留弹窗并显示错误，不提前关闭，也不误写入会话授权。
 5. `git_add` 完成后展开工具详情，结果区显示成功摘要和完整路径文本，复制输出也为文本；原始工具输入仍可检查。
-6. 创建带名称的后台任务，等待 `TaskOutput` 时已显示 `TaskOutput(任务名称)`，完成后和重新打开历史后保持名称。
+6. 创建带名称的后台任务，模型用 `TaskGet`（`block:true`）等待时已显示 `TaskGet(任务名称)`，完成后和重新打开历史后保持名称。
 
 2026-11-06 使用隔离数据目录、实际 Tauri WebView2 和本地模型 fixture 完成 Shell 路径保存/无效路径拒绝，以及上述 1、2、3、5、6 的运行中展示。文件选择器的系统对话框、历史重开和跨平台界面尚未在本轮手工验收；对应组件/回放测试不能代替这些系统界面检查。
 
@@ -163,4 +175,5 @@ Desktop 的自动压缩、手动压缩和局部摘要都调用 `crates/core` 的
 - `crates/core` 的摘要实现（`native_engine/generation.rs`、`services/compaction*`）：D3，以及 `cli-regression-tests.md` 的 L 节
 - 语音输入（`VoiceInput`、`peripheral.rs` 的 `voice_transcribe`）：Desktop 中配置音频转写后端，录音 5 秒后停止并转写，文本正确；录音以二进制传给后端（无 JSON 数字数组）。浏览器的 HTTP 页面点击麦克风弹出“需要 HTTPS”。
 - `features/trajectory/`（工具调用分组）：D6
+- `crates/core` 的技能发现、模型技能列表和 `Skill` 工具：D4，以及 `cli-regression-tests.md` 的 N 节
 - 其他范围：至少跑 D1

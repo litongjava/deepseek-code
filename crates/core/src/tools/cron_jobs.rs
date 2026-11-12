@@ -193,7 +193,7 @@ pub fn execute(name: &str, input: &Value, scope: &Scope) -> Result<Value> {
     }
 }
 
-fn claim(root: &Path, jobs_file: &Path) -> Result<Option<std::fs::File>> {
+fn claim(root: &Path, jobs_file: &Path) -> Result<Option<crate::fs::OwnedFileLock>> {
     use std::hash::{Hash, Hasher};
     let mut hash = std::collections::hash_map::DefaultHasher::new();
     jobs_file.hash(&mut hash);
@@ -204,11 +204,7 @@ fn claim(root: &Path, jobs_file: &Path) -> Result<Option<std::fs::File>> {
         .create(true)
         .truncate(false)
         .open(directory.join(format!("{:016x}.lock", hash.finish())))?;
-    match crate::fs::try_lock_file(&file) {
-        Ok(()) => Ok(Some(file)),
-        Err(std::fs::TryLockError::WouldBlock) => Ok(None),
-        Err(std::fs::TryLockError::Error(error)) => Err(error.into()),
-    }
+    Ok(crate::fs::OwnedFileLock::try_acquire(file)?)
 }
 
 /// Prompts whose time has come, oldest first. One-shot and expired recurring
@@ -351,5 +347,33 @@ mod tests {
             project: project.path(),
         };
         assert_eq!(execute("CronList", &json!({}), &other).unwrap()["count"], 0);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn claim_after_release_survives_concurrent_process_spawns() {
+        let root = tempfile::tempdir().unwrap();
+        let file = root.path().join("jobs.json");
+        let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let spawner = {
+            let stop = stop.clone();
+            std::thread::spawn(move || {
+                while !stop.load(std::sync::atomic::Ordering::Relaxed) {
+                    let _ = std::process::Command::new("true").status();
+                }
+            })
+        };
+        let mut failures = 0;
+        for _ in 0..200 {
+            let held = claim(root.path(), &file).unwrap().unwrap();
+            drop(held);
+            match claim(root.path(), &file).unwrap() {
+                Some(again) => drop(again),
+                None => failures += 1,
+            }
+        }
+        stop.store(true, std::sync::atomic::Ordering::Relaxed);
+        spawner.join().unwrap();
+        assert_eq!(failures, 0, "claims after release failed {failures} times");
     }
 }

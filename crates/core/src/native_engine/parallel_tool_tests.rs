@@ -26,6 +26,7 @@ fn executor(root: &std::path::Path) -> ToolLoopExecutor {
 
 fn call(id: &str, name: &str, input: Value, concurrent: bool) -> PendingToolCall {
     PendingToolCall {
+        provider_id: id.into(),
         id: id.into(),
         name: name.into(),
         input,

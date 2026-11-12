@@ -99,4 +99,11 @@ pub(super) const FILES: &[(&str, &str, &[u8])] = &[
     ("dataviz", "references/palette.md", include_bytes!("bundled/resources/dataviz/references/palette.md")),
     ("dataviz", "scripts/validate_palette.js", include_bytes!("bundled/resources/dataviz/scripts/validate_palette.js")),
     ("dataviz", "scripts/validate_palette.py", include_bytes!("bundled/resources/dataviz/scripts/validate_palette.py")),
+    ("skill-creator", "INSTRUCTIONS.md", include_bytes!("bundled/resources/skill-creator/INSTRUCTIONS.md")),
+    ("skill-creator", "NOTICE.md", include_bytes!("bundled/resources/skill-creator/NOTICE.md")),
+    ("skill-creator", "SKILL.md", include_bytes!("bundled/resources/skill-creator/SKILL.md")),
+    ("skill-creator", "license.txt", include_bytes!("bundled/resources/skill-creator/license.txt")),
+    ("skill-creator", "references/frontmatter.md", include_bytes!("bundled/resources/skill-creator/references/frontmatter.md")),
+    ("skill-creator", "scripts/init_skill.py", include_bytes!("bundled/resources/skill-creator/scripts/init_skill.py")),
+    ("skill-creator", "scripts/quick_validate.py", include_bytes!("bundled/resources/skill-creator/scripts/quick_validate.py")),
 ];

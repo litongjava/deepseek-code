@@ -151,4 +151,29 @@ describe('Customize management', () => {
     expect(api.updateSkill).toHaveBeenLastCalledWith('new-id', { name: 'new-skill', description: '', content: 'Updated instructions' });
     expect(screen.getByText('Canonical persisted instructions')).toBeInTheDocument();
   });
+
+  it('renders the file tree returned by the backend instead of a fixed skill list', async () => {
+    const bundled = {
+      ...skill,
+      id: 'embedded:skill-creator',
+      name: 'skill-creator',
+      source: 'bundled',
+      description: 'Create a skill',
+      content: 'Bundled instructions',
+      files: [
+        { name: 'scripts', type: 'folder', children: [{ name: 'init_skill.py', type: 'file' }] },
+        { name: 'SKILL.md', type: 'file' },
+      ],
+    };
+    vi.mocked(api.getSkills).mockResolvedValue({ skills: [bundled] });
+    vi.mocked(api.getSkillDetail).mockResolvedValue(bundled);
+    await openSkills();
+    await act(async () => fireEvent.click(screen.getByText('skill-creator')));
+    expect(screen.getByText('SKILL.md')).toBeInTheDocument();
+    expect(screen.getByText('scripts')).toBeInTheDocument();
+    expect(screen.queryByText('agents')).not.toBeInTheDocument();
+    expect(screen.queryByText('eval-viewer')).not.toBeInTheDocument();
+    await act(async () => fireEvent.click(screen.getByText('scripts')));
+    expect(screen.getByText('init_skill.py')).toBeInTheDocument();
+  });
 });

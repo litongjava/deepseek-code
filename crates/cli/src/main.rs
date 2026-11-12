@@ -49,6 +49,7 @@ mod memory;
 mod memory_shortcut;
 mod mentions;
 mod migration;
+mod observe;
 mod output;
 mod permission_commands;
 mod permissions_menu;
@@ -87,6 +88,7 @@ mod stats_view;
 mod status_commands;
 mod statusline_commands;
 mod super_agent_tick;
+mod task_commands;
 #[allow(dead_code)]
 mod terminal;
 mod tool_settings;
@@ -249,6 +251,12 @@ async fn run(cli: &Cli) -> Result<()> {
         None => deepseek_code_core::runtime::resolve_default_data_dir()?,
     };
     let paths = RuntimePaths::new(absolute(data_dir)?)?;
+    // Explicit task maintenance runs before any other startup work so it never
+    // creates logs, environment state or task storage on its own, and never
+    // imports anything automatically.
+    if let Some(Commands::Tasks { action }) = &cli.command {
+        return task_commands::run(&paths, action);
+    }
     let _resource_sampler = resource_sampling::start(&paths.data_dir);
     // Engine code that has no RuntimePaths (e.g. the task tools) and child
     // processes resolve the data directory from the environment.
@@ -872,6 +880,8 @@ async fn run(cli: &Cli) -> Result<()> {
             if let Err(error) = remote.command("", &paths, &session, &mut input).await { command_eprintln!("Remote Control: {error:#}"); }
         }
         let mut last_config_error = String::new();
+        // Read-only view of a turn a direct print/json owner still executes.
+        let mut execution_observer = observe::Observer::default();
         terminal::tips::start_session(&paths.data_dir);
         // Lets other sessions see this one is open while it is idle.
         let mut presence: Option<(String, deepseek_code_core::services::session_messages::PresenceLease)> = None;
@@ -1000,6 +1010,23 @@ async fn run(cli: &Cli) -> Result<()> {
                     }
                 },
                 _ = background_refresh.tick() => {
+                    // While a resumed session is owned elsewhere, show the public
+                    // text/tool progress that owner publishes. The observer never
+                    // takes the lease, submits input or runs a tool.
+                    if session.waiting_for_continue() {
+                        match execution_observer.poll(&session) {
+                            // Observing never opens the automatic-wake path: a
+                            // queued notification waits for explicit input.
+                            Ok((_, lines)) => {
+                                if let Some(reader) = input.as_ref() {
+                                    for line in lines { reader.notice(line); }
+                                }
+                            }
+                            Err(error) => {
+                                if let Some(reader) = input.as_ref() { reader.notice(format!("Observation: {error:#}")); }
+                            }
+                        }
+                    }
                     match deepseek_code_core::services::lifecycle_events::check_configuration(&session.hook_service_context(), &session.workspace, &session.id).await {
                         Ok(()) => last_config_error.clear(),
                         Err(error) => { let text = format!("{error:#}"); if last_config_error != text { input.as_ref().expect("interactive reader").notice(text.clone()); last_config_error = text; } }

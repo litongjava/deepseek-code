@@ -50,7 +50,22 @@ pub fn show_resumed(session: &Session, clear: bool) -> Result<()> {
         let active = crate::worker_frontend::settle_session(session)
             .ok()
             .flatten();
-        command_eprintln!("{}", resumed_notice(active.as_ref()));
+        if let Some(job) = &active {
+            command_eprintln!("{}", resumed_notice(Some(job)));
+        } else if crate::observe::execution_lease_active(session).unwrap_or(false) {
+            // A direct print/json owner keeps the execution lease. Show that the
+            // turn runs elsewhere so /continue cannot start a second one.
+            command_eprintln!(
+                "{}",
+                crate::observe::running_notice(session).unwrap_or_else(|_| {
+                    "✻ A turn is still running in another process; observing its published progress. Esc returns without stopping it.".into()
+                })
+            );
+        } else if crate::observe::latest_interrupted(session).unwrap_or(false) {
+            command_eprintln!("Session restored; the previous turn was interrupted before it completed and its request was not replayed. Send a new message or /continue to continue explicitly.");
+        } else {
+            command_eprintln!("{}", resumed_notice(None));
+        }
     }
     Ok(())
 }
@@ -97,6 +112,7 @@ fn hex_message_id(id: &str) -> String {
 fn completion_for_message(
     data_dir: &std::path::Path,
     message: &deepseek_code_core::db::message_repo::MessageRow,
+    turn: Option<&deepseek_code_core::db::turn_repo::TurnRecord>,
 ) -> Option<String> {
     if message.role != "assistant" {
         return None;
@@ -104,16 +120,37 @@ fn completion_for_message(
     let path = data_dir
         .join("turn-completions")
         .join(hex_message_id(&message.id));
-    Some(match std::fs::read_to_string(path) {
-        Ok(status) => status,
-        // Legacy message timestamps are save times, not measured completion times.
-        Err(_) => match chrono::DateTime::parse_from_rfc3339(&message.created_at) {
-            Ok(time) => format!(
-                "✻ Previous turn · saved {} · duration unavailable",
-                time.with_timezone(&chrono::Local).format("%-I:%M %p")
-            ),
-            Err(_) => "✻ Previous turn · duration unavailable".into(),
-        },
+    if let Ok(status) = std::fs::read_to_string(path) {
+        return Some(status);
+    }
+    // The live display writes a sidecar; a headless turn is measured in
+    // execution_turns instead. A running turn has no completion line at all, so
+    // a resumed screen never presents it as a finished Previous turn.
+    use deepseek_code_core::db::turn_repo::TurnStatus;
+    if let Some(turn) = turn {
+        return match turn.status {
+            TurnStatus::Running => None,
+            TurnStatus::Completed => Some(format!(
+                "✻ Worked for {} · done",
+                format_duration(turn.elapsed_ms.unwrap_or(0))
+            )),
+            TurnStatus::Failed => Some(format!(
+                "✻ Worked for {} · failed",
+                format_duration(turn.elapsed_ms.unwrap_or(0))
+            )),
+            TurnStatus::Cancelled if turn.interrupted() => {
+                Some("✻ Previous turn · interrupted · duration unknown".into())
+            }
+            TurnStatus::Cancelled => Some("✻ Previous turn · interrupted".into()),
+        };
+    }
+    // Legacy message timestamps are save times, not measured completion times.
+    Some(match chrono::DateTime::parse_from_rfc3339(&message.created_at) {
+        Ok(time) => format!(
+            "✻ Previous turn · saved {} · duration unavailable",
+            time.with_timezone(&chrono::Local).format("%-I:%M %p")
+        ),
+        Err(_) => "✻ Previous turn · duration unavailable".into(),
     })
 }
 
@@ -344,7 +381,8 @@ fn conversation(
             // Only the final legacy message has a fallback; intermediate tool
             // messages must not be presented as completed turns.
             if saved.is_file() || rows.last().is_some_and(|last| last.id == message.id) {
-                if let Some(status) = completion_for_message(&session.paths.data_dir, message) {
+                let turn = deepseek_code_core::db::turn_repo::get_message_turn(conn, &message.id).ok().flatten();
+                if let Some(status) = completion_for_message(&session.paths.data_dir, message, turn.as_ref()) {
                     separate_block(&mut lines);
                     lines.push(change_view::muted(&status));
                     if let Some(recorded) = recorded.as_deref_mut() {
@@ -837,25 +875,14 @@ mod tests {
         let id = store.create(dir.path(), "model", "provider").unwrap();
         store.append(&id, "assistant", "Finished").unwrap();
         store.append(&id, "user", "Next turn").unwrap();
-        let messages = store
-            .db
-            .with_conn(|conn| {
-                deepseek_code_core::db::message_repo::get_messages_by_conversation(conn, &id)
-            })
-            .unwrap()
-            .unwrap();
-        assert!(completion_for_message(&paths.data_dir, &messages[0])
-            .unwrap()
-            .contains("duration unavailable"));
+        let messages = store.db.with_conn(|conn| deepseek_code_core::db::message_repo::get_messages_by_conversation(conn, &id)).unwrap().unwrap();
+        assert!(completion_for_message(&paths.data_dir, &messages[0], None).unwrap().contains("duration unavailable"));
         let directory = paths.data_dir.join("turn-completions");
         std::fs::create_dir_all(&directory).unwrap();
         let status = "✻ Worked for 1m 30s · done 5:45 PM";
         std::fs::write(directory.join(hex_message_id(&messages[0].id)), status).unwrap();
-        assert_eq!(
-            completion_for_message(&paths.data_dir, &messages[0]).as_deref(),
-            Some(status)
-        );
-        assert_eq!(completion_for_message(&paths.data_dir, &messages[1]), None);
+        assert_eq!(completion_for_message(&paths.data_dir, &messages[0], None).as_deref(), Some(status));
+        assert_eq!(completion_for_message(&paths.data_dir, &messages[1], None), None);
     }
 
     #[test]

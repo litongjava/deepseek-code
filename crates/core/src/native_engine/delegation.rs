@@ -46,7 +46,7 @@ impl OwnedChild {
 pub(super) fn definitions() -> Vec<ToolDefinition> {
     vec![ToolDefinition {
         name: "Agent".into(),
-        description: "Launch a new agent to handle complex, multi-step tasks. Each agent type has specific capabilities and tools available to it.\n\nSpecify a subagent_type to select an agent definition; omitting it starts a general-purpose agent.\n\n## When to use\n\nReach for this when the task matches an available agent type, when you have independent work to run in parallel, or when answering would mean reading across several files — delegate it and you keep the conclusion, not the file dumps. For a single-fact lookup where you already know the file, symbol, or value, search directly. Once you've delegated a search, don't also run it yourself — wait for the result.\n\nSubagents run in the background; you'll be notified when one completes. Continue independent work while an agent runs. If nothing independent remains, return control to the user and let completion notification wake the session; do not poll TaskOutput or sleep repeatedly just to keep the parent turn open. A single sequential task is usually cheaper to execute directly than to delegate and wait. Never fabricate or predict a pending agent's results — the notification is never something you write yourself; if the user asks before it arrives, say it's still running. Pass run_in_background: false when you need the result before continuing.\n\n- The agent's final report is not shown to the user — relay what matters.\n- Use SendMessage with the agent's ID or name to continue a previously spawned agent with its context intact; a new Agent call starts fresh.\n- Each agent type's prompt and tools come from its definition (`.claude/agents/*.md` or SDK `agents`).\n- `isolation: \"worktree\"` gives the agent its own git worktree.".into(),
+        description: "Launch a new agent to handle complex, multi-step tasks. Each agent type has specific capabilities and tools available to it.\n\nSpecify a subagent_type to select an agent definition; omitting it starts a general-purpose agent.\n\n## When to use\n\nReach for this when the task matches an available agent type, when you have independent work to run in parallel, or when answering would mean reading across several files — delegate it and you keep the conclusion, not the file dumps. For a single-fact lookup where you already know the file, symbol, or value, search directly. Once you've delegated a search, don't also run it yourself — wait for the result.\n\nSubagents run in the background; you'll be notified when one completes. Continue independent work while an agent runs. If nothing independent remains, return control to the user and let completion notification wake the session; do not poll TaskGet or sleep repeatedly just to keep the parent turn open. A single sequential task is usually cheaper to execute directly than to delegate and wait. Never fabricate or predict a pending agent's results — the notification is never something you write yourself; if the user asks before it arrives, say it's still running. Pass run_in_background: false when you need the result before continuing.\n\n- The agent's final report is not shown to the user — relay what matters.\n- Use SendMessage with the agent's ID or name to continue a previously spawned agent with its context intact; a new Agent call starts fresh.\n- Each agent type's prompt and tools come from its definition (`.claude/agents/*.md` or SDK `agents`).\n- `isolation: \"worktree\"` gives the agent its own git worktree.".into(),
         input_schema: json!({"type":"object","properties":{
             "description":{"description":"A short (3-5 word) description of the task","type":"string"},
             "prompt":{"description":"The task for the agent to perform","type":"string"},
@@ -477,7 +477,8 @@ impl ToolLoopExecutor {
             crate::services::session_messages::ExecutionLease::acquire(
                 &context.paths.data_dir,
                 id,
-            )?;
+            )?
+            .map(std::sync::Arc::new);
         let current: Value = context
             .setting(&format!("delegation.{id}"))?
             .context("Child ownership disappeared")?;
@@ -1389,7 +1390,8 @@ impl ToolLoopExecutor {
                 child.execution_lease = crate::services::session_messages::ExecutionLease::acquire(
                     &context.paths.data_dir,
                     &id,
-                )?;
+                )?
+                .map(std::sync::Arc::new);
             }
             let state = ChildState {
                 context: context.clone(),

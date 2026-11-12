@@ -1666,6 +1666,7 @@ dependencies = [
  "pulldown-cmark",
  "ring",
  "rquickjs",
+ "rusqlite",
  "rustyline",
  "serde",
  "serde_json",
