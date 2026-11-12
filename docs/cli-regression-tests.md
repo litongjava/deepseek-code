@@ -290,6 +290,39 @@ OpenCode Go 用四种协议提供模型，模型地址和协议都来自内置�
 
 自动回归：`cargo test --locked -p deepseek-code-cli opencode`、`cargo test --locked -p deepseek-code-cli presets_use_catalog_models`、`cargo test --locked -p deepseek-code-cli wizard_keeps_a_provider_saved_when_the_connection_test_fails`、`cargo test --locked -p deepseek-code-core model_listing`、`cargo test --locked -p deepseek-code-core request_identity`、`cargo test --locked -p deepseek-code-core provider_runtime`、`cargo test --locked -p deepseek-code-core --lib performance::tests::region_and_session`、`npm run test:run -- modelCapabilities`。单元测试覆盖 URL 纠正、预设字段、目录 baseUrl 推导、网页错误、只发 OpenCode 的会话头与会话外回退、非 OpenCode 不发送会话头，以及地区拒绝时只输出固定词表（不回显上游正文）；真实终端步骤仍要按第 2 到第 7 条执行。
 
+### N. 模型列表刷新
+
+`/model refresh` 刷新当前提供商的模型列表，`/provider refresh [ID]` 刷新指定提供商（省略 ID 时刷新当前提供商）。刷新以上游返回的模型 ID 为准：新增上游新出现的模型，移除上游不再返回的模型（包括手工添加的）。同一 ID 保留本地名称、启用状态、上下文窗口和协议等设置；新模型使用现有模板并默认启用。
+
+自动检查：
+
+```bash
+cargo test --locked -p deepseek-code-cli --bin dcl interactive_config::tests
+cargo test --locked -p deepseek-code-cli --bin dcl refresh_subcommands
+cargo test --locked -p deepseek-code-core --lib model_listing
+```
+
+覆盖命令解析、增删同步、同 ID 设置保留、重复 ID、当前模型被移除后切换并保留历史、刷新其他提供商不切换会话、默认模型失效（含刷新前就已失效）与无效默认不写、取消不保存、会话切换失败和默认偏好写入失败后的回滚，以及刷新期间配置被并发修改：`refresh_aborts_when_the_provider_is_removed_meanwhile`（目标提供商被删除时中止，删除结果保留且不写入）、`refresh_aborts_when_the_provider_changes_meanwhile`（目标提供商被修改时中止，并发编辑保留且不写入刷新结果）、`refresh_keeps_a_concurrent_change_to_another_provider`（其他提供商的并发修改与本次刷新结果都保留），以及 `/model r`、`/provider r` 的子命令补全与 provider ID 补全。
+
+`model_listing` 的本地 HTTP fixture 分协议覆盖：OpenAI、Anthropic、Gemini 的认证；Anthropic 与 Gemini 的多页遍历和游标循环；OpenAI 兼容接口单页返回，以及它声明分页时安全拒绝；非法条目、错误类型的 `has_more`/`nextPageToken`、空列表、失败分页、非 JSON、200 错误对象、重复或缺失游标、超时。错误与游标都不回显凭据或令牌：Key 的原样、URL 编码（大小写十六进制、逐字符混合编码）、Base64/URL-safe Base64 形式都会被替换为 `[redacted]`，Base URL 路径中出现的 Key 同样会被隐去。
+
+`cli.json` 通过临时文件加改名写入，权限为仅所有者可读写。`config::search_tests` 的 `saving_preferences_keeps_the_previous_file_when_the_commit_fails` 校验提交失败时旧文件字节不变、没有残留临时文件；`a_failed_default_save_restores_the_list_and_selection` 在完整刷新流程中注入同一失败，校验模型列表、会话和偏好文件都恢复。
+
+真实终端验收（使用隔离数据目录和本地 mock 端点）：
+
+1. 保存一个提供商，启动 dcl 后执行 `/model refresh`：输出新增、移除和保留的数量以及各自的模型 ID，使用普通文本列表。随后直接执行 `/model`，无需重启即可看到新增模型。
+2. 让当前模型从上游列表消失后再次刷新：保存前出现替代模型选择；用方向键选择并按 `Enter` 确认后，当前会话切换过去，对话历史保留，`/model` 显示新列表。
+3. 在同一场景按 `Esc`，或在文本选择模式下直接回车（没有选择列表时）：整次刷新取消，`config.json` 字节不变，当前模型和默认模型都不变。有选择列表时 `Enter` 是确认，不是取消。
+4. 用 `/provider refresh <另一个 ID>` 刷新非当前提供商：模型列表更新，当前会话的提供商和模型不变。
+5. 重启 dcl：刷新后的模型列表仍然存在；被移除的模型不再出现在 `/model`。
+6. 对没有 Base URL 的多协议提供商、未保存的临时提供商、未知 ID 和多余参数分别执行刷新：都应给出明确错误，配置不变。
+7. 断开 mock 端点、返回空列表、只返回第一页后让下一页失败、上游返回缺模型 ID 或错误类型的分页字段、整次查询超过 20 秒总预算：都应报告失败，`config.json` 不变，错误信息不包含 API Key。查询进行中按 `Ctrl+C` 应立即显示 `Refresh cancelled; nothing was changed`，同样不写入。
+8. 补全：输入 `/model r` 按 `Tab` 得到 `/model refresh `；输入 `/provider r` 按 `Tab` 得到 `/provider refresh `；输入 `/provider refresh ` 按 `Tab` 补出已保存的 provider ID。
+
+OpenAI/Responses 的模型接口通常一次返回全部模型。它们声明还有下一页时，dcl 会拒绝这次刷新并保持配置不变，不会只同步第一页；Anthropic 和 Gemini 会读完所有页。
+
+Windows ConPTY 使用独立数据目录重跑第 1、2、3、5、8 条。当前分支的 Windows 终端验收尚未执行，汇报时必须单独列出，不能用 Linux 结果代替。
+
 ### J. 欢迎区与计划模式提示
 
 1. 新会话分别发送普通问题、`/plan <任务>`，以及先 `/plan` 再提问：欢迎区三行保持启动位置，计划模式提示使用 `DeepSeek Code`。
@@ -329,22 +362,22 @@ OpenCode Go 用四种协议提供模型，模型地址和协议都来自内置�
 
 1. `cargo test --locked -p deepseek-code-core --test compaction_status_regressions`（3 项）：指令开销的 `unknown_parts` 不为 0 时估算不得标为完整；与压缩边界同一毫秒、但没有记录该边界的旧请求不得成为当前用量；旧分支复制了祖先边界且没有计数键时，次数为“未知（旧历史）”、可证明的自身次数为 0，不显示精确的祖先累计值。
 2. `cargo test --locked -p deepseek-code-core --test compaction_boundary_provenance`（6 项，均覆盖 OpenAI 与 Anthropic）：先按当前历史读取消息与压缩边界，再由另一入口提交新的压缩，随后用旧消息发出真实 HTTP 请求。断言服务端正文是旧上下文、不含新摘要，且每个请求快照记录的 `contextBoundary` 都不是新边界；没有可信来源的主机消息记录为未知边界。把执行器改回“发送时查询数据库最新边界”后这 4 项全部失败，证明它们确实覆盖该缺陷。
-3. `cargo test --locked -p deepseek-code-core --test compaction_truncation`（37 项）：两个协议下分段与最终摘要提额且篇幅目标不变、模型上限下按 token 二分并合并、合并再次截断后提额、合并持续截断停在深度上限并复用已完成分段、单段额度耗尽时其它分段继续完成、恢复合并超过 64K 时拒绝发送、恢复结果在失败和重启后复用、合并超出安全输入预算、最后实际预算与拟请求预算分开报告、窗口过小与分段规划失败的完整诊断、非截断立即停止、截断文本不进入缓存、缓存写入失败不提交、并发修改历史拒绝提交、局部摘要截断、约 85 万 tokens 历史的分段与分层合并、约 80 万 tokens 的单段失败隔离与缓存复用、长摘要形成小于 8 份的分组并单项传递、空正文按原请求重试一次后安装、空正文重试仍为空时进入拆分、超长正文直接拆分且不提额也不原样重发、截断后提额返回空正文时先在提额后的预算原样重试、重试成功时不再拆分、重试仍为空时按原分段预算拆分、截断后提额返回超长正文时按原预算拆分且不再提额、持续空正文停在深度上限且不写缓存、持续空正文与持续超长正文的最终错误保留结束原因、字符数、预算与用量、空正文导致的分段失败不影响其它分段并在重试时复用它们、大量分段共用额度时拆分请求未发出仍报告触发它的超长正文、空正文重试后再拆分同样保留诊断、取消后新增真实记录时内容未变的分段不再重发（同进程）、同一场景在关闭并重新打开数据库与引擎后仍只重发改变的分段。多数用例在 OpenAI 与 Anthropic 各跑一遍；`persistent_empty_summaries_stop_at_the_depth_limit_and_cache_nothing` 只跑 OpenAI。
-4. `cargo test --locked -p deepseek-code-core --test compaction_overflow`：原有分段、取消、失败与最终摘要预算不变；合并首次用 4096、截断后按模型配置提高到 8192。
-5. OpenAI 的 `length` 与 Anthropic 的 `max_tokens` 都按结构化结束原因识别，不依赖错误文字；其他结束原因仍按普通失败处理，不进入拆分，且不新增请求。正常结束但正文为空或超过 32,000 个字符同样是结构化结果，不当作输出上限提额，也不会保存或替换上下文。
+3. `cargo test --locked -p deepseek-code-core --test compaction_truncation`（41 项）：两个协议下首次摘要请求直接使用所选模型配置的输出上限（缺失或 0 时用 32768 固定回退）且篇幅目标不变、模型上限下按 token 二分并合并、合并再次截断后按同一预算拆分、合并持续截断停在深度上限并复用已完成分段、单段额度耗尽时其它分段继续完成、恢复合并超过 64K 时拒绝发送、恢复结果在失败和重启后复用、合并超出安全输入预算、最后实际预算与拟请求预算分开报告、窗口过小与分段规划失败的完整诊断、非截断立即停止、截断文本不进入缓存、缓存写入失败不提交、并发修改历史拒绝提交、局部摘要截断、约 85 万 tokens 历史的分段与分层合并、约 80 万 tokens 的单段失败隔离与缓存复用、长摘要形成小于 8 份的分组并单项传递、空正文按同一预算重试一次后安装、空正文重试仍为空时进入拆分、超长正文直接拆分且只按同一预算拆分不原样重发、拆分恢复返回空正文时先在同一预算原样重试、重试成功时不再拆分、重试仍为空时按同一预算拆分、拆分恢复返回超长正文时按同一预算拆分且不再重试、持续空正文停在深度上限且不写缓存、持续空正文与持续超长正文的最终错误保留结束原因、字符数、预算与用量、空正文导致的分段失败不影响其它分段并在重试时复用它们、大量分段共用额度时拆分请求未发出仍报告触发它的超长正文、空正文重试后再拆分同样保留诊断、取消后新增真实记录时内容未变的分段不再重发（同进程）、同一场景在关闭并重新打开数据库与引擎后仍只重发改变的分段。多数用例在 OpenAI 与 Anthropic 各跑一遍；`persistent_empty_summaries_stop_at_the_depth_limit_and_cache_nothing` 只跑 OpenAI。
+4. `cargo test --locked -p deepseek-code-core --test compaction_overflow`（7 项，1 项按设计忽略）：分段、合并与最终摘要均从首个请求使用所选模型配置的输出上限；显式 8192 配置的每个请求都是 8192；配置为 null 或 0 时首个真实 HTTP 请求使用 32768 固定回退并仍完成提交；2000-token 窗口放不下该回退时发送 0 个请求，历史与缓存不变；原有取消、失败与最终摘要预算场景保持。
+5. OpenAI 的 `length` 与 Anthropic 的 `max_tokens` 都按结构化结束原因识别，不依赖错误文字；其他结束原因仍按普通失败处理，不进入拆分，且不新增请求。正常结束但正文为空或超过 32,000 个字符同样是结构化结果，不当作输出上限，也不会保存或替换上下文。
 6. 单次摘要请求的完整输入（系统指令、阶段提示词和历史）不超过 64,000 tokens，即使模型窗口能装下整段历史也先分段。该上限覆盖恢复合并：两份子摘要拼起来超过 64K 时，即使 1M 窗口仍装得下，也拒绝发送并只让该分段失败。约 85 万 tokens 的合成历史产生 14 个左右的分段，每个请求都在上限内，随后经 3 次分层合并得到最终摘要。
-7. 提额只增加输出预算，不改变篇幅目标：分段与合并始终约为 2048 tokens，最终摘要始终约为 4096 tokens。测试直接断言请求体中的目标文字。模型上限为 4096 时跳过提额，拆成两段后合并，内容顺序、中文、emoji 与超长工具结果完整。
+7. 预算与篇幅目标分离：分段与合并始终约为 2048 tokens，最终摘要始终约为 4096 tokens；输出预算为 32768/32000/128000 时也不放大目标。截断后不再提高预算，直接按同一预算拆分。模型上限为 4096 时目标随预算缩小，拆成两段后合并，内容顺序、中文、emoji 与超长工具结果完整。
 8. 每个初始分段有独立恢复额度（通常 8 次），成功分段的剩余额度转入合并池；合并池初始 16 次，每个中间合并或最终摘要节点最多使用 8 次。某段额度、拆分深度或输入预算耗尽时，错误列出失败分段的数量与索引、该段拟请求与最后实际发送的预算、已用次数与原因；其中因“无法发出下一个请求”而结束的恢复，还会保留触发它的那次响应（分段、结束原因、字符数与字符上限、实际预算、已报告或未知用量），不会退化成只说明额度用尽。其它分段继续完成并写入缓存，`/history` 中的原始记录不变，缓存中没有截断文本。
 9. 合并按时间顺序分层，每组最多 8 份摘要且不超过单次输入上限；单剩余项直接进入下一层；摘要数量无法减少、或连两份摘要都放不进合并输入预算时明确失败，不发送超限请求、不循环。
 10. 恢复过程中关闭并重新打开数据库与引擎后重试，或中途取消后重试，已完成的分段与子摘要都直接复用；恢复期间历史发生变化时拒绝提交，原有记录与新增记录都保留。
 11. 手动 `/compact` 与自动压缩显示同一套逐段进度。
 12. 真实 ConPTY：相邻开发支持目录的 `compaction-recovery-20261107/compaction_truncation_acceptance.py` 用隔离数据目录和本地模拟接口。每次运行写入独立目录（`--out`，或 `runs/<时间>-<随机>`），目录内保存 `run.json`（二进制路径、SHA256、运行时源码 revision 与是否有未提交改动、相关源码与验收脚本的 SHA256、场景参数、起止时间）和 `results.json`；非空目录直接拒绝，不会覆盖旧证据。运行时 revision 只说明当前检出，不能当作二进制的构建来源。每个场景声明必须产生的检查项；缺少必需项、任一项为假或场景报错都判为失败，重启未就绪与取消被忽略都不能跳过。场景：
     - `auto`、`manual`（窗口 14,000）：超大历史、两段摘要、首段截断。断言原始分段恰为 2、恢复子段恰为 2、合并在子段之后，核对终端 `fragment 1/2` 与 `fragment 2/2`；自动场景还检查 `Auto-compacting conversation`、压缩后原请求继续且只执行一次并携带摘要，手动场景检查 `/compact` 的进度与 `Compacted in … (ctrl+o to see full summary)`。
-    - `large`、`large-manual`（窗口 100,000）：历史约 86k tokens，整段能放进 90% 安全线但超过 64K 单次上限，因此仍拆成两段；其中 64K 分段连续两次触顶（首请求与提额后），拆分出的 32K 子段正常完成。断言所有摘要请求不超过 64K、至少两次截断被恢复、进度可见；自动场景还验证原请求只继续一次并携带摘要。
-    - `empty-auto`（窗口 100,000）与 `raise-empty-manual`（窗口 14,000）：首段 4096 截断、8192 提额返回空正文，随后在 8192 原样重试成功。断言三次预算依次为 4096/8192/8192、后两次请求体完全相同、该分段之后的所有请求都重复同一输入（没有拆分）；自动场景还要求原请求只继续一次并携带摘要。
-    - `raise-oversized-manual`（窗口 14,000）：首段截断、提额返回 32,001 字符。断言第三个请求回到 4096、后续不再提额，两个拆分输入与第一个请求不同，压缩完成并替换历史。
+    - `large`、`large-manual`（窗口 100,000）：历史约 86k tokens，整段能放进 90% 安全线但超过 64K 单次上限，因此仍拆成两段；摘要请求使用配置的输出上限，截断请求按同一预算拆分出的子段正常完成。断言所有摘要请求不超过 64K、至少两次截断被恢复且后续请求预算不变、进度可见；自动场景还验证原请求只继续一次并携带摘要。
+    - `empty-auto`（窗口 100,000）与 `empty-retry-manual`（窗口 14,000）：首段在同预算下返回空正文，随后在同一预算原样重试成功。断言两次请求预算相同、请求体完全相同、该分段之后的所有请求都重复同一输入（没有拆分）；自动场景还要求原请求只继续一次并携带摘要。
+    - `oversized-retry-manual`（窗口 14,000）：首段截断、随后返回 32,001 字符。断言不再提高预算，后续拆分请求使用同一配置预算、两个拆分输入与第一个请求不同，压缩完成并替换历史。
     - `empty-manual`、`blank-manual`（窗口 14,000）：普通入口直接返回空正文或纯空白正文，断言第二次请求与第一次同预算、同请求体，成功后替换历史，`/compact` 显示完成提示。
-    - `oversized-manual`（窗口 14,000）与 `oversized-auto`（窗口 100,000）：32,001 字符正文。断言没有原样重试、没有提额、后续请求是更小的拆分输入，压缩完成并替换历史；自动场景还要求原请求只继续一次。
+    - `oversized-manual`（窗口 14,000）与 `oversized-auto`（窗口 100,000）：32,001 字符正文。断言没有原样重试、输出预算不变、后续请求是更小的拆分输入，压缩完成并替换历史；自动场景还要求原请求只继续一次。
     - `invalid-restart-manual`（窗口 14,000）：首个分段的请求体带唯一标记，模拟持续返回 32,001 字符；另一个分段正常完成。断言失败信息同时包含 32,000 字符上限与历史保留、历史不变、缓存中没有超长文本；用 `--continue` 重启后再次 `/compact`，必须就绪、确实发出请求、只请求带标记的分段、已完成的其它分段直接复用，并且再次失败、历史不变。
     - `cancel-auto`（窗口 14,000）：自动压缩的首个分段请求一直不返回，在等待期间按 `Esc`。断言请求确实处于挂起、释放原响应后既没有新请求也没有提交、原有历史作为前缀保持不变、缓存中没有无效正文。
     - `cancel-manual`、`cancel-empty-manual`、`cancel-invalid-manual`（窗口 14,000）：同样的挂起分别发生在手动 `/compact` 的首个分段、空正文的同预算重试、以及最后一个分段的拆分恢复。断言 `Esc` 经现有输入读取器取消这次手动压缩，界面显示 `Compaction interrupted before it was saved`，释放迟到响应后没有新请求或提交，已有有效缓存仍在。
@@ -432,8 +465,10 @@ stream-json 宿主在一轮进行中发送的普通用户消息不再只等这�
 - 权限相关：E2，以及 `added_directory_survives_worker_resume_without_granting_other_sessions`（`bypass` 模式可以读工作区外的文件，其他模式受目录范围限制）
 - Provider、模型请求：E1、E6、M（OpenCode Go 的预设、URL 纠正、失败提示与会话头）
 - `scripts/sync-opencode-go-catalog.mjs`、`src/data/providerCatalog.json`：M，以及 `npm run test:run -- modelCapabilities`
-- `interactive_config.rs`：M 的预设、URL 纠正、保存后连接测试和失败提示
-- `native_engine/model_listing.rs`：M 的网页响应提示
+- `interactive_config.rs`：M 的预设、URL 纠正、保存后连接测试和失败提示，以及 N 的刷新命令解析、增删同步、替代模型、默认模型失效、取消不保存和保存失败回滚
+- `config.rs`：M 的默认模型读取，以及 N 的偏好文件原子写入、提交失败保持旧文件和文件权限
+- `native_engine/model_listing.rs`：M 的网页响应提示，以及 N 的严格列表校验、分页类型校验、原始模型 ID、空列表、失败分页，以及错误中 Key 的多种编码形式和路径凭据都不外泄
+- `terminal/editor.rs`、`terminal/input.rs` 的命令补全：`refresh_subcommands`（`/model r`、`/provider r`、`/provider refresh `）
 - `native_engine/request_identity.rs`：M 的会话头
 - `native_engine/provider_runtime.rs`：M 的目录 baseUrl 推导和四种协议真实对话
 - `native_engine/stream_retry.rs`、`native_engine/utf8_stream.rs`、`native_engine/request_trace.rs`、`performance/`：K，以及 E1

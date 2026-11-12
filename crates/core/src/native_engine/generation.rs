@@ -4,12 +4,14 @@ use crate::services::compaction::checkpoint::Checkpoint;
 use anyhow::{ensure, Context, Result};
 use std::fmt;
 
-/// Initial output budget of one fragment or intermediate merge summary.
-const FRAGMENT_OUTPUT: u32 = 4096;
-/// Initial output budget of the final summary.
-const FINAL_OUTPUT: u32 = 8192;
-/// A truncated request may raise its output budget once, up to this ceiling.
-const MAX_OUTPUT: u32 = 16_384;
+/// Fixed generation budget when neither the selected model nor reliable
+/// provider/model metadata supplies a positive output cap. This is an explicit
+/// fallback, not a value assumed for models that configure their own cap.
+const FALLBACK_OUTPUT: u32 = 32_768;
+/// Desired concise length of a fragment or intermediate merge summary.
+const FRAGMENT_SUMMARY_TARGET: u32 = 2048;
+/// Desired concise length of the final summary.
+const FINAL_SUMMARY_TARGET: u32 = 4096;
 /// One summary request never carries more estimated input than this, even when
 /// the model window could hold the whole transcript. Splitting first keeps a
 /// single request affordable and its length target reachable.
@@ -277,11 +279,15 @@ struct Targets {
 }
 
 impl Targets {
+    /// Length targets are the desired concise sizes, lowered only when the
+    /// generation budget of a small model cannot hold half of them. The budget
+    /// itself never enlarges a target: a 32k budget still asks for 2048/4096.
     fn new(fragment_output: u32, final_output: u32) -> Self {
+        let target = |desired: u32, budget: u32| desired.min(budget / 2).max(1);
         Self {
-            fragment: fragment_output / 2,
-            merge: fragment_output / 2,
-            final_summary: final_output / 2,
+            fragment: target(FRAGMENT_SUMMARY_TARGET, fragment_output),
+            merge: target(FRAGMENT_SUMMARY_TARGET, fragment_output),
+            final_summary: target(FINAL_SUMMARY_TARGET, final_output),
         }
     }
 
@@ -354,24 +360,15 @@ fn node_quota(pool: usize) -> usize {
     pool.min(MAX_NODE_RECOVERIES)
 }
 
-/// Largest input one initial fragment or intermediate merge may carry. When a
-/// budget raise is still possible, the smaller budget of the raised request is
-/// reserved so a truncated segment can raise instead of being re-split.
-fn planning_limit_for(window: u64, prompt_tokens: u64, initial: u32, raised: Option<u32>) -> u64 {
-    let chosen = match raised {
-        Some(raised) if prompt_tokens <= input_budget_for(window, raised) => raised,
-        _ => initial,
-    };
-    input_budget_for(window, chosen).min(MAX_INPUT_TOKENS)
-}
+/// Input room the planner keeps even for a very large configured output cap.
+/// When the safe line cannot provide it, planning fails before any request.
+const MIN_INPUT_TOKENS: u64 = 1024;
 
-/// The raised output budget of one request, when the model still allows one.
-fn raise_target(model_cap: Option<u32>, output: u32) -> Option<u32> {
-    let raised = output
-        .saturating_mul(2)
-        .min(MAX_OUTPUT)
-        .min(model_cap.unwrap_or(MAX_OUTPUT));
-    (raised > output).then_some(raised)
+/// Largest input one initial fragment or intermediate merge may carry. The
+/// request output budget is the selected model cap, so no room is reserved for
+/// a later raise.
+fn planning_limit_for(window: u64, output: u32) -> u64 {
+    input_budget_for(window, output).min(MAX_INPUT_TOKENS)
 }
 
 fn input_tokens(system: &str, input: &str) -> u64 {
@@ -448,11 +445,15 @@ fn fragments<'a>(system: &str, prompt: &str, input: &'a str, budget: u64) -> Res
 /// Split at the token midpoint, keeping both halves on UTF-8 boundaries and in
 /// their original order. `None` when there is nothing smaller to split into.
 fn split_in_half<'a>(system: &str, input: &'a str) -> Option<(&'a str, &'a str)> {
-    let total = input_tokens(system, input);
+    // Split the input by its own token contribution. The system instructions
+    // are a fixed overhead on every measurement, so using half of the total
+    // would leave no prefix inside the target when the input is short.
+    let base = input_tokens(system, "");
+    let total = input_tokens(system, input).saturating_sub(base);
     if total < 2 {
         return None;
     }
-    let target = total / 2;
+    let target = base + total / 2;
     let boundaries: Vec<usize> = input
         .char_indices()
         .map(|(i, _)| i)
@@ -471,28 +472,67 @@ fn split_in_half<'a>(system: &str, input: &'a str) -> Option<(&'a str, &'a str)>
     (!first.trim().is_empty() && !second.trim().is_empty()).then_some((first, second))
 }
 
-/// The output budget of a stage, never above what the model configuration allows.
-fn output_cap(provider: &ResolvedProvider, initial: u32) -> u32 {
-    provider.model.max_tokens.unwrap_or(initial).min(initial)
+/// Where a compaction request's generation budget came from, for diagnostics.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum BudgetSource {
+    /// The selected provider/model carries an explicit positive `max_tokens`.
+    Configured,
+    /// The configured cap was absent, zero or invalid, so the named fixed
+    /// fallback was used. This is not a claim about the model's real maximum.
+    Fallback,
+    /// A fixed budget outside the compaction path (`generate`).
+    Fixed,
 }
 
-/// Logging of one request. Sizes, budgets and usage only, never request text.
+impl BudgetSource {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Configured => "configured",
+            Self::Fallback => "fallback",
+            Self::Fixed => "fixed",
+        }
+    }
+}
+
+/// The generation budget of a stage and where it came from. The selected
+/// provider/model's positive `max_tokens` always wins, including a documented
+/// provider/model default already resolved into it. Only an absent, zero or
+/// invalid cap uses [`FALLBACK_OUTPUT`]; a cap too large for the context window
+/// is rejected by the safe-line check before a request, never silently replaced
+/// by an invented limit.
+fn output_budget(provider: &ResolvedProvider) -> (u32, BudgetSource) {
+    match provider.model.max_tokens {
+        Some(cap) if cap > 0 => (cap, BudgetSource::Configured),
+        _ => (FALLBACK_OUTPUT, BudgetSource::Fallback),
+    }
+}
+
+/// Logging of one request. Stage, budgets, finish reason, elapsed time and
+/// usage only; never request or response text, credentials or reasoning.
 fn log_request(
     label: Option<&str>,
     estimate: Option<u64>,
     budget: u32,
+    source: BudgetSource,
     finish: Option<&str>,
     usage: Option<(u32, u32)>,
+    reasoning: Option<u32>,
+    elapsed: std::time::Duration,
 ) {
     let (prompt, completion) = usage.unwrap_or_default();
+    // A provider that does not report reasoning usage is unknown, not zero.
+    let reasoning = reasoning.map_or_else(|| "unknown".to_owned(), |n| n.to_string());
     tracing::info!(
         module = "Compaction",
         stage = label.unwrap_or("generate"),
         input_tokens = estimate.unwrap_or_default(),
         output_budget = budget,
+        budget_source = source.as_str(),
         finished = finish.unwrap_or("unknown"),
         prompt_tokens = prompt,
         completion_tokens = completion,
+        reasoning_tokens = %reasoning,
+        elapsed_ms = elapsed.as_millis() as u64,
         "Summary request completed"
     );
 }
@@ -504,6 +544,9 @@ struct Summarizer<'a, 'b> {
     system: &'a str,
     window: u64,
     targets: Targets,
+    /// Where the stage budget came from; shared by every request of this
+    /// compaction so the diagnostics name one policy per run.
+    budget_source: BudgetSource,
     /// Output budget of the most recent request actually sent.
     last_budget: u32,
     /// Merge generations available to the node being executed, when it is a
@@ -520,19 +563,10 @@ impl<'a, 'b> Summarizer<'a, 'b> {
         input_budget_for(self.window, output)
     }
 
-    fn raise_target(&self, output: u32) -> Option<u32> {
-        raise_target(self.provider.model.max_tokens, output)
-    }
-
-    /// Largest input one initial fragment or merge may carry, reserving the
-    /// smaller budget of a possible raise when its prompt still fits there.
-    fn planning_limit(&self, stage: Stage, initial: u32) -> u64 {
-        planning_limit_for(
-            self.window,
-            input_tokens(self.system, &self.targets.prompt(stage)),
-            initial,
-            self.raise_target(initial),
-        )
+    /// Largest input one initial fragment or merge may carry. The generation
+    /// budget is already the selected model cap, so no raise is reserved.
+    fn planning_limit(&self, output: u32) -> u64 {
+        planning_limit_for(self.window, output)
     }
 
     /// The full request text for this stage. The length target is fixed, so a
@@ -547,12 +581,14 @@ impl<'a, 'b> Summarizer<'a, 'b> {
         input_tokens(self.system, text) <= self.input_budget(output).min(MAX_INPUT_TOKENS)
     }
 
-    /// Count a checkpoint hit and name it in the progress line.
-    fn reuse(&mut self, label: &str) {
+    /// Count a checkpoint hit and name it in the progress line. The saved
+    /// node matched this exact request text and output budget.
+    fn reuse(&mut self, label: &str, output: u32) {
         self.reused += 1;
         tracing::info!(
             module = "Compaction",
             stage = label,
+            output_budget = output,
             reused = self.reused,
             "Summary request reused from the checkpoint"
         );
@@ -620,7 +656,7 @@ impl<'a, 'b> Summarizer<'a, 'b> {
     async fn attempt(&mut self, text: &str, output: u32, label: &str) -> Result<String> {
         let key = Checkpoint::request_key(self.system, text, output);
         if let Some(saved) = self.cached(text, output) {
-            self.reuse(label);
+            self.reuse(label, output);
             return Ok(saved);
         }
         let session = self.session();
@@ -638,6 +674,7 @@ impl<'a, 'b> Summarizer<'a, 'b> {
             output,
             false,
             Some(label),
+            self.budget_source,
         )
         .await?;
         // Only a complete, validated summary reaches the cache.
@@ -709,14 +746,6 @@ impl<'a, 'b> Summarizer<'a, 'b> {
         Ok(())
     }
 
-    /// Raise once, only when the same input still fits the safe budget after
-    /// the raise, so a larger output never squeezes the input past the line.
-    fn raise_budget(&self, stage: Stage, body: &str, output: u32) -> Option<u32> {
-        let raised = self.raise_target(output)?;
-        self.text_fits(&self.text(stage, body), raised)
-            .then_some(raised)
-    }
-
     async fn request(
         &mut self,
         stage: Stage,
@@ -754,48 +783,9 @@ impl<'a, 'b> Summarizer<'a, 'b> {
         depth: usize,
         quota: &mut Quota,
     ) -> Result<String> {
-        // 1. Raise the output budget once; the fixed length target stays.
-        if let Some(raised) = self.raise_budget(stage, body, output) {
-            let text = self.text(stage, body);
-            if let Some(saved) = self.cached(&text, raised) {
-                self.reuse(&format!("{label} (raised output budget)"));
-                self.save_original(stage, body, output, &saved)?;
-                return Ok(saved);
-            }
-            // The request this branch would send next is the raised one, so the
-            // report names its budget rather than the truncated attempt's.
-            if !quota.take() {
-                return Err(self.exhausted(
-                    label,
-                    raised,
-                    Exhausted::Allowance { trigger: None },
-                    quota,
-                ));
-            }
-            let raised_label = format!("{label} (raising the output budget to {raised} tokens)");
-            match self.attempt(&text, raised, &raised_label).await {
-                Ok(summary) => {
-                    self.save_original(stage, body, output, &summary)?;
-                    return Ok(summary);
-                }
-                Err(error) => {
-                    if error.is::<Truncated>() {
-                        // Still an output limit: fall through to the split.
-                    } else if let Some(invalid) = invalid_result(&error) {
-                        // The raised request finished but carried nothing usable.
-                        // It gets the same empty-body retry as any other entry,
-                        // at its own budget, before this branch splits at the
-                        // original one.
-                        return self
-                            .recover_invalid(stage, body, invalid, output, label, depth, quota)
-                            .await;
-                    } else {
-                        return Err(self.request_failed(&raised_label, raised, error, quota));
-                    }
-                }
-            }
-        }
-        // 2. Split the failing input, summarize both halves, then merge them.
+        // The request already used the selected model's full configured
+        // budget, so a truncation cannot be repaired by spending another
+        // generation on the same input. Split it into smaller requests instead.
         self.split_recover(stage, body, output, label, depth, quota, None)
             .await
     }
@@ -966,7 +956,7 @@ impl<'a, 'b> Summarizer<'a, 'b> {
             ));
         }
         if let Some(saved) = self.cached(&text, output) {
-            self.reuse(label);
+            self.reuse(label, output);
             return Ok(saved);
         }
         if !quota.take() {
@@ -1040,14 +1030,26 @@ pub(crate) async fn summarize(
         super::token_counter::TokenCounter::get_model_context_limit(&provider.model.id) as u32
     });
     provider.model.context_window = Some(window);
-    let fragment_output = output_cap(&provider, FRAGMENT_OUTPUT);
-    let final_output = output_cap(&provider, FINAL_OUTPUT);
+    // The selected model's configured output cap is the generation budget of
+    // every compaction stage from the first request. It is never reduced to
+    // 4096/8192 to leave room for a staircase, and never assumed to be 32k for
+    // a model that configured something else. A missing, zero or invalid cap
+    // uses the named fixed fallback (32,768) instead of blocking compaction; a
+    // cap too large for this window is rejected below before any request.
+    let (fragment_output, budget_source) = output_budget(&provider);
+    let final_output = fragment_output;
+    ensure!(
+        input_budget_for(u64::from(window), fragment_output.max(final_output)) >= MIN_INPUT_TOKENS,
+        "Compaction output budget {} leaves less than {MIN_INPUT_TOKENS} input tokens in the {window}-token context window; no request was sent and original history retained",
+        fragment_output.max(final_output)
+    );
     let targets = Targets::new(fragment_output, final_output);
     let mut summarizer = Summarizer {
         provider,
         system,
         window: u64::from(window),
         targets,
+        budget_source,
         last_budget: fragment_output,
         merge_pool: None,
         reused: 0,
@@ -1077,7 +1079,7 @@ pub(crate) async fn summarize(
         );
         return Ok(summary);
     }
-    let fragment_limit = summarizer.planning_limit(Stage::Fragment, fragment_output);
+    let fragment_limit = summarizer.planning_limit(fragment_output);
     let prompt = summarizer.targets.prompt(Stage::Fragment);
     let parts = fragments(system, &prompt, input, fragment_limit)
         .map_err(|error| summarizer.planning_failed("fragment planning", fragment_output, error))?;
@@ -1088,6 +1090,8 @@ pub(crate) async fn summarize(
         fragments = count,
         fragment_limit,
         final_limit,
+        output_budget = fragment_output,
+        budget_source = budget_source.as_str(),
         "Compaction planned"
     );
     let mut merge_pool = MERGE_RESERVE;
@@ -1145,7 +1149,7 @@ pub(crate) async fn summarize(
         return Err(summarize_failure(count, &failures));
     }
     let mut layer: Vec<String> = prepared.into_iter().flatten().collect();
-    let merge_limit = summarizer.planning_limit(Stage::Merge, fragment_output);
+    let merge_limit = summarizer.planning_limit(fragment_output);
     let mut layer_index = 0usize;
     while layer.len() > 1 {
         layer_index += 1;
@@ -1223,16 +1227,26 @@ async fn generate_request(
     output_cap: u32,
     short_deadline: bool,
     label: Option<&str>,
+    source: BudgetSource,
 ) -> Result<String> {
     ensure!(
         provider.model.supports_text,
         "Selected model does not accept text"
     );
-    let max_tokens = provider
-        .model
-        .max_tokens
-        .unwrap_or(output_cap)
-        .min(output_cap);
+    // Compaction resolves the budget before calling; a zero/invalid configured
+    // cap must not zero the request, so the caller's resolved budget stands.
+    // The fixed non-compaction path keeps its original selection exactly.
+    let max_tokens = match source {
+        BudgetSource::Fixed => provider
+            .model
+            .max_tokens
+            .unwrap_or(output_cap)
+            .min(output_cap),
+        _ => match provider.model.max_tokens {
+            Some(cap) if cap > 0 => cap.min(output_cap),
+            _ => output_cap,
+        },
+    };
     ensure!(max_tokens > 0, "Model output budget must be positive");
     let estimate = match provider.model.context_window {
         Some(limit) => {
@@ -1246,6 +1260,7 @@ async fn generate_request(
         None => None,
     };
     let operation = async {
+        let started = std::time::Instant::now();
         let (text, finish, completion) = if provider.provider.builtin_id.is_some()
             || matches!(
                 provider.provider.api_format,
@@ -1271,13 +1286,27 @@ async fn generate_request(
                 .usage
                 .as_ref()
                 .map(|usage| (usage.prompt_tokens, usage.completion_tokens));
+            let reasoning = response
+                .usage
+                .as_ref()
+                .and_then(|usage| usage.completion_tokens_details.as_ref())
+                .and_then(|details| details.reasoning_tokens);
             let choice = response
                 .choices
                 .into_iter()
                 .next()
                 .context("Model returned no choices")?;
             let finish = choice.finish_reason.unwrap_or_default();
-            log_request(label, estimate, max_tokens, Some(&finish), usage);
+            log_request(
+                label,
+                estimate,
+                max_tokens,
+                source,
+                Some(&finish),
+                usage,
+                reasoning,
+                started.elapsed(),
+            );
             match finish.as_str() {
                 "stop" => {}
                 "length" => return Err(anyhow::Error::new(Truncated { budget: max_tokens })),
@@ -1311,7 +1340,17 @@ async fn generate_request(
                 .as_ref()
                 .map(|usage| (usage.input_tokens, usage.output_tokens));
             let finish = response.stop_reason.unwrap_or_default();
-            log_request(label, estimate, max_tokens, Some(&finish), usage);
+            // Anthropic usage carries no reasoning breakdown; it stays unknown.
+            log_request(
+                label,
+                estimate,
+                max_tokens,
+                source,
+                Some(&finish),
+                usage,
+                None,
+                started.elapsed(),
+            );
             match finish.as_str() {
                 "end_turn" | "stop_sequence" => {}
                 "max_tokens" => return Err(anyhow::Error::new(Truncated { budget: max_tokens })),
@@ -1358,7 +1397,16 @@ fn validate_result(
 }
 
 pub async fn generate(provider: ResolvedProvider, system: &str, input: &str) -> Result<String> {
-    generate_request(provider, system, input, 4096, true, None).await
+    generate_request(
+        provider,
+        system,
+        input,
+        4096,
+        true,
+        None,
+        BudgetSource::Fixed,
+    )
+    .await
 }
 
 async fn generation_deadline<T>(
@@ -1405,13 +1453,14 @@ mod tests {
     }
 
     fn summarizer(window: u32, max_tokens: Option<u32>) -> Summarizer<'static, 'static> {
-        let fragment = output_cap(&provider(window, max_tokens), FRAGMENT_OUTPUT);
-        let final_output = output_cap(&provider(window, max_tokens), FINAL_OUTPUT);
+        let (fragment, budget_source) = output_budget(&provider(window, max_tokens));
+        let final_output = fragment;
         Summarizer {
             provider: provider(window, max_tokens),
             system: "Summary instructions",
             window: u64::from(window),
             targets: Targets::new(fragment, final_output),
+            budget_source,
             last_budget: fragment,
             merge_pool: None,
             reused: 0,
@@ -1478,6 +1527,16 @@ mod tests {
         }
         assert!(split_in_half("system", "").is_none());
         assert!(split_in_half("system", "x").is_none());
+        // A fixed system prompt is not part of the split target: a short body
+        // under a long prompt still splits instead of reporting the depth limit.
+        let system = "fixed system instructions ".repeat(400);
+        let (first, second) =
+            split_in_half(&system, "first summary part second summary part").unwrap();
+        assert!(!first.trim().is_empty() && !second.trim().is_empty());
+        assert_eq!(
+            format!("{first}{second}"),
+            "first summary part second summary part"
+        );
     }
 
     #[test]
@@ -1529,31 +1588,57 @@ mod tests {
     #[test]
     fn planning_limits_stay_inside_the_single_request_ceiling() {
         let big = summarizer(1_000_000, Some(16_384));
-        assert_eq!(big.planning_limit(Stage::Fragment, 4096), MAX_INPUT_TOKENS);
-        assert_eq!(big.planning_limit(Stage::Merge, 4096), MAX_INPUT_TOKENS);
+        assert_eq!(big.planning_limit(16_384), MAX_INPUT_TOKENS);
         assert_eq!(
-            big.input_budget(8192).min(MAX_INPUT_TOKENS),
+            big.input_budget(16_384).min(MAX_INPUT_TOKENS),
             MAX_INPUT_TOKENS
         );
-        // A smaller window is bounded by its own safe line, not by 64K.
+        // A smaller window is bounded by its own safe line, not by 64K, and the
+        // full configured budget is reserved from the first request.
         let small = summarizer(16_000, Some(4096));
-        assert_eq!(small.planning_limit(Stage::Fragment, 4096), 9_280);
-        let raised = summarizer(16_000, Some(8192));
-        assert_eq!(raised.planning_limit(Stage::Fragment, 4096), 5_184);
-        // No raise is possible, so the initial budget decides.
-        assert_eq!(raise_target(Some(4096), 4096), None);
-        assert_eq!(raise_target(Some(8192), 4096), Some(8192));
-        assert_eq!(raise_target(None, 8192), Some(16_384));
-        assert_eq!(raise_target(Some(65_536), 16_384), None);
+        assert_eq!(small.planning_limit(4096), 9_280);
+        let configured = summarizer(16_000, Some(8192));
+        assert_eq!(configured.planning_limit(8192), 5_184);
+        // A missing or zero cap uses the fixed documented fallback, bounded by
+        // the single-request ceiling and the window.
+        let absent = summarizer(1_000_000, None);
+        assert_eq!(absent.planning_limit(FALLBACK_OUTPUT), MAX_INPUT_TOKENS);
+        let zero = summarizer(1_000_000, Some(0));
+        assert_eq!(zero.planning_limit(FALLBACK_OUTPUT), MAX_INPUT_TOKENS);
+        // The same fallback in a 16k window is rejected by context validation,
+        // not turned into an unsafe request.
+        let small_absent = summarizer(16_000, None);
+        assert_eq!(small_absent.planning_limit(FALLBACK_OUTPUT), 0);
     }
 
     #[test]
-    fn length_targets_do_not_change_when_a_budget_is_raised() {
+    fn compaction_generation_budget_uses_the_selected_model_cap() {
+        // Each model keeps its own configured cap; nothing is assumed to be 32k.
+        for cap in [8_192, 32_000, 128_000] {
+            let provider = provider(1_000_000, Some(cap));
+            assert_eq!(output_budget(&provider), (cap, BudgetSource::Configured));
+        }
+        // Unknown and invalid caps use the named fixed fallback rather than
+        // blocking compaction or borrowing a cap from another platform.
+        for cap in [None, Some(0)] {
+            let provider = provider(1_000_000, cap);
+            assert_eq!(
+                output_budget(&provider),
+                (FALLBACK_OUTPUT, BudgetSource::Fallback)
+            );
+        }
+        assert_eq!(BudgetSource::Configured.as_str(), "configured");
+        assert_eq!(BudgetSource::Fallback.as_str(), "fallback");
+        assert_eq!(BudgetSource::Fixed.as_str(), "fixed");
+    }
+
+    #[test]
+    fn concise_targets_are_independent_of_the_generation_budget() {
         let targets = Targets::new(4096, 8192);
         assert_eq!(targets.of(Stage::Fragment), 2048);
         assert_eq!(targets.of(Stage::Merge), 2048);
         assert_eq!(targets.of(Stage::Final), 4096);
-        // The prompt is built from the fixed target, not from a request budget.
+        // The prompt is built from the concise target, not from a request budget.
         assert!(targets
             .prompt(Stage::Fragment)
             .contains("Aim for about 2048 tokens"));
@@ -1563,6 +1648,11 @@ mod tests {
         assert!(targets
             .prompt(Stage::Final)
             .contains("Aim for about 4096 tokens"));
+        // A 32k generation budget still asks for the same concise summary.
+        let large = Targets::new(32_000, 32_000);
+        assert_eq!(large.of(Stage::Fragment), 2048);
+        assert_eq!(large.of(Stage::Merge), 2048);
+        assert_eq!(large.of(Stage::Final), 4096);
         // A model with a lower output cap lowers the target with it.
         let small = Targets::new(2048, 4096);
         assert_eq!(small.of(Stage::Fragment), 1024);

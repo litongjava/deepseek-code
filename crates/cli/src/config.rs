@@ -32,12 +32,54 @@ pub fn save_default_model(paths: &RuntimePaths, provider: &str, model: &str) -> 
     save_preferences(paths, &prefs)
 }
 
+/// The provider and model saved by `save_default_model`, if a preference file
+/// exists and holds a qualified value. Unreadable or malformed preferences
+/// report none rather than failing a caller that only wants to compare them.
+pub fn default_model(paths: &RuntimePaths) -> Option<(String, String)> {
+    let prefs = preferences(paths).ok()?;
+    let saved = prefs["model"].as_str()?;
+    let (provider, model) = saved.split_once("::")?;
+    (!provider.is_empty() && !model.is_empty()).then(|| (provider.to_owned(), model.to_owned()))
+}
+
+// Set by a test to fail the commit after the temporary file is written, which
+// is the window a crash would otherwise leave half-written.
+#[cfg(test)]
+thread_local! {
+    pub(crate) static FAIL_PREFERENCE_COMMIT: std::cell::Cell<bool> =
+        std::cell::Cell::new(false);
+}
+
 fn save_preferences(paths: &RuntimePaths, value: &Value) -> Result<()> {
     std::fs::create_dir_all(&paths.data_dir)?;
-    std::fs::write(
-        paths.data_dir.join("cli.json"),
-        serde_json::to_vec_pretty(value)?,
-    )?;
+    let path = paths.data_dir.join("cli.json");
+    let json = serde_json::to_vec_pretty(value)?;
+    // A crash or a failed write must leave the previous file usable, so the new
+    // content goes to a temporary file and replaces the old one in one step.
+    let temporary = paths
+        .data_dir
+        .join(format!("cli.json.{}.tmp", uuid::Uuid::new_v4()));
+    let commit = || -> Result<()> {
+        std::fs::write(&temporary, &json)?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&temporary, std::fs::Permissions::from_mode(0o600))?;
+        }
+        #[cfg(test)]
+        {
+            let fail = FAIL_PREFERENCE_COMMIT.with(|flag| flag.replace(false));
+            if fail {
+                bail!("injected preference commit failure");
+            }
+        }
+        std::fs::rename(&temporary, &path)?;
+        Ok(())
+    };
+    if let Err(error) = commit() {
+        let _ = std::fs::remove_file(&temporary);
+        return Err(error);
+    }
     Ok(())
 }
 
@@ -528,6 +570,67 @@ mod search_tests {
         assert_eq!(selected.provider_id, "first");
         let selected = select(&Cli::parse_from(["dcl"]), &paths, Some("fixture-model"), Some("first")).unwrap();
         assert_eq!(selected.provider_id, "first");
+    }
+
+    #[test]
+    fn the_saved_default_model_is_read_back_and_malformed_values_are_ignored() {
+        let root = tempfile::tempdir().unwrap();
+        let paths = RuntimePaths::new(root.path().join("data")).unwrap();
+        assert_eq!(default_model(&paths), None);
+        save_default_model(&paths, "second", "fixture-model").unwrap();
+        assert_eq!(
+            default_model(&paths),
+            Some(("second".into(), "fixture-model".into()))
+        );
+        std::fs::write(paths.data_dir.join("cli.json"), r#"{"model":"unqualified"}"#).unwrap();
+        assert_eq!(default_model(&paths), None);
+        std::fs::write(paths.data_dir.join("cli.json"), "not json").unwrap();
+        assert_eq!(default_model(&paths), None);
+    }
+
+    #[test]
+    fn saving_preferences_keeps_the_previous_file_when_the_commit_fails() {
+        let root = tempfile::tempdir().unwrap();
+        let paths = RuntimePaths::new(root.path().join("data")).unwrap();
+        save_default_model(&paths, "first", "model-a").unwrap();
+        let path = paths.data_dir.join("cli.json");
+        let before = std::fs::read(&path).unwrap();
+
+        FAIL_PREFERENCE_COMMIT.with(|flag| flag.set(true));
+        let error = save_default_model(&paths, "second", "model-b").unwrap_err();
+        assert!(
+            error.to_string().contains("injected preference commit failure"),
+            "{error:#}"
+        );
+
+        assert_eq!(std::fs::read(&path).unwrap(), before, "the old file survives");
+        assert_eq!(
+            default_model(&paths),
+            Some(("first".into(), "model-a".into()))
+        );
+        let leftovers: Vec<_> = std::fs::read_dir(&paths.data_dir)
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
+            .filter(|name| name.ends_with(".tmp"))
+            .collect();
+        assert!(leftovers.is_empty(), "temporary files left: {leftovers:?}");
+    }
+
+    #[test]
+    fn saved_preferences_are_private_to_the_owner() {
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let root = tempfile::tempdir().unwrap();
+            let paths = RuntimePaths::new(root.path().join("data")).unwrap();
+            save_default_model(&paths, "one", "model-a").unwrap();
+            let mode = std::fs::metadata(paths.data_dir.join("cli.json"))
+                .unwrap()
+                .permissions()
+                .mode()
+                & 0o777;
+            assert_eq!(mode, 0o600, "mode {mode:o}");
+        }
     }
 
     #[test]
