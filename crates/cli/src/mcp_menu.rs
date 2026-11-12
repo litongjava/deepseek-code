@@ -20,7 +20,7 @@ fn state(server: &McpServerStatus) -> String {
 
 /// A bundled preset nobody has turned on or changed; the reference CLI has
 /// no presets, so these stay out of the list.
-fn untouched_preset(server: &McpServerStatus) -> bool {
+pub(crate) fn untouched_preset(server: &McpServerStatus) -> bool {
     !server.enabled
         && deepseek_code_core::mcp::default_servers()
             .iter()

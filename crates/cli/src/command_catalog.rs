@@ -82,6 +82,8 @@ pub const COMMANDS: &[(&str, &str)] = &[
     ("/sessions", "List saved sessions; resume with --resume ID"),
     ("/tools", "Inspect or change tool loading; opens the Tools panel in a terminal"),
     ("/skills", "Installed skills; state NAME [off|user|name-only|user-only]"),
+    ("/plugins", "Plugins, MCP servers and skills: Installed, Errors and Stats"),
+    ("/skill-doctor", "Skill usage and context costs (Stats tab of /plugins)"),
     ("/mcp", "Configured MCP servers"),
     ("/provider", "Inspect/configure providers: [ID|add|edit ID]"),
     ("/model", "Inspect/switch models: [ID]"),

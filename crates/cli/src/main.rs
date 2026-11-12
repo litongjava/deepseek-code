@@ -32,6 +32,7 @@ mod worker_frontend;
 mod mcp_menu;
 mod hooks_menu;
 mod settings_dialog;
+mod plugins_panel;
 mod stats_view;
 mod permissions_menu;
 mod startup_prompts;
@@ -1046,6 +1047,26 @@ async fn run(cli: &Cli) -> Result<()> {
                         }
                     }
                     Err(error) => command_eprintln!("Error: {error:#}"),
+                }
+                continue;
+            }
+            if line.trim() == "/plugins" || line.trim() == "/skill-doctor" {
+                let start = if line.trim() == "/skill-doctor" { "skill-doctor" } else { "installed" };
+                if terminal::picker::available() {
+                    match plugins_panel::run(start, &paths, &mut session, input.as_mut().unwrap()).await {
+                        Ok(true) => match reload_skill_commands(&paths, &session.workspace, &mut skills, &mut input).await {
+                            Ok(count) => command_eprintln!("Reloaded: {count} skill commands."),
+                            Err(error) => command_eprintln!("Error: {error:#}"),
+                        },
+                        Ok(false) => {},
+                        Err(error) => command_eprintln!("Error: {error:#}"),
+                    }
+                } else {
+                    // Scripts and tests get the same Stats text without a terminal.
+                    match plugins_panel::load(&paths, &session).await {
+                        Ok(model) => command_eprintln!("{}", plugins_panel::stats_rows(&model, chrono::Utc::now(), true).join("\n")),
+                        Err(error) => command_eprintln!("Error: {error:#}"),
+                    }
                 }
                 continue;
             }
