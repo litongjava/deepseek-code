@@ -302,7 +302,7 @@ cargo test --locked -p deepseek-code-cli --bin dcl refresh_subcommands
 cargo test --locked -p deepseek-code-core --lib model_listing
 ```
 
-覆盖命令解析、增删同步、同 ID 设置保留、重复 ID、当前模型被移除后切换并保留历史、刷新其他提供商不切换会话、默认模型失效（含刷新前就已失效）与无效默认不写、取消不保存、会话切换失败和默认偏好写入失败后的回滚，以及 `/model r`、`/provider r` 的子命令补全与 provider ID 补全。
+覆盖命令解析、增删同步、同 ID 设置保留、重复 ID、当前模型被移除后切换并保留历史、刷新其他提供商不切换会话、默认模型失效（含刷新前就已失效）与无效默认不写、取消不保存、会话切换失败和默认偏好写入失败后的回滚，以及刷新期间配置被并发修改：`refresh_aborts_when_the_provider_is_removed_meanwhile`（目标提供商被删除时中止，删除结果保留且不写入）、`refresh_aborts_when_the_provider_changes_meanwhile`（目标提供商被修改时中止，并发编辑保留且不写入刷新结果）、`refresh_keeps_a_concurrent_change_to_another_provider`（其他提供商的并发修改与本次刷新结果都保留），以及 `/model r`、`/provider r` 的子命令补全与 provider ID 补全。
 
 `model_listing` 的本地 HTTP fixture 分协议覆盖：OpenAI、Anthropic、Gemini 的认证；Anthropic 与 Gemini 的多页遍历和游标循环；OpenAI 兼容接口单页返回，以及它声明分页时安全拒绝；非法条目、错误类型的 `has_more`/`nextPageToken`、空列表、失败分页、非 JSON、200 错误对象、重复或缺失游标、超时。错误与游标都不回显凭据或令牌：Key 的原样、URL 编码（大小写十六进制、逐字符混合编码）、Base64/URL-safe Base64 形式都会被替换为 `[redacted]`，Base URL 路径中出现的 Key 同样会被隐去。
 

@@ -1977,14 +1977,29 @@ mod tests {
     async fn listing_fixture(
         models: serde_json::Value,
     ) -> (String, tokio::task::JoinHandle<()>) {
+        listing_fixture_with(models, || {}).await
+    }
+
+    /// Starts a model-list endpoint that runs `on_request` when the list is
+    /// fetched. The fetch happens after the refresh read the configuration and
+    /// before it writes, so the callback can change the saved state there.
+    async fn listing_fixture_with(
+        models: serde_json::Value,
+        on_request: impl Fn() + Send + Sync + 'static,
+    ) -> (String, tokio::task::JoinHandle<()>) {
         use axum::{routing::get, Json, Router};
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let address = listener.local_addr().unwrap();
+        let on_request = std::sync::Arc::new(on_request);
         let app = Router::new().route(
             "/v1/models",
             get(move || {
                 let models = models.clone();
-                async move { Json(models) }
+                let on_request = on_request.clone();
+                async move {
+                    on_request();
+                    Json(models)
+                }
             }),
         );
         let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
@@ -2084,6 +2099,212 @@ mod tests {
             "conversation history is preserved"
         );
         assert_eq!(config::default_model(&paths), Some(("one".into(), "new".into())));
+        session.close().await.unwrap();
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn refresh_aborts_when_the_provider_is_removed_meanwhile() {
+        let dir = tempfile::tempdir().unwrap();
+        let data_dir = dir.path().to_path_buf();
+        let removed = data_dir.clone();
+        let (base, server) = listing_fixture_with(
+            json!({"data": [{"id": "keep"}, {"id": "new"}]}),
+            move || {
+                ConfigManager::new(removed.clone())
+                    .remove_provider("one")
+                    .unwrap();
+            },
+        )
+        .await;
+        let paths = RuntimePaths::new(data_dir).unwrap();
+        let mut manager = ConfigManager::new(paths.data_dir.clone());
+        manager
+            .add_provider(refresh_provider_config(
+                "one",
+                &format!("{base}/v1"),
+                &[("keep", true)],
+            ))
+            .unwrap();
+        manager
+            .add_provider(refresh_provider_config(
+                "two",
+                &format!("{base}/v1"),
+                &[("other", true)],
+            ))
+            .unwrap();
+        config::save_default_model(&paths, "two", "other").unwrap();
+        let before = paths.read_config().unwrap();
+        let two_before = serde_json::to_value(
+            before.providers.iter().find(|p| p.id == "two").unwrap(),
+        )
+        .unwrap();
+        let mut session = open_refresh_session(&paths, "one", "keep").await;
+
+        let error = handle("/provider refresh one", &paths, &mut session, &mut answers(&[]))
+            .await
+            .unwrap_err();
+
+        let message = format!("{error:#}");
+        assert!(
+            message.contains("was removed while its models were being refreshed"),
+            "{message}"
+        );
+        let saved = paths.read_config().unwrap();
+        assert!(
+            saved.providers.iter().all(|provider| provider.id != "one"),
+            "the concurrent removal stands"
+        );
+        let two_after = serde_json::to_value(
+            saved.providers.iter().find(|p| p.id == "two").unwrap(),
+        )
+        .unwrap();
+        assert_eq!(two_after, two_before, "the other provider is unchanged");
+        assert_eq!(session.provider_id, "one");
+        assert_eq!(session.model, "keep", "the session is unchanged");
+        assert_eq!(
+            config::default_model(&paths),
+            Some(("two".into(), "other".into())),
+            "the saved default is unchanged"
+        );
+        session.close().await.unwrap();
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn refresh_aborts_when_the_provider_changes_meanwhile() {
+        let dir = tempfile::tempdir().unwrap();
+        let data_dir = dir.path().to_path_buf();
+        let changed = data_dir.clone();
+        let (base, server) = listing_fixture_with(
+            json!({"data": [{"id": "keep"}, {"id": "new"}]}),
+            move || {
+                let mut manager = ConfigManager::new(changed.clone());
+                manager.reload().unwrap();
+                manager
+                    .update_config(|config| {
+                        if let Some(slot) = config.providers.iter_mut().find(|p| p.id == "one") {
+                            slot.models[0].context_window = Some(999_999);
+                        }
+                    })
+                    .unwrap();
+            },
+        )
+        .await;
+        let paths = RuntimePaths::new(data_dir).unwrap();
+        let mut manager = ConfigManager::new(paths.data_dir.clone());
+        manager
+            .add_provider(refresh_provider_config(
+                "one",
+                &format!("{base}/v1"),
+                &[("keep", true)],
+            ))
+            .unwrap();
+        manager
+            .add_provider(refresh_provider_config(
+                "two",
+                &format!("{base}/v1"),
+                &[("other", true)],
+            ))
+            .unwrap();
+        let before = paths.read_config().unwrap();
+        let two_before = serde_json::to_value(
+            before.providers.iter().find(|p| p.id == "two").unwrap(),
+        )
+        .unwrap();
+        let mut session = open_refresh_session(&paths, "one", "keep").await;
+
+        let error = handle("/provider refresh one", &paths, &mut session, &mut answers(&[]))
+            .await
+            .unwrap_err();
+
+        let message = format!("{error:#}");
+        assert!(
+            message.contains("changed while its models were being refreshed"),
+            "{message}"
+        );
+        let saved = paths.read_config().unwrap();
+        let one = saved.providers.iter().find(|p| p.id == "one").unwrap();
+        assert_eq!(
+            one.models.iter().map(|m| m.id.as_str()).collect::<Vec<_>>(),
+            ["keep"],
+            "the refreshed list is not written"
+        );
+        assert_eq!(
+            one.models[0].context_window,
+            Some(999_999),
+            "the concurrent edit stands"
+        );
+        let two_after = serde_json::to_value(
+            saved.providers.iter().find(|p| p.id == "two").unwrap(),
+        )
+        .unwrap();
+        assert_eq!(two_after, two_before, "the other provider is unchanged");
+        assert_eq!(session.provider_id, "one");
+        assert_eq!(session.model, "keep", "the session is unchanged");
+        session.close().await.unwrap();
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn refresh_keeps_a_concurrent_change_to_another_provider() {
+        let dir = tempfile::tempdir().unwrap();
+        let data_dir = dir.path().to_path_buf();
+        let changed = data_dir.clone();
+        let (base, server) = listing_fixture_with(
+            json!({"data": [{"id": "keep"}, {"id": "new"}]}),
+            move || {
+                let mut manager = ConfigManager::new(changed.clone());
+                manager.reload().unwrap();
+                manager
+                    .update_config(|config| {
+                        if let Some(slot) = config.providers.iter_mut().find(|p| p.id == "two") {
+                            slot.name = "Renamed two".into();
+                        }
+                    })
+                    .unwrap();
+            },
+        )
+        .await;
+        let paths = RuntimePaths::new(data_dir).unwrap();
+        let mut manager = ConfigManager::new(paths.data_dir.clone());
+        manager
+            .add_provider(refresh_provider_config(
+                "one",
+                &format!("{base}/v1"),
+                &[("keep", true)],
+            ))
+            .unwrap();
+        manager
+            .add_provider(refresh_provider_config(
+                "two",
+                &format!("{base}/v1"),
+                &[("other", true)],
+            ))
+            .unwrap();
+        // The current model survives the refresh, so no prompt appears.
+        let mut session = open_refresh_session(&paths, "one", "keep").await;
+
+        handle("/provider refresh one", &paths, &mut session, &mut answers(&[]))
+            .await
+            .unwrap();
+
+        let saved = paths.read_config().unwrap();
+        let one = saved.providers.iter().find(|p| p.id == "one").unwrap();
+        assert_eq!(
+            one.models.iter().map(|m| m.id.as_str()).collect::<Vec<_>>(),
+            ["keep", "new"],
+            "the target provider is refreshed"
+        );
+        let two = saved.providers.iter().find(|p| p.id == "two").unwrap();
+        assert_eq!(two.name, "Renamed two", "the concurrent edit stands");
+        assert_eq!(
+            two.models.iter().map(|m| m.id.as_str()).collect::<Vec<_>>(),
+            ["other"],
+            "the other provider's list is untouched"
+        );
+        assert_eq!(session.provider_id, "one");
+        assert_eq!(session.model, "keep");
         session.close().await.unwrap();
         server.abort();
     }
