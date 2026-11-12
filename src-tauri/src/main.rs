@@ -85,6 +85,16 @@ async fn cleanup_all_processes(app_handle: &tauri::AppHandle) {
 }
 
 fn main() {
+    // Internal managed-PTY roles are separate execs of this executable and must
+    // run before Tauri, a runtime or any database handle is initialised.
+    match deepseek_code_core::tools::run_internal_pty_role() {
+        Ok(Some(code)) => std::process::exit(code),
+        Ok(None) => {}
+        Err(error) => {
+            eprintln!("Managed PTY role failed: {error:#}");
+            std::process::exit(1);
+        }
+    }
     // Inside a sandbox with a domain allowlist: carry the proxy, then run the command.
     if let Some(code) = deepseek_code_core::tools::sandbox::run_bridge_from_args() {
         std::process::exit(code);

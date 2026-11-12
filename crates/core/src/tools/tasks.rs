@@ -499,6 +499,55 @@ pub(crate) fn execute_for_shell_owner(
     )
 }
 
+/// Apply a status/output update only when the stored record still matches the
+/// pre-image the caller observed.
+///
+/// The read and the write share one `BEGIN IMMEDIATE` transaction, so a
+/// concurrent writer that already made this record terminal — or changed it in
+/// any other way — is never overwritten by an older observation. Returns the
+/// current record and whether this call changed it.
+pub(crate) fn update_if_unchanged(
+    id: &str,
+    expected_status: &str,
+    expected_updated_at: Option<&str>,
+    status: &str,
+    output: &str,
+    root: &Path,
+    session: &str,
+) -> Result<(Value, bool)> {
+    let session = uuid::Uuid::parse_str(session).context("Invalid task session ID")?;
+    let path = root.join("tasks").join(format!("{session}.sqlite3"));
+    std::fs::create_dir_all(path.parent().context("Task storage parent missing")?)?;
+    let mut db = rusqlite::Connection::open(&path)?;
+    db.busy_timeout(std::time::Duration::from_secs(5))?;
+    db.execute_batch("CREATE TABLE IF NOT EXISTS tasks(id TEXT PRIMARY KEY, body TEXT NOT NULL);")?;
+    let tx = db.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+    let body: Option<String> = tx
+        .query_row("SELECT body FROM tasks WHERE id=?1", [id], |row| row.get(0))
+        .optional()?;
+    let mut current: Value =
+        serde_json::from_str(&body.with_context(|| format!("Task not found: {id}"))?)?;
+    let unchanged = current["status"].as_str() == Some(expected_status)
+        && current["updatedAt"].as_str() == expected_updated_at;
+    let terminal = matches!(
+        current["status"].as_str(),
+        Some("completed" | "failed" | "cancelled" | "deleted")
+    );
+    if terminal || !unchanged {
+        // Leave the record exactly as the other writer left it.
+        return Ok((current, false));
+    }
+    current["status"] = json!(status);
+    current["output"] = json!(output);
+    current["updatedAt"] = json!(chrono::Utc::now().to_rfc3339());
+    tx.execute(
+        "UPDATE tasks SET body=?2 WHERE id=?1",
+        params![id, current.to_string()],
+    )?;
+    tx.commit()?;
+    Ok((current, true))
+}
+
 fn execute_at(name: &str, input: Value, path: &Path) -> Result<Value> {
     execute_at_owned(name, input, path, false)
 }

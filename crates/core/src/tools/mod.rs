@@ -57,11 +57,42 @@ pub(crate) mod output_page;
 pub(crate) mod path_scope;
 pub(crate) mod provider_search;
 #[cfg(target_os = "linux")]
+pub(crate) mod pty_gate;
+#[cfg(target_os = "linux")]
+pub(crate) mod pty_owner;
+#[cfg(target_os = "linux")]
+pub(crate) mod pty_supervisor;
+#[cfg(target_os = "linux")]
 pub(crate) mod pty_transport;
 mod shell_discovery;
 pub(crate) mod shell_input;
 mod web;
 pub use provider_search::search as search_provider;
+
+/// Host entry for the internal managed-PTY roles.
+///
+/// The supervisor and the execution gate are separate execs of the same host
+/// executable. Both must run before the CLI or Desktop initialises a runtime,
+/// parses arguments, or opens the database: the supervisor outlives the owner
+/// and the gate becomes the user program. Returns `Some(exit_code)` when this
+/// process was started as one of those roles.
+#[cfg(target_os = "linux")]
+#[doc(hidden)]
+pub fn run_internal_pty_role() -> anyhow::Result<Option<i32>> {
+    if let Some(code) = pty_gate::run_from_env()? {
+        return Ok(Some(code));
+    }
+    if pty_supervisor::run_from_env()? {
+        return Ok(Some(0));
+    }
+    Ok(None)
+}
+
+#[cfg(not(target_os = "linux"))]
+#[doc(hidden)]
+pub fn run_internal_pty_role() -> anyhow::Result<Option<i32>> {
+    Ok(None)
+}
 
 #[cfg(windows)]
 use std::os::windows::process::CommandExt;

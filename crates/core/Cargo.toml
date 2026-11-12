@@ -66,7 +66,10 @@ tokio = { version = "1", features = ["full", "test-util"] }
 enigo = "0.2"
 
 [target.'cfg(unix)'.dependencies]
-rustix = { version = "1", features = ["fs", "process", "event"] }
+# `net` is for the managed PTY endpoint: a nonblocking `connect(2)` plus
+# `SO_PEERCRED`, so a saturated backlog cannot block a caller or leak a
+# connector thread.
+rustix = { version = "1", features = ["fs", "process", "event", "net"] }
 
 [target.'cfg(target_os = "linux")'.dependencies]
 # `MasterPty::get_termios()` returns `nix::sys::termios::Termios`, so reading

@@ -468,7 +468,7 @@ impl OwnerProbe {
 /// names its owner; a separate file written afterwards could be missing or stale
 /// for a moment and that window is exactly when a probe runs.
 #[cfg(unix)]
-fn take_lease(directory: &Path, id: &str) -> Result<OwnerLease> {
+pub(crate) fn take_lease(directory: &Path, id: &str) -> Result<OwnerLease> {
     use rustix::fs::{flock, FlockOperation};
     let staging = directory.join(format!("owner.lock.new-{}", uuid::Uuid::new_v4()));
     let lease = directory.join("owner.lock");
@@ -529,7 +529,7 @@ fn record_owner_identity(file: &std::fs::File, id: &str) -> std::io::Result<()> 
 /// Windows and other non-POSIX targets have no advisory-lock lease; the PID
 /// record stays the only signal there, and interactive pipe mode is unavailable.
 #[cfg(not(unix))]
-fn take_lease(_directory: &Path, _id: &str) -> Result<OwnerLease> {
+pub(crate) fn take_lease(_directory: &Path, _id: &str) -> Result<OwnerLease> {
     Ok(OwnerLease(None))
 }
 
@@ -601,6 +601,16 @@ static ACTIVE: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::
 /// Only tasks owned by this process keep its persistent worker alive.
 pub fn has_active() -> bool {
     ACTIVE.load(std::sync::atomic::Ordering::Acquire) != 0
+}
+
+/// Register an owner that lives outside a tokio task (a managed PTY driver
+/// thread). Matching `leave_owner` must run exactly once.
+pub(crate) fn enter_owner() {
+    ACTIVE.fetch_add(1, std::sync::atomic::Ordering::AcqRel);
+}
+
+pub(crate) fn leave_owner() {
+    ACTIVE.fetch_sub(1, std::sync::atomic::Ordering::AcqRel);
 }
 
 struct Completion {
@@ -1107,7 +1117,22 @@ pub(super) fn control(
     if policy.is_some() && !directory.exists() {
         return Ok(None);
     }
-    let status = json!(task_status(root, &session.to_string(), &task)?);
+    // An independent PTY supervisor may have recorded that this task's owner
+    // died. Reconcile that into the durable record before presenting it, so a
+    // dead owner is never shown as `running`/`pending` forever. The reconcile
+    // never overwrites a real terminal state and reports the same persisted
+    // facts on every later query.
+    let reconciled = reconcile_owner_loss(root, &session.to_string(), &directory, &task)?;
+    let (task, owner_loss) = match reconciled {
+        Some(reconcile) => (reconcile.task, reconcile.facts),
+        None => (task, None),
+    };
+    let mut status = json!(task_status(root, &session.to_string(), &task)?);
+    if owner_loss.is_some() {
+        // A verified owner death is a failed task even when the record update
+        // could not be persisted; that failure is reported separately.
+        status = json!("failed");
+    }
     if monitor {
         if name == "TaskStop" {
             // The monitor loop checks this file every 50 ms.
@@ -1144,7 +1169,11 @@ pub(super) fn control(
     // next one. Ownership was already enforced by `read_for_session` above.
     let page = crate::tools::output_page::PageRequest::parse(input)?;
     if matches!(&page, crate::tools::output_page::PageRequest::Page { .. }) {
-        return Ok(Some(page_task_get(task, &id, status, &directory, &page)?));
+        let mut value = page_task_get(task, &id, status, &directory, &page)?;
+        if let Some(facts) = &owner_loss {
+            value["owner_loss"] = facts.clone();
+        }
+        return Ok(Some(value));
     }
     let read = |name| -> Result<String> {
         use std::io::Read;
@@ -1175,6 +1204,9 @@ pub(super) fn control(
     } else {
         "not_ready"
     });
+    if let Some(facts) = owner_loss {
+        snapshot["owner_loss"] = facts;
+    }
     Ok(Some(snapshot))
 }
 
@@ -1193,6 +1225,197 @@ fn read_tail(path: &Path, limit: u64) -> Result<String> {
         }
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(String::new()),
         Err(error) => Err(error.into()),
+    }
+}
+
+/// The independent PTY supervisor's record that this task's owner died.
+///
+/// The record is written by a separate process into this task's own directory.
+/// A missing record proves nothing and is not an error; a present but
+/// unreadable one is an explicit failure, because a half-written state must
+/// never be read as a successful task.
+fn supervisor_owner_loss(directory: &Path) -> Result<Option<Value>> {
+    let path = directory.join("supervisor-state.json");
+    let text = match std::fs::read_to_string(&path) {
+        Ok(text) => text,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => {
+            return Err(error).with_context(|| format!("Reading {}", path.display()));
+        }
+    };
+    let value: Value = serde_json::from_str(&text)
+        .with_context(|| format!("Parsing the PTY supervisor state {}", path.display()))?;
+    // `owner_lost` is the one field every owner-death branch sets and the
+    // normal `owner_finalized` branch does not. A record that does not claim
+    // owner loss is advisory only and changes nothing here.
+    if value["owner_lost"] != true {
+        return Ok(None);
+    }
+    Ok(Some(value))
+}
+
+/// The verified owner-loss facts already stated by a reconciled record.
+///
+/// The facts are persisted as the record's `output`, so every later query (a
+/// plain snapshot or a cursor page) can report the same confirmed facts instead
+/// of losing them once the record became terminal.
+fn stored_owner_loss(task: &Value) -> Option<Value> {
+    if task["status"].as_str() != Some("failed") {
+        return None;
+    }
+    let mut facts: Value = serde_json::from_str(task["output"].as_str()?).ok()?;
+    if facts["owner_lost"] != true {
+        return None;
+    }
+    // The record exists in this state, so the update that wrote it did commit.
+    facts["task_record_updated"] = json!(true);
+    Some(facts)
+}
+
+/// What a reconcile presents.
+struct OwnerLoss {
+    /// The record to present: the reconciled one, or the record another writer
+    /// already made terminal.
+    task: Value,
+    /// Structured facts when the presented record states owner loss.
+    facts: Option<Value>,
+}
+
+/// The separate facts an owner death establishes, and nothing more.
+///
+/// The supervisor cleaned processes; it never read the log to EOF, so output
+/// finalization stays false. No exit code or success is invented.
+fn owner_loss_facts(state: &Value) -> Value {
+    json!({
+        "owner_lost": true,
+        "reason": "owner_lost",
+        "status": "failed",
+        "success": false,
+        "exit_code": Value::Null,
+        "os_cleanup_complete": state["os_cleanup_complete"].as_bool().unwrap_or(false),
+        "output_finalized": false,
+        "session_published": state["session_published"].as_bool().unwrap_or(false),
+        "persistence_complete": state["persistence_complete"].as_bool().unwrap_or(false),
+        "cleaned_pids": state.get("cleaned_pids").cloned().unwrap_or(Value::Null),
+        "remaining_pids": state.get("remaining_pids").cloned().unwrap_or(Value::Null),
+        "cleanup_error": state.get("cleanup_error").cloned().unwrap_or(Value::Null),
+        "supervisor_recorded_ms": state.get("recorded_ms").cloned().unwrap_or(Value::Null)
+    })
+}
+
+fn owner_proven_gone(directory: &Path) -> bool {
+    OwnerProbe::open(directory).is_ok_and(|probe| matches!(probe.state(), OwnerState::Gone(_)))
+}
+
+/// Reconcile a recorded owner death into the durable task record.
+///
+/// Only a verified owner-loss record for this task's own directory, combined
+/// with an owner proven gone by the existing lease/pidfd probe, changes the
+/// record. The update is a compare-and-set inside one SQLite transaction: an
+/// observation is applied only while the stored record still matches what the
+/// caller read (same status and `updatedAt`). A record another writer already
+/// made terminal is re-read and kept, never overwritten by an older view. Once
+/// reconciled, later queries report the same persisted facts without writing.
+fn reconcile_owner_loss(
+    root: &Path,
+    session: &str,
+    directory: &Path,
+    task: &Value,
+) -> Result<Option<OwnerLoss>> {
+    // A managed shell is not necessarily a PTY task; only this task's own PTY
+    // supervisor record may describe it.
+    #[cfg(target_os = "linux")]
+    if task["metadata"]["interaction"].as_str() != Some(super::pty_owner::INTERACTION) {
+        return Ok(None);
+    }
+    // Stable reporting comes first: once the durable record states the verified
+    // owner loss, every later query returns those persisted facts without
+    // depending on the supervisor file, which may since have been removed or
+    // damaged. No second write happens.
+    if let Some(facts) = stored_owner_loss(task) {
+        return Ok(Some(OwnerLoss {
+            task: task.clone(),
+            facts: Some(facts),
+        }));
+    }
+    let Some(state) = supervisor_owner_loss(directory)? else {
+        return Ok(None);
+    };
+    let stored = task["status"].as_str().unwrap_or("unknown");
+    if matches!(stored, "completed" | "failed" | "cancelled" | "deleted") {
+        return Ok(None);
+    }
+    // A live owner still owns its own lifecycle; the record is advisory only
+    // once the exact recorded owner process is gone.
+    if !owner_proven_gone(directory) {
+        return Ok(None);
+    }
+    let mut facts = owner_loss_facts(&state);
+    let id = task["id"].as_str().context("Task ID missing")?;
+    #[cfg(test)]
+    reconcile_probe::before_update();
+    let (current, applied) = match super::tasks::update_if_unchanged(
+        id,
+        stored,
+        task["updatedAt"].as_str(),
+        "failed",
+        &facts.to_string(),
+        root,
+        session,
+    ) {
+        Ok(result) => result,
+        Err(error) => {
+            // The verified death is still reported as failed; the fact that the
+            // record could not be written is surfaced separately.
+            facts["task_record_updated"] = json!(false);
+            facts["task_record_error"] = json!(format!("{error:#}"));
+            return Ok(Some(OwnerLoss {
+                task: task.clone(),
+                facts: Some(facts),
+            }));
+        }
+    };
+    if applied {
+        facts["task_record_updated"] = json!(true);
+        return Ok(Some(OwnerLoss {
+            task: current,
+            facts: Some(facts),
+        }));
+    }
+    // Another writer changed the record between the read and the compare-and-set.
+    // Keep its version; only report owner-loss facts if it is itself such a
+    // reconciled record.
+    let facts = stored_owner_loss(&current);
+    Ok(Some(OwnerLoss {
+        task: current,
+        facts,
+    }))
+}
+
+/// Test-only seam fired after the record was read and before the compare-and-set,
+/// so a deterministic test can interleave another writer's terminal update.
+#[cfg(test)]
+pub(crate) mod reconcile_probe {
+    use std::cell::RefCell;
+
+    thread_local! {
+        static HOOK: RefCell<Option<Box<dyn FnMut()>>> = const { RefCell::new(None) };
+    }
+
+    pub(crate) fn install(hook: Box<dyn FnMut()>) {
+        HOOK.with(|slot| *slot.borrow_mut() = Some(hook));
+    }
+
+    pub(crate) fn clear() {
+        HOOK.with(|slot| *slot.borrow_mut() = None);
+    }
+
+    pub(super) fn before_update() {
+        HOOK.with(|slot| {
+            if let Some(hook) = slot.borrow_mut().as_mut() {
+                hook();
+            }
+        });
     }
 }
 
@@ -1642,6 +1865,224 @@ mod tests {
             &session
         )
         .is_err());
+    }
+
+    /// A managed PTY task whose owner is proven gone by a released lease, with
+    /// the independent supervisor's verified owner-loss record in its own task
+    /// directory. Both facts are local files, so the fixture is deterministic.
+    #[cfg(target_os = "linux")]
+    fn owner_loss_fixture(interaction: &str) -> (tempfile::TempDir, String, String) {
+        let root = tempfile::tempdir().unwrap();
+        let session = uuid::Uuid::new_v4().to_string();
+        let task = super::super::tasks::execute_for_shell_owner(
+            "TaskCreate",
+            json!({"subject":"pty owner loss","metadata":{
+                "managed_shell":true,
+                "interaction":interaction
+            }}),
+            root.path(),
+            &session,
+        )
+        .unwrap();
+        let id = task["id"].as_str().unwrap().to_owned();
+        super::super::tasks::execute_for_shell_owner(
+            "TaskUpdate",
+            json!({"id":&id,"status":"running"}),
+            root.path(),
+            &session,
+        )
+        .unwrap();
+        let directory = root.path().join("shell-tasks").join(&session).join(&id);
+        std::fs::create_dir_all(&directory).unwrap();
+        // A lease nobody holds proves the recorded owner is gone.
+        std::fs::write(directory.join("owner.lock"), b"").unwrap();
+        std::fs::write(
+            directory.join("supervisor-state.json"),
+            json!({
+                "version":1,
+                "status":"failed",
+                "owner_lost":true,
+                "owner_finalized":false,
+                "cleanup_performed_by":"supervisor",
+                "session_published":true,
+                "os_cleanup_complete":true,
+                "output_finalized":false,
+                "task_record_updated":false,
+                "persistence_complete":true,
+                "cleaned_pids":[1234],
+                "remaining_pids":[]
+            })
+            .to_string(),
+        )
+        .unwrap();
+        std::fs::write(directory.join("stdout.log"), b"captured before death\n").unwrap();
+        std::fs::write(directory.join("stderr.log"), b"").unwrap();
+        (root, session, id)
+    }
+
+    /// The first query reconciles once; every later query — full snapshot or
+    /// cursor page — must report the same confirmed facts.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_verified_owner_loss_reconciles_once_and_reports_stable_facts() {
+        let (root, session, id) = owner_loss_fixture(super::super::pty_owner::INTERACTION);
+        let first = control(
+            "TaskGet",
+            &json!({"task_id":&id,"block":false}),
+            root.path(),
+            &session,
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(first["status"], "failed", "{first}");
+        assert_eq!(first["owner_loss"]["owner_lost"], true, "{first}");
+        assert_eq!(first["owner_loss"]["reason"], "owner_lost", "{first}");
+        assert_eq!(first["owner_loss"]["success"], false, "{first}");
+        assert_eq!(first["owner_loss"]["exit_code"], Value::Null, "{first}");
+        assert_eq!(first["owner_loss"]["os_cleanup_complete"], true, "{first}");
+        assert_eq!(first["owner_loss"]["output_finalized"], false, "{first}");
+        assert_eq!(first["owner_loss"]["task_record_updated"], true, "{first}");
+        assert!(
+            first["stdout"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("captured before death"),
+            "the captured log was lost: {first}"
+        );
+        let stored = super::super::tasks::read_for_session(&id, root.path(), &session).unwrap();
+        assert_eq!(stored["status"], "failed", "{stored}");
+
+        let second = control(
+            "TaskGet",
+            &json!({"task_id":&id,"block":false}),
+            root.path(),
+            &session,
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(second["status"], "failed", "{second}");
+        assert_eq!(
+            second["owner_loss"], first["owner_loss"],
+            "the confirmed owner-loss facts disappeared on a repeated query"
+        );
+        assert_eq!(
+            second["updatedAt"], first["updatedAt"],
+            "a repeated query rewrote the terminal record"
+        );
+
+        let page = control(
+            "TaskGet",
+            &json!({"task_id":&id,"max_output_bytes":8}),
+            root.path(),
+            &session,
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(page["status"], "failed", "{page}");
+        assert_eq!(
+            page["owner_loss"], first["owner_loss"],
+            "a cursor page lost the owner-loss facts: {page}"
+        );
+
+        // The persisted facts no longer depend on the supervisor file.
+        let state_path = root
+            .path()
+            .join("shell-tasks")
+            .join(&session)
+            .join(&id)
+            .join("supervisor-state.json");
+        std::fs::remove_file(&state_path).unwrap();
+        let after_removal = control(
+            "TaskGet",
+            &json!({"task_id":&id,"block":false}),
+            root.path(),
+            &session,
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(
+            after_removal["owner_loss"], first["owner_loss"],
+            "removing the supervisor file hid the persisted owner-loss facts"
+        );
+        // A damaged file must not turn a confirmed terminal record into an
+        // error either.
+        std::fs::write(&state_path, b"{\"owner_lost\":").unwrap();
+        let after_damage = control(
+            "TaskGet",
+            &json!({"task_id":&id,"block":false}),
+            root.path(),
+            &session,
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(
+            after_damage["owner_loss"], first["owner_loss"],
+            "a damaged supervisor file hid the persisted owner-loss facts"
+        );
+        assert_eq!(after_damage["status"], "failed", "{after_damage}");
+    }
+
+    /// Another writer that makes the record terminal between the read and the
+    /// compare-and-set must win; the older owner-loss view is discarded.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_concurrent_terminal_write_is_never_overwritten_by_owner_loss() {
+        let (root, session, id) = owner_loss_fixture(super::super::pty_owner::INTERACTION);
+        let hook_id = id.clone();
+        let hook_root = root.path().to_path_buf();
+        let hook_session = session.clone();
+        struct ProbeGuard;
+        impl Drop for ProbeGuard {
+            fn drop(&mut self) {
+                super::reconcile_probe::clear();
+            }
+        }
+        super::reconcile_probe::install(Box::new(move || {
+            super::super::tasks::execute_for_shell_owner(
+                "TaskUpdate",
+                json!({"id":&hook_id,"status":"completed"}),
+                &hook_root,
+                &hook_session,
+            )
+            .unwrap();
+        }));
+        let _guard = ProbeGuard;
+
+        let value = control(
+            "TaskGet",
+            &json!({"task_id":&id,"block":false}),
+            root.path(),
+            &session,
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(
+            value["status"], "completed",
+            "an older owner-loss observation overwrote a terminal record: {value}"
+        );
+        assert!(value["owner_loss"].is_null(), "{value}");
+        let stored = super::super::tasks::read_for_session(&id, root.path(), &session).unwrap();
+        assert_eq!(stored["status"], "completed", "{stored}");
+    }
+
+    /// A managed shell is not necessarily a PTY task: a supervisor record in a
+    /// pipe task's directory must never reconcile that task.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_pipe_task_is_never_reconciled_from_a_pty_supervisor_record() {
+        let (root, session, id) = owner_loss_fixture("pipe");
+        let value = control(
+            "TaskGet",
+            &json!({"task_id":&id,"block":false}),
+            root.path(),
+            &session,
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(value["status"], "unresponsive", "{value}");
+        assert!(value["owner_loss"].is_null(), "{value}");
+        let stored = super::super::tasks::read_for_session(&id, root.path(), &session).unwrap();
+        assert_eq!(stored["status"], "running", "{stored}");
     }
     #[tokio::test]
     async fn task_get_reads_gradual_output_and_blocks_until_a_real_shell_completes() {

@@ -1021,6 +1021,117 @@ fn session_members(session: u32) -> Result<Vec<SessionMember>> {
     session_members_with(&ProcFs, session)
 }
 
+/// The creation tick of one process, or `None` when it no longer exists.
+///
+/// This is the identity half of "PID plus process instance": a PID that was
+/// recycled has a different tick and must not be treated as the same process.
+pub(crate) fn process_start_tick(pid: u32) -> Result<Option<u64>> {
+    Ok(ProcFs.stat(pid)?.map(|stat| stat.start))
+}
+
+/// What an out-of-process cleanup accomplished.
+#[derive(Debug, Clone)]
+pub(crate) struct SessionCleanupReport {
+    pub session: u32,
+    /// Every PID that accepted a signal during this cleanup.
+    pub cleaned: Vec<u32>,
+    /// Members still alive when the bound expired.
+    pub remaining: Vec<u32>,
+    pub complete: bool,
+    pub error: Option<String>,
+}
+
+/// Terminate every live member of `session` from a process that does not own
+/// the leader and therefore cannot reap it.
+///
+/// `leader` is the published identity `(pid, start tick)`. If that PID is still
+/// present with a different tick, the session id now names a different process
+/// instance: nothing is signalled and ownership is reported as unverified.
+///
+/// Each member is signalled through its own pidfd after its session and start
+/// tick are re-read, exactly like [`OwnedChild::stop`]. Nothing is signalled by
+/// name, by PID range, or by an unverified process group.
+pub(crate) fn cleanup_owned_session(
+    session: u32,
+    leader: (u32, u64),
+    deadline: Instant,
+) -> SessionCleanupReport {
+    let mut cleaned: Vec<u32> = Vec::new();
+    let mut error: Option<String> = None;
+    loop {
+        match ProcFs.stat(leader.0) {
+            Ok(Some(stat)) if stat.start != leader.1 => {
+                return SessionCleanupReport {
+                    session,
+                    cleaned,
+                    remaining: Vec::new(),
+                    complete: false,
+                    error: Some(format!(
+                        "PID {} now belongs to a different process instance; refusing to treat its session as owned",
+                        leader.0
+                    )),
+                };
+            }
+            Ok(_) => {}
+            Err(read_error) => {
+                // Ownership cannot be verified: do not guess.
+                return SessionCleanupReport {
+                    session,
+                    cleaned,
+                    remaining: Vec::new(),
+                    complete: false,
+                    error: Some(format!(
+                        "Reading the identity of PID {}; ownership is unverified: {read_error:#}",
+                        leader.0
+                    )),
+                };
+            }
+        }
+        match session_members_with(&ProcFs, session) {
+            Ok(members) => {
+                if members.is_empty() {
+                    return SessionCleanupReport {
+                        session,
+                        cleaned,
+                        remaining: Vec::new(),
+                        complete: error.is_none(),
+                        error,
+                    };
+                }
+                for member in &members {
+                    match signal_member_with(&ProcFs, session, member) {
+                        Ok(true) => {
+                            if !cleaned.contains(&member.pid) {
+                                cleaned.push(member.pid);
+                            }
+                        }
+                        Ok(false) => {}
+                        Err(signal_error) => error = Some(format!("{signal_error:#}")),
+                    }
+                }
+            }
+            Err(read_error) => error = Some(format!("{read_error:#}")),
+        }
+        if Instant::now() >= deadline {
+            let remaining = session_members_with(&ProcFs, session)
+                .map(|members| members.into_iter().map(|member| member.pid).collect())
+                .unwrap_or_default();
+            return SessionCleanupReport {
+                session,
+                cleaned,
+                remaining,
+                complete: false,
+                error: error.or_else(|| {
+                    Some(format!(
+                        "The terminal session {session} still had live members when cleanup expired"
+                    ))
+                }),
+            };
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    }
+}
+
 /// Signal one observed session member through a pidfd.
 ///
 /// The pidfd pins the process identity, and the identity (creation tick and
