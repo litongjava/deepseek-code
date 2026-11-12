@@ -88,6 +88,12 @@ pub fn discover(data_dir: &Path, workspace: &Path) -> Result<BTreeMap<String, Sk
     Ok(discover_runtime_from(user.as_deref(), data_dir, workspace).0)
 }
 
+/// Skill files discovery had to skip because they are invalid or unreadable;
+/// the plugins panel's Errors tab lists them.
+pub fn invalid_skill_files(data_dir: &Path, workspace: &Path) -> Vec<PathBuf> {
+    discover_runtime_from(user_config_dir().as_deref(), data_dir, workspace).1
+}
+
 fn user_config_dir() -> Option<PathBuf> {
     std::env::var_os("CLAUDE_CONFIG_DIR")
         .map(PathBuf::from)
@@ -1237,5 +1243,26 @@ mod tests {
                 .collect::<Vec<_>>()
         };
         assert_eq!(ids(&first), ids(&second));
+    }
+
+    #[test]
+    fn invalid_skill_files_lists_bad_files() {
+        let temp = tempfile::tempdir().unwrap();
+        let workspace = temp.path().join("project");
+        std::fs::create_dir_all(&workspace).unwrap();
+        let data = temp.path().join("data");
+        let skills = data.join("skills");
+        write_skill(
+            &skills,
+            "good",
+            "---\nname: good\ndescription: Good fixture\n---\nUseful",
+        );
+        let bad = skills.join("bad/SKILL.md");
+        write_skill(
+            &skills,
+            "bad",
+            "---\nname: bad\nenabled: NOT_A_BOOL\n---\nBroken",
+        );
+        assert_eq!(invalid_skill_files(&data, &workspace), vec![bad]);
     }
 }
