@@ -1,5 +1,21 @@
 import { describe, expect, it } from 'vitest';
-import { mergeSkillMenu } from './skillMenu';
+import { mergeSkillMenu, submenuPlacement } from './skillMenu';
+
+describe('submenuPlacement', () => {
+  it('opens downward when there is more room below the row', () => {
+    expect(submenuPlacement(140, 175, 713)).toEqual({
+      direction: 'down',
+      maxHeight: Math.min(713 - 140 - 8, 713 * 0.6),
+    });
+  });
+
+  it('opens upward when there is more room above the row', () => {
+    expect(submenuPlacement(600, 635, 713)).toEqual({
+      direction: 'up',
+      maxHeight: Math.min(635 - 8, 713 * 0.6),
+    });
+  });
+});
 
 describe('mergeSkillMenu', () => {
   it('merges enabled manager skills with core commands, one entry per slug', () => {

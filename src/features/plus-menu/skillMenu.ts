@@ -1,3 +1,16 @@
+/** Which way the submenu opens and how tall it may be, so it stays inside the window. */
+export function submenuPlacement(
+  rowTop: number,
+  rowBottom: number,
+  viewportHeight: number,
+): { direction: 'up' | 'down'; maxHeight: number } {
+  const spaceAbove = rowBottom - 8;
+  const spaceBelow = viewportHeight - rowTop - 8;
+  const direction = spaceBelow >= spaceAbove ? 'down' : 'up';
+  const maxHeight = Math.min(direction === 'down' ? spaceBelow : spaceAbove, viewportHeight * 0.6);
+  return { direction, maxHeight };
+}
+
 export interface MenuSkill {
   id: string;
   name: string;
