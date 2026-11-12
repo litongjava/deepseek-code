@@ -101,11 +101,7 @@ pub struct MemberJobReceipt {
 }
 
 impl MemberJobReceipt {
-    fn new(
-        source: impl Into<String>,
-        role: impl Into<String>,
-        session: impl Into<String>,
-    ) -> Self {
+    fn new(source: impl Into<String>, role: impl Into<String>, session: impl Into<String>) -> Self {
         Self {
             source: source.into(),
             role: role.into(),
@@ -903,7 +899,8 @@ impl Launcher {
         let router = task.router_session_id.as_str();
         let mut result = CompletionMemberJobs::default();
 
-        for (key, value) in self.setting_rows(&format!("super-agent.launch-op.{}.", task.task_id))?
+        for (key, value) in
+            self.setting_rows(&format!("super-agent.launch-op.{}.", task.task_id))?
         {
             let source = format!("launch operation {key}");
             let operation: LaunchOperation = match serde_json::from_str(&value) {
@@ -920,18 +917,26 @@ impl Launcher {
                     continue;
                 }
             };
-            match operation_receipt_session(task, coder.as_deref(), reviewer.as_deref(), &key, &operation) {
+            match operation_receipt_session(
+                task,
+                coder.as_deref(),
+                reviewer.as_deref(),
+                &key,
+                &operation,
+            ) {
                 Ok(expected_session) => {
-                    result.observations.push(self.observe_member_job(
-                        router,
-                        MemberJobReceipt::new(source, operation.role.clone(), expected_session)
-                            .with_job(operation.job_id.clone())
-                            .with_stage(
-                                operation.purpose.clone(),
-                                operation.spec_version,
-                                operation.review_round,
-                            ),
-                    ));
+                    result.observations.push(
+                        self.observe_member_job(
+                            router,
+                            MemberJobReceipt::new(source, operation.role.clone(), expected_session)
+                                .with_job(operation.job_id.clone())
+                                .with_stage(
+                                    operation.purpose.clone(),
+                                    operation.spec_version,
+                                    operation.review_round,
+                                ),
+                        ),
+                    );
                 }
                 Err(reason) => result.observations.push(unknown_job_receipt(
                     source,
@@ -1000,22 +1005,20 @@ impl Launcher {
                 Ok(stage) => stage,
                 Err(reason) => {
                     result.observations.push(unknown_job_receipt(
-                        source,
-                        "reviewer",
-                        session,
-                        job_id,
-                        reason,
+                        source, "reviewer", session, job_id, reason,
                     ));
                     continue;
                 }
             };
-            result.observations.push(self.observe_member_job(
-                router,
-                MemberJobReceipt::new(source, "reviewer", session)
-                    .with_job(job_id)
-                    .with_stage(stage.0, stage.1, stage.2)
-                    .with_plan(stage.3),
-            ));
+            result.observations.push(
+                self.observe_member_job(
+                    router,
+                    MemberJobReceipt::new(source, "reviewer", session)
+                        .with_job(job_id)
+                        .with_stage(stage.0, stage.1, stage.2)
+                        .with_plan(stage.3),
+                ),
+            );
         }
 
         // Every planned repository of the authoritative plan must be covered by
@@ -1051,7 +1054,10 @@ impl Launcher {
                     source,
                     "coder",
                     &dispatch.coder_session_id,
-                    format!("the receipt belongs to Coder session {}, not {coder_session}", dispatch.coder_session_id),
+                    format!(
+                        "the receipt belongs to Coder session {}, not {coder_session}",
+                        dispatch.coder_session_id
+                    ),
                 ));
                 continue;
             }
@@ -1080,7 +1086,9 @@ impl Launcher {
                 ));
                 continue;
             };
-            let plan = match self.store().delivery_plan(&task.task_id, &dispatch.plan_operation_id)
+            let plan = match self
+                .store()
+                .delivery_plan(&task.task_id, &dispatch.plan_operation_id)
             {
                 Ok(Some(plan)) => plan,
                 Ok(None) => {
@@ -1109,12 +1117,9 @@ impl Launcher {
                 }
             };
             if let Err(reason) = dispatch_identity(task, coder_session, &dispatch, &plan) {
-                result.observations.push(unknown_receipt(
-                    source,
-                    "coder",
-                    coder_session,
-                    reason,
-                ));
+                result
+                    .observations
+                    .push(unknown_receipt(source, "coder", coder_session, reason));
                 continue;
             }
             if dispatch.plan_operation_id == required_plan_operation {
@@ -1125,22 +1130,23 @@ impl Launcher {
                     // A genuine legacy receipt is the sole identity for the one
                     // repository of a single-repository plan.
                     None if plan.repositories.len() == 1 => {
-                        covered_coder_targets
-                            .insert(plan.repositories[0].repository_id.clone());
+                        covered_coder_targets.insert(plan.repositories[0].repository_id.clone());
                     }
                     None => {}
                 }
             }
-            result.observations.push(self.observe_member_job(
-                router,
-                MemberJobReceipt::new(source, "coder", coder_session)
-                    .with_job(job_id)
-                    .with_stage(
-                        dispatch.purpose.clone(),
-                        dispatch.spec_version,
-                        dispatch.review_round,
-                    ),
-            ));
+            result.observations.push(
+                self.observe_member_job(
+                    router,
+                    MemberJobReceipt::new(source, "coder", coder_session)
+                        .with_job(job_id)
+                        .with_stage(
+                            dispatch.purpose.clone(),
+                            dispatch.spec_version,
+                            dispatch.review_round,
+                        ),
+                ),
+            );
         }
 
         // A repository the host found already carrying the approved commit was
@@ -1259,64 +1265,58 @@ impl Launcher {
         Ok(rows)
     }
 
-    fn observe_member_job(
-        &self,
-        router: &str,
-        receipt: MemberJobReceipt,
-    ) -> MemberJobObservation {
-        let state = match background_sessions::inspect(
-            &self.context.paths.data_dir,
-            &receipt.job_id,
-        ) {
-            Ok(JobSnapshot::Present(job)) => {
-                if job.id != receipt.job_id {
-                    MemberJobState::Unknown {
-                        reason: format!(
-                            "the job directory holds identity {}, not {}",
-                            job.id, receipt.job_id
-                        ),
-                    }
-                } else if job.session_id != receipt.session_id {
-                    MemberJobState::Unknown {
-                        reason: format!(
-                            "the job belongs to child session {}, not {}",
-                            job.session_id, receipt.session_id
-                        ),
-                    }
-                } else if job.parent_session_id != router {
-                    MemberJobState::Unknown {
-                        reason: format!(
+    fn observe_member_job(&self, router: &str, receipt: MemberJobReceipt) -> MemberJobObservation {
+        let state =
+            match background_sessions::inspect(&self.context.paths.data_dir, &receipt.job_id) {
+                Ok(JobSnapshot::Present(job)) => {
+                    if job.id != receipt.job_id {
+                        MemberJobState::Unknown {
+                            reason: format!(
+                                "the job directory holds identity {}, not {}",
+                                job.id, receipt.job_id
+                            ),
+                        }
+                    } else if job.session_id != receipt.session_id {
+                        MemberJobState::Unknown {
+                            reason: format!(
+                                "the job belongs to child session {}, not {}",
+                                job.session_id, receipt.session_id
+                            ),
+                        }
+                    } else if job.parent_session_id != router {
+                        MemberJobState::Unknown {
+                            reason: format!(
                             "the job belongs to parent session {}, not this task's Router {router}",
                             job.parent_session_id
                         ),
-                    }
-                } else {
-                    match job.status.as_str() {
-                        "starting" | "running" | "unresponsive" => MemberJobState::Active {
-                            status: job.status,
-                        },
-                        "completed" | "failed" | "cancelled" => MemberJobState::Stopped {
-                            status: job.status,
-                        },
-                        other => MemberJobState::Unknown {
-                            reason: format!("the job has an unrecognized status {other:?}"),
-                        },
+                        }
+                    } else {
+                        match job.status.as_str() {
+                            "starting" | "running" | "unresponsive" => {
+                                MemberJobState::Active { status: job.status }
+                            }
+                            "completed" | "failed" | "cancelled" => {
+                                MemberJobState::Stopped { status: job.status }
+                            }
+                            other => MemberJobState::Unknown {
+                                reason: format!("the job has an unrecognized status {other:?}"),
+                            },
+                        }
                     }
                 }
-            }
-            Ok(JobSnapshot::Missing) => MemberJobState::Unknown {
-                reason: "no durable task state exists; remove is not proof the process stopped"
-                    .into(),
-            },
-            Ok(JobSnapshot::Unreadable(reason)) => MemberJobState::Unknown {
-                reason: format!(
-                    "the job state is unreadable ({reason}); the original files were preserved"
-                ),
-            },
-            Err(error) => MemberJobState::Unknown {
-                reason: format!("the job state could not be read ({error:#})"),
-            },
-        };
+                Ok(JobSnapshot::Missing) => MemberJobState::Unknown {
+                    reason: "no durable task state exists; remove is not proof the process stopped"
+                        .into(),
+                },
+                Ok(JobSnapshot::Unreadable(reason)) => MemberJobState::Unknown {
+                    reason: format!(
+                        "the job state is unreadable ({reason}); the original files were preserved"
+                    ),
+                },
+                Err(error) => MemberJobState::Unknown {
+                    reason: format!("the job state could not be read ({error:#})"),
+                },
+            };
         MemberJobObservation { receipt, state }
     }
 
@@ -1886,6 +1886,8 @@ impl Launcher {
                 invocation: None,
                 member_binding: Some((draft.task.task_id.clone(), draft.member)),
                 allow_workspace_move: operation.allow_workspace_move,
+                // Super Agent members are launched or resumed, never forked.
+                fork: false,
             },
         )
         .await
@@ -2036,11 +2038,7 @@ fn operation_receipt_session(
     let expected = match operation.role.as_str() {
         "coder" => coder,
         "reviewer" => reviewer,
-        other => {
-            return Err(format!(
-                "the operation names unknown member role {other:?}"
-            ))
-        }
+        other => return Err(format!("the operation names unknown member role {other:?}")),
     };
     let Some(expected) = expected else {
         return Err(format!(
@@ -2077,10 +2075,7 @@ fn operation_receipt_session(
     let expected_operation_id = if operation.delivery.is_some() {
         identity
     } else {
-        format!(
-            "{}:{}:{}",
-            task.task_id, operation.role, operation.kind
-        )
+        format!("{}:{}:{}", task.task_id, operation.role, operation.kind)
     };
     if operation.operation_id != expected_operation_id {
         return Err(format!(
@@ -2088,9 +2083,7 @@ fn operation_receipt_session(
             operation.operation_id
         ));
     }
-    if operation.job_id.trim().is_empty()
-        || uuid::Uuid::parse_str(&operation.job_id).is_err()
-    {
+    if operation.job_id.trim().is_empty() || uuid::Uuid::parse_str(&operation.job_id).is_err() {
         return Err(format!(
             "the operation names no valid reserved job UUID ({:?})",
             operation.job_id
@@ -2153,14 +2146,11 @@ fn reviewer_marker_identity(
     }
     let prefix = format!("super-agent.reviewer-resume.{}.", task.task_id);
     let Some(rest) = key.strip_prefix(&prefix) else {
-        return Err(format!(
-            "the marker key {key} is not scoped to this task"
-        ));
+        return Err(format!("the marker key {key} is not scoped to this task"));
     };
     let parts: Vec<&str> = rest.split('.').collect();
     if parts.len() != 2
-        && !(parts.len() == 3
-            && matches!(parts[2], "final-delivery" | "final-completion"))
+        && !(parts.len() == 3 && matches!(parts[2], "final-delivery" | "final-completion"))
     {
         return Err(format!(
             "the marker key {key} is not a reviewer round or stage marker"
@@ -2226,9 +2216,7 @@ fn dispatch_identity(
         None => None,
     };
     let Some(target) = target else {
-        return Err(
-            "the receipt cannot be bound to exactly one planned repository".into(),
-        );
+        return Err("the receipt cannot be bound to exactly one planned repository".into());
     };
     if dispatch.purpose == LEGACY_DELIVERY_PURPOSE {
         return Ok(());
@@ -2253,7 +2241,8 @@ fn dispatch_identity(
     Ok(())
 }
 
-fn operation_key(task: &TaskRecord, member: MemberRole, kind: LaunchKind, purpose: &str) -> String {    let base = format!(
+fn operation_key(task: &TaskRecord, member: MemberRole, kind: LaunchKind, purpose: &str) -> String {
+    let base = format!(
         "super-agent.launch-op.{}.{}.{}.{}.{}",
         task.task_id,
         member.as_str(),

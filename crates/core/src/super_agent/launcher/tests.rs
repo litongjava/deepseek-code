@@ -789,27 +789,29 @@ fn delivery_plan_for(fixture: &Fixture, repositories: &[(&str, &str, &str)]) -> 
         repositories: repositories
             .iter()
             .enumerate()
-            .map(|(index, (repository_id, old_oid, new_oid))| DeliveryTargetPlan {
-                repository_id: (*repository_id).into(),
-                repo_root: fixture.project.clone(),
-                git_common_dir: fixture.project.join(".git"),
-                target_branch: "main".into(),
-                target_ref: "refs/heads/main".into(),
-                destination: DeliveryDestination::RefOnly,
-                baseline_commit: (*old_oid).into(),
-                reviewed_commit: (*new_oid).into(),
-                integrated_commit: (*new_oid).into(),
-                integrated_tree: "tree".into(),
-                old_oid: (*old_oid).into(),
-                new_oid: (*new_oid).into(),
-                review_stage: ReviewStage::Implementation,
-                lock_key: format!(
-                    "branch:{}:refs/heads/main",
-                    fixture.project.join(".git").display()
-                ),
-                lock_operation_id: format!("lock-{index}"),
-                attempt: 1,
-            })
+            .map(
+                |(index, (repository_id, old_oid, new_oid))| DeliveryTargetPlan {
+                    repository_id: (*repository_id).into(),
+                    repo_root: fixture.project.clone(),
+                    git_common_dir: fixture.project.join(".git"),
+                    target_branch: "main".into(),
+                    target_ref: "refs/heads/main".into(),
+                    destination: DeliveryDestination::RefOnly,
+                    baseline_commit: (*old_oid).into(),
+                    reviewed_commit: (*new_oid).into(),
+                    integrated_commit: (*new_oid).into(),
+                    integrated_tree: "tree".into(),
+                    old_oid: (*old_oid).into(),
+                    new_oid: (*new_oid).into(),
+                    review_stage: ReviewStage::Implementation,
+                    lock_key: format!(
+                        "branch:{}:refs/heads/main",
+                        fixture.project.join(".git").display()
+                    ),
+                    lock_operation_id: format!("lock-{index}"),
+                    attempt: 1,
+                },
+            )
             .collect(),
     }
 }
@@ -830,16 +832,10 @@ async fn two_repository_deliveries_get_distinct_operations_and_jobs() {
         &[("repo-1", "a-old", "a-new"), ("repo-2", "b-old", "b-new")],
     );
     fixture.store.save_delivery_plan(&plan).unwrap();
-    let identity_a = DeliveryOperationIdentity::for_target(
-        &plan,
-        &plan.repositories[0],
-        &initial.session_id,
-    );
-    let identity_b = DeliveryOperationIdentity::for_target(
-        &plan,
-        &plan.repositories[1],
-        &initial.session_id,
-    );
+    let identity_a =
+        DeliveryOperationIdentity::for_target(&plan, &plan.repositories[0], &initial.session_id);
+    let identity_b =
+        DeliveryOperationIdentity::for_target(&plan, &plan.repositories[1], &initial.session_id);
     let task = fixture.task();
 
     // The same full two-repository plan yields different operations and jobs
@@ -921,11 +917,8 @@ async fn forged_delivery_identity_never_starts_a_child() {
     let initial = fixture.launcher().launch_coder(&task).await.unwrap();
     let plan = delivery_plan_for(&fixture, &[("repo-1", "old", "new")]);
     fixture.store.save_delivery_plan(&plan).unwrap();
-    let real = DeliveryOperationIdentity::for_target(
-        &plan,
-        &plan.repositories[0],
-        &initial.session_id,
-    );
+    let real =
+        DeliveryOperationIdentity::for_target(&plan, &plan.repositories[0], &initial.session_id);
     let cases: Vec<fn(&mut DeliveryOperationIdentity)> = vec![
         |identity| identity.repository_id = "repo-9".into(),
         |identity| identity.old_oid = "forged-old".into(),
@@ -969,11 +962,8 @@ async fn a_typed_delivery_without_its_job_binding_is_never_adopted() {
     let initial = fixture.launcher().launch_coder(&task).await.unwrap();
     let plan = delivery_plan_for(&fixture, &[("repo-1", "old", "new")]);
     fixture.store.save_delivery_plan(&plan).unwrap();
-    let identity = DeliveryOperationIdentity::for_target(
-        &plan,
-        &plan.repositories[0],
-        &initial.session_id,
-    );
+    let identity =
+        DeliveryOperationIdentity::for_target(&plan, &plan.repositories[0], &initial.session_id);
     let task = fixture.task();
     let error = fixture
         .launcher_with_gate(Some(crash_gate("after-spawn")))
@@ -1041,16 +1031,10 @@ async fn a_contradictory_delivery_binding_is_never_overwritten() {
         &[("repo-1", "a-old", "a-new"), ("repo-2", "b-old", "b-new")],
     );
     fixture.store.save_delivery_plan(&plan).unwrap();
-    let identity_a = DeliveryOperationIdentity::for_target(
-        &plan,
-        &plan.repositories[0],
-        &initial.session_id,
-    );
-    let identity_b = DeliveryOperationIdentity::for_target(
-        &plan,
-        &plan.repositories[1],
-        &initial.session_id,
-    );
+    let identity_a =
+        DeliveryOperationIdentity::for_target(&plan, &plan.repositories[0], &initial.session_id);
+    let identity_b =
+        DeliveryOperationIdentity::for_target(&plan, &plan.repositories[1], &initial.session_id);
     let task = fixture.task();
     fixture
         .launcher_with_gate(Some(crash_gate("after-reservation")))
@@ -1184,11 +1168,8 @@ async fn a_tampered_cached_handle_is_never_returned() {
     let initial = fixture.launcher().launch_coder(&task).await.unwrap();
     let plan = delivery_plan_for(&fixture, &[("repo-1", "old", "new")]);
     fixture.store.save_delivery_plan(&plan).unwrap();
-    let identity = DeliveryOperationIdentity::for_target(
-        &plan,
-        &plan.repositories[0],
-        &initial.session_id,
-    );
+    let identity =
+        DeliveryOperationIdentity::for_target(&plan, &plan.repositories[0], &initial.session_id);
     let task = fixture.task();
     let outcome = fixture
         .launcher()
@@ -1215,7 +1196,11 @@ async fn a_tampered_cached_handle_is_never_returned() {
     for mutate in mutations {
         let mut changed = stored.clone();
         mutate(&mut changed);
-        fixture.launcher().context.save_setting(&key, &changed).unwrap();
+        fixture
+            .launcher()
+            .context
+            .save_setting(&key, &changed)
+            .unwrap();
         let error = fixture
             .reopen()
             .resume_coder_for_delivery(&task, "deliver", &identity)
@@ -1232,7 +1217,11 @@ async fn a_tampered_cached_handle_is_never_returned() {
             fixture.launcher().context.setting(&key).unwrap().unwrap();
         assert_eq!(preserved, changed);
     }
-    fixture.launcher().context.save_setting(&key, &stored).unwrap();
+    fixture
+        .launcher()
+        .context
+        .save_setting(&key, &stored)
+        .unwrap();
     let cached = fixture
         .reopen()
         .resume_coder_for_delivery(&task, "deliver", &identity)
@@ -1307,11 +1296,8 @@ async fn a_cached_typed_delivery_with_a_swapped_job_owner_is_never_returned() {
     let initial = fixture.launcher().launch_coder(&task).await.unwrap();
     let plan = delivery_plan_for(&fixture, &[("repo-1", "old", "new")]);
     fixture.store.save_delivery_plan(&plan).unwrap();
-    let identity = DeliveryOperationIdentity::for_target(
-        &plan,
-        &plan.repositories[0],
-        &initial.session_id,
-    );
+    let identity =
+        DeliveryOperationIdentity::for_target(&plan, &plan.repositories[0], &initial.session_id);
     let task = fixture.task();
     fixture
         .launcher()
@@ -1342,10 +1328,7 @@ async fn a_cached_typed_delivery_with_a_swapped_job_owner_is_never_returned() {
             .resume_coder_for_delivery(&task, "deliver", &identity)
             .await
             .unwrap_err();
-        assert!(
-            format!("{error:#}").contains("another"),
-            "{error:#}"
-        );
+        assert!(format!("{error:#}").contains("another"), "{error:#}");
         assert_eq!(fixture.child_runs(), 2);
         // The rejected adoption persists nothing.
         let preserved: serde_json::Value =
@@ -1362,11 +1345,8 @@ async fn a_cached_typed_delivery_without_its_actual_job_is_never_returned() {
     let initial = fixture.launcher().launch_coder(&task).await.unwrap();
     let plan = delivery_plan_for(&fixture, &[("repo-1", "old", "new")]);
     fixture.store.save_delivery_plan(&plan).unwrap();
-    let identity = DeliveryOperationIdentity::for_target(
-        &plan,
-        &plan.repositories[0],
-        &initial.session_id,
-    );
+    let identity =
+        DeliveryOperationIdentity::for_target(&plan, &plan.repositories[0], &initial.session_id);
     let task = fixture.task();
     fixture
         .launcher()
@@ -1406,11 +1386,8 @@ async fn a_typed_record_without_its_required_version_blocks() {
     let initial = fixture.launcher().launch_coder(&task).await.unwrap();
     let plan = delivery_plan_for(&fixture, &[("repo-1", "old", "new")]);
     fixture.store.save_delivery_plan(&plan).unwrap();
-    let identity = DeliveryOperationIdentity::for_target(
-        &plan,
-        &plan.repositories[0],
-        &initial.session_id,
-    );
+    let identity =
+        DeliveryOperationIdentity::for_target(&plan, &plan.repositories[0], &initial.session_id);
     let task = fixture.task();
     fixture
         .launcher()
@@ -1449,7 +1426,11 @@ async fn a_typed_record_without_its_required_version_blocks() {
     assert_eq!(preserved, without_version);
 
     // The sidecar's mandatory version is required as well.
-    fixture.launcher().context.save_setting(&key, &stored).unwrap();
+    fixture
+        .launcher()
+        .context
+        .save_setting(&key, &stored)
+        .unwrap();
     let path = binding_path(&fixture, &job_id);
     let bytes = std::fs::read(&path).unwrap();
     let mut binding: serde_json::Value = serde_json::from_slice(&bytes).unwrap();

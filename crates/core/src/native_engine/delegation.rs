@@ -46,11 +46,11 @@ impl OwnedChild {
 pub(super) fn definitions() -> Vec<ToolDefinition> {
     vec![ToolDefinition {
         name: "Agent".into(),
-        description: "Launch a new agent to handle complex, multi-step tasks. Each agent type has specific capabilities and tools available to it.\n\nSpecify a subagent_type to select an agent definition; omitting it starts a general-purpose agent.\n\n## When to use\n\nReach for this when the task matches an available agent type, when you have independent work to run in parallel, or when answering would mean reading across several files — delegate it and you keep the conclusion, not the file dumps. For a single-fact lookup where you already know the file, symbol, or value, search directly. Once you've delegated a search, don't also run it yourself — wait for the result.\n\nSubagents run in the background; you'll be notified when one completes. Continue independent work while an agent runs. If nothing independent remains, return control to the user and let completion notification wake the session; do not poll TaskGet or sleep repeatedly just to keep the parent turn open. A single sequential task is usually cheaper to execute directly than to delegate and wait. Never fabricate or predict a pending agent's results — the notification is never something you write yourself; if the user asks before it arrives, say it's still running. Pass run_in_background: false when you need the result before continuing.\n\n- The agent's final report is not shown to the user — relay what matters.\n- Use SendMessage with the agent's ID or name to continue a previously spawned agent with its context intact; a new Agent call starts fresh.\n- Each agent type's prompt and tools come from its definition (`.claude/agents/*.md` or SDK `agents`).\n- `isolation: \"worktree\"` gives the agent its own git worktree.".into(),
+        description: "Launch a new agent to handle complex, multi-step tasks. Each agent type has specific capabilities and tools available to it.\n\nSpecify a subagent_type to select an agent definition; omitting it starts a general-purpose agent. subagent_type: \"fork\" forks this session instead: the fork inherits the full conversation history, runs in the background on this session's model, and takes prompt as its directive, so the prompt does not need to repeat context. Use it for a side task that needs what this session already knows; use another type when a fresh context is better. A fork cannot start another fork.\n\n## When to use\n\nReach for this when the task matches an available agent type, when you have independent work to run in parallel, or when answering would mean reading across several files — delegate it and you keep the conclusion, not the file dumps. For a single-fact lookup where you already know the file, symbol, or value, search directly. Once you've delegated a search, don't also run it yourself — wait for the result.\n\nSubagents run in the background; you'll be notified when one completes. Continue independent work while an agent runs. If nothing independent remains, return control to the user and let completion notification wake the session; do not poll TaskGet or sleep repeatedly just to keep the parent turn open. A single sequential task is usually cheaper to execute directly than to delegate and wait. Never fabricate or predict a pending agent's results — the notification is never something you write yourself; if the user asks before it arrives, say it's still running. Pass run_in_background: false when you need the result before continuing.\n\n- The agent's final report is not shown to the user — relay what matters.\n- Use SendMessage with the agent's ID or name to continue a previously spawned agent with its context intact; a new Agent call starts fresh.\n- Each agent type's prompt and tools come from its definition (`.claude/agents/*.md` or SDK `agents`).\n- `isolation: \"worktree\"` gives the agent its own git worktree.".into(),
         input_schema: json!({"type":"object","properties":{
             "description":{"description":"A short (3-5 word) description of the task","type":"string"},
             "prompt":{"description":"The task for the agent to perform","type":"string"},
-            "subagent_type":{"description":"The type of specialized agent to use for this task","type":"string"},
+            "subagent_type":{"description":"The type of specialized agent to use for this task. Use \"fork\" to fork this session.","type":"string"},
             "model":{"description":"Optional model override for this agent: a model ID configured for the current provider. If omitted, the agent uses the parent's model.","type":"string"},
             "effort":{"description":"Reasoning effort for this agent. Set this ONLY when the user, or instructions such as AGENTS.md or a skill, explicitly ask that this agent or delegated work run at a specific effort level, never on your own judgment; otherwise omit it and the agent runs at its usual effort.","type":"string","enum":["low","medium","high","xhigh","max"]},
             "isolation":{"description":"Optional isolation. Omit or use null for the current workspace. Use worktree only when the task requests an isolated copy.","type":["string","null"],"enum":["worktree",null]},
@@ -79,6 +79,28 @@ pub(super) fn normalize_agent_input(input: &Value, main_session: bool) -> Value 
         input["run_in_background"] = json!(true);
     }
     input
+}
+
+/// A fork is a background branch of this session, not an agent definition.
+fn is_fork(input: &Value) -> bool {
+    input["agent_type"] == "fork"
+}
+
+/// Rejects fork options that do not apply to a copy of this session.
+fn validate_fork(input: &Value, typed: bool) -> Result<()> {
+    if input["run_in_background"] == false {
+        anyhow::bail!("A fork runs in the background; omit run_in_background or set it to true");
+    }
+    if input["model"]
+        .as_str()
+        .is_some_and(|model| !model.trim().is_empty())
+    {
+        anyhow::bail!("A fork uses this session's model; omit model");
+    }
+    if typed {
+        anyhow::bail!("A fork cannot take an output schema or a tool list");
+    }
+    Ok(())
 }
 
 struct ChildState {
@@ -686,6 +708,10 @@ impl ToolLoopExecutor {
             }
             return result;
         }
+        if is_fork(&input) {
+            validate_fork(&input, schema.is_some() || tools.is_some())?;
+            return Box::pin(self.spawn_background_agent(&input, tool_use_id)).await;
+        }
         if input["run_in_background"] == true && schema.is_none() && tools.is_none() {
             return Box::pin(self.spawn_background_agent(&input, tool_use_id)).await;
         }
@@ -767,6 +793,15 @@ impl ToolLoopExecutor {
             RuntimePaths::new(root.clone())?,
             Arc::new(EnvironmentCredentials),
         )?;
+        let fork = is_fork(input);
+        if fork {
+            ensure!(
+                context
+                    .setting::<Value>(&format!("fork-of.{parent}"))?
+                    .is_none(),
+                "A fork cannot start another fork"
+            );
+        }
         let description = input["description"]
             .as_str()
             .filter(|text| !text.trim().is_empty())
@@ -812,7 +847,11 @@ impl ToolLoopExecutor {
                     .map(str::to_owned),
                 effort: input["effort"].as_str().map(str::to_owned),
                 system_prompt_append: None,
-                title: format!("Agent: {description}"),
+                title: if fork {
+                    format!("Fork: {description}")
+                } else {
+                    format!("Agent: {description}")
+                },
                 resume_session: None,
                 reserved_session_id: None,
                 reserved_job_id: None,
@@ -827,6 +866,9 @@ impl ToolLoopExecutor {
                 }),
                 member_binding: None,
                 allow_workspace_move: false,
+                // A fork declares its branch here; the shared launch path
+                // copies the parent history and keeps its agent binding.
+                fork,
             },
         )
         .await?;
@@ -1546,6 +1588,10 @@ mod team_spawn_tests;
 #[cfg(test)]
 #[path = "sdk_agent_fields_tests.rs"]
 mod sdk_agent_fields_tests;
+
+#[cfg(test)]
+#[path = "delegation_fork_tests.rs"]
+mod fork_tests;
 
 #[cfg(test)]
 #[test]

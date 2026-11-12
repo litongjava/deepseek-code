@@ -18,6 +18,10 @@ use std::path::{Path, PathBuf};
 /// Prefix of the durable ownership record written for every launched child.
 pub const OWNER_KEY_PREFIX: &str = "child-owner.";
 
+/// The first line of every fork directive; both the model prompt and the real
+/// CLI tests match it to tell a fork's request from the parent's.
+pub(crate) const FORK_DIRECTIVE: &str = "You are a fork of this session: you have its full history above, and this message is your directive. Work on it alone and finish with a short report; the parent session will receive it.";
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ChildWorkspace {
     /// Launch in a directory the caller already prepared, such as a task worktree.
@@ -80,6 +84,12 @@ pub struct ChildSpawn {
     /// A host may move a reviewer to a new round-scoped checkout. Ordinary
     /// Agent-tool children keep the default refusal.
     pub allow_workspace_move: bool,
+    /// Fork the parent session instead of starting empty: the child is a branch
+    /// of the parent conversation and keeps its agent and worktree bindings, so
+    /// no agent definition is resolved, bound or appended, and the prompt is
+    /// framed as a fork directive. A fork cannot also resume or reserve another
+    /// session; callers keep their own entry-point rules such as fork depth.
+    pub fork: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -187,13 +197,27 @@ pub(crate) async fn prepare_child_session(
         spawn.parent_workspace.is_dir(),
         "Parent workspace is unavailable"
     );
+    ensure!(
+        !spawn.fork || (spawn.resume_session.is_none() && spawn.reserved_session_id.is_none()),
+        "A fork branches from its parent session; it cannot resume or reserve another session"
+    );
 
-    let agent_type = if spawn.agent_type.trim().is_empty() {
+    let requested_type = if spawn.agent_type.trim().is_empty() {
         "general"
     } else {
         spawn.agent_type.as_str()
     };
-    let definition = agents::resolve(&context, agent_type)?;
+    // A fork keeps the parent's binding: the branch copies it, so no agent
+    // definition is resolved, bound or appended to the child's system prompt.
+    let definition = if spawn.fork {
+        None
+    } else {
+        Some(agents::resolve(&context, requested_type)?)
+    };
+    let agent_type = definition
+        .as_ref()
+        .map(|definition| definition.id.clone())
+        .unwrap_or_else(|| "fork".to_owned());
     let description = describe(&spawn.description, &spawn.prompt);
 
     let sessions = SessionStore::new(context.db.clone());
@@ -260,6 +284,36 @@ pub(crate) async fn prepare_child_session(
             }
             (session.to_owned(), true)
         }
+        None if spawn.fork => {
+            // A fork is a branch of this session: messages, tool calls and the
+            // agent and worktree bindings are copied, so the child keeps the
+            // parent's history instead of starting empty.
+            let child = context.db.with_conn(|conn| {
+                crate::db::conversation_repo::branch_conversation(
+                    conn,
+                    &spawn.parent_session_id,
+                    None,
+                    None,
+                )
+            })??;
+            context.db.with_conn(|conn| {
+                crate::db::conversation_repo::update_conversation_title(
+                    conn,
+                    &child,
+                    &format!("Fork: {description}"),
+                )
+            })??;
+            context.save_setting(
+                &format!("fork-of.{child}"),
+                &json!({"parent": spawn.parent_session_id}),
+            )?;
+            crate::services::permission_authority::record_user(
+                &context.db,
+                &child,
+                &json!(spawn.prompt),
+            )?;
+            (child, false)
+        }
         None => {
             // Preserve the Agent-tool behavior: the session row keeps the
             // parent's model and an explicit `--model` only changes the launch.
@@ -284,7 +338,9 @@ pub(crate) async fn prepare_child_session(
                                 id,
                                 &json!(spawn.prompt),
                             )?;
-                            agents::bind(&context.db, id, &definition)?;
+                            if let Some(definition) = &definition {
+                                agents::bind(&context.db, id, definition)?;
+                            }
                             id.to_owned()
                         }
                         Err(error) => {
@@ -310,7 +366,9 @@ pub(crate) async fn prepare_child_session(
                                 id,
                                 &json!(spawn.prompt),
                             )?;
-                            agents::bind(&context.db, id, &definition)?;
+                            if let Some(definition) = &definition {
+                                agents::bind(&context.db, id, definition)?;
+                            }
                             id.to_owned()
                         }
                     }
@@ -326,7 +384,9 @@ pub(crate) async fn prepare_child_session(
                         &child,
                         &json!(spawn.prompt),
                     )?;
-                    agents::bind(&context.db, &child, &definition)?;
+                    if let Some(definition) = &definition {
+                        agents::bind(&context.db, &child, definition)?;
+                    }
                     child
                 }
             };
@@ -377,7 +437,10 @@ pub(crate) async fn prepare_child_session(
         "--output-format".into(),
         "stream-json".into(),
     ]);
-    let mut system = definition.system_prompt.clone();
+    let mut system = definition
+        .as_ref()
+        .map(|definition| definition.system_prompt.clone())
+        .unwrap_or_default();
     if let Some(extra) = spawn
         .system_prompt_append
         .as_deref()
@@ -394,7 +457,14 @@ pub(crate) async fn prepare_child_session(
     if let Some(effort) = spawn.effort.as_deref() {
         arguments.extend(["--effort".into(), effort.to_owned()]);
     }
-    arguments.extend(["--".into(), spawn.prompt.clone()]);
+    // A fork already holds the parent's history, so its prompt is framed as
+    // the directive rather than repeated context.
+    let directive = if spawn.fork {
+        format!("{FORK_DIRECTIVE}\n\n{}", spawn.prompt)
+    } else {
+        spawn.prompt.clone()
+    };
+    arguments.extend(["--".into(), directive]);
     // Explicit caller values win over inherited launch values.
     for (key, value) in &spawn.extra_env {
         environment.retain(|(existing, _)| existing != key);
@@ -414,7 +484,7 @@ pub(crate) async fn prepare_child_session(
     let ownership = match &spawn.resume_session {
         Some(_) => owner_record(&context, &session_id)?.unwrap_or(ChildOwnership {
             parent_session_id: spawn.parent_session_id.clone(),
-            agent_type: definition.id.clone(),
+            agent_type: agent_type.clone(),
             description: description.clone(),
             mode: "background".into(),
             status: "starting".into(),
@@ -425,7 +495,7 @@ pub(crate) async fn prepare_child_session(
         }),
         None => ChildOwnership {
             parent_session_id: spawn.parent_session_id.clone(),
-            agent_type: definition.id.clone(),
+            agent_type: agent_type.clone(),
             description: description.clone(),
             mode: "background".into(),
             status: "starting".into(),
@@ -442,7 +512,7 @@ pub(crate) async fn prepare_child_session(
         resumed,
         workspace,
         description,
-        agent_type: definition.id,
+        agent_type,
         arguments,
         environment,
         executable,
@@ -870,6 +940,7 @@ mod tests {
             invocation: None,
             member_binding: None,
             allow_workspace_move: false,
+            fork: false,
         }
     }
 

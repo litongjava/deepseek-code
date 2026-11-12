@@ -192,6 +192,7 @@ async fn real_child_runs_in_the_prepared_workspace_and_resumes_there() {
         invocation: None,
         member_binding: None,
         allow_workspace_move: false,
+        fork: false,
     };
 
     let first = spawn_child_session(
