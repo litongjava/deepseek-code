@@ -65,6 +65,8 @@ pub struct PromptEditor {
     pending_paste: Option<(usize, usize)>,
     permission_mode: String,
     commands: Vec<(String, String)>,
+    /// Saved provider IDs for `/provider refresh` completion.
+    provider_ids: Vec<String>,
     details: DetailsPanel,
     /// The conversation for keyboard scrolling and Ctrl+O.
     transcript: Vec<crate::terminal::change_view::Line>,
@@ -130,6 +132,7 @@ impl Default for PromptEditor {
                 .iter()
                 .map(|(n, d)| (n.to_string(), d.to_string()))
                 .collect(),
+            provider_ids: Vec::new(),
         }
     }
 }
@@ -330,6 +333,49 @@ pub(crate) fn matches(commands: &[(String, String)], text: &str) -> Vec<usize> {
         .collect();
     found.sort();
     found.into_iter().map(|(_, _, _, index)| index).collect()
+}
+
+/// Completion for the words after `/model` and `/provider`. The candidate is
+/// the whole command line, so accepting it keeps what was already typed and
+/// only refresh subcommands and saved provider IDs are offered.
+pub(crate) fn argument_matches(text: &str, provider_ids: &[String]) -> Vec<(String, String)> {
+    let Some((command, rest)) = text.split_once(char::is_whitespace) else {
+        return Vec::new();
+    };
+    let rest = rest.trim_start();
+    let subcommands: &[(&str, &str)] = match command {
+        "/model" => &[
+            ("list", "List the provider's models"),
+            ("refresh", "Refresh the provider's model list"),
+        ],
+        "/provider" => &[
+            ("add", "Save a provider"),
+            ("edit", "Edit a saved provider"),
+            ("list", "List saved providers"),
+            ("refresh", "Refresh a saved provider's model list"),
+        ],
+        _ => return Vec::new(),
+    };
+    let Some((subcommand, tail)) = rest.split_once(char::is_whitespace) else {
+        // Still typing the first word after the command.
+        return subcommands
+            .iter()
+            .filter(|(name, _)| name.starts_with(rest))
+            .map(|(name, description)| (format!("{command} {name}"), (*description).to_owned()))
+            .collect();
+    };
+    if command != "/provider" || subcommand != "refresh" {
+        return Vec::new();
+    }
+    let tail = tail.trim_start();
+    if tail.contains(char::is_whitespace) {
+        return Vec::new();
+    }
+    provider_ids
+        .iter()
+        .filter(|id| id.starts_with(tail))
+        .map(|id| (format!("/provider refresh {id}"), "Saved provider".to_owned()))
+        .collect()
 }
 /// Completion entries shown at once.
 const MENU_ROWS: usize = 5;
@@ -1083,6 +1129,9 @@ impl PromptEditor {
     pub fn set_commands(&mut self, commands: Vec<(String, String)>) {
         self.commands = commands;
     }
+    pub fn set_provider_ids(&mut self, ids: Vec<String>) {
+        self.provider_ids = ids;
+    }
     pub fn set_panel(&mut self, details: Vec<(String, String)>, expanded: bool) {
         self.set_details(details);
         self.details.expanded = expanded;
@@ -1279,14 +1328,21 @@ impl PromptEditor {
                 }
                 _ => Vec::new(),
             };
+            let arguments = if mention_query.is_none() && buffer.cursor == buffer.chars.len() {
+                argument_matches(&text, &self.provider_ids)
+            } else {
+                Vec::new()
+            };
             let entries: &[(String, String)] = if mention_query.is_some() {
                 &mentioned
+            } else if !arguments.is_empty() {
+                &arguments
             } else {
                 &self.commands
             };
             let items = if menu_hidden {
                 vec![]
-            } else if mention_query.is_some() {
+            } else if mention_query.is_some() || !arguments.is_empty() {
                 (0..entries.len()).collect()
             } else {
                 matches(entries, &text)
@@ -3143,6 +3199,37 @@ mod tests {
         b.insert("文");
         assert_eq!(b.text(), "中文🙂\ntext");
     }
+    #[test]
+    fn refresh_subcommands_complete_and_replace_the_typed_word() {
+        let names = |text: &str, ids: &[String]| {
+            argument_matches(text, ids)
+                .into_iter()
+                .map(|(name, _)| name)
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(names("/model r", &[]), ["/model refresh"]);
+        assert_eq!(names("/provider r", &[]), ["/provider refresh"]);
+        assert_eq!(
+            names("/provider ", &[]),
+            ["/provider add", "/provider edit", "/provider list", "/provider refresh"]
+        );
+        let providers = vec!["alpha".to_owned(), "beta".to_owned()];
+        assert_eq!(
+            names("/provider refresh ", &providers),
+            ["/provider refresh alpha", "/provider refresh beta"]
+        );
+        assert_eq!(
+            names("/provider refresh b", &providers),
+            ["/provider refresh beta"]
+        );
+        assert!(names("/model refresh ", &providers).is_empty());
+        assert!(names("/help arg", &providers).is_empty());
+        assert!(names("/provider refresh beta extra", &providers).is_empty());
+        // Accepting a candidate puts the whole command line in the prompt.
+        let candidate = argument_matches("/model r", &[]).remove(0).0;
+        assert_eq!(format!("{candidate} "), "/model refresh ");
+    }
+
     #[test]
     fn filters_builtins_and_dynamic_commands_without_matching_arguments() {
         let c = vec![
