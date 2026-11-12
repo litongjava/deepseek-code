@@ -31,8 +31,9 @@ const MAX_LINE_CHARS: usize = 4096;
 const MAX_EVENT_LINES: usize = 50;
 const MAX_EVENT_BYTES: usize = 16 * 1024;
 
-/// Starts a monitor for the owning session.
-pub(crate) fn start(
+/// Starts a monitor for the owning session; used by the Monitor tool and the
+/// CLI tests.
+pub fn start(
     mut command: Command,
     description: &str,
     command_text: &str,

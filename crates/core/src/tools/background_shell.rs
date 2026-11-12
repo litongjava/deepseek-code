@@ -44,7 +44,9 @@ pub fn task_status(root: &Path, session: &str, task: &Value) -> Result<String> {
     })
 }
 
-pub(crate) async fn scope<F: Future>(context: Option<(PathBuf, String)>, future: F) -> F::Output {
+/// Runs a task with its owning session; used by the Monitor tool and the CLI
+/// tests.
+pub async fn scope<F: Future>(context: Option<(PathBuf, String)>, future: F) -> F::Output {
     CONTEXT.scope(context, future).await
 }
 

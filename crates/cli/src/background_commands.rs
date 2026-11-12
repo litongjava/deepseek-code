@@ -1108,6 +1108,17 @@ fn shell_notifications(session: &Session) -> Result<Vec<String>> {
     Ok(notices)
 }
 
+/// Monitor events: each is queued for the model as a task notification and
+/// announced once.
+fn monitor_notifications(session: &Session) -> Result<Vec<String>> {
+    let mut notices = Vec::new();
+    for event in deepseek_code_core::tools::monitor::collect_events(&session.paths.data_dir, &session.id)? {
+        deepseek_code_core::services::input_queue::push(&session.store.db, &session.id, &event.notification())?;
+        notices.push(format!("\u{25cf} {}", event.summary()));
+    }
+    Ok(notices)
+}
+
 /// Starts a turn for task notifications waiting at an idle prompt; the
 /// model reads them as the reference CLI's background command updates.
 pub(crate) async fn wake_for_notifications(cli: &crate::args::Cli, session: &mut Session, input: &mut Option<crate::terminal::input::TerminalInput>) -> Result<bool> {
@@ -1163,11 +1174,13 @@ pub fn collect_completed(session: &Session) -> Result<Vec<String>> {
     static WORKER_WARNING: AtomicBool = AtomicBool::new(false);
     static SHELL_WARNING: AtomicBool = AtomicBool::new(false);
     static MESSAGE_WARNING: AtomicBool = AtomicBool::new(false);
+    static MONITOR_WARNING: AtomicBool = AtomicBool::new(false);
     let mut notices = Vec::new();
     for (source, warning, result) in [
         ("messages", &MESSAGE_WARNING, deepseek_code_core::services::session_messages::notices(&deepseek_code_core::services::ServiceContext { paths: session.paths.clone(), db: session.store.db.clone(), credentials: std::sync::Arc::new(deepseek_code_core::services::EnvironmentCredentials) },&session.id)),
         ("workers", &WORKER_WARNING, background_sessions::collect_completed(&session.store, &session.paths.data_dir, &session.id).and_then(|reports| reports.into_iter().map(|report| agent_notice(session, report)).collect())),
         ("shells", &SHELL_WARNING, shell_notifications(session)),
+        ("monitors", &MONITOR_WARNING, monitor_notifications(session)),
     ] {
         match result {
             Ok(mut messages) => notices.append(&mut messages),
@@ -1326,6 +1339,134 @@ mod worker_config_tests {
         assert!(collect_completed(&session).is_ok());
         session.close().await.unwrap();
     }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn monitor_events_are_queued_once_and_announced() {
+        use clap::Parser;
+        use deepseek_code_core::{
+            services::input_queue,
+            tools::{background_shell::scope, monitor},
+        };
+        use std::time::Duration;
+        let dir = tempfile::tempdir().unwrap();
+        let paths = RuntimePaths::new(dir.path().join("data")).unwrap();
+        let provider = serde_json::from_value(serde_json::json!({"id":"fixture","name":"Fixture","base_url":"http://127.0.0.1:1","api_key":"unused","api_format":"anthropic","enabled":true,"models":[{"id":"fixture-model","name":"Fixture","enabled":true,"supports_vision":false,"supports_web_search":false}]})).unwrap();
+        let selection = crate::config::Selection {
+            providers: vec![provider],
+            provider_id: "fixture".into(),
+            model: "fixture-model".into(),
+        };
+        let cli = Cli::parse_from(["dcl"]);
+        let session = Session::open(&cli, &paths, selection, None).await.unwrap();
+        let script = "echo first-event; sleep 0.3";
+        let mut command = tokio::process::Command::new("sh");
+        command.arg("-c").arg(script);
+        let owned = (paths.data_dir.clone(), session.id.clone());
+        let task = scope(Some(owned), async move {
+            monitor::start(command, "probe", script, monitor::DEFAULT_TIMEOUT, None).unwrap()
+        })
+        .await;
+        assert_eq!(task["status"], "running", "{task}");
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+        let mut lines = Vec::new();
+        loop {
+            lines.extend(collect_completed(&session).unwrap());
+            if lines.iter().any(|line| line.contains("exited")) {
+                break;
+            }
+            assert!(
+                tokio::time::Instant::now() < deadline,
+                "monitor notices did not arrive: {lines:?}"
+            );
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+        assert!(
+            lines
+                .iter()
+                .any(|line| line.contains("Monitor event") && line.contains("first-event")),
+            "{lines:?}"
+        );
+        assert!(lines.iter().any(|line| line.contains("exited")), "{lines:?}");
+        assert!(input_queue::any(&session.store.db, &session.id, is_notification).unwrap());
+        let more = collect_completed(&session).unwrap();
+        assert!(
+            !more.iter().any(|line| line.contains("Monitor event")),
+            "{more:?}"
+        );
+        session.close().await.unwrap();
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn idle_session_wakes_for_a_monitor_event() {
+        use axum::{extract::State, routing::post, Json, Router};
+        use clap::Parser;
+        use deepseek_code_core::tools::{background_shell::scope, monitor};
+        use std::sync::{Arc, Mutex};
+        use std::time::Duration;
+
+        let requests = Arc::new(Mutex::new(Vec::<serde_json::Value>::new()));
+        let app = Router::new().route("/v1/chat/completions", post(
+            |State(requests): State<Arc<Mutex<Vec<serde_json::Value>>>>, Json(body): Json<serde_json::Value>| async move {
+                requests.lock().unwrap().push(body);
+                ([("content-type", "text/event-stream")], "data: {\"choices\":[{\"index\":0,\"delta\":{\"content\":\"continued\"},\"finish_reason\":null}]}\n\ndata: {\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"stop\"}]}\n\ndata: [DONE]\n\n")
+            },
+        )).with_state(requests.clone());
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}", listener.local_addr().unwrap());
+        let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        let dir = tempfile::tempdir().unwrap();
+        let paths = RuntimePaths::new(dir.path().join("data")).unwrap();
+        std::fs::create_dir_all(&paths.data_dir).unwrap();
+        std::fs::write(
+            paths.data_dir.join("settings.json"),
+            r#"{"disableAllHooks":true}"#,
+        )
+        .unwrap();
+        let selection = crate::config::Selection {
+            providers: vec![serde_json::from_value(serde_json::json!({"id":"fixture","name":"Fixture","base_url":url,"api_key":"fixture","api_format":"openai","enabled":true,"models":[{"id":"fixture-model","name":"Fixture","enabled":true,"supports_vision":false,"supports_tools":true,"supports_web_search":false}]})).unwrap()],
+            provider_id: "fixture".into(),
+            model: "fixture-model".into(),
+        };
+        let cli = Cli::parse_from(["dcl", "--print", "--permission-mode", "dont-ask"]);
+        let mut session = Session::open(&cli, &paths, selection, None).await.unwrap();
+        let script = "echo first-event; sleep 0.3";
+        let mut command = tokio::process::Command::new("sh");
+        command.arg("-c").arg(script);
+        let owned = (paths.data_dir.clone(), session.id.clone());
+        scope(Some(owned), async move {
+            monitor::start(command, "probe", script, monitor::DEFAULT_TIMEOUT, None).unwrap()
+        })
+        .await;
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+        loop {
+            let lines = collect_completed(&session).unwrap();
+            if lines.iter().any(|line| line.contains("first-event")) {
+                break;
+            }
+            assert!(
+                tokio::time::Instant::now() < deadline,
+                "the monitor event was not queued: {lines:?}"
+            );
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+        assert!(wake_for_notifications(&cli, &mut session, &mut None)
+            .await
+            .unwrap());
+        {
+            let requests = requests.lock().unwrap();
+            assert_eq!(requests.len(), 1);
+            assert!(
+                requests[0]["messages"].to_string().contains("first-event"),
+                "{}",
+                requests[0]
+            );
+        }
+        session.close().await.unwrap();
+        server.abort();
+    }
+
     #[tokio::test]
     async fn explicit_effort_and_launch_rules_survive_worker_argument_roundtrip() {
         use clap::Parser;
