@@ -824,12 +824,8 @@ fn on_demand_mcp_tools_are_listed_not_sent() {
     assert!(!visible.contains(&"mcp__gh__create_issue".to_owned()), "{visible:?}");
     assert!(!visible.contains(&"mcp__gh__noisy".to_owned()), "{visible:?}");
 
-    let listing = on_demand_listing(
-        &executor.mcp_tools,
-        &executor.mcp_states,
-        &executor.loaded_tools,
-    )
-    .expect("on-demand tools are listed");
+    let listing = on_demand_listing(&executor.mcp_tools, &executor.mcp_states)
+        .expect("on-demand tools are listed");
     assert!(
         listing.starts_with("MCP tools available on demand (load with ToolSearch before calling):"),
         "{listing}"
@@ -848,7 +844,8 @@ fn on_demand_mcp_tools_are_listed_not_sent() {
     assert!(summary.ends_with('…'), "{line}");
 
     // The block reaches the system prompt, and a later setup replaces it
-    // instead of listing the same tool twice.
+    // instead of listing the same tool twice. A loaded tool stays listed so
+    // the prompt prefix does not change after a load.
     executor.refresh_on_demand_listing();
     let prompt = executor.system_prompt.clone().unwrap();
     assert!(prompt.contains("- mcp__gh__create_issue:"), "{prompt}");
@@ -860,7 +857,7 @@ fn on_demand_mcp_tools_are_listed_not_sent() {
         1,
         "{prompt}"
     );
-    assert!(!prompt.contains("mcp__gh__create_issue"), "{prompt}");
+    assert!(prompt.contains("mcp__gh__create_issue"), "{prompt}");
 }
 
 #[tokio::test]
@@ -901,13 +898,10 @@ async fn tool_search_loads_on_demand_mcp_tools() {
     assert!(restored.contains("mcp__gh__create_issue"));
 
     assert!(names(&executor).contains(&"mcp__gh__create_issue".to_owned()));
-    let listing = on_demand_listing(
-        &executor.mcp_tools,
-        &executor.mcp_states,
-        &executor.loaded_tools,
-    )
-    .expect("the other tool is still listed");
-    assert!(!listing.contains("mcp__gh__create_issue"), "{listing}");
+    let listing = on_demand_listing(&executor.mcp_tools, &executor.mcp_states)
+        .expect("both on-demand tools are still listed");
+    assert!(listing.contains("mcp__gh__create_issue"), "{listing}");
+    assert!(listing.contains("mcp__gh__list_pull_requests"), "{listing}");
 
     // A keyword search over the full description finds the other tool.
     let (_, output, failed) = executor
@@ -934,12 +928,7 @@ async fn user_only_mcp_tools_are_hidden_and_refused() {
         std::collections::BTreeMap::from([("gh".to_owned(), McpState::UserOnly)]);
 
     assert!(!names(&executor).contains(&"mcp__gh__create_issue".to_owned()));
-    assert!(on_demand_listing(
-        &executor.mcp_tools,
-        &executor.mcp_states,
-        &executor.loaded_tools,
-    )
-    .is_none());
+    assert!(on_demand_listing(&executor.mcp_tools, &executor.mcp_states).is_none());
 
     let (_, output, failed) = executor
         .execute_tool_call(

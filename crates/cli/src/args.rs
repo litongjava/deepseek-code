@@ -584,6 +584,11 @@ pub enum McpCommands {
     Hosts,
     Restart { name:String, #[arg(long)] host:Option<String> },
     List,
+    /// Show or set an MCP server's state: off, user, on-demand or user-only.
+    State {
+        server: Option<String>,
+        state: Option<String>,
+    },
     /// Add a server: `NAME COMMAND [ARGS...]` for stdio, or
     /// `--transport http|sse|ws NAME URL` for a remote server.
     Add {

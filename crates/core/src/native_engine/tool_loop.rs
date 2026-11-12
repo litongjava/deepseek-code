@@ -392,24 +392,26 @@ fn max_tool_concurrency() -> usize {
         .unwrap_or(10)
 }
 
-/// The system-prompt block that lists MCP tools whose server is on demand and
-/// that this turn has not loaded yet. `None` when no such tool is available.
+/// The system-prompt block that lists every MCP tool whose server is on demand,
+/// loaded or not, so the prompt prefix stays stable after a load. `None` when
+/// no such tool is available.
 fn on_demand_listing(
     tools: &[crate::tools::ToolDefinition],
     states: &std::collections::BTreeMap<String, McpState>,
-    loaded: &std::collections::BTreeSet<String>,
 ) -> Option<String> {
     let mut lines = Vec::new();
     for tool in tools {
         let Some(server) = crate::mcp::states::server_of(&tool.name) else {
             continue;
         };
-        if crate::mcp::states::effective(states, server) != McpState::OnDemand
-            || loaded.contains(&tool.name)
-        {
+        if crate::mcp::states::effective(states, server) != McpState::OnDemand {
             continue;
         }
-        lines.push(format!("- {}: {}", tool.name, description_summary(&tool.description)));
+        lines.push(format!(
+            "- {}: {}",
+            tool.name,
+            crate::mcp::states::description_summary(&tool.description)
+        ));
     }
     if lines.is_empty() {
         return None;
@@ -421,22 +423,6 @@ fn on_demand_listing(
         block.push_str(&line);
     }
     Some(block)
-}
-
-/// The first non-empty line of a description, trimmed and cut to 120 characters.
-fn description_summary(description: &str) -> String {
-    let line = description
-        .lines()
-        .map(str::trim)
-        .find(|line| !line.is_empty())
-        .unwrap_or_default();
-    if line.chars().count() > 120 {
-        let mut summary: String = line.chars().take(119).collect();
-        summary.push('…');
-        summary
-    } else {
-        line.to_owned()
-    }
 }
 
 enum CallStep {
@@ -2924,7 +2910,7 @@ impl ToolLoopExecutor {
 
     /// Keeps the system prompt's on-demand MCP listing in step with this turn:
     /// the block appended earlier is replaced, so a setup that runs twice
-    /// never lists the same tool twice or keeps listing a loaded one.
+    /// never lists the same tool twice.
     fn refresh_on_demand_listing(&mut self) {
         if let Some(previous) = self.on_demand_prompt.take() {
             if let Some(prompt) = self.system_prompt.as_mut() {
@@ -2933,8 +2919,7 @@ impl ToolLoopExecutor {
                 }
             }
         }
-        let Some(block) = on_demand_listing(&self.mcp_tools, &self.mcp_states, &self.loaded_tools)
-        else {
+        let Some(block) = on_demand_listing(&self.mcp_tools, &self.mcp_states) else {
             return;
         };
         let block = format!("\n{block}\n");

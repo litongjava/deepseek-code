@@ -30,6 +30,7 @@ mod context_commands;
 mod persistent_worker;
 mod worker_frontend;
 mod mcp_menu;
+mod mcp_states;
 mod hooks_menu;
 mod settings_dialog;
 mod plugins_panel;
@@ -1300,6 +1301,16 @@ async fn mcp(paths: &RuntimePaths, action: &McpCommands) -> Result<()> {
             let mut value = serde_json::to_value(manager.list_servers().await)?;
             config::redact(&mut value);
             println!("{}", serde_json::to_string_pretty(&value)?);
+        }
+        McpCommands::State { server, state } => {
+            let text = mcp_states::state_command(
+                paths,
+                &manager,
+                server.as_deref(),
+                state.as_deref(),
+            )
+            .await?;
+            println!("{text}");
         }
         McpCommands::Add {
             transport,

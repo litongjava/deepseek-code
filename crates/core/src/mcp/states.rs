@@ -51,7 +51,7 @@ impl std::str::FromStr for McpState {
     }
 }
 
-/// On-disk shape: `{"servers": {"<server name>": "<label>"}}`.
+/// On-disk shape: `{"servers": {"<server id>": "<label>"}}`.
 #[derive(Debug, Default, Deserialize, Serialize)]
 struct McpStatesFile {
     #[serde(default)]
@@ -115,7 +115,7 @@ pub fn set(data_dir: &Path, server: &str, state: McpState) -> Result<()> {
 }
 
 /// Whether two names denote the same server. Tool names carry the normalized
-/// form of the configured server, so the comparison normalizes both sides.
+/// form of the configured server id, so the comparison normalizes both sides.
 fn same_server(a: &str, b: &str) -> bool {
     normalize_name(a) == normalize_name(b)
 }
@@ -130,11 +130,41 @@ pub fn effective(states: &BTreeMap<String, McpState>, server: &str) -> McpState 
         .unwrap_or(McpState::User)
 }
 
-/// The server part of `mcp__<server>__<tool>`, or None for other names.
+/// The state shown to people: `off` when the server is disabled (the
+/// `enabled` switch is the only authority for that), otherwise the stored
+/// state, with a stored `off` read as `user`.
+pub fn shown(states: &BTreeMap<String, McpState>, server_id: &str, enabled: bool) -> McpState {
+    if !enabled {
+        return McpState::Off;
+    }
+    match effective(states, server_id) {
+        McpState::Off => McpState::User,
+        state => state,
+    }
+}
+
+/// The server id part of `mcp__<server>__<tool>`, or None for other names.
 pub fn server_of(tool: &str) -> Option<&str> {
     let rest = tool.strip_prefix("mcp__")?;
     let (server, name) = rest.split_once("__")?;
     (!server.is_empty() && !name.is_empty()).then_some(server)
+}
+
+/// The first non-empty line of a description, trimmed and cut to 120 characters.
+/// Shared by the on-demand prompt listing and the CLI's context estimate.
+pub fn description_summary(description: &str) -> String {
+    let line = description
+        .lines()
+        .map(str::trim)
+        .find(|line| !line.is_empty())
+        .unwrap_or_default();
+    if line.chars().count() > 120 {
+        let mut summary: String = line.chars().take(119).collect();
+        summary.push('…');
+        summary
+    } else {
+        line.to_owned()
+    }
 }
 
 #[cfg(test)]
@@ -198,6 +228,20 @@ mod tests {
         for label in ["off", "user", "on-demand", "user-only"] {
             assert!(error.contains(label), "{error}");
         }
+    }
+
+    #[test]
+    fn shown_reads_disabled_as_off_and_stored_off_as_user() {
+        let states = BTreeMap::from([
+            ("gh".to_owned(), McpState::OnDemand),
+            ("old".to_owned(), McpState::Off),
+        ]);
+        assert_eq!(shown(&states, "gh", true), McpState::OnDemand);
+        assert_eq!(shown(&states, "gh", false), McpState::Off);
+        assert_eq!(shown(&states, "old", true), McpState::User);
+        assert_eq!(shown(&states, "old", false), McpState::Off);
+        assert_eq!(shown(&BTreeMap::new(), "gh", true), McpState::User);
+        assert_eq!(shown(&BTreeMap::new(), "gh", false), McpState::Off);
     }
 
     #[test]
