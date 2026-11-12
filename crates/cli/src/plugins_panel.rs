@@ -7,6 +7,7 @@ use crate::terminal::input::TerminalInput;
 use crate::terminal::picker::{details_from_top, Entry, Key, Picked, Picker};
 use anyhow::Result;
 use chrono::{DateTime, Utc};
+use deepseek_code_core::mcp::states::{self as mcp_states, McpState};
 use deepseek_code_core::runtime::RuntimePaths;
 use deepseek_code_core::services::skill_usage::{self, Usage};
 use deepseek_code_core::skills::states::{self, SkillState};
@@ -55,8 +56,12 @@ pub(crate) struct PluginRow {
 }
 
 pub(crate) struct McpRow {
+    pub id: String,
     pub name: String,
     pub enabled: bool,
+    pub state: McpState,
+    /// Estimated tokens the server's tools cost in every request.
+    pub context_tokens: u64,
     pub last_used: Option<DateTime<Utc>>,
 }
 
@@ -180,21 +185,75 @@ pub(crate) async fn load(paths: &RuntimePaths, session: &Session) -> Result<Mode
     plugins.sort_by(|a, b| a.id.cmp(&b.id));
 
     // The `/mcp` menu's list, without its bundled presets nobody changed.
-    session.mcp.initialize().await?;
+    // `ensure_mcp` starts enabled servers once and keeps live connectors, so the
+    // token estimate below sees their tools and opening the panel does not
+    // disconnect servers that are already running.
+    session.ensure_mcp().await?;
     let last_used = skill_usage::mcp_last_used(&session.store.db)?;
+    let stored_mcp = mcp_states::load(&paths.data_dir);
+    let live_tools = session.mcp.get_all_tools().await;
     let mut mcp: Vec<McpRow> = session
         .mcp
         .list_servers()
         .await
         .into_iter()
         .filter(|server| !crate::mcp_menu::untouched_preset(server))
-        .map(|server| McpRow {
-            last_used: last_used
-                .get(&server.name)
-                .copied()
-                .or_else(|| last_used.get(&server.id).copied()),
-            name: server.name,
-            enabled: server.enabled,
+        .map(|server| {
+            let state = mcp_states::shown(&stored_mcp, &server.id, server.enabled);
+            let tools: Vec<_> = if server.running {
+                live_tools
+                    .iter()
+                    .filter(|tool| {
+                        tool.server_name == server.id || tool.server_name == server.name
+                    })
+                    .collect()
+            } else {
+                Vec::new()
+            };
+            let qualified = |tool: &deepseek_code_core::mcp::McpTool| {
+                deepseek_code_core::mcp::tool_executor::qualified_tool_name(
+                    &server.id,
+                    &tool.name,
+                )
+            };
+            let context_tokens = match state {
+                McpState::Off | McpState::UserOnly => 0,
+                McpState::User => tools
+                    .iter()
+                    .map(|tool| {
+                        skill_usage::estimate_tokens(&format!(
+                            "{}\n{}\n{}",
+                            qualified(tool),
+                            tool.description,
+                            tool.input_schema
+                        ))
+                    })
+                    .sum(),
+                McpState::OnDemand => {
+                    let lines: Vec<String> = tools
+                        .iter()
+                        .map(|tool| {
+                            format!(
+                                "- {}: {}",
+                                qualified(tool),
+                                mcp_states::description_summary(&tool.description)
+                            )
+                        })
+                        .collect();
+                    skill_usage::estimate_tokens(&lines.join("\n"))
+                }
+            };
+            McpRow {
+                last_used: last_used
+                    .get(&server.name)
+                    .copied()
+                    .or_else(|| last_used.get(&server.id).copied()),
+                id: server.id,
+                name: server.name,
+                enabled: server.enabled,
+                state,
+                context_tokens,
+            }
         })
         .collect();
     mcp.sort_by(|a, b| a.name.cmp(&b.name));
@@ -296,6 +355,46 @@ pub(crate) fn stats_rows(model: &Model, now: DateTime<Utc>, notice: bool) -> Vec
         rows.push(String::new());
     }
 
+    // MCP servers cost their tools' schemas (`user`) or their one-line
+    // listing (`on-demand`) in every request.
+    if !model.mcp.is_empty() {
+        let mut servers: Vec<&McpRow> = model.mcp.iter().collect();
+        servers.sort_by(|a, b| a.name.cmp(&b.name));
+        let server_width = servers
+            .iter()
+            .map(|server| server.name.chars().count())
+            .max()
+            .unwrap_or(0)
+            .clamp("server".len(), 24);
+        rows.push("MCP servers".to_owned());
+        rows.push(String::new());
+        rows.push(format!(
+            "  {:<server_width$}  {:<source_width$}  {:<9}  {:<7}  last used",
+            "server", "source", "state", "context"
+        ));
+        for server in &servers {
+            let context = if server.context_tokens == 0 {
+                "-".to_owned()
+            } else {
+                format!("~{}", server.context_tokens)
+            };
+            rows.push(format!(
+                "  {:<server_width$}  {:<source_width$}  {:<9}  {:<7}  {}",
+                fit(&server.name, server_width),
+                "MCP",
+                server.state.label(),
+                context,
+                skill_usage::relative_day(server.last_used, now),
+            ));
+        }
+        rows.push(String::new());
+        rows.push(
+            "  context = tool schemas sent every turn (user) or the on-demand listing; an unlisted server costs nothing"
+                .to_owned(),
+        );
+        rows.push(String::new());
+    }
+
     let mut stale: Vec<&PluginRow> = model
         .plugins
         .iter()
@@ -337,6 +436,31 @@ pub(crate) fn space_state(current: SkillState) -> SkillState {
     }
 }
 
+/// Space cycles an MCP server between `off` and `user`, as for skills.
+pub(crate) fn space_mcp_state(current: McpState) -> McpState {
+    match current {
+        McpState::Off => McpState::User,
+        _ => McpState::Off,
+    }
+}
+
+/// Apply a state to the live session, starting or stopping the server.
+async fn set_mcp_state(
+    paths: &RuntimePaths,
+    session: &Session,
+    server: &deepseek_code_core::mcp::McpServerStatus,
+    state: McpState,
+) -> Result<()> {
+    crate::mcp_states::apply(paths, &session.mcp, server, state).await?;
+    if state == McpState::Off {
+        crate::mcp_menu::disable(session, server).await?;
+    } else {
+        // A failed start is shown in the Errors tab instead of closing the panel.
+        let _ = crate::mcp_menu::enable(session, server).await;
+    }
+    Ok(())
+}
+
 /// The muted line under a skill: state, source, listing cost and last use.
 fn skill_detail(skill: &SkillRow, now: DateTime<Utc>) -> String {
     let mut parts = Vec::new();
@@ -375,6 +499,18 @@ fn plugin_title(plugin: &PluginRow, now: DateTime<Utc>, stale: bool) -> String {
             )),
             None => title.push_str(" \u{b7} never used"),
         }
+    }
+    title
+}
+
+fn mcp_title(server: &McpRow) -> String {
+    let mut title = format!(
+        "\u{2714} {:<28} MCP      {}",
+        server.name,
+        server.state.label()
+    );
+    if server.context_tokens > 0 {
+        title.push_str(&format!(" \u{b7} ~{} tok", server.context_tokens));
     }
     title
 }
@@ -434,7 +570,7 @@ pub(crate) fn installed_entries(
         for server in mcp {
             rows.push((
                 Entry {
-                    title: format!("\u{2714} {:<28} MCP", server.name),
+                    title: mcp_title(server),
                     detail: String::new(),
                 },
                 Target::Mcp(server.name.clone()),
@@ -501,7 +637,11 @@ pub(crate) fn installed_entries(
                 for server in disabled_mcp {
                     rows.push((
                         Entry {
-                            title: format!("\u{25cb} {:<28} MCP      disabled", server.name),
+                            title: format!(
+                                "\u{25cb} {:<28} MCP      {}",
+                                server.name,
+                                server.state.label()
+                            ),
                             detail: String::new(),
                         },
                         Target::Mcp(server.name.clone()),
@@ -619,6 +759,73 @@ fn pick_skill_state(name: &str, current: SkillState) -> std::io::Result<Option<S
     Ok(picker.run()?.map(|index| choices[index].0))
 }
 
+/// What the MCP state picker selected.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum McpStateChoice {
+    State(McpState),
+    Details,
+}
+
+/// The four MCP states plus the details view, with the current one marked.
+pub(crate) fn pick_mcp_state(
+    name: &str,
+    current: McpState,
+) -> std::io::Result<Option<McpStateChoice>> {
+    let choices = [
+        (
+            McpState::Off,
+            "Not started; its tools and prompts are unavailable".to_owned(),
+        ),
+        (
+            McpState::User,
+            "All tool schemas are sent with every request".to_owned(),
+        ),
+        (
+            McpState::OnDemand,
+            "Tools are listed by name and loaded with ToolSearch when needed".to_owned(),
+        ),
+        (
+            McpState::UserOnly,
+            "Connected; the model cannot see or call its tools; its prompts stay available to you"
+                .to_owned(),
+        ),
+    ];
+    let mut entries: Vec<Entry> = choices
+        .iter()
+        .map(|(state, detail)| Entry {
+            title: if *state == current {
+                format!("{} (current)", state.label())
+            } else {
+                state.label().to_owned()
+            },
+            detail: detail.clone(),
+        })
+        .collect();
+    entries.push(Entry {
+        title: "Details".to_owned(),
+        detail: String::new(),
+    });
+    let heading = format!("MCP state: {name}");
+    let selected = choices
+        .iter()
+        .position(|(state, _)| *state == current)
+        .unwrap_or(0);
+    let picker = Picker {
+        heading: &heading,
+        subtitle: None,
+        entries: &entries,
+        search: false,
+        hint: "Enter to set \u{b7} Esc to go back",
+        selected,
+    };
+    Ok(picker.run()?.map(|index| {
+        choices
+            .get(index)
+            .map(|(state, _)| McpStateChoice::State(*state))
+            .unwrap_or(McpStateChoice::Details)
+    }))
+}
+
 fn plugin_details(plugin: &PluginRow, now: DateTime<Utc>) -> std::io::Result<()> {
     let rows = vec![
         format!("id:        {}", plugin.id),
@@ -643,8 +850,18 @@ fn plugin_details(plugin: &PluginRow, now: DateTime<Utc>) -> std::io::Result<()>
 fn mcp_details(server: &McpRow, now: DateTime<Utc>) -> std::io::Result<()> {
     let rows = vec![
         format!("name:      {}", server.name),
+        format!("id:        {}", server.id),
         "kind:      MCP".to_owned(),
         format!("enabled:   {}", if server.enabled { "yes" } else { "no" }),
+        format!("state:     {}", server.state.label()),
+        format!(
+            "context:   {}",
+            if server.context_tokens == 0 {
+                "-".to_owned()
+            } else {
+                format!("~{} tok", server.context_tokens)
+            }
+        ),
         format!(
             "last used: {}",
             skill_usage::relative_day(server.last_used, now)
@@ -763,27 +980,39 @@ pub(crate) async fn run(
                         model = load(paths, session).await?;
                     }
                     Target::Mcp(name) => {
-                        let server = session
+                        let Some(row) = model.mcp.iter().find(|server| server.name == name) else {
+                            continue;
+                        };
+                        let (id, current) = (row.id.clone(), row.state);
+                        let Some(server) = session
                             .mcp
                             .list_servers()
                             .await
                             .into_iter()
-                            .find(|server| server.name == name);
-                        if !toggled {
-                            if let Some(row) = model.mcp.iter().find(|server| server.name == name)
-                            {
-                                mcp_details(row, now)?;
-                            }
+                            .find(|server| server.id == id)
+                        else {
                             continue;
-                        }
-                        let Some(server) = server else { continue };
-                        if server.enabled {
-                            crate::mcp_menu::disable(session, &server).await?;
+                        };
+                        if toggled {
+                            set_mcp_state(paths, session, &server, space_mcp_state(current))
+                                .await?;
                         } else {
-                            // A failed start is shown in the Errors tab instead
-                            // of closing the panel.
-                            let _ = crate::mcp_menu::enable(session, &server).await;
+                            match pick_mcp_state(&name, current)? {
+                                Some(McpStateChoice::State(state)) => {
+                                    set_mcp_state(paths, session, &server, state).await?
+                                }
+                                Some(McpStateChoice::Details) => {
+                                    if let Some(row) =
+                                        model.mcp.iter().find(|server| server.name == name)
+                                    {
+                                        mcp_details(row, now)?;
+                                    }
+                                    continue;
+                                }
+                                None => continue,
+                            }
                         }
+                        changed = true;
                         model = load(paths, session).await?;
                     }
                 }
@@ -990,13 +1219,35 @@ mod tests {
             ],
             mcp: vec![
                 McpRow {
+                    id: "codegraph".to_owned(),
                     name: "codegraph".to_owned(),
                     enabled: true,
+                    state: McpState::User,
+                    context_tokens: 1234,
                     last_used: None,
                 },
                 McpRow {
+                    id: "gh".to_owned(),
                     name: "gh".to_owned(),
                     enabled: false,
+                    state: McpState::Off,
+                    context_tokens: 0,
+                    last_used: None,
+                },
+                McpRow {
+                    id: "search".to_owned(),
+                    name: "search".to_owned(),
+                    enabled: true,
+                    state: McpState::OnDemand,
+                    context_tokens: 80,
+                    last_used: Some(five_days),
+                },
+                McpRow {
+                    id: "pdfmcp".to_owned(),
+                    name: "pdfmcp".to_owned(),
+                    enabled: true,
+                    state: McpState::UserOnly,
+                    context_tokens: 0,
                     last_used: None,
                 },
             ],
@@ -1010,26 +1261,37 @@ mod tests {
 
         let rows = installed_entries(&model, false, now);
         let titles: Vec<&str> = rows.iter().map(|(entry, _)| entry.title.as_str()).collect();
-        assert_eq!(rows.len(), 9);
+        assert_eq!(rows.len(), 11);
         assert_eq!(titles[0], "Not used recently");
         assert_eq!(titles[2], "User");
-        assert_eq!(titles[5], "Skills");
+        assert_eq!(titles[7], "Skills");
         assert!(titles[1].contains("old") && titles[1].ends_with("never used"));
         assert!(titles[3].contains("dsb") && titles[3].contains("1 skill \u{b7} 11 uses"));
         assert!(titles[4].contains("codegraph") && titles[4].contains("MCP"));
-        assert!(titles[6].contains("dcl"));
         assert!(
-            titles[6].ends_with("user \u{b7} ~39 tok \u{b7} never used"),
+            titles[4].ends_with("user \u{b7} ~1234 tok"),
+            "{}",
+            titles[4]
+        );
+        assert!(titles[5].contains("pdfmcp") && titles[5].ends_with("user-only"));
+        assert!(
+            titles[6].contains("search") && titles[6].ends_with("on-demand \u{b7} ~80 tok"),
             "{}",
             titles[6]
         );
-        assert!(titles[7].contains("pdf"));
+        assert!(titles[8].contains("dcl"));
         assert!(
-            titles[7].contains("user-only \u{b7} user \u{b7} not listed"),
+            titles[8].ends_with("user \u{b7} ~39 tok \u{b7} never used"),
             "{}",
-            titles[7]
+            titles[8]
         );
-        assert!(titles[8].trim_end().ends_with("\u{2192} Show disabled (3)"));
+        assert!(titles[9].contains("pdf"));
+        assert!(
+            titles[9].contains("user-only \u{b7} user \u{b7} not listed"),
+            "{}",
+            titles[9]
+        );
+        assert!(titles[10].trim_end().ends_with("\u{2192} Show disabled (3)"));
 
         let rows = installed_entries(&model, true, now);
         let titles: Vec<&str> = rows.iter().map(|(entry, _)| entry.title.as_str()).collect();
@@ -1041,6 +1303,7 @@ mod tests {
         assert!(titles[hide + 2].starts_with('\u{25cb}') && titles[hide + 2].contains("off-plugin"));
         assert_eq!(titles[hide + 3], "Disabled MCP");
         assert!(titles[hide + 4].starts_with('\u{25cb}') && titles[hide + 4].contains("gh"));
+        assert!(titles[hide + 4].ends_with("off"), "{}", titles[hide + 4]);
         assert_eq!(titles[hide + 5], "Disabled skills");
         assert!(titles[hide + 6].starts_with('\u{25cb}') && titles[hide + 6].contains("cu"));
         assert!(
@@ -1052,11 +1315,69 @@ mod tests {
     }
 
     #[test]
+    fn installed_mcp_rows_show_state_and_tokens() {
+        let now = Utc.with_ymd_and_hms(2026, 11, 11, 12, 0, 0).unwrap();
+        let model = installed_model(now);
+        let rows = installed_entries(&model, true, now);
+        let title = |name: &str| {
+            rows.iter()
+                .find(|(_, target)| *target == Target::Mcp(name.to_owned()))
+                .map(|(entry, _)| entry.title.clone())
+                .unwrap_or_else(|| panic!("no MCP row for {name}"))
+        };
+        assert!(
+            title("codegraph").ends_with("user \u{b7} ~1234 tok"),
+            "{}",
+            title("codegraph")
+        );
+        assert!(
+            title("search").ends_with("on-demand \u{b7} ~80 tok"),
+            "{}",
+            title("search")
+        );
+        assert!(title("pdfmcp").ends_with("user-only"), "{}", title("pdfmcp"));
+        let gh = title("gh");
+        assert!(gh.starts_with('\u{25cb}') && gh.ends_with("off"), "{gh}");
+    }
+
+    #[test]
+    fn stats_rows_list_mcp_servers() {
+        let now = Utc.with_ymd_and_hms(2026, 11, 11, 12, 0, 0).unwrap();
+        let model = installed_model(now);
+        let rows = stats_rows(&model, now, false);
+        let text = rows.join("\n");
+        let fields = |name: &str| {
+            rows.iter()
+                .map(|row| row.split_whitespace().collect::<Vec<_>>())
+                .find(|fields| fields.first() == Some(&name))
+                .unwrap_or_else(|| panic!("no row for {name}: {text}"))
+        };
+        assert!(rows.iter().any(|row| row == "MCP servers"), "{text}");
+        assert_eq!(
+            fields("codegraph"),
+            ["codegraph", "MCP", "user", "~1234", "never"]
+        );
+        assert_eq!(
+            fields("search"),
+            ["search", "MCP", "on-demand", "~80", "5", "days"]
+        );
+        assert_eq!(
+            fields("pdfmcp"),
+            ["pdfmcp", "MCP", "user-only", "-", "never"]
+        );
+        assert_eq!(fields("gh"), ["gh", "MCP", "off", "-", "never"]);
+    }
+
+    #[test]
     fn space_cycles_between_off_and_user() {
         assert_eq!(space_state(SkillState::Off), SkillState::User);
         assert_eq!(space_state(SkillState::User), SkillState::Off);
         assert_eq!(space_state(SkillState::NameOnly), SkillState::Off);
         assert_eq!(space_state(SkillState::UserOnly), SkillState::Off);
+        assert_eq!(space_mcp_state(McpState::Off), McpState::User);
+        assert_eq!(space_mcp_state(McpState::User), McpState::Off);
+        assert_eq!(space_mcp_state(McpState::OnDemand), McpState::Off);
+        assert_eq!(space_mcp_state(McpState::UserOnly), McpState::Off);
     }
 
     #[test]

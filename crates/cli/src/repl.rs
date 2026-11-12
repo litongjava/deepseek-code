@@ -530,7 +530,41 @@ pub async fn handle(
             if words.is_empty() { words.push("list".into()); }
             let parsed = crate::args::Cli::try_parse_from(["dcl".into(), "mcp".into()].into_iter().chain(words))?;
             let Some(crate::args::Commands::Mcp { action }) = parsed.command else { unreachable!() };
-            crate::mcp(paths, &action).await?;
+            if let crate::args::McpCommands::State { server: target, state } = &action {
+                // Use this session's manager: a second manager would leave the
+                // running session's configuration revision stale.
+                session.ensure_mcp().await?;
+                let text = crate::mcp_states::state_command(
+                    paths,
+                    &session.mcp,
+                    target.as_deref(),
+                    state.as_deref(),
+                )
+                .await?;
+                if let Some(label) = state {
+                    let update: deepseek_code_core::mcp::states::McpState = label.parse()?;
+                    let servers = session.mcp.list_servers().await;
+                    let query = target.as_deref().unwrap_or_default();
+                    let found = servers
+                        .iter()
+                        .find(|server| server.id == query)
+                        .or_else(|| servers.iter().find(|server| server.name == query));
+                    if let Some(server) = found {
+                        if update == deepseek_code_core::mcp::states::McpState::Off {
+                            crate::mcp_menu::disable(session, server).await?;
+                        } else if let Err(error) = crate::mcp_menu::enable(session, server).await {
+                            command_eprintln!("{} is now {}; it failed to start: {error:#}", server.name, update.label());
+                        }
+                        command_println!("{} is now {}.", server.name, update.label());
+                    } else {
+                        command_println!("{query} is now {}.", update.label());
+                    }
+                } else {
+                    command_println!("{text}");
+                }
+            } else {
+                crate::mcp(paths, &action).await?;
+            }
         }
         "/end" | "/cancel" => command_eprintln!("No unfinished prompt. Use /multiline to compose one."),
         _ => return crate::extended_commands::handle(command, argument, paths, session).await,

@@ -586,6 +586,8 @@ fn main() {
             commands::mcp_update_server,
             commands::mcp_remove_server,
             commands::mcp_toggle_server,
+            commands::mcp_get_states,
+            commands::mcp_set_state,
             commands::mcp_list_tools,
             commands::get_bridge_api_key,
             commands::get_bridge_endpoint,
