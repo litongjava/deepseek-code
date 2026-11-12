@@ -1072,7 +1072,34 @@ mod tests {
         })
         .await;
         let id = task["task_id"].as_str().unwrap();
-        let running = output(root.path(), &session, id, false).await;
+        // stdout and stderr go to separate log files, so the stdout-only wait in
+        // `output` can return before the stderr line is visible. Poll both streams
+        // within the same overall deadline before taking the snapshot.
+        let running = tokio::time::timeout(Duration::from_secs(8), async {
+            loop {
+                let value = super::super::tasks::execute_for_session(
+                    "TaskGet",
+                    json!({"task_id":id,"block":false}),
+                    root.path(),
+                    &session,
+                )
+                .unwrap();
+                if value["stdout"]
+                    .as_str()
+                    .unwrap_or_default()
+                    .contains("ready")
+                    && value["stderr"]
+                        .as_str()
+                        .unwrap_or_default()
+                        .contains("diagnostic")
+                {
+                    return value;
+                }
+                tokio::time::sleep(Duration::from_millis(30)).await;
+            }
+        })
+        .await
+        .unwrap();
         assert_eq!(running["status"], "running");
         assert!(running["stderr"].as_str().unwrap().contains("diagnostic"));
         for change in [
