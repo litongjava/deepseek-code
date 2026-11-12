@@ -454,7 +454,6 @@ fn idle_expiry_keeps_managed_servers_alive_but_not_fatal_workers() {
     assert!(should_expire(false, true, true, Duration::from_secs(301)));
     assert!(!should_expire(false, false, false, Duration::from_secs(299)));
 }
-
 #[cfg(test)]
 mod admission_tests {
     use super::*;
@@ -498,10 +497,19 @@ mod admission_tests {
     /// second turn overlap the first.
     #[test]
     fn only_a_provably_finished_admitted_turn_is_waited_for() {
-        assert_eq!(admission_state(true, Some("running"), |_| false), Admission::Busy);
+        assert_eq!(
+            admission_state(true, Some("running"), |_| false),
+            Admission::Busy
+        );
         assert_eq!(admission_state(true, None, finished), Admission::Busy);
-        assert_eq!(admission_state(true, Some("finished"), finished), Admission::Finalizing);
-        assert_eq!(admission_state(false, Some("finished"), finished), Admission::Admit);
+        assert_eq!(
+            admission_state(true, Some("finished"), finished),
+            Admission::Finalizing
+        );
+        assert_eq!(
+            admission_state(false, Some("finished"), finished),
+            Admission::Admit
+        );
         assert_eq!(admission_state(false, None, finished), Admission::Admit);
     }
 
@@ -520,9 +528,14 @@ mod admission_tests {
         let signal = release.clone();
         let waiter = tokio::spawn(async move {
             let _ = started_tx.send(());
-            let decision =
-                await_admission(&flag, Some("finished-job"), &signal, finished, ADMISSION_GRACE)
-                    .await;
+            let decision = await_admission(
+                &flag,
+                Some("finished-job"),
+                &signal,
+                finished,
+                ADMISSION_GRACE,
+            )
+            .await;
             let _ = done_tx.send(decision).await;
         });
         started_rx.await.unwrap();
@@ -530,9 +543,9 @@ mod admission_tests {
         tokio::task::yield_now().await;
         tokio::task::yield_now().await;
 
-        // 40 ticks = 400 ms virtual: past the old 250 ms window, still well
+        // 44 ticks = 440 ms virtual: past the old 250 ms window, still well
         // inside the 2 s grace.
-        advance_ticks(44).await;
+        advance_ticks(OLD_POLL_STEPS + 19).await;
         assert!(
             done_rx.try_recv().is_err(),
             "the submission stopped waiting while the turn still held admission"
@@ -565,7 +578,8 @@ mod admission_tests {
         let grace = Duration::from_millis(30);
         let waiter = tokio::spawn(async move {
             let _ = started_tx.send(());
-            let decision = await_admission(&flag, Some("finished-job"), &signal, finished, grace).await;
+            let decision =
+                await_admission(&flag, Some("finished-job"), &signal, finished, grace).await;
             let _ = done_tx.send(decision).await;
         });
         started_rx.await.unwrap();
@@ -590,7 +604,14 @@ mod admission_tests {
         active.store(false, Ordering::Release);
         release.notify_one();
         assert_eq!(
-            await_admission(&active, Some("finished-job"), &release, finished, ADMISSION_GRACE).await,
+            await_admission(
+                &active,
+                Some("finished-job"),
+                &release,
+                finished,
+                ADMISSION_GRACE
+            )
+            .await,
             Admission::Admit
         );
         assert!(
@@ -608,7 +629,14 @@ mod admission_tests {
         let active = AtomicBool::new(false);
         let release = tokio::sync::Notify::new();
         assert_eq!(
-            await_admission(&active, None, &release, |_| panic!("must not consult the job"), ADMISSION_GRACE).await,
+            await_admission(
+                &active,
+                None,
+                &release,
+                |_| panic!("must not consult the job"),
+                ADMISSION_GRACE
+            )
+            .await,
             Admission::Admit
         );
     }

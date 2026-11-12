@@ -43,75 +43,6 @@ impl OwnedChild {
     }
 }
 
-async fn standalone_child_executable() -> Result<std::path::PathBuf> {
-    let current = std::env::current_exe()?;
-    if matches!(
-        current.file_stem().and_then(|name| name.to_str()),
-        Some("dcl" | "deepseek-code-cli")
-    ) {
-        return Ok(current);
-    }
-    let name = if cfg!(windows) { "dcl.exe" } else { "dcl" };
-    let mut candidates = Vec::new();
-    if let Some(directory) = current.parent() {
-        candidates.push(directory.join(name));
-    }
-    if let Some(path) = std::env::var_os("PATH") {
-        candidates.extend(
-            std::env::split_paths(&path)
-                .filter(|path| path.is_absolute())
-                .map(|path| path.join(name)),
-        );
-    }
-    for candidate in candidates
-        .into_iter()
-        .filter(|path| path.is_file() && path != &current)
-    {
-        let mut command = tokio::process::Command::new(&candidate);
-        command.arg("--version").kill_on_drop(true);
-        #[cfg(windows)]
-        command.creation_flags(0x08000000);
-        if let Ok(Ok(output)) =
-            tokio::time::timeout(std::time::Duration::from_secs(3), command.output()).await
-        {
-            let version = String::from_utf8_lossy(&output.stdout);
-            if output.status.success()
-                && version.split_whitespace().next() == Some("dcl")
-                && version.split_whitespace().nth(1) == Some(env!("CARGO_PKG_VERSION"))
-            {
-                return Ok(candidate);
-            }
-        }
-    }
-    anyhow::bail!("Background agent launcher unavailable: install the matching standalone dcl CLI beside Desktop or on PATH")
-}
-
-struct InvocationGuard {
-    context: ServiceContext,
-    key: String,
-    value: Value,
-}
-
-impl InvocationGuard {
-    fn finish(&mut self, result: &Result<Value>) -> Result<()> {
-        self.value["status"] = json!(match result {
-            Ok(value) if value["backgrounded"] == true => "running",
-            Ok(_) => "completed",
-            Err(_) => "failed",
-        });
-        self.context.save_setting(&self.key, &self.value)
-    }
-}
-
-impl Drop for InvocationGuard {
-    fn drop(&mut self) {
-        if self.value["status"] == "starting" {
-            self.value["status"] = json!("cancelled");
-            let _ = self.context.save_setting(&self.key, &self.value);
-        }
-    }
-}
-
 pub(super) fn definitions() -> Vec<ToolDefinition> {
     vec![ToolDefinition {
         name: "Agent".into(),
@@ -154,10 +85,6 @@ pub(super) fn normalize_agent_input(input: &Value, main_session: bool) -> Value 
 fn is_fork(input: &Value) -> bool {
     input["agent_type"] == "fork"
 }
-
-/// The first line of every fork directive; tests match it to tell the child
-/// request from the parent's.
-const FORK_DIRECTIVE: &str = "You are a fork of this session: you have its full history above, and this message is your directive. Work on it alone and finish with a short report; the parent session will receive it.";
 
 /// Rejects fork options that do not apply to a copy of this session.
 fn validate_fork(input: &Value, typed: bool) -> Result<()> {
@@ -707,24 +634,16 @@ impl ToolLoopExecutor {
         input: &Value,
         tool_use_id: Option<&str>,
         mode: &str,
-    ) -> Result<Option<InvocationGuard>> {
-        let Some(tool_use_id) = tool_use_id else {
-            return Ok(None);
-        };
+    ) -> Result<Option<crate::native_engine::child_session::InvocationGuard>> {
         let parent = self.conv_id.as_deref().context("Child owner unavailable")?;
-        let parent_message_id = context.db.with_conn(|conn| -> Result<String> {
-            use rusqlite::OptionalExtension;
-            Ok(conn.query_row("SELECT id FROM messages WHERE conversation_id=?1 AND role='assistant' ORDER BY sort_order DESC LIMIT 1", [parent], |row| row.get(0)).optional()?.unwrap_or_default())
-        })??;
-        let attempt_id = uuid::Uuid::new_v4().to_string();
-        let key = format!("subagent_invocation:{parent}:{tool_use_id}:{attempt_id}");
-        let value = json!({"parent_session_id":parent,"parent_message_id":parent_message_id,"tool_use_id":tool_use_id,"child_session_id":child,"attempt_id":attempt_id,"mode":mode,"status":"starting","description":input["description"].as_str().unwrap_or("Agent")});
-        context.save_setting(&key, &value)?;
-        Ok(Some(InvocationGuard {
-            context: context.clone(),
-            key,
-            value,
-        }))
+        crate::native_engine::child_session::record_child_invocation(
+            context,
+            parent,
+            child,
+            input["description"].as_str().unwrap_or("Agent"),
+            tool_use_id,
+            mode,
+        )
     }
 
     /// Workflow children inherit authority and may only narrow their tool set.
@@ -861,50 +780,16 @@ impl ToolLoopExecutor {
         &self,
         root: &std::path::Path,
     ) -> Result<(Vec<String>, Vec<(String, String)>)> {
-        let provider = &self.provider;
         let mode = self
             .permission_manager
             .as_ref()
             .map(|manager| crate::services::session_permission_mode::name(manager.get_mode()))
             .unwrap_or("ask");
-        let mut arguments = vec![
-            "--data-dir".to_owned(),
-            root.to_string_lossy().into_owned(),
-            "--provider".into(),
-            provider.provider.id.clone(),
-            "--model".into(),
-            provider.model.id.clone(),
-            "--permission-mode".into(),
-            mode.into(),
-        ];
-        if provider.provider.builtin_id.is_none() {
-            arguments.extend(["--base-url".into(), provider.provider.base_url.clone()]);
-            arguments.extend([
-                "--api-format".into(),
-                match provider.provider.api_format {
-                    crate::native_engine::provider_manager::ApiFormat::Anthropic => "anthropic",
-                    crate::native_engine::provider_manager::ApiFormat::OpenAI => "openai",
-                }
-                .into(),
-            ]);
-        }
-        let mut environment = vec![(
-            "DEEPSEEK_CODE_WORKER_MODEL".to_owned(),
-            serde_json::to_string(&provider.model)?,
-        )];
-        // `DEEPSEEK_CODE_WORKER_AUTO_ROUTE` belongs to the parent worker and is
-        // deliberately not forwarded: a delegated child is pinned to the
-        // provider and model resolved for this request, which its
-        // `--provider`/`--model` arguments name explicitly. The spawn path also
-        // strips inherited worker state, so the child cannot inherit it.
-        if !provider.provider.api_key.is_empty() {
-            arguments.extend(["--api-key-env".into(), "DEEPSEEK_CODE_CHILD_API_KEY".into()]);
-            environment.push((
-                "DEEPSEEK_CODE_CHILD_API_KEY".into(),
-                provider.provider.api_key.clone(),
-            ));
-        }
-        Ok((arguments, environment))
+        Ok(crate::native_engine::child_session::child_cli_arguments(
+            &self.provider,
+            mode,
+            root,
+        ))
     }
 
     /// As the reference CLI's background agents: the child runs in its own
@@ -916,6 +801,8 @@ impl ToolLoopExecutor {
         input: &Value,
         tool_use_id: Option<&str>,
     ) -> Result<Value> {
+        // The Agent tool is a model entry point. The reusable child-session
+        // launcher deliberately has no depth rule of its own.
         ensure!(
             self.delegation_depth == 0,
             "Background agents start from the main session only"
@@ -945,12 +832,6 @@ impl ToolLoopExecutor {
                 "A fork cannot start another fork"
             );
         }
-        let agent_type = input["agent_type"].as_str().unwrap_or("general");
-        let definition = if fork {
-            None
-        } else {
-            Some(agents::resolve(&context, agent_type)?)
-        };
         let description = input["description"]
             .as_str()
             .filter(|text| !text.trim().is_empty())
@@ -964,142 +845,74 @@ impl ToolLoopExecutor {
                     .take(60)
                     .collect()
             });
-        let provider = &self.provider;
-        let child = if fork {
-            // A fork is a branch of this session: messages, tool calls and the
-            // agent and worktree bindings are copied.
-            let child = context.db.with_conn(|conn| {
-                crate::db::conversation_repo::branch_conversation(conn, &parent, None, None)
-            })??;
-            context.db.with_conn(|conn| {
-                crate::db::conversation_repo::update_conversation_title(
-                    conn,
-                    &child,
-                    &format!("Fork: {description}"),
-                )
-            })??;
-            context.save_setting(&format!("fork-of.{child}"), &json!({"parent": parent}))?;
-            child
-        } else {
-            SessionStore::new(context.db.clone()).create(
-                std::path::Path::new(&self.workspace_cwd),
-                &provider.model.id,
-                &provider.provider.id,
-            )?
-        };
-        crate::services::permission_authority::record_user(&context.db, &child, &json!(prompt))?;
-        let (mut arguments, mut environment) = self.child_cli_launch(&root)?;
-        arguments.extend([
-            "--resume".into(),
-            child.clone(),
-            "--print".into(),
-            "--output-format".into(),
-            "stream-json".into(),
-        ]);
-        // The child is started with --resume, so the engine applies the bound
-        // definition as its Agent role; repeating the prompt here would send it
-        // twice.
-        if let Some(model) = input["model"]
-            .as_str()
-            .filter(|model| !model.trim().is_empty())
-        {
-            let at = arguments
-                .iter()
-                .position(|arg| arg == "--model")
-                .context("child model argument")?
-                + 1;
-            arguments[at] = model.to_owned();
-            environment.retain(|(key, _)| key != "DEEPSEEK_CODE_WORKER_MODEL");
-        }
-        if let Some(effort) = input["effort"].as_str() {
-            ensure!(
-                ["low", "medium", "high", "xhigh", "max"].contains(&effort),
-                "Invalid effort"
-            );
-            arguments.extend(["--effort".into(), effort.into()]);
-        }
-        let child_workspace = match input["isolation"].as_str() {
-            None => std::path::PathBuf::from(&self.workspace_cwd),
-            Some("worktree") => {
-                // Bind before launch; --resume and --worktree stay mutually exclusive.
-                let input = json!({"name":format!("agent-{}", &child[..8.min(child.len())])});
-                let worktree: std::pin::Pin<
-                    Box<
-                        dyn std::future::Future<Output = Result<(Value, std::path::PathBuf)>>
-                            + Send
-                            + '_,
-                    >,
-                > = Box::pin(crate::tools::session_worktree::execute(
-                    "EnterWorktree",
-                    &input,
-                    &root,
-                    &child,
-                    std::path::Path::new(&self.workspace_cwd),
-                ));
-                worktree.await?.1
-            }
+        let workspace = match input["isolation"].as_str() {
+            None => crate::native_engine::child_session::ChildWorkspace::Directory(
+                std::path::PathBuf::from(&self.workspace_cwd),
+            ),
+            Some("worktree") => crate::native_engine::child_session::ChildWorkspace::Worktree,
             Some(other) => anyhow::bail!("Unsupported isolation mode: {other}"),
         };
-        if let Some(definition) = &definition {
-            agents::bind(&context.db, &child, definition)?;
-        }
-        // The branch already copied the parent's agent binding, so a fork only
-        // receives its directive, prefixed with the line that frames it.
-        let directive = if fork {
-            format!("{FORK_DIRECTIVE}\n\n{prompt}")
-        } else {
-            prompt.to_owned()
-        };
-        arguments.extend(["--".into(), directive]);
-        let executable = standalone_child_executable().await?;
-        let mut invocation =
-            self.record_child_invocation(&context, &child, input, tool_use_id, "background")?;
-        let label = if fork {
-            format!("Fork: {description}")
-        } else {
-            format!("Agent: {description}")
-        };
-        let job = crate::services::background_sessions::spawn(
-            &root,
-            &executable,
-            crate::services::background_sessions::Launch {
-                executable: executable.clone(),
-                arguments,
-                cwd: child_workspace,
-            },
-            &parent,
-            &child,
-            &label,
-            &environment,
-        );
-        if let Err(error) = job {
-            if let Some(invocation) = &mut invocation {
-                invocation.finish(&Err(anyhow::anyhow!(error.to_string())))?;
-            }
-            return Err(error);
-        }
-        let job = job?;
-        if let Some(invocation) = &mut invocation {
-            invocation.finish(&Ok(json!({"backgrounded":true})))?;
-        }
-        let setting_agent_type = definition
+        let mode = self
+            .permission_manager
             .as_ref()
-            .map(|definition| definition.id.clone())
-            .unwrap_or_else(|| "fork".to_owned());
+            .map(|manager| crate::services::session_permission_mode::name(manager.get_mode()))
+            .unwrap_or("ask")
+            .to_owned();
+        let handle = crate::native_engine::child_session::spawn_child_session(
+            crate::native_engine::child_session::ChildLaunchConfig {
+                provider: self.provider.clone(),
+                permission_mode: mode,
+            },
+            crate::native_engine::child_session::ChildSpawn {
+                data_dir: root.clone(),
+                parent_session_id: parent.clone(),
+                parent_workspace: std::path::PathBuf::from(&self.workspace_cwd),
+                workspace,
+                prompt: prompt.into(),
+                description: description.clone(),
+                agent_type: input["agent_type"].as_str().unwrap_or("general").into(),
+                model: input["model"]
+                    .as_str()
+                    .filter(|model| !model.trim().is_empty())
+                    .map(str::to_owned),
+                effort: input["effort"].as_str().map(str::to_owned),
+                system_prompt_append: None,
+                title: if fork {
+                    format!("Fork: {description}")
+                } else {
+                    format!("Agent: {description}")
+                },
+                resume_session: None,
+                reserved_session_id: None,
+                reserved_job_id: None,
+                extra_env: Vec::new(),
+                executable_override: None,
+                invocation: tool_use_id.map(|tool_use_id| {
+                    crate::native_engine::child_session::ChildInvocation {
+                        tool_use_id: tool_use_id.into(),
+                        description: description.clone(),
+                        mode: "background".into(),
+                    }
+                }),
+                member_binding: None,
+                allow_workspace_move: false,
+                // A fork declares its branch here; the shared launch path
+                // copies the parent history and keeps its agent binding.
+                fork,
+            },
+        )
+        .await?;
         context.save_setting(
-            &format!("background-agent.{}", job.id),
-            &json!({"agent_type":setting_agent_type,"description":description,"parent":parent,"session_id":child,"started_at":chrono::Utc::now().to_rfc3339()}),
+            &format!("background-agent.{}", handle.job_id),
+            &json!({"agent_type":handle.agent_type,"description":handle.description,"parent":parent,"session_id":handle.session_id,"started_at":chrono::Utc::now().to_rfc3339()}),
         )?;
-        if let Some(invocation) = &mut invocation {
-            invocation.finish(&Ok(json!({"backgrounded":true})))?;
-        }
         Ok(json!({
-            "agent_id": job.id,
-            "session_id": child,
-            "to": child,
+            "agent_id": handle.job_id,
+            "session_id": handle.session_id,
+            "to": handle.session_id,
             "status": "running",
             "backgrounded": true,
-            "description": description,
+            "description": handle.description,
             "message": "The agent is running in the background. You will be notified when it finishes; do not wait or poll for it."
         }))
     }

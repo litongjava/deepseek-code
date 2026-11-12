@@ -886,3 +886,330 @@ async fn mcp_plan_capability_applies_to_normal_and_approval_checks_and_clears_on
     ));
     assert!(executor.permission_hard_denial(name, &input).is_some());
 }
+
+fn super_agent_executor(
+    role: crate::super_agent::Role,
+    member: Option<crate::super_agent::MemberRole>,
+    runtime: crate::super_agent::crp::ToolRuntime,
+) -> ToolLoopExecutor {
+    crate::config::OrchestrationConfig::init_global().unwrap();
+    let provider = ResolvedProvider {
+        provider: serde_json::from_value(json!({"id":"fixture","name":"fixture","base_url":"http://127.0.0.1:1","api_key":"unused","api_format":"openai","models":[],"enabled":true})).unwrap(),
+        model: serde_json::from_value(json!({"id":"fixture","name":"fixture","enabled":true,"supports_vision":false,"supports_web_search":false})).unwrap(),
+    };
+    let (tx, _events) = mpsc::channel(16);
+    ToolLoopExecutor::new(
+        provider,
+        vec![],
+        Some("base".into()),
+        128,
+        tx,
+        ".".into(),
+        ReasoningMode::Standard,
+    )
+    .with_search_config_path(runtime.data_dir.join("config.json"))
+    .with_conv_id(runtime.session_id.clone())
+    .with_super_agent(role, member, runtime)
+}
+
+pub(crate) fn super_agent_runtime_fixture(
+    session_dir: &std::path::Path,
+) -> (
+    tempfile::TempDir,
+    crate::super_agent::crp::ToolRuntime,
+    String,
+) {
+    let temp = tempfile::tempdir().unwrap();
+    let data = temp.path().join("data");
+    std::fs::create_dir_all(&data).unwrap();
+    std::fs::create_dir_all(session_dir).unwrap();
+    let db = crate::db::DbManager::new(data.join(crate::runtime::DATABASE_FILE)).unwrap();
+    db.init().unwrap();
+    let db = Arc::new(db);
+    let session = crate::runtime::SessionStore::new(db.clone())
+        .create(session_dir, "fixture", "fixture")
+        .unwrap();
+    let runtime = crate::super_agent::crp::ToolRuntime {
+        db,
+        data_dir: data,
+        session_id: session.clone(),
+    };
+    (temp, runtime, session)
+}
+
+#[tokio::test]
+async fn router_tool_visibility_and_execution_guard_are_enforced_at_runtime() {
+    let temp = tempfile::tempdir().unwrap();
+    let project = temp.path().join("project");
+    let (_data, runtime, router) = super_agent_runtime_fixture(&project);
+    let mut router_executor =
+        super_agent_executor(crate::super_agent::Role::Router, None, runtime.clone());
+    let names: Vec<String> = router_executor
+        .tool_definitions()
+        .unwrap()
+        .into_iter()
+        .map(|tool| tool.name)
+        .collect();
+    assert!(names.contains(&"CrpCreate".to_string()), "{names:?}");
+    assert!(names.contains(&"Bash".to_string()));
+    assert!(names.contains(&"Read".to_string()));
+    for forbidden in ["Edit", "Write", "MultiEdit", "NotebookEdit"] {
+        assert!(
+            !names.contains(&forbidden.to_string()),
+            "{forbidden} was offered to Router"
+        );
+    }
+    assert!(!names.contains(&"CrpSubmit".to_string()));
+
+    let denied = router_executor
+        .permission_hard_denial("Write", &json!({"file_path":"/tmp/business.txt"}))
+        .unwrap();
+    assert!(denied.contains("cannot edit business code"), "{denied}");
+    assert!(router_executor
+        .permission_hard_denial("Bash", &json!({"command":"ls"}))
+        .is_none());
+
+    // A stale or forged call still fails at execution.
+    let step = router_executor
+        .execute_tool_call_inner(
+            "CrpSubmit",
+            &json!({"kind":"implementation","payload":{}}),
+            "forged",
+            "forged",
+        )
+        .await;
+    let CallStep::Finished((_, output, is_error)) = step else {
+        panic!("unexpected call step");
+    };
+    assert!(is_error, "forged member tool must fail: {output}");
+    assert!(output.contains("not a current Coder"), "{output}");
+
+    // Members get their own tools only, and only their report kinds.
+    let coder_dir = temp.path().join("coder");
+    let (_coder_data, coder_runtime, coder) = super_agent_runtime_fixture(&coder_dir);
+    crate::super_agent::role::set(&coder_runtime.db, &router, crate::super_agent::Role::Router)
+        .unwrap();
+    let store = coder_runtime.store();
+    let spec = crate::super_agent::TaskSpec {
+        title: "Runtime".into(),
+        workspace: project.clone(),
+        targets: vec![project.to_string_lossy().into_owned()],
+        goal: "runtime".into(),
+        requirements: vec![],
+        acceptance_criteria: vec![],
+        constraints: vec![],
+        out_of_scope: vec![],
+        target_branch: None,
+        repository_target_branches: Default::default(),
+    };
+    let task = store.create_task(&router, spec, "create").unwrap();
+    store
+        .set_sessions(&task.task_id, Some(&coder), None)
+        .unwrap();
+    let mut member_executor = super_agent_executor(
+        crate::super_agent::Role::Agent,
+        Some(crate::super_agent::MemberRole::Coder),
+        coder_runtime.clone(),
+    );
+    let names: Vec<String> = member_executor
+        .tool_definitions()
+        .unwrap()
+        .into_iter()
+        .map(|tool| tool.name)
+        .collect();
+    assert!(names.contains(&"CrpSubmit".to_string()));
+    assert!(!names.contains(&"CrpCreate".to_string()));
+    let business = json!({"file_path":"/tmp/business.txt"});
+    let denied = member_executor
+        .permission_hard_denial("Write", &business)
+        .expect("a Coder write before plan approval must be denied");
+    assert!(denied.contains("blocked until the host approves"), "{denied}");
+    assert!(member_executor
+        .permission_hard_denial("Bash", &json!({"command":"touch /tmp/x"}))
+        .is_some());
+    let plan_path = crate::services::plans::path(&coder_runtime.data_dir, &coder).unwrap();
+    assert!(member_executor
+        .permission_hard_denial("Write", &json!({"file_path": plan_path}))
+        .is_none());
+    // A stale spec approval cannot authorize execution.
+    let stale = store
+        .request_approval(
+            "stale-plan",
+            &task.task_id,
+            crate::super_agent::store::ApprovalDraft {
+                source_session_id: coder.clone(),
+                parent_session_id: router.clone(),
+                request_type: crate::super_agent::ApprovalType::Plan,
+                request: json!({"round": task.review_round}),
+                task_spec_version: task.spec_version + 1,
+                permission_policy_version: task.permission_policy_version,
+            },
+        )
+        .unwrap();
+    store
+        .resolve_approval(
+            "stale-answer",
+            &stale.approval_id,
+            crate::super_agent::ApprovalStatus::Approved,
+            None,
+        )
+        .unwrap();
+    assert!(member_executor
+        .permission_hard_denial("Write", &business)
+        .is_some());
+    // The current approval releases the gate.
+    let current = store
+        .request_approval(
+            "current-plan",
+            &task.task_id,
+            crate::super_agent::store::ApprovalDraft {
+                source_session_id: coder.clone(),
+                parent_session_id: router.clone(),
+                request_type: crate::super_agent::ApprovalType::Plan,
+                request: json!({"round": task.review_round}),
+                task_spec_version: task.spec_version,
+                permission_policy_version: task.permission_policy_version,
+            },
+        )
+        .unwrap();
+    store
+        .resolve_approval(
+            "current-answer",
+            &current.approval_id,
+            crate::super_agent::ApprovalStatus::Approved,
+            None,
+        )
+        .unwrap();
+    assert!(member_executor
+        .permission_hard_denial("Write", &business)
+        .is_none());
+    assert!(member_executor
+        .permission_hard_denial("Bash", &json!({"command":"touch /tmp/x"}))
+        .is_none());
+    // A member cannot invoke router tools even if it names one directly.
+    let step = member_executor
+        .execute_tool_call_inner(
+            "CrpCreate",
+            &json!({"spec":{}}),
+            "forged-router",
+            "forged-router",
+        )
+        .await;
+    let CallStep::Finished((_, output, is_error)) = step else {
+        panic!("unexpected call step");
+    };
+    assert!(is_error);
+    assert!(output.contains("requires a Router session"), "{output}");
+}
+
+#[tokio::test]
+async fn an_agent_session_has_no_super_agent_tools_and_cannot_forge_them() {
+    let temp = tempfile::tempdir().unwrap();
+    let project = temp.path().join("plain");
+    let (_data, runtime, _session) = super_agent_runtime_fixture(&project);
+    let mut executor = super_agent_executor(crate::super_agent::Role::Agent, None, runtime);
+    let names: Vec<String> = executor
+        .tool_definitions()
+        .unwrap()
+        .into_iter()
+        .map(|tool| tool.name)
+        .collect();
+    assert!(
+        !names.iter().any(|name| name.starts_with("Crp")),
+        "{names:?}"
+    );
+    let step = executor
+        .execute_tool_call_inner("CrpCreate", &json!({"spec":{}}), "forged", "forged")
+        .await;
+    let CallStep::Finished((_, output, is_error)) = step else {
+        panic!("unexpected call step");
+    };
+    assert!(is_error);
+    assert!(output.contains("requires a Router session"), "{output}");
+}
+
+#[tokio::test]
+async fn coder_exit_plan_requires_the_current_approval_and_inherits_the_router_mode() {
+    use crate::super_agent::{ApprovalStatus, ApprovalType, TaskSpec};
+
+    let temp = tempfile::tempdir().unwrap();
+    let router_dir = temp.path().join("router");
+    std::fs::create_dir_all(&router_dir).unwrap();
+    let coder_dir = temp.path().join("coder");
+    let (_data, runtime, coder) = super_agent_runtime_fixture(&coder_dir);
+    let sessions = crate::runtime::SessionStore::new(runtime.db.clone());
+    let router = sessions.create(&router_dir, "fixture", "fixture").unwrap();
+    crate::super_agent::role::set(&runtime.db, &router, crate::super_agent::Role::Router).unwrap();
+    let store = runtime.store();
+    let spec = TaskSpec {
+        title: "Exit plan".into(),
+        workspace: temp.path().to_path_buf(),
+        targets: vec![temp.path().to_string_lossy().into_owned()],
+        goal: "exit".into(),
+        requirements: vec![],
+        acceptance_criteria: vec![],
+        constraints: vec![],
+        out_of_scope: vec![],
+        target_branch: None,
+        repository_target_branches: Default::default(),
+    };
+    let task = store.create_task(&router, spec, "create").unwrap();
+    store
+        .set_sessions(&task.task_id, Some(&coder), None)
+        .unwrap();
+    crate::services::plans::save(&runtime.data_dir, &coder, "# Approved plan\n").unwrap();
+    let manager = crate::runtime::default_permissions();
+    crate::services::session_permission_mode::set(
+        &runtime.db,
+        &router,
+        &manager,
+        crate::permissions::PermissionMode::AcceptEdits,
+    )
+    .unwrap();
+    manager.set_mode(crate::permissions::PermissionMode::PlanMode);
+    let mut executor =
+        super_agent_executor(
+            crate::super_agent::Role::Agent,
+            Some(crate::super_agent::MemberRole::Coder),
+            runtime.clone(),
+        )
+        .with_permission_manager(manager.clone());
+
+    let (_, output, failed) = executor
+        .execute_tool_call("ExitPlanMode", &json!({}), "exit-before")
+        .await;
+    assert!(failed, "{output}");
+    assert!(output.contains("host has not approved"), "{output}");
+
+    let approval = store
+        .request_approval(
+            "plan-approval",
+            &task.task_id,
+            crate::super_agent::store::ApprovalDraft {
+                source_session_id: coder.clone(),
+                parent_session_id: router.clone(),
+                request_type: ApprovalType::Plan,
+                request: json!({"round": task.review_round}),
+                task_spec_version: task.spec_version,
+                permission_policy_version: task.permission_policy_version,
+            },
+        )
+        .unwrap();
+    store
+        .resolve_approval(
+            "plan-approval-answer",
+            &approval.approval_id,
+            ApprovalStatus::Approved,
+            None,
+        )
+        .unwrap();
+    let (_, output, failed) = executor
+        .execute_tool_call("ExitPlanMode", &json!({}), "exit-after")
+        .await;
+    assert!(!failed, "{output}");
+    assert!(output.contains("super-agent-orchestrator"), "{output}");
+    assert_eq!(
+        manager.get_mode(),
+        crate::permissions::PermissionMode::AcceptEdits
+    );
+}

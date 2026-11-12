@@ -179,6 +179,44 @@ pub fn migrate(conn: &Connection) -> Result<()> {
     conn.execute_batch("CREATE TABLE IF NOT EXISTS magic_auto_inputs(document_id TEXT PRIMARY KEY,input TEXT NOT NULL,FOREIGN KEY(document_id) REFERENCES magic_documents(id) ON DELETE CASCADE);
         CREATE TABLE IF NOT EXISTS legacy_magic_imports(path TEXT PRIMARY KEY,payload TEXT NOT NULL,document_id TEXT NOT NULL,FOREIGN KEY(document_id) REFERENCES magic_documents(id) ON DELETE CASCADE);
         INSERT OR IGNORE INTO peripheral_migrations(version) VALUES(9);")?;
+    let applied: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM peripheral_migrations WHERE version=10",
+        [],
+        |row| row.get(0),
+    )?;
+    if applied == 0 {
+        // Events written before this version keep the schema defaults; the
+        // completion gate only trusts events bound to the current contract.
+        let _ = conn.execute(
+            "ALTER TABLE sa_events ADD COLUMN spec_version INTEGER NOT NULL DEFAULT 1",
+            [],
+        );
+        let _ = conn.execute(
+            "ALTER TABLE sa_events ADD COLUMN review_round INTEGER NOT NULL DEFAULT 0",
+            [],
+        );
+        conn.execute(
+            "INSERT OR IGNORE INTO peripheral_migrations(version) VALUES(10)",
+            [],
+        )?;
+    }
+    let applied: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM peripheral_migrations WHERE version=11",
+        [],
+        |row| row.get(0),
+    )?;
+    if applied == 0 {
+        // Older task rows simply have no pinned non-Git submission; a task that
+        // needs one records it on the next submission.
+        let _ = conn.execute(
+            "ALTER TABLE sa_non_git_targets ADD COLUMN submission_json TEXT",
+            [],
+        );
+        conn.execute(
+            "INSERT OR IGNORE INTO peripheral_migrations(version) VALUES(11)",
+            [],
+        )?;
+    }
     Ok(())
 }
 

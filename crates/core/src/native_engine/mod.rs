@@ -27,4 +27,5 @@ pub mod request_context;
 pub mod permission_response;
 
 pub mod runtime_agents;
+pub mod child_session;
 pub(crate) mod mcp_output;

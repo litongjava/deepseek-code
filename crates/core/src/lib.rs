@@ -49,6 +49,8 @@ pub mod knowledge;
 pub mod runtime;
 pub mod services;
 
+pub mod super_agent;
+
 pub mod learning;
 pub mod performance;
 pub mod structured_output;

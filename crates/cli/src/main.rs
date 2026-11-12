@@ -16,90 +16,91 @@ macro_rules! command_println {
         } else { std::println!($($arg)*); }
     }};
 }
-mod hook_progress;
-mod workflows_view;
-mod lsp_commands;
-mod env_init;
-mod prompt_suggestion;
-mod shell_mode;
-mod mentions;
-mod memory_shortcut;
-mod images;
-mod launch_permissions;
-mod context_commands;
-mod persistent_worker;
-mod worker_frontend;
-mod mcp_menu;
-mod mcp_states;
-mod hooks_menu;
-mod settings_dialog;
-mod plugins_panel;
-mod stats_view;
-mod permissions_menu;
-mod startup_prompts;
-mod repl_loop;
-mod command_catalog;
-mod mcp_prompts;
-mod workflow_runner;
-mod workflow_commands;
-mod interactive_config;
-mod args;
-mod migration;
-mod task_commands;
-mod config;
-mod tool_settings;
-mod tools_menu;
-#[allow(dead_code)]
-mod legacy_api_config;
-mod session;
-mod services;
-mod memory;
-mod magic_docs;
-mod plugins;
-mod help;
-mod voice;
-#[allow(dead_code)]
-mod terminal;
-mod repl;
-mod observe;
-mod output;
-mod compaction;
-mod skill_commands;
+mod account_commands;
 mod agent_commands;
-mod extended_commands;
-mod session_commands;
-mod session_trust;
-mod status_commands;
-mod display_commands;
-mod statusline_commands;
-mod doctor_commands;
+mod args;
 mod background_commands;
 mod batch_commands;
-mod rewind_commands;
-mod keybindings;
-mod permission_commands;
-mod sdk_input;
-mod sdk;
-mod sdk_initialization;
-mod sdk_hooks;
-mod sdk_control;
-mod sdk_mcp;
-mod sdk_messages;
-mod sdk_queries;
-mod sdk_operations;
-mod account_commands;
-mod design_commands;
-mod ide_commands;
-mod startup_options;
+mod command_catalog;
+mod compaction;
+mod config;
+mod context_commands;
 mod debug_logging;
-mod resource_sampling;
-mod resource_commands;
-mod powerup;
+mod design_commands;
+mod display_commands;
+mod doctor_commands;
+mod env_init;
+mod extended_commands;
 mod feedback_commands;
+mod help;
+mod hook_progress;
+mod hooks_menu;
+mod ide_commands;
+mod images;
+mod interactive_config;
+mod keybindings;
+mod launch_permissions;
+#[allow(dead_code)]
+mod legacy_api_config;
+mod lsp_commands;
+mod magic_docs;
+mod mcp_menu;
+mod mcp_prompts;
+mod mcp_states;
+mod memory;
+mod memory_shortcut;
+mod mentions;
+mod migration;
+mod observe;
+mod output;
+mod permission_commands;
+mod permissions_menu;
+mod persistent_worker;
+mod plugins;
+mod plugins_panel;
+mod powerup;
+mod prompt_suggestion;
 mod remote_client;
 mod remote_commands;
 mod remote_host;
+mod repl;
+mod repl_loop;
+mod resource_commands;
+mod resource_sampling;
 mod restart;
+mod rewind_commands;
+mod sdk;
+mod sdk_control;
+mod sdk_hooks;
+mod sdk_initialization;
+mod sdk_input;
+mod sdk_mcp;
+mod sdk_messages;
+mod sdk_operations;
+mod sdk_queries;
+mod services;
+mod session;
+mod session_commands;
+mod session_trust;
+mod settings_dialog;
+mod shell_mode;
+mod skill_commands;
+mod startup_options;
+mod startup_prompts;
+mod stats_view;
+mod status_commands;
+mod statusline_commands;
+mod super_agent_tick;
+mod task_commands;
+#[allow(dead_code)]
+mod terminal;
+mod tool_settings;
+mod tools_menu;
+mod voice;
+mod worker_frontend;
+mod workflow_commands;
+mod workflow_runner;
+mod workflows_view;
 
 use anyhow::{bail, ensure, Context, Result};
 use args::{Cli, Commands, McpCommands, OutputFormat, SessionCommands, SkillsCommands};
@@ -183,23 +184,35 @@ async fn async_main() -> std::process::ExitCode {
     }
     match deepseek_code_core::services::batch::run_worker_from_env() {
         Ok(true) => return std::process::ExitCode::SUCCESS,
-        Ok(false) => {},
-        Err(error) => { eprintln!("Batch worker failed: {error:#}"); return std::process::ExitCode::FAILURE; },
+        Ok(false) => {}
+        Err(error) => {
+            eprintln!("Batch worker failed: {error:#}");
+            return std::process::ExitCode::FAILURE;
+        }
     }
     match deepseek_code_core::services::background_sessions::run_worker_from_env() {
         Ok(true) => return std::process::ExitCode::SUCCESS,
-        Ok(false) => {},
-        Err(error) => { eprintln!("Background worker failed: {error:#}"); return std::process::ExitCode::FAILURE; },
+        Ok(false) => {}
+        Err(error) => {
+            eprintln!("Background worker failed: {error:#}");
+            return std::process::ExitCode::FAILURE;
+        }
     }
     match deepseek_code_core::services::session_worker::run_supervisor_from_env() {
         Ok(true) => return std::process::ExitCode::SUCCESS,
-        Ok(false) => {},
-        Err(error) => { eprintln!("Session supervisor failed: {error:#}"); return std::process::ExitCode::FAILURE; },
+        Ok(false) => {}
+        Err(error) => {
+            eprintln!("Session supervisor failed: {error:#}");
+            return std::process::ExitCode::FAILURE;
+        }
     }
     match Box::pin(persistent_worker::run_from_env()).await {
         Ok(true) => return std::process::ExitCode::SUCCESS,
-        Ok(false) => {},
-        Err(error) => { eprintln!("Session host failed: {error:#}"); return std::process::ExitCode::FAILURE; },
+        Ok(false) => {}
+        Err(error) => {
+            eprintln!("Session host failed: {error:#}");
+            return std::process::ExitCode::FAILURE;
+        }
     }
     let mut cli = Cli::parse_with_mode_source();
     if cli.agent_teams {
@@ -249,7 +262,9 @@ async fn prompt_turn(
 }
 
 async fn run(cli: &Cli) -> Result<()> {
-    if let Some(Commands::Help {topic,command})=&cli.command {return help::show(topic.as_deref(),command); }
+    if let Some(Commands::Help { topic, command }) = &cli.command {
+        return help::show(topic.as_deref(), command);
+    }
     cli.response_schema()?;
     let data_dir = match &cli.data_dir {
         Some(path) => path.clone(),
@@ -266,51 +281,103 @@ async fn run(cli: &Cli) -> Result<()> {
     // Engine code that has no RuntimePaths (e.g. the task tools) and child
     // processes resolve the data directory from the environment.
     std::env::set_var(deepseek_code_core::runtime::DATA_DIR_ENV, &paths.data_dir);
-    debug_logging::configure_terminal(paths.data_dir.join("logs").join(format!("cli-{}.log", std::process::id())))?;
+    debug_logging::configure_terminal(
+        paths
+            .data_dir
+            .join("logs")
+            .join(format!("cli-{}.log", std::process::id())),
+    )?;
     if let Some(path) = &cli.path {
         std::env::set_current_dir(path).context("Cannot open project directory")?;
     }
     if cli.debug.is_some() || cli.debug_file.is_some() {
-        let log = cli.debug_file.clone().unwrap_or_else(||paths.data_dir.join(format!("debug-{}.log",uuid::Uuid::new_v4())));
+        let log = cli.debug_file.clone().unwrap_or_else(|| {
+            paths
+                .data_dir
+                .join(format!("debug-{}.log", uuid::Uuid::new_v4()))
+        });
         debug_logging::configure_filtered(log, cli.debug.as_deref().unwrap_or(""))?;
     }
     if cli.info {
-        println!("dcl {}\nOS: {}\nProject: {}\nData: {}\nEngine: deepseek-code-core (direct; no Bridge)", env!("CARGO_PKG_VERSION"), std::env::consts::OS, std::env::current_dir()?.display(), paths.data_dir.display());
+        println!(
+            "dcl {}\nOS: {}\nProject: {}\nData: {}\nEngine: deepseek-code-core (direct; no Bridge)",
+            env!("CARGO_PKG_VERSION"),
+            std::env::consts::OS,
+            std::env::current_dir()?.display(),
+            paths.data_dir.display()
+        );
         return Ok(());
     }
     let mut skill_prompt = None;
     match &cli.command {
         Some(Commands::Auth { action }) => return account_commands::run(&paths, action).await,
-        Some(Commands::Plugin { action }) => return plugins::run(&paths,action).await,
+        Some(Commands::Plugin { action }) => return plugins::run(&paths, action).await,
         Some(Commands::Update { url }) => {
-            let update = deepseek_code_core::services::updates::check(url,env!("CARGO_PKG_VERSION")).await?;
-            return services::print(&serde_json::json!({"up_to_date":update.is_none(),"update":update}));
+            let update =
+                deepseek_code_core::services::updates::check(url, env!("CARGO_PKG_VERSION"))
+                    .await?;
+            return services::print(
+                &serde_json::json!({"up_to_date":update.is_none(),"update":update}),
+            );
         }
-        Some(Commands::StressTest { concurrency, iterations, endpoint, allow_remote }) => {
+        Some(Commands::StressTest {
+            concurrency,
+            iterations,
+            endpoint,
+            allow_remote,
+        }) => {
             return tokio::select! {result=deepseek_code_core::services::diagnostics::stress(*concurrency,*iterations,endpoint.clone(),*allow_remote)=>services::print(&result?), _=tokio::signal::ctrl_c()=>anyhow::bail!("Diagnostics cancelled")};
         }
         Some(Commands::Learning { action }) => return migration::learning(&paths, action).await,
-        Some(Commands::Performance { action }) => return migration::performance(&paths, action).await,
+        Some(Commands::Performance { action }) => {
+            return migration::performance(&paths, action).await
+        }
         Some(Commands::Project { action }) => return migration::project(action).await,
-        Some(Commands::Cron { action }) => return migration::cron(&paths, &std::env::current_dir()?, action).await,
-        Some(Commands::WorkflowRun { script, run_dir, args_json, resume_dir, agent_args, concurrency }) => {
-            let source = std::fs::read_to_string(script).with_context(|| format!("Reading workflow script {}", script.display()))?;
+        Some(Commands::Cron { action }) => {
+            return migration::cron(&paths, &std::env::current_dir()?, action).await
+        }
+        Some(Commands::WorkflowRun {
+            script,
+            run_dir,
+            args_json,
+            resume_dir,
+            agent_args,
+            concurrency,
+        }) => {
+            let source = std::fs::read_to_string(script)
+                .with_context(|| format!("Reading workflow script {}", script.display()))?;
             let result = workflow_runner::run(workflow_runner::Run {
                 script: &source,
-                args: args_json.as_deref().map(serde_json::from_str).transpose()?.unwrap_or(serde_json::Value::Null),
+                args: args_json
+                    .as_deref()
+                    .map(serde_json::from_str)
+                    .transpose()?
+                    .unwrap_or(serde_json::Value::Null),
                 run_dir,
                 resume_dir: resume_dir.as_deref(),
                 cwd: &std::env::current_dir()?,
-                agent_args: serde_json::from_str(agent_args).context("--agent-args must be a JSON array")?,
+                agent_args: serde_json::from_str(agent_args)
+                    .context("--agent-args must be a JSON array")?,
                 concurrency: *concurrency,
-            }).await;
+            })
+            .await;
             // status.json tells /workflows how the run ended.
             let finished = chrono::Utc::now().timestamp_millis();
             return match result {
                 Ok(value) => {
-                    std::fs::write(run_dir.join("result.json"), serde_json::to_vec_pretty(&value)?)?;
-                    std::fs::write(run_dir.join("status.json"), serde_json::json!({"status":"completed","finished_ms":finished}).to_string())?;
-                    println!("Workflow result:\n{}", serde_json::to_string_pretty(&value)?);
+                    std::fs::write(
+                        run_dir.join("result.json"),
+                        serde_json::to_vec_pretty(&value)?,
+                    )?;
+                    std::fs::write(
+                        run_dir.join("status.json"),
+                        serde_json::json!({"status":"completed","finished_ms":finished})
+                            .to_string(),
+                    )?;
+                    println!(
+                        "Workflow result:\n{}",
+                        serde_json::to_string_pretty(&value)?
+                    );
                     Ok(())
                 }
                 Err(error) => {
@@ -319,29 +386,66 @@ async fn run(cli: &Cli) -> Result<()> {
                 }
             };
         }
-        Some(Commands::Ssh { config, operation, yes }) => return tokio::select! { result=migration::ssh(config,operation,*yes)=>result, _=tokio::signal::ctrl_c()=>anyhow::bail!("SSH operation cancelled") },
-        Some(Commands::Lsp { action, language, yes }) => {
+        Some(Commands::Ssh {
+            config,
+            operation,
+            yes,
+        }) => {
+            return tokio::select! { result=migration::ssh(config,operation,*yes)=>result, _=tokio::signal::ctrl_c()=>anyhow::bail!("SSH operation cancelled") }
+        }
+        Some(Commands::Lsp {
+            action,
+            language,
+            yes,
+        }) => {
             let workspace = cli.path.clone().map_or_else(std::env::current_dir, Ok)?;
-            return lsp_commands::command(&paths, &workspace, action.as_deref(), language.as_deref(), *yes).await;
+            return lsp_commands::command(
+                &paths,
+                &workspace,
+                action.as_deref(),
+                language.as_deref(),
+                *yes,
+            )
+            .await;
         }
         Some(Commands::InitEnv { target, dry_run }) => {
             let workspace = cli.path.clone().map_or_else(std::env::current_dir, Ok)?;
             return env_init::run(&paths, &workspace, target, *dry_run).await;
         }
-        Some(Commands::RemoteControl { action: args::RemoteControlCommands::Connect { address, token } }) => return remote_client::run(address, token.as_deref()).await,
-        Some(Commands::RemoteControl { action: args::RemoteControlCommands::Listen { host, port } }) => {
-            let listening = remote_host::Listening::bind(&remote_host::Options { host: *host, port: *port }).await?;
+        Some(Commands::RemoteControl {
+            action: args::RemoteControlCommands::Connect { address, token },
+        }) => return remote_client::run(address, token.as_deref()).await,
+        Some(Commands::RemoteControl {
+            action: args::RemoteControlCommands::Listen { host, port },
+        }) => {
+            let listening = remote_host::Listening::bind(&remote_host::Options {
+                host: *host,
+                port: *port,
+            })
+            .await?;
             let args = remote_host::launch_args(&std::env::args().skip(1).collect::<Vec<_>>());
             let workspace = cli.path.clone().unwrap_or(std::env::current_dir()?);
             let code = remote_host::run(listening, args, &workspace, &paths.data_dir).await?;
             std::process::exit(code);
-        },
-        Some(Commands::Remote { request, yes }) => return tokio::select! { result=migration::remote(request,*yes)=>result, _=tokio::signal::ctrl_c()=>anyhow::bail!("Remote operation cancelled") },
+        }
+        Some(Commands::Remote { request, yes }) => {
+            return tokio::select! { result=migration::remote(request,*yes)=>result, _=tokio::signal::ctrl_c()=>anyhow::bail!("Remote operation cancelled") }
+        }
         Some(Commands::Agents { action }) => {
             let context = services::context(&paths)?;
             match action {
-                args::AgentCommands::ImportLegacy { source, id, preview } => return services::print(&deepseek_code_core::services::agent_import::import(&context, source, id, *preview)?),
-                args::AgentCommands::List => return services::print(&deepseek_code_core::services::agents::list(&context)?),
+                args::AgentCommands::ImportLegacy {
+                    source,
+                    id,
+                    preview,
+                } => {
+                    return services::print(&deepseek_code_core::services::agent_import::import(
+                        &context, source, id, *preview,
+                    )?)
+                }
+                args::AgentCommands::List => {
+                    return services::print(&deepseek_code_core::services::agents::list(&context)?)
+                }
                 args::AgentCommands::Import { source } => {
                     let definition = serde_json::from_slice(&std::fs::read(source)?)?;
                     deepseek_code_core::services::agents::install(&context, definition)?;
@@ -362,19 +466,40 @@ async fn run(cli: &Cli) -> Result<()> {
         }
         Some(Commands::MagicDocs { action }) => return magic_docs::run(cli, &paths, action).await,
         Some(Commands::Memory { action }) => return memory::run(cli, &paths, action).await,
-        Some(Commands::VoiceConfig { endpoint, model, credential, language }) => {
+        Some(Commands::VoiceConfig {
+            endpoint,
+            model,
+            credential,
+            language,
+        }) => {
             let context = services::context(&paths)?;
             let config = deepseek_code_core::services::voice::VoiceConfig {
-                endpoint: endpoint.clone(), model: model.clone(),
-                credential: credential.clone(), language: language.clone(),
+                endpoint: endpoint.clone(),
+                model: model.clone(),
+                credential: credential.clone(),
+                language: language.clone(),
             };
             config.validate()?;
             context.save_setting("voice", &config)?;
             return services::print(&config);
         }
-        Some(Commands::Voice { file, push_to_talk, continuous, send }) => {
+        Some(Commands::Voice {
+            file,
+            push_to_talk,
+            continuous,
+            send,
+        }) => {
             let context = services::context(&paths)?;
-            return voice::run(cli, &paths, &context, file, *push_to_talk, *continuous, *send).await;
+            return voice::run(
+                cli,
+                &paths,
+                &context,
+                file,
+                *push_to_talk,
+                *continuous,
+                *send,
+            )
+            .await;
         }
         Some(Commands::TeamSync { action }) => {
             return services::team(&services::context(&paths)?, action).await;
@@ -396,10 +521,27 @@ async fn run(cli: &Cli) -> Result<()> {
             }
             let db = paths.open_database()?;
             let value = match action {
-                SessionCommands::ShutdownWorker { .. } | SessionCommands::StopTask { .. } => unreachable!(),
-                SessionCommands::Trust { id, folders } => serde_json::to_value(deepseek_code_core::services::session_trust::repair(&db, &paths.data_dir, id, folders).map_err(|error| session_trust::repair_error(&paths, id, error))?)?,
+                SessionCommands::ShutdownWorker { .. } | SessionCommands::StopTask { .. } => {
+                    unreachable!()
+                }
+                SessionCommands::Trust { id, folders } => serde_json::to_value(
+                    deepseek_code_core::services::session_trust::repair(
+                        &db,
+                        &paths.data_dir,
+                        id,
+                        folders,
+                    )
+                    .map_err(|error| session_trust::repair_error(&paths, id, error))?,
+                )?,
                 SessionCommands::Compact { .. } => unreachable!(),
-                SessionCommands::ImportLegacy {source,preview} => serde_json::to_value(deepseek_code_core::services::session_import::import(&services::context(&paths)?,source,&std::env::current_dir()?,*preview)?)?,
+                SessionCommands::ImportLegacy { source, preview } => {
+                    serde_json::to_value(deepseek_code_core::services::session_import::import(
+                        &services::context(&paths)?,
+                        source,
+                        &std::env::current_dir()?,
+                        *preview,
+                    )?)?
+                }
                 SessionCommands::List => serde_json::to_value(
                     db.with_conn(deepseek_code_core::db::conversation_repo::list_conversations)??,
                 )?,
@@ -431,13 +573,17 @@ async fn run(cli: &Cli) -> Result<()> {
             return Ok(());
         }
         Some(Commands::Skills { action }) => {
-            if let SkillsCommands::ImportLegacy {source,preview} = action {
-                return services::print(&deepseek_code_core::skills::import::import_legacy(source,&paths.data_dir.join("skills"),*preview)?);
+            if let SkillsCommands::ImportLegacy { source, preview } = action {
+                return services::print(&deepseek_code_core::skills::import::import_legacy(
+                    source,
+                    &paths.data_dir.join("skills"),
+                    *preview,
+                )?);
             }
             let manager = SkillsManager::with_path(paths.data_dir.join("skills"));
             let skills = manager.load_skills().await?;
             match action {
-                SkillsCommands::ImportLegacy {..} => unreachable!(),
+                SkillsCommands::ImportLegacy { .. } => unreachable!(),
                 SkillsCommands::List => {
                     println!("{}", serde_json::to_string_pretty(&skills)?);
                     return Ok(());
@@ -543,10 +689,17 @@ async fn run(cli: &Cli) -> Result<()> {
 
     let resumed = if let Some(id) = &cli.resume {
         let store = SessionStore::new(paths.open_database()?);
-        Some(store.resume(id).map_err(|error| session_trust::diagnose(&store.db, &paths, id, error))?)
+        Some(
+            store
+                .resume(id)
+                .map_err(|error| session_trust::diagnose(&store.db, &paths, id, error))?,
+        )
     } else if cli.continue_session {
-        Some(SessionStore::new(paths.open_database()?).latest(&std::env::current_dir()?)?
-            .context("No resumable Code session in this directory")?)
+        Some(
+            SessionStore::new(paths.open_database()?)
+                .latest(&std::env::current_dir()?)?
+                .context("No resumable Code session in this directory")?,
+        )
     } else {
         None
     };
@@ -590,8 +743,10 @@ async fn run(cli: &Cli) -> Result<()> {
             )?
         };
         let work = async {
-            deepseek_code_core::services::lifecycle_events::check_configuration(&context, &workspace, &id)
-                .await?;
+            deepseek_code_core::services::lifecycle_events::check_configuration(
+                &context, &workspace, &id,
+            )
+            .await?;
             for warning in deepseek_code_core::services::lifecycle_events::setup(
                 &context, &workspace, &id, "init", true,
             )
@@ -599,9 +754,10 @@ async fn run(cli: &Cli) -> Result<()> {
             {
                 eprintln!("Setup hook: {warning}");
             }
-            let mut hooks = deepseek_code_core::services::tool_hooks::HookRunner::load_with_plugins(
-                &context, &workspace,
-            )?;
+            let mut hooks =
+                deepseek_code_core::services::tool_hooks::HookRunner::load_with_plugins(
+                    &context, &workspace,
+                )?;
             hooks.force_synchronous();
             let result = hooks
                 .run(
@@ -618,13 +774,20 @@ async fn run(cli: &Cli) -> Result<()> {
         return tokio::select! { result = hook_progress::during(&id, true, work) => result, _ = tokio::signal::ctrl_c() => anyhow::bail!("Setup hooks interrupted") };
     }
     let _exit_cleanup = terminal::screen_mode::ExitCleanup(
-        !single && !sdk_stream && io::stdin().is_terminal() && io::stderr().is_terminal()
+        !single
+            && !sdk_stream
+            && io::stdin().is_terminal()
+            && io::stderr().is_terminal()
             && !terminal::screen_reader(),
     );
     if _exit_cleanup.0 && std::env::var_os(remote_host::HANDOFF_ENV).is_none() {
         terminal::screen_mode::prepare_screen()?;
     }
-    let mut input = if single { None } else { Some(session::terminal_input()) };
+    let mut input = if single {
+        None
+    } else {
+        Some(session::terminal_input())
+    };
     let selection = config::select(
         cli,
         &paths,
@@ -650,7 +813,12 @@ async fn run(cli: &Cli) -> Result<()> {
     if !single && !sdk_stream {
         // As in the reference CLI, before project settings and hooks load.
         let folder = cli.path.clone().unwrap_or(std::env::current_dir()?);
-        startup_prompts::confirm(&paths.data_dir, &folder, matches!(cli.permission_mode, args::PermissionModeArg::Bypass), cli.full_access)?;
+        startup_prompts::confirm(
+            &paths.data_dir,
+            &folder,
+            matches!(cli.permission_mode, args::PermissionModeArg::Bypass),
+            cli.full_access,
+        )?;
     }
     deepseek_code_core::permissions::set_full_access(
         cli.full_access && matches!(cli.permission_mode, args::PermissionModeArg::Bypass),
@@ -767,6 +935,11 @@ async fn run(cli: &Cli) -> Result<()> {
         }
         'repl: loop {
             resource_sampling::session(&session.id);
+            // Router sessions advance their tasks between turns. Normal Agent
+            // sessions pay only one setting read.
+            if let Err(error) = super_agent_tick::tick(&session).await {
+                command_eprintln!("Super Agent: {error:#}");
+            }
             terminal::title::apply(&session.id);
             let idle_deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(60);
             let mut idle_notified = false;
@@ -1265,10 +1438,23 @@ async fn run(cli: &Cli) -> Result<()> {
         }
         Ok(())
     }.await;
-    if !single { terminal::title::clear(); }
-    session.end_hooks(if result.is_ok() && !single { "prompt_input_exit" } else { "other" }).await;
-    let resume_hint = restart_args.is_none() && !single && !sdk_stream
-        && session.store.history(&session.id).is_ok_and(|rows| !rows.is_empty());
+    if !single {
+        terminal::title::clear();
+    }
+    session
+        .end_hooks(if result.is_ok() && !single {
+            "prompt_input_exit"
+        } else {
+            "other"
+        })
+        .await;
+    let resume_hint = restart_args.is_none()
+        && !single
+        && !sdk_stream
+        && session
+            .store
+            .history(&session.id)
+            .is_ok_and(|rows| !rows.is_empty());
     let shutdown = session.close().await;
     // Restore the shell before printing the one message that must survive cleanup.
     drop(input);
@@ -1288,7 +1474,9 @@ async fn run(cli: &Cli) -> Result<()> {
     // still fail, but stdout must not acquire a second result record.
     if single && cli.output_format != OutputFormat::Text && result.is_ok() {
         if let Err(error) = shutdown {
-            return Err(output::ReportedError(format!("Session shutdown failed: {error:#}")).into());
+            return Err(
+                output::ReportedError(format!("Session shutdown failed: {error:#}")).into(),
+            );
         }
         return result;
     }
@@ -1304,9 +1492,16 @@ async fn mcp(paths: &RuntimePaths, action: &McpCommands) -> Result<()> {
     manager.initialize().await?;
     match action {
         McpCommands::ImportLegacy { .. } => unreachable!(),
-        McpCommands::Hosts => services::print(&deepseek_code_core::mcp::control::hosts(&services::context(paths)?)?)?,
-        McpCommands::Restart {name,host} => {
-            let owner=deepseek_code_core::mcp::control::restart(&services::context(paths)?,name,host.as_deref()).await?;
+        McpCommands::Hosts => services::print(&deepseek_code_core::mcp::control::hosts(
+            &services::context(paths)?,
+        )?)?,
+        McpCommands::Restart { name, host } => {
+            let owner = deepseek_code_core::mcp::control::restart(
+                &services::context(paths)?,
+                name,
+                host.as_deref(),
+            )
+            .await?;
             services::print(&serde_json::json!({"restarted":name,"host":owner}))?;
         }
         McpCommands::List => {
@@ -1315,13 +1510,9 @@ async fn mcp(paths: &RuntimePaths, action: &McpCommands) -> Result<()> {
             println!("{}", serde_json::to_string_pretty(&value)?);
         }
         McpCommands::State { server, state } => {
-            let text = mcp_states::state_command(
-                paths,
-                &manager,
-                server.as_deref(),
-                state.as_deref(),
-            )
-            .await?;
+            let text =
+                mcp_states::state_command(paths, &manager, server.as_deref(), state.as_deref())
+                    .await?;
             println!("{text}");
         }
         McpCommands::Add {
@@ -1331,12 +1522,36 @@ async fn mcp(paths: &RuntimePaths, action: &McpCommands) -> Result<()> {
             command,
             args,
         } => {
-            let transport = transport.as_deref().map(|t| match t { "streamable-http" => "http", "websocket" => "ws", other => other });
-            ensure!(matches!(transport, None | Some("stdio" | "http" | "sse" | "ws")), "--transport must be stdio, http, sse or ws");
+            let transport = transport.as_deref().map(|t| match t {
+                "streamable-http" => "http",
+                "websocket" => "ws",
+                other => other,
+            });
+            ensure!(
+                matches!(transport, None | Some("stdio" | "http" | "sse" | "ws")),
+                "--transport must be stdio, http, sse or ws"
+            );
             let remote = matches!(transport, Some("http" | "sse" | "ws"));
-            ensure!(!remote || args.is_empty(), "Remote MCP servers take a URL, not command arguments");
-            ensure!(remote || headers.is_empty(), "--header applies to http, sse and ws servers");
-            let headers = headers.iter().map(|header| header.split_once(':').map(|(key, value)| (key.trim().to_owned(), value.trim().to_owned())).filter(|(key, _)| !key.is_empty()).with_context(|| format!("Header must look like \"Name: value\", not {header}"))).collect::<Result<HashMap<_, _>>>()?;
+            ensure!(
+                !remote || args.is_empty(),
+                "Remote MCP servers take a URL, not command arguments"
+            );
+            ensure!(
+                remote || headers.is_empty(),
+                "--header applies to http, sse and ws servers"
+            );
+            let headers = headers
+                .iter()
+                .map(|header| {
+                    header
+                        .split_once(':')
+                        .map(|(key, value)| (key.trim().to_owned(), value.trim().to_owned()))
+                        .filter(|(key, _)| !key.is_empty())
+                        .with_context(|| {
+                            format!("Header must look like \"Name: value\", not {header}")
+                        })
+                })
+                .collect::<Result<HashMap<_, _>>>()?;
             ensure!(
                 manager.get_server(name).await.is_none(),
                 "MCP server already exists"
@@ -1345,7 +1560,11 @@ async fn mcp(paths: &RuntimePaths, action: &McpCommands) -> Result<()> {
                 .add_server(McpServerConfig {
                     id: name.clone(),
                     name: name.clone(),
-                    command: if remote { String::new() } else { command.clone() },
+                    command: if remote {
+                        String::new()
+                    } else {
+                        command.clone()
+                    },
                     args: args.clone(),
                     env: HashMap::new(),
                     cwd: None,
@@ -1445,20 +1664,32 @@ mod piped_stdin_tests {
     #[test]
     fn silent_open_pipe_times_out_as_empty() {
         let started = std::time::Instant::now();
-        assert_eq!(read_piped_stdin(Silent, Duration::from_millis(50)).unwrap(), "");
+        assert_eq!(
+            read_piped_stdin(Silent, Duration::from_millis(50)).unwrap(),
+            ""
+        );
         assert!(started.elapsed() < Duration::from_secs(5));
     }
 
     #[test]
     fn data_and_eof_are_read_fully() {
         let input = io::Cursor::new(b"hello\nworld".to_vec());
-        assert_eq!(read_piped_stdin(input, Duration::from_secs(1)).unwrap(), "hello\nworld");
-        assert_eq!(read_piped_stdin(io::empty(), Duration::from_secs(1)).unwrap(), "");
+        assert_eq!(
+            read_piped_stdin(input, Duration::from_secs(1)).unwrap(),
+            "hello\nworld"
+        );
+        assert_eq!(
+            read_piped_stdin(io::empty(), Duration::from_secs(1)).unwrap(),
+            ""
+        );
     }
 
     #[test]
     fn slow_body_after_first_byte_has_no_deadline() {
         let input = Delayed(Some(b"late".to_vec()), Duration::from_millis(300));
-        assert_eq!(read_piped_stdin(input, Duration::from_millis(50)).unwrap(), "late");
+        assert_eq!(
+            read_piped_stdin(input, Duration::from_millis(50)).unwrap(),
+            "late"
+        );
     }
 }

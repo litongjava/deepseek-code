@@ -21,12 +21,76 @@ impl ToolLoopExecutor {
         self.permission_hard_denial_for(tool, input, false)
     }
 
+    /// Runtime plan gate for Super Agent Coders. It is independent of the
+    /// permission mode, so switching the parent mode cannot authorize a write
+    /// before the task's current plan is approved.
+    fn super_agent_plan_gate(&self, tool: &str, input: &Value) -> Option<String> {
+        if self.super_agent_member != Some(crate::super_agent::MemberRole::Coder) {
+            return None;
+        }
+        if !matches!(
+            tool,
+            "Write" | "Edit" | "MultiEdit" | "NotebookEdit" | "Bash"
+        ) || self.is_plan_document_tool(tool, input)
+        {
+            return None;
+        }
+        let runtime = self.super_agent.as_ref()?;
+        let session = self.conv_id.as_deref()?;
+        let Ok(Some((task_id, crate::super_agent::MemberRole::Coder))) =
+            crate::super_agent::role::membership(&runtime.db, session)
+        else {
+            return None;
+        };
+        let store = runtime.store();
+        let Ok(Some(task)) = store.get_task(&task_id) else {
+            return None;
+        };
+        let Ok(approvals) = store.approvals(&task_id) else {
+            return None;
+        };
+        let approved = approvals.iter().any(|approval| {
+            approval.request_type == crate::super_agent::ApprovalType::Plan
+                && approval.status == crate::super_agent::ApprovalStatus::Approved
+                && approval.task_spec_version == task.spec_version
+                && approval.permission_policy_version == task.permission_policy_version
+        });
+        if approved {
+            None
+        } else {
+            Some(
+                "Coder execution is blocked until the host approves the current task plan; \
+                 investigate, then submit the plan with CrpSubmit(kind=\"plan\")"
+                    .into(),
+            )
+        }
+    }
+
     pub(super) fn permission_hard_denial_for(
         &self,
         tool: &str,
         input: &Value,
         pre_tool_hook: bool,
     ) -> Option<String> {
+        // Router sessions never change business code. The plan document keeps
+        // its separate checked scope, which is the documented exception.
+        if tool != "SandboxNetwork"
+            && !self.is_plan_document_tool(tool, input)
+            && (self.super_agent_role.is_router())
+            && crate::super_agent::crp::is_forbidden_router_tool(tool)
+        {
+            return Some(
+                "Router sessions cannot edit business code; delegate the change to a Coder task"
+                    .into(),
+            );
+        }
+        // A Coder may investigate and write its plan document while planning,
+        // but business writes and shell commands stay blocked until the host
+        // has approved the plan for the current specification and permission
+        // policy. A parent permission-mode change cannot bypass this gate.
+        if let Some(reason) = self.super_agent_plan_gate(tool, input) {
+            return Some(reason);
+        }
         // A sandboxed command's host question belongs to its Bash call, which
         // already passed this check.
         if tool != "SandboxNetwork"

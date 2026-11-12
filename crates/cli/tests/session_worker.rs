@@ -177,7 +177,11 @@ async fn turns_submitted_right_after_completion_are_admitted() {
         }),
     );
     let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
-    let executable = temp.path().join(if cfg!(windows) { "immediate.exe" } else { "immediate" });
+    let executable = temp.path().join(if cfg!(windows) {
+        "immediate.exe"
+    } else {
+        "immediate"
+    });
     std::fs::copy(test_cli_executable(), &executable).unwrap();
     let host = worker::ensure_worker(&paths.data_dir, &executable, &session, &workspace)
         .await

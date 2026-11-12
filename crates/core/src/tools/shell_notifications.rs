@@ -65,7 +65,10 @@ pub fn collect_finished(root: &Path, session: &str) -> Result<Vec<Finished>> {
         Ok(tx) => tx,
         // Another writer holds the database; the next poll claims these shells.
         Err(rusqlite::Error::SqliteFailure(error, _))
-            if matches!(error.code, rusqlite::ErrorCode::DatabaseBusy | rusqlite::ErrorCode::DatabaseLocked) =>
+            if matches!(
+                error.code,
+                rusqlite::ErrorCode::DatabaseBusy | rusqlite::ErrorCode::DatabaseLocked
+            ) =>
         {
             return Ok(vec![]);
         }
