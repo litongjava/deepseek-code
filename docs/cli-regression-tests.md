@@ -509,7 +509,7 @@ stream-json 宿主在一轮进行中发送的普通用户消息不再只等这�
 6. 工具运行期间用独立 SQLite 连接持有写事务 3 秒：前台不弹锁库提示，继续显示工具结果并保留已有建议；持续锁超过 5 秒才提示状态延迟。释放锁后正常结束，过期建议不能获批；任务目录中没有新增 `cancel` 文件。
 7. 空标准输入失败后允许保留诊断日志，但不能创建会话数据库或配置；损坏的配置文件不能被覆盖。
 8. Windows 短暂独占 `pending-question.json` 后释放，前台仍能读取审批；持续占用时在有限重试后报告具体文件路径。文件已删除则视为审批已处理，其他会话不能读取或回答该审批。
-9. Ask 模式弹出普通权限审批时，直接输入 `/mcp state mockweather user-only` 再按 `Enter`：审批保持打开、选项不变，`j`/`k` 不再移动选择，选项下方显示 `Typed ahead: … · kept for after this prompt · Esc clears`。按 `Esc` 只清空这行缓冲；用 `Esc` 或 `Backspace` 清空后，数字 `1` 和 `Enter` 仍按原来的快捷方式回答。审批因该回合结束等外部原因关闭时，缓冲文字追加到输入框末尾且不自动提交。计划审批、AskUserQuestion 和多选菜单的按键行为保持不变。
+9. Ask 模式弹出普通权限审批时，直接输入 `/mcp state mockweather user-only` 再按 `Enter`：审批保持打开、选项不变，`j`/`k` 不再移动选择，选项下方显示 `Typed ahead: … · Esc keeps it and returns to the choices`。按 `Esc` 把已输入文字移出缓冲（不删除、也不回答），该行改为 `Kept for the input: … · answer the prompt as usual`，随后数字 `1`/`2`、`Enter` 和方向键恢复原有回答方式；回答后这段文字追加到输入框末尾且不自动提交。缓冲非空时按 `Backspace` 清空同样恢复快捷回答。审批因该回合结束等外部原因关闭时，已输入文字（含 `Esc` 移出的部分）按顺序追加到输入框末尾。计划审批、AskUserQuestion 和多选菜单的按键行为保持不变。
 
 ## Plan 联网与文件编辑授权回归
 

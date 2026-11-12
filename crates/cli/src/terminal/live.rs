@@ -465,6 +465,9 @@ struct State {
     /// Text typed during a plain permission prompt; it returns to the input
     /// box when the prompt closes instead of answering it.
     typeahead: String,
+    /// Text Esc moved out of the buffer so the prompt can be answered; it
+    /// follows the draft into the input box.
+    kept: String,
     answer: Option<oneshot::Sender<String>>,
     /// A pending menu question; its reply goes through `answer`.
     choice: Option<Choice>,
@@ -618,6 +621,7 @@ impl State {
             draft: Draft::default(),
             saved_draft: None,
             typeahead: String::new(),
+            kept: String::new(),
             answer: None,
             choice: None,
             partial: String::new(),
@@ -785,13 +789,15 @@ impl State {
         self.answer = Some(reply);
     }
     /// The draft the prompt hid, with anything typed ahead appended at the
-    /// end; the buffer is cleared.
+    /// end; the kept text comes first, then the buffer. Both are cleared.
     fn saved_draft_with_typeahead(&mut self) -> Draft {
         let mut draft = self.saved_draft.take().unwrap_or_default();
-        if !self.typeahead.is_empty() {
+        if !self.kept.is_empty() || !self.typeahead.is_empty() {
             draft.cursor = draft.characters.len();
-            draft.insert(&self.typeahead);
-            self.typeahead.clear();
+            let kept = std::mem::take(&mut self.kept);
+            let typeahead = std::mem::take(&mut self.typeahead);
+            draft.insert(&kept);
+            draft.insert(&typeahead);
         }
         draft
     }
@@ -866,7 +872,8 @@ impl State {
         let question = choice.option_previews.is_some();
         // A plain permission prompt does not take typing as an answer: text
         // typed while it is open is kept for the input box afterwards. Once
-        // anything is buffered, only arrows, Backspace, Esc and Ctrl act.
+        // anything is buffered, only arrows, Backspace, Esc and Ctrl act;
+        // Esc moves the text out of the way so the prompt can be answered.
         let plain = !plan && !question && choice.checked.is_none() && choice.amend.is_none();
         if plain {
             if control {
@@ -878,7 +885,10 @@ impl State {
                 match key.code {
                     KeyCode::Up => choice.selected = (choice.selected + count - 1) % count,
                     KeyCode::Down => choice.selected = (choice.selected + 1) % count,
-                    KeyCode::Esc => self.typeahead.clear(),
+                    KeyCode::Esc => {
+                        self.kept.push_str(&self.typeahead);
+                        self.typeahead.clear();
+                    }
                     KeyCode::Backspace => {
                         self.typeahead.pop();
                     }
@@ -1982,7 +1992,7 @@ impl Frame {
         let choice_rows = state
             .choice
             .as_ref()
-            .map(|choice| choice_lines(choice, &state.typeahead, &lines[1], &mode, width, size.1 as usize));
+            .map(|choice| choice_lines(choice, &state.kept, &state.typeahead, &lines[1], &mode, width, size.1 as usize));
         if choice_rows.is_some() {
             // The approval box takes the place of the streaming area.
             content.clear();
@@ -2054,7 +2064,7 @@ impl Frame {
 /// The frame below the activity line while a menu question is pending:
 /// the question, `❯ 1. Yes` style options and a key hint. Returns the rows,
 /// the selected row counted from the end and the cursor column.
-fn choice_lines(choice: &Choice, typeahead: &str, status: &str, mode: &str, width: usize, height: usize) -> (Vec<String>, usize, usize) {
+fn choice_lines(choice: &Choice, kept: &str, typeahead: &str, status: &str, mode: &str, width: usize, height: usize) -> (Vec<String>, usize, usize) {
     use crossterm::style::{Attribute, ResetColor, SetAttribute, SetForegroundColor};
     let color = std::env::var_os("NO_COLOR").is_none();
     let paint = |text: String, fg: crossterm::style::Color| {
@@ -2069,7 +2079,8 @@ fn choice_lines(choice: &Choice, typeahead: &str, status: &str, mode: &str, widt
     ];
     // The preview fits above the question; an edit's full diff is printed when
     // the call finishes.
-    let room = height.saturating_sub(rows.len() + choice.options.len() + 3 + usize::from(choice.plan_footer.is_some()) + usize::from(!typeahead.is_empty())).max(1);
+    let typed = !kept.is_empty() || !typeahead.is_empty();
+    let room = height.saturating_sub(rows.len() + choice.options.len() + 3 + usize::from(choice.plan_footer.is_some()) + usize::from(typed)).max(1);
     // A question shows the selected option's preview, as in the reference CLI.
     let preview = match &choice.option_previews {
         Some(previews) => previews.get(choice.selected).map(Vec::as_slice).unwrap_or_default(),
@@ -2097,7 +2108,11 @@ fn choice_lines(choice: &Choice, typeahead: &str, status: &str, mode: &str, widt
         rows.push(if index == choice.selected { paint(text, crate::terminal::style::accent()) } else { text });
     }
     if !typeahead.is_empty() {
-        rows.push(paint(clip(&format!(" Typed ahead: {} \u{b7} kept for after this prompt \u{b7} Esc clears", terminal_text(typeahead)), width), crate::terminal::style::muted()));
+        let text = format!(" Typed ahead: {} \u{b7} Esc keeps it and returns to the choices", terminal_text(&format!("{kept}{typeahead}")));
+        rows.push(paint(clip(&text, width), crate::terminal::style::muted()));
+    } else if !kept.is_empty() {
+        let text = format!(" Kept for the input: {} \u{b7} answer the prompt as usual", terminal_text(kept));
+        rows.push(paint(clip(&text, width), crate::terminal::style::muted()));
     }
     if choice.plan_footer.is_some() {
         rows.push(paint(clip("      shift+tab to approve with this feedback", width), crate::terminal::style::muted()));
@@ -2117,7 +2132,7 @@ fn choice_lines(choice: &Choice, typeahead: &str, status: &str, mode: &str, widt
         mode.replace("esc to interrupt", "\u{2191}\u{2193} select \u{b7} enter confirm \u{b7} esc to cancel")
     };
     rows.push(paint(clip(&format!(" {hint}"), width), crate::terminal::style::muted()));
-    let selected = 1 + usize::from(choice.plan_footer.is_some()) + usize::from(!typeahead.is_empty()) + choice.options.len() - choice.selected;
+    let selected = 1 + usize::from(choice.plan_footer.is_some()) + usize::from(typed) + choice.options.len() - choice.selected;
     // The cursor follows typed text while amending.
     let column = match &choice.amend {
         Some(text) if !text.is_empty() => {
@@ -3729,7 +3744,7 @@ mod tests {
         choice.scroll_preview(true, 40, 24);
         assert_eq!(choice.preview_offset, 0);
         for _ in 0..200 { choice.scroll_preview(false, 40, 24); }
-        let (rows, _, _) = choice_lines(&choice, "", "status", "mode", 40, 24);
+        let (rows, _, _) = choice_lines(&choice, "", "", "status", "mode", 40, 24);
         assert!(rows.iter().any(|row| row.contains("row-39")));
         assert!(rows.iter().any(|row| row.contains("Yes")));
         assert_eq!(choice.selected, 0);
@@ -4021,7 +4036,7 @@ mod tests {
             assert!(state.choice_key(key(KeyCode::Char(ch))));
         }
         assert_eq!(state.choice.as_ref().unwrap().label(0), "Yes, use -5 instead");
-        let (_, _, column) = choice_lines(state.choice.as_ref().unwrap(), &state.typeahead, "status", "esc", 80, 24);
+        let (_, _, column) = choice_lines(state.choice.as_ref().unwrap(), &state.kept, &state.typeahead, "status", "esc", 80, 24);
         assert_eq!(column, " \u{276f} 1. Yes, use -5 instead".chars().count());
         // Esc leaves the note without interrupting.
         assert!(state.choice_key(key(KeyCode::Esc)));
@@ -4073,7 +4088,7 @@ mod tests {
         let (reply, mut received) = oneshot::channel();
         state.question(reply);
         state.choice = Some(Choice { expanded: false, preview_offset: 0, preview: Vec::new(), question: "Indent?".into(), options: vec!["Tabs".into(), "Spaces".into(), "Type something else".into()], selected: 0, amend: None, plan_footer: None, option_previews: Some(previews), checked: None });
-        let shown = |state: &State| choice_lines(state.choice.as_ref().unwrap(), &state.typeahead, "status", "esc to interrupt", 60, 24).0.join("\n");
+        let shown = |state: &State| choice_lines(state.choice.as_ref().unwrap(), &state.kept, &state.typeahead, "status", "esc to interrupt", 60, 24).0.join("\n");
         assert!(shown(&state).contains("tabs preview") && !shown(&state).contains("spaces preview"));
         assert!(state.choice_key(key(KeyCode::Down)));
         assert!(shown(&state).contains("spaces preview") && !shown(&state).contains("tabs preview"));
@@ -4098,13 +4113,13 @@ mod tests {
         assert!(received.try_recv().is_err());
         assert!(state.choice_key(key(KeyCode::Enter)));
         assert_eq!(received.try_recv().unwrap(), "m:1,3");
-        let (rows, selected, _) = choice_lines(&Choice { expanded: false, preview_offset: 0, preview: Vec::new(), question: "Proceed?".into(), options: vec!["Yes".into(), "No".into()], selected: 1, amend: None, plan_footer: None, option_previews: None, checked: None }, "", "status", "esc to interrupt", 40, 24);
+        let (rows, selected, _) = choice_lines(&Choice { expanded: false, preview_offset: 0, preview: Vec::new(), question: "Proceed?".into(), options: vec!["Yes".into(), "No".into()], selected: 1, amend: None, plan_footer: None, option_previews: None, checked: None }, "", "", "status", "esc to interrupt", 40, 24);
         assert_eq!(rows.len() - selected, 5);
         // The approval preview sits between the rule and the question and is
         // clipped to the screen; answering removes the whole box.
         let preview = (0..30).map(|row| change_view::body(&format!("line {row}"))).collect();
         let choice = Choice { expanded: false, preview_offset: 0, preview, question: "Proceed?".into(), options: vec!["Yes".into(), "No".into()], selected: 0, amend: None, plan_footer: None, option_previews: None, checked: None };
-        let (rows, _, _) = choice_lines(&choice, "", "status", "esc to interrupt", 40, 20);
+        let (rows, _, _) = choice_lines(&choice, "", "", "status", "esc to interrupt", 40, 20);
         let strip = |row: &String| {
             let mut text = String::new();
             let mut escape = false;
@@ -4145,9 +4160,60 @@ mod tests {
         assert!(state.choice.is_some());
         assert_eq!(state.typeahead, typed);
         assert_eq!(state.choice.as_ref().unwrap().selected, 0);
-        let shown = choice_lines(state.choice.as_ref().unwrap(), &state.typeahead, "status", "esc to interrupt", 80, 24).0.join("\n");
+        let shown = choice_lines(state.choice.as_ref().unwrap(), &state.kept, &state.typeahead, "status", "esc to interrupt", 100, 24).0.join("\n");
         assert!(shown.contains("Typed ahead: /mcp state mockweather user-only"), "{shown}");
-        assert!(shown.contains("kept for after this prompt"), "{shown}");
+        assert!(shown.contains("Esc keeps it and returns to the choices"), "{shown}");
+    }
+    #[test]
+    fn esc_keeps_typed_text_and_lets_the_prompt_be_answered() {
+        use crossterm::event::KeyEvent;
+        let key = |code| KeyEvent::new(code, KeyModifiers::NONE);
+        let mut state = State::new("ask".into());
+        let (reply, mut received) = oneshot::channel();
+        state.question(reply);
+        state.choice = Some(Choice { expanded: false, preview_offset: 0, preview: Vec::new(), question: "Proceed?".into(), options: vec!["Yes".into(), "Always".into(), "No".into()], selected: 0, amend: None, plan_footer: None, option_previews: None, checked: None });
+        for ch in "next task".chars() {
+            assert!(state.choice_key(key(KeyCode::Char(ch))));
+        }
+        // Esc moves the buffer aside instead of answering or deleting it.
+        assert!(state.choice_key(key(KeyCode::Esc)));
+        assert!(received.try_recv().is_err());
+        assert!(state.choice.is_some());
+        assert!(state.typeahead.is_empty());
+        assert_eq!(state.kept, "next task");
+        let shown = choice_lines(state.choice.as_ref().unwrap(), &state.kept, &state.typeahead, "status", "esc to interrupt", 80, 24).0.join("\n");
+        assert!(shown.contains("Kept for the input: next task"), "{shown}");
+        assert!(shown.contains("answer the prompt as usual"), "{shown}");
+        // The choices answer as usual again and the kept text returns.
+        assert!(state.choice_key(key(KeyCode::Char('2'))));
+        assert_eq!(received.try_recv().unwrap(), "2");
+        assert!(state.choice.is_none());
+        assert_eq!(state.draft.take(), "next task");
+        assert!(state.kept.is_empty());
+    }
+    #[test]
+    fn esc_twice_keeps_both_parts() {
+        use crossterm::event::KeyEvent;
+        let key = |code| KeyEvent::new(code, KeyModifiers::NONE);
+        let mut state = State::new("ask".into());
+        let (reply, mut received) = oneshot::channel();
+        state.question(reply);
+        state.choice = Some(Choice { expanded: false, preview_offset: 0, preview: Vec::new(), question: "Proceed?".into(), options: vec!["Yes".into(), "Always".into(), "No".into()], selected: 0, amend: None, plan_footer: None, option_previews: None, checked: None });
+        for ch in "ab".chars() {
+            assert!(state.choice_key(key(KeyCode::Char(ch))));
+        }
+        assert!(state.choice_key(key(KeyCode::Esc)));
+        for ch in "cd".chars() {
+            assert!(state.choice_key(key(KeyCode::Char(ch))));
+        }
+        assert!(state.choice_key(key(KeyCode::Esc)));
+        assert_eq!(state.kept, "abcd");
+        assert!(state.typeahead.is_empty());
+        assert!(received.try_recv().is_err());
+        assert!(state.choice_key(key(KeyCode::Enter)));
+        assert_eq!(received.try_recv().unwrap(), "1");
+        assert_eq!(state.draft.take(), "abcd");
+        assert!(state.kept.is_empty());
     }
     #[test]
     fn typeahead_returns_to_the_input_after_the_prompt_is_answered() {
@@ -4158,13 +4224,6 @@ mod tests {
         let (reply, mut received) = oneshot::channel();
         state.question(reply);
         state.choice = Some(plain());
-        for ch in "hello".chars() {
-            assert!(state.choice_key(key(KeyCode::Char(ch))));
-        }
-        // Esc clears only the buffer; the prompt stays open.
-        assert!(state.choice_key(key(KeyCode::Esc)));
-        assert!(state.typeahead.is_empty() && state.choice.is_some());
-        assert!(received.try_recv().is_err());
         // Backspace empties the buffer, which returns the digits to answers.
         for ch in "hello".chars() {
             assert!(state.choice_key(key(KeyCode::Char(ch))));
