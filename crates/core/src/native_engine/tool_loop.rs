@@ -21,6 +21,7 @@ mod skill_tool;
 mod tool_approval;
 
 use super::mcp_output::McpOutput;
+use crate::mcp::states::McpState;
 use crate::mcp::McpToolRegistry;
 use crate::memory::{ContextManager, MemExClient, TieredCompressor};
 use crate::native_engine::anthropic_client::{
@@ -222,6 +223,11 @@ pub struct ToolLoopExecutor {
     file_state: super::file_state::FileState,
     mcp_tools: Vec<crate::tools::ToolDefinition>,
     mcp_read_only_tools: std::collections::HashSet<String>,
+    /// Per-server MCP states, read again at the start of every turn.
+    mcp_states: std::collections::BTreeMap<String, McpState>,
+    /// The on-demand MCP listing this executor appended to the system prompt,
+    /// so a repeated setup replaces it instead of adding a second copy.
+    on_demand_prompt: Option<String>,
     streaming_tool_args: HashMap<String, StreamingToolCall>,
     conv_id: Option<String>,
     answer_waiters: Arc<Mutex<HashMap<String, oneshot::Sender<String>>>>,
@@ -384,6 +390,53 @@ fn max_tool_concurrency() -> usize {
         .and_then(|value| value.parse().ok())
         .filter(|value| *value > 0)
         .unwrap_or(10)
+}
+
+/// The system-prompt block that lists MCP tools whose server is on demand and
+/// that this turn has not loaded yet. `None` when no such tool is available.
+fn on_demand_listing(
+    tools: &[crate::tools::ToolDefinition],
+    states: &std::collections::BTreeMap<String, McpState>,
+    loaded: &std::collections::BTreeSet<String>,
+) -> Option<String> {
+    let mut lines = Vec::new();
+    for tool in tools {
+        let Some(server) = crate::mcp::states::server_of(&tool.name) else {
+            continue;
+        };
+        if crate::mcp::states::effective(states, server) != McpState::OnDemand
+            || loaded.contains(&tool.name)
+        {
+            continue;
+        }
+        lines.push(format!("- {}: {}", tool.name, description_summary(&tool.description)));
+    }
+    if lines.is_empty() {
+        return None;
+    }
+    let mut block =
+        String::from("MCP tools available on demand (load with ToolSearch before calling):");
+    for line in lines {
+        block.push('\n');
+        block.push_str(&line);
+    }
+    Some(block)
+}
+
+/// The first non-empty line of a description, trimmed and cut to 120 characters.
+fn description_summary(description: &str) -> String {
+    let line = description
+        .lines()
+        .map(str::trim)
+        .find(|line| !line.is_empty())
+        .unwrap_or_default();
+    if line.chars().count() > 120 {
+        let mut summary: String = line.chars().take(119).collect();
+        summary.push('…');
+        summary
+    } else {
+        line.to_owned()
+    }
 }
 
 enum CallStep {
@@ -914,6 +967,8 @@ impl ToolLoopExecutor {
             file_state: Default::default(),
             mcp_tools: Vec::new(),
             mcp_read_only_tools: std::collections::HashSet::new(),
+            mcp_states: Default::default(),
+            on_demand_prompt: None,
             streaming_tool_args: HashMap::new(),
             conv_id: None,
             answer_waiters: Arc::new(Mutex::new(HashMap::new())),
@@ -1418,6 +1473,23 @@ impl ToolLoopExecutor {
             Err(error) => return Some(format!("Tool settings could not be read: {error:#}")),
         };
         if !self.builtin_names().contains(canonical) {
+            // An MCP tool follows its server's state before the legacy switch.
+            if let Some(server) = crate::mcp::states::server_of(name) {
+                match crate::mcp::states::effective(&self.mcp_states, server) {
+                    McpState::UserOnly => {
+                        return Some(format!(
+                            "{name} is set to user-only; the model cannot call it."
+                        ))
+                    }
+                    McpState::Off => return Some(format!("{name} is turned off.")),
+                    McpState::OnDemand if !self.loaded_tools.contains(name) => {
+                        return Some(format!(
+                            "{name} is not loaded; load it with ToolSearch first."
+                        ))
+                    }
+                    McpState::User | McpState::OnDemand => {}
+                }
+            }
             // MCP and host names were never part of the switches, but a legacy
             // entry that turned one off still does.
             return customization
@@ -1482,7 +1554,22 @@ impl ToolLoopExecutor {
                 )
             }
         };
-        let catalog = customization.described(self.builtin_catalog());
+        // Searchable tools: the built-ins under their loading switches, and MCP
+        // tools whose server is on demand. Off and user-only servers never
+        // appear here.
+        let mut searchable = self.builtin_catalog();
+        searchable.extend(
+            self.mcp_tools
+                .iter()
+                .filter(|tool| {
+                    crate::mcp::states::server_of(&tool.name).is_some_and(|server| {
+                        crate::mcp::states::effective(&self.mcp_states, server)
+                            == McpState::OnDemand
+                    })
+                })
+                .cloned(),
+        );
+        let catalog = customization.described(searchable);
         let exposed = self
             .exposed_tools
             .clone()
@@ -1514,9 +1601,17 @@ impl ToolLoopExecutor {
         let mut hits: Vec<(u8, crate::tools::ToolDefinition)> = catalog
             .iter()
             .filter(|tool| {
-                let loading = customization.loading(&tool.name);
-                loading.on_demand
-                    && !loading.enabled
+                let searchable = match crate::mcp::states::server_of(&tool.name) {
+                    Some(server) => {
+                        crate::mcp::states::effective(&self.mcp_states, server)
+                            == McpState::OnDemand
+                    }
+                    None => {
+                        let loading = customization.loading(&tool.name);
+                        loading.on_demand && !loading.enabled
+                    }
+                };
+                searchable
                     && !exposed.contains(&tool.name)
                     && self
                         .allowed_tools
@@ -2257,11 +2352,22 @@ impl ToolLoopExecutor {
             })
             .collect();
         // A legacy entry outside the built-in catalog keeps its old "off"
-        // meaning; built-ins are already handled by the switches above.
+        // meaning; built-ins are already handled by the switches above. An MCP
+        // tool follows its server's state: resident only for `user`, and for
+        // `on-demand` once ToolSearch loaded it.
         tools.extend(
             self.mcp_tools
                 .iter()
                 .filter(|tool| !customization.is_disabled(&tool.name))
+                .filter(|tool| match crate::mcp::states::server_of(&tool.name) {
+                    None => true,
+                    Some(server) => match crate::mcp::states::effective(&self.mcp_states, server)
+                    {
+                        McpState::User => true,
+                        McpState::OnDemand => self.loaded_tools.contains(&tool.name),
+                        McpState::Off | McpState::UserOnly => false,
+                    },
+                })
                 .cloned(),
         );
         let mut tools = customization.described(tools);
@@ -2695,6 +2801,9 @@ impl ToolLoopExecutor {
         // settings still decide whether it may come back.
         self.restore_loaded_tools();
         self.restore_persisted_loaded_tools()?;
+        // After the restore, so tools loaded in earlier turns are not listed
+        // as if they still had to be searched.
+        self.refresh_on_demand_listing();
         self.exposed_tools = None;
         let mut directories = self.allowed_directories.clone();
         if let (Some(manager), Some(conv)) = (&self.permission_manager, self.conv_id.as_deref()) {
@@ -2769,6 +2878,14 @@ impl ToolLoopExecutor {
     }
 
     async fn refresh_mcp_tools(&mut self) -> Result<()> {
+        // Read once per turn next to the discovery, so a saved change applies
+        // to this request without another lookup per tool.
+        self.mcp_states = self
+            .search_config_path
+            .as_deref()
+            .and_then(std::path::Path::parent)
+            .map(crate::mcp::states::load)
+            .unwrap_or_default();
         self.mcp_tools.clear();
         self.mcp_read_only_tools.clear();
         if let Some(registry) = &self.mcp_registry {
@@ -2803,6 +2920,28 @@ impl ToolLoopExecutor {
             self.mcp_read_only_tools = read_only;
         }
         Ok(())
+    }
+
+    /// Keeps the system prompt's on-demand MCP listing in step with this turn:
+    /// the block appended earlier is replaced, so a setup that runs twice
+    /// never lists the same tool twice or keeps listing a loaded one.
+    fn refresh_on_demand_listing(&mut self) {
+        if let Some(previous) = self.on_demand_prompt.take() {
+            if let Some(prompt) = self.system_prompt.as_mut() {
+                if let Some(index) = prompt.find(previous.as_str()) {
+                    prompt.replace_range(index..index + previous.len(), "");
+                }
+            }
+        }
+        let Some(block) = on_demand_listing(&self.mcp_tools, &self.mcp_states, &self.loaded_tools)
+        else {
+            return;
+        };
+        let block = format!("\n{block}\n");
+        self.system_prompt
+            .get_or_insert_with(String::new)
+            .push_str(&block);
+        self.on_demand_prompt = Some(block);
     }
 
     async fn execute_scoped(&mut self) -> Result<(String, Option<String>)> {

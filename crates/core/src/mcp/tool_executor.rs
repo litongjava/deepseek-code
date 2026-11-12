@@ -58,7 +58,7 @@ impl McpExecution {
 }
 
 /// Upstream `normalizeNameForMCP`: characters outside `[A-Za-z0-9_-]` become `_`.
-fn normalize_name(name: &str) -> String {
+pub(crate) fn normalize_name(name: &str) -> String {
     name.chars()
         .map(|c| {
             if c.is_ascii_alphanumeric() || matches!(c, '_' | '-') {

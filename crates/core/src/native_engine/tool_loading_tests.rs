@@ -54,6 +54,16 @@ fn names(executor: &ToolLoopExecutor) -> Vec<String> {
         .collect()
 }
 
+/// A fake MCP tool, set on the executor directly: discovery needs a running
+/// server, which these tests do not start.
+fn mcp_tool(name: &str, description: &str) -> crate::tools::ToolDefinition {
+    crate::tools::ToolDefinition {
+        name: name.into(),
+        description: description.into(),
+        input_schema: json!({"type":"object"}),
+    }
+}
+
 #[test]
 fn the_request_carries_only_the_core_tools_by_default() {
     let temp = tempfile::tempdir().unwrap();
@@ -789,6 +799,192 @@ fn a_legacy_entry_outside_the_catalog_still_turns_that_tool_off() {
     });
     assert!(names(&executor).contains(&"mcp__live__echo".to_owned()));
     assert!(executor.loading_violation("mcp__live__echo").is_none());
+}
+
+#[test]
+fn on_demand_mcp_tools_are_listed_not_sent() {
+    let temp = tempfile::tempdir().unwrap();
+    let mut executor = executor(temp.path());
+    let noisy = format!("{}\nA second line is never shown", "x".repeat(200));
+    executor.mcp_tools = vec![
+        mcp_tool(
+            "mcp__gh__create_issue",
+            "Create a new issue in a GitHub repository",
+        ),
+        mcp_tool("mcp__gh__noisy", &noisy),
+        mcp_tool("mcp__fs__read_file", "Read a file"),
+    ];
+    executor.mcp_states = std::collections::BTreeMap::from([
+        ("gh".to_owned(), McpState::OnDemand),
+        ("fs".to_owned(), McpState::User),
+    ]);
+
+    let visible = names(&executor);
+    assert!(visible.contains(&"mcp__fs__read_file".to_owned()), "{visible:?}");
+    assert!(!visible.contains(&"mcp__gh__create_issue".to_owned()), "{visible:?}");
+    assert!(!visible.contains(&"mcp__gh__noisy".to_owned()), "{visible:?}");
+
+    let listing = on_demand_listing(
+        &executor.mcp_tools,
+        &executor.mcp_states,
+        &executor.loaded_tools,
+    )
+    .expect("on-demand tools are listed");
+    assert!(
+        listing.starts_with("MCP tools available on demand (load with ToolSearch before calling):"),
+        "{listing}"
+    );
+    assert!(
+        listing.contains("- mcp__gh__create_issue: Create a new issue in a GitHub repository"),
+        "{listing}"
+    );
+    assert!(!listing.contains("mcp__fs__read_file"), "{listing}");
+    let line = listing
+        .lines()
+        .find(|line| line.starts_with("- mcp__gh__noisy"))
+        .expect("the second on-demand tool is listed");
+    let summary = line.trim_start_matches("- mcp__gh__noisy: ");
+    assert_eq!(summary.chars().count(), 120, "{line}");
+    assert!(summary.ends_with('…'), "{line}");
+
+    // The block reaches the system prompt, and a later setup replaces it
+    // instead of listing the same tool twice.
+    executor.refresh_on_demand_listing();
+    let prompt = executor.system_prompt.clone().unwrap();
+    assert!(prompt.contains("- mcp__gh__create_issue:"), "{prompt}");
+    executor.loaded_tools.insert("mcp__gh__create_issue".into());
+    executor.refresh_on_demand_listing();
+    let prompt = executor.system_prompt.clone().unwrap();
+    assert_eq!(
+        prompt.matches("MCP tools available on demand").count(),
+        1,
+        "{prompt}"
+    );
+    assert!(!prompt.contains("mcp__gh__create_issue"), "{prompt}");
+}
+
+#[tokio::test]
+async fn tool_search_loads_on_demand_mcp_tools() {
+    let temp = tempfile::tempdir().unwrap();
+    let mut executor = executor(temp.path());
+    executor.mcp_tools = vec![
+        mcp_tool(
+            "mcp__gh__create_issue",
+            "Create a new issue in a GitHub repository",
+        ),
+        mcp_tool(
+            "mcp__gh__list_pull_requests",
+            "List the open pull requests of a repository",
+        ),
+    ];
+    executor.mcp_states =
+        std::collections::BTreeMap::from([("gh".to_owned(), McpState::OnDemand)]);
+
+    let (_, output, failed) = executor
+        .execute_tool_call(
+            "ToolSearch",
+            &json!({"query":"select:mcp__gh__create_issue"}),
+            "search",
+        )
+        .await;
+    assert!(!failed, "{output}");
+    let value: Value = serde_json::from_str(&output).unwrap();
+    assert_eq!(
+        value["loaded_tools"],
+        json!(["mcp__gh__create_issue"]),
+        "{output}"
+    );
+    assert!(executor.loaded_tools.contains("mcp__gh__create_issue"));
+    // A resumed session restores the load from the stored ToolSearch result.
+    let mut restored = std::collections::BTreeSet::new();
+    ToolLoopExecutor::absorb_loaded(&output, &mut restored);
+    assert!(restored.contains("mcp__gh__create_issue"));
+
+    assert!(names(&executor).contains(&"mcp__gh__create_issue".to_owned()));
+    let listing = on_demand_listing(
+        &executor.mcp_tools,
+        &executor.mcp_states,
+        &executor.loaded_tools,
+    )
+    .expect("the other tool is still listed");
+    assert!(!listing.contains("mcp__gh__create_issue"), "{listing}");
+
+    // A keyword search over the full description finds the other tool.
+    let (_, output, failed) = executor
+        .execute_tool_call("ToolSearch", &json!({"query":"pull requests"}), "search")
+        .await;
+    assert!(!failed, "{output}");
+    let value: Value = serde_json::from_str(&output).unwrap();
+    let loaded = value["loaded_tools"].as_array().unwrap();
+    assert!(
+        loaded.iter().any(|name| name == "mcp__gh__list_pull_requests"),
+        "{output}"
+    );
+}
+
+#[tokio::test]
+async fn user_only_mcp_tools_are_hidden_and_refused() {
+    let temp = tempfile::tempdir().unwrap();
+    let mut executor = executor(temp.path());
+    executor.mcp_tools = vec![mcp_tool(
+        "mcp__gh__create_issue",
+        "Create a new issue in a GitHub repository",
+    )];
+    executor.mcp_states =
+        std::collections::BTreeMap::from([("gh".to_owned(), McpState::UserOnly)]);
+
+    assert!(!names(&executor).contains(&"mcp__gh__create_issue".to_owned()));
+    assert!(on_demand_listing(
+        &executor.mcp_tools,
+        &executor.mcp_states,
+        &executor.loaded_tools,
+    )
+    .is_none());
+
+    let (_, output, failed) = executor
+        .execute_tool_call(
+            "ToolSearch",
+            &json!({"query":"select:mcp__gh__create_issue"}),
+            "search",
+        )
+        .await;
+    assert!(!failed, "{output}");
+    let value: Value = serde_json::from_str(&output).unwrap();
+    assert_eq!(value["success"], false, "{output}");
+    assert_eq!(value["loaded_tools"], json!([]), "{output}");
+    assert!(!executor.loaded_tools.contains("mcp__gh__create_issue"));
+
+    let (_, output, _) = executor
+        .execute_tool_call("ToolSearch", &json!({"query":"create issue"}), "search")
+        .await;
+    assert!(!executor.loaded_tools.contains(&"mcp__gh__create_issue".to_owned()));
+    assert!(!output.is_empty());
+
+    let violation = executor
+        .loading_violation("mcp__gh__create_issue")
+        .expect("user-only is refused");
+    assert!(violation.contains("user-only"), "{violation}");
+}
+
+#[test]
+fn on_demand_mcp_tool_not_loaded_is_refused() {
+    let temp = tempfile::tempdir().unwrap();
+    let mut executor = executor(temp.path());
+    executor.mcp_tools = vec![mcp_tool(
+        "mcp__gh__create_issue",
+        "Create a new issue in a GitHub repository",
+    )];
+    executor.mcp_states =
+        std::collections::BTreeMap::from([("gh".to_owned(), McpState::OnDemand)]);
+
+    let violation = executor
+        .loading_violation("mcp__gh__create_issue")
+        .expect("unloaded on-demand tool is refused");
+    assert!(violation.contains("not loaded"), "{violation}");
+    assert!(violation.contains("ToolSearch"), "{violation}");
+
+    executor.loaded_tools.insert("mcp__gh__create_issue".into());
+    assert!(executor.loading_violation("mcp__gh__create_issue").is_none());
 }
 
 #[test]
