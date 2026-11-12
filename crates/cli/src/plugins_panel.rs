@@ -659,6 +659,17 @@ fn mcp_details(server: &McpRow, now: DateTime<Utc>) -> std::io::Result<()> {
     Ok(())
 }
 
+/// The tab a panel opens on: `/skill-doctor` lands on Stats, a tab name on
+/// that tab, anything else on Installed.
+fn start_tab(start: &str) -> usize {
+    if start.eq_ignore_ascii_case("skill-doctor") {
+        return TABS.iter().position(|tab| *tab == "Stats").unwrap_or(0);
+    }
+    TABS.iter()
+        .position(|tab| tab.eq_ignore_ascii_case(start))
+        .unwrap_or(0)
+}
+
 pub(crate) async fn run(
     start: &str,
     paths: &RuntimePaths,
@@ -667,10 +678,7 @@ pub(crate) async fn run(
 ) -> Result<bool> {
     let _screen = PluginsScreen::enter()?;
     let mut model = load(paths, session).await?;
-    let mut tab = TABS
-        .iter()
-        .position(|tab| tab.eq_ignore_ascii_case(start))
-        .unwrap_or(0);
+    let mut tab = start_tab(start);
     let mut selected = 0;
     let mut show_disabled = false;
     let mut changed = false;
@@ -904,6 +912,16 @@ mod tests {
             "{:?}",
             noticed[0]
         );
+    }
+
+    #[test]
+    fn start_tab_maps_skill_doctor_to_stats() {
+        let stats = TABS.iter().position(|tab| *tab == "Stats").unwrap();
+        let errors = TABS.iter().position(|tab| *tab == "Errors").unwrap();
+        assert_eq!(start_tab("skill-doctor"), stats);
+        assert_eq!(start_tab("installed"), 0);
+        assert_eq!(start_tab("errors"), errors);
+        assert_eq!(start_tab("nonsense"), 0);
     }
 
     #[test]
