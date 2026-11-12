@@ -311,10 +311,32 @@ pub struct QueryEngine {
 impl QueryEngine {
     /// No tools, automatic memory ingestion, detached tasks, or conversation mutations.
     /// Dropping this future cancels the underlying HTTP/runtime request.
-    pub async fn generate_text(&self, provider_id: &str, model: &str, system: &str, input: &str) -> Result<String> {
-        let provider = self.provider_manager.lock().await.resolve_selected(provider_id, model)
+    pub async fn generate_text(
+        &self,
+        provider_id: &str,
+        model: &str,
+        system: &str,
+        input: &str,
+    ) -> Result<String> {
+        self.generate_text_for_session(None, provider_id, model, system, input)
+            .await
+    }
+
+    pub async fn generate_text_for_session(
+        &self,
+        session: Option<&str>,
+        provider_id: &str,
+        model: &str,
+        system: &str,
+        input: &str,
+    ) -> Result<String> {
+        let provider = self
+            .provider_manager
+            .lock()
+            .await
+            .resolve_selected(provider_id, model)
             .ok_or_else(|| anyhow!("Provider/model is unavailable: {provider_id}::{model}"))?;
-        super::generation::generate(provider, system, input).await
+        super::generation::generate_for_session(provider, system, input, session).await
     }
 
     /// Tool-free summarization that also accepts histories larger than the model window.
@@ -1221,7 +1243,8 @@ impl QueryEngine {
 
                                     let title_result: Result<String, anyhow::Error> = match resolved.provider.api_format {
                                         crate::native_engine::provider_manager::ApiFormat::OpenAI => {
-                                            let client = crate::native_engine::openai_client::OpenAIClient::new();
+                                            let client = crate::native_engine::openai_client::OpenAIClient::new()
+                                                .with_request_options(super::request_options::RequestOptions::for_session(Some(&title_conv_id)));
                                             let msgs = vec![
                                                 crate::native_engine::openai_client::OpenAIMessage {
                                                     role: "user".to_string(),
@@ -1248,7 +1271,8 @@ impl QueryEngine {
                                             }
                                         }
                                         crate::native_engine::provider_manager::ApiFormat::Anthropic => {
-                                            let client = crate::native_engine::anthropic_client::AnthropicClient::new();
+                                            let client = crate::native_engine::anthropic_client::AnthropicClient::new()
+                                                .with_request_options(super::request_options::RequestOptions::for_session(Some(&title_conv_id)));
                                             let msgs = vec![
                                                 crate::native_engine::anthropic_client::AnthropicMessage {
                                                     role: "user".to_string(),

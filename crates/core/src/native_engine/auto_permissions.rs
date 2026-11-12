@@ -84,6 +84,7 @@ pub struct Classification {
 pub struct AutoClassifier {
     config: AutoConfig,
     provider: ResolvedProvider,
+    session_id: Option<String>,
 }
 
 /// User-authored text and assistant tool uses only. Never include assistant
@@ -262,7 +263,8 @@ pub async fn authorize(
             .cloned(),
     );
     let expected_provider = serde_json::to_value((&provider.provider, &provider.model)).ok();
-    let classifier = AutoClassifier::new(config.clone(), provider);
+    let classifier =
+        AutoClassifier::new(config.clone(), provider).with_session(&tool.conversation_id);
     let outcome = classifier
         .classify_started(
             &authorized_messages,
@@ -357,7 +359,15 @@ pub async fn authorize(
 
 impl AutoClassifier {
     pub fn new(config: AutoConfig, provider: ResolvedProvider) -> Self {
-        Self { config, provider }
+        Self {
+            config,
+            provider,
+            session_id: None,
+        }
+    }
+    pub fn with_session(mut self, session: &str) -> Self {
+        self.session_id = Some(session.to_owned());
+        self
     }
     pub fn provider_id(&self) -> &str {
         &self.provider.provider.id
@@ -428,6 +438,9 @@ impl AutoClassifier {
         match self.provider.provider.api_format {
             ApiFormat::OpenAI => {
                 let response = OpenAIClient::new()
+                    .with_request_options(super::request_options::RequestOptions::for_session(
+                        self.session_id.as_deref(),
+                    ))
                     .without_retries()
                     .with_response_schema(Some(schema()))
                     .send_message(
@@ -471,6 +484,9 @@ impl AutoClassifier {
             }
             ApiFormat::Anthropic => {
                 let response = AnthropicClient::new()
+                    .with_request_options(super::request_options::RequestOptions::for_session(
+                        self.session_id.as_deref(),
+                    ))
                     .without_retries()
                     .with_response_schema(Some(schema()))
                     .send_message(

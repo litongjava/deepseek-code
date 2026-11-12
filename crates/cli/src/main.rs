@@ -788,7 +788,7 @@ async fn run(cli: &Cli) -> Result<()> {
                 if history.len() != suggested_for {
                     suggested_for = history.len();
                     if let (Some(text), Ok(provider)) = (prompt_suggestion::context(&history), session.selected_provider().await) {
-                        prompt_suggestion::spawn(provider, text, input.as_ref().unwrap().suggestion_sender());
+                        prompt_suggestion::spawn(session.id.clone(), provider, text, input.as_ref().unwrap().suggestion_sender());
                     }
                 }
             }

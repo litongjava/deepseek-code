@@ -298,6 +298,12 @@ OpenCode Go 用四种协议提供模型，模型地址和协议都来自内置�
 4. 恢复仅含文本回答的会话：最新问题固定栏正常显示，`Ctrl+Home` 能到最早的问题；再检查排队撤回、工具展开和 `Esc` 中断。
 5. 在独立数据目录和工作目录中运行 `welcome-plan-acceptance-20261106.mjs`，传入本次构建产物；脚本与真实 ConPTY 文本、原始终端输出及断言结果位于相邻开发支持目录。不得用正在运行的已安装程序替代本次构建产物。
 
+### DeepSeek 平台请求头
+
+- `cargo test --locked -p deepseek-code-core --lib native_engine::request_options::tests`：平台只按 builtin_id=deepseek 或 URL hostname=deepseek.com / *.deepseek.com 判断，与模型名、api_format 无关；排除第三方 DeepSeek 模型、相似主机和 deepseek.com.evil.example。三通道真实本地 HTTP 检查有/无会话、普通/压缩矩阵和既有认证/身份头；直连客户端仅在测试 HTTP client 用 DNS resolve 指向本地 mock。
+- `cargo test --locked -p deepseek-code-cli --test deepseek_harness_headers`：两个 api_format 的真实 CLI 子进程，用 builtin_id=deepseek + 本地 base_url；普通轮次只带 x-deepseek-harness-session-id，逐字等于 SQLite 会话 ID；超限触发实际压缩后摘要同时带 x-deepseek-harness-compact: 1，恢复的普通请求不带 compact，摘要及边界已持久化。
+- 分段、合并、截断后的恢复及重试都走 Summarizer::attempt 的同一显式请求选项；回归 `compaction_truncation`、`compaction_overflow`。标题、权限分类、Hook、WebFetch 回答及会话辅助生成带其所属会话 ID，连接测试/模型列表不带。真实 DeepSeek 服务端及跨平台终端接受情况需单独验收，不能从 mock 推断。
+
 ### K. 模型请求失败的诊断与重试
 
 全部使用本机可控的 HTTP/TCP 故障服务，不使用真实密钥或计费接口。自动化分三层：

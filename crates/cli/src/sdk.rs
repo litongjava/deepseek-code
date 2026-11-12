@@ -879,7 +879,7 @@ async fn emit_prompt_suggestion(session: &Session) -> Result<()> {
     }
     let suggestion = tokio::time::timeout(
         std::time::Duration::from_secs(15),
-        session.engine.generate_text(
+        session.engine.generate_text_for_session(Some(&session.id),
             &session.provider_id,
             &session.model,
             "Predict the user's likely next message in this conversation. Reply with only that message, at most 120 characters, without quotes.",

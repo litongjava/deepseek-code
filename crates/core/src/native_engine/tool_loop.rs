@@ -557,6 +557,7 @@ async fn web_fetch_with_prompt(
     input: Value,
     cwd: &str,
     provider: &ResolvedProvider,
+    session: Option<&str>,
 ) -> Result<Value> {
     let prompt = input["prompt"].as_str().unwrap_or_default().to_owned();
     let page = crate::tools::execute_tool_async(
@@ -573,8 +574,13 @@ async fn web_fetch_with_prompt(
         page["content"].as_str().unwrap_or_default(),
         prompt
     );
-    let answer =
-        crate::native_engine::generation::generate(provider.clone(), system, &request).await?;
+    let answer = crate::native_engine::generation::generate_for_session(
+        provider.clone(),
+        system,
+        &request,
+        session,
+    )
+    .await?;
     Ok(
         json!({"url":page["url"],"result":answer,"offset":page["offset"],"next_offset":page["next_offset"],"truncated":page["truncated"]}),
     )
@@ -699,6 +705,7 @@ async fn execute_builtin_tool(
     event_tx: &mpsc::Sender<EngineEvent>,
     search_config_path: Option<&std::path::Path>,
     skill_shell_active: bool,
+    session: Option<&str>,
 ) -> Result<Value> {
     if name == "Bash" && skill_shell_active {
         let input = crate::skills::invocation::shell_input(
@@ -747,7 +754,7 @@ async fn execute_builtin_tool(
             .as_str()
             .is_some_and(|prompt| !prompt.trim().is_empty())
     {
-        return Box::pin(web_fetch_with_prompt(input, cwd, provider)).await;
+        return Box::pin(web_fetch_with_prompt(input, cwd, provider, session)).await;
     }
     if name == "ImageGenerate" {
         return crate::tools::image_generation::generate(input, cwd, provider).await;
@@ -816,7 +823,7 @@ async fn execute_builtin_tool(
     let _ = event_tx
         .send(EngineEvent::RequestSnapshot(trace.started()))
         .await;
-    let result = crate::tools::provider_search::search(input, provider).await;
+    let result = crate::tools::provider_search::search_for_session(input, provider, session).await;
     let snapshot = match &result {
         Ok(value) => {
             trace.observe_openai(&json!({"usage": value["usage"], "model": value["model"], "id": value["response_id"]}));
@@ -2013,6 +2020,7 @@ impl ToolLoopExecutor {
                         &self.event_tx,
                         self.search_config_path.as_deref(),
                         self.skill_shell_active,
+                        self.conv_id.as_deref(),
                     ),
                 ),
             ),
@@ -2705,6 +2713,9 @@ impl ToolLoopExecutor {
             .as_deref()
             .and_then(|p| p.parent())
             .map(|root| (root.to_path_buf(), self.conv_id.clone().unwrap_or_default()));
+        let options = super::request_options::RequestOptions::for_session(self.conv_id.as_deref());
+        self.openai_client.request_options = options.clone();
+        self.anthropic_client.request_options = options;
         let parent_session = self.request_parent_session();
         let identity =
             super::request_identity::TurnIdentity::new(self.conv_id.clone(), parent_session);
@@ -4728,6 +4739,7 @@ impl ToolLoopExecutor {
                     if crate::services::compaction::native::supports(&self.provider) {
                         let compacted = crate::services::compaction::native::generate_messages(
                             &self.provider,
+                            self.conv_id.as_deref(),
                             conversation_messages.clone(),
                             self.system_prompt.as_deref().unwrap_or(""),
                         )

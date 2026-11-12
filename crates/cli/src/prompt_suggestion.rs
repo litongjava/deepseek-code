@@ -76,6 +76,7 @@ pub fn filter(text: &str) -> Option<String> {
 
 /// Generates a suggestion in the background and sends it to the editor.
 pub fn spawn(
+    session: String,
     provider: deepseek_code_core::native_engine::provider_manager::ResolvedProvider,
     input: String,
     sender: std::sync::mpsc::Sender<String>,
@@ -83,7 +84,12 @@ pub fn spawn(
     tokio::spawn(async move {
         let generated = tokio::time::timeout(
             std::time::Duration::from_secs(30),
-            deepseek_code_core::native_engine::generation::generate(provider, SYSTEM, &input),
+            deepseek_code_core::native_engine::generation::generate_for_session(
+                provider,
+                SYSTEM,
+                &input,
+                Some(&session),
+            ),
         )
         .await;
         if let Ok(Ok(text)) = generated {

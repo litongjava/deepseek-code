@@ -149,6 +149,7 @@ pub struct AnthropicClient {
     client: Client,
     response_schema: Option<Value>,
     retry_requests: bool,
+    pub(super) request_options: super::request_options::RequestOptions,
 }
 
 impl AnthropicClient {
@@ -158,7 +159,24 @@ impl AnthropicClient {
             .redirect(reqwest::redirect::Policy::none())
             .build()
             .unwrap_or_else(|_| Client::new());
-        Self { client, response_schema: None, retry_requests: true, plain_text: false }
+        Self {
+            client,
+            request_options: Default::default(),
+            response_schema: None,
+            retry_requests: true,
+            plain_text: false,
+        }
+    }
+
+    pub fn with_request_options(mut self, options: super::request_options::RequestOptions) -> Self {
+        self.request_options = options;
+        self
+    }
+
+    #[cfg(test)]
+    pub(super) fn with_http_client(mut self, client: Client) -> Self {
+        self.client = client;
+        self
     }
 
     /// Isolated classifiers use one attempt and an outer cancellation deadline.
@@ -234,11 +252,13 @@ impl AnthropicClient {
         }
         self.apply_options(&mut body, provider)?;
         crate::performance::apply_prompt_cache(&mut body);
+        let harness_headers = self.request_options.headers(provider)?;
         let identity = super::request_identity::RequestIdentity::new(None, super::request_identity::is_opencode(provider));
         let request = || async {
             let request = self.client
                 .post(&url)
                 .headers(identity.headers())
+                .headers(harness_headers.clone())
                 .header("anthropic-version", "2023-06-01")
                 .header("content-type", "application/json")
                 .json(&body);
@@ -301,8 +321,10 @@ impl AnthropicClient {
         if let Some(effort) = provider.model.effort.as_deref() { apply_effort(&mut body, effort, &provider.model.id, max_tokens)?; }
         self.apply_options(&mut body, provider)?;
         crate::performance::apply_prompt_cache(&mut body);
+        let harness_headers = self.request_options.headers(provider)?;
         let identity = super::request_identity::RequestIdentity::new(None, super::request_identity::is_opencode(provider));
         let request = self.client.post(&url)
+            .headers(harness_headers)
             .header("anthropic-version", "2023-06-01")
             .header("content-type", "application/json")
             .json(&body);
@@ -399,8 +421,10 @@ impl AnthropicClient {
 
         self.apply_options(&mut body, provider)?;
         crate::performance::apply_conversation_cache(&mut body);
+        let harness_headers = self.request_options.headers(provider)?;
         let identity = super::request_identity::RequestIdentity::new(context_capture, super::request_identity::is_opencode(provider));
         let request = self.client.post(&url)
+            .headers(harness_headers)
             .header("anthropic-version", "2023-06-01")
             .header("content-type", "application/json")
             .json(&body);

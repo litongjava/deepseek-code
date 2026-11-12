@@ -675,6 +675,10 @@ impl<'a, 'b> Summarizer<'a, 'b> {
             false,
             Some(label),
             self.budget_source,
+            super::request_options::RequestOptions {
+                session_id: session,
+                compact: true,
+            },
         )
         .await?;
         // Only a complete, validated summary reaches the cache.
@@ -1228,6 +1232,7 @@ async fn generate_request(
     short_deadline: bool,
     label: Option<&str>,
     source: BudgetSource,
+    options: super::request_options::RequestOptions,
 ) -> Result<String> {
     ensure!(
         provider.model.supports_text,
@@ -1267,6 +1272,7 @@ async fn generate_request(
                 super::provider_manager::ApiFormat::OpenAI
             ) {
             let response = OpenAIClient::new()
+                .with_request_options(options.clone())
                 .send_message(
                     &provider,
                     vec![OpenAIMessage {
@@ -1323,6 +1329,7 @@ async fn generate_request(
             (text, finish, usage.map(|(_, completion)| completion))
         } else {
             let response = AnthropicClient::new()
+                .with_request_options(options.clone())
                 .plain_text()
                 .send_message(
                     &provider,
@@ -1397,6 +1404,15 @@ fn validate_result(
 }
 
 pub async fn generate(provider: ResolvedProvider, system: &str, input: &str) -> Result<String> {
+    generate_for_session(provider, system, input, None).await
+}
+
+pub async fn generate_for_session(
+    provider: ResolvedProvider,
+    system: &str,
+    input: &str,
+    session: Option<&str>,
+) -> Result<String> {
     generate_request(
         provider,
         system,
@@ -1405,6 +1421,7 @@ pub async fn generate(provider: ResolvedProvider, system: &str, input: &str) -> 
         true,
         None,
         BudgetSource::Fixed,
+        super::request_options::RequestOptions::for_session(session),
     )
     .await
 }

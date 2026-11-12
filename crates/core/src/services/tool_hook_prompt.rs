@@ -190,6 +190,11 @@ async fn evaluate(
     ) {
         (true, _) | (_, ApiFormat::OpenAI) => {
             let response = OpenAIClient::new()
+                .with_request_options(
+                    crate::native_engine::request_options::RequestOptions::for_session(
+                        input["session_id"].as_str(),
+                    ),
+                )
                 .without_retries()
                 .with_response_schema(Some(schema))
                 .send_message(
@@ -224,6 +229,11 @@ async fn evaluate(
         }
         (false, ApiFormat::Anthropic) => {
             let response = AnthropicClient::new()
+                .with_request_options(
+                    crate::native_engine::request_options::RequestOptions::for_session(
+                        input["session_id"].as_str(),
+                    ),
+                )
                 .without_retries()
                 .with_response_schema(Some(schema))
                 .send_message(
