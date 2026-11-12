@@ -15,6 +15,8 @@ pub struct SkillCommand {
     pub content: String,
     pub user_invocable: bool,
     pub disable_model_invocation: bool,
+    /// Listed to the model by name only; still invocable.
+    pub listing_name_only: bool,
     pub context: Option<String>,
     pub shell: Option<String>,
     pub agent: Option<String>,
@@ -86,6 +88,12 @@ pub fn discover(data_dir: &Path, workspace: &Path) -> Result<BTreeMap<String, Sk
     Ok(discover_runtime_from(user.as_deref(), data_dir, workspace).0)
 }
 
+/// Skill files discovery had to skip because they are invalid or unreadable;
+/// the plugins panel's Errors tab lists them.
+pub fn invalid_skill_files(data_dir: &Path, workspace: &Path) -> Vec<PathBuf> {
+    discover_runtime_from(user_config_dir().as_deref(), data_dir, workspace).1
+}
+
 fn user_config_dir() -> Option<PathBuf> {
     std::env::var_os("CLAUDE_CONFIG_DIR")
         .map(PathBuf::from)
@@ -109,6 +117,7 @@ pub fn discover_runtime_from(
         &mut commands,
         Some(&mut invalid),
     );
+    super::states::apply(&mut commands, &super::states::load(data_dir));
     log_invalid(&invalid);
     (commands, invalid)
 }
@@ -257,6 +266,7 @@ pub fn discover_plugin(
                             "disable-model-invocation",
                             false,
                         )?,
+                        listing_name_only: false,
                         context: metadata
                             .get("context")
                             .and_then(Value::as_str)
@@ -531,6 +541,7 @@ fn parse_definition(
             boolean(&metadata, "userInvocable", true)?,
         )?,
         disable_model_invocation: boolean(&metadata, "disable-model-invocation", false)?,
+        listing_name_only: false,
         context: metadata
             .get("context")
             .and_then(Value::as_str)
@@ -1097,6 +1108,31 @@ mod tests {
     }
 
     #[test]
+    fn data_dir_states_apply_to_discovery() {
+        let temp = tempfile::tempdir().unwrap();
+        let workspace = temp.path().join("project");
+        std::fs::create_dir_all(&workspace).unwrap();
+        let data = temp.path().join("data");
+        write_skill(
+            &data.join("skills"),
+            "demo",
+            "---\nname: demo\ndescription: Demo fixture\n---\nDemo body",
+        );
+
+        crate::skills::states::set(&data, "demo", crate::skills::states::SkillState::UserOnly)
+            .unwrap();
+        let (found, invalid) = discover_runtime_from(None, &data, &workspace);
+        assert!(invalid.is_empty(), "{invalid:?}");
+        let demo = &found["demo"];
+        assert!(!demo.model_invocable());
+        assert!(demo.user_invocable);
+
+        crate::skills::states::set(&data, "demo", crate::skills::states::SkillState::Off).unwrap();
+        let (found, _) = discover_runtime_from(None, &data, &workspace);
+        assert!(!found.contains_key("demo"));
+    }
+
+    #[test]
     fn runtime_discovery_does_not_create_the_data_skills_directory() {
         let temp = tempfile::tempdir().unwrap();
         let workspace = temp.path().join("project");
@@ -1207,5 +1243,26 @@ mod tests {
                 .collect::<Vec<_>>()
         };
         assert_eq!(ids(&first), ids(&second));
+    }
+
+    #[test]
+    fn invalid_skill_files_lists_bad_files() {
+        let temp = tempfile::tempdir().unwrap();
+        let workspace = temp.path().join("project");
+        std::fs::create_dir_all(&workspace).unwrap();
+        let data = temp.path().join("data");
+        let skills = data.join("skills");
+        write_skill(
+            &skills,
+            "good",
+            "---\nname: good\ndescription: Good fixture\n---\nUseful",
+        );
+        let bad = skills.join("bad/SKILL.md");
+        write_skill(
+            &skills,
+            "bad",
+            "---\nname: bad\nenabled: NOT_A_BOOL\n---\nBroken",
+        );
+        assert_eq!(invalid_skill_files(&data, &workspace), vec![bad]);
     }
 }
