@@ -59,6 +59,7 @@ async fn start_server(anthropic: bool, steps: Vec<(&'static str, Value)>) -> Ser
         anthropic,
         mode: Mode::Text,
         requests: Arc::new(Mutex::new(Vec::new())),
+        release: Arc::new(tokio::sync::Notify::new()),
     };
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let url = format!("http://{}", listener.local_addr().unwrap());

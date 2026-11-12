@@ -358,6 +358,47 @@ OpenCode Go 用四种协议提供模型，模型地址和协议都来自内置�
     - 计时口径：脚本用独立 PreCompact 标记观察钩子开始，以本次命令之后的完成提示为终点，使用单调时钟；明确记录这是不含更早规划的阶段区间。输入等待单独记录，首个摘要 HTTP 请求和压缩后的主请求都不能充当操作起点。8 秒前/后置钩子另有独立下限检查，故意漏算该阶段的时长必须失败。延迟 Enter 的受控探针要求启动等待被单独记录且耗时判定通过。
     `safe_budget_respected` 使用与引擎相同口径的完整请求体估算（含系统指令、按消息分组向上取整），只检查摘要路径的请求。所有场景的日志记录每个请求实际收到的注入类型与请求体哈希，不根据预算猜测。`compaction-review2-20261108/harness_negative_probe.py` 与 `harness_negative_probe2.py` 用受控假对象回放“重启未就绪”“忽略 Escape”“缺少必需检查”“存在假检查”“没有必需项”和“场景报错”，要求判定器一律返回非零；它们不替代真实重启或真实复用的场景。`compaction-review3-20261108/negative_probe_post_cancel.py` 让后续请求到达服务器但永不返回，要求汇总器因缺少完整回复、持久化与输入恢复而失败，同时证明请求确实已到达。`compaction-review4-20261108/harness_semantic_probe2.py` 把错误窗口、错误消息数、错误会话 ID、缺时区、额外正文、缺正文、错误耗时和丢失空格的路径逐个注入同一组检查函数，要求全部被拒绝，并用正确样本确认仍然通过。
 
+### N. 技能目录发现与优先级
+
+模型可见的技能列表、`Skill` 工具和斜杠列表共用 `skills::discovery::discover(data_dir, workspace)`。阅读顺序（后者覆盖前者）是：内置工作流（`bundled.rs`）、`CLAUDE_CONFIG_DIR`（未设置时为 `~/.claude`）、`<数据目录>/skills`、`<工作区>/.claude`。同一名称只列一次；项目覆盖用户，数据目录覆盖 Claude 兼容用户目录。`<数据目录>/skills/bundled` 和 `mcp` 仍会列出（斜杠列表原本就显示它们），但不会覆盖已发现的内置或 Claude 用户同名技能；`<数据目录>/skills/<名称>` 的直接用户技能仍按“用户覆盖内置”处理。发现过程只读，不创建 `<数据目录>/skills`，不跟随符号链接。
+
+数据目录技能的名称沿用 round 01 之前的斜杠命令规则：取 frontmatter `name`（缺省时为技能所在目录名）转小写、空白折叠为 `-`，其他标点保留。因此 `My Skill` 仍是 `/my-skill`，`R&D (team)'s check` 仍是 `/r&d-(team)'s-check`；多层集合也只使用技能自身名称，不加集合前缀。两个数据目录技能归一化后同名时，两者都改用按 `SKILL.md` 路径计算的稳定 `skill_<hash>`（只有哈希碰撞时才按排序后的路径追加 `-2`、`-3`），不会按文件系统顺序只保留其中一个。`~/.claude`、项目与插件技能的名称规则不变。
+
+1. 自动化：`cargo test --locked -p deepseek-code-core --lib discovery::tests`、`cargo test --locked -p deepseek-code-core --lib data_dir_skill`、`cargo test --locked -p deepseek-code-core --lib runtime_discovery_keeps_pre_round_01_slash_names_for_mixed_case_and_spaces`、`cargo test --locked -p deepseek-code-core --lib runtime_discovery_keeps_punctuation_that_skill_creation_allows`、`cargo test --locked -p deepseek-code-core --lib runtime_discovery_disambiguates_shared_data_dir_names_with_stable_ids`、`cargo test --locked -p deepseek-code-cli --bin dcl slash_list`、`cargo test --locked -p deepseek-code-cli --test skills`。真实进程用例确认 `CLAUDE_CONFIG_DIR` 指向空目录时，首个请求的 `Available skills` 含数据目录技能（名称已小写化），第二请求的工具结果给出真实技能目录。`discovery::tests` 中的 `installed_placeholder_and_legacy_builtins_are_visible_to_both_views` 还确认 `ensure_installed` 不再写出 `skill-creator` 占位，内置 `skill-creator` 只在模型列表和斜杠列表中各出现一次，五个 legacy builtins 仍按原样可见。
+2. 真实终端：用空的 `CLAUDE_CONFIG_DIR` 和独立数据目录，把 `skills/<名称>/SKILL.md` 只放在数据目录，运行 `dcl --data-dir <目录> --print "/<名称> 参数"`。确认斜杠命令展开、`dcl skills list` 显示该技能；再让模型自行调用 `Skill`，确认工具名与斜杠名称一致，返回的说明包含实际数据目录路径，`references/...` 等相对路径可解析。
+3. 同名覆盖：在数据目录、`CLAUDE_CONFIG_DIR` 和工作区 `.claude/skills` 放同名技能，确认列表只有一项且三处内容按“项目 > 数据目录 > CLAUDE 用户”选择；移除高层副本后依次落到下一层。
+4. 开关：`enabled: false` 不出现在列表和工具中；`disable-model-invocation: true` 不在模型列表、`Skill` 工具也不能调用，但斜杠命令仍可用；`user-invocable: false` 仍只供模型调用。
+5. 容错：在同一目录放一个格式错误的 `SKILL.md` 和一个有效技能，确认有效技能仍可用，无效文件只产生路径诊断（运行日志），不会回显文件内容；`<数据目录>/skills` 不存在时发现过程不创建它。
+6. `--data-dir` 与 `DEEPSEEK_CODE_DATA_DIR`：两者选中的非默认数据目录都生效，模型列表和工具使用同一位置，不回退到 `~/.deepseek-code` 或 `~/.claude`。
+7. 内置工作流不得被意外覆盖：在 `<数据目录>/skills/bundled` 放与内置同名的技能，确认仍执行内置定义；直接放在 `<数据目录>/skills/<同名>` 的用户技能按既有规则覆盖内置。插件命名空间技能的行为不变。
+8. 名称兼容：把 frontmatter `name` 写成 `My Skill` 或含 `(`、`&`、`'` 的名称，确认斜杠命令分别为 `/my-skill`、保留标点的旧名称，模型列表和 `Skill` 工具使用同一个名称，不存在大小写不同的第二个别名。再放两个同名的数据目录技能，确认两者都按 `skill_<hash>` 列出，重复运行结果相同。
+
+### O. 内置 skill-creator
+
+1. `dcl skills list` 在全新数据目录和已有旧占位的数据目录中只列出一个 skill-creator。旧占位必须是 `SKILL.md` 加 `agents/analyzer.md`、`agents/grader.md` 且内容未被改动才会被删除；改动过的副本、额外文件和不相关兄弟技能保持原样。
+2. 模型通过 `Skill` 工具调用 skill-creator：返回的说明含 `Base directory for this skill:` 和本次物化的临时目录；目录内有 `SKILL.md`、`scripts/init_skill.py`、`scripts/quick_validate.py`、`license.txt`、`NOTICE.md`、`references/frontmatter.md`，内容与内置字节一致。断网、未预先安装时同样可用。
+3. 在真实终端执行 `/skill-creator 创建一个处理 CSV 的技能`：走同一执行路径，命令表只出现一次 `/skill-creator`。
+4. 用没有 PyYAML 的 `python3` 运行物化后的 `scripts/init_skill.py demo --path <临时目录>`，再运行 `scripts/quick_validate.py <临时目录>/demo` 必须通过；缺少 name/description、name 含空格或 frontmatter 未闭合时必须返回非零。
+5. 自动回归：
+   ```bash
+   cargo test --locked -p deepseek-code-core --lib skills::skill_creator
+   cargo test --locked -p deepseek-code-core --lib skills::bundled_resources::tests
+   cargo test --locked -p deepseek-code-core --lib skills::bundled::tests
+   ```
+   覆盖发现恰好一次、模型和用户都可调用、迁移只删除原生占位、物化字节和完整性检查、Python 脚本在 `-S`（无 site-packages）下创建并通过验证。单元测试不能代替第 2、3 条的真实进程调用。
+
+### 第十一轮：SDK 回合内引导（mid-turn steering）
+
+stream-json 宿主在一轮进行中发送的普通用户消息不再只等这一轮结束，而是通过 `services/input_queue` 的 Steer 模式在下一个工具边界交给正在运行的回合；REPL 与 Desktop 的既有路径不变。全部使用本地模拟模型与临时数据目录。
+
+- `cargo test --locked -p deepseek-code-cli --test sdk steering::`：6 项。工具运行中发送第二条消息后，第二条消息出现在工具结果之后的第二个模型请求里，回合继续；两条消息按到达顺序各出现一次；模型直接给出最终回答时该消息作为下一轮恰好运行一次；`/status` 等斜杠命令不进入运行中的回合；`interrupt` 保留尚未交付的消息并在下一轮运行；`--replay-user-messages` 在交付时以原 `uuid` 回显用户信封，且交付事件、持久化消息各一次。
+- `cargo test --locked -p deepseek-code-core --lib services::input_queue`：包含 `undelivered_steer_items_are_cancelled_and_delivered_ones_stay`，确认未交付项被取消并返回、已 handoff 项保留。
+- `cargo test --locked -p deepseek-code-core --lib durable_steer_handoff_waits_for_boundary_and_pause_preserves_next_turn`：原有边界与暂停语义不变。
+- `cargo test --locked -p deepseek-code-cli --test sdk`：包含 `controls::running_turn_answers_queries_and_cancels_only_queued_messages`（运行中发消息后 `cancel_async_message` 取消尚未开始的引导消息）与 `hook_callbacks::sdk_eof_during_model_or_callback_cannot_continue_automatically_allowed_write`（宿主断开且仍需 Hook/MCP 回调时，排队消息连同引导消息一起丢弃，只发一个错误 `result`）。
+- 真实模型（本地不接受真实密钥的步骤不在此列）：用 `--input-format stream-json` 保持 stdin 打开，先发送要求三次 `sleep` 工具调用的消息，8 秒后发送“跳过剩余 sleep”的消息。预期 `queued_input` 事件在第一次工具结果之后出现，第二个模型请求包含该文本，剩余调用可以不再执行。2026-11-10 的基线与本地模拟证据在相邻开发支持目录 `steer-20261110/`。
+
+事件形状（与 REPL/Desktop 共用的 `queued_input` 行）：`{"type":"queued_input","text":"…","content":"…","origin":"queue-input-<id>"}`。`origin` 是持久队列项的 handoff 标识；引导消息自己的 `messages` 行已由 handoff 保存，故不再作为工具附件重复写入。REPL/Desktop 的 legacy 队列项保持原有 `origin`（`user`、`task_notification`）并继续依附最近工具结果。
+
 ## ApplyPatch 补丁工具
 
 `ApplyPatch` 是模型可见的写工具，解析、只读预检和写盘回滚三个内部模块位于 `crates/core/src/tools/apply_patch*.rs`。改动它们或改动 `tools/mod.rs` 的注册/分发时，至少运行：
@@ -558,3 +599,44 @@ git diff --check
 - `cargo test --locked -p deepseek-code-cli --test sdk recovery_interrupt::`：同一轮先报告 11/2 和一次工具拒绝再超限，在 PreCompact/PostCompact SDK 回调挂起时 interrupt；两协议提交前不保存摘要、提交后恰好一份摘要/边界/计数，不发送重试主请求，保留统计并允许下一轮。
 - SDK 全套覆盖审批、Hook、MCP 等待取消及迟到回复；同时保留 `usage_accounting`、`recovery_result_contract`、`request_usage_tests`、ContextReset、初始 Hook/hook wake 回归。
 - 第十轮的独立复现与需求证据已在 2026-11-10 的开发支持目录清理中删除。未执行平台或旧验收组合继续标记未验证。
+
+### 会话创建与消息追加的 SQLite 写者竞争
+
+- `cargo test --locked -p deepseek-code-core --test session_concurrency`：`SessionStore::create`/`append` 在第二个连接持有写锁且超过一次 `busy_timeout` 时，应重试整笔事务而不是直接失败；持锁超过 30 秒预算时返回带静态操作名（`session create`／`session append`）的类型化竞争错误，不得留下部分会话、项目、文件夹、消息、结构化内容或来源行，释放写者后同一连接池仍可正常写入。
+- 非竞争错误（如触发器中止）必须立即返回并整笔回滚；`BEFORE INSERT` 早失败和“消息/计数写入后、最终时间戳更新时失败”两种中断点都要覆盖。
+- 口径：每次尝试仍使用每连接原有的 5 秒 `busy_timeout`；30 秒只是整笔事务的重试预算，不改变全局超时，也不序列化整个应用。测试里夹具持有写者的保护上限长于该预算，避免夹具与预算同时到期。
+- 未包含：`derive_empty`（fork/clear/子会话）仍是单次 `BEGIN IMMEDIATE`，本轮没有观察到失败，也未改动。
+- 不确定：R37 全量套件失败只在“写者被占用超过一次 busy_timeout”这一边界上被确定性复现；保留的日志不能证明当时写者为何 ≥5 秒不可用（调度饥饿还是其他长写），因此不声称已还原那条历史时间线。
+
+### 回合内控制请求的确定性夹具
+
+- `cargo test --locked -p deepseek-code-cli --test sdk controls::running_turn_answers_queries_and_cancels_only_queued_messages -- --exact`：`Mode::HeldText` 只在第一个流式请求上先发出该协议的第一帧（Anthropic `message_start`／OpenAI 首个 delta），随后等待测试释放的 `Notify` 才发送完成帧；控制序列在释放前执行并刻意等待超过旧的固定 2 秒，两个协议都必须回答全部控制、保持排队消息未运行，释放后恰好 2 个结果、被取消的第二个提示不出现、保留的第三个提示出现。
+- 闸门等待有 30 秒上限，超时以 `io::Error` 结束响应体使测试显式失败，不会静默回落到旧的固定延时语义；测试自身还有 60 秒看门狗，`ReleaseHeld` 在断言失败或 panic 时也会释放。
+- 旧固定延时的负向复现不保留为源码里的测试：用例原文与重建步骤见相邻开发支持目录 `session-sqlite-20261111/round04-negative-control-test.rs.txt`，临时加入后以 `--ignored`（或普通）运行应看到 `Unexpected terminal result while waiting for control_response`，这正是 2026-11-11 全量 CLI 的失败形态；负向日志为同目录 `logs/round04-sdk-negative-control.log`。一次串行基线通过不能证明旧竞态不存在。
+
+### 会话消息收件箱的 SQLite 竞争与有界轮询
+
+会话消息（`SendMessage`/`session_messages`）的引擎侧轮询发生在每个模型/工具边界。宿主同时会把完整对话写回同一个数据库，因此轮询不能因为一次写者竞争而结束整个回合。
+
+```bash
+env -u DEEPSEEK_CODE_BACKGROUND_CONTROL -u DEEPSEEK_CODE_BACKGROUND_JOB \
+    -u DEEPSEEK_CODE_WORKER_MODEL -u DEEPSEEK_CODE_WORKER_AUTO_ROUTE \
+    -u DEEPSEEK_CODE_CHILD_API_KEY -u DEEPSEEK_CODE_DATA_DIR \
+  cargo test --locked -p deepseek-code-core --lib -- \
+    services::session_messages::tests:: db::write_tx_tests::
+```
+
+- `an_empty_drain_does_not_take_the_writer_lock`：第二个真实 SQLite 连接持有 `BEGIN IMMEDIATE` 时，空收件箱轮询不等待写者、不报错。空收件箱的授权检查在只读快照中完成，仍验证消费者 generation 以及 `project()`/`resolve_workspace` 的归档、Code 模式、项目信任和来源映射。
+- `an_empty_inbox_still_enforces_project_authorization`：空收件箱下分别归档会话、改成非 Code 模式、撤销项目信任且 generation 不变，三种情况都必须像旧路径一样拒绝，且不消费任何消息。
+- `a_pending_drain_defers_under_a_held_writer_and_delivers_once_after_release`：有排队消息但写者被占用时，轮询在限定时间内返回空；队列行保持 `queued`，`consumer_generation`/`committed_at` 保持空，历史为空。释放写者后同一条消息只投递一次，状态变为 `context_committed`，历史恰好一行，再轮询为空。
+- `a_late_acknowledgement_failure_rolls_back_the_whole_poll_unit`：在消息行插入和会话计数增加之后、`session_inbox` 确认更新时让触发器失败；整个轮询事务必须回滚（历史为空、`message_count` 不变、队列状态/generation/时间戳不变）。移除触发器后恰好投递一次。早期的 `BEFORE INSERT` 失败用例保留，覆盖更早的中断点。
+- `a_nonbusy_drain_failure_names_the_operation_and_keeps_the_queue`：非竞争错误（`RAISE(ABORT)`，扩展码 1811）仍向上传播，消息保持 `queued`，后续轮询只投递一次。
+- `a_revoked_consumer_is_refused_and_the_queue_survives`：消费者被撤销时轮询拒绝，队列不丢失；新消费者只投递一次。
+- `the_poll_restores_the_borrowed_connection_timeout_on_success_and_unwind`：借用连接原来的 `busy_timeout`（例如 7000ms）在成功、错误和 panic 展开后都恢复为原值，不留下 250ms 或全局放宽的超时。
+- `db::write_tx_tests::contention_exposes_the_extended_code`：真实写者竞争下诊断包含静态操作名和 SQLite 扩展码，不含 SQL 文本或绑定值。
+
+口径说明：
+
+- 只读快照读取沿用该连接原有的 `busy_timeout`（池默认值），250ms 只是有排队消息时“获取写事务”的单次上限，不是一次轮询或整个回合的总时限；模型请求、工具执行和其他写路径不受影响。
+- 仅对 `SQLITE_BUSY`/`SQLITE_LOCKED` 的类型化错误回滚并推迟到下一个边界；所有权、信任、归档和写入错误仍作为错误返回。没有递归重试，也没有全局修改数据库超时。
+- 本轮只证明并修复了收件箱轮询这一条可复现的致命竞争路径。历史长回合退出（Super R27/R01/R28）和独立数据目录下的启动期失败仍未归因；启动期数据库打开/初始化也未加同样的操作名诊断，不能用本场景的通过结果替代。

@@ -47,6 +47,9 @@ png = "0.18"
 
 [dev-dependencies]
 axum = "0.8"
+# Streams the held SSE fixture: the first frame is sent immediately and the
+# completion frames wait for the test. Test-only; already in the workspace lock.
+futures = "0.3"
 # Reads and writes the isolated legacy plan fixture without a production API.
 rusqlite = { version = "0.31", features = ["bundled", "chrono"] }
 # Paused/virtual time for the admission-window regression tests. This unions a
