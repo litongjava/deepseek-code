@@ -33,7 +33,7 @@ async fn resource_reads_keep_explicit_permissions_and_model_api_invocation() {
     .with_permission_manager(manager.clone())
     .with_search_config_path(paths.data_dir.join("config.json"));
     let result = executor
-        .execute_skill_tool(&json!({"skill":"claude-api","args":"literal !`echo should-not-run`"}))
+        .execute_skill_tool(&json!({"skill":"dataviz","args":"literal !`echo should-not-run`"}))
         .await
         .unwrap();
     let prompt = result["instructions"].as_str().unwrap();
@@ -44,7 +44,7 @@ async fn resource_reads_keep_explicit_permissions_and_model_api_invocation() {
         .unwrap()
         .strip_prefix("Base directory for this skill: ")
         .unwrap();
-    let path = Path::new(root).join("shared/live-sources.md");
+    let path = Path::new(root).join("scripts/validate_palette.js");
     let input = json!({"file_path":path,"offset":2,"limit":3});
     let (_, denied, failed) = executor
         .execute_tool_call("Read", &input, "denied-asset")
