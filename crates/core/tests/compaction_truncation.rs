@@ -26,27 +26,25 @@ const FINAL_PROMPT: &str = "Write one continuation summary of the conversation a
 /// How the fixture answers: 0 finished, 1 output limit reached, 2 other stop.
 #[derive(Clone, Copy)]
 enum Behavior {
-    /// Truncate anything below the configured 16k ceiling, then finish.
-    RaiseToCeiling,
-    /// Truncate fragment requests below the ceiling; the raised retry finishes.
-    RaiseFragment,
     /// Truncate inputs above this many tokens; smaller inputs finish.
     TruncateAbove(u64),
+    /// Truncate requests whose configured output budget is below this value.
+    /// A request already using the selected model's cap finishes.
+    TruncateBelowBudget(u64),
     /// Truncate like `TruncateAbove`, answering with a 32k-character summary.
     LongSummaryAbove(u64),
     /// Truncate like `TruncateAbove`, answering with the widest summary the
     /// character limit accepts, so merging two of them can exceed the
     /// single-request input ceiling even inside a very large window.
     WideSummaryAbove(u64),
-    /// Truncate requests below this output budget whose input is larger than
-    /// this many tokens, so the raised retry of a smaller input finishes.
-    SmallInputBelowBudget { tokens: u64, budget: u64 },
     /// Always report the output limit.
     AlwaysTruncate,
     /// Truncate every request carrying this marker, including the children a
     /// split produces, so one fragment spends its own allowance and fails.
     TruncateContaining(&'static str),
-    /// Truncate every merge at its initial budget; the raised merge finishes.
+    /// Truncate only the very first request at its configured budget.
+    TruncateFirst,
+    /// Truncate only the first merge request; the split recovery finishes.
     TruncateMergeOnce,
     /// Truncate every merge until the flag is cleared, so a retry can reuse
     /// the completed fragment summaries.
@@ -61,19 +59,12 @@ enum Behavior {
     /// Answer empty bodies for inputs above this many tokens; smaller inputs
     /// finish, so the retry and then the split can make progress.
     EmptyAbove(u64),
+    /// Answer the first request for an input above this many tokens with an
+    /// empty body; the same-budget retry finishes.
+    EmptyOnceAbove(u64),
     /// Answer empty bodies for every request carrying this marker, including
     /// the children a split produces, so one fragment spends its own allowance.
     EmptyContaining(&'static str),
-    /// Truncate inputs above this many tokens at the initial budget, answer a
-    /// raised budget with an empty body, and finish smaller inputs. This is the
-    /// reported failure: a raise came back empty during result validation.
-    TruncateThenEmptyAbove(u64),
-    /// Like `TruncateThenEmptyAbove`, but only the first answer at the raised
-    /// budget is empty, so the same-budget retry finishes.
-    TruncateThenEmptyOnceAbove(u64),
-    /// Truncate inputs above this many tokens at the initial budget, answer a
-    /// raised budget with 32,001 characters, and finish smaller inputs.
-    TruncateThenOversizedAbove(u64),
     /// Answer inputs above this many tokens with 32,001 characters, one over
     /// the limit; smaller inputs finish.
     OversizedAbove(u64),
@@ -272,7 +263,6 @@ async fn start(config: Config) -> Fixture {
     let sent = Arc::new(Mutex::new(Vec::new()));
     let parent = Arc::new(Mutex::new(None));
     let children = Arc::new(AtomicUsize::new(0));
-    let model_cap = u64::from(config.max_tokens);
     let stop_at = Arc::new(AtomicUsize::new(config.stop_at));
     let hang_at = Arc::new(AtomicUsize::new(0));
     let merge_truncate = Arc::new(AtomicUsize::new(1));
@@ -333,14 +323,10 @@ async fn start(config: Config) -> Fixture {
             let sent = body.to_string();
             let stage = stage_of(&sent);
             // A fragment request belongs to the recovery of the last truncated
-            // fragment when it repeats that input at a higher budget (a raise)
-            // or is one of the two halves a split produces.
+            // fragment when it is one of the two halves a split produces.
             let parent = *captured_parent.lock().unwrap();
-            let raise_possible = budget.saturating_mul(2).min(16_384).min(model_cap) > budget;
             let origin = if stage != "fragment" {
                 ""
-            } else if matches!(parent, Some((size, limit)) if tokens == size && budget > limit) {
-                "raise"
             } else if matches!(parent, Some((size, _)) if tokens > size) {
                 // Larger than the fragment it is compared with: a new planned
                 // fragment, and any pending halves belong to a finished branch.
@@ -354,35 +340,34 @@ async fn start(config: Config) -> Fixture {
             };
             let merge_flag = captured_merge.load(Ordering::SeqCst) == 1;
             let truncate = match behavior {
-                Behavior::RaiseToCeiling => budget < 16_384,
-                Behavior::RaiseFragment => stage == "fragment" && budget < 8_192,
                 Behavior::TruncateAbove(limit) => tokens > limit,
+                Behavior::TruncateBelowBudget(limit) => budget < limit,
                 Behavior::LongSummaryAbove(limit) => tokens > limit,
                 Behavior::WideSummaryAbove(limit) => tokens > limit,
-                Behavior::SmallInputBelowBudget {
-                    tokens: limit,
-                    budget: ceiling,
-                } => tokens > limit && budget < ceiling,
                 Behavior::AlwaysTruncate => true,
                 Behavior::TruncateContaining(marker) => sent.contains(marker),
-                Behavior::TruncateMergeOnce => stage == "merge" && budget < 8_192,
+                Behavior::TruncateFirst => number == 1,
+                // Only the first merge request is truncated; its split
+                // recovery finishes at the same configured budget.
+                Behavior::TruncateMergeOnce => {
+                    stage == "merge" && merge_flag && {
+                        captured_merge.store(0, Ordering::SeqCst);
+                        true
+                    }
+                }
                 Behavior::TruncateMergeSwitch => stage == "merge" && merge_flag,
                 Behavior::LongSummaryAlways => false,
-                Behavior::TruncateThenEmptyAbove(limit) => tokens > limit && budget <= 4096,
-                Behavior::TruncateThenEmptyOnceAbove(limit) => tokens > limit && budget <= 4096,
-                Behavior::TruncateThenOversizedAbove(limit) => tokens > limit && budget <= 4096,
                 Behavior::EmptyFirst
                 | Behavior::EmptyAlways
                 | Behavior::EmptyAbove(_)
+                | Behavior::EmptyOnceAbove(_)
                 | Behavior::EmptyContaining(_)
                 | Behavior::OversizedAbove(_) => false,
             };
             if truncate && stage == "fragment" {
-                // The two halves follow only when the raise is impossible or
-                // itself truncated.
-                if origin == "raise" || !raise_possible {
-                    captured_children.store(2, Ordering::SeqCst);
-                }
+                // Every truncation is recovered by splitting, so two children
+                // follow at the same configured budget.
+                captured_children.store(2, Ordering::SeqCst);
                 *captured_parent.lock().unwrap() = Some((tokens, budget));
             } else if stage == "fragment" {
                 *captured_parent.lock().unwrap() = None;
@@ -398,32 +383,28 @@ async fn start(config: Config) -> Fixture {
                 });
             }
             // A finished response the summarizer cannot use. It is never
-            // reported as an output limit, so recovery must not raise the
-            // budget for it.
+            // reported as an output limit, so recovery cannot repair it with a
+            // larger budget; it is retried once at the same budget or split.
             let empty = match behavior {
                 Behavior::EmptyFirst => number == 1 && !truncate,
                 Behavior::EmptyAlways => !truncate,
                 Behavior::EmptyAbove(limit) => tokens > limit && !truncate,
-                Behavior::EmptyContaining(marker) => sent.contains(marker) && !truncate,
-                Behavior::TruncateThenEmptyAbove(limit) => tokens > limit && budget > 4096,
-                // Only the first answer at the raised budget is empty; the
-                // same-budget retry of that input must then finish.
-                Behavior::TruncateThenEmptyOnceAbove(limit) => {
+                Behavior::EmptyOnceAbove(limit) => {
                     tokens > limit
-                        && budget > 4096
+                        && !truncate
                         && captured_sent
                             .lock()
                             .unwrap()
                             .iter()
-                            .filter(|entry| entry.tokens == tokens && entry.budget > 4096)
+                            .filter(|entry| entry.tokens == tokens && entry.budget == budget)
                             .count()
                             == 1
                 }
+                Behavior::EmptyContaining(marker) => sent.contains(marker) && !truncate,
                 _ => false,
             };
-            let oversized = (matches!(behavior, Behavior::OversizedAbove(limit) if tokens > limit)
-                || matches!(behavior, Behavior::TruncateThenOversizedAbove(limit) if tokens > limit && budget > 4096))
-                && !truncate;
+            let oversized =
+                matches!(behavior, Behavior::OversizedAbove(limit) if tokens > limit) && !truncate;
             let finish = if captured_stop.load(Ordering::SeqCst) == number {
                 2
             } else if truncate {
@@ -444,9 +425,7 @@ async fn start(config: Config) -> Fixture {
                 match (finish, behavior) {
                     // Truncated text must never reach the cache or the history.
                     (1, _) => format!("TRUNCATED #{number}"),
-                    (_, Behavior::LongSummaryAbove(_) | Behavior::SmallInputBelowBudget { .. }) => {
-                        "s".repeat(32_000)
-                    }
+                    (_, Behavior::LongSummaryAbove(_)) => "s".repeat(32_000),
                     // The widest text the character limit accepts: about 39k tokens
                     // each, so merging two exceeds the 64k request ceiling while a
                     // vast model window would still accept it.
@@ -572,13 +551,13 @@ fn attach_tool_result(fixture: &Fixture, name: &str, output: &str) {
         .unwrap();
 }
 #[tokio::test]
-async fn truncated_final_summary_raises_its_budget_and_keeps_its_length_target() {
+async fn final_summary_starts_at_the_configured_budget_and_keeps_its_target() {
     for format in ["openai", "anthropic"] {
         let fixture = start(Config::new(
             format,
             128_000,
             16_384,
-            Behavior::RaiseToCeiling,
+            Behavior::TruncateBelowBudget(16_384),
             History::Short,
         ))
         .await;
@@ -594,18 +573,13 @@ async fn truncated_final_summary_raises_its_budget_and_keeps_its_length_target()
         .await
         .unwrap();
         let sent = bodies(&fixture);
-        assert_eq!(sent.len(), 2, "{format}");
-        assert_eq!(sent[0]["max_tokens"], 8192);
+        // The first request already uses the configured cap, so the fixture's
+        // "truncate below the cap" rule never fires and no staircase exists.
+        assert_eq!(sent.len(), 1, "{format}");
+        assert_eq!(sent[0]["max_tokens"], 16_384, "{format}");
         assert!(prompt_of(&sent[0]).contains(FINAL_PROMPT));
         assert!(
             prompt_of(&sent[0]).contains("Aim for about 4096 tokens"),
-            "{format}"
-        );
-        assert_eq!(sent[1]["max_tokens"], 16_384);
-        assert!(prompt_of(&sent[1]).contains(FINAL_PROMPT));
-        // The raise adds room for the same target instead of enlarging it.
-        assert!(
-            prompt_of(&sent[1]).contains("Aim for about 4096 tokens"),
             "{format}"
         );
         assert_eq!(
@@ -616,13 +590,159 @@ async fn truncated_final_summary_raises_its_budget_and_keeps_its_length_target()
 }
 
 #[tokio::test]
-async fn truncated_fragment_raises_its_budget_and_keeps_its_length_target() {
+async fn configured_32k_generation_budget_completes_in_one_request() {
+    for format in ["openai", "anthropic"] {
+        let fixture = start(Config::new(
+            format,
+            128_000,
+            32_000,
+            Behavior::TruncateBelowBudget(32_000),
+            History::Short,
+        ))
+        .await;
+        let before = fixture.store.history(&fixture.id).unwrap();
+        compaction::compact(
+            &fixture.engine(),
+            &fixture.store.db,
+            &fixture.id,
+            "fixture",
+            "gpt-6-astra",
+            "",
+        )
+        .await
+        .unwrap();
+        let sent = bodies(&fixture);
+        // A step staircase at 4096/8192 would be truncated by this fixture; the
+        // configured 32k budget finishes in one request.
+        assert_eq!(sent.len(), 1, "{format}");
+        assert_eq!(sent[0]["max_tokens"], 32_000, "{format}");
+        assert!(prompt_of(&sent[0]).contains("Aim for about 4096 tokens"));
+        assert_eq!(
+            fixture.store.history(&fixture.id).unwrap().len(),
+            before.len() + 1
+        );
+    }
+}
+
+#[tokio::test]
+async fn configured_128k_budget_is_preserved_when_the_window_allows() {
+    for format in ["openai", "anthropic"] {
+        let fixture = start(Config::new(
+            format,
+            1_000_000,
+            128_000,
+            Behavior::TruncateBelowBudget(128_000),
+            History::Short,
+        ))
+        .await;
+        let before = fixture.store.history(&fixture.id).unwrap();
+        compaction::compact(
+            &fixture.engine(),
+            &fixture.store.db,
+            &fixture.id,
+            "fixture",
+            "gpt-6-astra",
+            "",
+        )
+        .await
+        .unwrap();
+        let sent = bodies(&fixture);
+        // The selected model's own 128k cap is honored, not a global 32k.
+        assert_eq!(sent.len(), 1, "{format}");
+        assert_eq!(sent[0]["max_tokens"], 128_000, "{format}");
+        assert!(prompt_of(&sent[0]).contains("Aim for about 4096 tokens"));
+        assert_eq!(
+            fixture.store.history(&fixture.id).unwrap().len(),
+            before.len() + 1
+        );
+    }
+}
+
+#[tokio::test]
+async fn a_cap_too_large_for_the_window_is_refused_before_any_request() {
+    let fixture = start(Config::new(
+        "openai",
+        2_000,
+        32_000,
+        Behavior::TruncateAbove(u64::MAX),
+        History::Short,
+    ))
+    .await;
+    let error = compaction::compact(
+        &fixture.engine(),
+        &fixture.store.db,
+        &fixture.id,
+        "fixture",
+        "gpt-6-astra",
+        "",
+    )
+    .await
+    .unwrap_err();
+    let text = format!("{error:#}");
+    // No number is invented to make the request fit; the configured budget is
+    // named and no request is sent.
+    assert!(
+        text.contains("Compaction output budget 32000 leaves less than 1024 input tokens"),
+        "{text}"
+    );
+    assert!(text.contains("no request was sent"), "{text}");
+    assert!(text.contains("original history retained"), "{text}");
+    assert!(bodies(&fixture).is_empty());
+}
+
+#[tokio::test]
+async fn truncated_final_summary_splits_at_the_configured_budget() {
     for format in ["openai", "anthropic"] {
         let fixture = start(Config::new(
             format,
             128_000,
             16_384,
-            Behavior::RaiseFragment,
+            Behavior::TruncateFirst,
+            History::Short,
+        ))
+        .await;
+        let before = fixture.store.history(&fixture.id).unwrap();
+        compaction::compact(
+            &fixture.engine(),
+            &fixture.store.db,
+            &fixture.id,
+            "fixture",
+            "gpt-6-astra",
+            "",
+        )
+        .await
+        .unwrap();
+        let sent = bodies(&fixture);
+        let log = sent_log(&fixture);
+        // Truncated final, its two halves and their merge, all at the same
+        // configured budget. There is no 8192/16384 staircase.
+        assert_eq!(log.len(), 4, "{format}: {log:?}");
+        assert!(
+            log.iter().all(|entry| entry.budget == 16_384),
+            "{format}: {log:?}"
+        );
+        assert_eq!(
+            (log[0].stage, log[1].stage, log[2].stage, log[3].stage),
+            ("final", "final", "final", "merge"),
+            "{format}"
+        );
+        assert!(prompt_of(&sent[0]).contains("Aim for about 4096 tokens"));
+        assert!(prompt_of(&sent[3]).contains("Aim for about 2048 tokens"));
+        assert_eq!(
+            fixture.store.history(&fixture.id).unwrap().len(),
+            before.len() + 1
+        );
+    }
+}
+
+#[tokio::test]
+async fn fragment_requests_start_at_the_configured_budget_and_keep_the_target() {
+    for format in ["openai", "anthropic"] {
+        let fixture = start(Config::new(
+            format,
+            128_000,
+            16_384,
+            Behavior::TruncateAbove(u64::MAX),
             History::Evidence(60_000),
         ))
         .await;
@@ -639,25 +759,22 @@ async fn truncated_fragment_raises_its_budget_and_keeps_its_length_target() {
         .unwrap();
         let sent = bodies(&fixture);
         let log = sent_log(&fixture);
-        let fragment_at = |budget: u64| {
+        assert!(!log.is_empty(), "{format}");
+        assert!(
             log.iter()
-                .position(|entry| entry.stage == "fragment" && entry.budget == budget)
-                .map(|index| &sent[index])
-                .unwrap_or_else(|| panic!("{format}: no {budget}-token fragment request"))
-        };
-        assert!(
-            prompt_of(fragment_at(4096)).contains("Aim for about 2048 tokens"),
-            "{format}"
+                .filter(|entry| entry.stage == "fragment")
+                .all(|entry| entry.budget == 16_384),
+            "{format}: every fragment uses the configured cap: {log:?}"
         );
-        // The raised request carries the same fixed target.
-        assert!(
-            prompt_of(fragment_at(8192)).contains("Aim for about 2048 tokens"),
-            "{format}"
-        );
-        assert!(
-            log.iter().all(|entry| entry.budget != 16_384),
-            "{format}: a fragment should raise once"
-        );
+        for body in sent
+            .iter()
+            .filter(|body| prompt_of(body).contains(FRAGMENT_PROMPT))
+        {
+            assert!(
+                prompt_of(body).contains("Aim for about 2048 tokens"),
+                "{format}"
+            );
+        }
         assert_eq!(
             fixture.store.history(&fixture.id).unwrap().len(),
             before.len() + 1
@@ -755,7 +872,7 @@ async fn truncation_at_the_model_cap_splits_by_tokens_and_merges_in_order() {
 }
 
 #[tokio::test]
-async fn a_truncated_merge_raises_again_and_reports_its_own_stage() {
+async fn a_truncated_merge_splits_at_the_configured_budget_and_reports_its_own_stage() {
     for format in ["openai", "anthropic"] {
         let fixture = start(Config::new(
             format,
@@ -778,21 +895,24 @@ async fn a_truncated_merge_raises_again_and_reports_its_own_stage() {
         .unwrap();
         let sent = bodies(&fixture);
         let log = sent_log(&fixture);
-        assert_eq!(log.len(), 5, "{format}: {log:?}");
-        // Two planned fragments, the merge of their summaries, the raised
-        // merge and the final summary.
+        // Two planned fragments, the truncated merge, its two halves, their
+        // merge and the final summary, all at the configured budget.
+        assert_eq!(log.len(), 7, "{format}: {log:?}");
         assert_eq!(
             stages(&sent),
-            ["fragment", "fragment", "merge", "merge", "final"],
+            ["fragment", "fragment", "merge", "merge", "merge", "merge", "final"],
             "{format}"
         );
-        assert_eq!(sent[2]["max_tokens"], 4096, "{format}");
+        assert!(
+            log.iter().all(|entry| entry.budget == 16_384),
+            "{format}: no staircase: {log:?}"
+        );
+        assert!(log[2].truncated, "{format}: {log:?}");
+        assert!(!log[3].truncated && !log[4].truncated, "{format}: {log:?}");
         assert!(
             prompt_of(&sent[2]).contains("Aim for about 2048 tokens"),
             "{format}"
         );
-        assert_eq!(sent[3]["max_tokens"], 8192, "{format}");
-        // The raised merge keeps the fixed length target of its stage.
         assert!(
             prompt_of(&sent[3]).contains("Aim for about 2048 tokens"),
             "{format}"
@@ -838,13 +958,9 @@ async fn a_persistently_truncated_merge_stops_at_the_depth_limit_and_reuses_frag
         // stage, its own node allowance and the last budget actually sent.
         assert!(text.contains(" merge "), "{text}");
         assert!(text.contains("depth limit"), "{text}");
-        assert!(text.contains("5 of 8 recovery generations"), "{text}");
+        assert!(text.contains("2 of 8 recovery generations"), "{text}");
         assert!(
-            text.contains("still exceeded its 4096-token output limit"),
-            "{text}"
-        );
-        assert!(
-            text.contains("last request actually sent used a 8192-token output budget"),
+            text.contains("still exceeded its 16384-token output limit"),
             "{text}"
         );
         assert!(text.contains("original history retained"), "{text}");
@@ -1093,7 +1209,7 @@ async fn a_failing_fragment_keeps_the_others_and_spends_only_its_own_allowance()
 }
 
 #[tokio::test]
-async fn exhausted_recovery_reports_the_last_actual_budget() {
+async fn exhausted_recovery_reports_the_configured_budget() {
     let fixture = start(Config::new(
         "openai",
         128_000,
@@ -1114,18 +1230,14 @@ async fn exhausted_recovery_reports_the_last_actual_budget() {
     .await
     .unwrap_err();
     let text = format!("{error:#}");
-    // The summary was planned at 8k and the last retry actually sent 16k, so
-    // both numbers are reported, each under its own label.
+    // The request already started at the configured cap, so every recovery
+    // attempt names the same budget.
     assert!(
-        text.contains("still exceeded its 8192-token output limit"),
+        text.contains("still exceeded its 16384-token output limit"),
         "{text}"
     );
-    assert!(
-        text.contains("last request actually sent used a 16384-token output budget"),
-        "{text}"
-    );
+    assert!(text.contains("2 of 8 recovery generations"), "{text}");
     assert!(text.contains("depth limit"), "{text}");
-    assert!(text.contains("of 8 recovery generations"), "{text}");
     assert!(text.contains("original history retained"), "{text}");
     assert_eq!(fixture.store.history(&fixture.id).unwrap(), before);
 }
@@ -1396,16 +1508,14 @@ async fn a_merge_above_the_safe_budget_fails_before_it_is_sent() {
 
 #[tokio::test]
 async fn summaries_that_cannot_be_combined_fail_without_a_loop() {
-    // Two 32k-character summaries cannot be merged inside the small window at
-    // all, so no layer can converge. The failure says so instead of looping.
+    // Each fragment answers with a summary that cannot fit the small window's
+    // merge input budget, so no layer can converge. The failure says so
+    // instead of looping.
     let fixture = start(Config::new(
         "openai",
         29_000,
         16_384,
-        Behavior::SmallInputBelowBudget {
-            tokens: 9_000,
-            budget: 8_192,
-        },
+        Behavior::LongSummaryAlways,
         History::Evidence(6_400),
     ))
     .await;
@@ -1430,7 +1540,7 @@ async fn summaries_that_cannot_be_combined_fail_without_a_loop() {
 }
 
 #[tokio::test]
-async fn a_window_too_small_for_the_prompt_fails_without_a_request() {
+async fn a_window_too_small_for_the_configured_budget_fails_without_a_request() {
     let fixture = start(Config::new(
         "openai",
         2_000,
@@ -1450,22 +1560,14 @@ async fn a_window_too_small_for_the_prompt_fails_without_a_request() {
     .await
     .unwrap_err();
     let text = format!("{error:#}");
-    // Planning failed before any request: the report still names the stage,
-    // the budget, the recoveries used and the retained history.
+    // A configured budget that leaves no safe input room is refused explicitly
+    // before any request; no unlimited output is invented.
     assert!(
-        text.contains("too small for conversation summarization"),
+        text.contains("Compaction output budget 4096 leaves less than 1024 input tokens"),
         "{text}"
     );
-    assert!(text.contains("for fragment planning"), "{text}");
-    assert!(
-        text.contains("safe context budget for its 4096-token output"),
-        "{text}"
-    );
-    assert!(text.contains("0 of 8 recovery generations"), "{text}");
-    assert!(
-        text.contains("no request was sent for the remaining input"),
-        "{text}"
-    );
+    assert!(text.contains("2000-token context window"), "{text}");
+    assert!(text.contains("no request was sent"), "{text}");
     assert!(text.contains("original history retained"), "{text}");
     assert!(bodies(&fixture).is_empty());
 }
@@ -1630,7 +1732,7 @@ async fn local_summary_recovery_handles_truncation() {
         "openai",
         128_000,
         16_384,
-        Behavior::RaiseToCeiling,
+        Behavior::TruncateFirst,
         History::Short,
     ))
     .await;
@@ -1660,9 +1762,10 @@ async fn local_summary_recovery_handles_truncation() {
     .unwrap();
     assert_eq!(count, 1);
     let sent = bodies(&fixture);
-    assert_eq!(sent.len(), 2);
-    assert_eq!(sent[0]["max_tokens"], 8192);
-    assert_eq!(sent[1]["max_tokens"], 16_384);
+    // The truncated first request is split and merged at the same configured
+    // budget; there is no 4096→8192 escalation.
+    assert_eq!(sent.len(), 4);
+    assert!(sent.iter().all(|body| body["max_tokens"] == 16_384));
     assert_eq!(fixture.store.history(&fixture.id).unwrap(), before);
     let branch_history = fixture.store.history(&branch).unwrap();
     let summary = branch_history.last().unwrap()["content"].as_str().unwrap();
@@ -1755,7 +1858,7 @@ async fn a_recovery_merge_above_the_single_request_ceiling_is_never_sent() {
         );
         assert!(text.contains("merge"), "{format}: {text}");
         assert!(
-            text.contains("safe context budget planned for its 4096-token output"),
+            text.contains("safe context budget planned for its 16384-token output"),
             "{format}: {text}"
         );
         assert!(
@@ -2030,7 +2133,7 @@ async fn an_empty_summary_splits_only_after_its_single_retry() {
 }
 
 #[tokio::test]
-async fn an_oversized_summary_splits_without_raising_or_retrying() {
+async fn an_oversized_summary_splits_without_changing_the_budget_or_retrying() {
     for format in ["openai", "anthropic"] {
         let fixture = start(Config::new(
             format,
@@ -2053,13 +2156,13 @@ async fn an_oversized_summary_splits_without_raising_or_retrying() {
         .unwrap();
         let sent = bodies(&fixture);
         let log = sent_log(&fixture);
-        // 32,001 characters is not an output limit: no raise and no unchanged
-        // retry, the input is split at once.
+        // 32,001 characters is not an output limit: no staircase and no
+        // unchanged retry, the input is split at the configured budget.
         assert_eq!(sent.len(), 4, "{format}: {log:?}");
         assert_eq!(log[0].stage, "final", "{format}");
         assert!(
-            log.iter().all(|entry| entry.budget != 16_384),
-            "{format}: an oversized body must not raise the budget: {log:?}"
+            log.iter().all(|entry| entry.budget == 16_384),
+            "{format}: an oversized body must not change the budget: {log:?}"
         );
         assert_ne!(
             sent[0], sent[1],
@@ -2076,16 +2179,16 @@ async fn an_oversized_summary_splits_without_raising_or_retrying() {
 }
 
 #[tokio::test]
-async fn a_raise_that_comes_back_empty_is_retried_at_its_own_budget_before_splitting() {
-    // The reported failure: the first answer is truncated, the raised answer
-    // is empty. The empty body is re-requested once at the raised budget; only
-    // when that also fails does the branch split, at the original budget.
+async fn an_empty_answer_at_the_configured_budget_is_retried_once_before_splitting() {
+    // The first answer is empty at the model's configured budget. The body is
+    // re-requested once at that same budget; only when that also fails does
+    // the branch split, still at the configured budget.
     for format in ["openai", "anthropic"] {
         let fixture = start(Config::new(
             format,
             128_000,
             16_384,
-            Behavior::TruncateThenEmptyAbove(40_000),
+            Behavior::EmptyAbove(40_000),
             History::Marked,
         ))
         .await;
@@ -2103,41 +2206,37 @@ async fn a_raise_that_comes_back_empty_is_retried_at_its_own_budget_before_split
         let requests = bodies(&fixture);
         let log = sent_log(&fixture);
         assert_eq!(log[0].stage, "fragment", "{format}: {log:?}");
-        assert!(log[0].truncated, "{format}: {log:?}");
-        assert_eq!(log[0].budget, 4096, "{format}");
-        // The raise, then an identical retry at the same budget.
-        assert_eq!(log[1].budget, 8192, "{format}");
-        assert!(
-            !log[1].truncated,
-            "{format}: the raised answer is empty, not truncated: {log:?}"
-        );
+        assert!(!log[0].truncated, "{format}: empty, not truncated: {log:?}");
+        assert_eq!(log[0].budget, 16_384, "{format}");
+        // An identical retry at the same budget.
+        assert_eq!(log[1].budget, 16_384, "{format}");
+        assert!(!log[1].truncated, "{format}: {log:?}");
         assert_eq!(
             (log[1].tokens, log[1].budget),
-            (log[2].tokens, log[2].budget),
-            "{format}: the retry repeats the raised request: {log:?}"
+            (log[0].tokens, log[0].budget),
+            "{format}: {log:?}"
         );
         assert_eq!(
-            requests[1], requests[2],
+            requests[0], requests[1],
             "{format}: the empty body must be retried unchanged"
         );
-        // Only then does the branch split, and it splits at the original
-        // budget rather than reusing the raised one.
+        // Only then does the branch split, at the same configured budget.
+        assert_eq!(
+            (log[2].stage, log[2].budget),
+            ("fragment", 16_384),
+            "{format}: {log:?}"
+        );
         assert_eq!(
             (log[3].stage, log[3].budget),
-            ("fragment", 4096),
+            ("fragment", 16_384),
             "{format}: {log:?}"
         );
-        assert_eq!(
-            (log[4].stage, log[4].budget),
-            ("fragment", 4096),
-            "{format}: {log:?}"
-        );
-        assert!(!log[3].truncated && !log[4].truncated, "{format}: {log:?}");
+        assert!(!log[2].truncated && !log[3].truncated, "{format}: {log:?}");
         assert!(
-            log[3].tokens < log[0].tokens && log[4].tokens < log[0].tokens,
+            log[2].tokens < log[0].tokens && log[3].tokens < log[0].tokens,
             "{format}: {log:?}"
         );
-        assert_eq!(log[5].stage, "merge", "{format}: {log:?}");
+        assert_eq!(log[4].stage, "merge", "{format}: {log:?}");
         assert_eq!(
             fixture.store.history(&fixture.id).unwrap().len(),
             before.len() + 1,
@@ -2147,15 +2246,15 @@ async fn a_raise_that_comes_back_empty_is_retried_at_its_own_budget_before_split
 }
 
 #[tokio::test]
-async fn a_raise_that_comes_back_empty_once_is_recovered_by_the_retry() {
-    // The raise finishes empty, and the same-budget retry succeeds: the branch
-    // never splits, and the summary is installed under the original key.
+async fn an_empty_summary_is_recovered_by_the_same_budget_retry() {
+    // The first answer is empty at the configured budget and the retry
+    // succeeds: the branch never splits, and the summary is installed.
     for format in ["openai", "anthropic"] {
         let fixture = start(Config::new(
             format,
             128_000,
             16_384,
-            Behavior::TruncateThenEmptyOnceAbove(40_000),
+            Behavior::EmptyOnceAbove(40_000),
             History::Marked,
         ))
         .await;
@@ -2172,22 +2271,19 @@ async fn a_raise_that_comes_back_empty_once_is_recovered_by_the_retry() {
         .unwrap();
         let requests = bodies(&fixture);
         let log = sent_log(&fixture);
-        // Fragment 1: truncated, raised, empty raise, successful retry, then
-        // the merge, the second fragment and the final summary.
         assert_eq!(
             (log[0].budget, log[0].truncated),
-            (4096, true),
+            (16_384, false),
             "{format}: {log:?}"
         );
-        assert_eq!((log[1].budget, log[1].truncated), (8192, false), "{format}");
         assert_eq!(
-            (log[2].budget, log[2].truncated),
-            (8192, false),
+            (log[1].budget, log[1].truncated),
+            (16_384, false),
             "{format}: {log:?}"
         );
-        assert_eq!(requests[1], requests[2], "{format}");
-        // The split of the first fragment never happened: the next fragment
-        // request is the second planned fragment of the history.
+        assert_eq!(requests[0], requests[1], "{format}");
+        // The split never happened: every fragment request is a planned
+        // fragment larger than the empty-answer threshold.
         let fragment_sizes: Vec<u64> = log
             .iter()
             .filter(|entry| entry.stage == "fragment")
@@ -2333,16 +2429,16 @@ async fn an_empty_fragment_failure_keeps_the_other_fragments_and_reuses_them() {
 }
 
 #[tokio::test]
-async fn a_raise_that_comes_back_oversized_splits_without_another_raise() {
-    // The raised answer passes the character limit. A larger budget cannot
-    // shorten it, so the branch splits at the original budget instead of
-    // retrying the same request or raising again.
+async fn an_oversized_fragment_splits_at_the_configured_budget_without_retrying() {
+    // The answer passes the character limit. No output budget can shorten it,
+    // so the branch splits at the configured budget instead of retrying the
+    // same request or escalating.
     for format in ["openai", "anthropic"] {
         let fixture = start(Config::new(
             format,
             128_000,
             16_384,
-            Behavior::TruncateThenOversizedAbove(40_000),
+            Behavior::OversizedAbove(40_000),
             History::Marked,
         ))
         .await;
@@ -2360,26 +2456,24 @@ async fn a_raise_that_comes_back_oversized_splits_without_another_raise() {
         let requests = bodies(&fixture);
         let log = sent_log(&fixture);
         assert_eq!(log[0].stage, "fragment", "{format}: {log:?}");
-        assert!(log[0].truncated, "{format}: {log:?}");
-        assert_eq!(log[0].budget, 4096, "{format}");
-        assert_eq!(log[1].budget, 8192, "{format}");
-        assert!(!log[1].truncated, "{format}: {log:?}");
-        // The oversized answer is not repeated and no third budget appears.
+        assert!(!log[0].truncated, "{format}: {log:?}");
+        assert_eq!(log[0].budget, 16_384, "{format}");
+        // The oversized answer is not repeated.
         assert_eq!(
-            requests.iter().filter(|body| **body == requests[1]).count(),
+            requests.iter().filter(|body| **body == requests[0]).count(),
             1,
             "{format}: the oversized answer must not be retried"
         );
         assert!(
-            log[2..].iter().all(|entry| entry.budget <= 8192),
+            log.iter().all(|entry| entry.budget == 16_384),
             "{format}: {log:?}"
         );
         assert_eq!(
-            (log[2].stage, log[3].stage, log[2].budget),
-            ("fragment", "fragment", 4096),
+            (log[1].stage, log[2].stage, log[1].budget),
+            ("fragment", "fragment", 16_384),
             "{format}: {log:?}"
         );
-        assert!(!log[2].truncated && !log[3].truncated, "{format}: {log:?}");
+        assert!(!log[1].truncated && !log[2].truncated, "{format}: {log:?}");
         assert_eq!(
             fixture.store.history(&fixture.id).unwrap().len(),
             before.len() + 1,
@@ -2424,7 +2518,7 @@ async fn persistent_empty_summaries_keep_the_finish_reason_and_sizes_in_the_fina
             "{format}: {text}"
         );
         assert!(
-            text.contains("8192-token output budget"),
+            text.contains("16384-token output budget"),
             "{format}: {text}"
         );
         // A provider that reports no usage says so instead of claiming zero.
@@ -2495,10 +2589,10 @@ async fn persistent_oversized_summaries_keep_the_limit_and_sizes_in_the_final_er
             text.contains("original history retained"),
             "{format}: {text}"
         );
-        // An oversized body is never retried unchanged and never raises.
+        // An oversized body is never retried unchanged and never escalates.
         let log = sent_log(&fixture);
         assert!(
-            log.iter().all(|entry| entry.budget <= 8192),
+            log.iter().all(|entry| entry.budget == 16_384),
             "{format}: {log:?}"
         );
         assert_eq!(fixture.store.history(&fixture.id).unwrap(), before);
