@@ -125,9 +125,12 @@ export default function PlusMenu({
               <button
                 key={skill.id}
                 onClick={() => onSelectSkill(skill)}
-                className="w-full text-left px-4 py-2 text-[13px] text-deepseek-text hover:bg-deepseek-hover transition-colors truncate"
+                className="w-full flex items-center justify-between gap-2 px-4 py-2 text-[13px] text-deepseek-text hover:bg-deepseek-hover transition-colors"
               >
-                {skill.name}
+                <span className="truncate">{skill.name}</span>
+                {skill.state === 'user-only' && (
+                  <span className="text-[11px] text-deepseek-textSecondary flex-shrink-0">user-only</span>
+                )}
               </button>
             )) : (
               <div className="px-4 py-2 text-[12px] text-deepseek-textSecondary italic">No skills enabled</div>

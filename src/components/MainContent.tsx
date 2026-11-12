@@ -9,6 +9,7 @@ import { useParams, useNavigate, useLocation } from 'react-router-dom';
 import { IconPlus, IconVoice, IconWebSearch } from './Icons';
 import ClaudeLogo from './ClaudeLogo';
 import { getConversation, sendMessage, createConversation, getUser, updateConversation, deleteMessagesFrom, deleteMessagesTail, branchConversation, compactConversation, answerUserQuestion, respondToolPermission, getUserUsage, getGenerationStatus, stopGeneration, getContextSize, getStreamStatus, reconnectStream, getSkills, warmEngine, getProjects, getProject, createProjectConversation, attachConversationToProject, Project, getProviders } from '../api';
+import { listSkillCommands } from '../api/skills';
 import ToolPermissionPrompt from './ToolPermissionPrompt';
 import PermissionDialog, { ApprovalInfo } from './PermissionDialog';
 import { permissionApprovalAPI } from '../utils/tauriAPI';
@@ -21,6 +22,7 @@ import { useStreamingStore } from '../stores/useStreamingStore';
 import { useUIStore } from '../stores/useUIStore';
 import { useAuthStore } from '../stores/useAuthStore';
 import { useProjectStore } from '../stores/useProjectStore';
+import { mergeSkillMenu } from '../features/plus-menu/skillMenu';
 import { useToolStore } from '../stores/useToolStore';
 import MarkdownRenderer from './MarkdownRenderer';
 import ModelSelector, { SelectableModel } from './ModelSelector';
@@ -524,13 +526,17 @@ const MainContent = ({ onNewChat, resetKey, tunerConfig, onOpenDocument, onArtif
     return () => observer.disconnect();
   }, [activeId, messages.length]);
 
-  // Load enabled skills for the plus menu
+  // Load enabled skills and core slash skills for the plus menu
   useEffect(() => {
     if (!showPlusMenu) { setShowSkillsSubmenu(false); setShowProjectsSubmenu(false); return; }
-    getSkills().then((data: any) => {
-      const all = [...(data.examples || []), ...(data.my_skills || [])];
-      setEnabledSkills(all.filter((s: any) => s.enabled).map((s: any) => ({ id: s.id, name: s.name, description: s.description })));
-    }).catch(() => {});
+    const loadSkills = async () => {
+      const [manager, commands] = await Promise.allSettled([getSkills(), listSkillCommands()]);
+      setEnabledSkills(mergeSkillMenu(
+        manager.status === 'fulfilled' ? manager.value : {},
+        commands.status === 'fulfilled' ? commands.value : {},
+      ));
+    };
+    loadSkills().catch(() => {});
     getProjects().then((data: Project[]) => {
       setProjectList((data || []).filter(p => !p.is_archived));
     }).catch(() => {});
@@ -1846,7 +1852,7 @@ const MainContent = ({ onNewChat, resetKey, tunerConfig, onOpenDocument, onArtif
     },
     onSelectSkill: (skill: any) => {
       setShowPlusMenu(false); setShowSkillsSubmenu(false);
-      const slug = skill.name.toLowerCase().replace(/\s+/g, '-');
+      const slug = skill.slug || skill.name.toLowerCase().replace(/\s+/g, '-');
       setSelectedSkill({ name: skill.name, slug, description: skill.description });
       setInputText(prev => prev ? `/${slug} ${prev}` : `/${slug} `);
       inputRef.current?.focus();

@@ -54,6 +54,13 @@ export async function listSkills() {
   return res.json();
 }
 
+/** Slash-invocable skills with their states, as `/name` resolves in a Desktop turn. */
+export async function listSkillCommands(workspace?: string) {
+  const query = workspace ? `?workspace=${encodeURIComponent(workspace)}` : '';
+  const res = await request(`/skills/commands${query}`);
+  return res.json();
+}
+
 /** Returns the normal chat SSE response; consume it with the chat stream handler. */
 export async function executeSkill(id: string, options: {
   input: string;

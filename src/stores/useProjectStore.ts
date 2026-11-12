@@ -5,6 +5,8 @@ interface EnabledSkill {
   id: string;
   name: string;
   description?: string;
+  slug?: string;
+  state?: string;
 }
 
 interface SelectedSkill {
