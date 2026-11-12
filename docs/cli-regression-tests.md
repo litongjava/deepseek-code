@@ -450,6 +450,73 @@ git diff --check
 
 数组 own-property 检查使用 QuickJS 的 native `JS_GetOwnProperty`（空 descriptor），不经过 `in`、`Object.keys` 或任何可被脚本替换的 intrinsic；边界仍会先做一次 own-key 连续性扫描，再在每次读取前逐 index 复查。这些用例只证明 JS 引擎、边界和限制，不证明权限、Hook、历史、持久化或真实执行器分发。Android（返回 `UnsupportedPlatform`，未构建）、Windows、macOS 未验证；阻塞式非 async host handler 不能被抢占；`run` 是 `!Send`，集成时必须由专用 current-thread executor 持有 VM。
 
+## ToolScript 执行器桥接（J4，引擎内部）
+
+`crates/core/src/native_engine/toolscript_bridge.rs` 是 `ToolLoopExecutor::run_toolscript` 的内部入口：真实 QuickJS 脚本的 `tools.call` 走现有 `prepare_tool_call_with`/`complete_tool_call_with`（加载策略、实时权限模式、Plan reset、Pre/Post hook、真实权限提示、路径/文件状态/MCP/sandbox），不注册模型可见工具，也没有持久后台任务生命周期。VM 在专用 16 MiB 线程的 current-thread runtime 上运行，只通过有界 channel 与执行器交换 JSON/id，不使用 `unsafe Send/Sync`。完整契约见 `docs/toolscript-executor-bridge.md`。
+
+改动该目录、`services/tool_history.rs`、`tool_call_origins` schema、`SessionStore::model_history` 或 CLI `BackgroundTranscript` 后运行：
+
+```bash
+cargo test -p deepseek-code-core --lib toolscript_bridge
+cargo test -p deepseek-code-core --lib "toolscript::"
+cargo test -p deepseek-code-core --lib "services::tool_history"
+cargo test -p deepseek-code-core --lib "db::conversation_repo"
+cargo test -p deepseek-code-cli --bins background_transcript
+cargo check -p deepseek-code-core --lib
+cargo check -p deepseek-code-cli
+cargo check -p deepseek-code-desktop --all-targets
+```
+
+17 个用例（15 个集成用例 + 2 个 `toolscript_bridge` 内部单测）使用真实 QuickJS、真实 Read/Bash/Edit 和真实 SQLite：
+
+- `sequential_calls_execute_real_tools_and_persist_after_reopen`：值/文件正确；事件顺序为 origin 先于 start；经共享 writer 持久化并重开后 4 行、独立 `inv-` id、parent/sequence 正确；OpenAI 与 Anthropic `model_history` 都不含嵌套 id。
+- `repeated_calls_and_replayed_events_keep_distinct_rows`：相同工具/参数两次调用保留两行；重复事件不覆盖。
+- `plan_mode_denies_edit_without_a_file_effect`、`unloaded_and_lifecycle_tools_are_refused_before_side_effects`、`pre_hook_blocks_and_rewrites_nested_input`：拒绝/未加载/生命周期工具/Pre-hook block 均无副作用且有终态记录；`ToolUseDone` 输入为 hook 后的有效输入。
+- `live_policy_changes_apply_between_script_calls`：两次脚本之间 PlanMode 生效。
+- `script_error_propagates_and_history_keeps_the_terminal_outcome`：脚本异常保留已执行工具的真实结果。
+- `cancellation_during_bash_terminates_the_exact_owned_processes`：fixture 先发布 shell 与后台子进程的 PID 及启动时间，取消后等两个精确身份消失，并等待超过命令自身副作用时长的 horizon；失败路径只用精确 PID 清理，不发宽泛信号。`ProcessTree::drop` 只发送 `SIGKILL(-pgid)`，不等待内核回收，这一点在文档中如实声明。
+- `dropping_the_alive_receiver_stops_a_started_bash_body`（单测）：这是**私有 per-call alive 缝**，与全局 `Cancellation` 不同：真实 Bash body 启动并发布 PID 后直接 drop alive sender，验证已启动 body 被丢弃且精确进程消失。清理 guard 在 barrier 读到 PID+启动时间时立即构造、经 `tokio::join!` 返回并在最终断言前一直持有，`join` 另一分支 panic 时仍会 drop；不重写原有显式取消用例。
+- `settling_script_abandons_an_unawaited_call_before_dispatch`：脚本在最后一次 await 后立即结束时，未 await 的调用不会被提交（`calls_started == 0`）。
+- `a_permission_wait_aborts_when_the_script_settles_early`：调用确实进入权限等待（观察到 `ToolPermission`）后脚本结束，准备阶段立即放弃而不是等到 600 s。
+- `completed_sibling_results_survive_cancellation`：取消时已完成的安全调用保留成功记录，阻塞的兄弟标记为取消。
+- `a_cancelled_first_batch_records_every_later_admitted_call`：被取消的首批 Bash、排队的 Write/Read 都得到终态记录；`late.txt` 不存在；持久化 id 完整且被重放排除。
+- `a_hook_rewritten_background_bash_is_refused_before_the_body`：hook 把 Bash 改写为 `run_in_background` 后仍在 body 前拒绝，无 sentinel、无 shell task 目录。
+- `a_hook_rewritten_mutation_does_not_overlap_a_safe_neighbor`：FIFO handshake 证明 hook 改写出的写命令不会与相邻安全调用并发。
+- `promise_all_reads_overlap_while_mutations_stay_serial`：FIFO handshake 证明安全读并发、写调用串行。
+- `a_prepared_mutation_with_a_gone_caller_never_runs`：body 前已放弃的写调用不会创建文件。
+
+`services::tool_history` 另有 6 个用例：row+origin 原子回滚、origin 先到而 row 未到时延后、冲突 origin 不重新认父、消息删除级联、late delta/start 不覆盖已完成输入、实时事件投影。Android（返回 `UnsupportedPlatform`）、Windows、macOS 未验证；Desktop `src-tauri` 仅转发 `nested_tool_call` 事件，尚未写 origins，且该工具未在 Desktop 注册。无模型可见注册、无 TaskGet/TaskStop、无持久后台脚本。
+
+## ToolScript 持久任务权限刷新（J2b）
+
+`crates/core/src/native_engine/toolscript_job.rs` 的 owner 每 500 ms 重新读取并**严格**应用整份持久权限快照（settings、会话规则、持久模式）。任一必需读取/解析/应用失败都会记录首个错误、取消该脚本并停止再接纳内层调用；终态为 `failed` + `policy_refresh_failed`，不会写成用户 `cancelled` 或 `completed`。此前 `if let Ok` 保留旧 Allow 的行为已删除。
+
+```bash
+env -u DEEPSEEK_CODE_BACKGROUND_CONTROL -u DEEPSEEK_CODE_BACKGROUND_JOB \
+  cargo test --locked -p deepseek-code-core --lib toolscript_job::j2_tests
+cargo test --locked -p deepseek-code-core --lib toolscript_job::j1_tests
+cargo build --locked -p deepseek-code-cli
+python3 ../dev-support/deepseek-code/toolscript-20261111/j2b/run_j2b.py \
+  target/debug/dcl /tmp/j2b-fixtures /tmp/j2b-result.json
+```
+
+6 个单测覆盖严格读取层。`toolscript_job::j2_tests` 5 个：损坏的会话规则、损坏的持久模式、存在但损坏的 settings 文件都带阶段失败，缺失文件不算失败；settings 中的 deny 不会被旧存储的 Allow 放宽；被拒绝的规则集不会清空已应用规则。`services::permission_updates::tests::strict_loading_rejects_malformed_permission_fields_the_lenient_path_skips` 1 个：`permissions` 不是对象、`deny` 是数字、`deny` 数组混入非字符串、`allow` 不是数组、`additionalDirectories` 混入非字符串、`defaultMode` 不是字符串、`deny` 规则非法，都在 strict 分支返回带文件名与字段的阶段错误，同时宽松路径对这些输入仍成功加载。
+
+真实 CLI 私有 worker（`DEEPSEEK_CODE_TOOLSCRIPT_JOB`）5 个用例，均使用隔离数据目录、本地 fixture provider（`127.0.0.1:1`，无真实凭据）、ask + 持久 `Bash: Allow`，脚本先完成一次 `Bash` marker，再进入有界真实工具调用循环等待 release 文件：
+
+- 会话规则损坏、持久模式损坏、settings 文件损坏、settings 为合法 JSON 但 `deny` 是数字（`{"permissions":{"deny":7}}`，即父级复现该缺陷的原始形状）：驱动等首个调用 `done` 后注入，再等 worker 自己写出 `policy_refresh_failed` 日志行（该行在请求取消之后写入），然后创建 release。断言终态 `failed`/`policy_refresh_failed`、错误阶段准确（结构倒例为 `permissions.deny must be an array of strings`）、`result.json` 的 `policy_refresh_failed=true` 且 `cancelled=false`、任务记录 `failed`、第一个 marker 存在、第二个 marker 不存在、`output.log` 保留已完成的调用记录、`calls_started`/`calls_succeeded` 为真实计数；恢复被破坏的来源后重跑同一 worker 必须被“terminal state”拒绝且 `state.json` 字节不变。
+- 运行中把持久规则改为 `Bash: Deny`：脚本捕获 `permission_denied` 后返回，终态 `completed`、`calls_succeeded=1`、第二个 marker 不存在，证明撤销在下一个调用生效。
+
+修复前的失败证据保留在 `supervision-20261110/restart-review-20261112/j2b-malformed-probe.json`（父级用同一 CLI 复现：`{"permissions":{"deny":7}}` 时 marker2 产生且 job `completed`），本轮的通过结果不能替代它。
+
+口径说明：
+
+- 500 ms 周期刷新**不是**每次调用即时读取的保证：同一窗口内已接纳的调用可能仍按旧策略执行。本场景只证明“刷新失败即停止并在下一调用前拒绝”，不证明所有权限边界即时一致。
+- 失败被检测前已经开始的并发批次按实际结果记录，不声称这些已发生的副作用被撤销。
+- 已执行调用保留在 `output.log` 与历史行中；`state.calls_*` 由同一事件流统计（脚本已返回时用引擎统计）。脚本在一次失败刷新同一 tick 内已返回的窄竞争会被记为 `failed`，其值保留在 `result.json` 的 `script_value`。
+- 未被覆盖的边界另行记录：每次调用的即时权限读取、等待审批期间撤销权限、运行中的 hooks 变化、J3 内层持久化、J4 真实审批、J5 停止清理。
+- 宽松的 CLI 交互路径（`load_settings`）不变；严格版本只在 ToolScript job 内使用。产品自身的 settings 写入是 temp+rename，不会产生半写文件。
+
 ## 按改动范围选择场景
 
 - `terminal/editor.rs`、`terminal/live.rs` 的按键处理：A、B、E1、E2、E3

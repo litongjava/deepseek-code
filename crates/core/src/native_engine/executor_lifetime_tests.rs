@@ -92,6 +92,7 @@ impl Fixture {
             conversation_id: self.id.clone(),
             messages: vec![json!({"role":"user","content":prompt})],
             context_boundary: None,
+            assistant_message_id: None,
             model: "fixture-model".into(),
             provider_id: Some("fixture".into()),
             effort: None,

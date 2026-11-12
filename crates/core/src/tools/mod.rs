@@ -17,6 +17,7 @@ pub mod plan_import;
 mod read;
 mod search;
 pub mod tasks;
+pub mod toolscript;
 
 /// Whether a plugin language server declaration is usable by the LSP tool.
 pub fn lsp_config_is_valid(server: &serde_json::Value) -> bool {
@@ -433,6 +434,7 @@ pub fn get_tool_definitions() -> Vec<ToolDefinition> {
     }
 
     defs.extend(tasks::definitions());
+    defs.push(toolscript::definition());
     defs.extend(coordination::definitions());
     defs.extend(teams::definitions());
     defs.extend(external_agents::definitions());

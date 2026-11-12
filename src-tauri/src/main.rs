@@ -89,6 +89,15 @@ fn main() {
     if let Some(code) = deepseek_code_core::tools::sandbox::run_bridge_from_args() {
         std::process::exit(code);
     }
+    #[cfg(not(target_os = "android"))]
+    match deepseek_code_core::native_engine::toolscript_job::run_worker_from_env() {
+        Ok(true) => return,
+        Ok(false) => {}
+        Err(error) => {
+            eprintln!("ToolScript worker failed: {error:#}");
+            std::process::exit(1);
+        }
+    }
     let args: Vec<String> = std::env::args().skip(1).collect();
     if args.iter().any(|arg| matches!(arg.as_str(), "--help" | "-h")) {
         println!("Usage: dcd [--dangerously-skip-permissions]\n\nBypass switching and plan approval choices are available without launch flags.\n  --dangerously-skip-permissions        Start in bypass mode\n  --allow-dangerously-skip-permissions  Accepted for compatibility\n\nBypass retains explicit deny rules and configured sandbox restrictions.");
@@ -275,6 +284,7 @@ fn main() {
                 provider_id: None, effort: None,
                             conversation_id: cid.clone(),
                             context_boundary: None,
+                            assistant_message_id: None,
                             messages: vec![serde_json::json!({
                                 "role": "user",
                                 "content": msg.content.clone()

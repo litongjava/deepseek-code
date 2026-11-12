@@ -21,6 +21,7 @@ pub mod input_queue;
 pub mod batch;
 pub mod checkpoints;
 pub mod tool_hooks;
+pub mod tool_history;
 pub mod hook_progress;
 pub mod async_hooks;
 pub mod hook_callbacks;

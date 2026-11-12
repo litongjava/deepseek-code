@@ -61,6 +61,11 @@ pub struct ChatRequest {
     pub model: String,
     #[serde(default)]
     pub provider_id: Option<String>,
+    /// The assistant message that owns this turn's persisted tool rows. A host
+    /// that persists history supplies it; a ToolScript job attaches its nested
+    /// records to the same message independently of the turn.
+    #[serde(default)]
+    pub assistant_message_id: Option<String>,
     #[serde(default)]
     pub effort: Option<String>,
     pub system_prompt: Option<String>,
@@ -978,6 +983,7 @@ impl QueryEngine {
         .with_bundled_resources(self.bundled_resources.clone())
         .with_search_config_path(search_config_path)
         .with_conv_id(conv_id.clone())
+        .with_parent_message_id_option(request.assistant_message_id.clone())
         .with_answer_waiters(self.answer_waiters.clone())
         .with_permission_mailbox(self.permission_mailbox.clone())
         .with_permission_manager(self.permission_manager.clone())

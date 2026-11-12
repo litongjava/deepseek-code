@@ -144,6 +144,18 @@ fn report_error(error: &anyhow::Error) {
 const MAIN_STACK_SIZE: usize = 16 * 1024 * 1024;
 
 fn main() -> std::process::ExitCode {
+    // The ToolScript owner is a private process mode. It must be dispatched
+    // before this binary starts its own runtime: the worker builds one itself,
+    // and nesting a runtime inside a runtime would panic.
+    #[cfg(not(target_os = "android"))]
+    match deepseek_code_core::native_engine::toolscript_job::run_worker_from_env() {
+        Ok(true) => return std::process::ExitCode::SUCCESS,
+        Ok(false) => {}
+        Err(error) => {
+            eprintln!("ToolScript worker failed: {error:#}");
+            return std::process::ExitCode::FAILURE;
+        }
+    }
     // Only the stack size changes: the runtime keeps its multi-threaded
     // scheduler, and every worker thread gets the same room so a nested tool
     // call cannot overflow any of them.

@@ -15,6 +15,13 @@ mod permission_denied_tests;
 mod plan_tool;
 #[path = "script_workflow.rs"]
 mod script_workflow;
+// The embedded QuickJS bridge is unavailable where rquickjs is not linked.
+#[cfg(not(target_os = "android"))]
+#[path = "toolscript_bridge.rs"]
+mod toolscript_bridge;
+#[cfg(all(test, not(target_os = "android")))]
+#[path = "toolscript_bridge_tests.rs"]
+mod toolscript_bridge_tests;
 #[path = "skill_tool.rs"]
 mod skill_tool;
 #[path = "tool_approval.rs"]
@@ -195,6 +202,15 @@ pub enum EngineEvent {
         usage: u64,
         limit: u64,
     },
+    /// A call made by an embedded ToolScript run. It is a real executor
+    /// occurrence (its own `tool_use_id`), not a provider protocol item: the
+    /// provider never emitted it, so hosts must persist it as history only and
+    /// never replay it as an assistant `tool_use` / `tool_result` pair.
+    NestedToolCall {
+        tool_use_id: String,
+        parent_tool_use_id: String,
+        sequence: u64,
+    },
 }
 
 pub struct ToolLoopExecutor {
@@ -224,6 +240,10 @@ pub struct ToolLoopExecutor {
     mcp_read_only_tools: std::collections::HashSet<String>,
     streaming_tool_args: HashMap<String, StreamingToolCall>,
     conv_id: Option<String>,
+    /// The assistant message that owns this turn's tool rows, when the host
+    /// persists them. A ToolScript job uses it to write nested history
+    /// records independently of the parent's ended turn.
+    parent_message_id: Option<String>,
     answer_waiters: Arc<Mutex<HashMap<String, oneshot::Sender<String>>>>,
     permission_mailbox: crate::native_engine::permission_response::Mailbox,
     permission_interrupted: std::sync::Mutex<Option<String>>,
@@ -916,6 +936,7 @@ impl ToolLoopExecutor {
             mcp_read_only_tools: std::collections::HashSet::new(),
             streaming_tool_args: HashMap::new(),
             conv_id: None,
+            parent_message_id: None,
             answer_waiters: Arc::new(Mutex::new(HashMap::new())),
             permission_mailbox: Default::default(),
             permission_interrupted: std::sync::Mutex::new(None),
@@ -1207,6 +1228,158 @@ impl ToolLoopExecutor {
         let result = self.run_builtin(name, input, &cwd, approved).await;
         let (output, failed) = self.finish_builtin(name, input, id, result);
         (input.clone(), output, failed)
+    }
+
+    /// Runs one ToolScript job through its durable owner.
+    ///
+    /// A background call returns the task id after admission. A foreground call
+    /// waits a bounded time for the result without ever cancelling the script;
+    /// if the wait elapses it returns the running task id instead.
+    async fn execute_toolscript_tool(
+        &mut self,
+        input: &Value,
+        id: &str,
+    ) -> (Value, String, bool) {
+        let failed = |message: String| (input.clone(), message, true);
+        let Some(root) = self
+            .search_config_path
+            .as_deref()
+            .and_then(std::path::Path::parent)
+            .map(std::path::Path::to_path_buf)
+        else {
+            return failed("ToolScript needs an interactive session data directory.".into());
+        };
+        let Some(session) = self.conv_id.clone() else {
+            return failed("ToolScript needs a session.".into());
+        };
+        let source = input["source"].as_str().unwrap_or_default();
+        if source.trim().is_empty() {
+            return failed("ToolScript source is required.".into());
+        }
+        if source.len() > 64 * 1024 {
+            return failed("ToolScript source exceeds the 64 KiB limit.".into());
+        }
+        let background = input["run_in_background"] == true;
+        let mode = self
+            .permission_manager
+            .as_ref()
+            .map(|manager| manager.get_mode())
+            .unwrap_or(crate::permissions::PermissionMode::AskPermissions);
+        let spec = crate::native_engine::toolscript_job::JobSpec {
+            id: String::new(),
+            session: session.clone(),
+            workspace: self.workspace_cwd.clone(),
+            assistant_id: self.parent_message_id.clone(),
+            parent_tool_use_id: id.to_owned(),
+            provider_id: self.provider.provider.id.clone(),
+            model: self.provider.model.id.clone(),
+            source: source.to_owned(),
+            args: input.get("args").cloned().unwrap_or(Value::Null),
+            data_dir: root.to_string_lossy().into_owned(),
+            settings_path: self
+                .search_config_path
+                .as_ref()
+                .map(|path| path.to_string_lossy().into_owned())
+                .unwrap_or_default(),
+            loaded_tools: self.loaded_tools.iter().cloned().collect(),
+            reasoning: self.reasoning_mode.clone(),
+            permission_mode: crate::services::session_permission_mode::name(mode).to_owned(),
+            allowed_tools: self.allowed_tools.clone(),
+            exposed_tools: self
+                .exposed_tools
+                .as_ref()
+                .map(|names| names.iter().cloned().collect()),
+            source_sha256: ring::digest::digest(&ring::digest::SHA256, source.as_bytes())
+                .as_ref()
+                .iter()
+                .map(|byte| format!("{byte:02x}"))
+                .collect(),
+            // Only a foreground call on a live host can answer prompts.
+            interactive: !background && self.permission_host_available,
+        };
+        let start = match crate::native_engine::toolscript_job::start_job(&root, spec).await {
+            Ok(start) => start,
+            Err(error) => return failed(format!("ToolScript could not start: {error:#}")),
+        };
+        if background {
+            return (
+                input.clone(),
+                json!({
+                    "task_id": start.id,
+                    "status": "running",
+                    "message": "ToolScript is running in the background. Use TaskGet with this task id for its paged output (block:true waits) and TaskStop to cancel it.",
+                })
+                .to_string(),
+                false,
+            );
+        }
+        let deadline = tokio::time::Instant::now()
+            + crate::native_engine::toolscript_job::FOREGROUND_WAIT;
+        loop {
+            // A live host answers the owner's permission requests while this
+            // call waits; without one the owner denies them itself.
+            self.service_toolscript_approvals(&start.directory).await;
+            let state = match crate::native_engine::toolscript_job::state(&start.directory) {
+                Ok(state) => state,
+                Err(error) => return failed(format!("ToolScript state is unreadable: {error:#}")),
+            };
+            if state.is_terminal() {
+                let value =
+                    crate::native_engine::toolscript_job::terminal_output(&start.directory, &start.id);
+                return (
+                    input.clone(),
+                    serde_json::to_string(&value).unwrap_or_default(),
+                    state.status != "completed",
+                );
+            }
+            if tokio::time::Instant::now() >= deadline {
+                return (
+                    input.clone(),
+                    json!({
+                        "task_id": start.id,
+                        "status": state.status,
+                        "message": "ToolScript is still running. Use TaskGet with this task id for its paged output and TaskStop to cancel it.",
+                    })
+                    .to_string(),
+                    false,
+                );
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+    }
+
+    /// Forwards pending owner approval requests to the live host and records
+    /// the answer. A failure is written as an explicit denial.
+    async fn service_toolscript_approvals(&self, directory: &std::path::Path) {
+        let Ok(entries) = std::fs::read_dir(directory.join("approvals")) else {
+            return;
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            let Some(name) = path.file_name().and_then(|name| name.to_str()) else {
+                continue;
+            };
+            let Some(stem) = name.strip_suffix(".request.json") else {
+                continue;
+            };
+            let response = path.with_file_name(format!("{stem}.response.json"));
+            if response.exists() {
+                continue;
+            }
+            let Ok(bytes) = std::fs::read(&path) else {
+                continue;
+            };
+            let Ok(value) = serde_json::from_slice::<Value>(&bytes) else {
+                continue;
+            };
+            let tool = value["tool"].as_str().unwrap_or_default().to_owned();
+            let tool_input = value.get("input").cloned().unwrap_or(Value::Null);
+            let body = match self.request_tool_approval_with(&tool, &tool_input, stem).await {
+                Ok(updated) => json!({"decision": "allow", "updated_input": updated}),
+                Err(error) => json!({"decision": "deny", "message": format!("{error:#}")}),
+            };
+            let _ = std::fs::write(&response, body.to_string());
+        }
     }
 
     /// Whether a call only reads, so it may run alongside neighbouring calls.
@@ -1923,6 +2096,43 @@ impl ToolLoopExecutor {
     pub fn with_conv_id(mut self, conv_id: String) -> Self {
         self.conv_id = Some(conv_id);
         self
+    }
+
+    pub fn with_parent_message_id(mut self, message_id: String) -> Self {
+        self.parent_message_id = Some(message_id);
+        self
+    }
+
+    pub fn with_parent_message_id_option(mut self, message_id: Option<String>) -> Self {
+        self.parent_message_id = message_id;
+        self
+    }
+
+    /// Treat these built-ins as already loaded, as a resumed session or a
+    /// durable job must. The loading gate is never widened beyond this set.
+    pub(super) fn with_loaded_tools(
+        mut self,
+        loaded: std::collections::BTreeSet<String>,
+    ) -> Self {
+        self.loaded_tools = loaded;
+        self
+    }
+
+    /// The tool names this request actually carried, so a resident call is
+    /// gated exactly as it was for the originating request.
+    pub(super) fn with_exposed_tools(
+        mut self,
+        exposed: std::collections::HashSet<String>,
+    ) -> Self {
+        self.exposed_tools = Some(exposed);
+        self
+    }
+
+    /// A durable owner answers permission prompts through its own channel.
+    pub(super) fn permission_mailbox_handle(
+        &self,
+    ) -> crate::native_engine::permission_response::Mailbox {
+        self.permission_mailbox.clone()
     }
 
     pub fn with_answer_waiters(
@@ -3344,6 +3554,12 @@ impl ToolLoopExecutor {
                     .await;
             }
             PermissionResult::Granted => {}
+        }
+
+        if crate::tools::toolscript::is_toolscript(tool_name) {
+            return CallStep::Finished(
+                self.execute_toolscript_tool(tool_input, _tool_use_id).await,
+            );
         }
 
         if tool_name == "ToolSearch" {

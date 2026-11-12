@@ -198,6 +198,7 @@ pub(super) async fn start_chat(
                 conversation_id: conv_id.clone(),
                 // The client supplies the messages; no boundary can be proven.
                 context_boundary: None,
+                assistant_message_id: Some(first_assistant_id.clone()),
                 messages: messages.clone(),
                 model: if model.is_empty() { "claude-sonnet-4-6".to_string() } else { model.clone() },
                 system_prompt: req.system_prompt.clone(),
@@ -399,6 +400,16 @@ pub(super) async fn start_chat(
                     Some(serde_json::json!({
                         "type": "thinking",
                         "thinking": thinking,
+                    }))
+                }
+                crate::native_engine::tool_loop::EngineEvent::NestedToolCall { tool_use_id, parent_tool_use_id, sequence } => {
+                    // Engine-only increment: forwarded for hosts that record
+                    // nested history; not a provider protocol item.
+                    Some(serde_json::json!({
+                        "type": "nested_tool_call",
+                        "tool_use_id": tool_use_id,
+                        "parent_tool_use_id": parent_tool_use_id,
+                        "sequence": sequence,
                     }))
                 }
                 crate::native_engine::tool_loop::EngineEvent::ToolUseStart { tool_use_id, tool_name, tool_input, text_before, display_title } => {

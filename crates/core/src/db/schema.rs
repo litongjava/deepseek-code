@@ -155,6 +155,19 @@ CREATE TABLE IF NOT EXISTS tool_calls (
     FOREIGN KEY (message_id) REFERENCES messages(id) ON DELETE CASCADE
 );
 
+-- Nested calls made by an embedded ToolScript run. The parent is the script's
+-- own occurrence; `sequence` is the script's internal admission order. The
+-- cascade is load-bearing: deleting a message cascades to tool_calls, and
+-- connections run PRAGMA foreign_keys=ON.
+CREATE TABLE IF NOT EXISTS tool_call_origins (
+    tool_call_id TEXT PRIMARY KEY REFERENCES tool_calls(id) ON DELETE CASCADE,
+    parent_tool_call_id TEXT NOT NULL,
+    sequence INTEGER NOT NULL,
+    origin TEXT NOT NULL DEFAULT 'toolscript'
+);
+CREATE INDEX IF NOT EXISTS idx_tool_call_origins_parent
+    ON tool_call_origins(parent_tool_call_id);
+
 -- Messages typed while a turn runs, read after its next tool results.
 CREATE TABLE IF NOT EXISTS session_input_queue (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
