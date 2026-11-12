@@ -145,7 +145,8 @@ impl Permissions {
     }
     pub async fn cancel(&self) {
         for (id, (_, _, tx)) in self.pending.lock().await.drain() {
-            let _ = tx.send(Err(anyhow::anyhow!("SDK turn interrupted")));
+            // Keep the common cancellation prefix when Session adds context.
+            let _ = tx.send(Err(anyhow::anyhow!("Interrupted by SDK host")));
             let _ = crate::session::emit_json(
                 &json!({"type":"control_cancel_request","request_id":id}),
             );

@@ -159,7 +159,7 @@ fn tool_results<'a>(frames: &'a [Value], id: &str) -> Vec<&'a Value> {
         .collect()
 }
 
-fn persisted_tool_calls(root: &Path, session: &str) -> Vec<message_repo::ToolCallRow> {
+pub(super) fn persisted_tool_calls(root: &Path, session: &str) -> Vec<message_repo::ToolCallRow> {
     let paths = RuntimePaths::new(data(root)).unwrap();
     let store = SessionStore::new(paths.open_database().unwrap());
     let messages = store
@@ -351,7 +351,7 @@ async fn sdk_input_closed_while_the_patch_waits_for_approval_never_writes() {
     client.send(user("apply the patch")).await;
 
     let request = permission_request(&mut client).await;
-    one_permission_request(&request);
+    let occurrence = one_permission_request(&request);
     unchanged(root.path());
 
     // Closing the input while the real request is pending must end the process
@@ -372,6 +372,12 @@ async fn sdk_input_closed_while_the_patch_waits_for_approval_never_writes() {
             .filter(|call| call.name == "ApplyPatch")
             .all(|call| call.is_error),
         "the cancelled call must not persist as success: {calls:?}"
+    );
+    super::approval_cancellation::assert_cancelled_call(
+        root.path(),
+        session,
+        &occurrence,
+        "ApplyPatch",
     );
     let jobs =
         deepseek_code_core::services::background_sessions::list(&data(root.path()), None).unwrap();

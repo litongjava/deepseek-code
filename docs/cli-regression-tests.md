@@ -420,6 +420,15 @@ env -u DEEPSEEK_CODE_DATA_DIR -u DEEPSEEK_CODE_BACKGROUND_CONTROL -u DEEPSEEK_CO
 
 工具调用身份采用“每次执行一个 occurrence id”的约定：事件、显示编号、`permission_denials`、`tool_result`、SDK `can_use_tool.tool_use_id`、hook payload 和持久化行都使用 `inv-<turn-scope>-<n>`；供应商原始调用 ID 只用于出站协议配对。因此 SDK 测试断言的是实际观察到的 occurrence id（非空、`inv-` 前缀、不等于 mock 的原始 `apply-1`），并单独在 provider 请求体中确认 `tool_calls[].id` 与 `tool_call_id` 仍是同一条原始 ID；持久化行 id 以 `:<occurrence>` 结尾。`sdk_reused_provider_id_keeps_occurrences_prompts_and_records_independent` 覆盖同一供应商 ID 被连续复用两次：两次补丁目标都处于 `Confirm`，第一次批准后只写入 `a.txt`，第二次仍单独弹出审批请求（request id 和 occurrence id 都与第一次不同），拒绝后 `secret.txt` 保持不变，两条持久化记录一条成功一条失败，provider 侧两次 `tool_call_id` 仍是同一个原始 ID。不要把该用例改成依赖自动放行来“通过”。
 
+SDK 审批等待期间关闭输入或发送 interrupt 时，还要核对持久化终态，不能只检查进程退出和文件不变：
+
+- `cargo test --locked -p deepseek-code-cli --test sdk apply_patch_permissions`：包含原 `sdk_input_closed_while_the_patch_waits_for_approval_never_writes`；准确 occurrence 对应且恰好一条工具行，`is_error=true`、`output` 为既有 `UNFINISHED_TOOL_RESULT`，关联回合为 cancelled，补丁目标字节不变。
+- `cargo test --locked -p deepseek-code-cli --test sdk approval_cancellation`：Write/Bash × EOF/interrupt 四个用例，每个覆盖 OpenAI/Anthropic；等待真实 `can_use_tool` 后取消，无目标文件、无多余模型请求，interrupt 后同 session 下一轮正常完成，旧调用终态不被改写。此文件是 SDK 子模块，没有独立的 `--test apply_patch_permissions` 目标。
+- `cargo test --locked -p deepseek-code-cli --bin dcl -- background_transcript_tests compaction_cancellation_tests`：先收齐已报告结果，再仅对缺少结果的工具补错误终态；已有成功（包括空输出）、失败与队列中晚到的完成结果保持，重复结算不改值。`SDK turn interrupted` 归为取消，不扩宽普通提供商/Hook 错误的分类。
+- 同时运行 SDK 全套及 core 的 `tool_approval::tests::`、`tool_loading_tests::`、`executor_lifetime_tests::`、`child_transcript::tests::`；分别覆盖审批决策、审批/运行取消、执行器与强制写库尾部的所有权、子会话最后事件收集。模型入口、核心 mailbox 取消及 Desktop 运行是不同证据层，不能互相替代。
+
+公共收尾使用结果未知的既有提示，不声称正在执行的工具没有副作用或已回滚；只有审批测试通过文件/marker 断言证明没有执行。真实完成结果必须优先于取消时的兜底结果。
+
 `ApplyPatch` 只做进程内失败一致性：受控失败会回滚已写文件，但进程崩溃没有日志恢复，不能当作跨文件原子操作验收。Linux 上的单元与 CLI 证据不代表 Windows 的 ACL/只读属性行为。
 
 ## 按改动范围选择场景

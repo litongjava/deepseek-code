@@ -1468,8 +1468,10 @@ impl Session {
                     EngineEvent::Text(_) | EngineEvent::ToolUseStart { .. } | EngineEvent::ToolUseDone { .. } | EngineEvent::MessageStop { .. } => round_open = false,
                     _ => {}
                 }
+                // Track pending calls for every host so cancellation can settle
+                // them; only background/JSON hosts publish intermediate rows.
+                live_transcript.observe(&event, &mut tools);
                 if background_transcript {
-                    live_transcript.observe(&event, &mut tools);
                     if matches!(&event, EngineEvent::ToolUseStart { .. } | EngineEvent::ToolUseDone { .. } | EngineEvent::PipelineToolResult { .. } | EngineEvent::ToolPermission { .. } | EngineEvent::AskUser { .. }) {
                         best_effort_live_write("transcript", live_transcript.flush(&self.store.db, &self.id, &assistant_id, &text, &thinking_text, &tools));
                     }
@@ -1828,7 +1830,7 @@ impl Session {
         // After joining, drain the last reported snapshots for every frontend.
         {
             while let Ok(event) = events.try_recv() {
-                if background_transcript { live_transcript.observe(&event, &mut tools); }
+                live_transcript.observe(&event, &mut tools);
                 match event {
                     EngineEvent::Text(delta) => {
                         if std::mem::take(&mut separate_text) && !text.is_empty() && !text.ends_with('\n') { text.push_str("\n\n"); }
@@ -1861,6 +1863,12 @@ impl Session {
                     }
                     _ => {}
                 }
+            }
+            // The executor has stopped and reported completions have been
+            // drained. Only now may unreported calls receive an unknown-outcome
+            // error; never overwrite a real result with cancellation bookkeeping.
+            if !completed || turn_result.is_err() || error.is_some() {
+                live_transcript.finish_interrupted(&mut tools);
             }
             if background_transcript {
                 live_transcript.dirty = true;
@@ -2251,6 +2259,16 @@ impl BackgroundTranscript {
         self.dirty = true;
     }
 
+    /// Called after the executor is joined and its final events are consumed.
+    /// Missing output proves no result was reported, not that no effects ran.
+    fn finish_interrupted(&mut self, tools: &mut [message_repo::ToolCallRow]) {
+        for tool in tools.iter_mut().filter(|tool| tool.output.is_none()) {
+            tool.output = Some(message_repo::UNFINISHED_TOOL_RESULT.to_owned());
+            tool.is_error = true;
+            self.dirty = true;
+        }
+    }
+
     fn flush(&mut self, db: &deepseek_code_core::db::DbManager, session_id: &str, assistant_id: &str, text: &str, thinking: &str, tools: &[message_repo::ToolCallRow]) -> Result<()> {
         if !self.dirty { return Ok(()); }
         db.with_conn(|conn| -> Result<()> {
@@ -2272,6 +2290,55 @@ impl BackgroundTranscript {
 #[cfg(test)]
 mod background_transcript_tests {
     use super::*;
+
+    #[test]
+    fn interruption_settles_only_unreported_calls_after_draining_results() {
+        let mut live = BackgroundTranscript::default();
+        let mut tools: Vec<_> = ["Bash", "Write", "Read", "ApplyPatch"]
+            .into_iter()
+            .enumerate()
+            .map(|(index, name)| message_repo::ToolCallRow {
+                id: format!("inv-{index}"),
+                message_id: String::new(),
+                name: name.into(),
+                input: Some("{}".into()),
+                output: None,
+                is_error: false,
+                sort_order: index as i64,
+            })
+            .collect();
+        tools[1].output = Some(String::new()); // Empty is still a real success.
+        tools[2].output = Some("Permission denied".into());
+        tools[2].is_error = true;
+        // A completion already in the event queue wins over the fallback.
+        live.observe(
+            &EngineEvent::ToolUseDone {
+                tool_use_id: "inv-3".into(),
+                tool_name: "ApplyPatch".into(),
+                tool_input: json!({"patch":"reviewed input"}),
+                output: "Actual completed result".into(),
+                is_error: false,
+            },
+            &mut tools,
+        );
+        let completed = serde_json::to_value(&tools[1..]).unwrap();
+        live.dirty = false;
+        live.finish_interrupted(&mut tools);
+        assert!(live.dirty);
+        assert_eq!(tools[0].id, "inv-0");
+        assert_eq!(tools[0].input.as_deref(), Some("{}"));
+        assert_eq!(
+            tools[0].output.as_deref(),
+            Some(message_repo::UNFINISHED_TOOL_RESULT)
+        );
+        assert!(tools[0].is_error);
+        assert_eq!(serde_json::to_value(&tools[1..]).unwrap(), completed);
+        let settled = serde_json::to_value(&tools).unwrap();
+        live.dirty = false;
+        live.finish_interrupted(&mut tools);
+        assert!(!live.dirty);
+        assert_eq!(serde_json::to_value(&tools).unwrap(), settled);
+    }
 
     #[test]
     fn worker_snapshot_retains_full_text_thinking_and_updates_one_tool() {
@@ -3107,6 +3174,7 @@ mod compaction_cancellation_tests {
             "Interrupted",
             "Interrupted: automatic compaction cancelled before it was saved",
             "Interrupted: automatic compaction cancelled after commit",
+            "Interrupted by SDK host (session fixture)",
         ] {
             assert!(
                 super::is_turn_cancel_error(&anyhow::anyhow!(message)),
@@ -3118,6 +3186,7 @@ mod compaction_cancellation_tests {
             "Hook failed",
             "Hook failed: cancel requested",
             "Autocompact task cancelled unexpectedly by provider",
+            "SDK turn interrupted unexpectedly by provider",
         ] {
             assert!(
                 !super::is_turn_cancel_error(&anyhow::anyhow!(message)),
