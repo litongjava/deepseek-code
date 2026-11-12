@@ -129,6 +129,7 @@ enum Message {
     ),
     PermissionMode(String),
     Commands(Vec<(String, String)>),
+    ProviderIds(Vec<String>),
     Details(Vec<(String, String)>),
     Transcript(Vec<super::change_view::Line>),
     Panel(Vec<(String, String)>, bool),
@@ -207,6 +208,10 @@ impl TerminalInput {
                     }
                     Message::Commands(commands) => {
                         editor.set_commands(commands);
+                        continue;
+                    }
+                    Message::ProviderIds(ids) => {
+                        editor.set_provider_ids(ids);
                         continue;
                     }
                     Message::Draft(draft) => {
@@ -329,6 +334,11 @@ impl TerminalInput {
 
     pub fn set_commands(&self, commands: Vec<(String, String)>) {
         let _ = self.requests.send(Message::Commands(commands));
+    }
+
+    /// Saved provider IDs for `/provider refresh` completion.
+    pub fn set_provider_ids(&self, ids: Vec<String>) {
+        let _ = self.requests.send(Message::ProviderIds(ids));
     }
 
     /// Reload before the next prompt. Invalid files leave the prior valid
