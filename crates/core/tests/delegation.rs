@@ -131,6 +131,7 @@ async fn run_case(cancel: bool, team: bool) {
             max_turns: None,
             response_schema: None,
             conversation_id: id.clone(),
+            assistant_message_id: None,
             context_boundary: None,
             messages: vec![json!({"role":"user","content":"Delegate inspection"})],
             model: "fixture".into(),

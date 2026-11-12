@@ -136,6 +136,29 @@ pub async fn execute_for_session_async(
             .or_else(|| input["taskId"].as_str())
             .or_else(|| input["id"].as_str())
         {
+            // A ToolScript job has its own durable owner and output store. Its
+            // session ownership is the task record, so a foreign session cannot
+            // read or stop it.
+            if uuid::Uuid::parse_str(id).is_ok()
+                && root
+                    .join("toolscript-jobs")
+                    .join(id)
+                    .join("state.json")
+                    .is_file()
+            {
+                let record = read_for_session(id, root, session)?;
+                ensure!(
+                    record["metadata"]["toolscript_job"] == true,
+                    "Task belongs to another session"
+                );
+                if name == "TaskStop" {
+                    return crate::native_engine::toolscript_job::stop_job(root, session, id);
+                }
+                return crate::native_engine::toolscript_job::read_job(
+                    root, session, id, &input,
+                )
+                .await;
+            }
             if uuid::Uuid::parse_str(id).is_ok()
                 && root
                     .join("background-tasks")

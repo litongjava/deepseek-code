@@ -59,6 +59,13 @@ pub fn branch_conversation(conn: &Connection, source_id: &str, message_id: Optio
             if let Some(duration) = message_repo::tool_duration(&transaction, &tool.id)? { message_repo::set_tool_duration(&transaction, &new_tool_id, duration)?; }
             tool_ids.insert(tool.id, new_tool_id);
         }
+        // Nested ToolScript origins follow their tool rows into the branch,
+        // remapping both the child and the parent occurrence id.
+        for (child, parent, sequence) in message_repo::get_tool_origins_for_message(&transaction, &message.id)? {
+            if let (Some(new_child), Some(new_parent)) = (tool_ids.get(&child), tool_ids.get(&parent)) {
+                message_repo::save_tool_origin(&transaction, new_child, new_parent, sequence)?;
+            }
+        }
         let mut snapshots = message_repo::get_request_snapshots(&transaction, &message.id)?;
         if let Some(requests) = snapshots.as_array_mut() {
             for request in requests {

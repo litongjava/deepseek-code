@@ -64,6 +64,10 @@ tokio = { version = "1", features = ["full", "test-util"] }
 [target.'cfg(not(target_os = "android"))'.dependencies]
 # Desktop input control; Android apps cannot drive other apps this way.
 enigo = "0.2"
+# ToolScript orchestration runs on the locked rquickjs release already used by
+# the CLI workflow runner. The crate ships no Android bindings, so this stays
+# out of the Android dependency graph.
+rquickjs = { version = "0.14.0", features = ["futures"] }
 
 [target.'cfg(unix)'.dependencies]
 # `net` is for the managed PTY endpoint: a nonblocking `connect(2)` plus

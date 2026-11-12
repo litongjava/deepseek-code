@@ -130,7 +130,7 @@ async fn respond(
     let eof = inputs.iter().any(|value| value["eof"] == true);
     let turn = user_turns(&body);
     let framed = if !loaded {
-        // TaskInput is not a core tool: the model must load it first.
+        // Both TaskInput and TaskGet are deferred: load them before use.
         tool_call_frame(
             "call-search",
             "ToolSearch",

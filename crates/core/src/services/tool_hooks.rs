@@ -1356,7 +1356,84 @@ impl Drop for ProcessTree {
         unsafe {
             kill(-(self.0 as i32), 9);
         }
+        // Drop only *requests* cleanup. A ToolScript job that reports a
+        // completed cancellation must wait for the proof below instead of
+        // claiming the OS processes are gone.
+        pending_cleanup()
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .push(self.0);
     }
+}
+
+#[cfg(unix)]
+fn pending_cleanup() -> &'static std::sync::Mutex<Vec<u32>> {
+    static PENDING: std::sync::OnceLock<std::sync::Mutex<Vec<u32>>> = std::sync::OnceLock::new();
+    PENDING.get_or_init(Default::default)
+}
+
+#[cfg(unix)]
+fn process_group_alive(pid: u32) -> bool {
+    unsafe extern "C" {
+        fn kill(pid: i32, signal: i32) -> i32;
+    }
+    // Signal 0 only checks existence; the group is the one this tree owns.
+    unsafe { kill(-(pid as i32), 0) == 0 }
+}
+
+/// Proof that every process group a dropped tool body signalled is gone.
+pub(crate) struct CleanupReport {
+    /// Whether this platform can verify awaited cleanup at all.
+    pub(crate) verified: bool,
+    /// Groups still alive after the limit; empty means cleanup is complete.
+    pub(crate) pending: Vec<u32>,
+}
+
+/// Waits until the owned process groups signalled by dropped bodies are gone.
+///
+/// `ProcessTree::drop` cannot block, so this is the explicit boundary a caller
+/// must await before publishing a terminal "cancelled" state.
+pub(crate) async fn await_process_cleanup(limit: std::time::Duration) -> CleanupReport {
+    #[cfg(unix)]
+    {
+        let deadline = std::time::Instant::now() + limit;
+        loop {
+            let mut pending = pending_cleanup()
+                .lock()
+                .unwrap_or_else(|error| error.into_inner());
+            pending.retain(|pid| process_group_alive(*pid));
+            if pending.is_empty() {
+                return CleanupReport {
+                    verified: true,
+                    pending: Vec::new(),
+                };
+            }
+            if std::time::Instant::now() >= deadline {
+                return CleanupReport {
+                    verified: true,
+                    pending: pending.clone(),
+                };
+            }
+            drop(pending);
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = limit;
+        CleanupReport {
+            verified: false,
+            pending: Vec::new(),
+        }
+    }
+}
+
+#[cfg(unix)]
+pub(crate) fn clear_pending_cleanup() {
+    pending_cleanup()
+        .lock()
+        .unwrap_or_else(|error| error.into_inner())
+        .clear();
 }
 
 #[cfg(test)]

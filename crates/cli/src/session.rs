@@ -1635,6 +1635,7 @@ impl Session {
         let chat_request = ChatRequest {
             conversation_id: self.id.clone(),
             context_boundary,
+            assistant_message_id: Some(assistant_id.clone()),
             messages: history,
             model: self.model.clone(),
             provider_id: if self.auto_route {
@@ -2792,86 +2793,32 @@ fn best_effort_live_write(what: &str, result: Result<()>) {
 #[derive(Default)]
 struct BackgroundTranscript {
     dirty: bool,
+    /// Independent argument assembly for streaming deltas, kept out of the row
+    /// so a late delta cannot rewrite a completed call's input.
     arguments: std::collections::HashMap<String, String>,
+    /// Nested ToolScript calls observed in this turn, keyed by occurrence.
+    origins: deepseek_code_core::services::tool_history::ToolOrigins,
 }
 
 impl BackgroundTranscript {
     fn observe(&mut self, event: &EngineEvent, tools: &mut Vec<message_repo::ToolCallRow>) {
-        let (id, name, input, result) = match event {
-            EngineEvent::Text(_) | EngineEvent::Thinking(_) | EngineEvent::MessageStop { .. } => {
-                self.dirty = true;
-                return;
-            }
-            EngineEvent::ToolArgDelta { tool_use_id, delta } => {
-                let input = self.arguments.entry(tool_use_id.clone()).or_default();
-                input.push_str(delta);
-                (tool_use_id, None, input.clone(), None)
-            }
-            EngineEvent::ToolUseStart {
-                tool_use_id,
-                tool_name,
-                tool_input,
-                ..
-            } => (tool_use_id, Some(tool_name), tool_input.to_string(), None),
-            EngineEvent::ToolUseDone {
-                tool_use_id,
-                tool_name,
-                tool_input,
-                output,
-                is_error,
-            }
-            | EngineEvent::PipelineToolResult {
-                tool_use_id,
-                tool_name,
-                tool_input,
-                output,
-                is_error,
-                ..
-            } => (
-                tool_use_id,
-                Some(tool_name),
-                tool_input.to_string(),
-                Some((output, *is_error)),
-            ),
-            _ => return,
-        };
-        let index = tools
-            .iter()
-            .position(|tool| tool.id == *id)
-            .unwrap_or_else(|| {
-                tools.push(message_repo::ToolCallRow {
-                    id: id.clone(),
-                    message_id: String::new(),
-                    name: String::new(),
-                    input: None,
-                    output: None,
-                    is_error: false,
-                    sort_order: tools.len() as i64,
-                });
-                tools.len() - 1
-            });
-        let row = &mut tools[index];
-        if let Some(name) = name {
-            row.name = name.clone();
+        if matches!(
+            event,
+            EngineEvent::Text(_) | EngineEvent::Thinking(_) | EngineEvent::MessageStop { .. }
+        ) {
+            self.dirty = true;
+            return;
         }
-        // Late start/delta events must not overwrite a completed call's input,
-        // and a legacy completion without input must not erase the richer
-        // input already seen for this occurrence.
-        let rich = |text: &str| {
-            serde_json::from_str::<Value>(text)
-                .ok()
-                .is_some_and(|value| value.as_object().is_some_and(|fields| !fields.is_empty()))
-        };
-        let incoming_rich = rich(&input);
-        let existing_rich = row.input.as_deref().is_some_and(rich);
-        if (row.output.is_none() || result.is_some()) && (incoming_rich || !existing_rich) {
-            row.input = Some(input);
+        // The same projector the engine integration tests use, so the real CLI
+        // path and the tests persist tool rows and ToolScript origins alike.
+        if deepseek_code_core::services::tool_history::apply_event(
+            tools,
+            &mut self.origins,
+            &mut self.arguments,
+            event,
+        ) {
+            self.dirty = true;
         }
-        if let Some((output, is_error)) = result {
-            row.output = Some(output.clone());
-            row.is_error = is_error;
-        }
-        self.dirty = true;
     }
 
     /// Called after the executor is joined and its final events are consumed.
@@ -2902,12 +2849,14 @@ impl BackgroundTranscript {
                 "UPDATE messages SET thinking = ?1 WHERE id = ?2",
                 [thinking, assistant_id],
             )?;
-            for tool in tools {
-                let mut row = tool.clone();
-                row.id = format!("{assistant_id}:{}", tool.id);
-                row.message_id = assistant_id.to_owned();
-                message_repo::save_stream_tool_result(conn, session_id, assistant_id, text, &row)?;
-            }
+            deepseek_code_core::services::tool_history::save(
+                conn,
+                session_id,
+                assistant_id,
+                text,
+                tools,
+                &self.origins,
+            )?;
             Ok(())
         })??;
         self.dirty = false;

@@ -81,6 +81,11 @@ pub struct ChatRequest {
     pub model: String,
     #[serde(default)]
     pub provider_id: Option<String>,
+    /// The assistant message that owns this turn's persisted tool rows. A host
+    /// that persists history supplies it; a ToolScript job attaches its nested
+    /// records to the same message independently of the turn.
+    #[serde(default)]
+    pub assistant_message_id: Option<String>,
     #[serde(default)]
     pub effort: Option<String>,
     pub system_prompt: Option<String>,
@@ -1322,12 +1327,7 @@ impl QueryEngine {
         // Super Agent identity is durable, so a resumed session keeps its role
         // and a task member keeps its member tools. A stale call is rejected at
         // execution even when the schema no longer offers it.
-        let super_agent_role =
-            crate::super_agent::role::load(&self.db_manager, &conv_id).unwrap_or_default();
-        let super_agent_member = crate::super_agent::role::membership(&self.db_manager, &conv_id)
-            .ok()
-            .flatten()
-            .map(|(_, role)| role);
+        let super_agent_role = crate::super_agent::role::load(&self.db_manager, &conv_id)?;
         let data_dir = self
             .workspaces_dir
             .parent()
@@ -1393,15 +1393,12 @@ impl QueryEngine {
         .with_bundled_resources(self.bundled_resources.clone())
         .with_search_config_path(search_config_path)
         .with_conv_id(conv_id.clone())
-        .with_super_agent(
-            super_agent_role,
-            super_agent_member,
-            crate::super_agent::crp::ToolRuntime {
-                db: self.db_manager.clone(),
-                data_dir,
-                session_id: conv_id.clone(),
-            },
-        )
+        .with_durable_super_agent(crate::super_agent::crp::ToolRuntime {
+            db: self.db_manager.clone(),
+            data_dir,
+            session_id: conv_id.clone(),
+        })?
+        .with_parent_message_id_option(request.assistant_message_id.clone())
         .with_answer_waiters(self.answer_waiters.clone())
         .with_permission_mailbox(self.permission_mailbox.clone())
         .with_permission_manager(self.permission_manager.clone())
