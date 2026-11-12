@@ -2910,6 +2910,43 @@ impl ToolLoopExecutor {
         tool_use_id: &str,
     ) -> PermissionResult {
         self.sync_parent_permission_mode();
+        // ApplyPatch names many files in one patch. A tool-level decision does
+        // not distinguish them, so aggregate the explicit rules for every
+        // canonical target (both move endpoints included) before the normal
+        // tool check. Deny always refuses; an explicit ask requests this exact
+        // call's approval instead of inheriting a mode's automatic edit grant.
+        if tool_name == "ApplyPatch" {
+            use crate::tools::apply_patch_tool::PathAuthorization;
+            if let Some(authorization) = crate::tools::apply_patch_tool::path_authorization(
+                &self.workspace_cwd,
+                tool_input,
+                self.conv_id.as_deref(),
+            ) {
+                match authorization {
+                    PathAuthorization::Denied { path, reason } => {
+                        return PermissionResult::Denied(format!(
+                            "'{path}' cannot be changed: {reason}"
+                        ));
+                    }
+                    PathAuthorization::ConfirmationRequired { paths } => {
+                        let approved_this_call =
+                            self.approved_call.as_ref().is_some_and(|approval| {
+                                !approval.pre_tool_hook
+                                    && approval.tool == tool_name
+                                    && approval.input == *tool_input
+                                    && approval.id == tool_use_id
+                            });
+                        if !approved_this_call {
+                            return PermissionResult::RequiresConfirmation(format!(
+                                "ApplyPatch requires confirmation before changing these files: {}",
+                                paths.join(", ")
+                            ));
+                        }
+                    }
+                    PathAuthorization::Allowed => {}
+                }
+            }
+        }
         if let Some(approval) = self.approved_call.as_ref().filter(|approval| {
             approval.tool == tool_name
                 && approval.input == *tool_input

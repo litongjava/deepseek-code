@@ -9,7 +9,7 @@ use super::*;
 /// release can keep `startup.lock` held after the logical owner has returned.
 /// Only the process that took the lock releases it: a forked copy inherits
 /// `owner` and must not unlock a live parent. Descriptor close stays as the
-/// fallback for abnormal exit.
+/// fallback for abnormal exit, including `SIGKILL`, where no `Drop` runs.
 pub(super) struct OwnedLock {
     file: fs::File,
     owner: u32,

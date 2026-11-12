@@ -147,6 +147,17 @@ fn report_error(error: &anyhow::Error) {
 const MAIN_STACK_SIZE: usize = 16 * 1024 * 1024;
 
 fn main() -> std::process::ExitCode {
+    // Internal managed-PTY roles are separate execs of this executable and must
+    // run before the Tokio runtime, argument parsing or any database handle
+    // exists. Nothing is printed for a normal start.
+    match deepseek_code_core::tools::run_internal_pty_role() {
+        Ok(Some(code)) => return std::process::ExitCode::from(code.clamp(0, 255) as u8),
+        Ok(None) => {}
+        Err(error) => {
+            eprintln!("Managed PTY role failed: {error:#}");
+            return std::process::ExitCode::FAILURE;
+        }
+    }
     // Only the stack size changes: the runtime keeps its multi-threaded
     // scheduler, and every worker thread gets the same room so a nested tool
     // call cannot overflow any of them.

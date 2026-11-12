@@ -29,7 +29,8 @@ pub const ROUTER_TOOL_NAMES: [&str; 6] = [
 pub const MEMBER_TOOL_NAMES: [&str; 2] = ["CrpSubmit", "CrpProposeTask"];
 
 /// Tools the Router must never use to change business code.
-pub const ROUTER_FORBIDDEN_EDIT_TOOLS: [&str; 4] = ["Edit", "Write", "MultiEdit", "NotebookEdit"];
+pub const ROUTER_FORBIDDEN_EDIT_TOOLS: [&str; 5] =
+    ["Edit", "Write", "MultiEdit", "NotebookEdit", "ApplyPatch"];
 
 #[derive(Clone)]
 pub struct ToolRuntime {

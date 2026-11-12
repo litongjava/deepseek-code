@@ -30,7 +30,7 @@ impl ToolLoopExecutor {
         }
         if !matches!(
             tool,
-            "Write" | "Edit" | "MultiEdit" | "NotebookEdit" | "Bash"
+            "Write" | "Edit" | "MultiEdit" | "NotebookEdit" | "ApplyPatch" | "Bash"
         ) || self.is_plan_document_tool(tool, input)
         {
             return None;
@@ -638,10 +638,7 @@ impl ToolLoopExecutor {
         provider_id: &str,
         _message: &str,
     ) -> CallStep {
-        let actual = match self
-            .request_tool_approval_with(tool, input, id)
-            .await
-        {
+        let actual = match self.request_tool_approval_with(tool, input, id).await {
             Ok(actual) => actual,
             Err(error) => {
                 return CallStep::Finished((

@@ -4394,7 +4394,7 @@ impl TurnDisplay {
                 &format!("{name} - {}", if failed { "error" } else { "completed" }),
                 &body,
             );
-            let change = matches!(name, "Write" | "Edit" | "MultiEdit")
+            let change = matches!(name, "Write" | "Edit" | "MultiEdit" | "ApplyPatch")
                 .then(|| change_view::change(output, failed))
                 .flatten();
             if let Some(lines) = change {

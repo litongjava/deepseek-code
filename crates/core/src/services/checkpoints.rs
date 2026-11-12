@@ -24,26 +24,47 @@ impl Capture {
     /// Associate only explicit file-edit tool targets with this turn. Shell commands,
     /// unrelated agent activity and arbitrary workspace changes are not rewindable.
     pub fn record_tool(&mut self, name: &str, input: &serde_json::Value) -> Result<()> {
-        if !matches!(
+        let mut raw_paths: Vec<String> = Vec::new();
+        if matches!(
             name,
             "Write" | "Edit" | "MultiEdit" | "NotebookEdit" | "FileWrite" | "file_write"
         ) {
+            raw_paths.push(
+                input
+                    .get("file_path")
+                    .or_else(|| input.get("path"))
+                    .or_else(|| input.get("notebook_path"))
+                    .and_then(|value| value.as_str())
+                    .context("File edit tool has no checkpointable path")?
+                    .to_owned(),
+            );
+        } else if name == "ApplyPatch" {
+            // Every affected file, including both endpoints of a move.
+            let patch = input
+                .get("patch")
+                .and_then(|value| value.as_str())
+                .context("ApplyPatch has no checkpointable patch")?;
+            let parsed = crate::tools::apply_patch::parse_patch(patch)
+                .map_err(|error| anyhow::anyhow!(error.to_string()))?;
+            raw_paths.extend(parsed.checkpoint_paths());
+        } else {
             return Ok(());
         }
-        let raw = input
-            .get("file_path")
-            .or_else(|| input.get("path"))
-            .or_else(|| input.get("notebook_path"))
-            .and_then(|value| value.as_str())
-            .context("File edit tool has no checkpointable path")?;
+        for raw in raw_paths {
+            self.record_path(&raw)?;
+        }
+        Ok(())
+    }
+
+    /// Records one file target. Canonicalization supports newly-created nested
+    /// files and Windows extended-length path prefixes consistently.
+    fn record_path(&mut self, raw: &str) -> Result<()> {
         let path = if Path::new(raw).is_absolute() {
             PathBuf::from(raw)
         } else {
             self.workspace.join(raw)
         };
         no_links(&path)?;
-        // Canonicalize the nearest existing ancestor, supporting newly-created
-        // nested files and Windows extended-length path prefixes consistently.
         let mut ancestor = path.as_path();
         let mut suffix = Vec::new();
         while !ancestor.exists() {
@@ -576,6 +597,64 @@ mod tests {
             "changed private"
         );
     }
+    #[test]
+    fn apply_patch_tracks_every_file_including_move_destination() {
+        let (work, data, session) = fixture();
+        fs::write(work.path().join("edit.txt"), "one\n").unwrap();
+        fs::write(work.path().join("del.txt"), "gone\n").unwrap();
+        fs::write(work.path().join("move.txt"), "old\n").unwrap();
+        assert!(Command::new("git")
+            .arg("-C")
+            .arg(work.path())
+            .args(["add", "."])
+            .status()
+            .unwrap()
+            .success());
+        let mut before = capture(data.path(), &session, "message", work.path()).unwrap();
+        before
+            .record_tool(
+                "ApplyPatch",
+                &serde_json::json!({"patch": "\
+*** Begin Patch
+*** Add File: added.txt
++new
+*** Update File: edit.txt
+@@
+-one
++ONE
+*** Delete File: del.txt
+*** Update File: move.txt
+*** Move to: moved.txt
+@@
+-old
++NEW
+*** End Patch"}),
+            )
+            .unwrap();
+        fs::write(work.path().join("added.txt"), "new\n").unwrap();
+        fs::write(work.path().join("edit.txt"), "ONE\n").unwrap();
+        fs::remove_file(work.path().join("del.txt")).unwrap();
+        fs::rename(work.path().join("move.txt"), work.path().join("moved.txt")).unwrap();
+        fs::write(work.path().join("moved.txt"), "NEW\n").unwrap();
+        let checkpoint = finish(before).unwrap();
+        assert_eq!(checkpoint.changes.len(), 5);
+        restore(data.path(), &session, &checkpoint.id).unwrap();
+        assert!(!work.path().join("added.txt").exists());
+        assert_eq!(
+            fs::read_to_string(work.path().join("edit.txt")).unwrap(),
+            "one\n"
+        );
+        assert_eq!(
+            fs::read_to_string(work.path().join("del.txt")).unwrap(),
+            "gone\n"
+        );
+        assert!(!work.path().join("moved.txt").exists());
+        assert_eq!(
+            fs::read_to_string(work.path().join("move.txt")).unwrap(),
+            "old\n"
+        );
+    }
+
     #[test]
     fn refuses_external_edits_and_path_escape() {
         let (work, data, session) = fixture();

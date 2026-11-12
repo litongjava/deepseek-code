@@ -268,16 +268,19 @@ fn conversation(
                 let output = tool.output.as_deref().unwrap_or("No result recorded");
                 if let Some(recorded) = recorded.as_deref_mut() {
                     // A saved edit looks as it did live: summary and diff preview, click for the rest.
-                    let change = matches!(tool.name.as_str(), "Write" | "Edit" | "MultiEdit")
-                        .then(|| {
-                            change_view::change_in_workspace(
-                                output,
-                                tool.is_error,
-                                Some(&session.workspace),
-                            )
-                        })
-                        .flatten()
-                        .filter(|lines| lines.len() > 1);
+                    let change = matches!(
+                        tool.name.as_str(),
+                        "Write" | "Edit" | "MultiEdit" | "ApplyPatch"
+                    )
+                    .then(|| {
+                        change_view::change_in_workspace(
+                            output,
+                            tool.is_error,
+                            Some(&session.workspace),
+                        )
+                    })
+                    .flatten()
+                    .filter(|lines| lines.len() > 1);
                     let (short, full) = if let Some(lines) = change {
                         let short = change_view::collapsed_change(&lines);
                         let mut full = lines;

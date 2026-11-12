@@ -156,6 +156,73 @@ pub fn preview(name: &str, input: &Value, cwd: &Path) -> Option<Value> {
     Some(change)
 }
 
+/// The files an `ApplyPatch` call would change, computed in memory for approval
+/// prompts. `None` when the patch cannot be parsed or resolved; the tool itself
+/// still decides on execution.
+pub fn preview_apply_patch(input: &Value, cwd: &Path) -> Option<Value> {
+    let text = input["patch"].as_str()?;
+    let parsed = super::apply_patch::parse_patch(text).ok()?;
+    let additional: Vec<std::path::PathBuf> = super::path_scope::allowed_roots()
+        .into_iter()
+        .filter_map(|path| path.canonicalize().ok())
+        .collect();
+    let roots = super::apply_patch_fs::TrustedRoots::new(cwd, &additional).ok()?;
+    let plan = super::apply_patch_fs::preflight_patch(&roots, &parsed).ok()?;
+    let mut files = Vec::new();
+    for change in &plan.changes {
+        let (path, raw, action, before, after) = match change {
+            super::apply_patch_fs::DiskChange::Add {
+                path,
+                raw_path,
+                contents,
+            } => (
+                path,
+                raw_path,
+                "added",
+                Some(Vec::new()),
+                Some(contents.clone()),
+            ),
+            super::apply_patch_fs::DiskChange::Update {
+                path,
+                raw_path,
+                old_contents,
+                new_contents,
+                ..
+            } => (
+                path,
+                raw_path,
+                "updated",
+                Some(old_contents.clone()),
+                Some(new_contents.clone()),
+            ),
+            super::apply_patch_fs::DiskChange::Delete {
+                path,
+                raw_path,
+                old_contents,
+                ..
+            } => (path, raw_path, "deleted", Some(old_contents.clone()), None),
+            super::apply_patch_fs::DiskChange::Move {
+                to,
+                to_raw,
+                new_contents,
+                ..
+            } => (to, to_raw, "moved", None, Some(new_contents.clone())),
+        };
+        let before = before.and_then(|bytes| String::from_utf8(bytes).ok());
+        let after = after.and_then(|bytes| String::from_utf8(bytes).ok());
+        let diff = completed_text(path, before, after);
+        files.push(json!({
+            "path": path.to_string_lossy(),
+            "raw_path": raw,
+            "action": action,
+            "added": diff["added"],
+            "removed": diff["removed"],
+            "notice": diff["notice"],
+        }));
+    }
+    Some(json!({"kind": "apply_patch", "files": files}))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -227,6 +294,26 @@ mod tests {
         assert_eq!(change["rows"][1]["text"], "new");
         fs::write(&file, vec![b'x'; MAX_BYTES + 1]).unwrap();
         assert!(completed(&file, Some("before".into()))["notice"].is_string());
+    }
+
+    #[test]
+    fn previews_apply_patch_files_without_touching_them() {
+        let temp = tempfile::tempdir().unwrap();
+        std::fs::write(temp.path().join("a.txt"), "one\n").unwrap();
+        let input = json!({"patch": "*** Begin Patch\n*** Update File: a.txt\n@@\n-one\n+two\n*** Add File: b.txt\n+x\n*** End Patch"});
+        let preview = preview_apply_patch(&input, temp.path()).unwrap();
+        assert_eq!(preview["kind"], "apply_patch");
+        let files = preview["files"].as_array().unwrap();
+        assert_eq!(files.len(), 2);
+        assert_eq!(files[0]["action"], "updated");
+        assert_eq!(files[0]["added"], 1);
+        assert_eq!(files[0]["removed"], 1);
+        assert_eq!(files[1]["action"], "added");
+        assert_eq!(
+            std::fs::read_to_string(temp.path().join("a.txt")).unwrap(),
+            "one\n"
+        );
+        assert!(!temp.path().join("b.txt").exists());
     }
 
     #[test]

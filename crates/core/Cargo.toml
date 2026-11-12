@@ -66,4 +66,13 @@ tokio = { version = "1", features = ["full", "test-util"] }
 enigo = "0.2"
 
 [target.'cfg(unix)'.dependencies]
-rustix = { version = "1", features = ["fs", "process"] }
+# `net` is for the managed PTY endpoint: a nonblocking `connect(2)` plus
+# `SO_PEERCRED`, so a saturated backlog cannot block a caller or leak a
+# connector thread.
+rustix = { version = "1", features = ["fs", "process", "event", "net"] }
+
+[target.'cfg(target_os = "linux")'.dependencies]
+# `MasterPty::get_termios()` returns `nix::sys::termios::Termios`, so reading
+# ICANON and the VEOF slot requires the same nix version. 0.28.0 is already in
+# the lockfile through portable-pty, so this adds no new package.
+nix = { version = "0.28", default-features = false, features = ["term"] }

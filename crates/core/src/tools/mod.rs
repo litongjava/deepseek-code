@@ -43,16 +43,57 @@ pub(crate) mod utf8;
 pub mod wakeup;
 mod worktrees;
 pub use utf8::powershell_command;
+pub(crate) mod apply_patch;
+pub(crate) mod apply_patch_apply;
+pub(crate) mod apply_patch_fs;
+pub(crate) mod apply_patch_tool;
 pub mod background_shell;
 mod bash_process;
 pub mod monitor;
 pub mod file_change;
+pub(crate) mod github;
 pub(crate) mod image_generation;
+pub(crate) mod output_page;
 pub(crate) mod path_scope;
 pub(crate) mod provider_search;
+mod pty_bash;
+#[cfg(target_os = "linux")]
+pub(crate) mod pty_gate;
+#[cfg(target_os = "linux")]
+pub(crate) mod pty_owner;
+#[cfg(target_os = "linux")]
+pub(crate) mod pty_supervisor;
+#[cfg(target_os = "linux")]
+pub(crate) mod pty_transport;
 mod shell_discovery;
+pub(crate) mod shell_input;
 mod web;
 pub use provider_search::search as search_provider;
+
+/// Host entry for the internal managed-PTY roles.
+///
+/// The supervisor and the execution gate are separate execs of the same host
+/// executable. Both must run before the CLI or Desktop initialises a runtime,
+/// parses arguments, or opens the database: the supervisor outlives the owner
+/// and the gate becomes the user program. Returns `Some(exit_code)` when this
+/// process was started as one of those roles.
+#[cfg(target_os = "linux")]
+#[doc(hidden)]
+pub fn run_internal_pty_role() -> anyhow::Result<Option<i32>> {
+    if let Some(code) = pty_gate::run_from_env()? {
+        return Ok(Some(code));
+    }
+    if pty_supervisor::run_from_env()? {
+        return Ok(Some(0));
+    }
+    Ok(None)
+}
+
+#[cfg(not(target_os = "linux"))]
+#[doc(hidden)]
+pub fn run_internal_pty_role() -> anyhow::Result<Option<i32>> {
+    Ok(None)
+}
 
 #[cfg(windows)]
 use std::os::windows::process::CommandExt;
@@ -103,6 +144,7 @@ pub fn get_tool_definitions() -> Vec<ToolDefinition> {
             description: "Execute an installed, enabled plugin command with OS user permissions. Requires execution approval.".into(),
             input_schema: serde_json::json!({"type":"object","properties":{"plugin":{"type":"string"},"command":{"type":"string"},"input":{}},"required":["plugin","command"]}),
         },
+        github::definition(),
         read::definition(),
         ToolDefinition {
             name: "Write".to_string(),
@@ -134,7 +176,7 @@ pub fn get_tool_definitions() -> Vec<ToolDefinition> {
         },
         ToolDefinition {
             name: "Bash".to_string(),
-            description: "Executes a shell command and returns its output.\n\nThe shell defaults to shell.toolDefault in settings.json (bash / Git Bash on Windows when unset): use Unix shell syntax there — `/dev/null` not `NUL`, forward slashes, `$VAR` not `%VAR%` or `$env:VAR`. Pass `shell` (powershell, pwsh, cmd, sh, zsh, fish, wsl) to use another shell's syntax; PowerShell input/output is UTF-8.\n\n- With bash, sh or zsh the working directory persists between calls, but prefer absolute paths; leaving the project resets it to the project directory. Shell state (env vars, functions) does not persist. Other shells start in the project directory each call.\n- Command output is displayed to you, not reliably to the user.\n- `timeout` is in milliseconds: default 120000, max 600000 for a foreground command.\n- `run_in_background` runs the command as a managed task: it keeps running across turns and returns a task_id. No `&` or Start-Process needed. You will be notified when it finishes, so do not poll or sleep waiting for it. To read its output before then, or to wait for it in a non-interactive run (nothing wakes the session after such a turn ends), load TaskGet with ToolSearch and call it with the task_id (block:true waits up to timeout milliseconds). TaskStop stops it.
+            description: "Executes a shell command and returns its output.\n\nThe shell defaults to shell.toolDefault in settings.json (bash / Git Bash on Windows when unset): use Unix shell syntax there — `/dev/null` not `NUL`, forward slashes, `$VAR` not `%VAR%` or `$env:VAR`. Pass `shell` (powershell, pwsh, cmd, sh, zsh, fish, wsl) to use another shell's syntax; PowerShell input/output is UTF-8.\n\n- With bash, sh or zsh the working directory persists between calls, but prefer absolute paths; leaving the project resets it to the project directory. Shell state (env vars, functions) does not persist. Other shells start in the project directory each call.\n- Command output is displayed to you, not reliably to the user.\n- `timeout` is in milliseconds: default 120000, max 600000 for a foreground command.\n- `run_in_background` runs the command as a managed task: it keeps running across turns and returns a task_id. No `&` or Start-Process needed. You will be notified when it finishes, so do not poll or sleep waiting for it. To read its output before then, or to wait for it in a non-interactive run (nothing wakes the session after such a turn ends), load TaskGet with ToolSearch and call it with the task_id (block:true waits up to timeout milliseconds). TaskStop stops it. Add `interaction: \"pipe\"` to that background call to give the process a writable stdin pipe: write UTF-8 data or close stdin with TaskInput. On Linux, interaction: \"pty\" instead provides a controlling terminal with merged output and TaskInput resize. PTY EOF sends canonical VEOF, not a permanent stdin close.
 - When a call finishes it cleans up the command's whole process tree, including children the command started. A service that must outlive the call (a local server, a daemon) needs `detach: true`, which starts it outside that tree and returns its pid and log files.
 - With bash and zsh a pipeline reports an earlier command's failure, so `failing | head` is not reported as success. `pipeline_sigpipe: true` means the output was only cut short by a reader such as `head`.\n\n# Git\n- Interactive flags (`-i`, e.g. `git rebase -i`, `git add -i`) are not supported in this environment.\n- Use the `gh` CLI for GitHub operations (PRs, issues, API).\n- Commit or push only when the user asks. If on the default branch, branch first.".to_string(),
             input_schema: serde_json::json!({
@@ -144,6 +186,9 @@ pub fn get_tool_definitions() -> Vec<ToolDefinition> {
                     "timeout": { "description": "Positive timeout in milliseconds: 1..600000 foreground, 1..86400000 background. Omit for no background runtime limit; zero is invalid.", "type": "number", "minimum": 1, "maximum": 86400000 },
                     "description": { "description": "Clear, concise description of what this command does in active voice. Never use words like \"complex\" or \"risk\" in the description - just describe what it does.\n\nSay what the command does in plain words: do not echo the command's text, its flags, or file paths - the user reads this description, often without seeing the command.\n\nFor simple commands (git, npm, standard CLI tools), keep it brief (5-10 words):\n- ls → \"List files in current directory\"\n- git status → \"Show working tree status\"\n- npm install → \"Install package dependencies\"\n\nFor commands that are harder to parse at a glance (piped commands, obscure flags, etc.), add enough context to clarify what it does:\n- find . -name \"*.tmp\" -exec rm {} \\; → \"Find and delete all .tmp files recursively\"\n- git reset --hard origin/main → \"Discard all local changes and match remote main\"\n- curl -s url | jq '.data[]' → \"Fetch JSON from URL and extract data array elements\"", "type": "string" },
                     "run_in_background": { "description": "Set to true to run this command in the background.", "type": "boolean" },
+                    "interaction": { "description": "Use with run_in_background:true. pipe provides writable stdin; pty provides a Linux controlling terminal with merged stdout/stderr. PTY is unsupported on Windows/macOS and with sandbox policies or Bash timeout; use TaskGet timeout to bound a read and TaskStop to stop it.", "type": "string", "enum": ["pipe", "pty"] },
+                    "rows": { "description": "Initial PTY rows (pty only).", "type": "integer", "minimum": 1, "maximum": 500, "default": 24 },
+                    "cols": { "description": "Initial PTY columns (pty only).", "type": "integer", "minimum": 1, "maximum": 1000, "default": 80 },
                     "detach": { "description": "Start an unmanaged service that must outlive this call, such as a local server or daemon. The command is not waited for and is not added to the process tree that a normal call cleans up, so it keeps running after this call, using `detach` with `run_in_background` or `timeout` is an error. Use it only when the process must survive; otherwise run the command normally or use `run_in_background`.", "type": "boolean" },
                     "dangerouslyDisableSandbox": { "description": "Set this to true to dangerously override sandbox mode and run commands without sandboxing.", "type": "boolean" },
                     "shell": { "description": "Shell to use: bash, zsh, fish, sh, cmd, powershell, pwsh, wsl (explicit configured WSL distribution; default: shell.toolDefault, otherwise bash)", "type": "string" }
@@ -206,6 +251,7 @@ pub fn get_tool_definitions() -> Vec<ToolDefinition> {
                 "additionalProperties": false
             }),
         },
+        apply_patch_tool::definition(),
         ToolDefinition {
             name: "MultiEdit".to_string(),
             description: "Make multiple string replacements in a file at once.".to_string(),
@@ -458,7 +504,7 @@ macro_rules! tool_dispatch {
             "Config" | "brief" | "SyntheticOutput" => content_compat::execute($name, &$input, $cwd),
             "ToolSearch" => tool_search($input),
             "ReportFindings" => findings::execute(&$input),
-            "TaskCreate" | "TaskGet" | "TaskList" | "TaskUpdate" | "TaskOutput" | "TaskStop" | "TodoWrite" | "TodoRead" => tasks::execute($name, $input, $cwd),
+            "TaskCreate" | "TaskGet" | "TaskList" | "TaskUpdate" | "TaskOutput" | "TaskStop" | "TaskInput" | "TodoWrite" | "TodoRead" => tasks::execute($name, $input, $cwd),
             "Read" => read::execute($input, $cwd),
             "Write" => tool_write($input, $cwd),
             "Edit" => tool_edit($input, $cwd),
@@ -469,6 +515,7 @@ macro_rules! tool_dispatch {
             "WebFetch" => $webfetch,
             "WebSearch" => $websearch,
             "MultiEdit" => tool_multi_edit($input, $cwd),
+            "ApplyPatch" => apply_patch_tool::execute($input, $cwd),
             "AskUserQuestion" => tool_ask_user_question($input),
             "git_status" => tool_git_status($input),
             "git_diff" => tool_git_diff($input),
@@ -534,6 +581,9 @@ pub async fn execute_tool_async(
     }
     if name == "worktree" {
         return worktrees::execute(input, cwd).await;
+    }
+    if name == "GitHub" {
+        return github::execute(input, cwd).await;
     }
     if external_agents::is_external_agent(name) {
         return external_agents::execute(name, input, cwd).await;
@@ -891,13 +941,13 @@ fn tool_edit(input: serde_json::Value, cwd: &str) -> Result<serde_json::Value> {
 
     let (new_content, replacements) =
         match text_edit::replace(&content, old_string, new_string, replace_all) {
-        Ok(result) => result,
+            Ok(result) => result,
             Err(error) => {
                 return Ok(
                     serde_json::json!({"success":false,"error":error.to_string(),"replacements":0}),
                 )
             }
-    };
+        };
     fs::write(&path, new_content.as_bytes())?;
 
     Ok(serde_json::json!({
@@ -976,10 +1026,10 @@ fn tool_ask_user_question(input: serde_json::Value) -> Result<serde_json::Value>
     let options_list: Vec<serde_json::Value> = options
         .iter()
         .map(|opt| {
-        serde_json::json!({
-            "label": opt["label"].as_str().unwrap_or(""),
-            "description": opt["description"].as_str().unwrap_or("")
-        })
+            serde_json::json!({
+                "label": opt["label"].as_str().unwrap_or(""),
+                "description": opt["description"].as_str().unwrap_or("")
+            })
         })
         .collect();
 
@@ -1028,20 +1078,20 @@ async fn tool_computer_use_async(input: serde_json::Value) -> Result<serde_json:
     };
 
     let coordinate = input.get("coordinate").and_then(|c| {
-            Some(ScreenCoordinate {
-                x: c.get("x")?.as_i64()? as i32,
-                y: c.get("y")?.as_i64()? as i32,
-            })
-        });
+        Some(ScreenCoordinate {
+            x: c.get("x")?.as_i64()? as i32,
+            y: c.get("y")?.as_i64()? as i32,
+        })
+    });
 
     let button = input["button"].as_str().and_then(|b| match b {
-            "Left" => Some(MouseButton::Left),
-            "Right" => Some(MouseButton::Right),
-            "Middle" => Some(MouseButton::Middle),
-            "Back" => Some(MouseButton::Back),
-            "Forward" => Some(MouseButton::Forward),
-            _ => None,
-        });
+        "Left" => Some(MouseButton::Left),
+        "Right" => Some(MouseButton::Right),
+        "Middle" => Some(MouseButton::Middle),
+        "Back" => Some(MouseButton::Back),
+        "Forward" => Some(MouseButton::Forward),
+        _ => None,
+    });
 
     let key = input["key"].as_str().map(|s| s.to_string());
     let text = input["text"].as_str().map(|s| s.to_string());
@@ -1122,6 +1172,21 @@ async fn tool_bash_async(input: serde_json::Value, cwd: &str) -> Result<serde_js
         !(detach && input["timeout"].is_number()),
         "A detached command is not waited for, so timeout has no effect; remove it"
     );
+    // A managed stdin pipe is an explicit opt-in and belongs to a background
+    // task; ordinary and foreground calls keep their historical null stdin.
+    let pty_size = pty_bash::validate(&input)?;
+    let interaction = match input.get("interaction").filter(|value| !value.is_null()) {
+        None => background_shell::Interaction::None,
+        Some(value) if value == "pipe" => {
+            anyhow::ensure!(
+                background,
+                "Bash interaction:\"pipe\" needs run_in_background:true: the pipe belongs to a managed background task"
+            );
+            background_shell::Interaction::StdinPipe
+        }
+        Some(value) if value == "pty" => background_shell::Interaction::None,
+        Some(other) => anyhow::bail!("Bash interaction must be pipe or pty; got {other}"),
+    };
     let timeout_ms = match input.get("timeout").filter(|value| !value.is_null()) {
         Some(value) => value
             .as_f64()
@@ -1205,15 +1270,15 @@ async fn tool_bash_async(input: serde_json::Value, cwd: &str) -> Result<serde_js
         .as_str()
         .map(PathBuf::from)
         .map(|state| {
-        if let Some(wsl) = &resolved.wsl {
-            use std::hash::{Hash, Hasher};
-            let mut hash = std::collections::hash_map::DefaultHasher::new();
-            wsl.distribution.hash(&mut hash);
-            state.with_extension(format!("wsl-{:016x}", hash.finish()))
+            if let Some(wsl) = &resolved.wsl {
+                use std::hash::{Hash, Hasher};
+                let mut hash = std::collections::hash_map::DefaultHasher::new();
+                wsl.distribution.hash(&mut hash);
+                state.with_extension(format!("wsl-{:016x}", hash.finish()))
             } else {
                 state
             }
-    })
+        })
         .filter(|_| {
             !background
                 && (powershell
@@ -1340,6 +1405,14 @@ async fn tool_bash_async(input: serde_json::Value, cwd: &str) -> Result<serde_js
         .filter(|text| !text.trim().is_empty())
         .unwrap_or(&command)
         .to_owned();
+    #[cfg(target_os = "linux")]
+    if let Some((rows, cols)) = pty_size {
+        let mut result = pty_bash::start(cmd, rows, cols, &description, &command)?;
+        result["shell_path"] = serde_json::json!(shell);
+        return Ok(result);
+    }
+    #[cfg(not(target_os = "linux"))]
+    let _ = pty_size;
     if detach {
         let directory = crate::runtime::resolve_default_data_dir()?
             .join("detached-shells")
@@ -1374,6 +1447,7 @@ async fn tool_bash_async(input: serde_json::Value, cwd: &str) -> Result<serde_js
             &description,
             &command,
             wsl_guard,
+            interaction,
         )?;
         result["shell_path"] = serde_json::json!(shell);
         Ok(result)
@@ -1662,12 +1736,12 @@ fn tool_git_status(input: serde_json::Value) -> Result<serde_json::Value> {
         .lines()
         .filter(|l| !l.is_empty())
         .map(|line| {
-        let status = &line[..2];
-        let file_path = &line[3..];
-        serde_json::json!({
-            "status": status.trim(),
-            "file": file_path
-        })
+            let status = &line[..2];
+            let file_path = &line[3..];
+            serde_json::json!({
+                "status": status.trim(),
+                "file": file_path
+            })
         })
         .collect();
 
@@ -1743,15 +1817,15 @@ fn tool_git_log(input: serde_json::Value) -> Result<serde_json::Value> {
         .lines()
         .filter(|l| !l.is_empty())
         .map(|line| {
-        if oneline {
-            let parts: Vec<&str> = line.splitn(2, ' ').collect();
-            serde_json::json!({
-                "hash": parts.first().unwrap_or(&""),
-                "message": parts.get(1).unwrap_or(&"")
-            })
-        } else {
-            serde_json::json!({ "raw": line })
-        }
+            if oneline {
+                let parts: Vec<&str> = line.splitn(2, ' ').collect();
+                serde_json::json!({
+                    "hash": parts.first().unwrap_or(&""),
+                    "message": parts.get(1).unwrap_or(&"")
+                })
+            } else {
+                serde_json::json!({ "raw": line })
+            }
         })
         .collect();
 
@@ -2018,8 +2092,8 @@ mod directory_edit_regressions {
             json!({"command":"false | head -1","shell":"bash"}),
             cwd,
         )
-            .await
-            .unwrap();
+        .await
+        .unwrap();
         assert_eq!(failed["success"], false, "{failed}");
         assert_ne!(failed["exit_code"], 0, "{failed}");
 
@@ -2028,8 +2102,8 @@ mod directory_edit_regressions {
             json!({"command":"printf 'a\\nb\\n' | head -1","shell":"bash"}),
             cwd,
         )
-            .await
-            .unwrap();
+        .await
+        .unwrap();
         assert_eq!(passed["success"], true, "{passed}");
         assert_eq!(passed["stdout"].as_str().unwrap().trim(), "a");
     }

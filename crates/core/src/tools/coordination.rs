@@ -63,7 +63,9 @@ fn team_lock(cwd: &str, id: &str) -> Result<(String, TeamLock)> {
         .create(true)
         .truncate(false)
         .open(&path)?;
-    // A just-released lock can stay held briefly by a child process between fork and exec.
+    // A just-released lock can stay held briefly by a child process between fork
+    // and exec. Retry briefly, then keep explicit-unlock ownership for the whole
+    // team execution so a forked descriptor cannot outlive it.
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(1);
     loop {
         match crate::fs::try_lock_file(&file) {
@@ -378,6 +380,8 @@ mod tests {
         assert_eq!(team["status"], "failed");
         assert_eq!(team["tasks"][0]["result"], "inspected");
     }
+
+    #[cfg(unix)]
     #[test]
     fn claim_after_finish_survives_concurrent_process_spawns() {
         let dir = tempfile::tempdir().unwrap();

@@ -43,6 +43,10 @@ pub fn lock_file(file: &File) -> io::Result<()> {
 /// after the owner drops its `File`, so a freshly opened contender keeps
 /// blocking until the child exits. An explicit unlock clears the lock on the
 /// shared description, so the next owner gets the session at once.
+///
+/// Boundary: this releases the lock this process holds, but it does not run on
+/// `SIGKILL`. A pre-`exec` child that inherited the descriptor can keep the lock
+/// held until it closes the descriptor or exits.
 pub fn unlock_file(file: &File) -> io::Result<()> {
     #[cfg(target_os = "android")]
     loop {

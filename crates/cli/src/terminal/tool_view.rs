@@ -667,6 +667,8 @@ fn file_name(path: &str) -> String {
 fn session_rule(name: &str, input: &Value) -> Option<String> {
     let rule = match (name, input["command"].as_str()) {
         ("Bash" | "PowerShell", _) => return None,
+        // Each ApplyPatch call lists its own paths; do not create a blanket rule.
+        ("ApplyPatch", _) => return None,
         // As in the reference CLI: don't ask again for this host.
         ("WebFetch", _) => format!("WebFetch(domain:{})", fetch_host(input)?),
         ("SandboxNetwork", _) => format!("SandboxNetwork(domain:{})", fetch_host(input)?),
@@ -725,6 +727,31 @@ pub fn approval(
                 ("Write", false) => format!("Do you want to overwrite {}?", file_name(path)),
                 _ => format!("Do you want to make this edit to {}?", file_name(path)),
             }
+        }
+        _ if name == "ApplyPatch" => {
+            lines.push(change_view::heading("Apply patch"));
+            if let Some(preview) = workspace.and_then(|workspace| {
+                deepseek_code_core::tools::file_change::preview_apply_patch(input, workspace)
+            }) {
+                if let Some(files) = preview["files"].as_array() {
+                    for file in files.iter().take(12) {
+                        let action = file["action"].as_str().unwrap_or("updated");
+                        let path = file["raw_path"].as_str().unwrap_or_default();
+                        lines.push(change_view::body(&format!("  {action} {path}")));
+                    }
+                    if files.len() > 12 {
+                        lines.push(change_view::muted(&format!(
+                            "  \u{2026} {} more file(s)",
+                            files.len() - 12
+                        )));
+                    }
+                }
+            } else {
+                lines.push(change_view::muted(
+                    "  The patch cannot be previewed; it will be validated before anything changes.",
+                ));
+            }
+            "Do you want to apply this patch?".to_owned()
         }
         _ => {
             match (name, input["command"].as_str()) {

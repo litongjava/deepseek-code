@@ -35,7 +35,11 @@ pub fn terminal_input() -> TerminalInput {
 /// The lease is taken for the settlement itself only, so two resumed terminals
 /// cannot settle concurrently; it is dropped before the caller displays
 /// anything and is not observation.
-fn settle_abandoned_turns(paths: &RuntimePaths, store: &SessionStore, id: &str) -> Vec<deepseek_code_core::db::turn_repo::TurnRecord> {
+fn settle_abandoned_turns(
+    paths: &RuntimePaths,
+    store: &SessionStore,
+    id: &str,
+) -> Vec<deepseek_code_core::db::turn_repo::TurnRecord> {
     use deepseek_code_core::services::session_messages;
     if session_messages::execution_active(&paths.data_dir, id).unwrap_or(true) {
         return Vec::new();
@@ -61,8 +65,7 @@ pub struct Session {
     pub(crate) sdk_content: Option<Value>,
     /// Stream-json user frames steered into the running turn, keyed by their
     /// handoff message id, replayed when the engine delivers them.
-    pub(crate) sdk_steered_replays:
-        Arc<std::sync::Mutex<std::collections::HashMap<String, Value>>>,
+    pub(crate) sdk_steered_replays: Arc<std::sync::Mutex<std::collections::HashMap<String, Value>>>,
     pub(crate) initial_hook_message: Option<String>,
     pub(crate) sdk_overrides: crate::sdk_initialization::Overrides,
     pub(crate) sdk_hooks: Option<crate::sdk_hooks::Runtime>,
@@ -1507,7 +1510,9 @@ impl Session {
         publish: bool,
         turn: &mut deepseek_code_core::db::turn_repo::TurnTimer,
         completion: &mut TurnCompletion,
-        execution_lease: Option<std::sync::Arc<deepseek_code_core::services::session_messages::ExecutionLease>>,
+        execution_lease: Option<
+            std::sync::Arc<deepseek_code_core::services::session_messages::ExecutionLease>,
+        >,
     ) -> Result<()> {
         self.sdk_cancellable(
             deepseek_code_core::services::lifecycle_events::check_configuration(
@@ -1660,13 +1665,25 @@ impl Session {
         let request = Box::pin(async {
             if hook_wake {
                 match execution_lease {
-                    Some(lease) => self.engine.send_hook_wake_with_lease(chat_request, false, lease).await,
+                    Some(lease) => {
+                        self.engine
+                            .send_hook_wake_with_lease(chat_request, false, lease)
+                            .await
+                    }
                     None => self.engine.send_hook_wake(chat_request, false).await,
                 }
             } else {
                 match execution_lease {
-                    Some(lease) => self.engine.send_message_with_lease(chat_request, false, lease).await,
-                    None => self.engine.send_message_with_history(chat_request, false).await,
+                    Some(lease) => {
+                        self.engine
+                            .send_message_with_lease(chat_request, false, lease)
+                            .await
+                    }
+                    None => {
+                        self.engine
+                            .send_message_with_history(chat_request, false)
+                            .await
+                    }
                 }
             }
         });
@@ -1721,7 +1738,10 @@ impl Session {
         let mut completed = false;
         let mut stop = None::<String>;
         let mut snapshots = Vec::<Value>::new();
-        best_effort_live_write("request", crate::session_commands::save_live_requests(self, &[]));
+        best_effort_live_write(
+            "request",
+            crate::session_commands::save_live_requests(self, &[]),
+        );
         let mut goal_requests = crate::session_commands::GoalRequests::default();
         let mut observed_plan_boundary =
             deepseek_code_core::services::plan_approval::latest_boundary(&self.store.db, &self.id)?;
@@ -1748,12 +1768,11 @@ impl Session {
         // A worker publishes progress for its frontend. A direct print/json owner
         // does too, so a resumed terminal can observe the turn while it runs;
         // only an interactive terminal turn has its own live display.
-        let background_transcript = std::env::var_os(
-            deepseek_code_core::services::background_sessions::CONTROL_ENV,
-        )
-        .is_some()
-            || input.is_none()
-            || cli.output_format != OutputFormat::Text;
+        let background_transcript =
+            std::env::var_os(deepseek_code_core::services::background_sessions::CONTROL_ENV)
+                .is_some()
+                || input.is_none()
+                || cli.output_format != OutputFormat::Text;
         let mut live_transcript = BackgroundTranscript::default();
         let mut refresh = tokio::time::interval(std::time::Duration::from_secs(1));
         refresh.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
@@ -1853,8 +1872,10 @@ impl Session {
                     EngineEvent::Text(_) | EngineEvent::ToolUseStart { .. } | EngineEvent::ToolUseDone { .. } | EngineEvent::MessageStop { .. } => round_open = false,
                     _ => {}
                 }
+                // Track pending calls for every host so cancellation can settle
+                // them; only background/JSON hosts publish intermediate rows.
+                live_transcript.observe(&event, &mut tools);
                 if background_transcript {
-                    live_transcript.observe(&event, &mut tools);
                     if matches!(&event, EngineEvent::ToolUseStart { .. } | EngineEvent::ToolUseDone { .. } | EngineEvent::PipelineToolResult { .. } | EngineEvent::ToolPermission { .. } | EngineEvent::AskUser { .. }) {
                         best_effort_live_write("transcript", live_transcript.flush(&self.store.db, &self.id, &assistant_id, &text, &thinking_text, &tools));
                     }
@@ -2215,9 +2236,7 @@ impl Session {
         // After joining, drain the last reported snapshots for every frontend.
         {
             while let Ok(event) = events.try_recv() {
-                if background_transcript {
-                    live_transcript.observe(&event, &mut tools);
-                }
+                live_transcript.observe(&event, &mut tools);
                 match event {
                     EngineEvent::Text(delta) => {
                         if std::mem::take(&mut separate_text)
@@ -2288,9 +2307,25 @@ impl Session {
                     _ => {}
                 }
             }
+            // The executor has stopped and reported completions have been
+            // drained. Only now may unreported calls receive an unknown-outcome
+            // error; never overwrite a real result with cancellation bookkeeping.
+            if !completed || turn_result.is_err() || error.is_some() {
+                live_transcript.finish_interrupted(&mut tools);
+            }
             if background_transcript {
                 live_transcript.dirty = true;
-                best_effort_live_write("transcript", live_transcript.flush(&self.store.db, &self.id, &assistant_id, &text, &thinking_text, &tools));
+                best_effort_live_write(
+                    "transcript",
+                    live_transcript.flush(
+                        &self.store.db,
+                        &self.id,
+                        &assistant_id,
+                        &text,
+                        &thinking_text,
+                        &tools,
+                    ),
+                );
             }
         }
         // Cancellation may happen after the atomic boundary commit but before its event.
@@ -2399,7 +2434,10 @@ impl Session {
                 )
             })??;
         }
-        best_effort_live_write("request", crate::session_commands::save_live_requests(self, &[]));
+        best_effort_live_write(
+            "request",
+            crate::session_commands::save_live_requests(self, &[]),
+        );
         if let Some(goal) = turn_goal {
             let (tokens, requests, unreported) = goal_requests.usage();
             deepseek_code_core::services::session_goals::record_turn(
@@ -2820,11 +2858,9 @@ impl BackgroundTranscript {
         // and a legacy completion without input must not erase the richer
         // input already seen for this occurrence.
         let rich = |text: &str| {
-            serde_json::from_str::<Value>(text).ok().is_some_and(|value| {
-                value
-                    .as_object()
-                    .is_some_and(|fields| !fields.is_empty())
-            })
+            serde_json::from_str::<Value>(text)
+                .ok()
+                .is_some_and(|value| value.as_object().is_some_and(|fields| !fields.is_empty()))
         };
         let incoming_rich = rich(&input);
         let existing_rich = row.input.as_deref().is_some_and(rich);
@@ -2836,6 +2872,16 @@ impl BackgroundTranscript {
             row.is_error = is_error;
         }
         self.dirty = true;
+    }
+
+    /// Called after the executor is joined and its final events are consumed.
+    /// Missing output proves no result was reported, not that no effects ran.
+    fn finish_interrupted(&mut self, tools: &mut [message_repo::ToolCallRow]) {
+        for tool in tools.iter_mut().filter(|tool| tool.output.is_none()) {
+            tool.output = Some(message_repo::UNFINISHED_TOOL_RESULT.to_owned());
+            tool.is_error = true;
+            self.dirty = true;
+        }
     }
 
     fn flush(
@@ -2872,6 +2918,55 @@ impl BackgroundTranscript {
 #[cfg(test)]
 mod background_transcript_tests {
     use super::*;
+
+    #[test]
+    fn interruption_settles_only_unreported_calls_after_draining_results() {
+        let mut live = BackgroundTranscript::default();
+        let mut tools: Vec<_> = ["Bash", "Write", "Read", "ApplyPatch"]
+            .into_iter()
+            .enumerate()
+            .map(|(index, name)| message_repo::ToolCallRow {
+                id: format!("inv-{index}"),
+                message_id: String::new(),
+                name: name.into(),
+                input: Some("{}".into()),
+                output: None,
+                is_error: false,
+                sort_order: index as i64,
+            })
+            .collect();
+        tools[1].output = Some(String::new()); // Empty is still a real success.
+        tools[2].output = Some("Permission denied".into());
+        tools[2].is_error = true;
+        // A completion already in the event queue wins over the fallback.
+        live.observe(
+            &EngineEvent::ToolUseDone {
+                tool_use_id: "inv-3".into(),
+                tool_name: "ApplyPatch".into(),
+                tool_input: json!({"patch":"reviewed input"}),
+                output: "Actual completed result".into(),
+                is_error: false,
+            },
+            &mut tools,
+        );
+        let completed = serde_json::to_value(&tools[1..]).unwrap();
+        live.dirty = false;
+        live.finish_interrupted(&mut tools);
+        assert!(live.dirty);
+        assert_eq!(tools[0].id, "inv-0");
+        assert_eq!(tools[0].input.as_deref(), Some("{}"));
+        assert_eq!(
+            tools[0].output.as_deref(),
+            Some(message_repo::UNFINISHED_TOOL_RESULT)
+        );
+        assert!(tools[0].is_error);
+        assert_eq!(serde_json::to_value(&tools[1..]).unwrap(), completed);
+        let settled = serde_json::to_value(&tools).unwrap();
+        live.dirty = false;
+        live.finish_interrupted(&mut tools);
+        assert!(!live.dirty);
+        assert_eq!(serde_json::to_value(&tools).unwrap(), settled);
+    }
 
     #[test]
     fn worker_snapshot_retains_full_text_thinking_and_updates_one_tool() {
@@ -2960,7 +3055,10 @@ mod background_transcript_tests {
         let mut tools = Vec::new();
         for index in 0..5 {
             let (name, input) = if index < 3 {
-                ("Bash", json!({"command":format!("printf 'RESULT_{index}'")}))
+                (
+                    "Bash",
+                    json!({"command":format!("printf 'RESULT_{index}'")}),
+                )
             } else {
                 ("Read", json!({"file_path":format!("file-{index}.txt")}))
             };
@@ -2997,14 +3095,24 @@ mod background_transcript_tests {
             },
             &mut tools,
         );
-        live.flush(&context.db, &session, &assistant, "", "", &tools).unwrap();
-        context.db.with_conn(|conn| {
-            let calls = message_repo::get_tool_calls_for_message(conn, &assistant).unwrap();
-            assert_eq!(calls.len(), 5);
-            assert_eq!(calls[0].input.as_deref(), Some(r#"{"command":"printf 'RESULT_0'"}"#));
-            assert_eq!(calls[1].output.as_deref(), Some("UPDATED_1"));
-            assert_eq!(calls[3].input.as_deref(), Some(r#"{"file_path":"file-3.txt"}"#));
-        }).unwrap();
+        live.flush(&context.db, &session, &assistant, "", "", &tools)
+            .unwrap();
+        context
+            .db
+            .with_conn(|conn| {
+                let calls = message_repo::get_tool_calls_for_message(conn, &assistant).unwrap();
+                assert_eq!(calls.len(), 5);
+                assert_eq!(
+                    calls[0].input.as_deref(),
+                    Some(r#"{"command":"printf 'RESULT_0'"}"#)
+                );
+                assert_eq!(calls[1].output.as_deref(), Some("UPDATED_1"));
+                assert_eq!(
+                    calls[3].input.as_deref(),
+                    Some(r#"{"file_path":"file-3.txt"}"#)
+                );
+            })
+            .unwrap();
     }
 
     #[test]
@@ -3036,12 +3144,19 @@ mod background_transcript_tests {
             },
             &mut tools,
         );
-        live.flush(&context.db, &session, &assistant, "", "", &tools).unwrap();
-        context.db.with_conn(|conn| {
-            let calls = message_repo::get_tool_calls_for_message(conn, &assistant).unwrap();
-            assert_eq!(calls.len(), 1);
-            assert_eq!(calls[0].input.as_deref(), Some(r#"{"command":"printf 'RICH_INPUT'"}"#));
-        }).unwrap();
+        live.flush(&context.db, &session, &assistant, "", "", &tools)
+            .unwrap();
+        context
+            .db
+            .with_conn(|conn| {
+                let calls = message_repo::get_tool_calls_for_message(conn, &assistant).unwrap();
+                assert_eq!(calls.len(), 1);
+                assert_eq!(
+                    calls[0].input.as_deref(),
+                    Some(r#"{"command":"printf 'RICH_INPUT'"}"#)
+                );
+            })
+            .unwrap();
     }
 
     #[test]
@@ -3089,13 +3204,20 @@ mod background_transcript_tests {
             },
             &mut tools,
         );
-        live.flush(&context.db, &session, &assistant, "", "", &tools).unwrap();
-        context.db.with_conn(|conn| {
-            let calls = message_repo::get_tool_calls_for_message(conn, &assistant).unwrap();
-            assert_eq!(calls.len(), 1);
-            assert_eq!(calls[0].input.as_deref(), Some(r#"{"command":"printf 'REVISED'"}"#));
-            assert_eq!(calls[0].output.as_deref(), Some("REVISED"));
-        }).unwrap();
+        live.flush(&context.db, &session, &assistant, "", "", &tools)
+            .unwrap();
+        context
+            .db
+            .with_conn(|conn| {
+                let calls = message_repo::get_tool_calls_for_message(conn, &assistant).unwrap();
+                assert_eq!(calls.len(), 1);
+                assert_eq!(
+                    calls[0].input.as_deref(),
+                    Some(r#"{"command":"printf 'REVISED'"}"#)
+                );
+                assert_eq!(calls[0].output.as_deref(), Some("REVISED"));
+            })
+            .unwrap();
     }
 
     #[test]
@@ -3109,17 +3231,28 @@ mod background_transcript_tests {
         let mut tools = Vec::new();
         live.observe(&EngineEvent::Text("streamed".into()), &mut tools);
         // Hold the writer like another process mid-checkpoint would.
-        let blocker = rusqlite::Connection::open(temp.path().join(deepseek_code_core::runtime::DATABASE_FILE)).unwrap();
+        let blocker = rusqlite::Connection::open(
+            temp.path().join(deepseek_code_core::runtime::DATABASE_FILE),
+        )
+        .unwrap();
         blocker.execute_batch("BEGIN IMMEDIATE").unwrap();
-        assert!(live.flush(&context.db, &session, &assistant, "streamed", "", &tools).is_err());
+        assert!(live
+            .flush(&context.db, &session, &assistant, "streamed", "", &tools)
+            .is_err());
         assert!(live.dirty, "a failed flush must retry on the next tick");
         blocker.execute_batch("COMMIT").unwrap();
-        live.flush(&context.db, &session, &assistant, "streamed", "", &tools).unwrap();
+        live.flush(&context.db, &session, &assistant, "streamed", "", &tools)
+            .unwrap();
         assert!(!live.dirty);
-        context.db.with_conn(|conn| {
-            let message = message_repo::get_message(conn, &assistant).unwrap().unwrap();
-            assert_eq!(message.content, "streamed");
-        }).unwrap();
+        context
+            .db
+            .with_conn(|conn| {
+                let message = message_repo::get_message(conn, &assistant)
+                    .unwrap()
+                    .unwrap();
+                assert_eq!(message.content, "streamed");
+            })
+            .unwrap();
     }
 }
 
@@ -3878,6 +4011,7 @@ mod compaction_cancellation_tests {
             "Interrupted",
             "Interrupted: automatic compaction cancelled before it was saved",
             "Interrupted: automatic compaction cancelled after commit",
+            "Interrupted by SDK host (session fixture)",
         ] {
             assert!(
                 super::is_turn_cancel_error(&anyhow::anyhow!(message)),
@@ -3889,6 +4023,7 @@ mod compaction_cancellation_tests {
             "Hook failed",
             "Hook failed: cancel requested",
             "Autocompact task cancelled unexpectedly by provider",
+            "SDK turn interrupted unexpectedly by provider",
         ] {
             assert!(
                 !super::is_turn_cancel_error(&anyhow::anyhow!(message)),

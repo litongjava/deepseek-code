@@ -372,10 +372,61 @@ pub fn change_in_workspace(
         return None;
     }
     let output: Value = serde_json::from_str(output).ok()?;
-    if output["success"] != true
-        || output["file_change"]["verified"] != true
-        || output["file_change"]["version"] != 1
-    {
+    if output["success"] != true {
+        return None;
+    }
+    // ApplyPatch reports one entry per file; show a bounded set with a clear
+    // count of the files that are not expanded.
+    if let Some(changes) = output["changes"].as_array().filter(|changes| !changes.is_empty()) {
+        let mut result = Vec::new();
+        let mut shown = 0;
+        for change in changes {
+            if shown >= 3 {
+                break;
+            }
+            let file_change = &change["file_change"];
+            if file_change["verified"] != true || file_change["version"] != 1 {
+                continue;
+            }
+            let path = change["path"].as_str()?;
+            let verb = match change["action"].as_str().unwrap_or("updated") {
+                "added" => "Added",
+                "deleted" => "Deleted",
+                "moved" => "Moved",
+                _ => "Updated",
+            };
+            let display = super::display_path::label(path, workspace);
+            result.push(Line(vec![
+                span("\u{25cf} ", Style::Success),
+                span(
+                    format!(
+                        "{verb} {display} (+{} -{})",
+                        file_change["added"].as_u64().unwrap_or(0),
+                        file_change["removed"].as_u64().unwrap_or(0)
+                    ),
+                    Style::Body,
+                ),
+            ]));
+            if let Some(notice) = file_change["notice"].as_str() {
+                result.push(Line(vec![span(format!("  {notice}"), Style::Muted)]));
+                shown += 1;
+                continue;
+            }
+            result.extend(diff_rows(file_change, path)?);
+            shown += 1;
+        }
+        if shown == 0 {
+            return None;
+        }
+        if changes.len() > shown {
+            result.push(Line(vec![span(
+                format!("  \u{2026} {} more changed file(s)", changes.len() - shown),
+                Style::Muted,
+            )]));
+        }
+        return Some(result);
+    }
+    if output["file_change"]["verified"] != true || output["file_change"]["version"] != 1 {
         return None;
     }
     let change = &output["file_change"];
@@ -460,7 +511,7 @@ pub fn diff_rows(change: &Value, path: &str) -> Option<Vec<Line>> {
     Some(result)
 }
 pub fn details(name: &str, output: &str, failed: bool) -> Option<String> {
-    matches!(name, "Write" | "Edit" | "MultiEdit")
+    matches!(name, "Write" | "Edit" | "MultiEdit" | "ApplyPatch")
         .then(|| change(output, failed))
         .flatten()
         .map(|lines| plain(&lines))

@@ -66,7 +66,10 @@ impl super::ToolLoopExecutor {
 }
 
 pub(super) fn render(name: &str, output: &str, body_budget: Option<usize>) -> String {
-    if !matches!(name, "Bash" | "Read" | "Write" | "Edit" | "MultiEdit") {
+    if !matches!(
+        name,
+        "Bash" | "Read" | "Write" | "Edit" | "MultiEdit" | "ApplyPatch"
+    ) {
         return output.into();
     }
     let (prefix, json) = output
@@ -78,6 +81,19 @@ pub(super) fn render(name: &str, output: &str, body_budget: Option<usize>) -> St
         return output.into();
     };
     let suffix = &json[stream.byte_offset()..];
+    if name == "ApplyPatch" {
+        // Per-file diffs stay in the UI/records; the model keeps the counts and
+        // path lists, including every unrestored path.
+        fields.remove("file_change");
+        if let Some(Value::Array(changes)) = fields.get_mut("changes") {
+            for change in changes {
+                if let Some(object) = change.as_object_mut() {
+                    object.remove("file_change");
+                }
+            }
+        }
+        return format!("{prefix}{}{suffix}", Value::Object(fields));
+    }
     if matches!(name, "Write" | "Edit" | "MultiEdit") {
         if fields.remove("file_change").is_none() {
             return output.into();
@@ -182,6 +198,39 @@ pub(super) fn render(name: &str, output: &str, body_budget: Option<usize>) -> St
 mod tests {
     use super::super::*;
     use super::*;
+
+    #[test]
+    fn apply_patch_keeps_paths_and_counts_but_not_per_file_diffs() {
+        let raw = json!({
+            "success": false,
+            "content": "Applied 1 change(s); 1 could not be restored",
+            "applied": [{"path":"/w/a.txt","raw_path":"a.txt","action":"updated","destination":null}],
+            "unchanged": [],
+            "rolled_back": [],
+            "unrestored": [{"path":"/w/b.txt","raw_path":"b.txt","message":"external edit","backup":"/w/.b.backup"}],
+            "changes": [{
+                "path": "/w/a.txt",
+                "raw_path": "a.txt",
+                "action": "updated",
+                "file_change": {"version": 1, "added": 1, "removed": 1, "rows": [{"text": "secret diff row"}]}
+            }],
+            "changes_truncated": false,
+            "file_change": {"version": 1, "added": 1, "removed": 1}
+        })
+        .to_string();
+        let rendered = render("ApplyPatch", &raw, None);
+        let value: Value = serde_json::from_str(&rendered).unwrap();
+        // Unresolved paths and counts survive; bulk diff rows do not.
+        assert_eq!(value["unrestored"][0]["path"], "/w/b.txt");
+        assert_eq!(value["changes"][0]["path"], "/w/a.txt");
+        assert!(value["changes"][0].get("file_change").is_none());
+        assert!(value.get("file_change").is_none());
+        assert!(!rendered.contains("secret diff row"));
+        // Hook context after the JSON is preserved verbatim.
+        let with_context = format!("{raw}\nPreToolUse context: keep me");
+        let rendered = render("ApplyPatch", &with_context, None);
+        assert!(rendered.contains("keep me"), "{rendered}");
+    }
 
     #[test]
     fn model_tool_output_preserves_payload_errors_and_hook_suffix() {
