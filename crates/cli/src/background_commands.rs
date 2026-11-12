@@ -369,9 +369,10 @@ fn job_runtime(job: &background_sessions::Job) -> String {
 #[path = "agent_liveness_tests.rs"]
 mod agent_liveness_tests;
 
-/// One background task: a managed shell or a detached worker job.
+/// One background task: a managed shell, a monitor or a detached worker job.
 enum Task {
     Shell(serde_json::Value),
+    Monitor(serde_json::Value),
     Job(background_sessions::Job),
 }
 
@@ -457,6 +458,26 @@ async fn tasks_menu(paths: &RuntimePaths, session: &Session) -> Result<()> {
                 let key = details("Shell details", &rows, &format!("{back}Esc/Enter/Space to close{stop}"), if stop.is_empty() { &[] } else { &['x'] })?;
                 key
             }
+            Task::Monitor(monitor) => {
+                let id = monitor["id"].as_str().unwrap_or_default().to_owned();
+                let status = monitor["status"].as_str().unwrap_or("unknown").to_owned();
+                let output = shell_control(paths, &session.id, &id, false).await.unwrap_or_default();
+                let mut rows = vec![format!("Status:   {status}")];
+                if let Some(started) = monitor["metadata"]["started_ms"].as_u64().filter(|_| status == "running") {
+                    rows.push(format!("Runtime:  {}", runtime(started, None)));
+                }
+                rows.push(format!("Script:   {}", safe_output(monitor["metadata"]["command"].as_str().unwrap_or(""))));
+                rows.push(String::new());
+                rows.push("Output:".into());
+                let text: Vec<String> = output["stdout"].as_str().unwrap_or_default().lines().map(safe_output).collect();
+                if text.is_empty() {
+                    rows.push("No output available".into());
+                } else {
+                    rows.extend(text.iter().rev().take(12).rev().cloned());
+                }
+                let stop = if status == "running" { " \u{b7} x to stop" } else { "" };
+                details("Monitor details", &rows, &format!("{back}Esc/Enter/Space to close{stop}"), if stop.is_empty() { &[] } else { &['x'] })?
+            }
             Task::Job(job) => {
                 let rows = vec![
                     format!("Status:   {}", job.status),
@@ -490,6 +511,12 @@ fn active_tasks(paths: &RuntimePaths, session: &Session) -> Result<Vec<Task>> {
         .map(Task::Shell)
         .collect();
     tasks.extend(
+        monitor_records(paths, &session.id)?
+            .into_iter()
+            .filter(|monitor| monitor["status"] == "running")
+            .map(Task::Monitor),
+    );
+    tasks.extend(
         background_sessions::list(&paths.data_dir, Some(&session.id))?
             .into_iter()
             .filter(|job| !job.foreground && matches!(job.status.as_str(), "starting" | "running" | "unresponsive"))
@@ -500,7 +527,7 @@ fn active_tasks(paths: &RuntimePaths, session: &Session) -> Result<Vec<Task>> {
 
 async fn stop_task(paths: &RuntimePaths, session: &Session, task: &Task) -> Result<()> {
     let id = match task {
-        Task::Shell(shell) => {
+        Task::Shell(shell) | Task::Monitor(shell) => {
             let id = shell["id"].as_str().unwrap_or_default().to_owned();
             shell_control(paths, &session.id, &id, true).await?;
             id
@@ -513,7 +540,7 @@ async fn stop_task(paths: &RuntimePaths, session: &Session, task: &Task) -> Resu
     // The list redraws only on a key press, so give the stop a moment to land.
     for _ in 0..40 {
         let gone = !active_tasks(paths, session)?.iter().any(|task| match task {
-            Task::Shell(shell) => shell["id"] == id.as_str(),
+            Task::Shell(shell) | Task::Monitor(shell) => shell["id"] == id.as_str(),
             Task::Job(job) => job.id == id,
         });
         if gone { break; }
@@ -525,11 +552,15 @@ async fn stop_task(paths: &RuntimePaths, session: &Session, task: &Task) -> Resu
 /// The list's subtitle, such as `2 active shells`, and one aligned row per task.
 fn task_rows(tasks: &[Task]) -> (String, Vec<crate::terminal::picker::Entry>) {
     use unicode_width::UnicodeWidthStr;
-    let counted = |shells: bool| tasks.iter().filter(|task| matches!(task, Task::Shell(_)) == shells && task.status() == "running").count();
-    let plural = |count: usize, one: &str, many: &str| format!("{count} active {}", if count == 1 { one } else { many });
+    let count = |wanted: fn(&Task) -> bool| tasks.iter().filter(|task| wanted(task) && task.status() == "running").count();
+    let shells = count(|task| matches!(task, Task::Shell(_)));
+    let monitors = count(|task| matches!(task, Task::Monitor(_)));
+    let jobs = count(|task| matches!(task, Task::Job(_)));
+    let plural = |count: usize, one: &str, many: &str| format!("{count} {}", if count == 1 { one } else { many });
     let mut parts = Vec::new();
-    if counted(true) > 0 { parts.push(plural(counted(true), "shell", "shells")); }
-    if counted(false) > 0 { parts.push(plural(counted(false), "task", "tasks")); }
+    if shells > 0 { parts.push(format!("{} active {}", shells, if shells == 1 { "shell" } else { "shells" })); }
+    if monitors > 0 { parts.push(plural(monitors, "monitor", "monitors")); }
+    if jobs > 0 { parts.push(format!("{} active {}", jobs, if jobs == 1 { "task" } else { "tasks" })); }
     let subtitle = if parts.is_empty() { "No active tasks".to_owned() } else { parts.join(", ") };
     let titles: Vec<String> = tasks.iter().map(Task::title).collect();
     let width = titles.iter().map(|title| title.width()).max().unwrap_or(0);
@@ -543,19 +574,20 @@ fn task_rows(tasks: &[Task]) -> (String, Vec<crate::terminal::picker::Entry>) {
 impl Task {
     fn started_ms(&self) -> u64 {
         match self {
-            Task::Shell(shell) => shell["metadata"]["started_ms"].as_u64().unwrap_or(0),
+            Task::Shell(shell) | Task::Monitor(shell) => shell["metadata"]["started_ms"].as_u64().unwrap_or(0),
             Task::Job(job) => job.started_ms,
         }
     }
     fn status(&self) -> &str {
         match self {
-            Task::Shell(shell) => shell["status"].as_str().unwrap_or("unknown"),
+            Task::Shell(shell) | Task::Monitor(shell) => shell["status"].as_str().unwrap_or("unknown"),
             Task::Job(job) => &job.status,
         }
     }
     fn title(&self) -> String {
         match self {
             Task::Shell(shell) => safe_output(shell["metadata"]["command"].as_str().or_else(|| shell["subject"].as_str()).unwrap_or("Background shell")),
+            Task::Monitor(monitor) => safe_output(monitor["subject"].as_str().unwrap_or("Monitor")),
             Task::Job(job) => safe_output(&job.title),
         }
     }
@@ -571,6 +603,17 @@ fn task_rows_align_one_row_per_task_and_count_what_is_active() {
     assert_eq!(rows[2].title, "\u{25cf} ls                  completed");
     assert!(rows.iter().all(|row| row.detail.is_empty()));
     assert_eq!(task_rows(&[shell("ls", "completed")]).0, "No active tasks");
+}
+
+#[cfg(test)]
+#[test]
+fn task_rows_include_monitors() {
+    let shell = Task::Shell(serde_json::json!({"id":"shell-1","subject":"sleep 30","status":"running","metadata":{"managed_shell":true,"command":"sleep 30","started_ms":1}}));
+    let monitor = Task::Monitor(serde_json::json!({"id":"monitor-1","subject":"watch the log","status":"running","metadata":{"monitor":true,"command":"tail -f x","started_ms":2}}));
+    let (subtitle, rows) = task_rows(&[shell, monitor]);
+    assert_eq!(subtitle, "1 active shell, 1 monitor");
+    let titles: Vec<&str> = rows.iter().map(|row| row.title.as_str()).collect();
+    assert!(titles.iter().any(|title| title.contains("watch the log") && title.contains("running")), "{titles:?}");
 }
 
 /// The session's todo list as (content, status), for ctrl+t.
@@ -796,6 +839,23 @@ pub(crate) fn agent_rows(agents: &[Agent], width: usize) -> Vec<String> {
 pub(crate) fn running_shells(paths: &RuntimePaths, session: &str) -> usize {
     managed_shell_records(paths, session)
         .map(|shells| shells.iter().filter(|shell| shell["status"] == "running").count())
+        .unwrap_or(0)
+}
+
+/// Monitors of this session, with the status stored in the task record.
+pub(crate) fn monitor_records(paths: &RuntimePaths, session: &str) -> Result<Vec<serde_json::Value>> {
+    let value = deepseek_code_core::tools::tasks::execute_for_session(
+        "TaskList", serde_json::json!({}), &paths.data_dir, session,
+    )?;
+    Ok(value["tasks"].as_array().into_iter().flatten()
+        .filter(|task| task["metadata"]["monitor"] == true)
+        .cloned().collect())
+}
+
+/// Monitors of this session that are still running.
+pub(crate) fn running_monitors(paths: &RuntimePaths, session: &str) -> usize {
+    monitor_records(paths, session)
+        .map(|monitors| monitors.iter().filter(|monitor| monitor["status"] == "running").count())
         .unwrap_or(0)
 }
 

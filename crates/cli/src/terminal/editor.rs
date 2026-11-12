@@ -79,7 +79,9 @@ pub struct PromptEditor {
     context_note: Option<String>,
     /// Background shells still running, shown as "1 shell · ↓ to manage".
     shells: usize,
-    shell_counter: Option<Box<dyn Fn() -> usize + Send>>,
+    /// Background monitors still running, shown next to the shells.
+    monitors: usize,
+    background_counter: Option<Box<dyn Fn() -> (usize, usize) + Send>>,
     /// Rows for running background agents at a width, shown above the editor.
     subagent_context: Option<(deepseek_code_core::services::ServiceContext, String)>,
     agent_details: Option<Box<dyn Fn(&str) -> String + Send>>,
@@ -114,7 +116,8 @@ impl Default for PromptEditor {
             files: None,
             context_note: None,
             shells: 0,
-            shell_counter: None,
+            monitors: 0,
+            background_counter: None,
             agent_rows: None,
             agent_details: None,
             subagent_context: None,
@@ -921,6 +924,23 @@ fn read_editor_event(
     }
 }
 
+/// The footer's background hint: running shells and monitors, such as
+/// "4 shells, 2 monitors · ↓ to manage"; nothing when both counts are zero.
+pub(crate) fn background_label(shells: usize, monitors: usize) -> Option<String> {
+    let mut parts = Vec::new();
+    if shells > 0 {
+        parts.push(format!("{shells} shell{}", if shells == 1 { "" } else { "s" }));
+    }
+    if monitors > 0 {
+        parts.push(format!("{monitors} monitor{}", if monitors == 1 { "" } else { "s" }));
+    }
+    if parts.is_empty() {
+        None
+    } else {
+        Some(format!("{} \u{b7} \u{2193} to manage", parts.join(", ")))
+    }
+}
+
 impl PromptEditor {
     pub fn set_permission_mode(&mut self, mode: String) {
         self.permission_mode = mode;
@@ -963,11 +983,12 @@ impl PromptEditor {
     pub fn set_context_note(&mut self, note: Option<String>) {
         self.context_note = note;
     }
-    pub fn set_shells(&mut self, count: usize) {
-        self.shells = count;
+    pub fn set_background(&mut self, shells: usize, monitors: usize) {
+        self.shells = shells;
+        self.monitors = monitors;
     }
-    pub fn set_shell_counter(&mut self, counter: Box<dyn Fn() -> usize + Send>) {
-        self.shell_counter = Some(counter);
+    pub fn set_background_counter(&mut self, counter: Box<dyn Fn() -> (usize, usize) + Send>) {
+        self.background_counter = Some(counter);
     }
     pub fn set_subagents(
         &mut self,
@@ -1163,10 +1184,10 @@ impl PromptEditor {
                     self.suggestion = Some(suggestion);
                 }
             }
-            if self.shells > 0 && last_shell_count.elapsed() >= std::time::Duration::from_secs(1) {
+            if self.shells + self.monitors > 0 && last_shell_count.elapsed() >= std::time::Duration::from_secs(1) {
                 last_shell_count = std::time::Instant::now();
-                if let Some(counter) = &self.shell_counter {
-                    self.shells = counter();
+                if let Some(counter) = &self.background_counter {
+                    (self.shells, self.monitors) = counter();
                 }
             }
             if buffer.chars != last_state.0 {
@@ -1393,23 +1414,16 @@ impl PromptEditor {
                 if let Some(note) = &self.context_note {
                     parts.push(note.clone());
                 }
-                if !agents.is_empty() && self.shells == 0 {
+                if !agents.is_empty() && self.shells == 0 && self.monitors == 0 {
                     parts.insert(1, "\u{2193} to manage".into());
                 }
                 parts.push("\u{2190} for agents".into());
                 if left_press.is_some_and(|at| at.elapsed() < std::time::Duration::from_secs(1)) {
                     parts = vec!["Press \u{2190} again to open agents".into()];
                 }
-                if self.shells > 0 {
+                if let Some(label) = background_label(self.shells, self.monitors) {
                     // Right after the mode label, as in the reference CLI.
-                    parts.insert(
-                        1,
-                        format!(
-                            "{} shell{} \u{b7} \u{2193} to manage",
-                            self.shells,
-                            if self.shells == 1 { "" } else { "s" }
-                        ),
-                    );
+                    parts.insert(1, label);
                 }
                 if kill_hint {
                     parts.push("Ctrl+Y to paste deleted text".into());
@@ -2365,7 +2379,7 @@ impl PromptEditor {
                             left_press = Some(std::time::Instant::now());
                         }
                         KeyCode::Down
-                            if (self.shells > 0 || !agents.is_empty())
+                            if (self.shells + self.monitors > 0 || !agents.is_empty())
                                 && buffer.chars.is_empty()
                                 && history_pos == self.history.len() =>
                         {
@@ -2567,6 +2581,15 @@ mod tests {
     }
 
     use super::*;
+    #[test]
+    fn background_label_counts_shells_and_monitors() {
+        assert_eq!(background_label(0, 0), None);
+        assert_eq!(background_label(1, 0).as_deref(), Some("1 shell \u{b7} \u{2193} to manage"));
+        assert_eq!(background_label(3, 0).as_deref(), Some("3 shells \u{b7} \u{2193} to manage"));
+        assert_eq!(background_label(0, 1).as_deref(), Some("1 monitor \u{b7} \u{2193} to manage"));
+        assert_eq!(background_label(4, 2).as_deref(), Some("4 shells, 2 monitors \u{b7} \u{2193} to manage"));
+    }
+
     fn frame_lines() -> Vec<DisplayLine> {
         vec![
             ("????".into(), TextStyle::Muted),

@@ -779,9 +779,15 @@ async fn run(cli: &Cli) -> Result<()> {
             input.as_mut().unwrap().set_commands(catalog);
             input.as_ref().unwrap().set_workspace(&session.workspace);
             input.as_ref().unwrap().set_context_note(session_commands::context_status(&session).await);
-            input.as_ref().unwrap().set_shells(background_commands::running_shells(&paths, &session.id));
+            input.as_ref().unwrap().set_background(
+                background_commands::running_shells(&paths, &session.id),
+                background_commands::running_monitors(&paths, &session.id),
+            );
             let (counter_paths, counter_session) = (paths.clone(), session.id.clone());
-            input.as_ref().unwrap().set_shell_counter(Box::new(move || background_commands::running_shells(&counter_paths, &counter_session)));
+            input.as_ref().unwrap().set_background_counter(Box::new(move || (
+                background_commands::running_shells(&counter_paths, &counter_session),
+                background_commands::running_monitors(&counter_paths, &counter_session),
+            )));
             input.as_ref().unwrap().set_effort(Some(session_commands::model_label(&session).await));
             let (agent_paths, agent_db, agent_session) = (paths.clone(), session.store.db.clone(), session.id.clone());
             input.as_ref().unwrap().set_agent_rows(Box::new(move || background_commands::running_agents(&agent_paths, &agent_db, &agent_session)));
