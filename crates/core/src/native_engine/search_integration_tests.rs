@@ -46,6 +46,7 @@ async fn parallel_searches_keep_provider_credentials_and_usage_separate() {
         &tx,
         None,
         false,
+        None,
     );
     let b = execute_builtin_tool(
         "WebSearch",
@@ -55,6 +56,7 @@ async fn parallel_searches_keep_provider_credentials_and_usage_separate() {
         &tx,
         None,
         false,
+        None,
     );
     let (a, b) = tokio::join!(a, b);
     let (a, b) = (a.unwrap().to_string(), b.unwrap().to_string());
@@ -103,7 +105,8 @@ async fn search_failure_still_records_provider_usage() {
         &provider,
         &tx,
         None,
-        false
+        false,
+        None,
     )
     .await
     .is_err());
@@ -145,6 +148,7 @@ async fn deepseek_search_falls_back_to_chat_when_unconfigured() {
         &tx,
         None,
         false,
+        None,
     )
     .await
     .unwrap();
@@ -162,6 +166,7 @@ async fn deepseek_search_falls_back_to_chat_when_unconfigured() {
         &tx,
         Some(&path),
         false,
+        None,
     )
     .await
     .unwrap_err()
@@ -209,6 +214,7 @@ async fn deepseek_search_reads_independent_endpoint_model_and_new_key_on_each_ca
             &tx,
             Some(&config_path),
             false,
+            None,
         )
         .await
         .unwrap();

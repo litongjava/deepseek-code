@@ -24,6 +24,22 @@ interface McpServer {
 /** Transports that connect to a URL instead of starting a command. */
 const REMOTE_TRANSPORTS = ['http', 'sse', 'ws'];
 
+/** State choices of the server selector. */
+const STATE_OPTIONS = [
+  { value: 'off', label: 'Off' },
+  { value: 'user', label: 'User' },
+  { value: 'on-demand', label: 'On demand' },
+  { value: 'user-only', label: 'User only' },
+];
+
+/** One-line explanation of what the selected state does. */
+const STATE_HINTS: Record<string, string> = {
+  off: 'Not started; its tools and prompts are unavailable.',
+  user: 'All tool schemas are sent with every request.',
+  'on-demand': 'Tools are listed by name and loaded with ToolSearch when needed.',
+  'user-only': 'Connected; the model cannot see or call its tools.',
+};
+
 interface McpTool {
   name: string;
   description: string;
@@ -33,6 +49,7 @@ interface McpTool {
 
 const McpSettingsPage = () => {
   const [servers, setServers] = useState<McpServer[]>([]);
+  const [states, setStates] = useState<Record<string, string>>({});
   const [tools, setTools] = useState<McpTool[]>([]);
   const [loading, setLoading] = useState(true);
   const [showAddForm, setShowAddForm] = useState(false);
@@ -56,6 +73,7 @@ const McpSettingsPage = () => {
   useEffect(() => {
     loadServers();
     loadTools();
+    loadStates();
   }, []);
 
   const loadServers = async () => {
@@ -83,8 +101,17 @@ const McpSettingsPage = () => {
     }
   };
 
+  const loadStates = async () => {
+    try {
+      const result = await invoke<Record<string, string>>('mcp_get_states');
+      setStates(result ?? {});
+    } catch (e: unknown) {
+      console.error('[MCP] Failed to load MCP states:', e);
+    }
+  };
+
   const refresh = async () => {
-    await Promise.all([loadServers(), loadTools()]);
+    await Promise.all([loadServers(), loadTools(), loadStates()]);
   };
 
   const showMessage = (message: string, type: 'success' | 'error' = 'success') => {
@@ -122,13 +149,13 @@ const McpSettingsPage = () => {
     }
   };
 
-  const handleToggle = async (id: string, enabled: boolean) => {
+  const handleStateChange = async (id: string, state: string) => {
     try {
-      await invoke('mcp_toggle_server', { id, enabled });
-      showMessage(enabled ? 'Server enabled' : 'Server disabled');
+      const label = await invoke<string>('mcp_set_state', { id, state });
+      showMessage(`State set to ${label}`);
       await refresh();
     } catch (e: unknown) {
-      showMessage(`Failed to toggle: ${e}`, 'error');
+      showMessage(`Failed to set state: ${e}`, 'error');
     }
   };
 
@@ -239,6 +266,9 @@ const McpSettingsPage = () => {
     acc[tool.server_name].push(tool);
     return acc;
   }, {} as Record<string, McpTool[]>);
+
+  // The state shown for a server, with the same fallback the backend uses.
+  const shownState = (server: McpServer) => states[server.id] ?? (server.enabled ? 'user' : 'off');
 
   if (loading) {
     return <div className="text-[14px] text-[#999] py-8">Loading MCP servers...</div>;
@@ -473,15 +503,21 @@ const McpSettingsPage = () => {
                     <Trash2 size={14} />
                   </button>
 
-                  <label className="flex items-center gap-1.5 ml-2 cursor-pointer">
-                    <input
-                      type="checkbox"
-                      checked={server.enabled}
-                      onChange={(e) => handleToggle(server.id, e.target.checked)}
-                      className="w-4 h-4 rounded border-[#d0d0d0] text-[#D97757] focus:ring-[#D97757]/30"
-                    />
-                    <span className="text-[12px] text-[#666]">Enabled</span>
-                  </label>
+                  <div className="ml-2 flex flex-col items-end">
+                    <select
+                      aria-label={`MCP state ${server.name}`}
+                      value={shownState(server)}
+                      onChange={(e) => handleStateChange(server.id, e.target.value)}
+                      className="px-2 py-1 border border-[#e0e0e0] rounded-lg text-[12px] bg-white focus:outline-none focus:ring-2 focus:ring-[#D97757]/30"
+                    >
+                      {STATE_OPTIONS.map((option) => (
+                        <option key={option.value} value={option.value}>{option.label}</option>
+                      ))}
+                    </select>
+                    <p className="text-[11px] text-[#999] mt-1">
+                      {STATE_HINTS[shownState(server)]}
+                    </p>
+                  </div>
                 </div>
               </div>
 

@@ -30,6 +30,7 @@ mod context_commands;
 mod persistent_worker;
 mod worker_frontend;
 mod mcp_menu;
+mod mcp_states;
 mod hooks_menu;
 mod settings_dialog;
 mod plugins_panel;
@@ -796,7 +797,7 @@ async fn run(cli: &Cli) -> Result<()> {
                 if history.len() != suggested_for {
                     suggested_for = history.len();
                     if let (Some(text), Ok(provider)) = (prompt_suggestion::context(&history), session.selected_provider().await) {
-                        prompt_suggestion::spawn(provider, text, input.as_ref().unwrap().suggestion_sender());
+                        prompt_suggestion::spawn(session.id.clone(), provider, text, input.as_ref().unwrap().suggestion_sender());
                     }
                 }
             }
@@ -1312,6 +1313,16 @@ async fn mcp(paths: &RuntimePaths, action: &McpCommands) -> Result<()> {
             let mut value = serde_json::to_value(manager.list_servers().await)?;
             config::redact(&mut value);
             println!("{}", serde_json::to_string_pretty(&value)?);
+        }
+        McpCommands::State { server, state } => {
+            let text = mcp_states::state_command(
+                paths,
+                &manager,
+                server.as_deref(),
+                state.as_deref(),
+            )
+            .await?;
+            println!("{text}");
         }
         McpCommands::Add {
             transport,

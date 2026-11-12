@@ -21,6 +21,7 @@ mod skill_tool;
 mod tool_approval;
 
 use super::mcp_output::McpOutput;
+use crate::mcp::states::McpState;
 use crate::mcp::McpToolRegistry;
 use crate::memory::{ContextManager, MemExClient, TieredCompressor};
 use crate::native_engine::anthropic_client::{
@@ -222,6 +223,11 @@ pub struct ToolLoopExecutor {
     file_state: super::file_state::FileState,
     mcp_tools: Vec<crate::tools::ToolDefinition>,
     mcp_read_only_tools: std::collections::HashSet<String>,
+    /// Per-server MCP states, read again at the start of every turn.
+    mcp_states: std::collections::BTreeMap<String, McpState>,
+    /// The on-demand MCP listing this executor appended to the system prompt,
+    /// so a repeated setup replaces it instead of adding a second copy.
+    on_demand_prompt: Option<String>,
     streaming_tool_args: HashMap<String, StreamingToolCall>,
     conv_id: Option<String>,
     answer_waiters: Arc<Mutex<HashMap<String, oneshot::Sender<String>>>>,
@@ -420,6 +426,39 @@ fn max_tool_concurrency() -> usize {
         .unwrap_or(10)
 }
 
+/// The system-prompt block that lists every MCP tool whose server is on demand,
+/// loaded or not, so the prompt prefix stays stable after a load. `None` when
+/// no such tool is available.
+fn on_demand_listing(
+    tools: &[crate::tools::ToolDefinition],
+    states: &std::collections::BTreeMap<String, McpState>,
+) -> Option<String> {
+    let mut lines = Vec::new();
+    for tool in tools {
+        let Some(server) = crate::mcp::states::server_of(&tool.name) else {
+            continue;
+        };
+        if crate::mcp::states::effective(states, server) != McpState::OnDemand {
+            continue;
+        }
+        lines.push(format!(
+            "- {}: {}",
+            tool.name,
+            crate::mcp::states::description_summary(&tool.description)
+        ));
+    }
+    if lines.is_empty() {
+        return None;
+    }
+    let mut block =
+        String::from("MCP tools available on demand (load with ToolSearch before calling):");
+    for line in lines {
+        block.push('\n');
+        block.push_str(&line);
+    }
+    Some(block)
+}
+
 enum CallStep {
     /// The call ended during its checks, or was a tool that runs inside them.
     Finished((Value, String, bool)),
@@ -591,6 +630,7 @@ async fn web_fetch_with_prompt(
     input: Value,
     cwd: &str,
     provider: &ResolvedProvider,
+    session: Option<&str>,
 ) -> Result<Value> {
     let prompt = input["prompt"].as_str().unwrap_or_default().to_owned();
     let page = crate::tools::execute_tool_async(
@@ -607,8 +647,13 @@ async fn web_fetch_with_prompt(
         page["content"].as_str().unwrap_or_default(),
         prompt
     );
-    let answer =
-        crate::native_engine::generation::generate(provider.clone(), system, &request).await?;
+    let answer = crate::native_engine::generation::generate_for_session(
+        provider.clone(),
+        system,
+        &request,
+        session,
+    )
+    .await?;
     Ok(
         json!({"url":page["url"],"result":answer,"offset":page["offset"],"next_offset":page["next_offset"],"truncated":page["truncated"]}),
     )
@@ -733,6 +778,7 @@ async fn execute_builtin_tool(
     event_tx: &mpsc::Sender<EngineEvent>,
     search_config_path: Option<&std::path::Path>,
     skill_shell_active: bool,
+    session: Option<&str>,
 ) -> Result<Value> {
     if name == "Bash" && skill_shell_active {
         let input = crate::skills::invocation::shell_input(
@@ -781,7 +827,7 @@ async fn execute_builtin_tool(
             .as_str()
             .is_some_and(|prompt| !prompt.trim().is_empty())
     {
-        return Box::pin(web_fetch_with_prompt(input, cwd, provider)).await;
+        return Box::pin(web_fetch_with_prompt(input, cwd, provider, session)).await;
     }
     if name == "ImageGenerate" {
         return crate::tools::image_generation::generate(input, cwd, provider).await;
@@ -850,7 +896,7 @@ async fn execute_builtin_tool(
     let _ = event_tx
         .send(EngineEvent::RequestSnapshot(trace.started()))
         .await;
-    let result = crate::tools::provider_search::search(input, provider).await;
+    let result = crate::tools::provider_search::search_for_session(input, provider, session).await;
     let snapshot = match &result {
         Ok(value) => {
             trace.observe_openai(&json!({"usage": value["usage"], "model": value["model"], "id": value["response_id"]}));
@@ -948,6 +994,8 @@ impl ToolLoopExecutor {
             file_state: Default::default(),
             mcp_tools: Vec::new(),
             mcp_read_only_tools: std::collections::HashSet::new(),
+            mcp_states: Default::default(),
+            on_demand_prompt: None,
             streaming_tool_args: HashMap::new(),
             conv_id: None,
             answer_waiters: Arc::new(Mutex::new(HashMap::new())),
@@ -1453,6 +1501,23 @@ impl ToolLoopExecutor {
             Err(error) => return Some(format!("Tool settings could not be read: {error:#}")),
         };
         if !self.builtin_names().contains(canonical) {
+            // An MCP tool follows its server's state before the legacy switch.
+            if let Some(server) = crate::mcp::states::server_of(name) {
+                match crate::mcp::states::effective(&self.mcp_states, server) {
+                    McpState::UserOnly => {
+                        return Some(format!(
+                            "{name} is set to user-only; the model cannot call it."
+                        ))
+                    }
+                    McpState::Off => return Some(format!("{name} is turned off.")),
+                    McpState::OnDemand if !self.loaded_tools.contains(name) => {
+                        return Some(format!(
+                            "{name} is not loaded; load it with ToolSearch first."
+                        ))
+                    }
+                    McpState::User | McpState::OnDemand => {}
+                }
+            }
             // MCP and host names were never part of the switches, but a legacy
             // entry that turned one off still does.
             return customization
@@ -1517,7 +1582,22 @@ impl ToolLoopExecutor {
                 )
             }
         };
-        let catalog = customization.described(self.builtin_catalog());
+        // Searchable tools: the built-ins under their loading switches, and MCP
+        // tools whose server is on demand. Off and user-only servers never
+        // appear here.
+        let mut searchable = self.builtin_catalog();
+        searchable.extend(
+            self.mcp_tools
+                .iter()
+                .filter(|tool| {
+                    crate::mcp::states::server_of(&tool.name).is_some_and(|server| {
+                        crate::mcp::states::effective(&self.mcp_states, server)
+                            == McpState::OnDemand
+                    })
+                })
+                .cloned(),
+        );
+        let catalog = customization.described(searchable);
         let exposed = self
             .exposed_tools
             .clone()
@@ -1549,9 +1629,17 @@ impl ToolLoopExecutor {
         let mut hits: Vec<(u8, crate::tools::ToolDefinition)> = catalog
             .iter()
             .filter(|tool| {
-                let loading = customization.loading(&tool.name);
-                loading.on_demand
-                    && !loading.enabled
+                let searchable = match crate::mcp::states::server_of(&tool.name) {
+                    Some(server) => {
+                        crate::mcp::states::effective(&self.mcp_states, server)
+                            == McpState::OnDemand
+                    }
+                    None => {
+                        let loading = customization.loading(&tool.name);
+                        loading.on_demand && !loading.enabled
+                    }
+                };
+                searchable
                     && !exposed.contains(&tool.name)
                     && self
                         .allowed_tools
@@ -2048,6 +2136,7 @@ impl ToolLoopExecutor {
                         &self.event_tx,
                         self.search_config_path.as_deref(),
                         self.skill_shell_active,
+                        self.conv_id.as_deref(),
                     ),
                 ),
             ),
@@ -2320,11 +2409,22 @@ impl ToolLoopExecutor {
             })
             .collect();
         // A legacy entry outside the built-in catalog keeps its old "off"
-        // meaning; built-ins are already handled by the switches above.
+        // meaning; built-ins are already handled by the switches above. An MCP
+        // tool follows its server's state: resident only for `user`, and for
+        // `on-demand` once ToolSearch loaded it.
         tools.extend(
             self.mcp_tools
                 .iter()
                 .filter(|tool| !customization.is_disabled(&tool.name))
+                .filter(|tool| match crate::mcp::states::server_of(&tool.name) {
+                    None => true,
+                    Some(server) => match crate::mcp::states::effective(&self.mcp_states, server)
+                    {
+                        McpState::User => true,
+                        McpState::OnDemand => self.loaded_tools.contains(&tool.name),
+                        McpState::Off | McpState::UserOnly => false,
+                    },
+                })
                 .cloned(),
         );
         let mut tools = customization.described(tools);
@@ -2758,6 +2858,9 @@ impl ToolLoopExecutor {
         // settings still decide whether it may come back.
         self.restore_loaded_tools();
         self.restore_persisted_loaded_tools()?;
+        // After the restore, so tools loaded in earlier turns are not listed
+        // as if they still had to be searched.
+        self.refresh_on_demand_listing();
         self.exposed_tools = None;
         let mut directories = self.allowed_directories.clone();
         if let (Some(manager), Some(conv)) = (&self.permission_manager, self.conv_id.as_deref()) {
@@ -2768,6 +2871,9 @@ impl ToolLoopExecutor {
             .as_deref()
             .and_then(|p| p.parent())
             .map(|root| (root.to_path_buf(), self.conv_id.clone().unwrap_or_default()));
+        let options = super::request_options::RequestOptions::for_session(self.conv_id.as_deref());
+        self.openai_client.request_options = options.clone();
+        self.anthropic_client.request_options = options;
         let parent_session = self.request_parent_session();
         let identity =
             super::request_identity::TurnIdentity::new(self.conv_id.clone(), parent_session);
@@ -2832,6 +2938,14 @@ impl ToolLoopExecutor {
     }
 
     async fn refresh_mcp_tools(&mut self) -> Result<()> {
+        // Read once per turn next to the discovery, so a saved change applies
+        // to this request without another lookup per tool.
+        self.mcp_states = self
+            .search_config_path
+            .as_deref()
+            .and_then(std::path::Path::parent)
+            .map(crate::mcp::states::load)
+            .unwrap_or_default();
         self.mcp_tools.clear();
         self.mcp_read_only_tools.clear();
         if let Some(registry) = &self.mcp_registry {
@@ -2866,6 +2980,27 @@ impl ToolLoopExecutor {
             self.mcp_read_only_tools = read_only;
         }
         Ok(())
+    }
+
+    /// Keeps the system prompt's on-demand MCP listing in step with this turn:
+    /// the block appended earlier is replaced, so a setup that runs twice
+    /// never lists the same tool twice.
+    fn refresh_on_demand_listing(&mut self) {
+        if let Some(previous) = self.on_demand_prompt.take() {
+            if let Some(prompt) = self.system_prompt.as_mut() {
+                if let Some(index) = prompt.find(previous.as_str()) {
+                    prompt.replace_range(index..index + previous.len(), "");
+                }
+            }
+        }
+        let Some(block) = on_demand_listing(&self.mcp_tools, &self.mcp_states) else {
+            return;
+        };
+        let block = format!("\n{block}\n");
+        self.system_prompt
+            .get_or_insert_with(String::new)
+            .push_str(&block);
+        self.on_demand_prompt = Some(block);
     }
 
     async fn execute_scoped(&mut self) -> Result<(String, Option<String>)> {
@@ -4803,6 +4938,7 @@ impl ToolLoopExecutor {
                     if crate::services::compaction::native::supports(&self.provider) {
                         let compacted = crate::services::compaction::native::generate_messages(
                             &self.provider,
+                            self.conv_id.as_deref(),
                             conversation_messages.clone(),
                             self.system_prompt.as_deref().unwrap_or(""),
                         )

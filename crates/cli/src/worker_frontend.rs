@@ -874,18 +874,14 @@ fn plan_event_mode(event: &Value) -> Option<deepseek_code_core::permissions::Per
     }
     let output: Value = serde_json::from_str(event["output"].as_str()?).ok()?;
     match event["name"].as_str()? {
-        "EnterPlanMode" | "plan_mode" if output["mode"] == "plan" => Some(PermissionMode::PlanMode),
-        "ExitPlanMode" | "plan_mode" if output["approved"] == true && output["mode"] == "ask" => {
+        "EnterPlanMode" if output["mode"] == "plan" => Some(PermissionMode::PlanMode),
+        "ExitPlanMode" if output["approved"] == true && output["mode"] == "ask" => {
             Some(PermissionMode::AskPermissions)
         }
-        "ExitPlanMode" | "plan_mode"
-            if output["approved"] == true && output["mode"] == "accept_edits" =>
-        {
+        "ExitPlanMode" if output["approved"] == true && output["mode"] == "accept_edits" => {
             Some(PermissionMode::AcceptEdits)
         }
-        "ExitPlanMode" | "plan_mode"
-            if output["approved"] == true && output["mode"] == "bypass" =>
-        {
+        "ExitPlanMode" if output["approved"] == true && output["mode"] == "bypass" => {
             Some(PermissionMode::BypassPermissions)
         }
         _ => None,
@@ -1103,6 +1099,60 @@ fn result_text(event: &Value, streamed: bool) -> Option<&str> {
 #[cfg(test)]
 mod failure_tests {
     use super::*;
+    #[test]
+    fn removed_plan_mode_tool_results_do_not_change_mode() {
+        for output in [
+            r#"{"mode":"plan"}"#,
+            r#"{"approved":true,"mode":"ask"}"#,
+            r#"{"approved":true,"mode":"accept_edits"}"#,
+            r#"{"approved":true,"mode":"bypass"}"#,
+        ] {
+            let event = serde_json::json!({
+                "type": "tool_result",
+                "name": "plan_mode",
+                "output": output,
+                "is_error": false,
+            });
+            assert_eq!(plan_event_mode(&event), None, "{output}");
+        }
+    }
+
+    #[test]
+    fn supported_plan_tool_results_keep_existing_transitions() {
+        use deepseek_code_core::permissions::PermissionMode;
+
+        for (name, output, expected) in [
+            (
+                "EnterPlanMode",
+                r#"{"mode":"plan"}"#,
+                PermissionMode::PlanMode,
+            ),
+            (
+                "ExitPlanMode",
+                r#"{"approved":true,"mode":"ask"}"#,
+                PermissionMode::AskPermissions,
+            ),
+            (
+                "ExitPlanMode",
+                r#"{"approved":true,"mode":"accept_edits"}"#,
+                PermissionMode::AcceptEdits,
+            ),
+            (
+                "ExitPlanMode",
+                r#"{"approved":true,"mode":"bypass"}"#,
+                PermissionMode::BypassPermissions,
+            ),
+        ] {
+            let event = serde_json::json!({
+                "type": "tool_result",
+                "name": name,
+                "output": output,
+                "is_error": false,
+            });
+            assert_eq!(plan_event_mode(&event), Some(expected), "{name}: {output}");
+        }
+    }
+
     #[tokio::test]
     async fn attachment_cannot_consume_another_tasks_goal_and_main_cancel_revokes_it() {
         use clap::Parser;

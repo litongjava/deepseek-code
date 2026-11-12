@@ -59,11 +59,12 @@ pub(crate) async fn generate(
         .into_iter()
         .map(serde_json::from_value::<OpenAIMessage>)
         .collect::<serde_json::Result<Vec<_>>>()?;
-    generate_messages(provider, messages, instructions).await
+    generate_messages(provider, Some(id), messages, instructions).await
 }
 
 pub(crate) async fn generate_messages(
     provider: &ResolvedProvider,
+    session: Option<&str>,
     messages: Vec<OpenAIMessage>,
     instructions: &str,
 ) -> Result<GeneratedSummary> {
@@ -88,6 +89,13 @@ pub(crate) async fn generate_messages(
         .build()?;
     let mut request = client
         .post(url)
+        .headers(
+            crate::native_engine::request_options::RequestOptions {
+                session_id: session.map(str::to_owned),
+                compact: true,
+            }
+            .headers(provider)?,
+        )
         .header("x-request-id", uuid::Uuid::new_v4().to_string())
         .json(&body);
     if !provider.provider.api_key.is_empty() {

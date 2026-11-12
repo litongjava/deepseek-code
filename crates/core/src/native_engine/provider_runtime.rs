@@ -100,6 +100,29 @@ pub async fn stream_with_schema_observed(
     response_schema: Option<&Value>,
     context_capture: Option<&super::request_context::ContextCapture>,
 ) -> Result<ProviderStream> {
+    stream_with_options(
+        provider,
+        messages,
+        system,
+        tools,
+        max_tokens,
+        response_schema,
+        context_capture,
+        &Default::default(),
+    )
+    .await
+}
+
+pub async fn stream_with_options(
+    provider: &ResolvedProvider,
+    messages: Vec<OpenAIMessage>,
+    system: Option<&str>,
+    tools: Vec<ToolDefinition>,
+    max_tokens: u32,
+    response_schema: Option<&Value>,
+    context_capture: Option<&super::request_context::ContextCapture>,
+    options: &super::request_options::RequestOptions,
+) -> Result<ProviderStream> {
     let (entry, model) = metadata(provider)?;
     let protocol = provider
         .model
@@ -343,11 +366,13 @@ pub async fn stream_with_schema_observed(
     } else {
         None
     };
+    let harness_headers = options.headers(provider)?;
     let identity = super::request_identity::RequestIdentity::new(context_capture, super::request_identity::is_opencode(provider));
     let response = retry_with_backoff(|| async {
         let mut request = client
             .post(&url)
             .headers(identity.headers())
+            .headers(harness_headers.clone())
             .header("content-type", "application/json")
             .body(encoded_body.clone());
         if entry["id"] == "github-copilot" {

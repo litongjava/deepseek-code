@@ -137,7 +137,7 @@ pub async fn handle(argument: &str, session: &Session, input: &mut TerminalInput
         let provider = session.selected_provider().await?;
         let request = request.to_string();
         let result = tokio::select! {
-            result = deepseek_code_core::native_engine::generation::generate(provider, setup::SYSTEM, &request) => result?,
+            result = deepseek_code_core::native_engine::generation::generate_for_session(provider, setup::SYSTEM, &request, Some(&session.id)) => result?,
             _ = tokio::signal::ctrl_c() => bail!("Status line setup cancelled; settings unchanged"),
         };
         let proposal = setup::parse_proposal(&result)?;

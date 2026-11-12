@@ -19,8 +19,17 @@ async fn builtin_errors_are_failures_in_serial_and_parallel_paths() {
         ),
         ("Read", json!({"file_path":"file.txt"}), false),
     ] {
-        let result =
-            execute_builtin_tool(name, input.clone(), &cwd, &provider, &events, None, false).await;
+        let result = execute_builtin_tool(
+            name,
+            input.clone(),
+            &cwd,
+            &provider,
+            &events,
+            None,
+            false,
+            None,
+        )
+        .await;
         assert_eq!(result.is_err(), failure, "{name}: {result:?}");
         let mut executor = ToolLoopExecutor::new(
             provider.clone(),

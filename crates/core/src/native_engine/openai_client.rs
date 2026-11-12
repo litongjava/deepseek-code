@@ -137,6 +137,7 @@ pub struct OpenAIClient {
     client: Client,
     response_schema: Option<Value>,
     retry_requests: bool,
+    pub(super) request_options: super::request_options::RequestOptions,
 }
 
 impl OpenAIClient {
@@ -145,7 +146,23 @@ impl OpenAIClient {
             .timeout(std::time::Duration::from_secs(300))
             .build()
             .unwrap_or_else(|_| Client::new());
-        Self { client, response_schema: None, retry_requests: true }
+        Self {
+            client,
+            request_options: Default::default(),
+            response_schema: None,
+            retry_requests: true,
+        }
+    }
+
+    pub fn with_request_options(mut self, options: super::request_options::RequestOptions) -> Self {
+        self.request_options = options;
+        self
+    }
+
+    #[cfg(test)]
+    pub(super) fn with_http_client(mut self, client: Client) -> Self {
+        self.client = client;
+        self
     }
 
     /// Isolated classifiers use one attempt and an outer cancellation deadline.
@@ -169,7 +186,17 @@ impl OpenAIClient {
     ) -> Result<OpenAIResponse> {
         anyhow::ensure!(!crate::services::anthropic_auth::is_oauth_marker(&provider.provider.api_key), "Anthropic OAuth credentials require Anthropic messages API");
         if provider.provider.builtin_id.is_some() {
-            let mut stream = super::provider_runtime::stream_with_schema(provider, messages, system_prompt, tools, max_tokens, self.response_schema.as_ref()).await?;
+            let mut stream = super::provider_runtime::stream_with_options(
+                provider,
+                messages,
+                system_prompt,
+                tools,
+                max_tokens,
+                self.response_schema.as_ref(),
+                None,
+                &self.request_options,
+            )
+            .await?;
             let mut text = String::new();
             let mut thinking = String::new();
             let mut calls = std::collections::BTreeMap::<usize, Value>::new();
@@ -257,11 +284,13 @@ impl OpenAIClient {
             }
         }
         if let Some(messages) = body["messages"].as_array_mut() { for message in messages { if let Some(object) = message.as_object_mut() { object.remove("provider_content"); } } }
+        let harness_headers = self.request_options.headers(provider)?;
         let identity = super::request_identity::RequestIdentity::new(None, super::request_identity::is_opencode(provider));
         let request = || async {
             let response = self.client
                 .post(&url)
                 .headers(identity.headers())
+                .headers(harness_headers.clone())
                 .header("Authorization", format!("Bearer {}", provider.provider.api_key))
                 .header("content-type", "application/json")
                 .json(&body)
@@ -335,7 +364,17 @@ impl OpenAIClient {
         if provider.provider.builtin_id.is_some() {
             // Built-in adapters use their own transport, so the attempt count is
             // not observable here and stays unknown rather than being invented.
-            let stream = super::provider_runtime::stream_with_schema_observed(provider, messages, system_prompt, tools, max_tokens, self.response_schema.as_ref(), context_capture).await?;
+            let stream = super::provider_runtime::stream_with_options(
+                provider,
+                messages,
+                system_prompt,
+                tools,
+                max_tokens,
+                self.response_schema.as_ref(),
+                context_capture,
+                &self.request_options,
+            )
+            .await?;
             return Ok((stream, crate::performance::AttemptCounter::default()));
         }
         let base_url = crate::native_engine::provider_manager::ProviderManager::normalize_base_url(&provider.provider.base_url);
@@ -389,8 +428,10 @@ impl OpenAIClient {
         }
         if let Some(messages) = body["messages"].as_array_mut() { for message in messages { if let Some(object) = message.as_object_mut() { object.remove("provider_content"); } } }
         if let Some(capture) = context_capture { capture.record("openai-completions", &body, provider.model.context_window, max_tokens).await; }
+        let harness_headers = self.request_options.headers(provider)?;
         let identity = super::request_identity::RequestIdentity::new(context_capture, super::request_identity::is_opencode(provider));
         let request = self.client.post(&url)
+            .headers(harness_headers)
             .header("Authorization", format!("Bearer {}", provider.provider.api_key))
             .header("content-type", "application/json")
             .json(&body);

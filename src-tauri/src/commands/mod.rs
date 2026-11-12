@@ -25,6 +25,8 @@ use crate::im_integration::{
 };
 use crate::im_integration::permission_manager::{PermissionMode as ImPermissionMode, UserPermission};
 use crate::mcp::{McpServerConfig, McpServerStatus, McpTool};
+use crate::mcp::states as mcp_states;
+use crate::mcp::states::McpState;
 use crate::native_engine::engine_core::ChatRequest as NativeChatRequest;
 use crate::native_engine::provider_manager::{Provider, ProviderManager};
 use crate::native_engine::session_manager::{Conversation, Message, SessionManager};
@@ -531,6 +533,113 @@ pub async fn mcp_toggle_server(
     } else {
         Err("MCP manager not initialized".to_string())
     }
+}
+
+/// The work one state request implies for a server. `off` disables the server
+/// and stops it when it runs, but leaves `mcp-states.json` alone so the stored
+/// state returns the next time the server is enabled. The other states are
+/// stored; they also enable and start a disabled server.
+#[derive(Debug, PartialEq, Eq)]
+struct StatePlan {
+    /// State to write; `None` for `off`.
+    stored: Option<McpState>,
+    /// New value of the `enabled` switch; `None` keeps it.
+    enabled: Option<bool>,
+    /// Whether to stop a running server.
+    stop: bool,
+    /// Whether to start the server after enabling it.
+    start: bool,
+}
+
+fn plan_state(requested: McpState, enabled: bool) -> StatePlan {
+    match requested {
+        McpState::Off => StatePlan {
+            stored: None,
+            enabled: Some(false),
+            stop: true,
+            start: false,
+        },
+        state if enabled => StatePlan {
+            stored: Some(state),
+            enabled: None,
+            stop: false,
+            start: false,
+        },
+        state => StatePlan {
+            stored: Some(state),
+            enabled: Some(true),
+            stop: false,
+            start: true,
+        },
+    }
+}
+
+/// Every configured server's shown state, keyed by server id: `off` when the
+/// server is disabled, otherwise its stored state (default `user`).
+#[tauri::command]
+pub async fn mcp_get_states(
+    app_handle: tauri::AppHandle,
+) -> Result<std::collections::BTreeMap<String, String>, String> {
+    let data_dir = app_data_dir()?;
+    let stored = mcp_states::load(&data_dir);
+    let mcp_state = app_handle.state::<Arc<Mutex<Option<Arc<Mutex<crate::mcp::McpServerManager>>>>>>();
+    let mcp_guard = mcp_state.lock().await;
+    let Some(mcp_manager) = mcp_guard.as_ref() else {
+        return Ok(std::collections::BTreeMap::new());
+    };
+    let manager = mcp_manager.lock().await;
+    Ok(manager
+        .list_servers()
+        .await
+        .into_iter()
+        .map(|server| {
+            let shown = mcp_states::shown(&stored, &server.id, server.enabled);
+            (server.id, shown.label().to_owned())
+        })
+        .collect())
+}
+
+/// Set one server's state. `off` disables the server (and stops it) without
+/// writing the file, so the stored state returns when it is enabled again;
+/// the other states are stored and enable a disabled server.
+#[tauri::command]
+pub async fn mcp_set_state(
+    app_handle: tauri::AppHandle,
+    id: String,
+    state: String,
+) -> Result<String, String> {
+    let requested = state.parse::<McpState>().map_err(|e| e.to_string())?;
+    let data_dir = app_data_dir()?;
+    let mcp_state = app_handle.state::<Arc<Mutex<Option<Arc<Mutex<crate::mcp::McpServerManager>>>>>>();
+    let mcp_guard = mcp_state.lock().await;
+    let mcp_manager = mcp_guard.as_ref().ok_or("MCP manager not initialized")?;
+    let manager = mcp_manager.lock().await;
+    let server = manager
+        .get_server(&id)
+        .await
+        .ok_or_else(|| format!("Unknown MCP server {id}"))?;
+    let plan = plan_state(requested, server.enabled);
+
+    if let Some(stored) = plan.stored {
+        mcp_states::set(&data_dir, &id, stored).map_err(|e| e.to_string())?;
+    }
+    if plan.stop && server.running {
+        manager.stop_server(&id).await.map_err(|e| e.to_string())?;
+    }
+    if let Some(enabled) = plan.enabled {
+        manager
+            .set_server_enabled(&id, enabled)
+            .await
+            .map_err(|e| e.to_string())?;
+    }
+    if plan.start {
+        manager.start_server(&id).await.map_err(|e| e.to_string())?;
+    }
+
+    let enabled = plan.enabled.unwrap_or(server.enabled);
+    Ok(mcp_states::shown(&mcp_states::load(&data_dir), &id, enabled)
+        .label()
+        .to_owned())
 }
 
 #[tauri::command]
@@ -1476,4 +1585,67 @@ pub async fn get_context_size(conversation_id: String) -> Result<serde_json::Val
         return Err(data["error"].as_str().map(String::from).unwrap_or_else(|| format!("Bridge error: {}", status)));
     }
     Ok(data)
+}
+
+#[cfg(test)]
+mod mcp_state_tests {
+    use super::*;
+
+    #[test]
+    fn mcp_state_labels_parse_and_unknown_labels_fail() {
+        for (label, state) in [
+            ("off", McpState::Off),
+            ("user", McpState::User),
+            ("on-demand", McpState::OnDemand),
+            ("user-only", McpState::UserOnly),
+        ] {
+            assert_eq!(label.parse::<McpState>().unwrap(), state);
+        }
+        let error = "always".parse::<McpState>().unwrap_err().to_string();
+        for label in ["off", "user", "on-demand", "user-only"] {
+            assert!(error.contains(label), "{error}");
+        }
+    }
+
+    #[test]
+    fn mcp_state_off_disables_and_stops_without_storing() {
+        let expected = StatePlan {
+            stored: None,
+            enabled: Some(false),
+            stop: true,
+            start: false,
+        };
+        assert_eq!(plan_state(McpState::Off, true), expected);
+        assert_eq!(plan_state(McpState::Off, false), expected);
+    }
+
+    #[test]
+    fn mcp_state_stored_states_leave_an_enabled_server_alone() {
+        for state in [McpState::User, McpState::OnDemand, McpState::UserOnly] {
+            assert_eq!(
+                plan_state(state, true),
+                StatePlan {
+                    stored: Some(state),
+                    enabled: None,
+                    stop: false,
+                    start: false,
+                }
+            );
+        }
+    }
+
+    #[test]
+    fn mcp_state_stored_states_enable_and_start_a_disabled_server() {
+        for state in [McpState::User, McpState::OnDemand, McpState::UserOnly] {
+            assert_eq!(
+                plan_state(state, false),
+                StatePlan {
+                    stored: Some(state),
+                    enabled: Some(true),
+                    stop: false,
+                    start: true,
+                }
+            );
+        }
+    }
 }

@@ -350,6 +350,14 @@ fn response_results(body: &Value, selected: Strategy, model: &str) -> Result<Vec
 }
 
 pub async fn search(input: Value, provider: &ResolvedProvider) -> Result<Value> {
+    search_for_session(input, provider, None).await
+}
+
+pub async fn search_for_session(
+    input: Value,
+    provider: &ResolvedProvider,
+    session: Option<&str>,
+) -> Result<Value> {
     let query = input["query"]
         .as_str()
         .map(str::trim)
@@ -368,6 +376,10 @@ pub async fn search(input: Value, provider: &ResolvedProvider) -> Result<Value> 
         .map_err(|_| anyhow!("Could not initialize the provider search HTTP client."))?;
     let mut request = client
         .post(url)
+        .headers(
+            crate::native_engine::request_options::RequestOptions::for_session(session)
+                .headers(provider)?,
+        )
         .header("accept", "application/json")
         .bearer_auth(&api_key)
         .json(&request_body(selected, query, &provider.model.id));

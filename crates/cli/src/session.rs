@@ -1767,7 +1767,7 @@ impl Session {
                                 progress.notice(&format!("Cannot checkpoint this tool's file: {error:#}"));
                             }
                         }
-                        if matches!(tool_name.as_str(), "EnterPlanMode" | "ExitPlanMode" | "plan_mode") {
+                        if matches!(tool_name.as_str(), "EnterPlanMode" | "ExitPlanMode") {
                             progress.set_permission_mode(self.permission_mode());
                         }
                         if let Some(start) = tool_started.remove(&tool_use_id) { tool_durations.entry(tool_use_id.clone()).or_insert(start.elapsed().as_millis().min(u64::MAX as u128) as u64); }
