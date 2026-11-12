@@ -1004,6 +1004,34 @@ pub struct GateEvidence {
     pub event_types: BTreeSet<EventType>,
     /// Verified snapshot state keyed by the target path as stored on the task.
     pub non_git_manifests: BTreeMap<String, NonGitVerification>,
+    /// The authoritative delivery record, present only when the store proved in
+    /// this same transaction that a complete persisted plan binds this task's
+    /// current version and every planned repository has its own observation.
+    /// It is what allows an integration merge commit (the delivered OID) to be
+    /// approved by a final review even though it differs from the
+    /// implementation-review commit.
+    pub delivery: Option<GateDeliveryEvidence>,
+}
+
+/// One planned repository as recorded in the authoritative immutable plan.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GateDeliveryTarget {
+    pub repository_id: String,
+    /// The implementation-review commit the plan recorded before integration.
+    pub reviewed_commit: String,
+    /// The host-verified integrated commit the plan delivered.
+    pub new_oid: String,
+    pub target_ref: String,
+}
+
+/// Durable, store-validated delivery facts for the completion gate.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GateDeliveryEvidence {
+    pub operation_id: String,
+    pub task_id: String,
+    pub spec_version: u32,
+    pub review_round: u32,
+    pub repositories: Vec<GateDeliveryTarget>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]

@@ -22,7 +22,7 @@ use crate::super_agent::config::{AgentModelRole, ModelFallback, SuperAgentConfig
 use crate::super_agent::crp;
 use crate::super_agent::delivery::{
     is_delivery_purpose, is_delivery_purpose_namespace, DeliveryOperationIdentity,
-    DELIVERY_IDENTITY_VERSION,
+    DELIVERY_IDENTITY_VERSION, LEGACY_DELIVERY_PURPOSE,
 };
 use crate::super_agent::role::MemberRole;
 use crate::super_agent::store::TaskStore;
@@ -71,6 +71,132 @@ pub struct DeliveryJobBinding {
 /// The job-directory file that carries [`DeliveryJobBinding`]. It is written
 /// atomically before the child is spawned and validated at every adoption.
 const DELIVERY_BINDING_FILE: &str = "delivery-identity.json";
+
+/// One durable reference that names a child process a task owns.
+///
+/// Completion reads these references directly instead of trusting the
+/// background-task discovery list: that list intentionally tolerates missing
+/// and malformed unrelated records, so its silence is not proof that a known
+/// member job stopped.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MemberJobReceipt {
+    /// The durable storage key or table row the reference came from.
+    pub source: String,
+    /// `coder` or `reviewer`.
+    pub role: String,
+    /// The member session the job must belong to.
+    pub session_id: String,
+    /// The exact reserved background job UUID.
+    pub job_id: String,
+    /// The evidence purpose the receipt was reserved for. Empty for an initial
+    /// launch; delivery purposes carry their typed identity.
+    pub purpose: String,
+    /// The specification version and review round the receipt belongs to.
+    pub spec_version: u32,
+    pub review_round: u32,
+    /// The persisted delivery plan the receipt is bound to. Empty when the
+    /// receipt cannot name one (an initial member launch, or a pre-delivery
+    /// final-delivery review reserved before any plan existed).
+    pub plan_operation_id: String,
+}
+
+impl MemberJobReceipt {
+    fn new(
+        source: impl Into<String>,
+        role: impl Into<String>,
+        session: impl Into<String>,
+    ) -> Self {
+        Self {
+            source: source.into(),
+            role: role.into(),
+            session_id: session.into(),
+            job_id: String::new(),
+            purpose: String::new(),
+            spec_version: 0,
+            review_round: 0,
+            plan_operation_id: String::new(),
+        }
+    }
+
+    fn with_job(mut self, job_id: impl Into<String>) -> Self {
+        self.job_id = job_id.into();
+        self
+    }
+
+    fn with_stage(mut self, purpose: impl Into<String>, spec: u32, round: u32) -> Self {
+        self.purpose = purpose.into();
+        self.spec_version = spec;
+        self.review_round = round;
+        self
+    }
+
+    fn with_plan(mut self, plan_operation_id: impl Into<String>) -> Self {
+        self.plan_operation_id = plan_operation_id.into();
+        self
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum MemberJobState {
+    /// The exact job exists and its supervisor recorded a terminal result.
+    Stopped { status: String },
+    /// The exact job is still working, including an expired heartbeat.
+    Active { status: String },
+    /// The reference cannot prove either a terminal or an active job.
+    Unknown { reason: String },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MemberJobObservation {
+    pub receipt: MemberJobReceipt,
+    pub state: MemberJobState,
+}
+
+/// Every known task-owned member job and what its real durable state proves.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct CompletionMemberJobs {
+    pub observations: Vec<MemberJobObservation>,
+}
+
+impl CompletionMemberJobs {
+    /// Jobs whose exact process is still working.
+    pub fn active(&self) -> impl Iterator<Item = &MemberJobObservation> {
+        self.observations
+            .iter()
+            .filter(|observation| matches!(observation.state, MemberJobState::Active { .. }))
+    }
+
+    /// References whose process exit cannot be proven.
+    pub fn unknown(&self) -> impl Iterator<Item = &MemberJobObservation> {
+        self.observations
+            .iter()
+            .filter(|observation| matches!(observation.state, MemberJobState::Unknown { .. }))
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.observations.is_empty()
+    }
+}
+
+impl MemberJobObservation {
+    pub fn describe(&self) -> String {
+        let source = &self.receipt.source;
+        let role = &self.receipt.role;
+        let job = &self.receipt.job_id;
+        let session = &self.receipt.session_id;
+        match &self.state {
+            MemberJobState::Stopped { status } => {
+                format!("{source} names {role} job {job} for session {session}: {status}")
+            }
+            MemberJobState::Active { status } => {
+                format!("{source} names {role} job {job} for session {session}: {status}")
+            }
+            MemberJobState::Unknown { reason } => {
+                format!("{source} names {role} job {job} for session {session}: {reason}")
+            }
+        }
+    }
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct LaunchOutcome {
@@ -504,6 +630,46 @@ impl Launcher {
         .await
     }
 
+    /// Resumes the SAME Reviewer once for the post-delivery completion review
+    /// of a task whose integration reused the implementation approval. The
+    /// purpose is distinct from the pre-delivery final review, so the two
+    /// stages can never share an operation or a job.
+    pub async fn resume_finalizing_reviewer(&self, task: &TaskRecord) -> Result<LaunchOutcome> {
+        let session = task
+            .reviewer
+            .session_id
+            .clone()
+            .context("Task has no Reviewer session to resume")?;
+        let key = operation_key(
+            task,
+            MemberRole::Reviewer,
+            LaunchKind::Resume,
+            "final-completion",
+        );
+        if let Some(operation) = self.load_operation(&key)? {
+            if operation.handle.is_some() {
+                return self.cached_outcome(task, MemberRole::Reviewer, operation);
+            }
+        }
+        let workspace = canonical(self.prepare_final_review_workspace(task)?)?;
+        let request = crate::super_agent::review::build_final_review_request(&self.store(), task)?;
+        let (model, warning) = self.resolve_model(AgentModelRole::Reviewer);
+        self.run(LaunchDraft {
+            task,
+            member: MemberRole::Reviewer,
+            kind: LaunchKind::Resume,
+            purpose: "final-completion",
+            delivery: None,
+            workspace,
+            resume_session: Some(session),
+            prompt: reviewer_finalizing_prompt(task, &request),
+            model: model.id,
+            warning,
+            allow_workspace_move: true,
+        })
+        .await
+    }
+
     /// Reads the typed delivery identity stored on one actual job. A missing
     /// job directory is `None`; an unreadable file is an error so callers block
     /// instead of treating damage as absence.
@@ -706,6 +872,452 @@ impl Launcher {
             return Ok(Some(incomplete.clone()));
         }
         Ok(operations.into_iter().next())
+    }
+
+    /// Reads every durable reference that names a Coder or Reviewer child of
+    /// this task and inspects the exact reserved job directly.
+    ///
+    /// This is completion evidence, not discovery: a reference whose job state
+    /// is missing, unreadable, foreign or unrecognized is reported as
+    /// `Unknown` so the caller blocks instead of concluding that the process
+    /// stopped. The required current-stage Reviewer receipt is derived from the
+    /// persisted delivery plan's decision and must be covered by a receipt for
+    /// this exact spec/round; historical receipts never satisfy it. Discovery
+    /// list semantics are deliberately unchanged.
+    pub fn completion_member_jobs(
+        &self,
+        task: &TaskRecord,
+        plan: &crate::super_agent::delivery::DeliveryPlan,
+        required_reviewer_purpose: &str,
+    ) -> Result<CompletionMemberJobs> {
+        let coder = task
+            .coder
+            .session_id
+            .clone()
+            .filter(|session| !session.trim().is_empty());
+        let reviewer = task
+            .reviewer
+            .session_id
+            .clone()
+            .filter(|session| !session.trim().is_empty());
+        let router = task.router_session_id.as_str();
+        let mut result = CompletionMemberJobs::default();
+
+        for (key, value) in self.setting_rows(&format!("super-agent.launch-op.{}.", task.task_id))?
+        {
+            let source = format!("launch operation {key}");
+            let operation: LaunchOperation = match serde_json::from_str(&value) {
+                Ok(operation) => operation,
+                Err(error) => {
+                    result.observations.push(unknown_receipt(
+                        source,
+                        "",
+                        "",
+                        format!(
+                            "the launch operation cannot be decoded ({error}); the original value was preserved"
+                        ),
+                    ));
+                    continue;
+                }
+            };
+            match operation_receipt_session(task, coder.as_deref(), reviewer.as_deref(), &key, &operation) {
+                Ok(expected_session) => {
+                    result.observations.push(self.observe_member_job(
+                        router,
+                        MemberJobReceipt::new(source, operation.role.clone(), expected_session)
+                            .with_job(operation.job_id.clone())
+                            .with_stage(
+                                operation.purpose.clone(),
+                                operation.spec_version,
+                                operation.review_round,
+                            ),
+                    ));
+                }
+                Err(reason) => result.observations.push(unknown_job_receipt(
+                    source,
+                    operation.role.clone(),
+                    operation.session_id.clone(),
+                    operation.job_id.clone(),
+                    reason,
+                )),
+            }
+        }
+
+        for (key, value) in
+            self.setting_rows(&format!("super-agent.reviewer-resume.{}.", task.task_id))?
+        {
+            let source = format!("reviewer resume marker {key}");
+            let marker: serde_json::Value = match serde_json::from_str(&value) {
+                Ok(marker) => marker,
+                Err(error) => {
+                    result.observations.push(unknown_receipt(
+                        source,
+                        "reviewer",
+                        "",
+                        format!(
+                            "the resume marker cannot be decoded ({error}); the original value was preserved"
+                        ),
+                    ));
+                    continue;
+                }
+            };
+            let session = marker["session_id"]
+                .as_str()
+                .filter(|session| !session.trim().is_empty());
+            let job_id = marker["job_id"]
+                .as_str()
+                .filter(|job| !job.trim().is_empty());
+            let (Some(session), Some(job_id)) = (session, job_id) else {
+                result.observations.push(unknown_receipt(
+                    source,
+                    "reviewer",
+                    session.unwrap_or(""),
+                    "the resume marker does not name both its session and its reserved job",
+                ));
+                continue;
+            };
+            if reviewer.as_deref() != Some(session) {
+                result.observations.push(unknown_job_receipt(
+                    source,
+                    "reviewer",
+                    session,
+                    job_id,
+                    format!(
+                        "the marker names session {session}, not this task's Reviewer {:?}",
+                        reviewer
+                    ),
+                ));
+                continue;
+            }
+            let stage = match reviewer_marker_identity(
+                task,
+                reviewer.as_deref(),
+                &key,
+                &marker,
+                session,
+                job_id,
+            ) {
+                Ok(stage) => stage,
+                Err(reason) => {
+                    result.observations.push(unknown_job_receipt(
+                        source,
+                        "reviewer",
+                        session,
+                        job_id,
+                        reason,
+                    ));
+                    continue;
+                }
+            };
+            result.observations.push(self.observe_member_job(
+                router,
+                MemberJobReceipt::new(source, "reviewer", session)
+                    .with_job(job_id)
+                    .with_stage(stage.0, stage.1, stage.2)
+                    .with_plan(stage.3),
+            ));
+        }
+
+        // Every planned repository of the authoritative plan must be covered by
+        // a Coder delivery receipt that names *this* plan. Scanning whatever
+        // historical rows happen to exist is not proof that the current
+        // delivery child stopped: deleting the current receipt must block.
+        let required_plan_operation = plan.operation_id.clone();
+        let mut covered_coder_targets = std::collections::BTreeSet::new();
+        for dispatch in self
+            .store()
+            .delivery_dispatches(&task.task_id)
+            .map_err(|error| anyhow!(error.to_string()))?
+        {
+            let repository = dispatch
+                .repository_id
+                .clone()
+                .unwrap_or_else(|| "legacy single-repository receipt".into());
+            let source = format!(
+                "delivery receipt {} ({repository})",
+                dispatch.plan_operation_id
+            );
+            let Some(coder_session) = coder.as_deref() else {
+                result.observations.push(unknown_receipt(
+                    source,
+                    "coder",
+                    &dispatch.coder_session_id,
+                    "the task has no Coder session for its delivery receipt",
+                ));
+                continue;
+            };
+            if dispatch.coder_session_id != coder_session {
+                result.observations.push(unknown_receipt(
+                    source,
+                    "coder",
+                    &dispatch.coder_session_id,
+                    format!("the receipt belongs to Coder session {}, not {coder_session}", dispatch.coder_session_id),
+                ));
+                continue;
+            }
+            if !is_delivery_purpose(&dispatch.purpose) {
+                result.observations.push(unknown_receipt(
+                    source,
+                    "coder",
+                    coder_session,
+                    format!(
+                        "the receipt purpose {:?} is not a delivery identity",
+                        dispatch.purpose
+                    ),
+                ));
+                continue;
+            }
+            let Some(job_id) = dispatch
+                .job_id
+                .clone()
+                .filter(|job_id| !job_id.trim().is_empty())
+            else {
+                result.observations.push(unknown_receipt(
+                    source,
+                    "coder",
+                    coder_session,
+                    "the delivery receipt names no reserved job; absence is not proof that its Coder stopped",
+                ));
+                continue;
+            };
+            let plan = match self.store().delivery_plan(&task.task_id, &dispatch.plan_operation_id)
+            {
+                Ok(Some(plan)) => plan,
+                Ok(None) => {
+                    result.observations.push(unknown_receipt(
+                        source,
+                        "coder",
+                        coder_session,
+                        format!(
+                            "the delivery receipt names plan {}, which is not persisted for this task",
+                            dispatch.plan_operation_id
+                        ),
+                    ));
+                    continue;
+                }
+                Err(error) => {
+                    result.observations.push(unknown_receipt(
+                        source,
+                        "coder",
+                        coder_session,
+                        format!(
+                            "the persisted plan {} could not be read ({error})",
+                            dispatch.plan_operation_id
+                        ),
+                    ));
+                    continue;
+                }
+            };
+            if let Err(reason) = dispatch_identity(task, coder_session, &dispatch, &plan) {
+                result.observations.push(unknown_receipt(
+                    source,
+                    "coder",
+                    coder_session,
+                    reason,
+                ));
+                continue;
+            }
+            if dispatch.plan_operation_id == required_plan_operation {
+                match dispatch.repository_id.as_deref() {
+                    Some(repository_id) => {
+                        covered_coder_targets.insert(repository_id.to_owned());
+                    }
+                    // A genuine legacy receipt is the sole identity for the one
+                    // repository of a single-repository plan.
+                    None if plan.repositories.len() == 1 => {
+                        covered_coder_targets
+                            .insert(plan.repositories[0].repository_id.clone());
+                    }
+                    None => {}
+                }
+            }
+            result.observations.push(self.observe_member_job(
+                router,
+                MemberJobReceipt::new(source, "coder", coder_session)
+                    .with_job(job_id)
+                    .with_stage(
+                        dispatch.purpose.clone(),
+                        dispatch.spec_version,
+                        dispatch.review_round,
+                    ),
+            ));
+        }
+
+        // A repository the host found already carrying the approved commit was
+        // observed without a delivery child, so it must not be asked for a
+        // Coder receipt. That fact is only accepted from the durable
+        // observation's own provenance: a missing receipt or equal OIDs are
+        // not proof that no child was ever dispatched.
+        for target in &plan.repositories {
+            if covered_coder_targets.contains(&target.repository_id) {
+                continue;
+            }
+            let observed_without_dispatch = self
+                .store()
+                .repository_delivery_observation(
+                    &task.task_id,
+                    &required_plan_operation,
+                    &target.repository_id,
+                )
+                .map_err(|error| anyhow!(error.to_string()))?
+                .is_some_and(|observation| {
+                    observation.verified
+                        && observation.source
+                            == crate::super_agent::delivery::DeliveryObservationSource::HostVerifiedAlreadyAtTarget
+                        && observation.spec_version == plan.spec_version
+                        && observation.review_round == plan.review_round
+                        && observation.old_oid == target.old_oid
+                        && observation.new_oid == target.new_oid
+                        && observation.attempt == target.attempt
+                });
+            if observed_without_dispatch {
+                continue;
+            }
+            result.observations.push(unknown_receipt(
+                format!(
+                    "required completion delivery receipt ({})",
+                    target.repository_id
+                ),
+                "coder",
+                coder.as_deref().unwrap_or_default(),
+                format!(
+                    "no durable Coder delivery receipt and no host-verified no-dispatch observation exist for plan {} repository {} attempt {}; a historical receipt, a missing one, or an unproven observation cannot show whether this delivery child stopped",
+                    required_plan_operation, target.repository_id, target.attempt
+                ),
+            ));
+        }
+
+        // The completion review is not interchangeable with any historical or
+        // different-stage Reviewer receipt. Its expected stage is derived from
+        // the persisted delivery plan's decision. If no current receipt covers
+        // it, absence becomes an explicit Unknown instead of leaving older
+        // terminal receipts to stand in for the job that must be proven.
+        let covered = result.observations.iter().any(|observation| {
+            observation.receipt.role == "reviewer"
+                && observation.receipt.purpose == required_reviewer_purpose
+                && observation.receipt.spec_version == task.spec_version
+                && observation.receipt.review_round == task.review_round
+                && observation.receipt.session_id == reviewer.as_deref().unwrap_or_default()
+                // The stage key is shared by every plan of this spec/round, so
+                // the post-delivery review must name the plan it reviewed.
+                && (required_reviewer_purpose != "final-completion"
+                    || observation.receipt.plan_operation_id == required_plan_operation)
+        });
+        if !covered {
+            result.observations.push(MemberJobObservation {
+                receipt: MemberJobReceipt::new(
+                    "required completion review receipt",
+                    "reviewer",
+                    reviewer.clone().unwrap_or_default(),
+                )
+                .with_stage(
+                    required_reviewer_purpose,
+                    task.spec_version,
+                    task.review_round,
+                )
+                .with_plan(required_plan_operation.clone()),
+                state: MemberJobState::Unknown {
+                    reason: format!(
+                        "no durable {required_reviewer_purpose} completion-review receipt exists for spec {} round {} plan {}; a historical, different-stage or different-plan receipt cannot prove the current Reviewer job",
+                        task.spec_version, task.review_round, required_plan_operation
+                    ),
+                },
+            });
+        }
+        // The required receipt must belong to the delivery plan actually used
+        // for completion, so a narrowed or replaced plan cannot reuse a review
+        // receipt from a different delivery.
+        if plan.task_id != task.task_id {
+            result.observations.push(unknown_receipt(
+                "required completion review receipt".into(),
+                "reviewer",
+                reviewer.clone().unwrap_or_default(),
+                format!(
+                    "the persisted plan {} belongs to task {}, not {}",
+                    plan.operation_id, plan.task_id, task.task_id
+                ),
+            ));
+        }
+
+        Ok(result)
+    }
+
+    fn setting_rows(&self, prefix: &str) -> Result<Vec<(String, String)>> {
+        let pattern = format!("{prefix}%");
+        let rows = self
+            .context
+            .db
+            .with_conn(|conn| -> Result<Vec<(String, String)>> {
+                let mut statement = conn.prepare(
+                    "SELECT key,value FROM peripheral_settings WHERE key LIKE ?1 ORDER BY key",
+                )?;
+                let rows = statement.query_map([pattern], |row| {
+                    Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+                })?;
+                Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
+            })??;
+        Ok(rows)
+    }
+
+    fn observe_member_job(
+        &self,
+        router: &str,
+        receipt: MemberJobReceipt,
+    ) -> MemberJobObservation {
+        let state = match background_sessions::inspect(
+            &self.context.paths.data_dir,
+            &receipt.job_id,
+        ) {
+            Ok(JobSnapshot::Present(job)) => {
+                if job.id != receipt.job_id {
+                    MemberJobState::Unknown {
+                        reason: format!(
+                            "the job directory holds identity {}, not {}",
+                            job.id, receipt.job_id
+                        ),
+                    }
+                } else if job.session_id != receipt.session_id {
+                    MemberJobState::Unknown {
+                        reason: format!(
+                            "the job belongs to child session {}, not {}",
+                            job.session_id, receipt.session_id
+                        ),
+                    }
+                } else if job.parent_session_id != router {
+                    MemberJobState::Unknown {
+                        reason: format!(
+                            "the job belongs to parent session {}, not this task's Router {router}",
+                            job.parent_session_id
+                        ),
+                    }
+                } else {
+                    match job.status.as_str() {
+                        "starting" | "running" | "unresponsive" => MemberJobState::Active {
+                            status: job.status,
+                        },
+                        "completed" | "failed" | "cancelled" => MemberJobState::Stopped {
+                            status: job.status,
+                        },
+                        other => MemberJobState::Unknown {
+                            reason: format!("the job has an unrecognized status {other:?}"),
+                        },
+                    }
+                }
+            }
+            Ok(JobSnapshot::Missing) => MemberJobState::Unknown {
+                reason: "no durable task state exists; remove is not proof the process stopped"
+                    .into(),
+            },
+            Ok(JobSnapshot::Unreadable(reason)) => MemberJobState::Unknown {
+                reason: format!(
+                    "the job state is unreadable ({reason}); the original files were preserved"
+                ),
+            },
+            Err(error) => MemberJobState::Unknown {
+                reason: format!("the job state could not be read ({error:#})"),
+            },
+        };
+        MemberJobObservation { receipt, state }
     }
 
     async fn run(&self, draft: LaunchDraft<'_>) -> Result<LaunchOutcome> {
@@ -1382,8 +1994,266 @@ impl Launcher {
     }
 }
 
-fn operation_key(task: &TaskRecord, member: MemberRole, kind: LaunchKind, purpose: &str) -> String {
-    let base = format!(
+fn unknown_receipt(
+    source: String,
+    role: impl Into<String>,
+    session: impl Into<String>,
+    reason: impl Into<String>,
+) -> MemberJobObservation {
+    unknown_job_receipt(source, role, session, "", reason)
+}
+
+fn unknown_job_receipt(
+    source: String,
+    role: impl Into<String>,
+    session: impl Into<String>,
+    job_id: impl Into<String>,
+    reason: impl Into<String>,
+) -> MemberJobObservation {
+    MemberJobObservation {
+        receipt: MemberJobReceipt::new(source, role, session).with_job(job_id),
+        state: MemberJobState::Unknown {
+            reason: reason.into(),
+        },
+    }
+}
+
+/// Proves that a stored launch operation is self-consistent and belongs to the
+/// task's current member slot before its job is inspected.
+fn operation_receipt_session(
+    task: &TaskRecord,
+    coder: Option<&str>,
+    reviewer: Option<&str>,
+    key: &str,
+    operation: &LaunchOperation,
+) -> std::result::Result<String, String> {
+    if operation.task_id != task.task_id {
+        return Err(format!(
+            "the operation belongs to task {}, not {}",
+            operation.task_id, task.task_id
+        ));
+    }
+    let expected = match operation.role.as_str() {
+        "coder" => coder,
+        "reviewer" => reviewer,
+        other => {
+            return Err(format!(
+                "the operation names unknown member role {other:?}"
+            ))
+        }
+    };
+    let Some(expected) = expected else {
+        return Err(format!(
+            "the operation names a {} but the task has no such session",
+            operation.role
+        ));
+    };
+    if operation.session_id != expected {
+        return Err(format!(
+            "the operation names session {}, not the task's {} session {expected}",
+            operation.session_id, operation.role
+        ));
+    }
+    if operation.kind != LaunchKind::Initial.as_str()
+        && operation.kind != LaunchKind::Resume.as_str()
+    {
+        return Err(format!(
+            "the operation names unknown launch kind {:?}",
+            operation.kind
+        ));
+    }
+    if operation.spec_version > task.spec_version || operation.review_round > task.review_round {
+        return Err(format!(
+            "the operation names spec {} round {}, which is newer than this task's spec {} round {}",
+            operation.spec_version, operation.review_round, task.spec_version, task.review_round
+        ));
+    }
+    let identity = key_of(operation);
+    if key != identity {
+        return Err(format!(
+            "the operation is stored under {key} but identifies itself as {identity}"
+        ));
+    }
+    let expected_operation_id = if operation.delivery.is_some() {
+        identity
+    } else {
+        format!(
+            "{}:{}:{}",
+            task.task_id, operation.role, operation.kind
+        )
+    };
+    if operation.operation_id != expected_operation_id {
+        return Err(format!(
+            "the operation id {:?} does not match its reserved identity {expected_operation_id:?}",
+            operation.operation_id
+        ));
+    }
+    if operation.job_id.trim().is_empty()
+        || uuid::Uuid::parse_str(&operation.job_id).is_err()
+    {
+        return Err(format!(
+            "the operation names no valid reserved job UUID ({:?})",
+            operation.job_id
+        ));
+    }
+    if let Some(handle) = &operation.handle {
+        if handle.role != operation.role
+            || handle.session_id != operation.session_id
+            || handle.job_id != operation.job_id
+            || handle.delivery != operation.delivery
+        {
+            return Err(format!(
+                "the recorded handle ({} job {} session {}) does not match the reserved operation ({} job {} session {})",
+                handle.role,
+                handle.job_id,
+                handle.session_id,
+                operation.role,
+                operation.job_id,
+                operation.session_id
+            ));
+        }
+    }
+    if let Some(delivery) = &operation.delivery {
+        if delivery.version != DELIVERY_IDENTITY_VERSION
+            || delivery.task_id != task.task_id
+            || delivery.spec_version != operation.spec_version
+            || delivery.review_round != operation.review_round
+            || delivery.coder_session_id != operation.session_id
+            || delivery.purpose_key() != operation.purpose
+        {
+            return Err(
+                "the operation's delivery identity does not match its task, spec, round, Coder session or purpose"
+                    .into(),
+            );
+        }
+    }
+    Ok(expected.to_owned())
+}
+
+/// Proves that a reviewer resume marker belongs to this task's Reviewer and to
+/// a real spec/round/purpose key. A `final-completion` marker must also name
+/// the persisted delivery plan it was reserved for: the stage key alone is
+/// shared by every plan of this spec/round, so a marker from another plan must
+/// not be able to prove the current one.
+fn reviewer_marker_identity(
+    task: &TaskRecord,
+    reviewer: Option<&str>,
+    key: &str,
+    marker: &serde_json::Value,
+    session: &str,
+    job_id: &str,
+) -> std::result::Result<(String, u32, u32, String), String> {
+    let Some(reviewer) = reviewer else {
+        return Err("the task has no Reviewer session".into());
+    };
+    if session != reviewer {
+        return Err(format!(
+            "the marker names session {session}, not this task's Reviewer {reviewer}"
+        ));
+    }
+    let prefix = format!("super-agent.reviewer-resume.{}.", task.task_id);
+    let Some(rest) = key.strip_prefix(&prefix) else {
+        return Err(format!(
+            "the marker key {key} is not scoped to this task"
+        ));
+    };
+    let parts: Vec<&str> = rest.split('.').collect();
+    if parts.len() != 2
+        && !(parts.len() == 3
+            && matches!(parts[2], "final-delivery" | "final-completion"))
+    {
+        return Err(format!(
+            "the marker key {key} is not a reviewer round or stage marker"
+        ));
+    }
+    let spec = parts[0]
+        .parse::<u32>()
+        .map_err(|_| format!("the marker key {key} has no numeric spec version"))?;
+    let round = parts[1]
+        .parse::<u32>()
+        .map_err(|_| format!("the marker key {key} has no numeric review round"))?;
+    if spec > task.spec_version || round > task.review_round {
+        return Err(format!(
+            "the marker names spec {spec} round {round}, which is newer than this task's spec {} round {}",
+            task.spec_version, task.review_round
+        ));
+    }
+    if uuid::Uuid::parse_str(job_id).is_err() {
+        return Err(format!(
+            "the marker names no valid reserved job UUID ({job_id:?})"
+        ));
+    }
+    let purpose = parts.get(2).copied().unwrap_or("").to_owned();
+    let plan_operation_id = marker["plan_operation_id"]
+        .as_str()
+        .unwrap_or_default()
+        .to_owned();
+    if purpose == "final-completion" && plan_operation_id.trim().is_empty() {
+        return Err(format!(
+            "the {purpose} marker for spec {spec} round {round} names no persisted delivery plan; a marker without a plan binding cannot prove the current completion review"
+        ));
+    }
+    Ok((purpose, spec, round, plan_operation_id))
+}
+
+/// Proves that a delivery receipt is bound to the persisted immutable plan it
+/// names and to a well-formed typed or genuine legacy purpose.
+fn dispatch_identity(
+    task: &TaskRecord,
+    coder_session: &str,
+    dispatch: &crate::super_agent::delivery::DeliveryDispatch,
+    plan: &crate::super_agent::delivery::DeliveryPlan,
+) -> std::result::Result<(), String> {
+    if plan.task_id != task.task_id
+        || plan.spec_version != dispatch.spec_version
+        || plan.review_round != dispatch.review_round
+    {
+        return Err(format!(
+            "the receipt names plan {} spec {} round {}, not this task's persisted plan for spec {} round {}",
+            dispatch.plan_operation_id,
+            dispatch.spec_version,
+            dispatch.review_round,
+            task.spec_version,
+            task.review_round
+        ));
+    }
+    let target = match dispatch.repository_id.as_deref() {
+        Some(repository_id) => plan
+            .repositories
+            .iter()
+            .find(|target| target.repository_id == repository_id),
+        None if plan.repositories.len() == 1 => plan.repositories.first(),
+        None => None,
+    };
+    let Some(target) = target else {
+        return Err(
+            "the receipt cannot be bound to exactly one planned repository".into(),
+        );
+    };
+    if dispatch.purpose == LEGACY_DELIVERY_PURPOSE {
+        return Ok(());
+    }
+    if dispatch.repository_id.as_deref() != Some(target.repository_id.as_str())
+        || dispatch.old_oid.as_deref() != Some(target.old_oid.as_str())
+        || dispatch.new_oid.as_deref() != Some(target.new_oid.as_str())
+        || dispatch.attempt != target.attempt
+    {
+        return Err(format!(
+            "the receipt does not match the planned repository {}, its old/new OIDs or attempt",
+            target.repository_id
+        ));
+    }
+    let identity = DeliveryOperationIdentity::for_target(plan, target, coder_session);
+    if identity.purpose_key() != dispatch.purpose {
+        return Err(format!(
+            "the receipt purpose {:?} does not match its planned delivery identity",
+            dispatch.purpose
+        ));
+    }
+    Ok(())
+}
+
+fn operation_key(task: &TaskRecord, member: MemberRole, kind: LaunchKind, purpose: &str) -> String {    let base = format!(
         "super-agent.launch-op.{}.{}.{}.{}.{}",
         task.task_id,
         member.as_str(),
@@ -1633,6 +2503,29 @@ pub fn reviewer_final_prompt(task: &TaskRecord, review_request: &serde_json::Val
     let request = serde_json::to_string_pretty(review_request).unwrap_or_default();
     format!(
         "Task {}: {}\n\nThe host prepared the integration and verified the isolated task worktree ({}). These repositories were checked out read-only at the exact integrated commit. Review the integrated content against every acceptance criterion; do not review an earlier implementation commit. Then submit CrpSubmit(kind=\"review\") with stage \"FINAL_DELIVERY\" and reviewed_versions[].commit equal to the integrated commit, and CrpSubmit(kind=\"harness\") with stage \"FINAL_DELIVERY\". Both new reports are required; earlier implementation reports cannot decide this review.\n\nreview_request:\n```json\n{request}\n```",
+        task.task_id,
+        task.title,
+        versions.join(", ")
+    )
+}
+
+/// Post-delivery completion review. The verified integrated content has
+/// already been written to the user's target branches, so this review decides
+/// only whether the task may be completed. A negative verdict blocks
+/// completion; it cannot roll back or replay the delivered commits.
+pub fn reviewer_finalizing_prompt(task: &TaskRecord, review_request: &serde_json::Value) -> String {
+    let versions: Vec<String> = task
+        .repositories
+        .iter()
+        .filter_map(|repo| {
+            repo.integrated_commit
+                .as_deref()
+                .map(|commit| format!("{} at {commit}", repo.repository_id))
+        })
+        .collect();
+    let request = serde_json::to_string_pretty(review_request).unwrap_or_default();
+    format!(
+        "Task {}: {}\n\nThe host verified the integration ({}) and delivered exactly those commits to the user's target branches. Review that delivered content against every acceptance criterion; do not review an earlier implementation commit. Then submit CrpSubmit(kind=\"review\") with stage \"FINAL_DELIVERY\" and reviewed_versions[].commit equal to the integrated commit, and CrpSubmit(kind=\"harness\") with stage \"FINAL_DELIVERY\". Both new reports are required; earlier implementation reports cannot decide this review. This is the final completion review: a negative verdict blocks completion, but the delivered commits stay in the target branches and cannot be rolled back or replayed.\n\nreview_request:\n```json\n{request}\n```",
         task.task_id,
         task.title,
         versions.join(", ")

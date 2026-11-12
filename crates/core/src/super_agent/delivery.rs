@@ -395,12 +395,44 @@ pub fn verify_plan_binding(
     task: &TaskRecord,
     plan: &DeliveryPlan,
 ) -> Result<Option<String>> {
+    let events = store.events(&task.task_id)?;
+    Ok(verify_plan_binding_events(task, plan, &events))
+}
+
+/// The same immutable-plan binding rules over already-loaded durable evidence.
+/// The store calls this inside its completion transaction, so a direct
+/// `TASK_COMPLETED` is held to exactly the rules a delivery dispatch uses and
+/// cannot rely on an unapproved or stale lineage.
+pub fn verify_plan_binding_events(
+    task: &TaskRecord,
+    plan: &DeliveryPlan,
+    events: &[Event],
+) -> Option<String> {
     if plan.task_id != task.task_id
         || plan.spec_version != task.spec_version
         || plan.review_round != task.review_round
     {
-        return Ok(Some(
-            "the delivery plan does not belong to the current task version".into(),
+        return Some("the delivery plan does not belong to the current task version".into());
+    }
+    // Exact, unique membership. A plan may neither narrow the task's
+    // repositories nor name one twice; every planned repository must be the
+    // task's own.
+    let planned: BTreeSet<&str> = plan
+        .repositories
+        .iter()
+        .map(|target| target.repository_id.as_str())
+        .collect();
+    let current: BTreeSet<&str> = task
+        .repositories
+        .iter()
+        .map(|repo| repo.repository_id.as_str())
+        .collect();
+    if planned.len() != plan.repositories.len() {
+        return Some("the delivery plan lists a repository more than once".into());
+    }
+    if planned != current {
+        return Some(format!(
+            "the delivery plan repository set {planned:?} does not match the task's {current:?}"
         ));
     }
     for target in &plan.repositories {
@@ -409,44 +441,37 @@ pub fn verify_plan_binding(
             .iter()
             .find(|repo| repo.repository_id == target.repository_id)
         else {
-            return Ok(Some(format!(
+            return Some(format!(
                 "the task no longer lists repository {}",
                 target.repository_id
-            )));
+            ));
         };
         if repo.reviewed_commit.as_deref() != Some(target.reviewed_commit.as_str())
             || repo.integrated_commit.as_deref() != Some(target.new_oid.as_str())
         {
-            return Ok(Some(format!(
+            return Some(format!(
                 "{}: the task's reviewed/integrated commits no longer match the planning approval",
                 target.repository_id
-            )));
+            ));
         }
     }
-    let events = store.events(&task.task_id)?;
     let Some(prepared) = events
         .iter()
         .find(|event| event.event_id == plan.evidence_event_id)
     else {
-        return Ok(Some(
-            "the host integration preparation event for this plan is missing".into(),
-        ));
+        return Some("the host integration preparation event for this plan is missing".into());
     };
     if prepared.event_type != EventType::IntegrationPrepared
         || prepared.spec_version != task.spec_version
         || prepared.review_round != task.review_round
     {
-        return Ok(Some(
-            "the recorded integration preparation is no longer current".into(),
-        ));
+        return Some("the recorded integration preparation is no longer current".into());
     }
     let Some(decision) = events
         .iter()
         .find(|event| event.event_id == plan.review_event_id)
     else {
-        return Ok(Some(
-            "the host review decision for this plan is missing".into(),
-        ));
+        return Some("the host review decision for this plan is missing".into());
     };
     let stage = plan
         .repositories
@@ -459,11 +484,9 @@ pub fn verify_plan_binding(
         || decision.payload["verdict"].as_str() != Some(ReviewVerdict::Approved.as_str())
         || decision.payload["stage"].as_str() != Some(stage)
     {
-        return Ok(Some(
-            "the approval that produced the delivery plan is no longer current".into(),
-        ));
+        return Some("the approval that produced the delivery plan is no longer current".into());
     }
-    Ok(None)
+    None
 }
 
 /// Durable delivery dispatch intent. It is written **before** the Coder is
@@ -496,6 +519,23 @@ pub struct DeliveryDispatch {
     pub created_at: String,
 }
 
+/// How a repository delivery observation was produced. Completion needs this
+/// distinction: a target the host found already carrying the approved commit
+/// never had a delivery child, so it must not be asked for a Coder receipt.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DeliveryObservationSource {
+    /// Recorded before this field existed. The source cannot be proven, so
+    /// completion treats a receipt-less observation conservatively.
+    #[default]
+    Unknown,
+    /// The host verified the target already carried the approved commit; no
+    /// delivery child was ever dispatched for it.
+    HostVerifiedAlreadyAtTarget,
+    /// The host observed the result of a real delivery job.
+    DeliveryJob,
+}
+
 /// One repository's host-verified delivery observation. It is durable evidence
 /// that this repository reached the approved integrated commit under the
 /// persisted plan. It never marks the whole task delivered.
@@ -513,6 +553,9 @@ pub struct RepositoryDeliveryObservation {
     pub attempt: u32,
     /// Only a real host verification may be recorded.
     pub verified: bool,
+    /// Which path produced this observation. Legacy rows default to Unknown.
+    #[serde(default)]
+    pub source: DeliveryObservationSource,
     pub observed_at: String,
 }
 

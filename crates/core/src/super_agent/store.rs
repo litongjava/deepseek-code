@@ -4,13 +4,15 @@
 //! table makes those identifiers globally idempotent: replaying the same request
 //! returns the original result, while reusing an identifier for a different
 //! task, kind or payload is an explicit conflict.
-use super::delivery::{DeliveryDispatch, DeliveryPlan, RepositoryDeliveryObservation};
+use super::delivery::{
+    DeliveryDispatch, DeliveryObservationSource, DeliveryPlan, RepositoryDeliveryObservation,
+};
 use super::model::{
     AgentStatus, Approval, ApprovalStatus, ApprovalType, CleanupStatus, Event, EventType,
-    GateEvidence, HarnessAnalysisReport, ImplementationReport, IntegrationReport,
-    IntegrationStatus, NewEvent, NonGitStatus, NonGitSubmission, NonGitTarget, Phase, PlanReport,
-    RepoTarget, Report, ReportKind, SessionRef, Status, TaskRecord, TaskReviewReport, TaskSpec,
-    VerificationStatus,
+    GateDeliveryEvidence, GateDeliveryTarget, GateEvidence, HarnessAnalysisReport,
+    ImplementationReport, IntegrationReport, IntegrationStatus, NewEvent, NonGitStatus,
+    NonGitSubmission, NonGitTarget, Phase, PlanReport, RepoTarget, Report, ReportKind, SessionRef,
+    Status, TaskRecord, TaskReviewReport, TaskSpec, VerificationStatus,
 };
 use super::state::{self, StateError, StatePolicy};
 use crate::db::DbManager;
@@ -19,6 +21,7 @@ use rusqlite::{params, Connection, OptionalExtension, Transaction};
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 use std::{
+    collections::BTreeSet,
     path::{Path, PathBuf},
     sync::Arc,
     time::Duration,
@@ -1108,6 +1111,68 @@ impl TaskStore {
         })
     }
 
+    /// Every durable delivery receipt recorded for a task, in deterministic
+    /// order. Both the typed repository-scoped table and the legacy
+    /// single-repository table are returned; callers reconcile each row against
+    /// its persisted plan instead of guessing which schema produced it.
+    pub fn delivery_dispatches(
+        &self,
+        task_id: &str,
+    ) -> Result<Vec<DeliveryDispatch>, StoreError> {
+        self.run_read(|tx| {
+            let mut dispatches = Vec::new();
+            {
+                let mut statement = tx.prepare(
+                    "SELECT plan_operation_id,spec_version,review_round,coder_session_id,purpose,job_id,created_at FROM sa_delivery_dispatches WHERE task_id=?1 ORDER BY created_at,plan_operation_id",
+                )?;
+                let rows = statement.query_map([task_id], |row| {
+                    Ok(DeliveryDispatch {
+                        task_id: task_id.to_owned(),
+                        spec_version: row.get::<_, i64>(1)? as u32,
+                        review_round: row.get::<_, i64>(2)? as u32,
+                        plan_operation_id: row.get(0)?,
+                        coder_session_id: row.get(3)?,
+                        purpose: row.get(4)?,
+                        repository_id: None,
+                        old_oid: None,
+                        new_oid: None,
+                        attempt: 0,
+                        job_id: row.get(5)?,
+                        created_at: row.get(6)?,
+                    })
+                })?;
+                for row in rows {
+                    dispatches.push(row?);
+                }
+            }
+            {
+                let mut statement = tx.prepare(
+                    "SELECT plan_operation_id,repository_id,spec_version,review_round,coder_session_id,purpose,old_oid,new_oid,attempt,job_id,created_at FROM sa_repository_dispatches WHERE task_id=?1 ORDER BY created_at,plan_operation_id,repository_id",
+                )?;
+                let rows = statement.query_map([task_id], |row| {
+                    Ok(DeliveryDispatch {
+                        task_id: task_id.to_owned(),
+                        spec_version: row.get::<_, i64>(2)? as u32,
+                        review_round: row.get::<_, i64>(3)? as u32,
+                        plan_operation_id: row.get(0)?,
+                        coder_session_id: row.get(4)?,
+                        purpose: row.get(5)?,
+                        repository_id: Some(row.get(1)?),
+                        old_oid: row.get(6)?,
+                        new_oid: row.get(7)?,
+                        attempt: row.get::<_, i64>(8)? as u32,
+                        job_id: row.get(9)?,
+                        created_at: row.get(10)?,
+                    })
+                })?;
+                for row in rows {
+                    dispatches.push(row?);
+                }
+            }
+            Ok(dispatches)
+        })
+    }
+
     /// Records one repository's host-verified delivery observation. It binds
     /// the persisted approved plan and its exact target, marks only that
     /// repository `COMPLETED`, and never appends a task-wide completion event.
@@ -1209,7 +1274,7 @@ impl TaskStore {
                 )));
             }
             tx.execute(
-                "INSERT INTO sa_repository_delivery_observations(task_id,plan_operation_id,repository_id,spec_version,review_round,coder_session_id,old_oid,new_oid,target_ref,attempt,observed_at) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11)",
+                "INSERT INTO sa_repository_delivery_observations(task_id,plan_operation_id,repository_id,spec_version,review_round,coder_session_id,old_oid,new_oid,target_ref,attempt,observed_at,source) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12)",
                 params![
                     observation.task_id,
                     observation.plan_operation_id,
@@ -1221,7 +1286,8 @@ impl TaskStore {
                     observation.new_oid,
                     observation.target_ref,
                     observation.attempt,
-                    observation.observed_at
+                    observation.observed_at,
+                    observation_source_name(observation.source)
                 ],
             )?;
             let updated = tx.execute(
@@ -1666,7 +1732,138 @@ fn gate_evidence_conn(
         }
         evidence.non_git_manifests.insert(path, verification);
     }
+    evidence.delivery = gate_delivery_evidence_conn(conn, record)?;
     Ok(evidence)
+}
+
+/// The authoritative delivery record the completion gate may rely on. It is
+/// read and validated inside the completion transaction with the same rules a
+/// delivery dispatch uses: the persisted complete plan must bind this exact
+/// task version and repository set, its integration-preparation and approval
+/// events must still be current, the task's recorded reviewed/integrated
+/// commits must equal the plan, and every planned repository must have its own
+/// matching durable observation. Anything else yields `None`, so a caller
+/// cannot substitute a plan, a refreshed OID or an unrelated reviewed commit.
+///
+/// The current record is never guessed: an unreadable current-round plan is an
+/// explicit error instead of silently falling back to an older plan.
+fn gate_delivery_evidence_conn(
+    conn: &Connection,
+    record: &TaskRecord,
+) -> Result<Option<GateDeliveryEvidence>, StoreError> {
+    let repos = load_repos_conn(conn, &record.task_id)?;
+    if repos.is_empty() {
+        return Ok(None);
+    }
+    let plans = load_delivery_plans_conn(
+        conn,
+        &record.task_id,
+        record.spec_version,
+        record.review_round,
+    )?;
+    let Some(plan) = plans.into_iter().max_by(|left, right| {
+        left.created_at
+            .cmp(&right.created_at)
+            .then(left.operation_id.cmp(&right.operation_id))
+    }) else {
+        return Ok(None);
+    };
+    let repo_ids: BTreeSet<&str> = repos
+        .iter()
+        .map(|repo| repo.repository_id.as_str())
+        .collect();
+    let planned: BTreeSet<&str> = plan
+        .repositories
+        .iter()
+        .map(|target| target.repository_id.as_str())
+        .collect();
+    if plan.task_id != record.task_id
+        || plan.repositories.is_empty()
+        || planned.len() != plan.repositories.len()
+        || planned != repo_ids
+        || plan.repositories.len() != repos.len()
+    {
+        return Ok(None);
+    }
+    for target in &plan.repositories {
+        let Some(repo) = repos
+            .iter()
+            .find(|repo| repo.repository_id == target.repository_id)
+        else {
+            return Ok(None);
+        };
+        if repo.reviewed_commit.as_deref() != Some(target.reviewed_commit.as_str())
+            || repo.integrated_commit.as_deref() != Some(target.new_oid.as_str())
+            || repo.target_branch != target.target_branch
+        {
+            return Ok(None);
+        }
+    }
+    let events = load_events_conn(conn, &record.task_id)?;
+    if super::delivery::verify_plan_binding_events(record, &plan, &events).is_some() {
+        return Ok(None);
+    }
+    if !delivery_plan_observations_complete_conn(conn, &plan)? {
+        return Ok(None);
+    }
+    Ok(Some(GateDeliveryEvidence {
+        operation_id: plan.operation_id.clone(),
+        task_id: plan.task_id.clone(),
+        spec_version: plan.spec_version,
+        review_round: plan.review_round,
+        repositories: plan
+            .repositories
+            .iter()
+            .map(|target| GateDeliveryTarget {
+                repository_id: target.repository_id.clone(),
+                reviewed_commit: target.reviewed_commit.clone(),
+                new_oid: target.new_oid.clone(),
+                target_ref: target.target_ref.clone(),
+            })
+            .collect(),
+    }))
+}
+
+/// Current-round delivery plans for one task. A malformed persisted record is
+/// an explicit error: dropping it would silently fall back to an older plan.
+fn load_delivery_plans_conn(
+    conn: &Connection,
+    task_id: &str,
+    spec_version: u32,
+    review_round: u32,
+) -> Result<Vec<DeliveryPlan>, StoreError> {
+    let mut statement = conn.prepare(
+        "SELECT operation_id, plan_json FROM sa_delivery_plans WHERE task_id=?1 AND spec_version=?2 AND review_round=?3 ORDER BY created_at,operation_id",
+    )?;
+    let encoded = statement
+        .query_map(
+            params![task_id, spec_version as i64, review_round as i64],
+            |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
+        )?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    let mut plans = Vec::with_capacity(encoded.len());
+    for (operation_id, json) in encoded {
+        plans.push(serde_json::from_str::<DeliveryPlan>(&json).map_err(|error| {
+            StoreError::Invalid(format!(
+                "the persisted delivery plan {operation_id} for task {task_id} is unreadable: {error}"
+            ))
+        })?);
+    }
+    Ok(plans)
+}
+
+fn load_events_conn(conn: &Connection, task_id: &str) -> Result<Vec<Event>, StoreError> {
+    let mut statement = conn.prepare(
+        "SELECT event_id,task_id,pair_id,session_id,run_id,sequence,event_type,causation_id,operation_id,timestamp,payload_json,processed,spec_version,review_round FROM sa_events WHERE task_id=?1 ORDER BY sequence",
+    )?;
+    let events = statement
+        .query_map([task_id], event_from_row)?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    let mut result = Vec::with_capacity(events.len());
+    for event in events {
+        result.push(event?);
+    }
+    Ok(result)
 }
 
 fn upsert_repo_conn(conn: &Connection, repo: &RepoTarget) -> Result<(), StoreError> {
@@ -2332,7 +2529,7 @@ fn load_repository_observation_conn(
 ) -> Result<Option<RepositoryDeliveryObservation>, StoreError> {
     Ok(conn
         .query_row(
-            "SELECT spec_version,review_round,coder_session_id,old_oid,new_oid,target_ref,attempt,observed_at FROM sa_repository_delivery_observations WHERE task_id=?1 AND plan_operation_id=?2 AND repository_id=?3",
+            "SELECT spec_version,review_round,coder_session_id,old_oid,new_oid,target_ref,attempt,observed_at,source FROM sa_repository_delivery_observations WHERE task_id=?1 AND plan_operation_id=?2 AND repository_id=?3",
             params![task_id, plan_operation_id, repository_id],
             |row| {
                 Ok(RepositoryDeliveryObservation {
@@ -2347,11 +2544,30 @@ fn load_repository_observation_conn(
                     target_ref: row.get(5)?,
                     attempt: row.get::<_, i64>(6)? as u32,
                     verified: true,
+                    source: parse_observation_source(&row.get::<_, String>(8)?),
                     observed_at: row.get(7)?,
                 })
             },
         )
         .optional()?)
+}
+
+/// Durable spelling of the observation provenance. An unrecognized or missing
+/// value is read back as Unknown, never as a no-dispatch proof.
+fn observation_source_name(source: DeliveryObservationSource) -> &'static str {
+    match source {
+        DeliveryObservationSource::Unknown => "unknown",
+        DeliveryObservationSource::HostVerifiedAlreadyAtTarget => "host_verified_already_at_target",
+        DeliveryObservationSource::DeliveryJob => "delivery_job",
+    }
+}
+
+fn parse_observation_source(value: &str) -> DeliveryObservationSource {
+    match value {
+        "host_verified_already_at_target" => DeliveryObservationSource::HostVerifiedAlreadyAtTarget,
+        "delivery_job" => DeliveryObservationSource::DeliveryJob,
+        _ => DeliveryObservationSource::Unknown,
+    }
 }
 
 /// A legacy receipt may bind only when the complete immutable plan has exactly

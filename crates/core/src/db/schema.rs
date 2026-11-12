@@ -574,6 +574,7 @@ CREATE TABLE IF NOT EXISTS sa_repository_delivery_observations (
     target_ref TEXT NOT NULL,
     attempt INTEGER NOT NULL,
     observed_at TEXT NOT NULL,
+    source TEXT NOT NULL DEFAULT 'unknown',
     PRIMARY KEY(task_id, plan_operation_id, repository_id)
 );
 "#;

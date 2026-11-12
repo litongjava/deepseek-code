@@ -189,6 +189,12 @@ impl Orchestrator {
             .get_task(&task.task_id)
             .map_err(store_error)?
             .context("Task disappeared")?;
+        // One phase per tick: the tick that prepared the integration never
+        // immediately launches delivery, and the tick that delivered never
+        // immediately completes. Each durable side effect is observed before
+        // the next one starts.
+        let deliver_ready = task.phase == Phase::DeliveryPending && task.status.is_active();
+        let finalize_ready = task.phase == Phase::Finalizing && task.status == Status::Running;
 
         // 2. Start or reconcile the Coder's initial launch. The operation is
         // keyed by task/member/spec/round, so calling it on every tick is a
@@ -280,14 +286,25 @@ impl Orchestrator {
             self.decide_review(store, &task, report)?;
         }
 
-        // 10. Stage5B2a: a SINGLE Git repository with approved, host-verified
-        // integrated content is delivered through the SAME Coder session. The
-        // host only verifies real Git state afterwards; the Coder writes.
-        if task.phase == Phase::DeliveryPending
+        // 10. Every prepared Git repository with approved, host-verified
+        // integrated content is delivered through the SAME Coder session, one
+        // repository at a time. The host only verifies real Git state
+        // afterwards; the Coder writes.
+        // The entry-phase cache only enforces the one-step-per-tick boundary;
+        // each step still re-reads the current state, so an earlier step that
+        // updated or blocked the task is never bypassed.
+        if deliver_ready
+            && task.phase == Phase::DeliveryPending
             && task.status.is_active()
             && self.config.delivery.enabled
         {
-            self.deliver(store, &task, report).await?;
+            task = self.deliver(store, &task, report).await?;
+        }
+
+        // 11. A fully delivered Git task is completed only through the
+        // transactional store gate, after every target is verified again.
+        if finalize_ready && task.phase == Phase::Finalizing && task.status == Status::Running {
+            self.finalize_task(store, &task, report).await?;
         }
         Ok(())
     }
@@ -435,7 +452,13 @@ impl Orchestrator {
             // already matches the approved content is recorded as an
             // observation instead of being rewritten.
             if verify_target_delivery(task, &plan, target)?.verified {
-                self.record_target_observation(store, task, &plan, target)?;
+                self.record_target_observation(
+                    store,
+                    task,
+                    &plan,
+                    target,
+                    crate::super_agent::delivery::DeliveryObservationSource::HostVerifiedAlreadyAtTarget,
+                )?;
                 return self.finalize_delivery(store, task, &plan, None, true, report);
             }
             // Carrying the plan is not ownership: this repository's live Git
@@ -793,7 +816,13 @@ impl Orchestrator {
         // already proves this repository's delivery, record that observation
         // instead of running the command again.
         if recorded.is_none() && verify_target_delivery(task, plan, target)?.verified {
-            self.record_target_observation(store, task, plan, target)?;
+            self.record_target_observation(
+                store,
+                task,
+                plan,
+                target,
+                crate::super_agent::delivery::DeliveryObservationSource::HostVerifiedAlreadyAtTarget,
+            )?;
             return self.finalize_delivery(store, task, plan, None, true, report);
         }
         // The receipt exists but no job was recorded: the previous host stopped
@@ -1053,7 +1082,13 @@ impl Orchestrator {
                 if verification.verified {
                     // Only this repository's own observation is durable now;
                     // the task-wide fact still needs every other repository.
-                    self.record_target_observation(store, task, plan, target)?;
+                    self.record_target_observation(
+                        store,
+                        task,
+                        plan,
+                        target,
+                        crate::super_agent::delivery::DeliveryObservationSource::DeliveryJob,
+                    )?;
                     return self.finalize_delivery(store, task, plan, Some(job_id), false, report);
                 }
                 let detail = if verification.reason.is_empty() {
@@ -1091,6 +1126,7 @@ impl Orchestrator {
         task: &TaskRecord,
         plan: &crate::super_agent::delivery::DeliveryPlan,
         target: &crate::super_agent::delivery::DeliveryTargetPlan,
+        source: crate::super_agent::delivery::DeliveryObservationSource,
     ) -> Result<()> {
         let coder_session_id = task
             .coder
@@ -1111,6 +1147,7 @@ impl Orchestrator {
                     coder_session_id,
                     attempt: target.attempt,
                     verified: true,
+                    source,
                     observed_at: chrono::Utc::now().to_rfc3339(),
                 },
             )
@@ -1211,6 +1248,412 @@ impl Orchestrator {
             .get_task(&task.task_id)
             .map_err(store_error)?
             .context("Task disappeared")
+    }
+
+    /// Completes a fully delivered Git task through the existing transactional
+    /// store gate.
+    ///
+    /// The task is only completed when the authoritative persisted delivery
+    /// plan still binds it, every target verifies against that plan right now,
+    /// every planned repository has its own durable observation, a real
+    /// `FINAL_DELIVERY` review and harness approve the delivered OIDs, no
+    /// relevant member job is still running, and the host recorded that it
+    /// analysed that harness evidence. Anything else either waits or blocks
+    /// with the concrete reason; no evidence is invented and nothing is
+    /// written directly to the task status.
+    async fn finalize_task(
+        &self,
+        store: &TaskStore,
+        task: &TaskRecord,
+        report: &mut TickReport,
+    ) -> Result<()> {
+        // This bounded increment completes Git deliveries only. A non-Git-only
+        // task reaches FINALIZING through the state machine as well, but its
+        // snapshot/report completion rules are a separate increment, so it is
+        // left untouched rather than treated as delivered.
+        if !task.non_git_targets.is_empty() || task.repositories.is_empty() {
+            return Ok(());
+        }
+        let Some(plan) = self.persisted_delivery_plan(store, task)? else {
+            return self
+                .block_delivery(
+                    store,
+                    &task.task_id,
+                    "No persisted delivery plan exists for the current task version; completion requires the authoritative delivered plan",
+                    "completion-plan",
+                    report,
+                )
+                .map(|_| ());
+        };
+        if let Some(reason) = crate::super_agent::delivery::verify_plan_binding(store, task, &plan)?
+        {
+            return self
+                .block_delivery(store, &task.task_id, &reason, "completion-binding", report)
+                .map(|_| ());
+        }
+        // A target that moved after delivery, or a repository that no longer
+        // holds the approved commit, blocks instead of completing from stale
+        // delivery evidence.
+        let verification = crate::super_agent::delivery::verify_delivery(task, &plan)?;
+        if !verification.complete {
+            let reason = format!(
+                "Task completion requires every planned target to still contain the approved commit, but {}",
+                verification.failures.join("; ")
+            );
+            return self
+                .block_delivery(
+                    store,
+                    &task.task_id,
+                    &reason,
+                    "completion-verification",
+                    report,
+                )
+                .map(|_| ());
+        }
+        if !store
+            .delivery_plan_observations_complete(&plan)
+            .map_err(store_error)?
+        {
+            // A delivery observation is still missing; wait instead of
+            // inferring one.
+            return Ok(());
+        }
+
+        let reports = store.reports(&task.task_id).map_err(store_error)?;
+        // The evidence must decode as the exact current-stage reports, not
+        // merely carry matching metadata.
+        let final_review = final_delivery_report(&reports, task, ReportKind::Review);
+        let final_harness = final_delivery_report(&reports, task, ReportKind::Harness);
+        if final_review.is_none() || final_harness.is_none() {
+            // Content-identical integrations reuse the implementation
+            // approval for delivery, so the completion gate still needs a real
+            // final-delivery review of the delivered content. It must come
+            // from the same Reviewer session, never from a relabelled or
+            // copied implementation report.
+            self.ensure_finalizing_reviewer(
+                store,
+                task,
+                report,
+                final_review.is_some(),
+                final_harness.is_some(),
+                &plan.operation_id,
+            )
+            .await?;
+            return Ok(());
+        }
+
+        let events = store.events(&task.task_id).map_err(store_error)?;
+        let decided = events.iter().any(|event| {
+            event.event_type == EventType::ReviewCompleted
+                && event.spec_version == task.spec_version
+                && event.review_round == task.review_round
+                && event.payload["stage"].as_str() == Some(ReviewStage::FinalDelivery.as_str())
+        });
+        if !decided {
+            // The decision is a pending host event; the next tick applies it
+            // before completion can be attempted.
+            self.decide_review(store, task, report)?;
+            return Ok(());
+        }
+
+        let task = store
+            .get_task(&task.task_id)
+            .map_err(store_error)?
+            .context("Task disappeared")?;
+        if task.phase != Phase::Finalizing || task.status != Status::Running {
+            return Ok(());
+        }
+        // The completion review is a current-stage receipt derived from the
+        // persisted delivery plan, not "any terminal Reviewer job". Missing it
+        // is an explicit Unknown even when older receipts still exist.
+        let Some(required_reviewer_purpose) =
+            required_completion_reviewer_purpose(&events, &plan)
+        else {
+            let reason = "The persisted delivery plan does not identify the current completion-review stage, so the required Reviewer receipt cannot be proven";
+            self.block_task(store, &task.task_id, reason, "completion-jobs")?;
+            report.blocked.push(format!("{}: {reason}", task.task_id));
+            return Ok(());
+        };
+        // Reports prove submission, not process exit. Every known task-owned
+        // member job is read directly, and the current required review stage
+        // must be covered by this spec/round. A known Unknown is reported
+        // before waiting on an Active job so damage stays actionable; a valid
+        // active job waits; only proven terminal jobs satisfy the condition.
+        let members = self.launcher().completion_member_jobs(
+            &task,
+            &plan,
+            required_reviewer_purpose,
+        )?;
+        if let Some(unknown) = members.unknown().next() {
+            let reason = format!(
+                "Task completion requires every known member job to have a proven terminal state, but {}; no completion, retry or rollback was attempted and the original job files were preserved",
+                unknown.describe()
+            );
+            self.block_task(store, &task.task_id, &reason, "completion-jobs")?;
+            report.blocked.push(format!("{}: {reason}", task.task_id));
+            return Ok(());
+        }
+        if members.active().next().is_some() {
+            // A real Coder or Reviewer child is still writing; completion waits
+            // for its actual process to stop.
+            return Ok(());
+        }
+        self.record_harness_analysis(store, &task, &reports)?;
+
+        let operation = format!(
+            "orchestrator:{}:completed:{}:{}:{}",
+            task.task_id, task.spec_version, task.review_round, plan.operation_id
+        );
+        let payload = serde_json::json!({
+            "plan_operation_id": plan.operation_id,
+            "repositories": plan
+                .repositories
+                .iter()
+                .map(|target| serde_json::json!({
+                    "repository_id": target.repository_id,
+                    "target_ref": target.target_ref,
+                    "reviewed_commit": target.reviewed_commit,
+                    "new_oid": target.new_oid,
+                }))
+                .collect::<Vec<_>>(),
+        });
+        match store.apply_event(
+            &task.task_id,
+            NewEvent {
+                session_id: None,
+                run_id: None,
+                event_type: EventType::TaskCompleted,
+                causation_id: None,
+                operation_id: operation,
+                payload,
+            },
+            &self.policy(),
+        ) {
+            Ok(_) => Ok(()),
+            Err(StoreError::Gate(unmet)) => {
+                let details: Vec<String> = unmet.iter().map(|item| item.describe()).collect();
+                let reason = format!(
+                    "Task completion is blocked by unmet completion evidence: {}",
+                    details.join("; ")
+                );
+                self.block_task(store, &task.task_id, &reason, "completion-gate")?;
+                report.blocked.push(format!("{}: {reason}", task.task_id));
+                Ok(())
+            }
+            Err(error) => Err(store_error(error)),
+        }
+    }
+
+    /// The authoritative persisted delivery plan for the current task version.
+    fn persisted_delivery_plan(
+        &self,
+        store: &TaskStore,
+        task: &TaskRecord,
+    ) -> Result<Option<crate::super_agent::delivery::DeliveryPlan>> {
+        Ok(store
+            .delivery_plans(&task.task_id)
+            .map_err(store_error)?
+            .into_iter()
+            .filter(|plan| {
+                plan.spec_version == task.spec_version && plan.review_round == task.review_round
+            })
+            .max_by(|left, right| {
+                left.created_at
+                    .cmp(&right.created_at)
+                    .then(left.operation_id.cmp(&right.operation_id))
+            }))
+    }
+
+    /// Records that the host analysed the rejected-or-accepted harness report
+    /// the completion decision actually cites. It never fabricates the trace:
+    /// without a current, valid, non-blocking `FINAL_DELIVERY` harness report
+    /// named by the real decision event, no event is written.
+    fn record_harness_analysis(
+        &self,
+        store: &TaskStore,
+        task: &TaskRecord,
+        reports: &[crate::super_agent::Report],
+    ) -> Result<()> {
+        let events = store.events(&task.task_id).map_err(store_error)?;
+        if events.iter().any(|event| {
+            event.event_type == EventType::HarnessAnalysisCompleted
+                && event.spec_version == task.spec_version
+                && event.review_round == task.review_round
+        }) {
+            return Ok(());
+        }
+        let Some(decision) = events.iter().rev().find(|event| {
+            event.event_type == EventType::ReviewCompleted
+                && event.spec_version == task.spec_version
+                && event.review_round == task.review_round
+                && event.payload["stage"].as_str() == Some(ReviewStage::FinalDelivery.as_str())
+        }) else {
+            return Ok(());
+        };
+        let Some(harness_id) = decision.payload["harness_report_id"]
+            .as_str()
+            .filter(|id| !id.is_empty())
+        else {
+            return Ok(());
+        };
+        let Some(report) = reports.iter().find(|candidate| {
+            candidate.report_id == harness_id
+                && candidate.kind == ReportKind::Harness
+                && !candidate.invalidated
+                && candidate.spec_version == task.spec_version
+                && candidate.round == task.review_round
+        }) else {
+            return Ok(());
+        };
+        let Ok(harness) = crate::super_agent::model::decode_body::<
+            crate::super_agent::HarnessAnalysisReport,
+        >(report) else {
+            return Ok(());
+        };
+        if harness.stage != ReviewStage::FinalDelivery
+            || harness.spec_version != task.spec_version
+            || harness.round != task.review_round
+            || harness.blocking()
+        {
+            return Ok(());
+        }
+        store
+            .apply_event(
+                &task.task_id,
+                NewEvent {
+                    session_id: None,
+                    run_id: None,
+                    event_type: EventType::HarnessAnalysisCompleted,
+                    causation_id: None,
+                    operation_id: format!(
+                        "orchestrator:{}:harness-analysis:{}:{}",
+                        task.task_id, task.spec_version, task.review_round
+                    ),
+                    payload: serde_json::json!({
+                        "report_id": harness_id,
+                        "review_report_id": decision.payload["review_report_id"],
+                        "stage": ReviewStage::FinalDelivery.as_str(),
+                    }),
+                },
+                &self.policy(),
+            )
+            .map_err(store_error)?;
+        Ok(())
+    }
+
+    /// Resumes the SAME Reviewer once for the post-delivery completion review.
+    /// Its durable marker is distinct from the pre-delivery final review, so a
+    /// content-identical task never reuses (or relabels) an implementation
+    /// report, and a changed-content task never starts a second review.
+    async fn ensure_finalizing_reviewer(
+        &self,
+        store: &TaskStore,
+        task: &TaskRecord,
+        report: &mut TickReport,
+        have_review: bool,
+        have_harness: bool,
+        plan_operation_id: &str,
+    ) -> Result<()> {
+        if task.reviewer.session_id.is_none() {
+            let reason = "No Reviewer session exists to record the final completion review";
+            self.block_task(store, &task.task_id, reason, "completion-reviewer")?;
+            report.blocked.push(format!("{}: {reason}", task.task_id));
+            return Ok(());
+        }
+        let key = format!(
+            "super-agent.reviewer-resume.{}.{}.{}.final-completion",
+            task.task_id, task.spec_version, task.review_round
+        );
+        let Some(marker) = self.context.setting::<serde_json::Value>(&key)? else {
+            // No resume was requested yet: ask the same Reviewer exactly once.
+            let outcome = self.launcher().resume_finalizing_reviewer(task).await?;
+            self.context.save_setting(
+                &key,
+                &serde_json::json!({
+                    "session_id": outcome.session_id,
+                    "job_id": outcome.job_id,
+                    // The stage key is shared by every plan of this spec/round;
+                    // recording the plan makes the receipt provable later.
+                    "plan_operation_id": plan_operation_id,
+                    "at": chrono::Utc::now().to_rfc3339()
+                }),
+            )?;
+            if outcome.fresh {
+                report.launched.push(format!(
+                    "{} reviewer {} (final completion review)",
+                    task.task_id, outcome.session_id
+                ));
+            }
+            return Ok(());
+        };
+        // A resume was already requested. Reconcile its durable job instead of
+        // launching again or waiting forever: an active child is waited for; a
+        // terminal, missing or unreadable one without the required reports is a
+        // block with the concrete diagnosis.
+        let Some(reviewer) = task.reviewer.session_id.clone() else {
+            return Ok(());
+        };
+        // The durable marker must belong to this task's Reviewer; it never
+        // authorizes waiting on another session's work.
+        let marker_session = marker["session_id"].as_str().filter(|id| !id.is_empty());
+        if marker_session != Some(reviewer.as_str()) {
+            let reason = format!(
+                "The recorded final completion review names session {marker_session:?}, not this task's Reviewer {reviewer}; no other session is resumed",
+            );
+            self.block_task(store, &task.task_id, &reason, "completion-review")?;
+            report.blocked.push(format!("{}: {reason}", task.task_id));
+            return Ok(());
+        }
+        let Some(job_id) = marker["job_id"].as_str().filter(|id| !id.is_empty()) else {
+            let reason = "The recorded final completion review names no durable job; the task cannot complete without a FINAL_DELIVERY review and harness";
+            self.block_task(store, &task.task_id, reason, "completion-review")?;
+            report.blocked.push(format!("{}: {reason}", task.task_id));
+            return Ok(());
+        };
+        let detail = format!("review present: {have_review}, harness present: {have_harness}");
+        let snapshot = match crate::services::background_sessions::inspect(
+            &self.context.paths.data_dir,
+            job_id,
+        ) {
+            Ok(snapshot) => snapshot,
+            Err(error) => {
+                let reason = format!(
+                    "The final completion review job {job_id} could not be read ({error:#}) ({detail}); the original files were preserved and a new resume is not launched automatically"
+                );
+                self.block_task(store, &task.task_id, &reason, "completion-review")?;
+                report.blocked.push(format!("{}: {reason}", task.task_id));
+                return Ok(());
+            }
+        };
+        let reason = match snapshot {
+            crate::services::background_sessions::JobSnapshot::Present(job)
+                if job.id == job_id
+                    && job.session_id == reviewer
+                    && job.parent_session_id == task.router_session_id =>
+            {
+                if matches!(job.status.as_str(), "starting" | "running" | "unresponsive") {
+                    // The genuine child is still working: wait, do not block.
+                    return Ok(());
+                }
+                format!(
+                    "The final completion review job {job_id} ended {} without a valid FINAL_DELIVERY review and harness ({detail}); a new resume is not launched automatically",
+                    job.status
+                )
+            }
+            crate::services::background_sessions::JobSnapshot::Present(job) => format!(
+                "The final completion review job {job_id} belongs to session {} under parent {}, not this Reviewer {reviewer} under {}; it is not adopted and no other session is resumed ({detail})",
+                job.session_id, job.parent_session_id, task.router_session_id
+            ),
+            crate::services::background_sessions::JobSnapshot::Missing => format!(
+                "The final completion review job {job_id} produced no durable state ({detail}); a new resume is not launched automatically"
+            ),
+            crate::services::background_sessions::JobSnapshot::Unreadable(error) => format!(
+                "The final completion review job {job_id} has unreadable state ({error}) ({detail}); the original files were preserved and a new resume is not launched automatically"
+            ),
+        };
+        self.block_task(store, &task.task_id, &reason, "completion-review")?;
+        report.blocked.push(format!("{}: {reason}", task.task_id));
+        Ok(())
     }
 
     fn prepare(&self, store: &TaskStore, task: &TaskRecord, report: &mut TickReport) -> Result<()> {
@@ -1545,7 +1988,7 @@ impl Orchestrator {
         // delivery review, even at the same spec version and review round.
         let expected = match task.phase {
             Phase::Reviewing => ReviewStage::Implementation,
-            Phase::FinalReview => ReviewStage::FinalDelivery,
+            Phase::FinalReview | Phase::Finalizing => ReviewStage::FinalDelivery,
             _ => return Ok(()),
         };
         let reports = store.reports(&task.task_id).map_err(store_error)?;
@@ -2157,6 +2600,50 @@ fn delivery_context_mismatch(
     None
 }
 
+/// The latest valid `FINAL_DELIVERY` report of one kind for the task's current
+/// spec version and round. Metadata alone is not evidence: the body must decode
+/// and declare the matching stage, version and round.
+fn final_delivery_report<'a>(
+    reports: &'a [crate::super_agent::Report],
+    task: &TaskRecord,
+    kind: ReportKind,
+) -> Option<&'a crate::super_agent::Report> {
+    reports
+        .iter()
+        .filter(|candidate| {
+            candidate.kind == kind
+                && !candidate.invalidated
+                && candidate.spec_version == task.spec_version
+                && candidate.round == task.review_round
+        })
+        .filter(|candidate| match kind {
+            ReportKind::Review => crate::super_agent::model::decode_body::<
+                crate::super_agent::TaskReviewReport,
+            >(candidate)
+            .map(|body| {
+                body.stage == ReviewStage::FinalDelivery
+                    && body.spec_version == task.spec_version
+                    && body.round == task.review_round
+            })
+            .unwrap_or(false),
+            ReportKind::Harness => crate::super_agent::model::decode_body::<
+                crate::super_agent::HarnessAnalysisReport,
+            >(candidate)
+            .map(|body| {
+                body.stage == ReviewStage::FinalDelivery
+                    && body.spec_version == task.spec_version
+                    && body.round == task.review_round
+            })
+            .unwrap_or(false),
+            _ => false,
+        })
+        .max_by(|left, right| {
+            left.created_at
+                .cmp(&right.created_at)
+                .then(left.report_id.cmp(&right.report_id))
+        })
+}
+
 /// A durable repository observation is only usable while it still describes
 /// the persisted plan's exact target and the task's current Coder. Anything
 /// else is a contradiction, not an upgrade or a refresh.
@@ -2382,6 +2869,32 @@ fn delivery_job_identity_mismatch(
         ));
     }
     None
+}
+
+/// The Reviewer resume purpose that owns the delivered content's completion
+/// review. A changed integrated tree was already reviewed before delivery, so
+/// that `final-delivery` job is reused. An unchanged tree reuses the
+/// implementation approval and therefore requires the post-delivery
+/// `final-completion` resume. The persisted decision named by the delivery plan
+/// is authoritative; anything else cannot prove the required stage.
+fn required_completion_reviewer_purpose(
+    events: &[crate::super_agent::Event],
+    plan: &crate::super_agent::delivery::DeliveryPlan,
+) -> Option<&'static str> {
+    let decision = events
+        .iter()
+        .find(|event| event.event_id == plan.review_event_id)?;
+    if decision.event_type != EventType::ReviewCompleted
+        || decision.spec_version != plan.spec_version
+        || decision.review_round != plan.review_round
+    {
+        return None;
+    }
+    match decision.payload["stage"].as_str() {
+        Some(stage) if stage == ReviewStage::FinalDelivery.as_str() => Some("final-delivery"),
+        Some(stage) if stage == ReviewStage::Implementation.as_str() => Some("final-completion"),
+        _ => None,
+    }
 }
 
 fn store_error(error: StoreError) -> anyhow::Error {

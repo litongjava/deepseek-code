@@ -1748,6 +1748,7 @@ fn recording_a_delivery_marks_the_repository_and_is_idempotent() {
             coder_session_id: "coder-session".into(),
             attempt: target.attempt,
             verified: true,
+            source: DeliveryObservationSource::DeliveryJob,
             observed_at: "2026-01-01T00:00:00Z".into(),
         })
         .unwrap();
@@ -1983,6 +1984,7 @@ fn repository_observation(
         coder_session_id: "coder-session".into(),
         attempt: target.attempt,
         verified: true,
+        source: DeliveryObservationSource::DeliveryJob,
         observed_at: "2026-01-01T00:00:00Z".into(),
     }
 }

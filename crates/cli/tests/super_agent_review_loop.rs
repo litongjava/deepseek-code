@@ -282,6 +282,17 @@ enum DeliveryMode {
     RecoveryMismatch,
     /// A bound receipt is redirected to another real job of the same Coder.
     BoundJobSwap,
+    /// Delivered content equals the reviewed content; completion needs a real
+    /// post-delivery FINAL_DELIVERY review of the delivered OIDs.
+    CompleteIdentical,
+    /// Changed content was reviewed FINAL_DELIVERY before delivery.
+    CompleteChanged,
+    /// Both final-delivery reports exist while the real Reviewer is still
+    /// running; its durable state is removed before the completion decision.
+    GateMissingState,
+    /// Both final-delivery reports exist while the real Reviewer is still
+    /// running; completion waits for its actual process to stop.
+    GateWaitsForExit,
 }
 
 impl DeliveryMode {
@@ -303,6 +314,10 @@ impl DeliveryMode {
             Self::SpawnCrash => "spawn-crash",
             Self::RecoveryMismatch => "recovery-mismatch",
             Self::BoundJobSwap => "bound-job-swap",
+            Self::CompleteIdentical => "complete-identical",
+            Self::CompleteChanged => "complete-changed",
+            Self::GateMissingState => "gate-missing-state",
+            Self::GateWaitsForExit => "gate-waits-for-exit",
         }
     }
 }
@@ -323,6 +338,10 @@ struct MockState {
     /// must not submit after a failed command, so a violation fails the test
     /// with the exact output instead of hiding it behind a later assertion.
     violations: Mutex<Vec<String>>,
+    /// Hold the post-submission completion-review turn so the real Reviewer
+    /// child stays alive after both reports are durable. Only the two
+    /// completion-gate scenarios enable it.
+    hold_finalization_exit: bool,
 }
 
 impl MockState {
@@ -665,7 +684,13 @@ async fn coder_response(
     }
 }
 
-async fn reviewer_response(state: &MockState, request: &Value, stage: &str, step: usize) -> String {
+async fn reviewer_response(
+    state: &MockState,
+    request: &Value,
+    stage: &str,
+    step: usize,
+    finalizing: bool,
+) -> String {
     let round = request["review_round"].as_u64().unwrap_or(0);
     let coder = request["coder"]["session_id"]
         .as_str()
@@ -679,6 +704,72 @@ async fn reviewer_response(state: &MockState, request: &Value, stage: &str, step
         .as_str()
         .unwrap_or_default()
         .to_owned();
+    if finalizing {
+        // The post-delivery completion review of the already delivered content.
+        // A different prompt and purpose; the delivered OIDs are the reviewed
+        // ones. The harness is held so the host must not decide on one report.
+        let integrated = request["repository_versions"][0]["integrated_commit"]
+            .as_str()
+            .unwrap_or_default()
+            .to_owned();
+        return match step {
+            0 => stream(
+                tool_call(
+                    "finalizing-read",
+                    "Bash",
+                    json!({
+                        "shell":"sh",
+                        "command":"pwd && cat file.txt && git rev-parse HEAD",
+                        "timeout":30000
+                    }),
+                ),
+                "tool_calls",
+            ),
+            1 => submit(
+                "finalizing-review",
+                "review",
+                json!({
+                    "verdict": "APPROVED",
+                    "spec_version": 1,
+                    "round": round,
+                    "stage": "FINAL_DELIVERY",
+                    "reviewed_versions": [{"repository_id": repository, "commit": integrated}],
+                    "acceptance_results": [{
+                        "criterion": "AC-001",
+                        "passed": true,
+                        "evidence": [CORRECTED_CONTENT]
+                    }],
+                    "issues": [],
+                    "verification": ["pwd; cat file.txt; git rev-parse HEAD"],
+                    "limitations": []
+                }),
+            ),
+            2 => {
+                wait_for_release(state, "finalization-harness").await;
+                submit(
+                    "finalizing-harness",
+                    "harness",
+                    json!({
+                        "spec_version": 1,
+                        "round": round,
+                        "stage": "FINAL_DELIVERY",
+                        "findings": []
+                    }),
+                )
+            }
+            3 => {
+                // The harness submission already returned "Report recorded".
+                // The real child is alive and waiting for this response, which
+                // makes "both reports durable, process still running" a
+                // protocol barrier instead of a sleep.
+                if state.hold_finalization_exit {
+                    wait_for_release(state, "finalization-exit").await;
+                }
+                stream(json!({"content": "completion review submitted"}), "stop")
+            }
+            _ => stream(json!({"content": "completion review submitted"}), "stop"),
+        };
+    }
     if stage == "FINAL_DELIVERY" {
         // The final-delivery review of the host-verified integrated content.
         let integrated = request["repository_versions"][0]["integrated_commit"]
@@ -948,7 +1039,15 @@ async fn mock_handler(
             .await
         }
         "reviewer" => {
-            reviewer_response(&state, request.as_ref().unwrap_or(&json!({})), &stage, step).await
+            let finalizing = role == "reviewer" && prompt.contains("final completion review");
+            reviewer_response(
+                &state,
+                request.as_ref().unwrap_or(&json!({})),
+                &stage,
+                step,
+                finalizing,
+            )
+            .await
         }
         _ => stream(json!({"content":"unused"}), "stop"),
     };
@@ -1191,6 +1290,294 @@ where
     );
 }
 
+/// Waits for a member report, but fails immediately when every child has
+/// stopped and the report is still missing. A silent deadline is not evidence:
+/// the real job status and error are reported instead.
+async fn wait_for_report_fail_fast<F>(
+    store: &TaskStore,
+    data: &Path,
+    router: &str,
+    task_id: &str,
+    mut ready: F,
+) where
+    F: FnMut(&[deepseek_code_core::super_agent::Report]) -> bool,
+{
+    for _ in 0..800 {
+        if ready(&store.reports(task_id).unwrap_or_default()) {
+            return;
+        }
+        let jobs = jobs(data, router);
+        let active = jobs
+            .iter()
+            .any(|job| matches!(job.status.as_str(), "starting" | "running" | "unresponsive"));
+        if !jobs.is_empty() && !active {
+            let states: Vec<_> = jobs
+                .iter()
+                .map(|job| (job.id.clone(), job.status.clone(), job.error.clone()))
+                .collect();
+            panic!(
+                "the member child stopped without the required report: {states:#?}\nreports: {:#?}",
+                store.reports(task_id).unwrap_or_default()
+            );
+        }
+        tokio::time::sleep(Duration::from_millis(250)).await;
+    }
+    panic!(
+        "expected member report did not appear: {:#?}",
+        store.reports(task_id).unwrap_or_default()
+    );
+}
+
+/// Waits until the real finalizing Reviewer child has received the recorded
+/// harness result and is blocked on the held model response. The mock records
+/// the step-3 request before it waits, so this is a protocol barrier rather
+/// than a fixed sleep.
+async fn wait_for_finalization_exit_request(state: &MockState) {
+    for _ in 0..2400 {
+        let waiting = {
+            let requests = state.requests.lock().unwrap();
+            requests.iter().any(|request| {
+                request["role"] == "reviewer"
+                    && request["step"] == json!(3)
+                    && request["prompt"]
+                        .as_str()
+                        .is_some_and(|prompt| prompt.contains("final completion review"))
+            })
+        };
+        if waiting {
+            return;
+        }
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    }
+    let requests: Vec<Value> = state.requests.lock().unwrap().clone();
+    panic!("the finalizing Reviewer never reached the held exit barrier: {requests:#?}");
+}
+
+/// The Linux start time of one PID, so a signal is bound to the exact process
+/// that was observed and never to a later process that reused the PID.
+#[cfg(target_os = "linux")]
+fn proc_start_ticks(pid: u32) -> Option<String> {
+    let stat = std::fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
+    let (_, rest) = stat.rsplit_once(')')?;
+    // Field 22 (`starttime`); the first token after `comm` is field 3.
+    rest.split_whitespace().nth(19).map(str::to_owned)
+}
+
+#[cfg(target_os = "linux")]
+fn signal_exact(pid: u32, start: &str, signal: &str) {
+    assert_eq!(
+        proc_start_ticks(pid).as_deref(),
+        Some(start),
+        "PID {pid} no longer has the recorded start identity; refusing to signal it"
+    );
+    let status = Command::new("kill")
+        .args([format!("-{signal}"), pid.to_string()])
+        .status()
+        .expect("running kill");
+    assert!(status.success(), "kill -{signal} {pid} failed: {status}");
+}
+
+/// Freezes only the recorded supervisor so its heartbeat cannot recreate the
+/// removed state file while the real Reviewer child stays alive. The identity
+/// is re-verified for every signal, including the drop-path resumption.
+#[cfg(target_os = "linux")]
+struct FrozenSupervisor {
+    pid: u32,
+    start: String,
+    frozen: bool,
+}
+
+#[cfg(target_os = "linux")]
+impl FrozenSupervisor {
+    fn freeze(pid: u32) -> Self {
+        let start = proc_start_ticks(pid)
+            .unwrap_or_else(|| panic!("no start identity for supervisor PID {pid}"));
+        // Hold the exact identity as a guard *before* signalling. If the bounded
+        // wait for the stopped state or an identity assertion panics, `Drop`
+        // still resumes this same process instead of leaving it stopped. `Drop`
+        // re-checks the start time, so a reused PID is never signalled.
+        let guard = Self {
+            pid,
+            start,
+            frozen: true,
+        };
+        signal_exact(guard.pid, &guard.start, "STOP");
+        // Signal success is not proof that the heartbeat writer stopped.
+        for _ in 0..400 {
+            if proc_state(guard.pid).as_deref() == Some("T") {
+                assert_eq!(
+                    proc_start_ticks(guard.pid).as_deref(),
+                    Some(guard.start.as_str()),
+                    "supervisor PID {pid} changed identity while stopping"
+                );
+                return guard;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        panic!("supervisor PID {pid} did not reach the stopped state");
+    }
+
+    fn thaw(&mut self) {
+        if self.frozen {
+            signal_exact(self.pid, &self.start, "CONT");
+            self.frozen = false;
+        }
+    }
+}
+
+#[cfg(target_os = "linux")]
+impl Drop for FrozenSupervisor {
+    fn drop(&mut self) {
+        if self.frozen {
+            if proc_start_ticks(self.pid).as_deref() == Some(self.start.as_str()) {
+                let _ = Command::new("kill")
+                    .args(["-CONT", &self.pid.to_string()])
+                    .status();
+            }
+            self.frozen = false;
+        }
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn proc_state(pid: u32) -> Option<String> {
+    let stat = std::fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
+    let (_, rest) = stat.rsplit_once(')')?;
+    rest.split_whitespace().next().map(str::to_owned)
+}
+
+/// The resumed supervisor rewrites the `state.json` the fixture deleted. Wait
+/// for that durable publication before releasing the held response, so the
+/// child's final control-channel read cannot race a missing file.
+#[cfg(target_os = "linux")]
+fn wait_for_republished_state(data: &Path, job_id: &str) {
+    let path = data
+        .join("background-tasks")
+        .join(job_id)
+        .join("state.json");
+    for _ in 0..400 {
+        if std::fs::read(&path).is_ok() {
+            return;
+        }
+        std::thread::sleep(Duration::from_millis(25));
+    }
+    panic!(
+        "the resumed supervisor did not republish {}",
+        path.display()
+    );
+}
+
+/// Waits for the deliberately damaged job to record a real terminal status.
+/// A missing `state.json` is not exit proof: only the exact job's terminal
+/// record counts. The damaged child may legitimately fail because its control
+/// directory lost state, so success is not required.
+#[cfg(target_os = "linux")]
+fn wait_damaged_job_terminal(data: &Path, job_id: &str) -> String {
+    for _ in 0..1200 {
+        if let Ok(deepseek_code_core::services::background_sessions::JobSnapshot::Present(job)) =
+            deepseek_code_core::services::background_sessions::inspect(data, job_id)
+        {
+            if matches!(job.status.as_str(), "completed" | "failed" | "cancelled") {
+                return job.status;
+            }
+        }
+        std::thread::sleep(Duration::from_millis(25));
+    }
+    panic!("the damaged job {job_id} did not reach a terminal state");
+}
+
+/// True once the exact recorded process is gone, or its PID now carries a
+/// different start time (the recorded instance exited). Only `/proc` identity
+/// is accepted; a missing job file proves nothing about the process.
+#[cfg(target_os = "linux")]
+fn wait_instance_stopped(pid: u32, start: &str) -> bool {
+    for _ in 0..1200 {
+        match proc_start_ticks(pid) {
+            None => return true,
+            Some(current) if current != start => return true,
+            Some(_) => {}
+        }
+        std::thread::sleep(Duration::from_millis(25));
+    }
+    false
+}
+
+#[cfg(not(target_os = "linux"))]
+fn proc_start_ticks(_: u32) -> Option<String> {
+    None
+}
+
+/// A process the completion-gate cleanup must never touch.
+struct Sentinel(std::process::Child);
+
+impl Sentinel {
+    fn start(&self) -> String {
+        proc_start_ticks(self.0.id()).unwrap_or_else(|| panic!("no sentinel start identity"))
+    }
+
+    fn assert_alive(&mut self) {
+        assert!(
+            self.0.try_wait().unwrap().is_none(),
+            "the sentinel process was terminated by cleanup"
+        );
+    }
+}
+
+impl Drop for Sentinel {
+    fn drop(&mut self) {
+        let _ = self.0.kill();
+        let _ = self.0.wait();
+    }
+}
+
+#[cfg(not(target_os = "linux"))]
+struct FrozenSupervisor;
+
+#[cfg(not(target_os = "linux"))]
+impl FrozenSupervisor {
+    fn freeze(_: u32) -> Self {
+        panic!("the completion-gate state-damage scenario is Linux-only");
+    }
+    fn thaw(&mut self) {}
+}
+
+/// The exact reserved job directory names, used to prove that a reopened host
+/// started no replacement without trusting the discovery list (which ignores
+/// damaged or missing state).
+fn job_directory_ids(data: &Path) -> Vec<String> {
+    let mut ids: Vec<String> = std::fs::read_dir(data.join("background-tasks"))
+        .map(|entries| {
+            entries
+                .filter_map(|entry| entry.ok())
+                .filter(|entry| entry.path().is_dir())
+                .map(|entry| entry.file_name().to_string_lossy().into_owned())
+                .collect()
+        })
+        .unwrap_or_default();
+    ids.sort();
+    ids
+}
+
+/// Durable settings rows under one prefix, keyed and ordered, so adding or
+/// rewriting a launch operation or resume marker is visible.
+fn setting_entries(context: &ServiceContext, prefix: &str) -> Vec<(String, String)> {
+    let pattern = format!("{prefix}%");
+    context
+        .db
+        .with_conn(|conn| -> anyhow::Result<Vec<(String, String)>> {
+            let mut statement = conn.prepare(
+                "SELECT key,value FROM peripheral_settings WHERE key LIKE ?1 ORDER BY key",
+            )?;
+            let rows = statement.query_map([pattern], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+            })?;
+            let rows: Vec<(String, String)> = rows.collect::<Result<_, _>>()?;
+            Ok(rows)
+        })
+        .unwrap()
+        .unwrap()
+}
+
 fn operation_prompts(context: &ServiceContext, task_id: &str) -> Vec<Value> {
     let prefix = format!("super-agent.launch-op.{task_id}.%");
     context
@@ -1285,6 +1672,12 @@ async fn run_review_loop_with(
     blocked: bool,
     delivery: DeliveryMode,
 ) -> (Fixture, ServiceContext, String, Arc<MockState>, Value) {
+    let content_changed = !matches!(
+        delivery,
+        DeliveryMode::CompleteIdentical
+            | DeliveryMode::GateMissingState
+            | DeliveryMode::GateWaitsForExit
+    );
     let fixture = Fixture::new();
     let context = open(&fixture.data);
     let sessions = SessionStore::new(context.db.clone());
@@ -1297,6 +1690,10 @@ async fn run_review_loop_with(
         router_session: router.clone(),
         blocked_review: blocked,
         fail_delivery: delivery == DeliveryMode::Failed,
+        hold_finalization_exit: matches!(
+            delivery,
+            DeliveryMode::GateMissingState | DeliveryMode::GateWaitsForExit
+        ),
         hold_delivery: !matches!(
             delivery,
             DeliveryMode::Failed
@@ -1359,9 +1756,21 @@ async fn run_review_loop_with(
         .unwrap();
     let task_id = created.task_id.clone();
     let executable = PathBuf::from(env!("CARGO_BIN_EXE_dcl"));
-    let orchestrator = Orchestrator::new(
+    // Completion scenarios keep delivery disabled until the pre-delivery
+    // assertions are done, then enable it with a fresh Orchestrator. Older
+    // scenarios keep the previous behavior exactly.
+    let completion_mode = matches!(
+        delivery,
+        DeliveryMode::CompleteIdentical
+            | DeliveryMode::CompleteChanged
+            | DeliveryMode::GateMissingState
+            | DeliveryMode::GateWaitsForExit
+    );
+    let early_delivery = delivery.enabled() && !completion_mode;
+    // Reassigned whenever the host is reopened during the loop.
+    let mut orchestrator = Orchestrator::new(
         context.clone(),
-        Fixture::config_with_delivery(delivery.enabled()),
+        Fixture::config_with_delivery(early_delivery),
         provider.clone(),
         "bypass".into(),
         Some(executable.clone()),
@@ -1553,9 +1962,9 @@ async fn run_review_loop_with(
     drop(orchestrator);
     let context = open(&fixture.data);
     let store = TaskStore::new(context.db.clone(), fixture.data.clone());
-    let orchestrator = Orchestrator::new(
+    orchestrator = Orchestrator::new(
         context.clone(),
-        Fixture::config_with_delivery(delivery.enabled()),
+        Fixture::config_with_delivery(early_delivery),
         provider.clone(),
         "bypass".into(),
         Some(executable.clone()),
@@ -1757,7 +2166,13 @@ async fn run_review_loop_with(
     // 6. Both round 1 reports approve the corrected version. The target branch
     // moves independently before integration starts, so the integration
     // baseline captures the newer target content.
-    let develop_before = move_target(&fixture.repo, "other.txt", "target work\n");
+    let develop_before = if content_changed {
+        move_target(&fixture.repo, "other.txt", "target work\n")
+    } else {
+        // Content-identical: the target does not move, so integration is a
+        // fast-forward that keeps the reviewed commit and its tree.
+        git(&fixture.repo, &["rev-parse", "develop"])
+    };
     let report = orchestrator.tick(&router).await.unwrap();
     assert_eq!(report.blocked, Vec::<String>::new(), "{report:?}");
     let task = store.get_task(&task_id).unwrap().unwrap();
@@ -1879,10 +2294,27 @@ async fn run_review_loop_with(
         .integrated_commit
         .clone()
         .expect("verified integrated commit");
-    assert_ne!(
-        integrated, second_commit,
-        "integration did not merge the target"
-    );
+    if content_changed {
+        assert_ne!(
+            integrated, second_commit,
+            "integration did not merge the target"
+        );
+        assert_eq!(
+            task.phase,
+            Phase::FinalReview,
+            "changed integrated content requires a final review"
+        );
+    } else {
+        assert_eq!(
+            integrated, second_commit,
+            "an unchanged integration keeps the reviewed commit"
+        );
+        assert_eq!(
+            task.phase,
+            Phase::DeliveryPending,
+            "unchanged content reuses the implementation review for delivery"
+        );
+    }
     assert_eq!(
         task.repositories[0].integration_status,
         deepseek_code_core::super_agent::IntegrationStatus::Prepared,
@@ -1891,11 +2323,6 @@ async fn run_review_loop_with(
     assert_eq!(
         task.repositories[0].reviewed_commit.as_deref(),
         Some(second_commit.as_str())
-    );
-    assert_eq!(
-        task.phase,
-        Phase::FinalReview,
-        "changed integrated content requires a final review"
     );
     // The claim was verified against the real commit, not trusted verbatim.
     let actual_head = git(&task.repositories[0].working_path, &["rev-parse", "HEAD"]);
@@ -1916,98 +2343,99 @@ async fn run_review_loop_with(
         .into_iter()
         .find(|event| event.event_type == EventType::IntegrationPrepared && event.review_round == 1)
         .expect("integration prepared event");
-    assert_eq!(prepared.payload["tree_changed"], json!(true));
+    assert_eq!(prepared.payload["tree_changed"], json!(content_changed));
     assert_eq!(
         prepared.payload["repositories"][0]["integrated_commit"],
         json!(integrated)
     );
 
-    // 8. The same Reviewer session reviews the immutable integrated checkout.
-    let report = orchestrator.tick(&router).await.unwrap();
-    assert_eq!(report.blocked, Vec::<String>::new(), "{report:?}");
-    wait_for_report(&store, &task_id, |reports| {
-        reports.iter().any(|report| {
-            report.kind == deepseek_code_core::super_agent::ReportKind::Review
-                && report.round == 1
-                && report.body["stage"] == "FINAL_DELIVERY"
+    if content_changed {
+        // 8. The same Reviewer session reviews the immutable integrated checkout.
+        let report = orchestrator.tick(&router).await.unwrap();
+        assert_eq!(report.blocked, Vec::<String>::new(), "{report:?}");
+        wait_for_report(&store, &task_id, |reports| {
+            reports.iter().any(|report| {
+                report.kind == deepseek_code_core::super_agent::ReportKind::Review
+                    && report.round == 1
+                    && report.body["stage"] == "FINAL_DELIVERY"
+            })
         })
-    })
-    .await;
-    let final_review = reports(&store, &task_id)
-        .into_iter()
-        .find(|report| {
-            report.kind == deepseek_code_core::super_agent::ReportKind::Review
-                && report.round == 1
-                && report.body["stage"] == "FINAL_DELIVERY"
-        })
-        .expect("final delivery review");
-    assert_eq!(
-        final_review.body["reviewed_versions"][0]["commit"],
-        json!(integrated)
-    );
-    // The final Reviewer ran in the immutable integrated checkout. The exact
-    // cwd, bytes and HEAD come from its real Bash tool output, and its durable
-    // resume operation is stage-specific.
-    let final_op = operation_prompts(&context, &task_id)
-        .into_iter()
-        .find(|operation| {
-            operation["role"] == "reviewer"
-                && operation["purpose"] == "final-delivery"
-                && operation["review_round"] == 1
-        })
-        .expect("final delivery reviewer operation");
-    let implementation_op = operation_prompts(&context, &task_id)
-        .into_iter()
-        .find(|operation| {
-            operation["role"] == "reviewer"
-                && operation["purpose"] == "implementation"
-                && operation["review_round"] == 1
-        })
-        .expect("implementation reviewer operation");
-    assert_ne!(
-        final_op["job_id"], implementation_op["job_id"],
-        "the final review reused the implementation review job"
-    );
-    assert_ne!(final_op["prompt"], implementation_op["prompt"]);
-    let final_workspace = final_op["workspace"]
-        .as_str()
-        .expect("final review workspace")
-        .to_owned();
-    let final_job = final_op["job_id"]
-        .as_str()
-        .expect("final job id")
-        .to_owned();
-    let final_launch =
-        deepseek_code_core::services::background_sessions::launch_of(&fixture.data, &final_job)
+        .await;
+        let final_review = reports(&store, &task_id)
+            .into_iter()
+            .find(|report| {
+                report.kind == deepseek_code_core::super_agent::ReportKind::Review
+                    && report.round == 1
+                    && report.body["stage"] == "FINAL_DELIVERY"
+            })
+            .expect("final delivery review");
+        assert_eq!(
+            final_review.body["reviewed_versions"][0]["commit"],
+            json!(integrated)
+        );
+        // The final Reviewer ran in the immutable integrated checkout. The exact
+        // cwd, bytes and HEAD come from its real Bash tool output, and its durable
+        // resume operation is stage-specific.
+        let final_op = operation_prompts(&context, &task_id)
+            .into_iter()
+            .find(|operation| {
+                operation["role"] == "reviewer"
+                    && operation["purpose"] == "final-delivery"
+                    && operation["review_round"] == 1
+            })
+            .expect("final delivery reviewer operation");
+        let implementation_op = operation_prompts(&context, &task_id)
+            .into_iter()
+            .find(|operation| {
+                operation["role"] == "reviewer"
+                    && operation["purpose"] == "implementation"
+                    && operation["review_round"] == 1
+            })
+            .expect("implementation reviewer operation");
+        assert_ne!(
+            final_op["job_id"], implementation_op["job_id"],
+            "the final review reused the implementation review job"
+        );
+        assert_ne!(final_op["prompt"], implementation_op["prompt"]);
+        let final_workspace = final_op["workspace"]
+            .as_str()
+            .expect("final review workspace")
+            .to_owned();
+        let final_job = final_op["job_id"]
+            .as_str()
+            .expect("final job id")
+            .to_owned();
+        let final_launch =
+            deepseek_code_core::services::background_sessions::launch_of(&fixture.data, &final_job)
+                .unwrap()
+                .expect("final reviewer launch record");
+        assert_eq!(
+            std::fs::canonicalize(&final_launch.cwd).unwrap(),
+            std::fs::canonicalize(&final_workspace).unwrap(),
+            "the final reviewer launch cwd is not the integrated checkout"
+        );
+        assert_eq!(git(&final_launch.cwd, &["rev-parse", "HEAD"]), integrated);
+        let reviewer_outputs: Vec<String> = state
+            .requests
+            .lock()
             .unwrap()
-            .expect("final reviewer launch record");
-    assert_eq!(
-        std::fs::canonicalize(&final_launch.cwd).unwrap(),
-        std::fs::canonicalize(&final_workspace).unwrap(),
-        "the final reviewer launch cwd is not the integrated checkout"
-    );
-    assert_eq!(git(&final_launch.cwd, &["rev-parse", "HEAD"]), integrated);
-    let reviewer_outputs: Vec<String> = state
-        .requests
-        .lock()
-        .unwrap()
-        .iter()
-        .filter(|request| request["role"] == "reviewer")
-        .flat_map(|request| {
-            request["tool_results"]
-                .as_array()
-                .cloned()
-                .unwrap_or_default()
-        })
-        .filter_map(|result| result.as_str().map(str::to_owned))
-        .filter(|result| result.starts_with("Exit code:"))
-        .filter_map(|result| {
-            result
-                .split_once("Output:\n")
-                .map(|(_, output)| output.trim().to_owned())
-        })
-        .collect();
-    let final_output = reviewer_outputs
+            .iter()
+            .filter(|request| request["role"] == "reviewer")
+            .flat_map(|request| {
+                request["tool_results"]
+                    .as_array()
+                    .cloned()
+                    .unwrap_or_default()
+            })
+            .filter_map(|result| result.as_str().map(str::to_owned))
+            .filter(|result| result.starts_with("Exit code:"))
+            .filter_map(|result| {
+                result
+                    .split_once("Output:\n")
+                    .map(|(_, output)| output.trim().to_owned())
+            })
+            .collect();
+        let final_output = reviewer_outputs
         .iter()
         .find(|output| output.contains("target work"))
         .cloned()
@@ -2031,94 +2459,99 @@ async fn run_review_loop_with(
                 "the final reviewer did not read the integrated checkout: {reviewer_outputs:#?}\nrequests: {requests:#?}"
             )
         });
-    let lines: Vec<&str> = final_output.lines().collect();
-    assert_eq!(lines.len(), 4, "{final_output:?}");
-    assert_eq!(
-        std::fs::canonicalize(lines[0]).unwrap(),
-        std::fs::canonicalize(&final_workspace).unwrap(),
-        "the final reviewer tool ran in the wrong checkout"
-    );
-    assert_eq!(lines[1], CORRECTED_CONTENT);
-    assert_eq!(lines[2], "target work");
-    assert_eq!(lines[3], integrated);
+        let lines: Vec<&str> = final_output.lines().collect();
+        assert_eq!(lines.len(), 4, "{final_output:?}");
+        assert_eq!(
+            std::fs::canonicalize(lines[0]).unwrap(),
+            std::fs::canonicalize(&final_workspace).unwrap(),
+            "the final reviewer tool ran in the wrong checkout"
+        );
+        assert_eq!(lines[1], CORRECTED_CONTENT);
+        assert_eq!(lines[2], "target work");
+        assert_eq!(lines[3], integrated);
 
-    // Reopening the task storage must not relaunch the Reviewer or lose the
-    // final-review evidence.
-    let jobs_before_reopen = jobs(&fixture.data, &router).len();
-    drop(orchestrator);
-    let context = open(&fixture.data);
-    let store = TaskStore::new(context.db.clone(), fixture.data.clone());
-    let orchestrator = Orchestrator::new(
-        context.clone(),
-        Fixture::config_with_delivery(delivery.enabled()),
-        provider.clone(),
-        "bypass".into(),
-        Some(executable.clone()),
-    );
-    let report = orchestrator.tick(&router).await.unwrap();
-    assert_eq!(report.blocked, Vec::<String>::new(), "{report:?}");
-    assert_eq!(
-        jobs(&fixture.data, &router).len(),
-        jobs_before_reopen,
-        "reopening duplicated the final review launch"
-    );
+        // Reopening the task storage must not relaunch the Reviewer or lose the
+        // final-review evidence.
+        let jobs_before_reopen = jobs(&fixture.data, &router).len();
+        drop(orchestrator);
+        let context = open(&fixture.data);
+        let store = TaskStore::new(context.db.clone(), fixture.data.clone());
+        orchestrator = Orchestrator::new(
+            context.clone(),
+            Fixture::config_with_delivery(early_delivery),
+            provider.clone(),
+            "bypass".into(),
+            Some(executable.clone()),
+        );
+        let report = orchestrator.tick(&router).await.unwrap();
+        assert_eq!(report.blocked, Vec::<String>::new(), "{report:?}");
+        assert_eq!(
+            jobs(&fixture.data, &router).len(),
+            jobs_before_reopen,
+            "reopening duplicated the final review launch"
+        );
 
-    // The review alone must not decide the final round: the implementation-stage
-    // harness is still present but belongs to the earlier review.
-    let report = orchestrator.tick(&router).await.unwrap();
-    assert_eq!(report.blocked, Vec::<String>::new(), "{report:?}");
-    let task = store.get_task(&task_id).unwrap().unwrap();
-    assert_eq!(task.phase, Phase::FinalReview);
-    assert!(
-        !events(&store, &task_id).iter().any(|event| {
-            event.event_type == EventType::ReviewCompleted
-                && event.payload["stage"].as_str() == Some("FINAL_DELIVERY")
-        }),
-        "the final review was decided without its own harness"
-    );
-    state.release("final-harness-r1");
-    wait_for_report(&store, &task_id, |reports| {
-        reports.iter().any(|report| {
-            report.kind == deepseek_code_core::super_agent::ReportKind::Harness
-                && report.round == 1
-                && report.body["stage"] == "FINAL_DELIVERY"
+        // The review alone must not decide the final round: the implementation-stage
+        // harness is still present but belongs to the earlier review.
+        let report = orchestrator.tick(&router).await.unwrap();
+        assert_eq!(report.blocked, Vec::<String>::new(), "{report:?}");
+        let task = store.get_task(&task_id).unwrap().unwrap();
+        assert_eq!(task.phase, Phase::FinalReview);
+        assert!(
+            !events(&store, &task_id).iter().any(|event| {
+                event.event_type == EventType::ReviewCompleted
+                    && event.payload["stage"].as_str() == Some("FINAL_DELIVERY")
+            }),
+            "the final review was decided without its own harness"
+        );
+        state.release("final-harness-r1");
+        wait_for_report(&store, &task_id, |reports| {
+            reports.iter().any(|report| {
+                report.kind == deepseek_code_core::super_agent::ReportKind::Harness
+                    && report.round == 1
+                    && report.body["stage"] == "FINAL_DELIVERY"
+            })
         })
-    })
-    .await;
-    let report = orchestrator.tick(&router).await.unwrap();
-    assert_eq!(report.blocked, Vec::<String>::new(), "{report:?}");
-    let task = store.get_task(&task_id).unwrap().unwrap();
-    assert_eq!(
-        task.phase,
-        Phase::DeliveryPending,
-        "approved integrated content must wait for delivery"
-    );
-    assert_eq!(task.status, Status::Running);
-    assert_eq!(task.coder.session_id.as_deref(), Some(coder.as_str()));
-    assert_eq!(task.reviewer.session_id.as_deref(), Some(reviewer.as_str()));
-    let final_decision = events(&store, &task_id)
-        .into_iter()
-        .find(|event| {
-            event.event_type == EventType::ReviewCompleted
-                && event.payload["stage"].as_str() == Some("FINAL_DELIVERY")
-        })
-        .expect("final delivery decision");
-    assert_eq!(
-        final_decision.payload["review_report_id"],
-        json!(final_review.report_id)
-    );
-    // Still nothing delivered and no completion.
-    assert!(!events(&store, &task_id).iter().any(|event| matches!(
-        event.event_type,
-        EventType::IntegrationCompleted | EventType::TaskCompleted | EventType::CleanupCompleted
-    )));
-    assert_eq!(
-        git(&fixture.repo, &["rev-parse", "develop"]),
-        develop_before
-    );
+        .await;
+        let report = orchestrator.tick(&router).await.unwrap();
+        assert_eq!(report.blocked, Vec::<String>::new(), "{report:?}");
+        let task = store.get_task(&task_id).unwrap().unwrap();
+        assert_eq!(
+            task.phase,
+            Phase::DeliveryPending,
+            "approved integrated content must wait for delivery"
+        );
+        assert_eq!(task.status, Status::Running);
+        assert_eq!(task.coder.session_id.as_deref(), Some(coder.as_str()));
+        assert_eq!(task.reviewer.session_id.as_deref(), Some(reviewer.as_str()));
+        let final_decision = events(&store, &task_id)
+            .into_iter()
+            .find(|event| {
+                event.event_type == EventType::ReviewCompleted
+                    && event.payload["stage"].as_str() == Some("FINAL_DELIVERY")
+            })
+            .expect("final delivery decision");
+        assert_eq!(
+            final_decision.payload["review_report_id"],
+            json!(final_review.report_id)
+        );
+        // Still nothing delivered and no completion.
+        assert!(!events(&store, &task_id).iter().any(|event| matches!(
+            event.event_type,
+            EventType::IntegrationCompleted
+                | EventType::TaskCompleted
+                | EventType::CleanupCompleted
+        )));
+        assert_eq!(
+            git(&fixture.repo, &["rev-parse", "develop"]),
+            develop_before
+        );
+    }
 
     // Repeated ticks after the final decision must not duplicate work.
     let settled_jobs = jobs(&fixture.data, &router).len();
+    // Facts for the two real completion-gate scenarios; null otherwise.
+    let mut completion_gate = Value::Null;
     if delivery == DeliveryMode::Pending {
         // Still nothing delivered and no completion.
         assert!(!events(&store, &task_id).iter().any(|event| matches!(
@@ -2258,6 +2691,17 @@ async fn run_review_loop_with(
             moved_target = Some(move_target(&fixture.repo, "base.txt", "external move\n"));
         }
         let delivery_index_before = index_bytes(&task.repositories[0].working_path);
+        if completion_mode {
+            // All pre-delivery assertions above are complete. Enable delivery
+            // now, so no earlier tick could have dispatched it.
+            orchestrator = Orchestrator::new(
+                context.clone(),
+                Fixture::config_with_delivery(true),
+                provider.clone(),
+                "bypass".into(),
+                Some(executable.clone()),
+            );
+        }
         let delivery_orchestrator = orchestrator;
         let report = if matches!(
             delivery,
@@ -3031,28 +3475,540 @@ async fn run_review_loop_with(
 
                 // Reopening the storage re-reads the recorded facts and does not
                 // dispatch or write Git again.
-                let jobs_before_reopen = jobs(&fixture.data, &router).len();
-                let reopen_context = open(&fixture.data);
-                let reopen_store = TaskStore::new(reopen_context.db.clone(), fixture.data.clone());
-                let reopen = Orchestrator::new(
-                    reopen_context.clone(),
-                    Fixture::config_with_delivery(true),
-                    provider.clone(),
-                    "bypass".into(),
-                    Some(executable.clone()),
-                );
-                let report = reopen.tick(&router).await.unwrap();
-                assert_eq!(report.blocked, Vec::<String>::new(), "{report:?}");
-                assert_eq!(
-                    jobs(&fixture.data, &router).len(),
-                    jobs_before_reopen,
-                    "reopening replayed the delivery"
-                );
-                assert_eq!(
-                    reopen_store.get_task(&task_id).unwrap().unwrap().phase,
-                    Phase::Finalizing
-                );
-                assert_eq!(git(&fixture.repo, &["rev-parse", "develop"]), integrated);
+                if matches!(
+                    delivery,
+                    DeliveryMode::CompleteIdentical
+                        | DeliveryMode::CompleteChanged
+                        | DeliveryMode::GateMissingState
+                        | DeliveryMode::GateWaitsForExit
+                ) {
+                    // Completion adds one more history-aware step; its own
+                    // reopen check below covers this.
+                } else {
+                    let jobs_before_reopen = jobs(&fixture.data, &router).len();
+                    let reopen_context = open(&fixture.data);
+                    let reopen_store =
+                        TaskStore::new(reopen_context.db.clone(), fixture.data.clone());
+                    let reopen = Orchestrator::new(
+                        reopen_context.clone(),
+                        Fixture::config_with_delivery(true),
+                        provider.clone(),
+                        "bypass".into(),
+                        Some(executable.clone()),
+                    );
+                    let report = reopen.tick(&router).await.unwrap();
+                    assert_eq!(report.blocked, Vec::<String>::new(), "{report:?}");
+                    assert_eq!(
+                        jobs(&fixture.data, &router).len(),
+                        jobs_before_reopen,
+                        "reopening replayed the delivery"
+                    );
+                    assert_eq!(
+                        reopen_store.get_task(&task_id).unwrap().unwrap().phase,
+                        Phase::Finalizing
+                    );
+                    assert_eq!(git(&fixture.repo, &["rev-parse", "develop"]), integrated);
+                }
+
+                if completion_mode {
+                    let jobs_before = jobs(&fixture.data, &router).len();
+                    let first = active_orchestrator.tick(&router).await.unwrap();
+                    assert_eq!(first.blocked, Vec::<String>::new(), "{first:?}");
+                    let gate_mode = matches!(
+                        delivery,
+                        DeliveryMode::GateMissingState | DeliveryMode::GateWaitsForExit
+                    );
+                    if delivery == DeliveryMode::CompleteIdentical || gate_mode {
+                        // The delivered content reused the implementation
+                        // approval, so the same Reviewer is resumed once for a
+                        // real final review of the delivered OIDs.
+                        let task = active_store.get_task(&task_id).unwrap().unwrap();
+                        assert_eq!(task.status, Status::Running);
+                        assert_eq!(task.phase, Phase::Finalizing);
+                        assert_eq!(
+                            jobs(&fixture.data, &router).len(),
+                            jobs_before + 1,
+                            "the completion review must resume the existing Reviewer once"
+                        );
+                        let final_ops = operation_prompts(&context, &task_id)
+                            .into_iter()
+                            .filter(|operation| operation["purpose"] == "final-completion")
+                            .collect::<Vec<_>>();
+                        assert_eq!(final_ops.len(), 1, "{final_ops:?}");
+                        assert_eq!(final_ops[0]["resume_session"], json!(reviewer));
+                        wait_for_report_fail_fast(
+                            &active_store,
+                            &fixture.data,
+                            &router,
+                            &task_id,
+                            |reports| {
+                                reports.iter().any(|report| {
+                                    report.kind
+                                        == deepseek_code_core::super_agent::ReportKind::Review
+                                        && report.round == 1
+                                        && report.body["stage"] == "FINAL_DELIVERY"
+                                })
+                            },
+                        )
+                        .await;
+                        // One report alone must not decide the completion.
+                        let deciding = active_orchestrator.tick(&router).await.unwrap();
+                        assert_eq!(deciding.blocked, Vec::<String>::new(), "{deciding:?}");
+                        assert!(
+                            !events(&active_store, &task_id).iter().any(|event| {
+                                event.event_type == EventType::ReviewCompleted
+                                    && event.payload["stage"].as_str() == Some("FINAL_DELIVERY")
+                            }),
+                            "the completion review was decided without its harness"
+                        );
+                        state.release("finalization-harness");
+                        wait_for_report_fail_fast(
+                            &active_store,
+                            &fixture.data,
+                            &router,
+                            &task_id,
+                            |reports| {
+                                reports.iter().any(|report| {
+                                    report.kind
+                                        == deepseek_code_core::super_agent::ReportKind::Harness
+                                        && report.round == 1
+                                        && report.body["stage"] == "FINAL_DELIVERY"
+                                })
+                            },
+                        )
+                        .await;
+                        // The real CrpSubmit admitted both reports in the
+                        // FINALIZING phase; a rejected submission would have
+                        // shown up in the Reviewer's tool results.
+                        let finalization_results: Vec<String> = state
+                            .requests
+                            .lock()
+                            .unwrap()
+                            .iter()
+                            .filter(|request| {
+                                request["role"] == "reviewer"
+                                    && request["prompt"].as_str().is_some_and(|prompt| {
+                                        prompt.contains("final completion review")
+                                    })
+                            })
+                            .flat_map(|request| {
+                                request["tool_results"]
+                                    .as_array()
+                                    .cloned()
+                                    .unwrap_or_default()
+                            })
+                            .filter_map(|result| result.as_str().map(str::to_owned))
+                            .collect();
+                        assert!(
+                            finalization_results
+                                .iter()
+                                .filter(|result| result.contains("Report recorded"))
+                                .count()
+                                >= 2,
+                            "the real CrpSubmit must record the completion review and harness: {finalization_results:#?}"
+                        );
+                        assert!(
+                            !finalization_results
+                                .iter()
+                                .any(|result| result.contains("not accepted")
+                                    || result.contains("does not match")),
+                            "the completion submission was rejected: {finalization_results:#?}"
+                        );
+                        if gate_mode {
+                            // The mock holds step 3 after both reports were
+                            // recorded, so the real Reviewer child is alive and
+                            // waiting on its held model response.
+                            wait_for_finalization_exit_request(&state).await;
+                            let round = active_store
+                                .get_task(&task_id)
+                                .unwrap()
+                                .unwrap()
+                                .review_round;
+                            let marker_key = format!(
+                                "super-agent.reviewer-resume.{task_id}.1.{round}.final-completion"
+                            );
+                            let marker = context
+                                .setting::<Value>(&marker_key)
+                                .unwrap()
+                                .expect("final completion Reviewer marker");
+                            let job_id = marker["job_id"]
+                                .as_str()
+                                .filter(|id| !id.is_empty())
+                                .expect("final completion job id")
+                                .to_owned();
+                            assert_eq!(
+                                marker["session_id"].as_str(),
+                                Some(reviewer.as_str()),
+                                "the recorded completion Reviewer is not this task's Reviewer"
+                            );
+                            let plan = active_store
+                                .delivery_plans(&task_id)
+                                .unwrap()
+                                .into_iter()
+                                .filter(|plan| plan.spec_version == 1 && plan.review_round == round)
+                                .max_by(|left, right| {
+                                    left.created_at
+                                        .cmp(&right.created_at)
+                                        .then(left.operation_id.cmp(&right.operation_id))
+                                })
+                                .expect("persisted delivery plan");
+                            assert_eq!(
+                                marker["plan_operation_id"],
+                                json!(plan.operation_id),
+                                "the completion receipt does not name the persisted plan"
+                            );
+                            let job = match deepseek_code_core::services::background_sessions::inspect(
+                                &fixture.data,
+                                &job_id,
+                            )
+                            .unwrap()
+                            {
+                                deepseek_code_core::services::background_sessions::JobSnapshot::Present(job) => job,
+                                other => panic!(
+                                    "the final completion job {job_id} is not a readable running job: {other:?}"
+                                ),
+                            };
+                            assert_eq!(job.id, job_id);
+                            assert_eq!(job.session_id, reviewer);
+                            assert_eq!(job.parent_session_id, router);
+                            assert_eq!(
+                                job.status, "running",
+                                "the completion Reviewer child is not running"
+                            );
+                            let live = active_store.get_task(&task_id).unwrap().unwrap();
+                            assert_eq!(live.phase, Phase::Finalizing);
+                            assert_eq!(live.status, Status::Running);
+                            let durable_reports = reports(&active_store, &task_id);
+                            assert!(
+                                durable_reports.iter().any(|report| {
+                                    report.kind
+                                        == deepseek_code_core::super_agent::ReportKind::Review
+                                        && report.round == round
+                                        && report.body["stage"] == "FINAL_DELIVERY"
+                                }) && durable_reports.iter().any(|report| {
+                                    report.kind
+                                        == deepseek_code_core::super_agent::ReportKind::Harness
+                                        && report.round == round
+                                        && report.body["stage"] == "FINAL_DELIVERY"
+                                }),
+                                "both current final-delivery reports must be durable: {durable_reports:#?}"
+                            );
+                            let job_dir = fixture.data.join("background-tasks").join(&job_id);
+                            let launch_bytes = std::fs::read(job_dir.join("launch.json")).unwrap();
+                            // Reports prove submission, not exit. A tick with
+                            // both reports and a live child only waits.
+                            let settling = active_orchestrator.tick(&router).await.unwrap();
+                            assert_eq!(settling.blocked, Vec::<String>::new(), "{settling:?}");
+                            let waiting = active_orchestrator.tick(&router).await.unwrap();
+                            assert_eq!(waiting.blocked, Vec::<String>::new(), "{waiting:?}");
+                            let waiting_task = active_store.get_task(&task_id).unwrap().unwrap();
+                            assert_eq!(waiting_task.phase, Phase::Finalizing);
+                            assert_eq!(waiting_task.status, Status::Running);
+                            assert!(
+                                !events(&active_store, &task_id)
+                                    .iter()
+                                    .any(|event| event.event_type == EventType::TaskCompleted),
+                                "an active completion Reviewer must never complete the task"
+                            );
+
+                            if delivery == DeliveryMode::GateWaitsForExit {
+                                state.release("finalization-exit");
+                                wait_idle(&fixture.data, &router, jobs_before + 1).await;
+                                let stopped =
+                                    match deepseek_code_core::services::background_sessions::inspect(
+                                        &fixture.data,
+                                        &job_id,
+                                    )
+                                    .unwrap()
+                                    {
+                                        deepseek_code_core::services::background_sessions::JobSnapshot::Present(job) => job,
+                                        other => panic!(
+                                            "the stopped completion job {job_id} is unreadable: {other:?}"
+                                        ),
+                                    };
+                                assert_eq!(stopped.status, "completed");
+                                completion_gate = json!({
+                                    "mode": delivery.label(),
+                                    "job_id": job_id,
+                                    "session_id": reviewer,
+                                    "parent_session_id": router,
+                                    "job_status_at_reports": "running",
+                                    "reports_durable_before_wait": true,
+                                    "uncompleted_while_active": true,
+                                    "released": true,
+                                    "job_status_after_exit": stopped.status,
+                                });
+                            } else {
+                                // Keep the real child alive and freeze only its
+                                // supervisor so the heartbeat cannot recreate
+                                // the state file; then damage exactly that job.
+                                let supervisor_pid =
+                                    job.supervisor_pid.expect("running job supervisor PID");
+                                // Capture the exact observed instances before the
+                                // fixture stops anything: after cleanup, only these
+                                // PID+start identities may be reported as stopped.
+                                let supervisor_start = proc_start_ticks(supervisor_pid)
+                                    .expect("supervisor start identity");
+                                let child_pid = job.child_pid.expect("running job child PID");
+                                let child_start =
+                                    proc_start_ticks(child_pid).expect("child start identity");
+                                let job_dirs_before = job_directory_ids(&fixture.data);
+                                let launch_ops_before = setting_entries(
+                                    &context,
+                                    &format!("super-agent.launch-op.{task_id}."),
+                                );
+                                let resume_markers_before = setting_entries(
+                                    &context,
+                                    &format!("super-agent.reviewer-resume.{task_id}."),
+                                );
+                                let mut supervisor = FrozenSupervisor::freeze(supervisor_pid);
+                                std::fs::remove_file(job_dir.join("state.json")).unwrap();
+                                assert!(!job_dir.join("state.json").exists());
+                                let mut sentinel = Sentinel(
+                                    Command::new("sleep")
+                                        .arg("90")
+                                        .spawn()
+                                        .expect("sentinel process"),
+                                );
+                                let sentinel_start = sentinel.start();
+                                let blocked = active_orchestrator.tick(&router).await.unwrap();
+                                let blocked_reason = blocked
+                                    .blocked
+                                    .iter()
+                                    .find(|reason| reason.contains(&job_id))
+                                    .cloned()
+                                    .unwrap_or_else(|| {
+                                        panic!(
+                                            "the damaged completion job {job_id} must block with its exact identity: {blocked:?}"
+                                        )
+                                    });
+                                let blocked_task =
+                                    active_store.get_task(&task_id).unwrap().unwrap();
+                                assert_eq!(blocked_task.status, Status::Blocked);
+                                assert_eq!(blocked_task.phase, Phase::Finalizing);
+                                assert!(
+                                    !events(&active_store, &task_id)
+                                        .iter()
+                                        .any(|event| event.event_type == EventType::TaskCompleted),
+                                    "a damaged completion job must never complete the task"
+                                );
+                                assert!(
+                                    !job_dir.join("state.json").exists(),
+                                    "the host recreated the damaged job state"
+                                );
+                                assert_eq!(
+                                    std::fs::read(job_dir.join("launch.json")).unwrap(),
+                                    launch_bytes,
+                                    "the host rewrote another job file"
+                                );
+                                // A new host must stay blocked, preserve the
+                                // damaged evidence and start no replacement.
+                                let reopened_context = open(&fixture.data);
+                                let reopened_store = TaskStore::new(
+                                    reopened_context.db.clone(),
+                                    fixture.data.clone(),
+                                );
+                                let reopened = Orchestrator::new(
+                                    reopened_context.clone(),
+                                    Fixture::config_with_delivery(true),
+                                    provider.clone(),
+                                    "bypass".into(),
+                                    Some(executable.clone()),
+                                );
+                                let reopened_report = reopened.tick(&router).await.unwrap();
+                                assert_eq!(
+                                    reopened_report.blocked,
+                                    Vec::<String>::new(),
+                                    "a blocked task must not be re-run by a fresh host"
+                                );
+                                let reopened_task =
+                                    reopened_store.get_task(&task_id).unwrap().unwrap();
+                                assert_eq!(reopened_task.status, Status::Blocked);
+                                assert_eq!(reopened_task.phase, Phase::Finalizing);
+                                assert!(
+                                    !events(&reopened_store, &task_id).iter().any(|event| {
+                                        event.event_type == EventType::TaskCompleted
+                                    }),
+                                    "a reopened host completed from a damaged job"
+                                );
+                                assert!(
+                                    !job_dir.join("state.json").exists(),
+                                    "the reopened host recreated the damaged job state"
+                                );
+                                // The discovery list ignores a damaged job, so
+                                // it cannot prove that no replacement started.
+                                // Compare the exact durable sets instead.
+                                assert_eq!(
+                                    job_directory_ids(&fixture.data),
+                                    job_dirs_before,
+                                    "a reopened host created another job directory"
+                                );
+                                assert_eq!(
+                                    setting_entries(
+                                        &reopened_context,
+                                        &format!("super-agent.launch-op.{task_id}.")
+                                    ),
+                                    launch_ops_before,
+                                    "a reopened host added or rewrote a launch operation"
+                                );
+                                assert_eq!(
+                                    setting_entries(
+                                        &reopened_context,
+                                        &format!("super-agent.reviewer-resume.{task_id}.")
+                                    ),
+                                    resume_markers_before,
+                                    "a reopened host added or rewrote a resume marker"
+                                );
+                                let reopened_marker = reopened_context
+                                    .setting::<Value>(&marker_key)
+                                    .unwrap()
+                                    .expect("final completion Reviewer marker");
+                                assert_eq!(reopened_marker["job_id"], json!(job_id));
+                                assert_eq!(reopened_marker["session_id"], json!(reviewer));
+
+                                // Cleanup resumes only the instance recorded
+                                // above. The damaged job is allowed to end
+                                // `failed`/`cancelled`: deleting its state is a
+                                // real control-directory loss, and success is
+                                // not an exit proof. Every other job keeps the
+                                // normal `completed` requirement.
+                                supervisor.thaw();
+                                wait_for_republished_state(&fixture.data, &job_id);
+                                state.release("finalization-exit");
+                                let damaged_status =
+                                    wait_damaged_job_terminal(&fixture.data, &job_id);
+                                assert!(
+                                    wait_instance_stopped(child_pid, &child_start),
+                                    "the damaged Reviewer child {child_pid} is still running"
+                                );
+                                assert!(
+                                    wait_instance_stopped(supervisor_pid, &supervisor_start),
+                                    "the frozen supervisor {supervisor_pid} is still running"
+                                );
+                                let others: Vec<_> = jobs(&fixture.data, &router)
+                                    .into_iter()
+                                    .filter(|job| job.id != job_id)
+                                    .collect();
+                                assert!(
+                                    others.iter().all(|job| job.status == "completed"),
+                                    "unrelated jobs did not complete: {others:#?}"
+                                );
+                                assert_eq!(
+                                    proc_start_ticks(sentinel.0.id()).as_deref(),
+                                    Some(sentinel_start.as_str()),
+                                    "the sentinel process was disturbed by cleanup"
+                                );
+                                sentinel.assert_alive();
+                                let _ = reopened.tick(&router).await.unwrap();
+                                let final_events = events(&reopened_store, &task_id);
+                                assert!(
+                                    !final_events
+                                        .iter()
+                                        .any(|event| event.event_type == EventType::TaskCompleted),
+                                    "the stopped damaged job completed the task"
+                                );
+                                assert_eq!(
+                                    reopened_store.get_task(&task_id).unwrap().unwrap().status,
+                                    Status::Blocked
+                                );
+                                completion_gate = json!({
+                                    "mode": delivery.label(),
+                                    "job_id": job_id,
+                                    "session_id": reviewer,
+                                    "parent_session_id": router,
+                                    "job_status_at_reports": "running",
+                                    "reports_durable_before_damage": true,
+                                    "supervisor_frozen_pid": supervisor_pid,
+                                    "state_removed": true,
+                                    "state_still_absent_after_tick": true,
+                                    "launch_bytes_unchanged": true,
+                                    "blocked_reason": blocked_reason,
+                                    "reopened_status": "BLOCKED",
+                                    "reopened_phase": "FINALIZING",
+                                    "job_directories_unchanged": true,
+                                    "launch_operations_unchanged": true,
+                                    "resume_markers_unchanged": true,
+                                    "job_status_after_cleanup": damaged_status,
+                                    "child_stopped": true,
+                                    "supervisor_stopped": true,
+                                    "other_jobs_completed": true,
+                                    "task_completed_events": 0,
+                                    "sentinel_alive_after_cleanup": true,
+                                });
+                            }
+                        } else {
+                            wait_idle(&fixture.data, &router, jobs_before + 1).await;
+                        }
+                    } else {
+                        // The pre-delivery FINAL_DELIVERY review of the changed
+                        // content already covers the delivered OIDs; a second
+                        // review would be a duplicate.
+                        assert_eq!(
+                            jobs(&fixture.data, &router).len(),
+                            jobs_before,
+                            "changed content must reuse its final-delivery review"
+                        );
+                    }
+                    // The damaged-state scenario ends blocked; its shared
+                    // assertions already ran above.
+                    if delivery != DeliveryMode::GateMissingState {
+                        let _ = active_orchestrator.tick(&router).await.unwrap();
+                        let report = active_orchestrator.tick(&router).await.unwrap();
+                        assert_eq!(report.blocked, Vec::<String>::new(), "{report:?}");
+                        let task = active_store.get_task(&task_id).unwrap().unwrap();
+                        assert_eq!(task.phase, Phase::Finalizing);
+                        assert_eq!(task.status, Status::Completed);
+                        assert_eq!(
+                            events(&active_store, &task_id)
+                                .iter()
+                                .filter(|event| event.event_type == EventType::TaskCompleted)
+                                .count(),
+                            1,
+                            "task completion must be recorded exactly once"
+                        );
+                        assert!(!events(&active_store, &task_id)
+                            .iter()
+                            .any(|event| event.event_type == EventType::CleanupCompleted));
+                        assert_eq!(git(&fixture.repo, &["rev-parse", "develop"]), integrated);
+                        // The delivered commit keeps its implementation-review
+                        // lineage; nothing was rewritten to satisfy the gate.
+                        assert_eq!(
+                            task.repositories[0].reviewed_commit.as_deref(),
+                            Some(second_commit.as_str())
+                        );
+
+                        // Extra ticks and a reopened store do not duplicate the
+                        // completion or replay the delivery.
+                        let _ = active_orchestrator.tick(&router).await.unwrap();
+                        let reopened_context = open(&fixture.data);
+                        let reopened_store =
+                            TaskStore::new(reopened_context.db.clone(), fixture.data.clone());
+                        let reopened = Orchestrator::new(
+                            reopened_context,
+                            Fixture::config_with_delivery(true),
+                            provider.clone(),
+                            "bypass".into(),
+                            Some(executable.clone()),
+                        );
+                        let reopened_report = reopened.tick(&router).await.unwrap();
+                        assert_eq!(
+                            reopened_report.blocked,
+                            Vec::<String>::new(),
+                            "{reopened_report:?}"
+                        );
+                        assert_eq!(
+                            reopened_store.get_task(&task_id).unwrap().unwrap().status,
+                            Status::Completed
+                        );
+                        assert_eq!(
+                            events(&reopened_store, &task_id)
+                                .iter()
+                                .filter(|event| event.event_type == EventType::TaskCompleted)
+                                .count(),
+                            1
+                        );
+                    }
+                }
             }
         }
     }
@@ -3114,9 +4070,18 @@ async fn run_review_loop_with(
         "second_commit": second_commit,
         "develop_before": develop_before,
         "integrated_commit": integrated,
+        "completion_gate": completion_gate,
         "integration_status": final_task.repositories[0].integration_status.as_str(),
         "integration_report": integration_report.body,
-        "final_review_stage": final_review.body["stage"],
+        "final_review_stage": reports(&store, &task_id)
+            .into_iter()
+            .filter(|report| {
+                report.kind == deepseek_code_core::super_agent::ReportKind::Review
+                    && report.body["stage"] == "FINAL_DELIVERY"
+            })
+            .last()
+            .map(|report| report.body["stage"].clone())
+            .unwrap_or(Value::Null),
         "coder": conversation(&coder),
         "reviewer": conversation(&reviewer),
         "jobs": jobs(&fixture.data, &router),
@@ -3180,7 +4145,9 @@ async fn single_repository_delivery_moves_the_target_through_the_same_coder() {
     assert!(!task_id.is_empty());
     assert_eq!(evidence["delivery"], json!("cas"));
     assert_eq!(evidence["phase"], json!("FINALIZING"));
-    assert_eq!(evidence["status"], json!("RUNNING"));
+    // All final-delivery evidence exists for changed content, so the final
+    // reopen observes completion; the flow asserted RUNNING before that tick.
+    assert_eq!(evidence["status"], json!("COMPLETED"));
     assert_eq!(evidence["integration_status"], json!("COMPLETED"));
     write_evidence("round-16-delivery-cas", &evidence);
 }
@@ -3239,7 +4206,9 @@ async fn a_reopened_host_reconciles_a_delivered_target_without_replaying() {
     assert!(!task_id.is_empty());
     assert_eq!(evidence["delivery"], json!("interrupted"));
     assert_eq!(evidence["phase"], json!("FINALIZING"));
-    assert_eq!(evidence["status"], json!("RUNNING"));
+    // The recovered delivery has all final-delivery evidence, so the final
+    // reopen tick completes the task.
+    assert_eq!(evidence["status"], json!("COMPLETED"));
     assert_eq!(evidence["integration_status"], json!("COMPLETED"));
     write_evidence("round-17-delivery-interrupted", &evidence);
 }
@@ -3263,7 +4232,9 @@ async fn a_spawn_crash_adopts_the_running_delivery_child() {
     assert!(!task_id.is_empty());
     assert_eq!(evidence["delivery"], json!("spawn-crash"));
     assert_eq!(evidence["phase"], json!("FINALIZING"));
-    assert_eq!(evidence["status"], json!("RUNNING"));
+    // The adopted child's delivery has all final-delivery evidence, so the
+    // final reopen tick completes the task.
+    assert_eq!(evidence["status"], json!("COMPLETED"));
     assert_eq!(evidence["integration_status"], json!("COMPLETED"));
     write_evidence("round-17-delivery-spawn-crash", &evidence);
 }
@@ -3302,6 +4273,118 @@ async fn a_bound_receipt_swapped_to_another_job_is_rejected() {
     assert_eq!(evidence["status"], json!("BLOCKED"));
     assert_eq!(evidence["integration_status"], json!("PREPARED"));
     write_evidence("round-34-delivery-bound-job-swap", &evidence);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_content_identical_delivery_reaches_task_completion() {
+    let (_fixture, _context, task_id, _state, evidence) =
+        run_review_loop_with(false, DeliveryMode::CompleteIdentical).await;
+    assert!(!task_id.is_empty());
+    assert_eq!(evidence["delivery"], json!("complete-identical"));
+    assert_eq!(evidence["phase"], json!("FINALIZING"));
+    assert_eq!(evidence["status"], json!("COMPLETED"));
+    write_evidence("round-37-content-identical-completion", &evidence);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_changed_content_delivery_reaches_task_completion() {
+    let (_fixture, _context, task_id, _state, evidence) =
+        run_review_loop_with(false, DeliveryMode::CompleteChanged).await;
+    assert!(!task_id.is_empty());
+    assert_eq!(evidence["delivery"], json!("complete-changed"));
+    assert_eq!(evidence["phase"], json!("FINALIZING"));
+    assert_eq!(evidence["status"], json!("COMPLETED"));
+    write_evidence("round-37-changed-content-completion", &evidence);
+}
+
+/// Real CLI negative: both `FINAL_DELIVERY` reports are durable and the real
+/// Reviewer child is still running when only its job `state.json` is removed.
+/// No `TASK_COMPLETED` may be recorded, the block reason must name that exact
+/// job, and a reopened host must stay blocked without a replacement Reviewer.
+#[cfg(target_os = "linux")]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_completion_review_with_destroyed_state_never_completes() {
+    let (_fixture, _context, task_id, _state, evidence) =
+        run_review_loop_with(false, DeliveryMode::GateMissingState).await;
+    assert!(!task_id.is_empty());
+    assert_eq!(evidence["delivery"], json!("gate-missing-state"));
+    assert!(
+        !evidence["completion_gate"].is_null(),
+        "the held completion barrier never ran: {evidence:#?}"
+    );
+    assert_eq!(evidence["phase"], json!("FINALIZING"));
+    assert_eq!(evidence["status"], json!("BLOCKED"));
+    let job_id = evidence["completion_gate"]["job_id"]
+        .as_str()
+        .expect("the damaged job identity");
+    let reason = evidence["completion_gate"]["blocked_reason"]
+        .as_str()
+        .expect("the blocked reason");
+    assert!(reason.contains(job_id), "{reason}");
+    assert_eq!(evidence["completion_gate"]["state_removed"], json!(true));
+    assert_eq!(
+        evidence["completion_gate"]["job_directories_unchanged"],
+        json!(true)
+    );
+    assert_eq!(
+        evidence["completion_gate"]["launch_operations_unchanged"],
+        json!(true)
+    );
+    assert_eq!(
+        evidence["completion_gate"]["resume_markers_unchanged"],
+        json!(true)
+    );
+    assert_eq!(
+        evidence["completion_gate"]["sentinel_alive_after_cleanup"],
+        json!(true)
+    );
+    let completed = evidence["events"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|event| event["type"] == "TASK_COMPLETED")
+        .count();
+    assert_eq!(completed, 0, "a damaged job completed the task");
+    write_evidence("round-45-completion-destroyed-state", &evidence);
+}
+
+/// Real CLI positive control: both reports are durable while the real Reviewer
+/// child is still running. Completion waits for its actual exit, and the
+/// `TASK_COMPLETED` event is recorded exactly once after it stops.
+///
+/// Both scenarios share one held-gate fixture whose damage/sentinel half is
+/// Linux-only (`/proc` start identity and `kill -STOP/CONT`). The pair is
+/// therefore limited to the same platform; macOS and Windows are not claimed.
+#[cfg(target_os = "linux")]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_live_completion_review_waits_then_completes_after_it_stops() {
+    let (_fixture, _context, task_id, _state, evidence) =
+        run_review_loop_with(false, DeliveryMode::GateWaitsForExit).await;
+    assert!(!task_id.is_empty());
+    assert_eq!(evidence["delivery"], json!("gate-waits-for-exit"));
+    assert!(
+        !evidence["completion_gate"].is_null(),
+        "the held completion barrier never ran: {evidence:#?}"
+    );
+    assert_eq!(evidence["phase"], json!("FINALIZING"));
+    assert_eq!(evidence["status"], json!("COMPLETED"));
+    assert_eq!(
+        evidence["completion_gate"]["uncompleted_while_active"],
+        json!(true)
+    );
+    assert_eq!(evidence["completion_gate"]["released"], json!(true));
+    assert_eq!(
+        evidence["completion_gate"]["job_status_after_exit"],
+        json!("completed")
+    );
+    let completed = evidence["events"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|event| event["type"] == "TASK_COMPLETED")
+        .count();
+    assert_eq!(completed, 1, "completion must be recorded exactly once");
+    write_evidence("round-45-completion-live-review", &evidence);
 }
 
 /// Actual delivery to two independent real Git repositories through real
@@ -4247,8 +5330,23 @@ mod two_repository_cli {
         // Extra ticks and another reopen emit exactly one global completion and
         // never task completion or cleanup in this increment.
         let extra = reopened.tick(&fixture.router).await.unwrap();
-        assert_eq!(extra.blocked, Vec::<String>::new(), "{extra:?}");
+        // This seeded fixture has no Reviewer session, so the completion
+        // finalizer blocks with its diagnosis instead of inventing evidence.
+        // Delivery completion is unaffected and stays exactly one event.
+        assert!(
+            extra.blocked.iter().any(|reason| reason
+                .contains("No Reviewer session exists to record the final completion review")),
+            "{extra:?}"
+        );
         assert_eq!(fixture.integration_completed_count(&reopened_store), 1);
+        assert_eq!(
+            reopened_store
+                .get_task(&fixture.task_id)
+                .unwrap()
+                .unwrap()
+                .status,
+            Status::Blocked
+        );
         let second_context = ServiceContext::open(
             RuntimePaths::new(fixture.data.clone()).unwrap(),
             Arc::new(EnvironmentCredentials),

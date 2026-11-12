@@ -894,6 +894,475 @@ fn completion_requires_durable_sessions_and_trace() {
     );
 }
 
+/// A FINALIZING task whose implementation review covers `reviewed-r` while the
+/// host-verified integration produced a different merge commit `delivered-m`.
+fn finalizing_with_a_merge_commit(store: &TaskStore) -> TaskRecord {
+    let policy = StatePolicy::default();
+    let task = store
+        .create_task("router", spec("Merge delivery"), "create-merge")
+        .unwrap();
+    let mut merge_repo = repo(&task.task_id);
+    merge_repo.reviewed_commit = Some("reviewed-r".into());
+    merge_repo.integrated_commit = Some("delivered-m".into());
+    store.save_repo(&merge_repo).unwrap();
+    let sessions = crate::runtime::SessionStore::new(store.db().clone());
+    let coder = sessions
+        .create(store.data_dir(), "fixture", "fixture")
+        .unwrap();
+    let reviewer = sessions
+        .create(store.data_dir(), "fixture", "fixture")
+        .unwrap();
+    sessions
+        .append(&coder, "user", "implement the task")
+        .unwrap();
+    sessions
+        .append(&reviewer, "user", "review the task")
+        .unwrap();
+    store
+        .set_sessions(&task.task_id, Some(&coder), Some(&reviewer))
+        .unwrap();
+    for (event_type, operation, payload) in [
+        (EventType::DiscoveryCompleted, "discovery", json!({})),
+        (EventType::PlanSubmitted, "plan", json!({})),
+        (
+            EventType::ApprovalRequested,
+            "approval-request",
+            json!({"request_type":"PLAN"}),
+        ),
+        (
+            EventType::ApprovalResolved,
+            "approval-resolve",
+            json!({"request_type":"PLAN","decision":"APPROVED"}),
+        ),
+        (
+            EventType::ImplementationSubmitted,
+            "implementation",
+            json!({}),
+        ),
+        (
+            EventType::ReviewCompleted,
+            "review-1",
+            json!({"verdict":"APPROVED"}),
+        ),
+        (
+            EventType::IntegrationPrepared,
+            "integration-prepared",
+            json!({"repositories":[{"repository_id":"repo-code","tree_changed":true}]}),
+        ),
+        (
+            EventType::ReviewCompleted,
+            "review-final",
+            json!({"verdict":"APPROVED","stage":"FINAL_DELIVERY"}),
+        ),
+        (EventType::HarnessAnalysisCompleted, "harness", json!({})),
+        (EventType::IntegrationCompleted, "integration", json!({})),
+    ] {
+        store
+            .apply_event(
+                &task.task_id,
+                event(event_type, operation, payload),
+                &policy,
+            )
+            .unwrap();
+    }
+    store
+        .add_report(
+            "merge-review",
+            &task.task_id,
+            ReportKind::Review,
+            1,
+            0,
+            json!({
+                "verdict":"APPROVED",
+                "spec_version":1,
+                "round":0,
+                "stage":"FINAL_DELIVERY",
+                "reviewed_versions":[{"repository_id":"repo-code","commit":"delivered-m"}],
+                "verification":["git rev-parse develop"],
+                "acceptance_results":[{"criterion":"AC-001","passed":true,"evidence":["git rev-parse develop"]}]
+            }),
+        )
+        .unwrap();
+    store
+        .add_report(
+            "merge-harness",
+            &task.task_id,
+            ReportKind::Harness,
+            1,
+            0,
+            json!({"spec_version":1,"round":0,"stage":"FINAL_DELIVERY","findings":[]}),
+        )
+        .unwrap();
+    store
+        .add_report(
+            "merge-implementation",
+            &task.task_id,
+            ReportKind::Implementation,
+            1,
+            0,
+            json!({"spec_version":1,"round":0,"summary":"implemented","commits":["HEAD"]}),
+        )
+        .unwrap();
+    store.get_task(&task.task_id).unwrap().unwrap()
+}
+
+fn merge_plan(
+    store: &TaskStore,
+    record: &TaskRecord,
+    round: u32,
+) -> crate::super_agent::delivery::DeliveryPlan {
+    use crate::super_agent::delivery::{DeliveryDestination, DeliveryPlan, DeliveryTargetPlan};
+    let events = store.events(&record.task_id).unwrap();
+    let prepared = events
+        .iter()
+        .find(|event| event.event_type == EventType::IntegrationPrepared)
+        .expect("preparation event");
+    let decision = events
+        .iter()
+        .rev()
+        .find(|event| {
+            event.event_type == EventType::ReviewCompleted
+                && event.payload["stage"].as_str() == Some("FINAL_DELIVERY")
+        })
+        .expect("final delivery decision");
+    DeliveryPlan {
+        operation_id: "plan-merge".into(),
+        task_id: record.task_id.clone(),
+        spec_version: 1,
+        review_round: round,
+        evidence_event_id: prepared.event_id.clone(),
+        review_event_id: decision.event_id.clone(),
+        content_fingerprint: "fingerprint".into(),
+        created_at: "2026-01-01T00:00:00Z".into(),
+        repositories: vec![DeliveryTargetPlan {
+            repository_id: "repo-code".into(),
+            repo_root: "/workspace/code".into(),
+            git_common_dir: "/workspace/code/.git".into(),
+            target_branch: "develop".into(),
+            target_ref: "refs/heads/develop".into(),
+            destination: DeliveryDestination::RefOnly,
+            baseline_commit: "base".into(),
+            reviewed_commit: "reviewed-r".into(),
+            integrated_commit: "delivered-m".into(),
+            integrated_tree: "tree-m".into(),
+            old_oid: "base".into(),
+            new_oid: "delivered-m".into(),
+            review_stage: crate::super_agent::ReviewStage::FinalDelivery,
+            lock_key: "branch:/workspace/code/.git:refs/heads/develop".into(),
+            lock_operation_id: "lock-op".into(),
+            attempt: 1,
+        }],
+    }
+}
+
+fn record_plan(store: &TaskStore, plan: &crate::super_agent::delivery::DeliveryPlan) {
+    let encoded = serde_json::to_string(plan).unwrap();
+    store
+        .db()
+        .with_conn(|conn| {
+            conn.execute(
+                "INSERT INTO sa_delivery_plans(operation_id,task_id,spec_version,review_round,created_at,plan_json) VALUES(?1,?2,?3,?4,?5,?6)",
+                rusqlite::params![
+                    plan.operation_id,
+                    plan.task_id,
+                    plan.spec_version,
+                    plan.review_round,
+                    plan.created_at,
+                    encoded
+                ],
+            )
+        })
+        .unwrap()
+        .unwrap();
+}
+
+fn record_observation(
+    store: &TaskStore,
+    plan: &crate::super_agent::delivery::DeliveryPlan,
+    coder: &str,
+) {
+    for target in &plan.repositories {
+        store
+            .db()
+            .with_conn(|conn| {
+                conn.execute(
+                    "INSERT INTO sa_repository_delivery_observations(task_id,plan_operation_id,repository_id,spec_version,review_round,coder_session_id,old_oid,new_oid,target_ref,attempt,observed_at) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11)",
+                    rusqlite::params![
+                        plan.task_id,
+                        plan.operation_id,
+                        target.repository_id,
+                        plan.spec_version,
+                        plan.review_round,
+                        coder,
+                        target.old_oid,
+                        target.new_oid,
+                        target.target_ref,
+                        target.attempt,
+                        "2026-01-01T00:00:00Z"
+                    ],
+                )
+            })
+            .unwrap()
+            .unwrap();
+    }
+}
+
+/// The store gate itself, not the orchestrator, must prove the persisted
+/// authoritative plan and its complete observations before accepting a final
+/// review of a delivered merge commit that differs from the implementation
+/// review commit.
+#[test]
+fn completion_with_a_merge_commit_requires_the_persisted_delivery_plan() {
+    let (_temp, _data, store) = fixture();
+    let policy = StatePolicy::default();
+    let record = finalizing_with_a_merge_commit(&store);
+    let coder = record.coder.session_id.clone().unwrap();
+    let plan = merge_plan(&store, &record, 0);
+
+    // No plan at all: the differing OIDs cannot be justified.
+    let unmet = gate_unmet(store.complete_task(&record.task_id, "complete-1", &policy));
+    assert!(
+        unmet.iter().any(|item| matches!(
+            item,
+            Unmet::VersionMismatch { repository_id, .. } if repository_id == "repo-code"
+        )),
+        "{unmet:?}"
+    );
+
+    // A plan without every planned observation is not enough either.
+    record_plan(&store, &plan);
+    let unmet = gate_unmet(store.complete_task(&record.task_id, "complete-2", &policy));
+    assert!(
+        unmet.iter().any(|item| matches!(
+            item,
+            Unmet::VersionMismatch { repository_id, .. } if repository_id == "repo-code"
+        )),
+        "{unmet:?}"
+    );
+
+    // The persisted plan plus the complete observation accepts the exact
+    // reviewed lineage and delivered OID.
+    record_observation(&store, &plan, &coder);
+    let completed = store
+        .complete_task(&record.task_id, "complete-3", &policy)
+        .unwrap();
+    assert_eq!(completed.status, Status::Completed);
+    assert_eq!(completed.phase, Phase::Finalizing);
+    // The implementation-review commit is preserved, never rewritten to the
+    // delivered OID.
+    assert_eq!(
+        store
+            .get_task(&record.task_id)
+            .unwrap()
+            .unwrap()
+            .repositories[0]
+            .reviewed_commit
+            .as_deref(),
+        Some("reviewed-r")
+    );
+}
+
+#[test]
+fn completion_rejects_a_tampered_or_stale_reviewed_lineage() {
+    // A tampered reviewed commit cannot ride on a report naming the delivered
+    // OID, even with a genuine plan and observation.
+    {
+        let (_temp, _data, store) = fixture();
+        let policy = StatePolicy::default();
+        let record = finalizing_with_a_merge_commit(&store);
+        let coder = record.coder.session_id.clone().unwrap();
+        let plan = merge_plan(&store, &record, 0);
+        record_plan(&store, &plan);
+        record_observation(&store, &plan, &coder);
+        let mut tampered = record.repositories[0].clone();
+        tampered.reviewed_commit = Some("unrelated".into());
+        store.save_repo(&tampered).unwrap();
+        let unmet = gate_unmet(store.complete_task(&record.task_id, "complete", &policy));
+        assert!(
+            unmet.iter().any(|item| matches!(
+                item,
+                Unmet::VersionMismatch { repository_id, .. } if repository_id == "repo-code"
+            )),
+            "{unmet:?}"
+        );
+        assert_ne!(
+            store.get_task(&record.task_id).unwrap().unwrap().status,
+            Status::Completed
+        );
+        assert_eq!(
+            store
+                .get_task(&record.task_id)
+                .unwrap()
+                .unwrap()
+                .repositories[0]
+                .reviewed_commit
+                .as_deref(),
+            Some("unrelated"),
+            "the rejected completion must not rewrite the record it rejected"
+        );
+    }
+
+    // A plan for another round is stale and cannot justify this version.
+    {
+        let (_temp, _data, store) = fixture();
+        let policy = StatePolicy::default();
+        let record = finalizing_with_a_merge_commit(&store);
+        let coder = record.coder.session_id.clone().unwrap();
+        let stale = merge_plan(&store, &record, 1);
+        record_plan(&store, &stale);
+        record_observation(&store, &stale, &coder);
+        let unmet = gate_unmet(store.complete_task(&record.task_id, "complete", &policy));
+        assert!(
+            unmet.iter().any(|item| matches!(
+                item,
+                Unmet::VersionMismatch { repository_id, .. } if repository_id == "repo-code"
+            )),
+            "{unmet:?}"
+        );
+        assert_ne!(
+            store.get_task(&record.task_id).unwrap().unwrap().status,
+            Status::Completed
+        );
+    }
+}
+
+#[test]
+fn completion_rejects_a_malformed_current_delivery_plan() {
+    let (_temp, _data, store) = fixture();
+    let policy = StatePolicy::default();
+    let record = finalizing_with_a_merge_commit(&store);
+    store
+        .db()
+        .with_conn(|conn| {
+            conn.execute(
+                "INSERT INTO sa_delivery_plans(operation_id,task_id,spec_version,review_round,created_at,plan_json) VALUES(?1,?2,?3,?4,?5,?6)",
+                rusqlite::params![
+                    "plan-broken",
+                    record.task_id,
+                    1i64,
+                    0i64,
+                    "2026-01-02T00:00:00Z",
+                    "{not json"
+                ],
+            )
+        })
+        .unwrap()
+        .unwrap();
+    let error = store
+        .complete_task(&record.task_id, "complete-malformed", &policy)
+        .unwrap_err();
+    assert!(
+        matches!(&error, StoreError::Invalid(message) if message.contains("unreadable")),
+        "{error:?}"
+    );
+    assert_ne!(
+        store.get_task(&record.task_id).unwrap().unwrap().status,
+        Status::Completed
+    );
+    // The contradictory record is preserved for inspection, never rewritten
+    // into a completion or silently replaced by an older plan.
+    let count: i64 = store
+        .db()
+        .with_conn(|conn| {
+            conn.query_row(
+                "SELECT COUNT(*) FROM sa_delivery_plans WHERE task_id=?1",
+                [&record.task_id],
+                |row| row.get(0),
+            )
+        })
+        .unwrap()
+        .unwrap();
+    assert_eq!(count, 1);
+}
+
+#[test]
+fn completion_rejects_a_plan_without_its_current_approval_evidence() {
+    let (_temp, _data, store) = fixture();
+    let policy = StatePolicy::default();
+    let record = finalizing_with_a_merge_commit(&store);
+    let coder = record.coder.session_id.clone().unwrap();
+
+    // The plan names an approval event that does not exist.
+    let mut stale = merge_plan(&store, &record, 0);
+    stale.review_event_id = "missing-decision".into();
+    record_plan(&store, &stale);
+    record_observation(&store, &stale, &coder);
+    let unmet = gate_unmet(store.complete_task(&record.task_id, "complete-1", &policy));
+    assert!(
+        unmet.iter().any(|item| matches!(
+            item,
+            Unmet::VersionMismatch { repository_id, .. } if repository_id == "repo-code"
+        )),
+        "{unmet:?}"
+    );
+
+    // A plan whose preparation event is missing is equally unusable.
+    let mut unbound = merge_plan(&store, &record, 0);
+    unbound.operation_id = "plan-unbound".into();
+    unbound.evidence_event_id = "missing-preparation".into();
+    record_plan(&store, &unbound);
+    let unmet = gate_unmet(store.complete_task(&record.task_id, "complete-2", &policy));
+    assert!(
+        unmet.iter().any(|item| matches!(
+            item,
+            Unmet::VersionMismatch { repository_id, .. } if repository_id == "repo-code"
+        )),
+        "{unmet:?}"
+    );
+    assert_ne!(
+        store.get_task(&record.task_id).unwrap().unwrap().status,
+        Status::Completed
+    );
+}
+
+#[test]
+fn completion_rejects_narrowed_or_duplicate_plan_membership() {
+    let (_temp, _data, store) = fixture();
+    let policy = StatePolicy::default();
+    let record = finalizing_with_a_merge_commit(&store);
+    let coder = record.coder.session_id.clone().unwrap();
+
+    // A plan that lists the same repository twice is not the task's set.
+    let mut duplicated = merge_plan(&store, &record, 0);
+    let target = duplicated.repositories[0].clone();
+    duplicated.repositories.push(target);
+    record_plan(&store, &duplicated);
+    let unmet = gate_unmet(store.complete_task(&record.task_id, "complete-dup", &policy));
+    assert!(
+        unmet.iter().any(|item| matches!(
+            item,
+            Unmet::VersionMismatch { repository_id, .. } if repository_id == "repo-code"
+        )),
+        "{unmet:?}"
+    );
+
+    // A plan that narrows the task to no repository is equally unusable.
+    let mut narrowed = merge_plan(&store, &record, 0);
+    narrowed.operation_id = "plan-narrowed".into();
+    narrowed.repositories.clear();
+    record_plan(&store, &narrowed);
+    let unmet = gate_unmet(store.complete_task(&record.task_id, "complete-empty", &policy));
+    assert!(
+        unmet.iter().any(|item| matches!(
+            item,
+            Unmet::VersionMismatch { repository_id, .. } if repository_id == "repo-code"
+        )),
+        "{unmet:?}"
+    );
+    // The task's real reviewed/integrated lineage was never rewritten.
+    let task = store.get_task(&record.task_id).unwrap().unwrap();
+    assert_eq!(task.status, Status::Running);
+    assert_eq!(
+        task.repositories[0].reviewed_commit.as_deref(),
+        Some("reviewed-r")
+    );
+    assert_eq!(
+        task.repositories[0].integrated_commit.as_deref(),
+        Some("delivered-m")
+    );
+    assert!(!coder.is_empty());
+}
+
 #[test]
 fn completion_rejects_an_unverified_non_git_snapshot() {
     let (_temp, data, store) = fixture();

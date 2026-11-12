@@ -2010,6 +2010,68 @@ mod two_repository_delivery {
         supervisor: PathBuf,
     }
 
+    /// Owns the PIDs of a held fixture child. Cleanup uses the PIDs the script
+    /// recorded itself, never the durable job state, so it still works after a
+    /// test deliberately damages that state.
+    struct HeldChildren {
+        pids: PathBuf,
+        release: PathBuf,
+        watched: Vec<u32>,
+    }
+
+    impl HeldChildren {
+        fn wait_for_pids(&mut self) -> (u32, u32) {
+            for _ in 0..1200 {
+                if let Ok(text) = std::fs::read_to_string(&self.pids) {
+                    let mut lines = text
+                        .lines()
+                        .filter_map(|line| line.trim().parse::<u32>().ok());
+                    if let (Some(child), Some(supervisor)) = (lines.next(), lines.next()) {
+                        self.watched = vec![child, supervisor];
+                        return (child, supervisor);
+                    }
+                }
+                std::thread::sleep(std::time::Duration::from_millis(10));
+            }
+            panic!("the held child did not record its process identity");
+        }
+
+        fn release(&self) {
+            std::fs::write(&self.release, b"release").unwrap();
+        }
+    }
+
+    impl Drop for HeldChildren {
+        fn drop(&mut self) {
+            let mut pids = self.watched.clone();
+            if let Ok(text) = std::fs::read_to_string(&self.pids) {
+                pids.extend(
+                    text.lines()
+                        .filter_map(|line| line.trim().parse::<u32>().ok()),
+                );
+            }
+            pids.sort_unstable();
+            pids.dedup();
+            for pid in pids {
+                let _ = std::process::Command::new("kill")
+                    .args(["-KILL", &pid.to_string()])
+                    .status();
+            }
+        }
+    }
+
+    fn stop_process(pid: u32) {
+        let status = std::process::Command::new("kill")
+            .args(["-STOP", &pid.to_string()])
+            .status()
+            .expect("stopping the fixture supervisor");
+        assert!(status.success(), "could not stop process {pid}");
+    }
+
+    fn process_alive(pid: u32) -> bool {
+        PathBuf::from(format!("/proc/{pid}")).exists()
+    }
+
     impl TwoRepoDeliveryFixture {
         fn new() -> Self {
             let temp = tempfile::tempdir().unwrap();
@@ -2099,7 +2161,7 @@ mod two_repository_delivery {
                 .db()
                 .with_conn(|conn| {
                     conn.execute(
-                        "UPDATE sa_tasks SET phase='REVIEWING', status='RUNNING' WHERE task_id=?1",
+                        "UPDATE sa_tasks SET phase='IMPLEMENTING', status='RUNNING' WHERE task_id=?1",
                         [&task.task_id],
                     )
                 })
@@ -2111,11 +2173,21 @@ mod two_repository_delivery {
                 .join(&task.task_id)
                 .join("workspace");
             std::fs::create_dir_all(&workspace).unwrap();
-            let coder = SessionStore::new(context.db.clone())
+            let sessions = SessionStore::new(context.db.clone());
+            let coder = sessions
                 .create(&workspace, "router-model", "fixture")
                 .unwrap();
-            // The real Coder is a Router child; record that ownership so the
-            // delivery resume passes the same parent check a live task would.
+            let reviewer = sessions
+                .create(&workspace, "router-model", "fixture")
+                .unwrap();
+            sessions
+                .append(&coder, "user", "implement the task")
+                .unwrap();
+            sessions
+                .append(&reviewer, "user", "review the task")
+                .unwrap();
+            // Both members are Router children; record that ownership so a
+            // resume passes the same parent check a live task would.
             crate::native_engine::child_session::record_adopted_ownership(
                 &context,
                 &coder,
@@ -2124,8 +2196,16 @@ mod two_repository_delivery {
                 "fixture-coder-job",
             )
             .unwrap();
+            crate::native_engine::child_session::record_adopted_ownership(
+                &context,
+                &reviewer,
+                &router,
+                "completed",
+                "fixture-reviewer-job",
+            )
+            .unwrap();
             store
-                .set_sessions(&task.task_id, Some(&coder), None)
+                .set_sessions(&task.task_id, Some(&coder), Some(&reviewer))
                 .unwrap();
             assert_eq!(
                 store.get_task(&task.task_id).unwrap().unwrap().phase,
@@ -2226,6 +2306,36 @@ mod two_repository_delivery {
                     })
                 })
                 .collect();
+            let implementation = store
+                .add_report(
+                    &format!("{}-implementation", task.task_id),
+                    &task.task_id,
+                    crate::super_agent::model::ReportKind::Implementation,
+                    task.spec_version,
+                    task.review_round,
+                    json!({
+                        "spec_version": task.spec_version,
+                        "round": task.review_round,
+                        "summary": "fixture implementation",
+                        "commits": ["HEAD"],
+                    }),
+                )
+                .unwrap();
+            assert!(!implementation.report_id.is_empty());
+            store
+                .apply_event(
+                    &task.task_id,
+                    NewEvent {
+                        session_id: None,
+                        run_id: None,
+                        event_type: EventType::ImplementationSubmitted,
+                        causation_id: None,
+                        operation_id: format!("{}-implementation-event", task.task_id),
+                        payload: json!({}),
+                    },
+                    policy,
+                )
+                .unwrap();
             let review = store
                 .add_report(
                     &format!("{}-review", task.task_id),
@@ -2389,6 +2499,215 @@ mod two_repository_delivery {
                 .unwrap()
         }
 
+        /// Records the host-verified delivery of every planned repository and
+        /// applies it through the real state machine. A repository that must
+        /// move from its approved baseline is dispatched through the real
+        /// launcher, so its durable Coder receipt is the production one; a
+        /// target already at its approved commit needs no dispatch and gets no
+        /// receipt.
+        async fn deliver_all(&self, plan: &DeliveryPlan) {
+            let task = self.task();
+            let coder = task.coder.session_id.clone().expect("coder session");
+            let launcher = self.orchestrator().launcher();
+            let mut dispatched = false;
+            for target in &plan.repositories {
+                if target.old_oid == target.new_oid {
+                    continue;
+                }
+                let identity = DeliveryOperationIdentity::for_target(plan, target, &coder);
+                self.store()
+                    .begin_repository_dispatch(&DeliveryDispatch {
+                        task_id: self.task_id.clone(),
+                        spec_version: plan.spec_version,
+                        review_round: plan.review_round,
+                        plan_operation_id: plan.operation_id.clone(),
+                        coder_session_id: coder.clone(),
+                        purpose: identity.purpose_key(),
+                        repository_id: Some(target.repository_id.clone()),
+                        old_oid: Some(target.old_oid.clone()),
+                        new_oid: Some(target.new_oid.clone()),
+                        attempt: target.attempt,
+                        job_id: None,
+                        created_at: "2026-01-01T00:00:00Z".into(),
+                    })
+                    .unwrap();
+                let outcome = launcher
+                    .resume_coder_for_delivery(&task, "fixture delivery", &identity)
+                    .await
+                    .unwrap();
+                self.store()
+                    .set_repository_dispatch_job(
+                        &self.task_id,
+                        &plan.operation_id,
+                        &target.repository_id,
+                        &outcome.job_id,
+                    )
+                    .unwrap();
+                dispatched = true;
+            }
+            if dispatched {
+                self.wait_settled().await;
+            }
+            self.set_target(0, &self.repos[0].reviewed);
+            self.set_target(1, &self.repos[1].reviewed);
+            self.record_observation(plan, 0);
+            self.record_observation(plan, 1);
+            self.store()
+                .record_delivery_completed(
+                    plan,
+                    &format!("{}-delivered", self.task_id),
+                    json!({"complete": true}),
+                )
+                .unwrap();
+            self.store()
+                .process_pending(
+                    &self.router,
+                    &crate::super_agent::state::StatePolicy::default(),
+                )
+                .unwrap();
+            assert_eq!(self.task().phase, Phase::Finalizing);
+            assert_eq!(self.task().status, Status::Running);
+        }
+
+        /// The final-delivery review and harness the same Reviewer submits.
+        fn final_reports(&self, plan: &DeliveryPlan, approved: bool) {
+            self.final_review_report(plan, approved);
+            self.final_harness_report();
+        }
+
+        fn final_review_report(&self, plan: &DeliveryPlan, approved: bool) {
+            let task = self.task();
+            let versions: Vec<Value> = plan
+                .repositories
+                .iter()
+                .map(|target| {
+                    json!({
+                        "repository_id": target.repository_id,
+                        "commit": target.new_oid,
+                    })
+                })
+                .collect();
+            let verdict = if approved {
+                "APPROVED"
+            } else {
+                "CHANGES_REQUESTED"
+            };
+            self.store()
+                .add_report(
+                    &format!("{}-final-review", self.task_id),
+                    &self.task_id,
+                    crate::super_agent::model::ReportKind::Review,
+                    task.spec_version,
+                    task.review_round,
+                    json!({
+                        "verdict": verdict,
+                        "spec_version": task.spec_version,
+                        "round": task.review_round,
+                        "stage": "FINAL_DELIVERY",
+                        "reviewed_versions": versions,
+                        "acceptance_results": [{
+                            "criterion": "AC-001",
+                            "passed": approved,
+                            "evidence": ["git rev-parse develop"],
+                        }],
+                        "issues": [],
+                        "verification": ["git rev-parse develop"],
+                        "limitations": [],
+                    }),
+                )
+                .unwrap();
+        }
+
+        fn final_harness_report(&self) {
+            let task = self.task();
+            self.store()
+                .add_report(
+                    &format!("{}-final-harness", self.task_id),
+                    &self.task_id,
+                    crate::super_agent::model::ReportKind::Harness,
+                    task.spec_version,
+                    task.review_round,
+                    json!({
+                        "spec_version": task.spec_version,
+                        "round": task.review_round,
+                        "stage": "FINAL_DELIVERY",
+                        "findings": [],
+                    }),
+                )
+                .unwrap();
+        }
+
+        /// Makes every future child exit with this code, as a Reviewer that
+        /// dies would.
+        fn fail_future_children(&self, code: i32) {
+            use std::os::unix::fs::PermissionsExt;
+            let test_binary = std::env::current_exe().unwrap();
+            std::fs::write(
+                &self.supervisor,
+                format!(
+                    "#!/bin/sh\nif [ -n \"$DEEPSEEK_CODE_BACKGROUND_JOB\" ]; then\n  exec '{}' --exact 'services::background_sessions::tests::run_worker_entry' --ignored --nocapture\nfi\nexit {code}\n",
+                    test_binary.display()
+                ),
+            )
+            .unwrap();
+            std::fs::set_permissions(&self.supervisor, std::fs::Permissions::from_mode(0o755))
+                .unwrap();
+        }
+
+        fn final_completion_marker(&self) -> Value {
+            self.context
+                .setting::<Value>(&format!(
+                    "super-agent.reviewer-resume.{}.{}.{}.final-completion",
+                    self.task_id,
+                    self.task().spec_version,
+                    self.task().review_round
+                ))
+                .unwrap()
+                .unwrap_or(Value::Null)
+        }
+
+        /// Replaces the supervisor with one that keeps the launched child alive
+        /// until the guard releases it, and records the child and supervisor
+        /// PIDs in a fixture-owned file.
+        fn hold_future_children(&self) -> HeldChildren {
+            use std::os::unix::fs::PermissionsExt;
+            let pids = self._temp.path().join("held-child-pids");
+            let release = self._temp.path().join("release-held-child");
+            let test_binary = std::env::current_exe().unwrap();
+            std::fs::write(
+                &self.supervisor,
+                format!(
+                    "#!/bin/sh\nif [ -n \"$DEEPSEEK_CODE_BACKGROUND_JOB\" ]; then\n  exec '{}' --exact 'services::background_sessions::tests::run_worker_entry' --ignored --nocapture\nfi\nprintf '%s\\n%s\\n' \"$$\" \"$PPID\" > '{}'\nwhile [ ! -f '{}' ]; do sleep 0.05; done\nexit 0\n",
+                    test_binary.display(),
+                    pids.display(),
+                    release.display()
+                ),
+            )
+            .unwrap();
+            std::fs::set_permissions(&self.supervisor, std::fs::Permissions::from_mode(0o755))
+                .unwrap();
+            HeldChildren {
+                pids,
+                release,
+                watched: Vec::new(),
+            }
+        }
+
+        /// The durable directory of one reserved job. The test damages only
+        /// `state.json`, leaving launch and identity files in place.
+        fn job_directory(&self, job_id: &str) -> PathBuf {
+            crate::services::background_sessions::directory(&self.data, job_id).unwrap()
+        }
+
+        fn task_completed_count(&self) -> usize {
+            self.store()
+                .events(&self.task_id)
+                .unwrap()
+                .iter()
+                .filter(|event| event.event_type == EventType::TaskCompleted)
+                .count()
+        }
+
         fn record_observation(&self, plan: &DeliveryPlan, index: usize) {
             let target = plan
                 .repositories
@@ -2409,6 +2728,14 @@ mod two_repository_delivery {
                         coder_session_id: self.task().coder.session_id.unwrap(),
                         attempt: target.attempt,
                         verified: true,
+                        // The fixture dispatches a real job for a repository
+                        // that must move, and never for one already at the
+                        // approved commit.
+                        source: if target.old_oid == target.new_oid {
+                            crate::super_agent::delivery::DeliveryObservationSource::HostVerifiedAlreadyAtTarget
+                        } else {
+                            crate::super_agent::delivery::DeliveryObservationSource::DeliveryJob
+                        },
                         observed_at: "2026-01-01T00:00:00Z".into(),
                     },
                 )
@@ -2710,7 +3037,9 @@ mod two_repository_delivery {
         let report = orchestrator.tick(&fixture.router).await.unwrap();
         assert!(
             report.blocked.iter().any(|reason| {
-                reason.contains("no longer lists repository")
+                // The binding now rejects a narrowed repository set itself,
+                // and must still name the repository the task no longer lists.
+                (reason.contains("no longer lists repository") || reason.contains("repository set"))
                     && reason.contains(&fixture.repos[1].repository_id)
             }),
             "a narrowed task must not deliver the full plan: {report:?}"
@@ -3006,5 +3335,1282 @@ mod two_repository_delivery {
                 "the blocked attempt moved B's target"
             );
         }
+    }
+
+    #[tokio::test]
+    async fn a_content_identical_delivery_completes_only_through_a_real_final_review() {
+        let fixture = TwoRepoDeliveryFixture::new();
+        let reviewer = fixture
+            .task()
+            .reviewer
+            .session_id
+            .clone()
+            .expect("reviewer session");
+        let plan = fixture.prepare_plan();
+        fixture.deliver_all(&plan).await;
+        let orchestrator = fixture.orchestrator();
+
+        // No final-delivery review exists yet: the same Reviewer is resumed
+        // once, and nothing is completed from the implementation approval.
+        let first = orchestrator.tick(&fixture.router).await.unwrap();
+        assert_eq!(first.blocked, Vec::<String>::new(), "{first:?}");
+        let task = fixture.task();
+        assert_eq!(task.phase, Phase::Finalizing);
+        assert_eq!(task.status, Status::Running);
+        assert_eq!(fixture.task_completed_count(), 0);
+        let jobs = crate::services::background_sessions::list(&fixture.data, Some(&fixture.router))
+            .unwrap_or_default();
+        let reviewer_jobs: Vec<_> = jobs
+            .iter()
+            .filter(|job| job.session_id == reviewer)
+            .collect();
+        assert_eq!(
+            reviewer_jobs.len(),
+            1,
+            "the completion review must resume the existing Reviewer once"
+        );
+        fixture.wait_settled().await;
+
+        // The Reviewer submits its own review and harness of the delivered
+        // OIDs. The decision is a durable event applied by the next tick.
+        fixture.final_reports(&plan, true);
+        let deciding = orchestrator.tick(&fixture.router).await.unwrap();
+        assert_eq!(deciding.blocked, Vec::<String>::new(), "{deciding:?}");
+        let report = orchestrator.tick(&fixture.router).await.unwrap();
+        assert_eq!(report.blocked, Vec::<String>::new(), "{report:?}");
+
+        let task = fixture.task();
+        assert_eq!(task.phase, Phase::Finalizing);
+        assert_eq!(task.status, Status::Completed);
+        assert_eq!(fixture.task_completed_count(), 1);
+        assert!(!fixture
+            .store()
+            .events(&fixture.task_id)
+            .unwrap()
+            .iter()
+            .any(|event| event.event_type == EventType::CleanupCompleted));
+        // The delivered OIDs are the reviewed ones; nothing was rewritten.
+        for (index, repo) in task.repositories.iter().enumerate() {
+            assert_eq!(
+                repo.integration_status,
+                crate::super_agent::IntegrationStatus::Completed
+            );
+            assert_eq!(
+                repo.reviewed_commit.as_deref(),
+                Some(fixture.repos[index].reviewed.as_str())
+            );
+            assert_eq!(
+                repo.integrated_commit.as_deref(),
+                Some(fixture.repos[index].reviewed.as_str())
+            );
+        }
+
+        // Extra ticks and a reopen never duplicate completion or replay
+        // delivery.
+        let delivery_events = fixture
+            .store()
+            .events(&fixture.task_id)
+            .unwrap()
+            .iter()
+            .filter(|event| event.event_type == EventType::IntegrationCompleted)
+            .count();
+        let _ = orchestrator.tick(&fixture.router).await.unwrap();
+        assert_eq!(fixture.task_completed_count(), 1);
+        let reopened_context = crate::services::ServiceContext::open(
+            RuntimePaths::new(fixture.data.clone()).unwrap(),
+            Arc::new(crate::services::EnvironmentCredentials),
+        )
+        .unwrap();
+        let reopened_store = TaskStore::new(reopened_context.db.clone(), fixture.data.clone());
+        let reopened = Orchestrator::new(
+            reopened_context.clone(),
+            TwoRepoDeliveryFixture::config(),
+            TwoRepoDeliveryFixture::provider(),
+            "bypass".into(),
+            Some(fixture.supervisor.clone()),
+        );
+        let reopened_report = reopened.tick(&fixture.router).await.unwrap();
+        assert_eq!(
+            reopened_report.blocked,
+            Vec::<String>::new(),
+            "{reopened_report:?}"
+        );
+        assert_eq!(
+            reopened_store
+                .get_task(&fixture.task_id)
+                .unwrap()
+                .unwrap()
+                .status,
+            Status::Completed
+        );
+        assert_eq!(
+            reopened_store
+                .events(&fixture.task_id)
+                .unwrap()
+                .iter()
+                .filter(|event| event.event_type == EventType::TaskCompleted)
+                .count(),
+            1
+        );
+        assert_eq!(
+            reopened_store
+                .events(&fixture.task_id)
+                .unwrap()
+                .iter()
+                .filter(|event| event.event_type == EventType::IntegrationCompleted)
+                .count(),
+            delivery_events
+        );
+    }
+
+    /// Both final reports can arrive from a Reviewer whose process is still
+    /// alive. The completion decision must inspect that exact known job
+    /// directly: removing only its own `state.json` may not make the discovery
+    /// list's silence count as proof that the child stopped.
+    #[tokio::test]
+    async fn a_live_completion_review_with_destroyed_state_never_completes() {
+        let fixture = TwoRepoDeliveryFixture::new();
+        let plan = fixture.prepare_plan();
+        fixture.deliver_all(&plan).await;
+        let mut held = fixture.hold_future_children();
+        let orchestrator = fixture.orchestrator();
+
+        // The real launcher starts the post-delivery completion review and the
+        // fixture keeps that genuine child running.
+        let launched = orchestrator.tick(&fixture.router).await.unwrap();
+        assert_eq!(launched.blocked, Vec::<String>::new(), "{launched:?}");
+        let (child, supervisor) = held.wait_for_pids();
+        let job_id = fixture.final_completion_marker()["job_id"]
+            .as_str()
+            .expect("completion review job")
+            .to_owned();
+
+        // Both valid FINAL_DELIVERY reports exist while the child is alive.
+        fixture.final_reports(&plan, true);
+        let deciding = orchestrator.tick(&fixture.router).await.unwrap();
+        assert_eq!(deciding.blocked, Vec::<String>::new(), "{deciding:?}");
+        assert_eq!(fixture.task_completed_count(), 0);
+
+        // Freeze the supervisor so it cannot republish, then damage only this
+        // known job's state file. The genuine child keeps running.
+        stop_process(supervisor);
+        let state = fixture.job_directory(&job_id).join("state.json");
+        assert!(state.exists(), "the genuine job state must exist");
+        std::fs::remove_file(&state).unwrap();
+        assert!(!state.exists());
+        assert!(process_alive(child), "the reviewer child must still be alive");
+
+        let blocked = orchestrator.tick(&fixture.router).await.unwrap();
+        assert_eq!(
+            fixture.task_completed_count(),
+            0,
+            "a reviewer whose own durable state was removed was treated as stopped: {blocked:?}"
+        );
+        assert!(
+            process_alive(child),
+            "the completion check must not complete while the genuine child is alive"
+        );
+        assert!(
+            blocked.blocked.iter().any(|reason| {
+                reason.contains(&job_id) && reason.contains("no durable task state")
+            }),
+            "the damaged known job must block with its exact identity: {blocked:?}"
+        );
+        let task = fixture.task();
+        assert_eq!(task.status, Status::Blocked);
+        assert_eq!(task.phase, Phase::Finalizing);
+
+        // A reopened host must keep the requirement instead of completing from
+        // the reports it can still read.
+        let reopened_context = crate::services::ServiceContext::open(
+            RuntimePaths::new(fixture.data.clone()).unwrap(),
+            Arc::new(crate::services::EnvironmentCredentials),
+        )
+        .unwrap();
+        let reopened_store = TaskStore::new(reopened_context.db.clone(), fixture.data.clone());
+        let reopened = Orchestrator::new(
+            reopened_context,
+            TwoRepoDeliveryFixture::config(),
+            TwoRepoDeliveryFixture::provider(),
+            "bypass".into(),
+            Some(fixture.supervisor.clone()),
+        );
+        let _ = reopened.tick(&fixture.router).await.unwrap();
+        assert_eq!(fixture.task_completed_count(), 0);
+        assert_eq!(
+            reopened_store
+                .get_task(&fixture.task_id)
+                .unwrap()
+                .unwrap()
+                .status,
+            Status::Blocked
+        );
+        assert!(process_alive(child), "the held child was lost");
+        held.release();
+    }
+
+    /// Older terminal receipts must not stand in for the current completion
+    /// review. Removing both the current marker and its launch operation while
+    /// the genuine held child's state is damaged leaves the receipt collection
+    /// non-empty, so coverage is checked against the plan's required stage.
+    #[tokio::test]
+    async fn a_missing_current_completion_review_receipt_blocks_with_older_receipts_present() {
+        let fixture = TwoRepoDeliveryFixture::new();
+        let plan = fixture.prepare_plan();
+        fixture.deliver_all(&plan).await;
+        // A genuine, terminal Coder integration receipt is preserved as the
+        // "older receipt" that must not satisfy the Reviewer requirement.
+        let older = fixture
+            .orchestrator()
+            .launcher()
+            .resume_coder(&fixture.task(), "fixture integration", "integration")
+            .await
+            .unwrap();
+        assert!(older.fresh);
+        fixture.wait_settled().await;
+
+        let mut held = fixture.hold_future_children();
+        let orchestrator = fixture.orchestrator();
+        let launched = orchestrator.tick(&fixture.router).await.unwrap();
+        assert_eq!(launched.blocked, Vec::<String>::new(), "{launched:?}");
+        let (child, supervisor) = held.wait_for_pids();
+        let job_id = fixture.final_completion_marker()["job_id"]
+            .as_str()
+            .expect("completion review job")
+            .to_owned();
+        fixture.final_reports(&plan, true);
+        let deciding = orchestrator.tick(&fixture.router).await.unwrap();
+        assert_eq!(deciding.blocked, Vec::<String>::new(), "{deciding:?}");
+
+        // Damage only the known current job, then remove both current
+        // references. The older terminal receipt remains.
+        stop_process(supervisor);
+        let state = fixture.job_directory(&job_id).join("state.json");
+        std::fs::remove_file(&state).unwrap();
+        assert!(process_alive(child));
+        let task = fixture.task();
+        let marker = format!(
+            "super-agent.reviewer-resume.{}.{}.{}.final-completion",
+            fixture.task_id, task.spec_version, task.review_round
+        );
+        let operation_pattern = format!(
+            "super-agent.launch-op.{}.reviewer.resume.{}.{}.final-completion",
+            fixture.task_id, task.spec_version, task.review_round
+        );
+        fixture
+            .context
+            .db
+            .with_conn(|conn| -> Result<()> {
+                conn.execute(
+                    "DELETE FROM peripheral_settings WHERE key=?1",
+                    [&marker],
+                )?;
+                conn.execute(
+                    "DELETE FROM peripheral_settings WHERE key=?1",
+                    [&operation_pattern],
+                )?;
+                Ok(())
+            })
+            .unwrap()
+            .unwrap();
+        assert!(fixture
+            .context
+            .setting::<Value>(&marker)
+            .unwrap()
+            .is_none());
+        assert!(fixture
+            .context
+            .setting::<Value>(&operation_pattern)
+            .unwrap()
+            .is_none());
+
+        let blocked = orchestrator.tick(&fixture.router).await.unwrap();
+        assert_eq!(
+            fixture.task_completed_count(),
+            0,
+            "older terminal receipts satisfied the current completion review: {blocked:?}"
+        );
+        assert!(
+            blocked.blocked.iter().any(|reason| {
+                reason.contains("no durable final-completion completion-review receipt")
+                    && reason.contains(&fixture.task_id)
+            }),
+            "the missing current-stage receipt must be Unknown: {blocked:?}"
+        );
+        assert_eq!(fixture.task().status, Status::Blocked);
+        assert!(process_alive(child));
+
+        let reopened_context = crate::services::ServiceContext::open(
+            RuntimePaths::new(fixture.data.clone()).unwrap(),
+            Arc::new(crate::services::EnvironmentCredentials),
+        )
+        .unwrap();
+        let reopened_store = TaskStore::new(reopened_context.db.clone(), fixture.data.clone());
+        let reopened = Orchestrator::new(
+            reopened_context,
+            TwoRepoDeliveryFixture::config(),
+            TwoRepoDeliveryFixture::provider(),
+            "bypass".into(),
+            Some(fixture.supervisor.clone()),
+        );
+        let _ = reopened.tick(&fixture.router).await.unwrap();
+        assert_eq!(fixture.task_completed_count(), 0);
+        assert_eq!(
+            reopened_store
+                .get_task(&fixture.task_id)
+                .unwrap()
+                .unwrap()
+                .status,
+            Status::Blocked
+        );
+        held.release();
+    }
+
+    /// A valid active job must wait, then complete once its real process is
+    /// terminal. This is the positive control for the strict inspection.
+    #[tokio::test]
+    async fn a_live_completion_review_waits_then_completes_after_it_stops() {
+        let fixture = TwoRepoDeliveryFixture::new();
+        let plan = fixture.prepare_plan();
+        fixture.deliver_all(&plan).await;
+        let mut held = fixture.hold_future_children();
+        let orchestrator = fixture.orchestrator();
+        let launched = orchestrator.tick(&fixture.router).await.unwrap();
+        assert_eq!(launched.blocked, Vec::<String>::new(), "{launched:?}");
+        let (child, _supervisor) = held.wait_for_pids();
+        fixture.final_reports(&plan, true);
+        let deciding = orchestrator.tick(&fixture.router).await.unwrap();
+        assert_eq!(deciding.blocked, Vec::<String>::new(), "{deciding:?}");
+
+        let waiting = orchestrator.tick(&fixture.router).await.unwrap();
+        assert_eq!(waiting.blocked, Vec::<String>::new(), "{waiting:?}");
+        assert_eq!(fixture.task_completed_count(), 0);
+        assert_eq!(fixture.task().status, Status::Running);
+        assert!(process_alive(child));
+
+        held.release();
+        fixture.wait_settled().await;
+        let completed = orchestrator.tick(&fixture.router).await.unwrap();
+        assert_eq!(completed.blocked, Vec::<String>::new(), "{completed:?}");
+        assert_eq!(fixture.task().status, Status::Completed);
+        assert_eq!(fixture.task_completed_count(), 1);
+    }
+
+    /// Rewrites one ownership field of the exact held job while its supervisor
+    /// is frozen. The job status itself stays `running`; only identity is
+    /// wrong, so the completion check must block rather than wait or accept it.
+    async fn assert_tampered_completion_job_blocks(field: &str, needle: &str) {
+        let fixture = TwoRepoDeliveryFixture::new();
+        let plan = fixture.prepare_plan();
+        fixture.deliver_all(&plan).await;
+        let mut held = fixture.hold_future_children();
+        let orchestrator = fixture.orchestrator();
+        let launched = orchestrator.tick(&fixture.router).await.unwrap();
+        assert_eq!(launched.blocked, Vec::<String>::new(), "{launched:?}");
+        let (child, supervisor) = held.wait_for_pids();
+        let job_id = fixture.final_completion_marker()["job_id"]
+            .as_str()
+            .expect("completion review job")
+            .to_owned();
+        fixture.final_reports(&plan, true);
+        let deciding = orchestrator.tick(&fixture.router).await.unwrap();
+        assert_eq!(deciding.blocked, Vec::<String>::new(), "{deciding:?}");
+
+        stop_process(supervisor);
+        let state_path = fixture.job_directory(&job_id).join("state.json");
+        let mut state: Value =
+            serde_json::from_slice(&std::fs::read(&state_path).unwrap()).unwrap();
+        match field {
+            "id" => state["id"] = json!(uuid::Uuid::new_v4().to_string()),
+            "session" => state["session_id"] = json!("other-session"),
+            "parent" => state["parent_session_id"] = json!("other-parent"),
+            other => panic!("unknown tamper field {other}"),
+        }
+        std::fs::write(&state_path, serde_json::to_vec(&state).unwrap()).unwrap();
+        assert!(process_alive(child));
+
+        let blocked = orchestrator.tick(&fixture.router).await.unwrap();
+        assert_eq!(
+            fixture.task_completed_count(),
+            0,
+            "a {field} mismatch was treated as a stopped job: {blocked:?}"
+        );
+        assert!(
+            blocked
+                .blocked
+                .iter()
+                .any(|reason| reason.contains(&job_id) && reason.contains(needle)),
+            "the {field} mismatch must block with its exact diagnosis: {blocked:?}"
+        );
+        assert_eq!(fixture.task().status, Status::Blocked);
+        held.release();
+    }
+
+    #[tokio::test]
+    async fn a_completion_review_with_wrong_job_identity_never_completes() {
+        assert_tampered_completion_job_blocks("id", "identity").await;
+        assert_tampered_completion_job_blocks("session", "child session").await;
+        assert_tampered_completion_job_blocks("parent", "parent session").await;
+    }
+
+    /// A terminal delivery Coder job is real evidence. If its known durable
+    /// state becomes uncertain after the targets were delivered, completion
+    /// blocks instead of treating the delivery receipt as proof of exit.
+    #[tokio::test]
+    async fn a_delivery_coder_receipt_whose_state_is_damaged_blocks_completion() {
+        let fixture = TwoRepoDeliveryFixture::new();
+        let plan = fixture.prepare_plan();
+        fixture.deliver_all(&plan).await;
+        let target = fixture.target_plan(&plan, 0).clone();
+        let delivery = fixture
+            .store()
+            .repository_dispatch(&fixture.task_id, &plan.operation_id, &target.repository_id)
+            .unwrap()
+            .expect("the moved repository has a durable delivery receipt");
+        let job_id = delivery.job_id.clone().expect("the receipt names its job");
+
+        let orchestrator = fixture.orchestrator();
+        let _ = orchestrator.tick(&fixture.router).await.unwrap();
+        fixture.wait_settled().await;
+        fixture.final_reports(&plan, true);
+        let _ = orchestrator.tick(&fixture.router).await.unwrap();
+
+        let state = fixture.job_directory(&job_id).join("state.json");
+        assert!(state.exists(), "the delivery job must have been terminal");
+        std::fs::remove_file(&state).unwrap();
+        let blocked = orchestrator.tick(&fixture.router).await.unwrap();
+        assert_eq!(
+            fixture.task_completed_count(),
+            0,
+            "a damaged delivery Coder receipt was treated as stopped: {blocked:?}"
+        );
+        assert!(
+            blocked.blocked.iter().any(|reason| {
+                reason.contains(&job_id) && reason.contains("no durable task state")
+            }),
+            "the delivery receipt must block with its job identity: {blocked:?}"
+        );
+        assert_eq!(fixture.task().status, Status::Blocked);
+        assert!(fixture.observation(&plan, 0) && fixture.observation(&plan, 1));
+        assert_eq!(
+            git(
+                &fixture.repos[0].root,
+                &[
+                    "rev-parse",
+                    &format!("refs/heads/{}", fixture.repos[0].branch)
+                ]
+            ),
+            fixture.repos[0].reviewed
+        );
+    }
+
+    /// The Coder side must prove the *current* plan's delivery jobs stopped.
+    /// Reports, delivery observations and older terminal receipts survive, but
+    /// the current plan's Coder delivery operations and receipt references are
+    /// removed. Absence of the current receipts is not proof of process exit.
+    #[tokio::test]
+    async fn a_missing_current_coder_delivery_receipt_is_not_treated_as_stopped() {
+        let fixture = TwoRepoDeliveryFixture::new();
+        let plan = fixture.prepare_plan();
+        // Every planned repository has to move, so delivery dispatches the real
+        // Coder and leaves one durable receipt per repository.
+        fixture.deliver_all(&plan).await;
+        assert_eq!(
+            fixture
+                .store()
+                .delivery_dispatches(&fixture.task_id)
+                .unwrap()
+                .len(),
+            2,
+            "both moved repositories must have a real delivery receipt"
+        );
+
+        let orchestrator = fixture.orchestrator();
+        // The reports do not exist yet, so this tick resumes the same Reviewer
+        // for the final completion review and records its durable receipt.
+        let launched = orchestrator.tick(&fixture.router).await.unwrap();
+        assert_eq!(launched.blocked, Vec::<String>::new(), "{launched:?}");
+        fixture.wait_settled().await;
+        fixture.final_reports(&plan, true);
+        let deciding = orchestrator.tick(&fixture.router).await.unwrap();
+        assert_eq!(deciding.blocked, Vec::<String>::new(), "{deciding:?}");
+
+        // Keep every report, observation and older terminal receipt; remove
+        // only the current plan's Coder delivery operations and receipts.
+        fixture
+            .context
+            .db
+            .with_conn(|conn| -> Result<()> {
+                conn.execute(
+                    "DELETE FROM sa_repository_dispatches WHERE task_id=?1 AND plan_operation_id=?2",
+                    rusqlite::params![fixture.task_id, plan.operation_id],
+                )?;
+                conn.execute(
+                    "DELETE FROM sa_delivery_dispatches WHERE task_id=?1 AND plan_operation_id=?2",
+                    rusqlite::params![fixture.task_id, plan.operation_id],
+                )?;
+                conn.execute(
+                    "DELETE FROM peripheral_settings WHERE key LIKE ?1",
+                    [format!("super-agent.launch-op.{}.coder.%", fixture.task_id)],
+                )?;
+                Ok(())
+            })
+            .unwrap()
+            .unwrap();
+
+        let blocked = orchestrator.tick(&fixture.router).await.unwrap();
+        assert_eq!(
+            fixture.task_completed_count(),
+            0,
+            "removing the current Coder delivery receipts was treated as proof they stopped: {blocked:?}"
+        );
+        assert!(
+            blocked
+                .blocked
+                .iter()
+                .any(|reason| reason.contains(&plan.operation_id) && reason.contains("Coder")),
+            "the missing current Coder receipt must block with its plan identity: {blocked:?}"
+        );
+        assert_eq!(fixture.task().status, Status::Blocked);
+        // A reopened host reads the same durable state and keeps the block.
+        let reopened_context = crate::services::ServiceContext::open(
+            RuntimePaths::new(fixture.data.clone()).unwrap(),
+            Arc::new(crate::services::EnvironmentCredentials),
+        )
+        .unwrap();
+        let reopened_store = TaskStore::new(reopened_context.db.clone(), fixture.data.clone());
+        let reopened = Orchestrator::new(
+            reopened_context,
+            TwoRepoDeliveryFixture::config(),
+            TwoRepoDeliveryFixture::provider(),
+            "bypass".into(),
+            Some(fixture.supervisor.clone()),
+        );
+        let reopened_report = reopened.tick(&fixture.router).await.unwrap();
+        assert_eq!(
+            fixture.task_completed_count(),
+            0,
+            "a reopened host completed without the current Coder receipt: {reopened_report:?}"
+        );
+        assert_eq!(
+            reopened_store
+                .get_task(&fixture.task_id)
+                .unwrap()
+                .unwrap()
+                .status,
+            Status::Blocked
+        );
+        // The delivery itself is untouched: observations and target OIDs stay.
+        assert!(fixture.observation(&plan, 0) && fixture.observation(&plan, 1));
+        assert_eq!(
+            git(
+                &fixture.repos[0].root,
+                &["rev-parse", &format!("refs/heads/{}", fixture.repos[0].branch)]
+            ),
+            fixture.repos[0].reviewed
+        );
+    }
+
+    /// The `final-completion` stage key is shared by every plan of one
+    /// spec/round. A receipt that names a different persisted plan must not
+    /// prove the current plan's Reviewer job stopped.
+    #[tokio::test]
+    async fn a_completion_review_from_another_plan_never_completes() {
+        let fixture = TwoRepoDeliveryFixture::new();
+        let plan = fixture.prepare_plan();
+        fixture.deliver_all(&plan).await;
+        let orchestrator = fixture.orchestrator();
+        let launched = orchestrator.tick(&fixture.router).await.unwrap();
+        assert_eq!(launched.blocked, Vec::<String>::new(), "{launched:?}");
+        fixture.wait_settled().await;
+        fixture.final_reports(&plan, true);
+        let deciding = orchestrator.tick(&fixture.router).await.unwrap();
+        assert_eq!(deciding.blocked, Vec::<String>::new(), "{deciding:?}");
+
+        // A second, genuinely persisted plan for the same spec/round. It is
+        // older, so the plan above stays authoritative.
+        let mut other = plan.clone();
+        other.operation_id = "fixture-other-plan".into();
+        other.created_at = "2020-01-01T00:00:00Z".into();
+        fixture.store().save_delivery_plan(&other).unwrap();
+
+        let task = fixture.task();
+        let key = format!(
+            "super-agent.reviewer-resume.{}.{}.{}.final-completion",
+            fixture.task_id, task.spec_version, task.review_round
+        );
+        let marker = fixture.final_completion_marker();
+        fixture
+            .context
+            .save_setting(
+                &key,
+                &json!({
+                    "session_id": marker["session_id"],
+                    "job_id": marker["job_id"],
+                    "plan_operation_id": other.operation_id,
+                    "at": "2026-01-01T00:00:00Z"
+                }),
+            )
+            .unwrap();
+
+        let blocked = orchestrator.tick(&fixture.router).await.unwrap();
+        assert_eq!(
+            fixture.task_completed_count(),
+            0,
+            "a review receipt from another plan was treated as the current one: {blocked:?}"
+        );
+        assert!(
+            blocked
+                .blocked
+                .iter()
+                .any(|reason| reason.contains(&plan.operation_id)
+                    && reason.contains("final-completion")),
+            "the foreign-plan receipt must block with the current plan identity: {blocked:?}"
+        );
+        assert_eq!(fixture.task().status, Status::Blocked);
+    }
+
+    /// The plan can record a real baseline to move from, and an external
+    /// process can still move the real target to the approved commit before any
+    /// dispatch. The host then observes that target without starting a child,
+    /// and completion must accept that durable no-dispatch observation instead
+    /// of demanding a Coder receipt.
+    #[tokio::test]
+    async fn a_target_moved_to_the_approved_commit_before_dispatch_completes_without_a_receipt() {
+        let fixture = TwoRepoDeliveryFixture::new();
+        let plan = fixture.prepare_plan();
+        for target in &plan.repositories {
+            assert_ne!(
+                target.old_oid, target.new_oid,
+                "the plan records a real baseline to move from"
+            );
+        }
+        // The targets reach the approved commits without any delivery child.
+        fixture.set_target(0, &fixture.repos[0].reviewed);
+        fixture.set_target(1, &fixture.repos[1].reviewed);
+        let orchestrator = fixture.orchestrator();
+        for _ in 0..2 {
+            let tick = orchestrator.tick(&fixture.router).await.unwrap();
+            assert_eq!(tick.blocked, Vec::<String>::new(), "{tick:?}");
+        }
+        assert!(
+            fixture
+                .store()
+                .delivery_dispatches(&fixture.task_id)
+                .unwrap()
+                .is_empty(),
+            "no delivery child may be dispatched for a target already at the approved commit"
+        );
+        for target in &plan.repositories {
+            let observation = fixture
+                .store()
+                .repository_delivery_observation(
+                    &fixture.task_id,
+                    &plan.operation_id,
+                    &target.repository_id,
+                )
+                .unwrap()
+                .expect("the host verified this target");
+            assert_eq!(
+                observation.source,
+                crate::super_agent::delivery::DeliveryObservationSource::HostVerifiedAlreadyAtTarget
+            );
+        }
+        assert_eq!(fixture.task().phase, Phase::Finalizing);
+
+        let launched = orchestrator.tick(&fixture.router).await.unwrap();
+        assert_eq!(launched.blocked, Vec::<String>::new(), "{launched:?}");
+        fixture.wait_settled().await;
+        fixture.final_reports(&plan, true);
+        let deciding = orchestrator.tick(&fixture.router).await.unwrap();
+        assert_eq!(deciding.blocked, Vec::<String>::new(), "{deciding:?}");
+        let completed = orchestrator.tick(&fixture.router).await.unwrap();
+        assert_eq!(completed.blocked, Vec::<String>::new(), "{completed:?}");
+        assert_eq!(fixture.task().status, Status::Completed);
+        assert_eq!(fixture.task_completed_count(), 1);
+
+        // A reopened host reads the same durable no-dispatch provenance and
+        // keeps the task completed instead of demanding a receipt.
+        let reopened_context = crate::services::ServiceContext::open(
+            RuntimePaths::new(fixture.data.clone()).unwrap(),
+            Arc::new(crate::services::EnvironmentCredentials),
+        )
+        .unwrap();
+        let reopened_store = TaskStore::new(reopened_context.db.clone(), fixture.data.clone());
+        let reopened = Orchestrator::new(
+            reopened_context,
+            TwoRepoDeliveryFixture::config(),
+            TwoRepoDeliveryFixture::provider(),
+            "bypass".into(),
+            Some(fixture.supervisor.clone()),
+        );
+        let reopened_report = reopened.tick(&fixture.router).await.unwrap();
+        assert_eq!(
+            reopened_report.blocked,
+            Vec::<String>::new(),
+            "{reopened_report:?}"
+        );
+        assert_eq!(
+            reopened_store
+                .get_task(&fixture.task_id)
+                .unwrap()
+                .unwrap()
+                .status,
+            Status::Completed
+        );
+        assert_eq!(fixture.task_completed_count(), 1);
+    }
+
+    /// A no-dispatch observation belongs to the plan that produced it. A row
+    /// from another plan cannot stand in for the current plan's repository.
+    #[tokio::test]
+    async fn a_no_dispatch_observation_from_another_plan_never_covers_the_current_plan() {
+        let fixture = TwoRepoDeliveryFixture::new();
+        let plan = fixture.prepare_plan();
+        fixture.set_target(0, &fixture.repos[0].reviewed);
+        fixture.set_target(1, &fixture.repos[1].reviewed);
+        let orchestrator = fixture.orchestrator();
+        for _ in 0..2 {
+            let tick = orchestrator.tick(&fixture.router).await.unwrap();
+            assert_eq!(tick.blocked, Vec::<String>::new(), "{tick:?}");
+        }
+        assert_eq!(fixture.task().phase, Phase::Finalizing);
+
+        // A second persisted plan of the same spec/round, and the real
+        // observations are re-attributed to it.
+        let mut other = plan.clone();
+        other.operation_id = "fixture-other-plan".into();
+        other.created_at = "2020-01-01T00:00:00Z".into();
+        fixture.store().save_delivery_plan(&other).unwrap();
+        fixture
+            .context
+            .db
+            .with_conn(|conn| -> Result<()> {
+                conn.execute(
+                    "UPDATE sa_repository_delivery_observations SET plan_operation_id=?2 WHERE task_id=?1",
+                    rusqlite::params![fixture.task_id, other.operation_id],
+                )?;
+                Ok(())
+            })
+            .unwrap()
+            .unwrap();
+
+        fixture.final_reports(&plan, true);
+        for _ in 0..3 {
+            let _ = orchestrator.tick(&fixture.router).await.unwrap();
+        }
+        assert_eq!(
+            fixture.task_completed_count(),
+            0,
+            "an observation from another plan covered the current one"
+        );
+        assert_ne!(fixture.task().status, Status::Completed);
+    }
+
+    /// The required completion-review receipt is the stage the persisted plan's
+    /// decision actually identifies: a changed tree reuses its pre-delivery
+    /// `final-delivery` review, an unchanged tree requires a post-delivery
+    /// `final-completion` review.
+    #[test]
+    fn the_required_completion_review_stage_is_derived_from_the_plan_decision() {
+        let fixture = TwoRepoDeliveryFixture::new();
+        let plan = fixture.prepare_plan();
+        let events = fixture.store().events(&fixture.task_id).unwrap();
+        assert_eq!(
+            required_completion_reviewer_purpose(&events, &plan),
+            Some("final-completion")
+        );
+        let mut changed_plan = plan.clone();
+        changed_plan.review_event_id = "changed-final-decision".into();
+        let mut decision = events
+            .iter()
+            .find(|event| event.event_type == EventType::ReviewCompleted)
+            .unwrap()
+            .clone();
+        decision.event_id = "changed-final-decision".into();
+        decision.payload["stage"] = json!(ReviewStage::FinalDelivery.as_str());
+        assert_eq!(
+            required_completion_reviewer_purpose(std::slice::from_ref(&decision), &changed_plan),
+            Some("final-delivery")
+        );
+        let mut foreign = changed_plan.clone();
+        foreign.review_round += 1;
+        assert_eq!(
+            required_completion_reviewer_purpose(&[decision], &foreign),
+            None,
+            "a decision from another round cannot define the required stage"
+        );
+    }
+
+    /// A task with no member receipt at all cannot prove process exit. It must
+    /// block with a compatibility reason instead of inferring "stopped" from
+    /// absence, and it must not need any fabricated receipt.
+    #[tokio::test]
+    async fn a_completion_without_any_member_receipt_is_not_treated_as_stopped() {
+        let fixture = TwoRepoDeliveryFixture::new();
+        let plan = fixture.prepare_plan();
+        fixture.deliver_all(&plan).await;
+        fixture.final_reports(&plan, true);
+        let orchestrator = fixture.orchestrator();
+        let deciding = orchestrator.tick(&fixture.router).await.unwrap();
+        assert_eq!(deciding.blocked, Vec::<String>::new(), "{deciding:?}");
+
+        let blocked = orchestrator.tick(&fixture.router).await.unwrap();
+        assert_eq!(fixture.task_completed_count(), 0);
+        assert!(
+            blocked
+                .blocked
+                .iter()
+                .any(|reason| reason.contains(
+                    "no durable final-completion completion-review receipt exists"
+                )),
+            "absence of every receipt must block instead of concluding stopped: {blocked:?}"
+        );
+        assert_eq!(fixture.task().status, Status::Blocked);
+    }
+
+    /// Damage confined to an unrelated background record must not block a task
+    /// whose own known jobs are all terminal.
+    #[tokio::test]
+    async fn an_unrelated_corrupt_job_does_not_block_a_valid_completion() {
+        let fixture = TwoRepoDeliveryFixture::new();
+        let plan = fixture.prepare_plan();
+        fixture.deliver_all(&plan).await;
+        let orchestrator = fixture.orchestrator();
+        let _ = orchestrator.tick(&fixture.router).await.unwrap();
+        fixture.wait_settled().await;
+        fixture.final_reports(&plan, true);
+        let _ = orchestrator.tick(&fixture.router).await.unwrap();
+
+        let foreign = uuid::Uuid::new_v4().to_string();
+        let directory =
+            crate::services::background_sessions::directory(&fixture.data, &foreign).unwrap();
+        std::fs::create_dir_all(&directory).unwrap();
+        std::fs::write(directory.join("state.json"), b"{not json").unwrap();
+
+        let completed = orchestrator.tick(&fixture.router).await.unwrap();
+        assert_eq!(completed.blocked, Vec::<String>::new(), "{completed:?}");
+        assert_eq!(fixture.task().status, Status::Completed);
+        assert_eq!(fixture.task_completed_count(), 1);
+        assert!(directory.join("state.json").exists());
+    }
+
+    #[tokio::test]
+    async fn a_target_moved_after_delivery_blocks_completion() {
+        let fixture = TwoRepoDeliveryFixture::new();
+        let plan = fixture.prepare_plan();
+        fixture.deliver_all(&plan).await;
+        fixture.final_reports(&plan, true);
+        // An external process moves B after the host recorded the delivery.
+        let elsewhere = fixture.move_target_elsewhere(1);
+        let orchestrator = fixture.orchestrator();
+
+        let report = orchestrator.tick(&fixture.router).await.unwrap();
+        assert!(
+            report.blocked.iter().any(|reason| {
+                reason.contains("completion") && reason.contains(&fixture.repos[1].repository_id)
+            }),
+            "a stale delivered target must block completion: {report:?}"
+        );
+        let task = fixture.task();
+        assert_eq!(task.status, Status::Blocked);
+        assert_eq!(task.phase, Phase::Finalizing);
+        assert_eq!(fixture.task_completed_count(), 0);
+        assert_eq!(
+            git(
+                &fixture.repos[1].root,
+                &[
+                    "rev-parse",
+                    &format!("refs/heads/{}", fixture.repos[1].branch)
+                ]
+            ),
+            elsewhere,
+            "a failed completion check must not rewind or rewrite the target"
+        );
+        assert_eq!(
+            git(
+                &fixture.repos[0].root,
+                &[
+                    "rev-parse",
+                    &format!("refs/heads/{}", fixture.repos[0].branch)
+                ]
+            ),
+            fixture.repos[0].reviewed
+        );
+        assert!(fixture.observation(&plan, 0) && fixture.observation(&plan, 1));
+    }
+
+    #[tokio::test]
+    async fn a_rejected_finalization_review_blocks_without_rollback() {
+        let fixture = TwoRepoDeliveryFixture::new();
+        let plan = fixture.prepare_plan();
+        fixture.deliver_all(&plan).await;
+        fixture.final_reports(&plan, false);
+        let orchestrator = fixture.orchestrator();
+
+        let report = orchestrator.tick(&fixture.router).await.unwrap();
+        assert_eq!(report.blocked, Vec::<String>::new(), "{report:?}");
+        let task = fixture.task();
+        assert_eq!(task.status, Status::Blocked);
+        assert_eq!(task.phase, Phase::Finalizing);
+        assert_eq!(fixture.task_completed_count(), 0);
+        // Delivery is not rolled back: the targets keep the delivered commits
+        // and the per-repository progress stays Completed.
+        for (index, repo) in task.repositories.iter().enumerate() {
+            assert_eq!(
+                repo.integration_status,
+                crate::super_agent::IntegrationStatus::Completed
+            );
+            assert_eq!(
+                git(
+                    &fixture.repos[index].root,
+                    &[
+                        "rev-parse",
+                        &format!("refs/heads/{}", fixture.repos[index].branch)
+                    ]
+                ),
+                fixture.repos[index].reviewed
+            );
+        }
+        // A later tick cannot complete a blocked task.
+        let _ = orchestrator.tick(&fixture.router).await.unwrap();
+        assert_eq!(fixture.task_completed_count(), 0);
+    }
+
+    #[tokio::test]
+    async fn a_non_git_only_finalizing_task_is_not_completed() {
+        let fixture = TwoRepoDeliveryFixture::new();
+        // Make the task non-Git-only, as the state machine allows after an
+        // approved FINAL_DELIVERY review with no Git targets.
+        fixture
+            .store()
+            .db()
+            .with_conn(|conn| {
+                conn.execute(
+                    "DELETE FROM sa_task_repos WHERE task_id=?1",
+                    [&fixture.task_id],
+                )
+            })
+            .unwrap()
+            .unwrap();
+        fixture
+            .store()
+            .save_non_git_target(&crate::super_agent::NonGitTarget {
+                task_id: fixture.task_id.clone(),
+                path: fixture.data.join("scripts"),
+                snapshot_dir: fixture.data.join("snapshots"),
+                snapshot_manifest_json: "{}".into(),
+                diff_ref: None,
+                status: crate::super_agent::NonGitStatus::Prepared,
+                lock_key: "path:fixture".into(),
+                submission: None,
+            })
+            .unwrap();
+        fixture
+            .store()
+            .db()
+            .with_conn(|conn| {
+                conn.execute(
+                    "UPDATE sa_tasks SET phase='FINALIZING', status='RUNNING' WHERE task_id=?1",
+                    [&fixture.task_id],
+                )
+            })
+            .unwrap()
+            .unwrap();
+        let orchestrator = fixture.orchestrator();
+
+        let report = orchestrator.tick(&fixture.router).await.unwrap();
+        assert_eq!(report.blocked, Vec::<String>::new(), "{report:?}");
+        let task = fixture.task();
+        assert_eq!(task.phase, Phase::Finalizing);
+        assert_eq!(task.status, Status::Running);
+        assert_eq!(fixture.task_completed_count(), 0);
+        assert_eq!(
+            task.non_git_targets[0].status,
+            crate::super_agent::NonGitStatus::Prepared,
+            "a bounded Git-only finalizer must not touch non-Git progress"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_completion_review_that_stops_without_reports_blocks_once_and_stays_blocked() {
+        let fixture = TwoRepoDeliveryFixture::new();
+        let plan = fixture.prepare_plan();
+        fixture.deliver_all(&plan).await;
+        let orchestrator = fixture.orchestrator();
+
+        // The same Reviewer is resumed once, then exits without submitting.
+        let first = orchestrator.tick(&fixture.router).await.unwrap();
+        assert_eq!(first.blocked, Vec::<String>::new(), "{first:?}");
+        fixture.wait_settled().await;
+        let marker = fixture.final_completion_marker();
+        let job_id = marker["job_id"]
+            .as_str()
+            .expect("completion review job")
+            .to_owned();
+        let second = orchestrator.tick(&fixture.router).await.unwrap();
+        assert!(
+            second.blocked.iter().any(|reason| {
+                reason.contains(&job_id)
+                    && reason.contains("without a valid FINAL_DELIVERY review and harness")
+                    && reason.contains("review present: false")
+                    && reason.contains("harness present: false")
+            }),
+            "a stopped review without reports must block with its diagnosis: {second:?}"
+        );
+        let task = fixture.task();
+        assert_eq!(task.status, Status::Blocked);
+        assert_eq!(task.phase, Phase::Finalizing);
+        assert_eq!(fixture.task_completed_count(), 0);
+
+        // Repeated and reopened ticks neither resume again nor duplicate work.
+        let jobs = crate::services::background_sessions::list(&fixture.data, Some(&fixture.router))
+            .unwrap_or_default()
+            .len();
+        let repeated = orchestrator.tick(&fixture.router).await.unwrap();
+        assert_eq!(repeated.blocked, Vec::<String>::new(), "{repeated:?}");
+        assert_eq!(
+            crate::services::background_sessions::list(&fixture.data, Some(&fixture.router))
+                .unwrap_or_default()
+                .len(),
+            jobs,
+            "a blocked completion review launched another child"
+        );
+        let reopened_context = crate::services::ServiceContext::open(
+            RuntimePaths::new(fixture.data.clone()).unwrap(),
+            Arc::new(crate::services::EnvironmentCredentials),
+        )
+        .unwrap();
+        let reopened_store = TaskStore::new(reopened_context.db.clone(), fixture.data.clone());
+        let reopened = Orchestrator::new(
+            reopened_context,
+            TwoRepoDeliveryFixture::config(),
+            TwoRepoDeliveryFixture::provider(),
+            "bypass".into(),
+            Some(fixture.supervisor.clone()),
+        );
+        let reopened_report = reopened.tick(&fixture.router).await.unwrap();
+        assert_eq!(
+            reopened_report.blocked,
+            Vec::<String>::new(),
+            "{reopened_report:?}"
+        );
+        assert_eq!(
+            crate::services::background_sessions::list(&fixture.data, Some(&fixture.router))
+                .unwrap_or_default()
+                .len(),
+            jobs
+        );
+        assert_eq!(
+            reopened_store
+                .get_task(&fixture.task_id)
+                .unwrap()
+                .unwrap()
+                .status,
+            Status::Blocked
+        );
+        assert_eq!(
+            fixture.final_completion_marker()["job_id"],
+            marker["job_id"],
+            "the durable completion-review job was replaced"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_single_completion_report_blocks_with_its_missing_evidence() {
+        let fixture = TwoRepoDeliveryFixture::new();
+        let plan = fixture.prepare_plan();
+        fixture.deliver_all(&plan).await;
+        let orchestrator = fixture.orchestrator();
+        let _ = orchestrator.tick(&fixture.router).await.unwrap();
+        fixture.wait_settled().await;
+        fixture.final_review_report(&plan, true);
+
+        let report = orchestrator.tick(&fixture.router).await.unwrap();
+        assert!(
+            report.blocked.iter().any(|reason| {
+                reason.contains("without a valid FINAL_DELIVERY review and harness")
+                    && reason.contains("review present: true")
+                    && reason.contains("harness present: false")
+            }),
+            "one report must not be treated as complete evidence: {report:?}"
+        );
+        assert_eq!(fixture.task().status, Status::Blocked);
+        assert_eq!(fixture.task_completed_count(), 0);
+    }
+
+    #[tokio::test]
+    async fn a_failed_or_missing_completion_reviewer_blocks_without_a_new_resume() {
+        // The Reviewer child exits non-zero.
+        {
+            let fixture = TwoRepoDeliveryFixture::new();
+            let plan = fixture.prepare_plan();
+            fixture.deliver_all(&plan).await;
+            fixture.fail_future_children(7);
+            let orchestrator = fixture.orchestrator();
+            let _ = orchestrator.tick(&fixture.router).await.unwrap();
+            fixture.wait_settled().await;
+            let jobs =
+                crate::services::background_sessions::list(&fixture.data, Some(&fixture.router))
+                    .unwrap_or_default()
+                    .len();
+
+            let report = orchestrator.tick(&fixture.router).await.unwrap();
+            assert!(
+                report
+                    .blocked
+                    .iter()
+                    .any(|reason| reason.contains("ended failed")),
+                "a failed completion reviewer must block: {report:?}"
+            );
+            assert_eq!(fixture.task().status, Status::Blocked);
+            assert_eq!(
+                crate::services::background_sessions::list(&fixture.data, Some(&fixture.router))
+                    .unwrap_or_default()
+                    .len(),
+                jobs,
+                "a failed completion reviewer must not be resumed again"
+            );
+            let _ = orchestrator.tick(&fixture.router).await.unwrap();
+            assert_eq!(
+                crate::services::background_sessions::list(&fixture.data, Some(&fixture.router))
+                    .unwrap_or_default()
+                    .len(),
+                jobs
+            );
+        }
+
+        // The reserved job produced no durable state at all.
+        {
+            let fixture = TwoRepoDeliveryFixture::new();
+            let plan = fixture.prepare_plan();
+            fixture.deliver_all(&plan).await;
+            let orchestrator = fixture.orchestrator();
+            let _ = orchestrator.tick(&fixture.router).await.unwrap();
+            fixture.wait_settled().await;
+            let job_id = fixture.final_completion_marker()["job_id"]
+                .as_str()
+                .expect("completion review job")
+                .to_owned();
+            let directory =
+                crate::services::background_sessions::directory(&fixture.data, &job_id).unwrap();
+            std::fs::remove_dir_all(&directory).unwrap();
+
+            let report = orchestrator.tick(&fixture.router).await.unwrap();
+            assert!(
+                report
+                    .blocked
+                    .iter()
+                    .any(|reason| reason.contains("produced no durable state")),
+                "a missing completion job must block: {report:?}"
+            );
+            assert_eq!(fixture.task().status, Status::Blocked);
+            assert_eq!(fixture.task_completed_count(), 0);
+        }
+    }
+
+    #[tokio::test]
+    async fn a_completion_review_marker_is_never_adopted_for_another_session() {
+        let fixture = TwoRepoDeliveryFixture::new();
+        let plan = fixture.prepare_plan();
+        fixture.deliver_all(&plan).await;
+        let orchestrator = fixture.orchestrator();
+        let _ = orchestrator.tick(&fixture.router).await.unwrap();
+        fixture.wait_settled().await;
+        let reviewer = fixture
+            .task()
+            .reviewer
+            .session_id
+            .clone()
+            .expect("reviewer session");
+        let key = format!(
+            "super-agent.reviewer-resume.{}.{}.{}.final-completion",
+            fixture.task_id, 1, 0
+        );
+
+        // The marker names this task's Reviewer but points at another
+        // session's still-running job. Ownership is checked before status, so
+        // this can never wait on, adopt or resume unrelated work.
+        let other = uuid::Uuid::new_v4().to_string();
+        let directory =
+            crate::services::background_sessions::directory(&fixture.data, &other).unwrap();
+        std::fs::create_dir_all(&directory).unwrap();
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_millis() as u64;
+        let fake = crate::services::background_sessions::Job {
+            id: other.clone(),
+            foreground: false,
+            parent_session_id: "other-parent".into(),
+            session_id: "other-session".into(),
+            title: "unrelated".into(),
+            status: "running".into(),
+            supervisor_pid: None,
+            child_pid: Some(1),
+            started_ms: now,
+            heartbeat_ms: now,
+            finished_ms: None,
+            exit_code: None,
+            error: None,
+            launched: true,
+        };
+        std::fs::write(
+            directory.join("state.json"),
+            serde_json::to_vec(&fake).unwrap(),
+        )
+        .unwrap();
+        fixture
+            .context
+            .save_setting(
+                &key,
+                &json!({"session_id": reviewer, "job_id": other, "at": "2026-01-01T00:00:00Z"}),
+            )
+            .unwrap();
+        let report = orchestrator.tick(&fixture.router).await.unwrap();
+        assert!(
+            report.blocked.iter().any(|reason| {
+                reason.contains("belongs to session other-session")
+                    && reason.contains("not this Reviewer")
+            }),
+            "an unrelated active job must block, not wait: {report:?}"
+        );
+        assert_eq!(fixture.task().status, Status::Blocked);
+        assert_eq!(fixture.task_completed_count(), 0);
+
+        // The marker's own session must be this task's Reviewer as well.
+        let fixture = TwoRepoDeliveryFixture::new();
+        let plan = fixture.prepare_plan();
+        fixture.deliver_all(&plan).await;
+        let orchestrator = fixture.orchestrator();
+        let _ = orchestrator.tick(&fixture.router).await.unwrap();
+        fixture.wait_settled().await;
+        let marker = fixture.final_completion_marker();
+        let key = format!(
+            "super-agent.reviewer-resume.{}.{}.{}.final-completion",
+            fixture.task_id, 1, 0
+        );
+        fixture
+            .context
+            .save_setting(
+                &key,
+                &json!({
+                    "session_id": "other-session",
+                    "job_id": marker["job_id"],
+                    "at": "2026-01-01T00:00:00Z"
+                }),
+            )
+            .unwrap();
+        let report = orchestrator.tick(&fixture.router).await.unwrap();
+        assert!(
+            report.blocked.iter().any(|reason| {
+                reason.contains("names session")
+                    && reason.contains("other-session")
+                    && reason.contains("not this task's Reviewer")
+            }),
+            "a marker for another session must block: {report:?}"
+        );
+        assert_eq!(fixture.task().status, Status::Blocked);
+        assert_eq!(fixture.task_completed_count(), 0);
     }
 }

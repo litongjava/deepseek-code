@@ -256,7 +256,7 @@ pub fn apply(
             // same spec version and review round.
             let expected_stage = match record.phase {
                 Phase::Reviewing => super::model::ReviewStage::Implementation,
-                Phase::FinalReview => super::model::ReviewStage::FinalDelivery,
+                Phase::FinalReview | Phase::Finalizing => super::model::ReviewStage::FinalDelivery,
                 _ => super::model::ReviewStage::Implementation,
             };
             let stage = event.payload["stage"]
@@ -333,11 +333,25 @@ pub fn apply(
                         }
                     }
                 },
+                // A post-delivery final review decides only whether the
+                // already delivered commits may be completed. It never rewinds
+                // delivery, bumps the round or starts new work: the user's
+                // target branches already hold those commits.
+                Phase::Finalizing => match verdict {
+                    ReviewVerdict::Approved => {
+                        // `TASK_COMPLETED` still requires the full store gate.
+                        transition.phase = Phase::Finalizing;
+                        transition.status = Status::Running;
+                    }
+                    ReviewVerdict::ChangesRequested | ReviewVerdict::Blocked => {
+                        transition.status = Status::Blocked;
+                    }
+                },
                 _ => {
                     return Err(invalid(
                         record,
                         &event_type,
-                        "reviews apply only in REVIEWING or FINAL_REVIEW",
+                        "reviews apply only in REVIEWING, FINAL_REVIEW or FINALIZING",
                     ))
                 }
             }
@@ -770,12 +784,43 @@ pub fn completion_gate(
                 });
                 continue;
             }
-            if delivered != recorded || delivered != Some(reviewed) {
+            // The final-delivery review must approve the OID that was actually
+            // delivered. An integration merge carries the implemented change
+            // into a different commit OID while the tree stays reviewable, so
+            // `reviewed_commit` remains the recorded pre-integration lineage
+            // and is not required to equal the delivered OID.
+            if delivered != Some(reviewed) {
                 unmet.push(Unmet::VersionMismatch {
                     repository_id: repo.repository_id.clone(),
-                    expected: repo.reviewed_commit.clone(),
-                    found: repo.integrated_commit.clone(),
+                    expected: repo.integrated_commit.clone(),
+                    found: Some(reviewed.to_owned()),
                 });
+                continue;
+            }
+            if delivered != recorded {
+                // Accepting differing implementation/final OIDs needs durable
+                // proof, not the caller's word: the store must have validated,
+                // in this transaction, the authoritative complete plan binding
+                // this exact reviewed lineage to the delivered OID and every
+                // planned observation. A stale, missing or tampered record
+                // never satisfies this.
+                let lineage_ok = evidence.delivery.as_ref().is_some_and(|delivery| {
+                    delivery.task_id == record.task_id
+                        && delivery.spec_version == record.spec_version
+                        && delivery.review_round == record.review_round
+                        && delivery.repositories.iter().any(|planned| {
+                            planned.repository_id == repo.repository_id
+                                && Some(planned.new_oid.as_str()) == delivered
+                                && Some(planned.reviewed_commit.as_str()) == recorded
+                        })
+                });
+                if !lineage_ok {
+                    unmet.push(Unmet::VersionMismatch {
+                        repository_id: repo.repository_id.clone(),
+                        expected: repo.integrated_commit.clone(),
+                        found: repo.reviewed_commit.clone(),
+                    });
+                }
             }
         }
         for target in &record.non_git_targets {

@@ -584,3 +584,185 @@ fn propose_task_records_a_pending_proposal_only_for_members() {
     )
     .is_err());
 }
+
+/// The real CrpSubmit admission for the post-delivery completion review. A
+/// FINALIZING task accepts only the current Reviewer's FINAL_DELIVERY review
+/// and harness; implementation-stage, stale-round and foreign submissions are
+/// rejected by the same tool path production uses.
+#[test]
+fn finalizing_accepts_only_the_current_final_delivery_review_and_harness() {
+    let fixture = Fixture::new();
+    let task = fixture.task();
+    let store = fixture.store();
+    store
+        .save_repo(&RepoTarget {
+            task_id: task.task_id.clone(),
+            repository_id: "repo-code".into(),
+            repo_root: "/workspace/code".into(),
+            git_common_dir: "/workspace/code/.git".into(),
+            target_path: "/workspace/code".into(),
+            target_branch: "develop".into(),
+            task_branch: "agent/task".into(),
+            worktree_path: "/data/worktrees/task".into(),
+            working_path: "/data/worktrees/task".into(),
+            base_commit: "base".into(),
+            submitted_commit: Some("submitted".into()),
+            reviewed_commit: Some("reviewed".into()),
+            integrated_commit: Some("delivered".into()),
+            integration_status: crate::super_agent::IntegrationStatus::Completed,
+            verification_status: crate::super_agent::VerificationStatus::Passed,
+            source_state: vec![],
+        })
+        .unwrap();
+    let policy = crate::super_agent::state::StatePolicy::default();
+    for (event_type, operation, payload) in [
+        (EventType::DiscoveryCompleted, "discovery", json!({})),
+        (EventType::PlanSubmitted, "plan", json!({})),
+        (
+            EventType::ApprovalRequested,
+            "approval-request",
+            json!({"request_type":"PLAN"}),
+        ),
+        (
+            EventType::ApprovalResolved,
+            "approval-resolve",
+            json!({"request_type":"PLAN","decision":"APPROVED"}),
+        ),
+        (
+            EventType::ImplementationSubmitted,
+            "implementation",
+            json!({}),
+        ),
+        (
+            EventType::ReviewCompleted,
+            "review-1",
+            json!({"verdict":"APPROVED"}),
+        ),
+        (
+            EventType::IntegrationPrepared,
+            "integration-prepared",
+            json!({"repositories":[{"repository_id":"repo-code","tree_changed":true}]}),
+        ),
+        (
+            EventType::ReviewCompleted,
+            "review-final",
+            json!({"verdict":"APPROVED","stage":"FINAL_DELIVERY"}),
+        ),
+        (EventType::HarnessAnalysisCompleted, "harness", json!({})),
+        (EventType::IntegrationCompleted, "integration", json!({})),
+    ] {
+        store
+            .apply_event(
+                &task.task_id,
+                NewEvent {
+                    session_id: None,
+                    run_id: None,
+                    event_type,
+                    causation_id: None,
+                    operation_id: operation.into(),
+                    payload,
+                },
+                &policy,
+            )
+            .unwrap();
+    }
+    assert_eq!(
+        store.get_task(&task.task_id).unwrap().unwrap().phase,
+        Phase::Finalizing
+    );
+
+    let review = |stage: &str, round: u32| {
+        json!({
+            "kind": "review",
+            "payload": {
+                "verdict": "APPROVED",
+                "spec_version": 1,
+                "round": round,
+                "stage": stage,
+                "reviewed_versions": [{"repository_id":"repo-code","commit":"delivered"}],
+                "acceptance_results": [{"criterion":"AC-001","passed":true,"evidence":["git rev-parse"]}],
+                "issues": [],
+                "verification": ["git rev-parse develop"],
+                "limitations": []
+            }
+        })
+    };
+
+    // Only FINAL_DELIVERY is admissible once the task is FINALIZING.
+    let rejected = execute(
+        &fixture.member("reviewer"),
+        "CrpSubmit",
+        review("IMPLEMENTATION", 0),
+        "finalizing-implementation",
+    )
+    .unwrap_err();
+    assert!(
+        rejected
+            .to_string()
+            .contains("does not match the current review stage FINAL_DELIVERY"),
+        "{rejected:#}"
+    );
+    // A stale round never becomes the completion review.
+    let stale = execute(
+        &fixture.member("reviewer"),
+        "CrpSubmit",
+        review("FINAL_DELIVERY", 1),
+        "finalizing-stale-round",
+    )
+    .unwrap_err();
+    assert!(stale.to_string().contains("round"), "{stale:#}");
+    // Only the task's own Reviewer can submit it.
+    let foreign = execute(
+        &fixture.runtime_for(&fixture.outsider),
+        "CrpSubmit",
+        review("FINAL_DELIVERY", 0),
+        "finalizing-outsider",
+    )
+    .unwrap_err();
+    assert!(
+        foreign
+            .to_string()
+            .contains("not a current Coder or Reviewer"),
+        "{foreign:#}"
+    );
+    // The harness must also be FINAL_DELIVERY.
+    let wrong_harness = execute(
+        &fixture.member("reviewer"),
+        "CrpSubmit",
+        json!({"kind":"harness","payload":{
+            "spec_version": 1,
+            "round": 0,
+            "stage": "IMPLEMENTATION",
+            "findings": []
+        }}),
+        "finalizing-wrong-harness",
+    )
+    .unwrap_err();
+    assert!(
+        wrong_harness.to_string().contains("does not match"),
+        "{wrong_harness:#}"
+    );
+
+    // The authorized pair is recorded through the real tool path.
+    let accepted = execute(
+        &fixture.member("reviewer"),
+        "CrpSubmit",
+        review("FINAL_DELIVERY", 0),
+        "finalizing-review",
+    )
+    .unwrap();
+    assert!(accepted["report_id"].is_string(), "{accepted}");
+    let harness = execute(
+        &fixture.member("reviewer"),
+        "CrpSubmit",
+        json!({"kind":"harness","payload":{
+            "spec_version": 1,
+            "round": 0,
+            "stage": "FINAL_DELIVERY",
+            "findings": []
+        }}),
+        "finalizing-harness",
+    )
+    .unwrap();
+    assert!(harness["report_id"].is_string(), "{harness}");
+}

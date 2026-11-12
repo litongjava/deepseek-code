@@ -696,7 +696,12 @@ fn submit(runtime: &ToolRuntime, input: Value, tool_use_id: &str) -> Result<Valu
     if report_kind == ReportKind::Review {
         let expected = match task.phase {
             Phase::Reviewing => crate::super_agent::ReviewStage::Implementation,
-            Phase::FinalReview => crate::super_agent::ReviewStage::FinalDelivery,
+            // The pre-delivery review of changed integrated content and the
+            // post-delivery completion review of already delivered content are
+            // both real FINAL_DELIVERY reviews, from the same Reviewer session.
+            Phase::FinalReview | Phase::Finalizing => {
+                crate::super_agent::ReviewStage::FinalDelivery
+            }
             other => anyhow::bail!(
                 "A review report is not accepted while the task is {}",
                 other.as_str()
@@ -717,7 +722,9 @@ fn submit(runtime: &ToolRuntime, input: Value, tool_use_id: &str) -> Result<Valu
         // a final-delivery review.
         let expected = match task.phase {
             Phase::Reviewing => Some(crate::super_agent::ReviewStage::Implementation),
-            Phase::FinalReview => Some(crate::super_agent::ReviewStage::FinalDelivery),
+            Phase::FinalReview | Phase::Finalizing => {
+                Some(crate::super_agent::ReviewStage::FinalDelivery)
+            }
             _ => None,
         };
         if let Some(expected) = expected {
